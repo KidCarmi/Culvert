@@ -1,6 +1,6 @@
 # ProxyShield
 
-**Enterprise-grade open source HTTP/HTTPS/SOCKS5 proxy** — built in Go, zero dependencies beyond the standard library.
+**Enterprise-grade open source HTTP/HTTPS/SOCKS5 proxy** - built in Go, zero dependencies beyond the standard library.
 
 [![CI](https://github.com/KidCarmi/Claude-Test/actions/workflows/ci.yml/badge.svg)](https://github.com/KidCarmi/Claude-Test/actions/workflows/ci.yml)
 
