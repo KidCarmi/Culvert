@@ -76,7 +76,19 @@ type LogEntry struct {
 	IP     string `json:"ip"`
 	Method string `json:"method"`
 	Host   string `json:"host"`
-	Status string `json:"status"` // OK | BLOCKED | AUTH_FAIL
+	Status string `json:"status"` // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED
+	Level  string `json:"level"`  // INFO | WARN | ERROR
+}
+
+func levelForStatus(status string) string {
+	switch status {
+	case "OK":
+		return "INFO"
+	case "BLOCKED", "RATE_LIMITED", "IP_BLOCKED":
+		return "WARN"
+	default: // AUTH_FAIL and anything unexpected
+		return "ERROR"
+	}
 }
 
 const maxLogs = 1000
@@ -362,6 +374,9 @@ func uptime() string {
 func recordRequest(ip, method, host, status string) {
 	atomic.AddInt64(&statTotal, 1)
 	tsRecord()
+	if status == "OK" {
+		topHosts.Record(host)
+	}
 	logAdd(LogEntry{
 		TS:     time.Now().UnixMilli(),
 		Time:   time.Now().Format("15:04:05"),
@@ -369,5 +384,50 @@ func recordRequest(ip, method, host, status string) {
 		Method: method,
 		Host:   host,
 		Status: status,
+		Level:  levelForStatus(status),
 	})
+}
+
+// ─── Top hosts ────────────────────────────────────────────────────────────────
+
+// HostStat is a hostname with its request count, used for top-hosts ranking.
+type HostStat struct {
+	Host  string `json:"host"`
+	Count int64  `json:"count"`
+}
+
+type hostCounter struct {
+	mu    sync.Mutex
+	hosts map[string]int64
+}
+
+var topHosts = &hostCounter{hosts: map[string]int64{}}
+
+func (hc *hostCounter) Record(host string) {
+	hc.mu.Lock()
+	hc.hosts[host]++
+	hc.mu.Unlock()
+}
+
+// Top returns the n most-requested hosts, sorted descending by count.
+func (hc *hostCounter) Top(n int) []HostStat {
+	hc.mu.Lock()
+	all := make([]HostStat, 0, len(hc.hosts))
+	for h, c := range hc.hosts {
+		all = append(all, HostStat{Host: h, Count: c})
+	}
+	hc.mu.Unlock()
+
+	// Simple selection: sort descending.
+	for i := 0; i < len(all)-1; i++ {
+		for j := i + 1; j < len(all); j++ {
+			if all[j].Count > all[i].Count {
+				all[i], all[j] = all[j], all[i]
+			}
+		}
+	}
+	if n > len(all) {
+		n = len(all)
+	}
+	return all[:n]
 }

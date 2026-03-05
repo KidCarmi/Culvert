@@ -103,6 +103,14 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	}
 	removeHopHeaders(r.Header)
+
+	// Apply request-side rewrite rules before forwarding.
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	rewriter.ApplyRequest(host, r.Header)
+
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -117,6 +125,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	pluginOnResponse(resp)
+	rewriter.ApplyResponse(host, resp) // response-side rewrite rules
 	removeHopHeaders(resp.Header)
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)

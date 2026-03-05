@@ -38,6 +38,12 @@ type FileConfig struct {
 	// When IntrospectionURL is set, OIDC auth is used instead of local auth.
 	// LDAP takes precedence over OIDC if both are configured.
 	OIDC OIDCConfig `yaml:"oidc"`
+
+	// Rewrite defines header mutation rules applied to matching requests/responses.
+	Rewrite []RewriteRule `yaml:"rewrite"`
+
+	// LogFormat controls the system-log output format: "text" (default) or "json".
+	LogFormat string `yaml:"log_format"`
 }
 
 func loadFileConfig(path string) (*FileConfig, error) {

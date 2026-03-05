@@ -235,6 +235,9 @@ tbody tr:hover { background: var(--surface2); }
     <div class="nav-item" data-view="security">
       <span class="icon">🔒</span> Security
     </div>
+    <div class="nav-item" data-view="rewrite">
+      <span class="icon">✏️</span> Rewrite
+    </div>
     <div class="nav-item" data-view="settings">
       <span class="icon">⚙️</span> Settings
     </div>
@@ -295,15 +298,38 @@ tbody tr:hover { background: var(--surface2); }
         </div>
       </div>
 
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:18px">
+        <div class="panel" style="margin-bottom:0">
+          <div class="panel-header">
+            <span class="panel-title">Request Rate — last 60 minutes</span>
+            <span style="font-size:.75rem;color:var(--muted)">req/min</span>
+          </div>
+          <div class="panel-body">
+            <div class="chart-wrap">
+              <canvas id="rateChart"></canvas>
+            </div>
+          </div>
+        </div>
+        <div class="panel" style="margin-bottom:0">
+          <div class="panel-header">
+            <span class="panel-title">Traffic Breakdown</span>
+          </div>
+          <div class="panel-body" style="display:flex;align-items:center;justify-content:center;height:160px">
+            <canvas id="breakdownChart" style="max-height:150px"></canvas>
+          </div>
+        </div>
+      </div>
+
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Request Rate — last 60 minutes</span>
-          <span style="font-size:.75rem;color:var(--muted)">req/min</span>
+          <span class="panel-title">Top Hosts</span>
+          <span style="font-size:.75rem;color:var(--muted)">by allowed requests</span>
         </div>
-        <div class="panel-body">
-          <div class="chart-wrap">
-            <canvas id="rateChart"></canvas>
-          </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Host</th><th style="text-align:right">Requests</th></tr></thead>
+            <tbody id="top-hosts-table"></tbody>
+          </table>
         </div>
       </div>
 
@@ -315,7 +341,7 @@ tbody tr:hover { background: var(--surface2); }
         <div class="tbl-wrap">
           <table>
             <thead>
-              <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th></tr>
+              <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
             </thead>
             <tbody id="dash-log"></tbody>
           </table>
@@ -331,7 +357,23 @@ tbody tr:hover { background: var(--surface2); }
           <option value="">All statuses</option>
           <option value="OK">OK</option>
           <option value="BLOCKED">Blocked</option>
+          <option value="RATE_LIMITED">Rate Limited</option>
+          <option value="IP_BLOCKED">IP Blocked</option>
           <option value="AUTH_FAIL">Auth Fail</option>
+        </select>
+        <select class="select" id="log-level" onchange="applyLogFilter()">
+          <option value="">All levels</option>
+          <option value="INFO">INFO</option>
+          <option value="WARN">WARN</option>
+          <option value="ERROR">ERROR</option>
+        </select>
+        <select class="select" id="log-method" onchange="applyLogFilter()">
+          <option value="">All methods</option>
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="CONNECT">CONNECT</option>
+          <option value="PUT">PUT</option>
+          <option value="DELETE">DELETE</option>
         </select>
         <button class="btn ghost sm" onclick="clearFilter()">Clear</button>
         <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer;margin-left:auto">
@@ -350,7 +392,7 @@ tbody tr:hover { background: var(--surface2); }
         <div class="tbl-wrap" style="max-height:60vh;overflow-y:auto" id="log-scroll">
           <table>
             <thead>
-              <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th></tr>
+              <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
             </thead>
             <tbody id="live-log"></tbody>
           </table>
@@ -520,6 +562,72 @@ tbody tr:hover { background: var(--surface2); }
       </div>
     </div>
 
+    <!-- ── REWRITE ──────────────────────────────────────────────────────────── -->
+    <div class="view" id="view-rewrite">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Add Rewrite Rule</span>
+        </div>
+        <div class="panel-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+            <div>
+              <div class="form-group">
+                <label class="form-label">Host pattern <span style="color:var(--muted);font-weight:400">(empty = all hosts, *.example.com = wildcard)</span></label>
+                <input type="text" class="input" style="width:100%" id="rw-host" placeholder="api.example.com or *.corp.com">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Request header — action</label>
+                <select class="select" id="rw-req-action" style="width:100%;margin-bottom:6px">
+                  <option value="">— none —</option>
+                  <option value="set">Set (overwrite)</option>
+                  <option value="add">Add (append)</option>
+                  <option value="remove">Remove</option>
+                </select>
+                <div class="form-row">
+                  <input type="text" class="input wide" id="rw-req-name" placeholder="Header-Name">
+                  <input type="text" class="input wide" id="rw-req-value" placeholder="Value (leave blank for remove)">
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="form-group" style="margin-top:0">
+                <label class="form-label">&nbsp;</label>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Response header — action</label>
+                <select class="select" id="rw-resp-action" style="width:100%;margin-bottom:6px">
+                  <option value="">— none —</option>
+                  <option value="set">Set (overwrite)</option>
+                  <option value="add">Add (append)</option>
+                  <option value="remove">Remove</option>
+                </select>
+                <div class="form-row">
+                  <input type="text" class="input wide" id="rw-resp-name" placeholder="Header-Name">
+                  <input type="text" class="input wide" id="rw-resp-value" placeholder="Value (leave blank for remove)">
+                </div>
+              </div>
+            </div>
+          </div>
+          <button class="btn" onclick="addRewriteRule()">+ Add Rule</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Active Rules</span>
+          <span class="topbar-meta" id="rw-count">0 rules</span>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Host</th><th>Request ops</th><th>Response ops</th><th></th></tr>
+            </thead>
+            <tbody id="rw-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /content -->
 </div><!-- /main -->
 
@@ -534,6 +642,8 @@ let currentView = 'dashboard';
 let blHosts = [];
 let logEntries = [];
 let chart = null;
+let breakdownChart = null;
+let rwRules = [];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Navigation
@@ -543,6 +653,7 @@ const viewMeta = {
   livefeed:  { title: 'Live Feed',  meta: 'All requests in real-time' },
   blocklist: { title: 'Blocklist',  meta: 'Manage blocked hosts & wildcards' },
   security:  { title: 'Security',   meta: 'IP filter, rate limiting & log export' },
+  rewrite:   { title: 'Rewrite',    meta: 'Header injection & removal rules' },
   settings:  { title: 'Settings',   meta: 'Configuration & credentials' },
 };
 
@@ -601,6 +712,36 @@ function updateChart(data) {
   chart.update('none');
 }
 
+function initBreakdownChart() {
+  const ctx = document.getElementById('breakdownChart').getContext('2d');
+  breakdownChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: ['Allowed', 'Blocked', 'Auth Fail'],
+      datasets: [{
+        data: [0, 0, 0],
+        backgroundColor: ['rgba(34,197,94,.7)', 'rgba(239,68,68,.7)', 'rgba(249,115,22,.7)'],
+        borderColor: ['#22c55e', '#ef4444', '#f97316'],
+        borderWidth: 1,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#64748b', font: {size: 11}, boxWidth: 12 } },
+      },
+      cutout: '60%',
+    }
+  });
+}
+
+function updateBreakdownChart(allowed, blocked, authFail) {
+  if (!breakdownChart) return;
+  breakdownChart.data.datasets[0].data = [allowed, blocked, authFail];
+  breakdownChart.update('none');
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // API helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -634,6 +775,28 @@ async function fetchStats() {
     // nav badge
     const nb = document.getElementById('nav-blocked-count');
     if (s.blocked > 0) { nb.textContent = fmt(s.blocked); nb.style.display = ''; }
+    updateBreakdownChart(s.allowed, s.blocked, s.authFail);
+  } catch(e) {}
+}
+
+async function fetchTopHosts() {
+  try {
+    const d = await api('/api/top-hosts?n=10');
+    const tbody = document.getElementById('top-hosts-table');
+    const hosts = d.hosts || [];
+    if (!hosts.length) {
+      tbody.innerHTML = '<tr><td colspan="3"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
+      return;
+    }
+    const max = hosts[0].count;
+    tbody.innerHTML = hosts.map((h, i) => `<tr>
+      <td style="color:var(--muted);font-size:.75rem">${i+1}</td>
+      <td style="font-family:monospace;font-size:.82rem">${h.host}</td>
+      <td style="text-align:right">
+        <span style="font-weight:600;margin-right:8px">${fmt(h.count)}</span>
+        <span style="display:inline-block;height:6px;width:${Math.round(h.count/max*100)}px;max-width:120px;background:var(--accent);border-radius:3px;vertical-align:middle"></span>
+      </td>
+    </tr>`).join('');
   } catch(e) {}
 }
 
@@ -653,7 +816,7 @@ function fmt(n) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Log
 // ═══════════════════════════════════════════════════════════════════════════
-let logFilter = '', logStatusFilter = '';
+let logFilter = '', logStatusFilter = '', logLevelFilter = '', logMethodFilter = '';
 
 function badgeHTML(status) {
   if (status === 'OK')       return '<span class="badge ok">OK</span>';
@@ -671,12 +834,32 @@ function rowHTML(e) {
   </tr>`;
 }
 
+function levelBadge(level) {
+  if (level === 'INFO')  return '<span style="font-size:.68rem;font-weight:700;color:var(--accent2)">INFO</span>';
+  if (level === 'WARN')  return '<span style="font-size:.68rem;font-weight:700;color:var(--yellow)">WARN</span>';
+  if (level === 'ERROR') return '<span style="font-size:.68rem;font-weight:700;color:var(--red)">ERROR</span>';
+  return '';
+}
+
+function rowHTML(e) {
+  return `<tr>
+    <td style="color:var(--muted)">${e.time}</td>
+    <td style="font-family:monospace">${e.ip}</td>
+    <td><code style="font-size:.78rem">${e.method}</code></td>
+    <td style="font-family:monospace;font-size:.8rem">${e.host}</td>
+    <td>${badgeHTML(e.status)}</td>
+    <td>${levelBadge(e.level)}</td>
+  </tr>`;
+}
+
 async function fetchLogs() {
   try {
     let url = '/api/logs';
     const params = [];
-    if (logFilter) params.push('filter=' + encodeURIComponent(logFilter));
+    if (logFilter)       params.push('filter=' + encodeURIComponent(logFilter));
     if (logStatusFilter) params.push('status=' + logStatusFilter);
+    if (logLevelFilter)  params.push('level='  + logLevelFilter);
+    if (logMethodFilter) params.push('method=' + logMethodFilter);
     if (params.length) url += '?' + params.join('&');
     const d = await api(url);
     logEntries = d.logs || [];
@@ -688,8 +871,8 @@ function renderLogs() {
   const tbody = document.getElementById('live-log');
   const dash  = document.getElementById('dash-log');
   if (logEntries.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
-    dash.innerHTML  = tbody.innerHTML;
+    tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
+    dash.innerHTML  = '<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
   } else {
     tbody.innerHTML = logEntries.map(rowHTML).join('');
     dash.innerHTML  = logEntries.slice(0,10).map(rowHTML).join('');
@@ -702,13 +885,17 @@ function renderLogs() {
 function applyLogFilter() {
   logFilter       = document.getElementById('log-filter').value;
   logStatusFilter = document.getElementById('log-status').value;
+  logLevelFilter  = document.getElementById('log-level').value;
+  logMethodFilter = document.getElementById('log-method').value;
   fetchLogs();
 }
 
 function clearFilter() {
   document.getElementById('log-filter').value = '';
   document.getElementById('log-status').value = '';
-  logFilter = ''; logStatusFilter = '';
+  document.getElementById('log-level').value  = '';
+  document.getElementById('log-method').value = '';
+  logFilter = ''; logStatusFilter = ''; logLevelFilter = ''; logMethodFilter = '';
   fetchLogs();
 }
 
@@ -916,6 +1103,92 @@ async function disableRateLimit() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Rewrite rules
+// ═══════════════════════════════════════════════════════════════════════════
+async function fetchRewrite() {
+  try {
+    const d = await api('/api/rewrite');
+    rwRules = d.rules || [];
+    renderRewrite();
+  } catch(e) {}
+}
+
+function renderRewrite() {
+  const tbody = document.getElementById('rw-table');
+  const count = rwRules.length;
+  document.getElementById('rw-count').textContent = count + ' rule' + (count !== 1 ? 's' : '');
+  if (!count) {
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">✏️</div>No rewrite rules</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = rwRules.map(r => {
+    const reqOps = summariseOps(r.req_set, r.req_add, r.req_remove, 'req');
+    const respOps = summariseOps(r.resp_set, r.resp_add, r.resp_remove, 'resp');
+    return `<tr>
+      <td style="color:var(--muted);font-size:.75rem">#${r.id}</td>
+      <td style="font-family:monospace;font-size:.82rem">${r.host || '<span style="color:var(--muted)">*</span>'}</td>
+      <td style="font-size:.78rem">${reqOps || '<span style="color:var(--muted)">—</span>'}</td>
+      <td style="font-size:.78rem">${respOps || '<span style="color:var(--muted)">—</span>'}</td>
+      <td style="text-align:right"><button class="btn danger sm" onclick="removeRewriteRule(${r.id})">Remove</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function summariseOps(set, add, remove, label) {
+  const parts = [];
+  if (set)    Object.entries(set).forEach(([k,v]) => parts.push(`set <b>${k}</b>: ${v}`));
+  if (add)    Object.entries(add).forEach(([k,v]) => parts.push(`add <b>${k}</b>: ${v}`));
+  if (remove) remove.forEach(k => parts.push(`del <b>${k}</b>`));
+  return parts.join('<br>');
+}
+
+async function addRewriteRule() {
+  const host       = document.getElementById('rw-host').value.trim();
+  const reqAction  = document.getElementById('rw-req-action').value;
+  const reqName    = document.getElementById('rw-req-name').value.trim();
+  const reqValue   = document.getElementById('rw-req-value').value.trim();
+  const respAction = document.getElementById('rw-resp-action').value;
+  const respName   = document.getElementById('rw-resp-name').value.trim();
+  const respValue  = document.getElementById('rw-resp-value').value.trim();
+
+  const rule = { host };
+  if (reqAction && reqName) {
+    if (reqAction === 'set')    rule.req_set    = { [reqName]: reqValue };
+    else if (reqAction === 'add')  rule.req_add    = { [reqName]: reqValue };
+    else if (reqAction === 'remove') rule.req_remove = [reqName];
+  }
+  if (respAction && respName) {
+    if (respAction === 'set')    rule.resp_set    = { [respName]: respValue };
+    else if (respAction === 'add')  rule.resp_add    = { [respName]: respValue };
+    else if (respAction === 'remove') rule.resp_remove = [respName];
+  }
+  if (!reqAction && !respAction) { toast('Choose at least one header operation', 'error'); return; }
+
+  try {
+    await api('/api/rewrite', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(rule),
+    });
+    // Clear form
+    ['rw-host','rw-req-name','rw-req-value','rw-resp-name','rw-resp-value'].forEach(id =>
+      document.getElementById(id).value = '');
+    document.getElementById('rw-req-action').value  = '';
+    document.getElementById('rw-resp-action').value = '';
+    toast('Rewrite rule added', 'success');
+    fetchRewrite();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function removeRewriteRule(id) {
+  try {
+    await api('/api/rewrite?id=' + id, { method: 'DELETE' });
+    toast('Rule removed', 'success');
+    fetchRewrite();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Export logs
 // ═══════════════════════════════════════════════════════════════════════════
 function exportLogs(format) {
@@ -968,22 +1241,28 @@ function toast(msg, type='success') {
 // ═══════════════════════════════════════════════════════════════════════════
 async function tick() {
   await Promise.all([fetchStats(), fetchTimeseries(), fetchLogs()]);
+  if (currentView === 'dashboard') fetchTopHosts();
   if (currentView === 'blocklist') fetchBlocklist();
+  if (currentView === 'rewrite')   fetchRewrite();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Init
 // ═══════════════════════════════════════════════════════════════════════════
 initChart();
+initBreakdownChart();
 fetchBlocklist();
 loadSettings();
 loadSecurity();
+fetchTopHosts();
 tick();
 setInterval(tick, 3000);
-// Reload security panel when switching to it
+// Reload panels when switching views
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
     if (el.dataset.view === 'security') loadSecurity();
+    if (el.dataset.view === 'rewrite')  fetchRewrite();
+    if (el.dataset.view === 'dashboard') fetchTopHosts();
   });
 });
 </script>

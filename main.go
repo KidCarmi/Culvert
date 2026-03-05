@@ -70,7 +70,7 @@ func main() {
 	// ── Logger ───────────────────────────────────────────────────────────────
 	var err error
 	var logCloser interface{ Close() error }
-	logger, logCloser, err = setupLogger(lPath, lMaxMB)
+	logger, logCloser, err = setupLogger(lPath, lMaxMB, fc.LogFormat)
 	if err != nil {
 		log.Fatalf("Logger setup failed: %v", err)
 	}
@@ -163,6 +163,12 @@ func main() {
 			logger.Fatalf("Cannot load blocklist: %v", err)
 		}
 		logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), blPath)
+	}
+
+	// ── Rewrite rules ────────────────────────────────────────────────────────
+	if len(fc.Rewrite) > 0 {
+		rewriter.SetRules(fc.Rewrite)
+		logger.Printf("Rewrite  → %d rule(s) loaded", len(fc.Rewrite))
 	}
 
 	// ── SOCKS5 server (optional) ─────────────────────────────────────────────

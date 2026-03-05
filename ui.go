@@ -24,10 +24,12 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/stats", apiStats)
 	mux.HandleFunc("/api/timeseries", apiTimeseries)
 	mux.HandleFunc("/api/logs", apiLogs)
+	mux.HandleFunc("/api/top-hosts", apiTopHosts)
 	mux.HandleFunc("/api/blocklist", apiBlocklist)
 	mux.HandleFunc("/api/settings", apiSettings)
 	mux.HandleFunc("/api/security", apiSecurity)
 	mux.HandleFunc("/api/export", apiExport)
+	mux.HandleFunc("/api/rewrite", apiRewrite)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -127,11 +129,13 @@ func apiTimeseries(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"data": tsGet()})
 }
 
-// GET /api/logs?limit=N&filter=...&status=...
+// GET /api/logs?filter=...&status=...&level=...&method=...
 func apiLogs(w http.ResponseWriter, r *http.Request) {
 	all := logGet()
-	filterHost := strings.ToLower(r.URL.Query().Get("filter"))
+	filterHost   := strings.ToLower(r.URL.Query().Get("filter"))
 	filterStatus := strings.ToUpper(r.URL.Query().Get("status"))
+	filterLevel  := strings.ToUpper(r.URL.Query().Get("level"))
+	filterMethod := strings.ToUpper(r.URL.Query().Get("method"))
 
 	filtered := all[:0:0]
 	for _, e := range all {
@@ -142,9 +146,29 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		if filterStatus != "" && e.Status != filterStatus {
 			continue
 		}
+		if filterLevel != "" && e.Level != filterLevel {
+			continue
+		}
+		if filterMethod != "" && e.Method != filterMethod {
+			continue
+		}
 		filtered = append(filtered, e)
 	}
 	jsonOK(w, map[string]any{"logs": filtered, "total": len(filtered)})
+}
+
+// GET /api/top-hosts?n=20
+func apiTopHosts(w http.ResponseWriter, r *http.Request) {
+	n := 20
+	if s := r.URL.Query().Get("n"); s != "" {
+		if v, err := fmt.Sscanf(s, "%d", &n); v == 0 || err != nil {
+			n = 20
+		}
+	}
+	if n <= 0 || n > 100 {
+		n = 20
+	}
+	jsonOK(w, map[string]any{"hosts": topHosts.Top(n)})
 }
 
 // GET/POST/DELETE /api/blocklist
@@ -267,6 +291,42 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		logger.Printf("UI: auth settings updated (user=%s)", body.User)
 		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET/POST/DELETE /api/rewrite — manage header rewrite rules
+func apiRewrite(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rules := rewriter.List()
+		jsonOK(w, map[string]any{"rules": rules, "count": len(rules)})
+
+	case http.MethodPost:
+		var rule RewriteRule
+		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		added := rewriter.Add(rule)
+		logger.Printf("UI: rewrite rule added id=%d host=%q", added.ID, added.Host)
+		jsonOK(w, added)
+
+	case http.MethodDelete:
+		idStr := strings.TrimSpace(r.URL.Query().Get("id"))
+		var id int
+		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+			http.Error(w, "missing or invalid id param", http.StatusBadRequest)
+			return
+		}
+		if !rewriter.RemoveByID(id) {
+			http.Error(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		logger.Printf("UI: rewrite rule removed id=%d", id)
+		w.WriteHeader(http.StatusNoContent)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
