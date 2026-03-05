@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/base64"
 	"io"
 	"net"
@@ -18,7 +19,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	if !ipf.Allowed(clientIP) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED")
+		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED", "", "")
 		logger.Printf("IP_BLOCKED %s", clientIP)
 		return
 	}
@@ -26,7 +27,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Rate limit check.
 	if !rl.Allow(clientIP) {
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED")
+		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "")
 		logger.Printf("RATE_LIMITED %s", clientIP)
 		return
 	}
@@ -38,7 +39,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			atomic.AddInt64(&statAuthFail, 1)
 			w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyShield"`)
 			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
-			recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL")
+			recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "")
 			logger.Printf("AUTH_FAIL %s", clientIP)
 			return
 		}
@@ -49,11 +50,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		host = h
 	}
 
-	// Blocklist check.
+	// Legacy blocklist check (still active alongside policy engine).
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by ProxyShield", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "BLOCKED")
+		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "", "")
 		logger.Printf("BLOCKED %s -> %s", clientIP, host)
 		return
 	}
@@ -62,15 +63,61 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	if pluginDecision(clientIP, r.Method, host) == DecisionBlock {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by plugin", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "BLOCKED")
+		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "", "")
 		return
 	}
 
-	recordRequest(clientIP, r.Method, r.Host, "OK")
-	logger.Printf("OK %s %s %s", clientIP, r.Method, r.Host)
+	// ── Policy engine (PBAC) pre-check ───────────────────────────────────────
+	// X-User-Identity is a mock header for identity; future versions will
+	// populate this from the OIDC/LDAP auth context.
+	identity := r.Header.Get("X-User-Identity")
+	match := policyStore.Evaluate(clientIP, identity, host)
+
+	if match != nil {
+		switch match.Action {
+		case ActionDrop:
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop))
+			logger.Printf("POLICY_DROP rule=%q %s -> %s", match.Rule.Name, clientIP, host)
+			// Silent TCP RST — hijack and close without sending an HTTP response.
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				conn.Close()
+			}
+			return
+
+		case ActionBlockPage:
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage))
+			logger.Printf("POLICY_BLOCK rule=%q %s -> %s", match.Rule.Name, clientIP, host)
+			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
+			return
+
+		case ActionRedirect:
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect))
+			logger.Printf("POLICY_REDIRECT rule=%q %s -> %s => %s", match.Rule.Name, clientIP, host, match.Rule.RedirectURL)
+			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
+			return
+
+		case ActionAllow:
+			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow))
+			logger.Printf("POLICY_ALLOW rule=%q %s %s %s", match.Rule.Name, clientIP, r.Method, r.Host)
+			// Fall through to normal handling below.
+		}
+	} else {
+		recordRequest(clientIP, r.Method, r.Host, "OK", "", "")
+		logger.Printf("OK %s %s %s", clientIP, r.Method, r.Host)
+	}
+
+	// Determine SSL action for CONNECT tunnels.
+	sslAction := SSLBypass
+	if match != nil && match.SSLAction == SSLInspect {
+		sslAction = SSLInspect
+	}
 
 	if r.Method == http.MethodConnect {
-		handleTunnel(w, r)
+		handleTunnel(w, r, sslAction)
 	} else if isWebSocketUpgrade(r) {
 		handleWebSocket(w, r)
 	} else {
@@ -203,7 +250,17 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	<-done
 }
 
-func handleTunnel(w http.ResponseWriter, r *http.Request) {
+// handleTunnel dispatches to SSL-bypass or SSL-inspect based on policy.
+func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction) {
+	if sslAction == SSLInspect && certMgr.Ready() {
+		handleTunnelInspect(w, r)
+	} else {
+		handleTunnelBypass(w, r)
+	}
+}
+
+// handleTunnelBypass is the original transparent TCP tunnel (Bypass mode).
+func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 	destConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
 	if err != nil {
 		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
@@ -229,6 +286,71 @@ func handleTunnel(w http.ResponseWriter, r *http.Request) {
 	go relay(destConn, clientConn)
 	go relay(clientConn, destConn)
 	<-done
+}
+
+// handleTunnelInspect performs SSL inspection (MITM) for CONNECT tunnels.
+// It terminates TLS on both sides using on-the-fly certificates signed by the
+// internal Root CA, allowing the proxy to inspect decrypted HTTP/1.x traffic.
+func handleTunnelInspect(w http.ResponseWriter, r *http.Request) {
+	targetHost := r.Host
+	if _, _, err := net.SplitHostPort(targetHost); err != nil {
+		targetHost += ":443"
+	}
+	hostOnly, _, _ := net.SplitHostPort(targetHost)
+
+	// 1. Connect to the upstream server over plain TCP.
+	rawUpstream, err := net.DialTimeout("tcp", targetHost, 10*time.Second)
+	if err != nil {
+		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// 2. Perform TLS handshake with the upstream, validating its certificate.
+	upstreamTLS := tls.Client(rawUpstream, &tls.Config{
+		ServerName: hostOnly,
+	})
+	if err := upstreamTLS.Handshake(); err != nil {
+		rawUpstream.Close()
+		http.Error(w, "Upstream TLS handshake failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// 3. Hijack the client connection and send the 200 Connection Established.
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		upstreamTLS.Close()
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	rawClient, _, err := hijacker.Hijack()
+	if err != nil {
+		upstreamTLS.Close()
+		logger.Printf("SSL_INSPECT hijack error: %v", err)
+		return
+	}
+
+	// 4. Perform TLS handshake with the client using a dynamically-signed cert.
+	clientTLS := tls.Server(rawClient, &tls.Config{
+		GetCertificate: certMgr.GetCert,
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		clientTLS.Close()
+		upstreamTLS.Close()
+		logger.Printf("SSL_INSPECT client TLS handshake error for %s: %v", hostOnly, err)
+		return
+	}
+
+	logger.Printf("SSL_INSPECT tunnel → %s", targetHost)
+
+	// 5. Relay decrypted traffic bidirectionally.
+	done := make(chan struct{}, 2)
+	relay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} }
+	go relay(upstreamTLS, clientTLS)
+	go relay(clientTLS, upstreamTLS)
+	<-done
+	clientTLS.Close()
+	upstreamTLS.Close()
 }
 
 func removeHopHeaders(h http.Header) {

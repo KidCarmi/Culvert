@@ -19,6 +19,7 @@ type FileConfig struct {
 		TLSKey     string `yaml:"tls_key"`     // path to TLS key for UI
 		SOCKS5Port   int    `yaml:"socks5_port"`   // 0 = disabled
 		MetricsToken string `yaml:"metrics_token"` // Bearer token for /metrics; empty=open
+		PolicyFile   string `yaml:"policy_file"`   // JSON file for PBAC policy rules
 	} `yaml:"proxy"`
 	Auth struct {
 		User string `yaml:"user"`
