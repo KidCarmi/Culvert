@@ -1,0 +1,14 @@
+# ProxyShield Configuration
+# Copy to config.yaml and edit as needed.
+# CLI flags always override values here.
+
+proxy:
+  port: 8080          # Proxy listening port
+  ui_port: 9090       # Web UI port
+  blocklist: ""       # Path to blocklist file (one host per line, wildcards supported)
+  log_file: ""        # Path to log file (empty = stdout only)
+  log_max_mb: 50      # Rotate log file when it reaches this size (MB)
+
+auth:
+  user: ""            # Leave empty to disable authentication
+  pass: ""
