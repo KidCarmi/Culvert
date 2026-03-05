@@ -13,6 +13,23 @@ import (
 func handleRequest(w http.ResponseWriter, r *http.Request) {
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 
+	// IP filter check.
+	if !ipf.Allowed(clientIP) {
+		atomic.AddInt64(&statBlocked, 1)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED")
+		logger.Printf("IP_BLOCKED %s", clientIP)
+		return
+	}
+
+	// Rate limit check.
+	if !rl.Allow(clientIP) {
+		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED")
+		logger.Printf("RATE_LIMITED %s", clientIP)
+		return
+	}
+
 	// Basic auth check.
 	if cfg.AuthEnabled() {
 		user, pass := cfg.GetAuth()

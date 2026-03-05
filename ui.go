@@ -15,7 +15,7 @@ import (
 //go:embed static
 var staticFiles embed.FS
 
-func startUI(port int) {
+func startUI(port int, certFile, keyFile string) {
 	sub, _ := fs.Sub(staticFiles, "static")
 
 	mux := http.NewServeMux()
@@ -25,11 +25,34 @@ func startUI(port int) {
 	mux.HandleFunc("/api/logs", apiLogs)
 	mux.HandleFunc("/api/blocklist", apiBlocklist)
 	mux.HandleFunc("/api/settings", apiSettings)
+	mux.HandleFunc("/api/security", apiSecurity)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: corsMiddleware(mux),
 	}
+
+	if certFile != "" && keyFile != "" {
+		logger.Printf("UI TLS  → https://localhost:%d (custom cert)", port)
+		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
+			logger.Fatalf("UI TLS error: %v", err)
+		}
+		return
+	}
+
+	// Auto self-signed TLS.
+	tlsCfg, err := selfSignedTLS()
+	if err != nil {
+		logger.Printf("TLS self-sign failed (%v), falling back to HTTP", err)
+	} else {
+		srv.TLSConfig = tlsCfg
+		logger.Printf("UI TLS  → https://localhost:%d (self-signed)", port)
+		if err := srv.ListenAndServeTLS("", ""); err != nil {
+			logger.Fatalf("UI TLS error: %v", err)
+		}
+		return
+	}
+
 	if err := srv.ListenAndServe(); err != nil {
 		logger.Fatalf("UI server error: %v", err)
 	}
@@ -143,6 +166,52 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		bl.Save()
 		logger.Printf("UI: unblocked %s", host)
 		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET/POST /api/security — IP filter + rate limiter config
+func apiSecurity(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, map[string]any{
+			"ipFilterMode": ipf.Mode(),
+			"ipList":       ipf.List(),
+			"rateLimitRPM": rl.Limit(),
+			"rateLimitOn":  rl.Enabled(),
+		})
+
+	case http.MethodPost:
+		var body struct {
+			IPFilterMode string   `json:"ipFilterMode"` // "allow"|"block"|""
+			IPAdd        string   `json:"ipAdd"`
+			IPRemove     string   `json:"ipRemove"`
+			RateLimitRPM int      `json:"rateLimitRPM"` // 0 = disable
+			IPList       []string `json:"ipList"`       // full replace
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.IPFilterMode != "" || body.IPFilterMode == "" {
+			ipf.SetMode(body.IPFilterMode)
+		}
+		if body.IPAdd != "" {
+			if err := ipf.Add(body.IPAdd); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		if body.IPRemove != "" {
+			ipf.Remove(body.IPRemove)
+		}
+		if body.RateLimitRPM >= 0 {
+			rl.Configure(body.RateLimitRPM, time.Minute)
+		}
+		logger.Printf("UI: security config updated (ipMode=%s rateRPM=%d)", ipf.Mode(), rl.Limit())
+		jsonOK(w, map[string]any{"ok": true})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

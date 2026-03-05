@@ -14,12 +14,19 @@ type FileConfig struct {
 		UIPort    int    `yaml:"ui_port"`
 		Blocklist string `yaml:"blocklist"`
 		LogFile   string `yaml:"log_file"`
-		LogMaxMB  int    `yaml:"log_max_mb"` // rotate at this size
+		LogMaxMB  int    `yaml:"log_max_mb"`
+		TLSCert   string `yaml:"tls_cert"` // path to TLS cert for UI
+		TLSKey    string `yaml:"tls_key"`  // path to TLS key for UI
 	} `yaml:"proxy"`
 	Auth struct {
 		User string `yaml:"user"`
 		Pass string `yaml:"pass"`
 	} `yaml:"auth"`
+	Security struct {
+		IPFilterMode string   `yaml:"ip_filter_mode"` // "allow" | "block" | ""
+		IPList       []string `yaml:"ip_list"`        // IPs or CIDRs
+		RateLimit    int      `yaml:"rate_limit"`     // max requests per minute (0=off)
+	} `yaml:"security"`
 }
 
 func loadFileConfig(path string) (*FileConfig, error) {

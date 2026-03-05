@@ -18,14 +18,18 @@ var logger *log.Logger
 
 func main() {
 	// ── CLI flags ────────────────────────────────────────────────────────────
-	configPath  := flag.String("config",    "",      "Path to config.yaml (optional)")
-	proxyPort   := flag.Int("port",         0,       "Proxy port (overrides config)")
-	uiPortFlag  := flag.Int("ui-port",      0,       "Web UI port (overrides config)")
-	user        := flag.String("user",      "",      "Basic auth username")
-	pass        := flag.String("pass",      "",      "Basic auth password")
-	blockFile   := flag.String("blocklist", "",      "Blocklist file path")
-	logFilePath := flag.String("logfile",   "",      "Log file path")
-	logMaxMB    := flag.Int("log-max-mb",   50,      "Log rotation size in MB")
+	configPath   := flag.String("config",        "",   "Path to config.yaml (optional)")
+	proxyPort    := flag.Int("port",             0,    "Proxy port (overrides config)")
+	uiPortFlag   := flag.Int("ui-port",          0,    "Web UI port (overrides config)")
+	user         := flag.String("user",          "",   "Basic auth username")
+	pass         := flag.String("pass",          "",   "Basic auth password")
+	blockFile    := flag.String("blocklist",     "",   "Blocklist file path")
+	logFilePath  := flag.String("logfile",       "",   "Log file path")
+	logMaxMB     := flag.Int("log-max-mb",       50,   "Log rotation size in MB")
+	tlsCert      := flag.String("tls-cert",      "",   "TLS cert file for UI (optional)")
+	tlsKey       := flag.String("tls-key",       "",   "TLS key file for UI (optional)")
+	rateLimitRPM := flag.Int("rate-limit",       0,    "Max requests/min per IP (0=off)")
+	ipMode       := flag.String("ip-filter-mode","",   "IP filter mode: allow|block (empty=off)")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -47,6 +51,10 @@ func main() {
 	lMaxMB := firstNonZero(*logMaxMB, fc.Proxy.LogMaxMB, 50)
 	authU  := firstStr(*user, fc.Auth.User)
 	authP  := firstStr(*pass, fc.Auth.Pass)
+	cert   := firstStr(*tlsCert, fc.Proxy.TLSCert)
+	key    := firstStr(*tlsKey,  fc.Proxy.TLSKey)
+	rlRPM  := firstNonZero(*rateLimitRPM, fc.Security.RateLimit)
+	ipModeVal := firstStr(*ipMode, fc.Security.IPFilterMode)
 
 	// ── Logger ───────────────────────────────────────────────────────────────
 	var err error
@@ -61,6 +69,29 @@ func main() {
 	cfg.UIPort    = uPort
 	cfg.SetAuth(authU, authP)
 
+	// ── Security: IP filter ──────────────────────────────────────────────────
+	if ipModeVal != "" {
+		ipf.SetMode(ipModeVal)
+		for _, entry := range fc.Security.IPList {
+			if err := ipf.Add(entry); err != nil {
+				logger.Printf("IP filter: invalid entry %q: %v", entry, err)
+			}
+		}
+		logger.Printf("IP filter → mode=%s entries=%d", ipModeVal, len(fc.Security.IPList))
+	}
+
+	// ── Security: Rate limiter ───────────────────────────────────────────────
+	if rlRPM > 0 {
+		rl.Configure(rlRPM, time.Minute)
+		logger.Printf("Rate limit → %d req/min per IP", rlRPM)
+		go func() {
+			t := time.NewTicker(5 * time.Minute)
+			for range t.C {
+				rl.Cleanup()
+			}
+		}()
+	}
+
 	// ── Blocklist ────────────────────────────────────────────────────────────
 	if blPath != "" {
 		if err := bl.Load(blPath); err != nil {
@@ -69,9 +100,8 @@ func main() {
 		logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), blPath)
 	}
 
-	// ── Web UI ───────────────────────────────────────────────────────────────
-	go startUI(uPort)
-	logger.Printf("Web UI  → http://localhost:%d", uPort)
+	// ── Web UI (HTTPS with self-signed cert by default) ───────────────────
+	go startUI(uPort, cert, key)
 
 	// ── Proxy server ─────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
@@ -114,7 +144,7 @@ func main() {
 	logger.Println("Stopped.")
 }
 
-// handleHealth is a simple liveness probe used by load balancers and Docker.
+// handleHealth is a simple liveness probe.
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","uptime":"%s","version":"1.0.0"}`, uptime())
