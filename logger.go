@@ -17,7 +17,7 @@ type rotatingFile struct {
 }
 
 func newRotatingFile(path string, maxMB int) (*rotatingFile, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +40,7 @@ func (r *rotatingFile) Write(p []byte) (int, error) {
 	if r.size+int64(len(p)) > r.maxBytes {
 		r.file.Close()
 		os.Rename(r.path, r.path+".1")
-		f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			return 0, err
 		}
