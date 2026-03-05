@@ -59,7 +59,7 @@ docker-compose up -d
 #### With monitoring stack (Prometheus + Grafana)
 
 ```bash
-docker-compose --profile monitoring up -d
+docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 # Grafana → http://localhost:3000  (admin / proxyshield)
 ```
 
@@ -198,7 +198,7 @@ Available at `GET http://localhost:8080/metrics`:
 
 ```bash
 # Start full monitoring stack (Prometheus + Grafana)
-docker-compose --profile monitoring up -d
+docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 # Grafana → http://localhost:3000  (admin / proxyshield)
 ```
 
