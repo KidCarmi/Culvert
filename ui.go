@@ -31,7 +31,10 @@ func startUI(port int, certFile, keyFile string) {
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: corsMiddleware(mux),
+		Handler:      securityMiddleware(mux),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	if certFile != "" && keyFile != "" {
@@ -60,11 +63,29 @@ func startUI(port int, certFile, keyFile string) {
 	}
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+// securityMiddleware sets restrictive CORS and security headers.
+// CORS: only the same origin the browser loaded the UI from is allowed
+// (no wildcard *). Preflight requests are answered with the caller's origin.
+func securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// ── Security headers ─────────────────────────────────────────────────
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+
+		// ── CORS: reflect the request origin only (no wildcard) ──────────────
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.Header().Set("Vary", "Origin")
+		}
+
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -224,10 +245,9 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 func apiSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		u, _ := cfg.GetAuth()
 		jsonOK(w, map[string]any{
 			"authEnabled": cfg.AuthEnabled(),
-			"user":        u,
+			"user":        cfg.GetUser(), // password is NEVER returned
 			"proxyPort":   cfg.ProxyPort,
 			"uiPort":      cfg.UIPort,
 		})
@@ -241,7 +261,10 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		cfg.SetAuth(body.User, body.Pass)
+		if err := cfg.SetAuth(body.User, body.Pass); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		logger.Printf("UI: auth settings updated (user=%s)", body.User)
 		jsonOK(w, map[string]any{"ok": true})
 

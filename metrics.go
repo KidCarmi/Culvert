@@ -1,15 +1,29 @@
 package main
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
 
+// metricsToken is the Bearer token required to access /metrics.
+// Empty string = open access (backward-compatible default; not recommended).
+var metricsToken string
+
 // handleMetrics serves Prometheus-compatible text metrics on GET /metrics.
-// No external library needed — Prometheus text format is simple.
+// If metricsToken is set, the request must carry: Authorization: Bearer <token>
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if metricsToken != "" {
+		auth := r.Header.Get("Authorization")
+		token := strings.TrimPrefix(auth, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(token), []byte(metricsToken)) != 1 {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
 	total   := atomic.LoadInt64(&statTotal)
 	blocked := atomic.LoadInt64(&statBlocked)
 	authFail := atomic.LoadInt64(&statAuthFail)

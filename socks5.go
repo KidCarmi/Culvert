@@ -57,8 +57,7 @@ func handleSOCKS5(conn net.Conn) {
 	}
 
 	// ── Auth negotiation ─────────────────────────────────────────────────────
-	authUser, authPass := cfg.GetAuth()
-	if cfg.AuthEnabled() && authUser != "" {
+	if cfg.AuthEnabled() {
 		hasUserPass := false
 		for _, m := range methods {
 			if m == 0x02 {
@@ -89,7 +88,7 @@ func handleSOCKS5(conn net.Conn) {
 		if _, err := io.ReadFull(conn, passwd); err != nil {
 			return
 		}
-		if string(uname) != authUser || string(passwd) != authPass {
+		if !cfg.VerifyAuth(string(uname), string(passwd)) {
 			conn.Write([]byte{0x01, 0x01}) //nolint:errcheck
 			atomic.AddInt64(&statAuthFail, 1)
 			recordRequest(clientIP, "SOCKS5", "", "AUTH_FAIL")

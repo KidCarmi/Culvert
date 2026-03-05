@@ -26,6 +26,18 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: "2024.1.1"
+
+      - name: gosec
+        uses: securego/gosec@master
+        with:
+          args: "-exclude=G304,G401 ./..."
+        # G304: file path from variable (acceptable for blocklist/config loading)
+        # G401: MD5/SHA1 — we use SHA-256, gosec sometimes misidentifies
+
       - name: Test
         run: go test -v -race -count=1 ./...
 

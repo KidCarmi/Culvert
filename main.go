@@ -30,7 +30,8 @@ func main() {
 	tlsKey       := flag.String("tls-key",       "",   "TLS key file for UI (optional)")
 	rateLimitRPM := flag.Int("rate-limit",       0,    "Max requests/min per IP (0=off)")
 	ipMode       := flag.String("ip-filter-mode","",   "IP filter mode: allow|block (empty=off)")
-	socks5Port   := flag.Int("socks5-port",     0,    "SOCKS5 proxy port (0=disabled)")
+	socks5Port    := flag.Int("socks5-port",     0,    "SOCKS5 proxy port (0=disabled)")
+	metricsTok    := flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -68,7 +69,17 @@ func main() {
 	// ── Config ───────────────────────────────────────────────────────────────
 	cfg.ProxyPort = pPort
 	cfg.UIPort    = uPort
-	cfg.SetAuth(authU, authP)
+	if err := cfg.SetAuth(authU, authP); err != nil {
+		log.Fatalf("Failed to set auth: %v", err)
+	}
+
+	// ── Metrics token ────────────────────────────────────────────────────────
+	metricsToken = firstStr(*metricsTok, fc.Proxy.MetricsToken)
+	if metricsToken != "" {
+		logger.Printf("Metrics  → /metrics protected by Bearer token")
+	} else {
+		logger.Printf("Metrics  → /metrics open (set -metrics-token to restrict)")
+	}
 
 	// ── Security: IP filter ──────────────────────────────────────────────────
 	if ipModeVal != "" {

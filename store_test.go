@@ -9,33 +9,42 @@ import (
 // ── Config tests ───────────────────────────────────────────────────────────────
 
 func TestConfig_Auth(t *testing.T) {
-	c := &Config{}
+	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	if c.AuthEnabled() {
 		t.Error("new Config should have auth disabled")
 	}
 
-	c.SetAuth("alice", "secret")
+	if err := c.SetAuth("alice", "secret"); err != nil {
+		t.Fatalf("SetAuth error: %v", err)
+	}
 	if !c.AuthEnabled() {
 		t.Error("auth should be enabled after SetAuth with user")
 	}
-	u, p := c.GetAuth()
-	if u != "alice" || p != "secret" {
-		t.Errorf("GetAuth = (%q,%q), want (alice,secret)", u, p)
+	if c.GetUser() != "alice" {
+		t.Errorf("GetUser = %q, want alice", c.GetUser())
+	}
+	if !c.VerifyAuth("alice", "secret") {
+		t.Error("VerifyAuth should succeed with correct credentials")
+	}
+	if c.VerifyAuth("alice", "wrong") {
+		t.Error("VerifyAuth should fail with wrong password")
 	}
 
-	c.SetAuth("", "")
+	if err := c.SetAuth("", ""); err != nil {
+		t.Fatalf("SetAuth('','') error: %v", err)
+	}
 	if c.AuthEnabled() {
 		t.Error("auth should be disabled when user is empty")
 	}
 }
 
 func TestConfig_ConcurrentAccess(t *testing.T) {
-	c := &Config{}
+	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(2)
-		go func() { defer wg.Done(); c.SetAuth("u", "p") }()
-		go func() { defer wg.Done(); c.GetAuth() }()
+		go func() { defer wg.Done(); c.SetAuth("u", "p") }() //nolint:errcheck
+		go func() { defer wg.Done(); c.GetUser() }()
 	}
 	wg.Wait()
 }

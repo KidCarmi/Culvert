@@ -15,7 +15,7 @@ func setupProxyTest(t *testing.T) {
 	bl = &Blocklist{hosts: map[string]bool{}}
 	ipf = &IPFilter{single: map[string]bool{}}
 	rl = &RateLimiter{clients: map[string]*clientBucket{}}
-	cfg = &Config{}
+	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	plugins = nil
 }
 
@@ -36,7 +36,9 @@ func makeRequest(method, targetURL string, headers map[string]string) *http.Requ
 
 func TestHandleRequest_AuthRequired(t *testing.T) {
 	setupProxyTest(t)
-	cfg.SetAuth("alice", "secret")
+	if err := cfg.SetAuth("alice", "secret"); err != nil {
+		t.Fatalf("SetAuth: %v", err)
+	}
 
 	w := httptest.NewRecorder()
 	r := makeRequest("GET", "http://example.com/", nil)
@@ -49,7 +51,9 @@ func TestHandleRequest_AuthRequired(t *testing.T) {
 
 func TestHandleRequest_AuthWrongPassword(t *testing.T) {
 	setupProxyTest(t)
-	cfg.SetAuth("alice", "secret")
+	if err := cfg.SetAuth("alice", "secret"); err != nil {
+		t.Fatalf("SetAuth: %v", err)
+	}
 
 	creds := base64.StdEncoding.EncodeToString([]byte("alice:wrong"))
 	w := httptest.NewRecorder()

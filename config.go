@@ -17,7 +17,8 @@ type FileConfig struct {
 		LogMaxMB  int    `yaml:"log_max_mb"`
 		TLSCert    string `yaml:"tls_cert"`    // path to TLS cert for UI
 		TLSKey     string `yaml:"tls_key"`     // path to TLS key for UI
-		SOCKS5Port int    `yaml:"socks5_port"` // 0 = disabled
+		SOCKS5Port   int    `yaml:"socks5_port"`   // 0 = disabled
+		MetricsToken string `yaml:"metrics_token"` // Bearer token for /metrics; empty=open
 	} `yaml:"proxy"`
 	Auth struct {
 		User string `yaml:"user"`

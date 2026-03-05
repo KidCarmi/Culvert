@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ─── Uptime ───────────────────────────────────────────────────────────────────
@@ -199,35 +203,122 @@ func (b *Blocklist) Count() int {
 	return len(b.hosts)
 }
 
+// ─── Auth cache ───────────────────────────────────────────────────────────────
+//
+// bcrypt is intentionally slow (~100 ms). For a proxy that authenticates on
+// every request we cache the result for authCacheTTL to avoid a CPU bottleneck
+// while still rotating frequently enough to catch revoked credentials.
+
+const authCacheTTL = 5 * time.Minute
+
+type authCacheEntry struct {
+	ok     bool
+	expiry time.Time
+}
+
+type authCacheStore struct {
+	mu      sync.Mutex
+	entries map[string]*authCacheEntry
+}
+
+func (a *authCacheStore) get(user, pass string) (ok, hit bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	k := cacheKey(user, pass)
+	if e, found := a.entries[k]; found && time.Now().Before(e.expiry) {
+		return e.ok, true
+	}
+	return false, false
+}
+
+func (a *authCacheStore) set(user, pass string, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.entries[cacheKey(user, pass)] = &authCacheEntry{ok: ok, expiry: time.Now().Add(authCacheTTL)}
+}
+
+func (a *authCacheStore) clear() {
+	a.mu.Lock()
+	a.entries = map[string]*authCacheEntry{}
+	a.mu.Unlock()
+}
+
+// cacheKey hashes (user+pass) with SHA-256 so we never store plaintext creds
+// as map keys in heap-visible memory.
+func cacheKey(user, pass string) string {
+	h := sha256.Sum256([]byte(user + ":" + pass))
+	return hex.EncodeToString(h[:])
+}
+
 // ─── Config (live-editable) ───────────────────────────────────────────────────
 
 type Config struct {
 	mu        sync.RWMutex
 	ProxyPort int
 	UIPort    int
-	User      string
-	Pass      string
+	user      string
+	passHash  []byte // bcrypt hash; nil = no auth
+	cache     authCacheStore
 }
 
-var cfg = &Config{}
+var cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 
-func (c *Config) GetAuth() (string, string) {
+// GetUser returns the configured username (password is never returned).
+func (c *Config) GetUser() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.User, c.Pass
+	return c.user
 }
 
-func (c *Config) SetAuth(user, pass string) {
+// SetAuth hashes pass with bcrypt and clears the auth cache.
+// Call with empty user to disable authentication.
+func (c *Config) SetAuth(user, pass string) error {
+	if user == "" {
+		c.mu.Lock()
+		c.user = ""
+		c.passHash = nil
+		c.mu.Unlock()
+		c.cache.clear()
+		return nil
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
 	c.mu.Lock()
-	c.User = user
-	c.Pass = pass
+	c.user = user
+	c.passHash = hash
 	c.mu.Unlock()
+	c.cache.clear()
+	return nil
+}
+
+// VerifyAuth checks credentials against the bcrypt hash, using a short-lived
+// cache to avoid hashing on every proxied request.
+func (c *Config) VerifyAuth(user, pass string) bool {
+	c.mu.RLock()
+	storedUser := c.user
+	storedHash := c.passHash
+	c.mu.RUnlock()
+
+	if storedUser == "" {
+		return true // auth disabled
+	}
+	if user != storedUser {
+		return false
+	}
+	if ok, hit := c.cache.get(user, pass); hit {
+		return ok
+	}
+	ok := bcrypt.CompareHashAndPassword(storedHash, []byte(pass)) == nil
+	c.cache.set(user, pass, ok)
+	return ok
 }
 
 func (c *Config) AuthEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.User != ""
+	return c.user != ""
 }
 
 func uptime() string {

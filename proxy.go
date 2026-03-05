@@ -31,11 +31,10 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Basic auth check.
+	// Basic auth check (bcrypt-verified, cached per authCacheTTL).
 	if cfg.AuthEnabled() {
-		user, pass := cfg.GetAuth()
 		u, p, ok := parseProxyAuth(r)
-		if !ok || u != user || p != pass {
+		if !ok || !cfg.VerifyAuth(u, p) {
 			atomic.AddInt64(&statAuthFail, 1)
 			w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyShield"`)
 			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
@@ -95,7 +94,14 @@ func parseProxyAuth(r *http.Request) (string, string, bool) {
 	return parts[0], parts[1], true
 }
 
+// maxRequestBody is the largest body we'll forward for non-tunnel requests.
+// CONNECT tunnels and WebSocket upgrades bypass this limit (they stream raw TCP).
+const maxRequestBody = 64 << 20 // 64 MB
+
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	}
 	removeHopHeaders(r.Header)
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
