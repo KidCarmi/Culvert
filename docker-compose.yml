@@ -9,7 +9,7 @@ services:
       - "8080:8080"   # Proxy
       - "9090:9090"   # Web UI (HTTPS)
     volumes:
-      - ./config.yaml:/app/config.yaml:ro   # optional — create from config.example.yaml
+      # - ./config.yaml:/app/config.yaml:ro   # optional — copy config.example.yaml → config.yaml first
       - proxy-data:/data
     environment:
       - TZ=UTC
