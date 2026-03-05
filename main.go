@@ -1,25 +1,59 @@
 package main
 
 import (
+	"bufio"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
 var (
-	port    = flag.Int("port", 8080, "Port to listen on")
-	verbose = flag.Bool("verbose", false, "Enable verbose logging")
+	port        = flag.Int("port", 8080, "Port to listen on")
+	verbose     = flag.Bool("verbose", false, "Enable verbose logging")
+	proxyUser   = flag.String("user", "", "Basic auth username (leave empty to disable auth)")
+	proxyPass   = flag.String("pass", "", "Basic auth password")
+	blockFile   = flag.String("blocklist", "", "Path to blocklist file (one host per line)")
+	logFile     = flag.String("logfile", "", "Path to log file (leave empty for stdout only)")
+
+	blocklist = map[string]bool{}
+	logger    *log.Logger
 )
 
 func main() {
 	flag.Parse()
 
+	// Set up logger (stdout + optional file).
+	writers := []io.Writer{os.Stdout}
+	if *logFile != "" {
+		f, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.Fatalf("Cannot open log file: %v", err)
+		}
+		defer f.Close()
+		writers = append(writers, f)
+	}
+	logger = log.New(io.MultiWriter(writers...), "", log.LstdFlags)
+
+	// Load blocklist if provided.
+	if *blockFile != "" {
+		if err := loadBlocklist(*blockFile); err != nil {
+			logger.Fatalf("Cannot load blocklist: %v", err)
+		}
+		logger.Printf("Loaded %d blocked hosts", len(blocklist))
+	}
+
 	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("Starting HTTP/HTTPS proxy on %s", addr)
+	logger.Printf("Starting HTTP/HTTPS proxy on %s", addr)
+	if *proxyUser != "" {
+		logger.Printf("Basic auth enabled (user: %s)", *proxyUser)
+	}
 
 	server := &http.Server{
 		Addr:         addr,
@@ -29,14 +63,55 @@ func main() {
 	}
 
 	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		logger.Fatalf("Server failed: %v", err)
 	}
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request) {
-	if *verbose {
-		log.Printf("%s %s %s", r.Method, r.Host, r.URL)
+func loadBlocklist(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
 	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		blocklist[strings.ToLower(line)] = true
+	}
+	return scanner.Err()
+}
+
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+	// Basic auth check.
+	if *proxyUser != "" {
+		user, pass, ok := parseProxyAuth(r)
+		if !ok || user != *proxyUser || pass != *proxyPass {
+			w.Header().Set("Proxy-Authenticate", `Basic realm="proxy"`)
+			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+			logger.Printf("AUTH FAIL %s", clientIP)
+			return
+		}
+	}
+
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+
+	// Blocklist check.
+	if blocklist[strings.ToLower(host)] {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		logger.Printf("BLOCKED %s -> %s", clientIP, host)
+		return
+	}
+
+	logger.Printf("%s %s %s %s", clientIP, r.Method, r.Host, r.URL)
 
 	if r.Method == http.MethodConnect {
 		handleTunnel(w, r)
@@ -45,9 +120,25 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// parseProxyAuth decodes the Proxy-Authorization header.
+func parseProxyAuth(r *http.Request) (string, string, bool) {
+	auth := r.Header.Get("Proxy-Authorization")
+	if !strings.HasPrefix(auth, "Basic ") {
+		return "", "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
+	if err != nil {
+		return "", "", false
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
 // handleHTTP proxies plain HTTP requests.
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
-	// Strip hop-by-hop headers before forwarding.
 	removeHopHeaders(r.Header)
 
 	client := &http.Client{
@@ -90,12 +181,11 @@ func handleTunnel(w http.ResponseWriter, r *http.Request) {
 
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
-		log.Printf("Hijack error: %v", err)
+		logger.Printf("Hijack error: %v", err)
 		return
 	}
 	defer clientConn.Close()
 
-	// Relay data in both directions concurrently.
 	done := make(chan struct{}, 2)
 	relay := func(dst, src net.Conn) {
 		io.Copy(dst, src)
@@ -107,14 +197,12 @@ func handleTunnel(w http.ResponseWriter, r *http.Request) {
 	<-done
 }
 
-// removeHopHeaders deletes hop-by-hop headers that must not be forwarded.
 func removeHopHeaders(h http.Header) {
-	hopHeaders := []string{
+	for _, hdr := range []string{
 		"Connection", "Keep-Alive", "Proxy-Authenticate",
 		"Proxy-Authorization", "TE", "Trailers",
 		"Transfer-Encoding", "Upgrade",
-	}
-	for _, hdr := range hopHeaders {
+	} {
 		h.Del(hdr)
 	}
 }
@@ -126,4 +214,3 @@ func copyHeaders(dst, src http.Header) {
 		}
 	}
 }
-
