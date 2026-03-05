@@ -30,6 +30,7 @@ func main() {
 	tlsKey       := flag.String("tls-key",       "",   "TLS key file for UI (optional)")
 	rateLimitRPM := flag.Int("rate-limit",       0,    "Max requests/min per IP (0=off)")
 	ipMode       := flag.String("ip-filter-mode","",   "IP filter mode: allow|block (empty=off)")
+	socks5Port   := flag.Int("socks5-port",     0,    "SOCKS5 proxy port (0=disabled)")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -98,6 +99,12 @@ func main() {
 			logger.Fatalf("Cannot load blocklist: %v", err)
 		}
 		logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), blPath)
+	}
+
+	// ── SOCKS5 server (optional) ─────────────────────────────────────────────
+	s5Port := firstNonZero(*socks5Port, fc.Proxy.SOCKS5Port)
+	if s5Port > 0 {
+		go startSOCKS5(s5Port)
 	}
 
 	// ── Web UI (HTTPS with self-signed cert by default) ───────────────────

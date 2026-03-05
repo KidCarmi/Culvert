@@ -232,6 +232,9 @@ tbody tr:hover { background: var(--surface2); }
     <div class="nav-item" data-view="blocklist">
       <span class="icon">🚫</span> Blocklist
     </div>
+    <div class="nav-item" data-view="security">
+      <span class="icon">🔒</span> Security
+    </div>
     <div class="nav-item" data-view="settings">
       <span class="icon">⚙️</span> Settings
     </div>
@@ -338,7 +341,11 @@ tbody tr:hover { background: var(--surface2); }
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Live Request Log</span>
-          <span class="topbar-meta" id="log-count">0 entries</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="topbar-meta" id="log-count">0 entries</span>
+            <button class="btn ghost sm" onclick="exportLogs('csv')">⬇ CSV</button>
+            <button class="btn ghost sm" onclick="exportLogs('json')">⬇ JSON</button>
+          </div>
         </div>
         <div class="tbl-wrap" style="max-height:60vh;overflow-y:auto" id="log-scroll">
           <table>
@@ -383,6 +390,82 @@ tbody tr:hover { background: var(--surface2); }
             </table>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- ── SECURITY ──────────────────────────────────────────────────────── -->
+    <div class="view" id="view-security">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;">
+
+        <!-- IP Filter -->
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">IP Filter</span></div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label class="form-label">Mode</label>
+              <div style="display:flex;gap:10px;flex-wrap:wrap">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.85rem">
+                  <input type="radio" name="ip-mode" value="" id="ip-mode-off"> Off
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.85rem">
+                  <input type="radio" name="ip-mode" value="allow" id="ip-mode-allow"> Allow-list only
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.85rem">
+                  <input type="radio" name="ip-mode" value="block" id="ip-mode-block"> Block-list
+                </label>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Add IP / CIDR</label>
+              <div class="add-row" style="margin-bottom:0">
+                <input type="text" class="input wide" id="sec-ip-input" placeholder="192.168.1.1 or 10.0.0.0/8">
+                <button class="btn" onclick="secAddIP()">Add</button>
+              </div>
+            </div>
+            <div id="sec-ip-count" style="font-size:.75rem;color:var(--muted);margin-bottom:8px;"></div>
+            <div class="tbl-wrap">
+              <table>
+                <thead><tr><th>IP / CIDR</th><th></th></tr></thead>
+                <tbody id="sec-ip-table"></tbody>
+              </table>
+            </div>
+            <button class="btn" style="margin-top:14px;width:100%" onclick="saveSecurity()">Apply Changes</button>
+          </div>
+        </div>
+
+        <!-- Rate Limit + Export -->
+        <div style="display:flex;flex-direction:column;gap:18px;">
+          <div class="panel">
+            <div class="panel-header"><span class="panel-title">Rate Limiting</span></div>
+            <div class="panel-body">
+              <div class="form-group">
+                <label class="form-label">Max requests / minute per IP</label>
+                <div class="form-row">
+                  <input type="number" class="input" style="width:110px" id="sec-rpm" min="0" placeholder="0 = off">
+                  <button class="btn" onclick="saveRateLimit()">Apply</button>
+                  <button class="btn danger" onclick="disableRateLimit()">Disable</button>
+                </div>
+                <p style="font-size:.72rem;color:var(--muted);margin-top:8px;">
+                  Current: <strong id="sec-rpm-cur">—</strong> &nbsp;|&nbsp; Status: <strong id="sec-rl-status">—</strong>
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header"><span class="panel-title">Export Logs</span></div>
+            <div class="panel-body">
+              <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px;">
+                Download all recorded requests (up to last 1 000 entries).
+              </p>
+              <div style="display:flex;gap:10px;flex-wrap:wrap">
+                <button class="btn" onclick="exportLogs('csv')" style="flex:1">⬇ Export CSV</button>
+                <button class="btn ghost" onclick="exportLogs('json')" style="flex:1">⬇ Export JSON</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
 
@@ -459,6 +542,7 @@ const viewMeta = {
   dashboard: { title: 'Dashboard',  meta: 'Real-time proxy overview' },
   livefeed:  { title: 'Live Feed',  meta: 'All requests in real-time' },
   blocklist: { title: 'Blocklist',  meta: 'Manage blocked hosts & wildcards' },
+  security:  { title: 'Security',   meta: 'IP filter, rate limiting & log export' },
   settings:  { title: 'Settings',   meta: 'Configuration & credentials' },
 };
 
@@ -729,6 +813,122 @@ document.getElementById('new-host').addEventListener('keydown', e => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Security panel
+// ═══════════════════════════════════════════════════════════════════════════
+let secIPList = [];
+
+async function loadSecurity() {
+  try {
+    const s = await api('/api/security');
+    // Mode radios
+    const modeVal = s.ipFilterMode || '';
+    document.querySelectorAll('input[name="ip-mode"]').forEach(r => {
+      r.checked = r.value === modeVal;
+    });
+    secIPList = s.ipList || [];
+    renderSecIPList();
+    document.getElementById('sec-rpm').value  = s.rateLimitRPM || 0;
+    document.getElementById('sec-rpm-cur').textContent  = s.rateLimitRPM ? s.rateLimitRPM + ' req/min' : '—';
+    document.getElementById('sec-rl-status').textContent = s.rateLimitOn ? 'Enabled' : 'Disabled';
+  } catch(e) {}
+}
+
+function renderSecIPList() {
+  const tbody = document.getElementById('sec-ip-table');
+  document.getElementById('sec-ip-count').textContent =
+    secIPList.length + ' entr' + (secIPList.length !== 1 ? 'ies' : 'y');
+  if (!secIPList.length) {
+    tbody.innerHTML = '<tr><td colspan="2"><div class="empty-state"><div class="empty-icon">✅</div>No IPs configured</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = secIPList.map(ip => `<tr>
+    <td style="font-family:monospace;font-size:.82rem">${ip}</td>
+    <td style="text-align:right">
+      <button class="btn danger sm" onclick="secRemoveIP('${ip}')">Remove</button>
+    </td>
+  </tr>`).join('');
+}
+
+async function secAddIP() {
+  const input = document.getElementById('sec-ip-input');
+  const ip = input.value.trim();
+  if (!ip) return;
+  try {
+    await api('/api/security', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ipAdd: ip}),
+    });
+    input.value = '';
+    toast('Added ' + ip, 'success');
+    loadSecurity();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function secRemoveIP(ip) {
+  try {
+    await api('/api/security', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ipRemove: ip}),
+    });
+    toast('Removed ' + ip, 'success');
+    loadSecurity();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function saveSecurity() {
+  const mode = document.querySelector('input[name="ip-mode"]:checked')?.value ?? '';
+  try {
+    await api('/api/security', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ipFilterMode: mode}),
+    });
+    toast('IP filter mode set to: ' + (mode || 'off'), 'success');
+    loadSecurity();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function saveRateLimit() {
+  const rpm = parseInt(document.getElementById('sec-rpm').value) || 0;
+  try {
+    await api('/api/security', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({rateLimitRPM: rpm}),
+    });
+    toast('Rate limit set to ' + (rpm || 'disabled'), 'success');
+    loadSecurity();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function disableRateLimit() {
+  try {
+    await api('/api/security', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({rateLimitRPM: 0}),
+    });
+    toast('Rate limiting disabled', 'success');
+    loadSecurity();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Export logs
+// ═══════════════════════════════════════════════════════════════════════════
+function exportLogs(format) {
+  const a = document.createElement('a');
+  a.href = '/api/export?format=' + format;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  toast('Downloading logs as ' + format.toUpperCase(), 'success');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Settings
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadSettings() {
@@ -777,8 +977,15 @@ async function tick() {
 initChart();
 fetchBlocklist();
 loadSettings();
+loadSecurity();
 tick();
 setInterval(tick, 3000);
+// Reload security panel when switching to it
+document.querySelectorAll('.nav-item').forEach(el => {
+  el.addEventListener('click', () => {
+    if (el.dataset.view === 'security') loadSecurity();
+  });
+});
 </script>
 </body>
 </html>

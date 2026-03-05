@@ -15,8 +15,9 @@ type FileConfig struct {
 		Blocklist string `yaml:"blocklist"`
 		LogFile   string `yaml:"log_file"`
 		LogMaxMB  int    `yaml:"log_max_mb"`
-		TLSCert   string `yaml:"tls_cert"` // path to TLS cert for UI
-		TLSKey    string `yaml:"tls_key"`  // path to TLS key for UI
+		TLSCert    string `yaml:"tls_cert"`    // path to TLS cert for UI
+		TLSKey     string `yaml:"tls_key"`     // path to TLS key for UI
+		SOCKS5Port int    `yaml:"socks5_port"` // 0 = disabled
 	} `yaml:"proxy"`
 	Auth struct {
 		User string `yaml:"user"`
