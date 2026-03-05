@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,7 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/blocklist", apiBlocklist)
 	mux.HandleFunc("/api/settings", apiSettings)
 	mux.HandleFunc("/api/security", apiSecurity)
+	mux.HandleFunc("/api/export", apiExport)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -245,5 +247,36 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET /api/export?format=json|csv — download all logs
+func apiExport(w http.ResponseWriter, r *http.Request) {
+	entries := logGet()
+	format := r.URL.Query().Get("format")
+	ts := time.Now().Format("20060102-150405")
+
+	switch format {
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="proxyshield-%s.csv"`, ts))
+		cw := csv.NewWriter(w)
+		cw.Write([]string{"timestamp", "time", "ip", "method", "host", "status"})
+		for _, e := range entries {
+			cw.Write([]string{
+				fmt.Sprintf("%d", e.TS),
+				e.Time, e.IP, e.Method, e.Host, e.Status,
+			})
+		}
+		cw.Flush()
+
+	default: // json
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="proxyshield-%s.json"`, ts))
+		json.NewEncoder(w).Encode(map[string]any{
+			"exported": ts,
+			"count":    len(entries),
+			"logs":     entries,
+		})
 	}
 }

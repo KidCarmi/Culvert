@@ -106,6 +106,7 @@ func main() {
 	// ── Proxy server ─────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/metrics", handleMetrics)
 	mux.HandleFunc("/", handleRequest)
 
 	proxySrv := &http.Server{

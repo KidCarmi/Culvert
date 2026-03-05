@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  proxy:
+    build: .
+    container_name: proxyshield
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # Proxy
+      - "9090:9090"   # Web UI (HTTPS)
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro   # optional — create from config.example.yaml
+      - proxy-data:/data
+    environment:
+      - TZ=UTC
+    command: ["-port", "8080", "-ui-port", "9090", "-logfile", "/data/proxy.log"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Optional: Prometheus + Grafana stack
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: proxyshield-prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    profiles: ["monitoring"]
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: proxyshield-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=proxyshield
+      - GF_USERS_ALLOW_SIGN_UP=false
+    profiles: ["monitoring"]
+
+volumes:
+  proxy-data:
+  prom-data:
+  grafana-data:
