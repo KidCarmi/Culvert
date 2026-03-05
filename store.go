@@ -256,14 +256,31 @@ type Config struct {
 	mu        sync.RWMutex
 	ProxyPort int
 	UIPort    int
-	user      string
-	passHash  []byte // bcrypt hash; nil = no auth
-	cache     authCacheStore
+
+	// Local (bcrypt) auth fields — used when no external AuthProvider is set.
+	user     string
+	passHash []byte // bcrypt hash; nil = no auth
+	cache    authCacheStore
+
+	// External auth provider (LDAP or OIDC). When non-nil, takes precedence
+	// over the local bcrypt credentials for Verify calls.
+	provider AuthProvider
 }
 
 var cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 
-// GetUser returns the configured username (password is never returned).
+// SetProvider replaces the active authentication backend.
+// Pass nil to fall back to local bcrypt auth.
+func (c *Config) SetProvider(p AuthProvider) {
+	c.mu.Lock()
+	c.provider = p
+	c.mu.Unlock()
+	if p != nil {
+		logger.Printf("Auth provider → %s", p.Name())
+	}
+}
+
+// GetUser returns the configured local username (never returns the password).
 func (c *Config) GetUser() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -271,7 +288,8 @@ func (c *Config) GetUser() string {
 }
 
 // SetAuth hashes pass with bcrypt and clears the auth cache.
-// Call with empty user to disable authentication.
+// Call with empty user to disable local authentication.
+// Has no effect on an external AuthProvider.
 func (c *Config) SetAuth(user, pass string) error {
 	if user == "" {
 		c.mu.Lock()
@@ -293,14 +311,22 @@ func (c *Config) SetAuth(user, pass string) error {
 	return nil
 }
 
-// VerifyAuth checks credentials against the bcrypt hash, using a short-lived
-// cache to avoid hashing on every proxied request.
+// VerifyAuth checks credentials against the active auth backend:
+//   - External provider (LDAP / OIDC) if configured, otherwise
+//   - Local bcrypt hash with a short-lived cache.
 func (c *Config) VerifyAuth(user, pass string) bool {
 	c.mu.RLock()
+	p := c.provider
 	storedUser := c.user
 	storedHash := c.passHash
 	c.mu.RUnlock()
 
+	// External provider takes precedence.
+	if p != nil {
+		return p.Verify(user, pass)
+	}
+
+	// Local bcrypt auth.
 	if storedUser == "" {
 		return true // auth disabled
 	}
@@ -315,10 +341,11 @@ func (c *Config) VerifyAuth(user, pass string) bool {
 	return ok
 }
 
+// AuthEnabled returns true when any form of authentication is active.
 func (c *Config) AuthEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != ""
+	return c.user != "" || c.provider != nil
 }
 
 func uptime() string {

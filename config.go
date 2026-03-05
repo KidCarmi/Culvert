@@ -29,6 +29,15 @@ type FileConfig struct {
 		IPList       []string `yaml:"ip_list"`        // IPs or CIDRs
 		RateLimit    int      `yaml:"rate_limit"`     // max requests per minute (0=off)
 	} `yaml:"security"`
+
+	// LDAP / Active Directory authentication backend.
+	// When URL is set, LDAP auth is used instead of local username/password.
+	LDAP LDAPConfig `yaml:"ldap"`
+
+	// OIDC / OAuth2 token-introspection authentication backend.
+	// When IntrospectionURL is set, OIDC auth is used instead of local auth.
+	// LDAP takes precedence over OIDC if both are configured.
+	OIDC OIDCConfig `yaml:"oidc"`
 }
 
 func loadFileConfig(path string) (*FileConfig, error) {

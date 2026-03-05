@@ -30,8 +30,17 @@ func main() {
 	tlsKey       := flag.String("tls-key",       "",   "TLS key file for UI (optional)")
 	rateLimitRPM := flag.Int("rate-limit",       0,    "Max requests/min per IP (0=off)")
 	ipMode       := flag.String("ip-filter-mode","",   "IP filter mode: allow|block (empty=off)")
-	socks5Port    := flag.Int("socks5-port",     0,    "SOCKS5 proxy port (0=disabled)")
-	metricsTok    := flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
+	socks5Port  := flag.Int("socks5-port",      0,  "SOCKS5 proxy port (0=disabled)")
+	metricsTok  := flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
+	cpGRPCAddr  := flag.String("cp-grpc-addr",  "", "ControlPlane gRPC listen addr e.g. :50051 (empty=off)")
+	cpGRPCCert  := flag.String("cp-grpc-cert",  "", "ControlPlane gRPC TLS cert (mTLS)")
+	cpGRPCKey   := flag.String("cp-grpc-key",   "", "ControlPlane gRPC TLS key")
+	cpGRPCCA    := flag.String("cp-grpc-ca",    "", "ControlPlane gRPC CA for mTLS client validation")
+	dpCPAddr    := flag.String("dp-cp-addr",    "", "DataPlane: ControlPlane gRPC addr to connect to")
+	dpNodeID    := flag.String("dp-node-id",    "", "DataPlane: node identifier (default=hostname)")
+	dpCert      := flag.String("dp-cert",       "", "DataPlane gRPC client TLS cert")
+	dpKey       := flag.String("dp-key",        "", "DataPlane gRPC client TLS key")
+	dpCA        := flag.String("dp-ca",         "", "DataPlane gRPC CA cert")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -73,12 +82,56 @@ func main() {
 		log.Fatalf("Failed to set auth: %v", err)
 	}
 
+	// ── External auth provider (LDAP / OIDC) ─────────────────────────────────
+	// LDAP takes precedence when URL is configured.
+	if fc.LDAP.URL != "" {
+		ldapProvider, err := NewLDAPAuth(fc.LDAP)
+		if err != nil {
+			log.Fatalf("LDAP config error: %v", err)
+		}
+		cfg.SetProvider(ldapProvider)
+		logger.Printf("Auth     → LDAP (%s, base=%s)", fc.LDAP.URL, fc.LDAP.BaseDN)
+	} else if fc.OIDC.IntrospectionURL != "" {
+		oidcProvider, err := NewOIDCAuth(fc.OIDC)
+		if err != nil {
+			log.Fatalf("OIDC config error: %v", err)
+		}
+		cfg.SetProvider(oidcProvider)
+		logger.Printf("Auth     → OIDC introspection (%s)", fc.OIDC.IntrospectionURL)
+	} else if authU != "" {
+		logger.Printf("Auth     → local bcrypt (user=%s)", authU)
+	}
+
 	// ── Metrics token ────────────────────────────────────────────────────────
 	metricsToken = firstStr(*metricsTok, fc.Proxy.MetricsToken)
 	if metricsToken != "" {
 		logger.Printf("Metrics  → /metrics protected by Bearer token")
 	} else {
 		logger.Printf("Metrics  → /metrics open (set -metrics-token to restrict)")
+	}
+
+	// ── Control Plane / Data Plane gRPC ──────────────────────────────────────
+	if *cpGRPCAddr != "" {
+		// This process is (also) a Control Plane.
+		globalConfigStore.Update(CurrentConfigSnapshot())
+		if err := StartControlPlaneGRPC(*cpGRPCAddr, *cpGRPCCert, *cpGRPCKey, *cpGRPCCA); err != nil {
+			logger.Fatalf("ControlPlane gRPC: %v", err)
+		}
+	}
+	if *dpCPAddr != "" {
+		// This process is a Data Plane node.
+		nodeID := *dpNodeID
+		if nodeID == "" {
+			if h, err2 := os.Hostname(); err2 == nil {
+				nodeID = h
+			}
+		}
+		dpClient, err := NewDataPlaneClient(nodeID, *dpCPAddr, *dpCert, *dpKey, *dpCA)
+		if err != nil {
+			logger.Fatalf("DataPlane client: %v", err)
+		}
+		dpClient.Run(context.Background(), 30*time.Second)
+		logger.Printf("DataPlane: polling ControlPlane at %s every 30s", *dpCPAddr)
 	}
 
 	// ── Security: IP filter ──────────────────────────────────────────────────
