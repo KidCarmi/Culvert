@@ -11,11 +11,14 @@
 | Category | Details |
 |----------|---------|
 | **Protocols** | HTTP, HTTPS (CONNECT tunnel), WebSocket, SOCKS5 |
-| **Security** | Basic auth, domain blocklist (wildcards), IP allowlist/blocklist (CIDR), rate limiting |
-| **Observability** | Prometheus metrics (`/metrics`), real-time Web UI, request log |
+| **Security** | Basic auth (bcrypt), domain blocklist (wildcards), IP allowlist/blocklist (CIDR), rate limiting |
+| **Auth providers** | Local credentials, LDAP (two-step bind), OIDC token introspection (RFC 7662) |
+| **Header rewriting** | Per-host request/response header set/add/remove rules (exact + `*.wildcard` patterns) |
+| **Observability** | Prometheus metrics (`/metrics`), real-time Web UI, structured request log (text or JSON) |
 | **Export** | Download logs as CSV or JSON |
 | **Production** | Docker image, docker-compose, graceful shutdown, log rotation |
 | **Extensibility** | Plugin middleware API (`Middleware` interface) |
+| **Distributed** | Control Plane / Data Plane gRPC mode for multi-node deployments |
 
 ---
 
@@ -50,6 +53,7 @@ proxy:
   port: 8080
   ui_port: 9090
   socks5_port: 1080      # 0 = disabled
+  log_format: json       # "text" (default) or "json"
 
 auth:
   user: alice
@@ -60,6 +64,29 @@ security:
   ip_list:
     - 192.168.1.0/24
   rate_limit: 60         # requests/min per IP
+
+# Optional: LDAP authentication (takes precedence over local auth)
+ldap:
+  url: ldap://ldap.example.com:389
+  bind_dn: "cn=svc,dc=example,dc=com"
+  bind_pass: secret
+  base_dn: "ou=users,dc=example,dc=com"
+  filter: "(uid=%s)"
+
+# Optional: OIDC token introspection (RFC 7662)
+oidc:
+  introspection_url: https://auth.example.com/oauth2/introspect
+  client_id: proxyshield
+  client_secret: secret
+
+# Optional: header rewrite rules
+rewrite:
+  - host: "*.internal.example.com"
+    req_set:
+      X-Forwarded-By: ProxyShield
+    resp_remove:
+      - Server
+      - X-Powered-By
 ```
 
 ### CLI Flags
@@ -78,6 +105,8 @@ security:
 -ip-filter-mode string IP filter mode: allow|block (empty = off)
 -tls-cert string       Custom TLS certificate for Web UI
 -tls-key string        Custom TLS key for Web UI
+-metrics-token string  Bearer token to protect /metrics (empty = open)
+-socks5-port int       SOCKS5 proxy port (0 = disabled)
 ```
 
 ---
@@ -185,11 +214,60 @@ Open `https://localhost:9090` in your browser (accept the self-signed certificat
 
 | Section | Features |
 |---------|---------|
-| Dashboard | Request stats, rate chart, recent requests |
-| Live Feed | Real-time log with host/IP/status filters, CSV/JSON export |
+| Dashboard | Request stats, timeseries chart, traffic breakdown doughnut, top-hosts panel |
+| Live Feed | Real-time log with host/IP/status/level/method filters, CSV/JSON export |
 | Blocklist | Add/remove/wildcard hosts, import/export `.txt` |
-| Security | IP filter mode + list, rate limit, export logs |
+| Security | IP filter mode + list, rate limit |
+| Rewrite | Per-host request/response header rewrite rules (set/add/remove) |
 | Settings | Basic auth credentials |
+
+---
+
+## Self-Hosted CI Runner
+
+ProxyShield CI runs on a self-hosted GitHub Actions runner so the Docker build step can use a real Docker daemon.
+
+### One-command install
+
+```bash
+# Set your registration token (Settings → Actions → Runners → New self-hosted runner)
+export RUNNER_TOKEN=<your_token>
+bash scripts/install-runner.sh
+```
+
+The script will:
+1. Install Docker (if missing)
+2. **Add the current user to the `docker` group** — this is the most common failure point
+3. Download & configure the GitHub Actions runner binary
+4. Install it as a systemd service that starts automatically on boot
+
+### Manual setup (if you prefer)
+
+```bash
+# 1. Install Docker
+curl -fsSL https://get.docker.com | sudo sh
+
+# 2. Add your user to the docker group (prevents "permission denied" on the Docker socket)
+sudo usermod -aG docker "$USER"
+newgrp docker          # apply immediately without re-login
+
+# 3. Download runner (replace VERSION and TOKEN)
+mkdir ~/actions-runner && cd ~/actions-runner
+curl -fsSL -o runner.tar.gz \
+  https://github.com/actions/runner/releases/download/v2.322.0/actions-runner-linux-x64-2.322.0.tar.gz
+tar xzf runner.tar.gz && rm runner.tar.gz
+
+# 4. Configure
+./config.sh --url https://github.com/KidCarmi/Claude-Test \
+            --token <TOKEN> --labels self-hosted,linux,x64 --unattended
+
+# 5. Run as a service
+sudo ./svc.sh install && sudo ./svc.sh start
+```
+
+> **Note:** After `usermod -aG docker`, you must log out and back in (or run `newgrp docker`)
+> for the group change to take effect. Then restart the runner service:
+> `sudo ~/actions-runner/svc.sh restart`
 
 ---
 
@@ -216,18 +294,23 @@ go test -run TestHandleRequest ./... # proxy handler integration tests
 ## Architecture
 
 ```
-main.go          — CLI flags, startup, graceful shutdown
-proxy.go         — HTTP/HTTPS/WebSocket request handler
-socks5.go        — SOCKS5 server
-plugin.go        — Plugin middleware API
-security.go      — IPFilter + RateLimiter
-store.go         — Blocklist, Config, request log, time-series stats
-ui.go            — Web UI server + REST API endpoints
-metrics.go       — Prometheus /metrics endpoint
-logger.go        — Structured logging + log rotation
-config.go        — YAML config file loading
-tls.go           — Self-signed TLS certificate generation
-static/          — Embedded Web UI (single HTML file, Chart.js)
+main.go           — CLI flags, startup, graceful shutdown
+proxy.go          — HTTP/HTTPS/WebSocket request handler
+socks5.go         — SOCKS5 server
+plugin.go         — Plugin middleware API
+security.go       — IPFilter + RateLimiter
+store.go          — Blocklist, Config, request log, time-series stats, top-hosts
+ui.go             — Web UI server + REST API endpoints
+metrics.go        — Prometheus /metrics endpoint
+logger.go         — Structured logging + log rotation (text/JSON)
+config.go         — YAML config file loading
+tls.go            — Self-signed TLS certificate generation
+rewrite.go        — Header rewrite engine (host-pattern, req/resp rules)
+auth_ldap.go      — LDAP authentication provider
+auth_oidc.go      — OIDC token introspection provider
+controlplane.go   — Control Plane / Data Plane gRPC
+static/           — Embedded Web UI (single HTML file, Chart.js)
+scripts/          — Helper scripts (self-hosted runner setup)
 ```
 
 ---
