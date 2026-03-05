@@ -24,6 +24,45 @@
 
 ## Quick Start
 
+### Docker (recommended)
+
+```bash
+git clone https://github.com/KidCarmi/Claude-Test
+cd Claude-Test
+docker-compose up -d
+```
+
+That's it. No configuration required.
+
+| Endpoint | URL |
+|----------|-----|
+| HTTP/HTTPS Proxy | `http://localhost:8080` |
+| Web UI | `https://localhost:9090` (accept the self-signed cert) |
+| Health check | `http://localhost:8080/health` |
+
+To verify it works:
+```bash
+curl http://localhost:8080/health
+# → {"status":"ok","uptime":"...","version":"1.0.0"}
+
+curl -x http://localhost:8080 https://example.com
+```
+
+#### With custom config (optional)
+
+```bash
+cp config.example.yaml config.yaml   # edit as needed
+# Uncomment the config.yaml volume line in docker-compose.yml, then:
+docker-compose up -d
+```
+
+#### With monitoring stack (Prometheus + Grafana)
+
+```bash
+docker-compose --profile monitoring up -d
+# Grafana → http://localhost:3000  (admin / proxyshield)
+```
+
 ### Binary
 
 ```bash
@@ -31,15 +70,6 @@
 ./proxyshield                          # runs on :8080 (proxy) + :9090 (UI)
 ./proxyshield -port 3128 -socks5-port 1080
 ./proxyshield -config config.yaml
-```
-
-### Docker
-
-```bash
-cp config.example.yaml config.yaml   # edit as needed
-docker-compose up -d
-# Web UI → https://localhost:9090
-# Prometheus → docker-compose --profile monitoring up -d
 ```
 
 ---
