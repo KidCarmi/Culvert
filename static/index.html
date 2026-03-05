@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProxyShield</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+/* ─── Reset & Variables ──────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:        #0b0f1a;
+  --surface:   #111827;
+  --surface2:  #1a2235;
+  --border:    #1f2d45;
+  --accent:    #3b82f6;
+  --accent2:   #60a5fa;
+  --green:     #22c55e;
+  --red:       #ef4444;
+  --orange:    #f97316;
+  --yellow:    #eab308;
+  --text:      #e2e8f0;
+  --muted:     #64748b;
+  --sidebar-w: 220px;
+  --radius:    10px;
+  --shadow:    0 4px 24px rgba(0,0,0,.4);
+}
+body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+       background: var(--bg); color: var(--text); min-height: 100vh;
+       display: flex; overflow: hidden; }
+/* ─── Sidebar ───────────────────────────────────────────────────────────── */
+#sidebar {
+  width: var(--sidebar-w); min-height: 100vh; background: var(--surface);
+  border-right: 1px solid var(--border); display: flex; flex-direction: column;
+  flex-shrink: 0; position: fixed; left: 0; top: 0; bottom: 0; z-index: 100;
+}
+.logo {
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px;
+}
+.logo-icon {
+  width: 32px; height: 32px; background: var(--accent);
+  border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  font-size: 16px; flex-shrink: 0;
+}
+.logo-text { font-size: 1rem; font-weight: 700; color: var(--text); }
+.logo-sub  { font-size: .65rem; color: var(--muted); }
+nav { flex: 1; padding: 12px 10px; }
+.nav-section { font-size: .65rem; font-weight: 700; color: var(--muted);
+               letter-spacing: .08em; text-transform: uppercase;
+               padding: 12px 10px 4px; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 7px; cursor: pointer;
+  font-size: .85rem; color: var(--muted); transition: all .15s; margin-bottom: 1px;
+}
+.nav-item:hover  { background: var(--surface2); color: var(--text); }
+.nav-item.active { background: rgba(59,130,246,.15); color: var(--accent2);
+                   font-weight: 600; }
+.nav-item .icon  { width: 18px; text-align: center; flex-shrink: 0; }
+.nav-badge {
+  margin-left: auto; background: var(--red); color: #fff;
+  font-size: .65rem; font-weight: 700; padding: 2px 6px;
+  border-radius: 999px; min-width: 18px; text-align: center;
+}
+.sidebar-footer {
+  padding: 12px 16px; border-top: 1px solid var(--border); font-size: .72rem;
+}
+.status-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.gray  { background: var(--muted); }
+.status-label { color: var(--muted); }
+/* ─── Main content ──────────────────────────────────────────────────────── */
+#main { margin-left: var(--sidebar-w); flex: 1; min-height: 100vh;
+        overflow-y: auto; display: flex; flex-direction: column; }
+.topbar {
+  padding: 16px 28px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--surface); position: sticky; top: 0; z-index: 50;
+}
+.topbar-title { font-size: 1rem; font-weight: 600; }
+.topbar-meta  { font-size: .75rem; color: var(--muted); }
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: 999px; font-size: .72rem; font-weight: 600;
+}
+.pill.live { background: rgba(34,197,94,.12); color: var(--green);
+             border: 1px solid rgba(34,197,94,.3); }
+.content { padding: 24px 28px; flex: 1; }
+/* ─── Views ─────────────────────────────────────────────────────────────── */
+.view { display: none; }
+.view.active { display: block; }
+/* ─── Cards ─────────────────────────────────────────────────────────────── */
+.cards { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px;
+         margin-bottom: 22px; }
+@media(max-width:1100px){ .cards { grid-template-columns: repeat(2,1fr); } }
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px 20px;
+}
+.card-label { font-size: .72rem; color: var(--muted); font-weight: 500;
+              text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px;
+              display: flex; align-items: center; gap: 6px; }
+.card-value { font-size: 1.9rem; font-weight: 700; line-height: 1; }
+.card-sub   { font-size: .72rem; color: var(--muted); margin-top: 4px; }
+.c-blue   .card-value { color: var(--accent2); }
+.c-green  .card-value { color: var(--green); }
+.c-red    .card-value { color: var(--red); }
+.c-orange .card-value { color: var(--orange); }
+/* ─── Panels ─────────────────────────────────────────────────────────────── */
+.panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); margin-bottom: 18px;
+}
+.panel-header {
+  padding: 14px 20px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.panel-title { font-size: .85rem; font-weight: 600; }
+.panel-body  { padding: 18px 20px; }
+/* ─── Chart ──────────────────────────────────────────────────────────────── */
+.chart-wrap { height: 160px; }
+/* ─── Table ──────────────────────────────────────────────────────────────── */
+.tbl-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+thead th {
+  padding: 8px 14px; text-align: left; color: var(--muted);
+  font-weight: 600; font-size: .72rem; text-transform: uppercase;
+  letter-spacing: .05em; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+tbody td { padding: 9px 14px; border-bottom: 1px solid var(--border); }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr { transition: background .1s; }
+tbody tr:hover { background: var(--surface2); }
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: .72rem; font-weight: 700;
+}
+.badge.ok      { background: rgba(34,197,94,.12); color: var(--green); }
+.badge.blocked { background: rgba(239,68,68,.12);  color: var(--red); }
+.badge.auth    { background: rgba(249,115,22,.12); color: var(--orange); }
+/* ─── Blocklist ──────────────────────────────────────────────────────────── */
+.add-row { display: flex; gap: 8px; margin-bottom: 16px; }
+.input {
+  background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); padding: 8px 12px; border-radius: 7px;
+  font-size: .85rem; outline: none; transition: border-color .15s;
+}
+.input:focus { border-color: var(--accent); }
+.input.wide { flex: 1; }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent); color: #fff; border: none;
+  padding: 8px 16px; border-radius: 7px; cursor: pointer;
+  font-size: .82rem; font-weight: 600; transition: opacity .15s;
+  white-space: nowrap;
+}
+.btn:hover   { opacity: .85; }
+.btn.danger  { background: var(--red); }
+.btn.ghost   { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+.btn.ghost:hover { color: var(--text); border-color: var(--text); }
+.btn.sm      { padding: 5px 10px; font-size: .75rem; }
+/* host chips in blocklist table */
+.host-td { font-family: monospace; font-size: .82rem; }
+.wild-tag { color: var(--yellow); font-size: .7rem; font-weight: 700;
+            background: rgba(234,179,8,.1); padding: 1px 5px;
+            border-radius: 3px; margin-left: 6px; }
+/* ─── Search / filter bar ───────────────────────────────────────────────── */
+.filter-bar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.select {
+  background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); padding: 7px 10px; border-radius: 7px;
+  font-size: .82rem; outline: none; cursor: pointer;
+}
+/* ─── Settings ───────────────────────────────────────────────────────────── */
+.form-group { margin-bottom: 16px; }
+.form-label { font-size: .78rem; font-weight: 600; color: var(--muted);
+              display: block; margin-bottom: 6px; }
+.form-row { display: flex; gap: 10px; }
+.info-item { display: flex; justify-content: space-between;
+             padding: 10px 0; border-bottom: 1px solid var(--border);
+             font-size: .85rem; }
+.info-item:last-child { border: none; }
+.info-key { color: var(--muted); }
+.info-val { font-weight: 600; font-family: monospace; }
+/* ─── Toast ──────────────────────────────────────────────────────────────── */
+#toasts { position: fixed; bottom: 24px; right: 24px; z-index: 999;
+          display: flex; flex-direction: column; gap: 8px; }
+.toast {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 16px; font-size: .82rem;
+  display: flex; align-items: center; gap: 8px; box-shadow: var(--shadow);
+  animation: slideIn .2s ease;
+}
+.toast.success { border-left: 3px solid var(--green); }
+.toast.error   { border-left: 3px solid var(--red); }
+@keyframes slideIn { from { opacity:0; transform: translateX(20px); } }
+/* ─── Empty state ────────────────────────────────────────────────────────── */
+.empty-state {
+  text-align: center; padding: 40px 20px;
+  color: var(--muted); font-size: .85rem;
+}
+.empty-icon { font-size: 2rem; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<!-- ═══ SIDEBAR ════════════════════════════════════════════════════════════ -->
+<aside id="sidebar">
+  <div class="logo">
+    <div class="logo-icon">🛡️</div>
+    <div>
+      <div class="logo-text">ProxyShield</div>
+      <div class="logo-sub">v1.0 · Open Source</div>
+    </div>
+  </div>
+
+  <nav>
+    <div class="nav-section">Monitor</div>
+    <div class="nav-item active" data-view="dashboard">
+      <span class="icon">📊</span> Dashboard
+    </div>
+    <div class="nav-item" data-view="livefeed">
+      <span class="icon">⚡</span> Live Feed
+      <span class="nav-badge" id="nav-blocked-count" style="display:none">0</span>
+    </div>
+
+    <div class="nav-section">Control</div>
+    <div class="nav-item" data-view="blocklist">
+      <span class="icon">🚫</span> Blocklist
+    </div>
+    <div class="nav-item" data-view="settings">
+      <span class="icon">⚙️</span> Settings
+    </div>
+  </nav>
+
+  <div class="sidebar-footer">
+    <div class="status-row">
+      <div class="dot green" id="proxy-dot"></div>
+      <span class="status-label">Proxy &nbsp;<strong id="proxy-port">:8080</strong></span>
+    </div>
+    <div class="status-row">
+      <div class="dot green"></div>
+      <span class="status-label">Web UI &nbsp;<strong id="ui-port">:9090</strong></span>
+    </div>
+    <div style="margin-top:8px; color:var(--muted); font-size:.68rem;">
+      Up <span id="uptime">0s</span>
+    </div>
+  </div>
+</aside>
+
+<!-- ═══ MAIN ════════════════════════════════════════════════════════════════ -->
+<div id="main">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title" id="topbar-title">Dashboard</div>
+      <div class="topbar-meta" id="topbar-meta">Real-time proxy overview</div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <span class="topbar-meta" id="server-time"></span>
+      <span class="pill live">● LIVE</span>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- ── DASHBOARD ─────────────────────────────────────────────────────── -->
+    <div class="view active" id="view-dashboard">
+      <div class="cards">
+        <div class="card c-blue">
+          <div class="card-label">📥 Total Requests</div>
+          <div class="card-value" id="d-total">0</div>
+          <div class="card-sub">all time</div>
+        </div>
+        <div class="card c-green">
+          <div class="card-label">✅ Allowed</div>
+          <div class="card-value" id="d-allowed">0</div>
+          <div class="card-sub">passed through</div>
+        </div>
+        <div class="card c-red">
+          <div class="card-label">🚫 Blocked</div>
+          <div class="card-value" id="d-blocked">0</div>
+          <div class="card-sub">by blocklist</div>
+        </div>
+        <div class="card c-orange">
+          <div class="card-label">🔐 Auth Failures</div>
+          <div class="card-value" id="d-auth">0</div>
+          <div class="card-sub">bad credentials</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Request Rate — last 60 minutes</span>
+          <span style="font-size:.75rem;color:var(--muted)">req/min</span>
+        </div>
+        <div class="panel-body">
+          <div class="chart-wrap">
+            <canvas id="rateChart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Recent Requests</span>
+          <span style="font-size:.75rem;color:var(--muted)">last 10</span>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th></tr>
+            </thead>
+            <tbody id="dash-log"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── LIVE FEED ──────────────────────────────────────────────────────── -->
+    <div class="view" id="view-livefeed">
+      <div class="filter-bar">
+        <input type="text" class="input wide" id="log-filter" placeholder="Filter by host or IP…" oninput="applyLogFilter()">
+        <select class="select" id="log-status" onchange="applyLogFilter()">
+          <option value="">All statuses</option>
+          <option value="OK">OK</option>
+          <option value="BLOCKED">Blocked</option>
+          <option value="AUTH_FAIL">Auth Fail</option>
+        </select>
+        <button class="btn ghost sm" onclick="clearFilter()">Clear</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer;margin-left:auto">
+          <input type="checkbox" id="auto-scroll" checked> Auto-scroll
+        </label>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Live Request Log</span>
+          <span class="topbar-meta" id="log-count">0 entries</span>
+        </div>
+        <div class="tbl-wrap" style="max-height:60vh;overflow-y:auto" id="log-scroll">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th></tr>
+            </thead>
+            <tbody id="live-log"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── BLOCKLIST ──────────────────────────────────────────────────────── -->
+    <div class="view" id="view-blocklist">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Manage Blocklist</span>
+          <div style="display:flex;gap:8px">
+            <button class="btn ghost sm" onclick="exportBlocklist()">⬇ Export</button>
+            <label class="btn ghost sm" style="cursor:pointer">
+              ⬆ Import <input type="file" accept=".txt,.json" style="display:none" onchange="importBlocklist(this)">
+            </label>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="add-row">
+            <input type="text" class="input wide" id="new-host"
+              placeholder="example.com or *.example.com (wildcards supported)">
+            <button class="btn" onclick="addHost()">+ Add Host</button>
+          </div>
+          <div class="filter-bar">
+            <input type="text" class="input" style="width:260px" id="bl-filter"
+              placeholder="Search hosts…" oninput="renderBlocklist()">
+          </div>
+          <div id="bl-count" style="font-size:.75rem;color:var(--muted);margin-bottom:10px;"></div>
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr><th>Host / Pattern</th><th>Type</th><th></th></tr>
+              </thead>
+              <tbody id="bl-table"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SETTINGS ───────────────────────────────────────────────────────── -->
+    <div class="view" id="view-settings">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;">
+
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Proxy Info</span></div>
+          <div class="panel-body">
+            <div class="info-item">
+              <span class="info-key">Proxy Port</span>
+              <span class="info-val" id="s-proxy-port">—</span>
+            </div>
+            <div class="info-item">
+              <span class="info-key">Web UI Port</span>
+              <span class="info-val" id="s-ui-port">—</span>
+            </div>
+            <div class="info-item">
+              <span class="info-key">Uptime</span>
+              <span class="info-val" id="s-uptime">—</span>
+            </div>
+            <div class="info-item">
+              <span class="info-key">Blocklist Size</span>
+              <span class="info-val" id="s-bl-sz">—</span>
+            </div>
+            <div class="info-item">
+              <span class="info-key">Auth</span>
+              <span class="info-val" id="s-auth">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Authentication</span></div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label class="form-label">Username</label>
+              <input type="text" class="input" style="width:100%" id="s-user" placeholder="Leave empty to disable auth">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Password</label>
+              <input type="password" class="input" style="width:100%" id="s-pass" placeholder="Password">
+            </div>
+            <button class="btn" onclick="saveSettings()">Save Credentials</button>
+            <p style="font-size:.72rem;color:var(--muted);margin-top:10px;">
+              Changes apply immediately without restart.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<div id="toasts"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════════════════════════════
+const BASE = '';
+let currentView = 'dashboard';
+let blHosts = [];
+let logEntries = [];
+let chart = null;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Navigation
+// ═══════════════════════════════════════════════════════════════════════════
+const viewMeta = {
+  dashboard: { title: 'Dashboard',  meta: 'Real-time proxy overview' },
+  livefeed:  { title: 'Live Feed',  meta: 'All requests in real-time' },
+  blocklist: { title: 'Blocklist',  meta: 'Manage blocked hosts & wildcards' },
+  settings:  { title: 'Settings',   meta: 'Configuration & credentials' },
+};
+
+document.querySelectorAll('.nav-item').forEach(el => {
+  el.addEventListener('click', () => switchView(el.dataset.view));
+});
+
+function switchView(name) {
+  currentView = name;
+  document.querySelectorAll('.nav-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.view === name));
+  document.querySelectorAll('.view').forEach(el =>
+    el.classList.toggle('active', el.id === 'view-' + name));
+  const m = viewMeta[name] || {};
+  document.getElementById('topbar-title').textContent = m.title || name;
+  document.getElementById('topbar-meta').textContent  = m.meta  || '';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Chart
+// ═══════════════════════════════════════════════════════════════════════════
+function initChart() {
+  const ctx = document.getElementById('rateChart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: Array.from({length:60}, (_,i) => i === 59 ? 'now' : `-${59-i}m`),
+      datasets: [{
+        data: new Array(60).fill(0),
+        borderColor: '#3b82f6',
+        backgroundColor: 'rgba(59,130,246,.08)',
+        fill: true,
+        tension: .4,
+        pointRadius: 0,
+        borderWidth: 2,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: false,
+      plugins: { legend: { display: false }, tooltip: {
+        callbacks: { label: c => c.parsed.y + ' req/min' }
+      }},
+      scales: {
+        x: { grid: { color: '#1f2d45' }, ticks: { color: '#64748b', maxTicksLimit: 10, font:{size:10} } },
+        y: { grid: { color: '#1f2d45' }, ticks: { color: '#64748b', font:{size:10} },
+             beginAtZero: true, min: 0 },
+      }
+    }
+  });
+}
+
+function updateChart(data) {
+  if (!chart) return;
+  chart.data.datasets[0].data = data;
+  chart.update('none');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// API helpers
+// ═══════════════════════════════════════════════════════════════════════════
+async function api(path, opts={}) {
+  const r = await fetch(BASE + path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  if (r.status === 204) return null;
+  return r.json();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stats & chart polling
+// ═══════════════════════════════════════════════════════════════════════════
+async function fetchStats() {
+  try {
+    const s = await api('/api/stats');
+    document.getElementById('d-total').textContent   = fmt(s.total);
+    document.getElementById('d-allowed').textContent = fmt(s.allowed);
+    document.getElementById('d-blocked').textContent = fmt(s.blocked);
+    document.getElementById('d-auth').textContent    = fmt(s.authFail);
+    document.getElementById('uptime').textContent    = s.uptime;
+    document.getElementById('server-time').textContent = s.serverTime;
+    document.getElementById('proxy-port').textContent  = ':' + s.proxyPort;
+    document.getElementById('ui-port').textContent     = ':' + s.uiPort;
+    // settings view
+    document.getElementById('s-proxy-port').textContent = ':' + s.proxyPort;
+    document.getElementById('s-ui-port').textContent    = ':' + s.uiPort;
+    document.getElementById('s-uptime').textContent     = s.uptime;
+    document.getElementById('s-bl-sz').textContent      = s.blocklistSz + ' hosts';
+    document.getElementById('s-auth').textContent       = s.authEnabled ? 'Enabled' : 'Disabled';
+    // nav badge
+    const nb = document.getElementById('nav-blocked-count');
+    if (s.blocked > 0) { nb.textContent = fmt(s.blocked); nb.style.display = ''; }
+  } catch(e) {}
+}
+
+async function fetchTimeseries() {
+  try {
+    const d = await api('/api/timeseries');
+    updateChart(d.data);
+  } catch(e) {}
+}
+
+function fmt(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return n;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Log
+// ═══════════════════════════════════════════════════════════════════════════
+let logFilter = '', logStatusFilter = '';
+
+function badgeHTML(status) {
+  if (status === 'OK')       return '<span class="badge ok">OK</span>';
+  if (status === 'BLOCKED')  return '<span class="badge blocked">BLOCKED</span>';
+  return '<span class="badge auth">AUTH FAIL</span>';
+}
+
+function rowHTML(e) {
+  return `<tr>
+    <td style="color:var(--muted)">${e.time}</td>
+    <td style="font-family:monospace">${e.ip}</td>
+    <td><code style="font-size:.78rem">${e.method}</code></td>
+    <td style="font-family:monospace;font-size:.8rem">${e.host}</td>
+    <td>${badgeHTML(e.status)}</td>
+  </tr>`;
+}
+
+async function fetchLogs() {
+  try {
+    let url = '/api/logs';
+    const params = [];
+    if (logFilter) params.push('filter=' + encodeURIComponent(logFilter));
+    if (logStatusFilter) params.push('status=' + logStatusFilter);
+    if (params.length) url += '?' + params.join('&');
+    const d = await api(url);
+    logEntries = d.logs || [];
+    renderLogs();
+  } catch(e) {}
+}
+
+function renderLogs() {
+  const tbody = document.getElementById('live-log');
+  const dash  = document.getElementById('dash-log');
+  if (logEntries.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
+    dash.innerHTML  = tbody.innerHTML;
+  } else {
+    tbody.innerHTML = logEntries.map(rowHTML).join('');
+    dash.innerHTML  = logEntries.slice(0,10).map(rowHTML).join('');
+  }
+  document.getElementById('log-count').textContent = logEntries.length + ' entries';
+  const sc = document.getElementById('log-scroll');
+  if (document.getElementById('auto-scroll').checked) sc.scrollTop = 0;
+}
+
+function applyLogFilter() {
+  logFilter       = document.getElementById('log-filter').value;
+  logStatusFilter = document.getElementById('log-status').value;
+  fetchLogs();
+}
+
+function clearFilter() {
+  document.getElementById('log-filter').value = '';
+  document.getElementById('log-status').value = '';
+  logFilter = ''; logStatusFilter = '';
+  fetchLogs();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Blocklist
+// ═══════════════════════════════════════════════════════════════════════════
+async function fetchBlocklist() {
+  try {
+    const d = await api('/api/blocklist');
+    blHosts = d.hosts || [];
+    renderBlocklist();
+  } catch(e) {}
+}
+
+function renderBlocklist() {
+  const filter = (document.getElementById('bl-filter').value || '').toLowerCase();
+  const visible = filter ? blHosts.filter(h => h.includes(filter)) : blHosts;
+  document.getElementById('bl-count').textContent =
+    visible.length + ' host' + (visible.length !== 1 ? 's' : '') +
+    (filter ? ' (filtered)' : ' total');
+  const tbody = document.getElementById('bl-table');
+  if (visible.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3"><div class="empty-state"><div class="empty-icon">✅</div>No blocked hosts</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = visible.map(h => {
+    const wild = h.startsWith('*.');
+    return `<tr>
+      <td class="host-td">${h}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
+      <td style="color:var(--muted);font-size:.75rem">${wild ? 'Wildcard' : 'Exact'}</td>
+      <td style="text-align:right">
+        <button class="btn danger sm" onclick="removeHost('${h}')">Remove</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function addHost() {
+  const input = document.getElementById('new-host');
+  const hosts = input.value.split('\n').map(h => h.trim()).filter(Boolean);
+  if (!hosts.length) return;
+  try {
+    await api('/api/blocklist', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({hosts})
+    });
+    input.value = '';
+    toast('Added ' + hosts.length + ' host(s)', 'success');
+    fetchBlocklist();
+    fetchStats();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function removeHost(host) {
+  try {
+    await api('/api/blocklist?host=' + encodeURIComponent(host), {method:'DELETE'});
+    toast('Removed ' + host, 'success');
+    fetchBlocklist();
+    fetchStats();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+function exportBlocklist() {
+  const txt = blHosts.join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/plain,' + encodeURIComponent(txt);
+  a.download = 'blocklist.txt';
+  a.click();
+  toast('Exported ' + blHosts.length + ' hosts', 'success');
+}
+
+function importBlocklist(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async e => {
+    let text = e.target.result;
+    let hosts;
+    if (file.name.endsWith('.json')) {
+      try { hosts = JSON.parse(text); } catch { toast('Invalid JSON', 'error'); return; }
+    } else {
+      hosts = text.split('\n').map(h => h.trim()).filter(h => h && !h.startsWith('#'));
+    }
+    try {
+      await api('/api/blocklist', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({hosts})
+      });
+      toast('Imported ' + hosts.length + ' hosts', 'success');
+      fetchBlocklist(); fetchStats();
+    } catch(err) { toast('Import error: ' + err.message, 'error'); }
+  };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+// Keyboard shortcut: Enter to add host
+document.getElementById('new-host').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addHost(); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Settings
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadSettings() {
+  try {
+    const s = await api('/api/settings');
+    document.getElementById('s-user').value = s.user || '';
+  } catch(e) {}
+}
+
+async function saveSettings() {
+  const user = document.getElementById('s-user').value;
+  const pass = document.getElementById('s-pass').value;
+  try {
+    await api('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({user, pass})
+    });
+    toast('Settings saved', 'success');
+    fetchStats();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Toast
+// ═══════════════════════════════════════════════════════════════════════════
+function toast(msg, type='success') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.innerHTML = (type === 'success' ? '✅' : '❌') + ' ' + msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Poll loop
+// ═══════════════════════════════════════════════════════════════════════════
+async function tick() {
+  await Promise.all([fetchStats(), fetchTimeseries(), fetchLogs()]);
+  if (currentView === 'blocklist') fetchBlocklist();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════════════════════════
+initChart();
+fetchBlocklist();
+loadSettings();
+tick();
+setInterval(tick, 3000);
+</script>
+</body>
+</html>

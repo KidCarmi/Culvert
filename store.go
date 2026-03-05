@@ -1,0 +1,255 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// ─── Uptime ───────────────────────────────────────────────────────────────────
+
+var startTime = time.Now()
+
+// ─── Stats ────────────────────────────────────────────────────────────────────
+
+var (
+	statTotal    int64
+	statBlocked  int64
+	statAuthFail int64
+)
+
+// ─── Time-series: requests per minute, last 60 minutes ───────────────────────
+
+type timeSeries struct {
+	mu      sync.Mutex
+	buckets [60]int64
+	cur     int
+	lastMin int64
+}
+
+var ts = &timeSeries{}
+
+func tsRecord() {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	now := time.Now().Unix() / 60
+	if ts.lastMin == 0 {
+		ts.lastMin = now
+	}
+	diff := now - ts.lastMin
+	if diff > 0 {
+		if diff > 60 {
+			diff = 60
+		}
+		for i := int64(0); i < diff; i++ {
+			ts.cur = (ts.cur + 1) % 60
+			ts.buckets[ts.cur] = 0
+		}
+		ts.lastMin = now
+	}
+	ts.buckets[ts.cur]++
+}
+
+func tsGet() []int64 {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	out := make([]int64, 60)
+	for i := 0; i < 60; i++ {
+		out[59-i] = ts.buckets[(ts.cur-i+60)%60]
+	}
+	return out
+}
+
+// ─── Request log ──────────────────────────────────────────────────────────────
+
+type LogEntry struct {
+	TS     int64  `json:"ts"`
+	Time   string `json:"time"`
+	IP     string `json:"ip"`
+	Method string `json:"method"`
+	Host   string `json:"host"`
+	Status string `json:"status"` // OK | BLOCKED | AUTH_FAIL
+}
+
+const maxLogs = 1000
+
+var (
+	logsMu sync.Mutex
+	logs   []LogEntry
+)
+
+func logAdd(e LogEntry) {
+	logsMu.Lock()
+	defer logsMu.Unlock()
+	logs = append(logs, e)
+	if len(logs) > maxLogs {
+		logs = logs[len(logs)-maxLogs:]
+	}
+}
+
+func logGet() []LogEntry {
+	logsMu.Lock()
+	cp := make([]LogEntry, len(logs))
+	copy(cp, logs)
+	logsMu.Unlock()
+	for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
+		cp[i], cp[j] = cp[j], cp[i]
+	}
+	return cp
+}
+
+// ─── Blocklist ────────────────────────────────────────────────────────────────
+
+type Blocklist struct {
+	mu    sync.RWMutex
+	hosts map[string]bool
+	path  string
+}
+
+var bl = &Blocklist{hosts: map[string]bool{}}
+
+func (b *Blocklist) Load(path string) error {
+	b.path = path
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	m := map[string]bool{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		m[strings.ToLower(line)] = true
+	}
+	b.mu.Lock()
+	b.hosts = m
+	b.mu.Unlock()
+	return sc.Err()
+}
+
+func (b *Blocklist) Save() {
+	if b.path == "" {
+		return
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	f, err := os.Create(b.path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	for h := range b.hosts {
+		fmt.Fprintln(f, h)
+	}
+}
+
+func (b *Blocklist) IsBlocked(host string) bool {
+	host = strings.ToLower(host)
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.hosts[host] {
+		return true
+	}
+	for pattern := range b.hosts {
+		if strings.HasPrefix(pattern, "*.") {
+			suffix := pattern[1:] // .example.com
+			if strings.HasSuffix(host, suffix) || host == pattern[2:] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *Blocklist) Add(host string) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	b.mu.Lock()
+	b.hosts[host] = true
+	b.mu.Unlock()
+}
+
+func (b *Blocklist) Remove(host string) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	b.mu.Lock()
+	delete(b.hosts, host)
+	b.mu.Unlock()
+}
+
+func (b *Blocklist) List() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]string, 0, len(b.hosts))
+	for h := range b.hosts {
+		out = append(out, h)
+	}
+	return out
+}
+
+func (b *Blocklist) Count() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.hosts)
+}
+
+// ─── Config (live-editable) ───────────────────────────────────────────────────
+
+type Config struct {
+	mu        sync.RWMutex
+	ProxyPort int
+	UIPort    int
+	User      string
+	Pass      string
+}
+
+var cfg = &Config{}
+
+func (c *Config) GetAuth() (string, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.User, c.Pass
+}
+
+func (c *Config) SetAuth(user, pass string) {
+	c.mu.Lock()
+	c.User = user
+	c.Pass = pass
+	c.mu.Unlock()
+}
+
+func (c *Config) AuthEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.User != ""
+}
+
+func uptime() string {
+	d := time.Since(startTime).Round(time.Second)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+	}
+	return fmt.Sprintf("%dm %ds", m, s)
+}
+
+func recordRequest(ip, method, host, status string) {
+	atomic.AddInt64(&statTotal, 1)
+	tsRecord()
+	logAdd(LogEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("15:04:05"),
+		IP:     ip,
+		Method: method,
+		Host:   host,
+		Status: status,
+	})
+}
