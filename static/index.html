@@ -250,6 +250,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="policy">
       <span class="icon">📋</span> Policy
     </div>
+    <div class="nav-item" data-view="fileblock">
+      <span class="icon">🛡️</span> File Block
+    </div>
     <div class="nav-item" data-view="rewrite">
       <span class="icon">✏️</span> Rewrite
     </div>
@@ -759,6 +762,76 @@ tr.dragging  { opacity: .4; }
 
     </div><!-- /view-policy -->
 
+    <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
+    <div class="view" id="view-fileblock">
+      <div style="display:grid;grid-template-columns:300px 1fr;gap:18px;align-items:start">
+
+        <!-- Left: Object Library -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Extension Objects</span>
+          </div>
+          <div class="panel-body">
+            <p style="font-size:.78rem;color:var(--muted);margin-bottom:14px">
+              Click a profile to bulk-add its extensions, or add a custom extension below.
+            </p>
+
+            <div style="font-size:.68rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Quick Profiles</div>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:20px">
+              <button class="btn ghost sm" style="justify-content:flex-start;gap:10px;height:auto;padding:8px 10px" onclick="addProfile('executables')">
+                <span>⚙️</span>
+                <div style="text-align:left">
+                  <div style="font-weight:600;font-size:.82rem">Windows Executables</div>
+                  <div style="font-size:.7rem;color:var(--muted)">.exe .dll .com .scr .pif</div>
+                </div>
+              </button>
+              <button class="btn ghost sm" style="justify-content:flex-start;gap:10px;height:auto;padding:8px 10px" onclick="addProfile('scripts')">
+                <span>📜</span>
+                <div style="text-align:left">
+                  <div style="font-weight:600;font-size:.82rem">Scripts</div>
+                  <div style="font-size:.7rem;color:var(--muted)">.bat .cmd .ps1 .vbs .sh</div>
+                </div>
+              </button>
+              <button class="btn ghost sm" style="justify-content:flex-start;gap:10px;height:auto;padding:8px 10px" onclick="addProfile('installers')">
+                <span>📦</span>
+                <div style="text-align:left">
+                  <div style="font-weight:600;font-size:.82rem">Installers</div>
+                  <div style="font-size:.7rem;color:var(--muted)">.msi .msp .mst .cab</div>
+                </div>
+              </button>
+              <button class="btn ghost sm" style="justify-content:flex-start;gap:10px;height:auto;padding:8px 10px" onclick="addProfile('archives')">
+                <span>🗜️</span>
+                <div style="text-align:left">
+                  <div style="font-weight:600;font-size:.82rem">Archives</div>
+                  <div style="font-size:.7rem;color:var(--muted)">.zip .rar .7z .gz .tar</div>
+                </div>
+              </button>
+            </div>
+
+            <div style="font-size:.68rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Custom Extension</div>
+            <input type="text" class="input wide" id="fb-ext-input"
+              placeholder=".exe or exe" style="margin-bottom:6px">
+            <button class="btn" style="width:100%" onclick="addFileExt()">+ Add Extension</button>
+          </div>
+        </div>
+
+        <!-- Right: Active Profile -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Active Block Profile</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span id="fb-count-badge" style="font-size:.75rem;color:var(--muted)">0 extensions</span>
+              <button class="btn danger sm" onclick="clearAllExts()">Clear All</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div id="fb-ext-chips" style="display:flex;flex-wrap:wrap;gap:8px;min-height:80px"></div>
+          </div>
+        </div>
+
+      </div>
+    </div><!-- /view-fileblock -->
+
   </div><!-- /content -->
 </div><!-- /main -->
 
@@ -785,6 +858,7 @@ const viewMeta = {
   blocklist: { title: 'Blocklist',  meta: 'Manage blocked hosts & wildcards' },
   security:  { title: 'Security',   meta: 'IP filter, rate limiting & log export' },
   policy:    { title: 'Policy',     meta: 'Policy-Based Access Control (PBAC) rules' },
+  fileblock: { title: 'File Block', meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   rewrite:   { title: 'Rewrite',    meta: 'Header injection & removal rules' },
   settings:  { title: 'Settings',   meta: 'Configuration & credentials' },
 };
@@ -1537,6 +1611,105 @@ async function saveSettings() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// File Block Profile
+// ═══════════════════════════════════════════════════════════════════════════
+const FB_PROFILES = {
+  executables: { label: 'Executable', color: '#ef4444', exts: ['.exe','.dll','.com','.scr','.pif'] },
+  scripts:     { label: 'Script',     color: '#f97316', exts: ['.bat','.cmd','.ps1','.vbs','.sh'] },
+  installers:  { label: 'Installer',  color: '#a855f7', exts: ['.msi','.msp','.mst','.cab'] },
+  archives:    { label: 'Archive',    color: '#3b82f6', exts: ['.zip','.rar','.7z','.gz','.tar'] },
+};
+
+function fbCategory(ext) {
+  for (const p of Object.values(FB_PROFILES)) {
+    if (p.exts.includes(ext)) return p;
+  }
+  return { label: 'Custom', color: '#64748b' };
+}
+
+let fbExts = [];
+
+async function fetchFileBlock() {
+  try {
+    const data = await api('/api/fileblock');
+    fbExts = (data.extensions || []).sort();
+    renderFileBlock();
+  } catch(e) { toast('Failed to load file block profile', 'error'); }
+}
+
+function renderFileBlock() {
+  const n = fbExts.length;
+  document.getElementById('fb-count-badge').textContent = n + ' extension' + (n !== 1 ? 's' : '');
+  const box = document.getElementById('fb-ext-chips');
+  if (n === 0) {
+    box.innerHTML = '<div style="color:var(--muted);font-size:.82rem;width:100%;text-align:center;padding:30px 0">No extensions blocked. Add a Quick Profile or a custom extension.</div>';
+    return;
+  }
+  box.innerHTML = fbExts.map(ext => {
+    const cat = fbCategory(ext);
+    return `<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-left:3px solid ${cat.color};border-radius:6px;padding:5px 10px;font-size:.82rem">
+      <span style="font-weight:700;font-family:monospace">${ext}</span>
+      <span style="font-size:.65rem;color:${cat.color};background:${cat.color}20;padding:1px 6px;border-radius:3px;font-weight:700;text-transform:uppercase;letter-spacing:.04em">${cat.label}</span>
+      <button onclick="removeFileExt('${ext}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1;padding:0;margin-left:2px" title="Remove ${ext}">&times;</button>
+    </div>`;
+  }).join('');
+}
+
+async function addFileExt() {
+  const input = document.getElementById('fb-ext-input');
+  const ext = input.value.trim();
+  if (!ext) return;
+  try {
+    await api('/api/fileblock', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({extension: ext})
+    });
+    input.value = '';
+    toast('Extension added: ' + ext, 'success');
+    fetchFileBlock();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function removeFileExt(ext) {
+  try {
+    await api('/api/fileblock?ext=' + encodeURIComponent(ext), {method:'DELETE'});
+    toast('Removed: ' + ext, 'success');
+    fetchFileBlock();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function addProfile(name) {
+  const p = FB_PROFILES[name];
+  if (!p) return;
+  try {
+    await api('/api/fileblock', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({extensions: p.exts})
+    });
+    toast('Added ' + p.label + ' profile (' + p.exts.length + ' extensions)', 'success');
+    fetchFileBlock();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function clearAllExts() {
+  if (!fbExts.length) return;
+  if (!confirm('Remove all ' + fbExts.length + ' blocked extension(s)?')) return;
+  try {
+    await Promise.all(fbExts.map(ext =>
+      api('/api/fileblock?ext=' + encodeURIComponent(ext), {method:'DELETE'})
+    ));
+    toast('All extensions removed', 'success');
+    fetchFileBlock();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+document.getElementById('fb-ext-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); addFileExt(); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Toast
 // ═══════════════════════════════════════════════════════════════════════════
 function toast(msg, type='success') {
@@ -1554,6 +1727,7 @@ async function tick() {
   await Promise.all([fetchStats(), fetchTimeseries(), fetchLogs()]);
   if (currentView === 'dashboard') fetchTopHosts();
   if (currentView === 'blocklist') fetchBlocklist();
+  if (currentView === 'fileblock') fetchFileBlock();
   if (currentView === 'rewrite')   fetchRewrite();
   if (currentView === 'policy')    fetchPolicy();
 }
@@ -1564,6 +1738,7 @@ async function tick() {
 initChart();
 initBreakdownChart();
 fetchBlocklist();
+fetchFileBlock();
 loadSettings();
 loadSecurity();
 fetchTopHosts();
@@ -1573,6 +1748,7 @@ setInterval(tick, 3000);
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
     if (el.dataset.view === 'security')  loadSecurity();
+    if (el.dataset.view === 'fileblock') fetchFileBlock();
     if (el.dataset.view === 'rewrite')   fetchRewrite();
     if (el.dataset.view === 'dashboard') fetchTopHosts();
     if (el.dataset.view === 'policy')    fetchPolicy();
