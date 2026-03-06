@@ -176,17 +176,21 @@ func (b *Blocklist) Save() {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	f, err := os.Create(b.path)
+	// Write to a temp file first, then rename for an atomic replace so a crash
+	// mid-write never leaves a partially-written (corrupt) blocklist on disk.
+	tmp := b.path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) // #nosec G304 -- path is operator-configured
 	if err != nil {
 		return
 	}
-	defer f.Close()
 	for h := range b.exact {
 		fmt.Fprintln(f, h)
 	}
 	for suffix := range b.wildcards {
 		fmt.Fprintln(f, "*"+suffix) // ".example.com" → "*.example.com"
 	}
+	f.Close()
+	os.Rename(tmp, b.path) //nolint:errcheck
 }
 
 // IsBlocked checks exact match first (O(1)), then walks the host's dot-labels
@@ -285,9 +289,31 @@ func (a *authCacheStore) get(user, pass string) (ok, hit bool) {
 	return false, false
 }
 
+// maxAuthCacheSize caps the number of cached auth results to prevent unbounded
+// memory growth from credential-stuffing attacks with unique user/pass pairs.
+const maxAuthCacheSize = 5_000
+
 func (a *authCacheStore) set(user, pass string, ok bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if len(a.entries) >= maxAuthCacheSize {
+		// Evict one expired entry first; if none found, drop an arbitrary one.
+		now := time.Now()
+		evicted := false
+		for k, e := range a.entries {
+			if now.After(e.expiry) {
+				delete(a.entries, k)
+				evicted = true
+				break
+			}
+		}
+		if !evicted {
+			for k := range a.entries {
+				delete(a.entries, k)
+				break
+			}
+		}
+	}
 	a.entries[cacheKey(user, pass)] = &authCacheEntry{ok: ok, expiry: time.Now().Add(authCacheTTL)}
 }
 

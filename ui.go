@@ -98,8 +98,19 @@ func securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// ── CSRF: reject state-changing requests that carry a non-local Origin.
+		// Browsers always send Origin on cross-site requests; if it's present and
+		// not localhost the request is a cross-site forgery attempt.
+		// Requests without Origin (same-origin browser navigation, server-side
+		// tools, curl) are allowed — they cannot be cross-site browser requests.
+		isMutating := r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete
+		if origin != "" && !isLocalOrigin(origin) && isMutating {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
 		// ── Body size limit on mutating requests ─────────────────────────────
-		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		if isMutating {
 			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 		}
 
@@ -124,6 +135,14 @@ func isLocalOrigin(origin string) bool {
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+// decodeJSON decodes the request body into v using strict mode:
+// unknown fields are rejected (prevents payload-inflation / field confusion).
+func decodeJSON(r *http.Request, v any) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
 }
 
 // GET /api/stats
@@ -209,7 +228,7 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 			Hosts []string `json:"hosts"` // support bulk add
 			Host  string   `json:"host"`  // single add
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeJSON(r,&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -263,7 +282,7 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			RateLimitRPM int      `json:"rateLimitRPM"` // 0 = disable
 			IPList       []string `json:"ipList"`       // full replace
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeJSON(r,&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -306,7 +325,7 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 			User string `json:"user"`
 			Pass string `json:"pass"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeJSON(r,&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -331,7 +350,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var rule RewriteRule
-		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		if err := decodeJSON(r,&rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -369,7 +388,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var rule PolicyRule
-		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		if err := decodeJSON(r,&rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -394,7 +413,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var rule PolicyRule
-		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		if err := decodeJSON(r,&rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -436,7 +455,7 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Priorities []int `json:"priorities"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSON(r,&body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -509,7 +528,7 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 			Extensions []string `json:"extensions"` // bulk add
 			Extension  string   `json:"extension"`  // single add
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeJSON(r,&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}

@@ -260,6 +260,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	rewriter.ApplyRequest(host, r.Header)
 
 	client := &http.Client{
+		Transport: upstreamTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -387,6 +388,16 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, t
 	} else {
 		handleTunnelBypass(w, r)
 	}
+}
+
+// upstreamTransport is a shared http.Transport used by handleHTTP so that
+// connections to upstream servers are pooled across requests, avoiding the
+// overhead of a new TCP/TLS handshake per proxied request.
+var upstreamTransport = &http.Transport{
+	MaxIdleConns:        256,
+	MaxIdleConnsPerHost: 16,
+	MaxConnsPerHost:     64,
+	IdleConnTimeout:     90 * time.Second,
 }
 
 // handleTunnelBypass is the original transparent TCP tunnel (Bypass mode).

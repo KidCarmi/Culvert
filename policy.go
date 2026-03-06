@@ -128,7 +128,13 @@ func (ps *PolicyStore) Save() {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(ps.path, data, 0600)
+	// Write to a temp file then rename for an atomic replace — a crash
+	// mid-write must not corrupt the persisted rule file.
+	tmp := ps.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, ps.path)
 }
 
 // List returns a copy of all rules (including live HitCount).

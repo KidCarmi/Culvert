@@ -154,13 +154,22 @@ func main() {
 	}
 
 	// ── Security: Rate limiter ───────────────────────────────────────────────
+	var rlCleanupCancel context.CancelFunc
 	if rlRPM > 0 {
 		rl.Configure(rlRPM, time.Minute)
 		logger.Printf("Rate limit → %d req/min per IP", rlRPM)
+		var rlCtx context.Context
+		rlCtx, rlCleanupCancel = context.WithCancel(context.Background())
 		go func() {
 			t := time.NewTicker(5 * time.Minute)
-			for range t.C {
-				rl.Cleanup()
+			defer t.Stop()
+			for {
+				select {
+				case <-rlCtx.Done():
+					return
+				case <-t.C:
+					rl.Cleanup()
+				}
 			}
 		}()
 	}
@@ -262,6 +271,10 @@ func main() {
 
 	<-quit
 	logger.Println("Shutting down gracefully…")
+
+	if rlCleanupCancel != nil {
+		rlCleanupCancel()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
