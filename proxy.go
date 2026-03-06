@@ -12,6 +12,78 @@ import (
 	"time"
 )
 
+// privateCIDRs lists RFC 1918, loopback, link-local, and ULA ranges whose
+// addresses must never be forwarded to upstream servers in headers such as
+// X-Forwarded-For, preventing internal network topology leakage.
+var privateCIDRs = func() []*net.IPNet {
+	ranges := []string{
+		"10.0.0.0/8",     // RFC 1918
+		"172.16.0.0/12",  // RFC 1918
+		"192.168.0.0/16", // RFC 1918
+		"127.0.0.0/8",    // loopback (IPv4)
+		"169.254.0.0/16", // link-local (IPv4)
+		"::1/128",        // loopback (IPv6)
+		"fc00::/7",       // ULA (IPv6)
+		"fe80::/10",      // link-local (IPv6)
+	}
+	nets := make([]*net.IPNet, 0, len(ranges))
+	for _, r := range ranges {
+		_, cidr, _ := net.ParseCIDR(r)
+		if cidr != nil {
+			nets = append(nets, cidr)
+		}
+	}
+	return nets
+}()
+
+// isPrivateIP reports whether ip falls within any private/internal range.
+func isPrivateIP(ip net.IP) bool {
+	for _, cidr := range privateCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// scrubForwardedHeaders sanitises request headers before forwarding upstream:
+//   - X-Forwarded-For: private/internal IPs are stripped; if all IPs were
+//     private the header is removed entirely.
+//   - X-Real-IP: removed when it contains a private address.
+//   - X-User-Identity: always removed (internal identity mock header —
+//     must not be trusted from downstream clients or leak upstream).
+//
+// This prevents internal network topology disclosure and stops clients from
+// injecting fake identity claims via the mock identity header.
+func scrubForwardedHeaders(r *http.Request) {
+	// Strip private IPs from X-Forwarded-For.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		var public []string
+		for _, raw := range strings.Split(xff, ",") {
+			ip := net.ParseIP(strings.TrimSpace(raw))
+			if ip != nil && !isPrivateIP(ip) {
+				public = append(public, ip.String())
+			}
+		}
+		if len(public) == 0 {
+			r.Header.Del("X-Forwarded-For")
+		} else {
+			r.Header.Set("X-Forwarded-For", strings.Join(public, ", "))
+		}
+	}
+
+	// Remove X-Real-IP if it resolves to a private address.
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		ip := net.ParseIP(strings.TrimSpace(xri))
+		if ip == nil || isPrivateIP(ip) {
+			r.Header.Del("X-Real-IP")
+		}
+	}
+
+	// Always remove internal identity header before forwarding.
+	r.Header.Del("X-User-Identity")
+}
+
 func handleRequest(w http.ResponseWriter, r *http.Request) {
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 
@@ -150,6 +222,10 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	}
 	removeHopHeaders(r.Header)
+
+	// Scrub internal/private headers before forwarding upstream (shift-left:
+	// prevent topology leakage and fake identity injection).
+	scrubForwardedHeaders(r)
 
 	// Apply request-side rewrite rules before forwarding.
 	host := r.Host
@@ -306,8 +382,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Perform TLS handshake with the upstream, validating its certificate.
+	// MinVersion TLS 1.2 is enforced; certificate validation is on by default
+	// (InsecureSkipVerify is intentionally omitted — shift-left: fail-secure).
 	upstreamTLS := tls.Client(rawUpstream, &tls.Config{
 		ServerName: hostOnly,
+		MinVersion: tls.VersionTLS12,
 	})
 	if err := upstreamTLS.Handshake(); err != nil {
 		rawUpstream.Close()

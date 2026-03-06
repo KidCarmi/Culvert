@@ -20,6 +20,7 @@ type FileConfig struct {
 		SOCKS5Port   int    `yaml:"socks5_port"`   // 0 = disabled
 		MetricsToken string `yaml:"metrics_token"` // Bearer token for /metrics; empty=open
 		PolicyFile   string `yaml:"policy_file"`   // JSON file for PBAC policy rules
+		CAPath       string `yaml:"ca_path"`       // Path for encrypted Root CA bundle
 	} `yaml:"proxy"`
 	Auth struct {
 		User string `yaml:"user"`

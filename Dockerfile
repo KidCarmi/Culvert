@@ -9,6 +9,14 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o proxyshield .
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
+# Security hardening (shift-left):
+#   • Non-root user (proxy:proxy) — no elevated privileges at runtime
+#   • Read-only root FS: run with --read-only + tmpfs mounts
+#       docker run --read-only --tmpfs /tmp --tmpfs /data proxyshield
+#   • Recommended seccomp profile: --security-opt seccomp=seccomp.json
+#       (see deploy/seccomp.json)
+#   • Drop all Linux capabilities: --cap-drop=ALL
+#   • No new privileges: --security-opt no-new-privileges
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata && \

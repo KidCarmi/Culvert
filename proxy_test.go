@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -178,6 +179,94 @@ func TestParseProxyAuth_Malformed(t *testing.T) {
 	_, _, ok := parseProxyAuth(r)
 	if ok {
 		t.Error("expected ok=false with invalid base64")
+	}
+}
+
+// ── scrubForwardedHeaders tests ───────────────────────────────────────────────
+
+func TestScrubForwardedHeaders_XFFPrivateStripped(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Forwarded-For", "10.0.0.1, 1.2.3.4, 192.168.1.5")
+	scrubForwardedHeaders(r)
+	if got := r.Header.Get("X-Forwarded-For"); got != "1.2.3.4" {
+		t.Errorf("X-Forwarded-For = %q, want %q", got, "1.2.3.4")
+	}
+}
+
+func TestScrubForwardedHeaders_XFFAllPrivateRemoved(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Forwarded-For", "10.0.0.1, 172.16.5.1, 192.168.100.50")
+	scrubForwardedHeaders(r)
+	if got := r.Header.Get("X-Forwarded-For"); got != "" {
+		t.Errorf("X-Forwarded-For should be removed when all IPs are private, got %q", got)
+	}
+}
+
+func TestScrubForwardedHeaders_XFFPublicKept(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Forwarded-For", "8.8.8.8, 1.1.1.1")
+	scrubForwardedHeaders(r)
+	if got := r.Header.Get("X-Forwarded-For"); got != "8.8.8.8, 1.1.1.1" {
+		t.Errorf("X-Forwarded-For = %q, want %q", got, "8.8.8.8, 1.1.1.1")
+	}
+}
+
+func TestScrubForwardedHeaders_XRealIPPrivateRemoved(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Real-IP", "192.168.1.1")
+	scrubForwardedHeaders(r)
+	if got := r.Header.Get("X-Real-IP"); got != "" {
+		t.Errorf("X-Real-IP with private addr should be removed, got %q", got)
+	}
+}
+
+func TestScrubForwardedHeaders_XRealIPPublicKept(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Real-IP", "203.0.113.5")
+	scrubForwardedHeaders(r)
+	if got := r.Header.Get("X-Real-IP"); got != "203.0.113.5" {
+		t.Errorf("X-Real-IP with public addr should be kept, got %q", got)
+	}
+}
+
+func TestScrubForwardedHeaders_XUserIdentityAlwaysRemoved(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-User-Identity", "admin")
+	scrubForwardedHeaders(r)
+	if got := r.Header.Get("X-User-Identity"); got != "" {
+		t.Errorf("X-User-Identity should always be stripped, got %q", got)
+	}
+}
+
+// ── isPrivateIP tests ─────────────────────────────────────────────────────────
+
+func TestIsPrivateIP(t *testing.T) {
+	cases := []struct {
+		ip      string
+		private bool
+	}{
+		{"10.0.0.1", true},
+		{"172.16.0.1", true},
+		{"172.31.255.255", true},
+		{"192.168.0.1", true},
+		{"127.0.0.1", true},
+		{"169.254.1.1", true},
+		{"::1", true},
+		{"fc00::1", true},
+		{"fe80::1", true},
+		{"8.8.8.8", false},
+		{"1.1.1.1", false},
+		{"203.0.113.1", false},
+		{"172.32.0.1", false}, // just outside 172.16/12
+	}
+	for _, c := range cases {
+		ip := net.ParseIP(c.ip)
+		if ip == nil {
+			t.Fatalf("invalid test IP: %s", c.ip)
+		}
+		if got := isPrivateIP(ip); got != c.private {
+			t.Errorf("isPrivateIP(%s) = %v, want %v", c.ip, got, c.private)
+		}
 	}
 }
 

@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+// caPassphraseEnv is the environment variable name for the CA private-key
+// encryption passphrase. Using an env var keeps the secret out of CLI history
+// and process listings (shift-left: secrets management at startup).
+const caPassphraseEnv = "PROXYSHIELD_CA_PASSPHRASE"
+
 var logger *log.Logger
 
 func main() {
@@ -42,6 +47,7 @@ func main() {
 	dpKey       := flag.String("dp-key",        "", "DataPlane gRPC client TLS key")
 	dpCA        := flag.String("dp-ca",         "", "DataPlane gRPC CA cert")
 	policyFile  := flag.String("policy",        "", "Policy rules JSON file path")
+	caPath      := flag.String("ca-path",       "", "Path to persist encrypted Root CA bundle (optional)")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -167,10 +173,22 @@ func main() {
 	}
 
 	// ── Root CA for SSL inspection ────────────────────────────────────────────
-	if err := certMgr.InitCA(); err != nil {
-		logger.Printf("Warning: Root CA init failed (%v) — SSL inspection disabled", err)
+	// Passphrase is read from env so it never appears in CLI history or
+	// process listings (shift-left secret hygiene).
+	caPassphrase := os.Getenv(caPassphraseEnv)
+	caPathVal := firstStr(*caPath, fc.Proxy.CAPath)
+	if caPathVal != "" {
+		if err := certMgr.LoadOrInitCA(caPathVal, caPassphrase); err != nil {
+			logger.Printf("Warning: Root CA load/init failed (%v) — SSL inspection disabled", err)
+		} else {
+			logger.Printf("SSL CA   → Root CA ready (persisted at %s, encrypted=%v)", caPathVal, caPassphrase != "")
+		}
 	} else {
-		logger.Printf("SSL CA   → Root CA ready (download via /api/ca-cert)")
+		if err := certMgr.InitCA(); err != nil {
+			logger.Printf("Warning: Root CA init failed (%v) — SSL inspection disabled", err)
+		} else {
+			logger.Printf("SSL CA   → Root CA ready in-memory (set -ca-path + %s for persistence)", caPassphraseEnv)
+		}
 	}
 
 	// ── Policy engine ─────────────────────────────────────────────────────────
