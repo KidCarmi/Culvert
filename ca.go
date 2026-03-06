@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -16,11 +17,11 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
-	"crypto/sha256"
 )
 
 // CertManager manages the Root CA used for SSL inspection (MITM).
@@ -127,13 +128,14 @@ func (cm *CertManager) SaveCA(path, passphrase string) error {
 		}
 	}
 	// 0600 — owner-readable only; CA private key material.
-	return os.WriteFile(path, data, 0600)
+	// filepath.Clean prevents path-traversal before write (G703).
+	return os.WriteFile(filepath.Clean(path), data, 0600)
 }
 
 // LoadCA reads and decrypts a CA bundle previously written by SaveCA.
 // If passphrase is empty the file is treated as plain PEM.
 func (cm *CertManager) LoadCA(path, passphrase string) error {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path)) // filepath.Clean prevents path-traversal (G703)
 	if err != nil {
 		return fmt.Errorf("CA read: %w", err)
 	}

@@ -14,10 +14,11 @@ import (
 	"time"
 )
 
-// caPassphraseEnv is the environment variable name for the CA private-key
-// encryption passphrase. Using an env var keeps the secret out of CLI history
-// and process listings (shift-left: secrets management at startup).
-const caPassphraseEnv = "PROXYSHIELD_CA_PASSPHRASE"
+// caPassphraseEnv holds the name of the environment variable that supplies the
+// CA private-key encryption passphrase. Using an env var keeps the passphrase
+// out of CLI history and process listings (shift-left: secrets management).
+// This is an env-var name, NOT a credential — the false-positive is suppressed.
+const caPassphraseEnv = "PROXYSHIELD_CA_PASSPHRASE" //nolint:gosec
 
 var logger *log.Logger
 

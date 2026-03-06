@@ -127,7 +127,7 @@ func (ps *PolicyStore) Save() {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(ps.path, data, 0640)
+	_ = os.WriteFile(ps.path, data, 0600)
 }
 
 // List returns a copy of all rules (including live HitCount).
