@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"io"
 	"net"
@@ -404,11 +405,18 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Perform TLS handshake with the upstream, validating its certificate.
-	// MinVersion TLS 1.2 is enforced; certificate validation is on by default
-	// (InsecureSkipVerify is intentionally omitted — shift-left: fail-secure).
+	// RootCAs is set explicitly from the system cert pool — fail-secure: if the
+	// upstream presents an untrusted or expired certificate the connection is
+	// refused and the client receives 502.
+	systemRoots, err := x509.SystemCertPool()
+	if err != nil {
+		// Fall back to an empty pool; handshake will reject unknown CAs.
+		systemRoots = x509.NewCertPool()
+	}
 	upstreamTLS := tls.Client(rawUpstream, &tls.Config{
 		ServerName: hostOnly,
 		MinVersion: tls.VersionTLS12,
+		RootCAs:    systemRoots,
 	})
 	if err := upstreamTLS.Handshake(); err != nil {
 		rawUpstream.Close()

@@ -7,7 +7,7 @@ import (
 )
 
 func freshBL() *Blocklist {
-	return &Blocklist{hosts: map[string]bool{}}
+	return &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
 }
 
 func TestBlocklist_AddAndIsBlocked(t *testing.T) {

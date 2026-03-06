@@ -335,7 +335,7 @@ func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawM
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
 func applyConfigSnapshot(snap ConfigSnapshot) {
 	// Blocklist.
-	newBL := &Blocklist{hosts: map[string]bool{}}
+	newBL := &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
 	for _, h := range snap.BlockedHosts {
 		newBL.Add(h)
 	}

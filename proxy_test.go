@@ -13,7 +13,7 @@ import (
 // setupProxyTest resets all global state for a clean test run.
 func setupProxyTest(t *testing.T) {
 	t.Helper()
-	bl = &Blocklist{hosts: map[string]bool{}}
+	bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
 	ipf = &IPFilter{single: map[string]bool{}}
 	rl = &RateLimiter{clients: map[string]*clientBucket{}}
 	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}

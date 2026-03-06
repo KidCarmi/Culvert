@@ -123,13 +123,30 @@ func logGet() []LogEntry {
 
 // ─── Blocklist ────────────────────────────────────────────────────────────────
 
+// Blocklist holds two separate maps for O(1) host lookups:
+//   - exact:     e.g. "ads.example.com"
+//   - wildcards: keyed by dot-prefix, e.g. ".example.com" (from "*.example.com")
+//
+// IsBlocked walks the host's own dot-labels to probe the wildcards map, so
+// lookup cost is O(labels) ≈ O(1) for real-world domain names, regardless of
+// how many wildcard rules are loaded.
 type Blocklist struct {
-	mu    sync.RWMutex
-	hosts map[string]bool
-	path  string
+	mu        sync.RWMutex
+	exact     map[string]bool // exact hostnames
+	wildcards map[string]bool // dot-prefixes: ".example.com"
+	path      string
 }
 
-var bl = &Blocklist{hosts: map[string]bool{}}
+var bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+
+func (b *Blocklist) load(line string) {
+	line = strings.ToLower(strings.TrimSpace(line))
+	if strings.HasPrefix(line, "*.") {
+		b.wildcards[line[1:]] = true // "*.example.com" → ".example.com"
+	} else {
+		b.exact[line] = true
+	}
+}
 
 func (b *Blocklist) Load(path string) error {
 	b.path = path
@@ -139,17 +156,24 @@ func (b *Blocklist) Load(path string) error {
 	}
 	defer f.Close()
 
-	m := map[string]bool{}
+	exact := map[string]bool{}
+	wildcards := map[string]bool{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		m[strings.ToLower(line)] = true
+		line = strings.ToLower(line)
+		if strings.HasPrefix(line, "*.") {
+			wildcards[line[1:]] = true
+		} else {
+			exact[line] = true
+		}
 	}
 	b.mu.Lock()
-	b.hosts = m
+	b.exact = exact
+	b.wildcards = wildcards
 	b.mu.Unlock()
 	return sc.Err()
 }
@@ -165,25 +189,37 @@ func (b *Blocklist) Save() {
 		return
 	}
 	defer f.Close()
-	for h := range b.hosts {
+	for h := range b.exact {
 		fmt.Fprintln(f, h)
+	}
+	for suffix := range b.wildcards {
+		fmt.Fprintln(f, "*"+suffix) // ".example.com" → "*.example.com"
 	}
 }
 
+// IsBlocked checks exact match first (O(1)), then walks the host's dot-labels
+// to probe the wildcards map (O(labels) ≈ O(1)).
+//
+// Example: host "sub.ads.example.com", wildcard "*.example.com" (stored as ".example.com"):
+//   dot-walk checks ".ads.example.com" → not matched
+//             checks ".example.com"    → matched ✓
+// Apex match: host "example.com" vs "*.example.com" → checks ".example.com" directly.
 func (b *Blocklist) IsBlocked(host string) bool {
 	host = strings.ToLower(host)
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	if b.hosts[host] {
+	if b.exact[host] {
 		return true
 	}
-	for pattern := range b.hosts {
-		if strings.HasPrefix(pattern, "*.") {
-			suffix := pattern[1:] // .example.com
-			if strings.HasSuffix(host, suffix) || host == pattern[2:] {
-				return true
-			}
+	// Dot-walk: "sub.ads.example.com" → check ".ads.example.com", ".example.com", ".com"
+	for i, ch := range host {
+		if ch == '.' && b.wildcards[host[i:]] {
+			return true
 		}
+	}
+	// Apex match: "example.com" should match "*.example.com" (stored as ".example.com")
+	if b.wildcards["."+host] {
+		return true
 	}
 	return false
 }
@@ -191,23 +227,34 @@ func (b *Blocklist) IsBlocked(host string) bool {
 func (b *Blocklist) Add(host string) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	b.mu.Lock()
-	b.hosts[host] = true
+	if strings.HasPrefix(host, "*.") {
+		b.wildcards[host[1:]] = true
+	} else {
+		b.exact[host] = true
+	}
 	b.mu.Unlock()
 }
 
 func (b *Blocklist) Remove(host string) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	b.mu.Lock()
-	delete(b.hosts, host)
+	if strings.HasPrefix(host, "*.") {
+		delete(b.wildcards, host[1:])
+	} else {
+		delete(b.exact, host)
+	}
 	b.mu.Unlock()
 }
 
 func (b *Blocklist) List() []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	out := make([]string, 0, len(b.hosts))
-	for h := range b.hosts {
+	out := make([]string, 0, len(b.exact)+len(b.wildcards))
+	for h := range b.exact {
 		out = append(out, h)
+	}
+	for suffix := range b.wildcards {
+		out = append(out, "*"+suffix)
 	}
 	return out
 }
@@ -215,7 +262,7 @@ func (b *Blocklist) List() []string {
 func (b *Blocklist) Count() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return len(b.hosts)
+	return len(b.exact) + len(b.wildcards)
 }
 
 // ─── Auth cache ───────────────────────────────────────────────────────────────
