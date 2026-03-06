@@ -139,15 +139,6 @@ type Blocklist struct {
 
 var bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
 
-func (b *Blocklist) load(line string) {
-	line = strings.ToLower(strings.TrimSpace(line))
-	if strings.HasPrefix(line, "*.") {
-		b.wildcards[line[1:]] = true // "*.example.com" → ".example.com"
-	} else {
-		b.exact[line] = true
-	}
-}
-
 func (b *Blocklist) Load(path string) error {
 	b.path = path
 	f, err := os.Open(path)
