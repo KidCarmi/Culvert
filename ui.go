@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -69,8 +70,8 @@ func startUI(port int, certFile, keyFile string) {
 }
 
 // securityMiddleware sets restrictive CORS and security headers.
-// CORS: only the same origin the browser loaded the UI from is allowed
-// (no wildcard *). Preflight requests are answered with the caller's origin.
+// CORS: only localhost origins are permitted — the UI is an admin panel and
+// must never be reachable from arbitrary third-party sites.
 func securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// ── Security headers ─────────────────────────────────────────────────
@@ -81,11 +82,11 @@ func securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
 
-		// ── CORS: reflect the request origin only (no wildcard) ──────────────
+		// ── CORS: allow only localhost origins (explicit allowlist) ──────────
 		origin := r.Header.Get("Origin")
-		if origin != "" {
+		if isLocalOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			w.Header().Set("Vary", "Origin")
@@ -95,8 +96,28 @@ func securityMiddleware(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+
+		// ── Body size limit on mutating requests ─────────────────────────────
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
+		}
+
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isLocalOrigin returns true only for loopback-host origins (http or https),
+// preventing cross-site requests from arbitrary external domains.
+func isLocalOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
 }
 
 func jsonOK(w http.ResponseWriter, v any) {

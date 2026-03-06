@@ -18,6 +18,10 @@ var metricsToken string
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if metricsToken != "" {
 		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 		token := strings.TrimPrefix(auth, "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(token), []byte(metricsToken)) != 1 {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)

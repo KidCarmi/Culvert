@@ -42,9 +42,20 @@ func RegisterPlugin(m Middleware) {
 
 // pluginDecision runs all plugins in order and returns DecisionBlock on the
 // first plugin that blocks, or DecisionAllow if all pass.
+// A panicking plugin is recovered and treated as a pass-through to avoid
+// bringing down the proxy.
 func pluginDecision(clientIP, method, host string) Decision {
 	for _, p := range plugins {
-		if p.OnRequest(clientIP, method, host) == DecisionBlock {
+		decision := func() (d Decision) {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Printf("Plugin[%s] panicked: %v — treated as Allow", p.Name(), r)
+					d = DecisionAllow
+				}
+			}()
+			return p.OnRequest(clientIP, method, host)
+		}()
+		if decision == DecisionBlock {
 			logger.Printf("Plugin[%s] blocked %s -> %s %s", p.Name(), clientIP, method, host)
 			return DecisionBlock
 		}
@@ -55,6 +66,13 @@ func pluginDecision(clientIP, method, host string) Decision {
 // pluginOnResponse notifies all plugins of a completed response.
 func pluginOnResponse(resp *http.Response) {
 	for _, p := range plugins {
-		p.OnResponse(resp)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Printf("Plugin[%s] panicked in OnResponse: %v", p.Name(), r)
+				}
+			}()
+			p.OnResponse(resp)
+		}()
 	}
 }

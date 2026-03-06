@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -168,6 +169,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		case ActionRedirect:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect))
+			if !isSafeRedirectURL(match.Rule.RedirectURL) {
+				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", match.Rule.Name, match.Rule.RedirectURL)
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
 			logger.Printf("POLICY_REDIRECT rule=%q %s -> %s => %s", match.Rule.Name, clientIP, host, match.Rule.RedirectURL)
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
 			return
@@ -243,7 +249,8 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	r.RequestURI = ""
 	resp, err := client.Do(r)
 	if err != nil {
-		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
+		logger.Printf("upstream request error: %v", err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -253,6 +260,16 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// isSafeRedirectURL returns true only for absolute http/https URLs, preventing
+// javascript: URIs and protocol-relative open redirects from policy config.
+func isSafeRedirectURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https")
 }
 
 // isWebSocketUpgrade returns true when the request is an HTTP→WebSocket upgrade.
@@ -272,7 +289,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	destConn, err := net.DialTimeout("tcp", host, 10*time.Second)
 	if err != nil {
-		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
+		logger.Printf("WS dial error %s: %v", host, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 	defer destConn.Close()
@@ -280,7 +298,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Forward the original request to the target (preserve Upgrade headers).
 	r.RequestURI = r.URL.RequestURI()
 	if err := r.Write(destConn); err != nil {
-		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
+		logger.Printf("WS write error %s: %v", host, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 
@@ -288,7 +307,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	br := bufio.NewReader(destConn)
 	resp, err := http.ReadResponse(br, r)
 	if err != nil {
-		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
+		logger.Printf("WS upstream response error %s: %v", host, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 
@@ -339,7 +359,8 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction) {
 func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 	destConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
 	if err != nil {
-		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
+		logger.Printf("tunnel dial error %s: %v", r.Host, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 	defer destConn.Close()
@@ -377,7 +398,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request) {
 	// 1. Connect to the upstream server over plain TCP.
 	rawUpstream, err := net.DialTimeout("tcp", targetHost, 10*time.Second)
 	if err != nil {
-		http.Error(w, "Bad Gateway: "+err.Error(), http.StatusBadGateway)
+		logger.Printf("inspect dial error %s: %v", targetHost, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 
@@ -390,7 +412,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request) {
 	})
 	if err := upstreamTLS.Handshake(); err != nil {
 		rawUpstream.Close()
-		http.Error(w, "Upstream TLS handshake failed: "+err.Error(), http.StatusBadGateway)
+		logger.Printf("upstream TLS handshake error %s: %v", targetHost, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 
