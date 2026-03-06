@@ -27,6 +27,7 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/logs", apiLogs)
 	mux.HandleFunc("/api/top-hosts", apiTopHosts)
 	mux.HandleFunc("/api/blocklist", apiBlocklist)
+	mux.HandleFunc("/api/fileblock", apiFileblock)
 	mux.HandleFunc("/api/settings", apiSettings)
 	mux.HandleFunc("/api/security", apiSecurity)
 	mux.HandleFunc("/api/export", apiExport)
@@ -492,5 +493,51 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 			"count":    len(entries),
 			"logs":     entries,
 		})
+	}
+}
+
+// GET/POST/DELETE /api/fileblock — manage the file-extension block profile
+func apiFileblock(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		exts := fileBlocker.List()
+		sort.Strings(exts)
+		jsonOK(w, map[string]any{"extensions": exts, "count": len(exts)})
+
+	case http.MethodPost:
+		var body struct {
+			Extensions []string `json:"extensions"` // bulk add
+			Extension  string   `json:"extension"`  // single add
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Extension != "" {
+			body.Extensions = append(body.Extensions, body.Extension)
+		}
+		added := 0
+		for _, ext := range body.Extensions {
+			ext = strings.TrimSpace(ext)
+			if ext != "" {
+				fileBlocker.Add(ext)
+				logger.Printf("UI: file block extension added %s", ext)
+				added++
+			}
+		}
+		jsonOK(w, map[string]any{"added": added})
+
+	case http.MethodDelete:
+		ext := strings.TrimSpace(r.URL.Query().Get("ext"))
+		if ext == "" {
+			http.Error(w, "missing ext param", http.StatusBadRequest)
+			return
+		}
+		fileBlocker.Remove(ext)
+		logger.Printf("UI: file block extension removed %s", ext)
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }

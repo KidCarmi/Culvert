@@ -21,9 +21,10 @@ var startTime = time.Now()
 // ─── Stats ────────────────────────────────────────────────────────────────────
 
 var (
-	statTotal    int64
-	statBlocked  int64
-	statAuthFail int64
+	statTotal       int64
+	statBlocked     int64
+	statAuthFail    int64
+	statFileBlocked int64 // requests blocked by the file-extension profile
 )
 
 // ─── Time-series: requests per minute, last 60 minutes ───────────────────────

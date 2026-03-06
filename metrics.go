@@ -28,9 +28,10 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	total   := atomic.LoadInt64(&statTotal)
-	blocked := atomic.LoadInt64(&statBlocked)
-	authFail := atomic.LoadInt64(&statAuthFail)
+	total       := atomic.LoadInt64(&statTotal)
+	blocked     := atomic.LoadInt64(&statBlocked)
+	authFail    := atomic.LoadInt64(&statAuthFail)
+	fileBlocked := atomic.LoadInt64(&statFileBlocked)
 	allowed := total - blocked - authFail
 	if allowed < 0 {
 		allowed = 0
@@ -74,10 +75,19 @@ proxyshield_rate_limit_rpm %d
 # HELP proxyshield_rate_limit_enabled Whether rate limiting is active
 # TYPE proxyshield_rate_limit_enabled gauge
 proxyshield_rate_limit_enabled %d
+
+# HELP proxyshield_file_blocked_total Total requests blocked by file-extension profile
+# TYPE proxyshield_file_blocked_total counter
+proxyshield_file_blocked_total %d
+
+# HELP proxyshield_file_block_profile_size Number of blocked file extensions
+# TYPE proxyshield_file_block_profile_size gauge
+proxyshield_file_block_profile_size %d
 `,
 		total, allowed, blocked, authFail,
 		int64(bl.Count()),
 		time.Since(startTime).Seconds(),
 		rlLimit, rlEnabled,
+		fileBlocked, int64(fileBlocker.Count()),
 	)
 }

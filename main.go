@@ -205,6 +205,18 @@ func main() {
 		logger.Printf("Policy   → in-memory only (set -policy <file> for persistence)")
 	}
 
+	// ── File block profile ───────────────────────────────────────────────────
+	if len(fc.FileBlock.Extensions) > 0 {
+		for _, ext := range fc.FileBlock.Extensions {
+			fileBlocker.Add(ext)
+		}
+	} else {
+		for _, ext := range defaultBlockedExts {
+			fileBlocker.Add(ext)
+		}
+	}
+	logger.Printf("FileBlock → %d extension(s) in profile", fileBlocker.Count())
+
 	// ── Rewrite rules ────────────────────────────────────────────────────────
 	if len(fc.Rewrite) > 0 {
 		rewriter.SetRules(fc.Rewrite)

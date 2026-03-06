@@ -141,6 +141,20 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// File block profile — check URL path extension for non-tunnel requests.
+	// CONNECT tunnels are opaque until SSL inspection; inner requests go through
+	// handleRequest again and will be checked at that point.
+	if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
+		if ext := fileBlocker.CheckPath(r.URL.Path); ext != "" {
+			atomic.AddInt64(&statFileBlocked, 1)
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "")
+			logger.Printf("FILE_BLOCKED %s -> %s%s (ext=%s)", clientIP, host, r.URL.Path, ext)
+			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
+			return
+		}
+	}
+
 	// ── Policy engine (PBAC) pre-check ───────────────────────────────────────
 	// X-User-Identity is a mock header for identity; future versions will
 	// populate this from the OIDC/LDAP auth context.
@@ -258,6 +272,21 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	pluginOnResponse(resp)
 	rewriter.ApplyResponse(host, resp) // response-side rewrite rules
 	removeHopHeaders(resp.Header)
+
+	// File block — check Content-Disposition for blocked download extensions.
+	// This catches downloads that use a generic URL but declare the real
+	// file extension in the response header (e.g. /download?id=123 →
+	// Content-Disposition: attachment; filename="setup.exe").
+	if ext := fileBlocker.CheckContentDisposition(resp.Header.Get("Content-Disposition")); ext != "" {
+		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		atomic.AddInt64(&statFileBlocked, 1)
+		atomic.AddInt64(&statBlocked, 1)
+		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "")
+		logger.Printf("FILE_BLOCKED (resp cd) %s -> %s%s (ext=%s)", cip, r.Host, r.URL.Path, ext)
+		serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
+		return
+	}
+
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)

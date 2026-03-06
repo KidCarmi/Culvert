@@ -44,6 +44,12 @@ type FileConfig struct {
 	// Rewrite defines header mutation rules applied to matching requests/responses.
 	Rewrite []RewriteRule `yaml:"rewrite"`
 
+	// FileBlock configures the file-extension block profile.
+	// When Extensions is empty the built-in default list is loaded instead.
+	FileBlock struct {
+		Extensions []string `yaml:"extensions"`
+	} `yaml:"file_block"`
+
 	// LogFormat controls the system-log output format: "text" (default) or "json".
 	LogFormat string `yaml:"log_format"`
 }
