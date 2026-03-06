@@ -128,8 +128,8 @@ func (cm *CertManager) SaveCA(path, passphrase string) error {
 		}
 	}
 	// 0600 — owner-readable only; CA private key material.
-	// filepath.Clean prevents path-traversal before write (G703).
-	return os.WriteFile(filepath.Clean(path), data, 0600)
+	// filepath.Clean normalises the path; the value comes from operator config, not user input.
+	return os.WriteFile(filepath.Clean(path), data, 0600) // #nosec G703
 }
 
 // LoadCA reads and decrypts a CA bundle previously written by SaveCA.

@@ -18,7 +18,7 @@ import (
 // CA private-key encryption passphrase. Using an env var keeps the passphrase
 // out of CLI history and process listings (shift-left: secrets management).
 // This is an env-var name, NOT a credential — the false-positive is suppressed.
-const caPassphraseEnv = "PROXYSHIELD_CA_PASSPHRASE" //nolint:gosec
+const caPassphraseEnv = "PROXYSHIELD_CA_PASSPHRASE" // #nosec G101 -- env-var name, not a credential
 
 var logger *log.Logger
 
