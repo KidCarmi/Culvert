@@ -74,6 +74,7 @@ type PolicyRule struct {
 	DestCategory   URLCategory  `json:"destCategory"`   // URL category; empty = any
 	SSLAction      SSLAction    `json:"sslAction"`      // Inspect | Bypass
 	FileFiltering  bool         `json:"fileFiltering"`  // enable file-type scanning (future)
+	TLSSkipVerify  bool         `json:"tlsSkipVerify"`  // skip upstream cert verification (use with caution)
 	Action         PolicyAction `json:"action"`
 	RedirectURL    string       `json:"redirectURL"` // used when Action == Redirect
 	HitCount       int64        `json:"hitCount"`    // runtime counter, not persisted
@@ -212,9 +213,10 @@ func (ps *PolicyStore) sortLocked() {
 
 // PolicyMatch is returned when a rule is matched against a request.
 type PolicyMatch struct {
-	Rule      *PolicyRule
-	Action    PolicyAction
-	SSLAction SSLAction
+	Rule          *PolicyRule
+	Action        PolicyAction
+	SSLAction     SSLAction
+	TLSSkipVerify bool
 }
 
 // Evaluate iterates rules in priority order and returns the first match.
@@ -233,9 +235,10 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, host string) *PolicyMatch {
 		}
 		atomic.AddInt64(&rule.HitCount, 1)
 		return &PolicyMatch{
-			Rule:      rule,
-			Action:    rule.Action,
-			SSLAction: rule.SSLAction,
+			Rule:          rule,
+			Action:        rule.Action,
+			SSLAction:     rule.SSLAction,
+			TLSSkipVerify: rule.TLSSkipVerify,
 		}
 	}
 	return nil

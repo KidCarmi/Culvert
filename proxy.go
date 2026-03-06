@@ -203,14 +203,18 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		logger.Printf("OK %s %s %s", clientIP, r.Method, r.Host)
 	}
 
-	// Determine SSL action for CONNECT tunnels.
+	// Determine SSL action and per-rule TLS options for CONNECT tunnels.
 	sslAction := SSLBypass
-	if match != nil && match.SSLAction == SSLInspect {
-		sslAction = SSLInspect
+	tlsSkipVerify := false
+	if match != nil {
+		if match.SSLAction == SSLInspect {
+			sslAction = SSLInspect
+		}
+		tlsSkipVerify = match.TLSSkipVerify
 	}
 
 	if r.Method == http.MethodConnect {
-		handleTunnel(w, r, sslAction)
+		handleTunnel(w, r, sslAction, tlsSkipVerify)
 	} else if isWebSocketUpgrade(r) {
 		handleWebSocket(w, r)
 	} else {
@@ -377,9 +381,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTunnel dispatches to SSL-bypass or SSL-inspect based on policy.
-func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction) {
+func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, tlsSkipVerify bool) {
 	if sslAction == SSLInspect && certMgr.Ready() {
-		handleTunnelInspect(w, r)
+		handleTunnelInspect(w, r, tlsSkipVerify)
 	} else {
 		handleTunnelBypass(w, r)
 	}
@@ -418,7 +422,9 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 // handleTunnelInspect performs SSL inspection (MITM) for CONNECT tunnels.
 // It terminates TLS on both sides using on-the-fly certificates signed by the
 // internal Root CA, allowing the proxy to inspect decrypted HTTP/1.x traffic.
-func handleTunnelInspect(w http.ResponseWriter, r *http.Request) {
+// tlsSkipVerify disables upstream certificate validation for specific policy
+// rules (e.g. internal sites with self-signed certs); use with caution.
+func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool) {
 	targetHost := r.Host
 	if _, _, err := net.SplitHostPort(targetHost); err != nil {
 		targetHost += ":443"
@@ -433,20 +439,32 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Perform TLS handshake with the upstream, validating its certificate.
-	// RootCAs is set explicitly from the system cert pool — fail-secure: if the
-	// upstream presents an untrusted or expired certificate the connection is
-	// refused and the client receives 502.
-	systemRoots, err := x509.SystemCertPool()
-	if err != nil {
-		// Fall back to an empty pool; handshake will reject unknown CAs.
-		systemRoots = x509.NewCertPool()
+	// 2. Perform TLS handshake with the upstream.
+	// By default RootCAs is set from the system cert pool (fail-secure).
+	// When tlsSkipVerify is true (admin-configured per-rule) cert validation is
+	// skipped — this is intentional for internal/self-signed cert hosts and is
+	// logged as a warning so it is auditable.
+	var upstreamTLSCfg *tls.Config
+	if tlsSkipVerify {
+		logger.Printf("WARN SSL_INSPECT skipping upstream cert verify for %s (tlsSkipVerify rule)", hostOnly)
+		upstreamTLSCfg = &tls.Config{
+			ServerName:         hostOnly,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true, // #nosec G402 — admin-configured per-rule override
+		}
+	} else {
+		systemRoots, err := x509.SystemCertPool()
+		if err != nil {
+			// Fall back to an empty pool; handshake will reject unknown CAs.
+			systemRoots = x509.NewCertPool()
+		}
+		upstreamTLSCfg = &tls.Config{
+			ServerName: hostOnly,
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    systemRoots,
+		}
 	}
-	upstreamTLS := tls.Client(rawUpstream, &tls.Config{
-		ServerName: hostOnly,
-		MinVersion: tls.VersionTLS12,
-		RootCAs:    systemRoots,
-	})
+	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
 	if err := upstreamTLS.Handshake(); err != nil {
 		rawUpstream.Close()
 		logger.Printf("upstream TLS handshake error %s: %v", targetHost, err)

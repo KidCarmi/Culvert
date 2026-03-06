@@ -718,9 +718,12 @@ tr.dragging  { opacity: .4; }
             </div>
           </div>
 
-          <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:18px;margin-bottom:14px;flex-wrap:wrap">
             <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem">
               <input type="checkbox" id="pol-file-filter"> Enable File Filtering
+            </label>
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Skip upstream TLS certificate verification for this rule. Use only for internal sites with self-signed certs.">
+              <input type="checkbox" id="pol-tls-skip"> <span>Skip TLS Verify <span style="color:#f59e0b;font-weight:700">⚠</span></span>
             </label>
             <a href="/api/ca-cert" class="btn ghost sm" download="proxyshield-ca.pem" title="Install this CA cert in your browser to trust inspected connections">
               ⬇ Download Root CA
@@ -1413,10 +1416,12 @@ function actionBadge(action) {
   return `<span class="badge ${cls}">${action}</span>`;
 }
 
-function sslBadge(ssl) {
+function sslBadge(ssl, skipVerify) {
   if (!ssl) return '<span style="color:var(--muted);font-size:.75rem">—</span>';
   const cls = ssl === 'Inspect' ? 'inspect' : 'bypass';
-  return `<span class="badge ${cls}">${ssl}</span>`;
+  let badge = `<span class="badge ${cls}">${ssl}</span>`;
+  if (skipVerify) badge += ' <span style="font-size:.72rem;color:#f59e0b;font-weight:700" title="TLS certificate verification disabled">⚠ NO-VERIFY</span>';
+  return badge;
 }
 
 function renderPolicy() {
@@ -1436,7 +1441,7 @@ function renderPolicy() {
       <td style="font-weight:600">${r.name}</td>
       <td style="font-size:.78rem;font-family:monospace">${src}</td>
       <td style="font-size:.78rem;font-family:monospace">${dest}</td>
-      <td>${sslBadge(r.sslAction)}</td>
+      <td>${sslBadge(r.sslAction, r.tlsSkipVerify)}</td>
       <td>${actionBadge(r.action)}</td>
       <td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${r.hitCount || 0}</td>
       <td style="text-align:right;white-space:nowrap">
@@ -1462,6 +1467,7 @@ function editPolicy(priority) {
   document.getElementById('pol-dest-cat').value   = r.destCategory || '';
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
   document.getElementById('pol-file-filter').checked = !!r.fileFiltering;
+  document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
   document.getElementById('policy-form-title').textContent = 'Edit Rule: ' + r.name;
   document.getElementById('policy-submit-btn').textContent = '💾 Save Changes';
   document.getElementById('policy-cancel-btn').style.display = '';
@@ -1483,6 +1489,7 @@ function clearPolicyForm() {
   document.getElementById('pol-dest-cat').value  = '';
   document.getElementById('pol-ssl').value       = 'Bypass';
   document.getElementById('pol-file-filter').checked = false;
+  document.getElementById('pol-tls-skip').checked = false;
 }
 
 async function submitPolicyRule() {
@@ -1503,6 +1510,7 @@ async function submitPolicyRule() {
     destCategory:   document.getElementById('pol-dest-cat').value || '',
     sslAction:      document.getElementById('pol-ssl').value,
     fileFiltering:  document.getElementById('pol-file-filter').checked,
+    tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
   };
   try {
     if (polEditPriority !== null) {
