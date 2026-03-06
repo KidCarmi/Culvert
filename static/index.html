@@ -204,6 +204,18 @@ tbody tr:hover { background: var(--surface2); }
   color: var(--muted); font-size: .85rem;
 }
 .empty-icon { font-size: 2rem; margin-bottom: 8px; }
+/* ─── Policy badges ──────────────────────────────────────────────────────── */
+.badge.allow    { background: rgba(34,197,94,.12);  color: var(--green); }
+.badge.drop     { background: rgba(239,68,68,.12);  color: var(--red); }
+.badge.blockpg  { background: rgba(239,68,68,.12);  color: var(--red); }
+.badge.redirect { background: rgba(249,115,22,.12); color: var(--orange); }
+.badge.inspect  { background: rgba(59,130,246,.12); color: var(--accent2); }
+.badge.bypass   { background: rgba(100,116,139,.12);color: var(--muted); }
+/* ─── Drag & drop ────────────────────────────────────────────────────────── */
+.drag-handle { cursor: grab; color: var(--muted); padding: 0 4px; user-select: none; font-size:1rem; }
+.drag-handle:active { cursor: grabbing; }
+tr.drag-over { background: rgba(59,130,246,.08) !important; outline: 1px dashed var(--accent); }
+tr.dragging  { opacity: .4; }
 </style>
 </head>
 <body>
@@ -234,6 +246,9 @@ tbody tr:hover { background: var(--surface2); }
     </div>
     <div class="nav-item" data-view="security">
       <span class="icon">🔒</span> Security
+    </div>
+    <div class="nav-item" data-view="policy">
+      <span class="icon">📋</span> Policy
     </div>
     <div class="nav-item" data-view="rewrite">
       <span class="icon">✏️</span> Rewrite
@@ -628,6 +643,122 @@ tbody tr:hover { background: var(--surface2); }
       </div>
     </div>
 
+    <!-- ── POLICY ──────────────────────────────────────────────────────────── -->
+    <div class="view" id="view-policy">
+
+      <!-- Add / Edit Rule Form -->
+      <div class="panel" id="policy-form-panel">
+        <div class="panel-header">
+          <span class="panel-title" id="policy-form-title">Add Policy Rule</span>
+          <button class="btn ghost sm" id="policy-cancel-btn" onclick="cancelPolicyEdit()" style="display:none">✕ Cancel</button>
+        </div>
+        <div class="panel-body">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px">
+            <div>
+              <label class="form-label">Priority <span style="color:var(--muted);font-weight:400">(lower = higher priority)</span></label>
+              <input type="number" class="input" style="width:100%" id="pol-priority" min="1" placeholder="e.g. 10">
+            </div>
+            <div>
+              <label class="form-label">Rule Name</label>
+              <input type="text" class="input" style="width:100%" id="pol-name" placeholder="Descriptive name">
+            </div>
+            <div>
+              <label class="form-label">Action</label>
+              <select class="select" style="width:100%" id="pol-action">
+                <option value="Allow">Allow</option>
+                <option value="Drop">Drop (silent TCP RST)</option>
+                <option value="Block_Page">Block Page (403 HTML)</option>
+                <option value="Redirect">Redirect (302)</option>
+              </select>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px">
+            <div>
+              <label class="form-label">Source IP / CIDR <span style="color:var(--muted);font-weight:400">(empty = any)</span></label>
+              <input type="text" class="input" style="width:100%" id="pol-src-ip" placeholder="10.0.0.0/8 or 1.2.3.4">
+            </div>
+            <div>
+              <label class="form-label">Source Identity <span style="color:var(--muted);font-weight:400">(user/group mock)</span></label>
+              <input type="text" class="input" style="width:100%" id="pol-src-id" placeholder="alice or engineering">
+            </div>
+            <div>
+              <label class="form-label">Redirect URL <span style="color:var(--muted);font-weight:400">(for Redirect action)</span></label>
+              <input type="text" class="input" style="width:100%" id="pol-redirect" placeholder="https://example.com/blocked">
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px">
+            <div>
+              <label class="form-label">Destination FQDN <span style="color:var(--muted);font-weight:400">(empty = any)</span></label>
+              <input type="text" class="input" style="width:100%" id="pol-dest-fqdn" placeholder="*.google.com or evil.com">
+            </div>
+            <div>
+              <label class="form-label">URL Category</label>
+              <select class="select" style="width:100%" id="pol-dest-cat">
+                <option value="">— any —</option>
+                <option value="Any">Any</option>
+                <option value="Social">Social</option>
+                <option value="Malicious">Malicious</option>
+                <option value="News">News</option>
+                <option value="Streaming">Streaming</option>
+                <option value="Gambling">Gambling</option>
+                <option value="Adult">Adult</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label">SSL Action</label>
+              <select class="select" style="width:100%" id="pol-ssl">
+                <option value="Bypass">Bypass (transparent tunnel)</option>
+                <option value="Inspect">Inspect (MITM / SSL decryption)</option>
+              </select>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem">
+              <input type="checkbox" id="pol-file-filter"> Enable File Filtering
+            </label>
+            <a href="/api/ca-cert" class="btn ghost sm" download="proxyshield-ca.pem" title="Install this CA cert in your browser to trust inspected connections">
+              ⬇ Download Root CA
+            </a>
+          </div>
+
+          <button class="btn" id="policy-submit-btn" onclick="submitPolicyRule()">+ Add Rule</button>
+        </div>
+      </div>
+
+      <!-- Rule Table -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Active Policy Rules</span>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span class="topbar-meta" id="pol-count">0 rules</span>
+            <span style="font-size:.72rem;color:var(--muted)">drag rows to reorder priority</span>
+          </div>
+        </div>
+        <div class="tbl-wrap">
+          <table id="policy-table">
+            <thead>
+              <tr>
+                <th style="width:32px"></th>
+                <th>Priority</th>
+                <th>Name</th>
+                <th>Source</th>
+                <th>Destination</th>
+                <th>SSL</th>
+                <th>Action</th>
+                <th style="text-align:right">Hits</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="pol-table"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div><!-- /view-policy -->
+
   </div><!-- /content -->
 </div><!-- /main -->
 
@@ -653,6 +784,7 @@ const viewMeta = {
   livefeed:  { title: 'Live Feed',  meta: 'All requests in real-time' },
   blocklist: { title: 'Blocklist',  meta: 'Manage blocked hosts & wildcards' },
   security:  { title: 'Security',   meta: 'IP filter, rate limiting & log export' },
+  policy:    { title: 'Policy',     meta: 'Policy-Based Access Control (PBAC) rules' },
   rewrite:   { title: 'Rewrite',    meta: 'Header injection & removal rules' },
   settings:  { title: 'Settings',   meta: 'Configuration & credentials' },
 };
@@ -816,6 +948,8 @@ function fmt(n) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Log
 // ═══════════════════════════════════════════════════════════════════════════
+let polRules = [];
+let polEditPriority = null; // null = adding new rule
 let logFilter = '', logStatusFilter = '', logLevelFilter = '', logMethodFilter = '';
 
 function badgeHTML(status) {
@@ -1189,6 +1323,183 @@ async function removeRewriteRule(id) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Policy (PBAC)
+// ═══════════════════════════════════════════════════════════════════════════
+async function fetchPolicy() {
+  try {
+    const d = await api('/api/policy');
+    polRules = d.rules || [];
+    renderPolicy();
+  } catch(e) {}
+}
+
+function actionBadge(action) {
+  if (!action) return '';
+  const cls = { Allow:'allow', Drop:'drop', Block_Page:'blockpg', Redirect:'redirect' }[action] || 'auth';
+  return `<span class="badge ${cls}">${action}</span>`;
+}
+
+function sslBadge(ssl) {
+  if (!ssl) return '<span style="color:var(--muted);font-size:.75rem">—</span>';
+  const cls = ssl === 'Inspect' ? 'inspect' : 'bypass';
+  return `<span class="badge ${cls}">${ssl}</span>`;
+}
+
+function renderPolicy() {
+  const tbody = document.getElementById('pol-table');
+  const count = polRules.length;
+  document.getElementById('pol-count').textContent = count + ' rule' + (count !== 1 ? 's' : '');
+  if (!count) {
+    tbody.innerHTML = '<tr><td colspan="9"><div class="empty-state"><div class="empty-icon">📋</div>No policy rules — traffic is unrestricted</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = polRules.map(r => {
+    const src = [r.sourceIP, r.sourceIdentity].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    const dest = [r.destFQDN, r.destCategory].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    return `<tr draggable="true" data-priority="${r.priority}">
+      <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
+      <td style="color:var(--muted);font-size:.78rem;font-weight:700">${r.priority}</td>
+      <td style="font-weight:600">${r.name}</td>
+      <td style="font-size:.78rem;font-family:monospace">${src}</td>
+      <td style="font-size:.78rem;font-family:monospace">${dest}</td>
+      <td>${sslBadge(r.sslAction)}</td>
+      <td>${actionBadge(r.action)}</td>
+      <td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${r.hitCount || 0}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn ghost sm" onclick="editPolicy(${r.priority})" style="margin-right:4px">Edit</button>
+        <button class="btn danger sm" onclick="deletePolicy(${r.priority})">Del</button>
+      </td>
+    </tr>`;
+  }).join('');
+  initPolicyDragDrop();
+}
+
+function editPolicy(priority) {
+  const r = polRules.find(x => x.priority === priority);
+  if (!r) return;
+  polEditPriority = priority;
+  document.getElementById('pol-priority').value  = r.priority;
+  document.getElementById('pol-name').value       = r.name;
+  document.getElementById('pol-action').value     = r.action;
+  document.getElementById('pol-src-ip').value     = r.sourceIP || '';
+  document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
+  document.getElementById('pol-redirect').value   = r.redirectURL || '';
+  document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
+  document.getElementById('pol-dest-cat').value   = r.destCategory || '';
+  document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
+  document.getElementById('pol-file-filter').checked = !!r.fileFiltering;
+  document.getElementById('policy-form-title').textContent = 'Edit Rule: ' + r.name;
+  document.getElementById('policy-submit-btn').textContent = '💾 Save Changes';
+  document.getElementById('policy-cancel-btn').style.display = '';
+  document.getElementById('policy-form-panel').scrollIntoView({behavior:'smooth'});
+}
+
+function cancelPolicyEdit() {
+  polEditPriority = null;
+  clearPolicyForm();
+  document.getElementById('policy-form-title').textContent = 'Add Policy Rule';
+  document.getElementById('policy-submit-btn').textContent = '+ Add Rule';
+  document.getElementById('policy-cancel-btn').style.display = 'none';
+}
+
+function clearPolicyForm() {
+  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-redirect','pol-dest-fqdn'].forEach(id =>
+    document.getElementById(id).value = '');
+  document.getElementById('pol-action').value    = 'Allow';
+  document.getElementById('pol-dest-cat').value  = '';
+  document.getElementById('pol-ssl').value       = 'Bypass';
+  document.getElementById('pol-file-filter').checked = false;
+}
+
+async function submitPolicyRule() {
+  const priority = parseInt(document.getElementById('pol-priority').value);
+  const name     = document.getElementById('pol-name').value.trim();
+  const action   = document.getElementById('pol-action').value;
+  if (!priority || !name || !action) {
+    toast('Priority, Name and Action are required', 'error'); return;
+  }
+  const rule = {
+    priority,
+    name,
+    action,
+    sourceIP:       document.getElementById('pol-src-ip').value.trim(),
+    sourceIdentity: document.getElementById('pol-src-id').value.trim(),
+    redirectURL:    document.getElementById('pol-redirect').value.trim(),
+    destFQDN:       document.getElementById('pol-dest-fqdn').value.trim(),
+    destCategory:   document.getElementById('pol-dest-cat').value || '',
+    sslAction:      document.getElementById('pol-ssl').value,
+    fileFiltering:  document.getElementById('pol-file-filter').checked,
+  };
+  try {
+    if (polEditPriority !== null) {
+      await api('/api/policy?priority=' + polEditPriority, {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(rule),
+      });
+      toast('Rule updated', 'success');
+      cancelPolicyEdit();
+    } else {
+      await api('/api/policy', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(rule),
+      });
+      toast('Rule added', 'success');
+      clearPolicyForm();
+    }
+    fetchPolicy();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deletePolicy(priority) {
+  try {
+    await api('/api/policy?priority=' + priority, { method: 'DELETE' });
+    toast('Rule deleted', 'success');
+    if (polEditPriority === priority) cancelPolicyEdit();
+    fetchPolicy();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Drag-and-drop reordering ──────────────────────────────────────────────
+function initPolicyDragDrop() {
+  const rows = document.querySelectorAll('#pol-table tbody tr[data-priority]');
+  rows.forEach(row => {
+    row.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/plain', row.dataset.priority);
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => row.classList.remove('dragging'));
+    row.addEventListener('dragover', e => { e.preventDefault(); row.classList.add('drag-over'); });
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+    row.addEventListener('drop', async e => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const fromPri = parseInt(e.dataTransfer.getData('text/plain'));
+      const toPri   = parseInt(row.dataset.priority);
+      if (fromPri === toPri) return;
+
+      // Build new ordered priority list
+      const allRows = [...document.querySelectorAll('#pol-table tbody tr[data-priority]')];
+      const priorities = allRows.map(r => parseInt(r.dataset.priority));
+      const fromIdx = priorities.indexOf(fromPri);
+      const toIdx   = priorities.indexOf(toPri);
+      priorities.splice(fromIdx, 1);
+      priorities.splice(toIdx, 0, fromPri);
+
+      try {
+        await api('/api/policy/reorder', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ priorities }),
+        });
+        fetchPolicy();
+      } catch(e) { toast('Reorder failed: ' + e.message, 'error'); }
+    });
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Export logs
 // ═══════════════════════════════════════════════════════════════════════════
 function exportLogs(format) {
@@ -1244,6 +1555,7 @@ async function tick() {
   if (currentView === 'dashboard') fetchTopHosts();
   if (currentView === 'blocklist') fetchBlocklist();
   if (currentView === 'rewrite')   fetchRewrite();
+  if (currentView === 'policy')    fetchPolicy();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1260,9 +1572,10 @@ setInterval(tick, 3000);
 // Reload panels when switching views
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
-    if (el.dataset.view === 'security') loadSecurity();
-    if (el.dataset.view === 'rewrite')  fetchRewrite();
+    if (el.dataset.view === 'security')  loadSecurity();
+    if (el.dataset.view === 'rewrite')   fetchRewrite();
     if (el.dataset.view === 'dashboard') fetchTopHosts();
+    if (el.dataset.view === 'policy')    fetchPolicy();
   });
 });
 </script>

@@ -18,7 +18,7 @@ var logger *log.Logger
 
 func main() {
 	// ── CLI flags ────────────────────────────────────────────────────────────
-	configPath   := flag.String("config",        "",   "Path to config.yaml (optional)")
+	configPath   := flag.String("config",        "",     "Path to config.yaml (optional)")
 	proxyPort    := flag.Int("port",             0,    "Proxy port (overrides config)")
 	uiPortFlag   := flag.Int("ui-port",          0,    "Web UI port (overrides config)")
 	user         := flag.String("user",          "",   "Basic auth username")
@@ -41,6 +41,7 @@ func main() {
 	dpCert      := flag.String("dp-cert",       "", "DataPlane gRPC client TLS cert")
 	dpKey       := flag.String("dp-key",        "", "DataPlane gRPC client TLS key")
 	dpCA        := flag.String("dp-ca",         "", "DataPlane gRPC CA cert")
+	policyFile  := flag.String("policy",        "", "Policy rules JSON file path")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -163,6 +164,26 @@ func main() {
 			logger.Fatalf("Cannot load blocklist: %v", err)
 		}
 		logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), blPath)
+	}
+
+	// ── Root CA for SSL inspection ────────────────────────────────────────────
+	if err := certMgr.InitCA(); err != nil {
+		logger.Printf("Warning: Root CA init failed (%v) — SSL inspection disabled", err)
+	} else {
+		logger.Printf("SSL CA   → Root CA ready (download via /api/ca-cert)")
+	}
+
+	// ── Policy engine ─────────────────────────────────────────────────────────
+	polPath := firstStr(*policyFile, fc.Proxy.PolicyFile)
+	if polPath != "" {
+		if err := policyStore.Load(polPath); err != nil {
+			logger.Fatalf("Cannot load policy file: %v", err)
+		}
+		logger.Printf("Policy   → %d rule(s) loaded from %s", len(policyStore.List()), polPath)
+	} else {
+		// Use an in-memory store (no persistence until a path is set).
+		policyStore.path = ""
+		logger.Printf("Policy   → in-memory only (set -policy <file> for persistence)")
 	}
 
 	// ── Rewrite rules ────────────────────────────────────────────────────────

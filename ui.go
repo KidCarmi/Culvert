@@ -30,6 +30,9 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/security", apiSecurity)
 	mux.HandleFunc("/api/export", apiExport)
 	mux.HandleFunc("/api/rewrite", apiRewrite)
+	mux.HandleFunc("/api/policy", apiPolicy)
+	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
+	mux.HandleFunc("/api/ca-cert", apiCACert)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -331,6 +334,113 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// ─── Policy API ───────────────────────────────────────────────────────────────
+
+// GET/POST/PUT/DELETE /api/policy — manage PBAC policy rules
+func apiPolicy(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rules := policyStore.List()
+		jsonOK(w, map[string]any{"rules": rules, "count": len(rules)})
+
+	case http.MethodPost:
+		var rule PolicyRule
+		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if rule.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if rule.Action == "" {
+			http.Error(w, "action is required", http.StatusBadRequest)
+			return
+		}
+		added := policyStore.Add(rule)
+		policyStore.Save()
+		logger.Printf("UI: policy rule added priority=%d name=%q action=%s", added.Priority, added.Name, added.Action)
+		jsonOK(w, added)
+
+	case http.MethodPut:
+		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
+		var priority int
+		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
+			http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
+			return
+		}
+		var rule PolicyRule
+		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if !policyStore.Update(priority, rule) {
+			http.Error(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		policyStore.Save()
+		logger.Printf("UI: policy rule updated priority=%d name=%q", priority, rule.Name)
+		jsonOK(w, map[string]any{"ok": true})
+
+	case http.MethodDelete:
+		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
+		var priority int
+		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
+			http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
+			return
+		}
+		if !policyStore.Delete(priority) {
+			http.Error(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		policyStore.Save()
+		logger.Printf("UI: policy rule deleted priority=%d", priority)
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST /api/policy/reorder — drag-and-drop priority reordering
+// Body: {"priorities": [3,1,2]} — ordered list of old priorities (new order)
+func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Priorities []int `json:"priorities"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if !policyStore.Reorder(body.Priorities) {
+		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
+		return
+	}
+	policyStore.Save()
+	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// GET /api/ca-cert — download the Root CA certificate (PEM) for browser import
+func apiCACert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	pem := certMgr.CACertPEM()
+	if pem == nil {
+		http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", `attachment; filename="proxyshield-ca.pem"`)
+	w.Write(pem)
 }
 
 // GET /api/export?format=json|csv — download all logs

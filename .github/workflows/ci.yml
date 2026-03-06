@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: Test & Build
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +18,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-          cache: false   # gha cache not available on self-hosted; Go module cache persists on disk
+          cache: true
 
       - name: Download dependencies
         run: go mod download
@@ -38,7 +38,7 @@ jobs:
           args: "-exclude=G104,G302,G304,G401,G402,G704 ./..."
         # G104: unhandled errors on network writes/copies — intentional for streaming proxy paths
         # G302: log file permissions — fixed to 0600; rule kept excluded for any residual hits
-        # G304: file path from variable — acceptable for blocklist/config loading
+        # G304: file path from variable — acceptable for blocklist/config/policy loading
         # G401: MD5/SHA1 — we use SHA-256, gosec sometimes misidentifies
         # G402: TLSSkipVerify — documented dev/test option, guarded by config flag
         # G704: SSRF taint — a forward proxy must connect to arbitrary client-supplied hosts
@@ -58,7 +58,7 @@ jobs:
 
   docker:
     name: Docker Build
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     needs: test
 
     steps:
@@ -66,8 +66,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker   # use the daemon already present on the host
 
       - name: Build image (no push)
         uses: docker/build-push-action@v5
@@ -75,18 +73,12 @@ jobs:
           context: .
           push: false
           tags: proxyshield:${{ github.sha }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-
-      # Rotate cache so it doesn't grow unboundedly
-      - name: Rotate build cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache 2>/dev/null || true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   release:
     name: Release
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     needs: [test, docker]
     if: startsWith(github.ref, 'refs/tags/v')
 
@@ -108,7 +100,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-          cache: false
+          cache: true
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:

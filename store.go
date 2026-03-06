@@ -71,20 +71,23 @@ func tsGet() []int64 {
 // ─── Request log ──────────────────────────────────────────────────────────────
 
 type LogEntry struct {
-	TS     int64  `json:"ts"`
-	Time   string `json:"time"`
-	IP     string `json:"ip"`
-	Method string `json:"method"`
-	Host   string `json:"host"`
-	Status string `json:"status"` // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED
-	Level  string `json:"level"`  // INFO | WARN | ERROR
+	TS          int64  `json:"ts"`
+	Time        string `json:"time"`
+	IP          string `json:"ip"`
+	Method      string `json:"method"`
+	Host        string `json:"host"`
+	Status      string `json:"status"`      // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
+	Level       string `json:"level"`       // INFO | WARN | ERROR
+	RuleMatched string `json:"ruleMatched"` // policy rule name that matched, if any
+	ActionTaken string `json:"actionTaken"` // policy action taken, if any
 }
 
 func levelForStatus(status string) string {
 	switch status {
-	case "OK":
+	case "OK", "POLICY_ALLOW":
 		return "INFO"
-	case "BLOCKED", "RATE_LIMITED", "IP_BLOCKED":
+	case "BLOCKED", "RATE_LIMITED", "IP_BLOCKED",
+		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT":
 		return "WARN"
 	default: // AUTH_FAIL and anything unexpected
 		return "ERROR"
@@ -371,20 +374,22 @@ func uptime() string {
 	return fmt.Sprintf("%dm %ds", m, s)
 }
 
-func recordRequest(ip, method, host, status string) {
+func recordRequest(ip, method, host, status, ruleMatched, actionTaken string) {
 	atomic.AddInt64(&statTotal, 1)
 	tsRecord()
-	if status == "OK" {
+	if status == "OK" || status == "POLICY_ALLOW" {
 		topHosts.Record(host)
 	}
 	logAdd(LogEntry{
-		TS:     time.Now().UnixMilli(),
-		Time:   time.Now().Format("15:04:05"),
-		IP:     ip,
-		Method: method,
-		Host:   host,
-		Status: status,
-		Level:  levelForStatus(status),
+		TS:          time.Now().UnixMilli(),
+		Time:        time.Now().Format("15:04:05"),
+		IP:          ip,
+		Method:      method,
+		Host:        host,
+		Status:      status,
+		Level:       levelForStatus(status),
+		RuleMatched: ruleMatched,
+		ActionTaken: actionTaken,
 	})
 }
 
