@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -226,7 +228,7 @@ type PolicyMatch struct {
 }
 
 // Evaluate iterates rules in priority order and returns the first match.
-// Returns nil when no rule matches (caller should default to Allow).
+// Returns nil when no rule matches (caller should default to Deny — Zero Trust).
 func (ps *PolicyStore) Evaluate(clientIP, identity, host string) *PolicyMatch {
 	ps.mu.RLock()
 	rules := ps.rules
@@ -312,6 +314,69 @@ func matchCategory(cat URLCategory, host string) bool {
 		h = strings.ToLower(h)
 		if host == h || strings.HasSuffix(host, "."+h) {
 			return true
+		}
+	}
+	return false
+}
+
+// ── SSL Bypass Matcher ────────────────────────────────────────────────────────
+
+// bypassPattern holds one compiled bypass entry.
+// Glob patterns (e.g. "*.co.il") use matchFQDN semantics.
+// Regex patterns are prefixed with "~" (e.g. "~^.*\.gov\.il$").
+type bypassPattern struct {
+	raw  string
+	isRE bool
+	re   *regexp.Regexp
+}
+
+// SSLBypassMatcher holds a list of host patterns that must always bypass
+// SSL inspection, regardless of what the PBAC policy says.
+type SSLBypassMatcher struct {
+	mu       sync.RWMutex
+	patterns []bypassPattern
+}
+
+var sslBypass = &SSLBypassMatcher{}
+
+// Set replaces the current bypass pattern list. Returns an error if any
+// regex pattern (prefix "~") fails to compile.
+func (m *SSLBypassMatcher) Set(patterns []string) error {
+	compiled := make([]bypassPattern, 0, len(patterns))
+	for _, p := range patterns {
+		bp := bypassPattern{raw: p}
+		if strings.HasPrefix(p, "~") {
+			re, err := regexp.Compile(p[1:])
+			if err != nil {
+				return fmt.Errorf("ssl bypass pattern %q: %w", p, err)
+			}
+			bp.isRE = true
+			bp.re = re
+		}
+		compiled = append(compiled, bp)
+	}
+	m.mu.Lock()
+	m.patterns = compiled
+	m.mu.Unlock()
+	return nil
+}
+
+// Matches reports whether host matches any configured bypass pattern.
+// Glob patterns follow matchFQDN semantics ("*.co.il" matches "www.co.il").
+// Regex patterns (prefix "~") are matched against the lower-cased bare host.
+func (m *SSLBypassMatcher) Matches(host string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, p := range m.patterns {
+		if p.isRE {
+			if p.re.MatchString(h) {
+				return true
+			}
+		} else {
+			if matchFQDN(p.raw, h) {
+				return true
+			}
 		}
 	}
 	return false

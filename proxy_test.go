@@ -270,6 +270,104 @@ func TestIsPrivateIP(t *testing.T) {
 	}
 }
 
+// ── Zero Trust Default Deny tests ────────────────────────────────────────────
+
+func TestHandleRequest_DefaultDeny_NoRules(t *testing.T) {
+	setupProxyTest(t)
+	// policyStore starts empty after setupProxyTest; no rules → default deny.
+	w := httptest.NewRecorder()
+	r := makeRequest("GET", "http://example.com/", nil)
+	handleRequest(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("default deny: expected 403, got %d", w.Code)
+	}
+}
+
+func TestHandleRequest_AllowedByRule(t *testing.T) {
+	setupProxyTest(t)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	policyStore.rules = nil
+	policyStore.Add(PolicyRule{
+		Priority: 1,
+		Name:     "allow-backend",
+		DestFQDN: "*",
+		Action:   ActionAllow,
+	})
+
+	// With a matching Allow rule, the request reaches the backend (200), not policy-deny (403).
+	w := httptest.NewRecorder()
+	r := makeRequest("GET", backend.URL+"/", nil)
+	handleRequest(w, r)
+	if w.Code == http.StatusForbidden {
+		t.Errorf("allowed rule: expected not-403, got 403")
+	}
+}
+
+// ── SSLBypassMatcher tests ────────────────────────────────────────────────────
+
+func TestSSLBypassMatcher_GlobSuffix(t *testing.T) {
+	m := &SSLBypassMatcher{}
+	if err := m.Set([]string{"*.co.il"}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"www.ynet.co.il", true},
+		{"co.il", true},          // bare domain also matches
+		{"evil.co.il.com", false}, // suffix must be exact
+		{"example.com", false},
+	}
+	for _, c := range cases {
+		if got := m.Matches(c.host); got != c.want {
+			t.Errorf("Matches(%q) = %v, want %v", c.host, got, c.want)
+		}
+	}
+}
+
+func TestSSLBypassMatcher_GlobWildcard(t *testing.T) {
+	m := &SSLBypassMatcher{}
+	if err := m.Set([]string{"*"}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if !m.Matches("anything.example.com") {
+		t.Error("wildcard * should match everything")
+	}
+}
+
+func TestSSLBypassMatcher_Regex(t *testing.T) {
+	m := &SSLBypassMatcher{}
+	if err := m.Set([]string{`~^.*\.gov\.il$`}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if !m.Matches("www.taxes.gov.il") {
+		t.Error("regex should match www.taxes.gov.il")
+	}
+	if m.Matches("gov.il.evil.com") {
+		t.Error("regex should not match gov.il.evil.com")
+	}
+}
+
+func TestSSLBypassMatcher_InvalidRegex(t *testing.T) {
+	m := &SSLBypassMatcher{}
+	err := m.Set([]string{"~[invalid"})
+	if err == nil {
+		t.Error("expected error for invalid regex pattern")
+	}
+}
+
+func TestSSLBypassMatcher_EmptyList(t *testing.T) {
+	m := &SSLBypassMatcher{}
+	if m.Matches("example.com") {
+		t.Error("empty bypass list should not match anything")
+	}
+}
+
 // ── isWebSocketUpgrade tests ──────────────────────────────────────────────────
 
 func TestIsWebSocketUpgrade(t *testing.T) {

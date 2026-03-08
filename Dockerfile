@@ -31,10 +31,17 @@ COPY config.example.yaml ./config.example.yaml
 RUN mkdir -p /data && chown proxy:proxy /data /app
 USER proxy
 
+# /data is the persistent volume for the Root CA bundle, policy rules, and
+# other state that must survive container restarts.
+# Mount with: docker run -v proxyshield_data:/data ...
+VOLUME ["/data"]
+
 EXPOSE 8080 9090
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD wget -qO- http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["./proxyshield"]
-CMD ["-port", "8080", "-ui-port", "9090"]
+# -ca-path /data/ca.bundle ensures the Root CA is loaded from the persistent
+# volume on restart instead of being regenerated each time.
+CMD ["-port", "8080", "-ui-port", "9090", "-ca-path", "/data/ca.bundle"]

@@ -15,6 +15,13 @@ proxy:
   log_max_mb: 50      # Rotate log when it reaches this size in MB
   tls_cert: ""        # Custom TLS certificate for Web UI (PEM, optional)
   tls_key: ""         # Custom TLS key for Web UI (PEM, optional)
+  ca_path: "/data/ca.bundle"  # Persistent Root CA bundle (mount /data as Docker volume to survive restarts)
+  ssl_bypass_patterns: []     # Hosts that always bypass SSL inspection (glob or ~regex)
+    # Glob examples (*.X matches subdomain and bare domain):
+    # - "*.co.il"
+    # - "*.bank.com"
+    # Regex examples (prefix with ~):
+    # - "~^.*\\.gov\\.il$"
 
 auth:
   user: ""            # Basic-auth username (empty = auth disabled for HTTP proxy & SOCKS5)

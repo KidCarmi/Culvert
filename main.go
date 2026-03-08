@@ -226,6 +226,14 @@ func main() {
 	}
 	logger.Printf("FileBlock → %d extension(s) in profile", fileBlocker.Count())
 
+	// ── SSL Bypass patterns ───────────────────────────────────────────────────
+	if len(fc.Proxy.SSLBypassPatterns) > 0 {
+		if err := sslBypass.Set(fc.Proxy.SSLBypassPatterns); err != nil {
+			logger.Fatalf("SSL bypass pattern error: %v", err)
+		}
+		logger.Printf("SSL Bypass → %d pattern(s) configured", len(fc.Proxy.SSLBypassPatterns))
+	}
+
 	// ── Rewrite rules ────────────────────────────────────────────────────────
 	if len(fc.Rewrite) > 0 {
 		rewriter.SetRules(fc.Rewrite)

@@ -199,8 +199,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			// Fall through to normal handling below.
 		}
 	} else {
-		recordRequest(clientIP, r.Method, r.Host, "OK", "", "")
-		logger.Printf("OK %s %s %s", clientIP, r.Method, r.Host)
+		// Zero Trust: no rule matched → deny by default.
+		atomic.AddInt64(&statBlocked, 1)
+		http.Error(w, "Forbidden by ProxyShield policy (no matching rule)", http.StatusForbidden)
+		recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "")
+		logger.Printf("POLICY_DEFAULT_DENY %s %s %s", clientIP, r.Method, r.Host)
+		return
 	}
 
 	// Determine SSL action and per-rule TLS options for CONNECT tunnels.
@@ -211,6 +215,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			sslAction = SSLInspect
 		}
 		tlsSkipVerify = match.TLSSkipVerify
+	}
+	// Smart Bypass: explicit bypass-list patterns (glob or regex) always
+	// override policy-based SSL inspection, regardless of rule SSLAction.
+	if sslAction == SSLInspect && sslBypass.Matches(host) {
+		sslAction = SSLBypass
+		logger.Printf("SSL_BYPASS_PATTERN %s -> %s", clientIP, host)
 	}
 
 	if r.Method == http.MethodConnect {
