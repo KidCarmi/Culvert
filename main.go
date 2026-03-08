@@ -105,6 +105,10 @@ func main() {
 			log.Fatalf("OIDC config error: %v", err)
 		}
 		cfg.SetProvider(oidcProvider)
+		if fc.OIDC.LoginURL != "" {
+			SetOIDCLoginURL(fc.OIDC.LoginURL)
+			logger.Printf("Auth     → OIDC login redirect: %s", fc.OIDC.LoginURL)
+		}
 		logger.Printf("Auth     → OIDC introspection (%s)", fc.OIDC.IntrospectionURL)
 	} else if authU != "" {
 		logger.Printf("Auth     → local bcrypt (user=%s)", authU)
@@ -276,6 +280,24 @@ func main() {
 		rewriter.SetRules(fc.Rewrite)
 		logger.Printf("Rewrite  → %d rule(s) loaded", len(fc.Rewrite))
 	}
+
+	// ── Default policy action ────────────────────────────────────────────────
+	// "allow" = passthrough mode (good for initial setup); "deny" = zero-trust.
+	// Defaults to "deny" when rules are configured, "allow" when no rules exist.
+	defaultAction := firstStr(fc.DefaultAction)
+	if defaultAction == "" {
+		if len(policyStore.List()) == 0 {
+			defaultAction = "allow"
+			logger.Printf("Policy   → no rules configured; defaulting to Allow (passthrough). Add rules and set default_action: deny for Zero Trust.")
+		} else {
+			defaultAction = "deny"
+		}
+	}
+	setDefaultPolicyAction(defaultAction)
+	logger.Printf("Policy   → default action: %s", defaultAction)
+
+	// ── SSE live dashboard broadcaster ───────────────────────────────────────
+	startSSEBroadcaster()
 
 	// ── SOCKS5 server (optional) ─────────────────────────────────────────────
 	s5Port := firstNonZero(*socks5Port, fc.Proxy.SOCKS5Port)

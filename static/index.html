@@ -256,6 +256,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="rewrite">
       <span class="icon">✏️</span> Rewrite
     </div>
+    <div class="nav-item" data-view="certificates">
+      <span class="icon">🔑</span> Certificates
+    </div>
     <div class="nav-item" data-view="settings">
       <span class="icon">⚙️</span> Settings
     </div>
@@ -314,6 +317,11 @@ tr.dragging  { opacity: .4; }
           <div class="card-value" id="d-auth">0</div>
           <div class="card-sub">bad credentials</div>
         </div>
+        <div class="card c-blue">
+          <div class="card-label">⚡ Active Connections</div>
+          <div class="card-value" id="d-active">0</div>
+          <div class="card-sub" id="d-rps">0.0 req/s</div>
+        </div>
       </div>
 
       <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:18px">
@@ -351,18 +359,29 @@ tr.dragging  { opacity: .4; }
         </div>
       </div>
 
-      <div class="panel">
-        <div class="panel-header">
-          <span class="panel-title">Recent Requests</span>
-          <span style="font-size:.75rem;color:var(--muted)">last 10</span>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
+        <div class="panel" style="margin-bottom:0">
+          <div class="panel-header">
+            <span class="panel-title">🌍 Destination Countries</span>
+            <span style="font-size:.75rem;color:var(--muted)">top 10 by traffic</span>
+          </div>
+          <div class="panel-body" id="country-chart-wrap" style="min-height:180px">
+            <div class="empty-state" style="padding:30px 0">No geo data yet</div>
+          </div>
         </div>
-        <div class="tbl-wrap">
-          <table>
-            <thead>
-              <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
-            </thead>
-            <tbody id="dash-log"></tbody>
-          </table>
+        <div class="panel" style="margin-bottom:0">
+          <div class="panel-header">
+            <span class="panel-title">Recent Requests</span>
+            <span style="font-size:.75rem;color:var(--muted)">last 10</span>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
+              </thead>
+              <tbody id="dash-log"></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -526,6 +545,81 @@ tr.dragging  { opacity: .4; }
           </div>
         </div>
 
+      </div>
+    </div>
+
+    <!-- ── CERTIFICATES ───────────────────────────────────────────────────── -->
+    <div class="view" id="view-certificates">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start">
+
+        <!-- Root CA Info & Download -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">🏛️ Root CA Certificate</span>
+            <button class="btn ghost sm" onclick="loadCACertInfo()">↻ Refresh</button>
+          </div>
+          <div class="panel-body">
+            <div id="ca-info" style="font-size:.85rem;line-height:1.8;margin-bottom:14px">
+              <div style="color:var(--muted)">Loading…</div>
+            </div>
+            <p style="font-size:.82rem;color:var(--muted);margin-bottom:12px">
+              Install this certificate in your OS/browser trust store so that SSL-inspected connections appear trusted.
+              Private keys are <strong>never</strong> sent to the browser.
+            </p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <a id="ca-download-btn" href="/api/ca-cert" class="btn" download="proxyshield-ca.pem">⬇ Download Root CA (.pem)</a>
+              <button class="btn ghost sm" onclick="copyCAInstallInstructions()">📋 Install Instructions</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Upload Custom CA for MITM -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">⬆ Upload Custom Certificate</span>
+          </div>
+          <div class="panel-body">
+            <div style="margin-bottom:10px">
+              <label class="form-label">Target</label>
+              <select class="select" style="width:100%" id="cert-target">
+                <option value="mitm">MITM / SSL Inspection Engine</option>
+                <option value="ui">Management UI (requires restart)</option>
+              </select>
+            </div>
+            <div style="margin-bottom:10px">
+              <label class="form-label">Certificate (PEM)</label>
+              <textarea class="input" id="cert-pem" rows="5" style="width:100%;font-family:monospace;font-size:.75rem;resize:vertical" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+            </div>
+            <div style="margin-bottom:14px">
+              <label class="form-label">Private Key (PEM) <span style="color:#ef4444;font-weight:400">— stored in memory only, never logged</span></label>
+              <textarea class="input" id="cert-key" rows="5" style="width:100%;font-family:monospace;font-size:.75rem;resize:vertical" placeholder="-----BEGIN EC PRIVATE KEY-----&#10;...&#10;-----END EC PRIVATE KEY-----"></textarea>
+            </div>
+            <button class="btn" onclick="uploadCustomCert()">⬆ Upload & Activate</button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- CA Install Instructions modal -->
+      <div id="ca-instructions-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:none;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border-radius:12px;padding:24px;max-width:540px;width:90%;box-shadow:0 24px 64px rgba(0,0,0,.4)">
+          <div style="font-weight:700;font-size:1rem;margin-bottom:14px">🔑 Install Root CA — Instructions</div>
+          <pre style="background:rgba(0,0,0,.2);padding:12px;border-radius:8px;font-size:.75rem;overflow:auto;line-height:1.6">Windows:
+  1. Double-click proxyshield-ca.pem → Install Certificate
+  2. Select "Local Machine" → Place in "Trusted Root CAs"
+
+macOS:
+  1. Double-click proxyshield-ca.pem → Keychain Access
+  2. Find "ProxyShield Root CA" → Get Info → Trust → Always Trust
+
+Linux (Ubuntu/Debian):
+  sudo cp proxyshield-ca.pem /usr/local/share/ca-certificates/proxyshield.crt
+  sudo update-ca-certificates
+
+Firefox (all platforms):
+  Settings → Privacy → View Certificates → Authorities → Import</pre>
+          <button class="btn" style="margin-top:14px" onclick="document.getElementById('ca-instructions-modal').style.display='none'">Close</button>
+        </div>
       </div>
     </div>
 
@@ -710,24 +804,38 @@ tr.dragging  { opacity: .4; }
               </select>
             </div>
             <div>
+              <label class="form-label">Destination Countries <span style="color:var(--muted);font-weight:400">(Geo-IP, comma-sep ISO codes)</span></label>
+              <input type="text" class="input" style="width:100%" id="pol-dest-country" placeholder="RU, CN, KP (empty = any)">
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px">
+            <div>
               <label class="form-label">SSL Action</label>
               <select class="select" style="width:100%" id="pol-ssl">
                 <option value="Bypass">Bypass (transparent tunnel)</option>
                 <option value="Inspect">Inspect (MITM / SSL decryption)</option>
               </select>
             </div>
-          </div>
-
-          <div style="display:flex;align-items:center;gap:18px;margin-bottom:14px;flex-wrap:wrap">
-            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem">
-              <input type="checkbox" id="pol-file-filter"> Enable File Filtering
-            </label>
-            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Skip upstream TLS certificate verification for this rule. Use only for internal sites with self-signed certs.">
-              <input type="checkbox" id="pol-tls-skip"> <span>Skip TLS Verify <span style="color:#f59e0b;font-weight:700">⚠</span></span>
-            </label>
-            <a href="/api/ca-cert" class="btn ghost sm" download="proxyshield-ca.pem" title="Install this CA cert in your browser to trust inspected connections">
-              ⬇ Download Root CA
-            </a>
+            <div>
+              <label class="form-label">File Extension Profile</label>
+              <select class="select" style="width:100%" id="pol-file-profile">
+                <option value="">— none —</option>
+                <option value="Executables">Executables (.exe .dll .bat…)</option>
+                <option value="Archives">Archives (.zip .rar .7z…)</option>
+                <option value="Documents">Macro Documents (.docm .xlsm…)</option>
+                <option value="Media">Media (.mp4 .avi .mkv…)</option>
+                <option value="Strict">Strict (all of the above)</option>
+              </select>
+            </div>
+            <div style="display:flex;flex-direction:column;justify-content:flex-end;gap:10px">
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem">
+                <input type="checkbox" id="pol-file-filter"> Enable File Filtering
+              </label>
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Skip upstream TLS certificate verification for this rule. Use only for internal sites with self-signed certs.">
+                <input type="checkbox" id="pol-tls-skip"> <span>Skip TLS Verify <span style="color:#f59e0b;font-weight:700">⚠</span></span>
+              </label>
+            </div>
           </div>
 
           <button class="btn" id="policy-submit-btn" onclick="submitPolicyRule()">+ Add Rule</button>
@@ -748,10 +856,12 @@ tr.dragging  { opacity: .4; }
             <thead>
               <tr>
                 <th style="width:32px"></th>
-                <th>Priority</th>
+                <th>Pri</th>
                 <th>Name</th>
                 <th>Source</th>
                 <th>Destination</th>
+                <th>Country</th>
+                <th>File Profile</th>
                 <th>SSL</th>
                 <th>Action</th>
                 <th style="text-align:right">Hits</th>
@@ -759,6 +869,19 @@ tr.dragging  { opacity: .4; }
               </tr>
             </thead>
             <tbody id="pol-table"></tbody>
+            <tfoot>
+              <tr style="background:rgba(239,68,68,.06);border-top:2px solid rgba(239,68,68,.25)">
+                <td colspan="2" style="padding:8px 12px"><span style="font-size:.72rem;color:var(--muted)">∞</span></td>
+                <td style="padding:8px 12px;font-weight:600;color:var(--danger);font-size:.82rem">Default Drop <span style="font-size:.68rem;color:var(--muted);font-weight:400">(system)</span></td>
+                <td colspan="6" style="padding:8px 12px;font-size:.75rem;color:var(--muted)">Matches all unmatched traffic — always last</td>
+                <td style="padding:8px 12px;text-align:right" id="default-action-cell">
+                  <span id="default-action-badge"></span>
+                </td>
+                <td style="padding:8px 12px;text-align:right">
+                  <button class="btn ghost sm" onclick="toggleDefaultAction()" id="default-action-btn" title="Toggle default action for unmatched traffic">Toggle</button>
+                </td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       </div>
@@ -856,14 +979,15 @@ let rwRules = [];
 // Navigation
 // ═══════════════════════════════════════════════════════════════════════════
 const viewMeta = {
-  dashboard: { title: 'Dashboard',  meta: 'Real-time proxy overview' },
-  livefeed:  { title: 'Live Feed',  meta: 'All requests in real-time' },
-  blocklist: { title: 'Blocklist',  meta: 'Manage blocked hosts & wildcards' },
-  security:  { title: 'Security',   meta: 'IP filter, rate limiting & log export' },
-  policy:    { title: 'Policy',     meta: 'Policy-Based Access Control (PBAC) rules' },
-  fileblock: { title: 'File Block', meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
-  rewrite:   { title: 'Rewrite',    meta: 'Header injection & removal rules' },
-  settings:  { title: 'Settings',   meta: 'Configuration & credentials' },
+  dashboard:    { title: 'Dashboard',     meta: 'Real-time proxy overview' },
+  livefeed:     { title: 'Live Feed',     meta: 'All requests in real-time' },
+  blocklist:    { title: 'Blocklist',     meta: 'Manage blocked hosts & wildcards' },
+  security:     { title: 'Security',      meta: 'IP filter, rate limiting & log export' },
+  policy:       { title: 'Policy',        meta: 'Policy-Based Access Control (PBAC) rules' },
+  fileblock:    { title: 'File Block',    meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
+  rewrite:      { title: 'Rewrite',       meta: 'Header injection & removal rules' },
+  certificates: { title: 'Certificates', meta: 'Root CA management & custom TLS certificates' },
+  settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -1729,6 +1853,261 @@ function toast(msg, type='success') {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SSE Live Dashboard
+// ═══════════════════════════════════════════════════════════════════════════
+let sseConnected = false;
+function connectSSE() {
+  if (typeof EventSource === 'undefined') return;
+  const es = new EventSource('/api/events');
+  es.addEventListener('connected', () => { sseConnected = true; });
+  es.onmessage = e => {
+    try {
+      const d = JSON.parse(e.data);
+      document.getElementById('d-active').textContent = d.activeConns || 0;
+      document.getElementById('d-rps').textContent = (d.rps || 0).toFixed(1) + ' req/s';
+      renderCountryChart(d.topCountries || []);
+    } catch(_) {}
+  };
+  es.onerror = () => { sseConnected = false; setTimeout(connectSSE, 5000); };
+}
+
+const FLAG_BASE = 'https://flagcdn.com/16x12/';
+function countryFlag(code) {
+  if (!code) return '';
+  return `<img src="${FLAG_BASE}${code.toLowerCase()}.png" width="16" height="12" style="vertical-align:middle;margin-right:4px;border-radius:2px" onerror="this.style.display='none'">`;
+}
+
+function renderCountryChart(countries) {
+  const wrap = document.getElementById('country-chart-wrap');
+  if (!wrap) return;
+  if (!countries || !countries.length) {
+    wrap.innerHTML = '<div class="empty-state" style="padding:30px 0">No geo data yet</div>';
+    return;
+  }
+  const max = countries[0].count || 1;
+  wrap.innerHTML = countries.slice(0, 10).map(c => {
+    const pct = Math.max(2, Math.round((c.count / max) * 100));
+    const name = c.name || c.code;
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:.8rem">
+      <div style="width:28px;text-align:right;font-family:monospace;font-size:.72rem;color:var(--muted)">${countryFlag(c.code)}${c.code}</div>
+      <div style="flex:1;background:rgba(59,130,246,.1);border-radius:4px;overflow:hidden">
+        <div style="height:20px;background:rgba(59,130,246,.55);width:${pct}%;border-radius:4px;transition:width .3s;display:flex;align-items:center;padding:0 6px;min-width:24px">
+        </div>
+      </div>
+      <div style="width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)" title="${name}">${name}</div>
+      <div style="width:36px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${c.count}</div>
+    </div>`;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Policy: Country & FileProfile support
+// ═══════════════════════════════════════════════════════════════════════════
+// Extend editPolicy to handle new fields
+const _origEditPolicy = window.editPolicy;
+function editPolicy(priority) {
+  const r = polRules.find(x => x.priority === priority);
+  if (!r) return;
+  polEditPriority = priority;
+  document.getElementById('pol-priority').value  = r.priority;
+  document.getElementById('pol-name').value       = r.name;
+  document.getElementById('pol-action').value     = r.action;
+  document.getElementById('pol-src-ip').value     = r.sourceIP || '';
+  document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
+  document.getElementById('pol-redirect').value   = r.redirectURL || '';
+  document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
+  document.getElementById('pol-dest-cat').value   = r.destCategory || '';
+  document.getElementById('pol-dest-country').value = (r.destCountry || []).join(', ');
+  document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
+  document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
+  document.getElementById('pol-file-profile').value   = r.fileProfile || '';
+  document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
+  document.getElementById('policy-form-title').textContent = 'Edit Rule: ' + r.name;
+  document.getElementById('policy-submit-btn').textContent = '💾 Save Changes';
+  document.getElementById('policy-cancel-btn').style.display = '';
+  document.getElementById('policy-form-panel').scrollIntoView({behavior:'smooth'});
+}
+
+const _origClearPolicyForm = window.clearPolicyForm;
+function clearPolicyForm() {
+  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-redirect','pol-dest-fqdn','pol-dest-country'].forEach(id =>
+    document.getElementById(id).value = '');
+  document.getElementById('pol-action').value       = 'Allow';
+  document.getElementById('pol-dest-cat').value     = '';
+  document.getElementById('pol-ssl').value          = 'Bypass';
+  document.getElementById('pol-file-filter').checked = false;
+  document.getElementById('pol-file-profile').value = '';
+  document.getElementById('pol-tls-skip').checked   = false;
+}
+
+const _origSubmitPolicyRule = window.submitPolicyRule;
+async function submitPolicyRule() {
+  const priority = parseInt(document.getElementById('pol-priority').value);
+  const name     = document.getElementById('pol-name').value.trim();
+  const action   = document.getElementById('pol-action').value;
+  if (!priority || !name || !action) {
+    toast('Priority, Name and Action are required', 'error'); return;
+  }
+  const countryStr = document.getElementById('pol-dest-country').value.trim();
+  const destCountry = countryStr ? countryStr.split(',').map(s => s.trim().toUpperCase()).filter(Boolean) : [];
+  const rule = {
+    priority,
+    name,
+    action,
+    sourceIP:       document.getElementById('pol-src-ip').value.trim(),
+    sourceIdentity: document.getElementById('pol-src-id').value.trim(),
+    redirectURL:    document.getElementById('pol-redirect').value.trim(),
+    destFQDN:       document.getElementById('pol-dest-fqdn').value.trim(),
+    destCategory:   document.getElementById('pol-dest-cat').value || '',
+    destCountry,
+    sslAction:      document.getElementById('pol-ssl').value,
+    fileFiltering:  document.getElementById('pol-file-filter').checked,
+    fileProfile:    document.getElementById('pol-file-profile').value || '',
+    tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
+  };
+  try {
+    if (polEditPriority !== null) {
+      await api('/api/policy?priority=' + polEditPriority, {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(rule),
+      });
+      toast('Rule updated', 'success');
+      cancelPolicyEdit();
+    } else {
+      await api('/api/policy', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(rule),
+      });
+      toast('Rule added', 'success');
+      clearPolicyForm();
+    }
+    fetchPolicy();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// Extend renderPolicy to show country and file profile columns
+function renderPolicy() {
+  const tbody = document.getElementById('pol-table');
+  const count = polRules.length;
+  document.getElementById('pol-count').textContent = count + ' rule' + (count !== 1 ? 's' : '');
+  updateDefaultActionBadge();
+  if (!count) {
+    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">📋</div>No policy rules yet — default action applies to all traffic</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = polRules.map(r => {
+    const src = [r.sourceIP, r.sourceIdentity].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    const destParts = [r.destFQDN, r.destCategory].filter(Boolean);
+    const dest = destParts.join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    const countryCell = r.destCountry && r.destCountry.length
+      ? r.destCountry.map(c => `<span style="font-family:monospace;font-size:.72rem;background:rgba(59,130,246,.15);padding:1px 5px;border-radius:4px">${countryFlag(c)}${c}</span>`).join(' ')
+      : '<span style="color:var(--muted)">Any</span>';
+    const fileProfileCell = r.fileProfile
+      ? `<span style="font-size:.72rem;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 6px;border-radius:4px">${r.fileProfile}</span>`
+      : '<span style="color:var(--muted)">—</span>';
+    return `<tr draggable="true" data-priority="${r.priority}">
+      <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
+      <td style="color:var(--muted);font-size:.78rem;font-weight:700">${r.priority}</td>
+      <td style="font-weight:600">${r.name}</td>
+      <td style="font-size:.78rem;font-family:monospace">${src}</td>
+      <td style="font-size:.78rem;font-family:monospace">${dest}</td>
+      <td style="font-size:.78rem">${countryCell}</td>
+      <td style="font-size:.78rem">${fileProfileCell}</td>
+      <td>${sslBadge(r.sslAction, r.tlsSkipVerify)}</td>
+      <td>${actionBadge(r.action)}</td>
+      <td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${r.hitCount || 0}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn ghost sm" onclick="editPolicy(${r.priority})" style="margin-right:4px">Edit</button>
+        <button class="btn danger sm" onclick="deletePolicy(${r.priority})">Del</button>
+      </td>
+    </tr>`;
+  }).join('');
+  initPolicyDragDrop();
+}
+
+// Default action toggle
+let _defaultAction = 'allow';
+async function loadDefaultAction() {
+  try {
+    const d = await api('/api/default-action');
+    _defaultAction = d.defaultAction || 'deny';
+    updateDefaultActionBadge();
+  } catch(_) {}
+}
+
+function updateDefaultActionBadge() {
+  const badge = document.getElementById('default-action-badge');
+  if (!badge) return;
+  const isAllow = _defaultAction === 'allow';
+  badge.innerHTML = isAllow
+    ? '<span class="badge allow">Allow (Passthrough)</span>'
+    : '<span class="badge drop">Drop (Zero Trust)</span>';
+}
+
+async function toggleDefaultAction() {
+  const next = _defaultAction === 'allow' ? 'deny' : 'allow';
+  try {
+    await api('/api/default-action', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ action: next }),
+    });
+    _defaultAction = next;
+    updateDefaultActionBadge();
+    toast('Default action set to: ' + next, 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Certificate Management
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadCACertInfo() {
+  try {
+    const info = await fetch('/api/ca-cert', {headers:{Accept:'application/json'}}).then(r => r.json());
+    const el = document.getElementById('ca-info');
+    if (!el) return;
+    if (!info.ready) {
+      el.innerHTML = '<div style="color:var(--danger)">CA not initialised</div>';
+      return;
+    }
+    el.innerHTML = `
+      <div><strong>Subject:</strong> ${info.subject}</div>
+      <div><strong>Valid From:</strong> ${info.notBefore}</div>
+      <div><strong>Valid Until:</strong> <span style="color:${new Date(info.notAfter) < new Date() ? '#ef4444' : '#22c55e'}">${info.notAfter}</span></div>
+      <div style="margin-top:6px;font-family:monospace;font-size:.72rem;color:var(--muted);word-break:break-all"><strong>SHA-256:</strong> ${info.fingerprint}</div>`;
+  } catch(e) {
+    const el = document.getElementById('ca-info');
+    if (el) el.innerHTML = '<div style="color:var(--danger)">Failed to load CA info</div>';
+  }
+}
+
+function copyCAInstallInstructions() {
+  document.getElementById('ca-instructions-modal').style.display = 'flex';
+}
+
+async function uploadCustomCert() {
+  const target  = document.getElementById('cert-target').value;
+  const certPEM = document.getElementById('cert-pem').value.trim();
+  const keyPEM  = document.getElementById('cert-key').value.trim();
+  if (!certPEM || !keyPEM) { toast('Certificate and key are required', 'error'); return; }
+  const fd = new FormData();
+  fd.append('target', target);
+  fd.append('cert', certPEM);
+  fd.append('key', keyPEM);
+  try {
+    const resp = await fetch('/api/certs/upload', { method: 'POST', body: fd });
+    if (!resp.ok) { const t = await resp.text(); throw new Error(t); }
+    const d = await resp.json();
+    toast(d.note ? d.note : 'Certificate uploaded & activated', 'success');
+    document.getElementById('cert-pem').value = '';
+    document.getElementById('cert-key').value = '';
+    if (target === 'mitm') loadCACertInfo();
+  } catch(e) { toast('Upload failed: ' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Poll loop
 // ═══════════════════════════════════════════════════════════════════════════
 async function tick() {
@@ -1750,16 +2129,19 @@ fetchFileBlock();
 loadSettings();
 loadSecurity();
 fetchTopHosts();
+loadDefaultAction();
+connectSSE();
 tick();
 setInterval(tick, 3000);
 // Reload panels when switching views
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
-    if (el.dataset.view === 'security')  loadSecurity();
-    if (el.dataset.view === 'fileblock') fetchFileBlock();
-    if (el.dataset.view === 'rewrite')   fetchRewrite();
-    if (el.dataset.view === 'dashboard') fetchTopHosts();
-    if (el.dataset.view === 'policy')    fetchPolicy();
+    if (el.dataset.view === 'security')      loadSecurity();
+    if (el.dataset.view === 'fileblock')     fetchFileBlock();
+    if (el.dataset.view === 'rewrite')       fetchRewrite();
+    if (el.dataset.view === 'dashboard')     fetchTopHosts();
+    if (el.dataset.view === 'policy')        { fetchPolicy(); loadDefaultAction(); }
+    if (el.dataset.view === 'certificates')  loadCACertInfo();
   });
 });
 </script>

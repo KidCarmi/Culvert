@@ -47,6 +47,12 @@ type OIDCConfig struct {
 
 	// TLSSkipVerify disables certificate verification (dev/test only).
 	TLSSkipVerify bool `yaml:"tls_skip_verify"`
+
+	// LoginURL is the OIDC authorization endpoint where unauthenticated
+	// browser requests are redirected (captive portal).
+	// Example (Okta): "https://your-domain.okta.com/oauth2/default/v1/authorize"
+	// Leave empty to disable browser redirect (return 407 instead).
+	LoginURL string `yaml:"login_url"`
 }
 
 // introspectionResponse is the RFC 7662 JSON payload.

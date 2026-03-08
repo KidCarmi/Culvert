@@ -297,6 +297,68 @@ func (cm *CertManager) CACertPEM() []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cm.caCert.Raw})
 }
 
+// CACertInfo returns metadata about the current Root CA for the UI dashboard.
+func (cm *CertManager) CACertInfo() map[string]any {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if cm.caCert == nil {
+		return map[string]any{"ready": false}
+	}
+	fp := sha256.Sum256(cm.caCert.Raw)
+	fpHex := fmt.Sprintf("%X", fp)
+	var fpFormatted []byte
+	for i, b := range fpHex {
+		if i > 0 && i%2 == 0 {
+			fpFormatted = append(fpFormatted, ':')
+		}
+		fpFormatted = append(fpFormatted, byte(b))
+	}
+	return map[string]any{
+		"ready":       true,
+		"subject":     cm.caCert.Subject.CommonName,
+		"issuer":      cm.caCert.Issuer.CommonName,
+		"notBefore":   cm.caCert.NotBefore.Format("2006-01-02"),
+		"notAfter":    cm.caCert.NotAfter.Format("2006-01-02"),
+		"fingerprint": string(fpFormatted),
+	}
+}
+
+// LoadCustomCA loads a PEM-encoded CA certificate and private key supplied by
+// the user (e.g. an enterprise intermediate CA). Private key is never stored in
+// cleartext memory beyond the parsing step.
+func (cm *CertManager) LoadCustomCA(certPEM, keyPEM []byte) error {
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return fmt.Errorf("key pair mismatch: %w", err)
+	}
+	x509Cert, err := x509.ParseCertificate(tlsCert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("invalid certificate: %w", err)
+	}
+	if !x509Cert.IsCA {
+		return errors.New("certificate is not a CA (BasicConstraints.IsCA must be true)")
+	}
+	ecKey, ok := tlsCert.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return errors.New("only ECDSA private keys are supported for MITM CA")
+	}
+	cm.mu.Lock()
+	cm.caCert = x509Cert
+	cm.caKey = ecKey
+	cm.cache = map[string]*tls.Certificate{}
+	cm.mu.Unlock()
+	return nil
+}
+
+// ParseTLSPair validates a PEM cert+key pair without storing it.
+func (cm *CertManager) ParseTLSPair(certPEM, keyPEM []byte) (*tls.Certificate, error) {
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, err
+	}
+	return &tlsCert, nil
+}
+
 // Ready returns true once the Root CA has been initialised.
 func (cm *CertManager) Ready() bool {
 	cm.mu.RLock()

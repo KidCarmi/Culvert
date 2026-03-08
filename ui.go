@@ -38,9 +38,13 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/policy", apiPolicy)
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
 	mux.HandleFunc("/api/ca-cert", apiCACert)
+	mux.HandleFunc("/api/certs/upload", apiCertsUpload)
 	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)
 	mux.HandleFunc("/api/content-scan", apiContentScan)
 	mux.HandleFunc("/api/audit", apiAudit)
+	mux.HandleFunc("/api/events", apiEvents)           // SSE live dashboard
+	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
+	mux.HandleFunc("/api/default-action", apiDefaultAction)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -221,18 +225,38 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 // action follows "resource.verb" e.g. "policy.add", "blocklist.remove".
 // Credentials must NEVER appear in object or detail.
 func auditEvent(r *http.Request, action, object, detail string) {
+	auditEventDiff(r, action, object, detail, nil, nil)
+}
+
+// auditEventDiff records an audit event with optional before/after JSON snapshots.
+func auditEventDiff(r *http.Request, action, object, detail string, before, after any) {
 	actor, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if actor == "" {
 		actor = r.RemoteAddr
 	}
-	auditAdd(AuditEntry{
+	// Use authenticated username from UI session if available.
+	if u := r.Header.Get("X-UI-User"); u != "" {
+		actor = u
+	}
+	entry := AuditEntry{
 		TS:     time.Now().UnixMilli(),
 		Time:   time.Now().Format("2006-01-02 15:04:05"),
 		Actor:  actor,
 		Action: action,
 		Object: object,
 		Detail: detail,
-	})
+	}
+	if before != nil {
+		if b, err := json.Marshal(before); err == nil {
+			entry.Before = string(b)
+		}
+	}
+	if after != nil {
+		if a, err := json.Marshal(after); err == nil {
+			entry.After = string(a)
+		}
+	}
+	auditAdd(entry)
 }
 
 // GET /api/audit — return recent configuration-change audit entries (newest first).
@@ -523,8 +547,8 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		added := policyStore.Add(rule)
 		policyStore.Save()
 		logger.Printf("UI: policy rule added priority=%d name=%q action=%s", added.Priority, added.Name, added.Action)
-		auditEvent(r, "policy.add", added.Name,
-			fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action))
+		auditEventDiff(r, "policy.add", added.Name,
+			fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
 		jsonOK(w, added)
 
 	case http.MethodPut:
@@ -533,6 +557,15 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
 			http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
 			return
+		}
+		// Snapshot before state for diff.
+		var beforeRule *PolicyRule
+		for _, existing := range policyStore.List() {
+			if existing.Priority == priority {
+				r2 := existing
+				beforeRule = &r2
+				break
+			}
 		}
 		var rule PolicyRule
 		if err := decodeJSON(r,&rule); err != nil {
@@ -545,8 +578,8 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		policyStore.Save()
 		logger.Printf("UI: policy rule updated priority=%d name=%q", priority, rule.Name)
-		auditEvent(r, "policy.update", rule.Name,
-			fmt.Sprintf("priority=%d action=%s", priority, rule.Action))
+		auditEventDiff(r, "policy.update", rule.Name,
+			fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
 		jsonOK(w, map[string]any{"ok": true})
 
 	case http.MethodDelete:
@@ -556,13 +589,26 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
 			return
 		}
+		// Snapshot before deletion.
+		var beforeRule *PolicyRule
+		for _, existing := range policyStore.List() {
+			if existing.Priority == priority {
+				r2 := existing
+				beforeRule = &r2
+				break
+			}
+		}
 		if !policyStore.Delete(priority) {
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
 		}
 		policyStore.Save()
+		name := fmt.Sprintf("priority=%d", priority)
+		if beforeRule != nil {
+			name = beforeRule.Name
+		}
 		logger.Printf("UI: policy rule deleted priority=%d", priority)
-		auditEvent(r, "policy.delete", fmt.Sprintf("priority=%d", priority), "")
+		auditEventDiff(r, "policy.delete", name, "", beforeRule, nil)
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -594,20 +640,94 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": true})
 }
 
-// GET /api/ca-cert — download the Root CA certificate (PEM) for browser import
+// GET /api/ca-cert — download the Root CA certificate (PEM) for browser/OS import.
+// Also returns metadata: subject, expiry, SHA256 fingerprint.
 func apiCACert(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		pem := certMgr.CACertPEM()
+		if pem == nil {
+			http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
+			return
+		}
+		// Return JSON metadata or raw PEM depending on Accept header.
+		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+			info := certMgr.CACertInfo()
+			jsonOK(w, info)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-pem-file")
+		w.Header().Set("Content-Disposition", `attachment; filename="proxyshield-ca.pem"`)
+		w.Write(pem)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST /api/certs/upload — upload a custom TLS certificate+key for the UI or MITM engine.
+// Body: multipart/form-data with fields: "cert" (PEM), "key" (PEM), "target" ("ui"|"mitm")
+func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	pem := certMgr.CACertPEM()
-	if pem == nil {
-		http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
+	if err := r.ParseMultipartForm(1 << 20); err != nil { // 1 MB limit
+		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-pem-file")
-	w.Header().Set("Content-Disposition", `attachment; filename="proxyshield-ca.pem"`)
-	w.Write(pem)
+	target := r.FormValue("target")
+	if target != "ui" && target != "mitm" {
+		http.Error(w, `target must be "ui" or "mitm"`, http.StatusBadRequest)
+		return
+	}
+	certPEM := []byte(r.FormValue("cert"))
+	keyPEM := []byte(r.FormValue("key"))
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		http.Error(w, "cert and key are required", http.StatusBadRequest)
+		return
+	}
+	if target == "mitm" {
+		if err := certMgr.LoadCustomCA(certPEM, keyPEM); err != nil {
+			http.Error(w, "invalid CA cert/key: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEvent(r, "certs.upload_mitm", "custom MITM CA", "")
+		jsonOK(w, map[string]string{"status": "ok", "target": "mitm"})
+		return
+	}
+	// UI cert — validate only; actual rotation requires restart.
+	if _, err := certMgr.ParseTLSPair(certPEM, keyPEM); err != nil {
+		http.Error(w, "invalid cert/key pair: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	auditEvent(r, "certs.upload_ui", "custom UI cert (requires restart)", "")
+	jsonOK(w, map[string]string{"status": "ok", "target": "ui", "note": "restart required to activate"})
+}
+
+// GET/POST /api/default-action — read or update the default policy action at runtime.
+func apiDefaultAction(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction})
+	case http.MethodPost:
+		var body struct {
+			Action string `json:"action"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Action != "allow" && body.Action != "deny" {
+			http.Error(w, `action must be "allow" or "deny"`, http.StatusBadRequest)
+			return
+		}
+		setDefaultPolicyAction(body.Action)
+		auditEvent(r, "policy.default_action", body.Action, "")
+		logger.Printf("UI: default policy action set to %q", body.Action)
+		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // GET /api/export?format=json|csv — download all logs

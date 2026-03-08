@@ -15,6 +15,19 @@ import (
 	"time"
 )
 
+// defaultPolicyAction controls what happens when no PBAC rule matches a request.
+// "allow" = passthrough mode (initial setup), "deny" = zero-trust (production).
+// Set by setDefaultPolicyAction() during startup based on config or rule count.
+var defaultPolicyAction = "deny"
+
+func setDefaultPolicyAction(action string) {
+	if action == "allow" {
+		defaultPolicyAction = "allow"
+	} else {
+		defaultPolicyAction = "deny"
+	}
+}
+
 // privateCIDRs lists RFC 1918, loopback, link-local, and ULA ranges whose
 // addresses must never be forwarded to upstream servers in headers such as
 // X-Forwarded-For, preventing internal network topology leakage.
@@ -107,17 +120,47 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Basic auth check (bcrypt-verified, cached per authCacheTTL).
-	if cfg.AuthEnabled() {
+	// ── Adaptive Authentication ───────────────────────────────────────────────
+	// Priority: LDAP/OIDC provider (if configured) → local bcrypt → anonymous.
+	// Browser requests (Mozilla UA) without auth are redirected to OIDC portal.
+	// Non-browser clients without auth receive 407 for native Basic-auth prompt.
+	var authenticatedIdentity string
+	if cfg.AuthEnabled() || cfg.ProviderEnabled() {
 		u, p, ok := parseProxyAuth(r)
-		if !ok || !cfg.VerifyAuth(u, p) {
+		if ok {
+			if !cfg.VerifyAuth(u, p) {
+				atomic.AddInt64(&statAuthFail, 1)
+				w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyShield"`)
+				http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+				recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "")
+				logger.Printf("AUTH_FAIL %s", clientIP)
+				return
+			}
+			authenticatedIdentity = u
+		} else {
+			// No credentials — adaptive response based on client type.
+			isBrowser := strings.Contains(r.Header.Get("User-Agent"), "Mozilla")
+			oidcURL := cfg.OIDCLoginURL()
+			if isBrowser && oidcURL != "" && r.Method != http.MethodConnect {
+				// Redirect browser to OIDC captive portal.
+				http.Redirect(w, r, oidcURL, http.StatusFound)
+				return
+			}
 			atomic.AddInt64(&statAuthFail, 1)
 			w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyShield"`)
+			if oidcURL != "" {
+				w.Header().Set("Link", `<`+oidcURL+`>; rel="authorization_endpoint"`)
+			}
 			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 			recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "")
-			logger.Printf("AUTH_FAIL %s", clientIP)
+			logger.Printf("AUTH_FAIL (no-credentials) %s", clientIP)
 			return
 		}
+	}
+	// Set the internal identity header for the policy engine.
+	// scrubForwardedHeaders() will remove it before forwarding upstream.
+	if authenticatedIdentity != "" {
+		r.Header.Set("X-User-Identity", authenticatedIdentity)
 	}
 
 	host := r.Host
@@ -201,15 +244,29 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			// Fall through to normal handling below.
 		}
 	} else {
-		// Zero Trust: no rule matched → deny by default.
-		// Serve the custom HTML block page (HTTP 403) so end-users see a
-		// clear, branded explanation instead of a raw error string.
-		atomic.AddInt64(&statBlocked, 1)
-		recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "")
-		logger.Printf("POLICY_DEFAULT_DENY %s %s %s", clientIP, r.Method, r.Host)
-		serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
-		return
+		// No rule matched — apply the configured default action.
+		if defaultPolicyAction == "allow" {
+			// Passthrough mode: allow all unmatched traffic (initial setup).
+			recordRequest(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow")
+		} else {
+			// Zero Trust: deny by default. Serve the custom HTML block page so
+			// end-users see a clear, branded explanation.
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "")
+			logger.Printf("POLICY_DEFAULT_DENY %s %s %s", clientIP, r.Method, r.Host)
+			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
+			return
+		}
 	}
+
+	// ── Geo-IP tracking (async) ───────────────────────────────────────────────
+	// Record destination country for the live dashboard without blocking.
+	go func(h string) {
+		code, name := geo.LookupFull(h)
+		if code != "" {
+			countryTraffic.Record(code, name)
+		}
+	}(host)
 
 	// Determine SSL action and per-rule TLS options for CONNECT tunnels.
 	sslAction := SSLBypass
@@ -436,6 +493,9 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clientConn.Close()
+
+	recordActiveConn(1)
+	defer recordActiveConn(-1)
 
 	done := make(chan struct{}, 2)
 	relay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} }

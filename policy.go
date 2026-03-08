@@ -66,20 +66,43 @@ var categoryHosts = map[URLCategory][]string{
 	CategoryAdult: {},
 }
 
+// FileProfileName identifies a named file-extension block profile.
+type FileProfileName string
+
+const (
+	FileProfileNone        FileProfileName = ""
+	FileProfileExecutables FileProfileName = "Executables"    // .exe .dll .bat .cmd .ps1 .scr .msi .pif .com .vbs
+	FileProfileArchives    FileProfileName = "Archives"       // .zip .rar .7z .tar .gz .bz2 .xz .cab
+	FileProfileDocuments   FileProfileName = "Documents"      // .doc .docm .xls .xlsm .ppt .pptm (macro-enabled)
+	FileProfileMedia       FileProfileName = "Media"          // .mp3 .mp4 .avi .mkv .mov .flv .wmv
+	FileProfileStrict      FileProfileName = "Strict"         // all of the above combined
+)
+
+// fileProfileExts maps profile names to their blocked extensions.
+var fileProfileExts = map[FileProfileName][]string{
+	FileProfileExecutables: {".exe", ".dll", ".bat", ".cmd", ".ps1", ".scr", ".msi", ".pif", ".com", ".vbs"},
+	FileProfileArchives:    {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".cab", ".iso"},
+	FileProfileDocuments:   {".docm", ".xlsm", ".pptm", ".xlam", ".dotm"},
+	FileProfileMedia:       {".mp3", ".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm"},
+	FileProfileStrict:      {".exe", ".dll", ".bat", ".cmd", ".ps1", ".scr", ".msi", ".pif", ".com", ".vbs", ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".iso", ".docm", ".xlsm", ".pptm"},
+}
+
 // PolicyRule is a single PBAC rule evaluated in priority order.
 type PolicyRule struct {
-	Priority       int          `json:"priority"`
-	Name           string       `json:"name"`
-	SourceIP       string       `json:"sourceIP"`       // single IP or CIDR; empty = any
-	SourceIdentity string       `json:"sourceIdentity"` // authenticated user/group (OIDC/LDAP); empty = any
-	DestFQDN       string       `json:"destFQDN"`       // exact or wildcard FQDN; empty = any
-	DestCategory   URLCategory  `json:"destCategory"`   // URL category; empty = any
-	SSLAction      SSLAction    `json:"sslAction"`      // Inspect | Bypass
-	FileFiltering  bool         `json:"fileFiltering"`  // enable file-type scanning (future)
-	TLSSkipVerify  bool         `json:"tlsSkipVerify"`  // skip upstream cert verification (use with caution)
-	Action         PolicyAction `json:"action"`
-	RedirectURL    string       `json:"redirectURL"` // used when Action == Redirect
-	HitCount       int64        `json:"hitCount"`    // runtime counter, not persisted
+	Priority       int             `json:"priority"`
+	Name           string          `json:"name"`
+	SourceIP       string          `json:"sourceIP"`       // single IP or CIDR; empty = any
+	SourceIdentity string          `json:"sourceIdentity"` // authenticated user/group (OIDC/LDAP); empty = any
+	DestFQDN       string          `json:"destFQDN"`       // exact or wildcard FQDN; empty = any
+	DestCategory   URLCategory     `json:"destCategory"`   // URL category; empty = any
+	DestCountry    []string        `json:"destCountry"`    // ISO 3166-1 alpha-2 country codes; empty = any
+	SSLAction      SSLAction       `json:"sslAction"`      // Inspect | Bypass
+	FileFiltering  bool            `json:"fileFiltering"`  // enable file-type scanning
+	FileProfile    FileProfileName `json:"fileProfile"`    // named file-extension block profile
+	TLSSkipVerify  bool            `json:"tlsSkipVerify"`  // skip upstream cert verification (use with caution)
+	Action         PolicyAction    `json:"action"`
+	RedirectURL    string          `json:"redirectURL"` // used when Action == Redirect
+	HitCount       int64           `json:"hitCount"`    // runtime counter, not persisted
 }
 
 // PolicyStore holds an ordered list of policy rules with thread-safe access.
@@ -275,20 +298,69 @@ func matchIPOrCIDR(cidrOrIP, clientIP string) bool {
 // ─── Destination matching ─────────────────────────────────────────────────────
 
 func matchDest(rule *PolicyRule, host string) bool {
-	// Empty fields mean "match any" — both must satisfy independently.
+	// Empty fields mean "match any" — all configured fields must satisfy.
 	fqdnSet := rule.DestFQDN != ""
 	catSet := rule.DestCategory != "" && rule.DestCategory != CategoryAny
+	countrySet := len(rule.DestCountry) > 0
 
-	switch {
-	case !fqdnSet && !catSet:
-		return true // wildcard rule
-	case fqdnSet && !catSet:
-		return matchFQDN(rule.DestFQDN, host)
-	case !fqdnSet && catSet:
-		return matchCategory(rule.DestCategory, host)
-	default: // both set → AND logic
-		return matchFQDN(rule.DestFQDN, host) && matchCategory(rule.DestCategory, host)
+	// FQDN check.
+	if fqdnSet && !matchFQDN(rule.DestFQDN, host) {
+		return false
 	}
+	// URL category check.
+	if catSet && !matchCategory(rule.DestCategory, host) {
+		return false
+	}
+	// Geo-IP country check (async-friendly: lookup is cached).
+	if countrySet {
+		code := geo.Lookup(host)
+		if !matchCountry(rule.DestCountry, code) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchCountry(countries []string, code string) bool {
+	if code == "" {
+		return false
+	}
+	code = strings.ToUpper(code)
+	for _, c := range countries {
+		if strings.ToUpper(c) == code {
+			return true
+		}
+	}
+	return false
+}
+
+// FileProfileBlocked returns true if the file extension of urlPath is blocked
+// by the rule's FileProfile, and FileFiltering is enabled.
+func (r *PolicyRule) FileProfileBlocked(urlPath string) bool {
+	if !r.FileFiltering || r.FileProfile == FileProfileNone {
+		return false
+	}
+	exts, ok := fileProfileExts[r.FileProfile]
+	if !ok {
+		return false
+	}
+	// Extract extension (path.Ext semantics).
+	ext := ""
+	for i := len(urlPath) - 1; i >= 0 && urlPath[i] != '/'; i-- {
+		if urlPath[i] == '.' {
+			ext = strings.ToLower(urlPath[i:])
+			break
+		}
+	}
+	if ext == "" {
+		return false
+	}
+	for _, e := range exts {
+		if e == ext {
+			return true
+		}
+	}
+	return false
 }
 
 func matchFQDN(pattern, host string) bool {

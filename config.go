@@ -56,6 +56,11 @@ type FileConfig struct {
 
 	// LogFormat controls the system-log output format: "text" (default) or "json".
 	LogFormat string `yaml:"log_format"`
+
+	// DefaultAction controls what happens when no policy rule matches a request.
+	// "allow" (passthrough mode) or "deny" (zero-trust, default).
+	// Use "allow" for initial setup; switch to "deny" once rules are configured.
+	DefaultAction string `yaml:"default_action"`
 }
 
 func loadFileConfig(path string) (*FileConfig, error) {

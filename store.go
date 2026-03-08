@@ -134,10 +134,12 @@ func logGet() []LogEntry {
 type AuditEntry struct {
 	TS     int64  `json:"ts"`     // Unix milliseconds
 	Time   string `json:"time"`   // human-readable "2006-01-02 15:04:05"
-	Actor  string `json:"actor"`  // client IP (future: authenticated username)
+	Actor  string `json:"actor"`  // client IP (or authenticated username)
 	Action string `json:"action"` // "policy.add" | "blocklist.remove" | …
 	Object string `json:"object"` // the specific item that changed
 	Detail string `json:"detail"` // extra context (never contains credentials)
+	Before string `json:"before,omitempty"` // JSON snapshot before the change
+	After  string `json:"after,omitempty"`  // JSON snapshot after the change
 }
 
 const maxAuditLogs = 500
@@ -474,6 +476,23 @@ func (c *Config) AuthEnabled() bool {
 	defer c.mu.RUnlock()
 	return c.user != "" || c.provider != nil
 }
+
+// ProviderEnabled returns true when an external auth provider (LDAP/OIDC) is set.
+func (c *Config) ProviderEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.provider != nil
+}
+
+// oidcLoginURL stores the OIDC authorization/login URL for browser redirects.
+var oidcLoginURL string
+
+// SetOIDCLoginURL stores the OIDC authorization URL so the proxy can redirect
+// unauthenticated browser requests to the OIDC captive portal.
+func SetOIDCLoginURL(u string) { oidcLoginURL = u }
+
+// OIDCLoginURL returns the configured OIDC login redirect URL (empty if not set).
+func (c *Config) OIDCLoginURL() string { return oidcLoginURL }
 
 func uptime() string {
 	d := time.Since(startTime).Round(time.Second)
