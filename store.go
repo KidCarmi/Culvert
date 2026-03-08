@@ -122,6 +122,53 @@ func logGet() []LogEntry {
 	return cp
 }
 
+// ─── Audit Log ────────────────────────────────────────────────────────────────
+//
+// AuditEntry captures every configuration change made through the UI/API so
+// operators can answer "Who changed What, and When?" — a core SOC requirement.
+//
+// Actor is the client IP of the UI caller.  When the UI gains its own
+// authentication layer the Actor field will be upgraded to a username.
+// Action follows a "resource.verb" naming scheme (e.g. "policy.add").
+
+type AuditEntry struct {
+	TS     int64  `json:"ts"`     // Unix milliseconds
+	Time   string `json:"time"`   // human-readable "2006-01-02 15:04:05"
+	Actor  string `json:"actor"`  // client IP (future: authenticated username)
+	Action string `json:"action"` // "policy.add" | "blocklist.remove" | …
+	Object string `json:"object"` // the specific item that changed
+	Detail string `json:"detail"` // extra context (never contains credentials)
+}
+
+const maxAuditLogs = 500
+
+var (
+	auditMu  sync.Mutex
+	auditLog []AuditEntry
+)
+
+// auditAdd appends an entry to the in-memory audit ring buffer.
+func auditAdd(e AuditEntry) {
+	auditMu.Lock()
+	defer auditMu.Unlock()
+	auditLog = append(auditLog, e)
+	if len(auditLog) > maxAuditLogs {
+		auditLog = auditLog[len(auditLog)-maxAuditLogs:]
+	}
+}
+
+// auditGet returns a newest-first snapshot of the audit log.
+func auditGet() []AuditEntry {
+	auditMu.Lock()
+	cp := make([]AuditEntry, len(auditLog))
+	copy(cp, auditLog)
+	auditMu.Unlock()
+	for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
+		cp[i], cp[j] = cp[j], cp[i]
+	}
+	return cp
+}
+
 // ─── Blocklist ────────────────────────────────────────────────────────────────
 
 // Blocklist holds two separate maps for O(1) host lookups:

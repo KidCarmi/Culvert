@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -125,6 +126,64 @@ func TestUptime_Format(t *testing.T) {
 	}
 	if !hasM {
 		t.Errorf("uptime() format unexpected: %q", u)
+	}
+}
+
+// ── Audit log ─────────────────────────────────────────────────────────────────
+
+func resetAuditLog() {
+	auditMu.Lock()
+	auditLog = nil
+	auditMu.Unlock()
+}
+
+func TestAuditLog_AddAndGet(t *testing.T) {
+	resetAuditLog()
+	auditAdd(AuditEntry{TS: 1, Actor: "1.1.1.1", Action: "policy.add", Object: "rule-A", Detail: "priority=1"})
+	auditAdd(AuditEntry{TS: 2, Actor: "2.2.2.2", Action: "blocklist.remove", Object: "evil.com", Detail: ""})
+
+	got := auditGet()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(got))
+	}
+	// Newest first.
+	if got[0].Action != "blocklist.remove" {
+		t.Errorf("expected newest entry first, got %q", got[0].Action)
+	}
+	if got[1].Action != "policy.add" {
+		t.Errorf("expected oldest entry second, got %q", got[1].Action)
+	}
+}
+
+func TestAuditLog_MaxCapacity(t *testing.T) {
+	resetAuditLog()
+	for i := 0; i < maxAuditLogs+10; i++ {
+		auditAdd(AuditEntry{TS: int64(i), Action: "policy.add"})
+	}
+	if got := auditGet(); len(got) != maxAuditLogs {
+		t.Errorf("expected %d audit entries, got %d", maxAuditLogs, len(got))
+	}
+}
+
+func TestAuditLog_NeverContainsCredentials(t *testing.T) {
+	resetAuditLog()
+	// Simulate settings.update — password must NOT appear in any field.
+	auditAdd(AuditEntry{
+		TS:     1,
+		Actor:  "127.0.0.1",
+		Action: "settings.update",
+		Object: "auth",
+		Detail: "user=alice", // password deliberately absent
+	})
+	got := auditGet()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(got))
+	}
+	entry := got[0]
+	for _, field := range []string{entry.Object, entry.Detail} {
+		if strings.Contains(field, "pass") || strings.Contains(field, "secret") {
+			t.Errorf("audit entry contains suspicious credential hint: %q", field)
+		}
 	}
 }
 

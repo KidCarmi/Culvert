@@ -21,5 +21,6 @@ This document outlines the strategic progression for ProxyShield, moving from a 
 - [ ] **File Blocking Profile:** Ability to block specific file extensions (.exe, .dll, .zip) based on user group.
 
 ## Phase 4: Observability & Management
-- [ ] **Audit Logs:** Track all configuration changes (Who, What, When).
-- [ ] **Live Dashboard:** Real-time view of active connections and blocked attempts.
+- [x] **Audit Logs:** Track all configuration changes (Who, What, When). Every mutating API call (policy, blocklist, security, settings, rewrite, SSL bypass, file block) is recorded with actor IP, action, object, and detail. Accessible via `GET /api/audit`. In-memory ring buffer of 500 entries.
+- [ ] **Live Stats:** Real-time WebSocket feed of active connection counts and blocked attempts per second.
+- [ ] **Content Scanning (DPI):** Regex/YARA engine applied to decrypted HTTPS traffic (requires SSL Inspect mode).

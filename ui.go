@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -36,6 +37,7 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
 	mux.HandleFunc("/api/ca-cert", apiCACert)
 	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)
+	mux.HandleFunc("/api/audit", apiAudit)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -131,6 +133,35 @@ func isLocalOrigin(origin string) bool {
 	}
 	h := u.Hostname()
 	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+// auditEvent records a configuration change to the audit ring buffer.
+// It extracts the caller's IP from the HTTP request as the actor identity.
+// action follows "resource.verb" e.g. "policy.add", "blocklist.remove".
+// Credentials must NEVER appear in object or detail.
+func auditEvent(r *http.Request, action, object, detail string) {
+	actor, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if actor == "" {
+		actor = r.RemoteAddr
+	}
+	auditAdd(AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  actor,
+		Action: action,
+		Object: object,
+		Detail: detail,
+	})
+}
+
+// GET /api/audit — return recent configuration-change audit entries (newest first).
+func apiAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	entries := auditGet()
+	jsonOK(w, map[string]any{"entries": entries, "count": len(entries)})
 }
 
 func jsonOK(w http.ResponseWriter, v any) {
@@ -246,6 +277,7 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		bl.Save()
+		auditEvent(r, "blocklist.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
 		jsonOK(w, map[string]any{"added": added})
 
 	case http.MethodDelete:
@@ -257,6 +289,7 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		bl.Remove(host)
 		bl.Save()
 		logger.Printf("UI: unblocked %s", host)
+		auditEvent(r, "blocklist.remove", host, "")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -303,6 +336,8 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			rl.Configure(body.RateLimitRPM, time.Minute)
 		}
 		logger.Printf("UI: security config updated (ipMode=%s rateRPM=%d)", ipf.Mode(), rl.Limit())
+		auditEvent(r, "security.update", "ip_filter+rate_limit",
+			fmt.Sprintf("mode=%s rpm=%d", ipf.Mode(), rl.Limit()))
 		jsonOK(w, map[string]any{"ok": true})
 
 	default:
@@ -335,6 +370,7 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logger.Printf("UI: auth settings updated (user=%s)", body.User)
+		auditEvent(r, "settings.update", "auth", fmt.Sprintf("user=%s", body.User))
 		jsonOK(w, map[string]any{"ok": true})
 
 	default:
@@ -357,6 +393,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		}
 		added := rewriter.Add(rule)
 		logger.Printf("UI: rewrite rule added id=%d host=%q", added.ID, added.Host)
+		auditEvent(r, "rewrite.add", fmt.Sprintf("id=%d host=%s", added.ID, added.Host), "")
 		jsonOK(w, added)
 
 	case http.MethodDelete:
@@ -371,6 +408,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logger.Printf("UI: rewrite rule removed id=%d", id)
+		auditEvent(r, "rewrite.remove", fmt.Sprintf("id=%d", id), "")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -404,6 +442,8 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		added := policyStore.Add(rule)
 		policyStore.Save()
 		logger.Printf("UI: policy rule added priority=%d name=%q action=%s", added.Priority, added.Name, added.Action)
+		auditEvent(r, "policy.add", added.Name,
+			fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action))
 		jsonOK(w, added)
 
 	case http.MethodPut:
@@ -424,6 +464,8 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		policyStore.Save()
 		logger.Printf("UI: policy rule updated priority=%d name=%q", priority, rule.Name)
+		auditEvent(r, "policy.update", rule.Name,
+			fmt.Sprintf("priority=%d action=%s", priority, rule.Action))
 		jsonOK(w, map[string]any{"ok": true})
 
 	case http.MethodDelete:
@@ -439,6 +481,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		policyStore.Save()
 		logger.Printf("UI: policy rule deleted priority=%d", priority)
+		auditEvent(r, "policy.delete", fmt.Sprintf("priority=%d", priority), "")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -466,6 +509,7 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	}
 	policyStore.Save()
 	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
+	auditEvent(r, "policy.reorder", fmt.Sprintf("%d rules", len(body.Priorities)), "")
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -557,6 +601,8 @@ func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
 			added++
 		}
 		sslBypass.Save()
+		auditEvent(r, "ssl_bypass.add", fmt.Sprintf("%d pattern(s)", added),
+			strings.Join(body.Patterns, ", "))
 		jsonOK(w, map[string]any{"added": added})
 
 	case http.MethodDelete:
@@ -568,6 +614,7 @@ func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
 		sslBypass.Remove(pattern)
 		sslBypass.Save()
 		logger.Printf("UI: ssl bypass removed %q", pattern)
+		auditEvent(r, "ssl_bypass.remove", pattern, "")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -604,6 +651,7 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 				added++
 			}
 		}
+		auditEvent(r, "fileblock.add", fmt.Sprintf("%d extension(s)", added), "")
 		jsonOK(w, map[string]any{"added": added})
 
 	case http.MethodDelete:
@@ -614,6 +662,7 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 		}
 		fileBlocker.Remove(ext)
 		logger.Printf("UI: file block extension removed %s", ext)
+		auditEvent(r, "fileblock.remove", ext, "")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
