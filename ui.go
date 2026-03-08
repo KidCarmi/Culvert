@@ -671,7 +671,8 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseMultipartForm(1 << 20); err != nil { // 1 MB limit
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // enforce 1 MB limit before parsing (G120)
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
 	}

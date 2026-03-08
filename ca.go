@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -305,21 +306,19 @@ func (cm *CertManager) CACertInfo() map[string]any {
 		return map[string]any{"ready": false}
 	}
 	fp := sha256.Sum256(cm.caCert.Raw)
-	fpHex := fmt.Sprintf("%X", fp)
-	var fpFormatted []byte
-	for i, b := range fpHex {
-		if i > 0 && i%2 == 0 {
-			fpFormatted = append(fpFormatted, ':')
-		}
-		fpFormatted = append(fpFormatted, byte(b))
+	// Format fingerprint as XX:XX:XX:... without rune→byte conversion (G115).
+	fpParts := make([]string, len(fp))
+	for i, b := range fp {
+		fpParts[i] = fmt.Sprintf("%02X", b)
 	}
+	fingerprint := strings.Join(fpParts, ":")
 	return map[string]any{
 		"ready":       true,
 		"subject":     cm.caCert.Subject.CommonName,
 		"issuer":      cm.caCert.Issuer.CommonName,
 		"notBefore":   cm.caCert.NotBefore.Format("2006-01-02"),
 		"notAfter":    cm.caCert.NotAfter.Format("2006-01-02"),
-		"fingerprint": string(fpFormatted),
+		"fingerprint": fingerprint,
 	}
 }
 
