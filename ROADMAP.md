@@ -23,4 +23,4 @@ This document outlines the strategic progression for ProxyShield, moving from a 
 ## Phase 4: Observability & Management
 - [x] **Audit Logs:** Track all configuration changes (Who, What, When). Every mutating API call (policy, blocklist, security, settings, rewrite, SSL bypass, file block) is recorded with actor IP, action, object, and detail. Accessible via `GET /api/audit`. In-memory ring buffer of 500 entries.
 - [ ] **Live Stats:** Real-time WebSocket feed of active connection counts and blocked attempts per second.
-- [ ] **Content Scanning (DPI):** Regex/YARA engine applied to decrypted HTTPS traffic (requires SSL Inspect mode).
+- [x] **Content Scanning (DPI):** Regex engine applied to decrypted HTTPS text responses (requires SSL Inspect mode). Patterns managed via `GET/POST/DELETE /api/content-scan`. Persistent JSON storage (`content_scan_file`). Responses are buffered (up to 1 MiB) before forwarding — true prevention, not just detection. WebSocket upgrades fall back to raw relay. Binary/media content passes through unscanned.

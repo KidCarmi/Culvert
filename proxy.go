@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -523,12 +524,88 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 
 	logger.Printf("SSL_INSPECT tunnel → %s", targetHost)
 
-	// 5. Relay decrypted traffic bidirectionally.
-	done := make(chan struct{}, 2)
-	relay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} }
-	go relay(upstreamTLS, clientTLS)
-	go relay(clientTLS, upstreamTLS)
-	<-done
+	// 5. Proxy HTTP/1.x with optional DPI scanning on response bodies.
+	//
+	// Parsing the decrypted HTTP stream request-by-request lets us:
+	//   a) Apply DPI signatures to text response bodies before forwarding.
+	//   b) Block on match (true prevention, not just detection).
+	//
+	// WebSocket upgrades (101 Switching Protocols) fall back to raw relay
+	// because the protocol is no longer HTTP after the handshake.
+	//
+	// Limitation: HTTP/2 inside the tunnel is not parsed; the fallback raw
+	// relay is used.  H2 DPI support requires a full HPACK parser.
+	clientBR := bufio.NewReaderSize(clientTLS, 32*1024)
+	upstreamBR := bufio.NewReaderSize(upstreamTLS, 32*1024)
+
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+	for {
+		// Read next HTTP/1.x request from the (decrypted) client stream.
+		req, err := http.ReadRequest(clientBR)
+		if err != nil {
+			break
+		}
+		// Strip hop-by-hop headers before forwarding upstream.
+		removeHopHeaders(req.Header)
+
+		// Forward the request to the upstream TLS connection.
+		if err := req.Write(upstreamTLS); err != nil {
+			req.Body.Close()
+			break
+		}
+		req.Body.Close()
+
+		// Read the upstream HTTP/1.x response.
+		resp, err := http.ReadResponse(upstreamBR, req)
+		if err != nil {
+			break
+		}
+
+		// WebSocket upgrade: the protocol switches after the 101 handshake.
+		// Write the 101 response to the client and fall back to raw relay.
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			resp.Write(clientTLS) //nolint:errcheck
+			resp.Body.Close()
+			done := make(chan struct{}, 2)
+			rawRelay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} } //nolint:errcheck
+			go rawRelay(upstreamTLS, clientTLS)
+			go rawRelay(clientTLS, upstreamTLS)
+			<-done
+			clientTLS.Close()
+			upstreamTLS.Close()
+			return
+		}
+
+		// DPI: scan text response bodies for malicious signatures.
+		// We buffer up to dpiScanner.maxBytes before forwarding so a match
+		// blocks the response entirely (not merely logged after-the-fact).
+		if dpiScanner.Enabled() && isTextContentType(resp.Header.Get("Content-Type")) {
+			origBody := resp.Body
+			body, readErr := io.ReadAll(io.LimitReader(origBody, dpiScanner.maxBytes))
+			if readErr == nil {
+				if pattern, matched := dpiScanner.Scan(body); matched {
+					origBody.Close()
+					recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern)
+					dpiBlock(clientTLS, hostOnly, pattern)
+					break
+				}
+				// No match: reassemble the body (scanned prefix + any remaining bytes).
+				resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), origBody))
+			}
+		}
+
+		closeAfter := req.Close || resp.Close
+		removeHopHeaders(resp.Header)
+		if err := resp.Write(clientTLS); err != nil {
+			resp.Body.Close()
+			break
+		}
+		resp.Body.Close()
+		if closeAfter {
+			break
+		}
+	}
 	clientTLS.Close()
 	upstreamTLS.Close()
 }

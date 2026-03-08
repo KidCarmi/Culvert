@@ -248,6 +248,29 @@ func main() {
 		logger.Printf("SSL Bypass → %d pattern(s) (in-memory; set ssl_bypass_file for dynamic management)", len(sslBypass.List()))
 	}
 
+	// ── DPI Content Scanner ──────────────────────────────────────────────────
+	// If content_scan_file is set, patterns are loaded from JSON and can be
+	// managed at runtime via /api/content-scan without restarting.
+	// On first run, content_scan_patterns from YAML seeds the file.
+	scanFilePath := firstStr(fc.Proxy.ContentScanFile)
+	if scanFilePath != "" {
+		if err := dpiScanner.Load(scanFilePath); err != nil {
+			logger.Fatalf("Content scan file error: %v", err)
+		}
+		if len(dpiScanner.List()) == 0 && len(fc.Proxy.ContentScanPatterns) > 0 {
+			if err := dpiScanner.Set(fc.Proxy.ContentScanPatterns); err != nil {
+				logger.Fatalf("Content scan pattern error: %v", err)
+			}
+			dpiScanner.Save()
+		}
+		logger.Printf("DPI Scan → %d pattern(s) (file: %s)", len(dpiScanner.List()), scanFilePath)
+	} else if len(fc.Proxy.ContentScanPatterns) > 0 {
+		if err := dpiScanner.Set(fc.Proxy.ContentScanPatterns); err != nil {
+			logger.Fatalf("Content scan pattern error: %v", err)
+		}
+		logger.Printf("DPI Scan → %d pattern(s) (in-memory; set content_scan_file for persistence)", len(dpiScanner.List()))
+	}
+
 	// ── Rewrite rules ────────────────────────────────────────────────────────
 	if len(fc.Rewrite) > 0 {
 		rewriter.SetRules(fc.Rewrite)

@@ -23,6 +23,12 @@ proxy:
     # - "bank.example.com"        # matches bank.example.com AND *.bank.example.com
     # Regex examples (prefix with ~):
     # - "~^.*\\.gov\\.il$"
+  content_scan_file: "/data/content-scan.json"  # DPI patterns — managed via /api/content-scan (no restart needed)
+  content_scan_patterns: []      # Initial DPI regex patterns — seeded into content_scan_file on first run
+    # Pattern examples (standard Go regex):
+    # - "(?i)malware-signature"
+    # - "eval\\(base64_decode"   # PHP webshell
+    # - "\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b"  # CC-like numbers
 
 auth:
   user: ""            # Basic-auth username (empty = auth disabled for HTTP proxy & SOCKS5)

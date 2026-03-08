@@ -23,6 +23,8 @@ type FileConfig struct {
 		CAPath            string   `yaml:"ca_path"`            // Path for encrypted Root CA bundle
 		SSLBypassFile     string   `yaml:"ssl_bypass_file"`    // JSON file for persistent/dynamic SSL bypass patterns
 		SSLBypassPatterns []string `yaml:"ssl_bypass_patterns"` // Initial patterns (seeded into ssl_bypass_file on first run)
+		ContentScanFile     string   `yaml:"content_scan_file"`     // JSON file for persistent DPI signature patterns
+		ContentScanPatterns []string `yaml:"content_scan_patterns"` // Initial DPI patterns (seeded into content_scan_file on first run)
 	} `yaml:"proxy"`
 	Auth struct {
 		User string `yaml:"user"`

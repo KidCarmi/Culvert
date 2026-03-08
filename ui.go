@@ -37,6 +37,7 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
 	mux.HandleFunc("/api/ca-cert", apiCACert)
 	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)
+	mux.HandleFunc("/api/content-scan", apiContentScan)
 	mux.HandleFunc("/api/audit", apiAudit)
 
 	srv := &http.Server{
@@ -615,6 +616,72 @@ func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
 		sslBypass.Save()
 		logger.Printf("UI: ssl bypass removed %q", pattern)
 		auditEvent(r, "ssl_bypass.remove", pattern, "")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET/POST/DELETE /api/content-scan — manage DPI signature patterns
+//
+// These regex patterns are matched against decrypted HTTP response bodies
+// flowing through SSL Inspect tunnels.  Only text/* and application/json
+// responses are scanned; binary content is passed through unscanned.
+//
+//   GET    → {"patterns": [...], "count": N, "blocked_total": N}
+//   POST   → {"pattern": "evil-keyword"} or {"patterns": ["p1","p2"]}
+//   DELETE → ?pattern=evil-keyword
+func apiContentScan(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		patterns := dpiScanner.List()
+		jsonOK(w, map[string]any{
+			"patterns":      patterns,
+			"count":         len(patterns),
+			"blocked_total": statDPIBlocked,
+		})
+
+	case http.MethodPost:
+		var body struct {
+			Pattern  string   `json:"pattern"`
+			Patterns []string `json:"patterns"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Pattern != "" {
+			body.Patterns = append(body.Patterns, body.Pattern)
+		}
+		added := 0
+		for _, p := range body.Patterns {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if err := dpiScanner.Add(p); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			logger.Printf("UI: content-scan pattern added %q", p)
+			added++
+		}
+		dpiScanner.Save()
+		auditEvent(r, "content_scan.add", fmt.Sprintf("%d pattern(s)", added),
+			strings.Join(body.Patterns, ", "))
+		jsonOK(w, map[string]any{"added": added})
+
+	case http.MethodDelete:
+		pattern := strings.TrimSpace(r.URL.Query().Get("pattern"))
+		if pattern == "" {
+			http.Error(w, "missing pattern param", http.StatusBadRequest)
+			return
+		}
+		dpiScanner.Remove(pattern)
+		dpiScanner.Save()
+		logger.Printf("UI: content-scan pattern removed %q", pattern)
+		auditEvent(r, "content_scan.remove", pattern, "")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
