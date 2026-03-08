@@ -301,7 +301,9 @@ func matchFQDN(pattern, host string) bool {
 		suffix := pattern[1:] // .example.com
 		return strings.HasSuffix(host, suffix) || host == pattern[2:]
 	}
-	return host == pattern
+	// Palo Alto-style: a bare domain implicitly includes all its subdomains.
+	// "example.com" matches "example.com" AND "www.example.com".
+	return host == pattern || strings.HasSuffix(host, "."+pattern)
 }
 
 func matchCategory(cat URLCategory, host string) bool {
@@ -332,33 +334,127 @@ type bypassPattern struct {
 
 // SSLBypassMatcher holds a list of host patterns that must always bypass
 // SSL inspection, regardless of what the PBAC policy says.
+// Patterns are managed at runtime via /api/ssl-bypass and persisted to a
+// JSON file so they survive restarts without modifying config.yaml.
 type SSLBypassMatcher struct {
 	mu       sync.RWMutex
-	patterns []bypassPattern
+	raw      []string       // raw strings for persistence and API listing
+	compiled []bypassPattern // pre-compiled for fast matching
+	path     string         // optional JSON file path for persistence
 }
 
 var sslBypass = &SSLBypassMatcher{}
 
-// Set replaces the current bypass pattern list. Returns an error if any
-// regex pattern (prefix "~") fails to compile.
+func compileBypassPattern(p string) (bypassPattern, error) {
+	bp := bypassPattern{raw: p}
+	if strings.HasPrefix(p, "~") {
+		re, err := regexp.Compile(p[1:])
+		if err != nil {
+			return bypassPattern{}, fmt.Errorf("ssl bypass pattern %q: %w", p, err)
+		}
+		bp.isRE = true
+		bp.re = re
+	}
+	return bp, nil
+}
+
+// Set atomically replaces all bypass patterns.
 func (m *SSLBypassMatcher) Set(patterns []string) error {
 	compiled := make([]bypassPattern, 0, len(patterns))
 	for _, p := range patterns {
-		bp := bypassPattern{raw: p}
-		if strings.HasPrefix(p, "~") {
-			re, err := regexp.Compile(p[1:])
-			if err != nil {
-				return fmt.Errorf("ssl bypass pattern %q: %w", p, err)
-			}
-			bp.isRE = true
-			bp.re = re
+		bp, err := compileBypassPattern(p)
+		if err != nil {
+			return err
 		}
 		compiled = append(compiled, bp)
 	}
 	m.mu.Lock()
-	m.patterns = compiled
+	m.raw = append([]string(nil), patterns...)
+	m.compiled = compiled
 	m.mu.Unlock()
 	return nil
+}
+
+// Load reads bypass patterns from a JSON file (array of strings).
+// A missing file is treated as an empty list (not an error).
+// Sets the persistence path so subsequent Save() calls write to this file.
+func (m *SSLBypassMatcher) Load(path string) error {
+	m.path = path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var patterns []string
+	if err := json.Unmarshal(data, &patterns); err != nil {
+		return err
+	}
+	return m.Set(patterns)
+}
+
+// Save atomically persists the current patterns to the configured JSON file.
+// A temporary file + rename ensures a crash mid-write never corrupts the list.
+func (m *SSLBypassMatcher) Save() {
+	if m.path == "" {
+		return
+	}
+	m.mu.RLock()
+	raw := make([]string, len(m.raw))
+	copy(raw, m.raw)
+	m.mu.RUnlock()
+
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := m.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, m.path)
+}
+
+// Add appends a single pattern. No-ops if the pattern is already present.
+func (m *SSLBypassMatcher) Add(pattern string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.raw {
+		if p == pattern {
+			return nil // already present
+		}
+	}
+	bp, err := compileBypassPattern(pattern)
+	if err != nil {
+		return err
+	}
+	m.raw = append(m.raw, pattern)
+	m.compiled = append(m.compiled, bp)
+	return nil
+}
+
+// Remove deletes a pattern by exact string match. Returns true if removed.
+func (m *SSLBypassMatcher) Remove(pattern string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, p := range m.raw {
+		if p == pattern {
+			m.raw = append(m.raw[:i], m.raw[i+1:]...)
+			m.compiled = append(m.compiled[:i], m.compiled[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// List returns a snapshot of all raw patterns.
+func (m *SSLBypassMatcher) List() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, len(m.raw))
+	copy(out, m.raw)
+	return out
 }
 
 // Matches reports whether host matches any configured bypass pattern.
@@ -368,7 +464,7 @@ func (m *SSLBypassMatcher) Matches(host string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	for _, p := range m.patterns {
+	for _, p := range m.compiled {
 		if p.isRE {
 			if p.re.MatchString(h) {
 				return true

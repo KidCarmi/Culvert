@@ -200,10 +200,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Zero Trust: no rule matched → deny by default.
+		// Serve the custom HTML block page (HTTP 403) so end-users see a
+		// clear, branded explanation instead of a raw error string.
 		atomic.AddInt64(&statBlocked, 1)
-		http.Error(w, "Forbidden by ProxyShield policy (no matching rule)", http.StatusForbidden)
 		recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "")
 		logger.Printf("POLICY_DEFAULT_DENY %s %s %s", clientIP, r.Method, r.Host)
+		serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
 		return
 	}
 

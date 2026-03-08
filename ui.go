@@ -35,6 +35,7 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/policy", apiPolicy)
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
 	mux.HandleFunc("/api/ca-cert", apiCACert)
+	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -512,6 +513,65 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 			"count":    len(entries),
 			"logs":     entries,
 		})
+	}
+}
+
+// GET/POST/DELETE /api/ssl-bypass — manage the dynamic SSL bypass pattern list.
+//
+// Patterns are persisted to the file configured via ssl_bypass_file in
+// config.yaml (or -ssl-bypass-file flag). Changes take effect immediately
+// without a proxy restart.
+//
+//   GET    → {"patterns": [...], "count": N}
+//   POST   → {"pattern": "*.co.il"} or {"patterns": ["*.co.il","~^.*\.gov\.il$"]}
+//   DELETE → ?pattern=*.co.il
+func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		patterns := sslBypass.List()
+		jsonOK(w, map[string]any{"patterns": patterns, "count": len(patterns)})
+
+	case http.MethodPost:
+		var body struct {
+			Pattern  string   `json:"pattern"`
+			Patterns []string `json:"patterns"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Pattern != "" {
+			body.Patterns = append(body.Patterns, body.Pattern)
+		}
+		added := 0
+		for _, p := range body.Patterns {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if err := sslBypass.Add(p); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			logger.Printf("UI: ssl bypass added %q", p)
+			added++
+		}
+		sslBypass.Save()
+		jsonOK(w, map[string]any{"added": added})
+
+	case http.MethodDelete:
+		pattern := strings.TrimSpace(r.URL.Query().Get("pattern"))
+		if pattern == "" {
+			http.Error(w, "missing pattern param", http.StatusBadRequest)
+			return
+		}
+		sslBypass.Remove(pattern)
+		sslBypass.Save()
+		logger.Printf("UI: ssl bypass removed %q", pattern)
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 

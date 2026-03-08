@@ -270,6 +270,35 @@ func TestIsPrivateIP(t *testing.T) {
 	}
 }
 
+// ── FQDN suffix matching tests ────────────────────────────────────────────────
+
+func TestMatchFQDN_SuffixMatch(t *testing.T) {
+	cases := []struct {
+		pattern string
+		host    string
+		want    bool
+	}{
+		// Palo Alto-style: bare domain matches itself AND all subdomains.
+		{"example.com", "example.com", true},
+		{"example.com", "www.example.com", true},
+		{"example.com", "deep.sub.example.com", true},
+		// Must not match unrelated domains.
+		{"example.com", "notexample.com", false},
+		{"example.com", "evil-example.com", false},
+		// Wildcard patterns still work as before.
+		{"*.co.il", "www.co.il", true},
+		{"*.co.il", "co.il", true},
+		{"*.co.il", "evil.co.il.com", false},
+		// Global wildcard.
+		{"*", "anything.example.org", true},
+	}
+	for _, c := range cases {
+		if got := matchFQDN(c.pattern, c.host); got != c.want {
+			t.Errorf("matchFQDN(%q, %q) = %v, want %v", c.pattern, c.host, got, c.want)
+		}
+	}
+}
+
 // ── Zero Trust Default Deny tests ────────────────────────────────────────────
 
 func TestHandleRequest_DefaultDeny_NoRules(t *testing.T) {
@@ -365,6 +394,63 @@ func TestSSLBypassMatcher_EmptyList(t *testing.T) {
 	m := &SSLBypassMatcher{}
 	if m.Matches("example.com") {
 		t.Error("empty bypass list should not match anything")
+	}
+}
+
+func TestSSLBypassMatcher_AddRemoveList(t *testing.T) {
+	m := &SSLBypassMatcher{}
+	if err := m.Add("*.co.il"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := m.Add("example.com"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// Duplicate add is a no-op.
+	if err := m.Add("*.co.il"); err != nil {
+		t.Fatalf("Add duplicate: %v", err)
+	}
+	if got := m.List(); len(got) != 2 {
+		t.Errorf("List len = %d, want 2", len(got))
+	}
+	if !m.Matches("news.co.il") {
+		t.Error("should match news.co.il after Add")
+	}
+	removed := m.Remove("*.co.il")
+	if !removed {
+		t.Error("Remove should return true for existing pattern")
+	}
+	if m.Matches("news.co.il") {
+		t.Error("should not match news.co.il after Remove")
+	}
+	if m.Remove("nonexistent") {
+		t.Error("Remove should return false for missing pattern")
+	}
+}
+
+func TestSSLBypassMatcher_LoadSave(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/bypass.json"
+
+	m := &SSLBypassMatcher{}
+	// Loading a missing file should not error.
+	if err := m.Load(path); err != nil {
+		t.Fatalf("Load missing file: %v", err)
+	}
+	// Add patterns and save.
+	m.Add("*.co.il")      //nolint:errcheck
+	m.Add("example.com")  //nolint:errcheck
+	m.Save()
+
+	// Load into a fresh matcher and verify.
+	m2 := &SSLBypassMatcher{}
+	if err := m2.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := m2.List(); len(got) != 2 {
+		t.Errorf("after Load: List len = %d, want 2", len(got))
+	}
+	if !m2.Matches("www.co.il") {
+		t.Error("after Load: should match www.co.il")
 	}
 }
 

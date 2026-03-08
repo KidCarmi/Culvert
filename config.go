@@ -20,8 +20,9 @@ type FileConfig struct {
 		SOCKS5Port   int    `yaml:"socks5_port"`   // 0 = disabled
 		MetricsToken string `yaml:"metrics_token"` // Bearer token for /metrics; empty=open
 		PolicyFile   string `yaml:"policy_file"`   // JSON file for PBAC policy rules
-		CAPath           string   `yaml:"ca_path"`            // Path for encrypted Root CA bundle
-		SSLBypassPatterns []string `yaml:"ssl_bypass_patterns"` // Glob or ~regex patterns that force SSL bypass
+		CAPath            string   `yaml:"ca_path"`            // Path for encrypted Root CA bundle
+		SSLBypassFile     string   `yaml:"ssl_bypass_file"`    // JSON file for persistent/dynamic SSL bypass patterns
+		SSLBypassPatterns []string `yaml:"ssl_bypass_patterns"` // Initial patterns (seeded into ssl_bypass_file on first run)
 	} `yaml:"proxy"`
 	Auth struct {
 		User string `yaml:"user"`

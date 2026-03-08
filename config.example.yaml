@@ -15,11 +15,12 @@ proxy:
   log_max_mb: 50      # Rotate log when it reaches this size in MB
   tls_cert: ""        # Custom TLS certificate for Web UI (PEM, optional)
   tls_key: ""         # Custom TLS key for Web UI (PEM, optional)
-  ca_path: "/data/ca.bundle"  # Persistent Root CA bundle (mount /data as Docker volume to survive restarts)
-  ssl_bypass_patterns: []     # Hosts that always bypass SSL inspection (glob or ~regex)
-    # Glob examples (*.X matches subdomain and bare domain):
+  ca_path: "/data/ca.bundle"      # Persistent Root CA bundle (mount /data as Docker volume)
+  ssl_bypass_file: "/data/ssl-bypass.json"  # Dynamic bypass list — managed via /api/ssl-bypass (no restart needed)
+  ssl_bypass_patterns: []         # Initial bypass patterns — seeded into ssl_bypass_file on first run
+    # Glob examples (bare domain also matches all subdomains — Palo Alto style):
     # - "*.co.il"
-    # - "*.bank.com"
+    # - "bank.example.com"        # matches bank.example.com AND *.bank.example.com
     # Regex examples (prefix with ~):
     # - "~^.*\\.gov\\.il$"
 

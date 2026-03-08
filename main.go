@@ -227,11 +227,25 @@ func main() {
 	logger.Printf("FileBlock → %d extension(s) in profile", fileBlocker.Count())
 
 	// ── SSL Bypass patterns ───────────────────────────────────────────────────
-	if len(fc.Proxy.SSLBypassPatterns) > 0 {
+	// If ssl_bypass_file is set, load from the JSON file (dynamic — managed via
+	// /api/ssl-bypass without restart). On first run, seed it from ssl_bypass_patterns.
+	bypassFilePath := firstStr(fc.Proxy.SSLBypassFile)
+	if bypassFilePath != "" {
+		if err := sslBypass.Load(bypassFilePath); err != nil {
+			logger.Fatalf("SSL bypass file error: %v", err)
+		}
+		if len(sslBypass.List()) == 0 && len(fc.Proxy.SSLBypassPatterns) > 0 {
+			if err := sslBypass.Set(fc.Proxy.SSLBypassPatterns); err != nil {
+				logger.Fatalf("SSL bypass pattern error: %v", err)
+			}
+			sslBypass.Save() // persist seed patterns on first run
+		}
+		logger.Printf("SSL Bypass → %d pattern(s) (file: %s)", len(sslBypass.List()), bypassFilePath)
+	} else if len(fc.Proxy.SSLBypassPatterns) > 0 {
 		if err := sslBypass.Set(fc.Proxy.SSLBypassPatterns); err != nil {
 			logger.Fatalf("SSL bypass pattern error: %v", err)
 		}
-		logger.Printf("SSL Bypass → %d pattern(s) configured", len(fc.Proxy.SSLBypassPatterns))
+		logger.Printf("SSL Bypass → %d pattern(s) (in-memory; set ssl_bypass_file for dynamic management)", len(sslBypass.List()))
 	}
 
 	// ── Rewrite rules ────────────────────────────────────────────────────────

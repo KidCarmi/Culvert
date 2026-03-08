@@ -20,16 +20,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o proxyshield .
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata && \
-    addgroup -S proxy && adduser -S proxy -G proxy
+    addgroup -S proxy && adduser -S proxy -G proxy && \
+    mkdir -p /data && chown proxy:proxy /data
 
+# Switch to non-root user before COPY so all assets are owned by proxy from
+# the start — no extra chown layer needed after the binary is written.
+USER proxy
 WORKDIR /app
-COPY --from=builder /app/proxyshield .
+COPY --from=builder --chown=proxy:proxy /app/proxyshield .
 
 # Default config (mount your own at /app/config.yaml)
-COPY config.example.yaml ./config.example.yaml
-
-RUN mkdir -p /data && chown proxy:proxy /data /app
-USER proxy
+COPY --chown=proxy:proxy config.example.yaml ./config.example.yaml
 
 # /data is the persistent volume for the Root CA bundle, policy rules, and
 # other state that must survive container restarts.
