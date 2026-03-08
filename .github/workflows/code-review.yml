@@ -1,0 +1,227 @@
+## ─────────────────────────────────────────────────────────────────────────────
+## ProxyShield — Automated Code Review Checks
+## ─────────────────────────────────────────────────────────────────────────────
+## Runs on every Pull Request.  Provides inline review comments via reviewdog
+## so developers see findings directly in the PR diff — not just in CI logs.
+##
+## These checks are ADVISORY on feature branches and BLOCKING on PRs to main.
+## ─────────────────────────────────────────────────────────────────────────────
+
+name: Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review_request: {}
+
+concurrency:
+  group: code-review-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── 1. golangci-lint (comprehensive linter with inline PR comments) ────────
+  lint:
+    name: "Lint · golangci-lint"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # needed for reviewdog inline comments
+      checks: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: golangci-lint + reviewdog
+        uses: reviewdog/action-golangci-lint@v2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-review          # inline comments on the diff
+          golangci_lint_flags: >-
+            --config=.golangci.yml
+            --timeout=5m
+          filter_mode: diff_context
+          fail_on_error: true
+
+  # ─── 2. PR size gate ───────────────────────────────────────────────────────
+  pr-size:
+    name: "Review · PR size"
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Count changed lines
+        id: diff
+        run: |
+          BASE=${{ github.event.pull_request.base.sha }}
+          HEAD=${{ github.event.pull_request.head.sha }}
+          ADDED=$(git diff --numstat $BASE..$HEAD -- '*.go' | awk '{s+=$1} END {print s+0}')
+          DELETED=$(git diff --numstat $BASE..$HEAD -- '*.go' | awk '{s+=$2} END {print s+0}')
+          TOTAL=$((ADDED + DELETED))
+          echo "added=$ADDED"    >> $GITHUB_OUTPUT
+          echo "deleted=$DELETED" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL"     >> $GITHUB_OUTPUT
+          echo "### PR Size" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Lines |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Added  | +$ADDED |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deleted| -$DELETED |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total  | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Warn on large PR
+        if: ${{ fromJson(steps.diff.outputs.total) > 800 }}
+        run: |
+          echo "::warning::This PR changes ${{ steps.diff.outputs.total }} lines of Go code."
+          echo "Consider splitting it into smaller, focused PRs for easier review."
+          echo "Large PRs: > 800 lines → ⚠ warning | > 1500 lines → ❌ blocked"
+
+      - name: Block very large PR
+        if: ${{ fromJson(steps.diff.outputs.total) > 1500 }}
+        run: |
+          echo "::error::PR is too large (${{ steps.diff.outputs.total }} lines changed)."
+          echo "Split into smaller PRs. Max for a single PR: 1500 changed lines."
+          exit 1
+
+  # ─── 3. Coverage delta — don't regress ─────────────────────────────────────
+  coverage-delta:
+    name: "Review · coverage delta"
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Coverage on PR branch
+        run: |
+          go test -coverprofile=pr.out ./...
+          PR_COV=$(go tool cover -func=pr.out | grep ^total | awk '{print $3}' | tr -d '%')
+          echo "pr_coverage=$PR_COV" >> $GITHUB_ENV
+
+      - name: Coverage on base branch
+        run: |
+          git stash
+          git checkout ${{ github.event.pull_request.base.sha }} -- .
+          go test -coverprofile=base.out ./... 2>/dev/null || true
+          BASE_COV=$(go tool cover -func=base.out 2>/dev/null | grep ^total | awk '{print $3}' | tr -d '%')
+          BASE_COV=${BASE_COV:-0}
+          echo "base_coverage=$BASE_COV" >> $GITHUB_ENV
+          git checkout -
+
+      - name: Check coverage delta
+        run: |
+          DELTA=$(echo "$pr_coverage - $base_coverage" | bc)
+          echo "### Coverage Delta" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | Coverage |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Base (${{ github.base_ref }}) | ${base_coverage}% |" >> $GITHUB_STEP_SUMMARY
+          echo "| PR    | ${pr_coverage}% |" >> $GITHUB_STEP_SUMMARY
+          echo "| Delta | ${DELTA}% |" >> $GITHUB_STEP_SUMMARY
+          if (( $(echo "$DELTA < -3" | bc -l) )); then
+            echo "::error::Coverage dropped by ${DELTA}% (base: ${base_coverage}%, PR: ${pr_coverage}%)"
+            echo "Test coverage must not decrease by more than 3 percentage points."
+            exit 1
+          fi
+          if (( $(echo "$DELTA < 0" | bc -l) )); then
+            echo "::warning::Coverage decreased slightly by ${DELTA}%"
+          fi
+
+  # ─── 4. Conventional commits check ────────────────────────────────────────
+  commits:
+    name: "Review · commit messages"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit message format
+        run: |
+          FAIL=0
+          while IFS= read -r msg; do
+            # Allow: type(scope): description  OR  type: description
+            # Types: feat fix chore docs refactor test perf ci build revert security
+            if ! echo "$msg" | grep -qP '^(feat|fix|chore|docs|refactor|test|perf|ci|build|revert|security)(\(.+\))?: .{1,100}$'; then
+              echo "::warning::Bad commit message: \"$msg\""
+              echo "  Expected format: type(scope): description"
+              echo "  Types: feat fix chore docs refactor test perf ci build revert security"
+              FAIL=1
+            fi
+          done < <(git log --format=%s ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }})
+          # Advisory only — warn but don't block
+          exit 0
+
+  # ─── 5. Secrets in new code — gitleaks on PR diff only ────────────────────
+  secrets-diff:
+    name: "Review · secrets in diff"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks on PR diff
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: >-
+            --log-opts="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
+  # ─── 6. Build verification ─────────────────────────────────────────────────
+  build:
+    name: "Review · build"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o /dev/null .
+
+      - name: go mod tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum || {
+            echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit."
+            exit 1
+          }
+
+  # ─── Summary ───────────────────────────────────────────────────────────────
+  review-summary:
+    name: "✅ Code Review — Complete"
+    runs-on: ubuntu-latest
+    needs: [lint, pr-size, coverage-delta, secrets-diff, build]
+    if: always()
+    steps:
+      - name: Summarise results
+        run: |
+          echo "## Code Review Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| golangci-lint | ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| PR size       | ${{ needs.pr-size.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Coverage delta| ${{ needs.coverage-delta.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Secrets scan  | ${{ needs.secrets-diff.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build check   | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CODEOWNERS — ProxyShield
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub automatically requests review from these owners on every PR that
+# touches the matching paths.  At least ONE owner must approve before merge.
+#
+# Format:  <path-pattern>   <@user-or-team> [<@user-or-team> ...]
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Default — every file requires review from the core team.
+*                           @KidCarmi
+
+# ── Security-critical files — require explicit security review ──────────────
+# Any change to authentication, TLS, or proxy core requires security sign-off.
+auth.go                     @KidCarmi
+auth_ldap.go                @KidCarmi
+auth_oidc.go                @KidCarmi
+ca.go                       @KidCarmi
+tls.go                      @KidCarmi
+proxy.go                    @KidCarmi
+security.go                 @KidCarmi
+geoip.go                    @KidCarmi
+
+# ── Policy engine — changes affect all traffic decisions ────────────────────
+policy.go                   @KidCarmi
+store.go                    @KidCarmi
+
+# ── CI / Release pipeline — changes here affect all deployments ─────────────
+.github/                    @KidCarmi
+Dockerfile                  @KidCarmi
+install.sh                  @KidCarmi
+
+# ── Configuration schema — breaking changes need special care ───────────────
+config.go                   @KidCarmi
+config.yaml                 @KidCarmi
+config.example.yaml         @KidCarmi
+
+# ── Frontend — UI changes need UX + security review (XSS risk) ─────────────
+static/                     @KidCarmi
+ui.go                       @KidCarmi

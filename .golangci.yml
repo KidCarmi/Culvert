@@ -1,0 +1,119 @@
+# ProxyShield — golangci-lint configuration
+# Runs in CI (code-review.yml) and locally: golangci-lint run
+# Docs: https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 5m
+  go: "1.24"
+  # Skip generated / vendored files.
+  skip-dirs:
+    - vendor
+  skip-files:
+    - ".*_generated\\.go$"
+
+linters:
+  # Start from a minimal set and add explicitly — avoids surprise breakage
+  # when golangci-lint adds new linters in future versions.
+  disable-all: true
+  enable:
+    # ── Bugs & correctness ──────────────────────────────────────────────────
+    - errcheck          # unhandled errors
+    - gosimple          # simplifiable code (subset of staticcheck)
+    - govet             # go vet misuse, printf format strings
+    - ineffassign       # assignments whose result is never used
+    - staticcheck       # SA*, ST*, QF* checks
+    - unused            # unused code
+    - bodyclose         # response body not closed → goroutine leak
+    - noctx             # http.NewRequest without context
+    - rowserrcheck      # sql.Rows.Err() not checked
+    - sqlclosecheck     # sql.Rows/Stmt not closed
+
+    # ── Security ────────────────────────────────────────────────────────────
+    - gosec             # OWASP / CWE findings (mirrors security gate)
+
+    # ── Style & maintainability ─────────────────────────────────────────────
+    - gofmt             # gofmt formatting
+    - goimports         # import ordering
+    - misspell          # common English misspellings in comments/strings
+    - unconvert         # unnecessary type conversions
+    - unparam           # function parameters always receive the same value
+    - dupl              # duplicate code blocks (threshold: 150 tokens)
+    - gocritic          # opinionated but useful style checks
+    - revive            # general linting rules (replaces golint)
+    - whitespace        # unnecessary blank lines
+
+    # ── Complexity ──────────────────────────────────────────────────────────
+    - cyclop            # cyclomatic complexity > 15 → warning
+    - funlen            # functions > 80 lines → warning
+    - gocognit          # cognitive complexity > 30 → warning
+    - nestif            # deeply nested if blocks > 5 → warning
+
+    # ── Concurrency ─────────────────────────────────────────────────────────
+    - gosmopolitan      # i18n and locale issues (optional)
+    - tparallel         # tests don't call t.Parallel()
+
+linters-settings:
+  errcheck:
+    # Ignore errors on defer Close() — idiomatic Go.
+    exclude-functions:
+      - (io.ReadCloser).Close
+      - (*os.File).Close
+      - (net.Conn).Close
+
+  gosec:
+    # Mirror ci.yml exclusions.
+    excludes:
+      - G104  # unhandled errors on stream copies
+      - G302  # log file permissions
+      - G304  # file path from variable (acceptable for blocklist loading)
+      - G401  # MD5/SHA1 misidentification
+      - G402  # TLSSkipVerify — config-guarded
+      - G704  # SSRF — forward proxy design
+
+  cyclop:
+    max-complexity: 15
+
+  funlen:
+    lines: 80
+    statements: 50
+
+  gocognit:
+    min-complexity: 30
+
+  nestif:
+    min-complexity: 5
+
+  dupl:
+    threshold: 150
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      - hugeParam   # proxy handles large structs intentionally
+      - paramTypeCombine
+
+  revive:
+    rules:
+      - name: exported
+        arguments:
+          - "checkPrivateReceivers"
+          - "sayRepetitiveInsteadOfStutters"
+
+issues:
+  # Allow up to 3 issues of the same type before suppressing.
+  max-same-issues: 3
+  # Don't exclude issues in test files.
+  exclude-rules:
+    - path: "_test\\.go$"
+      linters:
+        - funlen      # test functions can be long
+        - dupl        # test cases often look similar
+        - cyclop      # table-driven tests have high complexity
+    # Allow TODO/FIXME in comments — tracked via issues.
+    - linters: [godox]
+      text: "TODO|FIXME"
+  # Show all issues, not just new ones on the diff.
+  new: false
