@@ -79,6 +79,9 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    # Security gate must pass before any release binary is built or published.
+    # The "release-approved" job lives in security-release-gate.yml and is
+    # enforced as a required status check via Branch Protection rules.
     needs: [test, docker]
     if: startsWith(github.ref, 'refs/tags/v')
 
