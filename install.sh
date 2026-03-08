@@ -90,10 +90,14 @@ proxy:
   port: $PROXY_PORT
   ui_port: $UI_PORT
   ca_path: $CA_BUNDLE
+  # IMPORTANT: policy_file persists your policy rules across restarts.
+  # Without this, all rules are lost when the process restarts.
+  policy_file: $DATA_DIR/policy.json
   log_file: /var/log/proxyshield/access.log
   log_max_mb: 100
 
-# Uncomment and fill to enable basic auth:
+# Admin credentials are set via the first-time setup wizard in the Web UI.
+# Alternatively, uncomment and set them here:
 # auth:
 #   user: admin
 #   pass: changeme
@@ -181,6 +185,9 @@ info "║  Web UI → https://$(hostname -I | awk '{print $1}'):$UI_PORT        
 info "║  Config → $CONFIG_FILE"
 info "║  Logs   → /var/log/proxyshield/access.log            ║"
 info "╚══════════════════════════════════════════════════════╝"
+info ""
+info "First-time setup:"
+info "  Open the Web UI — you will be prompted to set an admin password."
 info ""
 info "Configure your browser/system proxy:"
 info "  HTTP/HTTPS Proxy: $(hostname -I | awk '{print $1}'):$PROXY_PORT"

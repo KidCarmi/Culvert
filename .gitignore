@@ -1,2 +1,22 @@
+# Compiled binaries
 proxy
 proxyshield
+
+# Local configuration (may contain real passwords — never commit)
+config.yaml
+
+# CA bundles contain private keys
+*.bundle
+
+# Sensitive runtime state (these live in /data volume, not in git)
+data/
+
+# Atomic-write temp files
+*.tmp
+
+# Environment files
+.env
+.env.*
+
+# Editor cruft
+.DS_Store

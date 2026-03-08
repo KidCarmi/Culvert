@@ -23,6 +23,8 @@ func startUI(port int, certFile, keyFile string) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(sub)))
+	mux.HandleFunc("/api/setup/status", apiSetupStatus)
+	mux.HandleFunc("/api/setup/complete", apiSetupComplete)
 	mux.HandleFunc("/api/stats", apiStats)
 	mux.HandleFunc("/api/timeseries", apiTimeseries)
 	mux.HandleFunc("/api/logs", apiLogs)
@@ -42,7 +44,7 @@ func startUI(port int, certFile, keyFile string) {
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler:      securityMiddleware(mux),
+		Handler:      securityMiddleware(uiAuthMiddleware(mux)),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -134,6 +136,84 @@ func isLocalOrigin(origin string) bool {
 	}
 	h := u.Hostname()
 	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+// uiAuthMiddleware enforces Basic Auth for all /api/ endpoints when auth is
+// enabled.  The /api/setup/* bootstrap endpoints are always accessible so
+// that a brand-new deployment can complete first-time setup without a
+// chicken-and-egg problem.  Static assets (/) are never gated.
+func uiAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Setup bootstrap — always public.
+		if strings.HasPrefix(r.URL.Path, "/api/setup") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Auth not yet configured (first-time or intentionally disabled).
+		if !cfg.AuthEnabled() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Enforce Basic Auth for all API requests.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			user, pass, ok := r.BasicAuth()
+			if !ok || !cfg.VerifyAuth(user, pass) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="ProxyShield"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// GET /api/setup/status — reports whether first-time setup is still needed.
+// Always public so the browser can decide whether to show the setup wizard.
+func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	jsonOK(w, map[string]any{"needsSetup": !cfg.AuthEnabled()})
+}
+
+// POST /api/setup/complete — sets the initial admin credential.
+// Only callable once; returns 403 if auth is already configured.
+// Body: {"user": "...", "pass": "..."}
+// Password must be at least 8 characters to enforce minimum hygiene.
+func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if cfg.AuthEnabled() {
+		http.Error(w, "setup already complete", http.StatusForbidden)
+		return
+	}
+	var body struct {
+		User string `json:"user"`
+		Pass string `json:"pass"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	body.User = strings.TrimSpace(body.User)
+	if len(body.User) < 1 || len(body.User) > 64 {
+		http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
+		return
+	}
+	if len(body.Pass) < 8 {
+		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+	if err := cfg.SetAuth(body.User, body.Pass); err != nil {
+		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	auditEvent(r, "setup.complete", body.User, "first-time admin password configured")
+	logger.Printf("First-time setup: admin user %q created", body.User)
+	jsonOK(w, map[string]any{"ok": true})
 }
 
 // auditEvent records a configuration change to the audit ring buffer.

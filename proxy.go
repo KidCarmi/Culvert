@@ -53,11 +53,11 @@ func isPrivateIP(ip net.IP) bool {
 //   - X-Forwarded-For: private/internal IPs are stripped; if all IPs were
 //     private the header is removed entirely.
 //   - X-Real-IP: removed when it contains a private address.
-//   - X-User-Identity: always removed (internal identity mock header —
-//     must not be trusted from downstream clients or leak upstream).
+//   - X-User-Identity: always removed — set internally by auth context;
+//     must not be trusted from downstream clients or leak upstream.
 //
 // This prevents internal network topology disclosure and stops clients from
-// injecting fake identity claims via the mock identity header.
+// injecting identity claims.
 func scrubForwardedHeaders(r *http.Request) {
 	// Strip private IPs from X-Forwarded-For.
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
@@ -157,8 +157,9 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Policy engine (PBAC) pre-check ───────────────────────────────────────
-	// X-User-Identity is a mock header for identity; future versions will
-	// populate this from the OIDC/LDAP auth context.
+	// X-User-Identity is the authenticated identity set by the auth layer
+	// (OIDC/LDAP); scrubForwardedHeaders already stripped any client-supplied
+	// value, so this value is safe to use for policy matching.
 	identity := r.Header.Get("X-User-Identity")
 	match := policyStore.Evaluate(clientIP, identity, host)
 

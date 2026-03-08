@@ -1763,5 +1763,124 @@ document.querySelectorAll('.nav-item').forEach(el => {
   });
 });
 </script>
+
+<!-- ── First-time Setup Wizard ─────────────────────────────────────────── -->
+<style>
+#setup-overlay {
+  display: none;
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(11,15,26,.97);
+  align-items: center; justify-content: center;
+}
+#setup-overlay.active { display: flex; }
+.setup-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 16px; padding: 48px 44px; width: 100%; max-width: 440px;
+  box-shadow: 0 24px 64px rgba(0,0,0,.6);
+}
+.setup-logo { font-size: 2.4rem; margin-bottom: 12px; }
+.setup-card h2 { font-size: 1.35rem; font-weight: 700; margin-bottom: 8px; }
+.setup-card p  { color: var(--muted); font-size: .9rem; margin-bottom: 28px; line-height: 1.55; }
+.setup-card label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: 5px; margin-top: 16px; }
+.setup-card input {
+  width: 100%; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg);
+  color: var(--text); font-size: .95rem;
+}
+.setup-card input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+.setup-submit {
+  margin-top: 28px; width: 100%; padding: 12px;
+  background: var(--accent); color: #fff; font-weight: 600;
+  border: none; border-radius: 8px; cursor: pointer; font-size: 1rem;
+  transition: background .15s;
+}
+.setup-submit:hover { background: var(--accent2); }
+.setup-submit:disabled { opacity: .5; cursor: default; }
+.setup-err {
+  display: none; margin-top: 14px; padding: 10px 12px;
+  background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35);
+  border-radius: 8px; color: var(--red); font-size: .88rem;
+}
+.setup-success { text-align: center; color: var(--green); font-size: 1.1rem; margin-top: 24px; }
+.setup-hint {
+  margin-top: 20px; font-size: .78rem; color: var(--muted);
+  border-top: 1px solid var(--border); padding-top: 14px; line-height: 1.6;
+}
+</style>
+
+<div id="setup-overlay">
+  <div class="setup-card" id="setup-card-inner">
+    <div class="setup-logo">🛡️</div>
+    <h2>Welcome to ProxyShield</h2>
+    <p>This is the first-time setup.<br>
+       Set an admin username and password to secure this management interface.
+       These credentials will be required every time you open the dashboard.</p>
+    <form id="setup-form" autocomplete="on">
+      <label for="su-user">Admin username</label>
+      <input id="su-user" type="text" value="admin" autocomplete="username" maxlength="64" required>
+      <label for="su-pass">Password <span style="color:var(--muted)">(minimum 8 characters)</span></label>
+      <input id="su-pass" type="password" autocomplete="new-password" minlength="8" required>
+      <label for="su-pass2">Confirm password</label>
+      <input id="su-pass2" type="password" autocomplete="new-password" minlength="8" required>
+      <div class="setup-err" id="su-err"></div>
+      <button class="setup-submit" id="su-btn" type="submit">Set Password &amp; Continue</button>
+    </form>
+    <div class="setup-hint">
+      &#9888; The management port is restricted to localhost by default.
+      For remote access, use an SSH tunnel or a reverse proxy with mTLS.
+    </div>
+  </div>
+</div>
+
+<script>
+(async () => {
+  try {
+    const s = await fetch('/api/setup/status');
+    if (!s.ok) return;
+    const d = await s.json();
+    if (!d.needsSetup) return;
+
+    document.getElementById('setup-overlay').classList.add('active');
+
+    document.getElementById('setup-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const user  = document.getElementById('su-user').value.trim();
+      const pass  = document.getElementById('su-pass').value;
+      const pass2 = document.getElementById('su-pass2').value;
+      const errEl = document.getElementById('su-err');
+      const btn   = document.getElementById('su-btn');
+      const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
+      errEl.style.display = 'none';
+
+      if (!user)            return showErr('Username cannot be empty.');
+      if (pass.length < 8)  return showErr('Password must be at least 8 characters.');
+      if (pass !== pass2)   return showErr('Passwords do not match.');
+
+      btn.disabled = true; btn.textContent = 'Saving\u2026';
+      try {
+        const r = await fetch('/api/setup/complete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({user, pass})
+        });
+        if (r.ok) {
+          document.getElementById('setup-card-inner').innerHTML =
+            '<div class="setup-logo">&#10003;</div>' +
+            '<h2>Setup complete!</h2>' +
+            '<p class="setup-success">Admin account created.<br>Reloading the dashboard\u2026</p>';
+          setTimeout(() => location.reload(), 1800);
+        } else {
+          const txt = await r.text();
+          showErr(txt || 'Setup failed. Please try again.');
+          btn.disabled = false; btn.textContent = 'Set Password \u0026 Continue';
+        }
+      } catch (_) {
+        showErr('Network error \u2014 is the server running?');
+        btn.disabled = false; btn.textContent = 'Set Password \u0026 Continue';
+      }
+    });
+  } catch (_) { /* server unreachable — show normal UI */ }
+})();
+</script>
 </body>
 </html>

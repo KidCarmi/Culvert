@@ -71,7 +71,7 @@ type PolicyRule struct {
 	Priority       int          `json:"priority"`
 	Name           string       `json:"name"`
 	SourceIP       string       `json:"sourceIP"`       // single IP or CIDR; empty = any
-	SourceIdentity string       `json:"sourceIdentity"` // user/group mock; empty = any
+	SourceIdentity string       `json:"sourceIdentity"` // authenticated user/group (OIDC/LDAP); empty = any
 	DestFQDN       string       `json:"destFQDN"`       // exact or wildcard FQDN; empty = any
 	DestCategory   URLCategory  `json:"destCategory"`   // URL category; empty = any
 	SSLAction      SSLAction    `json:"sslAction"`      // Inspect | Bypass

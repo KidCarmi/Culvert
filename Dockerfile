@@ -43,6 +43,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD wget -qO- http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["./proxyshield"]
-# -ca-path /data/ca.bundle ensures the Root CA is loaded from the persistent
-# volume on restart instead of being regenerated each time.
-CMD ["-port", "8080", "-ui-port", "9090", "-ca-path", "/data/ca.bundle"]
+# All persistent state lives in /data (mount as a Docker volume):
+#   -ca-path  → Root CA bundle (ssl inspection)
+#   -policy   → Policy rules (CRITICAL: without this, rules are lost on restart)
+CMD ["-port", "8080", "-ui-port", "9090", "-ca-path", "/data/ca.bundle", "-policy", "/data/policy.json"]
