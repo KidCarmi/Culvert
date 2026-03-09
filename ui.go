@@ -53,9 +53,13 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/auth/logout", apiAuthLogout)
 
 	// ── Generic IdP Framework ─────────────────────────────────────────────
-	mux.HandleFunc("/api/idp", apiIdPList)           // GET list / POST create
-	mux.HandleFunc("/api/idp/", apiIdPItem)          // GET|PUT|DELETE /api/idp/{id}
-	mux.HandleFunc("/api/idp/discover", apiIdPDiscover) // POST: run OIDC discovery
+	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
+	mux.HandleFunc("/api/idp/discover", apiIdPDiscover) // POST: run OIDC discovery (must be before /api/idp/)
+	mux.HandleFunc("/api/idp/", apiIdPRouter)           // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
+
+	// ── PAC file ─────────────────────────────────────────────────────────
+	mux.HandleFunc("/proxy.pac", servePACFile)    // served on the UI port
+	mux.HandleFunc("/api/pac-config", apiPACConfig)
 
 	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
 	// These are reached by browser redirects from IdPs (not admin UI calls).
@@ -165,10 +169,12 @@ func isSameOrigin(r *http.Request, origin string) bool {
 // HTTP Basic Auth is accepted as a fallback for CLI / API clients.
 func uiAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Always public: setup bootstrap, auth endpoints, IdP callbacks.
+		// Always public: setup bootstrap, auth endpoints, IdP callbacks,
+		// and /proxy.pac (Windows clients need it without credentials).
 		if strings.HasPrefix(r.URL.Path, "/api/setup") ||
 			strings.HasPrefix(r.URL.Path, "/api/auth/") ||
-			strings.HasPrefix(r.URL.Path, "/auth/") {
+			strings.HasPrefix(r.URL.Path, "/auth/") ||
+			r.URL.Path == "/proxy.pac" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1112,8 +1118,18 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 // GET /api/idp/{id}     — get profile
 // PUT /api/idp/{id}     — update profile
 // DELETE /api/idp/{id}  — delete profile
-func apiIdPItem(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/idp/")
+// apiIdPRouter dispatches /api/idp/{id} and /api/idp/{id}/groups.
+func apiIdPRouter(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/idp/")
+	if strings.HasSuffix(rest, "/groups") {
+		id := strings.TrimSuffix(rest, "/groups")
+		apiIdPGroups(w, r, id)
+		return
+	}
+	apiIdPItem(w, r, rest)
+}
+
+func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 	if id == "" {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
@@ -1153,6 +1169,24 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// GET /api/idp/{id}/groups — returns the known-groups list for the profile.
+func apiIdPGroups(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	p := idpRegistry.Get(id)
+	if p == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	groups := p.KnownGroups
+	if groups == nil {
+		groups = []string{}
+	}
+	jsonOK(w, groups)
 }
 
 // POST /api/idp/discover — run OIDC discovery for a given issuer URL and

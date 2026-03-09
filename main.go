@@ -107,6 +107,12 @@ func main() {
 		logger.Printf("IdP      → loaded from %s (%d profiles)", fc.Proxy.IdPProfilesFile, len(idpRegistry.All()))
 	}
 
+	// ── PAC file configuration ────────────────────────────────────────────────
+	pacCfgPath := "pac_config.json"
+	if err := pacStore.Load(pacCfgPath); err != nil {
+		log.Fatalf("PAC config load error: %v", err)
+	}
+
 	// ── Legacy external auth provider (LDAP / OIDC introspection) ────────────
 	// LDAP takes precedence when URL is configured.
 	// The generic IdP registry is preferred; the legacy providers remain for

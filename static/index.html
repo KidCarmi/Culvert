@@ -259,6 +259,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="idproviders">
       <span class="icon">🪪</span> Identity Providers
     </div>
+    <div class="nav-item" data-view="pac">
+      <span class="icon">📡</span> PAC File
+    </div>
     <div class="nav-item" data-view="certificates">
       <span class="icon">🔑</span> Certificates
     </div>
@@ -604,7 +607,14 @@ tr.dragging  { opacity: .4; }
           <label class="field-label">Metadata URL</label>
           <input id="idp-meta-url" class="input-field" placeholder="https://idp.example.com/metadata.xml" style="width:100%;margin-bottom:12px">
 
-          <label class="field-label">— or paste Metadata XML —</label>
+          <label class="field-label">— or upload / paste Metadata XML —</label>
+          <div style="display:flex;gap:8px;margin-bottom:6px">
+            <label style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0">
+              📂 Upload XML
+              <input type="file" id="idp-meta-xml-file" accept=".xml,text/xml,application/xml" style="display:none" onchange="loadXMLFile(event)">
+            </label>
+            <span style="font-size:.75rem;color:var(--muted);align-self:center" id="idp-xml-filename">No file chosen</span>
+          </div>
           <textarea id="idp-meta-xml" class="input-field" rows="5" placeholder="&lt;EntityDescriptor ...&gt;" style="width:100%;margin-bottom:12px;font-family:monospace;font-size:.8rem"></textarea>
 
           <label class="field-label">Groups Attribute Name</label>
@@ -613,6 +623,9 @@ tr.dragging  { opacity: .4; }
           <label class="field-label">Email Attribute Name</label>
           <input id="idp-saml-email" class="input-field" placeholder="email" style="width:100%;margin-bottom:12px">
         </div>
+
+        <label class="field-label">Known Groups <span style="font-weight:400;color:var(--muted)">(one per line — shown in Policy dropdown)</span></label>
+        <textarea id="idp-known-groups" class="input-field" rows="4" placeholder="Engineering&#10;Admins&#10;Contractors" style="width:100%;margin-bottom:12px;font-family:monospace;font-size:.82rem"></textarea>
 
         <label style="display:flex;align-items:center;gap:8px;margin-bottom:16px;cursor:pointer">
           <input type="checkbox" id="idp-enabled" checked> Enable this provider
@@ -624,6 +637,53 @@ tr.dragging  { opacity: .4; }
         </div>
       </div>
     </div>
+
+    <!-- ── PAC FILE ───────────────────────────────────────────────────────── -->
+    <div class="view" id="view-pac">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start">
+
+        <!-- Left: PAC config -->
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Proxy Auto-Configuration</span></div>
+          <div class="panel-body">
+            <p style="font-size:.8rem;color:var(--muted);margin-bottom:18px;line-height:1.6">
+              A <strong>PAC file</strong> lets Windows/macOS/Linux clients automatically route traffic through this proxy.
+              Point client machines to <code style="background:var(--surface2);padding:2px 6px;border-radius:4px;font-size:.78rem" id="pac-url-display">/proxy.pac</code>
+              in their proxy settings — no per-app configuration needed.
+              Exclusions are evaluated first and bypassed entirely (DIRECT), without touching this proxy.
+            </p>
+
+            <label class="form-label">Proxy Hostname / IP <span style="color:var(--muted);font-weight:400">(leave empty to auto-detect from request)</span></label>
+            <input type="text" id="pac-host" class="input" style="width:100%;margin-bottom:12px" placeholder="proxy.corp.com or 10.0.0.5">
+
+            <label class="form-label">Proxy Port</label>
+            <input type="number" id="pac-port" class="input" style="width:100%;margin-bottom:12px" placeholder="8080" value="8080" min="1" max="65535">
+
+            <label class="form-label">Bypass Exclusions <span style="color:var(--muted);font-weight:400">(one per line — domain, *.wildcard, or 10.0.0.0/8 CIDR)</span></label>
+            <textarea id="pac-exclusions" class="input" rows="7" style="width:100%;font-family:monospace;font-size:.82rem;resize:vertical"
+              placeholder="*.corp.local&#10;internal.mycompany.com&#10;192.168.0.0/16&#10;10.0.0.0/8"></textarea>
+
+            <div style="display:flex;gap:8px;margin-top:14px">
+              <button class="btn" onclick="savePACConfig()">💾 Save Configuration</button>
+              <button class="btn ghost" onclick="downloadPAC()">⬇ Download PAC</button>
+              <button class="btn ghost" onclick="copyPACURL()">📋 Copy URL</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Live PAC preview -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Live PAC Preview</span>
+            <button class="btn ghost sm" onclick="refreshPACPreview()">Refresh</button>
+          </div>
+          <div class="panel-body" style="padding:0">
+            <pre id="pac-preview" style="margin:0;padding:16px;overflow-x:auto;font-size:.78rem;line-height:1.6;background:var(--bg);border-radius:0 0 10px 10px;min-height:200px;color:var(--text)">Loading…</pre>
+          </div>
+        </div>
+
+      </div>
+    </div><!-- /view-pac -->
 
     <!-- ── CERTIFICATES ───────────────────────────────────────────────────── -->
     <div class="view" id="view-certificates">
@@ -827,14 +887,11 @@ Firefox (all platforms):
           <button class="btn ghost sm" id="policy-cancel-btn" onclick="cancelPolicyEdit()" style="display:none">✕ Cancel</button>
         </div>
         <div class="panel-body">
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px">
-            <div>
-              <label class="form-label">Priority <span style="color:var(--muted);font-weight:400">(lower = higher priority)</span></label>
-              <input type="number" class="input" style="width:100%" id="pol-priority" min="1" placeholder="e.g. 10">
-            </div>
+          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:14px">
             <div>
               <label class="form-label">Rule Name</label>
               <input type="text" class="input" style="width:100%" id="pol-name" placeholder="Descriptive name">
+              <input type="hidden" id="pol-priority">
             </div>
             <div>
               <label class="form-label">Action</label>
@@ -847,7 +904,7 @@ Firefox (all platforms):
             </div>
           </div>
 
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px">
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px">
             <div>
               <label class="form-label">Source IP / CIDR <span style="color:var(--muted);font-weight:400">(empty = any)</span></label>
               <input type="text" class="input" style="width:100%" id="pol-src-ip" placeholder="10.0.0.0/8 or 1.2.3.4">
@@ -857,9 +914,20 @@ Firefox (all platforms):
               <input type="text" class="input" style="width:100%" id="pol-src-id" placeholder="alice">
             </div>
             <div>
-              <label class="form-label">Source Group <span style="color:var(--muted);font-weight:400">(IdP group/role)</span></label>
-              <input type="text" class="input" style="width:100%" id="pol-src-group" placeholder="engineering or Admins">
+              <label class="form-label">Auth Provider <span style="color:var(--muted);font-weight:400">(for group filter)</span></label>
+              <select class="select" style="width:100%" id="pol-src-provider" onchange="loadPolicyGroupOptions()">
+                <option value="">— any provider —</option>
+              </select>
             </div>
+            <div>
+              <label class="form-label">Source Group <span style="color:var(--muted);font-weight:400">(IdP group/role)</span></label>
+              <div style="position:relative">
+                <select class="select" style="width:100%;display:none" id="pol-src-group-select" onchange="syncGroupInput()"></select>
+                <input type="text" class="input" style="width:100%" id="pol-src-group" placeholder="engineering or Admins" oninput="filterGroupOptions(this.value)">
+              </div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr;gap:14px;margin-bottom:14px">
             <div>
               <label class="form-label">Redirect URL <span style="color:var(--muted);font-weight:400">(for Redirect action)</span></label>
               <input type="text" class="input" style="width:100%" id="pol-redirect" placeholder="https://example.com/blocked">
@@ -1068,6 +1136,7 @@ const viewMeta = {
   fileblock:    { title: 'File Block',    meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   rewrite:      { title: 'Rewrite',       meta: 'Header injection & removal rules' },
   idproviders:  { title: 'Identity Providers', meta: 'OIDC & SAML 2.0 identity provider profiles' },
+  pac:          { title: 'PAC File',      meta: 'Proxy Auto-Configuration — serve /proxy.pac to Windows/macOS clients' },
   certificates: { title: 'Certificates', meta: 'Root CA management & custom TLS certificates' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
 };
@@ -2028,9 +2097,14 @@ function editPolicy(priority) {
   document.getElementById('pol-name').value       = r.name;
   document.getElementById('pol-action').value     = r.action;
   document.getElementById('pol-src-ip').value     = r.sourceIP || '';
-  document.getElementById('pol-src-id').value       = r.sourceIdentity || '';
-  document.getElementById('pol-src-group').value    = r.sourceGroup    || '';
+  document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
+  document.getElementById('pol-src-group').value  = r.sourceGroup || '';
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
+  loadPolicyProviderOptions().then(() => {
+    const groupSel = document.getElementById('pol-src-group-select');
+    groupSel.style.display = 'none';
+    document.getElementById('pol-src-group').style.display = '';
+  });
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
   document.getElementById('pol-dest-cat').value   = r.destCategory || '';
   document.getElementById('pol-dest-country').value = (r.destCountry || []).join(', ');
@@ -2046,8 +2120,13 @@ function editPolicy(priority) {
 
 const _origClearPolicyForm = window.clearPolicyForm;
 function clearPolicyForm() {
-  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-src-group','pol-redirect','pol-dest-fqdn','pol-dest-country'].forEach(id =>
+  ['pol-name','pol-src-ip','pol-src-id','pol-src-group','pol-redirect','pol-dest-fqdn','pol-dest-country'].forEach(id =>
     document.getElementById(id).value = '');
+  document.getElementById('pol-priority').value = '';
+  const pSel = document.getElementById('pol-src-provider');
+  if (pSel) pSel.value = '';
+  const gSel = document.getElementById('pol-src-group-select');
+  if (gSel) { gSel.style.display = 'none'; gSel.value = ''; }
   document.getElementById('pol-action').value       = 'Allow';
   document.getElementById('pol-dest-cat').value     = '';
   document.getElementById('pol-ssl').value          = 'Bypass';
@@ -2058,11 +2137,17 @@ function clearPolicyForm() {
 
 const _origSubmitPolicyRule = window.submitPolicyRule;
 async function submitPolicyRule() {
-  const priority = parseInt(document.getElementById('pol-priority').value);
-  const name     = document.getElementById('pol-name').value.trim();
-  const action   = document.getElementById('pol-action').value;
-  if (!priority || !name || !action) {
-    toast('Priority, Name and Action are required', 'error'); return;
+  const name   = document.getElementById('pol-name').value.trim();
+  const action = document.getElementById('pol-action').value;
+  if (!name || !action) {
+    toast('Name and Action are required', 'error'); return;
+  }
+  // Auto-assign priority: when adding new rule use max+10; when editing keep existing.
+  let priority;
+  if (polEditPriority !== null) {
+    priority = polEditPriority;
+  } else {
+    priority = nextAutoPriority();
   }
   const countryStr = document.getElementById('pol-dest-country').value.trim();
   const destCountry = countryStr ? countryStr.split(',').map(s => s.trim().toUpperCase()).filter(Boolean) : [];
@@ -2257,9 +2342,10 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.view === 'fileblock')     fetchFileBlock();
     if (el.dataset.view === 'rewrite')       fetchRewrite();
     if (el.dataset.view === 'dashboard')     fetchTopHosts();
-    if (el.dataset.view === 'policy')        { fetchPolicy(); loadDefaultAction(); }
+    if (el.dataset.view === 'policy')        { fetchPolicy(); loadDefaultAction(); loadPolicyProviderOptions(); }
     if (el.dataset.view === 'certificates')  loadCACertInfo();
     if (el.dataset.view === 'idproviders')   loadIdPList();
+    if (el.dataset.view === 'pac')           loadPACConfig();
   });
 });
 
@@ -2267,29 +2353,70 @@ document.querySelectorAll('.nav-item').forEach(el => {
 // Identity Providers
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Provider logo detection — maps known IdP patterns to badge colours + short labels.
+function idpProviderMeta(p) {
+  const n = (p.name || '').toLowerCase();
+  const issuer = (p.oidc && p.oidc.issuer || '').toLowerCase();
+  const metaUrl = (p.saml && p.saml.metadataUrl || '').toLowerCase();
+  const src = n + ' ' + issuer + ' ' + metaUrl;
+  if (src.includes('okta'))         return { label: 'Okta',        color: '#009de0', icon: '🔵' };
+  if (src.includes('azure') || src.includes('microsoftonline') || src.includes('microsoft'))
+                                     return { label: 'Azure AD',    color: '#0078d4', icon: '🪟' };
+  if (src.includes('google'))       return { label: 'Google',       color: '#4285f4', icon: '🔴' };
+  if (src.includes('auth0'))        return { label: 'Auth0',        color: '#eb5424', icon: '⭕' };
+  if (src.includes('keycloak'))     return { label: 'Keycloak',     color: '#e0521b', icon: '🔑' };
+  if (src.includes('onelogin'))     return { label: 'OneLogin',     color: '#2b2b2b', icon: '1️⃣' };
+  if (src.includes('ping') || src.includes('pingfederate'))
+                                     return { label: 'PingFederate', color: '#e8611a', icon: '🏓' };
+  if (src.includes('duo') || src.includes('cisco')) return { label: 'Cisco Duo', color: '#6abe45', icon: '🛡' };
+  if (src.includes('jumpcloud'))    return { label: 'JumpCloud',    color: '#16ad62', icon: '☁️' };
+  if (src.includes('gsuite') || src.includes('workspace')) return { label: 'Google Workspace', color: '#fbbc04', icon: '📧' };
+  if (src.includes('adfs') || src.includes('active directory')) return { label: 'ADFS', color: '#0078d4', icon: '🏢' };
+  return { label: p.type === 'saml' ? 'SAML 2.0' : 'OIDC',  color: '#3b82f6', icon: p.type === 'saml' ? '🔐' : '🌐' };
+}
+
 async function loadIdPList() {
   const res = await apiFetch('/api/idp');
   if (!res.ok) return;
   const list = await res.json();
   const el = document.getElementById('idp-list');
   if (!list || list.length === 0) {
-    el.innerHTML = '<p style="color:var(--muted)">No identity providers configured. Click "+ Add Provider" to get started.</p>';
+    el.innerHTML = `<div style="text-align:center;padding:48px 24px;color:var(--muted)">
+      <div style="font-size:3rem;margin-bottom:12px">🪪</div>
+      <div style="font-size:1rem;font-weight:600;margin-bottom:6px">No identity providers configured</div>
+      <div style="font-size:.85rem">Click "+ Add Provider" to connect Okta, Azure AD, Google Workspace, ADFS or any OIDC/SAML provider.</div>
+    </div>`;
     return;
   }
-  el.innerHTML = list.map(p => `
-    <div style="background:var(--surface1);border-radius:8px;padding:16px;display:flex;justify-content:space-between;align-items:center">
-      <div>
-        <strong>${escHtml(p.name)}</strong>
-        <span style="background:var(--surface2);border-radius:4px;padding:2px 8px;font-size:.75rem;margin-left:8px">${p.type.toUpperCase()}</span>
-        ${p.enabled ? '<span style="color:#22c55e;font-size:.75rem;margin-left:4px">● enabled</span>' : '<span style="color:var(--muted);font-size:.75rem;margin-left:4px">○ disabled</span>'}
-        ${p.emailDomains && p.emailDomains.length ? `<div style="font-size:.8rem;color:var(--muted);margin-top:4px">Domains: ${p.emailDomains.join(', ')}</div>` : ''}
-        ${p.type==='oidc' && p.oidc ? `<div style="font-size:.8rem;color:var(--muted)">Issuer: ${escHtml(p.oidc.issuer)}</div>` : ''}
+  el.innerHTML = list.map(p => {
+    const meta = idpProviderMeta(p);
+    const groups = p.knownGroups && p.knownGroups.length
+      ? `<div style="font-size:.75rem;color:var(--muted);margin-top:3px">Groups: <span style="color:var(--text)">${p.knownGroups.slice(0,5).map(g => escHtml(g)).join(', ')}${p.knownGroups.length > 5 ? ` +${p.knownGroups.length-5} more` : ''}</span></div>`
+      : '';
+    return `
+    <div style="background:var(--surface1);border-radius:10px;padding:18px 20px;display:flex;justify-content:space-between;align-items:center;gap:16px;border:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:16px;flex:1;min-width:0">
+        <div style="width:48px;height:48px;border-radius:10px;background:${meta.color}22;border:2px solid ${meta.color}44;display:flex;align-items:center;justify-content:center;font-size:1.5rem;flex-shrink:0">${meta.icon}</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <strong style="font-size:.95rem">${escHtml(p.name)}</strong>
+            <span style="background:${meta.color}22;color:${meta.color};border-radius:4px;padding:2px 8px;font-size:.7rem;font-weight:700;border:1px solid ${meta.color}44">${meta.label}</span>
+            <span style="background:var(--surface2);border-radius:4px;padding:2px 8px;font-size:.7rem;text-transform:uppercase;color:var(--muted)">${p.type}</span>
+            ${p.enabled ? '<span style="color:#22c55e;font-size:.75rem">● enabled</span>' : '<span style="color:var(--muted);font-size:.75rem">○ disabled</span>'}
+          </div>
+          ${p.emailDomains && p.emailDomains.length ? `<div style="font-size:.78rem;color:var(--muted);margin-top:3px">Domains: ${p.emailDomains.join(', ')}</div>` : ''}
+          ${p.type==='oidc' && p.oidc ? `<div style="font-size:.78rem;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(p.oidc.issuer)}">Issuer: ${escHtml(p.oidc.issuer)}</div>` : ''}
+          ${p.type==='saml' && p.saml && p.saml.metadataUrl ? `<div style="font-size:.78rem;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Metadata: ${escHtml(p.saml.metadataUrl)}</div>` : ''}
+          ${p.type==='saml' && p.saml && !p.saml.metadataUrl && p.saml.metadataXml ? `<div style="font-size:.78rem;color:#22c55e;margin-top:2px">Metadata: inline XML ✓</div>` : ''}
+          ${groups}
+        </div>
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-shrink:0">
         <button class="btn-secondary" onclick="editIdP(${JSON.stringify(JSON.stringify(p))})">Edit</button>
         <button class="btn-danger"    onclick="deleteIdP('${p.id}', '${escHtml(p.name)}')">Delete</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function openIdPModal(p) {
@@ -2313,6 +2440,9 @@ function openIdPModal(p) {
   document.getElementById('idp-meta-xml').value    = saml.metadataXml    || '';
   document.getElementById('idp-saml-groups').value = saml.groupsAttribute|| '';
   document.getElementById('idp-saml-email').value  = saml.emailAttribute || '';
+  // Known groups
+  document.getElementById('idp-known-groups').value = (p && p.knownGroups ? p.knownGroups : []).join('\n');
+  document.getElementById('idp-xml-filename').textContent = 'No file chosen';
   document.getElementById('idp-discover-result').style.display = 'none';
   toggleIdPTypeFields();
   document.getElementById('idp-modal').style.display = 'block';
@@ -2360,12 +2490,15 @@ async function saveIdP() {
   const id   = document.getElementById('idp-edit-id').value;
   const type = document.getElementById('idp-type').value;
   const domains = document.getElementById('idp-domains').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const knownGroupsRaw = document.getElementById('idp-known-groups').value;
+  const knownGroups = knownGroupsRaw.split('\n').map(s => s.trim()).filter(Boolean);
   const body = {
     id:           id || undefined,
     name:         document.getElementById('idp-name').value.trim(),
     type,
     emailDomains: domains,
     enabled:      document.getElementById('idp-enabled').checked,
+    knownGroups,
   };
   if (type === 'oidc') {
     const scopeStr = document.getElementById('idp-scopes').value.trim();
@@ -2400,6 +2533,162 @@ async function deleteIdP(id, name) {
   const res = await apiFetch(`/api/idp/${id}`, { method: 'DELETE' });
   if (!res.ok) { alert('Delete failed: ' + await res.text()); return; }
   loadIdPList();
+}
+
+// XML file upload handler for SAML metadata
+function loadXMLFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  document.getElementById('idp-xml-filename').textContent = file.name;
+  const reader = new FileReader();
+  reader.onload = e => { document.getElementById('idp-meta-xml').value = e.target.result; };
+  reader.readAsText(file);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PAC File
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function loadPACConfig() {
+  try {
+    const c = await api('/api/pac-config');
+    document.getElementById('pac-host').value = c.proxyHost || '';
+    document.getElementById('pac-port').value = c.proxyPort || 8080;
+    document.getElementById('pac-exclusions').value = (c.exclusions || []).join('\n');
+    // Update the displayed PAC URL
+    document.getElementById('pac-url-display').textContent =
+      window.location.protocol + '//' + window.location.host + '/proxy.pac';
+    refreshPACPreview();
+  } catch(e) { /* first load may fail */ }
+}
+
+async function savePACConfig() {
+  const proxyHost = document.getElementById('pac-host').value.trim();
+  const proxyPort = parseInt(document.getElementById('pac-port').value) || 8080;
+  const exclRaw = document.getElementById('pac-exclusions').value;
+  const exclusions = exclRaw.split('\n').map(s => s.trim()).filter(Boolean);
+  try {
+    await api('/api/pac-config', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ proxyHost, proxyPort, exclusions }),
+    });
+    toast('PAC configuration saved', 'success');
+    refreshPACPreview();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function refreshPACPreview() {
+  try {
+    const resp = await fetch('/proxy.pac');
+    const text = await resp.text();
+    document.getElementById('pac-preview').textContent = text;
+  } catch(e) {
+    document.getElementById('pac-preview').textContent = '// Error loading PAC: ' + e.message;
+  }
+}
+
+function downloadPAC() {
+  const a = document.createElement('a');
+  a.href = '/proxy.pac';
+  a.download = 'proxy.pac';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  toast('PAC file download started', 'success');
+}
+
+function copyPACURL() {
+  const url = window.location.protocol + '//' + window.location.host + '/proxy.pac';
+  navigator.clipboard.writeText(url).then(
+    () => toast('PAC URL copied to clipboard', 'success'),
+    () => toast('Copy failed — URL: ' + url, 'error')
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Policy: Auto-priority + Provider/Group dropdown
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Compute next priority = max existing + 10 (or 10 if empty)
+function nextAutoPriority() {
+  if (!polRules || !polRules.length) return 10;
+  const max = polRules.reduce((m, r) => Math.max(m, r.priority || 0), 0);
+  return max + 10;
+}
+
+// Load IdP provider options into the Policy source-provider dropdown
+let _policyIdPList = [];
+async function loadPolicyProviderOptions() {
+  try {
+    const list = await api('/api/idp');
+    _policyIdPList = list || [];
+    const sel = document.getElementById('pol-src-provider');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— any provider —</option>' +
+      _policyIdPList.filter(p => p.enabled).map(p =>
+        `<option value="${p.id}">${escHtml(p.name)} (${p.type.toUpperCase()})</option>`
+      ).join('');
+    if (cur) sel.value = cur;
+  } catch(e) {}
+}
+
+// Load groups for selected provider
+let _policyGroupList = [];
+async function loadPolicyGroupOptions() {
+  const pid = document.getElementById('pol-src-provider').value;
+  const groupInput = document.getElementById('pol-src-group');
+  const groupSel   = document.getElementById('pol-src-group-select');
+  if (!pid) {
+    _policyGroupList = [];
+    groupSel.style.display = 'none';
+    groupInput.style.display = '';
+    return;
+  }
+  try {
+    const groups = await api('/api/idp/' + pid + '/groups');
+    _policyGroupList = groups || [];
+    if (_policyGroupList.length > 0) {
+      groupSel.innerHTML = '<option value="">— any group —</option>' +
+        _policyGroupList.map(g => `<option value="${escHtml(g)}">${escHtml(g)}</option>`).join('');
+      if (_policyGroupList.length > 10) {
+        // Many groups: keep text input for filtering, also show select
+        groupSel.style.display = 'none';
+        groupInput.style.display = '';
+        // Populate datalist for autocomplete
+        let dl = document.getElementById('pol-group-datalist');
+        if (!dl) {
+          dl = document.createElement('datalist');
+          dl.id = 'pol-group-datalist';
+          document.body.appendChild(dl);
+        }
+        dl.innerHTML = _policyGroupList.map(g => `<option value="${escHtml(g)}">`).join('');
+        groupInput.setAttribute('list', 'pol-group-datalist');
+      } else {
+        // Few groups: show select dropdown
+        groupSel.style.display = '';
+        groupInput.style.display = 'none';
+        groupSel.value = groupInput.value || '';
+      }
+    } else {
+      groupSel.style.display = 'none';
+      groupInput.style.display = '';
+      groupInput.removeAttribute('list');
+    }
+  } catch(e) {
+    groupSel.style.display = 'none';
+    groupInput.style.display = '';
+  }
+}
+
+function syncGroupInput() {
+  const sel = document.getElementById('pol-src-group-select');
+  const inp = document.getElementById('pol-src-group');
+  inp.value = sel.value;
+}
+
+function filterGroupOptions(val) {
+  // Just let the browser handle the datalist; nothing extra needed.
 }
 </script>
 

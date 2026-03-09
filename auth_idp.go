@@ -31,6 +31,12 @@ type IdPProfile struct {
 	EmailDomains []string `json:"emailDomains"` // routing hints, e.g. ["corp.com"]
 	Enabled      bool     `json:"enabled"`
 
+	// KnownGroups is the admin-maintained list of group names available in
+	// this IdP.  Used by the policy UI to populate the group dropdown.
+	// Not used for authentication decisions — the live token/assertion is
+	// the authoritative source.
+	KnownGroups []string `json:"knownGroups,omitempty"`
+
 	// Only one of OIDC/SAML is populated depending on Type.
 	OIDC *OIDCProfileConfig `json:"oidc,omitempty"`
 	SAML *SAMLProfileConfig `json:"saml,omitempty"`
