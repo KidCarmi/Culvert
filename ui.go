@@ -65,10 +65,10 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/auth/logout", authLogout)
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
+		Addr:         fmt.Sprintf(":%d", port),
 		Handler:      securityMiddleware(uiAuthMiddleware(mux)),
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: 0, // SSE (/api/events) requires long-lived write streams; no write deadline
 		IdleTimeout:  60 * time.Second,
 	}
 

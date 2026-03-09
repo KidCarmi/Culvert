@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -476,5 +479,154 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 			t.Errorf("isWebSocketUpgrade(Upgrade=%q Connection=%q) = %v, want %v",
 				c.upgrade, c.connection, got, c.want)
 		}
+	}
+}
+
+// ── UNAUTH integration tests ──────────────────────────────────────────────────
+// These tests start a real proxy listener and send actual HTTP/CONNECT requests
+// through it to verify end-to-end behaviour in unauthenticated passthrough mode.
+
+// startTestProxy spins up a real HTTP proxy server on a random port with no
+// authentication and default-allow policy, returning its URL and a cleanup fn.
+func startTestProxy(t *testing.T) *url.URL {
+	t.Helper()
+	setupProxyTest(t)
+	setDefaultPolicyAction("allow")
+	policyStore.rules = nil
+
+	// Must not use http.ServeMux: it 301-redirects CONNECT requests (empty path).
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			handleHealth(w, r)
+		} else {
+			handleRequest(w, r)
+		}
+	})
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	return u
+}
+
+// TestUNAUTH_HTTP_ForwardsRequest verifies that the proxy forwards plain HTTP
+// requests to the backend and returns the upstream response body unchanged.
+func TestUNAUTH_HTTP_ForwardsRequest(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "hello from backend")
+	}))
+	defer backend.Close()
+
+	proxyURL := startTestProxy(t)
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   5 * time.Second,
+	}
+
+	resp, err := client.Get(backend.URL + "/test")
+	if err != nil {
+		t.Fatalf("proxy GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "hello from backend" {
+		t.Errorf("unexpected body: %q", string(body))
+	}
+}
+
+// TestUNAUTH_HTTP_BlockedByPolicy verifies that a Drop policy rule in UNAUTH
+// mode still blocks the request (proxy security is independent of auth).
+func TestUNAUTH_HTTP_BlockedByPolicy(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	proxyURL := startTestProxy(t)
+	// Override: block everything via policy.
+	policyStore.rules = nil
+	policyStore.Add(PolicyRule{Priority: 1, Name: "block-all", DestFQDN: "*", Action: ActionBlockPage})
+
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   5 * time.Second,
+	}
+	resp, err := client.Get(backend.URL + "/")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("policy block: expected 403, got %d", resp.StatusCode)
+	}
+}
+
+// TestUNAUTH_CONNECT_SSRFBlocksLoopback verifies that the proxy correctly
+// rejects CONNECT requests targeting loopback / private addresses (SSRF
+// protection). This is expected to return 403, not 200.
+func TestUNAUTH_CONNECT_SSRFBlocksLoopback(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	proxyURL := startTestProxy(t)
+	proxyConn, err := net.DialTimeout("tcp", proxyURL.Host, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer proxyConn.Close()
+
+	target := ln.Addr().String()
+	fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+
+	br := bufio.NewReader(proxyConn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("SSRF: expected 403 for loopback target, got %d", resp.StatusCode)
+	}
+}
+
+// TestUNAUTH_CONNECT_EstablishesTunnel verifies end-to-end CONNECT tunnel
+// establishment. Skipped when the test machine has no external network access.
+func TestUNAUTH_CONNECT_EstablishesTunnel(t *testing.T) {
+	// Probe network availability before starting — skips gracefully in
+	// air-gapped environments without failing the test suite.
+	conn, err := net.DialTimeout("tcp", "example.com:80", 3*time.Second)
+	if err != nil {
+		t.Skipf("no external network access, skipping CONNECT tunnel test: %v", err)
+	}
+	conn.Close()
+
+	proxyURL := startTestProxy(t)
+	proxyConn, err := net.DialTimeout("tcp", proxyURL.Host, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer proxyConn.Close()
+
+	target := "example.com:80"
+	fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+
+	br := bufio.NewReader(proxyConn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("CONNECT tunnel: expected 200, got %d", resp.StatusCode)
 	}
 }

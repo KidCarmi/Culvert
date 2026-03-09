@@ -328,14 +328,24 @@ func main() {
 	go startUI(uPort, cert, key)
 
 	// ── Proxy server ─────────────────────────────────────────────────────────
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", handleHealth)
-	mux.HandleFunc("/metrics", handleMetrics)
-	mux.HandleFunc("/", handleRequest)
+	// NOTE: http.ServeMux cannot be used here because it "cleans" URLs and
+	// issues a 301 redirect when the path is empty — which is always the case
+	// for CONNECT requests (HTTPS tunnels). Using a plain HandlerFunc avoids
+	// the redirect and lets handleRequest receive every proxy request directly.
+	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			handleHealth(w, r)
+		case "/metrics":
+			handleMetrics(w, r)
+		default:
+			handleRequest(w, r)
+		}
+	})
 
 	proxySrv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", pPort),
-		Handler:      mux,
+		Handler:      proxyHandler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
