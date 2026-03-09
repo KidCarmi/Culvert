@@ -292,6 +292,7 @@ tr.dragging  { opacity: .4; }
     <div style="display:flex;gap:10px;align-items:center">
       <span class="topbar-meta" id="server-time"></span>
       <span class="pill live">● LIVE</span>
+      <button class="btn ghost sm" id="logout-btn" onclick="doLogout()" style="display:none">Sign Out</button>
     </div>
   </div>
 
@@ -1158,10 +1159,28 @@ function updateBreakdownChart(allowed, blocked, authFail) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Login overlay
+// ═══════════════════════════════════════════════════════════════════════════
+function showLoginOverlay() {
+  const el = document.getElementById('login-overlay');
+  if (el) { el.style.display = 'flex'; }
+}
+function hideLoginOverlay() {
+  const el = document.getElementById('login-overlay');
+  if (el) { el.style.display = 'none'; }
+}
+async function doLogout() {
+  await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+  document.getElementById('logout-btn').style.display = 'none';
+  showLoginOverlay();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // API helpers
 // ═══════════════════════════════════════════════════════════════════════════
 async function api(path, opts={}) {
   const r = await fetch(BASE + path, opts);
+  if (r.status === 401) { showLoginOverlay(); throw new Error('Unauthorized'); }
   if (!r.ok) throw new Error(await r.text());
   if (r.status === 204) return null;
   return r.json();
@@ -1169,7 +1188,9 @@ async function api(path, opts={}) {
 
 // apiFetch — like api() but returns the Response so callers can check ok/status.
 async function apiFetch(path, opts={}) {
-  return fetch(BASE + path, opts);
+  const r = await fetch(BASE + path, opts);
+  if (r.status === 401) { showLoginOverlay(); }
+  return r;
 }
 
 // escHtml — escape HTML special chars to prevent XSS in innerHTML.
@@ -2444,61 +2465,135 @@ async function deleteIdP(id, name) {
       <button class="setup-submit" id="su-btn" type="submit">Set Password &amp; Continue</button>
     </form>
     <div class="setup-hint">
-      &#9888; The management port is restricted to localhost by default.
-      For remote access, use an SSH tunnel or a reverse proxy with mTLS.
+      &#9888; Security tip: use the IP Filter (Security page) to restrict
+      access to trusted admin IPs once setup is complete.
     </div>
   </div>
 </div>
 
 <script>
+// ── Login overlay form handler ──────────────────────────────────────────
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const user  = document.getElementById('li-user').value.trim();
+  const pass  = document.getElementById('li-pass').value;
+  const errEl = document.getElementById('li-err');
+  const btn   = document.getElementById('li-btn');
+  errEl.style.display = 'none';
+  btn.disabled = true; btn.textContent = 'Signing in\u2026';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user, pass})
+    });
+    if (r.ok) {
+      hideLoginOverlay();
+      document.getElementById('logout-btn').style.display = '';
+      // Refresh dashboard data after login.
+      fetchStats(); fetchTopHosts(); fetchTimeseries(); fetchLogs();
+    } else {
+      const txt = await r.text();
+      errEl.textContent = txt || 'Invalid credentials.';
+      errEl.style.display = 'block';
+    }
+  } catch (_) {
+    errEl.textContent = 'Network error \u2014 is the server running?';
+    errEl.style.display = 'block';
+  }
+  btn.disabled = false; btn.textContent = 'Sign In';
+});
+
+// ── Init: check setup status then auth status ───────────────────────────
 (async () => {
   try {
     const s = await fetch('/api/setup/status');
     if (!s.ok) return;
     const d = await s.json();
-    if (!d.needsSetup) return;
 
-    document.getElementById('setup-overlay').classList.add('active');
+    if (d.needsSetup) {
+      // First-time setup — show the setup wizard.
+      document.getElementById('setup-overlay').classList.add('active');
 
-    document.getElementById('setup-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const user  = document.getElementById('su-user').value.trim();
-      const pass  = document.getElementById('su-pass').value;
-      const pass2 = document.getElementById('su-pass2').value;
-      const errEl = document.getElementById('su-err');
-      const btn   = document.getElementById('su-btn');
-      const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
-      errEl.style.display = 'none';
+      document.getElementById('setup-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const user  = document.getElementById('su-user').value.trim();
+        const pass  = document.getElementById('su-pass').value;
+        const pass2 = document.getElementById('su-pass2').value;
+        const errEl = document.getElementById('su-err');
+        const btn   = document.getElementById('su-btn');
+        const showErr = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
+        errEl.style.display = 'none';
 
-      if (!user)            return showErr('Username cannot be empty.');
-      if (pass.length < 8)  return showErr('Password must be at least 8 characters.');
-      if (pass !== pass2)   return showErr('Passwords do not match.');
+        if (!user)            return showErr('Username cannot be empty.');
+        if (pass.length < 8)  return showErr('Password must be at least 8 characters.');
+        if (pass !== pass2)   return showErr('Passwords do not match.');
 
-      btn.disabled = true; btn.textContent = 'Saving\u2026';
-      try {
-        const r = await fetch('/api/setup/complete', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({user, pass})
-        });
-        if (r.ok) {
-          document.getElementById('setup-card-inner').innerHTML =
-            '<div class="setup-logo">&#10003;</div>' +
-            '<h2>Setup complete!</h2>' +
-            '<p class="setup-success">Admin account created.<br>Reloading the dashboard\u2026</p>';
-          setTimeout(() => location.reload(), 1800);
-        } else {
-          const txt = await r.text();
-          showErr(txt || 'Setup failed. Please try again.');
+        btn.disabled = true; btn.textContent = 'Saving\u2026';
+        try {
+          const r = await fetch('/api/setup/complete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({user, pass})
+          });
+          if (r.ok) {
+            // Setup auto-logs in; just hide the overlay and show dashboard.
+            document.getElementById('setup-overlay').classList.remove('active');
+            document.getElementById('logout-btn').style.display = '';
+            fetchStats(); fetchTopHosts(); fetchTimeseries(); fetchLogs();
+          } else {
+            const txt = await r.text();
+            showErr(txt || 'Setup failed. Please try again.');
+            btn.disabled = false; btn.textContent = 'Set Password \u0026 Continue';
+          }
+        } catch (_) {
+          showErr('Network error \u2014 is the server running?');
           btn.disabled = false; btn.textContent = 'Set Password \u0026 Continue';
         }
-      } catch (_) {
-        showErr('Network error \u2014 is the server running?');
-        btn.disabled = false; btn.textContent = 'Set Password \u0026 Continue';
-      }
-    });
+      });
+
+    } else {
+      // Auth already configured — check if the current session is valid.
+      try {
+        const a = await fetch('/api/auth/status');
+        if (a.ok) {
+          const ad = await a.json();
+          if (!ad.loggedIn) {
+            showLoginOverlay();
+          } else if (ad.user) {
+            document.getElementById('logout-btn').style.display = '';
+          }
+        }
+      } catch (_) { /* server unreachable */ }
+    }
   } catch (_) { /* server unreachable — show normal UI */ }
 })();
 </script>
+
+<!-- ── Login Overlay ───────────────────────────────────────────────────── -->
+<style>
+#login-overlay {
+  display: none;
+  position: fixed; inset: 0; z-index: 9998;
+  background: rgba(11,15,26,.97);
+  align-items: center; justify-content: center;
+}
+</style>
+<div id="login-overlay">
+  <div class="setup-card">
+    <div class="setup-logo">🛡️</div>
+    <h2>Sign in to ProxyShield</h2>
+    <p>Enter your admin credentials to access the management dashboard.</p>
+    <form id="login-form" autocomplete="on">
+      <label for="li-user">Username</label>
+      <input id="li-user" type="text" autocomplete="username" maxlength="64" required>
+      <label for="li-pass">Password</label>
+      <input id="li-pass" type="password" autocomplete="current-password" required>
+      <div class="setup-err" id="li-err"></div>
+      <button class="setup-submit" id="li-btn" type="submit">Sign In</button>
+    </form>
+  </div>
+</div>
+
 </body>
 </html>

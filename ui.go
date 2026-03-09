@@ -46,6 +46,11 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
 
+	// ── Admin session auth ────────────────────────────────────────────────
+	mux.HandleFunc("/api/auth/login", apiAuthLogin)
+	mux.HandleFunc("/api/auth/status", apiAuthStatus)
+	mux.HandleFunc("/api/auth/logout", apiAuthLogout)
+
 	// ── Generic IdP Framework ─────────────────────────────────────────────
 	mux.HandleFunc("/api/idp", apiIdPList)           // GET list / POST create
 	mux.HandleFunc("/api/idp/", apiIdPItem)          // GET|PUT|DELETE /api/idp/{id}
@@ -94,8 +99,8 @@ func startUI(port int, certFile, keyFile string) {
 }
 
 // securityMiddleware sets restrictive CORS and security headers.
-// CORS: only localhost origins are permitted — the UI is an admin panel and
-// must never be reachable from arbitrary third-party sites.
+// CSRF protection is based on same-origin check (Origin == Host), not
+// localhost-only, so the UI works from any IP the admin uses.
 func securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// ── Security headers ─────────────────────────────────────────────────
@@ -104,11 +109,11 @@ func securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+			"default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://flagcdn.com; connect-src 'self'")
 
-		// ── CORS: allow only localhost origins (explicit allowlist) ──────────
+		// ── CORS: allow same-origin requests (reflect the origin back) ───────
 		origin := r.Header.Get("Origin")
-		if isLocalOrigin(origin) {
+		if origin != "" && isSameOrigin(r, origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -121,13 +126,12 @@ func securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// ── CSRF: reject state-changing requests that carry a non-local Origin.
-		// Browsers always send Origin on cross-site requests; if it's present and
-		// not localhost the request is a cross-site forgery attempt.
-		// Requests without Origin (same-origin browser navigation, server-side
-		// tools, curl) are allowed — they cannot be cross-site browser requests.
+		// ── CSRF: reject state-changing requests from a foreign origin ────────
+		// Browsers send Origin on cross-site requests; if it's present and
+		// doesn't match our Host header it's a cross-site forgery attempt.
+		// Requests without Origin (curl, API clients) are allowed through.
 		isMutating := r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete
-		if origin != "" && !isLocalOrigin(origin) && isMutating {
+		if origin != "" && !isSameOrigin(r, origin) && isMutating {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
@@ -141,47 +145,173 @@ func securityMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// isLocalOrigin returns true only for loopback-host origins (http or https),
-// preventing cross-site requests from arbitrary external domains.
-func isLocalOrigin(origin string) bool {
+// isSameOrigin returns true when the Origin header matches the request's Host.
+// This is the correct CSRF protection for single-origin admin UIs: any IP is
+// fine as long as the request comes from the same scheme+host+port as the UI.
+func isSameOrigin(r *http.Request, origin string) bool {
 	if origin == "" {
-		return false
+		return true // no Origin = direct tool access — not a browser cross-site request
 	}
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
 	}
-	h := u.Hostname()
-	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+	return strings.EqualFold(u.Host, r.Host)
 }
 
-// uiAuthMiddleware enforces Basic Auth for all /api/ endpoints when auth is
-// enabled.  The /api/setup/* bootstrap endpoints are always accessible so
-// that a brand-new deployment can complete first-time setup without a
-// chicken-and-egg problem.  Static assets (/) are never gated.
+// uiAuthMiddleware gates /api/ endpoints with session-cookie auth.
+// Static assets (/) and bootstrap + auth endpoints are always public.
+// HTTP Basic Auth is accepted as a fallback for CLI / API clients.
 func uiAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Setup bootstrap — always public.
-		if strings.HasPrefix(r.URL.Path, "/api/setup") {
+		// Always public: setup bootstrap, auth endpoints, IdP callbacks.
+		if strings.HasPrefix(r.URL.Path, "/api/setup") ||
+			strings.HasPrefix(r.URL.Path, "/api/auth/") ||
+			strings.HasPrefix(r.URL.Path, "/auth/") {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Auth not yet configured (first-time or intentionally disabled).
+		// Auth not yet configured — first-time or intentionally disabled.
 		if !cfg.AuthEnabled() {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Enforce Basic Auth for all API requests.
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			user, pass, ok := r.BasicAuth()
-			if !ok || !cfg.VerifyAuth(user, pass) {
-				w.Header().Set("WWW-Authenticate", `Basic realm="ProxyShield"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		// Gate only /api/ endpoints; static assets are always public.
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
 		}
-		next.ServeHTTP(w, r)
+		// Check session cookie (browser login via login overlay).
+		sess, err := readUISessionCookie(r)
+		if err == nil && sess != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Fallback: HTTP Basic Auth for programmatic / CLI access.
+		user, pass, ok := r.BasicAuth()
+		if ok && cfg.VerifyAuth(user, pass) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// No valid auth — 401 without WWW-Authenticate: Basic so the browser
+		// does NOT show its native credential dialog.
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	})
+}
+
+// ── UI admin session cookie ───────────────────────────────────────────────
+// Separate from the proxy-user ps_session cookie; same HMAC encoding.
+
+const uiSessionCookieName = "ps_ui_session"
+
+func setUISessionCookie(w http.ResponseWriter, username string) error {
+	s := &Session{
+		Sub:      username,
+		Provider: "local",
+		Exp:      time.Now().Add(sessionTTL).Unix(),
+	}
+	value, err := encodeSession(s)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     uiSessionCookieName,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   int(sessionTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return nil
+}
+
+func readUISessionCookie(r *http.Request) (*Session, error) {
+	c, err := r.Cookie(uiSessionCookieName)
+	if err == http.ErrNoCookie {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return decodeSession(c.Value)
+}
+
+func clearUISessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     uiSessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// POST /api/auth/login — validate admin credentials, set session cookie.
+func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		User string `json:"user"`
+		Pass string `json:"pass"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if !cfg.AuthEnabled() || cfg.VerifyAuth(body.User, body.Pass) {
+		if err := setUISessionCookie(w, body.User); err != nil {
+			http.Error(w, "session error", http.StatusInternalServerError)
+			return
+		}
+		auditEvent(r, "auth.login", body.User, "admin UI login")
+		jsonOK(w, map[string]any{"ok": true, "user": body.User})
+		return
+	}
+	time.Sleep(300 * time.Millisecond) // slow down brute-force
+	http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+}
+
+// GET /api/auth/status — return whether the current request has a valid session.
+func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !cfg.AuthEnabled() {
+		jsonOK(w, map[string]any{"loggedIn": true, "user": ""})
+		return
+	}
+	sess, err := readUISessionCookie(r)
+	if err == nil && sess != nil {
+		jsonOK(w, map[string]any{"loggedIn": true, "user": sess.Sub})
+		return
+	}
+	// Accept Basic Auth header for CLI/API callers.
+	user, pass, ok := r.BasicAuth()
+	if ok && cfg.VerifyAuth(user, pass) {
+		jsonOK(w, map[string]any{"loggedIn": true, "user": user})
+		return
+	}
+	jsonOK(w, map[string]any{"loggedIn": false})
+}
+
+// POST /api/auth/logout — clear the admin session cookie.
+func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sess, _ := readUISessionCookie(r)
+	if sess != nil {
+		auditEvent(r, "auth.logout", sess.Sub, "admin UI logout")
+	}
+	clearUISessionCookie(w)
+	jsonOK(w, map[string]any{"ok": true})
 }
 
 // GET /api/setup/status — reports whether first-time setup is still needed.
@@ -228,6 +358,8 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Auto-login after setup so the user lands directly in the dashboard.
+	_ = setUISessionCookie(w, body.User)
 	auditEvent(r, "setup.complete", body.User, "first-time admin password configured")
 	logger.Printf("First-time setup: admin user %q created", body.User)
 	jsonOK(w, map[string]any{"ok": true})
