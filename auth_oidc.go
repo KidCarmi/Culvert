@@ -214,10 +214,6 @@ func (a *OIDCAuth) oidcCacheGet(key string) (ok, hit bool) {
 	return false, false
 }
 
-func (a *OIDCAuth) oidcCacheSet(key string, ok bool) {
-	a.oidcCacheSetWithExp(key, ok, 0)
-}
-
 // oidcCacheSetWithExp caps the cache TTL to min(CacheTTL, time.Until(tokenExp))
 // so a cached "ok" entry never outlives the actual token expiry (MED-4).
 func (a *OIDCAuth) oidcCacheSetWithExp(key string, ok bool, tokenExp int64) {
