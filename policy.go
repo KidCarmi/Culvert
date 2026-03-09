@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // PolicyAction defines what happens when a rule matches.
@@ -108,9 +109,24 @@ type PolicyRule struct {
 
 // PolicyStore holds an ordered list of policy rules with thread-safe access.
 type PolicyStore struct {
-	mu    sync.RWMutex
-	rules []*PolicyRule
-	path  string
+	mu        sync.RWMutex
+	rules     []*PolicyRule
+	path      string
+	version   int64  // incremented on every mutation
+	updatedAt string // RFC3339 timestamp of last mutation
+}
+
+// policyVersion returns the current version number and last-updated time.
+func (ps *PolicyStore) policyVersion() (int64, string) {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.version, ps.updatedAt
+}
+
+// bumpVersion must be called under ps.mu.Lock().
+func (ps *PolicyStore) bumpVersion() {
+	ps.version++
+	ps.updatedAt = time.Now().UTC().Format(time.RFC3339)
 }
 
 var policyStore = &PolicyStore{}
@@ -181,6 +197,7 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	nr.HitCount = 0
 	ps.rules = append(ps.rules, &nr)
 	ps.sortLocked()
+	ps.bumpVersion()
 	ps.mu.Unlock()
 	return nr
 }
@@ -194,6 +211,7 @@ func (ps *PolicyStore) Update(priority int, r PolicyRule) bool {
 			r.HitCount = rule.HitCount // preserve live hit count
 			ps.rules[i] = &r
 			ps.sortLocked()
+			ps.bumpVersion()
 			return true
 		}
 	}
@@ -207,6 +225,7 @@ func (ps *PolicyStore) Delete(priority int) bool {
 	for i, rule := range ps.rules {
 		if rule.Priority == priority {
 			ps.rules = append(ps.rules[:i], ps.rules[i+1:]...)
+			ps.bumpVersion()
 			return true
 		}
 	}
@@ -234,6 +253,7 @@ func (ps *PolicyStore) Reorder(orderedPriorities []int) bool {
 		r.Priority = newIdx + 1
 	}
 	ps.sortLocked()
+	ps.bumpVersion()
 	return true
 }
 

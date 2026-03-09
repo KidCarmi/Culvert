@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -16,15 +17,22 @@ import (
 // PACConfig holds settings for the generated PAC file served at /proxy.pac.
 type PACConfig struct {
 	// ProxyHost is the hostname or IP of this proxy, e.g. "proxy.corp.com".
-	// If empty the /proxy.pac endpoint uses the request's Host header.
+	// If empty the /proxy.pac endpoint uses the hostname from the request's
+	// Host header (stripping the port, which belongs to the UI — not the proxy).
 	ProxyHost string `json:"proxyHost"`
-	// ProxyPort is the proxy port.  Defaults to 8080.
+	// ProxyPort is the port the proxy server listens on.
+	// If zero it falls back to the runtime proxy port set at startup.
 	ProxyPort int `json:"proxyPort"`
 	// Exclusions is the list of host patterns that should bypass the proxy.
 	// Supports bare domains ("corp.local"), wildcard prefixes ("*.corp.local"),
 	// and IP CIDR ranges ("192.168.0.0/16").
 	Exclusions []string `json:"exclusions"`
 }
+
+// pacDefaultProxyPort is set at startup to the actual proxy listening port.
+// Used when PACConfig.ProxyPort is zero, so /proxy.pac auto-detects the right port
+// even when the admin hasn't explicitly configured it.
+var pacDefaultProxyPort int
 
 // PACStore persists PACConfig to a JSON file.
 type PACStore struct {
@@ -87,13 +95,24 @@ func (s *PACStore) GeneratePAC(proxyAddr string) string {
 	host := c.ProxyHost
 	port := c.ProxyPort
 	if port == 0 {
-		port = 8080
+		if pacDefaultProxyPort > 0 {
+			port = pacDefaultProxyPort
+		} else {
+			port = 8080
+		}
 	}
 	if host == "" {
-		// Fall back to the proxy address derived from the request.
+		// r.Host is "uiHost:uiPort" — we only want the hostname part.
+		// The port we serve /proxy.pac from is the UI port, NOT the proxy port;
+		// using it as-is would send client traffic to the wrong listener.
 		proxyAddr = strings.TrimPrefix(proxyAddr, "https://")
 		proxyAddr = strings.TrimPrefix(proxyAddr, "http://")
-		host = proxyAddr
+		h, _, err := net.SplitHostPort(proxyAddr)
+		if err == nil && h != "" {
+			host = h // bare hostname; port comes from PACConfig.ProxyPort
+		} else {
+			host = proxyAddr // already bare (no port suffix)
+		}
 	}
 	proxyDirective := fmt.Sprintf("PROXY %s:%d", host, port)
 	if host == "" {
@@ -173,6 +192,14 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		c := pacStore.Get()
+		// Include the effective proxy port so the UI can show the right hint.
+		if c.ProxyPort == 0 {
+			if pacDefaultProxyPort > 0 {
+				c.ProxyPort = pacDefaultProxyPort
+			} else {
+				c.ProxyPort = 8080
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(c) //nolint:errcheck
 	case http.MethodPost:

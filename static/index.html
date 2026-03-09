@@ -564,79 +564,193 @@ tr.dragging  { opacity: .4; }
       <div id="idp-list" style="display:grid;gap:12px"></div>
     </div>
 
-    <!-- ── IdP MODAL ───────────────────────────────────────────────────────── -->
-    <div id="idp-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;overflow-y:auto">
-      <div style="background:var(--surface1);border-radius:10px;max-width:540px;margin:60px auto;padding:24px">
-        <h3 id="idp-modal-title" style="margin-top:0">Add Identity Provider</h3>
+    <!-- ── IdP MODAL (wizard) ──────────────────────────────────────────────── -->
+    <div id="idp-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:200;overflow-y:auto">
+      <div style="background:var(--surface1);border-radius:14px;max-width:640px;margin:40px auto 60px;box-shadow:0 32px 80px rgba(0,0,0,.6);overflow:hidden">
+
+        <!-- Modal header -->
+        <div style="padding:22px 26px 0;border-bottom:1px solid var(--border);margin-bottom:0;display:flex;justify-content:space-between;align-items:center;padding-bottom:16px">
+          <div>
+            <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px" id="idp-step-label">Step 1 of 2 — Choose Provider</div>
+            <h3 id="idp-modal-title" style="margin:0;font-size:1.05rem">Add Identity Provider</h3>
+          </div>
+          <button onclick="closeIdPModal()" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.4rem;line-height:1;padding:4px">&times;</button>
+        </div>
         <input type="hidden" id="idp-edit-id">
 
-        <label class="field-label">Provider Name *</label>
-        <input id="idp-name" class="input-field" placeholder="e.g. Okta Corporate" style="width:100%;margin-bottom:12px">
-
-        <label class="field-label">Type *</label>
-        <select id="idp-type" class="input-field" style="width:100%;margin-bottom:12px" onchange="toggleIdPTypeFields()">
-          <option value="oidc">OIDC (OpenID Connect)</option>
-          <option value="saml">SAML 2.0</option>
-        </select>
-
-        <label class="field-label">Email Domains (comma-separated)</label>
-        <input id="idp-domains" class="input-field" placeholder="corp.com, company.org" style="width:100%;margin-bottom:12px">
-
-        <div id="idp-oidc-fields">
-          <label class="field-label">Issuer URL *</label>
-          <div style="display:flex;gap:8px;margin-bottom:12px">
-            <input id="idp-issuer" class="input-field" placeholder="https://your-domain.okta.com" style="flex:1">
-            <button class="btn-secondary" onclick="discoverOIDC()" title="Auto-discover endpoints">Discover</button>
+        <!-- Step 1: Provider picker (hidden during edit) -->
+        <div id="idp-step1" style="padding:20px 26px">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:8px">
+            <!-- SAML providers -->
+            <button class="idp-provider-card" onclick="selectIdPTemplate('okta-saml')" data-tpl="okta-saml">
+              <span style="font-size:1.8rem">🔵</span>
+              <span style="font-weight:700;font-size:.88rem">Okta</span>
+              <span style="font-size:.68rem;color:var(--muted)">SAML 2.0</span>
+            </button>
+            <button class="idp-provider-card" onclick="selectIdPTemplate('azure-saml')" data-tpl="azure-saml">
+              <span style="font-size:1.8rem">🪟</span>
+              <span style="font-weight:700;font-size:.88rem">Azure AD / Entra</span>
+              <span style="font-size:.68rem;color:var(--muted)">SAML 2.0</span>
+            </button>
+            <button class="idp-provider-card" onclick="selectIdPTemplate('google-saml')" data-tpl="google-saml">
+              <span style="font-size:1.8rem">🔴</span>
+              <span style="font-weight:700;font-size:.88rem">Google Workspace</span>
+              <span style="font-size:.68rem;color:var(--muted)">SAML 2.0</span>
+            </button>
+            <button class="idp-provider-card" onclick="selectIdPTemplate('adfs')" data-tpl="adfs">
+              <span style="font-size:1.8rem">🏢</span>
+              <span style="font-weight:700;font-size:.88rem">ADFS</span>
+              <span style="font-size:.68rem;color:var(--muted)">SAML 2.0</span>
+            </button>
+            <button class="idp-provider-card" onclick="selectIdPTemplate('keycloak')" data-tpl="keycloak">
+              <span style="font-size:1.8rem">🔑</span>
+              <span style="font-weight:700;font-size:.88rem">Keycloak</span>
+              <span style="font-size:.68rem;color:var(--muted)">SAML / OIDC</span>
+            </button>
+            <!-- OIDC providers -->
+            <button class="idp-provider-card" onclick="selectIdPTemplate('okta-oidc')" data-tpl="okta-oidc">
+              <span style="font-size:1.8rem">🔵</span>
+              <span style="font-weight:700;font-size:.88rem">Okta</span>
+              <span style="font-size:.68rem;color:var(--muted)">OIDC</span>
+            </button>
+            <button class="idp-provider-card" onclick="selectIdPTemplate('azure-oidc')" data-tpl="azure-oidc">
+              <span style="font-size:1.8rem">🪟</span>
+              <span style="font-weight:700;font-size:.88rem">Azure AD / Entra</span>
+              <span style="font-size:.68rem;color:var(--muted)">OIDC</span>
+            </button>
+            <button class="idp-provider-card" onclick="selectIdPTemplate('auth0')" data-tpl="auth0">
+              <span style="font-size:1.8rem">⭕</span>
+              <span style="font-weight:700;font-size:.88rem">Auth0 / Okta CIC</span>
+              <span style="font-size:.68rem;color:var(--muted)">OIDC</span>
+            </button>
+            <button class="idp-provider-card" onclick="selectIdPTemplate('generic-saml')" data-tpl="generic-saml" style="grid-column:span 1">
+              <span style="font-size:1.8rem">🔐</span>
+              <span style="font-weight:700;font-size:.88rem">Generic SAML</span>
+              <span style="font-size:.68rem;color:var(--muted)">Any SAML 2.0 IdP</span>
+            </button>
           </div>
-          <div id="idp-discover-result" style="display:none;background:var(--surface2);border-radius:6px;padding:10px;font-size:.8rem;margin-bottom:12px;word-break:break-all"></div>
-
-          <label class="field-label">Client ID *</label>
-          <input id="idp-client-id" class="input-field" placeholder="0oa..." style="width:100%;margin-bottom:12px">
-
-          <label class="field-label">Client Secret</label>
-          <input id="idp-client-secret" class="input-field" type="password" placeholder="••••••••" style="width:100%;margin-bottom:12px">
-
-          <label class="field-label">Scopes (space-separated)</label>
-          <input id="idp-scopes" class="input-field" placeholder="openid email profile groups" style="width:100%;margin-bottom:12px">
-
-          <label class="field-label">Groups Claim Name</label>
-          <input id="idp-groups-claim" class="input-field" placeholder="groups" style="width:100%;margin-bottom:12px">
         </div>
 
-        <div id="idp-saml-fields" style="display:none">
-          <label class="field-label">Metadata URL</label>
-          <input id="idp-meta-url" class="input-field" placeholder="https://idp.example.com/metadata.xml" style="width:100%;margin-bottom:12px">
+        <!-- Step 2: Configuration form -->
+        <div id="idp-step2" style="padding:0 26px 22px;display:none">
 
-          <label class="field-label">— or upload / paste Metadata XML —</label>
-          <div style="display:flex;gap:8px;margin-bottom:6px">
-            <label style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0">
-              📂 Upload XML
-              <input type="file" id="idp-meta-xml-file" accept=".xml,text/xml,application/xml" style="display:none" onchange="loadXMLFile(event)">
-            </label>
-            <span style="font-size:.75rem;color:var(--muted);align-self:center" id="idp-xml-filename">No file chosen</span>
+          <!-- Context banner (provider-specific instructions) -->
+          <div id="idp-context-banner" style="background:var(--surface2);border-radius:8px;padding:12px 14px;margin-bottom:16px;margin-top:16px;font-size:.8rem;line-height:1.65;border-left:3px solid var(--accent);display:none"></div>
+
+          <!-- SP callback info (what admin must enter INTO the IdP portal) -->
+          <div id="idp-sp-info" style="background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:.78rem;line-height:1.7;display:none">
+            <div style="font-weight:700;color:#22c55e;margin-bottom:4px;font-size:.8rem">📋 Enter these values in your IdP portal</div>
+            <div id="idp-sp-info-body"></div>
           </div>
-          <textarea id="idp-meta-xml" class="input-field" rows="5" placeholder="&lt;EntityDescriptor ...&gt;" style="width:100%;margin-bottom:12px;font-family:monospace;font-size:.8rem"></textarea>
 
-          <label class="field-label">Groups Attribute Name</label>
-          <input id="idp-saml-groups" class="input-field" placeholder="groups" style="width:100%;margin-bottom:12px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+            <div>
+              <label class="field-label">Provider Name *</label>
+              <input id="idp-name" class="input-field" placeholder="e.g. Okta Corporate" style="width:100%">
+            </div>
+            <div>
+              <label class="field-label">Email Domains <span style="font-weight:400;color:var(--muted)">(comma-sep)</span></label>
+              <input id="idp-domains" class="input-field" placeholder="corp.com, company.org" style="width:100%">
+            </div>
+          </div>
+          <input type="hidden" id="idp-type">
 
-          <label class="field-label">Email Attribute Name</label>
-          <input id="idp-saml-email" class="input-field" placeholder="email" style="width:100%;margin-bottom:12px">
+          <!-- OIDC fields -->
+          <div id="idp-oidc-fields" style="display:none">
+            <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:12px">
+              <div>
+                <label class="field-label">Issuer URL *</label>
+                <input id="idp-issuer" class="input-field" placeholder="https://your-domain.okta.com" style="width:100%">
+              </div>
+              <div style="display:flex;align-items:flex-end">
+                <button class="btn-secondary" onclick="discoverOIDC()" title="Auto-discover endpoints" style="white-space:nowrap">🔍 Discover</button>
+              </div>
+            </div>
+            <div id="idp-discover-result" style="display:none;background:var(--surface2);border-radius:6px;padding:10px;font-size:.78rem;margin-bottom:12px;word-break:break-all"></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+              <div>
+                <label class="field-label">Client ID *</label>
+                <input id="idp-client-id" class="input-field" placeholder="0oa..." style="width:100%">
+              </div>
+              <div>
+                <label class="field-label">Client Secret</label>
+                <input id="idp-client-secret" class="input-field" type="password" placeholder="••••••••" style="width:100%">
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+              <div>
+                <label class="field-label">Scopes <span style="font-weight:400;color:var(--muted)">(space-sep)</span></label>
+                <input id="idp-scopes" class="input-field" placeholder="openid email profile groups" style="width:100%">
+              </div>
+              <div>
+                <label class="field-label">Groups Claim</label>
+                <input id="idp-groups-claim" class="input-field" placeholder="groups" style="width:100%">
+              </div>
+            </div>
+          </div>
+
+          <!-- SAML fields -->
+          <div id="idp-saml-fields" style="display:none">
+            <label class="field-label">Metadata URL <span style="font-weight:400;color:var(--muted)">(recommended)</span></label>
+            <input id="idp-meta-url" class="input-field" placeholder="https://your-idp.com/metadata.xml" style="width:100%;margin-bottom:10px">
+            <label class="field-label">— or Upload / Paste Metadata XML —</label>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <label style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0">
+                📂 Upload XML
+                <input type="file" id="idp-meta-xml-file" accept=".xml,text/xml,application/xml" style="display:none" onchange="loadXMLFile(event)">
+              </label>
+              <span style="font-size:.75rem;color:var(--muted)" id="idp-xml-filename">No file chosen</span>
+            </div>
+            <textarea id="idp-meta-xml" class="input-field" rows="4" placeholder="&lt;EntityDescriptor xmlns=&quot;urn:oasis:names:tc:SAML:2.0:metadata&quot; ...&gt;" style="width:100%;margin-bottom:10px;font-family:monospace;font-size:.78rem"></textarea>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+              <div>
+                <label class="field-label">Groups Attribute <span style="font-weight:400;color:var(--muted)">(assertion)</span></label>
+                <input id="idp-saml-groups" class="input-field" placeholder="groups" style="width:100%">
+              </div>
+              <div>
+                <label class="field-label">Email Attribute <span style="font-weight:400;color:var(--muted)">(assertion)</span></label>
+                <input id="idp-saml-email" class="input-field" placeholder="email" style="width:100%">
+              </div>
+            </div>
+          </div>
+
+          <!-- Known Groups -->
+          <details style="margin-bottom:14px">
+            <summary style="cursor:pointer;font-size:.82rem;color:var(--muted);font-weight:600;list-style:none;display:flex;align-items:center;gap:6px;padding:6px 0">
+              <span>▸</span> Known Groups <span style="font-weight:400">(for Policy dropdown)</span>
+            </summary>
+            <div style="padding-top:8px">
+              <p style="font-size:.77rem;color:var(--muted);margin:0 0 6px">One group name per line. These populate the group dropdown in the Policy editor.</p>
+              <textarea id="idp-known-groups" class="input-field" rows="4" placeholder="Engineering&#10;Admins&#10;Contractors&#10;SecurityTeam" style="width:100%;font-family:monospace;font-size:.82rem"></textarea>
+            </div>
+          </details>
+
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:20px;cursor:pointer;font-size:.85rem">
+            <input type="checkbox" id="idp-enabled" checked> Enable this provider immediately
+          </label>
+
+          <div style="display:flex;gap:8px;justify-content:space-between;align-items:center">
+            <button class="btn ghost sm" id="idp-back-btn" onclick="idpGoBack()" style="display:none">← Back</button>
+            <div style="display:flex;gap:8px;margin-left:auto">
+              <button class="btn-secondary" onclick="closeIdPModal()">Cancel</button>
+              <button class="btn-primary" onclick="saveIdP()">💾 Save Provider</button>
+            </div>
+          </div>
         </div>
 
-        <label class="field-label">Known Groups <span style="font-weight:400;color:var(--muted)">(one per line — shown in Policy dropdown)</span></label>
-        <textarea id="idp-known-groups" class="input-field" rows="4" placeholder="Engineering&#10;Admins&#10;Contractors" style="width:100%;margin-bottom:12px;font-family:monospace;font-size:.82rem"></textarea>
-
-        <label style="display:flex;align-items:center;gap:8px;margin-bottom:16px;cursor:pointer">
-          <input type="checkbox" id="idp-enabled" checked> Enable this provider
-        </label>
-
-        <div style="display:flex;gap:8px;justify-content:flex-end">
-          <button class="btn-secondary" onclick="closeIdPModal()">Cancel</button>
-          <button class="btn-primary" onclick="saveIdP()">Save Provider</button>
-        </div>
       </div>
     </div>
+
+    <style>
+    .idp-provider-card {
+      display:flex;flex-direction:column;align-items:center;gap:5px;
+      background:var(--surface2);border:2px solid var(--border);border-radius:10px;
+      padding:14px 8px;cursor:pointer;transition:border-color .15s,background .15s;
+      color:var(--text);font-family:inherit;text-align:center;
+    }
+    .idp-provider-card:hover { border-color:var(--accent);background:rgba(99,102,241,.08); }
+    .idp-provider-card.selected { border-color:var(--accent);background:rgba(99,102,241,.15); }
+    </style>
 
     <!-- ── PAC FILE ───────────────────────────────────────────────────────── -->
     <div class="view" id="view-pac">
@@ -995,9 +1109,11 @@ Firefox (all platforms):
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Active Policy Rules</span>
-          <div style="display:flex;align-items:center;gap:10px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <span class="topbar-meta" id="pol-count">0 rules</span>
-            <span style="font-size:.72rem;color:var(--muted)">drag rows to reorder priority</span>
+            <span id="pol-version-badge" style="display:none;background:rgba(59,130,246,.15);color:#60a5fa;border:1px solid rgba(59,130,246,.3);border-radius:4px;padding:2px 8px;font-size:.68rem;font-weight:700;font-family:monospace" title="Policy revision. Increments on every add/edit/delete/reorder."></span>
+            <span id="pol-updated-badge" style="font-size:.68rem;color:var(--muted)" title="Last policy change"></span>
+            <span style="font-size:.72rem;color:var(--muted)">⠿ drag rows to reorder</span>
           </div>
         </div>
         <div class="tbl-wrap">
@@ -1005,7 +1121,7 @@ Firefox (all platforms):
             <thead>
               <tr>
                 <th style="width:32px"></th>
-                <th>Pri</th>
+                <th style="width:36px;color:var(--muted);font-size:.68rem">#</th>
                 <th>Name</th>
                 <th>Source</th>
                 <th>Destination</th>
@@ -1712,6 +1828,17 @@ async function fetchPolicy() {
   try {
     const d = await api('/api/policy');
     polRules = d.rules || [];
+    // Show version badge
+    const vBadge = document.getElementById('pol-version-badge');
+    const uBadge = document.getElementById('pol-updated-badge');
+    if (vBadge && d.version !== undefined) {
+      vBadge.textContent = 'v' + d.version;
+      vBadge.style.display = '';
+    }
+    if (uBadge && d.updatedAt) {
+      const dt = new Date(d.updatedAt);
+      uBadge.textContent = 'updated ' + dt.toLocaleString();
+    }
     renderPolicy();
   } catch(e) {}
 }
@@ -1738,12 +1865,12 @@ function renderPolicy() {
     tbody.innerHTML = '<tr><td colspan="9"><div class="empty-state"><div class="empty-icon">📋</div>No policy rules — traffic is unrestricted</div></td></tr>';
     return;
   }
-  tbody.innerHTML = polRules.map(r => {
+  tbody.innerHTML = polRules.map((r, idx) => {
     const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const dest = [r.destFQDN, r.destCategory].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     return `<tr draggable="true" data-priority="${r.priority}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
-      <td style="color:var(--muted);font-size:.78rem;font-weight:700">${r.priority}</td>
+      <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
       <td style="font-weight:600">${r.name}</td>
       <td style="font-size:.78rem;font-family:monospace">${src}</td>
       <td style="font-size:.78rem;font-family:monospace">${dest}</td>
@@ -2199,7 +2326,7 @@ function renderPolicy() {
     tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">📋</div>No policy rules yet — default action applies to all traffic</div></td></tr>';
     return;
   }
-  tbody.innerHTML = polRules.map(r => {
+  tbody.innerHTML = polRules.map((r, idx) => {
     const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const destParts = [r.destFQDN, r.destCategory].filter(Boolean);
     const dest = destParts.join(' / ') || '<span style="color:var(--muted)">Any</span>';
@@ -2211,7 +2338,7 @@ function renderPolicy() {
       : '<span style="color:var(--muted)">—</span>';
     return `<tr draggable="true" data-priority="${r.priority}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
-      <td style="color:var(--muted);font-size:.78rem;font-weight:700">${r.priority}</td>
+      <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
       <td style="font-weight:600">${r.name}</td>
       <td style="font-size:.78rem;font-family:monospace">${src}</td>
       <td style="font-size:.78rem;font-family:monospace">${dest}</td>
@@ -2419,32 +2546,201 @@ async function loadIdPList() {
   }).join('');
 }
 
+// ─── IdP wizard templates ─────────────────────────────────────────────────
+// Each template pre-fills defaults and shows contextual hints.
+const IDP_TEMPLATES = {
+  'okta-saml': {
+    type: 'saml', name: 'Okta', icon: '🔵',
+    metaUrlHint: 'https://YOUR-ORG.okta.com/app/APP-ID/sso/saml/metadata',
+    groupsAttr: 'groups', emailAttr: 'email',
+    banner: '🔵 <b>Okta SAML</b>: In Okta Admin → Applications → Create App Integration → SAML 2.0. Enter the ACS URL and SP Entity ID below into Okta. Add a <em>Group Attribute Statement</em> named <code>groups</code> with filter "Matches regex .*" to pass group memberships.',
+    spInfo: true,
+  },
+  'azure-saml': {
+    type: 'saml', name: 'Azure AD / Entra ID', icon: '🪟',
+    metaUrlHint: 'https://login.microsoftonline.com/TENANT-ID/federationmetadata/2007-06/federationmetadata.xml',
+    groupsAttr: 'http://schemas.microsoft.com/ws/2008/06/identity/claims/groups',
+    emailAttr: 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress',
+    banner: '🪟 <b>Azure AD / Entra ID SAML</b>: In Azure Portal → Enterprise Applications → New application → Create your own → "Integrate any other application". Set ACS URL and Entity ID. Under <em>Attributes & Claims</em>, add a Groups claim. Replace the groups attribute name below if you want group display names instead of GUIDs (requires group claim transformation).',
+    spInfo: true,
+  },
+  'google-saml': {
+    type: 'saml', name: 'Google Workspace', icon: '🔴',
+    metaUrlHint: '',
+    groupsAttr: 'groups', emailAttr: 'email',
+    banner: '🔴 <b>Google Workspace SAML</b>: In Google Admin → Apps → Web and mobile apps → Add custom SAML app. Download the IdP metadata XML and upload it here. Map <em>email</em> and any custom group attribute under <em>Attribute mapping</em> in the Google app. Note: Google does not natively pass group memberships — you need a custom attribute or use LDAP.',
+    spInfo: true,
+  },
+  'adfs': {
+    type: 'saml', name: 'ADFS', icon: '🏢',
+    metaUrlHint: 'https://adfs.YOUR-DOMAIN.com/FederationMetadata/2007-06/FederationMetadata.xml',
+    groupsAttr: 'http://schemas.microsoft.com/ws/2008/06/identity/claims/groups',
+    emailAttr: 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress',
+    banner: '🏢 <b>ADFS</b>: In ADFS Management → Relying Party Trusts → Add Relying Party Trust. Import federation metadata from the URL below, or enter the ACS URL manually. Add Claim Rules: <em>Send LDAP Attributes as Claims</em> for email/UPN; <em>Send Group Membership as Claim</em> for each group you want to pass.',
+    spInfo: true,
+  },
+  'keycloak': {
+    type: 'saml', name: 'Keycloak', icon: '🔑',
+    metaUrlHint: 'https://YOUR-KEYCLOAK/realms/YOUR-REALM/protocol/saml/descriptor',
+    groupsAttr: 'Role', emailAttr: 'email',
+    banner: '🔑 <b>Keycloak SAML</b>: In Keycloak Admin → Clients → Create client (SAML protocol). Set Client ID to the SP Entity ID. Under <em>Mappers</em> add a <em>Role List</em> mapper (attribute name: <code>Role</code>) and a <em>User Attribute</em> mapper for <code>email</code>.',
+    spInfo: true,
+  },
+  'okta-oidc': {
+    type: 'oidc', name: 'Okta', icon: '🔵',
+    issuerHint: 'https://YOUR-ORG.okta.com',
+    scopes: 'openid email profile groups', groupsClaim: 'groups',
+    banner: '🔵 <b>Okta OIDC</b>: In Okta Admin → Applications → Create App Integration → OIDC → Web Application. Copy the Issuer URL, Client ID and Client Secret here. Enable the <em>groups</em> scope and add a groups claim filter in Okta.',
+    spInfo: false,
+  },
+  'azure-oidc': {
+    type: 'oidc', name: 'Azure AD / Entra ID', icon: '🪟',
+    issuerHint: 'https://login.microsoftonline.com/TENANT-ID/v2.0',
+    scopes: 'openid email profile', groupsClaim: 'groups',
+    banner: '🪟 <b>Azure AD OIDC</b>: In Azure Portal → App registrations → New registration. Add a <em>Web</em> redirect URI with the callback URL shown below. Copy the Directory (Tenant) ID for the issuer. Under <em>Certificates &amp; secrets</em> create a secret. Add optional claims for <em>email</em> and <em>groups</em> in Token configuration.',
+    spInfo: false,
+  },
+  'auth0': {
+    type: 'oidc', name: 'Auth0', icon: '⭕',
+    issuerHint: 'https://YOUR-DOMAIN.auth0.com',
+    scopes: 'openid email profile', groupsClaim: 'https://YOUR-DOMAIN/groups',
+    banner: '⭕ <b>Auth0 / Okta CIC</b>: In Auth0 Dashboard → Applications → Create Application → Regular Web Application. Copy the Domain as the Issuer URL. Add the callback URL as an Allowed Callback URL. To pass groups create a <em>Login Action</em> that sets a custom claim on the ID token.',
+    spInfo: false,
+  },
+  'generic-saml': {
+    type: 'saml', name: '', icon: '🔐',
+    metaUrlHint: 'https://your-idp.com/metadata.xml',
+    groupsAttr: 'groups', emailAttr: 'email',
+    banner: '🔐 <b>Generic SAML 2.0</b>: Provide the ACS URL and SP Entity ID below to your IdP admin. Get the metadata URL or XML from your IdP and paste/upload it. Map the attribute names for email and group memberships to match what your IdP sends.',
+    spInfo: true,
+  },
+};
+
+let _idpWizardBaseURL = '';
+
+function _idpSPInfoHTML() {
+  const base = _idpWizardBaseURL || (window.location.protocol + '//' + window.location.host);
+  return `<div><b>ACS URL (Assertion Consumer Service):</b><br>
+    <code style="background:var(--bg);padding:2px 6px;border-radius:4px;font-size:.82rem;word-break:break-all">${escHtml(base + '/auth/saml/callback')}</code></div>
+    <div style="margin-top:6px"><b>SP Entity ID:</b><br>
+    <code style="background:var(--bg);padding:2px 6px;border-radius:4px;font-size:.82rem;word-break:break-all">${escHtml(base)}</code></div>
+    <div style="margin-top:6px"><b>Name ID Format:</b> <code>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</code></div>`;
+}
+
+function _idpOIDCCallbackHTML() {
+  const base = _idpWizardBaseURL || (window.location.protocol + '//' + window.location.host);
+  return `<div><b>Redirect / Callback URI:</b><br>
+    <code style="background:var(--bg);padding:2px 6px;border-radius:4px;font-size:.82rem;word-break:break-all">${escHtml(base + '/auth/oidc/callback')}</code></div>`;
+}
+
+function selectIdPTemplate(tpl) {
+  const t = IDP_TEMPLATES[tpl];
+  if (!t) return;
+  // Highlight selected card
+  document.querySelectorAll('.idp-provider-card').forEach(c => c.classList.remove('selected'));
+  const btn = document.querySelector(`.idp-provider-card[data-tpl="${tpl}"]`);
+  if (btn) btn.classList.add('selected');
+
+  // Pre-fill type and name
+  document.getElementById('idp-type').value = t.type;
+  if (t.name) document.getElementById('idp-name').value = t.name;
+  // OIDC defaults
+  if (t.scopes) document.getElementById('idp-scopes').value = t.scopes;
+  if (t.groupsClaim) document.getElementById('idp-groups-claim').value = t.groupsClaim;
+  if (t.issuerHint) document.getElementById('idp-issuer').placeholder = t.issuerHint;
+  // SAML defaults
+  if (t.metaUrlHint) document.getElementById('idp-meta-url').placeholder = t.metaUrlHint;
+  if (t.groupsAttr) document.getElementById('idp-saml-groups').value = t.groupsAttr;
+  if (t.emailAttr) document.getElementById('idp-saml-email').value = t.emailAttr;
+
+  // Show banner
+  const banner = document.getElementById('idp-context-banner');
+  if (t.banner) {
+    banner.innerHTML = t.banner;
+    banner.style.display = '';
+  } else {
+    banner.style.display = 'none';
+  }
+  // SP info
+  const spDiv = document.getElementById('idp-sp-info');
+  const spBody = document.getElementById('idp-sp-info-body');
+  if (t.spInfo) {
+    spBody.innerHTML = _idpSPInfoHTML();
+    spDiv.style.display = '';
+  } else {
+    spBody.innerHTML = _idpOIDCCallbackHTML();
+    spDiv.style.display = '';
+  }
+
+  // Go to step 2
+  document.getElementById('idp-step1').style.display = 'none';
+  document.getElementById('idp-step2').style.display = '';
+  document.getElementById('idp-step-label').textContent = 'Step 2 of 2 — Configure';
+  document.getElementById('idp-back-btn').style.display = '';
+  document.getElementById('idp-modal-title').textContent = `Configure ${t.icon} ${t.name || 'Identity Provider'}`;
+  toggleIdPTypeFields();
+}
+
+function idpGoBack() {
+  document.getElementById('idp-step1').style.display = '';
+  document.getElementById('idp-step2').style.display = 'none';
+  document.getElementById('idp-step-label').textContent = 'Step 1 of 2 — Choose Provider';
+  document.getElementById('idp-back-btn').style.display = 'none';
+  document.getElementById('idp-modal-title').textContent = 'Add Identity Provider';
+}
+
 function openIdPModal(p) {
-  document.getElementById('idp-modal-title').textContent = p ? 'Edit Identity Provider' : 'Add Identity Provider';
-  document.getElementById('idp-edit-id').value   = p ? p.id   : '';
-  document.getElementById('idp-name').value       = p ? p.name : '';
-  document.getElementById('idp-type').value       = p ? p.type : 'oidc';
-  document.getElementById('idp-enabled').checked  = p ? p.enabled : true;
-  const domains = p && p.emailDomains ? p.emailDomains.join(', ') : '';
-  document.getElementById('idp-domains').value = domains;
-  // OIDC fields
-  const oidc = (p && p.oidc) || {};
-  document.getElementById('idp-issuer').value       = oidc.issuer       || '';
-  document.getElementById('idp-client-id').value    = oidc.clientId     || '';
-  document.getElementById('idp-client-secret').value= oidc.clientSecret || '';
-  document.getElementById('idp-scopes').value       = (oidc.scopes || []).join(' ');
-  document.getElementById('idp-groups-claim').value = oidc.groupsClaim  || '';
-  // SAML fields
-  const saml = (p && p.saml) || {};
-  document.getElementById('idp-meta-url').value    = saml.metadataUrl    || '';
-  document.getElementById('idp-meta-xml').value    = saml.metadataXml    || '';
-  document.getElementById('idp-saml-groups').value = saml.groupsAttribute|| '';
-  document.getElementById('idp-saml-email').value  = saml.emailAttribute || '';
-  // Known groups
+  _idpWizardBaseURL = window.location.protocol + '//' + window.location.host;
+  document.getElementById('idp-edit-id').value = p ? p.id : '';
+  document.getElementById('idp-enabled').checked = p ? p.enabled : true;
   document.getElementById('idp-known-groups').value = (p && p.knownGroups ? p.knownGroups : []).join('\n');
   document.getElementById('idp-xml-filename').textContent = 'No file chosen';
   document.getElementById('idp-discover-result').style.display = 'none';
-  toggleIdPTypeFields();
+  document.getElementById('idp-context-banner').style.display = 'none';
+
+  if (p) {
+    // Edit mode — skip step 1, go straight to form
+    document.getElementById('idp-step1').style.display = 'none';
+    document.getElementById('idp-step2').style.display = '';
+    document.getElementById('idp-step-label').textContent = 'Edit Provider';
+    document.getElementById('idp-back-btn').style.display = 'none';
+    document.getElementById('idp-modal-title').textContent = 'Edit Identity Provider';
+    document.getElementById('idp-type').value = p.type;
+    document.getElementById('idp-name').value = p.name || '';
+    const domains = p.emailDomains ? p.emailDomains.join(', ') : '';
+    document.getElementById('idp-domains').value = domains;
+    const oidc = p.oidc || {};
+    document.getElementById('idp-issuer').value       = oidc.issuer       || '';
+    document.getElementById('idp-client-id').value    = oidc.clientId     || '';
+    document.getElementById('idp-client-secret').value= oidc.clientSecret || '';
+    document.getElementById('idp-scopes').value       = (oidc.scopes || []).join(' ');
+    document.getElementById('idp-groups-claim').value = oidc.groupsClaim  || '';
+    const saml = p.saml || {};
+    document.getElementById('idp-meta-url').value    = saml.metadataUrl    || '';
+    document.getElementById('idp-meta-xml').value    = saml.metadataXml    || '';
+    document.getElementById('idp-saml-groups').value = saml.groupsAttribute|| '';
+    document.getElementById('idp-saml-email').value  = saml.emailAttribute || '';
+    // Show SP info for SAML
+    if (p.type === 'saml') {
+      document.getElementById('idp-sp-info-body').innerHTML = _idpSPInfoHTML();
+      document.getElementById('idp-sp-info').style.display = '';
+    } else {
+      document.getElementById('idp-sp-info-body').innerHTML = _idpOIDCCallbackHTML();
+      document.getElementById('idp-sp-info').style.display = '';
+    }
+    toggleIdPTypeFields();
+  } else {
+    // Add mode — show step 1 (provider picker)
+    document.getElementById('idp-step1').style.display = '';
+    document.getElementById('idp-step2').style.display = 'none';
+    document.getElementById('idp-step-label').textContent = 'Step 1 of 2 — Choose Provider';
+    document.getElementById('idp-back-btn').style.display = 'none';
+    document.getElementById('idp-modal-title').textContent = 'Add Identity Provider';
+    document.getElementById('idp-sp-info').style.display = 'none';
+    // Reset form
+    ['idp-name','idp-domains','idp-issuer','idp-client-id','idp-client-secret','idp-scopes','idp-groups-claim','idp-meta-url','idp-meta-xml','idp-saml-groups','idp-saml-email'].forEach(id => document.getElementById(id).value = '');
+    document.querySelectorAll('.idp-provider-card').forEach(c => c.classList.remove('selected'));
+  }
   document.getElementById('idp-modal').style.display = 'block';
 }
 
@@ -2464,7 +2760,7 @@ function toggleIdPTypeFields() {
 
 async function discoverOIDC() {
   const issuer = document.getElementById('idp-issuer').value.trim();
-  if (!issuer) { alert('Enter an Issuer URL first.'); return; }
+  if (!issuer) { toast('Enter an Issuer URL first', 'error'); return; }
   const res = await apiFetch('/api/idp/discover', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ issuer }) });
   const el = document.getElementById('idp-discover-result');
   if (!res.ok) {
@@ -2476,11 +2772,10 @@ async function discoverOIDC() {
   }
   const doc = await res.json();
   el.style.display = 'block';
-  el.style.color = 'var(--text)';
-  el.innerHTML = [
+  el.style.color = '#22c55e';
+  el.innerHTML = '✅ Discovered endpoints:<br>' + [
     doc.authorization_endpoint && `<b>Auth:</b> ${escHtml(doc.authorization_endpoint)}`,
     doc.token_endpoint          && `<b>Token:</b> ${escHtml(doc.token_endpoint)}`,
-    doc.introspection_endpoint  && `<b>Introspect:</b> ${escHtml(doc.introspection_endpoint)}`,
     doc.userinfo_endpoint       && `<b>Userinfo:</b> ${escHtml(doc.userinfo_endpoint)}`,
     doc.jwks_uri                && `<b>JWKs:</b> ${escHtml(doc.jwks_uri)}`,
   ].filter(Boolean).join('<br>');

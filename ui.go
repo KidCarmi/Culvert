@@ -678,7 +678,13 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		rules := policyStore.List()
-		jsonOK(w, map[string]any{"rules": rules, "count": len(rules)})
+		ver, updatedAt := policyStore.policyVersion()
+		jsonOK(w, map[string]any{
+			"rules":     rules,
+			"count":     len(rules),
+			"version":   ver,
+			"updatedAt": updatedAt,
+		})
 
 	case http.MethodPost:
 		var rule PolicyRule

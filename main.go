@@ -112,6 +112,9 @@ func main() {
 	if err := pacStore.Load(pacCfgPath); err != nil {
 		log.Fatalf("PAC config load error: %v", err)
 	}
+	// Tell the PAC generator the real proxy port so /proxy.pac auto-generates
+	// the correct PROXY directive even when the admin hasn't explicitly set it.
+	pacDefaultProxyPort = pPort
 
 	// ── Legacy external auth provider (LDAP / OIDC introspection) ────────────
 	// LDAP takes precedence when URL is configured.
