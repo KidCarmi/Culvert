@@ -46,6 +46,19 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
 
+	// ── Generic IdP Framework ─────────────────────────────────────────────
+	mux.HandleFunc("/api/idp", apiIdPList)           // GET list / POST create
+	mux.HandleFunc("/api/idp/", apiIdPItem)          // GET|PUT|DELETE /api/idp/{id}
+	mux.HandleFunc("/api/idp/discover", apiIdPDiscover) // POST: run OIDC discovery
+
+	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
+	// These are reached by browser redirects from IdPs (not admin UI calls).
+	// They are registered on the same UI port; the proxy port handles traffic.
+	mux.HandleFunc("/auth/oidc/callback", authOIDCCallback)
+	mux.HandleFunc("/auth/saml/callback", authSAMLCallback)
+	mux.HandleFunc("/auth/select", authSelectProvider) // IdP selection screen
+	mux.HandleFunc("/auth/logout", authLogout)
+
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler:      securityMiddleware(uiAuthMiddleware(mux)),
@@ -934,4 +947,212 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// ── Generic IdP Framework API ────────────────────────────────────────────────
+
+// GET /api/idp          — list all profiles
+// POST /api/idp         — create a new profile
+func apiIdPList(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, idpRegistry.All())
+	case http.MethodPost:
+		var p IdPProfile
+		if err := decodeJSON(r, &p); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		p.ID = "" // force generation of new ID
+		if err := idpRegistry.Upsert(&p); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEventDiff(r, "idp.create", p.ID, p.Name, nil, &p)
+		logger.Printf("UI: IdP profile created id=%s name=%q type=%s", p.ID, p.Name, p.Type)
+		jsonOK(w, &p)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET /api/idp/{id}     — get profile
+// PUT /api/idp/{id}     — update profile
+// DELETE /api/idp/{id}  — delete profile
+func apiIdPItem(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/idp/")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		p := idpRegistry.Get(id)
+		if p == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		jsonOK(w, p)
+	case http.MethodPut:
+		before := idpRegistry.Get(id)
+		var p IdPProfile
+		if err := decodeJSON(r, &p); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		p.ID = id
+		if err := idpRegistry.Upsert(&p); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEventDiff(r, "idp.update", id, p.Name, before, &p)
+		logger.Printf("UI: IdP profile updated id=%s name=%q", id, p.Name)
+		jsonOK(w, &p)
+	case http.MethodDelete:
+		p := idpRegistry.Get(id)
+		if err := idpRegistry.Delete(id); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		auditEventDiff(r, "idp.delete", id, "", p, nil)
+		logger.Printf("UI: IdP profile deleted id=%s", id)
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST /api/idp/discover — run OIDC discovery for a given issuer URL and
+// return the discovered endpoints without saving anything.
+func apiIdPDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Issuer string `json:"issuer"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := validateExternalURL(body.Issuer); err != nil {
+		http.Error(w, "issuer: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	doc, err := fetchOIDCDiscovery(body.Issuer)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	jsonOK(w, doc)
+}
+
+// ── Auth callbacks ───────────────────────────────────────────────────────────
+
+// GET /auth/oidc/callback?code=...&state=...
+// Called by the IdP after the user authenticates (Authorization Code flow).
+func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+	if code == "" || state == "" {
+		http.Error(w, "missing code or state", http.StatusBadRequest)
+		return
+	}
+	// Find provider by state (providerID is stored inside the PKCE entry).
+	entry, ok := globalPKCEStore.peek(state)
+	if !ok {
+		http.Error(w, "invalid or expired state", http.StatusBadRequest)
+		return
+	}
+	prov, ok := idpRegistry.LiveProvider(entry.providerID)
+	if !ok {
+		http.Error(w, "provider not found", http.StatusInternalServerError)
+		return
+	}
+	oidcProv, ok := prov.(*OIDCFlowProvider)
+	if !ok {
+		http.Error(w, "provider is not OIDC", http.StatusInternalServerError)
+		return
+	}
+	id, err := oidcProv.ExchangeCode(code, state)
+	if err != nil {
+		logger.Printf("OIDC callback error: %v", err)
+		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		return
+	}
+	if err := setSessionCookie(w, id); err != nil {
+		http.Error(w, "session error", http.StatusInternalServerError)
+		return
+	}
+	// Redirect to the original URL the user was trying to reach.
+	relayURL := entry.relayURL
+	if relayURL == "" || !isSafeRedirectURL(relayURL) {
+		relayURL = "/"
+	}
+	logger.Printf("OIDC login OK: user=%s email=%s provider=%s", id.Sub, id.Email, id.Provider)
+	http.Redirect(w, r, relayURL, http.StatusFound)
+}
+
+// POST /auth/saml/callback
+// Called by the IdP's POST binding after SAML authentication.
+func authSAMLCallback(w http.ResponseWriter, r *http.Request) {
+	// Determine which SAML provider this response belongs to.
+	// We try all enabled SAML providers and use the one that validates cleanly.
+	for _, prov := range idpRegistry.EnabledProviders() {
+		samlProv, ok := prov.(*SAMLProvider)
+		if !ok {
+			continue
+		}
+		id, relayURL, err := samlProv.ExchangeAssertion(r)
+		if err != nil {
+			continue // try next provider
+		}
+		if err := setSessionCookie(w, id); err != nil {
+			http.Error(w, "session error", http.StatusInternalServerError)
+			return
+		}
+		if relayURL == "" || !isSafeRedirectURL(relayURL) {
+			relayURL = "/"
+		}
+		logger.Printf("SAML login OK: user=%s email=%s provider=%s", id.Sub, id.Email, id.Provider)
+		http.Redirect(w, r, relayURL, http.StatusFound)
+		return
+	}
+	http.Error(w, "SAML authentication failed", http.StatusUnauthorized)
+}
+
+// GET /auth/select?relay=...  — IdP selection screen for multi-tenancy.
+// Renders a minimal HTML page listing all enabled providers.
+func authSelectProvider(w http.ResponseWriter, r *http.Request) {
+	relay := r.URL.Query().Get("relay")
+	if relay == "" {
+		relay = "/"
+	}
+	providers := idpRegistry.EnabledProviders()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html><html><head>
+<meta charset="utf-8"><title>ProxyShield — Sign In</title>
+<style>body{font-family:sans-serif;max-width:400px;margin:80px auto;padding:0 16px}
+h1{font-size:1.4rem}a.btn{display:block;padding:12px 16px;margin:8px 0;border-radius:6px;
+background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover{background:#1d4ed8}
+</style></head><body><h1>Sign in to ProxyShield</h1>`)
+	for _, p := range providers {
+		loginURL := p.CaptiveLoginURL(relay)
+		if loginURL == "" {
+			continue
+		}
+		fmt.Fprintf(w, `<a class="btn" href="%s">Continue with %s</a>`,
+			loginURL, p.Name())
+	}
+	if len(providers) == 0 {
+		fmt.Fprintf(w, `<p>No identity providers are configured.</p>`)
+	}
+	fmt.Fprintf(w, `</body></html>`)
+}
+
+// POST /auth/logout — clear session cookie.
+func authLogout(w http.ResponseWriter, r *http.Request) {
+	clearSessionCookie(w)
+	http.Redirect(w, r, "/", http.StatusFound)
 }

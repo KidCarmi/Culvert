@@ -487,6 +487,17 @@ func (c *Config) ProviderEnabled() bool {
 // oidcLoginURL stores the OIDC authorization/login URL for browser redirects.
 var oidcLoginURL string
 
+// proxyExternalBaseURL is the externally-visible base URL of the proxy UI
+// (e.g. "https://proxy.corp.com:9090").  Set by SetProxyBaseURL() at startup.
+// Used to build OIDC/SAML callback redirect_uris.
+var proxyExternalBaseURL string
+
+// SetProxyBaseURL sets the external base URL used for OIDC/SAML callbacks.
+func SetProxyBaseURL(u string) { proxyExternalBaseURL = strings.TrimRight(u, "/") }
+
+// ProxyBaseURL returns the configured external base URL (empty if not set).
+func (c *Config) ProxyBaseURL() string { return proxyExternalBaseURL }
+
 // SetOIDCLoginURL stores the OIDC authorization URL so the proxy can redirect
 // unauthenticated browser requests to the OIDC captive portal.
 func SetOIDCLoginURL(u string) { oidcLoginURL = u }

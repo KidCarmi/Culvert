@@ -256,6 +256,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="rewrite">
       <span class="icon">✏️</span> Rewrite
     </div>
+    <div class="nav-item" data-view="idproviders">
+      <span class="icon">🪪</span> Identity Providers
+    </div>
     <div class="nav-item" data-view="certificates">
       <span class="icon">🔑</span> Certificates
     </div>
@@ -548,6 +551,79 @@ tr.dragging  { opacity: .4; }
       </div>
     </div>
 
+    <!-- ── IDENTITY PROVIDERS ─────────────────────────────────────────────── -->
+    <div class="view" id="view-idproviders">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin:0">Identity Providers</h2>
+        <button class="btn-primary" onclick="openIdPModal()">+ Add Provider</button>
+      </div>
+      <div id="idp-list" style="display:grid;gap:12px"></div>
+    </div>
+
+    <!-- ── IdP MODAL ───────────────────────────────────────────────────────── -->
+    <div id="idp-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;overflow-y:auto">
+      <div style="background:var(--surface1);border-radius:10px;max-width:540px;margin:60px auto;padding:24px">
+        <h3 id="idp-modal-title" style="margin-top:0">Add Identity Provider</h3>
+        <input type="hidden" id="idp-edit-id">
+
+        <label class="field-label">Provider Name *</label>
+        <input id="idp-name" class="input-field" placeholder="e.g. Okta Corporate" style="width:100%;margin-bottom:12px">
+
+        <label class="field-label">Type *</label>
+        <select id="idp-type" class="input-field" style="width:100%;margin-bottom:12px" onchange="toggleIdPTypeFields()">
+          <option value="oidc">OIDC (OpenID Connect)</option>
+          <option value="saml">SAML 2.0</option>
+        </select>
+
+        <label class="field-label">Email Domains (comma-separated)</label>
+        <input id="idp-domains" class="input-field" placeholder="corp.com, company.org" style="width:100%;margin-bottom:12px">
+
+        <div id="idp-oidc-fields">
+          <label class="field-label">Issuer URL *</label>
+          <div style="display:flex;gap:8px;margin-bottom:12px">
+            <input id="idp-issuer" class="input-field" placeholder="https://your-domain.okta.com" style="flex:1">
+            <button class="btn-secondary" onclick="discoverOIDC()" title="Auto-discover endpoints">Discover</button>
+          </div>
+          <div id="idp-discover-result" style="display:none;background:var(--surface2);border-radius:6px;padding:10px;font-size:.8rem;margin-bottom:12px;word-break:break-all"></div>
+
+          <label class="field-label">Client ID *</label>
+          <input id="idp-client-id" class="input-field" placeholder="0oa..." style="width:100%;margin-bottom:12px">
+
+          <label class="field-label">Client Secret</label>
+          <input id="idp-client-secret" class="input-field" type="password" placeholder="••••••••" style="width:100%;margin-bottom:12px">
+
+          <label class="field-label">Scopes (space-separated)</label>
+          <input id="idp-scopes" class="input-field" placeholder="openid email profile groups" style="width:100%;margin-bottom:12px">
+
+          <label class="field-label">Groups Claim Name</label>
+          <input id="idp-groups-claim" class="input-field" placeholder="groups" style="width:100%;margin-bottom:12px">
+        </div>
+
+        <div id="idp-saml-fields" style="display:none">
+          <label class="field-label">Metadata URL</label>
+          <input id="idp-meta-url" class="input-field" placeholder="https://idp.example.com/metadata.xml" style="width:100%;margin-bottom:12px">
+
+          <label class="field-label">— or paste Metadata XML —</label>
+          <textarea id="idp-meta-xml" class="input-field" rows="5" placeholder="&lt;EntityDescriptor ...&gt;" style="width:100%;margin-bottom:12px;font-family:monospace;font-size:.8rem"></textarea>
+
+          <label class="field-label">Groups Attribute Name</label>
+          <input id="idp-saml-groups" class="input-field" placeholder="groups" style="width:100%;margin-bottom:12px">
+
+          <label class="field-label">Email Attribute Name</label>
+          <input id="idp-saml-email" class="input-field" placeholder="email" style="width:100%;margin-bottom:12px">
+        </div>
+
+        <label style="display:flex;align-items:center;gap:8px;margin-bottom:16px;cursor:pointer">
+          <input type="checkbox" id="idp-enabled" checked> Enable this provider
+        </label>
+
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn-secondary" onclick="closeIdPModal()">Cancel</button>
+          <button class="btn-primary" onclick="saveIdP()">Save Provider</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ── CERTIFICATES ───────────────────────────────────────────────────── -->
     <div class="view" id="view-certificates">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start">
@@ -776,8 +852,12 @@ Firefox (all platforms):
               <input type="text" class="input" style="width:100%" id="pol-src-ip" placeholder="10.0.0.0/8 or 1.2.3.4">
             </div>
             <div>
-              <label class="form-label">Source Identity <span style="color:var(--muted);font-weight:400">(user/group mock)</span></label>
-              <input type="text" class="input" style="width:100%" id="pol-src-id" placeholder="alice or engineering">
+              <label class="form-label">Source Identity <span style="color:var(--muted);font-weight:400">(username)</span></label>
+              <input type="text" class="input" style="width:100%" id="pol-src-id" placeholder="alice">
+            </div>
+            <div>
+              <label class="form-label">Source Group <span style="color:var(--muted);font-weight:400">(IdP group/role)</span></label>
+              <input type="text" class="input" style="width:100%" id="pol-src-group" placeholder="engineering or Admins">
             </div>
             <div>
               <label class="form-label">Redirect URL <span style="color:var(--muted);font-weight:400">(for Redirect action)</span></label>
@@ -986,6 +1066,7 @@ const viewMeta = {
   policy:       { title: 'Policy',        meta: 'Policy-Based Access Control (PBAC) rules' },
   fileblock:    { title: 'File Block',    meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   rewrite:      { title: 'Rewrite',       meta: 'Header injection & removal rules' },
+  idproviders:  { title: 'Identity Providers', meta: 'OIDC & SAML 2.0 identity provider profiles' },
   certificates: { title: 'Certificates', meta: 'Root CA management & custom TLS certificates' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
 };
@@ -1003,6 +1084,7 @@ function switchView(name) {
   const m = viewMeta[name] || {};
   document.getElementById('topbar-title').textContent = m.title || name;
   document.getElementById('topbar-meta').textContent  = m.meta  || '';
+  if (name === 'idproviders') loadIdPList();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1083,6 +1165,16 @@ async function api(path, opts={}) {
   if (!r.ok) throw new Error(await r.text());
   if (r.status === 204) return null;
   return r.json();
+}
+
+// apiFetch — like api() but returns the Response so callers can check ok/status.
+async function apiFetch(path, opts={}) {
+  return fetch(BASE + path, opts);
+}
+
+// escHtml — escape HTML special chars to prevent XSS in innerHTML.
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1557,7 +1649,7 @@ function renderPolicy() {
     return;
   }
   tbody.innerHTML = polRules.map(r => {
-    const src = [r.sourceIP, r.sourceIdentity].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const dest = [r.destFQDN, r.destCategory].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     return `<tr draggable="true" data-priority="${r.priority}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
@@ -1585,7 +1677,8 @@ function editPolicy(priority) {
   document.getElementById('pol-name').value       = r.name;
   document.getElementById('pol-action').value     = r.action;
   document.getElementById('pol-src-ip').value     = r.sourceIP || '';
-  document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
+  document.getElementById('pol-src-id').value       = r.sourceIdentity || '';
+  document.getElementById('pol-src-group').value    = r.sourceGroup    || '';
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
   document.getElementById('pol-dest-cat').value   = r.destCategory || '';
@@ -1607,7 +1700,7 @@ function cancelPolicyEdit() {
 }
 
 function clearPolicyForm() {
-  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-redirect','pol-dest-fqdn'].forEach(id =>
+  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-src-group','pol-redirect','pol-dest-fqdn'].forEach(id =>
     document.getElementById(id).value = '');
   document.getElementById('pol-action').value    = 'Allow';
   document.getElementById('pol-dest-cat').value  = '';
@@ -1629,6 +1722,7 @@ async function submitPolicyRule() {
     action,
     sourceIP:       document.getElementById('pol-src-ip').value.trim(),
     sourceIdentity: document.getElementById('pol-src-id').value.trim(),
+    sourceGroup:    document.getElementById('pol-src-group').value.trim(),
     redirectURL:    document.getElementById('pol-redirect').value.trim(),
     destFQDN:       document.getElementById('pol-dest-fqdn').value.trim(),
     destCategory:   document.getElementById('pol-dest-cat').value || '',
@@ -1913,7 +2007,8 @@ function editPolicy(priority) {
   document.getElementById('pol-name').value       = r.name;
   document.getElementById('pol-action').value     = r.action;
   document.getElementById('pol-src-ip').value     = r.sourceIP || '';
-  document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
+  document.getElementById('pol-src-id').value       = r.sourceIdentity || '';
+  document.getElementById('pol-src-group').value    = r.sourceGroup    || '';
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
   document.getElementById('pol-dest-cat').value   = r.destCategory || '';
@@ -1930,7 +2025,7 @@ function editPolicy(priority) {
 
 const _origClearPolicyForm = window.clearPolicyForm;
 function clearPolicyForm() {
-  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-redirect','pol-dest-fqdn','pol-dest-country'].forEach(id =>
+  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-src-group','pol-redirect','pol-dest-fqdn','pol-dest-country'].forEach(id =>
     document.getElementById(id).value = '');
   document.getElementById('pol-action').value       = 'Allow';
   document.getElementById('pol-dest-cat').value     = '';
@@ -1956,6 +2051,7 @@ async function submitPolicyRule() {
     action,
     sourceIP:       document.getElementById('pol-src-ip').value.trim(),
     sourceIdentity: document.getElementById('pol-src-id').value.trim(),
+    sourceGroup:    document.getElementById('pol-src-group').value.trim(),
     redirectURL:    document.getElementById('pol-redirect').value.trim(),
     destFQDN:       document.getElementById('pol-dest-fqdn').value.trim(),
     destCategory:   document.getElementById('pol-dest-cat').value || '',
@@ -1998,7 +2094,7 @@ function renderPolicy() {
     return;
   }
   tbody.innerHTML = polRules.map(r => {
-    const src = [r.sourceIP, r.sourceIdentity].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const destParts = [r.destFQDN, r.destCategory].filter(Boolean);
     const dest = destParts.join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const countryCell = r.destCountry && r.destCountry.length
@@ -2142,8 +2238,148 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.view === 'dashboard')     fetchTopHosts();
     if (el.dataset.view === 'policy')        { fetchPolicy(); loadDefaultAction(); }
     if (el.dataset.view === 'certificates')  loadCACertInfo();
+    if (el.dataset.view === 'idproviders')   loadIdPList();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Identity Providers
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function loadIdPList() {
+  const res = await apiFetch('/api/idp');
+  if (!res.ok) return;
+  const list = await res.json();
+  const el = document.getElementById('idp-list');
+  if (!list || list.length === 0) {
+    el.innerHTML = '<p style="color:var(--muted)">No identity providers configured. Click "+ Add Provider" to get started.</p>';
+    return;
+  }
+  el.innerHTML = list.map(p => `
+    <div style="background:var(--surface1);border-radius:8px;padding:16px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <strong>${escHtml(p.name)}</strong>
+        <span style="background:var(--surface2);border-radius:4px;padding:2px 8px;font-size:.75rem;margin-left:8px">${p.type.toUpperCase()}</span>
+        ${p.enabled ? '<span style="color:#22c55e;font-size:.75rem;margin-left:4px">● enabled</span>' : '<span style="color:var(--muted);font-size:.75rem;margin-left:4px">○ disabled</span>'}
+        ${p.emailDomains && p.emailDomains.length ? `<div style="font-size:.8rem;color:var(--muted);margin-top:4px">Domains: ${p.emailDomains.join(', ')}</div>` : ''}
+        ${p.type==='oidc' && p.oidc ? `<div style="font-size:.8rem;color:var(--muted)">Issuer: ${escHtml(p.oidc.issuer)}</div>` : ''}
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn-secondary" onclick="editIdP(${JSON.stringify(JSON.stringify(p))})">Edit</button>
+        <button class="btn-danger"    onclick="deleteIdP('${p.id}', '${escHtml(p.name)}')">Delete</button>
+      </div>
+    </div>`).join('');
+}
+
+function openIdPModal(p) {
+  document.getElementById('idp-modal-title').textContent = p ? 'Edit Identity Provider' : 'Add Identity Provider';
+  document.getElementById('idp-edit-id').value   = p ? p.id   : '';
+  document.getElementById('idp-name').value       = p ? p.name : '';
+  document.getElementById('idp-type').value       = p ? p.type : 'oidc';
+  document.getElementById('idp-enabled').checked  = p ? p.enabled : true;
+  const domains = p && p.emailDomains ? p.emailDomains.join(', ') : '';
+  document.getElementById('idp-domains').value = domains;
+  // OIDC fields
+  const oidc = (p && p.oidc) || {};
+  document.getElementById('idp-issuer').value       = oidc.issuer       || '';
+  document.getElementById('idp-client-id').value    = oidc.clientId     || '';
+  document.getElementById('idp-client-secret').value= oidc.clientSecret || '';
+  document.getElementById('idp-scopes').value       = (oidc.scopes || []).join(' ');
+  document.getElementById('idp-groups-claim').value = oidc.groupsClaim  || '';
+  // SAML fields
+  const saml = (p && p.saml) || {};
+  document.getElementById('idp-meta-url').value    = saml.metadataUrl    || '';
+  document.getElementById('idp-meta-xml').value    = saml.metadataXml    || '';
+  document.getElementById('idp-saml-groups').value = saml.groupsAttribute|| '';
+  document.getElementById('idp-saml-email').value  = saml.emailAttribute || '';
+  document.getElementById('idp-discover-result').style.display = 'none';
+  toggleIdPTypeFields();
+  document.getElementById('idp-modal').style.display = 'block';
+}
+
+function editIdP(jsonStr) {
+  openIdPModal(JSON.parse(jsonStr));
+}
+
+function closeIdPModal() {
+  document.getElementById('idp-modal').style.display = 'none';
+}
+
+function toggleIdPTypeFields() {
+  const t = document.getElementById('idp-type').value;
+  document.getElementById('idp-oidc-fields').style.display = t === 'oidc' ? '' : 'none';
+  document.getElementById('idp-saml-fields').style.display = t === 'saml' ? '' : 'none';
+}
+
+async function discoverOIDC() {
+  const issuer = document.getElementById('idp-issuer').value.trim();
+  if (!issuer) { alert('Enter an Issuer URL first.'); return; }
+  const res = await apiFetch('/api/idp/discover', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ issuer }) });
+  const el = document.getElementById('idp-discover-result');
+  if (!res.ok) {
+    const txt = await res.text();
+    el.style.display = 'block';
+    el.style.color = 'var(--red, #ef4444)';
+    el.textContent = 'Error: ' + txt;
+    return;
+  }
+  const doc = await res.json();
+  el.style.display = 'block';
+  el.style.color = 'var(--text)';
+  el.innerHTML = [
+    doc.authorization_endpoint && `<b>Auth:</b> ${escHtml(doc.authorization_endpoint)}`,
+    doc.token_endpoint          && `<b>Token:</b> ${escHtml(doc.token_endpoint)}`,
+    doc.introspection_endpoint  && `<b>Introspect:</b> ${escHtml(doc.introspection_endpoint)}`,
+    doc.userinfo_endpoint       && `<b>Userinfo:</b> ${escHtml(doc.userinfo_endpoint)}`,
+    doc.jwks_uri                && `<b>JWKs:</b> ${escHtml(doc.jwks_uri)}`,
+  ].filter(Boolean).join('<br>');
+}
+
+async function saveIdP() {
+  const id   = document.getElementById('idp-edit-id').value;
+  const type = document.getElementById('idp-type').value;
+  const domains = document.getElementById('idp-domains').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const body = {
+    id:           id || undefined,
+    name:         document.getElementById('idp-name').value.trim(),
+    type,
+    emailDomains: domains,
+    enabled:      document.getElementById('idp-enabled').checked,
+  };
+  if (type === 'oidc') {
+    const scopeStr = document.getElementById('idp-scopes').value.trim();
+    body.oidc = {
+      issuer:       document.getElementById('idp-issuer').value.trim(),
+      clientId:     document.getElementById('idp-client-id').value.trim(),
+      clientSecret: document.getElementById('idp-client-secret').value,
+      scopes:       scopeStr ? scopeStr.split(/\s+/) : [],
+      groupsClaim:  document.getElementById('idp-groups-claim').value.trim(),
+    };
+  } else {
+    body.saml = {
+      metadataUrl:     document.getElementById('idp-meta-url').value.trim(),
+      metadataXml:     document.getElementById('idp-meta-xml').value.trim(),
+      groupsAttribute: document.getElementById('idp-saml-groups').value.trim(),
+      emailAttribute:  document.getElementById('idp-saml-email').value.trim(),
+    };
+  }
+  const method = id ? 'PUT' : 'POST';
+  const url    = id ? `/api/idp/${id}` : '/api/idp';
+  const res = await apiFetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!res.ok) {
+    alert('Error: ' + await res.text());
+    return;
+  }
+  closeIdPModal();
+  loadIdPList();
+}
+
+async function deleteIdP(id, name) {
+  if (!confirm(`Delete provider "${name}"?`)) return;
+  const res = await apiFetch(`/api/idp/${id}`, { method: 'DELETE' });
+  if (!res.ok) { alert('Delete failed: ' + await res.text()); return; }
+  loadIdPList();
+}
 </script>
 
 <!-- ── First-time Setup Wizard ─────────────────────────────────────────── -->

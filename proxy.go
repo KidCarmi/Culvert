@@ -151,44 +151,82 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Adaptive Authentication ───────────────────────────────────────────────
-	// Priority: LDAP/OIDC provider (if configured) → local bcrypt → anonymous.
-	// Browser requests (Mozilla UA) without auth are redirected to OIDC portal.
-	// Non-browser clients without auth receive 407 for native Basic-auth prompt.
+	// Resolution order:
+	//  1. Signed session cookie (browser SSO — OIDC code flow or SAML).
+	//  2. Proxy-Authorization Basic header (non-browser / API clients).
+	//     a. Resolved via IdP registry (OIDC introspection) if providers exist.
+	//     b. Legacy single LDAP/OIDC provider (cfg.ProviderEnabled).
+	//     c. Local bcrypt auth.
+	//  3. No credentials — redirect browser to captive portal or send 407.
 	var authenticatedIdentity string
-	if cfg.AuthEnabled() || cfg.ProviderEnabled() {
-		u, p, ok := parseProxyAuth(r)
-		if ok {
-			if !cfg.VerifyAuth(u, p) {
+	var authenticatedGroups []string
+
+	authRequired := cfg.AuthEnabled() || cfg.ProviderEnabled() || len(idpRegistry.EnabledProviders()) > 0
+
+	if authRequired {
+		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
+		if sess, err := readSessionCookie(r); err == nil && sess != nil {
+			id := sess.Identity()
+			authenticatedIdentity = id.Sub
+			if authenticatedIdentity == "" {
+				authenticatedIdentity = id.Email
+			}
+			authenticatedGroups = id.Groups
+		} else {
+			// ── 2. Basic Auth header ──────────────────────────────────────────
+			u, p, ok := parseProxyAuth(r)
+			if ok {
+				// Try IdP registry providers first (OIDC introspection).
+				authed := false
+				for _, prov := range idpRegistry.EnabledProviders() {
+					if id, resolved := prov.ResolveIdentity(u, p); resolved && id != nil {
+						authenticatedIdentity = id.Sub
+						if authenticatedIdentity == "" {
+							authenticatedIdentity = u
+						}
+						authenticatedGroups = id.Groups
+						authed = true
+						break
+					}
+				}
+				// Fall back to legacy single provider or local bcrypt.
+				if !authed {
+					if !cfg.VerifyAuth(u, p) {
+						atomic.AddInt64(&statAuthFail, 1)
+						w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyShield"`)
+						http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+						recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "")
+						logger.Printf("AUTH_FAIL %s", clientIP)
+						return
+					}
+					authenticatedIdentity = u
+				}
+			} else {
+				// ── 3. No credentials ────────────────────────────────────────
+				isBrowser := strings.Contains(r.Header.Get("User-Agent"), "Mozilla")
+				if isBrowser && r.Method != http.MethodConnect {
+					// Route browser to appropriate IdP based on email domain hint.
+					loginURL := resolveCaptivePortalURL(r)
+					if loginURL != "" {
+						http.Redirect(w, r, loginURL, http.StatusFound)
+						return
+					}
+				}
 				atomic.AddInt64(&statAuthFail, 1)
 				w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyShield"`)
+				if u := cfg.OIDCLoginURL(); u != "" {
+					w.Header().Set("Link", `<`+u+`>; rel="authorization_endpoint"`)
+				}
 				http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 				recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "")
-				logger.Printf("AUTH_FAIL %s", clientIP)
+				logger.Printf("AUTH_FAIL (no-credentials) %s", clientIP)
 				return
 			}
-			authenticatedIdentity = u
-		} else {
-			// No credentials — adaptive response based on client type.
-			isBrowser := strings.Contains(r.Header.Get("User-Agent"), "Mozilla")
-			oidcURL := cfg.OIDCLoginURL()
-			if isBrowser && oidcURL != "" && r.Method != http.MethodConnect {
-				// Redirect browser to OIDC captive portal.
-				http.Redirect(w, r, oidcURL, http.StatusFound)
-				return
-			}
-			atomic.AddInt64(&statAuthFail, 1)
-			w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyShield"`)
-			if oidcURL != "" {
-				w.Header().Set("Link", `<`+oidcURL+`>; rel="authorization_endpoint"`)
-			}
-			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
-			recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "")
-			logger.Printf("AUTH_FAIL (no-credentials) %s", clientIP)
-			return
 		}
 	}
-	// Set the internal identity header for the policy engine.
-	// scrubForwardedHeaders() will remove it before forwarding upstream.
+
+	// Set internal identity headers — scrubForwardedHeaders removes them
+	// before forwarding upstream.
 	if authenticatedIdentity != "" {
 		r.Header.Set("X-User-Identity", authenticatedIdentity)
 	}
@@ -234,7 +272,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// (OIDC/LDAP); scrubForwardedHeaders already stripped any client-supplied
 	// value, so this value is safe to use for policy matching.
 	identity := r.Header.Get("X-User-Identity")
-	match := policyStore.Evaluate(clientIP, identity, host)
+	match := policyStore.Evaluate(clientIP, identity, host, authenticatedGroups)
 
 	if match != nil {
 		switch match.Action {
@@ -324,6 +362,47 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 const maxUsernameLen = 256
+
+// resolveCaptivePortalURL picks the best IdP login URL for an unauthenticated
+// browser request.  Resolution priority:
+//  1. Email domain hint from "X-Proxy-Email-Hint" header or "email" query param.
+//  2. First enabled IdP in registry (if exactly one — skips selection screen).
+//  3. Proxy selection page (/auth/select) when multiple providers are registered.
+//  4. Legacy OIDCLoginURL from single-provider config.
+func resolveCaptivePortalURL(r *http.Request) string {
+	// Determine the original URL the browser was trying to reach (relay URL).
+	relayURL := r.URL.String()
+	if r.Host != "" {
+		relayURL = "http://" + r.Host + r.URL.RequestURI()
+	}
+
+	// Email domain hint.
+	emailHint := r.Header.Get("X-Proxy-Email-Hint")
+	if emailHint == "" {
+		emailHint = r.URL.Query().Get("email")
+	}
+	if emailHint != "" {
+		if at := strings.LastIndex(emailHint, "@"); at >= 0 {
+			domain := emailHint[at+1:]
+			if prov := idpRegistry.RouteByDomain(domain); prov != nil {
+				return prov.CaptiveLoginURL(relayURL)
+			}
+		}
+	}
+
+	// Single provider — redirect directly without selection screen.
+	providers := idpRegistry.EnabledProviders()
+	if len(providers) == 1 {
+		return providers[0].CaptiveLoginURL(relayURL)
+	}
+	// Multiple providers — send to selection page.
+	if len(providers) > 1 {
+		return fmt.Sprintf("/auth/select?relay=%s", url.QueryEscape(relayURL))
+	}
+
+	// Legacy single OIDC provider.
+	return cfg.OIDCLoginURL()
+}
 
 func parseProxyAuth(r *http.Request) (string, string, bool) {
 	auth := r.Header.Get("Proxy-Authorization")

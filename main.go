@@ -90,8 +90,27 @@ func main() {
 		log.Fatalf("Failed to set auth: %v", err)
 	}
 
-	// ── External auth provider (LDAP / OIDC) ─────────────────────────────────
+	// ── Session secret ───────────────────────────────────────────────────────
+	initSessionSecret()
+
+	// ── External base URL (for OIDC/SAML callbacks) ──────────────────────────
+	if fc.Proxy.BaseURL != "" {
+		SetProxyBaseURL(fc.Proxy.BaseURL)
+		logger.Printf("BaseURL  → %s", fc.Proxy.BaseURL)
+	}
+
+	// ── Generic IdP Registry ─────────────────────────────────────────────────
+	if fc.Proxy.IdPProfilesFile != "" {
+		if err := idpRegistry.Load(fc.Proxy.IdPProfilesFile); err != nil {
+			log.Fatalf("IdP profiles load error: %v", err)
+		}
+		logger.Printf("IdP      → loaded from %s (%d profiles)", fc.Proxy.IdPProfilesFile, len(idpRegistry.All()))
+	}
+
+	// ── Legacy external auth provider (LDAP / OIDC introspection) ────────────
 	// LDAP takes precedence when URL is configured.
+	// The generic IdP registry is preferred; the legacy providers remain for
+	// backwards-compatibility.
 	if fc.LDAP.URL != "" {
 		ldapProvider, err := NewLDAPAuth(fc.LDAP)
 		if err != nil {
