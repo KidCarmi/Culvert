@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io/fs"
 	"net"
 	"net/http"
@@ -1275,7 +1276,7 @@ background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover
 			continue
 		}
 		fmt.Fprintf(w, `<a class="btn" href="%s">Continue with %s</a>`,
-			loginURL, p.Name())
+			html.EscapeString(loginURL), html.EscapeString(p.Name()))
 	}
 	if len(providers) == 0 {
 		fmt.Fprintf(w, `<p>No identity providers are configured.</p>`)
