@@ -85,7 +85,7 @@ type LogEntry struct {
 
 func levelForStatus(status string) string {
 	switch status {
-	case "OK", "POLICY_ALLOW":
+	case "OK", "POLICY_ALLOW", "PAC_DOWNLOAD":
 		return "INFO"
 	case "BLOCKED", "RATE_LIMITED", "IP_BLOCKED",
 		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT":
