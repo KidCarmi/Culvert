@@ -198,6 +198,13 @@ func (a *LDAPAuth) cacheGet(key string) (ok, hit bool) {
 
 func (a *LDAPAuth) cacheSet(key string, ok bool) {
 	a.mu.Lock()
+	// Evict a random entry when the cache is full to prevent unbounded growth.
+	if len(a.cache) >= maxAuthCacheSize {
+		for k := range a.cache {
+			delete(a.cache, k)
+			break
+		}
+	}
 	a.cache[key] = &ldapCacheEntry{ok: ok, expiry: time.Now().Add(a.ttl)}
 	a.mu.Unlock()
 }

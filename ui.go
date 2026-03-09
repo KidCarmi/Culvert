@@ -234,10 +234,8 @@ func auditEventDiff(r *http.Request, action, object, detail string, before, afte
 	if actor == "" {
 		actor = r.RemoteAddr
 	}
-	// Use authenticated username from UI session if available.
-	if u := r.Header.Get("X-UI-User"); u != "" {
-		actor = u
-	}
+	// Do NOT trust client-supplied headers for the audit actor identity;
+	// the remote IP is the only trustworthy identity at this layer.
 	entry := AuditEntry{
 		TS:     time.Now().UnixMilli(),
 		Time:   time.Now().Format("2006-01-02 15:04:05"),
@@ -425,7 +423,7 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if body.IPFilterMode != "" || body.IPFilterMode == "" {
+		if body.IPFilterMode != "" {
 			ipf.SetMode(body.IPFilterMode)
 		}
 		if body.IPAdd != "" {
@@ -709,7 +707,7 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 func apiDefaultAction(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction})
+		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction()})
 	case http.MethodPost:
 		var body struct {
 			Action string `json:"action"`
@@ -725,7 +723,7 @@ func apiDefaultAction(w http.ResponseWriter, r *http.Request) {
 		setDefaultPolicyAction(body.Action)
 		auditEvent(r, "policy.default_action", body.Action, "")
 		logger.Printf("UI: default policy action set to %q", body.Action)
-		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction})
+		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

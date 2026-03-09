@@ -100,7 +100,8 @@ func apiEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Restrict SSE to same-origin requests only (no CORS wildcard).
+	// The dashboard is served from the same origin, so no CORS header is needed.
 
 	ch := make(chan []byte, 4)
 	hub.register(ch)

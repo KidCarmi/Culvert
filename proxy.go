@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,14 +19,23 @@ import (
 // defaultPolicyAction controls what happens when no PBAC rule matches a request.
 // "allow" = passthrough mode (initial setup), "deny" = zero-trust (production).
 // Set by setDefaultPolicyAction() during startup based on config or rule count.
-var defaultPolicyAction = "deny"
+// Stored as 1 (allow) or 0 (deny) via atomic int32 to avoid data races.
+var defaultPolicyActionAllow int32 // 0 = deny (default)
 
 func setDefaultPolicyAction(action string) {
 	if action == "allow" {
-		defaultPolicyAction = "allow"
+		atomic.StoreInt32(&defaultPolicyActionAllow, 1)
 	} else {
-		defaultPolicyAction = "deny"
+		atomic.StoreInt32(&defaultPolicyActionAllow, 0)
 	}
+}
+
+// defaultPolicyAction returns the current default action string ("allow"/"deny").
+func defaultPolicyAction() string {
+	if atomic.LoadInt32(&defaultPolicyActionAllow) == 1 {
+		return "allow"
+	}
+	return "deny"
 }
 
 // privateCIDRs lists RFC 1918, loopback, link-local, and ULA ranges whose
@@ -60,6 +70,26 @@ func isPrivateIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// isPrivateHost resolves host (host or host:port) and returns an error if any
+// resolved IP falls within a private/internal range. This prevents SSRF via
+// proxy CONNECT to loopback, RFC 1918, link-local, or metadata endpoints.
+func isPrivateHost(hostport string) error {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport // no port
+	}
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return nil // let Dial handle resolution errors
+	}
+	for _, ipStr := range ips {
+		if ip := net.ParseIP(ipStr); ip != nil && isPrivateIP(ip) {
+			return fmt.Errorf("destination %s resolves to private address %s", host, ipStr)
+		}
+	}
+	return nil
 }
 
 // scrubForwardedHeaders sanitises request headers before forwarding upstream:
@@ -245,7 +275,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// No rule matched — apply the configured default action.
-		if defaultPolicyAction == "allow" {
+		if defaultPolicyAction() == "allow" {
 			// Passthrough mode: allow all unmatched traffic (initial setup).
 			recordRequest(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow")
 		} else {
@@ -293,6 +323,8 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+const maxUsernameLen = 256
+
 func parseProxyAuth(r *http.Request) (string, string, bool) {
 	auth := r.Header.Get("Proxy-Authorization")
 	if !strings.HasPrefix(auth, "Basic ") {
@@ -304,6 +336,9 @@ func parseProxyAuth(r *http.Request) (string, string, bool) {
 	}
 	parts := strings.SplitN(string(decoded), ":", 2)
 	if len(parts) != 2 {
+		return "", "", false
+	}
+	if len(parts[0]) > maxUsernameLen {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
@@ -368,14 +403,23 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-// isSafeRedirectURL returns true only for absolute http/https URLs, preventing
-// javascript: URIs and protocol-relative open redirects from policy config.
+// isSafeRedirectURL returns true only for absolute http/https URLs whose host
+// resolves to a public IP. This prevents javascript: URIs, protocol-relative
+// open redirects, and SSRF via redirect to internal/private destinations.
 func isSafeRedirectURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return false
 	}
-	return u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https")
+	if !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	// Reject redirects that target private/internal addresses.
+	if isPrivateHost(u.Host) == nil {
+		// isPrivateHost returns nil if the host is public (no private IPs found).
+		return true
+	}
+	return false
 }
 
 // isWebSocketUpgrade returns true when the request is an HTTP→WebSocket upgrade.
@@ -393,6 +437,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		host += ":80"
 	}
 
+	if err := isPrivateHost(host); err != nil {
+		logger.Printf("WS SSRF block %s: %v", host, err)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	destConn, err := net.DialTimeout("tcp", host, 10*time.Second)
 	if err != nil {
 		logger.Printf("WS dial error %s: %v", host, err)
@@ -473,6 +522,11 @@ var upstreamTransport = &http.Transport{
 
 // handleTunnelBypass is the original transparent TCP tunnel (Bypass mode).
 func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
+	if err := isPrivateHost(r.Host); err != nil {
+		logger.Printf("CONNECT SSRF block %s: %v", r.Host, err)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	destConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
 	if err != nil {
 		logger.Printf("tunnel dial error %s: %v", r.Host, err)
@@ -517,6 +571,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	hostOnly, _, _ := net.SplitHostPort(targetHost)
 
 	// 1. Connect to the upstream server over plain TCP.
+	if err := isPrivateHost(targetHost); err != nil {
+		logger.Printf("inspect SSRF block %s: %v", targetHost, err)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	rawUpstream, err := net.DialTimeout("tcp", targetHost, 10*time.Second)
 	if err != nil {
 		logger.Printf("inspect dial error %s: %v", targetHost, err)
@@ -584,6 +643,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	}
 
 	logger.Printf("SSL_INSPECT tunnel → %s", targetHost)
+	recordActiveConn(1)
+	defer recordActiveConn(-1)
 
 	// 5. Proxy HTTP/1.x with optional DPI scanning on response bodies.
 	//

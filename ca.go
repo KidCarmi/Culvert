@@ -266,6 +266,9 @@ func decryptBundle(data, passphrase []byte) ([]byte, error) {
 		return nil, fmt.Errorf("CA bundle: unsupported version %d", data[4])
 	}
 	iter := int(binary.BigEndian.Uint32(data[5:9]))
+	if iter < 100_000 {
+		return nil, fmt.Errorf("CA bundle: iteration count %d is below minimum (100000)", iter)
+	}
 	salt := data[9 : 9+pbkdf2SaltLen]
 	nonce := data[9+pbkdf2SaltLen : 9+pbkdf2SaltLen+aesGCMNonceLen]
 	ciphertext := data[hdrLen:]

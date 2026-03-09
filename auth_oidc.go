@@ -117,8 +117,8 @@ func (a *OIDCAuth) Verify(username, token string) bool {
 		return ok
 	}
 
-	ok := a.introspect(token)
-	a.oidcCacheSet(k, ok)
+	ok, exp := a.introspect(token)
+	a.oidcCacheSetWithExp(k, ok, exp)
 	if ok {
 		logger.Printf("OIDC auth OK: user=%s", username)
 	} else {
@@ -127,7 +127,9 @@ func (a *OIDCAuth) Verify(username, token string) bool {
 	return ok
 }
 
-func (a *OIDCAuth) introspect(token string) bool {
+// introspect returns (active, exp) where exp is the Unix timestamp from the
+// token's "exp" claim (0 if absent or not active).
+func (a *OIDCAuth) introspect(token string) (bool, int64) {
 	body := url.Values{
 		"token":           {token},
 		"token_type_hint": {"access_token"},
@@ -140,7 +142,7 @@ func (a *OIDCAuth) introspect(token string) bool {
 	)
 	if err != nil {
 		logger.Printf("OIDC introspect build error: %v", err)
-		return false
+		return false, 0
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(a.cfg.ClientID, a.cfg.ClientSecret)
@@ -148,44 +150,44 @@ func (a *OIDCAuth) introspect(token string) bool {
 	resp, err := a.client.Do(req)
 	if err != nil {
 		logger.Printf("OIDC introspect request error: %v", err)
-		return false
+		return false, 0
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Printf("OIDC introspect HTTP %d", resp.StatusCode)
-		return false
+		return false, 0
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
-		return false
+		return false, 0
 	}
 
 	var ir introspectionResponse
 	if err := json.Unmarshal(raw, &ir); err != nil {
 		logger.Printf("OIDC introspect parse error: %v", err)
-		return false
+		return false, 0
 	}
 	if !ir.Active {
-		return false
+		return false, 0
 	}
 
 	// Optional scope check.
 	if a.cfg.RequiredScope != "" {
 		if !strings.Contains(" "+ir.Scope+" ", " "+a.cfg.RequiredScope+" ") {
 			logger.Printf("OIDC: required scope %q not in %q", a.cfg.RequiredScope, ir.Scope)
-			return false
+			return false, 0
 		}
 	}
 
 	// Optional audience check.
 	if a.cfg.RequiredAudience != "" && !audienceContains(ir.Audience, a.cfg.RequiredAudience) {
 		logger.Printf("OIDC: required audience %q not present", a.cfg.RequiredAudience)
-		return false
+		return false, 0
 	}
 
-	return true
+	return true, ir.Exp
 }
 
 // audienceContains handles both string and []string JWT aud claims.
@@ -213,7 +215,26 @@ func (a *OIDCAuth) oidcCacheGet(key string) (ok, hit bool) {
 }
 
 func (a *OIDCAuth) oidcCacheSet(key string, ok bool) {
+	a.oidcCacheSetWithExp(key, ok, 0)
+}
+
+// oidcCacheSetWithExp caps the cache TTL to min(CacheTTL, time.Until(tokenExp))
+// so a cached "ok" entry never outlives the actual token expiry (MED-4).
+func (a *OIDCAuth) oidcCacheSetWithExp(key string, ok bool, tokenExp int64) {
+	ttl := a.ttl
+	if tokenExp > 0 {
+		if until := time.Until(time.Unix(tokenExp, 0)); until > 0 && until < ttl {
+			ttl = until
+		}
+	}
 	a.mu.Lock()
-	a.cache[key] = &oidcCacheEntry{ok: ok, expiry: time.Now().Add(a.ttl)}
+	// Evict a random entry when the cache is full to prevent unbounded growth.
+	if len(a.cache) >= maxAuthCacheSize {
+		for k := range a.cache {
+			delete(a.cache, k)
+			break
+		}
+	}
+	a.cache[key] = &oidcCacheEntry{ok: ok, expiry: time.Now().Add(ttl)}
 	a.mu.Unlock()
 }

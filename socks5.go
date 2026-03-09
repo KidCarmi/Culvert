@@ -165,6 +165,14 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
+	// ── SSRF guard: block private/internal destinations ───────────────────────
+	if err := isPrivateHost(target); err != nil {
+		socks5Reply(conn, 0x02) // Connection not allowed by ruleset
+		logger.Printf("SOCKS5 SSRF block %s -> %s: %v", clientIP, target, err)
+		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "")
+		return
+	}
+
 	// ── Dial target ───────────────────────────────────────────────────────────
 	destConn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {

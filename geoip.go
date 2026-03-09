@@ -25,7 +25,10 @@ type geoCache struct {
 
 var geo = &geoCache{cache: make(map[string]*geoResult)}
 
-const geoCacheTTL = time.Hour
+const (
+	geoCacheTTL     = time.Hour
+	geoCacheMaxSize = 50_000 // max entries; random eviction when exceeded
+)
 
 // CountryTraffic tracks request counts per country code for the dashboard.
 type countryTrafficStore struct {
@@ -116,6 +119,24 @@ func (g *geoCache) Lookup(host string) string {
 	return code
 }
 
+// LookupCached returns the country code only if it is already in the cache.
+// It never blocks on a network call, making it safe to call in the hot policy
+// evaluation path. A cache miss returns ("", false); the caller should treat
+// a miss as "unknown" country and fall back to allow/skip-country-check.
+func (g *geoCache) LookupCached(host string) (code string, ok bool) {
+	ip := resolveHost(host)
+	if ip == nil {
+		return "", false
+	}
+	ipStr := ip.String()
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if r, hit := g.cache[ipStr]; hit && time.Since(r.cachedAt) < geoCacheTTL {
+		return r.CountryCode, true
+	}
+	return "", false
+}
+
 // LookupFull returns the country code and full country name for a host.
 // Results are cached for geoCacheTTL. Private IPs always return ("", "").
 func (g *geoCache) LookupFull(host string) (code, name string) {
@@ -151,6 +172,13 @@ func (g *geoCache) LookupFull(host string) (code, name string) {
 	r.cachedAt = time.Now()
 
 	g.mu.Lock()
+	// Evict a random entry when the cache is full to bound memory usage.
+	if len(g.cache) >= geoCacheMaxSize {
+		for k := range g.cache {
+			delete(g.cache, k)
+			break
+		}
+	}
 	g.cache[ipStr] = &r
 	g.mu.Unlock()
 

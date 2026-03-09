@@ -311,10 +311,12 @@ func matchDest(rule *PolicyRule, host string) bool {
 	if catSet && !matchCategory(rule.DestCategory, host) {
 		return false
 	}
-	// Geo-IP country check (async-friendly: lookup is cached).
+	// Geo-IP country check — cache-only to avoid blocking the request goroutine.
+	// On a cache miss the country is unknown; skip the country filter so we do
+	// not inadvertently block traffic while the background poller catches up.
 	if countrySet {
-		code := geo.Lookup(host)
-		if !matchCountry(rule.DestCountry, code) {
+		code, cached := geo.LookupCached(host)
+		if cached && !matchCountry(rule.DestCountry, code) {
 			return false
 		}
 	}
