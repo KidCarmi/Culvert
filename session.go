@@ -82,10 +82,35 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 // Session type
 // ---------------------------------------------------------------------------
 
-const (
-	sessionCookieName = "ps_session"
-	sessionTTL        = 8 * time.Hour
+const sessionCookieName = "ps_session"
+
+// uiSessionTTL is the lifetime of admin UI sessions.
+// Configurable at runtime via /api/session-timeout; default 8 hours.
+var (
+	uiSessionTTL   = 8 * time.Hour
+	uiSessionTTLMu sync.RWMutex
 )
+
+func getSessionTTL() time.Duration {
+	uiSessionTTLMu.RLock()
+	defer uiSessionTTLMu.RUnlock()
+	return uiSessionTTL
+}
+
+// SetSessionTTL updates the session lifetime. Clamped to [15min, 7d].
+func SetSessionTTL(d time.Duration) {
+	const minTTL = 15 * time.Minute
+	const maxTTL = 7 * 24 * time.Hour
+	if d < minTTL {
+		d = minTTL
+	}
+	if d > maxTTL {
+		d = maxTTL
+	}
+	uiSessionTTLMu.Lock()
+	uiSessionTTL = d
+	uiSessionTTLMu.Unlock()
+}
 
 // Session is the payload stored inside the signed proxy session cookie.
 // It carries just enough identity data to reconstruct an Identity object
@@ -179,7 +204,7 @@ func setSessionCookie(w http.ResponseWriter, id *Identity) error {
 		Name:     id.Name,
 		Groups:   id.Groups,
 		Provider: id.Provider,
-		Exp:      time.Now().Add(sessionTTL).Unix(),
+		Exp:      time.Now().Add(getSessionTTL()).Unix(),
 	}
 	value, err := encodeSession(s)
 	if err != nil {
@@ -189,7 +214,7 @@ func setSessionCookie(w http.ResponseWriter, id *Identity) error {
 		Name:     sessionCookieName,
 		Value:    value,
 		Path:     "/",
-		MaxAge:   int(sessionTTL.Seconds()),
+		MaxAge:   int(getSessionTTL().Seconds()),
 		HttpOnly: true,
 		Secure:   true, // set by proxy on HTTPS; harmless on plain HTTP
 		SameSite: http.SameSiteLaxMode,

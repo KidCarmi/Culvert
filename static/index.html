@@ -962,6 +962,58 @@ Firefox (all platforms):
           <div id="backup-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
         </div>
       </div>
+
+      <!-- Session Timeout -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">🕐 Session Timeout</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            How long admin UI sessions remain valid without activity. Existing sessions are not revoked when this is changed.
+          </p>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input type="number" class="input" id="s-session-hrs" min="1" max="168" style="width:90px" placeholder="8">
+            <span style="font-size:.85rem;color:var(--muted)">hours (1–168)</span>
+            <button class="btn" onclick="saveSessionTimeout()">Save</button>
+          </div>
+          <div id="s-session-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
+        </div>
+      </div>
+
+      <!-- Admin UI IP Allowlist -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">🛡️ Admin Panel IP Restriction</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Restrict access to this admin panel to specific IP addresses or CIDR ranges.<br>
+            <strong style="color:var(--red)">Warning:</strong> Adding your own IP before applying is strongly recommended to avoid locking yourself out. Leave empty to allow all IPs.
+          </p>
+          <div class="add-row" style="margin-bottom:10px">
+            <input type="text" class="input wide" id="s-uiip-new" placeholder="10.0.0.0/8 or 192.168.1.5">
+            <button class="btn" onclick="addUIAllowIP()">+ Add</button>
+          </div>
+          <div id="s-uiip-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>
+          <button class="btn ghost sm" onclick="saveUIAllowIPs()">Apply Changes</button>
+          <span id="s-uiip-status" style="font-size:.8rem;color:var(--muted);margin-left:10px"></span>
+        </div>
+      </div>
+
+      <!-- Syslog / SIEM -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">📡 Syslog / SIEM Forwarding</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Forward all log lines and audit events to a remote syslog server (RFC 3164).<br>
+            Compatible with Splunk, Elastic, QRadar, rsyslog, syslog-ng.
+          </p>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input type="text" class="input wide" id="s-syslog-addr" placeholder="udp://10.0.0.1:514 or tcp://logs.corp.com:601">
+            <button class="btn" onclick="saveSyslog()">Save</button>
+            <button class="btn ghost sm" onclick="disableSyslog()">Disable</button>
+          </div>
+          <div id="s-syslog-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
+        </div>
+      </div>
+
     </div>
 
     <!-- ── USERS & ROLES ──────────────────────────────────────────────────── -->
@@ -1461,6 +1513,7 @@ function switchView(name) {
   document.getElementById('topbar-meta').textContent  = m.meta  || '';
   if (name === 'idproviders')    loadIdPList();
   if (name === 'audit')          loadAuditLog();
+  if (name === 'settings')       loadSettings();
   if (name === 'policy-tester')  { /* form is self-contained */ }
 }
 
@@ -2480,6 +2533,120 @@ async function loadSettings() {
     const s = await api('/api/settings');
     document.getElementById('s-user').value = s.user || '';
   } catch(e) {}
+  // Session timeout
+  try {
+    const t = await api('/api/session-timeout');
+    document.getElementById('s-session-hrs').value = t.hours || 8;
+  } catch(e) {}
+  // Syslog
+  try {
+    const sl = await api('/api/syslog');
+    document.getElementById('s-syslog-addr').value = sl.addr || '';
+    if (sl.addr) {
+      const el = document.getElementById('s-syslog-status');
+      el.style.display = '';
+      el.textContent = '✅ Forwarding to ' + sl.addr;
+      el.style.color = 'var(--green)';
+    }
+  } catch(e) {}
+  // UI allow IPs
+  try {
+    const ip = await api('/api/ui-allow-ips');
+    _uiAllowIPList = ip.ips || [];
+    renderUIAllowIPList();
+  } catch(e) {}
+}
+
+// ── Session Timeout ───────────────────────────────────────────────────────
+async function saveSessionTimeout() {
+  const hrs = parseInt(document.getElementById('s-session-hrs').value, 10);
+  const el = document.getElementById('s-session-status');
+  if (!hrs || hrs < 1 || hrs > 168) { toast('Hours must be 1–168', 'error'); return; }
+  try {
+    await api('/api/session-timeout', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({hours: hrs})
+    });
+    el.style.display = '';
+    el.textContent = '✅ Session timeout set to ' + hrs + 'h';
+    el.style.color = 'var(--green)';
+    toast('Session timeout updated', 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Admin UI IP Allowlist ─────────────────────────────────────────────────
+let _uiAllowIPList = [];
+
+function renderUIAllowIPList() {
+  const el = document.getElementById('s-uiip-list');
+  if (!_uiAllowIPList.length) {
+    el.innerHTML = '<span style="font-size:.78rem;color:var(--muted)">No restrictions — all IPs allowed</span>';
+    return;
+  }
+  el.innerHTML = _uiAllowIPList.map((ip, i) =>
+    `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);padding:3px 8px;border-radius:8px;font-size:.78rem">
+      ${escHtml(ip)}
+      <button style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:.9rem;line-height:1" onclick="removeUIAllowIP(${i})">×</button>
+    </span>`
+  ).join('');
+}
+
+function addUIAllowIP() {
+  const v = document.getElementById('s-uiip-new').value.trim();
+  if (!v) return;
+  _uiAllowIPList.push(v);
+  document.getElementById('s-uiip-new').value = '';
+  renderUIAllowIPList();
+}
+
+function removeUIAllowIP(idx) {
+  _uiAllowIPList.splice(idx, 1);
+  renderUIAllowIPList();
+}
+
+async function saveUIAllowIPs() {
+  const statusEl = document.getElementById('s-uiip-status');
+  try {
+    await api('/api/ui-allow-ips', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ips: _uiAllowIPList})
+    });
+    statusEl.textContent = '✅ Saved';
+    statusEl.style.color = 'var(--green)';
+    toast('IP allowlist updated', 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Syslog / SIEM ─────────────────────────────────────────────────────────
+async function saveSyslog() {
+  const addr = document.getElementById('s-syslog-addr').value.trim();
+  const el = document.getElementById('s-syslog-status');
+  if (!addr) { toast('Enter a syslog address', 'error'); return; }
+  try {
+    await api('/api/syslog', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({addr})
+    });
+    el.style.display = '';
+    el.textContent = '✅ Forwarding to ' + addr;
+    el.style.color = 'var(--green)';
+    toast('Syslog configured', 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function disableSyslog() {
+  const el = document.getElementById('s-syslog-status');
+  try {
+    await api('/api/syslog', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({addr: ''})
+    });
+    document.getElementById('s-syslog-addr').value = '';
+    el.style.display = '';
+    el.textContent = 'Syslog disabled';
+    el.style.color = 'var(--muted)';
+    toast('Syslog disabled', 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
 async function saveSettings() {

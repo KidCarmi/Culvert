@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -145,17 +146,62 @@ type AuditEntry struct {
 const maxAuditLogs = 500
 
 var (
-	auditMu  sync.Mutex
-	auditLog []AuditEntry
+	auditMu      sync.Mutex
+	auditLog     []AuditEntry
+	auditLogFile *os.File // persistent JSONL file; nil = in-memory only
 )
 
-// auditAdd appends an entry to the in-memory audit ring buffer.
+// InitAuditLog opens path for append-only JSONL persistence.
+// Existing entries are loaded into the in-memory ring buffer on startup.
+// If path is empty this is a no-op (backwards-compatible).
+func InitAuditLog(path string) error {
+	if path == "" {
+		return nil
+	}
+	// Load existing entries first.
+	if data, err := os.ReadFile(path); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line == "" {
+				continue
+			}
+			var e AuditEntry
+			if json.Unmarshal([]byte(line), &e) == nil {
+				auditLog = append(auditLog, e)
+			}
+		}
+		if len(auditLog) > maxAuditLogs {
+			auditLog = auditLog[len(auditLog)-maxAuditLogs:]
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return fmt.Errorf("audit log open %s: %w", path, err)
+	}
+	auditLogFile = f
+	return nil
+}
+
+// auditAdd appends an entry to the in-memory ring buffer and, when configured,
+// to the persistent JSONL file and the syslog forwarder.
 func auditAdd(e AuditEntry) {
 	auditMu.Lock()
-	defer auditMu.Unlock()
 	auditLog = append(auditLog, e)
 	if len(auditLog) > maxAuditLogs {
 		auditLog = auditLog[len(auditLog)-maxAuditLogs:]
+	}
+	f := auditLogFile
+	auditMu.Unlock()
+
+	// Persist to JSONL file (outside the lock to avoid blocking callers).
+	if f != nil {
+		if b, err := json.Marshal(e); err == nil {
+			b = append(b, '\n')
+			f.Write(b) //nolint:errcheck
+		}
+	}
+	// Forward to syslog/SIEM if configured.
+	if globalSyslog != nil {
+		globalSyslog.WriteAudit(e)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -49,6 +50,10 @@ func main() {
 	dpCA        := flag.String("dp-ca",         "", "DataPlane gRPC CA cert")
 	policyFile  := flag.String("policy",        "", "Policy rules JSON file path")
 	caPath      := flag.String("ca-path",       "", "Path to persist encrypted Root CA bundle (optional)")
+	auditLog    := flag.String("audit-log",     "", "Persistent audit log file path (JSONL, appended)")
+	syslogAddr  := flag.String("syslog",        "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
+	uiAllowIP   := flag.String("ui-allow-ip",   "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
+	sessionHrs  := flag.Int("session-timeout",  0,  "Admin UI session lifetime in hours (1-168, 0=default 8h)")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -92,6 +97,49 @@ func main() {
 
 	// ── Session secret ───────────────────────────────────────────────────────
 	initSessionSecret()
+
+	// ── Session timeout ───────────────────────────────────────────────────────
+	hrs := firstNonZero(*sessionHrs, fc.SessionTimeoutHours)
+	if hrs > 0 {
+		SetSessionTTL(time.Duration(hrs) * time.Hour)
+		logger.Printf("Session  → timeout %dh", hrs)
+	}
+
+	// ── Syslog / SIEM forwarding ──────────────────────────────────────────────
+	syslogVal := firstStr(*syslogAddr, fc.SyslogAddr)
+	if syslogVal != "" {
+		if err := InitSyslog(syslogVal); err != nil {
+			logger.Printf("Syslog   → connect failed (%v) — continuing without syslog", err)
+		} else {
+			syslogConfigured = syslogVal
+		}
+	}
+
+	// ── Persistent audit log ──────────────────────────────────────────────────
+	auditLogVal := firstStr(*auditLog, fc.AuditLogFile)
+	if auditLogVal != "" {
+		if err := InitAuditLog(auditLogVal); err != nil {
+			logger.Printf("Audit    → log file error (%v) — falling back to in-memory", err)
+		} else {
+			logger.Printf("Audit    → persisting to %s", auditLogVal)
+		}
+	}
+
+	// ── Admin UI IP allowlist ─────────────────────────────────────────────────
+	uiAllowIPVal := firstStr(*uiAllowIP, "")
+	uiAllowList := fc.UIAllowIPs
+	if uiAllowIPVal != "" {
+		for _, cidr := range strings.Split(uiAllowIPVal, ",") {
+			uiAllowList = append(uiAllowList, strings.TrimSpace(cidr))
+		}
+	}
+	if len(uiAllowList) > 0 {
+		if err := SetUIAllowedCIDRs(uiAllowList); err != nil {
+			logger.Printf("UI guard → invalid IP/CIDR (%v) — allowing all IPs", err)
+		} else {
+			logger.Printf("UI guard → admin panel restricted to %v", uiAllowList)
+		}
+	}
 
 	// ── External base URL (for OIDC/SAML callbacks) ──────────────────────────
 	if fc.Proxy.BaseURL != "" {

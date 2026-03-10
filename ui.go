@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -48,9 +49,12 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/events", apiEvents)           // SSE live dashboard
 	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
-	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode) // GET/POST blocklist mode
-	mux.HandleFunc("/api/config/export", apiConfigExport)   // GET — download backup JSON
-	mux.HandleFunc("/api/config/import", apiConfigImport)   // POST — restore from backup JSON
+	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)   // GET/POST blocklist mode
+	mux.HandleFunc("/api/config/export", apiConfigExport)    // GET — download backup JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)    // POST — restore from backup JSON
+	mux.HandleFunc("/api/session-timeout", apiSessionTimeout) // GET/POST session TTL (hours)
+	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)        // GET/POST UI access IP allowlist
+	mux.HandleFunc("/api/syslog", apiSyslogConfig)            // GET/POST syslog forwarding
 
 	// ── Admin session auth ────────────────────────────────────────────────
 	mux.HandleFunc("/api/auth/login", apiAuthLogin)
@@ -77,7 +81,7 @@ func startUI(port int, certFile, keyFile string) {
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      securityMiddleware(uiAuthMiddleware(mux)),
+		Handler:      uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(mux))),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // SSE (/api/events) requires long-lived write streams; no write deadline
 		IdleTimeout:  60 * time.Second,
@@ -107,6 +111,99 @@ func startUI(port int, certFile, keyFile string) {
 	if err := srv.ListenAndServe(); err != nil {
 		logger.Fatalf("UI server error: %v", err)
 	}
+}
+
+// uiAllowedNets is the optional allowlist for admin panel access.
+// Empty = allow from any IP. Populated via -ui-allow-ip flag or /api/ui-allow-ips.
+var (
+	uiAllowedNetsMu sync.RWMutex
+	uiAllowedNets   []*net.IPNet
+)
+
+// AddUIAllowedCIDR adds a CIDR to the UI access allowlist.
+func AddUIAllowedCIDR(cidr string) error {
+	_, n, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil {
+		// Try as bare IP.
+		ip := net.ParseIP(strings.TrimSpace(cidr))
+		if ip == nil {
+			return fmt.Errorf("invalid IP/CIDR: %s", cidr)
+		}
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		n = &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
+	}
+	uiAllowedNetsMu.Lock()
+	uiAllowedNets = append(uiAllowedNets, n)
+	uiAllowedNetsMu.Unlock()
+	return nil
+}
+
+// SetUIAllowedCIDRs replaces the full allowlist.
+func SetUIAllowedCIDRs(cidrs []string) error {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			ip := net.ParseIP(c)
+			if ip == nil {
+				return fmt.Errorf("invalid IP/CIDR: %s", c)
+			}
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			n = &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
+		}
+		nets = append(nets, n)
+	}
+	uiAllowedNetsMu.Lock()
+	uiAllowedNets = nets
+	uiAllowedNetsMu.Unlock()
+	return nil
+}
+
+// ListUIAllowedCIDRs returns the current allowlist as strings.
+func ListUIAllowedCIDRs() []string {
+	uiAllowedNetsMu.RLock()
+	defer uiAllowedNetsMu.RUnlock()
+	out := make([]string, len(uiAllowedNets))
+	for i, n := range uiAllowedNets {
+		out[i] = n.String()
+	}
+	return out
+}
+
+// uiIPGuardMiddleware blocks requests from IPs not in uiAllowedNets.
+// When the allowlist is empty all IPs are permitted (default behaviour).
+func uiIPGuardMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uiAllowedNetsMu.RLock()
+		allowed := uiAllowedNets
+		uiAllowedNetsMu.RUnlock()
+		if len(allowed) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		ip := net.ParseIP(host)
+		for _, cidr := range allowed {
+			if ip != nil && cidr.Contains(ip) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		http.Error(w, "Forbidden: admin panel access restricted by IP", http.StatusForbidden)
+	})
 }
 
 // securityMiddleware sets restrictive CORS and security headers.
@@ -254,7 +351,7 @@ func setUISessionCookie(w http.ResponseWriter, username string, role UIRole) err
 		Sub:      username,
 		Provider: "local",
 		Role:     string(role),
-		Exp:      time.Now().Add(sessionTTL).Unix(),
+		Exp:      time.Now().Add(getSessionTTL()).Unix(),
 	}
 	value, err := encodeSession(s)
 	if err != nil {
@@ -264,7 +361,7 @@ func setUISessionCookie(w http.ResponseWriter, username string, role UIRole) err
 		Name:     uiSessionCookieName,
 		Value:    value,
 		Path:     "/",
-		MaxAge:   int(sessionTTL.Seconds()),
+		MaxAge:   int(getSessionTTL().Seconds()),
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
@@ -871,6 +968,119 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 
 	auditEvent(r, "config.import", "restore", fmt.Sprintf("from backup exported %s", b.ExportedAt))
 	jsonOK(w, map[string]any{"ok": true, "exportedAt": b.ExportedAt})
+}
+
+// GET/POST /api/session-timeout — read or change the UI session lifetime.
+func apiSessionTimeout(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{"hours": int(getSessionTTL().Hours())})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Hours int `json:"hours"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Hours < 1 || body.Hours > 168 {
+			http.Error(w, "hours must be 1–168", http.StatusBadRequest)
+			return
+		}
+		SetSessionTTL(time.Duration(body.Hours) * time.Hour)
+		auditEvent(r, "settings.session_timeout", fmt.Sprintf("%dh", body.Hours), "")
+		jsonOK(w, map[string]any{"ok": true, "hours": body.Hours})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET/POST /api/ui-allow-ips — manage the admin panel IP access allowlist.
+// GET    → returns current list (empty = all IPs allowed).
+// POST   → {"ips": ["10.0.0.0/8", "192.168.1.5"]} — replaces the full list.
+//          Send empty array [] to remove all restrictions.
+func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		jsonOK(w, map[string]any{"ips": ListUIAllowedCIDRs()})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			IPs []string `json:"ips"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := SetUIAllowedCIDRs(body.IPs); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEvent(r, "settings.ui_allow_ips", fmt.Sprintf("%d entries", len(body.IPs)), strings.Join(body.IPs, ", "))
+		jsonOK(w, map[string]any{"ok": true, "ips": ListUIAllowedCIDRs()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// syslogConfigured tracks whether syslog was initialised so the UI can reflect it.
+var syslogConfigured string // the addr string, empty = not configured
+
+// GET/POST /api/syslog — configure remote syslog/SIEM forwarding at runtime.
+// GET  → returns current syslog address (empty string = disabled).
+// POST → {"addr": "udp://10.0.0.1:514"} — reconnects immediately.
+//         Send addr="" to disable forwarding.
+func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		jsonOK(w, map[string]any{"addr": syslogConfigured})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Addr string `json:"addr"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		body.Addr = strings.TrimSpace(body.Addr)
+		if body.Addr == "" {
+			// Disable syslog.
+			if globalSyslog != nil {
+				globalSyslog.Close()
+				globalSyslog = nil
+			}
+			syslogConfigured = ""
+			auditEvent(r, "settings.syslog", "disabled", "")
+			jsonOK(w, map[string]any{"ok": true, "addr": ""})
+			return
+		}
+		if err := InitSyslog(body.Addr); err != nil {
+			http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		syslogConfigured = body.Addr
+		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled")
+		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // GET/POST /api/security — IP filter + rate limiter config

@@ -63,6 +63,22 @@ type FileConfig struct {
 	// "allow" (passthrough mode) or "deny" (zero-trust, default).
 	// Use "allow" for initial setup; switch to "deny" once rules are configured.
 	DefaultAction string `yaml:"default_action"`
+
+	// AuditLogFile is the path for persistent JSONL audit log.
+	// When empty audit events are kept in-memory only (lost on restart).
+	AuditLogFile string `yaml:"audit_log_file"`
+
+	// SyslogAddr enables forwarding of all log lines and audit events to a
+	// remote syslog server. Format: "udp://host:514" or "tcp://host:601".
+	SyslogAddr string `yaml:"syslog_addr"`
+
+	// UIAllowIPs is an optional list of CIDRs/IPs allowed to access the admin
+	// panel. Empty = allow from any IP address (default).
+	UIAllowIPs []string `yaml:"ui_allow_ips"`
+
+	// SessionTimeoutHours overrides the default 8-hour UI session lifetime.
+	// Must be 1–168 (one hour to one week). Zero = use the default (8h).
+	SessionTimeoutHours int `yaml:"session_timeout_hours"`
 }
 
 func loadFileConfig(path string) (*FileConfig, error) {

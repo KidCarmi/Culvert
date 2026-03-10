@@ -13,7 +13,18 @@ services:
       - proxy-data:/data
     environment:
       - TZ=UTC
-    command: ["-port", "8080", "-ui-port", "9090", "-logfile", "/data/proxy.log"]
+    command: [
+      "-port",      "8080",
+      "-ui-port",   "9090",
+      "-ca-path",   "/data/ca.bundle",
+      "-policy",    "/data/policy.json",
+      "-logfile",   "/data/proxy.log",
+      "-audit-log", "/data/audit.jsonl"
+      # Optional extras — uncomment and set values as needed:
+      # "-syslog",         "udp://10.0.0.1:514",
+      # "-ui-allow-ip",    "10.0.0.0/8,192.168.0.0/16",
+      # "-session-timeout","8"
+    ]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
