@@ -47,6 +47,9 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/events", apiEvents)           // SSE live dashboard
 	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
+	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode) // GET/POST blocklist mode
+	mux.HandleFunc("/api/config/export", apiConfigExport)   // GET — download backup JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)   // POST — restore from backup JSON
 
 	// ── Admin session auth ────────────────────────────────────────────────
 	mux.HandleFunc("/api/auth/login", apiAuthLogin)
@@ -305,11 +308,19 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+	// Account lockout check — before any credential verification.
+	if locked, secs := loginLimiter.Check(body.User); locked {
+		auditEvent(r, "auth.lockout", body.User, fmt.Sprintf("blocked — %ds remaining", secs))
+		http.Error(w, LockoutMsg(secs), http.StatusTooManyRequests)
+		return
+	}
+
 	role, ok := cfg.VerifyUIUser(body.User, body.Pass)
 	if !cfg.AuthEnabled() {
 		role, ok = RoleAdmin, true
 	}
 	if ok {
+		loginLimiter.RecordSuccess(body.User)
 		if err := setUISessionCookie(w, body.User, role); err != nil {
 			http.Error(w, "session error", http.StatusInternalServerError)
 			return
@@ -318,7 +329,16 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"ok": true, "user": body.User, "role": role})
 		return
 	}
+	nowLocked := loginLimiter.RecordFailure(body.User)
+	auditEvent(r, "auth.login.fail", body.User,
+		fmt.Sprintf("invalid credentials, locked=%v, attempts_left=%d",
+			nowLocked, loginLimiter.AttemptsLeft(body.User)))
 	time.Sleep(300 * time.Millisecond) // slow down brute-force
+	if nowLocked {
+		_, secs := loginLimiter.Check(body.User)
+		http.Error(w, LockoutMsg(secs), http.StatusTooManyRequests)
+		return
+	}
 	http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 }
 
@@ -362,6 +382,9 @@ func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
 	if sess != nil {
 		auditEvent(r, "auth.logout", sess.Sub, "admin UI logout")
 	}
+	// Revoke the session token so it cannot be reused even if the cookie is
+	// replayed before it naturally expires.
+	revokeSessionCookie(uiSessionCookieName, r)
 	clearUISessionCookie(w)
 	jsonOK(w, map[string]any{"ok": true})
 }
@@ -422,7 +445,10 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing username param", http.StatusBadRequest)
 			return
 		}
-		cfg.DeleteUIUser(username)
+		if err := cfg.DeleteUIUser(username); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		auditEvent(r, "auth.users.delete", username, "")
 		w.WriteHeader(http.StatusNoContent)
 
@@ -677,6 +703,158 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// GET/POST /api/blocklist/mode — switch between "block" and "allow" modes.
+func apiBlocklistMode(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, map[string]string{"mode": bl.Mode()})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Mode string `json:"mode"` // "block" or "allow"
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Mode != "block" && body.Mode != "allow" {
+			http.Error(w, `mode must be "block" or "allow"`, http.StatusBadRequest)
+			return
+		}
+		bl.SetMode(body.Mode)
+		auditEvent(r, "blocklist.mode", body.Mode, "")
+		jsonOK(w, map[string]string{"mode": bl.Mode()})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// configBackup is the portable JSON snapshot of all non-secret configuration.
+type configBackup struct {
+	Version              int               `json:"version"`
+	ExportedAt           string            `json:"exportedAt"`
+	BlocklistMode        string            `json:"blocklistMode"`
+	Blocklist            []string          `json:"blocklist"`
+	PolicyRules          []PolicyRule      `json:"policyRules"`
+	DefaultAction        string            `json:"defaultAction"`
+	RewriteRules         []RewriteRule     `json:"rewriteRules"`
+	SSLBypass            []string          `json:"sslBypass"`
+	ContentScanPatterns  []string          `json:"contentScanPatterns"`
+	FileBlockExtensions  []string          `json:"fileBlockExtensions"`
+	IPFilterMode         string            `json:"ipFilterMode"`
+	IPList               []string          `json:"ipList"`
+	RateLimitRPM         int               `json:"rateLimitRPM"`
+}
+
+// GET /api/config/export — download a full configuration backup as JSON.
+func apiConfigExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	b := configBackup{
+		Version:             1,
+		ExportedAt:          time.Now().UTC().Format(time.RFC3339),
+		BlocklistMode:       bl.Mode(),
+		Blocklist:           bl.List(),
+		PolicyRules:         policyStore.List(),
+		DefaultAction:       defaultPolicyAction(),
+		RewriteRules:        rewriter.List(),
+		SSLBypass:           sslBypass.List(),
+		ContentScanPatterns: dpiScanner.List(),
+		FileBlockExtensions: fileBlocker.List(),
+		IPFilterMode:        ipf.Mode(),
+		IPList:              ipf.List(),
+		RateLimitRPM:        rl.Limit(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", `attachment; filename="proxyshield-backup.json"`)
+	json.NewEncoder(w).Encode(b) //nolint:errcheck
+	auditEvent(r, "config.export", "backup", fmt.Sprintf("exported at %s", b.ExportedAt))
+}
+
+// POST /api/config/import — restore configuration from a backup JSON.
+// Each section is applied atomically; partial failures are logged but do not abort.
+func apiConfigImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var b configBackup
+	if err := decodeJSON(r, &b); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if b.Version != 1 {
+		http.Error(w, "unsupported backup version", http.StatusBadRequest)
+		return
+	}
+
+	// Blocklist.
+	for _, h := range b.Blocklist {
+		bl.Add(h)
+	}
+	bl.Save()
+	if b.BlocklistMode == "allow" || b.BlocklistMode == "block" {
+		bl.SetMode(b.BlocklistMode)
+	}
+
+	// Policy rules.
+	for _, rule := range b.PolicyRules {
+		policyStore.Add(rule)
+	}
+	policyStore.Save()
+	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
+		setDefaultPolicyAction(b.DefaultAction)
+	}
+
+	// Rewrite rules.
+	for _, rule := range b.RewriteRules {
+		rewriter.Add(rule)
+	}
+
+	// SSL bypass.
+	for _, p := range b.SSLBypass {
+		_ = sslBypass.Add(p)
+	}
+	sslBypass.Save()
+
+	// Content scan patterns.
+	for _, p := range b.ContentScanPatterns {
+		_ = dpiScanner.Add(p)
+	}
+	dpiScanner.Save()
+
+	// File block extensions.
+	for _, ext := range b.FileBlockExtensions {
+		fileBlocker.Add(ext)
+	}
+
+	// Security.
+	if b.IPFilterMode != "" {
+		ipf.SetMode(b.IPFilterMode)
+	}
+	for _, ip := range b.IPList {
+		_ = ipf.Add(ip)
+	}
+	if b.RateLimitRPM > 0 {
+		rl.Configure(b.RateLimitRPM, time.Minute)
+	}
+
+	auditEvent(r, "config.import", "restore", fmt.Sprintf("from backup exported %s", b.ExportedAt))
+	jsonOK(w, map[string]any{"ok": true, "exportedAt": b.ExportedAt})
 }
 
 // GET/POST /api/security — IP filter + rate limiter config

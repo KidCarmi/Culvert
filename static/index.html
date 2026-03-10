@@ -466,6 +466,11 @@ tr.dragging  { opacity: .4; }
           </div>
         </div>
         <div class="panel-body">
+          <!-- Mode bar -->
+          <div id="blocklist-mode-bar" class="mode-block">
+            <span id="blocklist-mode-label">🚫 <strong>Block mode</strong> — listed hosts are blocked</span>
+            <button class="btn ghost sm" style="margin-left:auto" id="blocklist-mode-btn" onclick="toggleBlocklistMode()">Switch to Allowlist mode</button>
+          </div>
           <div class="add-row">
             <input type="text" class="input wide" id="new-host"
               placeholder="example.com or *.example.com (wildcards supported)">
@@ -931,6 +936,23 @@ Firefox (all platforms):
           </div>
         </div>
 
+      <!-- Backup & Restore -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">Backup &amp; Restore</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:16px">
+            Export all configuration (policy rules, blocklist, rewrites, SSL bypass, security settings) as a portable JSON file.<br>
+            <strong style="color:var(--red)">Note:</strong> Admin credentials are not exported for security reasons.
+          </p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+            <button class="btn" onclick="exportConfig()">⬇ Export Configuration</button>
+            <label class="btn ghost" style="cursor:pointer">
+              ⬆ Import Configuration
+              <input type="file" accept=".json" style="display:none" onchange="importConfig(this)">
+            </label>
+          </div>
+          <div id="backup-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
+        </div>
       </div>
     </div>
 
@@ -1139,6 +1161,39 @@ Firefox (all platforms):
               </label>
             </div>
           </div>
+
+          <!-- Schedule (optional) -->
+          <details id="pol-schedule-details" style="margin-bottom:12px">
+            <summary style="cursor:pointer;font-size:.82rem;color:var(--muted);user-select:none;padding:4px 0">
+              ⏰ Schedule <span style="font-weight:400">(optional — restrict rule to specific days/times)</span>
+            </summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px;margin-top:12px;padding:12px;background:var(--surface2);border-radius:8px">
+              <div>
+                <label class="form-label">Active Days <span style="color:var(--muted);font-weight:400">(empty = any)</span></label>
+                <div id="pol-sched-days" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px">
+                  <label class="sched-day-lbl"><input type="checkbox" value="Mon" class="pol-day-cb"> Mon</label>
+                  <label class="sched-day-lbl"><input type="checkbox" value="Tue" class="pol-day-cb"> Tue</label>
+                  <label class="sched-day-lbl"><input type="checkbox" value="Wed" class="pol-day-cb"> Wed</label>
+                  <label class="sched-day-lbl"><input type="checkbox" value="Thu" class="pol-day-cb"> Thu</label>
+                  <label class="sched-day-lbl"><input type="checkbox" value="Fri" class="pol-day-cb"> Fri</label>
+                  <label class="sched-day-lbl"><input type="checkbox" value="Sat" class="pol-day-cb"> Sat</label>
+                  <label class="sched-day-lbl"><input type="checkbox" value="Sun" class="pol-day-cb"> Sun</label>
+                </div>
+              </div>
+              <div>
+                <label class="form-label">Start Time <span style="color:var(--muted);font-weight:400">(HH:MM, 24h)</span></label>
+                <input type="time" class="input" style="width:100%" id="pol-sched-start">
+              </div>
+              <div>
+                <label class="form-label">End Time <span style="color:var(--muted);font-weight:400">(HH:MM, 24h)</span></label>
+                <input type="time" class="input" style="width:100%" id="pol-sched-end">
+              </div>
+              <div>
+                <label class="form-label">Timezone <span style="color:var(--muted);font-weight:400">(IANA, empty = UTC)</span></label>
+                <input type="text" class="input" style="width:100%" id="pol-sched-tz" placeholder="America/New_York">
+              </div>
+            </div>
+          </details>
 
           <button class="btn" id="policy-submit-btn" onclick="submitPolicyRule()">+ Add Rule</button>
         </div>
@@ -1527,6 +1582,121 @@ async function deleteUser(username) {
     fetchUsers();
   } catch (err) {
     alert('Delete failed: ' + err.message);
+  }
+}
+
+// ── Blocklist mode ───────────────────────────────────────────────────────
+let _blMode = 'block';
+
+async function loadBlocklistMode() {
+  try {
+    const d = await api('/api/blocklist/mode');
+    applyBlocklistMode(d.mode || 'block');
+  } catch(_) {}
+}
+
+function applyBlocklistMode(mode) {
+  _blMode = mode;
+  const bar = document.getElementById('blocklist-mode-bar');
+  const lbl = document.getElementById('blocklist-mode-label');
+  const btn = document.getElementById('blocklist-mode-btn');
+  if (!bar) return;
+  bar.className = 'mode-' + mode;
+  if (mode === 'allow') {
+    lbl.innerHTML = '✅ <strong>Allowlist mode</strong> — only listed hosts are allowed, everything else is blocked';
+    btn.textContent = 'Switch to Block mode';
+  } else {
+    lbl.innerHTML = '🚫 <strong>Block mode</strong> — listed hosts are blocked, everything else is allowed';
+    btn.textContent = 'Switch to Allowlist mode';
+  }
+}
+
+async function toggleBlocklistMode() {
+  const newMode = _blMode === 'block' ? 'allow' : 'block';
+  const warn = newMode === 'allow'
+    ? 'Switch to ALLOWLIST mode?\n\nOnly the hosts in your list will be reachable. Everything else will be blocked. Make sure your list is correct before confirming.'
+    : 'Switch back to BLOCK mode?\n\nOnly the hosts in your list will be blocked. Everything else will be allowed.';
+  if (!confirm(warn)) return;
+  try {
+    const d = await api('/api/blocklist/mode', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({mode: newMode})
+    });
+    applyBlocklistMode(d.mode);
+  } catch(err) {
+    alert('Failed: ' + err.message);
+  }
+}
+
+// ── Config Backup / Restore ──────────────────────────────────────────────
+async function exportConfig() {
+  const r = await fetch('/api/config/export');
+  if (!r.ok) { alert('Export failed: ' + await r.text()); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'proxyshield-backup.json';
+  a.click();
+}
+
+async function importConfig(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('backup-status');
+  statusEl.style.display = 'none';
+  try {
+    const text = await file.text();
+    JSON.parse(text); // validate JSON before sending
+    const r = await fetch('/api/config/import', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: text
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) {
+      statusEl.style.cssText = 'display:block;color:var(--green)';
+      statusEl.textContent = `✓ Configuration restored (backup from ${data.exportedAt || 'unknown date'})`;
+      // Refresh relevant views.
+      fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
+    } else {
+      statusEl.style.cssText = 'display:block;color:var(--red)';
+      statusEl.textContent = '✗ Import failed: ' + (data.error || r.statusText);
+    }
+  } catch(err) {
+    statusEl.style.cssText = 'display:block;color:var(--red)';
+    statusEl.textContent = '✗ ' + err.message;
+  }
+  input.value = '';
+}
+
+// ── Schedule helpers ─────────────────────────────────────────────────────
+function getScheduleFromForm(prefix) {
+  // prefix = '' for add form, or the edit modal's IDs
+  const days = [...document.querySelectorAll('.pol-day-cb:checked')].map(cb => cb.value);
+  const start = document.getElementById('pol-sched-start').value;
+  const end   = document.getElementById('pol-sched-end').value;
+  const tz    = document.getElementById('pol-sched-tz').value.trim();
+  if (!days.length && !start && !end && !tz) return null;
+  return {days, timeStart: start, timeEnd: end, timezone: tz};
+}
+
+function setScheduleToForm(sched) {
+  // Clear all checkboxes first.
+  document.querySelectorAll('.pol-day-cb').forEach(cb => { cb.checked = false; });
+  document.getElementById('pol-sched-start').value = '';
+  document.getElementById('pol-sched-end').value   = '';
+  document.getElementById('pol-sched-tz').value    = '';
+  if (!sched) return;
+  (sched.days || []).forEach(d => {
+    const cb = document.querySelector(`.pol-day-cb[value="${d}"]`);
+    if (cb) cb.checked = true;
+  });
+  document.getElementById('pol-sched-start').value = sched.timeStart || '';
+  document.getElementById('pol-sched-end').value   = sched.timeEnd   || '';
+  document.getElementById('pol-sched-tz').value    = sched.timezone  || '';
+  if (sched.days?.length || sched.timeStart || sched.timeEnd) {
+    document.getElementById('pol-schedule-details').open = true;
   }
 }
 
@@ -2037,11 +2207,12 @@ function renderPolicy() {
   }
   tbody.innerHTML = polRules.map((r, idx) => {
     const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`, r.authSource && `via:${r.authSource}`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    const schedBadge = r.schedule ? ` <span title="Schedule active" style="font-size:.8em">⏰</span>` : '';
     const dest = [r.destFQDN, r.destCategory].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     return `<tr draggable="true" data-priority="${r.priority}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
       <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
-      <td style="font-weight:600">${r.name}</td>
+      <td style="font-weight:600">${r.name}${schedBadge}</td>
       <td style="font-size:.78rem;font-family:monospace">${src}</td>
       <td style="font-size:.78rem;font-family:monospace">${dest}</td>
       <td>${sslBadge(r.sslAction, r.tlsSkipVerify)}</td>
@@ -2073,6 +2244,7 @@ function editPolicy(priority) {
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
   document.getElementById('pol-file-filter').checked = !!r.fileFiltering;
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
+  setScheduleToForm(r.schedule || null);
   document.getElementById('policy-form-title').textContent = 'Edit Rule: ' + r.name;
   document.getElementById('policy-submit-btn').textContent = '💾 Save Changes';
   document.getElementById('policy-cancel-btn').style.display = '';
@@ -2095,6 +2267,8 @@ function clearPolicyForm() {
   document.getElementById('pol-ssl').value       = 'Bypass';
   document.getElementById('pol-file-filter').checked = false;
   document.getElementById('pol-tls-skip').checked = false;
+  setScheduleToForm(null);
+  document.getElementById('pol-schedule-details').open = false;
 }
 
 async function submitPolicyRule() {
@@ -2118,6 +2292,7 @@ async function submitPolicyRule() {
     sslAction:      document.getElementById('pol-ssl').value,
     fileFiltering:  document.getElementById('pol-file-filter').checked,
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
+    schedule:       getScheduleFromForm(),
   };
   try {
     if (polEditPriority !== null) {
@@ -2412,6 +2587,7 @@ function editPolicy(priority) {
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
+  setScheduleToForm(r.schedule || null);
   document.getElementById('policy-form-title').textContent = 'Edit Rule: ' + r.name;
   document.getElementById('policy-submit-btn').textContent = '💾 Save Changes';
   document.getElementById('policy-cancel-btn').style.display = '';
@@ -2433,6 +2609,9 @@ function clearPolicyForm() {
   document.getElementById('pol-file-filter').checked = false;
   document.getElementById('pol-file-profile').value = '';
   document.getElementById('pol-tls-skip').checked   = false;
+  document.getElementById('pol-src-auth').value     = '';
+  setScheduleToForm(null);
+  document.getElementById('pol-schedule-details').open = false;
 }
 
 const _origSubmitPolicyRule = window.submitPolicyRule;
@@ -2467,6 +2646,7 @@ async function submitPolicyRule() {
     fileFiltering:  document.getElementById('pol-file-filter').checked,
     fileProfile:    document.getElementById('pol-file-profile').value || '',
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
+    schedule:       getScheduleFromForm(),
   };
   try {
     if (polEditPriority !== null) {
@@ -2513,7 +2693,7 @@ function renderPolicy() {
     return `<tr draggable="true" data-priority="${r.priority}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
       <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
-      <td style="font-weight:600">${r.name}</td>
+      <td style="font-weight:600">${r.name}${schedBadge}</td>
       <td style="font-size:.78rem;font-family:monospace">${src}</td>
       <td style="font-size:.78rem;font-family:monospace">${dest}</td>
       <td style="font-size:.78rem">${countryCell}</td>
@@ -2628,6 +2808,7 @@ async function tick() {
 initChart();
 initBreakdownChart();
 fetchBlocklist();
+loadBlocklistMode();
 fetchFileBlock();
 loadSettings();
 loadSecurity();
@@ -2648,6 +2829,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.view === 'idproviders')   loadIdPList();
     if (el.dataset.view === 'pac')           loadPACConfig();
     if (el.dataset.view === 'users')         fetchUsers();
+    if (el.dataset.view === 'blocklist')     loadBlocklistMode();
   });
 });
 
@@ -3370,6 +3552,20 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 .role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }
 #user-modal { display:none }
 #user-modal.open { display:flex }
+.sched-day-lbl {
+  display:inline-flex;align-items:center;gap:4px;cursor:pointer;
+  padding:3px 8px;border-radius:6px;font-size:.78rem;border:1px solid var(--border);
+  background:var(--surface);transition:background .1s,border-color .1s;
+}
+.sched-day-lbl:has(input:checked) {
+  background:rgba(59,130,246,.2);border-color:var(--accent);color:var(--accent2);
+}
+#blocklist-mode-bar {
+  display:flex;align-items:center;gap:10px;padding:8px 12px;
+  border-radius:8px;margin-bottom:12px;font-size:.82rem;
+}
+#blocklist-mode-bar.mode-block { background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25); }
+#blocklist-mode-bar.mode-allow { background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25); }
 </style>
 
 <!-- ── Login Overlay ───────────────────────────────────────────────────── -->

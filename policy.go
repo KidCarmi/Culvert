@@ -99,6 +99,7 @@ type PolicyRule struct {
 	DestFQDN       string          `json:"destFQDN"`       // exact or wildcard FQDN; empty = any
 	DestCategory   URLCategory     `json:"destCategory"`   // URL category; empty = any
 	DestCountry    []string        `json:"destCountry"`    // ISO 3166-1 alpha-2 country codes; empty = any
+	Schedule       *PolicySchedule `json:"schedule,omitempty"` // nil = always active
 	SSLAction      SSLAction       `json:"sslAction"`      // Inspect | Bypass
 	FileFiltering  bool            `json:"fileFiltering"`  // enable file-type scanning
 	FileProfile    FileProfileName `json:"fileProfile"`    // named file-extension block profile
@@ -106,6 +107,15 @@ type PolicyRule struct {
 	Action         PolicyAction    `json:"action"`
 	RedirectURL    string          `json:"redirectURL"` // used when Action == Redirect
 	HitCount       int64           `json:"hitCount"`    // runtime counter, not persisted
+}
+
+// PolicySchedule restricts a rule to specific days/times.
+// Empty/nil fields mean "any" (match all).
+type PolicySchedule struct {
+	Days      []string `json:"days"`      // e.g. ["Mon","Tue","Wed","Thu","Fri"]; empty = any
+	TimeStart string   `json:"timeStart"` // "09:00" 24-h; empty = any
+	TimeEnd   string   `json:"timeEnd"`   // "17:00" 24-h; empty = any
+	Timezone  string   `json:"timezone"`  // IANA tz name; empty = UTC
 }
 
 // PolicyStore holds an ordered list of policy rules with thread-safe access.
@@ -286,6 +296,9 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if !matchSource(rule, clientIP, identity, authSource, groups) {
 			continue
 		}
+		if !matchSchedule(rule.Schedule) {
+			continue
+		}
 		if !matchDest(rule, host) {
 			continue
 		}
@@ -298,6 +311,53 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		}
 	}
 	return nil
+}
+
+// ─── Schedule matching ────────────────────────────────────────────────────────
+
+func matchSchedule(s *PolicySchedule) bool {
+	if s == nil {
+		return true
+	}
+	loc := time.UTC
+	if s.Timezone != "" {
+		if l, err := time.LoadLocation(s.Timezone); err == nil {
+			loc = l
+		}
+	}
+	now := time.Now().In(loc)
+
+	// Day-of-week check.
+	if len(s.Days) > 0 {
+		day := now.Weekday().String()[:3] // "Mon", "Tue" …
+		found := false
+		for _, d := range s.Days {
+			if strings.EqualFold(d, day) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	// Time-of-day check.
+	if s.TimeStart != "" && s.TimeEnd != "" {
+		cur := fmt.Sprintf("%02d:%02d", now.Hour(), now.Minute())
+		if s.TimeStart <= s.TimeEnd {
+			// Normal range e.g. 09:00–17:00.
+			if cur < s.TimeStart || cur >= s.TimeEnd {
+				return false
+			}
+		} else {
+			// Overnight range e.g. 22:00–06:00.
+			if cur < s.TimeStart && cur >= s.TimeEnd {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // ─── Source matching ──────────────────────────────────────────────────────────

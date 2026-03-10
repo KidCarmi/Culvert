@@ -185,12 +185,47 @@ type Blocklist struct {
 	exact     map[string]bool // exact hostnames
 	wildcards map[string]bool // dot-prefixes: ".example.com"
 	path      string
+	mode      string // "block" (default) or "allow"
 }
 
 var bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
 
+func (b *Blocklist) Mode() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.mode == "allow" {
+		return "allow"
+	}
+	return "block"
+}
+
+func (b *Blocklist) SetMode(mode string) {
+	if mode != "allow" {
+		mode = "block"
+	}
+	b.mu.Lock()
+	b.mode = mode
+	b.mu.Unlock()
+	b.saveMode()
+}
+
+// saveMode persists the mode to a sidecar file (<blocklist>.mode).
+func (b *Blocklist) saveMode() {
+	if b.path == "" {
+		return
+	}
+	os.WriteFile(b.path+".mode", []byte(b.mode), 0600) //nolint:errcheck
+}
+
 func (b *Blocklist) Load(path string) error {
 	b.path = path
+	// Load mode sidecar.
+	if data, err := os.ReadFile(path + ".mode"); err == nil {
+		m := strings.TrimSpace(string(data))
+		if m == "allow" {
+			b.mode = "allow"
+		}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -242,31 +277,31 @@ func (b *Blocklist) Save() {
 	os.Rename(tmp, b.path) //nolint:errcheck
 }
 
-// IsBlocked checks exact match first (O(1)), then walks the host's dot-labels
-// to probe the wildcards map (O(labels) ≈ O(1)).
-//
-// Example: host "sub.ads.example.com", wildcard "*.example.com" (stored as ".example.com"):
-//   dot-walk checks ".ads.example.com" → not matched
-//             checks ".example.com"    → matched ✓
-// Apex match: host "example.com" vs "*.example.com" → checks ".example.com" directly.
-func (b *Blocklist) IsBlocked(host string) bool {
-	host = strings.ToLower(host)
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+// isListed reports whether host matches any entry in the list (mode-agnostic).
+func (b *Blocklist) isListed(host string) bool {
 	if b.exact[host] {
 		return true
 	}
-	// Dot-walk: "sub.ads.example.com" → check ".ads.example.com", ".example.com", ".com"
 	for i, ch := range host {
 		if ch == '.' && b.wildcards[host[i:]] {
 			return true
 		}
 	}
-	// Apex match: "example.com" should match "*.example.com" (stored as ".example.com")
-	if b.wildcards["."+host] {
-		return true
+	return b.wildcards["."+host]
+}
+
+// IsBlocked reports whether a request to host should be blocked.
+// In "block" mode (default): listed hosts are blocked.
+// In "allow" mode:           only listed hosts are allowed; all others blocked.
+func (b *Blocklist) IsBlocked(host string) bool {
+	host = strings.ToLower(host)
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	listed := b.isListed(host)
+	if b.mode == "allow" {
+		return !listed
 	}
-	return false
+	return listed
 }
 
 func (b *Blocklist) Add(host string) {
@@ -568,10 +603,24 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 }
 
 // DeleteUIUser removes a UI admin user.
-func (c *Config) DeleteUIUser(username string) {
+// Returns an error if this would leave the roster with no admin.
+func (c *Config) DeleteUIUser(username string) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	u := c.uiUsers[username]
+	if u != nil && u.role == RoleAdmin {
+		adminCount := 0
+		for _, usr := range c.uiUsers {
+			if usr.role == RoleAdmin {
+				adminCount++
+			}
+		}
+		if adminCount <= 1 {
+			return fmt.Errorf("cannot delete the last admin user")
+		}
+	}
 	delete(c.uiUsers, username)
-	c.mu.Unlock()
+	return nil
 }
 
 // ListUIUsers returns a snapshot of all admin UI users (without password hashes).

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,58 @@ func initSessionSecret() {
 	sessionSecret = make([]byte, 32)
 	if _, err := rand.Read(sessionSecret); err != nil {
 		panic(fmt.Sprintf("session: failed to generate secret: %v", err))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Session revocation list — invalidates tokens on explicit logout.
+// Entries are evicted lazily when their original expiry passes.
+// ---------------------------------------------------------------------------
+
+type revocationList struct {
+	mu     sync.Mutex
+	tokens map[string]time.Time // b64 payload → session expiry
+}
+
+var sessionRevoked = &revocationList{tokens: map[string]time.Time{}}
+
+func (r *revocationList) Revoke(token string, exp time.Time) {
+	r.mu.Lock()
+	r.tokens[token] = exp
+	r.mu.Unlock()
+}
+
+func (r *revocationList) IsRevoked(token string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	exp, ok := r.tokens[token]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(r.tokens, token) // lazy eviction
+		return false
+	}
+	return true
+}
+
+// revokeSessionCookie adds the cookie from r to the revocation list.
+func revokeSessionCookie(cookieName string, r *http.Request) {
+	c, err := r.Cookie(cookieName)
+	if err != nil {
+		return
+	}
+	dot := strings.LastIndex(c.Value, ".")
+	if dot < 0 {
+		return
+	}
+	b64part := c.Value[:dot]
+	// Decode just to get the expiry (HMAC already verified by decodeSession).
+	if payload, decErr := base64.RawURLEncoding.DecodeString(b64part); decErr == nil {
+		var s Session
+		if json.Unmarshal(payload, &s) == nil {
+			sessionRevoked.Revoke(b64part, time.Unix(s.Exp, 0))
+		}
 	}
 }
 
@@ -87,6 +140,11 @@ func decodeSession(raw string) (*Session, error) {
 	expected := sessionMAC(b64)
 	if !hmac.Equal([]byte(mac), []byte(expected)) {
 		return nil, fmt.Errorf("session: invalid signature")
+	}
+
+	// Revocation check (explicit logout).
+	if sessionRevoked.IsRevoked(b64) {
+		return nil, fmt.Errorf("session: revoked")
 	}
 
 	payload, err := base64.RawURLEncoding.DecodeString(b64)
