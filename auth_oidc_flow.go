@@ -336,7 +336,8 @@ func (p *OIDCFlowProvider) ResolveIdentity(username, token string) (*Identity, b
 	}
 
 	// Try JWT validation first (browser flow — token is an ID token).
-	if id, err := p.validateIDToken(token); err == nil {
+	// No nonce check here: non-browser clients submit access tokens, not ID tokens.
+	if id, err := p.validateIDToken(token, ""); err == nil {
 		return id, true
 	}
 
@@ -442,13 +443,12 @@ func (p *OIDCFlowProvider) ExchangeCode(code, state string) (*Identity, error) {
 		return nil, fmt.Errorf("oidc: no id_token in response")
 	}
 
-	// Validate ID token and extract identity.
-	id, err := p.validateIDToken(tr.IDToken)
+	// Validate ID token and extract identity; nonce verified inside.
+	id, err := p.validateIDToken(tr.IDToken, entry.nonce)
 	if err != nil {
 		return nil, fmt.Errorf("oidc id_token validation: %w", err)
 	}
 
-	// Verify nonce to prevent replay.
 	if id.Sub == "" {
 		return nil, fmt.Errorf("oidc: empty sub in id_token")
 	}
@@ -468,7 +468,10 @@ func (p *OIDCFlowProvider) ExchangeCode(code, state string) (*Identity, error) {
 // ID token validation
 // ---------------------------------------------------------------------------
 
-func (p *OIDCFlowProvider) validateIDToken(rawToken string) (*Identity, error) {
+// validateIDToken parses, validates, and extracts identity from a raw JWT ID token.
+// expectedNonce must match the "nonce" claim when non-empty (browser PKCE flow);
+// pass "" to skip nonce verification (non-browser introspection path).
+func (p *OIDCFlowProvider) validateIDToken(rawToken, expectedNonce string) (*Identity, error) {
 	if p.jwks == nil {
 		return nil, fmt.Errorf("oidc: no jwks_uri configured for ID-token validation")
 	}
@@ -517,6 +520,14 @@ func (p *OIDCFlowProvider) validateIDToken(rawToken string) (*Identity, error) {
 		groupsClaim = "groups"
 	}
 	id.Groups = extractStringSliceClaim(claims, groupsClaim)
+
+	// Verify nonce to prevent ID token replay attacks (OIDC Core §3.1.3.7).
+	if expectedNonce != "" {
+		nonceClaim, _ := claims["nonce"].(string)
+		if nonceClaim != expectedNonce {
+			return nil, fmt.Errorf("oidc: nonce mismatch — possible token replay")
+		}
+	}
 
 	return id, nil
 }

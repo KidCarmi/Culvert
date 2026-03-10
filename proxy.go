@@ -82,7 +82,10 @@ func isPrivateHost(hostport string) error {
 	}
 	ips, err := net.LookupHost(host)
 	if err != nil {
-		return nil // let Dial handle resolution errors
+		// Fail closed: unresolvable hosts are rejected to prevent DNS-rebinding
+		// attacks where the check resolves to a public IP but Dial resolves to
+		// a private one after TTL expiry.
+		return fmt.Errorf("destination %s: DNS resolution failed: %w", host, err)
 	}
 	for _, ipStr := range ips {
 		if ip := net.ParseIP(ipStr); ip != nil && isPrivateIP(ip) {
@@ -501,12 +504,10 @@ func isSafeRedirectURL(raw string) bool {
 	if !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	// Reject redirects that target private/internal addresses.
-	if isPrivateHost(u.Host) == nil {
-		// isPrivateHost returns nil if the host is public (no private IPs found).
-		return true
-	}
-	return false
+	// isPrivateHost returns nil only when all resolved IPs are public.
+	// DNS failure now also returns an error (fail-closed), so unresolvable
+	// hosts are rejected as unsafe redirect destinations.
+	return isPrivateHost(u.Host) == nil
 }
 
 // isWebSocketUpgrade returns true when the request is an HTTP→WebSocket upgrade.

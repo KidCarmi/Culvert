@@ -562,6 +562,9 @@ func apiAudit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	entries := auditGet()
 	jsonOK(w, map[string]any{"entries": entries, "count": len(entries)})
 }
@@ -581,6 +584,9 @@ func decodeJSON(r *http.Request, v any) error {
 
 // GET /api/stats
 func apiStats(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	total := atomic.LoadInt64(&statTotal)
 	blocked := atomic.LoadInt64(&statBlocked)
 	authFail := atomic.LoadInt64(&statAuthFail)
@@ -604,11 +610,17 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/timeseries
 func apiTimeseries(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	jsonOK(w, map[string]any{"data": tsGet()})
 }
 
 // GET /api/logs?filter=...&status=...&level=...&method=...
 func apiLogs(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	all := logGet()
 	filterHost   := strings.ToLower(r.URL.Query().Get("filter"))
 	filterStatus := strings.ToUpper(r.URL.Query().Get("status"))
@@ -637,6 +649,9 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/top-hosts?n=20
 func apiTopHosts(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	n := 20
 	if s := r.URL.Query().Get("n"); s != "" {
 		if v, err := fmt.Sscanf(s, "%d", &n); v == 0 || err != nil {
@@ -1020,6 +1035,12 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "action is required", http.StatusBadRequest)
 			return
 		}
+		if rule.Schedule != nil && rule.Schedule.Timezone != "" {
+			if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
+				http.Error(w, "invalid schedule timezone: "+rule.Schedule.Timezone, http.StatusBadRequest)
+				return
+			}
+		}
 		added := policyStore.Add(rule)
 		policyStore.Save()
 		logger.Printf("UI: policy rule added priority=%d name=%q action=%s", added.Priority, added.Name, added.Action)
@@ -1050,6 +1071,12 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		if err := decodeJSON(r,&rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
+		}
+		if rule.Schedule != nil && rule.Schedule.Timezone != "" {
+			if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
+				http.Error(w, "invalid schedule timezone: "+rule.Schedule.Timezone, http.StatusBadRequest)
+				return
+			}
 		}
 		if !policyStore.Update(priority, rule) {
 			http.Error(w, "rule not found", http.StatusNotFound)
@@ -1451,6 +1478,9 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 func apiIdPList(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
 		jsonOK(w, idpRegistry.All())
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
@@ -1495,6 +1525,9 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
 		p := idpRegistry.Get(id)
 		if p == nil {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -1542,6 +1575,9 @@ func apiIdPGroups(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	p := idpRegistry.Get(id)
 	if p == nil {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -1556,9 +1592,13 @@ func apiIdPGroups(w http.ResponseWriter, r *http.Request, id string) {
 
 // POST /api/idp/discover — run OIDC discovery for a given issuer URL and
 // return the discovered endpoints without saving anything.
+// Requires Admin: this endpoint makes outbound HTTP requests based on user input.
 func apiIdPDiscover(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
 	var body struct {
