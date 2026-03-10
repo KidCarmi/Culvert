@@ -269,6 +269,14 @@ tr.dragging  { opacity: .4; }
       <span class="icon">⚙️</span> Settings
     </div>
 
+    <div class="nav-section">Tools</div>
+    <div class="nav-item" data-view="policy-tester">
+      <span class="icon">🧪</span> Policy Tester
+    </div>
+    <div class="nav-item" data-view="audit">
+      <span class="icon">📋</span> Audit Log
+    </div>
+
     <div class="nav-section" id="nav-section-admin" style="display:none">Admin</div>
     <div class="nav-item" data-view="users" id="nav-users" style="display:none">
       <span class="icon">👥</span> Users &amp; Roles
@@ -1317,6 +1325,90 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-fileblock -->
 
+    <!-- ── POLICY TESTER ────────────────────────────────────────────────── -->
+    <div class="view" id="view-policy-tester">
+      <div style="display:grid;grid-template-columns:380px 1fr;gap:18px;align-items:start">
+
+        <!-- Input form -->
+        <div class="panel" style="margin-bottom:0">
+          <div class="panel-header"><span class="panel-title">Test Inputs</span></div>
+          <div class="panel-body" style="display:flex;flex-direction:column;gap:12px">
+            <div>
+              <label class="label">Source IP</label>
+              <input type="text" class="input" id="pt-ip" placeholder="192.168.1.50" style="width:100%">
+            </div>
+            <div>
+              <label class="label">Identity (username / email)</label>
+              <input type="text" class="input" id="pt-identity" placeholder="alice@corp.com" style="width:100%">
+            </div>
+            <div>
+              <label class="label">Auth Source</label>
+              <input type="text" class="input" id="pt-auth" placeholder="unauth / local / okta" style="width:100%">
+            </div>
+            <div>
+              <label class="label">Groups (comma-separated)</label>
+              <input type="text" class="input" id="pt-groups" placeholder="sales, vpn-users" style="width:100%">
+            </div>
+            <div>
+              <label class="label">Destination Host</label>
+              <input type="text" class="input" id="pt-host" placeholder="example.com" style="width:100%">
+            </div>
+            <button class="btn" style="width:100%" onclick="runPolicyTest()">🧪 Run Test</button>
+          </div>
+        </div>
+
+        <!-- Results -->
+        <div>
+          <div class="panel" style="margin-bottom:14px" id="pt-result-panel" style="display:none">
+            <div class="panel-header"><span class="panel-title">Result</span></div>
+            <div class="panel-body" id="pt-result-body">
+              <div class="empty-state" style="padding:30px 0">Run a test to see results</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Rule Trace</span>
+              <span style="font-size:.75rem;color:var(--muted)">evaluation order</span>
+            </div>
+            <div class="tbl-wrap">
+              <table>
+                <thead><tr><th>#</th><th>Rule</th><th>Result</th></tr></thead>
+                <tbody id="pt-trace"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-policy-tester -->
+
+    <!-- ── AUDIT LOG ───────────────────────────────────────────────────── -->
+    <div class="view" id="view-audit">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Audit Log</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" class="input" style="width:200px" id="audit-filter" placeholder="Filter…" oninput="renderAuditLog()">
+            <button class="btn ghost sm" onclick="loadAuditLog()">↺ Refresh</button>
+          </div>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Actor IP</th>
+                <th>Action</th>
+                <th>Object</th>
+                <th>Detail</th>
+                <th>Diff</th>
+              </tr>
+            </thead>
+            <tbody id="audit-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div><!-- /view-audit -->
+
   </div><!-- /content -->
 </div><!-- /main -->
 
@@ -1349,7 +1441,9 @@ const viewMeta = {
   pac:          { title: 'PAC File',      meta: 'Proxy Auto-Configuration — serve /proxy.pac to Windows/macOS clients' },
   certificates: { title: 'Certificates', meta: 'Root CA management & custom TLS certificates' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
-  users:        { title: 'Users & Roles', meta: 'Manage dashboard users and RBAC permissions' },
+  users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
+  'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
+  audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -1365,7 +1459,9 @@ function switchView(name) {
   const m = viewMeta[name] || {};
   document.getElementById('topbar-title').textContent = m.title || name;
   document.getElementById('topbar-meta').textContent  = m.meta  || '';
-  if (name === 'idproviders') loadIdPList();
+  if (name === 'idproviders')    loadIdPList();
+  if (name === 'audit')          loadAuditLog();
+  if (name === 'policy-tester')  { /* form is self-contained */ }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3342,6 +3438,136 @@ function syncGroupInput() {
 function filterGroupOptions(val) {
   // Just let the browser handle the datalist; nothing extra needed.
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Policy Tester
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function runPolicyTest() {
+  const ip         = document.getElementById('pt-ip').value.trim();
+  const identity   = document.getElementById('pt-identity').value.trim();
+  const authSource = document.getElementById('pt-auth').value.trim() || 'unauth';
+  const groupsRaw  = document.getElementById('pt-groups').value.trim();
+  const host       = document.getElementById('pt-host').value.trim();
+  const groups     = groupsRaw ? groupsRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+  if (!host) { toast('Destination host is required', 'error'); return; }
+
+  let data;
+  try {
+    data = await api('/api/policy/test', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({sourceIP: ip, identity, authSource, groups, host})
+    });
+  } catch(err) { toast('Test error: ' + err.message, 'error'); return; }
+
+  // Result banner
+  const rb = document.getElementById('pt-result-body');
+  if (data.matched) {
+    const r = data.rule;
+    rb.innerHTML = `<div class="pt-match">
+      <div class="pt-action">✅ ${escHtml(String(r.action))}</div>
+      <div class="pt-sub">Matched rule <strong>#${r.priority} — ${escHtml(r.name)}</strong></div>
+      ${r.sslAction ? `<div class="pt-sub" style="margin-top:4px">SSL: ${escHtml(r.sslAction)}</div>` : ''}
+      ${r.redirectURL ? `<div class="pt-sub" style="margin-top:4px">Redirect → ${escHtml(r.redirectURL)}</div>` : ''}
+    </div>`;
+  } else {
+    rb.innerHTML = `<div class="pt-nomatch">
+      <div class="pt-action">⛔ No rule matched</div>
+      <div class="pt-sub">Default action: <strong>${escHtml(data.defaultAction)}</strong></div>
+    </div>`;
+  }
+
+  // Trace table
+  const tb = document.getElementById('pt-trace');
+  if (!data.trace || !data.trace.length) {
+    tb.innerHTML = '<tr><td colspan="3" class="empty-state" style="padding:20px">No rules configured</td></tr>';
+    return;
+  }
+  tb.innerHTML = data.trace.map((t, i) => {
+    const isMatch = !t.skipReason;
+    const cls = isMatch ? 'trace-match' : 'trace-skip';
+    const badge = isMatch
+      ? '<span style="background:rgba(74,222,128,.15);color:#4ade80;padding:2px 8px;border-radius:12px;font-size:.72rem">✓ MATCH</span>'
+      : `<span style="color:var(--muted);font-size:.78rem">${escHtml(t.skipReason)}</span>`;
+    return `<tr class="${cls}">
+      <td>${t.priority}</td>
+      <td>${escHtml(t.name)}</td>
+      <td>${badge}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Audit Log
+// ═══════════════════════════════════════════════════════════════════════════
+
+let auditEntries = [];
+
+async function loadAuditLog() {
+  try {
+    const d = await api('/api/audit');
+    auditEntries = d.entries || [];
+    renderAuditLog();
+  } catch(err) { toast('Failed to load audit log: ' + err.message, 'error'); }
+}
+
+function renderAuditLog() {
+  const filter = document.getElementById('audit-filter').value.toLowerCase();
+  const tb = document.getElementById('audit-table');
+  const entries = filter
+    ? auditEntries.filter(e =>
+        (e.action||'').toLowerCase().includes(filter) ||
+        (e.object||'').toLowerCase().includes(filter) ||
+        (e.actor||'').toLowerCase().includes(filter) ||
+        (e.detail||'').toLowerCase().includes(filter))
+    : auditEntries;
+
+  if (!entries.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="empty-state" style="padding:24px">No audit entries yet</td></tr>';
+    return;
+  }
+
+  tb.innerHTML = entries.map((e, idx) => {
+    const hasDiff = e.before || e.after;
+    const diffBtn = hasDiff
+      ? `<button class="audit-diff-btn" onclick="toggleAuditDiff(${idx})">± diff</button>`
+      : '—';
+    return `<tr id="audit-row-${idx}">
+      <td style="white-space:nowrap;font-size:.75rem">${escHtml(e.time||'')}</td>
+      <td style="font-size:.78rem">${escHtml(e.actor||'')}</td>
+      <td><code style="font-size:.78rem">${escHtml(e.action||'')}</code></td>
+      <td style="font-size:.82rem">${escHtml(e.object||'')}</td>
+      <td style="font-size:.78rem;color:var(--muted)">${escHtml(e.detail||'')}</td>
+      <td>${diffBtn}</td>
+    </tr>`;
+  }).join('');
+
+  // Store index for diff toggle
+  window._auditEntries = entries;
+}
+
+function toggleAuditDiff(idx) {
+  const existing = document.getElementById('audit-diff-' + idx);
+  if (existing) { existing.remove(); return; }
+  const e = window._auditEntries[idx];
+  const row = document.getElementById('audit-row-' + idx);
+  if (!row) return;
+  const diffRow = document.createElement('tr');
+  diffRow.id = 'audit-diff-' + idx;
+  diffRow.className = 'audit-diff-row';
+  let html = '<td colspan="6">';
+  if (e.before) html += `<div style="margin-bottom:6px"><strong style="font-size:.75rem">Before:</strong><pre class="diff-block">${escHtml(prettyJSON(e.before))}</pre></div>`;
+  if (e.after)  html += `<div><strong style="font-size:.75rem">After:</strong><pre class="diff-block">${escHtml(prettyJSON(e.after))}</pre></div>`;
+  html += '</td>';
+  diffRow.innerHTML = html;
+  row.after(diffRow);
+}
+
+function prettyJSON(str) {
+  try { return JSON.stringify(JSON.parse(str), null, 2); } catch { return str; }
+}
 </script>
 
 <!-- ── First-time Setup Wizard ─────────────────────────────────────────── -->
@@ -3566,6 +3792,17 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 }
 #blocklist-mode-bar.mode-block { background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25); }
 #blocklist-mode-bar.mode-allow { background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25); }
+.pt-match  { background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px;padding:16px 20px; }
+.pt-nomatch{ background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:16px 20px; }
+.pt-action { font-size:1.4rem;font-weight:700;margin-bottom:4px; }
+.pt-sub    { font-size:.82rem;color:var(--muted); }
+.trace-match { color:#4ade80;font-weight:600; }
+.trace-skip  { color:var(--muted);font-style:italic; }
+.audit-diff-btn { background:none;border:none;cursor:pointer;color:var(--accent2);font-size:.75rem;padding:2px 6px;border-radius:4px; }
+.audit-diff-btn:hover { background:var(--surface2); }
+.audit-diff-row td { font-size:.75rem;color:var(--muted);padding:4px 12px 8px; }
+pre.diff-block { margin:0;white-space:pre-wrap;word-break:break-all;font-size:.72rem;
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:200px;overflow-y:auto; }
 </style>
 
 <!-- ── Login Overlay ───────────────────────────────────────────────────── -->

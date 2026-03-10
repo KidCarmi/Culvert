@@ -39,6 +39,7 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/rewrite", apiRewrite)
 	mux.HandleFunc("/api/policy", apiPolicy)
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
+	mux.HandleFunc("/api/policy/test", apiPolicyTest)
 	mux.HandleFunc("/api/ca-cert", apiCACert)
 	mux.HandleFunc("/api/certs/upload", apiCertsUpload)
 	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)
@@ -1150,6 +1151,81 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
 	auditEvent(r, "policy.reorder", fmt.Sprintf("%d rules", len(body.Priorities)), "")
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// POST /api/policy/test — evaluate policy rules against hypothetical inputs.
+// Useful for debugging: returns the first matching rule (or no-match) without
+// side-effects (hit counts are NOT incremented).
+// Body: {"sourceIP":"…","identity":"…","authSource":"…","groups":["…"],"host":"…"}
+func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	var body struct {
+		SourceIP   string   `json:"sourceIP"`
+		Identity   string   `json:"identity"`
+		AuthSource string   `json:"authSource"`
+		Groups     []string `json:"groups"`
+		Host       string   `json:"host"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.Host == "" {
+		http.Error(w, "host is required", http.StatusBadRequest)
+		return
+	}
+	if body.AuthSource == "" {
+		body.AuthSource = "unauth"
+	}
+
+	// Walk rules manually without incrementing hit counts.
+	rules := policyStore.List()
+	type ruleTrace struct {
+		Priority   int    `json:"priority"`
+		Name       string `json:"name"`
+		SkipReason string `json:"skipReason,omitempty"` // why this rule was skipped
+	}
+	var trace []ruleTrace
+	var matched *PolicyRule
+
+	for _, rule := range rules {
+		r2 := rule // copy
+		skip := ""
+		if !matchSource(&r2, body.SourceIP, body.Identity, body.AuthSource, body.Groups) {
+			skip = "source mismatch"
+		} else if !matchSchedule(r2.Schedule) {
+			skip = "schedule inactive"
+		} else if !matchDest(&r2, body.Host) {
+			skip = "destination mismatch"
+		}
+		trace = append(trace, ruleTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})
+		if skip == "" {
+			matched = &r2
+			break
+		}
+	}
+
+	if matched == nil {
+		defAction := defaultPolicyAction()
+		jsonOK(w, map[string]any{
+			"matched":       false,
+			"defaultAction": defAction,
+			"trace":         trace,
+		})
+		return
+	}
+	jsonOK(w, map[string]any{
+		"matched": true,
+		"rule":    matched,
+		"action":  matched.Action,
+		"trace":   trace,
+	})
 }
 
 // GET /api/ca-cert — download the Root CA certificate (PEM) for browser/OS import.
