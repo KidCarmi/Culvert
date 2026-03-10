@@ -331,9 +331,10 @@ func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"needsSetup": !cfg.AuthEnabled()})
 }
 
-// POST /api/setup/complete — sets the initial admin credential.
+// POST /api/setup/complete — sets the initial admin credential or enables unauth mode.
 // Only callable once; returns 403 if auth is already configured.
-// Body: {"user": "...", "pass": "..."}
+// Body (with credentials): {"user": "...", "pass": "..."}
+// Body (open/unauth mode):  {"unauth": true}
 // Password must be at least 8 characters to enforce minimum hygiene.
 func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -345,13 +346,23 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		User string `json:"user"`
-		Pass string `json:"pass"`
+		User   string `json:"user"`
+		Pass   string `json:"pass"`
+		Unauth bool   `json:"unauth"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+
+	// Unauth (open proxy) mode — skip credential requirements.
+	if body.Unauth {
+		cfg.SetUnauthMode(true)
+		auditEvent(r, "setup.complete", "system", "unauth mode enabled — proxy requires no credentials")
+		jsonOK(w, map[string]any{"ok": true, "unauth": true})
+		return
+	}
+
 	body.User = strings.TrimSpace(body.User)
 	if len(body.User) < 1 || len(body.User) > 64 {
 		http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)

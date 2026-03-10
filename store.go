@@ -394,6 +394,10 @@ type Config struct {
 	// External auth provider (LDAP or OIDC). When non-nil, takes precedence
 	// over the local bcrypt credentials for Verify calls.
 	provider AuthProvider
+
+	// unauthMode marks setup as complete without requiring credentials.
+	// When true the proxy forwards all traffic without any authentication check.
+	unauthMode bool
 }
 
 var cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
@@ -470,11 +474,30 @@ func (c *Config) VerifyAuth(user, pass string) bool {
 	return ok
 }
 
-// AuthEnabled returns true when any form of authentication is active.
+// AuthEnabled returns true when any form of authentication is active,
+// or when unauthMode is explicitly set (setup is considered complete).
 func (c *Config) AuthEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != "" || c.provider != nil
+	return c.user != "" || c.provider != nil || c.unauthMode
+}
+
+// UnauthMode returns true when the proxy is explicitly configured to run
+// without authentication (open proxy mode, setup is still considered done).
+func (c *Config) UnauthMode() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.unauthMode
+}
+
+// SetUnauthMode enables or disables explicit unauthenticated (open) mode.
+func (c *Config) SetUnauthMode(enabled bool) {
+	c.mu.Lock()
+	c.unauthMode = enabled
+	c.mu.Unlock()
+	if enabled {
+		logger.Printf("Auth mode → UNAUTH (open proxy, no credentials required)")
+	}
 }
 
 // ProviderEnabled returns true when an external auth provider (LDAP/OIDC) is set.

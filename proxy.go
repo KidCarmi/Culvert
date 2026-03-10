@@ -161,7 +161,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	var authenticatedIdentity string
 	var authenticatedGroups []string
 
-	authRequired := cfg.AuthEnabled() || cfg.ProviderEnabled() || len(idpRegistry.EnabledProviders()) > 0
+	authRequired := !cfg.UnauthMode() && (cfg.AuthEnabled() || cfg.ProviderEnabled() || len(idpRegistry.EnabledProviders()) > 0)
 
 	if authRequired {
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────

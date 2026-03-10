@@ -62,6 +62,7 @@ type ConfigSnapshot struct {
 	IPList       []string `json:"ip_list"`
 	RateLimitRPM int      `json:"rate_limit_rpm"`
 	AuthEnabled  bool     `json:"auth_enabled"`
+	UnauthMode   bool     `json:"unauth_mode"`
 	UpdatedAt    string   `json:"updated_at"`
 }
 
@@ -369,6 +370,7 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 		IPList:       ipf.List(),
 		RateLimitRPM: rl.Limit(),
 		AuthEnabled:  cfg.AuthEnabled(),
+		UnauthMode:   cfg.UnauthMode(),
 	}
 }
 
