@@ -268,6 +268,11 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="settings">
       <span class="icon">⚙️</span> Settings
     </div>
+
+    <div class="nav-section" id="nav-section-admin" style="display:none">Admin</div>
+    <div class="nav-item" data-view="users" id="nav-users" style="display:none">
+      <span class="icon">👥</span> Users &amp; Roles
+    </div>
   </nav>
 
   <div class="sidebar-footer">
@@ -295,6 +300,10 @@ tr.dragging  { opacity: .4; }
     <div style="display:flex;gap:10px;align-items:center">
       <span class="topbar-meta" id="server-time"></span>
       <span class="pill live">● LIVE</span>
+      <span id="topbar-user-info" style="display:none;align-items:center;gap:6px;font-size:.8rem">
+        <span id="topbar-username" style="color:var(--muted)"></span>
+        <span id="topbar-role-badge" style="padding:2px 8px;border-radius:99px;font-size:.7rem;font-weight:700;text-transform:uppercase"></span>
+      </span>
       <button class="btn ghost sm" id="logout-btn" onclick="doLogout()" style="display:none">Sign Out</button>
     </div>
   </div>
@@ -925,6 +934,32 @@ Firefox (all platforms):
       </div>
     </div>
 
+    <!-- ── USERS & ROLES ──────────────────────────────────────────────────── -->
+    <div class="view" id="view-users">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Admin Users</span>
+          <button class="btn" onclick="openUserModal()">+ Add User</button>
+        </div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Manage who can access this dashboard and what they can do.
+            <strong>admin</strong> — full access &nbsp;·&nbsp;
+            <strong>operator</strong> — manage policy/blocklist/filters &nbsp;·&nbsp;
+            <strong>viewer</strong> — read-only
+          </p>
+          <table>
+            <thead><tr>
+              <th>Username</th>
+              <th>Role</th>
+              <th style="width:130px">Actions</th>
+            </tr></thead>
+            <tbody id="users-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- ── REWRITE ──────────────────────────────────────────────────────────── -->
     <div class="view" id="view-rewrite">
       <div class="panel">
@@ -1255,6 +1290,7 @@ const viewMeta = {
   pac:          { title: 'PAC File',      meta: 'Proxy Auto-Configuration — serve /proxy.pac to Windows/macOS clients' },
   certificates: { title: 'Certificates', meta: 'Root CA management & custom TLS certificates' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
+  users:        { title: 'Users & Roles', meta: 'Manage dashboard users and RBAC permissions' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -1346,7 +1382,37 @@ function updateBreakdownChart(allowed, blocked, authFail) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Login overlay
 // ═══════════════════════════════════════════════════════════════════════════
+// ── Role state ──────────────────────────────────────────────────────────
+let uiRole = '';
+let uiUsername = '';
+
+function applySession(user, role) {
+  uiRole     = role || '';
+  uiUsername = user || '';
+
+  // Topbar info
+  const info = document.getElementById('topbar-user-info');
+  if (user || role) {
+    info.style.display = 'flex';
+    document.getElementById('topbar-username').textContent = user ? user : '';
+    const badge = document.getElementById('topbar-role-badge');
+    badge.textContent = role || '';
+    badge.className = 'role-badge-' + (role || 'viewer');
+  } else {
+    info.style.display = 'none';
+  }
+
+  // Admin-only nav items
+  const isAdmin = role === 'admin';
+  document.getElementById('nav-users').style.display         = isAdmin ? '' : 'none';
+  document.getElementById('nav-section-admin').style.display = isAdmin ? '' : 'none';
+
+  // Logout button
+  document.getElementById('logout-btn').style.display = (user || role) ? '' : 'none';
+}
+
 function showLoginOverlay() {
+  applySession('', '');
   const el = document.getElementById('login-overlay');
   if (el) { el.style.display = 'flex'; }
 }
@@ -1356,8 +1422,108 @@ function hideLoginOverlay() {
 }
 async function doLogout() {
   await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
-  document.getElementById('logout-btn').style.display = 'none';
+  applySession('', '');
   showLoginOverlay();
+}
+
+// ── Users & Roles ────────────────────────────────────────────────────────
+let _editingUsername = null; // null = new user, else username being edited
+
+async function fetchUsers() {
+  if (uiRole !== 'admin') return;
+  try {
+    const d = await api('/api/auth/users');
+    renderUsersTable(d.users || []);
+  } catch (_) {}
+}
+
+function renderUsersTable(users) {
+  const tbody = document.getElementById('users-table');
+  if (!tbody) return;
+  if (!users.length) {
+    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">No users yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = users.map(u => `
+    <tr>
+      <td><strong>${escHtml(u.username)}</strong></td>
+      <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span></td>
+      <td>
+        <button class="btn ghost sm" onclick="openUserModal(${JSON.stringify(u.username)}, ${JSON.stringify(u.role)})">Edit</button>
+        ${u.username !== uiUsername ? `<button class="btn ghost sm" style="color:var(--red)" onclick="deleteUser(${JSON.stringify(u.username)})">Delete</button>` : '<span style="color:var(--muted);font-size:.75rem">  (you)</span>'}
+      </td>
+    </tr>`).join('');
+}
+
+function openUserModal(username, role) {
+  _editingUsername = username || null;
+  const isEdit = !!username;
+  document.getElementById('user-modal-title').textContent = isEdit ? 'Edit User' : 'Add User';
+  document.getElementById('user-modal-sub').textContent   = isEdit ? `Update role or password for ${username}` : 'Create a new dashboard user';
+  document.getElementById('um-username').value    = username || '';
+  document.getElementById('um-username').disabled = isEdit;
+  document.getElementById('um-pass').value        = '';
+  document.getElementById('um-pass-change').value = '';
+  document.getElementById('um-pass-group').style.display       = isEdit ? 'none' : '';
+  document.getElementById('um-pass-hint-group').style.display  = isEdit ? '' : 'none';
+  document.getElementById('um-role').value = role || 'operator';
+  document.getElementById('um-err').style.display = 'none';
+  document.getElementById('um-err').textContent   = '';
+  document.getElementById('user-modal').classList.add('open');
+  if (!isEdit) setTimeout(() => document.getElementById('um-username').focus(), 50);
+}
+
+function closeUserModal() {
+  document.getElementById('user-modal').classList.remove('open');
+  _editingUsername = null;
+}
+
+async function saveUser() {
+  const errEl = document.getElementById('um-err');
+  const btn   = document.getElementById('um-save-btn');
+  errEl.style.display = 'none';
+
+  const isEdit = !!_editingUsername;
+  const username = isEdit ? _editingUsername : document.getElementById('um-username').value.trim();
+  const password = isEdit ? document.getElementById('um-pass-change').value
+                           : document.getElementById('um-pass').value;
+  const role     = document.getElementById('um-role').value;
+
+  if (!username)                           return showUserErr('Username is required.');
+  if (!isEdit && password.length < 8)      return showUserErr('Password must be at least 8 characters.');
+  if (isEdit && password && password.length < 8) return showUserErr('New password must be at least 8 characters.');
+
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const body = {username, role};
+    if (password) body.password = password;
+    await api('/api/auth/users', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    closeUserModal();
+    fetchUsers();
+  } catch (err) {
+    showUserErr(err.message || 'Save failed.');
+  }
+  btn.disabled = false; btn.textContent = 'Save';
+}
+
+function showUserErr(msg) {
+  const el = document.getElementById('um-err');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+async function deleteUser(username) {
+  if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+  try {
+    await api('/api/auth/users?username=' + encodeURIComponent(username), {method:'DELETE'});
+    fetchUsers();
+  } catch (err) {
+    alert('Delete failed: ' + err.message);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2473,6 +2639,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.view === 'certificates')  loadCACertInfo();
     if (el.dataset.view === 'idproviders')   loadIdPList();
     if (el.dataset.view === 'pac')           loadPACConfig();
+    if (el.dataset.view === 'users')         fetchUsers();
   });
 });
 
@@ -3072,8 +3239,9 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
       body: JSON.stringify({user, pass})
     });
     if (r.ok) {
+      const data = await r.json().catch(() => ({}));
       hideLoginOverlay();
-      document.getElementById('logout-btn').style.display = '';
+      applySession(data.user || user, data.role || '');
       // Refresh dashboard data after login.
       fetchStats(); fetchTopHosts(); fetchTimeseries(); fetchLogs();
     } else {
@@ -3123,7 +3291,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
           if (r.ok) {
             // Setup auto-logs in; just hide the overlay and show dashboard.
             document.getElementById('setup-overlay').classList.remove('active');
-            document.getElementById('logout-btn').style.display = '';
+            applySession(user, 'admin'); // setup always creates an admin
             fetchStats(); fetchTopHosts(); fetchTimeseries(); fetchLogs();
           } else {
             const txt = await r.text();
@@ -3144,8 +3312,8 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
           const ad = await a.json();
           if (!ad.loggedIn) {
             showLoginOverlay();
-          } else if (ad.user) {
-            document.getElementById('logout-btn').style.display = '';
+          } else {
+            applySession(ad.user || '', ad.role || '');
           }
         }
       } catch (_) { /* server unreachable */ }
@@ -3153,6 +3321,48 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
   } catch (_) { /* server unreachable — show normal UI */ }
 })();
 </script>
+
+<!-- ── User Modal ──────────────────────────────────────────────────────── -->
+<div id="user-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
+  <div class="setup-card" style="width:360px;max-width:94vw">
+    <h2 id="user-modal-title" style="font-size:1.15rem;margin-bottom:4px">Add User</h2>
+    <p id="user-modal-sub" style="font-size:.82rem;color:var(--muted);margin-bottom:18px">New admin dashboard user</p>
+    <div class="form-group">
+      <label class="form-label">Username</label>
+      <input id="um-username" type="text" class="input" style="width:100%" maxlength="64" autocomplete="off">
+    </div>
+    <div class="form-group" id="um-pass-group">
+      <label class="form-label">Password <span style="color:var(--muted)">(min 8 characters)</span></label>
+      <input id="um-pass" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="form-group" id="um-pass-hint-group" style="display:none">
+      <label class="form-label">New Password <span style="color:var(--muted)">(leave blank to keep current)</span></label>
+      <input id="um-pass-change" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Role</label>
+      <select id="um-role" class="input" style="width:100%">
+        <option value="admin">admin — full access</option>
+        <option value="operator" selected>operator — manage content</option>
+        <option value="viewer">viewer — read only</option>
+      </select>
+    </div>
+    <div class="setup-err" id="um-err" style="margin-bottom:10px"></div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn" id="um-save-btn" onclick="saveUser()">Save</button>
+      <button class="btn ghost" onclick="closeUserModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── User Modal / Role Badges ─────────────────────────────────────────── -->
+<style>
+.role-badge-admin    { background:rgba(239,68,68,.15);  color:#f87171; }
+.role-badge-operator { background:rgba(59,130,246,.15); color:#60a5fa; }
+.role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }
+#user-modal { display:none }
+#user-modal.open { display:flex }
+</style>
 
 <!-- ── Login Overlay ───────────────────────────────────────────────────── -->
 <style>
