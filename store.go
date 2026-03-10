@@ -379,6 +379,41 @@ func cacheKey(user, pass string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// ─── UI RBAC roles ────────────────────────────────────────────────────────────
+
+// UIRole defines the permission level for admin UI users.
+type UIRole string
+
+const (
+	RoleAdmin    UIRole = "admin"    // full system access
+	RoleOperator UIRole = "operator" // manage content (policy, blocklist, etc.)
+	RoleViewer   UIRole = "viewer"   // read-only dashboard access
+)
+
+// rolePriority maps roles to numeric levels for comparison.
+var rolePriority = map[UIRole]int{
+	RoleViewer:   1,
+	RoleOperator: 2,
+	RoleAdmin:    3,
+}
+
+// HasRole returns true when r's level is at least the level of min.
+func (r UIRole) HasRole(min UIRole) bool {
+	return rolePriority[r] >= rolePriority[min]
+}
+
+// uiAdminUser holds credentials and role for a single UI admin user.
+type uiAdminUser struct {
+	passHash []byte
+	role     UIRole
+}
+
+// UIUserInfo is the public (no hash) view of a UI admin user.
+type UIUserInfo struct {
+	Username string `json:"username"`
+	Role     UIRole `json:"role"`
+}
+
 // ─── Config (live-editable) ───────────────────────────────────────────────────
 
 type Config struct {
@@ -398,6 +433,10 @@ type Config struct {
 	// unauthMode marks setup as complete without requiring credentials.
 	// When true the proxy forwards all traffic without any authentication check.
 	unauthMode bool
+
+	// uiUsers holds the multi-user admin roster with per-user roles.
+	// When nil/empty, falls back to the legacy single-user (user/passHash).
+	uiUsers map[string]*uiAdminUser
 }
 
 var cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
@@ -439,6 +478,11 @@ func (c *Config) SetAuth(user, pass string) error {
 	c.mu.Lock()
 	c.user = user
 	c.passHash = hash
+	// Mirror into the RBAC user roster so the RBAC path works immediately.
+	if c.uiUsers == nil {
+		c.uiUsers = map[string]*uiAdminUser{}
+	}
+	c.uiUsers[user] = &uiAdminUser{passHash: hash, role: RoleAdmin}
 	c.mu.Unlock()
 	c.cache.clear()
 	return nil
@@ -498,6 +542,74 @@ func (c *Config) SetUnauthMode(enabled bool) {
 	if enabled {
 		logger.Printf("Auth mode → UNAUTH (open proxy, no credentials required)")
 	}
+}
+
+// ─── UI multi-user admin management ──────────────────────────────────────────
+
+// SetUIUser creates or updates an admin UI user with the given role.
+// Call with empty password to update only the role (password unchanged).
+func (c *Config) SetUIUser(username, password string, role UIRole) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.uiUsers == nil {
+		c.uiUsers = map[string]*uiAdminUser{}
+	}
+	existing := c.uiUsers[username]
+	if password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return err
+		}
+		c.uiUsers[username] = &uiAdminUser{passHash: hash, role: role}
+	} else if existing != nil {
+		existing.role = role
+	}
+	return nil
+}
+
+// DeleteUIUser removes a UI admin user.
+func (c *Config) DeleteUIUser(username string) {
+	c.mu.Lock()
+	delete(c.uiUsers, username)
+	c.mu.Unlock()
+}
+
+// ListUIUsers returns a snapshot of all admin UI users (without password hashes).
+func (c *Config) ListUIUsers() []UIUserInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]UIUserInfo, 0, len(c.uiUsers))
+	for name, u := range c.uiUsers {
+		out = append(out, UIUserInfo{Username: name, Role: u.role})
+	}
+	return out
+}
+
+// VerifyUIUser checks credentials against the admin user roster and returns
+// the user's role.  Falls back to the legacy single-user when the roster is
+// empty, assigning RoleAdmin for backwards compatibility.
+func (c *Config) VerifyUIUser(username, password string) (UIRole, bool) {
+	c.mu.RLock()
+	uiU := c.uiUsers[username]
+	legacyUser := c.user
+	legacyHash := c.passHash
+	c.mu.RUnlock()
+
+	// Multi-user roster takes precedence.
+	if uiU != nil {
+		if bcrypt.CompareHashAndPassword(uiU.passHash, []byte(password)) == nil {
+			return uiU.role, true
+		}
+		return "", false
+	}
+
+	// Legacy single-user fallback (pre-RBAC deployments).
+	if legacyUser != "" && username == legacyUser {
+		if bcrypt.CompareHashAndPassword(legacyHash, []byte(password)) == nil {
+			return RoleAdmin, true
+		}
+	}
+	return "", false
 }
 
 // ProviderEnabled returns true when an external auth provider (LDAP/OIDC) is set.

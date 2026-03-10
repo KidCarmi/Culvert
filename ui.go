@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/csv"
 	"embed"
 	"encoding/json"
@@ -51,6 +52,7 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/auth/login", apiAuthLogin)
 	mux.HandleFunc("/api/auth/status", apiAuthStatus)
 	mux.HandleFunc("/api/auth/logout", apiAuthLogout)
+	mux.HandleFunc("/api/auth/users", apiAuthUsers) // RBAC user management (admin only)
 
 	// ── Generic IdP Framework ─────────────────────────────────────────────
 	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
@@ -164,7 +166,30 @@ func isSameOrigin(r *http.Request, origin string) bool {
 	return strings.EqualFold(u.Host, r.Host)
 }
 
-// uiAuthMiddleware gates /api/ endpoints with session-cookie auth.
+// uiRoleKey is the context key used to propagate the authenticated UI role.
+type uiRoleKey struct{}
+
+// uiRole extracts the UI role injected by uiAuthMiddleware.
+// Returns RoleViewer when no role is in context (safe default).
+func uiRole(r *http.Request) UIRole {
+	if role, ok := r.Context().Value(uiRoleKey{}).(UIRole); ok && role != "" {
+		return role
+	}
+	return RoleViewer
+}
+
+// requireRole returns true when the current session has at least minRole.
+// Writes HTTP 403 and returns false when the check fails.
+func requireRole(w http.ResponseWriter, r *http.Request, minRole UIRole) bool {
+	if uiRole(r).HasRole(minRole) {
+		return true
+	}
+	http.Error(w, "Forbidden: insufficient role", http.StatusForbidden)
+	return false
+}
+
+// uiAuthMiddleware gates /api/ endpoints with session-cookie auth and injects
+// the authenticated user's UIRole into the request context for RBAC checks.
 // Static assets (/) and bootstrap + auth endpoints are always public.
 // HTTP Basic Auth is accepted as a fallback for CLI / API clients.
 func uiAuthMiddleware(next http.Handler) http.Handler {
@@ -180,7 +205,8 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		}
 		// Auth not yet configured — first-time or intentionally disabled.
 		if !cfg.AuthEnabled() {
-			next.ServeHTTP(w, r)
+			ctx := context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		// Gate only /api/ endpoints; static assets are always public.
@@ -191,14 +217,22 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		// Check session cookie (browser login via login overlay).
 		sess, err := readUISessionCookie(r)
 		if err == nil && sess != nil {
-			next.ServeHTTP(w, r)
+			role := UIRole(sess.Role)
+			if !role.HasRole(RoleViewer) {
+				role = RoleAdmin // backwards compat: sessions without role = admin
+			}
+			ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		// Fallback: HTTP Basic Auth for programmatic / CLI access.
 		user, pass, ok := r.BasicAuth()
-		if ok && cfg.VerifyAuth(user, pass) {
-			next.ServeHTTP(w, r)
-			return
+		if ok {
+			if role, valid := cfg.VerifyUIUser(user, pass); valid {
+				ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
 		}
 		// No valid auth — 401 without WWW-Authenticate: Basic so the browser
 		// does NOT show its native credential dialog.
@@ -211,10 +245,11 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 
 const uiSessionCookieName = "ps_ui_session"
 
-func setUISessionCookie(w http.ResponseWriter, username string) error {
+func setUISessionCookie(w http.ResponseWriter, username string, role UIRole) error {
 	s := &Session{
 		Sub:      username,
 		Provider: "local",
+		Role:     string(role),
 		Exp:      time.Now().Add(sessionTTL).Unix(),
 	}
 	value, err := encodeSession(s)
@@ -270,13 +305,17 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if !cfg.AuthEnabled() || cfg.VerifyAuth(body.User, body.Pass) {
-		if err := setUISessionCookie(w, body.User); err != nil {
+	role, ok := cfg.VerifyUIUser(body.User, body.Pass)
+	if !cfg.AuthEnabled() {
+		role, ok = RoleAdmin, true
+	}
+	if ok {
+		if err := setUISessionCookie(w, body.User, role); err != nil {
 			http.Error(w, "session error", http.StatusInternalServerError)
 			return
 		}
-		auditEvent(r, "auth.login", body.User, "admin UI login")
-		jsonOK(w, map[string]any{"ok": true, "user": body.User})
+		auditEvent(r, "auth.login", body.User, fmt.Sprintf("admin UI login role=%s", role))
+		jsonOK(w, map[string]any{"ok": true, "user": body.User, "role": role})
 		return
 	}
 	time.Sleep(300 * time.Millisecond) // slow down brute-force
@@ -290,19 +329,25 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !cfg.AuthEnabled() {
-		jsonOK(w, map[string]any{"loggedIn": true, "user": ""})
+		jsonOK(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
 		return
 	}
 	sess, err := readUISessionCookie(r)
 	if err == nil && sess != nil {
-		jsonOK(w, map[string]any{"loggedIn": true, "user": sess.Sub})
+		role := UIRole(sess.Role)
+		if !role.HasRole(RoleViewer) {
+			role = RoleAdmin
+		}
+		jsonOK(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
 		return
 	}
 	// Accept Basic Auth header for CLI/API callers.
 	user, pass, ok := r.BasicAuth()
-	if ok && cfg.VerifyAuth(user, pass) {
-		jsonOK(w, map[string]any{"loggedIn": true, "user": user})
-		return
+	if ok {
+		if role, valid := cfg.VerifyUIUser(user, pass); valid {
+			jsonOK(w, map[string]any{"loggedIn": true, "user": user, "role": role})
+			return
+		}
 	}
 	jsonOK(w, map[string]any{"loggedIn": false})
 }
@@ -319,6 +364,71 @@ func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	clearUISessionCookie(w)
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// GET/POST/DELETE /api/auth/users — RBAC user management (admin only).
+//
+//	GET    → list all UI admin users (without passwords)
+//	POST   → create or update a user: {"username":"…","password":"…","role":"admin|operator|viewer"}
+//	DELETE → remove a user: ?username=…
+func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		jsonOK(w, map[string]any{"users": cfg.ListUIUsers()})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+			Role     string `json:"role"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		body.Username = strings.TrimSpace(body.Username)
+		if len(body.Username) < 1 || len(body.Username) > 64 {
+			http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
+			return
+		}
+		if body.Password != "" && len(body.Password) < 8 {
+			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+			return
+		}
+		role := UIRole(body.Role)
+		if !role.HasRole(RoleViewer) {
+			http.Error(w, "role must be admin, operator, or viewer", http.StatusBadRequest)
+			return
+		}
+		if err := cfg.SetUIUser(body.Username, body.Password, role); err != nil {
+			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		auditEvent(r, "auth.users.set", body.Username, fmt.Sprintf("role=%s", role))
+		jsonOK(w, map[string]any{"ok": true})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		username := strings.TrimSpace(r.URL.Query().Get("username"))
+		if username == "" {
+			http.Error(w, "missing username param", http.StatusBadRequest)
+			return
+		}
+		cfg.DeleteUIUser(username)
+		auditEvent(r, "auth.users.delete", username, "")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // GET /api/setup/status — reports whether first-time setup is still needed.
@@ -377,7 +487,7 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Auto-login after setup so the user lands directly in the dashboard.
-	_ = setUISessionCookie(w, body.User)
+	_ = setUISessionCookie(w, body.User, RoleAdmin)
 	auditEvent(r, "setup.complete", body.User, "first-time admin password configured")
 	logger.Printf("First-time setup: admin user %q created", body.User)
 	jsonOK(w, map[string]any{"ok": true})
@@ -522,6 +632,9 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"hosts": hosts, "count": len(hosts)})
 
 	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		var body struct {
 			Hosts []string `json:"hosts"` // support bulk add
 			Host  string   `json:"host"`  // single add
@@ -547,6 +660,9 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"added": added})
 
 	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		host := strings.TrimSpace(r.URL.Query().Get("host"))
 		if host == "" {
 			http.Error(w, "missing host param", http.StatusBadRequest)
@@ -575,6 +691,9 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
 		var body struct {
 			IPFilterMode string   `json:"ipFilterMode"` // "allow"|"block"|""
 			IPAdd        string   `json:"ipAdd"`
@@ -623,6 +742,9 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
 		var body struct {
 			User string `json:"user"`
 			Pass string `json:"pass"`
@@ -652,6 +774,9 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"rules": rules, "count": len(rules)})
 
 	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		var rule RewriteRule
 		if err := decodeJSON(r,&rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -663,6 +788,9 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, added)
 
 	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		idStr := strings.TrimSpace(r.URL.Query().Get("id"))
 		var id int
 		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
@@ -698,6 +826,9 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		var rule PolicyRule
 		if err := decodeJSON(r,&rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -719,6 +850,9 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, added)
 
 	case http.MethodPut:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
 		var priority int
 		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
@@ -750,6 +884,9 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"ok": true})
 
 	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
 		var priority int
 		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
@@ -788,6 +925,9 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
 		return
 	}
 	var body struct {
@@ -878,6 +1018,9 @@ func apiDefaultAction(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction()})
 	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		var body struct {
 			Action string `json:"action"`
 		}
@@ -945,6 +1088,9 @@ func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"patterns": patterns, "count": len(patterns)})
 
 	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		var body struct {
 			Pattern  string   `json:"pattern"`
 			Patterns []string `json:"patterns"`
@@ -975,6 +1121,9 @@ func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"added": added})
 
 	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		pattern := strings.TrimSpace(r.URL.Query().Get("pattern"))
 		if pattern == "" {
 			http.Error(w, "missing pattern param", http.StatusBadRequest)
@@ -1011,6 +1160,9 @@ func apiContentScan(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		var body struct {
 			Pattern  string   `json:"pattern"`
 			Patterns []string `json:"patterns"`
@@ -1041,6 +1193,9 @@ func apiContentScan(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"added": added})
 
 	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		pattern := strings.TrimSpace(r.URL.Query().Get("pattern"))
 		if pattern == "" {
 			http.Error(w, "missing pattern param", http.StatusBadRequest)
@@ -1066,6 +1221,9 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"extensions": exts, "count": len(exts)})
 
 	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		var body struct {
 			Extensions []string `json:"extensions"` // bulk add
 			Extension  string   `json:"extension"`  // single add
@@ -1090,6 +1248,9 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"added": added})
 
 	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
 		ext := strings.TrimSpace(r.URL.Query().Get("ext"))
 		if ext == "" {
 			http.Error(w, "missing ext param", http.StatusBadRequest)
@@ -1114,6 +1275,9 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		jsonOK(w, idpRegistry.All())
 	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
 		var p IdPProfile
 		if err := decodeJSON(r, &p); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -1160,6 +1324,9 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		jsonOK(w, p)
 	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
 		before := idpRegistry.Get(id)
 		var p IdPProfile
 		if err := decodeJSON(r, &p); err != nil {
@@ -1175,6 +1342,9 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 		logger.Printf("UI: IdP profile updated id=%s name=%q", id, p.Name)
 		jsonOK(w, &p)
 	case http.MethodDelete:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
 		p := idpRegistry.Get(id)
 		if err := idpRegistry.Delete(id); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)

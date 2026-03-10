@@ -95,6 +95,7 @@ type PolicyRule struct {
 	SourceIP       string          `json:"sourceIP"`       // single IP or CIDR; empty = any
 	SourceIdentity string          `json:"sourceIdentity"` // authenticated username; empty = any
 	SourceGroup    string          `json:"sourceGroup"`    // IdP group/role membership; empty = any
+	AuthSource     string          `json:"authSource"`     // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
 	DestFQDN       string          `json:"destFQDN"`       // exact or wildcard FQDN; empty = any
 	DestCategory   URLCategory     `json:"destCategory"`   // URL category; empty = any
 	DestCountry    []string        `json:"destCountry"`    // ISO 3166-1 alpha-2 country codes; empty = any
@@ -272,15 +273,17 @@ type PolicyMatch struct {
 }
 
 // Evaluate iterates rules in priority order and returns the first match.
+// authSource is the IdP name that authenticated the user (e.g. "okta", "ldap",
+// "local") or "unauth" when no credentials were presented.
 // groups is the list of IdP group/role memberships for the authenticated user.
 // Returns nil when no rule matches (caller should default to Deny — Zero Trust).
-func (ps *PolicyStore) Evaluate(clientIP, identity, host string, groups []string) *PolicyMatch {
+func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, groups []string) *PolicyMatch {
 	ps.mu.RLock()
 	rules := ps.rules
 	ps.mu.RUnlock()
 
 	for _, rule := range rules {
-		if !matchSource(rule, clientIP, identity, groups) {
+		if !matchSource(rule, clientIP, identity, authSource, groups) {
 			continue
 		}
 		if !matchDest(rule, host) {
@@ -299,11 +302,12 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, host string, groups []string
 
 // ─── Source matching ──────────────────────────────────────────────────────────
 
-func matchSource(rule *PolicyRule, clientIP, identity string, groups []string) bool {
+func matchSource(rule *PolicyRule, clientIP, identity, authSource string, groups []string) bool {
 	ipOK := rule.SourceIP == "" || matchIPOrCIDR(rule.SourceIP, clientIP)
 	idOK := rule.SourceIdentity == "" || strings.EqualFold(rule.SourceIdentity, identity)
 	grpOK := rule.SourceGroup == "" || containsGroupCI(groups, rule.SourceGroup)
-	return ipOK && idOK && grpOK
+	srcOK := rule.AuthSource == "" || strings.EqualFold(rule.AuthSource, authSource)
+	return ipOK && idOK && grpOK && srcOK
 }
 
 // containsGroupCI reports whether groups contains name (case-insensitive).

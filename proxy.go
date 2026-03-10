@@ -160,6 +160,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	//  3. No credentials — redirect browser to captive portal or send 407.
 	var authenticatedIdentity string
 	var authenticatedGroups []string
+	authenticatedSource := "unauth" // default: no credentials presented
 
 	authRequired := !cfg.UnauthMode() && (cfg.AuthEnabled() || cfg.ProviderEnabled() || len(idpRegistry.EnabledProviders()) > 0)
 
@@ -172,6 +173,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 				authenticatedIdentity = id.Email
 			}
 			authenticatedGroups = id.Groups
+			if id.Provider != "" {
+				authenticatedSource = id.Provider
+			} else {
+				authenticatedSource = "local"
+			}
 		} else {
 			// ── 2. Basic Auth header ──────────────────────────────────────────
 			u, p, ok := parseProxyAuth(r)
@@ -185,6 +191,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 							authenticatedIdentity = u
 						}
 						authenticatedGroups = id.Groups
+						authenticatedSource = prov.Name()
 						authed = true
 						break
 					}
@@ -200,6 +207,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					authenticatedIdentity = u
+					authenticatedSource = "local"
 				}
 			} else {
 				// ── 3. No credentials ────────────────────────────────────────
@@ -272,7 +280,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// (OIDC/LDAP); scrubForwardedHeaders already stripped any client-supplied
 	// value, so this value is safe to use for policy matching.
 	identity := r.Header.Get("X-User-Identity")
-	match := policyStore.Evaluate(clientIP, identity, host, authenticatedGroups)
+	match := policyStore.Evaluate(clientIP, identity, authenticatedSource, host, authenticatedGroups)
 
 	if match != nil {
 		switch match.Action {

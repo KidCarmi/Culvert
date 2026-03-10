@@ -43,7 +43,8 @@ type Session struct {
 	Name     string   `json:"name"`
 	Groups   []string `json:"grp,omitempty"`
 	Provider string   `json:"pvd"`
-	Exp      int64    `json:"exp"` // Unix timestamp
+	Role     string   `json:"role,omitempty"` // UI admin role: admin|operator|viewer
+	Exp      int64    `json:"exp"`            // Unix timestamp
 }
 
 // Identity converts the session payload into the canonical Identity object.
