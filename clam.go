@@ -103,7 +103,7 @@ func (c *ClamAV) Scan(data []byte) (string, bool, error) {
 		}
 		chunk := data[off:end]
 		var lenBuf [4]byte
-		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(chunk)))
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(chunk))) // #nosec G115 -- chunk size is bounded by clamChunkSize (4096), well within uint32 range
 		if _, err := conn.Write(lenBuf[:]); err != nil {
 			return "", false, fmt.Errorf("clamav: write chunk length: %w", err)
 		}
