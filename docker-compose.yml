@@ -1,30 +1,86 @@
 version: "3.3"
 
+# ProxyShield — full stack with ClamAV antivirus sidecar
+#
+# Quick start:
+#   docker compose up -d
+#
+# ClamAV downloads its virus definition database on first boot (~250 MB).
+# The proxy starts immediately; ClamAV scanning activates once the daemon
+# is ready (~2–5 min on first run, instant on subsequent starts because the
+# definitions are persisted in the clamav-db volume).
+# Watch progress: docker compose logs -f clamav
+#
+# Persistent data (volume "proxy-data"):
+#   /data/ca.bundle         Root CA for SSL inspection
+#   /data/policy.json       PBAC policy rules
+#   /data/proxy.log         Rotating request log
+#   /data/audit.jsonl       Persistent audit trail
+#   /data/threatfeeds.json  Local threat intelligence database (auto-synced)
+#
+# YARA rules (/app/yara in the proxy container):
+#   Starter rules are bundled in the image (yara/sample_rules.yar).
+#   Override: mount a host directory over /app/yara, then reload at runtime via
+#   POST /api/security-scan/yara/reload
+
 services:
+
+  # ── ClamAV antivirus daemon ─────────────────────────────────────────────────
+  # Official image from the ClamAV project (Cisco Talos).
+  # clamd listens on TCP 3310 inside the compose network (not exposed to host).
+  clamav:
+    image: clamav/clamav:1.4
+    container_name: proxyshield-clamav
+    restart: unless-stopped
+    volumes:
+      - clamav-db:/var/lib/clamav   # persist virus signatures across restarts
+    environment:
+      - CLAMAV_NO_FRESHCLAMD=false  # run freshclam to keep definitions current
+      - CLAMAV_NO_MILTERD=true      # disable milter daemon (not needed here)
+    healthcheck:
+      test: ["CMD", "clamdcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s  # first run downloads ~250 MB of signatures
+
+  # ── ProxyShield proxy + admin UI ────────────────────────────────────────────
   proxy:
     build: .
     container_name: proxyshield
     restart: unless-stopped
+    # We use service_started (not service_healthy) so the proxy isn't held back
+    # while ClamAV downloads signatures. The proxy handles ClamAV unreachability
+    # gracefully — scanning resumes automatically once the daemon is ready.
+    depends_on:
+      - clamav
     ports:
-      - "8080:8080"   # Proxy
-      - "9090:9090"   # Web UI (HTTPS)
+      - "8080:8080"   # Proxy (configure browsers / PAC file to point here)
+      - "9090:9090"   # Admin Web UI (HTTPS — accept the self-signed cert)
     volumes:
-      # - ./config.yaml:/app/config.yaml:ro   # optional — copy config.example.yaml → config.yaml first
       - proxy-data:/data
+      # Uncomment to use your own YARA rules without rebuilding the image:
+      # - ./yara:/app/yara:ro
+      # Uncomment to use a custom config file:
+      # - ./config.yaml:/app/config.yaml:ro
     environment:
       - TZ=UTC
     command: [
-      "-port",      "8080",
-      "-ui-port",   "9090",
-      "-ca-path",   "/data/ca.bundle",
-      "-policy",    "/data/policy.json",
-      "-logfile",   "/data/proxy.log",
-      "-audit-log", "/data/audit.jsonl"
-      # Optional extras — uncomment and set values as needed:
-      # "-syslog",         "udp://10.0.0.1:514",
-      # "-ui-allow-ip",    "10.0.0.0/8,192.168.0.0/16",
-      # "-session-timeout","8",
-      # "-geoip-db",       "/data/GeoLite2-Country.mmdb"
+      "-port",           "8080",
+      "-ui-port",        "9090",
+      "-ca-path",        "/data/ca.bundle",
+      "-policy",         "/data/policy.json",
+      "-logfile",        "/data/proxy.log",
+      "-audit-log",      "/data/audit.jsonl",
+      "-geoip-db",       "/app/GeoLite2-Country.mmdb",
+      "-clamav-addr",    "tcp:clamav:3310",
+      "-yara-rules-dir", "/app/yara",
+      "-threat-feed-db", "/data/threatfeeds.json"
+      # Optional extras — uncomment as needed:
+      # "-syslog",          "udp://10.0.0.1:514",
+      # "-ui-allow-ip",     "10.0.0.0/8,192.168.0.0/16",
+      # "-session-timeout", "8",
+      # "-rate-limit",      "200"
     ]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -34,3 +90,4 @@ services:
 
 volumes:
   proxy-data:
+  clamav-db:    # ClamAV signature database — persisted to skip re-download on restart

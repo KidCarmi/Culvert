@@ -42,6 +42,11 @@ COPY --from=geoip   --chown=proxy:proxy /GeoLite2-Country.mmdb ./GeoLite2-Countr
 # Default config (mount your own at /app/config.yaml)
 COPY --chown=proxy:proxy config.example.yaml ./config.example.yaml
 
+# Starter YARA rules — bundled at build time so scanning works out of the box.
+# Mount a volume over /app/yara to supply your own rule set, then call
+#   POST /api/security-scan/yara/reload  to load the new rules at runtime.
+COPY --chown=proxy:proxy yara/ ./yara/
+
 # /data is the persistent volume for the Root CA bundle, policy rules, and
 # other state that must survive container restarts.
 # Mount with: docker run -v proxyshield_data:/data ...
@@ -54,7 +59,17 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
 
 ENTRYPOINT ["./proxyshield"]
 # All persistent state lives in /data (mount as a Docker volume):
-#   -ca-path  → Root CA bundle (ssl inspection)
-#   -policy   → Policy rules (CRITICAL: without this, rules are lost on restart)
-#   -geoip-db → Bundled at build time from db-ip.com (CC BY 4.0)
-CMD ["-port", "8080", "-ui-port", "9090", "-ca-path", "/data/ca.bundle", "-policy", "/data/policy.json", "-geoip-db", "/app/GeoLite2-Country.mmdb"]
+#   -ca-path        → Root CA bundle (ssl inspection)
+#   -policy         → Policy rules (CRITICAL: without this, rules are lost on restart)
+#   -geoip-db       → Bundled at build time from db-ip.com (CC BY 4.0)
+#   -yara-rules-dir → Starter rules bundled in /app/yara (mount to override)
+#   -threat-feed-db → Persisted threat feed DB in /data (populated on first run)
+#   -clamav-addr    → Injected by docker-compose via the clamav sidecar
+CMD ["-port", "8080", "-ui-port", "9090", \
+     "-ca-path",        "/data/ca.bundle", \
+     "-policy",         "/data/policy.json", \
+     "-logfile",        "/data/proxy.log", \
+     "-audit-log",      "/data/audit.jsonl", \
+     "-geoip-db",       "/app/GeoLite2-Country.mmdb", \
+     "-yara-rules-dir", "/app/yara", \
+     "-threat-feed-db", "/data/threatfeeds.json"]
