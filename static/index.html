@@ -1053,7 +1053,7 @@ Firefox (all platforms):
             </div>
           </div>
 
-          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px">
+          <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:14px">
             <div>
               <label class="form-label">Source IP / CIDR <span style="color:var(--muted);font-weight:400">(empty = any)</span></label>
               <input type="text" class="input" style="width:100%" id="pol-src-ip" placeholder="10.0.0.0/8 or 1.2.3.4">
@@ -1074,6 +1074,10 @@ Firefox (all platforms):
                 <select class="select" style="width:100%;display:none" id="pol-src-group-select" onchange="syncGroupInput()"></select>
                 <input type="text" class="input" style="width:100%" id="pol-src-group" placeholder="engineering or Admins" oninput="filterGroupOptions(this.value)">
               </div>
+            </div>
+            <div>
+              <label class="form-label">Auth Source <span style="color:var(--muted);font-weight:400">(IdP name or unauth)</span></label>
+              <input type="text" class="input" style="width:100%" id="pol-src-auth" placeholder="okta · local · unauth" title="IdP provider name (e.g. okta, adfs, ldap, local) or 'unauth' for unauthenticated traffic. Leave empty to match any.">
             </div>
           </div>
           <div style="display:grid;grid-template-columns:1fr;gap:14px;margin-bottom:14px">
@@ -2032,7 +2036,7 @@ function renderPolicy() {
     return;
   }
   tbody.innerHTML = polRules.map((r, idx) => {
-    const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`, r.authSource && `via:${r.authSource}`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const dest = [r.destFQDN, r.destCategory].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     return `<tr draggable="true" data-priority="${r.priority}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
@@ -2060,8 +2064,9 @@ function editPolicy(priority) {
   document.getElementById('pol-name').value       = r.name;
   document.getElementById('pol-action').value     = r.action;
   document.getElementById('pol-src-ip').value     = r.sourceIP || '';
-  document.getElementById('pol-src-id').value       = r.sourceIdentity || '';
-  document.getElementById('pol-src-group').value    = r.sourceGroup    || '';
+  document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
+  document.getElementById('pol-src-group').value  = r.sourceGroup    || '';
+  document.getElementById('pol-src-auth').value   = r.authSource     || '';
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
   document.getElementById('pol-dest-cat').value   = r.destCategory || '';
@@ -2083,7 +2088,7 @@ function cancelPolicyEdit() {
 }
 
 function clearPolicyForm() {
-  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-src-group','pol-redirect','pol-dest-fqdn'].forEach(id =>
+  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-src-group','pol-src-auth','pol-redirect','pol-dest-fqdn'].forEach(id =>
     document.getElementById(id).value = '');
   document.getElementById('pol-action').value    = 'Allow';
   document.getElementById('pol-dest-cat').value  = '';
@@ -2106,6 +2111,7 @@ async function submitPolicyRule() {
     sourceIP:       document.getElementById('pol-src-ip').value.trim(),
     sourceIdentity: document.getElementById('pol-src-id').value.trim(),
     sourceGroup:    document.getElementById('pol-src-group').value.trim(),
+    authSource:     document.getElementById('pol-src-auth').value.trim(),
     redirectURL:    document.getElementById('pol-redirect').value.trim(),
     destFQDN:       document.getElementById('pol-dest-fqdn').value.trim(),
     destCategory:   document.getElementById('pol-dest-cat').value || '',
@@ -2392,6 +2398,7 @@ function editPolicy(priority) {
   document.getElementById('pol-src-ip').value     = r.sourceIP || '';
   document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
   document.getElementById('pol-src-group').value  = r.sourceGroup || '';
+  document.getElementById('pol-src-auth').value   = r.authSource  || '';
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
   loadPolicyProviderOptions().then(() => {
     const groupSel = document.getElementById('pol-src-group-select');
@@ -2451,6 +2458,7 @@ async function submitPolicyRule() {
     sourceIP:       document.getElementById('pol-src-ip').value.trim(),
     sourceIdentity: document.getElementById('pol-src-id').value.trim(),
     sourceGroup:    document.getElementById('pol-src-group').value.trim(),
+    authSource:     document.getElementById('pol-src-auth').value.trim(),
     redirectURL:    document.getElementById('pol-redirect').value.trim(),
     destFQDN:       document.getElementById('pol-dest-fqdn').value.trim(),
     destCategory:   document.getElementById('pol-dest-cat').value || '',
@@ -2493,7 +2501,7 @@ function renderPolicy() {
     return;
   }
   tbody.innerHTML = polRules.map((r, idx) => {
-    const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`, r.authSource && `via:${r.authSource}`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const destParts = [r.destFQDN, r.destCategory].filter(Boolean);
     const dest = destParts.join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const countryCell = r.destCountry && r.destCountry.length
