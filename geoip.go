@@ -1,91 +1,117 @@
 package main
 
 import (
-	"encoding/json"
 	"net"
-	"net/http"
 	"sync"
 	"sync/atomic"
-	"time"
+
+	"github.com/oschwald/geoip2-golang"
 )
 
-// geoResult holds a cached GeoIP lookup result.
-type geoResult struct {
-	CountryCode string `json:"countryCode"`
-	Country     string `json:"country"`
-	Status      string `json:"status"`
-	cachedAt    time.Time
+// ---------------------------------------------------------------------------
+// GeoIP — local MaxMind GeoLite2 database
+//
+// No external HTTP calls. Lookups are served from the local .mmdb file.
+// If no database path is configured, all GeoIP lookups return ("", "")
+// and destCountry policy conditions are silently skipped (fail-open for
+// country checks only — the rest of the rule still applies).
+//
+// To enable:
+//   1. Download GeoLite2-Country.mmdb from https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
+//   2. Place it in /data/ (Docker) or any accessible path
+//   3. Pass -geoip-db /data/GeoLite2-Country.mmdb
+// ---------------------------------------------------------------------------
+
+var (
+	geoDBMu sync.RWMutex
+	geoDB   *geoip2.Reader // nil = disabled
+)
+
+// InitGeoDB opens the GeoLite2-Country .mmdb file.
+// Call once at startup. Subsequent calls replace the open reader atomically.
+func InitGeoDB(path string) error {
+	r, err := geoip2.Open(path)
+	if err != nil {
+		return err
+	}
+	geoDBMu.Lock()
+	old := geoDB
+	geoDB = r
+	geoDBMu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	return nil
 }
 
-// geoCache caches GeoIP lookups keyed by resolved IP address.
+// geoEnabled reports whether a GeoIP database is loaded.
+func geoEnabled() bool {
+	geoDBMu.RLock()
+	ok := geoDB != nil
+	geoDBMu.RUnlock()
+	return ok
+}
+
+// ---------------------------------------------------------------------------
+// In-memory cache — avoids repeated .mmdb lookups for the same IP
+// ---------------------------------------------------------------------------
+
+type geoResult struct {
+	CountryCode string
+	Country     string
+}
+
 type geoCache struct {
 	mu    sync.RWMutex
 	cache map[string]*geoResult
 }
 
+const geoCacheMaxSize = 50_000
+
 var geo = &geoCache{cache: make(map[string]*geoResult)}
 
-const (
-	geoCacheTTL     = time.Hour
-	geoCacheMaxSize = 50_000 // max entries; random eviction when exceeded
-)
-
-// CountryTraffic tracks request counts per country code for the dashboard.
-type countryTrafficStore struct {
-	mu    sync.RWMutex
-	stats map[string]int64 // countryCode → count
-	names map[string]string // countryCode → full name
-}
-
-var countryTraffic = &countryTrafficStore{
-	stats: make(map[string]int64),
-	names: make(map[string]string),
-}
-
-// activeConns tracks the number of open proxy tunnels/connections.
-var activeConns int64
-
-func recordActiveConn(delta int64) { atomic.AddInt64(&activeConns, delta) }
-func getActiveConns() int64        { return atomic.LoadInt64(&activeConns) }
-
-func (s *countryTrafficStore) Record(code, name string) {
-	if code == "" {
+func (g *geoCache) lookup(ipStr string) (code, name string) {
+	g.mu.RLock()
+	if r, ok := g.cache[ipStr]; ok {
+		code, name = r.CountryCode, r.Country
+		g.mu.RUnlock()
 		return
 	}
-	s.mu.Lock()
-	s.stats[code]++
-	if name != "" {
-		s.names[code] = name
-	}
-	s.mu.Unlock()
-}
+	g.mu.RUnlock()
 
-type CountryCount struct {
-	Code    string `json:"code"`
-	Name    string `json:"name"`
-	Count   int64  `json:"count"`
-}
-
-func (s *countryTrafficStore) Top(n int) []CountryCount {
-	s.mu.RLock()
-	out := make([]CountryCount, 0, len(s.stats))
-	for code, cnt := range s.stats {
-		out = append(out, CountryCount{Code: code, Name: s.names[code], Count: cnt})
+	geoDBMu.RLock()
+	db := geoDB
+	geoDBMu.RUnlock()
+	if db == nil {
+		return "", ""
 	}
-	s.mu.RUnlock()
-	// Sort descending by count.
-	for i := 0; i < len(out)-1; i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].Count > out[i].Count {
-				out[i], out[j] = out[j], out[i]
-			}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "", ""
+	}
+	record, err := db.Country(ip)
+	if err != nil {
+		return "", ""
+	}
+	code = record.Country.IsoCode
+	name = record.Country.Names["en"]
+
+	g.mu.Lock()
+	if len(g.cache) >= geoCacheMaxSize {
+		for k := range g.cache { // evict one random entry
+			delete(g.cache, k)
+			break
 		}
 	}
-	if n > 0 && len(out) > n {
-		out = out[:n]
-	}
-	return out
+	g.cache[ipStr] = &geoResult{CountryCode: code, Country: name}
+	g.mu.Unlock()
+	return
 }
+
+// ---------------------------------------------------------------------------
+// Public API used by proxy.go and policy.go
+// ---------------------------------------------------------------------------
 
 // resolveHost returns the first public IP for a given host (or parses it directly).
 func resolveHost(host string) net.IP {
@@ -113,17 +139,31 @@ func resolveHost(host string) net.IP {
 	return nil
 }
 
-// Lookup returns the two-letter ISO country code for a host (empty on failure).
+// Lookup returns the two-letter ISO country code for a host ("" on failure or disabled).
 func (g *geoCache) Lookup(host string) string {
 	code, _ := g.LookupFull(host)
 	return code
 }
 
-// LookupCached returns the country code only if it is already in the cache.
-// It never blocks on a network call, making it safe to call in the hot policy
-// evaluation path. A cache miss returns ("", false); the caller should treat
-// a miss as "unknown" country and fall back to allow/skip-country-check.
+// LookupFull returns the country code and full name for a host.
+func (g *geoCache) LookupFull(host string) (code, name string) {
+	if !geoEnabled() {
+		return "", ""
+	}
+	ip := resolveHost(host)
+	if ip == nil {
+		return "", ""
+	}
+	return g.lookup(ip.String())
+}
+
+// LookupCached returns the country code only if already in cache.
+// Never triggers a new lookup — safe to call in the hot policy path.
+// Returns ("", false) on cache miss or when GeoIP is disabled.
 func (g *geoCache) LookupCached(host string) (code string, ok bool) {
+	if !geoEnabled() {
+		return "", false
+	}
 	ip := resolveHost(host)
 	if ip == nil {
 		return "", false
@@ -131,56 +171,67 @@ func (g *geoCache) LookupCached(host string) (code string, ok bool) {
 	ipStr := ip.String()
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	if r, hit := g.cache[ipStr]; hit && time.Since(r.cachedAt) < geoCacheTTL {
+	if r, hit := g.cache[ipStr]; hit {
 		return r.CountryCode, true
 	}
 	return "", false
 }
 
-// LookupFull returns the country code and full country name for a host.
-// Results are cached for geoCacheTTL. Private IPs always return ("", "").
-func (g *geoCache) LookupFull(host string) (code, name string) {
-	ip := resolveHost(host)
-	if ip == nil {
-		return "", ""
-	}
-	ipStr := ip.String()
+// ---------------------------------------------------------------------------
+// Country traffic stats (dashboard)
+// ---------------------------------------------------------------------------
 
-	g.mu.RLock()
-	if r, ok := g.cache[ipStr]; ok && time.Since(r.cachedAt) < geoCacheTTL {
-		code, name = r.CountryCode, r.Country
-		g.mu.RUnlock()
+type countryTrafficStore struct {
+	mu    sync.RWMutex
+	stats map[string]int64
+	names map[string]string
+}
+
+var countryTraffic = &countryTrafficStore{
+	stats: make(map[string]int64),
+	names: make(map[string]string),
+}
+
+var activeConns int64
+
+func recordActiveConn(delta int64) { atomic.AddInt64(&activeConns, delta) }
+func getActiveConns() int64        { return atomic.LoadInt64(&activeConns) }
+
+func (s *countryTrafficStore) Record(code, name string) {
+	if code == "" {
 		return
 	}
-	g.mu.RUnlock()
-
-	// ip-api.com free tier: 45 req/min, HTTP only, no API key.
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("http://ip-api.com/json/" + ipStr + "?fields=status,countryCode,country")
-	if err != nil {
-		return "", ""
+	s.mu.Lock()
+	s.stats[code]++
+	if name != "" {
+		s.names[code] = name
 	}
-	defer resp.Body.Close()
+	s.mu.Unlock()
+}
 
-	var r geoResult
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return "", ""
-	}
-	if r.Status != "success" {
-		return "", ""
-	}
-	r.cachedAt = time.Now()
+type CountryCount struct {
+	Code  string `json:"code"`
+	Name  string `json:"name"`
+	Count int64  `json:"count"`
+}
 
-	g.mu.Lock()
-	// Evict a random entry when the cache is full to bound memory usage.
-	if len(g.cache) >= geoCacheMaxSize {
-		for k := range g.cache {
-			delete(g.cache, k)
-			break
+func (s *countryTrafficStore) Top(n int) []CountryCount {
+	s.mu.RLock()
+	out := make([]CountryCount, 0, len(s.stats))
+	for code, cnt := range s.stats {
+		out = append(out, CountryCount{Code: code, Name: s.names[code], Count: cnt})
+	}
+	s.mu.RUnlock()
+	for i := 0; i < len(out)-1; i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].Count > out[i].Count {
+				out[i], out[j] = out[j], out[i]
+			}
 		}
 	}
-	g.cache[ipStr] = &r
-	g.mu.Unlock()
-
-	return r.CountryCode, r.Country
+	if n > 0 && len(out) > n {
+		out = out[:n]
+	}
+	return out
 }
+

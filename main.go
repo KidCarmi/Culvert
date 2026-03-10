@@ -54,6 +54,7 @@ func main() {
 	syslogAddr  := flag.String("syslog",        "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
 	uiAllowIP   := flag.String("ui-allow-ip",   "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
 	sessionHrs  := flag.Int("session-timeout",  0,  "Admin UI session lifetime in hours (1-168, 0=default 8h)")
+	geoIPDB     := flag.String("geoip-db",      "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -123,6 +124,18 @@ func main() {
 		} else {
 			logger.Printf("Audit    → persisting to %s", auditLogVal)
 		}
+	}
+
+	// ── GeoIP database ───────────────────────────────────────────────────────
+	geoDBVal := firstStr(*geoIPDB, fc.Proxy.GeoIPDB)
+	if geoDBVal != "" {
+		if err := InitGeoDB(geoDBVal); err != nil {
+			logger.Printf("GeoIP    → failed to open %s (%v) — GeoIP disabled", geoDBVal, err)
+		} else {
+			logger.Printf("GeoIP    → loaded %s", geoDBVal)
+		}
+	} else {
+		logger.Printf("GeoIP    → disabled (no -geoip-db set; destCountry rules will be skipped)")
 	}
 
 	// ── Admin UI IP allowlist ─────────────────────────────────────────────────

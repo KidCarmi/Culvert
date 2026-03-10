@@ -25,6 +25,7 @@ type FileConfig struct {
 		SSLBypassPatterns []string `yaml:"ssl_bypass_patterns"` // Initial patterns (seeded into ssl_bypass_file on first run)
 		ContentScanFile     string   `yaml:"content_scan_file"`     // JSON file for persistent DPI signature patterns
 		ContentScanPatterns []string `yaml:"content_scan_patterns"` // Initial DPI patterns (seeded into content_scan_file on first run)
+		GeoIPDB             string   `yaml:"geoip_db"`              // Path to GeoLite2-Country.mmdb; empty = GeoIP disabled
 		IdPProfilesFile     string   `yaml:"idp_profiles_file"`     // JSON file for generic IdP profiles
 		BaseURL             string   `yaml:"base_url"`              // External base URL for OIDC/SAML callbacks (e.g. "https://proxy.corp.com:9090")
 	} `yaml:"proxy"`
