@@ -43,6 +43,13 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 		rlEnabled = 1
 	}
 
+	clamBlocked    := atomic.LoadInt64(&statClamBlocked)
+	yaraBlocked    := atomic.LoadInt64(&statYARABlocked)
+	feedBlocked    := atomic.LoadInt64(&statThreatFeedBlocked)
+	dpiBlocked     := atomic.LoadInt64(&statDPIBlocked)
+	feedEntries, _, _ := globalThreatFeed.Stats()
+	_, _, cacheSize := globalSecScanner.cache.Stats()
+
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	fmt.Fprintf(w, `# HELP proxyshield_requests_total Total proxy requests
 # TYPE proxyshield_requests_total counter
@@ -83,11 +90,41 @@ proxyshield_file_blocked_total %d
 # HELP proxyshield_file_block_profile_size Number of blocked file extensions
 # TYPE proxyshield_file_block_profile_size gauge
 proxyshield_file_block_profile_size %d
+
+# HELP proxyshield_dpi_blocked_total Total requests blocked by DPI content signatures
+# TYPE proxyshield_dpi_blocked_total counter
+proxyshield_dpi_blocked_total %d
+
+# HELP proxyshield_clamav_blocked_total Total requests blocked by ClamAV antivirus
+# TYPE proxyshield_clamav_blocked_total counter
+proxyshield_clamav_blocked_total %d
+
+# HELP proxyshield_yara_blocked_total Total requests blocked by YARA rules
+# TYPE proxyshield_yara_blocked_total counter
+proxyshield_yara_blocked_total %d
+
+# HELP proxyshield_threat_feed_blocked_total Total requests blocked by threat intelligence feeds
+# TYPE proxyshield_threat_feed_blocked_total counter
+proxyshield_threat_feed_blocked_total %d
+
+# HELP proxyshield_threat_feed_entries Total URLs in threat feed database
+# TYPE proxyshield_threat_feed_entries gauge
+proxyshield_threat_feed_entries %d
+
+# HELP proxyshield_scan_cache_size Current number of entries in the SHA256 scan result cache
+# TYPE proxyshield_scan_cache_size gauge
+proxyshield_scan_cache_size %d
 `,
 		total, allowed, blocked, authFail,
 		int64(bl.Count()),
 		time.Since(startTime).Seconds(),
 		rlLimit, rlEnabled,
 		fileBlocked, int64(fileBlocker.Count()),
+		dpiBlocked,
+		clamBlocked,
+		yaraBlocked,
+		feedBlocked,
+		feedEntries,
+		int64(cacheSize),
 	)
 }

@@ -80,6 +80,48 @@ type FileConfig struct {
 	// SessionTimeoutHours overrides the default 8-hour UI session lifetime.
 	// Must be 1–168 (one hour to one week). Zero = use the default (8h).
 	SessionTimeoutHours int `yaml:"session_timeout_hours"`
+
+	// SecurityScan configures the local security scanning stack:
+	// ClamAV antivirus, YARA rule-based detection, and threat-intelligence
+	// feed lookups — all running locally with no external API dependency.
+	SecurityScan struct {
+		// Enabled activates the security scanner subsystem.
+		// Individual components (ClamAV, YARA, feeds) are only active when
+		// their respective options are also set.
+		Enabled bool `yaml:"enabled"`
+
+		// ClamAVAddr is the address of the ClamAV daemon.
+		// Formats: "unix:/var/run/clamav/clamd.sock"  or  "tcp:localhost:3310"
+		// Leave empty to disable ClamAV scanning.
+		ClamAVAddr string `yaml:"clamav_addr"`
+
+		// YARARulesDir is the path to a directory containing *.yar / *.yara
+		// rule files.  All files in the directory are loaded at startup.
+		// Leave empty to disable YARA scanning.
+		YARARulesDir string `yaml:"yara_rules_dir"`
+
+		// ThreatFeedDB is the path to the JSON file used to persist threat
+		// feed data across restarts.  The file is created automatically on
+		// the first sync.  Leave empty to keep feed data in-memory only.
+		ThreatFeedDB string `yaml:"threat_feed_db"`
+
+		// SyncInterval is how often the threat feeds are re-downloaded.
+		// Valid Go duration string, e.g. "6h", "12h", "24h".  Default: 6h.
+		SyncInterval string `yaml:"sync_interval"`
+
+		// CacheTTL is how long a scan result is cached by SHA-256 hash.
+		// Valid Go duration string, e.g. "1h", "4h".  Default: 1h.
+		CacheTTL string `yaml:"cache_ttl"`
+
+		// CacheSize is the maximum number of hash entries in the scan cache.
+		// Default: 10 000.
+		CacheSize int `yaml:"cache_size"`
+
+		// MaxScanMB is the maximum megabytes to buffer per HTTP response for
+		// scanning.  Responses larger than this are forwarded unscanned.
+		// Default: 5 (5 MiB).
+		MaxScanMB int `yaml:"max_scan_mb"`
+	} `yaml:"security_scan"`
 }
 
 func loadFileConfig(path string) (*FileConfig, error) {

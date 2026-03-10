@@ -256,6 +256,29 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Threat intelligence feed check — covers both plain HTTP destinations
+	// and CONNECT tunnel targets.
+	if globalSecScanner.Enabled() {
+		// Domain-level check (applies to CONNECT and plain HTTP).
+		if result := globalSecScanner.CheckDomain(host); result != nil {
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason)
+			logger.Printf("THREAT_BLOCKED domain %s -> %s (%s)", clientIP, host, result.Reason)
+			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
+			return
+		}
+		// Full-URL check for non-CONNECT (plain HTTP) requests.
+		if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
+			if result := globalSecScanner.CheckURL(r.URL.String()); result != nil {
+				atomic.AddInt64(&statBlocked, 1)
+				recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason)
+				logger.Printf("THREAT_BLOCKED url %s -> %s (%s)", clientIP, r.Host, result.Reason)
+				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
+				return
+			}
+		}
+	}
+
 	// Plugin check.
 	if pluginDecision(clientIP, r.Method, host) == DecisionBlock {
 		atomic.AddInt64(&statBlocked, 1)
@@ -486,6 +509,23 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		logger.Printf("FILE_BLOCKED (resp cd) %s -> %s%s (ext=%s)", cip, r.Host, r.URL.Path, ext)
 		serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 		return
+	}
+
+	// Security body scan (ClamAV + YARA) for non-tunnel HTTP responses.
+	if globalSecScanner.BodyScanEnabled() {
+		buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
+		if readErr == nil {
+			if result := globalSecScanner.ScanBody(buffered); result != nil {
+				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)
+				atomic.AddInt64(&statBlocked, 1)
+				recordRequest(cip2, r.Method, r.Host, "SCAN_BLOCKED", result.Source, result.Reason)
+				logger.Printf("SCAN_BLOCKED %s -> %s (%s: %s)", cip2, r.Host, result.Source, result.Reason)
+				scanBlock(w, r.Host, result.Reason, result.Source)
+				return
+			}
+			// Reassemble: buffered prefix + any remaining bytes beyond the limit.
+			resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buffered), resp.Body))
+		}
 	}
 
 	copyHeaders(w.Header(), resp.Header)
@@ -787,20 +827,32 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			return
 		}
 
-		// DPI: scan text response bodies for malicious signatures.
-		// We buffer up to dpiScanner.maxBytes before forwarding so a match
-		// blocks the response entirely (not merely logged after-the-fact).
-		if dpiScanner.Enabled() && isTextContentType(resp.Header.Get("Content-Type")) {
+		// Unified scan buffer: DPI signatures + ClamAV + YARA.
+		// We buffer up to maxScanBufferBytes() before forwarding so any match
+		// blocks the response entirely (true prevention, not merely logging).
+		ct := resp.Header.Get("Content-Type")
+		if bodyNeedsBuffering(ct) {
 			origBody := resp.Body
-			body, readErr := io.ReadAll(io.LimitReader(origBody, dpiScanner.maxBytes))
+			body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
 			if readErr == nil {
-				if pattern, matched := dpiScanner.Scan(body); matched {
+				// DPI regex scan (text content only).
+				if dpiScanner.Enabled() && isTextContentType(ct) {
+					if pattern, matched := dpiScanner.Scan(body); matched {
+						origBody.Close()
+						recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern)
+						dpiBlock(clientTLS, hostOnly, pattern)
+						break
+					}
+				}
+				// ClamAV + YARA body scan (all content types).
+				if result := globalSecScanner.ScanBody(body); result != nil {
 					origBody.Close()
-					recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern)
-					dpiBlock(clientTLS, hostOnly, pattern)
+					atomic.AddInt64(&statBlocked, 1)
+					recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", result.Source, result.Reason)
+					scanBlockConn(clientTLS, hostOnly, result.Reason, result.Source)
 					break
 				}
-				// No match: reassemble the body (scanned prefix + any remaining bytes).
+				// No match: reassemble the body (buffered prefix + remaining bytes).
 				resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), origBody))
 			}
 		}

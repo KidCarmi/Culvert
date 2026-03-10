@@ -56,6 +56,11 @@ func startUI(port int, certFile, keyFile string) {
 	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)        // GET/POST UI access IP allowlist
 	mux.HandleFunc("/api/syslog", apiSyslogConfig)            // GET/POST syslog forwarding
 
+	// ── Security scanning (ClamAV / YARA / Threat Feeds) ─────────────────
+	mux.HandleFunc("/api/security-scan/status", apiSecScanStatus)        // GET
+	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)     // POST — force immediate sync
+	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)   // POST — reload YARA rules from dir
+
 	// ── Admin session auth ────────────────────────────────────────────────
 	mux.HandleFunc("/api/auth/login", apiAuthLogin)
 	mux.HandleFunc("/api/auth/status", apiAuthStatus)
@@ -2013,4 +2018,66 @@ background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover
 func authLogout(w http.ResponseWriter, r *http.Request) {
 	clearSessionCookie(w)
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// ── Security scan API ─────────────────────────────────────────────────────────
+
+// GET /api/security-scan/status — returns ClamAV connectivity, YARA rule count,
+// threat feed statistics, and hash cache metrics.
+func apiSecScanStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(secScanStatusMap()); err != nil {
+		logger.Printf("apiSecScanStatus: encode error: %v", err)
+	}
+}
+
+// POST /api/security-scan/feeds/sync — trigger an immediate threat feed sync.
+// Returns the updated status after the sync completes.
+func apiSecFeedsSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !globalThreatFeed.Enabled() {
+		http.Error(w, `{"error":"threat feeds not enabled"}`, http.StatusServiceUnavailable)
+		return
+	}
+	// Run the sync synchronously so the response reflects the updated data.
+	globalThreatFeed.Sync()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(secScanStatusMap()); err != nil {
+		logger.Printf("apiSecFeedsSync: encode error: %v", err)
+	}
+}
+
+// POST /api/security-scan/yara/reload — reload YARA rules from the configured
+// directory without restarting the proxy.
+func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	globalYARA.mu.RLock()
+	dir := globalYARA.dir
+	globalYARA.mu.RUnlock()
+
+	if dir == "" {
+		http.Error(w, `{"error":"no YARA rules directory configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if err := globalYARA.LoadDir(dir); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"yara_rules": globalYARA.Count(),
+		"directory":  dir,
+	}); err != nil {
+		logger.Printf("apiSecYARAReload: encode error: %v", err)
+	}
 }

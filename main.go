@@ -55,6 +55,9 @@ func main() {
 	uiAllowIP   := flag.String("ui-allow-ip",   "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
 	sessionHrs  := flag.Int("session-timeout",  0,  "Admin UI session lifetime in hours (1-168, 0=default 8h)")
 	geoIPDB     := flag.String("geoip-db",      "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
+	clamavAddr  := flag.String("clamav-addr",   "", "ClamAV address: unix:/run/clamav/clamd.sock or tcp:host:port")
+	yaraRulesDir := flag.String("yara-rules-dir", "", "Directory containing *.yar/*.yara YARA rule files")
+	threatFeedDB := flag.String("threat-feed-db", "", "Path for persisted threat feed JSON database")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -384,6 +387,59 @@ func main() {
 	}
 	setDefaultPolicyAction(defaultAction)
 	logger.Printf("Policy   → default action: %s", defaultAction)
+
+	// ── Security scanning: ClamAV + YARA + Threat Feeds ─────────────────────
+	secCfg := fc.SecurityScan
+	clamAddr  := firstStr(*clamavAddr,   secCfg.ClamAVAddr)
+	yaraDir   := firstStr(*yaraRulesDir, secCfg.YARARulesDir)
+	feedDB    := firstStr(*threatFeedDB, secCfg.ThreatFeedDB)
+
+	if secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "" {
+		// Scan result cache TTL.
+		cacheTTL := time.Hour
+		if secCfg.CacheTTL != "" {
+			if d, err := time.ParseDuration(secCfg.CacheTTL); err == nil {
+				cacheTTL = d
+			}
+		}
+		// Feed sync interval.
+		syncInterval := 6 * time.Hour
+		if secCfg.SyncInterval != "" {
+			if d, err := time.ParseDuration(secCfg.SyncInterval); err == nil {
+				syncInterval = d
+			}
+		}
+		cacheSize := secCfg.CacheSize
+		if cacheSize <= 0 {
+			cacheSize = 10_000
+		}
+		var maxScanBytes int64
+		if secCfg.MaxScanMB > 0 {
+			maxScanBytes = int64(secCfg.MaxScanMB) << 20
+		}
+
+		// Initialise scanner and hash cache.
+		globalSecScanner.cache = newHashCache(cacheSize, cacheTTL)
+		globalSecScanner.Init(clamAddr, maxScanBytes)
+
+		// YARA rules.
+		if yaraDir != "" {
+			if err := globalYARA.LoadDir(yaraDir); err != nil {
+				logger.Printf("YARA     → load error: %v", err)
+			} else {
+				logger.Printf("YARA     → %d rule(s) from %s", globalYARA.Count(), yaraDir)
+			}
+		} else {
+			logger.Printf("YARA     → disabled (set -yara-rules-dir to enable)")
+		}
+
+		// Threat feeds.
+		if feedDB != "" || secCfg.Enabled {
+			globalThreatFeed.Init(feedDB, syncInterval)
+			globalThreatFeed.Start(context.Background())
+			logger.Printf("ThreatFeed → sync every %s, db=%q", syncInterval, feedDB)
+		}
+	}
 
 	// ── SSE live dashboard broadcaster ───────────────────────────────────────
 	startSSEBroadcaster()
