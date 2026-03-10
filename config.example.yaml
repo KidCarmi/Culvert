@@ -29,10 +29,8 @@ proxy:
     # - "(?i)malware-signature"
     # - "eval\\(base64_decode"   # PHP webshell
     # - "\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b"  # CC-like numbers
-  geoip_db: ""            # Path to MaxMind GeoLite2-Country.mmdb — enables destCountry policy rules
-                          # and country traffic stats in the dashboard.
-                          # Download free DB: https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
-                          # Example: "/data/GeoLite2-Country.mmdb"
+  geoip_db: "/app/GeoLite2-Country.mmdb"  # Bundled at Docker build time from db-ip.com (CC BY 4.0 — https://db-ip.com)
+                                           # Override with your own MaxMind GeoLite2-Country.mmdb if preferred.
 
 auth:
   user: ""            # Basic-auth username (empty = auth disabled for HTTP proxy & SOCKS5)

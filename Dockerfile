@@ -8,6 +8,15 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o proxyshield .
 
+# ── GeoIP stage ───────────────────────────────────────────────────────────────
+# Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build
+# time so no runtime network access or manual download is required.
+# Attribution: https://db-ip.com
+FROM alpine:3.21 AS geoip
+RUN apk add --no-cache wget && \
+    wget -qO- "https://download.db-ip.com/free/dbip-country-lite-$(date +%Y-%m).mmdb.gz" \
+      | gzip -d > /GeoLite2-Country.mmdb
+
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 # Security hardening (shift-left):
 #   • Non-root user (proxy:proxy) — no elevated privileges at runtime
@@ -28,6 +37,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
 USER proxy
 WORKDIR /app
 COPY --from=builder --chown=proxy:proxy /app/proxyshield .
+COPY --from=geoip   --chown=proxy:proxy /GeoLite2-Country.mmdb ./GeoLite2-Country.mmdb
 
 # Default config (mount your own at /app/config.yaml)
 COPY --chown=proxy:proxy config.example.yaml ./config.example.yaml
@@ -46,4 +56,5 @@ ENTRYPOINT ["./proxyshield"]
 # All persistent state lives in /data (mount as a Docker volume):
 #   -ca-path  → Root CA bundle (ssl inspection)
 #   -policy   → Policy rules (CRITICAL: without this, rules are lost on restart)
-CMD ["-port", "8080", "-ui-port", "9090", "-ca-path", "/data/ca.bundle", "-policy", "/data/policy.json"]
+#   -geoip-db → Bundled at build time from db-ip.com (CC BY 4.0)
+CMD ["-port", "8080", "-ui-port", "9090", "-ca-path", "/data/ca.bundle", "-policy", "/data/policy.json", "-geoip-db", "/app/GeoLite2-Country.mmdb"]
