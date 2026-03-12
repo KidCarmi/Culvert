@@ -11,8 +11,7 @@ name: Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
-  pull_request_review_request: {}
+    types: [opened, synchronize, reopened, review_requested]
 
 concurrency:
   group: code-review-${{ github.head_ref }}
