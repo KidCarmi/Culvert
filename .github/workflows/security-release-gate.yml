@@ -45,6 +45,8 @@ jobs:
   sast-gosec:
     name: "SAST · gosec"
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
@@ -88,6 +90,8 @@ jobs:
   vuln-trivy-fs:
     name: "CVE · trivy (source)"
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
@@ -113,6 +117,8 @@ jobs:
   vuln-trivy-image:
     name: "CVE · trivy (Docker image)"
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
