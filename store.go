@@ -518,6 +518,10 @@ type Config struct {
 	// uiUsers holds the multi-user admin roster with per-user roles.
 	// When nil/empty, falls back to the legacy single-user (user/passHash).
 	uiUsers map[string]*uiAdminUser
+
+	// uiUsersFile is the path to persist UI users across restarts.
+	// Empty = in-memory only (auth resets on every restart).
+	uiUsersFile string
 }
 
 var cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
@@ -678,6 +682,89 @@ func (c *Config) ListUIUsers() []UIUserInfo {
 		out = append(out, UIUserInfo{Username: name, Role: u.role})
 	}
 	return out
+}
+
+// SetUIUsersFile sets the path used to persist UI users across restarts.
+// Call before LoadUIUsersFile / SaveUIUsersFile.
+func (c *Config) SetUIUsersFile(path string) {
+	c.mu.Lock()
+	c.uiUsersFile = path
+	c.mu.Unlock()
+}
+
+// uiUserRecord is the on-disk representation of a UI admin user.
+type uiUserRecord struct {
+	Username string `json:"username"`
+	PassHash string `json:"pass_hash"` // hex-encoded bcrypt hash
+	Role     UIRole `json:"role"`
+}
+
+// LoadUIUsersFile reads persisted UI users from disk and populates the roster.
+// Silently returns nil if the file does not exist yet (first run).
+func (c *Config) LoadUIUsersFile() error {
+	c.mu.RLock()
+	path := c.uiUsersFile
+	c.mu.RUnlock()
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var records []uiUserRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.uiUsers == nil {
+		c.uiUsers = map[string]*uiAdminUser{}
+	}
+	for _, rec := range records {
+		hash, err := hex.DecodeString(rec.PassHash)
+		if err != nil {
+			continue
+		}
+		c.uiUsers[rec.Username] = &uiAdminUser{passHash: hash, role: rec.Role}
+		// Keep legacy single-user in sync with the first admin found.
+		if rec.Role == RoleAdmin && c.user == "" {
+			c.user = rec.Username
+			c.passHash = hash
+		}
+	}
+	return nil
+}
+
+// SaveUIUsersFile writes the current UI user roster to disk atomically.
+// No-op when no file path is configured.
+func (c *Config) SaveUIUsersFile() error {
+	c.mu.RLock()
+	path := c.uiUsersFile
+	records := make([]uiUserRecord, 0, len(c.uiUsers))
+	for name, u := range c.uiUsers {
+		records = append(records, uiUserRecord{
+			Username: name,
+			PassHash: hex.EncodeToString(u.passHash),
+			Role:     u.role,
+		})
+	}
+	c.mu.RUnlock()
+	if path == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // VerifyUIUser checks credentials against the admin user roster and returns

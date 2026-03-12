@@ -540,6 +540,9 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if err := cfg.SaveUIUsersFile(); err != nil {
+			logger.Printf("UI users → failed to persist: %v", err)
+		}
 		auditEvent(r, "auth.users.set", body.Username, fmt.Sprintf("role=%s", role))
 		jsonOK(w, map[string]any{"ok": true})
 
@@ -555,6 +558,9 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 		if err := cfg.DeleteUIUser(username); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
+		}
+		if err := cfg.SaveUIUsersFile(); err != nil {
+			logger.Printf("UI users → failed to persist: %v", err)
 		}
 		auditEvent(r, "auth.users.delete", username, "")
 		w.WriteHeader(http.StatusNoContent)
@@ -618,6 +624,9 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 	if err := cfg.SetAuth(body.User, body.Pass); err != nil {
 		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if err := cfg.SaveUIUsersFile(); err != nil {
+		logger.Printf("UI users → failed to persist: %v", err)
 	}
 	// Auto-login after setup so the user lands directly in the dashboard.
 	_ = setUISessionCookie(w, r, body.User, RoleAdmin)

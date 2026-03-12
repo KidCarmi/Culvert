@@ -57,7 +57,8 @@ func main() {
 	geoIPDB     := flag.String("geoip-db",      "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
 	clamavAddr  := flag.String("clamav-addr",   "", "ClamAV address: unix:/run/clamav/clamd.sock or tcp:host:port")
 	yaraRulesDir := flag.String("yara-rules-dir", "", "Directory containing *.yar/*.yara YARA rule files")
-	threatFeedDB := flag.String("threat-feed-db", "", "Path for persisted threat feed JSON database")
+	threatFeedDB  := flag.String("threat-feed-db",  "", "Path for persisted threat feed JSON database")
+	uiUsersFile   := flag.String("ui-users-file",   "", "Path to persist admin UI users across restarts (e.g. /data/ui_users.json)")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -97,6 +98,18 @@ func main() {
 	cfg.UIPort    = uPort
 	if err := cfg.SetAuth(authU, authP); err != nil {
 		log.Fatalf("Failed to set auth: %v", err)
+	}
+
+	// ── UI user persistence ───────────────────────────────────────────────────
+	// Load previously-created admin users from disk so auth survives restarts.
+	// The file is written whenever a user is created/modified/deleted via the UI.
+	if *uiUsersFile != "" {
+		cfg.SetUIUsersFile(*uiUsersFile)
+		if err := cfg.LoadUIUsersFile(); err != nil {
+			logger.Printf("UI users → failed to load %s: %v", *uiUsersFile, err)
+		} else if cfg.AuthEnabled() {
+			logger.Printf("UI users → loaded from %s", *uiUsersFile)
+		}
 	}
 
 	// ── Session secret ───────────────────────────────────────────────────────
