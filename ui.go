@@ -21,7 +21,7 @@ import (
 //go:embed static
 var staticFiles embed.FS
 
-func startUI(port int, certFile, keyFile string) {
+func startUI(port int, certFile, keyFile string, noTLS bool) {
 	sub, _ := fs.Sub(staticFiles, "static")
 
 	mux := http.NewServeMux()
@@ -100,19 +100,22 @@ func startUI(port int, certFile, keyFile string) {
 		return
 	}
 
-	// Auto self-signed TLS.
-	tlsCfg, err := selfSignedTLS()
-	if err != nil {
-		logger.Printf("TLS self-sign failed (%v), falling back to HTTP", err)
-	} else {
-		srv.TLSConfig = tlsCfg
-		logger.Printf("UI TLS  → https://localhost:%d (self-signed)", port)
-		if err := srv.ListenAndServeTLS("", ""); err != nil {
-			logger.Fatalf("UI TLS error: %v", err)
+	// Auto self-signed TLS — only when explicitly requested.
+	if !noTLS {
+		tlsCfg, err := selfSignedTLS()
+		if err != nil {
+			logger.Printf("TLS self-sign failed (%v), falling back to HTTP", err)
+		} else {
+			srv.TLSConfig = tlsCfg
+			logger.Printf("UI TLS  → https://localhost:%d (self-signed)", port)
+			if err := srv.ListenAndServeTLS("", ""); err != nil {
+				logger.Fatalf("UI TLS error: %v", err)
+			}
+			return
 		}
-		return
 	}
 
+	logger.Printf("UI HTTP → http://localhost:%d", port)
 	if err := srv.ListenAndServe(); err != nil {
 		logger.Fatalf("UI server error: %v", err)
 	}

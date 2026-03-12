@@ -56,7 +56,7 @@ services:
       - clamav
     ports:
       - "8080:8080"   # Proxy (configure browsers / PAC file to point here)
-      - "9090:9090"   # Admin Web UI (HTTPS — accept the self-signed cert)
+      - "9090:9090"   # Admin Web UI (HTTP)
     volumes:
       - proxy-data:/data
       # Uncomment to use your own YARA rules without rebuilding the image:
@@ -76,7 +76,8 @@ services:
       "-clamav-addr",    "tcp:clamav:3310",
       "-yara-rules-dir", "/app/yara",
       "-threat-feed-db", "/data/threatfeeds.json",
-      "-ui-users-file",  "/data/ui_users.json"
+      "-ui-users-file",  "/data/ui_users.json",
+      "-ui-no-tls"
       # Optional extras — uncomment as needed:
       # "-syslog",          "udp://10.0.0.1:514",
       # "-ui-allow-ip",     "10.0.0.0/8,192.168.0.0/16",

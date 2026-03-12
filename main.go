@@ -59,6 +59,7 @@ func main() {
 	yaraRulesDir := flag.String("yara-rules-dir", "", "Directory containing *.yar/*.yara YARA rule files")
 	threatFeedDB  := flag.String("threat-feed-db",  "", "Path for persisted threat feed JSON database")
 	uiUsersFile   := flag.String("ui-users-file",   "", "Path to persist admin UI users across restarts (e.g. /data/ui_users.json)")
+	uiNoTLS       := flag.Bool("ui-no-tls",         false, "Disable auto self-signed TLS; serve admin UI over plain HTTP")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -463,8 +464,8 @@ func main() {
 		go startSOCKS5(s5Port)
 	}
 
-	// ── Web UI (HTTPS with self-signed cert by default) ───────────────────
-	go startUI(uPort, cert, key)
+	// ── Web UI ────────────────────────────────────────────────────────────
+	go startUI(uPort, cert, key, *uiNoTLS)
 
 	// ── Proxy server ─────────────────────────────────────────────────────────
 	// NOTE: http.ServeMux cannot be used here because it "cleans" URLs and
