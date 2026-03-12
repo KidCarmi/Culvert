@@ -141,7 +141,7 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 	port := binary.BigEndian.Uint16(portBuf)
-	target := fmt.Sprintf("%s:%d", host, port)
+	target := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
 	if cmd != 0x01 { // only CONNECT supported
 		socks5Reply(conn, 0x07)
