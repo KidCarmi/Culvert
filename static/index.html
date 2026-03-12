@@ -575,6 +575,64 @@ tr.dragging  { opacity: .4; }
         </div>
 
       </div>
+
+      <!-- SSL Bypass -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header">
+          <span class="panel-title">SSL Inspection Bypass</span>
+        </div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Domains listed here bypass TLS interception entirely — traffic passes through opaque. Useful for banking, certificate-pinned apps, and internal CAs.
+            Supports exact domains (<code style="font-size:.78rem;background:var(--surface2);padding:1px 5px;border-radius:4px">api.example.com</code>), wildcards (<code style="font-size:.78rem;background:var(--surface2);padding:1px 5px;border-radius:4px">*.example.com</code>), and regex (prefix <code style="font-size:.78rem;background:var(--surface2);padding:1px 5px;border-radius:4px">~</code>).
+          </p>
+          <div class="add-row" style="margin-bottom:12px">
+            <input type="text" class="input wide" id="ssl-bypass-input" placeholder="*.example.com or ~.*\.internal$">
+            <button class="btn" onclick="addSSLBypass()">+ Add</button>
+          </div>
+          <div id="ssl-bypass-count" style="font-size:.75rem;color:var(--muted);margin-bottom:8px"></div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>Pattern</th><th></th></tr></thead>
+              <tbody id="ssl-bypass-table"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Security Scanning -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header">
+          <span class="panel-title">Security Scanning</span>
+          <span id="sec-scan-enabled-badge" style="font-size:.72rem;font-weight:600;padding:2px 8px;border-radius:99px;margin-left:8px"></span>
+        </div>
+        <div class="panel-body">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
+            <div style="background:var(--surface2);border-radius:8px;padding:12px">
+              <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">ClamAV</div>
+              <div id="sec-clamav-status" style="font-weight:600;font-size:.9rem">—</div>
+              <div id="sec-clam-blocked" style="font-size:.75rem;color:var(--muted);margin-top:2px"></div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:12px">
+              <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">YARA Rules</div>
+              <div id="sec-yara-count" style="font-weight:600;font-size:.9rem">—</div>
+              <div id="sec-yara-blocked" style="font-size:.75rem;color:var(--muted);margin-top:2px"></div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:12px">
+              <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Threat Feeds</div>
+              <div id="sec-feed-entries" style="font-weight:600;font-size:.9rem">—</div>
+              <div id="sec-feed-sync" style="font-size:.75rem;color:var(--muted);margin-top:2px"></div>
+              <div id="sec-feed-blocked" style="font-size:.75rem;color:var(--muted);margin-top:2px"></div>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn ghost sm" onclick="syncThreatFeeds()">↻ Sync Feeds Now</button>
+            <button class="btn ghost sm" onclick="reloadYARA()">↻ Reload YARA Rules</button>
+          </div>
+          <div id="sec-scan-action-status" style="display:none;margin-top:10px;font-size:.8rem"></div>
+        </div>
+      </div>
+
     </div>
 
     <!-- ── IDENTITY PROVIDERS ─────────────────────────────────────────────── -->
@@ -2144,6 +2202,8 @@ async function loadSecurity() {
     document.getElementById('sec-rpm-cur').textContent  = s.rateLimitRPM ? s.rateLimitRPM + ' req/min' : '—';
     document.getElementById('sec-rl-status').textContent = s.rateLimitOn ? 'Enabled' : 'Disabled';
   } catch(e) {}
+  loadSSLBypass();
+  loadSecScanStatus();
 }
 
 function renderSecIPList() {
@@ -2226,6 +2286,123 @@ async function disableRateLimit() {
     toast('Rate limiting disabled', 'success');
     loadSecurity();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SSL Bypass
+// ═══════════════════════════════════════════════════════════════════════════
+let _sslBypassList = [];
+
+async function loadSSLBypass() {
+  try {
+    const d = await api('/api/ssl-bypass');
+    _sslBypassList = d.patterns || [];
+    renderSSLBypass();
+  } catch(e) {}
+}
+
+function renderSSLBypass() {
+  const tbody = document.getElementById('ssl-bypass-table');
+  const count = document.getElementById('ssl-bypass-count');
+  if (!tbody) return;
+  count.textContent = _sslBypassList.length + ' pattern' + (_sslBypassList.length !== 1 ? 's' : '');
+  if (!_sslBypassList.length) {
+    tbody.innerHTML = '<tr><td colspan="2"><div class="empty-state"><div class="empty-icon">🔒</div>No bypass patterns — all HTTPS traffic is inspected</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = _sslBypassList.map(p => `<tr>
+    <td style="font-family:monospace;font-size:.82rem">${escHtml(p)}</td>
+    <td style="text-align:right"><button class="btn danger sm" onclick="removeSSLBypass('${escHtml(p)}')">Remove</button></td>
+  </tr>`).join('');
+}
+
+async function addSSLBypass() {
+  const input = document.getElementById('ssl-bypass-input');
+  const pattern = input.value.trim();
+  if (!pattern) return;
+  try {
+    await api('/api/ssl-bypass', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({pattern}),
+    });
+    input.value = '';
+    toast('Bypass pattern added', 'success');
+    loadSSLBypass();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function removeSSLBypass(pattern) {
+  try {
+    await api('/api/ssl-bypass?pattern=' + encodeURIComponent(pattern), { method: 'DELETE' });
+    toast('Pattern removed', 'success');
+    loadSSLBypass();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Security Scanning (ClamAV / YARA / Threat Feeds)
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadSecScanStatus() {
+  try {
+    const s = await api('/api/security-scan/status');
+    const badge = document.getElementById('sec-scan-enabled-badge');
+    if (badge) {
+      badge.textContent  = s.enabled ? 'ENABLED' : 'DISABLED';
+      badge.style.background = s.enabled ? 'rgba(34,197,94,.15)' : 'rgba(100,116,139,.15)';
+      badge.style.color      = s.enabled ? 'var(--green)' : 'var(--muted)';
+    }
+    const clamEl = document.getElementById('sec-clamav-status');
+    if (clamEl) {
+      const ok = s.clamav_status === 'ok';
+      clamEl.textContent  = s.clamav_status || '—';
+      clamEl.style.color  = ok ? 'var(--green)' : (s.clamav_status === 'disabled' ? 'var(--muted)' : 'var(--red)');
+    }
+    const cb = document.getElementById('sec-clam-blocked');
+    if (cb) cb.textContent = s.stat_clam_blocked ? s.stat_clam_blocked + ' blocked' : '';
+    const yr = document.getElementById('sec-yara-count');
+    if (yr) yr.textContent = s.yara_rules != null ? s.yara_rules + ' rules loaded' : '—';
+    const yb = document.getElementById('sec-yara-blocked');
+    if (yb) yb.textContent = s.stat_yara_blocked ? s.stat_yara_blocked + ' blocked' : '';
+    const fe = document.getElementById('sec-feed-entries');
+    if (fe) fe.textContent = s.threat_feed_entries != null ? s.threat_feed_entries.toLocaleString() + ' entries' : '—';
+    const fs = document.getElementById('sec-feed-sync');
+    if (fs) fs.textContent = s.threat_feed_last_sync ? 'Last sync: ' + new Date(s.threat_feed_last_sync).toLocaleTimeString() : '';
+    const fb = document.getElementById('sec-feed-blocked');
+    if (fb) fb.textContent = s.stat_feed_blocked ? s.stat_feed_blocked + ' blocked' : '';
+  } catch(e) {}
+}
+
+async function syncThreatFeeds() {
+  const statusEl = document.getElementById('sec-scan-action-status');
+  statusEl.style.display = 'block';
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = 'Syncing threat feeds…';
+  try {
+    await api('/api/security-scan/feeds/sync', { method: 'POST' });
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = 'Sync complete.';
+    loadSecScanStatus();
+  } catch(e) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'Sync failed: ' + e.message;
+  }
+}
+
+async function reloadYARA() {
+  const statusEl = document.getElementById('sec-scan-action-status');
+  statusEl.style.display = 'block';
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = 'Reloading YARA rules…';
+  try {
+    const d = await api('/api/security-scan/yara/reload', { method: 'POST' });
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = 'Loaded ' + (d.yara_rules || 0) + ' rules from ' + (d.directory || '—');
+    loadSecScanStatus();
+  } catch(e) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'Reload failed: ' + e.message;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

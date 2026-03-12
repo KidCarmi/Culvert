@@ -13,10 +13,12 @@ version: "3.4"
 #
 # Persistent data (volume "proxy-data"):
 #   /data/ca.bundle         Root CA for SSL inspection
+#   /data/blocklist.txt     Domain blocklist (persisted across restarts)
 #   /data/policy.json       PBAC policy rules
 #   /data/proxy.log         Rotating request log
 #   /data/audit.jsonl       Persistent audit trail
 #   /data/threatfeeds.json  Local threat intelligence database (auto-synced)
+#   /data/ui_users.json     Admin UI users (persisted across restarts)
 #
 # YARA rules (/app/yara in the proxy container):
 #   Starter rules are bundled in the image (yara/sample_rules.yar).
@@ -69,6 +71,7 @@ services:
       "-port",           "8080",
       "-ui-port",        "9090",
       "-ca-path",        "/data/ca.bundle",
+      "-blocklist",      "/data/blocklist.txt",
       "-policy",         "/data/policy.json",
       "-logfile",        "/data/proxy.log",
       "-audit-log",      "/data/audit.jsonl",
