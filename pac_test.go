@@ -76,7 +76,7 @@ func TestPACStore_GetDefault(t *testing.T) {
 	if c.ProxyPort != 0 {
 		t.Errorf("default ProxyPort should be 0, got %d", c.ProxyPort)
 	}
-	if c.Exclusions != nil && len(c.Exclusions) != 0 {
+	if len(c.Exclusions) != 0 {
 		t.Errorf("default Exclusions should be empty, got %v", c.Exclusions)
 	}
 }

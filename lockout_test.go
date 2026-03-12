@@ -167,7 +167,7 @@ func TestLockoutMsg(t *testing.T) {
 	if !strings.Contains(msg, "300") {
 		t.Errorf("LockoutMsg should contain seconds, got %q", msg)
 	}
-	if !strings.Contains(msg, "locked") || !strings.Contains(msg, "locked") {
+	if !strings.Contains(msg, "locked") || !strings.Contains(msg, "300") {
 		t.Errorf("LockoutMsg should mention lock, got %q", msg)
 	}
 }
