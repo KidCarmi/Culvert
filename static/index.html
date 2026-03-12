@@ -1514,7 +1514,11 @@ function switchView(name) {
   if (name === 'idproviders')    loadIdPList();
   if (name === 'audit')          loadAuditLog();
   if (name === 'settings')       loadSettings();
-  if (name === 'policy-tester')  { /* form is self-contained */ }
+  if (name === 'policy')         fetchPolicy();
+  if (name === 'fileblock')      fetchFileBlock();
+  if (name === 'rewrite')        fetchRewrite();
+  if (name === 'pac')            loadPACConfig();
+  if (name === 'policy-tester')  loadPolicyProviderOptions();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

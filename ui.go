@@ -351,7 +351,11 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 
 const uiSessionCookieName = "ps_ui_session"
 
-func setUISessionCookie(w http.ResponseWriter, username string, role UIRole) error {
+func isSecureRequest(r *http.Request) bool {
+	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
+func setUISessionCookie(w http.ResponseWriter, r *http.Request, username string, role UIRole) error {
 	s := &Session{
 		Sub:      username,
 		Provider: "local",
@@ -368,7 +372,7 @@ func setUISessionCookie(w http.ResponseWriter, username string, role UIRole) err
 		Path:     "/",
 		MaxAge:   int(getSessionTTL().Seconds()),
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
@@ -385,14 +389,14 @@ func readUISessionCookie(r *http.Request) (*Session, error) {
 	return decodeSession(c.Value)
 }
 
-func clearUISessionCookie(w http.ResponseWriter) {
+func clearUISessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     uiSessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -424,7 +428,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if ok {
 		loginLimiter.RecordSuccess(body.User)
-		if err := setUISessionCookie(w, body.User, role); err != nil {
+		if err := setUISessionCookie(w, r, body.User, role); err != nil {
 			http.Error(w, "session error", http.StatusInternalServerError)
 			return
 		}
@@ -488,7 +492,7 @@ func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
 	// Revoke the session token so it cannot be reused even if the cookie is
 	// replayed before it naturally expires.
 	revokeSessionCookie(uiSessionCookieName, r)
-	clearUISessionCookie(w)
+	clearUISessionCookie(w, r)
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -616,7 +620,7 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Auto-login after setup so the user lands directly in the dashboard.
-	_ = setUISessionCookie(w, body.User, RoleAdmin)
+	_ = setUISessionCookie(w, r, body.User, RoleAdmin)
 	auditEvent(r, "setup.complete", body.User, "first-time admin password configured")
 	logger.Printf("First-time setup: admin user %q created", body.User)
 	jsonOK(w, map[string]any{"ok": true})
