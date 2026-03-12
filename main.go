@@ -478,6 +478,10 @@ func main() {
 			handleHealth(w, r)
 		case "/metrics":
 			handleMetrics(w, r)
+		case "/proxy.pac":
+			// Serve PAC over plain HTTP so Windows/macOS clients can fetch it
+			// without TLS — the proxy port is always HTTP.
+			servePACFile(w, r)
 		default:
 			handleRequest(w, r)
 		}

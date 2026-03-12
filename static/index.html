@@ -3468,15 +3468,19 @@ function loadXMLFile(event) {
 // PAC File
 // ═══════════════════════════════════════════════════════════════════════════
 
+// PAC is served on the proxy port (plain HTTP) so clients can fetch it without TLS.
+function pacHTTPURL() {
+  const proxyPort = parseInt(document.getElementById('pac-port').value) || 8080;
+  return 'http://' + window.location.hostname + ':' + proxyPort + '/proxy.pac';
+}
+
 async function loadPACConfig() {
   try {
     const c = await api('/api/pac-config');
     document.getElementById('pac-host').value = c.proxyHost || '';
     document.getElementById('pac-port').value = c.proxyPort || 8080;
     document.getElementById('pac-exclusions').value = (c.exclusions || []).join('\n');
-    // Update the displayed PAC URL
-    document.getElementById('pac-url-display').textContent =
-      window.location.protocol + '//' + window.location.host + '/proxy.pac';
+    document.getElementById('pac-url-display').textContent = pacHTTPURL();
     refreshPACPreview();
   } catch(e) { /* first load may fail */ }
 }
@@ -3499,7 +3503,7 @@ async function savePACConfig() {
 
 async function refreshPACPreview() {
   try {
-    const resp = await fetch('/proxy.pac');
+    const resp = await fetch(pacHTTPURL());
     const text = await resp.text();
     document.getElementById('pac-preview').textContent = text;
   } catch(e) {
@@ -3509,7 +3513,7 @@ async function refreshPACPreview() {
 
 function downloadPAC() {
   const a = document.createElement('a');
-  a.href = '/proxy.pac';
+  a.href = pacHTTPURL();
   a.download = 'proxy.pac';
   document.body.appendChild(a);
   a.click();
@@ -3518,7 +3522,7 @@ function downloadPAC() {
 }
 
 function copyPACURL() {
-  const url = window.location.protocol + '//' + window.location.host + '/proxy.pac';
+  const url = pacHTTPURL();
   navigator.clipboard.writeText(url).then(
     () => toast('PAC URL copied to clipboard', 'success'),
     () => toast('Copy failed — URL: ' + url, 'error')
@@ -3847,7 +3851,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 (async () => {
   try {
     const s = await fetch('/api/setup/status');
-    if (!s.ok) return;
+    if (!s.ok) { showLoginOverlay(); return; }
     const d = await s.json();
 
     if (d.needsSetup) {
@@ -3902,8 +3906,10 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
           } else {
             applySession(ad.user || '', ad.role || '');
           }
+        } else {
+          showLoginOverlay();
         }
-      } catch (_) { /* server unreachable */ }
+      } catch (_) { showLoginOverlay(); }
     }
   } catch (_) { /* server unreachable — show normal UI */ }
 })();
