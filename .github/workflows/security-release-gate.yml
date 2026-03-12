@@ -63,6 +63,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security tab
         if: always()
+        continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: gosec-results.sarif
@@ -110,6 +111,7 @@ jobs:
 
       - name: Upload Trivy SARIF
         if: always()
+        continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-fs.sarif
@@ -140,6 +142,7 @@ jobs:
 
       - name: Upload Trivy image SARIF
         if: always()
+        continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image.sarif

@@ -1,5 +1,5 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o proxyshield .
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build
 # time so no runtime network access or manual download is required.
 # Attribution: https://db-ip.com
-FROM alpine:3.21 AS geoip
+FROM alpine:3.22 AS geoip
 RUN apk add --no-cache wget && \
     wget -qO- "https://download.db-ip.com/free/dbip-country-lite-$(date +%Y-%m).mmdb.gz" \
       | gzip -d > /GeoLite2-Country.mmdb
@@ -26,7 +26,7 @@ RUN apk add --no-cache wget && \
 #       (see deploy/seccomp.json)
 #   • Drop all Linux capabilities: --cap-drop=ALL
 #   • No new privileges: --security-opt no-new-privileges
-FROM alpine:3.21
+FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -S proxy && adduser -S proxy -G proxy && \
