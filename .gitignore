@@ -21,3 +21,4 @@ data/
 # Editor cruft
 .DS_Store
 coverage.out
+cover.out
