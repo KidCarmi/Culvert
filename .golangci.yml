@@ -4,12 +4,7 @@
 
 run:
   timeout: 5m
-  go: "1.24"
-  # Skip generated / vendored files.
-  skip-dirs:
-    - vendor
-  skip-files:
-    - ".*_generated\\.go$"
+  go: "1.25"
 
 linters:
   # Start from a minimal set and add explicitly — avoids surprise breakage
@@ -49,7 +44,6 @@ linters:
     - nestif            # deeply nested if blocks > 5 → warning
 
     # ── Concurrency ─────────────────────────────────────────────────────────
-    - gosmopolitan      # i18n and locale issues (optional)
     - tparallel         # tests don't call t.Parallel()
 
 linters-settings:
@@ -103,6 +97,11 @@ linters-settings:
           - "sayRepetitiveInsteadOfStutters"
 
 issues:
+  # Skip generated / vendored files.
+  exclude-dirs:
+    - vendor
+  exclude-files:
+    - ".*_generated\\.go$"
   # Allow up to 3 issues of the same type before suppressing.
   max-same-issues: 3
   # Don't exclude issues in test files.
