@@ -24,7 +24,7 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    branches: ["main", "master"]
+    branches: ["main", "claude/create-proxy-server-aUDd0","master"]
   schedule:
     # Weekly proactive scan — catches new CVEs between releases.
     - cron: "0 3 * * 1"   # every Monday 03:00 UTC
