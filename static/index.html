@@ -2008,16 +2008,6 @@ function badgeHTML(status) {
   return '<span class="badge auth">AUTH FAIL</span>';
 }
 
-function rowHTML(e) {
-  return `<tr>
-    <td style="color:var(--muted)">${e.time}</td>
-    <td style="font-family:monospace">${e.ip}</td>
-    <td><code style="font-size:.78rem">${e.method}</code></td>
-    <td style="font-family:monospace;font-size:.8rem">${e.host}</td>
-    <td>${badgeHTML(e.status)}</td>
-  </tr>`;
-}
-
 function levelBadge(level) {
   if (level === 'INFO')  return '<span style="font-size:.68rem;font-weight:700;color:var(--accent2)">INFO</span>';
   if (level === 'WARN')  return '<span style="font-size:.68rem;font-weight:700;color:var(--yellow)">WARN</span>';
@@ -2527,123 +2517,12 @@ function sslBadge(ssl, skipVerify) {
   return badge;
 }
 
-function renderPolicy() {
-  const tbody = document.getElementById('pol-table');
-  const count = polRules.length;
-  document.getElementById('pol-count').textContent = count + ' rule' + (count !== 1 ? 's' : '');
-  if (!count) {
-    tbody.innerHTML = '<tr><td colspan="9"><div class="empty-state"><div class="empty-icon">📋</div>No policy rules — traffic is unrestricted</div></td></tr>';
-    return;
-  }
-  tbody.innerHTML = polRules.map((r, idx) => {
-    const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`, r.authSource && `via:${r.authSource}`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
-    const schedBadge = r.schedule ? ` <span title="Schedule active" style="font-size:.8em">⏰</span>` : '';
-    const dest = [r.destFQDN, r.destCategory].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
-    return `<tr draggable="true" data-priority="${r.priority}">
-      <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
-      <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
-      <td style="font-weight:600">${r.name}${schedBadge}</td>
-      <td style="font-size:.78rem;font-family:monospace">${src}</td>
-      <td style="font-size:.78rem;font-family:monospace">${dest}</td>
-      <td>${sslBadge(r.sslAction, r.tlsSkipVerify)}</td>
-      <td>${actionBadge(r.action)}</td>
-      <td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${r.hitCount || 0}</td>
-      <td style="text-align:right;white-space:nowrap">
-        <button class="btn ghost sm" onclick="editPolicy(${r.priority})" style="margin-right:4px">Edit</button>
-        <button class="btn danger sm" onclick="deletePolicy(${r.priority})">Del</button>
-      </td>
-    </tr>`;
-  }).join('');
-  initPolicyDragDrop();
-}
-
-function editPolicy(priority) {
-  const r = polRules.find(x => x.priority === priority);
-  if (!r) return;
-  polEditPriority = priority;
-  document.getElementById('pol-priority').value  = r.priority;
-  document.getElementById('pol-name').value       = r.name;
-  document.getElementById('pol-action').value     = r.action;
-  document.getElementById('pol-src-ip').value     = r.sourceIP || '';
-  document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
-  document.getElementById('pol-src-group').value  = r.sourceGroup    || '';
-  document.getElementById('pol-src-auth').value   = r.authSource     || '';
-  document.getElementById('pol-redirect').value   = r.redirectURL || '';
-  document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
-  document.getElementById('pol-dest-cat').value   = r.destCategory || '';
-  document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
-  document.getElementById('pol-file-filter').checked = !!r.fileFiltering;
-  document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
-  setScheduleToForm(r.schedule || null);
-  document.getElementById('policy-form-title').textContent = 'Edit Rule: ' + r.name;
-  document.getElementById('policy-submit-btn').textContent = '💾 Save Changes';
-  document.getElementById('policy-cancel-btn').style.display = '';
-  document.getElementById('policy-form-panel').scrollIntoView({behavior:'smooth'});
-}
-
 function cancelPolicyEdit() {
   polEditPriority = null;
   clearPolicyForm();
   document.getElementById('policy-form-title').textContent = 'Add Policy Rule';
   document.getElementById('policy-submit-btn').textContent = '+ Add Rule';
   document.getElementById('policy-cancel-btn').style.display = 'none';
-}
-
-function clearPolicyForm() {
-  ['pol-priority','pol-name','pol-src-ip','pol-src-id','pol-src-group','pol-src-auth','pol-redirect','pol-dest-fqdn'].forEach(id =>
-    document.getElementById(id).value = '');
-  document.getElementById('pol-action').value    = 'Allow';
-  document.getElementById('pol-dest-cat').value  = '';
-  document.getElementById('pol-ssl').value       = 'Bypass';
-  document.getElementById('pol-file-filter').checked = false;
-  document.getElementById('pol-tls-skip').checked = false;
-  setScheduleToForm(null);
-  document.getElementById('pol-schedule-details').open = false;
-}
-
-async function submitPolicyRule() {
-  const priority = parseInt(document.getElementById('pol-priority').value);
-  const name     = document.getElementById('pol-name').value.trim();
-  const action   = document.getElementById('pol-action').value;
-  if (!priority || !name || !action) {
-    toast('Priority, Name and Action are required', 'error'); return;
-  }
-  const rule = {
-    priority,
-    name,
-    action,
-    sourceIP:       document.getElementById('pol-src-ip').value.trim(),
-    sourceIdentity: document.getElementById('pol-src-id').value.trim(),
-    sourceGroup:    document.getElementById('pol-src-group').value.trim(),
-    authSource:     document.getElementById('pol-src-auth').value.trim(),
-    redirectURL:    document.getElementById('pol-redirect').value.trim(),
-    destFQDN:       document.getElementById('pol-dest-fqdn').value.trim(),
-    destCategory:   document.getElementById('pol-dest-cat').value || '',
-    sslAction:      document.getElementById('pol-ssl').value,
-    fileFiltering:  document.getElementById('pol-file-filter').checked,
-    tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
-    schedule:       getScheduleFromForm(),
-  };
-  try {
-    if (polEditPriority !== null) {
-      await api('/api/policy?priority=' + polEditPriority, {
-        method: 'PUT',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(rule),
-      });
-      toast('Rule updated', 'success');
-      cancelPolicyEdit();
-    } else {
-      await api('/api/policy', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(rule),
-      });
-      toast('Rule added', 'success');
-      clearPolicyForm();
-    }
-    fetchPolicy();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
 async function deletePolicy(priority) {
@@ -3125,6 +3004,7 @@ function renderPolicy() {
     return;
   }
   tbody.innerHTML = polRules.map((r, idx) => {
+    const schedBadge = r.schedule ? ` <span title="Schedule active" style="font-size:.8em">⏰</span>` : '';
     const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`, r.authSource && `via:${r.authSource}`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const destParts = [r.destFQDN, r.destCategory].filter(Boolean);
     const dest = destParts.join(' / ') || '<span style="color:var(--muted)">Any</span>';
