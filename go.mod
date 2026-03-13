@@ -2,8 +2,6 @@ module proxy
 
 go 1.25.8
 
-toolchain go1.25.8
-
 require (
 	github.com/crewjam/saml v0.5.1
 	github.com/go-ldap/ldap/v3 v3.4.12

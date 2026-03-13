@@ -23,8 +23,8 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      - name: Download dependencies
-        run: go mod download
+      - name: Tidy and download dependencies
+        run: go mod tidy && go mod download
 
       - name: Vet
         run: go vet ./...
@@ -107,6 +107,9 @@ jobs:
         with:
           go-version: "1.25"
           cache: true
+
+      - name: Tidy modules
+        run: go mod tidy
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
