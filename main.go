@@ -287,9 +287,14 @@ func main() {
 	// ── Blocklist ────────────────────────────────────────────────────────────
 	if blPath != "" {
 		if err := bl.Load(blPath); err != nil {
-			logger.Fatalf("Cannot load blocklist: %v", err)
+			if os.IsNotExist(err) {
+				logger.Printf("Blocklist not found at %s — starting with empty list", blPath)
+			} else {
+				logger.Fatalf("Cannot load blocklist: %v", err)
+			}
+		} else {
+			logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), blPath)
 		}
-		logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), blPath)
 	}
 
 	// ── Root CA for SSL inspection ────────────────────────────────────────────
