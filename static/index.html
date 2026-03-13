@@ -3870,6 +3870,98 @@ function prettyJSON(str) {
   </div>
 </div>
 
+<!-- ── User Modal ──────────────────────────────────────────────────────── -->
+<div id="user-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
+  <div class="setup-card" style="width:360px;max-width:94vw">
+    <h2 id="user-modal-title" style="font-size:1.15rem;margin-bottom:4px">Add User</h2>
+    <p id="user-modal-sub" style="font-size:.82rem;color:var(--muted);margin-bottom:18px">New admin dashboard user</p>
+    <div class="form-group">
+      <label class="form-label">Username</label>
+      <input id="um-username" type="text" class="input" style="width:100%" maxlength="64" autocomplete="off">
+    </div>
+    <div class="form-group" id="um-pass-group">
+      <label class="form-label">Password <span style="color:var(--muted)">(min 8 characters)</span></label>
+      <input id="um-pass" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="form-group" id="um-pass-hint-group" style="display:none">
+      <label class="form-label">New Password <span style="color:var(--muted)">(leave blank to keep current)</span></label>
+      <input id="um-pass-change" type="password" class="input" style="width:100%" autocomplete="new-password">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Role</label>
+      <select id="um-role" class="input" style="width:100%">
+        <option value="admin">admin — full access</option>
+        <option value="operator" selected>operator — manage content</option>
+        <option value="viewer">viewer — read only</option>
+      </select>
+    </div>
+    <div class="setup-err" id="um-err" style="margin-bottom:10px"></div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn" id="um-save-btn" onclick="saveUser()">Save</button>
+      <button class="btn ghost" onclick="closeUserModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── User Modal / Role Badges ─────────────────────────────────────────── -->
+<style>
+.role-badge-admin    { background:rgba(239,68,68,.15);  color:#f87171; }
+.role-badge-operator { background:rgba(59,130,246,.15); color:#60a5fa; }
+.role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }
+#user-modal { display:none }
+#user-modal.open { display:flex }
+.sched-day-lbl {
+  display:inline-flex;align-items:center;gap:4px;cursor:pointer;
+  padding:3px 8px;border-radius:6px;font-size:.78rem;border:1px solid var(--border);
+  background:var(--surface);transition:background .1s,border-color .1s;
+}
+.sched-day-lbl:has(input:checked) {
+  background:rgba(59,130,246,.2);border-color:var(--accent);color:var(--accent2);
+}
+#blocklist-mode-bar {
+  display:flex;align-items:center;gap:10px;padding:8px 12px;
+  border-radius:8px;margin-bottom:12px;font-size:.82rem;
+}
+#blocklist-mode-bar.mode-block { background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25); }
+#blocklist-mode-bar.mode-allow { background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25); }
+.pt-match  { background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px;padding:16px 20px; }
+.pt-nomatch{ background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:16px 20px; }
+.pt-action { font-size:1.4rem;font-weight:700;margin-bottom:4px; }
+.pt-sub    { font-size:.82rem;color:var(--muted); }
+.trace-match { color:#4ade80;font-weight:600; }
+.trace-skip  { color:var(--muted);font-style:italic; }
+.audit-diff-btn { background:none;border:none;cursor:pointer;color:var(--accent2);font-size:.75rem;padding:2px 6px;border-radius:4px; }
+.audit-diff-btn:hover { background:var(--surface2); }
+.audit-diff-row td { font-size:.75rem;color:var(--muted);padding:4px 12px 8px; }
+pre.diff-block { margin:0;white-space:pre-wrap;word-break:break-all;font-size:.72rem;
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:200px;overflow-y:auto; }
+</style>
+
+<!-- ── Login Overlay ───────────────────────────────────────────────────── -->
+<style>
+#login-overlay {
+  display: none;
+  position: fixed; inset: 0; z-index: 9998;
+  background: rgba(11,15,26,.97);
+  align-items: center; justify-content: center;
+}
+</style>
+<div id="login-overlay">
+  <div class="setup-card">
+    <div class="setup-logo">🛡️</div>
+    <h2>Sign in to ProxyShield</h2>
+    <p>Enter your admin credentials to access the management dashboard.</p>
+    <form id="login-form" autocomplete="on">
+      <label for="li-user">Username</label>
+      <input id="li-user" type="text" autocomplete="username" maxlength="64" required>
+      <label for="li-pass">Password</label>
+      <input id="li-pass" type="password" autocomplete="current-password" required>
+      <div class="setup-err" id="li-err"></div>
+      <button class="setup-submit" id="li-btn" type="submit">Sign In</button>
+    </form>
+  </div>
+</div>
+
 <script>
 // ── Login overlay form handler ──────────────────────────────────────────
 document.getElementById('login-form').addEventListener('submit', async (e) => {
@@ -3971,98 +4063,6 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
   } catch (_) { /* server unreachable — show normal UI */ }
 })();
 </script>
-
-<!-- ── User Modal ──────────────────────────────────────────────────────── -->
-<div id="user-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
-  <div class="setup-card" style="width:360px;max-width:94vw">
-    <h2 id="user-modal-title" style="font-size:1.15rem;margin-bottom:4px">Add User</h2>
-    <p id="user-modal-sub" style="font-size:.82rem;color:var(--muted);margin-bottom:18px">New admin dashboard user</p>
-    <div class="form-group">
-      <label class="form-label">Username</label>
-      <input id="um-username" type="text" class="input" style="width:100%" maxlength="64" autocomplete="off">
-    </div>
-    <div class="form-group" id="um-pass-group">
-      <label class="form-label">Password <span style="color:var(--muted)">(min 8 characters)</span></label>
-      <input id="um-pass" type="password" class="input" style="width:100%" autocomplete="new-password">
-    </div>
-    <div class="form-group" id="um-pass-hint-group" style="display:none">
-      <label class="form-label">New Password <span style="color:var(--muted)">(leave blank to keep current)</span></label>
-      <input id="um-pass-change" type="password" class="input" style="width:100%" autocomplete="new-password">
-    </div>
-    <div class="form-group">
-      <label class="form-label">Role</label>
-      <select id="um-role" class="input" style="width:100%">
-        <option value="admin">admin — full access</option>
-        <option value="operator" selected>operator — manage content</option>
-        <option value="viewer">viewer — read only</option>
-      </select>
-    </div>
-    <div class="setup-err" id="um-err" style="margin-bottom:10px"></div>
-    <div style="display:flex;gap:10px;margin-top:6px">
-      <button class="btn" id="um-save-btn" onclick="saveUser()">Save</button>
-      <button class="btn ghost" onclick="closeUserModal()">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- ── User Modal / Role Badges ─────────────────────────────────────────── -->
-<style>
-.role-badge-admin    { background:rgba(239,68,68,.15);  color:#f87171; }
-.role-badge-operator { background:rgba(59,130,246,.15); color:#60a5fa; }
-.role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }
-#user-modal { display:none }
-#user-modal.open { display:flex }
-.sched-day-lbl {
-  display:inline-flex;align-items:center;gap:4px;cursor:pointer;
-  padding:3px 8px;border-radius:6px;font-size:.78rem;border:1px solid var(--border);
-  background:var(--surface);transition:background .1s,border-color .1s;
-}
-.sched-day-lbl:has(input:checked) {
-  background:rgba(59,130,246,.2);border-color:var(--accent);color:var(--accent2);
-}
-#blocklist-mode-bar {
-  display:flex;align-items:center;gap:10px;padding:8px 12px;
-  border-radius:8px;margin-bottom:12px;font-size:.82rem;
-}
-#blocklist-mode-bar.mode-block { background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25); }
-#blocklist-mode-bar.mode-allow { background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25); }
-.pt-match  { background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:10px;padding:16px 20px; }
-.pt-nomatch{ background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:16px 20px; }
-.pt-action { font-size:1.4rem;font-weight:700;margin-bottom:4px; }
-.pt-sub    { font-size:.82rem;color:var(--muted); }
-.trace-match { color:#4ade80;font-weight:600; }
-.trace-skip  { color:var(--muted);font-style:italic; }
-.audit-diff-btn { background:none;border:none;cursor:pointer;color:var(--accent2);font-size:.75rem;padding:2px 6px;border-radius:4px; }
-.audit-diff-btn:hover { background:var(--surface2); }
-.audit-diff-row td { font-size:.75rem;color:var(--muted);padding:4px 12px 8px; }
-pre.diff-block { margin:0;white-space:pre-wrap;word-break:break-all;font-size:.72rem;
-  background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:200px;overflow-y:auto; }
-</style>
-
-<!-- ── Login Overlay ───────────────────────────────────────────────────── -->
-<style>
-#login-overlay {
-  display: none;
-  position: fixed; inset: 0; z-index: 9998;
-  background: rgba(11,15,26,.97);
-  align-items: center; justify-content: center;
-}
-</style>
-<div id="login-overlay">
-  <div class="setup-card">
-    <div class="setup-logo">🛡️</div>
-    <h2>Sign in to ProxyShield</h2>
-    <p>Enter your admin credentials to access the management dashboard.</p>
-    <form id="login-form" autocomplete="on">
-      <label for="li-user">Username</label>
-      <input id="li-user" type="text" autocomplete="username" maxlength="64" required>
-      <label for="li-pass">Password</label>
-      <input id="li-pass" type="password" autocomplete="current-password" required>
-      <div class="setup-err" id="li-err"></div>
-      <button class="setup-submit" id="li-btn" type="submit">Sign In</button>
-    </form>
-  </div>
-</div>
 
 </body>
 </html>
