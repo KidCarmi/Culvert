@@ -216,6 +216,35 @@ tbody tr:hover { background: var(--surface2); }
 .drag-handle:active { cursor: grabbing; }
 tr.drag-over { background: rgba(59,130,246,.08) !important; outline: 1px dashed var(--accent); }
 tr.dragging  { opacity: .4; }
+/* ─── Policy pickers (group / country) ──────────────────────────────────── */
+.picker-dropdown {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 500;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; max-height: 210px; overflow-y: auto;
+  box-shadow: var(--shadow); margin-top: 4px;
+}
+.picker-option {
+  padding: 7px 12px; cursor: pointer; font-size: .82rem;
+  display: flex; align-items: center; gap: 8px;
+}
+.picker-option:hover { background: rgba(59,130,246,.1); color: var(--accent2); }
+.picker-empty { padding: 12px; text-align: center; color: var(--muted); font-size: .78rem; }
+.picker-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: rgba(59,130,246,.15); border: 1px solid rgba(59,130,246,.3);
+  color: var(--accent2); padding: 2px 8px 2px 6px; border-radius: 999px;
+  font-size: .75rem; font-weight: 600;
+}
+.picker-chip button {
+  background: none; border: none; cursor: pointer;
+  color: var(--accent2); font-size: .95rem; line-height: 1; padding: 0;
+}
+.group-chip-row {
+  display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+  background: rgba(59,130,246,.12); border: 1px solid rgba(59,130,246,.3);
+  border-radius: 7px; font-size: .82rem;
+}
+.country-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
 </style>
 </head>
 <body>
@@ -1233,14 +1262,26 @@ Firefox (all platforms):
             </div>
             <div>
               <label class="form-label">Source Group <span style="color:var(--muted);font-weight:400">(IdP group/role)</span></label>
-              <div style="position:relative">
-                <select class="select" style="width:100%;display:none" id="pol-src-group-select" onchange="syncGroupInput()"></select>
-                <input type="text" class="input" style="width:100%" id="pol-src-group" placeholder="engineering or Admins" oninput="filterGroupOptions(this.value)">
+              <div style="position:relative" id="pol-src-group-wrap">
+                <input type="hidden" id="pol-src-group">
+                <div class="group-chip-row" id="pol-src-group-chip" style="display:none">
+                  <span style="color:var(--accent2);font-weight:600;font-size:.82rem" id="pol-src-group-chip-text"></span>
+                  <button type="button" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1;padding:0 0 0 4px;margin-left:auto" onclick="clearGroupSelection()" title="Clear">×</button>
+                </div>
+                <input type="text" class="input" style="width:100%" id="pol-src-group-search"
+                  placeholder="Search groups…" autocomplete="off"
+                  onfocus="onGroupFocus()" oninput="onGroupSearchInput(this.value)"
+                  onblur="setTimeout(()=>closeGroupDropdown(),200)">
+                <div id="pol-src-group-dropdown" class="picker-dropdown" style="display:none"></div>
               </div>
             </div>
             <div>
-              <label class="form-label">Auth Source <span style="color:var(--muted);font-weight:400">(IdP name or unauth)</span></label>
-              <input type="text" class="input" style="width:100%" id="pol-src-auth" placeholder="okta · local · unauth" title="IdP provider name (e.g. okta, adfs, ldap, local) or 'unauth' for unauthenticated traffic. Leave empty to match any.">
+              <label class="form-label">Auth Source <span style="color:var(--muted);font-weight:400">(IdP or unauth)</span></label>
+              <select class="select" style="width:100%" id="pol-src-auth">
+                <option value="">— any source —</option>
+                <option value="unauth">unauth — unauthenticated</option>
+                <option value="local">local — local credentials</option>
+              </select>
             </div>
           </div>
           <div style="display:grid;grid-template-columns:1fr;gap:14px;margin-bottom:14px">
@@ -1269,8 +1310,16 @@ Firefox (all platforms):
               </select>
             </div>
             <div>
-              <label class="form-label">Destination Countries <span style="color:var(--muted);font-weight:400">(Geo-IP, comma-sep ISO codes)</span></label>
-              <input type="text" class="input" style="width:100%" id="pol-dest-country" placeholder="RU, CN, KP (empty = any)">
+              <label class="form-label">Destination Countries <span style="color:var(--muted);font-weight:400">(Geo-IP)</span></label>
+              <div style="position:relative" id="pol-dest-country-wrap">
+                <input type="hidden" id="pol-dest-country">
+                <div class="country-chips" id="pol-dest-country-chips"></div>
+                <input type="text" class="input" style="width:100%" id="pol-dest-country-input"
+                  placeholder="Search country or ISO code…" autocomplete="off"
+                  oninput="onCountryInput(this.value)" onfocus="onCountryFocus()"
+                  onblur="setTimeout(()=>closeCountryDropdown(),200)">
+                <div id="pol-dest-country-dropdown" class="picker-dropdown" style="display:none"></div>
+              </div>
             </div>
           </div>
 
