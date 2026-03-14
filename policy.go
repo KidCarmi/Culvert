@@ -634,6 +634,22 @@ func matchFQDN(pattern, host string) bool {
 }
 
 func matchCategory(cat URLCategory, host string) bool {
+	// Layer 1: admin-managed catStore — exact + suffix match (fast, in-memory).
+	if matchCategoryInStore(cat, host) {
+		return true
+	}
+	// Layer 2: community BadgerDB feed — domain-walking point lookups.
+	if communityDB != nil {
+		if foundCat, ok := communityDB.Lookup(host); ok {
+			return strings.EqualFold(foundCat, string(cat))
+		}
+	}
+	return false
+}
+
+// matchCategoryInStore is the original single-layer lookup against catStore.
+// Retained as a named helper so Layer 2 can be added without duplicating logic.
+func matchCategoryInStore(cat URLCategory, host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	catStore.mu.RLock()
 	defer catStore.mu.RUnlock()

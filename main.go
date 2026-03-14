@@ -60,6 +60,9 @@ func main() {
 	threatFeedDB  := flag.String("threat-feed-db",  "", "Path for persisted threat feed JSON database")
 	uiUsersFile   := flag.String("ui-users-file",   "", "Path to persist admin UI users across restarts (e.g. /data/ui_users.json)")
 	uiNoTLS       := flag.Bool("ui-no-tls",         false, "Disable auto self-signed TLS; serve admin UI over plain HTTP")
+	catFeedDB     := flag.String("cat-feed-db",     "", "Directory for BadgerDB URL category community feed (empty=disabled)")
+	catFeedURL    := flag.String("cat-feed-url",    "", "Override URL for the UT1 category tarball (default: UT1 Capestat)")
+	catSyncIntvl  := flag.String("cat-sync-interval","24h", "How often to re-sync the URL category feed (e.g. 12h, 24h)")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -339,6 +342,29 @@ func main() {
 	}
 	logger.Printf("URLCat   → %d categories loaded from %s", len(catStore.All()), catPath)
 
+	// ── Community URL category feed (BadgerDB) ────────────────────────────────
+	// When --cat-feed-db is set, open BadgerDB and start the UT1 FeedSyncer.
+	// Layer 1 (catStore) remains the priority; BadgerDB is the fallback.
+	var feedSyncer *FeedSyncer
+	if *catFeedDB != "" {
+		var dbErr error
+		communityDB, dbErr = openCommunityDB(*catFeedDB)
+		if dbErr != nil {
+			logger.Fatalf("CatFeedDB → cannot open BadgerDB at %s: %v", *catFeedDB, dbErr)
+		}
+		syncD := 24 * time.Hour
+		if *catSyncIntvl != "" {
+			if d, err2 := time.ParseDuration(*catSyncIntvl); err2 == nil {
+				syncD = d
+			}
+		}
+		feedSyncer = newFeedSyncer(communityDB, *catFeedURL, syncD)
+		feedSyncer.Start(context.Background())
+		logger.Printf("CatFeedDB → BadgerDB at %s, sync every %s", *catFeedDB, syncD)
+	} else {
+		logger.Printf("CatFeedDB → disabled (set --cat-feed-db for community feed)")
+	}
+
 	// ── File block profile ───────────────────────────────────────────────────
 	if len(fc.FileBlock.Extensions) > 0 {
 		for _, ext := range fc.FileBlock.Extensions {
@@ -536,9 +562,15 @@ func main() {
 	if err := proxySrv.Shutdown(ctx); err != nil {
 		logger.Printf("Shutdown error: %v", err)
 	}
+	if communityDB != nil {
+		if err := communityDB.Close(); err != nil {
+			logger.Printf("CatFeedDB → close error: %v", err)
+		}
+	}
 	if logCloser != nil {
 		logCloser.Close()
 	}
+	_ = feedSyncer // suppress unused warning; it runs as a goroutine
 	logger.Println("Stopped.")
 }
 
