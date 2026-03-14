@@ -62,6 +62,10 @@ func startUI(port int, certFile, keyFile string, noTLS bool) {
 	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)     // POST — force immediate sync
 	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)   // POST — reload YARA rules from dir
 
+	// ── URL Categories (dynamic host-list management) ─────────────────────
+	mux.HandleFunc("/api/urlcat", apiURLCat)           // GET/POST/PUT/DELETE categories
+	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)  // POST/DELETE individual hosts
+
 	// ── Admin session auth ────────────────────────────────────────────────
 	mux.HandleFunc("/api/auth/login", apiAuthLogin)
 	mux.HandleFunc("/api/auth/status", apiAuthStatus)
@@ -864,6 +868,138 @@ func apiBlocklistMode(w http.ResponseWriter, r *http.Request) {
 		bl.SetMode(body.Mode)
 		auditEvent(r, "blocklist.mode", body.Mode, "")
 		jsonOK(w, map[string]string{"mode": bl.Mode()})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ── URL Categories ─────────────────────────────────────────────────────────
+
+// GET/POST/PUT/DELETE /api/urlcat
+func apiURLCat(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, catStore.All())
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Name  string   `json:"name"`
+			Hosts []string `json:"hosts"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if err := catStore.Set(body.Name, body.Hosts, false); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEvent(r, "urlcat.create", body.Name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
+		jsonOK(w, map[string]string{"name": body.Name})
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name query param required", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Hosts []string `json:"hosts"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		// Preserve builtIn flag when updating.
+		all := catStore.All()
+		builtIn := false
+		for _, e := range all {
+			if strings.EqualFold(e.Name, name) {
+				builtIn = e.BuiltIn
+				break
+			}
+		}
+		if err := catStore.Set(name, body.Hosts, builtIn); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEvent(r, "urlcat.update", name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
+		jsonOK(w, map[string]string{"name": name})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name query param required", http.StatusBadRequest)
+			return
+		}
+		if err := catStore.Delete(name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "urlcat.delete", name, "")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST/DELETE /api/urlcat/host — add or remove a single host from a category.
+func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Category string `json:"category"`
+			Host     string `json:"host"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Category == "" || body.Host == "" {
+			http.Error(w, "category and host are required", http.StatusBadRequest)
+			return
+		}
+		if err := catStore.AddHost(body.Category, body.Host); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "urlcat.host.add", body.Category, body.Host)
+		jsonOK(w, map[string]string{"category": body.Category, "host": body.Host})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		category := r.URL.Query().Get("category")
+		host := r.URL.Query().Get("host")
+		if category == "" || host == "" {
+			http.Error(w, "category and host query params required", http.StatusBadRequest)
+			return
+		}
+		if err := catStore.RemoveHost(category, host); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "urlcat.host.remove", category, host)
+		w.WriteHeader(http.StatusNoContent)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
