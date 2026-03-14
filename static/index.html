@@ -1311,14 +1311,14 @@ Firefox (all platforms):
             </div>
             <div>
               <label class="form-label">Destination Countries <span style="color:var(--muted);font-weight:400">(Geo-IP)</span></label>
-              <div style="position:relative" id="pol-dest-country-wrap">
+              <div id="pol-dest-country-wrap">
                 <input type="hidden" id="pol-dest-country">
                 <div class="country-chips" id="pol-dest-country-chips"></div>
                 <input type="text" class="input" style="width:100%" id="pol-dest-country-input"
-                  placeholder="Search country or ISO code…" autocomplete="off"
-                  oninput="onCountryInput(this.value)" onfocus="onCountryFocus()"
-                  onblur="setTimeout(()=>closeCountryDropdown(),200)">
-                <div id="pol-dest-country-dropdown" class="picker-dropdown" style="display:none"></div>
+                  placeholder="Type ISO code + Enter (e.g. US, DE, JP…)"
+                  autocomplete="off" maxlength="2"
+                  onkeydown="onCountryKeydown(event)">
+                <div style="font-size:.68rem;color:var(--muted);margin-top:3px">2-letter ISO code · Enter or comma to add · Backspace to remove last</div>
               </div>
             </div>
           </div>
@@ -3011,21 +3011,24 @@ function editPolicy(priority) {
   document.getElementById('pol-action').value     = r.action;
   document.getElementById('pol-src-ip').value     = r.sourceIP || '';
   document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
-  document.getElementById('pol-src-group').value  = r.sourceGroup || '';
-  document.getElementById('pol-src-auth').value   = r.authSource  || '';
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
-  loadPolicyProviderOptions().then(() => {
-    const groupSel = document.getElementById('pol-src-group-select');
-    groupSel.style.display = 'none';
-    document.getElementById('pol-src-group').style.display = '';
-  });
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
   document.getElementById('pol-dest-cat').value   = r.destCategory || '';
-  document.getElementById('pol-dest-country').value = (r.destCountry || []).join(', ');
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
+  // Group chip picker
+  clearGroupSelection();
+  if (r.sourceGroup) selectGroup(r.sourceGroup);
+  // Auth source dropdown — populate providers then set value
+  loadPolicyProviderOptions().then(() => {
+    document.getElementById('pol-src-auth').value = r.authSource || '';
+  });
+  // Country chips
+  _selectedCountries = [...(r.destCountry || [])];
+  _syncCountryHidden();
+  renderCountryChips();
   setScheduleToForm(r.schedule || null);
   document.getElementById('policy-form-title').textContent = 'Edit Rule: ' + r.name;
   document.getElementById('policy-submit-btn').textContent = '💾 Save Changes';
@@ -3033,22 +3036,26 @@ function editPolicy(priority) {
   document.getElementById('policy-form-panel').scrollIntoView({behavior:'smooth'});
 }
 
-const _origClearPolicyForm = window.clearPolicyForm;
 function clearPolicyForm() {
-  ['pol-name','pol-src-ip','pol-src-id','pol-src-group','pol-redirect','pol-dest-fqdn','pol-dest-country'].forEach(id =>
-    document.getElementById(id).value = '');
+  ['pol-name','pol-src-ip','pol-src-id','pol-redirect','pol-dest-fqdn'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
   document.getElementById('pol-priority').value = '';
   const pSel = document.getElementById('pol-src-provider');
   if (pSel) pSel.value = '';
-  const gSel = document.getElementById('pol-src-group-select');
-  if (gSel) { gSel.style.display = 'none'; gSel.value = ''; }
-  document.getElementById('pol-action').value       = 'Allow';
-  document.getElementById('pol-dest-cat').value     = '';
-  document.getElementById('pol-ssl').value          = 'Bypass';
+  document.getElementById('pol-action').value        = 'Allow';
+  document.getElementById('pol-dest-cat').value      = '';
+  document.getElementById('pol-ssl').value           = 'Bypass';
   document.getElementById('pol-file-filter').checked = false;
-  document.getElementById('pol-file-profile').value = '';
-  document.getElementById('pol-tls-skip').checked   = false;
-  document.getElementById('pol-src-auth').value     = '';
+  document.getElementById('pol-file-profile').value  = '';
+  document.getElementById('pol-tls-skip').checked    = false;
+  document.getElementById('pol-src-auth').value      = '';
+  clearGroupSelection();
+  _selectedCountries = [];
+  _syncCountryHidden();
+  renderCountryChips();
+  const ci = document.getElementById('pol-dest-country-input');
+  if (ci) ci.value = '';
   setScheduleToForm(null);
   document.getElementById('pol-schedule-details').open = false;
 }
@@ -3715,77 +3722,153 @@ function nextAutoPriority() {
 
 // Load IdP provider options into the Policy source-provider dropdown
 let _policyIdPList = [];
+let _policyGroupList = [];
+let _groupDebounceTimer = null;
+let _selectedCountries = [];
+
 async function loadPolicyProviderOptions() {
   try {
     const list = await api('/api/idp');
     _policyIdPList = list || [];
-    const sel = document.getElementById('pol-src-provider');
-    const cur = sel.value;
-    sel.innerHTML = '<option value="">— any provider —</option>' +
+    // Provider dropdown
+    const provSel = document.getElementById('pol-src-provider');
+    const curProv = provSel.value;
+    provSel.innerHTML = '<option value="">— any provider —</option>' +
       _policyIdPList.filter(p => p.enabled).map(p =>
         `<option value="${p.id}">${escHtml(p.name)} (${p.type.toUpperCase()})</option>`
       ).join('');
-    if (cur) sel.value = cur;
+    if (curProv) provSel.value = curProv;
+    // Auth source dropdown — static options + live IdP names
+    const authSel = document.getElementById('pol-src-auth');
+    if (authSel) {
+      const curAuth = authSel.value;
+      authSel.innerHTML = '<option value="">— any source —</option>' +
+        '<option value="unauth">unauth — unauthenticated</option>' +
+        '<option value="local">local — local credentials</option>' +
+        _policyIdPList.filter(p => p.enabled).map(p =>
+          `<option value="${escHtml(p.name)}">${escHtml(p.name)} (${p.type.toUpperCase()})</option>`
+        ).join('');
+      if (curAuth) authSel.value = curAuth;
+    }
   } catch(e) {}
 }
 
-// Load groups for selected provider
-let _policyGroupList = [];
 async function loadPolicyGroupOptions() {
   const pid = document.getElementById('pol-src-provider').value;
-  const groupInput = document.getElementById('pol-src-group');
-  const groupSel   = document.getElementById('pol-src-group-select');
-  if (!pid) {
-    _policyGroupList = [];
-    groupSel.style.display = 'none';
-    groupInput.style.display = '';
-    return;
-  }
+  _policyGroupList = [];
+  clearGroupSelection();
+  if (!pid) return;
   try {
     const groups = await api('/api/idp/' + pid + '/groups');
     _policyGroupList = groups || [];
-    if (_policyGroupList.length > 0) {
-      groupSel.innerHTML = '<option value="">— any group —</option>' +
-        _policyGroupList.map(g => `<option value="${escHtml(g)}">${escHtml(g)}</option>`).join('');
-      if (_policyGroupList.length > 10) {
-        // Many groups: keep text input for filtering, also show select
-        groupSel.style.display = 'none';
-        groupInput.style.display = '';
-        // Populate datalist for autocomplete
-        let dl = document.getElementById('pol-group-datalist');
-        if (!dl) {
-          dl = document.createElement('datalist');
-          dl.id = 'pol-group-datalist';
-          document.body.appendChild(dl);
-        }
-        dl.innerHTML = _policyGroupList.map(g => `<option value="${escHtml(g)}">`).join('');
-        groupInput.setAttribute('list', 'pol-group-datalist');
-      } else {
-        // Few groups: show select dropdown
-        groupSel.style.display = '';
-        groupInput.style.display = 'none';
-        groupSel.value = groupInput.value || '';
-      }
-    } else {
-      groupSel.style.display = 'none';
-      groupInput.style.display = '';
-      groupInput.removeAttribute('list');
-    }
-  } catch(e) {
-    groupSel.style.display = 'none';
-    groupInput.style.display = '';
+  } catch(e) {}
+}
+
+// ── Group picker: search-as-you-type with chip ────────────────────────────
+function onGroupFocus() {
+  const pid = document.getElementById('pol-src-provider').value;
+  if (!pid) {
+    const dd = document.getElementById('pol-src-group-dropdown');
+    dd.innerHTML = '<div class="picker-empty">Select an Auth Provider first</div>';
+    dd.style.display = '';
+    return;
+  }
+  renderGroupDropdown(document.getElementById('pol-src-group-search').value);
+}
+
+function onGroupSearchInput(val) {
+  clearTimeout(_groupDebounceTimer);
+  _groupDebounceTimer = setTimeout(() => renderGroupDropdown(val), 200);
+}
+
+function renderGroupDropdown(query) {
+  const dd = document.getElementById('pol-src-group-dropdown');
+  const q = (query || '').toLowerCase();
+  const matches = q
+    ? _policyGroupList.filter(g => g.toLowerCase().includes(q))
+    : _policyGroupList;
+  const shown = matches.slice(0, 50);
+  if (!shown.length) {
+    dd.innerHTML = '<div class="picker-empty">' +
+      (_policyGroupList.length ? 'No groups match — type to search' : 'No groups cached for this provider') +
+      '</div>';
+  } else {
+    dd.innerHTML = shown.map(g =>
+      `<div class="picker-option" onmousedown="selectGroup(${JSON.stringify(g)})">👥 ${escHtml(g)}</div>`
+    ).join('') +
+    (matches.length > 50
+      ? `<div class="picker-empty">Showing 50 of ${matches.length} — type to filter</div>` : '');
+  }
+  dd.style.display = '';
+}
+
+function closeGroupDropdown() {
+  const dd = document.getElementById('pol-src-group-dropdown');
+  if (dd) dd.style.display = 'none';
+}
+
+function selectGroup(name) {
+  document.getElementById('pol-src-group').value = name;
+  document.getElementById('pol-src-group-chip-text').textContent = name;
+  document.getElementById('pol-src-group-chip').style.display = 'flex';
+  document.getElementById('pol-src-group-search').style.display = 'none';
+  document.getElementById('pol-src-group-search').value = '';
+  closeGroupDropdown();
+}
+
+function clearGroupSelection() {
+  const h = document.getElementById('pol-src-group');
+  if (h) h.value = '';
+  const chip = document.getElementById('pol-src-group-chip');
+  const search = document.getElementById('pol-src-group-search');
+  if (chip) chip.style.display = 'none';
+  if (search) { search.style.display = ''; search.value = ''; }
+  closeGroupDropdown();
+}
+
+// ── Country tag-input: type ISO code + Enter/comma → chip ─────────────────
+function onCountryKeydown(e) {
+  if (e.key === 'Enter' || e.key === ',' || e.key === ' ') {
+    e.preventDefault();
+    const val = e.target.value.trim().toUpperCase().replace(/[^A-Z]/g, '');
+    if (val.length === 2) addCountryTag(val);
+    e.target.value = '';
+  } else if (e.key === 'Backspace' && !e.target.value && _selectedCountries.length) {
+    removeCountry(_selectedCountries[_selectedCountries.length - 1]);
   }
 }
 
-function syncGroupInput() {
-  const sel = document.getElementById('pol-src-group-select');
-  const inp = document.getElementById('pol-src-group');
-  inp.value = sel.value;
+function addCountryTag(code) {
+  if (!code || _selectedCountries.includes(code)) return;
+  _selectedCountries.push(code);
+  _syncCountryHidden();
+  renderCountryChips();
 }
 
-function filterGroupOptions(val) {
-  // Just let the browser handle the datalist; nothing extra needed.
+function removeCountry(code) {
+  _selectedCountries = _selectedCountries.filter(c => c !== code);
+  _syncCountryHidden();
+  renderCountryChips();
 }
+
+function _syncCountryHidden() {
+  const h = document.getElementById('pol-dest-country');
+  if (h) h.value = _selectedCountries.join(', ');
+}
+
+function renderCountryChips() {
+  const el = document.getElementById('pol-dest-country-chips');
+  if (!el) return;
+  el.innerHTML = _selectedCountries.map(code =>
+    `<span class="picker-chip">${countryFlag(code)} ${escHtml(code)}
+      <button type="button" onmousedown="removeCountry('${code}')">×</button>
+    </span>`
+  ).join('');
+}
+
+// Legacy stubs — no longer used but kept to avoid ReferenceError if called
+function syncGroupInput() {}
+function filterGroupOptions() {}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Policy Tester
