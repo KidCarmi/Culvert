@@ -26,7 +26,7 @@
   --shadow:    0 4px 24px rgba(0,0,0,.4);
 }
 body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
-       background: var(--bg); color: var(--text); min-height: 100vh;
+       background: var(--bg); color: var(--text); height: 100vh;
        display: flex; overflow: hidden; }
 /* ─── Sidebar ───────────────────────────────────────────────────────────── */
 #sidebar {
@@ -73,7 +73,7 @@ nav { flex: 1; padding: 12px 10px; }
 .dot.gray  { background: var(--muted); }
 .status-label { color: var(--muted); }
 /* ─── Main content ──────────────────────────────────────────────────────── */
-#main { margin-left: var(--sidebar-w); flex: 1; min-height: 100vh;
+#main { margin-left: var(--sidebar-w); flex: 1; height: 100vh;
         overflow-y: auto; display: flex; flex-direction: column; }
 .topbar {
   padding: 16px 28px; border-bottom: 1px solid var(--border);
