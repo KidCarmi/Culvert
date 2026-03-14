@@ -58,7 +58,7 @@ type CategoryStore struct {
 	path    string
 }
 
-var catStore = &CategoryStore{}
+var catStore = &CategoryStore{entries: defaultCategoryEntries()}
 
 // defaultCategoryEntries returns the built-in category seed list.
 func defaultCategoryEntries() []*CategoryEntry {
