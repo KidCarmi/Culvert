@@ -21,6 +21,7 @@
   --yellow:    #eab308;
   --text:      #e2e8f0;
   --muted:     #64748b;
+  --text-muted:#64748b;
   --sidebar-w: 220px;
   --radius:    10px;
   --shadow:    0 4px 24px rgba(0,0,0,.4);
@@ -1898,32 +1899,38 @@ function renderURLCatList(cats) {
     el.innerHTML = '<p style="color:var(--text-muted)">No categories defined.</p>';
     return;
   }
-  el.innerHTML = cats.map(cat => `
+  el.innerHTML = cats.map(cat => {
+    const qn = escHtml(cat.name);
+    const jn = JSON.stringify(cat.name).replace(/"/g, '&quot;');
+    return `
     <div class="card" style="margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
         <div style="display:flex;align-items:center;gap:8px">
-          <strong style="font-size:15px">${escHtml(cat.name)}</strong>
+          <strong style="font-size:15px">${qn}</strong>
           ${cat.builtIn ? '<span class="badge" style="font-size:11px;background:var(--surface2);color:var(--text-muted)">built-in</span>' : ''}
         </div>
-        <button class="btn sm danger" onclick="deleteURLCategory(${JSON.stringify(cat.name)})"
+        <button class="btn sm danger" onclick="deleteURLCategory(${jn})"
           title="Delete category">Delete</button>
       </div>
-      <div id="uc-chips-${escHtml(cat.name)}" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
-        ${(cat.hosts || []).map(h => `
-          <span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px">
+      <div id="uc-chips-${qn}" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+        ${(cat.hosts || []).map(h => {
+          const jh = JSON.stringify(h).replace(/"/g, '&quot;');
+          return `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px">
             ${escHtml(h)}
-            <button onclick="removeURLCatHost(${JSON.stringify(cat.name)}, ${JSON.stringify(h)})" title="Remove host"
+            <button onclick="removeURLCatHost(${jn}, ${jh})" title="Remove host"
               style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px;padding:0;line-height:1">&times;</button>
-          </span>`).join('')}
+          </span>`;
+        }).join('')}
         ${(cat.hosts || []).length === 0 ? '<span style="color:var(--text-muted);font-size:12px">No hosts yet</span>' : ''}
       </div>
       <div style="display:flex;gap:6px">
-        <input class="form-input" id="uc-new-host-${escHtml(cat.name)}" type="text"
+        <input class="form-input" id="uc-new-host-${qn}" type="text"
           placeholder="add host (e.g. example.com)" style="flex:1;max-width:300px"
-          onkeydown="if(event.key==='Enter')addURLCatHost(${JSON.stringify(cat.name)})">
-        <button class="btn sm" onclick="addURLCatHost(${JSON.stringify(cat.name)})">Add Host</button>
+          onkeydown="if(event.key===&quot;Enter&quot;)addURLCatHost(${jn})">
+        <button class="btn sm" onclick="addURLCatHost(${jn})">Add Host</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 async function deleteURLCategory(name) {
@@ -2105,7 +2112,12 @@ function setScheduleToForm(sched) {
 // API helpers
 // ═══════════════════════════════════════════════════════════════════════════
 async function api(path, opts={}) {
-  const r = await fetch(BASE + path, opts);
+  const o = {...opts};
+  if (o.body && typeof o.body === 'object') {
+    o.body = JSON.stringify(o.body);
+    o.headers = {'Content-Type': 'application/json', ...(o.headers || {})};
+  }
+  const r = await fetch(BASE + path, o);
   if (r.status === 401) { showLoginOverlay(); throw new Error('Unauthorized'); }
   if (!r.ok) throw new Error(await r.text());
   if (r.status === 204) return null;
