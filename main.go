@@ -329,6 +329,16 @@ func main() {
 		logger.Printf("Policy   → in-memory only (set -policy <file> for persistence)")
 	}
 
+	// ── URL Categories ────────────────────────────────────────────────────────
+	catPath := fc.Proxy.URLCategoriesFile
+	if catPath == "" {
+		catPath = "categories.json"
+	}
+	if err := catStore.Load(catPath); err != nil {
+		logger.Fatalf("Cannot load URL categories: %v", err)
+	}
+	logger.Printf("URLCat   → %d categories loaded from %s", len(catStore.All()), catPath)
+
 	// ── File block profile ───────────────────────────────────────────────────
 	if len(fc.FileBlock.Extensions) > 0 {
 		for _, ext := range fc.FileBlock.Extensions {

@@ -279,6 +279,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="policy">
       <span class="icon">📋</span> Policy
     </div>
+    <div class="nav-item" data-view="urlcat">
+      <span class="icon">🏷️</span> URL Categories
+    </div>
     <div class="nav-item" data-view="fileblock">
       <span class="icon">🛡️</span> File Block
     </div>
@@ -1301,12 +1304,6 @@ Firefox (all platforms):
               <select class="select" style="width:100%" id="pol-dest-cat">
                 <option value="">— any —</option>
                 <option value="Any">Any</option>
-                <option value="Social">Social</option>
-                <option value="Malicious">Malicious</option>
-                <option value="News">News</option>
-                <option value="Streaming">Streaming</option>
-                <option value="Gambling">Gambling</option>
-                <option value="Adult">Adult</option>
               </select>
             </div>
             <div>
@@ -1436,6 +1433,19 @@ Firefox (all platforms):
       </div>
 
     </div><!-- /view-policy -->
+
+    <!-- ── URL CATEGORIES ──────────────────────────────────────────────── -->
+    <div class="view" id="view-urlcat">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+        <h2 style="margin:0">URL Categories</h2>
+        <button class="btn" onclick="openNewCategoryModal()">+ New Category</button>
+      </div>
+      <p style="color:var(--text-muted);margin-bottom:20px;font-size:13px">
+        Manage host lists for each URL category. Built-in categories are seeded automatically.
+        Categories are matched by hostname suffix (e.g. adding <code>example.com</code> also matches <code>www.example.com</code>).
+      </p>
+      <div id="urlcat-list"></div>
+    </div><!-- /view-urlcat -->
 
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
     <div class="view" id="view-fileblock">
@@ -1617,6 +1627,7 @@ const viewMeta = {
   blocklist:    { title: 'Blocklist',     meta: 'Manage blocked hosts & wildcards' },
   security:     { title: 'Security',      meta: 'IP filter, rate limiting & log export' },
   policy:       { title: 'Policy',        meta: 'Policy-Based Access Control (PBAC) rules' },
+  urlcat:       { title: 'URL Categories', meta: 'Manage host lists for each URL category used in policy rules' },
   fileblock:    { title: 'File Block',    meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   rewrite:      { title: 'Rewrite',       meta: 'Header injection & removal rules' },
   idproviders:  { title: 'Identity Providers', meta: 'OIDC & SAML 2.0 identity provider profiles' },
@@ -1645,6 +1656,7 @@ function switchView(name) {
   if (name === 'audit')          loadAuditLog();
   if (name === 'settings')       loadSettings();
   if (name === 'policy')         fetchPolicy();
+  if (name === 'urlcat')         loadURLCategories();
   if (name === 'fileblock')      fetchFileBlock();
   if (name === 'rewrite')        fetchRewrite();
   if (name === 'pac')            loadPACConfig();
@@ -1866,6 +1878,112 @@ async function deleteUser(username) {
   } catch (err) {
     alert('Delete failed: ' + err.message);
   }
+}
+
+// ── URL Categories ────────────────────────────────────────────────────────
+
+async function loadURLCategories() {
+  try {
+    const cats = await api('/api/urlcat');
+    renderURLCatList(cats);
+  } catch (err) {
+    document.getElementById('urlcat-list').innerHTML =
+      `<p style="color:var(--danger)">Failed to load categories: ${escHtml(err.message)}</p>`;
+  }
+}
+
+function renderURLCatList(cats) {
+  const el = document.getElementById('urlcat-list');
+  if (!cats || cats.length === 0) {
+    el.innerHTML = '<p style="color:var(--text-muted)">No categories defined.</p>';
+    return;
+  }
+  el.innerHTML = cats.map(cat => `
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <strong style="font-size:15px">${escHtml(cat.name)}</strong>
+          ${cat.builtIn ? '<span class="badge" style="font-size:11px;background:var(--surface2);color:var(--text-muted)">built-in</span>' : ''}
+        </div>
+        <button class="btn sm danger" onclick="deleteURLCategory(${JSON.stringify(cat.name)})"
+          title="Delete category">Delete</button>
+      </div>
+      <div id="uc-chips-${escHtml(cat.name)}" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+        ${(cat.hosts || []).map(h => `
+          <span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px">
+            ${escHtml(h)}
+            <button onclick="removeURLCatHost(${JSON.stringify(cat.name)}, ${JSON.stringify(h)})" title="Remove host"
+              style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px;padding:0;line-height:1">&times;</button>
+          </span>`).join('')}
+        ${(cat.hosts || []).length === 0 ? '<span style="color:var(--text-muted);font-size:12px">No hosts yet</span>' : ''}
+      </div>
+      <div style="display:flex;gap:6px">
+        <input class="form-input" id="uc-new-host-${escHtml(cat.name)}" type="text"
+          placeholder="add host (e.g. example.com)" style="flex:1;max-width:300px"
+          onkeydown="if(event.key==='Enter')addURLCatHost(${JSON.stringify(cat.name)})">
+        <button class="btn sm" onclick="addURLCatHost(${JSON.stringify(cat.name)})">Add Host</button>
+      </div>
+    </div>`).join('');
+}
+
+async function deleteURLCategory(name) {
+  if (!confirm(`Delete category "${name}"? Policy rules referencing it will no longer match.`)) return;
+  try {
+    await api('/api/urlcat?name=' + encodeURIComponent(name), {method: 'DELETE'});
+    showToast(`Category "${name}" deleted`, 'success');
+    loadURLCategories();
+  } catch (err) {
+    showToast('Delete failed: ' + err.message, 'error');
+  }
+}
+
+async function addURLCatHost(catName) {
+  const input = document.getElementById('uc-new-host-' + catName);
+  const host = (input.value || '').trim().toLowerCase();
+  if (!host) return;
+  try {
+    await api('/api/urlcat/host', {method: 'POST', body: {category: catName, host}});
+    input.value = '';
+    showToast(`Added "${host}" to ${catName}`, 'success');
+    loadURLCategories();
+  } catch (err) {
+    showToast('Failed: ' + err.message, 'error');
+  }
+}
+
+async function removeURLCatHost(catName, host) {
+  try {
+    await api('/api/urlcat/host?category=' + encodeURIComponent(catName) + '&host=' + encodeURIComponent(host), {method: 'DELETE'});
+    showToast(`Removed "${host}" from ${catName}`, 'success');
+    loadURLCategories();
+  } catch (err) {
+    showToast('Failed: ' + err.message, 'error');
+  }
+}
+
+function openNewCategoryModal() {
+  const name = prompt('New category name:');
+  if (!name || !name.trim()) return;
+  api('/api/urlcat', {method: 'POST', body: {name: name.trim(), hosts: []}})
+    .then(() => {
+      showToast(`Category "${name.trim()}" created`, 'success');
+      loadURLCategories();
+    })
+    .catch(err => showToast('Failed: ' + err.message, 'error'));
+}
+
+// Populate the policy form's URL category dropdown from the live category list.
+async function loadPolicyCategoryOptions(selectedValue) {
+  const sel = document.getElementById('pol-dest-cat');
+  if (!sel) return;
+  try {
+    const cats = await api('/api/urlcat');
+    // Preserve any value that was already set
+    const current = selectedValue !== undefined ? selectedValue : sel.value;
+    sel.innerHTML = '<option value="">— any —</option><option value="Any">Any</option>' +
+      (cats || []).map(c => `<option value="${escHtml(c.name)}">${escHtml(c.name)}${c.builtIn ? '' : ' ★'}</option>`).join('');
+    sel.value = current;
+  } catch (_) { /* fall through — keep static options */ }
 }
 
 // ── Blocklist mode ───────────────────────────────────────────────────────
@@ -2557,6 +2675,7 @@ async function removeRewriteRule(id) {
 // Policy (PBAC)
 // ═══════════════════════════════════════════════════════════════════════════
 async function fetchPolicy() {
+  loadPolicyCategoryOptions();
   try {
     const d = await api('/api/policy');
     polRules = d.rules || [];
@@ -3013,7 +3132,7 @@ function editPolicy(priority) {
   document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
-  document.getElementById('pol-dest-cat').value   = r.destCategory || '';
+  loadPolicyCategoryOptions(r.destCategory || '');
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';

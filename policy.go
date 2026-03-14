@@ -44,27 +44,183 @@ const (
 	CategoryAny       URLCategory = "Any"
 )
 
-// categoryHosts maps URL categories to known host patterns (suffix-matched).
-var categoryHosts = map[URLCategory][]string{
-	CategorySocial: {
-		"facebook.com", "twitter.com", "x.com", "instagram.com",
-		"tiktok.com", "linkedin.com", "reddit.com", "snapchat.com", "pinterest.com",
-	},
-	CategoryMalicious: {
-		"malware.com", "phishing.com", "eicar.org",
-	},
-	CategoryNews: {
-		"cnn.com", "bbc.com", "bbc.co.uk", "reuters.com", "nytimes.com",
-		"theguardian.com", "foxnews.com", "nbcnews.com", "apnews.com",
-	},
-	CategoryStreaming: {
-		"netflix.com", "youtube.com", "twitch.tv", "hulu.com",
-		"disneyplus.com", "spotify.com", "primevideo.com",
-	},
-	CategoryGambling: {
-		"bet365.com", "pokerstars.com", "draftkings.com", "fanduel.com",
-	},
-	CategoryAdult: {},
+// CategoryEntry is one named URL category with its list of host patterns.
+type CategoryEntry struct {
+	Name    string   `json:"name"`
+	Hosts   []string `json:"hosts"`
+	BuiltIn bool     `json:"builtIn"` // seeded from built-in defaults; editable by admin
+}
+
+// CategoryStore manages URL categories with thread-safe, file-backed persistence.
+type CategoryStore struct {
+	mu      sync.RWMutex
+	entries []*CategoryEntry
+	path    string
+}
+
+var catStore = &CategoryStore{entries: defaultCategoryEntries()}
+
+// defaultCategoryEntries returns the built-in category seed list.
+func defaultCategoryEntries() []*CategoryEntry {
+	return []*CategoryEntry{
+		{Name: "Social", BuiltIn: true, Hosts: []string{
+			"facebook.com", "twitter.com", "x.com", "instagram.com",
+			"tiktok.com", "linkedin.com", "reddit.com", "snapchat.com", "pinterest.com",
+		}},
+		{Name: "Malicious", BuiltIn: true, Hosts: []string{
+			"malware.com", "phishing.com", "eicar.org",
+		}},
+		{Name: "News", BuiltIn: true, Hosts: []string{
+			"cnn.com", "bbc.com", "bbc.co.uk", "reuters.com", "nytimes.com",
+			"theguardian.com", "foxnews.com", "nbcnews.com", "apnews.com",
+		}},
+		{Name: "Streaming", BuiltIn: true, Hosts: []string{
+			"netflix.com", "youtube.com", "twitch.tv", "hulu.com",
+			"disneyplus.com", "spotify.com", "primevideo.com",
+		}},
+		{Name: "Gambling", BuiltIn: true, Hosts: []string{
+			"bet365.com", "pokerstars.com", "draftkings.com", "fanduel.com",
+		}},
+		{Name: "Adult", BuiltIn: true, Hosts: []string{}},
+	}
+}
+
+// Load reads categories from a JSON file. If the file does not exist the
+// built-in defaults are seeded and written to disk.
+func (cs *CategoryStore) Load(path string) error {
+	cs.path = path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			cs.mu.Lock()
+			cs.entries = defaultCategoryEntries()
+			cs.mu.Unlock()
+			cs.Save()
+			return nil
+		}
+		return err
+	}
+	var entries []*CategoryEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return err
+	}
+	cs.mu.Lock()
+	cs.entries = entries
+	cs.mu.Unlock()
+	return nil
+}
+
+// Save atomically persists categories to disk.
+func (cs *CategoryStore) Save() {
+	if cs.path == "" {
+		return
+	}
+	cs.mu.RLock()
+	data, err := json.MarshalIndent(cs.entries, "", "  ")
+	cs.mu.RUnlock()
+	if err != nil {
+		return
+	}
+	tmp := cs.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, cs.path)
+}
+
+// All returns a copy of all category entries.
+func (cs *CategoryStore) All() []CategoryEntry {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	out := make([]CategoryEntry, len(cs.entries))
+	for i, e := range cs.entries {
+		cp := *e
+		cp.Hosts = append([]string(nil), e.Hosts...)
+		out[i] = cp
+	}
+	return out
+}
+
+// Set creates or replaces the host list for a named category.
+func (cs *CategoryStore) Set(name string, hosts []string, builtIn bool) error {
+	if name == "" {
+		return fmt.Errorf("category name must not be empty")
+	}
+	if hosts == nil {
+		hosts = []string{}
+	}
+	cs.mu.Lock()
+	for _, e := range cs.entries {
+		if strings.EqualFold(e.Name, name) {
+			e.Hosts = hosts
+			cs.mu.Unlock()
+			cs.Save()
+			return nil
+		}
+	}
+	cs.entries = append(cs.entries, &CategoryEntry{Name: name, Hosts: hosts, BuiltIn: builtIn})
+	cs.mu.Unlock()
+	cs.Save()
+	return nil
+}
+
+// Delete removes a category by name. Returns an error if not found.
+func (cs *CategoryStore) Delete(name string) error {
+	cs.mu.Lock()
+	for i, e := range cs.entries {
+		if strings.EqualFold(e.Name, name) {
+			cs.entries = append(cs.entries[:i], cs.entries[i+1:]...)
+			cs.mu.Unlock()
+			cs.Save()
+			return nil
+		}
+	}
+	cs.mu.Unlock()
+	return fmt.Errorf("category %q not found", name)
+}
+
+// AddHost appends a host to the named category (no-op if already present).
+func (cs *CategoryStore) AddHost(category, host string) error {
+	cs.mu.Lock()
+	for _, e := range cs.entries {
+		if strings.EqualFold(e.Name, category) {
+			host = strings.ToLower(strings.TrimSpace(host))
+			for _, h := range e.Hosts {
+				if strings.ToLower(h) == host {
+					cs.mu.Unlock()
+					return nil // already present
+				}
+			}
+			e.Hosts = append(e.Hosts, host)
+			cs.mu.Unlock()
+			cs.Save()
+			return nil
+		}
+	}
+	cs.mu.Unlock()
+	return fmt.Errorf("category %q not found", category)
+}
+
+// RemoveHost deletes a host from the named category.
+func (cs *CategoryStore) RemoveHost(category, host string) error {
+	cs.mu.Lock()
+	for _, e := range cs.entries {
+		if strings.EqualFold(e.Name, category) {
+			host = strings.ToLower(strings.TrimSpace(host))
+			for i, h := range e.Hosts {
+				if strings.ToLower(h) == host {
+					e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
+					cs.mu.Unlock()
+					cs.Save()
+					return nil
+				}
+			}
+			cs.mu.Unlock()
+			return fmt.Errorf("host %q not in category %q", host, category)
+		}
+	}
+	cs.mu.Unlock()
+	return fmt.Errorf("category %q not found", category)
 }
 
 // FileProfileName identifies a named file-extension block profile.
@@ -478,16 +634,20 @@ func matchFQDN(pattern, host string) bool {
 }
 
 func matchCategory(cat URLCategory, host string) bool {
-	known, ok := categoryHosts[cat]
-	if !ok {
-		return false
-	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	for _, h := range known {
-		h = strings.ToLower(h)
-		if host == h || strings.HasSuffix(host, "."+h) {
-			return true
+	catStore.mu.RLock()
+	defer catStore.mu.RUnlock()
+	for _, e := range catStore.entries {
+		if !strings.EqualFold(e.Name, string(cat)) {
+			continue
 		}
+		for _, h := range e.Hosts {
+			h = strings.ToLower(h)
+			if host == h || strings.HasSuffix(host, "."+h) {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
