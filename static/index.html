@@ -1055,6 +1055,28 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Proxy Authentication Mode -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">🔑 Proxy Authentication Mode</span></div>
+        <div class="panel-body">
+          <div id="s-unauth-status-bar" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.85rem;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2)">
+            <span id="s-unauth-mode-icon" style="font-size:1.2rem">🔒</span>
+            <div>
+              <div id="s-unauth-mode-label" style="font-weight:600">Credentials Required</div>
+              <div id="s-unauth-mode-desc" style="font-size:.75rem;color:var(--muted)">Proxy requires Proxy-Authorization. Clients must authenticate before any traffic is forwarded.</div>
+            </div>
+          </div>
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            <strong>Credentials Required</strong> — Proxy port demands authentication (407). Use when all clients authenticate via local/LDAP/OIDC credentials.<br>
+            <strong>Open / Policy-Only</strong> — Proxy accepts all clients without credentials. Identity is set to <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> for unauthenticated traffic. <strong>Policy rules</strong> control access — create a rule with Auth Source = <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> to allow or block unauthenticated users. Recommended when using a PAC file with PBAC.
+          </p>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button class="btn" id="s-unauth-toggle-btn" onclick="toggleUnauthMode()">Enable Open / Policy-Only</button>
+            <span id="s-unauth-save-status" style="font-size:.8rem;color:var(--muted)"></span>
+          </div>
+        </div>
+      </div>
+
       <!-- Syslog / SIEM -->
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">📡 Syslog / SIEM Forwarding</span></div>
@@ -2589,10 +2611,54 @@ function exportLogs(format) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Settings
 // ═══════════════════════════════════════════════════════════════════════════
+let _unauthMode = false;
+
+function renderUnauthModeUI(enabled) {
+  _unauthMode = enabled;
+  const bar  = document.getElementById('s-unauth-status-bar');
+  const icon = document.getElementById('s-unauth-mode-icon');
+  const lbl  = document.getElementById('s-unauth-mode-label');
+  const desc = document.getElementById('s-unauth-mode-desc');
+  const btn  = document.getElementById('s-unauth-toggle-btn');
+  if (!bar) return;
+  if (enabled) {
+    bar.style.background = 'rgba(34,197,94,.08)';
+    bar.style.borderColor = 'rgba(34,197,94,.25)';
+    icon.textContent = '🌐';
+    lbl.textContent = 'Open / Policy-Only';
+    desc.textContent = 'Proxy accepts all traffic without credentials. Policy rules control access based on identity.';
+    btn.textContent = 'Switch to Credentials Required';
+    btn.className = 'btn danger';
+  } else {
+    bar.style.background = 'rgba(59,130,246,.08)';
+    bar.style.borderColor = 'rgba(59,130,246,.2)';
+    icon.textContent = '🔒';
+    lbl.textContent = 'Credentials Required';
+    desc.textContent = 'Proxy requires Proxy-Authorization. Clients must authenticate before any traffic is forwarded.';
+    btn.textContent = 'Enable Open / Policy-Only';
+    btn.className = 'btn';
+  }
+}
+
+async function toggleUnauthMode() {
+  const next = !_unauthMode;
+  const statusEl = document.getElementById('s-unauth-save-status');
+  try {
+    await api('/api/settings/unauth-mode', {
+      method: 'PUT', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({enabled: next})
+    });
+    renderUnauthModeUI(next);
+    toast('Proxy auth mode updated', 'success');
+    if (statusEl) { statusEl.textContent = next ? '✅ Open / Policy-Only active' : '✅ Credentials Required active'; statusEl.style.color = 'var(--green)'; }
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
 async function loadSettings() {
   try {
     const s = await api('/api/settings');
     document.getElementById('s-user').value = s.user || '';
+    renderUnauthModeUI(!!s.unauthMode);
   } catch(e) {}
   // Session timeout
   try {

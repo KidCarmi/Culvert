@@ -52,6 +52,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) {
 	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)   // GET/POST blocklist mode
 	mux.HandleFunc("/api/config/export", apiConfigExport)    // GET — download backup JSON
 	mux.HandleFunc("/api/config/import", apiConfigImport)    // POST — restore from backup JSON
+	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode)  // PUT — toggle proxy auth requirement
 	mux.HandleFunc("/api/session-timeout", apiSessionTimeout) // GET/POST session TTL (hours)
 	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)        // GET/POST UI access IP allowlist
 	mux.HandleFunc("/api/syslog", apiSyslogConfig)            // GET/POST syslog forwarding
@@ -1164,6 +1165,7 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 			"user":        cfg.GetUser(), // password is NEVER returned
 			"proxyPort":   cfg.ProxyPort,
 			"uiPort":      cfg.UIPort,
+			"unauthMode":  cfg.UnauthMode(),
 		})
 
 	case http.MethodPost:
@@ -1189,6 +1191,33 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// PUT /api/settings/unauth-mode — toggle proxy authentication requirement
+func apiUnauthMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	cfg.SetUnauthMode(body.Enabled)
+	if body.Enabled {
+		auditEvent(r, "settings.update", "unauthMode", "enabled — proxy accepts unauthenticated traffic; policy rules govern access")
+		logger.Printf("UI: unauth mode enabled — proxy accepts traffic without credentials")
+	} else {
+		auditEvent(r, "settings.update", "unauthMode", "disabled — proxy requires credentials")
+		logger.Printf("UI: unauth mode disabled — proxy requires credentials")
+	}
+	jsonOK(w, map[string]any{"ok": true, "unauthMode": body.Enabled})
 }
 
 // GET/POST/DELETE /api/rewrite — manage header rewrite rules
