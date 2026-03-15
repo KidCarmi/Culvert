@@ -17,7 +17,7 @@ import (
 
 // makeScannerWithYARA creates a SecurityScanner with a minimal YARA rule so
 // BodyScanEnabled() returns true (requires clam != nil OR globalYARA.Enabled()).
-func makeScannerWithYARA(t *testing.T) (*SecurityScanner, func()) {
+func makeScannerWithYARA(t *testing.T) (*SecurityScanner, func()) { //nolint:gocritic // unnamed cleanup func is idiomatic Go
 	t.Helper()
 	rules, err := parseYARASrc(yaraRule("TestCacheRule", `        $a = "MATCH_THIS_STRING"`, "any of them"))
 	if err != nil {
@@ -86,7 +86,7 @@ func TestBodyNeedsBuffering_DPIEnabled_Binary(t *testing.T) {
 // ─── SetUIAllowedCIDRs IPv6 path ──────────────────────────────────────────────
 
 func TestSetUIAllowedCIDRs_IPv6(t *testing.T) {
-	defer SetUIAllowedCIDRs([]string{}) //nolint:errcheck
+	defer SetUIAllowedCIDRs([]string{}) //nolint:errcheck // test teardown; reset errors are non-actionable
 	err := SetUIAllowedCIDRs([]string{"::1", "2001:db8::/32"})
 	if err != nil {
 		t.Errorf("SetUIAllowedCIDRs IPv6: %v", err)
@@ -101,7 +101,7 @@ func TestSetUIAllowedCIDRs_Invalid(t *testing.T) {
 }
 
 func TestSetUIAllowedCIDRs_PlainIP(t *testing.T) {
-	defer SetUIAllowedCIDRs([]string{}) //nolint:errcheck
+	defer SetUIAllowedCIDRs([]string{}) //nolint:errcheck // test teardown; reset errors are non-actionable
 	err := SetUIAllowedCIDRs([]string{"192.168.1.5"})
 	if err != nil {
 		t.Errorf("SetUIAllowedCIDRs plain IP: %v", err)
@@ -116,7 +116,7 @@ func TestAPICertsUpload_MissingCert(t *testing.T) {
 	_ = mw.WriteField("target", "ui")
 	_ = mw.WriteField("cert", "")
 	_ = mw.WriteField("key", "")
-	mw.Close()
+	_ = mw.Close() // multipart.Writer.Close flushes the boundary; test cleanup
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/certs/upload", strings.NewReader(body.String()))
@@ -133,7 +133,7 @@ func TestAPICertsUpload_InvalidTarget(t *testing.T) {
 	_ = mw.WriteField("target", "invalid")
 	_ = mw.WriteField("cert", "some-cert")
 	_ = mw.WriteField("key", "some-key")
-	mw.Close()
+	_ = mw.Close() // multipart.Writer.Close flushes the boundary; test cleanup
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/certs/upload", strings.NewReader(body.String()))
@@ -237,7 +237,7 @@ func TestSecurityScanner_ScanBody_YARA_Clean(t *testing.T) {
 }
 
 func TestReadUISessionCookie_NoCookie(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	sess, err := readUISessionCookie(r)
 	if err != nil || sess != nil {
 		t.Errorf("readUISessionCookie no cookie: got sess=%v err=%v, want nil/nil", sess, err)
@@ -270,7 +270,7 @@ func TestLoadCustomCA_ValidSelfSigned(t *testing.T) {
 func TestAPIAuthUsers_Delete_LastAdmin_Protected(t *testing.T) {
 	// Ensure only one admin exists
 	_ = cfg.SetAuth("soleadmin", "adminpass123")
-	defer cfg.SetAuth("", "") //nolint:errcheck
+	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodDelete, "/api/auth/users", map[string]any{
@@ -300,7 +300,7 @@ func TestAPIBlocklist_Post_BulkAdd(t *testing.T) {
 
 func TestAPIBlocklist_Delete_MissingHost(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/blocklist", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/blocklist", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiBlocklist(w, r)
@@ -319,7 +319,7 @@ func testSecMiddleware(r *http.Request) *httptest.ResponseRecorder {
 }
 
 func TestSecurityMiddleware_CORS_SameOrigin(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r.Host = "localhost:8080"
 	r.Header.Set("Origin", "http://localhost:8080")
@@ -330,7 +330,7 @@ func TestSecurityMiddleware_CORS_SameOrigin(t *testing.T) {
 }
 
 func TestSecurityMiddleware_CSRF_Block(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/api/stats", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/stats", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r.Host = "localhost:8080"
 	r.Header.Set("Origin", "http://evil.example.com")
@@ -342,9 +342,9 @@ func TestSecurityMiddleware_CSRF_Block(t *testing.T) {
 
 // ─── apiTimeseries wrong method ───────────────────────────────────────────────
 
-func TestAPITimeseries_WrongMethod(t *testing.T) {
+func TestAPITimeseries_WrongMethod(_ *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/timeseries", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/timeseries", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	// No role set — should fail without crash
 	apiTimeseries(w, r)
@@ -367,7 +367,7 @@ func TestAPIAuthLogin_Success_AuthDisabled(t *testing.T) {
 
 // ─── store.auditAdd with syslog (global nil) ──────────────────────────────────
 
-func TestAuditAdd_NoFile_NoSyslog(t *testing.T) {
+func TestAuditAdd_NoFile_NoSyslog(_ *testing.T) {
 	// Make sure auditLogFile and globalSyslog are nil
 	oldFile := auditLogFile
 	auditLogFile = nil
@@ -421,7 +421,7 @@ func TestBlocklist_SaveMode_NonEmptyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
 	b := &Blocklist{
 		exact:     make(map[string]bool),
@@ -448,13 +448,17 @@ func TestBlocklist_Load_WithModeSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
 	path := dir + "/blocklist.txt"
 	// Create blocklist file with some hosts
-	os.WriteFile(path, []byte("blocked.example.com\n*.bad.example.com\n"), 0600)
+	if err := os.WriteFile(path, []byte("blocked.example.com\n*.bad.example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// Create mode sidecar
-	os.WriteFile(path+".mode", []byte("allow"), 0600)
+	if err := os.WriteFile(path+".mode", []byte("allow"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	b := &Blocklist{
 		exact:     make(map[string]bool),
@@ -484,7 +488,7 @@ func TestAuditAdd_WithFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(f.Name())
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
 
 	oldFile := auditLogFile
 	auditLogFile = f
@@ -496,7 +500,7 @@ func TestAuditAdd_WithFile(t *testing.T) {
 	auditAdd(AuditEntry{TS: 1, Action: "test.file.write", Actor: "testactor"})
 
 	// Verify something was written
-	f.Seek(0, 0) //nolint:errcheck
+	f.Seek(0, 0) //nolint:errcheck // seeking to start of file; error is non-actionable in test context
 	buf := make([]byte, 1024)
 	n, _ := f.Read(buf)
 	if n == 0 {
@@ -530,7 +534,7 @@ func TestCertManager_LoadCA_BadPassphrase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 	path := dir + "/ca.enc"
 
 	// Create an encrypted CA bundle
@@ -592,7 +596,7 @@ func TestCertManager_SaveCA_WithPassphrase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 	path := dir + "/ca-pass.bin"
 
 	cm := &CertManager{}
@@ -616,11 +620,11 @@ func TestAPIAuthUsers_Delete_QueryParam(t *testing.T) {
 	// Create a second admin so deletion is allowed
 	_ = cfg.SetUIUser("deletetest1", "password123", RoleAdmin)
 	_ = cfg.SetUIUser("deletetest2", "password123", RoleAdmin)
-	defer cfg.DeleteUIUser("deletetest1") //nolint:errcheck
-	defer cfg.DeleteUIUser("deletetest2") //nolint:errcheck
+	defer cfg.DeleteUIUser("deletetest1") //nolint:errcheck // test teardown; reset errors are non-actionable
+	defer cfg.DeleteUIUser("deletetest2") //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/auth/users?username=deletetest2", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/auth/users?username=deletetest2", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiAuthUsers(w, r)
@@ -633,7 +637,7 @@ func TestAPIAuthUsers_Delete_QueryParam(t *testing.T) {
 // ─── isSameOrigin: parse error path ──────────────────────────────────────────
 
 func TestIsSameOrigin_InvalidOrigin(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
 	r.Host = "localhost:9090"
 	// An invalid URL will fail url.Parse
 	if isSameOrigin(r, "://invalid") {
@@ -656,7 +660,7 @@ func TestAPISSLBypass_Post_Add(t *testing.T) {
 
 func TestAPISSLBypass_Delete_Missing(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/ssl-bypass", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/ssl-bypass", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSSLBypass(w, r)
@@ -718,7 +722,7 @@ func TestAPIConfigImport_WithData(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/config/import", map[string]any{
-		"version":              1,
+		"version":             1,
 		"exportedAt":          "2026-01-01T00:00:00Z",
 		"blocklistMode":       "block",
 		"blocklist":           []string{"import-test.example.com"},
@@ -756,7 +760,7 @@ func TestAPIPolicyTest_ValidNoMatch(t *testing.T) {
 
 func TestAPISettings_GetFull(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/settings", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSettings(w, r)
@@ -770,7 +774,7 @@ func TestIdPRegistry_Save_WithPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
 	reg := &IdPRegistry{
 		profiles: []*IdPProfile{
@@ -793,7 +797,7 @@ func TestIdPRegistry_Save_WithPath(t *testing.T) {
 
 func TestAuthSelectProvider_WithRelay(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/auth/select?relay=/dashboard", nil)
+	r := httptest.NewRequest(http.MethodGet, "/auth/select?relay=/dashboard", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	authSelectProvider(w, r)
 	if w.Code == 0 {
@@ -808,11 +812,11 @@ func TestInitAuditLog_WithManyEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(f.Name())
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
 
 	// Write more than maxAuditLogs entries to trigger truncation
 	for i := 0; i < maxAuditLogs+5; i++ {
-		f.WriteString(`{"ts":` + string(rune('0'+i%10)) + `,"action":"test"}` + "\n")
+		_, _ = f.WriteString(`{"ts":` + string(rune('0'+i%10)) + `,"action":"test"}` + "\n")
 	}
 	f.Close()
 
@@ -863,7 +867,7 @@ func TestAPIIdPItem_Put_Valid(t *testing.T) {
 	idpRegistry.mu.Lock()
 	idpRegistry.profiles = append(idpRegistry.profiles, p)
 	idpRegistry.mu.Unlock()
-	defer idpRegistry.Delete("put-test-id") //nolint:errcheck
+	defer idpRegistry.Delete("put-test-id") //nolint:errcheck // test teardown; cleanup errors are non-actionable
 
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPut, "/api/idp/put-test-id", map[string]any{
@@ -885,13 +889,13 @@ func TestAPIIdPItem_Put_Valid(t *testing.T) {
 func TestUIIPGuardMiddleware_IPAllowed(t *testing.T) {
 	// Set allowed CIDRs to include 127.0.0.1
 	_ = SetUIAllowedCIDRs([]string{"127.0.0.0/8"})
-	defer SetUIAllowedCIDRs(nil) //nolint:errcheck
+	defer SetUIAllowedCIDRs(nil) //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	handler := uiIPGuardMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
@@ -902,13 +906,13 @@ func TestUIIPGuardMiddleware_IPAllowed(t *testing.T) {
 func TestUIIPGuardMiddleware_IPBlocked(t *testing.T) {
 	// Set allowed CIDRs to only 192.168.0.0/24 (excludes 127.0.0.1)
 	_ = SetUIAllowedCIDRs([]string{"192.168.0.0/24"})
-	defer SetUIAllowedCIDRs(nil) //nolint:errcheck
+	defer SetUIAllowedCIDRs(nil) //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	handler := uiIPGuardMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
@@ -918,8 +922,8 @@ func TestUIIPGuardMiddleware_IPBlocked(t *testing.T) {
 
 // ─── readUISessionCookie: invalid cookie value ───────────────────────────────
 
-func TestReadUISessionCookie_InvalidValue(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+func TestReadUISessionCookie_InvalidValue(_ *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: "invalidcookievalue"})
 	sess, err := readUISessionCookie(r)
 	// Should return nil session (invalid token); err may or may not be set
@@ -949,7 +953,7 @@ func TestUptime_HoursPath(t *testing.T) {
 
 func TestAPITimeseries_WithRole(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/timeseries", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/timeseries", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiTimeseries(w, r)
@@ -960,7 +964,7 @@ func TestAPITimeseries_WithRole(t *testing.T) {
 
 func TestAPIStats_WithBlockedStats(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiStats(w, r)
@@ -993,7 +997,7 @@ func TestBlocklist_List_WithWildcards(t *testing.T) {
 // ─── parseProxyAuth: username too long ───────────────────────────────────────
 
 func TestParseProxyAuth_UsernameTooLong(t *testing.T) {
-	r := httptest.NewRequest("GET", "/", nil)
+	r := httptest.NewRequest("GET", "/", http.NoBody)
 	longUser := strings.Repeat("a", maxUsernameLen+1)
 	r.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(longUser+":pass")))
 	_, _, ok := parseProxyAuth(r)
@@ -1005,7 +1009,7 @@ func TestParseProxyAuth_UsernameTooLong(t *testing.T) {
 // ─── parseProxyAuth: no colon in decoded ─────────────────────────────────────
 
 func TestParseProxyAuth_NoColon(t *testing.T) {
-	r := httptest.NewRequest("GET", "/", nil)
+	r := httptest.NewRequest("GET", "/", http.NoBody)
 	r.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("nocolon")))
 	_, _, ok := parseProxyAuth(r)
 	if ok {
@@ -1029,7 +1033,7 @@ func TestIsSafeRedirectURL_FTPScheme(t *testing.T) {
 
 // ─── tsRecord: diff > 0 path ──────────────────────────────────────────────────
 
-func TestTsRecord_DiffPath(t *testing.T) {
+func TestTsRecord_DiffPath(_ *testing.T) {
 	// Force ts.lastMin to be in the past to trigger the diff > 0 branch
 	ts.mu.Lock()
 	ts.lastMin = (time.Now().Unix() / 60) - 2 // 2 minutes ago
@@ -1077,7 +1081,7 @@ func TestBlocklist_Remove_Wildcard(t *testing.T) {
 
 func TestConfig_VerifyAuth_CacheHit(t *testing.T) {
 	_ = cfg.SetAuth("cacheuser", "cachepass123")
-	defer cfg.SetAuth("", "") //nolint:errcheck
+	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	// First call populates cache
 	cfg.VerifyAuth("cacheuser", "cachepass123")
@@ -1093,7 +1097,7 @@ func TestConfig_VerifyAuth_CacheHit(t *testing.T) {
 func TestConfig_SetUIUser_UpdateRoleOnly(t *testing.T) {
 	// Create a user first
 	_ = cfg.SetUIUser("roletest", "password123", RoleAdmin)
-	defer cfg.DeleteUIUser("roletest") //nolint:errcheck
+	defer cfg.DeleteUIUser("roletest") //nolint:errcheck // test teardown; cleanup errors are non-actionable
 
 	// Update role without changing password
 	err := cfg.SetUIUser("roletest", "", RoleAdmin)
@@ -1107,7 +1111,7 @@ func TestConfig_SetUIUser_UpdateRoleOnly(t *testing.T) {
 func TestConfig_VerifyUIUser_LegacyFallback(t *testing.T) {
 	// Set up legacy auth (single user, no uiUsers map entry)
 	_ = cfg.SetAuth("legacytest", "legacypass123")
-	defer cfg.SetAuth("", "") //nolint:errcheck
+	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	// Clear the uiUsers for legacytest to simulate legacy mode
 	cfg.mu.Lock()
@@ -1130,7 +1134,7 @@ func TestBlocklist_List_Save(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
 	b := &Blocklist{
 		exact:     make(map[string]bool),

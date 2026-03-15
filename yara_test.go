@@ -227,7 +227,7 @@ func TestYARARuleSet_Enabled(t *testing.T) {
 func TestYARARuleSet_LoadDir(t *testing.T) {
 	dir := t.TempDir()
 	content := yaraRule("TestFile", `        $a = "test"`, "any of them")
-	if err := os.WriteFile(filepath.Join(dir, "test.yar"), []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "test.yar"), []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	y := &YARARuleSet{}

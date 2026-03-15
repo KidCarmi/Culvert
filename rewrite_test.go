@@ -229,7 +229,7 @@ func TestRewriter_ApplyRequest_MultipleRules(t *testing.T) {
 
 // ─── ApplyResponse ────────────────────────────────────────────────────────────
 
-func TestRewriter_ApplyResponse_Nil(t *testing.T) {
+func TestRewriter_ApplyResponse_Nil(_ *testing.T) {
 	rw := newTestRewriter()
 	rw.Add(RewriteRule{Host: "example.com", RespSet: map[string]string{"X-Frame-Options": "DENY"}})
 	// Should not panic.

@@ -38,7 +38,7 @@ func TestFirstStr(t *testing.T) {
 
 func TestHandleHealth(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/health", nil)
+	r := httptest.NewRequest(http.MethodGet, "/health", http.NoBody)
 	handleHealth(w, r)
 	if w.Code != http.StatusOK {
 		t.Errorf("handleHealth status = %d, want 200", w.Code)
@@ -112,7 +112,7 @@ func TestHashCache_Expired(t *testing.T) {
 	}
 }
 
-func TestHashCache_Eviction(t *testing.T) {
+func TestHashCache_Eviction(_ *testing.T) {
 	c := newHashCache(4, time.Minute)
 	for i := 0; i < 6; i++ {
 		h := SHA256Hex([]byte(string(rune('a' + i))))
@@ -128,7 +128,7 @@ func TestHashCache_Stats(t *testing.T) {
 	c := newHashCache(100, time.Minute)
 	hash := SHA256Hex([]byte("data"))
 	c.Set(hash, ScanCacheResult{Clean: false, Reason: "EICAR"})
-	c.Get(hash)  // hit
+	c.Get(hash) // hit
 	c.Get("x")  // miss
 
 	hits, misses, size := c.Stats()
@@ -191,7 +191,6 @@ func TestEncodeDecodeSession(t *testing.T) {
 	}
 }
 
-
 func TestSetClearSessionCookie(t *testing.T) {
 	w := httptest.NewRecorder()
 	id := &Identity{Sub: "u1", Email: "u@e.com", Name: "U", Provider: "local"}
@@ -221,7 +220,7 @@ func TestSetClearSessionCookie(t *testing.T) {
 }
 
 func TestReadSessionCookie_NoCookie(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	sess, err := readSessionCookie(r)
 	if err != nil {
 		t.Errorf("readSessionCookie with no cookie returned error: %v", err)
@@ -230,7 +229,6 @@ func TestReadSessionCookie_NoCookie(t *testing.T) {
 		t.Error("readSessionCookie with no cookie should return nil session")
 	}
 }
-
 
 // ─── IPFilter ─────────────────────────────────────────────────────────────────
 
@@ -260,7 +258,7 @@ func TestIPFilter_SetGetMode(t *testing.T) {
 
 // ─── RateLimiter.Window ───────────────────────────────────────────────────────
 
-func TestRateLimiter_Window(t *testing.T) {
+func TestRateLimiter_Window(_ *testing.T) {
 	// rl is the package-level rate limiter; just verify accessors don't panic
 	w := rl.Window()
 	_ = w
@@ -270,7 +268,7 @@ func TestRateLimiter_Window(t *testing.T) {
 
 // ─── Config helpers ───────────────────────────────────────────────────────────
 
-func TestConfig_SetProvider(t *testing.T) {
+func TestConfig_SetProvider(_ *testing.T) {
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	// nil provider should not panic
 	c.SetProvider(nil)
@@ -298,7 +296,7 @@ func TestConfig_OIDCLoginURL(t *testing.T) {
 	}
 }
 
-func TestConfig_SetUIUsersFile(t *testing.T) {
+func TestConfig_SetUIUsersFile(_ *testing.T) {
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	c.SetUIUsersFile("/tmp/test-ui-users.json")
 	// Verify it was stored (LoadUIUsersFile returns nil for empty file path)
@@ -348,4 +346,3 @@ func TestInitAuditLog_EmptyPath(t *testing.T) {
 		t.Errorf("InitAuditLog('') returned error: %v", err)
 	}
 }
-

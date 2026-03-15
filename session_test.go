@@ -200,11 +200,11 @@ func TestSetSessionTTL_Clamping(t *testing.T) {
 		input time.Duration
 		want  time.Duration
 	}{
-		{time.Second, 15 * time.Minute},                    // below min → clamped to 15min
-		{15 * time.Minute, 15 * time.Minute},               // exactly min → unchanged
-		{8 * time.Hour, 8 * time.Hour},                     // normal value
-		{7 * 24 * time.Hour, 7 * 24 * time.Hour},           // exactly max → unchanged
-		{8 * 24 * time.Hour, 7 * 24 * time.Hour},           // above max → clamped to 7d
+		{time.Second, 15 * time.Minute},          // below min → clamped to 15min
+		{15 * time.Minute, 15 * time.Minute},     // exactly min → unchanged
+		{8 * time.Hour, 8 * time.Hour},           // normal value
+		{7 * 24 * time.Hour, 7 * 24 * time.Hour}, // exactly max → unchanged
+		{8 * 24 * time.Hour, 7 * 24 * time.Hour}, // above max → clamped to 7d
 	}
 	for _, c := range cases {
 		SetSessionTTL(c.input)

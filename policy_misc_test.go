@@ -43,7 +43,7 @@ func TestMatchSchedule_TimeRange_InRange(t *testing.T) {
 	}
 }
 
-func TestMatchSchedule_TimeRange_OutOfRange(t *testing.T) {
+func TestMatchSchedule_TimeRange_OutOfRange(_ *testing.T) {
 	// Use a time range that is guaranteed not to match current time:
 	// if current time is < 12:00, use 12:00-12:01; otherwise 00:00-00:01
 	now := time.Now().UTC()
@@ -64,7 +64,7 @@ func TestMatchSchedule_TimeRange_OutOfRange(t *testing.T) {
 
 func TestMatchSchedule_Timezone(t *testing.T) {
 	s := &PolicySchedule{
-		Timezone: "America/New_York",
+		Timezone:  "America/New_York",
 		TimeStart: "00:00",
 		TimeEnd:   "23:59",
 	}
@@ -75,7 +75,7 @@ func TestMatchSchedule_Timezone(t *testing.T) {
 
 func TestMatchSchedule_InvalidTimezone(t *testing.T) {
 	s := &PolicySchedule{
-		Timezone: "Invalid/Timezone",
+		Timezone:  "Invalid/Timezone",
 		TimeStart: "00:00",
 		TimeEnd:   "23:59",
 	}
@@ -123,7 +123,7 @@ func TestServeBlockPage(t *testing.T) {
 func TestAPIAuthLogin_InvalidCreds(t *testing.T) {
 	// Set up auth
 	_ = cfg.SetAuth("logintest", "correctpass123")
-	defer cfg.SetAuth("", "") //nolint:errcheck
+	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/auth/login", map[string]any{
@@ -151,7 +151,7 @@ func TestAPIAuthLogin_AuthDisabled(t *testing.T) {
 
 func TestAPIStats_Get(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiStats(w, r)
@@ -167,7 +167,7 @@ func TestCertMgr_LoadOrInitCA_NewPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 	path := dir + "/ca.bin"
 
 	if err := cm.LoadOrInitCA(path, ""); err != nil {
@@ -183,7 +183,7 @@ func TestCertMgr_LoadOrInitCA_ExistingPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 	path := dir + "/ca.bin"
 
 	// First create it (empty passphrase = plain PEM)

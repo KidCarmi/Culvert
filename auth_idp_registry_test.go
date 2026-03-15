@@ -87,8 +87,8 @@ func TestIdPRegistry_Get_NotFound(t *testing.T) {
 
 func TestIdPRegistry_All(t *testing.T) {
 	r := newTestRegistry()
-	r.Upsert(samlProfile("id1", "First"))  //nolint:errcheck
-	r.Upsert(samlProfile("id2", "Second")) //nolint:errcheck
+	r.Upsert(samlProfile("id1", "First"))  //nolint:errcheck // test setup; errors are not actionable
+	r.Upsert(samlProfile("id2", "Second")) //nolint:errcheck // test setup; errors are not actionable
 
 	all := r.All()
 	if len(all) != 2 {
@@ -98,7 +98,7 @@ func TestIdPRegistry_All(t *testing.T) {
 
 func TestIdPRegistry_Delete(t *testing.T) {
 	r := newTestRegistry()
-	r.Upsert(samlProfile("del-id", "ToDelete")) //nolint:errcheck
+	r.Upsert(samlProfile("del-id", "ToDelete")) //nolint:errcheck // test setup; errors are not actionable
 
 	if err := r.Delete("del-id"); err != nil {
 		t.Fatalf("Delete error: %v", err)
@@ -117,10 +117,10 @@ func TestIdPRegistry_Delete_NotFound(t *testing.T) {
 
 func TestIdPRegistry_Upsert_Replace(t *testing.T) {
 	r := newTestRegistry()
-	r.Upsert(samlProfile("same-id", "Original")) //nolint:errcheck
+	r.Upsert(samlProfile("same-id", "Original")) //nolint:errcheck // test setup; errors are not actionable
 
 	updated := samlProfile("same-id", "Updated")
-	r.Upsert(updated) //nolint:errcheck
+	r.Upsert(updated) //nolint:errcheck // test setup; errors are not actionable
 
 	got := r.Get("same-id")
 	if got == nil {
@@ -138,7 +138,7 @@ func TestIdPRegistry_RouteByDomain_NoMatch(t *testing.T) {
 	r := newTestRegistry()
 	p := samlProfile("route-id", "Corp IdP")
 	p.EmailDomains = []string{"corp.com"}
-	r.Upsert(p) //nolint:errcheck
+	r.Upsert(p) //nolint:errcheck // test setup; errors are not actionable
 
 	// No live provider (disabled) — should return nil
 	if prov := r.RouteByDomain("corp.com"); prov != nil {

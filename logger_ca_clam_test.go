@@ -15,14 +15,14 @@ func TestNewRotatingFile_CreatesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	defer os.Remove(f.Name())
-	defer os.Remove(f.Name() + ".1")
+	defer os.Remove(f.Name())        //nolint:errcheck // test cleanup
+	defer os.Remove(f.Name() + ".1") //nolint:errcheck // test cleanup
 
 	rf, err := newRotatingFile(f.Name(), 1)
 	if err != nil {
 		t.Fatalf("newRotatingFile: %v", err)
 	}
-	defer rf.Close()
+	defer rf.Close() //nolint:errcheck // test cleanup
 
 	n, err := rf.Write([]byte("hello\n"))
 	if err != nil {
@@ -40,8 +40,8 @@ func TestRotatingFile_Rotate(t *testing.T) {
 	}
 	f.Close()
 	path := f.Name()
-	defer os.Remove(path)
-	defer os.Remove(path + ".1")
+	defer os.Remove(path)        //nolint:errcheck // test cleanup
+	defer os.Remove(path + ".1") //nolint:errcheck // test cleanup
 
 	// maxMB=0 defaults to 50MB, set maxBytes tiny by creating with a raw struct
 	rf := &rotatingFile{
@@ -49,11 +49,11 @@ func TestRotatingFile_Rotate(t *testing.T) {
 		maxBytes: 10, // force rotation after 10 bytes
 		size:     0,
 	}
-	rf.file, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	rf.file, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rf.Close()
+	defer rf.Close() //nolint:errcheck // test cleanup
 
 	// Write more than 10 bytes to trigger rotation
 	_, err = rf.Write([]byte("this is more than 10 bytes of data"))
@@ -68,13 +68,13 @@ func TestRotatingFile_DefaultMaxMB(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	defer os.Remove(f.Name())
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
 
 	rf, err := newRotatingFile(f.Name(), 0) // 0 = use default 50MB
 	if err != nil {
 		t.Fatalf("newRotatingFile with 0 maxMB: %v", err)
 	}
-	defer rf.Close()
+	defer rf.Close() //nolint:errcheck // test cleanup
 	if rf.maxBytes != 50*1024*1024 {
 		t.Errorf("default maxBytes = %d, want %d", rf.maxBytes, 50*1024*1024)
 	}
@@ -108,7 +108,7 @@ func TestSetupLogger_PlainText_NoFile(t *testing.T) {
 		t.Error("setupLogger returned nil logger")
 	}
 	if closer != nil {
-		closer.Close()
+		_ = closer.Close()
 	}
 }
 
@@ -121,7 +121,7 @@ func TestSetupLogger_JSON_NoFile(t *testing.T) {
 		t.Error("setupLogger JSON returned nil logger")
 	}
 	if closer != nil {
-		closer.Close()
+		_ = closer.Close()
 	}
 }
 
@@ -131,7 +131,7 @@ func TestSetupLogger_WithFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	defer os.Remove(f.Name())
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
 
 	l, closer, err := setupLogger(f.Name(), 1, "text")
 	if err != nil {
@@ -142,7 +142,7 @@ func TestSetupLogger_WithFile(t *testing.T) {
 	}
 	l.Println("test message")
 	if closer != nil {
-		closer.Close()
+		_ = closer.Close()
 	}
 }
 
@@ -152,7 +152,7 @@ func TestSetupLogger_JSONWithFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	defer os.Remove(f.Name())
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
 
 	l, closer, err := setupLogger(f.Name(), 1, "json")
 	if err != nil {
@@ -160,7 +160,7 @@ func TestSetupLogger_JSONWithFile(t *testing.T) {
 	}
 	l.Println("json test message")
 	if closer != nil {
-		closer.Close()
+		_ = closer.Close()
 	}
 }
 
@@ -263,8 +263,8 @@ func TestLoadFileConfig_ValidYAML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(f.Name())
-	f.WriteString("listen: \":8080\"\n")
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.WriteString("listen: \":8080\"\n")
 	f.Close()
 
 	fc, err := loadFileConfig(f.Name())
@@ -281,8 +281,8 @@ func TestLoadFileConfig_BadYAML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(f.Name())
-	f.WriteString("listen: [unclosed\n")
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.WriteString("listen: [unclosed\n")
 	f.Close()
 
 	_, err = loadFileConfig(f.Name())
@@ -299,10 +299,10 @@ func TestInitAuditLog_ValidPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Write some valid audit entries
-	f.WriteString(`{"ts":1,"action":"test"}` + "\n")
-	f.WriteString(`{"ts":2,"action":"test2"}` + "\n")
+	_, _ = f.WriteString(`{"ts":1,"action":"test"}` + "\n")
+	_, _ = f.WriteString(`{"ts":2,"action":"test2"}` + "\n")
 	f.Close()
-	defer os.Remove(f.Name())
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
 
 	// Reset the global audit log file before test
 	oldFile := auditLogFile
@@ -372,8 +372,8 @@ func TestSaveAndLoadUIUsersFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	defer os.Remove(f.Name())
-	defer os.Remove(f.Name() + ".tmp")
+	defer os.Remove(f.Name())          //nolint:errcheck // test cleanup
+	defer os.Remove(f.Name() + ".tmp") //nolint:errcheck // test cleanup
 
 	cfg2 := &Config{}
 	cfg2.SetUIUsersFile(f.Name())

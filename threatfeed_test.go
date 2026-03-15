@@ -191,8 +191,8 @@ func TestThreatFeed_LoadFromDisk_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(f.Name())
-	f.Write(data)
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.Write(data)
 	f.Close()
 
 	tf := newEnabledFeed()
@@ -206,8 +206,8 @@ func TestThreatFeed_LoadFromDisk_Valid(t *testing.T) {
 
 func TestThreatFeed_LoadFromDisk_BadJSON(t *testing.T) {
 	f, _ := os.CreateTemp("", "badfeed*.json")
-	defer os.Remove(f.Name())
-	f.WriteString("not json")
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.WriteString("not json")
 	f.Close()
 
 	tf := newEnabledFeed()

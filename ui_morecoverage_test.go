@@ -10,7 +10,7 @@ import (
 
 func TestAPIConfigImport_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/config/import", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/config/import", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiConfigImport(w, r)
@@ -19,7 +19,7 @@ func TestAPIConfigImport_WrongMethod(t *testing.T) {
 
 func TestAPIConfigImport_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/config/import", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/config/import", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiConfigImport(w, r)
@@ -39,19 +39,19 @@ func TestAPIConfigImport_WrongVersion(t *testing.T) {
 func TestAPIConfigImport_Valid(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/config/import", map[string]any{
-		"version":        1,
-		"exportedAt":     "2026-01-01T00:00:00Z",
-		"blocklistMode":  "block",
-		"blocklist":      []string{},
-		"policyRules":    []any{},
-		"defaultAction":  "allow",
-		"rewriteRules":   []any{},
-		"sslBypass":      []string{},
+		"version":             1,
+		"exportedAt":          "2026-01-01T00:00:00Z",
+		"blocklistMode":       "block",
+		"blocklist":           []string{},
+		"policyRules":         []any{},
+		"defaultAction":       "allow",
+		"rewriteRules":        []any{},
+		"sslBypass":           []string{},
 		"contentScanPatterns": []string{},
 		"fileBlockExtensions": []string{},
-		"ipFilterMode":   "",
-		"ipList":         []string{},
-		"rateLimitRPM":   0,
+		"ipFilterMode":        "",
+		"ipList":              []string{},
+		"rateLimitRPM":        0,
 	})
 	r = adminCtx(r)
 	apiConfigImport(w, r)
@@ -62,7 +62,7 @@ func TestAPIConfigImport_Valid(t *testing.T) {
 
 func TestAPIExport_JSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/export", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/export", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiExport(w, r)
@@ -71,7 +71,7 @@ func TestAPIExport_JSON(t *testing.T) {
 
 func TestAPIExport_CSV(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/export?format=csv", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/export?format=csv", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiExport(w, r)
@@ -82,7 +82,7 @@ func TestAPIExport_CSV(t *testing.T) {
 
 func TestAPICACert_Get_NotInitialized(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/ca-cert", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/ca-cert", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	// certMgr may or may not be initialized - either 200 or 503 is acceptable
@@ -98,7 +98,7 @@ func TestAPICACert_Get_JSON(t *testing.T) {
 		t.Skipf("InitCA failed: %v", err)
 	}
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/ca-cert", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/ca-cert", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r.Header.Set("Accept", "application/json")
 	r = adminCtx(r)
@@ -108,7 +108,7 @@ func TestAPICACert_Get_JSON(t *testing.T) {
 
 func TestAPICACert_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/ca-cert", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/ca-cert", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiCACert(w, r)
@@ -119,7 +119,7 @@ func TestAPICACert_WrongMethod(t *testing.T) {
 
 func TestAPICertsUpload_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/certs/upload", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/certs/upload", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiCertsUpload(w, r)
@@ -128,7 +128,7 @@ func TestAPICertsUpload_WrongMethod(t *testing.T) {
 
 func TestAPICertsUpload_BadForm(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/certs/upload", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/certs/upload", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiCertsUpload(w, r)
@@ -139,7 +139,7 @@ func TestAPICertsUpload_BadForm(t *testing.T) {
 
 func TestAuthLogout(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/auth/logout", nil)
+	r := httptest.NewRequest(http.MethodGet, "/auth/logout", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	authLogout(w, r)
 	if w.Code != http.StatusFound {
@@ -151,7 +151,7 @@ func TestAuthLogout(t *testing.T) {
 
 func TestAuthSelectProvider_NoProviders(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/auth/select", nil)
+	r := httptest.NewRequest(http.MethodGet, "/auth/select", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	authSelectProvider(w, r)
 	// Should return some status (200 or redirect) without panic
@@ -164,7 +164,7 @@ func TestAuthSelectProvider_NoProviders(t *testing.T) {
 
 func TestAuthOIDCCallback_MissingParams(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/auth/oidc/callback", nil)
+	r := httptest.NewRequest(http.MethodGet, "/auth/oidc/callback", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	authOIDCCallback(w, r)
 	assertStatus(t, w, http.StatusBadRequest)
@@ -172,7 +172,7 @@ func TestAuthOIDCCallback_MissingParams(t *testing.T) {
 
 func TestAuthOIDCCallback_InvalidState(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/auth/oidc/callback?code=testcode&state=invalidstate", nil)
+	r := httptest.NewRequest(http.MethodGet, "/auth/oidc/callback?code=testcode&state=invalidstate", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	authOIDCCallback(w, r)
 	assertStatus(t, w, http.StatusBadRequest)
@@ -182,7 +182,7 @@ func TestAuthOIDCCallback_InvalidState(t *testing.T) {
 
 func TestAuthSAMLCallback_MissingRelayState(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/auth/saml/callback", nil)
+	r := httptest.NewRequest(http.MethodPost, "/auth/saml/callback", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	authSAMLCallback(w, r)
 	// Should return an error status

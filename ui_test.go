@@ -34,7 +34,7 @@ func jsonReq(method, path string, body any) *http.Request {
 
 // getReq builds a plain GET request with admin context.
 func getReq(path string) *http.Request {
-	r := httptest.NewRequest(http.MethodGet, path, nil)
+	r := httptest.NewRequest(http.MethodGet, path, http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	return adminCtx(r)
 }
@@ -111,7 +111,7 @@ func TestUIIPGuardMiddleware_NoList(t *testing.T) {
 		reached = true
 	}))
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	r.RemoteAddr = "1.2.3.4:1234"
 	handler.ServeHTTP(w, r)
 	if !reached {
@@ -131,7 +131,7 @@ func TestUIIPGuardMiddleware_Blocked(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	r.RemoteAddr = "192.168.1.1:1234"
 	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
@@ -140,7 +140,7 @@ func TestUIIPGuardMiddleware_Blocked(t *testing.T) {
 }
 
 func TestIsSameOrigin(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	r.Host = "localhost:9090"
 
 	if !isSameOrigin(r, "https://localhost:9090") {
@@ -159,7 +159,7 @@ func TestSecurityMiddleware_Headers(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
 
 	if w.Header().Get("X-Frame-Options") != "DENY" {
 		t.Error("X-Frame-Options should be DENY")
@@ -174,7 +174,7 @@ func TestSecurityMiddleware_OPTIONS(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, httptest.NewRequest(http.MethodOptions, "/", nil))
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodOptions, "/", http.NoBody))
 	if w.Code != http.StatusNoContent {
 		t.Errorf("OPTIONS should return 204, got %d", w.Code)
 	}
@@ -361,7 +361,7 @@ func TestAPIAuthUsers_Create_ShortPassword(t *testing.T) {
 
 func TestAPIAuthUsers_Delete_Missing(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/auth/users", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/auth/users", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiAuthUsers(w, adminCtx(r))
 	assertStatus(t, w, http.StatusBadRequest)
@@ -369,7 +369,7 @@ func TestAPIAuthUsers_Delete_Missing(t *testing.T) {
 
 func TestAPIAuthUsers_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPatch, "/api/auth/users", nil)
+	r := httptest.NewRequest(http.MethodPatch, "/api/auth/users", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiAuthUsers(w, adminCtx(r))
 	assertStatus(t, w, http.StatusMethodNotAllowed)
@@ -456,7 +456,7 @@ func TestAPIBlocklist_AddBadJSON(t *testing.T) {
 func TestAPIBlocklist_Delete(t *testing.T) {
 	bl.Add("todelete.example.com")
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/blocklist?host=todelete.example.com", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/blocklist?host=todelete.example.com", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiBlocklist(w, adminCtx(r))
 	// DELETE returns 204 No Content on success
@@ -465,7 +465,7 @@ func TestAPIBlocklist_Delete(t *testing.T) {
 
 func TestAPIBlocklist_DeleteMissing(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/blocklist", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/blocklist", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiBlocklist(w, adminCtx(r))
 	assertStatus(t, w, http.StatusBadRequest)
@@ -521,7 +521,7 @@ func TestAPIPolicy_BadJSON(t *testing.T) {
 
 func TestAPIPolicy_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPatch, "/api/policy", nil)
+	r := httptest.NewRequest(http.MethodPatch, "/api/policy", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiPolicy(w, adminCtx(r))
 	assertStatus(t, w, http.StatusMethodNotAllowed)
@@ -548,7 +548,7 @@ func TestAPISSLBypass_Add(t *testing.T) {
 func TestAPISSLBypass_Delete(t *testing.T) {
 	_ = sslBypass.Add("delete-me.example.com")
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/ssl-bypass?pattern=delete-me.example.com", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/ssl-bypass?pattern=delete-me.example.com", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiSSLBypass(w, adminCtx(r))
 	assertStatus(t, w, http.StatusNoContent)
@@ -556,7 +556,7 @@ func TestAPISSLBypass_Delete(t *testing.T) {
 
 func TestAPISSLBypass_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPatch, "/api/ssl-bypass", nil)
+	r := httptest.NewRequest(http.MethodPatch, "/api/ssl-bypass", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiSSLBypass(w, adminCtx(r))
 	assertStatus(t, w, http.StatusMethodNotAllowed)
@@ -580,7 +580,7 @@ func TestAPIContentScan_Add(t *testing.T) {
 
 func TestAPIContentScan_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPatch, "/api/content-scan", nil)
+	r := httptest.NewRequest(http.MethodPatch, "/api/content-scan", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiContentScan(w, adminCtx(r))
 	assertStatus(t, w, http.StatusMethodNotAllowed)
@@ -628,7 +628,7 @@ func TestAPIPACConfig_Set(t *testing.T) {
 
 func TestAPIPACConfig_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/pac-config", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/pac-config", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiPACConfig(w, adminCtx(r))
 	assertStatus(t, w, http.StatusMethodNotAllowed)
@@ -664,7 +664,7 @@ func TestAPISecurity_Get(t *testing.T) {
 
 func TestAPISecurity_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/security", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/security", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiSecurity(w, adminCtx(r))
 	assertStatus(t, w, http.StatusMethodNotAllowed)
@@ -703,7 +703,7 @@ func TestAPISessionTimeout_Set(t *testing.T) {
 
 func TestAPISessionTimeout_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/session-timeout", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/session-timeout", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiSessionTimeout(w, adminCtx(r))
 	assertStatus(t, w, http.StatusMethodNotAllowed)
@@ -819,7 +819,7 @@ func TestAPIPolicyReorder_WrongMethod(t *testing.T) {
 
 func TestRequireRole_Pass(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := adminCtx(httptest.NewRequest(http.MethodGet, "/", nil))
+	r := adminCtx(httptest.NewRequest(http.MethodGet, "/", http.NoBody))
 	if !requireRole(w, r, RoleAdmin) {
 		t.Error("requireRole should pass for admin")
 	}
@@ -828,7 +828,7 @@ func TestRequireRole_Pass(t *testing.T) {
 func TestRequireRole_Fail(t *testing.T) {
 	w := httptest.NewRecorder()
 	// No role in context → defaults to RoleViewer.
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	if requireRole(w, r, RoleAdmin) {
 		t.Error("requireRole should fail for viewer trying admin route")
@@ -839,7 +839,7 @@ func TestRequireRole_Fail(t *testing.T) {
 }
 
 func TestUIRole_NoContext(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	role := uiRole(r)
 	if role != RoleViewer {
 		t.Errorf("uiRole with no context = %q, want %q", role, RoleViewer)

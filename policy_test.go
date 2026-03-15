@@ -52,9 +52,9 @@ func TestMatchFQDN(t *testing.T) {
 
 func TestMatchIPOrCIDR(t *testing.T) {
 	cases := []struct {
-		cidr   string
-		ip     string
-		want   bool
+		cidr string
+		ip   string
+		want bool
 	}{
 		// Exact IP match.
 		{"192.168.1.1", "192.168.1.1", true},
@@ -324,7 +324,7 @@ func TestPolicyStore_LoadInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestPolicyStore_SaveWithoutPath(t *testing.T) {
+func TestPolicyStore_SaveWithoutPath(_ *testing.T) {
 	ps := newTestPolicyStore()
 	ps.Add(PolicyRule{Priority: 1, Name: "test"})
 	// Should not panic when path is empty.
@@ -477,7 +477,7 @@ func TestSSLBypassMatcher_GlobMatches(t *testing.T) {
 		want bool
 	}{
 		{"app.corp.local", true},
-		{"corp.local", true},       // apex
+		{"corp.local", true}, // apex
 		{"other.example.com", false},
 		{"exact.example.com", true},
 		{"sub.exact.example.com", true}, // matchFQDN: bare domain also matches subdomains (Palo Alto style)
@@ -501,7 +501,7 @@ func TestSSLBypassMatcher_RegexMatches(t *testing.T) {
 		host string
 		want bool
 	}{
-		{"gov.il", false},               // doesn't have a subdomain prefix
+		{"gov.il", false}, // doesn't have a subdomain prefix
 		{"tax.gov.il", true},
 		{"deep.sub.gov.il", true},
 		{"evil-gov.il", false},
