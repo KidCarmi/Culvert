@@ -648,6 +648,44 @@ func matchCategory(cat URLCategory, host string) bool {
 	return false
 }
 
+// lookupHostCategory resolves a hostname to its URL category across both tiers.
+// Returns (category, tier, matchedBy) where tier is "admin", "community", or "none".
+// Used by the admin URL-lookup API endpoint and policy test response enrichment.
+func lookupHostCategory(host string) (category, tier, matchedBy string) {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+
+	// Layer 1: admin-managed catStore — exact + suffix match.
+	catStore.mu.RLock()
+	found := false
+	for _, e := range catStore.entries {
+		for _, p := range e.Hosts {
+			pl := strings.ToLower(p)
+			if h == pl || strings.HasSuffix(h, "."+pl) {
+				category = e.Name
+				tier = "admin"
+				matchedBy = p
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	catStore.mu.RUnlock()
+	if found {
+		return
+	}
+
+	// Layer 2: community BadgerDB feed.
+	if communityDB != nil {
+		if foundCat, ok := communityDB.Lookup(h); ok {
+			return foundCat, "community", h
+		}
+	}
+	return "", "none", ""
+}
+
 // matchCategoryInStore is the original single-layer lookup against catStore.
 // Retained as a named helper so Layer 2 can be added without duplicating logic.
 func matchCategoryInStore(cat URLCategory, host string) bool {

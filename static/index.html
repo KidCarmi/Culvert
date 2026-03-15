@@ -1445,6 +1445,22 @@ Firefox (all platforms):
         Manage host lists for each URL category. Built-in categories are seeded automatically.
         Categories are matched by hostname suffix (e.g. adding <code>example.com</code> also matches <code>www.example.com</code>).
       </p>
+      <!-- URL Lookup Tool -->
+      <div class="panel" style="margin-bottom:20px">
+        <div class="panel-header"><span class="panel-title">URL Lookup</span></div>
+        <div class="panel-body">
+          <p style="color:var(--text-muted);font-size:13px;margin:0 0 12px">
+            Paste any domain to see which category it resolves to. Checks admin-managed lists first, then the community feed.
+          </p>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" class="input" id="urlcat-lookup-host" placeholder="e.g. casino-example.com"
+              style="flex:1" onkeydown="if(event.key==='Enter')runURLLookup()">
+            <button class="btn" onclick="runURLLookup()">Look up</button>
+          </div>
+          <div id="urlcat-lookup-result" style="margin-top:12px;display:none"></div>
+        </div>
+      </div>
+
       <div id="urlcat-list"></div>
     </div><!-- /view-urlcat -->
 
@@ -1882,6 +1898,34 @@ async function deleteUser(username) {
 }
 
 // ── URL Categories ────────────────────────────────────────────────────────
+
+async function runURLLookup() {
+  const host = document.getElementById('urlcat-lookup-host').value.trim();
+  if (!host) { toast('Enter a domain to look up', 'error'); return; }
+  const el = document.getElementById('urlcat-lookup-result');
+  el.style.display = 'block';
+  el.innerHTML = '<span style="color:var(--text-muted)">Looking up…</span>';
+  try {
+    const d = await api('/api/urlcat/lookup?host=' + encodeURIComponent(host));
+    if (d.tier === 'none') {
+      el.innerHTML = `<span style="color:var(--text-muted)">No category found for <strong>${escHtml(d.host)}</strong> — not in any list or community feed.</span>`;
+    } else {
+      const tierLabel = d.tier === 'admin' ? '★ Admin-managed' : 'Community feed';
+      const tierColor = d.tier === 'admin' ? '#60a5fa' : '#a78bfa';
+      const viaStr    = d.matchedBy && d.matchedBy !== d.host
+        ? ` <span style="color:var(--text-muted);font-size:.78rem">(via ${escHtml(d.matchedBy)})</span>`
+        : '';
+      el.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <strong style="font-size:.92rem">${escHtml(d.host)}</strong>
+        <span style="background:rgba(99,102,241,.18);color:#818cf8;padding:3px 10px;border-radius:12px;font-size:.82rem;font-weight:600">${escHtml(d.category)}</span>
+        <span style="color:${tierColor};font-size:.8rem">${escHtml(tierLabel)}</span>
+        ${viaStr}
+      </div>`;
+    }
+  } catch(err) {
+    el.innerHTML = `<span style="color:var(--danger)">Error: ${escHtml(err.message)}</span>`;
+  }
+}
 
 async function loadURLCategories() {
   try {
@@ -4026,6 +4070,24 @@ async function runPolicyTest() {
 
   // Result banner
   const rb = document.getElementById('pt-result-body');
+  // Build the resolved-category badge (shown for both match and no-match).
+  let catBadge = '';
+  if (data.hostCategory && data.hostCategory.tier !== 'none') {
+    const hc = data.hostCategory;
+    const tierLabel = hc.tier === 'admin' ? '★ Admin-managed' : 'Community feed';
+    const tierColor = hc.tier === 'admin' ? '#60a5fa' : '#a78bfa';
+    const viaStr = hc.matchedBy && hc.matchedBy !== host
+      ? ` <span style="color:var(--text-muted);font-size:.75rem">via ${escHtml(hc.matchedBy)}</span>`
+      : '';
+    catBadge = `<div class="pt-sub" style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span style="color:var(--text-muted);font-size:.8rem">Category:</span>
+      <span style="background:rgba(99,102,241,.18);color:#818cf8;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">${escHtml(hc.category)}</span>
+      <span style="color:${tierColor};font-size:.75rem">${escHtml(tierLabel)}</span>${viaStr}
+    </div>`;
+  } else if (data.hostCategory && data.hostCategory.tier === 'none') {
+    catBadge = `<div class="pt-sub" style="margin-top:6px;color:var(--text-muted);font-size:.78rem">Category: <em>uncategorised</em></div>`;
+  }
+
   if (data.matched) {
     const r = data.rule;
     rb.innerHTML = `<div class="pt-match">
@@ -4033,11 +4095,13 @@ async function runPolicyTest() {
       <div class="pt-sub">Matched rule <strong>#${r.priority} — ${escHtml(r.name)}</strong></div>
       ${r.sslAction ? `<div class="pt-sub" style="margin-top:4px">SSL: ${escHtml(r.sslAction)}</div>` : ''}
       ${r.redirectURL ? `<div class="pt-sub" style="margin-top:4px">Redirect → ${escHtml(r.redirectURL)}</div>` : ''}
+      ${catBadge}
     </div>`;
   } else {
     rb.innerHTML = `<div class="pt-nomatch">
       <div class="pt-action">⛔ No rule matched</div>
       <div class="pt-sub">Default action: <strong>${escHtml(data.defaultAction)}</strong></div>
+      ${catBadge}
     </div>`;
   }
 

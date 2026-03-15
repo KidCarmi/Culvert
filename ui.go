@@ -63,8 +63,9 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload) // POST — reload YARA rules from dir
 
 	// ── URL Categories (dynamic host-list management) ─────────────────────
-	mux.HandleFunc("/api/urlcat", apiURLCat)          // GET/POST/PUT/DELETE categories
-	mux.HandleFunc("/api/urlcat/host", apiURLCatHost) // POST/DELETE individual hosts
+	mux.HandleFunc("/api/urlcat", apiURLCat)            // GET/POST/PUT/DELETE categories
+	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)   // POST/DELETE individual hosts
+	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup) // GET — resolve a domain to its category
 
 	// ── Admin session auth ────────────────────────────────────────────────
 	mux.HandleFunc("/api/auth/login", apiAuthLogin)
@@ -1006,6 +1007,28 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET /api/urlcat/lookup?host=example.com
+// Resolves a hostname to its URL category across both data tiers.
+// Response: {"host":"…","category":"…","tier":"admin"|"community"|"none","matchedBy":"…"}
+func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	host := r.URL.Query().Get("host")
+	if host == "" {
+		http.Error(w, "host query param required", http.StatusBadRequest)
+		return
+	}
+	category, tier, matchedBy := lookupHostCategory(host)
+	jsonOK(w, map[string]string{
+		"host":      host,
+		"category":  category,
+		"tier":      tier,
+		"matchedBy": matchedBy,
+	})
+}
+
 // configBackup is the portable JSON snapshot of all non-secret configuration.
 type configBackup struct {
 	Version             int           `json:"version"`
@@ -1609,20 +1632,30 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Enrich with category lookup so the admin can see how the host was categorised.
+	catName, catTier, catMatchedBy := lookupHostCategory(body.Host)
+	hostCategory := map[string]string{
+		"category":  catName,
+		"tier":      catTier,
+		"matchedBy": catMatchedBy,
+	}
+
 	if matched == nil {
 		defAction := defaultPolicyAction()
 		jsonOK(w, map[string]any{
 			"matched":       false,
 			"defaultAction": defAction,
 			"trace":         trace,
+			"hostCategory":  hostCategory,
 		})
 		return
 	}
 	jsonOK(w, map[string]any{
-		"matched": true,
-		"rule":    matched,
-		"action":  matched.Action,
-		"trace":   trace,
+		"matched":      true,
+		"rule":         matched,
+		"action":       matched.Action,
+		"trace":        trace,
+		"hostCategory": hostCategory,
 	})
 }
 
