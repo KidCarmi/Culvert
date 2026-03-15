@@ -40,7 +40,7 @@ services:
       - CLAMAV_NO_FRESHCLAMD=false  # run freshclam to keep definitions current
       - CLAMAV_NO_MILTERD=true      # disable milter daemon (not needed here)
     healthcheck:
-      test: ["CMD", "clamdcheck"]
+      test: ["CMD", "clamdscan", "--ping", "3"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -51,11 +51,12 @@ services:
     build: .
     container_name: proxyshield
     restart: unless-stopped
-    # We use service_started (not service_healthy) so the proxy isn't held back
-    # while ClamAV downloads signatures. The proxy handles ClamAV unreachability
-    # gracefully — scanning resumes automatically once the daemon is ready.
+    # Wait for ClamAV to pass its health check before starting the proxy.
+    # The proxy still handles transient ClamAV unavailability gracefully
+    # (per-request retry), so this just avoids "unreachable" log noise on startup.
     depends_on:
-      - clamav
+      clamav:
+        condition: service_healthy
     ports:
       - "8080:8080"   # Proxy (configure browsers / PAC file to point here)
       - "9090:9090"   # Admin Web UI (HTTPS — accept the self-signed cert on first visit)
