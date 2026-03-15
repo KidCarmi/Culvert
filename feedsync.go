@@ -48,18 +48,18 @@ const (
 // ut1CategoryMap maps UT1 directory names to our URLCategory values.
 // Only directories listed here are ingested; all others are ignored.
 var ut1CategoryMap = map[string]string{
-	"adult":            "Adult",
-	"agressif":         "Malicious", // French for "aggressive" — contains attack infrastructure
-	"dating":           "Dating",
-	"gambling":         "Gambling",
-	"games":            "Gaming",
-	"malware":          "Malicious",
-	"phishing":         "Malicious",
-	"redirector":       "Malicious", // URL shorteners abused for phishing
-	"social_networks":  "Social",
-	"streamingmedia":   "Streaming",
-	"news":             "News",
-	"warez":            "Malicious", // piracy/malware distribution sites
+	"adult":           "Adult",
+	"agressif":        "Malicious", // French for "aggressive" — contains attack infrastructure
+	"dating":          "Dating",
+	"gambling":        "Gambling",
+	"games":           "Gaming",
+	"malware":         "Malicious",
+	"phishing":        "Malicious",
+	"redirector":      "Malicious", // URL shorteners abused for phishing
+	"social_networks": "Social",
+	"streamingmedia":  "Streaming",
+	"news":            "News",
+	"warez":           "Malicious", // piracy/malware distribution sites
 }
 
 // FeedSyncer manages periodic synchronisation of UT1 data into CommunityDB.
@@ -145,7 +145,7 @@ func (fs *FeedSyncer) Stats() (int64, time.Time, time.Duration) {
 // domain → mappedCategory map ready for BulkWrite.
 func downloadAndParse(url string) (map[string]string, error) {
 	client := &http.Client{Timeout: feedSyncHTTPTimeout}
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -172,7 +172,7 @@ func parseTarball(r io.Reader) (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gzip open: %w", err)
 	}
-	defer gz.Close()
+	defer gz.Close() //nolint:errcheck // gzip.Reader.Close flushes no data; error is non-actionable in deferred context
 
 	entries := make(map[string]string, 500_000)
 	tr := tar.NewReader(gz)
@@ -223,7 +223,7 @@ func classifyTarEntry(path string) (string, bool) {
 
 // parseDomainFile reads one UT1 "domains" file from tr and adds its entries
 // into the shared map (domain → mappedCategory).
-func parseDomainFile(r io.Reader, mappedCat string, out map[string]string) error {
+func parseDomainFile(r io.Reader, mappedCat string, out map[string]string) error { //nolint:gocognit // byte-level streaming parser; complexity is inherent
 	count := 0
 	buf := make([]byte, 0, 256)
 	scratch := make([]byte, 4096)

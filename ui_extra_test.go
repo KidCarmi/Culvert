@@ -63,7 +63,7 @@ func TestAPISecurity_Post_IPRemove(t *testing.T) {
 // ─── /api/settings POST ───────────────────────────────────────────────────────
 
 func TestAPISettings_Post(t *testing.T) {
-	defer cfg.SetAuth("", "") //nolint:errcheck
+	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/settings", map[string]string{
 		"user": "admin",
@@ -76,7 +76,7 @@ func TestAPISettings_Post(t *testing.T) {
 
 func TestAPISettings_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/settings", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/settings", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
 	apiSettings(w, r)
@@ -88,7 +88,7 @@ func TestAPISettings_Post_BadJSON(t *testing.T) {
 func TestAPIRewrite_Delete(t *testing.T) {
 	rule := rewriter.Add(RewriteRule{Host: "delete-me.com"})
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/rewrite?id=%d", rule.ID), nil)
+	r := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/rewrite?id=%d", rule.ID), http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiRewrite(w, r)
@@ -97,7 +97,7 @@ func TestAPIRewrite_Delete(t *testing.T) {
 
 func TestAPIRewrite_Delete_NotFound(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/rewrite?id=99999", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/rewrite?id=99999", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiRewrite(w, r)
@@ -106,7 +106,7 @@ func TestAPIRewrite_Delete_NotFound(t *testing.T) {
 
 func TestAPIRewrite_Delete_BadID(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/rewrite?id=abc", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/rewrite?id=abc", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiRewrite(w, r)
@@ -118,7 +118,7 @@ func TestAPIRewrite_Delete_BadID(t *testing.T) {
 func TestAPIPolicy_Delete(t *testing.T) {
 	rule := policyStore.Add(PolicyRule{Priority: 9901, Name: "del-test", Action: "allow"})
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/policy?priority=%d", rule.Priority), nil)
+	r := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/policy?priority=%d", rule.Priority), http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiPolicy(w, r)
@@ -127,7 +127,7 @@ func TestAPIPolicy_Delete(t *testing.T) {
 
 func TestAPIPolicy_Delete_NotFound(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/policy?priority=999999", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/policy?priority=999999", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiPolicy(w, r)
@@ -172,12 +172,12 @@ func TestAPIAuthUsers_Delete_Success(t *testing.T) {
 	_ = cfg.SetUIUser("admin-to-delete", "password123", RoleAdmin)
 	_ = cfg.SetUIUser("admin-keeper", "password456", RoleAdmin)
 	defer func() {
-		cfg.DeleteUIUser("admin-to-delete")  //nolint:errcheck
-		cfg.DeleteUIUser("admin-keeper")     //nolint:errcheck
+		cfg.DeleteUIUser("admin-to-delete") //nolint:errcheck // test teardown; cleanup errors are non-actionable
+		cfg.DeleteUIUser("admin-keeper")    //nolint:errcheck // test teardown; cleanup errors are non-actionable
 	}()
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/auth/users?username=admin-to-delete", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/auth/users?username=admin-to-delete", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiAuthUsers(w, r)
@@ -186,7 +186,7 @@ func TestAPIAuthUsers_Delete_Success(t *testing.T) {
 
 func TestAPIAuthUsers_Delete_MissingUsername(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/auth/users", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/auth/users", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiAuthUsers(w, r)
@@ -197,7 +197,7 @@ func TestAPIAuthUsers_Delete_MissingUsername(t *testing.T) {
 
 func TestOIDCMustRandHex(t *testing.T) {
 	h := mustRandHex(16)
-	if len(h) == 0 {
+	if h == "" {
 		t.Error("mustRandHex should return non-empty string")
 	}
 	h2 := mustRandHex(16)

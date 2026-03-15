@@ -25,44 +25,44 @@ var logger *log.Logger
 
 func main() {
 	// ── CLI flags ────────────────────────────────────────────────────────────
-	configPath   := flag.String("config",        "",     "Path to config.yaml (optional)")
-	proxyPort    := flag.Int("port",             0,    "Proxy port (overrides config)")
-	uiPortFlag   := flag.Int("ui-port",          0,    "Web UI port (overrides config)")
-	user         := flag.String("user",          "",   "Basic auth username")
-	pass         := flag.String("pass",          "",   "Basic auth password")
-	blockFile    := flag.String("blocklist",     "",   "Blocklist file path")
-	logFilePath  := flag.String("logfile",       "",   "Log file path")
-	logMaxMB     := flag.Int("log-max-mb",       50,   "Log rotation size in MB")
-	tlsCert      := flag.String("tls-cert",      "",   "TLS cert file for UI (optional)")
-	tlsKey       := flag.String("tls-key",       "",   "TLS key file for UI (optional)")
-	rateLimitRPM := flag.Int("rate-limit",       0,    "Max requests/min per IP (0=off)")
-	ipMode       := flag.String("ip-filter-mode","",   "IP filter mode: allow|block (empty=off)")
-	socks5Port  := flag.Int("socks5-port",      0,  "SOCKS5 proxy port (0=disabled)")
-	metricsTok  := flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
-	cpGRPCAddr  := flag.String("cp-grpc-addr",  "", "ControlPlane gRPC listen addr e.g. :50051 (empty=off)")
-	cpGRPCCert  := flag.String("cp-grpc-cert",  "", "ControlPlane gRPC TLS cert (mTLS)")
-	cpGRPCKey   := flag.String("cp-grpc-key",   "", "ControlPlane gRPC TLS key")
-	cpGRPCCA    := flag.String("cp-grpc-ca",    "", "ControlPlane gRPC CA for mTLS client validation")
-	dpCPAddr    := flag.String("dp-cp-addr",    "", "DataPlane: ControlPlane gRPC addr to connect to")
-	dpNodeID    := flag.String("dp-node-id",    "", "DataPlane: node identifier (default=hostname)")
-	dpCert      := flag.String("dp-cert",       "", "DataPlane gRPC client TLS cert")
-	dpKey       := flag.String("dp-key",        "", "DataPlane gRPC client TLS key")
-	dpCA        := flag.String("dp-ca",         "", "DataPlane gRPC CA cert")
-	policyFile  := flag.String("policy",        "", "Policy rules JSON file path")
-	caPath      := flag.String("ca-path",       "", "Path to persist encrypted Root CA bundle (optional)")
-	auditLog    := flag.String("audit-log",     "", "Persistent audit log file path (JSONL, appended)")
-	syslogAddr  := flag.String("syslog",        "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
-	uiAllowIP   := flag.String("ui-allow-ip",   "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
-	sessionHrs  := flag.Int("session-timeout",  0,  "Admin UI session lifetime in hours (1-168, 0=default 8h)")
-	geoIPDB     := flag.String("geoip-db",      "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
-	clamavAddr  := flag.String("clamav-addr",   "", "ClamAV address: unix:/run/clamav/clamd.sock or tcp:host:port")
+	configPath := flag.String("config", "", "Path to config.yaml (optional)")
+	proxyPort := flag.Int("port", 0, "Proxy port (overrides config)")
+	uiPortFlag := flag.Int("ui-port", 0, "Web UI port (overrides config)")
+	user := flag.String("user", "", "Basic auth username")
+	pass := flag.String("pass", "", "Basic auth password")
+	blockFile := flag.String("blocklist", "", "Blocklist file path")
+	logFilePath := flag.String("logfile", "", "Log file path")
+	logMaxMB := flag.Int("log-max-mb", 50, "Log rotation size in MB")
+	tlsCert := flag.String("tls-cert", "", "TLS cert file for UI (optional)")
+	tlsKey := flag.String("tls-key", "", "TLS key file for UI (optional)")
+	rateLimitRPM := flag.Int("rate-limit", 0, "Max requests/min per IP (0=off)")
+	ipMode := flag.String("ip-filter-mode", "", "IP filter mode: allow|block (empty=off)")
+	socks5Port := flag.Int("socks5-port", 0, "SOCKS5 proxy port (0=disabled)")
+	metricsTok := flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
+	cpGRPCAddr := flag.String("cp-grpc-addr", "", "ControlPlane gRPC listen addr e.g. :50051 (empty=off)")
+	cpGRPCCert := flag.String("cp-grpc-cert", "", "ControlPlane gRPC TLS cert (mTLS)")
+	cpGRPCKey := flag.String("cp-grpc-key", "", "ControlPlane gRPC TLS key")
+	cpGRPCCA := flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
+	dpCPAddr := flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to")
+	dpNodeID := flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
+	dpCert := flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
+	dpKey := flag.String("dp-key", "", "DataPlane gRPC client TLS key")
+	dpCA := flag.String("dp-ca", "", "DataPlane gRPC CA cert")
+	policyFile := flag.String("policy", "", "Policy rules JSON file path")
+	caPath := flag.String("ca-path", "", "Path to persist encrypted Root CA bundle (optional)")
+	auditLog := flag.String("audit-log", "", "Persistent audit log file path (JSONL, appended)")
+	syslogAddr := flag.String("syslog", "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
+	uiAllowIP := flag.String("ui-allow-ip", "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
+	sessionHrs := flag.Int("session-timeout", 0, "Admin UI session lifetime in hours (1-168, 0=default 8h)")
+	geoIPDB := flag.String("geoip-db", "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
+	clamavAddr := flag.String("clamav-addr", "", "ClamAV address: unix:/run/clamav/clamd.sock or tcp:host:port")
 	yaraRulesDir := flag.String("yara-rules-dir", "", "Directory containing *.yar/*.yara YARA rule files")
-	threatFeedDB  := flag.String("threat-feed-db",  "", "Path for persisted threat feed JSON database")
-	uiUsersFile   := flag.String("ui-users-file",   "", "Path to persist admin UI users across restarts (e.g. /data/ui_users.json)")
-	uiNoTLS       := flag.Bool("ui-no-tls",         false, "Disable auto self-signed TLS; serve admin UI over plain HTTP")
-	catFeedDB     := flag.String("cat-feed-db",     "", "Directory for BadgerDB URL category community feed (empty=disabled)")
-	catFeedURL    := flag.String("cat-feed-url",    "", "Override URL for the UT1 category tarball (default: UT1 Capestat)")
-	catSyncIntvl  := flag.String("cat-sync-interval","24h", "How often to re-sync the URL category feed (e.g. 12h, 24h)")
+	threatFeedDB := flag.String("threat-feed-db", "", "Path for persisted threat feed JSON database")
+	uiUsersFile := flag.String("ui-users-file", "", "Path to persist admin UI users across restarts (e.g. /data/ui_users.json)")
+	uiNoTLS := flag.Bool("ui-no-tls", false, "Disable auto self-signed TLS; serve admin UI over plain HTTP")
+	catFeedDB := flag.String("cat-feed-db", "", "Directory for BadgerDB URL category community feed (empty=disabled)")
+	catFeedURL := flag.String("cat-feed-url", "", "Override URL for the UT1 category tarball (default: UT1 Capestat)")
+	catSyncIntvl := flag.String("cat-sync-interval", "24h", "How often to re-sync the URL category feed (e.g. 12h, 24h)")
 	flag.Parse()
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -77,16 +77,16 @@ func main() {
 	}
 
 	// CLI flags override file config.
-	pPort  := firstNonZero(*proxyPort,  fc.Proxy.Port,   8080)
-	uPort  := firstNonZero(*uiPortFlag, fc.Proxy.UIPort, 9090)
-	lPath  := firstStr(*logFilePath, fc.Proxy.LogFile)
-	blPath := firstStr(*blockFile,   fc.Proxy.Blocklist)
+	pPort := firstNonZero(*proxyPort, fc.Proxy.Port, 8080)
+	uPort := firstNonZero(*uiPortFlag, fc.Proxy.UIPort, 9090)
+	lPath := firstStr(*logFilePath, fc.Proxy.LogFile)
+	blPath := firstStr(*blockFile, fc.Proxy.Blocklist)
 	lMaxMB := firstNonZero(*logMaxMB, fc.Proxy.LogMaxMB, 50)
-	authU  := firstStr(*user, fc.Auth.User)
-	authP  := firstStr(*pass, fc.Auth.Pass)
-	cert   := firstStr(*tlsCert, fc.Proxy.TLSCert)
-	key    := firstStr(*tlsKey,  fc.Proxy.TLSKey)
-	rlRPM  := firstNonZero(*rateLimitRPM, fc.Security.RateLimit)
+	authU := firstStr(*user, fc.Auth.User)
+	authP := firstStr(*pass, fc.Auth.Pass)
+	cert := firstStr(*tlsCert, fc.Proxy.TLSCert)
+	key := firstStr(*tlsKey, fc.Proxy.TLSKey)
+	rlRPM := firstNonZero(*rateLimitRPM, fc.Security.RateLimit)
 	ipModeVal := firstStr(*ipMode, fc.Security.IPFilterMode)
 
 	// ── Logger ───────────────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ func main() {
 
 	// ── Config ───────────────────────────────────────────────────────────────
 	cfg.ProxyPort = pPort
-	cfg.UIPort    = uPort
+	cfg.UIPort = uPort
 	if err := cfg.SetAuth(authU, authP); err != nil {
 		log.Fatalf("Failed to set auth: %v", err)
 	}
@@ -346,7 +346,9 @@ func main() {
 	// When --cat-feed-db is set, open BadgerDB and start the UT1 FeedSyncer.
 	// Layer 1 (catStore) remains the priority; BadgerDB is the fallback.
 	var feedSyncer *FeedSyncer
-	if *catFeedDB != "" {
+	if *catFeedDB == "" { //nolint:nestif // straightforward init block; nesting is necessary
+		logger.Printf("CatFeedDB → disabled (set --cat-feed-db for community feed)")
+	} else {
 		var dbErr error
 		communityDB, dbErr = openCommunityDB(*catFeedDB)
 		if dbErr != nil {
@@ -361,8 +363,6 @@ func main() {
 		feedSyncer = newFeedSyncer(communityDB, *catFeedURL, syncD)
 		feedSyncer.Start(context.Background())
 		logger.Printf("CatFeedDB → BadgerDB at %s, sync every %s", *catFeedDB, syncD)
-	} else {
-		logger.Printf("CatFeedDB → disabled (set --cat-feed-db for community feed)")
 	}
 
 	// ── File block profile ───────────────────────────────────────────────────
@@ -445,9 +445,9 @@ func main() {
 
 	// ── Security scanning: ClamAV + YARA + Threat Feeds ─────────────────────
 	secCfg := fc.SecurityScan
-	clamAddr  := firstStr(*clamavAddr,   secCfg.ClamAVAddr)
-	yaraDir   := firstStr(*yaraRulesDir, secCfg.YARARulesDir)
-	feedDB    := firstStr(*threatFeedDB, secCfg.ThreatFeedDB)
+	clamAddr := firstStr(*clamavAddr, secCfg.ClamAVAddr)
+	yaraDir := firstStr(*yaraRulesDir, secCfg.YARARulesDir)
+	feedDB := firstStr(*threatFeedDB, secCfg.ThreatFeedDB)
 
 	if secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "" {
 		// Scan result cache TTL.

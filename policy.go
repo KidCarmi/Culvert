@@ -122,7 +122,7 @@ func (cs *CategoryStore) Save() {
 		return
 	}
 	tmp := cs.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	_ = os.Rename(tmp, cs.path)
@@ -183,19 +183,20 @@ func (cs *CategoryStore) Delete(name string) error {
 func (cs *CategoryStore) AddHost(category, host string) error {
 	cs.mu.Lock()
 	for _, e := range cs.entries {
-		if strings.EqualFold(e.Name, category) {
-			host = strings.ToLower(strings.TrimSpace(host))
-			for _, h := range e.Hosts {
-				if strings.ToLower(h) == host {
-					cs.mu.Unlock()
-					return nil // already present
-				}
-			}
-			e.Hosts = append(e.Hosts, host)
-			cs.mu.Unlock()
-			cs.Save()
-			return nil
+		if !strings.EqualFold(e.Name, category) {
+			continue
 		}
+		host = strings.ToLower(strings.TrimSpace(host))
+		for _, h := range e.Hosts {
+			if strings.EqualFold(h, host) {
+				cs.mu.Unlock()
+				return nil // already present
+			}
+		}
+		e.Hosts = append(e.Hosts, host)
+		cs.mu.Unlock()
+		cs.Save()
+		return nil
 	}
 	cs.mu.Unlock()
 	return fmt.Errorf("category %q not found", category)
@@ -208,7 +209,7 @@ func (cs *CategoryStore) RemoveHost(category, host string) error {
 		if strings.EqualFold(e.Name, category) {
 			host = strings.ToLower(strings.TrimSpace(host))
 			for i, h := range e.Hosts {
-				if strings.ToLower(h) == host {
+				if strings.EqualFold(h, host) {
 					e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
 					cs.mu.Unlock()
 					cs.Save()
@@ -340,7 +341,7 @@ func (ps *PolicyStore) Save() {
 	// Write to a temp file then rename for an atomic replace — a crash
 	// mid-write must not corrupt the persisted rule file.
 	tmp := ps.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	_ = os.Rename(tmp, ps.path)
@@ -757,7 +758,7 @@ func (m *SSLBypassMatcher) Save() {
 		return
 	}
 	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	_ = os.Rename(tmp, m.path)

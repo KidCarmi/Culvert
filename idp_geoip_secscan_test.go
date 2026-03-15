@@ -26,8 +26,8 @@ func TestIdPRegistry_Load_BadJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(f.Name())
-	f.WriteString("not json")
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.WriteString("not json")
 	f.Close()
 
 	r := &IdPRegistry{
@@ -54,8 +54,8 @@ func TestIdPRegistry_Load_ValidProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(f.Name())
-	f.Write(data)
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.Write(data)
 	f.Close()
 
 	r := &IdPRegistry{
@@ -330,14 +330,14 @@ func TestOIDCCacheSetWithExp_TokenExpiry(t *testing.T) {
 
 // ─── session.revokeSessionCookie ─────────────────────────────────────────────
 
-func TestRevokeSessionCookie_NoCookie(t *testing.T) {
-	r := httptest.NewRequest("GET", "/", nil)
+func TestRevokeSessionCookie_NoCookie(_ *testing.T) {
+	r := httptest.NewRequest("GET", "/", http.NoBody)
 	// Should not panic when no cookie is present
 	revokeSessionCookie(uiSessionCookieName, r)
 }
 
-func TestRevokeSessionCookie_InvalidValue(t *testing.T) {
-	r := httptest.NewRequest("GET", "/", nil)
+func TestRevokeSessionCookie_InvalidValue(_ *testing.T) {
+	r := httptest.NewRequest("GET", "/", http.NoBody)
 	r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: "nodot"})
 	// Should not panic with invalid cookie value
 	revokeSessionCookie(uiSessionCookieName, r)

@@ -12,7 +12,7 @@ import (
 func TestAPIAuthStatus_Get_AuthDisabled(t *testing.T) {
 	// When auth is not enabled, should return loggedIn:true
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiAuthStatus(w, r)
 	assertStatus(t, w, http.StatusOK)
@@ -21,14 +21,14 @@ func TestAPIAuthStatus_Get_AuthDisabled(t *testing.T) {
 func TestAPIAuthStatus_BasicAuth_Valid(t *testing.T) {
 	// Set up a UI user for basic-auth test
 	_ = cfg.SetUIUser("teststatuser", "testpass999", RoleAdmin)
-	defer cfg.DeleteUIUser("teststatuser") //nolint:errcheck
+	defer cfg.DeleteUIUser("teststatuser") //nolint:errcheck // test teardown; cleanup errors are non-actionable
 
 	// Enable auth so the basic-auth branch is reached
 	_ = cfg.SetAuth("teststatuser", "testpass999")
-	defer cfg.SetAuth("", "") //nolint:errcheck
+	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r.SetBasicAuth("teststatuser", "testpass999")
 	apiAuthStatus(w, r)
@@ -37,10 +37,10 @@ func TestAPIAuthStatus_BasicAuth_Valid(t *testing.T) {
 
 func TestAPIAuthStatus_BasicAuth_Invalid(t *testing.T) {
 	_ = cfg.SetAuth("authstatuser2", "correctpass")
-	defer cfg.SetAuth("", "") //nolint:errcheck
+	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r.SetBasicAuth("authstatuser2", "wrongpass")
 	apiAuthStatus(w, r)
@@ -51,7 +51,7 @@ func TestAPIAuthStatus_BasicAuth_Invalid(t *testing.T) {
 
 func TestAPIAuthLogout_Post(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/logout", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiAuthLogout(w, r)
@@ -85,7 +85,7 @@ func TestAPIFileblock_Post_BulkAdd(t *testing.T) {
 
 func TestAPIFileblock_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/fileblock", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/fileblock", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiFileblock(w, r)
@@ -95,7 +95,7 @@ func TestAPIFileblock_Post_BadJSON(t *testing.T) {
 func TestAPIFileblock_Delete(t *testing.T) {
 	fileBlocker.Add(".tmpext")
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/fileblock?ext=.tmpext", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/fileblock?ext=.tmpext", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiFileblock(w, r)
@@ -104,7 +104,7 @@ func TestAPIFileblock_Delete(t *testing.T) {
 
 func TestAPIFileblock_Delete_MissingExt(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/fileblock", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/fileblock", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiFileblock(w, r)
@@ -113,7 +113,7 @@ func TestAPIFileblock_Delete_MissingExt(t *testing.T) {
 
 func TestAPIFileblock_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPut, "/api/fileblock", nil)
+	r := httptest.NewRequest(http.MethodPut, "/api/fileblock", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiFileblock(w, r)
@@ -124,7 +124,7 @@ func TestAPIFileblock_WrongMethod(t *testing.T) {
 
 func TestAPIPolicyReorder_Post_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/policy/reorder", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/policy/reorder", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiPolicyReorder(w, r)
@@ -133,14 +133,14 @@ func TestAPIPolicyReorder_Post_WrongMethod(t *testing.T) {
 
 func TestAPIPolicyReorder_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/policy/reorder", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/policy/reorder", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiPolicyReorder(w, r)
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
-func TestAPIPolicyReorder_Post_Mismatch(t *testing.T) {
+func TestAPIPolicyReorder_Post_Mismatch(_ *testing.T) {
 	// empty priorities list should cause a mismatch if there are rules
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/policy/reorder", map[string]any{
@@ -178,7 +178,7 @@ func TestAPIPolicyReorder_Post_Success(t *testing.T) {
 
 func TestAPIIdPList_Get(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/idp", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/idp", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPList(w, r)
@@ -187,7 +187,7 @@ func TestAPIIdPList_Get(t *testing.T) {
 
 func TestAPIIdPList_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/idp", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/idp", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPList(w, r)
@@ -212,7 +212,7 @@ func TestAPIIdPList_Post_Create(t *testing.T) {
 
 func TestAPIIdPList_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/idp", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/idp", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPList(w, r)
@@ -223,7 +223,7 @@ func TestAPIIdPList_WrongMethod(t *testing.T) {
 
 func TestAPIIdPItem_Get_NotFound(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/idp/nonexistent-id", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/idp/nonexistent-id", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPItem(w, r, "nonexistent-id")
@@ -232,7 +232,7 @@ func TestAPIIdPItem_Get_NotFound(t *testing.T) {
 
 func TestAPIIdPItem_Get_MissingID(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/idp/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/idp/", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPItem(w, r, "")
@@ -241,7 +241,7 @@ func TestAPIIdPItem_Get_MissingID(t *testing.T) {
 
 func TestAPIIdPItem_Delete_NotFound(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/idp/nonexistent-id", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/idp/nonexistent-id", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPItem(w, r, "nonexistent-id")
@@ -250,7 +250,7 @@ func TestAPIIdPItem_Delete_NotFound(t *testing.T) {
 
 func TestAPIIdPItem_Put_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPut, "/api/idp/some-id", nil)
+	r := httptest.NewRequest(http.MethodPut, "/api/idp/some-id", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPItem(w, r, "some-id")
@@ -267,10 +267,10 @@ func TestAPIIdPItem_Get_Exists(t *testing.T) {
 	if err := idpRegistry.Upsert(p); err != nil {
 		t.Fatalf("Upsert failed: %v", err)
 	}
-	defer idpRegistry.Delete(p.ID) //nolint:errcheck
+	defer idpRegistry.Delete(p.ID) //nolint:errcheck // test teardown; cleanup errors are non-actionable
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/idp/%s", p.ID), nil)
+	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/idp/%s", p.ID), http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPItem(w, r, p.ID)
@@ -289,7 +289,7 @@ func TestAPIIdPItem_Delete_Exists(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/idp/%s", p.ID), nil)
+	r := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/idp/%s", p.ID), http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPItem(w, r, p.ID)
@@ -298,7 +298,7 @@ func TestAPIIdPItem_Delete_Exists(t *testing.T) {
 
 func TestAPIIdPItem_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPatch, "/api/idp/some-id", nil)
+	r := httptest.NewRequest(http.MethodPatch, "/api/idp/some-id", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPItem(w, r, "some-id")
@@ -309,7 +309,7 @@ func TestAPIIdPItem_WrongMethod(t *testing.T) {
 
 func TestAPIIdPGroups_Get_NotFound(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/idp/nonexistent/groups", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/idp/nonexistent/groups", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPGroups(w, r, "nonexistent")
@@ -318,7 +318,7 @@ func TestAPIIdPGroups_Get_NotFound(t *testing.T) {
 
 func TestAPIIdPGroups_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/idp/some-id/groups", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/idp/some-id/groups", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPGroups(w, r, "some-id")
@@ -336,10 +336,10 @@ func TestAPIIdPGroups_Get_Exists(t *testing.T) {
 	if err := idpRegistry.Upsert(p); err != nil {
 		t.Fatalf("Upsert failed: %v", err)
 	}
-	defer idpRegistry.Delete(p.ID) //nolint:errcheck
+	defer idpRegistry.Delete(p.ID) //nolint:errcheck // test teardown; cleanup errors are non-actionable
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/idp/%s/groups", p.ID), nil)
+	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/idp/%s/groups", p.ID), http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPGroups(w, r, p.ID)
@@ -358,10 +358,10 @@ func TestAPIIdPRouter_Groups(t *testing.T) {
 	if err := idpRegistry.Upsert(p); err != nil {
 		t.Fatalf("Upsert failed: %v", err)
 	}
-	defer idpRegistry.Delete(p.ID) //nolint:errcheck
+	defer idpRegistry.Delete(p.ID) //nolint:errcheck // test teardown; cleanup errors are non-actionable
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/idp/%s/groups", p.ID), nil)
+	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/idp/%s/groups", p.ID), http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	r.URL.Path = fmt.Sprintf("/api/idp/%s/groups", p.ID)
@@ -379,10 +379,10 @@ func TestAPIIdPRouter_Item(t *testing.T) {
 	if err := idpRegistry.Upsert(p); err != nil {
 		t.Fatalf("Upsert failed: %v", err)
 	}
-	defer idpRegistry.Delete(p.ID) //nolint:errcheck
+	defer idpRegistry.Delete(p.ID) //nolint:errcheck // test teardown; cleanup errors are non-actionable
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/idp/%s", p.ID), nil)
+	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/idp/%s", p.ID), http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	r.URL.Path = fmt.Sprintf("/api/idp/%s", p.ID)
@@ -394,7 +394,7 @@ func TestAPIIdPRouter_Item(t *testing.T) {
 
 func TestAPISecFeedsSync_FeedsNotEnabled(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/security-scan/feeds/sync", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/security-scan/feeds/sync", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSecFeedsSync(w, r)
@@ -403,7 +403,7 @@ func TestAPISecFeedsSync_FeedsNotEnabled(t *testing.T) {
 
 func TestAPISecFeedsSync_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/security-scan/feeds/sync", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/security-scan/feeds/sync", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSecFeedsSync(w, r)
@@ -418,7 +418,7 @@ func TestAPISecYARAReload_NoDirConfigured(t *testing.T) {
 	defer func() { globalYARA = old }()
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/security-scan/yara/reload", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/security-scan/yara/reload", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSecYARAReload(w, r)
@@ -427,7 +427,7 @@ func TestAPISecYARAReload_NoDirConfigured(t *testing.T) {
 
 func TestAPISecYARAReload_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/security-scan/yara/reload", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/security-scan/yara/reload", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSecYARAReload(w, r)
@@ -438,7 +438,7 @@ func TestAPISecYARAReload_WrongMethod(t *testing.T) {
 
 func TestAPIIdPDiscover_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/idp/discover", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/idp/discover", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPDiscover(w, r)
@@ -447,7 +447,7 @@ func TestAPIIdPDiscover_WrongMethod(t *testing.T) {
 
 func TestAPIIdPDiscover_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/idp/discover", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/idp/discover", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiIdPDiscover(w, r)

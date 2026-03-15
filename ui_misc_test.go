@@ -21,7 +21,7 @@ func TestAPIContentScan_Post_Add(t *testing.T) {
 
 func TestAPIContentScan_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/content-scan", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/content-scan", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiContentScan(w, r)
@@ -41,7 +41,7 @@ func TestAPIContentScan_Post_InvalidPattern(t *testing.T) {
 func TestAPIContentScan_Delete(t *testing.T) {
 	_ = dpiScanner.Add("delete-this-pattern")
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/content-scan?pattern=delete-this-pattern", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/content-scan?pattern=delete-this-pattern", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiContentScan(w, r)
@@ -50,7 +50,7 @@ func TestAPIContentScan_Delete(t *testing.T) {
 
 func TestAPIContentScan_Delete_MissingPattern(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/content-scan", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/content-scan", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiContentScan(w, r)
@@ -61,7 +61,7 @@ func TestAPIContentScan_Delete_MissingPattern(t *testing.T) {
 
 func TestAPISecScanStatus_Get(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/security-scan/status", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/security-scan/status", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSecScanStatus(w, r)
@@ -70,7 +70,7 @@ func TestAPISecScanStatus_Get(t *testing.T) {
 
 func TestAPISecScanStatus_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/security-scan/status", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/security-scan/status", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSecScanStatus(w, r)
@@ -102,7 +102,7 @@ func TestAPIBlocklistMode_Post_Invalid(t *testing.T) {
 
 func TestAPIBlocklistMode_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/blocklist/mode", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/blocklist/mode", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiBlocklistMode(w, r)
@@ -111,7 +111,7 @@ func TestAPIBlocklistMode_Post_BadJSON(t *testing.T) {
 
 func TestAPIBlocklistMode_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/blocklist/mode", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/blocklist/mode", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiBlocklistMode(w, r)
@@ -122,7 +122,7 @@ func TestAPIBlocklistMode_WrongMethod(t *testing.T) {
 
 func TestAPITimeseries_Get(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/timeseries", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/timeseries", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiTimeseries(w, r)
@@ -153,7 +153,7 @@ func TestAPISessionTimeout_Post_OutOfRange(t *testing.T) {
 
 func TestAPISessionTimeout_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/session-timeout", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/session-timeout", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSessionTimeout(w, r)
@@ -164,7 +164,7 @@ func TestAPISessionTimeout_Post_BadJSON(t *testing.T) {
 
 func TestAPILogs_Get(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/logs", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/logs", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiLogs(w, r)
@@ -173,7 +173,7 @@ func TestAPILogs_Get(t *testing.T) {
 
 func TestAPILogs_WithFilters(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/logs?filter=example.com&status=OK&level=INFO&method=GET", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/logs?filter=example.com&status=OK&level=INFO&method=GET", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiLogs(w, r)
@@ -184,7 +184,7 @@ func TestAPILogs_WithFilters(t *testing.T) {
 
 func TestAPIConfigExport_Get(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/config/export", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/config/export", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiConfigExport(w, r)
@@ -195,7 +195,7 @@ func TestAPIConfigExport_Get(t *testing.T) {
 
 func TestAPISyslogConfig_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/syslog", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/syslog", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSyslogConfig(w, r)
@@ -206,7 +206,7 @@ func TestAPISyslogConfig_Post_BadJSON(t *testing.T) {
 
 func TestAPIDefaultAction_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/default-action", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/default-action", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiDefaultAction(w, r)
@@ -215,7 +215,7 @@ func TestAPIDefaultAction_WrongMethod(t *testing.T) {
 
 func TestAPIDefaultAction_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/default-action", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/default-action", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiDefaultAction(w, r)
@@ -236,7 +236,7 @@ func TestAPIDefaultAction_Post_InvalidAction(t *testing.T) {
 
 func TestAPIAuthUsers_Get(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/auth/users", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiAuthUsers(w, r)
@@ -244,7 +244,7 @@ func TestAPIAuthUsers_Get(t *testing.T) {
 }
 
 func TestAPIAuthUsers_Post_Create(t *testing.T) {
-	defer cfg.DeleteUIUser("newuser-test") //nolint:errcheck
+	defer cfg.DeleteUIUser("newuser-test") //nolint:errcheck // test teardown; cleanup errors are non-actionable
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/auth/users", map[string]any{
 		"username": "newuser-test",
@@ -270,10 +270,9 @@ func TestAPIAuthUsers_Post_ShortPassword(t *testing.T) {
 
 func TestAPIAuthUsers_Post_BadJSON(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/users", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/users", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiAuthUsers(w, r)
 	assertStatus(t, w, http.StatusBadRequest)
 }
-

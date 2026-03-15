@@ -110,7 +110,6 @@ func TestSSLBypassMatcher_AddRemoveMatches(t *testing.T) {
 	}
 }
 
-
 func TestSSLBypassMatcher_CompileBypassPattern(t *testing.T) {
 	_, err := compileBypassPattern("*.valid.com")
 	if err != nil {

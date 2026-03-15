@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/csv"
 	"embed"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -21,7 +21,7 @@ import (
 //go:embed static
 var staticFiles embed.FS
 
-func startUI(port int, certFile, keyFile string, noTLS bool) {
+func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen // route registration; each line is one endpoint
 	sub, _ := fs.Sub(staticFiles, "static")
 
 	mux := http.NewServeMux()
@@ -46,25 +46,25 @@ func startUI(port int, certFile, keyFile string, noTLS bool) {
 	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)
 	mux.HandleFunc("/api/content-scan", apiContentScan)
 	mux.HandleFunc("/api/audit", apiAudit)
-	mux.HandleFunc("/api/events", apiEvents)           // SSE live dashboard
+	mux.HandleFunc("/api/events", apiEvents) // SSE live dashboard
 	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
-	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)   // GET/POST blocklist mode
-	mux.HandleFunc("/api/config/export", apiConfigExport)    // GET — download backup JSON
-	mux.HandleFunc("/api/config/import", apiConfigImport)    // POST — restore from backup JSON
-	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode)  // PUT — toggle proxy auth requirement
-	mux.HandleFunc("/api/session-timeout", apiSessionTimeout) // GET/POST session TTL (hours)
-	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)        // GET/POST UI access IP allowlist
-	mux.HandleFunc("/api/syslog", apiSyslogConfig)            // GET/POST syslog forwarding
+	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)    // GET/POST blocklist mode
+	mux.HandleFunc("/api/config/export", apiConfigExport)      // GET — download backup JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)      // POST — restore from backup JSON
+	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode) // PUT — toggle proxy auth requirement
+	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)  // GET/POST session TTL (hours)
+	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)         // GET/POST UI access IP allowlist
+	mux.HandleFunc("/api/syslog", apiSyslogConfig)             // GET/POST syslog forwarding
 
 	// ── Security scanning (ClamAV / YARA / Threat Feeds) ─────────────────
-	mux.HandleFunc("/api/security-scan/status", apiSecScanStatus)        // GET
-	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)     // POST — force immediate sync
-	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)   // POST — reload YARA rules from dir
+	mux.HandleFunc("/api/security-scan/status", apiSecScanStatus)      // GET
+	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)   // POST — force immediate sync
+	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload) // POST — reload YARA rules from dir
 
 	// ── URL Categories (dynamic host-list management) ─────────────────────
-	mux.HandleFunc("/api/urlcat", apiURLCat)           // GET/POST/PUT/DELETE categories
-	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)  // POST/DELETE individual hosts
+	mux.HandleFunc("/api/urlcat", apiURLCat)          // GET/POST/PUT/DELETE categories
+	mux.HandleFunc("/api/urlcat/host", apiURLCatHost) // POST/DELETE individual hosts
 
 	// ── Admin session auth ────────────────────────────────────────────────
 	mux.HandleFunc("/api/auth/login", apiAuthLogin)
@@ -78,7 +78,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) {
 	mux.HandleFunc("/api/idp/", apiIdPRouter)           // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
 
 	// ── PAC file ─────────────────────────────────────────────────────────
-	mux.HandleFunc("/proxy.pac", servePACFile)    // served on the UI port
+	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
 	mux.HandleFunc("/api/pac-config", apiPACConfig)
 
 	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
@@ -746,9 +746,9 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	all := logGet()
-	filterHost   := strings.ToLower(r.URL.Query().Get("filter"))
+	filterHost := strings.ToLower(r.URL.Query().Get("filter"))
 	filterStatus := strings.ToUpper(r.URL.Query().Get("status"))
-	filterLevel  := strings.ToUpper(r.URL.Query().Get("level"))
+	filterLevel := strings.ToUpper(r.URL.Query().Get("level"))
 	filterMethod := strings.ToUpper(r.URL.Query().Get("method"))
 
 	filtered := all[:0:0]
@@ -804,7 +804,7 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 			Hosts []string `json:"hosts"` // support bulk add
 			Host  string   `json:"host"`  // single add
 		}
-		if err := decodeJSON(r,&body); err != nil {
+		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -877,7 +877,7 @@ func apiBlocklistMode(w http.ResponseWriter, r *http.Request) {
 // ── URL Categories ─────────────────────────────────────────────────────────
 
 // GET/POST/PUT/DELETE /api/urlcat
-func apiURLCat(w http.ResponseWriter, r *http.Request) {
+func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen // CRUD handler: one branch per HTTP method is intentional
 	switch r.Method {
 	case http.MethodGet:
 		jsonOK(w, catStore.All())
@@ -1008,19 +1008,19 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 
 // configBackup is the portable JSON snapshot of all non-secret configuration.
 type configBackup struct {
-	Version              int               `json:"version"`
-	ExportedAt           string            `json:"exportedAt"`
-	BlocklistMode        string            `json:"blocklistMode"`
-	Blocklist            []string          `json:"blocklist"`
-	PolicyRules          []PolicyRule      `json:"policyRules"`
-	DefaultAction        string            `json:"defaultAction"`
-	RewriteRules         []RewriteRule     `json:"rewriteRules"`
-	SSLBypass            []string          `json:"sslBypass"`
-	ContentScanPatterns  []string          `json:"contentScanPatterns"`
-	FileBlockExtensions  []string          `json:"fileBlockExtensions"`
-	IPFilterMode         string            `json:"ipFilterMode"`
-	IPList               []string          `json:"ipList"`
-	RateLimitRPM         int               `json:"rateLimitRPM"`
+	Version             int           `json:"version"`
+	ExportedAt          string        `json:"exportedAt"`
+	BlocklistMode       string        `json:"blocklistMode"`
+	Blocklist           []string      `json:"blocklist"`
+	PolicyRules         []PolicyRule  `json:"policyRules"`
+	DefaultAction       string        `json:"defaultAction"`
+	RewriteRules        []RewriteRule `json:"rewriteRules"`
+	SSLBypass           []string      `json:"sslBypass"`
+	ContentScanPatterns []string      `json:"contentScanPatterns"`
+	FileBlockExtensions []string      `json:"fileBlockExtensions"`
+	IPFilterMode        string        `json:"ipFilterMode"`
+	IPList              []string      `json:"ipList"`
+	RateLimitRPM        int           `json:"rateLimitRPM"`
 }
 
 // GET /api/config/export — download a full configuration backup as JSON.
@@ -1162,7 +1162,8 @@ func apiSessionTimeout(w http.ResponseWriter, r *http.Request) {
 // GET/POST /api/ui-allow-ips — manage the admin panel IP access allowlist.
 // GET    → returns current list (empty = all IPs allowed).
 // POST   → {"ips": ["10.0.0.0/8", "192.168.1.5"]} — replaces the full list.
-//          Send empty array [] to remove all restrictions.
+//
+//	Send empty array [] to remove all restrictions.
 func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1198,7 +1199,8 @@ var syslogConfigured string // the addr string, empty = not configured
 // GET/POST /api/syslog — configure remote syslog/SIEM forwarding at runtime.
 // GET  → returns current syslog address (empty string = disabled).
 // POST → {"addr": "udp://10.0.0.1:514"} — reconnects immediately.
-//         Send addr="" to disable forwarding.
+//
+//	Send addr="" to disable forwarding.
 func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1263,7 +1265,7 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			RateLimitRPM int      `json:"rateLimitRPM"` // 0 = disable
 			IPList       []string `json:"ipList"`       // full replace
 		}
-		if err := decodeJSON(r,&body); err != nil {
+		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -1312,7 +1314,7 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 			User string `json:"user"`
 			Pass string `json:"pass"`
 		}
-		if err := decodeJSON(r,&body); err != nil {
+		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -1368,7 +1370,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var rule RewriteRule
-		if err := decodeJSON(r,&rule); err != nil {
+		if err := decodeJSON(r, &rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -1420,7 +1422,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var rule PolicyRule
-		if err := decodeJSON(r,&rule); err != nil {
+		if err := decodeJSON(r, &rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -1465,7 +1467,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var rule PolicyRule
-		if err := decodeJSON(r,&rule); err != nil {
+		if err := decodeJSON(r, &rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
@@ -1535,7 +1537,7 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Priorities []int `json:"priorities"`
 	}
-	if err := decodeJSON(r,&body); err != nil {
+	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -1755,9 +1757,9 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 // config.yaml (or -ssl-bypass-file flag). Changes take effect immediately
 // without a proxy restart.
 //
-//   GET    → {"patterns": [...], "count": N}
-//   POST   → {"pattern": "*.co.il"} or {"patterns": ["*.co.il","~^.*\.gov\.il$"]}
-//   DELETE → ?pattern=*.co.il
+//	GET    → {"patterns": [...], "count": N}
+//	POST   → {"pattern": "*.co.il"} or {"patterns": ["*.co.il","~^.*\.gov\.il$"]}
+//	DELETE → ?pattern=*.co.il
 func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1823,9 +1825,9 @@ func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
 // flowing through SSL Inspect tunnels.  Only text/* and application/json
 // responses are scanned; binary content is passed through unscanned.
 //
-//   GET    → {"patterns": [...], "count": N, "blocked_total": N}
-//   POST   → {"pattern": "evil-keyword"} or {"patterns": ["p1","p2"]}
-//   DELETE → ?pattern=evil-keyword
+//	GET    → {"patterns": [...], "count": N, "blocked_total": N}
+//	POST   → {"pattern": "evil-keyword"} or {"patterns": ["p1","p2"]}
+//	DELETE → ?pattern=evil-keyword
 func apiContentScan(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1905,7 +1907,7 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 			Extensions []string `json:"extensions"` // bulk add
 			Extension  string   `json:"extension"`  // single add
 		}
-		if err := decodeJSON(r,&body); err != nil {
+		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}

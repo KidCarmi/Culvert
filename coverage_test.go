@@ -46,7 +46,7 @@ func TestSSEHub_Broadcast(t *testing.T) {
 	h.unregister(ch)
 }
 
-func TestSSEHub_Broadcast_SlowClient(t *testing.T) {
+func TestSSEHub_Broadcast_SlowClient(_ *testing.T) {
 	// A full channel (no buffer space) should be skipped gracefully.
 	h := &sseHub{clients: make(map[chan []byte]struct{})}
 	ch := make(chan []byte) // unbuffered — will always be "full"
@@ -178,10 +178,9 @@ func TestScanBlockConn(t *testing.T) {
 	}
 }
 
-
 func TestServePACFile(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/proxy.pac", nil)
+	r := httptest.NewRequest(http.MethodGet, "/proxy.pac", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9000"
 	servePACFile(w, r)
 	if w.Code != http.StatusOK {
@@ -196,7 +195,7 @@ func TestServePACFile(t *testing.T) {
 
 func TestServePACFile_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/proxy.pac", nil)
+	r := httptest.NewRequest(http.MethodPost, "/proxy.pac", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9000"
 	servePACFile(w, r)
 	if w.Code != http.StatusMethodNotAllowed {
@@ -205,7 +204,6 @@ func TestServePACFile_WrongMethod(t *testing.T) {
 }
 
 // ─── proxy.go helpers ────────────────────────────────────────────────────────
-
 
 func TestRemoveHopHeaders(t *testing.T) {
 	h := http.Header{}
@@ -241,7 +239,7 @@ func TestCopyHeaders(t *testing.T) {
 }
 
 func TestScrubForwardedHeaders(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	// Private IPs should be stripped from X-Forwarded-For
 	r.Header.Set("X-Forwarded-For", "192.168.1.1, 8.8.8.8, 10.0.0.1")
 	r.Header.Set("X-Real-IP", "192.168.1.5") // private — should be removed
@@ -265,14 +263,13 @@ func TestScrubForwardedHeaders(t *testing.T) {
 }
 
 func TestScrubForwardedHeaders_AllPrivate(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	r.Header.Set("X-Forwarded-For", "192.168.1.1, 10.0.0.1")
 	scrubForwardedHeaders(r)
 	if r.Header.Get("X-Forwarded-For") != "" {
 		t.Error("X-Forwarded-For should be deleted when all IPs are private")
 	}
 }
-
 
 func TestDefaultPolicyAction(t *testing.T) {
 	// Should return one of "allow" or "deny"
@@ -290,7 +287,7 @@ func TestHandleMetrics_NoToken(t *testing.T) {
 	defer func() { metricsToken = old }()
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	r := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	handleMetrics(w, r)
 	if w.Code != http.StatusOK {
 		t.Errorf("handleMetrics status = %d, want 200", w.Code)
@@ -306,7 +303,7 @@ func TestHandleMetrics_WithToken_Authorized(t *testing.T) {
 	defer func() { metricsToken = old }()
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	r := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	r.Header.Set("Authorization", "Bearer secret123")
 	handleMetrics(w, r)
 	if w.Code != http.StatusOK {
@@ -320,7 +317,7 @@ func TestHandleMetrics_WithToken_Unauthorized(t *testing.T) {
 	defer func() { metricsToken = old }()
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	r := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	r.Header.Set("Authorization", "Bearer wrongtoken")
 	handleMetrics(w, r)
 	if w.Code != http.StatusUnauthorized {
@@ -334,10 +331,9 @@ func TestHandleMetrics_NoBearer(t *testing.T) {
 	defer func() { metricsToken = old }()
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	r := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	handleMetrics(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("handleMetrics with no token status = %d, want 401", w.Code)
 	}
 }
-

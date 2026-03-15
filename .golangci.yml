@@ -1,22 +1,25 @@
 # ProxyShield — golangci-lint configuration
 # Runs in CI (code-review.yml) and locally: golangci-lint run
 # Docs: https://golangci-lint.run/usage/configuration/
+version: "2"
 
 run:
   timeout: 5m
   go: "1.25"
 
+formatters:
+  enable:
+    - gofmt             # gofmt formatting
+    - goimports         # import ordering
+
 linters:
-  # Start from a minimal set and add explicitly — avoids surprise breakage
-  # when golangci-lint adds new linters in future versions.
   disable-all: true
   enable:
     # ── Bugs & correctness ──────────────────────────────────────────────────
     - errcheck          # unhandled errors
-    - gosimple          # simplifiable code (subset of staticcheck)
     - govet             # go vet misuse, printf format strings
     - ineffassign       # assignments whose result is never used
-    - staticcheck       # SA*, ST*, QF* checks
+    - staticcheck       # SA*, ST*, QF* checks (includes gosimple rules)
     - unused            # unused code
     - bodyclose         # response body not closed → goroutine leak
     - noctx             # http.NewRequest without context
@@ -27,8 +30,6 @@ linters:
     - gosec             # OWASP / CWE findings (mirrors security gate)
 
     # ── Style & maintainability ─────────────────────────────────────────────
-    - gofmt             # gofmt formatting
-    - goimports         # import ordering
     - misspell          # common English misspellings in comments/strings
     - unconvert         # unnecessary type conversions
     - unparam           # function parameters always receive the same value
@@ -46,55 +47,55 @@ linters:
     # ── Concurrency ─────────────────────────────────────────────────────────
     - tparallel         # tests don't call t.Parallel()
 
-linters-settings:
-  errcheck:
-    # Ignore errors on defer Close() — idiomatic Go.
-    exclude-functions:
-      - (io.ReadCloser).Close
-      - (*os.File).Close
-      - (net.Conn).Close
+  settings:
+    errcheck:
+      # Ignore errors on defer Close() — idiomatic Go.
+      exclude-functions:
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - (net.Conn).Close
 
-  gosec:
-    # Mirror ci.yml exclusions.
-    excludes:
-      - G104  # unhandled errors on stream copies
-      - G302  # log file permissions
-      - G304  # file path from variable (acceptable for blocklist loading)
-      - G401  # MD5/SHA1 misidentification
-      - G402  # TLSSkipVerify — config-guarded
-      - G704  # SSRF — forward proxy design
+    gosec:
+      # Mirror ci.yml exclusions.
+      excludes:
+        - G104  # unhandled errors on stream copies
+        - G302  # log file permissions
+        - G304  # file path from variable (acceptable for blocklist loading)
+        - G401  # MD5/SHA1 misidentification
+        - G402  # TLSSkipVerify — config-guarded
+        - G704  # SSRF — forward proxy design
 
-  cyclop:
-    max-complexity: 15
+    cyclop:
+      max-complexity: 15
 
-  funlen:
-    lines: 80
-    statements: 50
+    funlen:
+      lines: 80
+      statements: 50
 
-  gocognit:
-    min-complexity: 30
+    gocognit:
+      min-complexity: 30
 
-  nestif:
-    min-complexity: 5
+    nestif:
+      min-complexity: 5
 
-  dupl:
-    threshold: 150
+    dupl:
+      threshold: 150
 
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      - hugeParam   # proxy handles large structs intentionally
-      - paramTypeCombine
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - hugeParam   # proxy handles large structs intentionally
+        - paramTypeCombine
 
-  revive:
-    rules:
-      - name: exported
-        arguments:
-          - "checkPrivateReceivers"
-          - "sayRepetitiveInsteadOfStutters"
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - "checkPrivateReceivers"
+            - "sayRepetitiveInsteadOfStutters"
 
 issues:
   # Skip generated / vendored files.
@@ -111,6 +112,8 @@ issues:
         - funlen      # test functions can be long
         - dupl        # test cases often look similar
         - cyclop      # table-driven tests have high complexity
+        - errcheck    # defer Close() and cleanup errors in tests are non-critical
+        - unparam     # t *testing.T is required by Go even if not used in body
     # Allow TODO/FIXME in comments — tracked via issues.
     - linters: [godox]
       text: "TODO|FIXME"

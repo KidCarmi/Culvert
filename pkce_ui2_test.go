@@ -103,7 +103,7 @@ func TestPKCEStore_Set_Eviction(t *testing.T) {
 func TestAPISetupComplete_AlreadySetup(t *testing.T) {
 	// Set auth so AuthEnabled() = true
 	_ = cfg.SetAuth("setupuser", "setuppass123")
-	defer cfg.SetAuth("", "") //nolint:errcheck
+	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
@@ -119,7 +119,7 @@ func TestAPISetupComplete_BadJSON(t *testing.T) {
 	_ = cfg.SetAuth("", "")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/setup/complete", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/setup/complete", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiSetupComplete(w, r)
 	assertStatus(t, w, http.StatusBadRequest)
@@ -141,7 +141,7 @@ func TestAPISetupComplete_EmptyUser(t *testing.T) {
 
 func TestAPITopHosts_Default(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/top-hosts", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/top-hosts", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiTopHosts(w, r)
@@ -150,7 +150,7 @@ func TestAPITopHosts_Default(t *testing.T) {
 
 func TestAPITopHosts_WithN(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/top-hosts?n=5", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/top-hosts?n=5", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiTopHosts(w, r)
@@ -159,7 +159,7 @@ func TestAPITopHosts_WithN(t *testing.T) {
 
 func TestAPITopHosts_BadN(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/top-hosts?n=badvalue", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/top-hosts?n=badvalue", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiTopHosts(w, r)
@@ -170,7 +170,7 @@ func TestAPITopHosts_BadN(t *testing.T) {
 
 func TestAPISyslogConfig_WrongMethod(t *testing.T) {
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/syslog", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/api/syslog", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	r = adminCtx(r)
 	apiSyslogConfig(w, r)
