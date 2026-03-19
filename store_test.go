@@ -191,7 +191,7 @@ func TestAuditLog_NeverContainsCredentials(t *testing.T) {
 
 func TestRecordRequest_IncrementsTotal(t *testing.T) {
 	before := statTotal
-	recordRequest("1.1.1.1", "GET", "example.com", "OK", "", "")
+	recordRequest("1.1.1.1", "GET", "example.com", "OK", "", "", "")
 	if statTotal != before+1 {
 		t.Errorf("statTotal should have incremented by 1")
 	}
@@ -200,18 +200,18 @@ func TestRecordRequest_IncrementsTotal(t *testing.T) {
 // ── timeSeries ────────────────────────────────────────────────────────────────
 
 func TestTimeSeries_Get(t *testing.T) {
-	data := tsGet()
+	data, _, _ := tsGet()
 	if len(data) != 60 {
 		t.Errorf("tsGet() should return 60 buckets, got %d", len(data))
 	}
 }
 
 func TestTimeSeries_Record(t *testing.T) {
-	before := tsGet()
+	before, _, _ := tsGet()
 	// Record one request and verify the first bucket (most recent) increases.
 	// Give it a tiny sleep to ensure same minute bucket.
 	tsRecord()
-	after := tsGet()
+	after, _, _ := tsGet()
 	if after[0] < before[0] {
 		t.Error("most-recent bucket should be >= before after tsRecord()")
 	}
