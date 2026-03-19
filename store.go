@@ -33,15 +33,15 @@ var (
 type timeSeries struct {
 	mu      sync.Mutex
 	buckets [60]int64
+	allowed [60]int64
+	blocked [60]int64
 	cur     int
 	lastMin int64
 }
 
 var ts = &timeSeries{}
 
-func tsRecord() {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
+func tsAdvance() {
 	now := time.Now().Unix() / 60
 	if ts.lastMin == 0 {
 		ts.lastMin = now
@@ -54,20 +54,45 @@ func tsRecord() {
 		for i := int64(0); i < diff; i++ {
 			ts.cur = (ts.cur + 1) % 60
 			ts.buckets[ts.cur] = 0
+			ts.allowed[ts.cur] = 0
+			ts.blocked[ts.cur] = 0
 		}
 		ts.lastMin = now
 	}
+}
+
+func tsRecord() {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	tsAdvance()
 	ts.buckets[ts.cur]++
 }
 
-func tsGet() []int64 {
+func tsRecordResult(isAllowed bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	out := make([]int64, 60)
-	for i := 0; i < 60; i++ {
-		out[59-i] = ts.buckets[(ts.cur-i+60)%60]
+	tsAdvance()
+	ts.buckets[ts.cur]++
+	if isAllowed {
+		ts.allowed[ts.cur]++
+	} else {
+		ts.blocked[ts.cur]++
 	}
-	return out
+}
+
+func tsGet() (total, allowed, blocked []int64) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	total   = make([]int64, 60)
+	allowed = make([]int64, 60)
+	blocked = make([]int64, 60)
+	for i := 0; i < 60; i++ {
+		idx        := (ts.cur - i + 60) % 60
+		total[59-i]   = ts.buckets[idx]
+		allowed[59-i] = ts.allowed[idx]
+		blocked[59-i] = ts.blocked[idx]
+	}
+	return
 }
 
 // ─── Request log ──────────────────────────────────────────────────────────────
@@ -76,6 +101,7 @@ type LogEntry struct {
 	TS          int64  `json:"ts"`
 	Time        string `json:"time"`
 	IP          string `json:"ip"`
+	Identity    string `json:"identity,omitempty"` // authenticated username/email, empty if unauthenticated
 	Method      string `json:"method"`
 	Host        string `json:"host"`
 	Status      string `json:"status"`      // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
@@ -391,6 +417,50 @@ func (b *Blocklist) Count() int {
 	return len(b.exact) + len(b.wildcards)
 }
 
+// MergeFromLines adds all valid host entries from lines to the blocklist and
+// saves it. Existing entries are NOT removed — safe to call on a live blocklist.
+// Lines starting with '#' or empty are skipped.
+// Returns the number of newly-added entries.
+func (b *Blocklist) MergeFromLines(lines []string) int {
+	added := 0
+	b.mu.Lock()
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Strip scheme if someone accidentally includes it.
+		if i := strings.Index(line, "://"); i >= 0 {
+			line = line[i+3:]
+		}
+		// Strip path/query/port.
+		if i := strings.IndexAny(line, "/:?"); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.ToLower(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "*.") {
+			key := line[1:] // ".example.com"
+			if !b.wildcards[key] {
+				b.wildcards[key] = true
+				added++
+			}
+		} else {
+			if !b.exact[line] {
+				b.exact[line] = true
+				added++
+			}
+		}
+	}
+	b.mu.Unlock()
+	if added > 0 {
+		b.Save()
+	}
+	return added
+}
+
 // ─── Auth cache ───────────────────────────────────────────────────────────────
 //
 // bcrypt is intentionally slow (~100 ms). For a proxy that authenticates on
@@ -485,14 +555,17 @@ func (r UIRole) HasRole(min UIRole) bool {
 
 // uiAdminUser holds credentials and role for a single UI admin user.
 type uiAdminUser struct {
-	passHash []byte
-	role     UIRole
+	passHash    []byte
+	role        UIRole
+	totpSecret  string   // base32 TOTP secret; empty = TOTP not enrolled
+	backupCodes []string // bcrypt-hashed backup codes
 }
 
 // UIUserInfo is the public (no hash) view of a UI admin user.
 type UIUserInfo struct {
-	Username string `json:"username"`
-	Role     UIRole `json:"role"`
+	Username    string `json:"username"`
+	Role        UIRole `json:"role"`
+	TOTPEnabled bool   `json:"totpEnabled"`
 }
 
 // ─── Config (live-editable) ───────────────────────────────────────────────────
@@ -679,7 +752,7 @@ func (c *Config) ListUIUsers() []UIUserInfo {
 	defer c.mu.RUnlock()
 	out := make([]UIUserInfo, 0, len(c.uiUsers))
 	for name, u := range c.uiUsers {
-		out = append(out, UIUserInfo{Username: name, Role: u.role})
+		out = append(out, UIUserInfo{Username: name, Role: u.role, TOTPEnabled: u.totpSecret != ""})
 	}
 	return out
 }
@@ -694,9 +767,11 @@ func (c *Config) SetUIUsersFile(path string) {
 
 // uiUserRecord is the on-disk representation of a UI admin user.
 type uiUserRecord struct {
-	Username string `json:"username"`
-	PassHash string `json:"pass_hash"` // hex-encoded bcrypt hash
-	Role     UIRole `json:"role"`
+	Username    string   `json:"username"`
+	PassHash    string   `json:"pass_hash"`               // hex-encoded bcrypt hash
+	Role        UIRole   `json:"role"`
+	TOTPSecret  string   `json:"totp_secret,omitempty"`   // base32 TOTP secret
+	BackupCodes []string `json:"backup_codes,omitempty"`  // bcrypt-hashed one-time codes
 }
 
 // LoadUIUsersFile reads persisted UI users from disk and populates the roster.
@@ -729,7 +804,12 @@ func (c *Config) LoadUIUsersFile() error {
 		if err != nil {
 			continue
 		}
-		c.uiUsers[rec.Username] = &uiAdminUser{passHash: hash, role: rec.Role}
+		c.uiUsers[rec.Username] = &uiAdminUser{
+			passHash:    hash,
+			role:        rec.Role,
+			totpSecret:  rec.TOTPSecret,
+			backupCodes: rec.BackupCodes,
+		}
 		// Keep legacy single-user in sync with the first admin found.
 		if rec.Role == RoleAdmin && c.user == "" {
 			c.user = rec.Username
@@ -747,9 +827,11 @@ func (c *Config) SaveUIUsersFile() error {
 	records := make([]uiUserRecord, 0, len(c.uiUsers))
 	for name, u := range c.uiUsers {
 		records = append(records, uiUserRecord{
-			Username: name,
-			PassHash: hex.EncodeToString(u.passHash),
-			Role:     u.role,
+			Username:    name,
+			PassHash:    hex.EncodeToString(u.passHash),
+			Role:        u.role,
+			TOTPSecret:  u.totpSecret,
+			BackupCodes: u.backupCodes,
 		})
 	}
 	c.mu.RUnlock()
@@ -794,6 +876,70 @@ func (c *Config) VerifyUIUser(username, password string) (UIRole, bool) {
 	return "", false
 }
 
+// UserHasTOTP returns true if the user has TOTP enrolled.
+func (c *Config) UserHasTOTP(username string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if u, ok := c.uiUsers[username]; ok {
+		return u.totpSecret != ""
+	}
+	return false
+}
+
+// GetTOTPSecret returns the base32 TOTP secret for a user (empty if not enrolled).
+func (c *Config) GetTOTPSecret(username string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if u, ok := c.uiUsers[username]; ok {
+		return u.totpSecret
+	}
+	return ""
+}
+
+// SetTOTPSecret stores a TOTP secret and backup codes for a user.
+func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	u, ok := c.uiUsers[username]
+	if !ok {
+		return false
+	}
+	u.totpSecret = secret
+	u.backupCodes = backupCodes
+	return true
+}
+
+// ClearTOTP removes TOTP enrollment for a user.
+func (c *Config) ClearTOTP(username string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	u, ok := c.uiUsers[username]
+	if !ok {
+		return false
+	}
+	u.totpSecret = ""
+	u.backupCodes = nil
+	return true
+}
+
+// ConsumeBackupCode checks and consumes a backup code (one-time use).
+// Returns true if code was valid and has been removed.
+func (c *Config) ConsumeBackupCode(username, code string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	u, ok := c.uiUsers[username]
+	if !ok {
+		return false
+	}
+	for i, hashed := range u.backupCodes {
+		if bcrypt.CompareHashAndPassword([]byte(hashed), []byte(code)) == nil {
+			u.backupCodes = append(u.backupCodes[:i], u.backupCodes[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // ProviderEnabled returns true when an external auth provider (LDAP/OIDC) is set.
 func (c *Config) ProviderEnabled() bool {
 	c.mu.RLock()
@@ -833,9 +979,21 @@ func uptime() string {
 	return fmt.Sprintf("%dm %ds", m, s)
 }
 
-func recordRequest(ip, method, host, status, ruleMatched, actionTaken string) {
+func recordRequest(ip, method, host, status, ruleMatched, actionTaken, identity string) {
 	atomic.AddInt64(&statTotal, 1)
-	tsRecord()
+	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT" || status == "PAC_DOWNLOAD"
+	tsRecordResult(isAllowed)
+	// Fire webhook alerts for security events (async, non-blocking).
+	switch status {
+	case "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED":
+		go fireAlert("threat_detected", AlertPayload{
+			Actor: ip, Host: host, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
+		})
+	case "POLICY_BLOCK", "POLICY_DROP":
+		go fireAlert("policy_block", AlertPayload{
+			Actor: ip, Host: host, Detail: ruleMatched, Source: "policy",
+		})
+	}
 	if status == "OK" || status == "POLICY_ALLOW" {
 		topHosts.Record(host)
 	}
@@ -843,6 +1001,7 @@ func recordRequest(ip, method, host, status, ruleMatched, actionTaken string) {
 		TS:          time.Now().UnixMilli(),
 		Time:        time.Now().Format("15:04:05"),
 		IP:          ip,
+		Identity:    identity,
 		Method:      method,
 		Host:        host,
 		Status:      status,

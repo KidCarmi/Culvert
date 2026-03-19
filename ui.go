@@ -50,6 +50,8 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
 	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)    // GET/POST blocklist mode
+	mux.HandleFunc("/api/blocklist/feed", apiBlocklistFeed)    // GET/POST feed URL+interval
+	mux.HandleFunc("/api/blocklist/feed/sync", apiBlocklistFeedSync) // POST force-sync
 	mux.HandleFunc("/api/config/export", apiConfigExport)      // GET — download backup JSON
 	mux.HandleFunc("/api/config/import", apiConfigImport)      // POST — restore from backup JSON
 	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode) // PUT — toggle proxy auth requirement
@@ -77,6 +79,10 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
 	mux.HandleFunc("/api/idp/discover", apiIdPDiscover) // POST: run OIDC discovery (must be before /api/idp/)
 	mux.HandleFunc("/api/idp/", apiIdPRouter)           // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
+
+	// ── Alert webhooks ───────────────────────────────────────────────────
+	mux.HandleFunc("/api/alerts/webhooks", apiAlertsWebhooks)         // GET list / POST create
+	mux.HandleFunc("/api/alerts/webhooks/test", apiAlertsWebhookTest) // POST — test-fire
 
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
@@ -411,6 +417,8 @@ func clearUISessionCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/auth/login — validate admin credentials, set session cookie.
+// When TOTP is enrolled for the user, a first-pass response of {"totp_required":true}
+// is returned (HTTP 200, no cookie); the client must re-POST with the totp field set.
 func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -419,6 +427,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		User string `json:"user"`
 		Pass string `json:"pass"`
+		TOTP string `json:"totp"` // 6-digit code or backup code; empty on first step
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -427,6 +436,11 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	// Account lockout check — before any credential verification.
 	if locked, secs := loginLimiter.Check(body.User); locked {
 		auditEvent(r, "auth.lockout", body.User, fmt.Sprintf("blocked — %ds remaining", secs))
+		go fireAlert("auth_lockout", AlertPayload{
+			Actor:  body.User,
+			Detail: fmt.Sprintf("account locked for %ds", secs),
+			Source: "auth",
+		})
 		http.Error(w, LockoutMsg(secs), http.StatusTooManyRequests)
 		return
 	}
@@ -436,6 +450,26 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 		role, ok = RoleAdmin, true
 	}
 	if ok {
+		// Credentials valid — check TOTP if enrolled.
+		if cfg.UserHasTOTP(body.User) {
+			if body.TOTP == "" {
+				// First step: tell the client TOTP is required (no session yet).
+				jsonOK(w, map[string]any{"totp_required": true})
+				return
+			}
+			secret := cfg.GetTOTPSecret(body.User)
+			if !verifyTOTP(secret, body.TOTP) {
+				// Try backup codes.
+				if !cfg.ConsumeBackupCode(body.User, body.TOTP) {
+					cfg.SaveUIUsersFile() //nolint:errcheck — best-effort persist
+					time.Sleep(300 * time.Millisecond)
+					http.Error(w, "Invalid TOTP code", http.StatusUnauthorized)
+					return
+				}
+				// Backup code consumed — persist removal.
+				cfg.SaveUIUsersFile() //nolint:errcheck
+			}
+		}
 		loginLimiter.RecordSuccess(body.User)
 		if err := setUISessionCookie(w, r, body.User, role); err != nil {
 			http.Error(w, "session error", http.StatusInternalServerError)
@@ -738,7 +772,8 @@ func apiTimeseries(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, map[string]any{"data": tsGet()})
+	total, allowed, blocked := tsGet()
+	jsonOK(w, map[string]any{"data": total, "allowed": allowed, "blocked": blocked})
 }
 
 // GET /api/logs?filter=...&status=...&level=...&method=...
@@ -751,6 +786,7 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 	filterStatus := strings.ToUpper(r.URL.Query().Get("status"))
 	filterLevel := strings.ToUpper(r.URL.Query().Get("level"))
 	filterMethod := strings.ToUpper(r.URL.Query().Get("method"))
+	filterIdentity := strings.ToLower(r.URL.Query().Get("identity"))
 
 	filtered := all[:0:0]
 	for _, e := range all {
@@ -765,6 +801,9 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if filterMethod != "" && e.Method != filterMethod {
+			continue
+		}
+		if filterIdentity != "" && !strings.Contains(strings.ToLower(e.Identity), filterIdentity) {
 			continue
 		}
 		filtered = append(filtered, e)
@@ -873,6 +912,173 @@ func apiBlocklistMode(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// ── Blocklist Feed ─────────────────────────────────────────────────────────
+
+// GET  /api/blocklist/feed  → current feed config + status
+// POST /api/blocklist/feed  → update feed URL and interval
+func apiBlocklistFeed(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		url, lastSync, count, interval := blFeedSyncer.Stats()
+		lastSyncStr := ""
+		if !lastSync.IsZero() {
+			lastSyncStr = lastSync.UTC().Format(time.RFC3339)
+		}
+		jsonOK(w, map[string]any{
+			"url":            url,
+			"interval":       interval.String(),
+			"last_sync":      lastSyncStr,
+			"imported_count": count,
+		})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			URL      string `json:"url"`
+			Interval string `json:"interval"` // e.g. "24h"
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		interval := blFeedDefaultInterval
+		if body.Interval != "" {
+			if d, err := time.ParseDuration(body.Interval); err == nil && d > 0 {
+				interval = d
+			}
+		}
+		blFeedSyncer.SetFeed(body.URL, interval)
+		auditEvent(r, "blocklist.feed.set", body.URL, "")
+		jsonOK(w, map[string]any{"ok": true, "url": body.URL, "interval": interval.String()})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST /api/blocklist/feed/sync → trigger immediate sync
+func apiBlocklistFeedSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	go blFeedSyncer.Sync()
+	auditEvent(r, "blocklist.feed.sync", "", "")
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// ── Alert Webhooks ─────────────────────────────────────────────────────────
+
+// GET  /api/alerts/webhooks      → list webhooks (secrets redacted)
+// POST /api/alerts/webhooks      → create webhook
+// PUT  /api/alerts/webhooks?id=X → update webhook
+// DELETE /api/alerts/webhooks?id=X → delete webhook
+func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{"webhooks": globalAlertStore.List()})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var h AlertWebhook
+		if err := decodeJSON(r, &h); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if h.URL == "" {
+			http.Error(w, "url required", http.StatusBadRequest)
+			return
+		}
+		h.Enabled = true
+		created := globalAlertStore.Add(h)
+		auditEvent(r, "alert.webhook.create", created.ID, h.URL)
+		jsonOK(w, created)
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "id required", http.StatusBadRequest)
+			return
+		}
+		var h AlertWebhook
+		if err := decodeJSON(r, &h); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if !globalAlertStore.Update(id, h) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "alert.webhook.update", id, "")
+		jsonOK(w, map[string]any{"ok": true})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "id required", http.StatusBadRequest)
+			return
+		}
+		if !globalAlertStore.Delete(id) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "alert.webhook.delete", id, "")
+		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST /api/alerts/webhooks/test?id=X → fire a test payload to the webhook
+func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	h, ok := globalAlertStore.GetByID(id)
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	go deliverWebhook(h, AlertPayload{
+		Event:     "test",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Actor:     "proxyshield",
+		Host:      "test",
+		Detail:    "This is a test alert from ProxyShield",
+		Source:    "test",
+	})
+	jsonOK(w, map[string]any{"ok": true})
 }
 
 // ── URL Categories ─────────────────────────────────────────────────────────

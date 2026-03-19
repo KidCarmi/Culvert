@@ -67,7 +67,7 @@ func startSSEBroadcaster() {
 			if hub.ClientCount() == 0 {
 				continue
 			}
-			series := tsGet()
+			series, _, _ := tsGet()
 			var sum int64
 			for _, v := range series {
 				sum += v

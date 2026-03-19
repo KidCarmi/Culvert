@@ -353,6 +353,9 @@ tr.dragging  { opacity: .4; }
 
     <!-- ── DASHBOARD ─────────────────────────────────────────────────────── -->
     <div class="view active" id="view-dashboard">
+      <!-- CA cert expiry warning — hidden until JS populates it -->
+      <div id="ca-expiry-banner" style="display:none;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:.85rem;font-weight:500"></div>
+
       <div class="cards">
         <div class="card c-blue">
           <div class="card-label">📥 Total Requests</div>
@@ -434,7 +437,7 @@ tr.dragging  { opacity: .4; }
           <div class="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
+                <tr><th>Time</th><th>IP</th><th>User</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
               </thead>
               <tbody id="dash-log"></tbody>
             </table>
@@ -447,6 +450,7 @@ tr.dragging  { opacity: .4; }
     <div class="view" id="view-livefeed">
       <div class="filter-bar">
         <input type="text" class="input wide" id="log-filter" placeholder="Filter by host or IP…" oninput="applyLogFilter()">
+        <input type="text" class="input" style="width:160px" id="log-identity" placeholder="Filter by user…" oninput="applyLogFilter()">
         <select class="select" id="log-status" onchange="applyLogFilter()">
           <option value="">All statuses</option>
           <option value="OK">OK</option>
@@ -486,7 +490,7 @@ tr.dragging  { opacity: .4; }
         <div class="tbl-wrap" style="max-height:60vh;overflow-y:auto" id="log-scroll">
           <table>
             <thead>
-              <tr><th>Time</th><th>IP</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
+              <tr><th>Time</th><th>IP</th><th>User</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
             </thead>
             <tbody id="live-log"></tbody>
           </table>
@@ -1197,6 +1201,55 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Blocklist Feed panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Blocklist Feed Auto-Sync</span>
+        </div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Automatically import domains from a remote blocklist feed (one domain per line, # comments allowed).<br>
+            New entries are merged — manually-added entries are never removed.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;margin-bottom:10px">
+            <input type="text" class="input wide" id="s-bl-feed-url" placeholder="https://example.com/blocklist.txt">
+            <select class="select" id="s-bl-feed-interval">
+              <option value="">Never</option>
+              <option value="12h">Every 12h</option>
+              <option value="24h" selected>Every 24h</option>
+              <option value="48h">Every 48h</option>
+              <option value="168h">Every 7d</option>
+            </select>
+            <div style="display:flex;gap:6px">
+              <button class="btn" onclick="saveBlocklistFeed()">Save</button>
+              <button class="btn ghost" onclick="syncBlocklistFeed()">Sync Now</button>
+            </div>
+          </div>
+          <div id="s-bl-feed-status" style="font-size:.8rem;color:var(--muted)"></div>
+        </div>
+      </div>
+
+      <!-- Alert Webhooks panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Alert Webhooks</span>
+          <button class="btn sm" onclick="openAddWebhookModal()">+ Add Webhook</button>
+        </div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Receive real-time push notifications when threats are detected, policies block traffic, or auth lockouts occur.<br>
+            Supports any HTTP endpoint (Slack, Teams, PagerDuty, custom).
+          </p>
+          <div id="webhook-list-empty" style="font-size:.85rem;color:var(--muted);display:none">No webhooks configured yet.</div>
+          <div class="tbl-wrap">
+            <table id="webhook-table" style="display:none">
+              <thead><tr><th>Name</th><th>URL</th><th>Events</th><th>Status</th><th style="width:120px">Actions</th></tr></thead>
+              <tbody id="webhook-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
     </div>
     </div><!-- /view-settings -->
 
@@ -1759,22 +1812,47 @@ function initChart() {
     type: 'line',
     data: {
       labels: Array.from({length:60}, (_,i) => i === 59 ? 'now' : `-${59-i}m`),
-      datasets: [{
-        data: new Array(60).fill(0),
-        borderColor: '#3b82f6',
-        backgroundColor: 'rgba(59,130,246,.08)',
-        fill: true,
-        tension: .4,
-        pointRadius: 0,
-        borderWidth: 2,
-      }]
+      datasets: [
+        {
+          label: 'Total',
+          data: new Array(60).fill(0),
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,.06)',
+          fill: true,
+          tension: .4,
+          pointRadius: 0,
+          borderWidth: 2,
+        },
+        {
+          label: 'Allowed',
+          data: new Array(60).fill(0),
+          borderColor: '#22c55e',
+          backgroundColor: 'rgba(34,197,94,.06)',
+          fill: false,
+          tension: .4,
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [],
+        },
+        {
+          label: 'Blocked',
+          data: new Array(60).fill(0),
+          borderColor: '#ef4444',
+          backgroundColor: 'rgba(239,68,68,.06)',
+          fill: false,
+          tension: .4,
+          pointRadius: 0,
+          borderWidth: 1.5,
+        },
+      ]
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       animation: false,
-      plugins: { legend: { display: false }, tooltip: {
-        callbacks: { label: c => c.parsed.y + ' req/min' }
-      }},
+      plugins: {
+        legend: { display: true, position: 'top', labels: { color: '#64748b', font:{size:10}, boxWidth: 10 } },
+        tooltip: { callbacks: { label: c => c.dataset.label + ': ' + c.parsed.y + ' req/min' } }
+      },
       scales: {
         x: { grid: { color: '#1f2d45' }, ticks: { color: '#64748b', maxTicksLimit: 10, font:{size:10} } },
         y: { grid: { color: '#1f2d45' }, ticks: { color: '#64748b', font:{size:10} },
@@ -1784,9 +1862,14 @@ function initChart() {
   });
 }
 
-function updateChart(data) {
+function updateChart(payload) {
   if (!chart) return;
+  const data    = Array.isArray(payload) ? payload : (payload.data    || []);
+  const allowed = Array.isArray(payload) ? []       : (payload.allowed || []);
+  const blocked = Array.isArray(payload) ? []       : (payload.blocked || []);
   chart.data.datasets[0].data = data;
+  chart.data.datasets[1].data = allowed;
+  chart.data.datasets[2].data = blocked;
   chart.update('none');
 }
 
@@ -2275,6 +2358,26 @@ async function fetchStats() {
     if (s.blocked > 0) { nb.textContent = fmt(s.blocked); nb.style.display = ''; }
     updateBreakdownChart(s.allowed, s.blocked, s.authFail);
   } catch(e) {}
+  // CA cert expiry check
+  checkCACertExpiry();
+}
+
+async function checkCACertExpiry() {
+  try {
+    const info = await fetch('/api/ca-cert', { headers: { 'Accept': 'application/json' } })
+      .then(r => r.json());
+    const banner = document.getElementById('ca-expiry-banner');
+    if (!info || !info.notAfter) { banner.style.display = 'none'; return; }
+    const expiry = new Date(info.notAfter);
+    const days   = Math.floor((expiry - Date.now()) / 86400000);
+    if (days > 30) { banner.style.display = 'none'; return; }
+    const isCritical = days <= 7;
+    banner.style.background = isCritical ? 'rgba(220,53,69,.15)' : 'rgba(255,193,7,.15)';
+    banner.style.border      = `1px solid ${isCritical ? 'rgba(220,53,69,.4)' : 'rgba(255,193,7,.4)'}`;
+    banner.style.color       = isCritical ? '#e74c3c' : '#b8860b';
+    banner.textContent       = `⚠ CA certificate expires in ${days} day${days===1?'':'s'} (${info.notAfter}) — renew via the Certificates page`;
+    banner.style.display     = 'block';
+  } catch(e) {}
 }
 
 async function fetchTopHosts() {
@@ -2301,7 +2404,7 @@ async function fetchTopHosts() {
 async function fetchTimeseries() {
   try {
     const d = await api('/api/timeseries');
-    updateChart(d.data);
+    updateChart(d);
   } catch(e) {}
 }
 
@@ -2316,7 +2419,7 @@ function fmt(n) {
 // ═══════════════════════════════════════════════════════════════════════════
 let polRules = [];
 let polEditPriority = null; // null = adding new rule
-let logFilter = '', logStatusFilter = '', logLevelFilter = '', logMethodFilter = '';
+let logFilter = '', logStatusFilter = '', logLevelFilter = '', logMethodFilter = '', logIdentityFilter = '';
 
 function badgeHTML(status) {
   if (status === 'OK')       return '<span class="badge ok">OK</span>';
@@ -2332,9 +2435,13 @@ function levelBadge(level) {
 }
 
 function rowHTML(e) {
+  const identityCell = e.identity
+    ? `<td style="font-size:.75rem;color:var(--accent);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.identity)}">${escHtml(e.identity)}</td>`
+    : `<td style="color:var(--muted);font-size:.75rem">—</td>`;
   return `<tr>
     <td style="color:var(--muted)">${e.time}</td>
     <td style="font-family:monospace">${e.ip}</td>
+    ${identityCell}
     <td><code style="font-size:.78rem">${e.method}</code></td>
     <td style="font-family:monospace;font-size:.8rem">${e.host}</td>
     <td>${badgeHTML(e.status)}</td>
@@ -2346,10 +2453,11 @@ async function fetchLogs() {
   try {
     let url = '/api/logs';
     const params = [];
-    if (logFilter)       params.push('filter=' + encodeURIComponent(logFilter));
-    if (logStatusFilter) params.push('status=' + logStatusFilter);
-    if (logLevelFilter)  params.push('level='  + logLevelFilter);
-    if (logMethodFilter) params.push('method=' + logMethodFilter);
+    if (logFilter)         params.push('filter='   + encodeURIComponent(logFilter));
+    if (logIdentityFilter) params.push('identity=' + encodeURIComponent(logIdentityFilter));
+    if (logStatusFilter)   params.push('status='   + logStatusFilter);
+    if (logLevelFilter)    params.push('level='    + logLevelFilter);
+    if (logMethodFilter)   params.push('method='   + logMethodFilter);
     if (params.length) url += '?' + params.join('&');
     const d = await api(url);
     logEntries = d.logs || [];
@@ -2361,8 +2469,8 @@ function renderLogs() {
   const tbody = document.getElementById('live-log');
   const dash  = document.getElementById('dash-log');
   if (logEntries.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
-    dash.innerHTML  = '<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
+    dash.innerHTML  = '<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
   } else {
     tbody.innerHTML = logEntries.map(rowHTML).join('');
     dash.innerHTML  = logEntries.slice(0,10).map(rowHTML).join('');
@@ -2373,19 +2481,21 @@ function renderLogs() {
 }
 
 function applyLogFilter() {
-  logFilter       = document.getElementById('log-filter').value;
-  logStatusFilter = document.getElementById('log-status').value;
-  logLevelFilter  = document.getElementById('log-level').value;
-  logMethodFilter = document.getElementById('log-method').value;
+  logFilter         = document.getElementById('log-filter').value;
+  logIdentityFilter = document.getElementById('log-identity').value;
+  logStatusFilter   = document.getElementById('log-status').value;
+  logLevelFilter    = document.getElementById('log-level').value;
+  logMethodFilter   = document.getElementById('log-method').value;
   fetchLogs();
 }
 
 function clearFilter() {
-  document.getElementById('log-filter').value = '';
-  document.getElementById('log-status').value = '';
-  document.getElementById('log-level').value  = '';
-  document.getElementById('log-method').value = '';
-  logFilter = ''; logStatusFilter = ''; logLevelFilter = ''; logMethodFilter = '';
+  document.getElementById('log-filter').value   = '';
+  document.getElementById('log-identity').value = '';
+  document.getElementById('log-status').value   = '';
+  document.getElementById('log-level').value    = '';
+  document.getElementById('log-method').value   = '';
+  logFilter = ''; logIdentityFilter = ''; logStatusFilter = ''; logLevelFilter = ''; logMethodFilter = '';
   fetchLogs();
 }
 
@@ -2976,6 +3086,10 @@ async function loadSettings() {
     _uiAllowIPList = ip.ips || [];
     renderUIAllowIPList();
   } catch(e) {}
+  // Blocklist feed
+  fetchBlocklistFeed();
+  // Alert webhooks
+  loadWebhooks();
 }
 
 // ── Session Timeout ───────────────────────────────────────────────────────
@@ -3067,6 +3181,136 @@ async function disableSyslog() {
     el.textContent = 'Syslog disabled';
     el.style.color = 'var(--muted)';
     toast('Syslog disabled', 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Alert Webhooks ──────────────────────────────────────────────────────────
+let _webhookEditID = null;
+
+async function loadWebhooks() {
+  try {
+    const d = await api('/api/alerts/webhooks');
+    const hooks = d.webhooks || [];
+    const tbody = document.getElementById('webhook-tbody');
+    const tbl   = document.getElementById('webhook-table');
+    const empty = document.getElementById('webhook-list-empty');
+    if (!hooks.length) { tbl.style.display='none'; empty.style.display=''; return; }
+    tbl.style.display=''; empty.style.display='none';
+    tbody.innerHTML = hooks.map(h => `<tr>
+      <td style="font-weight:500">${escHtml(h.name||'—')}</td>
+      <td style="font-family:monospace;font-size:.78rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(h.url)}">${escHtml(h.url)}</td>
+      <td style="font-size:.78rem">${(h.events||[]).join(', ')}</td>
+      <td><span style="font-size:.75rem;padding:2px 8px;border-radius:10px;background:${h.enabled?'rgba(34,197,94,.15)':'rgba(100,116,139,.15)'};color:${h.enabled?'var(--green)':'var(--muted)'}">${h.enabled?'Active':'Disabled'}</span></td>
+      <td style="display:flex;gap:6px">
+        <button class="btn ghost sm" onclick="testWebhook('${h.id}')">Test</button>
+        <button class="btn ghost sm" onclick="editWebhook('${h.id}')">Edit</button>
+        <button class="btn danger sm" onclick="deleteWebhook('${h.id}')">Del</button>
+      </td>
+    </tr>`).join('');
+  } catch(e) {}
+}
+
+function openAddWebhookModal() {
+  _webhookEditID = null;
+  document.getElementById('webhook-modal-title').textContent = 'Add Webhook';
+  document.getElementById('wh-name').value = '';
+  document.getElementById('wh-url').value = '';
+  document.getElementById('wh-secret').value = '';
+  document.getElementById('wh-enabled').checked = true;
+  document.querySelectorAll('.wh-event').forEach(cb => cb.checked = false);
+  document.getElementById('webhook-modal').style.display = 'flex';
+}
+
+function editWebhook(id) {
+  api('/api/alerts/webhooks').then(d => {
+    const h = (d.webhooks||[]).find(x=>x.id===id);
+    if (!h) return;
+    _webhookEditID = id;
+    document.getElementById('webhook-modal-title').textContent = 'Edit Webhook';
+    document.getElementById('wh-name').value = h.name||'';
+    document.getElementById('wh-url').value = h.url||'';
+    document.getElementById('wh-secret').value = '';
+    document.getElementById('wh-enabled').checked = !!h.enabled;
+    document.querySelectorAll('.wh-event').forEach(cb => { cb.checked = (h.events||[]).includes(cb.value); });
+    document.getElementById('webhook-modal').style.display = 'flex';
+  }).catch(()=>{});
+}
+
+function closeWebhookModal() {
+  document.getElementById('webhook-modal').style.display = 'none';
+}
+
+async function saveWebhook() {
+  const events = [...document.querySelectorAll('.wh-event:checked')].map(cb=>cb.value);
+  const body = {
+    name:    document.getElementById('wh-name').value.trim(),
+    url:     document.getElementById('wh-url').value.trim(),
+    secret:  document.getElementById('wh-secret').value,
+    enabled: document.getElementById('wh-enabled').checked,
+    events,
+  };
+  if (!body.url) { toast('URL required', 'error'); return; }
+  try {
+    if (_webhookEditID) {
+      await api('/api/alerts/webhooks?id=' + _webhookEditID, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    } else {
+      await api('/api/alerts/webhooks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    }
+    toast('Webhook saved', 'success');
+    closeWebhookModal();
+    loadWebhooks();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteWebhook(id) {
+  if (!confirm('Delete this webhook?')) return;
+  try {
+    await api('/api/alerts/webhooks?id=' + id, {method:'DELETE'});
+    toast('Webhook deleted', 'success');
+    loadWebhooks();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function testWebhook(id) {
+  try {
+    await api('/api/alerts/webhooks/test?id=' + id, {method:'POST'});
+    toast('Test payload sent', 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function fetchBlocklistFeed() {
+  try {
+    const d = await api('/api/blocklist/feed');
+    document.getElementById('s-bl-feed-url').value = d.url || '';
+    const sel = document.getElementById('s-bl-feed-interval');
+    sel.value = d.interval && d.interval !== '0s' ? d.interval : '';
+    const st = document.getElementById('s-bl-feed-status');
+    if (d.last_sync) {
+      st.textContent = `Last synced: ${new Date(d.last_sync).toLocaleString()} — ${d.imported_count} entries imported`;
+    } else {
+      st.textContent = d.url ? 'Not yet synced' : 'No feed configured';
+    }
+  } catch(e) {}
+}
+
+async function saveBlocklistFeed() {
+  const url      = document.getElementById('s-bl-feed-url').value.trim();
+  const interval = document.getElementById('s-bl-feed-interval').value;
+  try {
+    await api('/api/blocklist/feed', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({url, interval})
+    });
+    toast('Blocklist feed saved', 'success');
+    fetchBlocklistFeed();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function syncBlocklistFeed() {
+  try {
+    await api('/api/blocklist/feed/sync', {method: 'POST'});
+    toast('Feed sync triggered', 'success');
+    setTimeout(fetchBlocklistFeed, 2000);
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -4366,6 +4610,43 @@ function prettyJSON(str) {
 </div>
 
 <!-- ── User Modal ──────────────────────────────────────────────────────── -->
+<!-- Webhook modal -->
+<div id="webhook-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
+  <div class="setup-card" style="width:440px;max-width:96vw">
+    <h2 id="webhook-modal-title" style="font-size:1.1rem;margin-bottom:14px">Add Webhook</h2>
+    <div class="form-group">
+      <label class="form-label">Name</label>
+      <input type="text" class="input wide" id="wh-name" placeholder="e.g. Slack Security">
+    </div>
+    <div class="form-group">
+      <label class="form-label">URL</label>
+      <input type="url" class="input wide" id="wh-url" placeholder="https://hooks.slack.com/...">
+    </div>
+    <div class="form-group">
+      <label class="form-label">HMAC Secret (optional)</label>
+      <input type="text" class="input wide" id="wh-secret" placeholder="Leave blank for no signing">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Events</label>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px">
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_detected"> Threat detected</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="policy_block"> Policy block</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="auth_lockout"> Auth lockout</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cert_expiry"> Cert expiry</label>
+      </div>
+    </div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:8px;font-size:.84rem;cursor:pointer">
+        <input type="checkbox" id="wh-enabled" checked> Enabled
+      </label>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+      <button class="btn ghost" onclick="closeWebhookModal()">Cancel</button>
+      <button class="btn" onclick="saveWebhook()">Save</button>
+    </div>
+  </div>
+</div>
+
 <div id="user-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
   <div class="setup-card" style="width:360px;max-width:94vw">
     <h2 id="user-modal-title" style="font-size:1.15rem;margin-bottom:4px">Add User</h2>

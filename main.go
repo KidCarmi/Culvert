@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -22,6 +23,9 @@ import (
 const caPassphraseEnv = "PROXYSHIELD_CA_PASSPHRASE" // #nosec G101 -- env-var name, not a credential
 
 var logger *log.Logger
+
+// blFeedSyncer is the process-wide blocklist feed syncer, set in main().
+var blFeedSyncer *BlocklistSyncer
 
 func main() {
 	// ── CLI flags ────────────────────────────────────────────────────────────
@@ -300,6 +304,22 @@ func main() {
 		}
 	}
 
+	// ── Blocklist feed sync ───────────────────────────────────────────────────
+	blFeedURL := fc.Proxy.BlocklistFeedURL
+	if blFeedURL != "" {
+		blFeedInterval := blFeedDefaultInterval
+		if s := fc.Proxy.BlocklistFeedInterval; s != "" {
+			if d, err := time.ParseDuration(s); err == nil && d > 0 {
+				blFeedInterval = d
+			}
+		}
+		blFeedSyncer = newBlocklistSyncer(bl, blFeedURL, blFeedInterval)
+		blFeedSyncer.Start(context.Background())
+		logger.Printf("BlocklistFeed → syncing from %s every %s", blFeedURL, blFeedInterval)
+	} else {
+		blFeedSyncer = newBlocklistSyncer(bl, "", blFeedDefaultInterval)
+	}
+
 	// ── Root CA for SSL inspection ────────────────────────────────────────────
 	// Passphrase is read from env so it never appears in CLI history or
 	// process listings (shift-left secret hygiene).
@@ -574,10 +594,48 @@ func main() {
 	logger.Println("Stopped.")
 }
 
-// handleHealth is a simple liveness probe.
+// handleHealth returns liveness + readiness details for monitoring tools.
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"ok","uptime":"%s","version":"1.0.0"}`, uptime())
+
+	// CA cert expiry
+	caExpiresDays := -1
+	if info := certMgr.CACertInfo(); info["ready"] == true {
+		if notAfterStr, ok := info["notAfter"].(string); ok {
+			if t, err := time.Parse("2006-01-02", notAfterStr); err == nil {
+				caExpiresDays = int(time.Until(t).Hours() / 24)
+			}
+		}
+	}
+
+	// Threat feed entry count
+	tfEntries, _, _ := globalThreatFeed.Stats()
+
+	// ClamAV connectivity
+	clamStatus := "disabled"
+	if globalSecScanner != nil {
+		clamStatus = globalSecScanner.ClamAVStatus()
+	}
+
+	type healthResponse struct {
+		Status            string `json:"status"`
+		Uptime            string `json:"uptime"`
+		Version           string `json:"version"`
+		ClamAV            string `json:"clamav"`
+		CAExpiresDays     int    `json:"ca_expires_days"`
+		ThreatFeedEntries int64  `json:"threat_feed_entries"`
+	}
+	resp := healthResponse{
+		Status:            "ok",
+		Uptime:            uptime(),
+		Version:           "1.0.0",
+		ClamAV:            clamStatus,
+		CAExpiresDays:     caExpiresDays,
+		ThreatFeedEntries: tfEntries,
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Printf("handleHealth encode: %v", err)
+	}
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

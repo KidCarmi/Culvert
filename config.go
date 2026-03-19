@@ -29,6 +29,8 @@ type FileConfig struct {
 		IdPProfilesFile     string   `yaml:"idp_profiles_file"`     // JSON file for generic IdP profiles
 		URLCategoriesFile   string   `yaml:"url_categories_file"`   // JSON file for dynamic URL categories (host lists per category)
 		BaseURL             string   `yaml:"base_url"`              // External base URL for OIDC/SAML callbacks (e.g. "https://proxy.corp.com:9090")
+		BlocklistFeedURL      string   `yaml:"blocklist_feed_url"`      // URL to auto-sync blocklist from (one domain per line)
+		BlocklistFeedInterval string   `yaml:"blocklist_feed_interval"` // sync interval (e.g. "24h"); default 24h
 	} `yaml:"proxy"`
 	Auth struct {
 		User string `yaml:"user"`
