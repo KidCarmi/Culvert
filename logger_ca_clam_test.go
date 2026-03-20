@@ -402,7 +402,7 @@ func TestTsRecord_CallsSucceed(t *testing.T) {
 	// Just call tsRecord a few times — it manipulates global ts struct
 	tsRecord()
 	tsRecord()
-	out := tsGet()
+	out, _, _ := tsGet()
 	if len(out) != 60 {
 		t.Errorf("tsGet should return 60 buckets, got %d", len(out))
 	}

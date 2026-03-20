@@ -230,7 +230,7 @@ func servePACFile(w http.ResponseWriter, r *http.Request) {
 	if clientIP == "" {
 		clientIP = r.RemoteAddr
 	}
-	recordRequest(clientIP, r.Method, "/proxy.pac", "PAC_DOWNLOAD", "", "")
+	recordRequest(clientIP, r.Method, "/proxy.pac", "PAC_DOWNLOAD", "", "", "")
 	logger.Printf("PAC_DOWNLOAD %s", clientIP)
 
 	pac := pacStore.GeneratePAC(r.Host)
