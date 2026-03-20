@@ -1,0 +1,68 @@
+## ─────────────────────────────────────────────────────────────────────────────
+## ProxyShield — CodeQL SAST
+## ─────────────────────────────────────────────────────────────────────────────
+## GitHub CodeQL performs deep semantic analysis of Go source code, catching
+## injection flaws, unsafe deserialization, path traversal, improper access
+## control, and other CWE-mapped vulnerabilities that simpler linters miss.
+##
+## Findings are surfaced in the GitHub Security tab as code scanning alerts.
+## ─────────────────────────────────────────────────────────────────────────────
+
+name: CodeQL
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+  schedule:
+    - cron: "0 4 * * 1"   # weekly Monday 04:00 UTC (offset from security gate)
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: "SAST · CodeQL"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF to GitHub Security tab
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Tidy modules
+        run: go mod tidy
+
+      # Initialise CodeQL tooling — must happen before the build.
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: go
+          # Use the extended security-and-quality query suite for maximum coverage.
+          queries: security-and-quality
+
+      # Build the binary so CodeQL can trace the compilation and understand
+      # data-flow across the whole codebase (not just individual files).
+      - name: Build for CodeQL tracing
+        run: CGO_ENABLED=0 go build -o /dev/null .
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: codeql-go
+          # Upload SARIF results to GitHub Advanced Security.
+          upload: true

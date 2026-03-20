@@ -279,6 +279,34 @@ jobs:
           path: coverage.out
           retention-days: 30
 
+  # ─── 10. Dockerfile linting — hadolint ──────────────────────────────────────
+  lint-dockerfile:
+    name: "Lint · Hadolint (Dockerfile)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile with Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          format: sarif
+          output-file: hadolint.sarif
+          # DL3018: pin apk versions — acceptable in build stage; GeoIP download is version-pinned via URL
+          # DL3008: pin apt versions — not applicable (alpine-only image)
+          ignore: DL3018
+
+      - name: Upload Hadolint SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint.sarif
+          category: hadolint
+
   # ─── GATE: all checks must pass ─────────────────────────────────────────────
   release-approved:
     name: "✅ Security Gate — APPROVED"
@@ -292,6 +320,7 @@ jobs:
       - license-check
       - sast-staticcheck
       - tests-race
+      - lint-dockerfile
     # sbom is informational — not in needs (non-blocking)
     steps:
       - name: Gate passed
@@ -319,6 +348,7 @@ jobs:
           | License audit | ✅ |
           | Static analysis (staticcheck) | ✅ |
           | Tests (race detector + coverage) | ✅ |
+          | Dockerfile lint (hadolint) | ✅ |
 
           **SBOM** attached as artifact (`proxyshield-sbom.json`).
           EOF

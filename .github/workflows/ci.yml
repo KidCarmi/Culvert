@@ -46,8 +46,32 @@ jobs:
         # G402: TLSSkipVerify — documented dev/test option, guarded by config flag
         # G704: SSRF taint — a forward proxy must connect to arbitrary client-supplied hosts
 
+      - name: Fuzz (short regression run)
+        # Run each fuzz target for 15 s — long enough to replay the seed corpus
+        # and catch obvious regressions, short enough for CI to stay fast.
+        run: |
+          for target in \
+            FuzzIsPrivateHost \
+            FuzzIsSafeRedirectURL \
+            FuzzParseClamResponse \
+            FuzzNormaliseFeedURL \
+            FuzzMatchDest \
+            FuzzParseYARALiteral; do
+            echo "── $target ──"
+            go test -run='^$' -fuzz="$target" -fuzztime=15s .
+          done
+
       - name: Test
-        run: go test -v -race -count=1 ./...
+        run: go test -v -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: Check coverage threshold (≥ 60%)
+        run: |
+          total=$(go tool cover -func=coverage.out | grep ^total | awk '{print $3}' | tr -d '%')
+          echo "Coverage: ${total}%"
+          if (( $(echo "$total < 60" | bc -l) )); then
+            echo "::error::Coverage ${total}% is below the 60% threshold"
+            exit 1
+          fi
 
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags="-s -w" -o proxyshield .
@@ -90,6 +114,7 @@ jobs:
 
     permissions:
       contents: write
+      id-token: write   # required for cosign keyless signing and SLSA provenance
 
     strategy:
       matrix:
@@ -120,7 +145,45 @@ jobs:
           go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
             -o proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
 
-      - name: Upload release asset
+      # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Sign the binary with cosign keyless signing.
+      # The signature and certificate are stored in the Sigstore transparency log (Rekor).
+      # Consumers can verify with: cosign verify-blob --certificate-identity-regexp 'github.com/...'
+      - name: Sign binary with cosign (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          BINARY="proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
+          cosign sign-blob \
+            --yes \
+            --output-certificate "${BINARY}.pem" \
+            --output-signature  "${BINARY}.sig" \
+            "${BINARY}"
+
+      - name: Upload release asset + signature
         uses: softprops/action-gh-release@v1
         with:
-          files: proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
+          files: |
+            proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
+            proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.sig
+            proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.pem
+
+  # ─── SLSA provenance ──────────────────────────────────────────────────────
+  # Generates SLSA Level 3 provenance for all release binaries, providing a
+  # cryptographically verifiable record of what was built, when, and how.
+  provenance:
+    name: "Supply Chain · SLSA provenance"
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: |
+        ${{ needs.release.outputs.hashes || '' }}
+      upload-assets: true
