@@ -2076,19 +2076,33 @@ async function runURLLookup() {
   el.innerHTML = '<span style="color:var(--text-muted)">Looking up…</span>';
   try {
     const d = await api('/api/urlcat/lookup?host=' + encodeURIComponent(host));
-    if (d.tier === 'none') {
-      el.innerHTML = `<span style="color:var(--text-muted)">No category found for <strong>${escHtml(d.host)}</strong> — not in any list or community feed.</span>`;
+
+    // Blocklist badge — shown regardless of category result
+    const blockedBadge = d.blocked
+      ? `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(239,68,68,.15);color:#f87171;padding:3px 10px;border-radius:12px;font-size:.82rem;font-weight:700;border:1px solid rgba(239,68,68,.3)">
+           ⛔ Blocklisted
+         </span>`
+      : '';
+
+    if (d.tier === 'none' && !d.blocked) {
+      el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <strong style="font-size:.92rem">${escHtml(d.host)}</strong>
+        <span style="color:var(--muted);font-size:.85rem">No category found — not in any list, community feed, or blocklist.</span>
+      </div>`;
     } else {
-      const tierLabel = d.tier === 'admin' ? '★ Admin-managed' : 'Community feed';
+      const tierLabel = d.tier === 'admin' ? '★ Admin-managed' : d.tier === 'community' ? 'Community feed' : '';
       const tierColor = d.tier === 'admin' ? '#60a5fa' : '#a78bfa';
       const viaStr    = d.matchedBy && d.matchedBy !== d.host
-        ? ` <span style="color:var(--text-muted);font-size:.78rem">(via ${escHtml(d.matchedBy)})</span>`
+        ? ` <span style="color:var(--muted);font-size:.78rem">(via ${escHtml(d.matchedBy)})</span>`
+        : '';
+      const catBadge = d.category
+        ? `<span style="background:rgba(99,102,241,.18);color:#818cf8;padding:3px 10px;border-radius:12px;font-size:.82rem;font-weight:600">${escHtml(d.category)}</span>
+           <span style="color:${tierColor};font-size:.8rem">${escHtml(tierLabel)}</span>${viaStr}`
         : '';
       el.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <strong style="font-size:.92rem">${escHtml(d.host)}</strong>
-        <span style="background:rgba(99,102,241,.18);color:#818cf8;padding:3px 10px;border-radius:12px;font-size:.82rem;font-weight:600">${escHtml(d.category)}</span>
-        <span style="color:${tierColor};font-size:.8rem">${escHtml(tierLabel)}</span>
-        ${viaStr}
+        ${catBadge}
+        ${blockedBadge}
       </div>`;
     }
   } catch(err) {

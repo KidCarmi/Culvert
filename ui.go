@@ -1219,8 +1219,8 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/urlcat/lookup?host=example.com
-// Resolves a hostname to its URL category across both data tiers.
-// Response: {"host":"…","category":"…","tier":"admin"|"community"|"none","matchedBy":"…"}
+// Resolves a hostname to its URL category AND checks the blocklist.
+// Response: {"host":"…","category":"…","tier":"admin"|"community"|"none","matchedBy":"…","blocked":true|false,"blockSource":"manual"|"feed"|""}
 func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1232,11 +1232,19 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	category, tier, matchedBy := lookupHostCategory(host)
-	jsonOK(w, map[string]string{
-		"host":      host,
-		"category":  category,
-		"tier":      tier,
-		"matchedBy": matchedBy,
+	// Also check the blocklist so the lookup tool gives a complete picture.
+	blocked := bl.IsBlocked(host)
+	blockSource := ""
+	if blocked {
+		blockSource = "blocklist"
+	}
+	jsonOK(w, map[string]any{
+		"host":        host,
+		"category":    category,
+		"tier":        tier,
+		"matchedBy":   matchedBy,
+		"blocked":     blocked,
+		"blockSource": blockSource,
 	})
 }
 
