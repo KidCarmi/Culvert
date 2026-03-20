@@ -381,14 +381,14 @@ func setUISessionCookie(w http.ResponseWriter, r *http.Request, username string,
 	if err != nil {
 		return err
 	}
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure is set dynamically via isSecureRequest; HttpOnly+SameSiteStrict+HMAC-signed value are in place
 		Name:     uiSessionCookieName,
 		Value:    value,
 		Path:     "/",
 		MaxAge:   int(getSessionTTL().Seconds()),
 		HttpOnly: true,
 		Secure:   isSecureRequest(r),
-		SameSite: http.SameSiteStrictMode, // admin UI — Strict prevents CSRF via cross-site navigation
+		SameSite: http.SameSiteStrictMode,
 	})
 	return nil
 }
@@ -405,14 +405,14 @@ func readUISessionCookie(r *http.Request) (*Session, error) {
 }
 
 func clearUISessionCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure is set dynamically via isSecureRequest; HttpOnly+SameSiteStrict are in place
 		Name:     uiSessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   isSecureRequest(r),
-		SameSite: http.SameSiteStrictMode, // admin UI — Strict prevents CSRF via cross-site navigation
+		SameSite: http.SameSiteStrictMode,
 	})
 }
 
@@ -1897,7 +1897,7 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // enforce 1 MB limit before parsing
-	if err := r.ParseMultipartForm(1 << 20); err != nil { //nolint:G120 // body already bounded by MaxBytesReader above
+	if err := r.ParseMultipartForm(1 << 20); err != nil { // #nosec G120 -- body already bounded by MaxBytesReader(1 MiB) on the line above
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
 	}

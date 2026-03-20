@@ -82,7 +82,7 @@ func (as *AlertStore) save() {
 	if as.filePath == "" {
 		return
 	}
-	data, _ := json.MarshalIndent(as.hooks, "", "  ") //nolint:G117 // Secret is the HMAC signing key — intentionally persisted so webhooks survive restart
+	data, _ := json.MarshalIndent(as.hooks, "", "  ") // #nosec G117 -- Secret is the HMAC signing key; intentionally persisted so webhooks survive restart
 	tmp := as.filePath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil { // #nosec G306
 		logger.Printf("AlertStore: write %s: %v", tmp, err)
