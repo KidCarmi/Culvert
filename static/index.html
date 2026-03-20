@@ -521,18 +521,26 @@ tr.dragging  { opacity: .4; }
               placeholder="example.com or *.example.com (wildcards supported)">
             <button class="btn" onclick="addHost()">+ Add Host</button>
           </div>
-          <div class="filter-bar">
-            <input type="text" class="input" style="width:260px" id="bl-filter"
+          <div class="filter-bar" style="gap:8px;flex-wrap:wrap">
+            <input type="text" class="input" style="width:240px" id="bl-filter"
               placeholder="Search hosts…" oninput="renderBlocklist()">
+            <div style="display:flex;gap:4px" id="bl-source-tabs">
+              <button class="btn sm active" id="bl-src-all"   onclick="setBlSource('')"      >All</button>
+              <button class="btn sm ghost" id="bl-src-manual" onclick="setBlSource('manual')" >Admin only</button>
+              <button class="btn sm ghost" id="bl-src-feed"   onclick="setBlSource('feed')"   >Feed only</button>
+            </div>
           </div>
-          <div id="bl-count" style="font-size:.75rem;color:var(--muted);margin-bottom:10px;"></div>
+          <div id="bl-count" style="font-size:.75rem;color:var(--muted);margin:8px 0 10px;"></div>
           <div class="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Host / Pattern</th><th>Type</th><th></th></tr>
+                <tr><th>Host / Pattern</th><th>Type</th><th>Added by</th><th></th></tr>
               </thead>
               <tbody id="bl-table"></tbody>
             </table>
+          </div>
+          <div id="bl-load-more" style="display:none;margin-top:10px;text-align:center">
+            <button class="btn ghost sm" onclick="blLoadMore()">Load more…</button>
           </div>
         </div>
       </div>
@@ -1797,7 +1805,10 @@ Firefox (all platforms):
 // ═══════════════════════════════════════════════════════════════════════════
 const BASE = '';
 let currentView = 'dashboard';
-let blHosts = [];
+let blEntries = [];
+let blSourceFilter = '';
+let blVisible = [];
+let blOffset = 0;
 let logEntries = [];
 let chart = null;
 let breakdownChart = null;
@@ -2159,7 +2170,7 @@ const BL_CAT_PAGE = 50;
 async function loadBlCat() {
   try {
     const d = await api('/api/blocklist');
-    _blCatAll = (d.hosts || []).slice().sort();
+    _blCatAll = (d.entries || []).map(e => e.host).sort();
     _blCatOffset = 0;
     document.getElementById('bl-cat-search').value = '';
     document.getElementById('bl-cat-match-count').textContent = '';
@@ -2615,35 +2626,76 @@ function clearFilter() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Blocklist
 // ═══════════════════════════════════════════════════════════════════════════
+const BL_PAGE = 100;       // rows per page — keeps DOM small
+
 async function fetchBlocklist() {
   try {
     const d = await api('/api/blocklist');
-    blHosts = d.hosts || [];
+    blEntries = d.entries || [];
     renderBlocklist();
   } catch(e) {}
 }
 
+function setBlSource(src) {
+  blSourceFilter = src;
+  // Update tab appearance.
+  document.getElementById('bl-src-all').className    = 'btn sm' + (src === ''       ? ' active' : ' ghost');
+  document.getElementById('bl-src-manual').className = 'btn sm' + (src === 'manual' ? ' active' : ' ghost');
+  document.getElementById('bl-src-feed').className   = 'btn sm' + (src === 'feed'   ? ' active' : ' ghost');
+  renderBlocklist();
+}
+
 function renderBlocklist() {
-  const filter = (document.getElementById('bl-filter').value || '').toLowerCase();
-  const visible = filter ? blHosts.filter(h => h.includes(filter)) : blHosts;
-  document.getElementById('bl-count').textContent =
-    visible.length + ' host' + (visible.length !== 1 ? 's' : '') +
-    (filter ? ' (filtered)' : ' total');
+  const q = (document.getElementById('bl-filter').value || '').toLowerCase();
+  blVisible = blEntries.filter(e =>
+    (!q || e.host.includes(q)) &&
+    (!blSourceFilter || e.source === blSourceFilter)
+  );
+  blOffset = 0;
   const tbody = document.getElementById('bl-table');
-  if (visible.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="3"><div class="empty-state"><div class="empty-icon">✅</div>No blocked hosts</div></td></tr>';
+  if (blVisible.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4"><div class="empty-state"><div class="empty-icon">✅</div>No blocked hosts</div></td></tr>';
+    document.getElementById('bl-load-more').style.display = 'none';
+    document.getElementById('bl-count').textContent = '0 hosts';
     return;
   }
-  tbody.innerHTML = visible.map(h => {
-    const wild = h.startsWith('*.');
+  document.getElementById('bl-count').textContent =
+    blVisible.length + ' host' + (blVisible.length !== 1 ? 's' : '') +
+    (q || blSourceFilter ? ' (filtered)' : ' total');
+  _blRenderPage(false);
+}
+
+function _blRenderPage(append) {
+  const page = blVisible.slice(blOffset, blOffset + BL_PAGE);
+  const html = page.map(e => {
+    const h = escHtml(e.host);
+    const jh = JSON.stringify(e.host).replace(/"/g, '&quot;');
+    const wild = e.host.startsWith('*.');
+    const srcBadge = e.source === 'manual'
+      ? '<span class="badge" style="background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.25);font-size:10px">Admin</span>'
+      : '<span class="badge" style="background:var(--surface2);color:var(--muted);font-size:10px">Feed</span>';
     return `<tr>
       <td class="host-td">${h}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
       <td style="color:var(--muted);font-size:.75rem">${wild ? 'Wildcard' : 'Exact'}</td>
+      <td>${srcBadge}</td>
       <td style="text-align:right">
-        <button class="btn danger sm" onclick="removeHost('${h}')">Remove</button>
+        <button class="btn danger sm" onclick="removeHost(${jh})">Remove</button>
       </td>
     </tr>`;
   }).join('');
+  const tbody = document.getElementById('bl-table');
+  if (append) {
+    tbody.insertAdjacentHTML('beforeend', html);
+  } else {
+    tbody.innerHTML = html;
+  }
+  blOffset += page.length;
+  document.getElementById('bl-load-more').style.display =
+    blOffset < blVisible.length ? '' : 'none';
+}
+
+function blLoadMore() {
+  _blRenderPage(true);
 }
 
 async function addHost() {
@@ -2673,12 +2725,13 @@ async function removeHost(host) {
 }
 
 function exportBlocklist() {
-  const txt = blHosts.join('\n');
+  const hosts = blEntries.map(e => e.host);
+  const txt = hosts.join('\n');
   const a = document.createElement('a');
   a.href = 'data:text/plain,' + encodeURIComponent(txt);
   a.download = 'blocklist.txt';
   a.click();
-  toast('Exported ' + blHosts.length + ' hosts', 'success');
+  toast('Exported ' + hosts.length + ' hosts', 'success');
 }
 
 function importBlocklist(input) {

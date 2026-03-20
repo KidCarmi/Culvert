@@ -838,55 +838,58 @@ func apiTopHosts(w http.ResponseWriter, r *http.Request) {
 func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		hosts := bl.List()
-		sort.Strings(hosts)
-		// Optional search/pagination: ?q=keyword&limit=N&offset=N
-		// Without params, returns full list (backward-compatible).
+		entries := bl.ListWithSource()
+		// Sort by host for stable output.
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Host < entries[j].Host })
+
+		// Optional filters: ?q=keyword&source=manual|feed&limit=N&offset=N
 		q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+		sourceFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 		limitStr := r.URL.Query().Get("limit")
 		offsetStr := r.URL.Query().Get("offset")
-		if q != "" || limitStr != "" || offsetStr != "" {
-			// Filter by query.
-			filtered := hosts
-			if q != "" {
-				filtered = make([]string, 0, 64)
-				for _, h := range hosts {
-					if strings.Contains(h, q) {
-						filtered = append(filtered, h)
-					}
+
+		// Apply filters.
+		filtered := entries
+		if q != "" || sourceFilter != "" {
+			filtered = make([]BlocklistEntry, 0, 64)
+			for _, e := range entries {
+				if q != "" && !strings.Contains(e.Host, q) {
+					continue
 				}
-			}
-			total := len(filtered)
-			// Apply offset.
-			offset := 0
-			if offsetStr != "" {
-				if v, err := strconv.Atoi(offsetStr); err == nil && v > 0 {
-					offset = v
+				if sourceFilter != "" && e.Source != sourceFilter {
+					continue
 				}
+				filtered = append(filtered, e)
 			}
-			if offset > total {
-				offset = total
-			}
-			filtered = filtered[offset:]
-			// Apply limit.
-			limit := 50
-			if limitStr != "" {
-				if v, err := strconv.Atoi(limitStr); err == nil && v > 0 {
-					limit = v
-				}
-			}
-			if limit > len(filtered) {
-				limit = len(filtered)
-			}
-			jsonOK(w, map[string]any{
-				"hosts":  filtered[:limit],
-				"count":  total,
-				"offset": offset,
-				"limit":  limit,
-			})
-			return
 		}
-		jsonOK(w, map[string]any{"hosts": hosts, "count": len(hosts)})
+		total := len(filtered)
+
+		// Apply offset.
+		offset := 0
+		if offsetStr != "" {
+			if v, err := strconv.Atoi(offsetStr); err == nil && v > 0 {
+				offset = v
+			}
+		}
+		if offset > total {
+			offset = total
+		}
+		filtered = filtered[offset:]
+
+		// Apply limit (default: all, for backward-compat with export/import).
+		limit := total
+		if limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v < limit {
+				limit = v
+			}
+		}
+
+		jsonOK(w, map[string]any{
+			"entries": filtered[:limit],
+			"count":   total,
+			"offset":  offset,
+			"limit":   limit,
+		})
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
@@ -907,7 +910,7 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		for _, h := range body.Hosts {
 			h = strings.TrimSpace(h)
 			if h != "" {
-				bl.Add(h)
+				bl.AddManual(h)
 				logger.Printf("UI: blocked %s", h)
 				added++
 			}

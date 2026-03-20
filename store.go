@@ -252,15 +252,22 @@ func auditGet() []AuditEntry {
 // IsBlocked walks the host's own dot-labels to probe the wildcards map, so
 // lookup cost is O(labels) ≈ O(1) for real-world domain names, regardless of
 // how many wildcard rules are loaded.
+// BlocklistEntry is a single blocklist host with its origin.
+type BlocklistEntry struct {
+	Host   string `json:"host"`
+	Source string `json:"source"` // "manual" or "feed"
+}
+
 type Blocklist struct {
 	mu        sync.RWMutex
 	exact     map[string]bool // exact hostnames
 	wildcards map[string]bool // dot-prefixes: ".example.com"
+	manual    map[string]bool // subset added by an admin (not the feed)
 	path      string
 	mode      string // "block" (default) or "allow"
 }
 
-var bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+var bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}, manual: map[string]bool{}}
 
 func (b *Blocklist) Mode() string {
 	b.mu.RLock()
@@ -298,6 +305,16 @@ func (b *Blocklist) Load(path string) error {
 			b.mode = "allow"
 		}
 	}
+	// Load manual sidecar — tracks which hosts were added by an admin.
+	manual := map[string]bool{}
+	if data, err := os.ReadFile(path + ".manual"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				manual[line] = true
+			}
+		}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -322,6 +339,7 @@ func (b *Blocklist) Load(path string) error {
 	b.mu.Lock()
 	b.exact = exact
 	b.wildcards = wildcards
+	b.manual = manual
 	b.mu.Unlock()
 	return sc.Err()
 }
@@ -387,6 +405,40 @@ func (b *Blocklist) Add(host string) {
 	b.mu.Unlock()
 }
 
+// AddManual adds a host and marks it as manually managed by an admin.
+// Unlike Add (used by the feed syncer), this persists the source attribution.
+func (b *Blocklist) AddManual(host string) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	b.mu.Lock()
+	if strings.HasPrefix(host, "*.") {
+		b.wildcards[host[1:]] = true
+	} else {
+		b.exact[host] = true
+	}
+	b.manual[host] = true
+	b.mu.Unlock()
+	b.saveManual()
+}
+
+// saveManual persists the set of manually-added hosts to a sidecar file.
+func (b *Blocklist) saveManual() {
+	if b.path == "" {
+		return
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	tmp := b.path + ".manual.tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) // #nosec G304
+	if err != nil {
+		return
+	}
+	for h := range b.manual {
+		fmt.Fprintln(f, h)
+	}
+	f.Close()
+	os.Rename(tmp, b.path+".manual") //nolint:errcheck
+}
+
 func (b *Blocklist) Remove(host string) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	b.mu.Lock()
@@ -395,7 +447,9 @@ func (b *Blocklist) Remove(host string) {
 	} else {
 		delete(b.exact, host)
 	}
+	delete(b.manual, host)
 	b.mu.Unlock()
+	b.saveManual()
 }
 
 func (b *Blocklist) List() []string {
@@ -407,6 +461,30 @@ func (b *Blocklist) List() []string {
 	}
 	for suffix := range b.wildcards {
 		out = append(out, "*"+suffix)
+	}
+	return out
+}
+
+// ListWithSource returns all blocklist entries annotated with their origin:
+// "manual" if added by an admin via the UI/API, "feed" if imported from a feed.
+func (b *Blocklist) ListWithSource() []BlocklistEntry {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]BlocklistEntry, 0, len(b.exact)+len(b.wildcards))
+	for h := range b.exact {
+		src := "feed"
+		if b.manual[h] {
+			src = "manual"
+		}
+		out = append(out, BlocklistEntry{Host: h, Source: src})
+	}
+	for suffix := range b.wildcards {
+		h := "*" + suffix
+		src := "feed"
+		if b.manual[h] {
+			src = "manual"
+		}
+		out = append(out, BlocklistEntry{Host: h, Source: src})
 	}
 	return out
 }
