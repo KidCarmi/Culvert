@@ -1601,6 +1601,35 @@ Firefox (all platforms):
       </div>
 
       <div id="urlcat-list"></div>
+
+      <!-- Blocklist card — shows the global blocklist as a read-only category object -->
+      <div class="card" style="margin-top:16px" id="urlcat-blocklist-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <strong style="font-size:15px">⛔ Blocklist</strong>
+            <span class="badge" style="font-size:11px;background:rgba(239,68,68,.12);color:#f87171;border:1px solid rgba(239,68,68,.25)"
+              id="bl-cat-count">loading…</span>
+            <span class="badge" style="font-size:11px;background:var(--surface2);color:var(--muted)">read-only · managed in Settings</span>
+          </div>
+          <a href="#" onclick="event.preventDefault();showView('settings')"
+            style="font-size:.75rem;color:var(--accent)">Manage in Settings →</a>
+        </div>
+        <p style="font-size:.78rem;color:var(--muted);margin:0 0 12px;line-height:1.55">
+          All domains in the global blocklist (including feed-imported entries) are shown here.
+          These are always blocked regardless of policy rules. Managed via Settings → Blocklist.
+        </p>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+          <input type="text" class="input" id="bl-cat-search"
+            placeholder="Search blocklisted domains…"
+            style="flex:1;font-family:monospace;font-size:.82rem"
+            oninput="blCatSearch()">
+          <span id="bl-cat-match-count" style="font-size:.75rem;color:var(--muted);white-space:nowrap"></span>
+        </div>
+        <div id="bl-cat-results" style="display:flex;flex-direction:column;gap:2px;max-height:320px;overflow-y:auto;font-family:monospace;font-size:.82rem"></div>
+        <div id="bl-cat-load-more" style="display:none;margin-top:8px">
+          <button class="btn ghost sm" onclick="blCatLoadMore()">Load more…</button>
+        </div>
+      </div>
     </div><!-- /view-urlcat -->
 
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
@@ -2076,19 +2105,33 @@ async function runURLLookup() {
   el.innerHTML = '<span style="color:var(--text-muted)">Looking up…</span>';
   try {
     const d = await api('/api/urlcat/lookup?host=' + encodeURIComponent(host));
-    if (d.tier === 'none') {
-      el.innerHTML = `<span style="color:var(--text-muted)">No category found for <strong>${escHtml(d.host)}</strong> — not in any list or community feed.</span>`;
+
+    // Blocklist badge — shown regardless of category result
+    const blockedBadge = d.blocked
+      ? `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(239,68,68,.15);color:#f87171;padding:3px 10px;border-radius:12px;font-size:.82rem;font-weight:700;border:1px solid rgba(239,68,68,.3)">
+           ⛔ Blocklisted
+         </span>`
+      : '';
+
+    if (d.tier === 'none' && !d.blocked) {
+      el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <strong style="font-size:.92rem">${escHtml(d.host)}</strong>
+        <span style="color:var(--muted);font-size:.85rem">No category found — not in any list, community feed, or blocklist.</span>
+      </div>`;
     } else {
-      const tierLabel = d.tier === 'admin' ? '★ Admin-managed' : 'Community feed';
+      const tierLabel = d.tier === 'admin' ? '★ Admin-managed' : d.tier === 'community' ? 'Community feed' : '';
       const tierColor = d.tier === 'admin' ? '#60a5fa' : '#a78bfa';
       const viaStr    = d.matchedBy && d.matchedBy !== d.host
-        ? ` <span style="color:var(--text-muted);font-size:.78rem">(via ${escHtml(d.matchedBy)})</span>`
+        ? ` <span style="color:var(--muted);font-size:.78rem">(via ${escHtml(d.matchedBy)})</span>`
+        : '';
+      const catBadge = d.category
+        ? `<span style="background:rgba(99,102,241,.18);color:#818cf8;padding:3px 10px;border-radius:12px;font-size:.82rem;font-weight:600">${escHtml(d.category)}</span>
+           <span style="color:${tierColor};font-size:.8rem">${escHtml(tierLabel)}</span>${viaStr}`
         : '';
       el.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <strong style="font-size:.92rem">${escHtml(d.host)}</strong>
-        <span style="background:rgba(99,102,241,.18);color:#818cf8;padding:3px 10px;border-radius:12px;font-size:.82rem;font-weight:600">${escHtml(d.category)}</span>
-        <span style="color:${tierColor};font-size:.8rem">${escHtml(tierLabel)}</span>
-        ${viaStr}
+        ${catBadge}
+        ${blockedBadge}
       </div>`;
     }
   } catch(err) {
@@ -2104,6 +2147,60 @@ async function loadURLCategories() {
     document.getElementById('urlcat-list').innerHTML =
       `<p style="color:var(--danger)">Failed to load categories: ${escHtml(err.message)}</p>`;
   }
+  loadBlCat();
+}
+
+// ── Blocklist-as-category card ────────────────────────────────────────────
+let _blCatAll = [];      // full sorted list
+let _blCatFiltered = []; // after search filter
+let _blCatOffset = 0;
+const BL_CAT_PAGE = 50;
+
+async function loadBlCat() {
+  try {
+    const d = await api('/api/blocklist');
+    _blCatAll = (d.hosts || []).slice().sort();
+    _blCatOffset = 0;
+    document.getElementById('bl-cat-search').value = '';
+    document.getElementById('bl-cat-match-count').textContent = '';
+    _blCatFiltered = _blCatAll;
+    _renderBlCat();
+  } catch (err) {
+    document.getElementById('bl-cat-results').innerHTML =
+      `<span style="color:var(--danger)">Failed to load: ${escHtml(err.message)}</span>`;
+  }
+}
+
+function blCatSearch() {
+  const q = document.getElementById('bl-cat-search').value.toLowerCase().trim();
+  _blCatFiltered = q ? _blCatAll.filter(h => h.includes(q)) : _blCatAll;
+  _blCatOffset = 0;
+  _renderBlCat();
+}
+
+function blCatLoadMore() {
+  _blCatOffset += BL_CAT_PAGE;
+  _renderBlCat(true);
+}
+
+function _renderBlCat(append) {
+  const total = _blCatFiltered.length;
+  document.getElementById('bl-cat-count').textContent = total + ' hosts';
+  const q = document.getElementById('bl-cat-search').value.trim();
+  document.getElementById('bl-cat-match-count').textContent =
+    q ? `${total} match${total !== 1 ? 'es' : ''}` : '';
+  const page = _blCatFiltered.slice(0, _blCatOffset + BL_CAT_PAGE);
+  const container = document.getElementById('bl-cat-results');
+  const html = page.map(h =>
+    `<span style="padding:2px 4px;border-radius:3px;background:var(--surface2)">${escHtml(h)}</span>`
+  ).join('');
+  if (append) {
+    container.insertAdjacentHTML('beforeend', html);
+  } else {
+    container.innerHTML = html || '<span style="color:var(--muted)">No matching hosts.</span>';
+  }
+  const hasMore = (page.length < total);
+  document.getElementById('bl-cat-load-more').style.display = hasMore ? '' : 'none';
 }
 
 function renderURLCatList(cats) {
