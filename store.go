@@ -1221,13 +1221,7 @@ func (hc *hostCounter) Top(n int) []HostStat {
 	hc.mu.Unlock()
 
 	// Simple selection: sort descending.
-	for i := 0; i < len(all)-1; i++ {
-		for j := i + 1; j < len(all); j++ {
-			if all[j].Count > all[i].Count {
-				all[i], all[j] = all[j], all[i]
-			}
-		}
-	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Count > all[j].Count })
 	if n > len(all) {
 		n = len(all)
 	}

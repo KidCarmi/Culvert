@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -99,9 +100,19 @@ func (g *geoCache) lookup(ipStr string) (code, name string) {
 
 	g.mu.Lock()
 	if len(g.cache) >= geoCacheMaxSize {
-		for k := range g.cache { // evict one random entry
+		// Evict ~10 % of entries to avoid thrashing (one-at-a-time eviction
+		// under sustained load causes a cache miss on nearly every new IP).
+		toEvict := geoCacheMaxSize / 10
+		if toEvict == 0 {
+			toEvict = 1
+		}
+		evicted := 0
+		for k := range g.cache {
 			delete(g.cache, k)
-			break
+			evicted++
+			if evicted >= toEvict {
+				break
+			}
 		}
 	}
 	g.cache[ipStr] = &geoResult{CountryCode: code, Country: name}
@@ -222,13 +233,7 @@ func (s *countryTrafficStore) Top(n int) []CountryCount {
 		out = append(out, CountryCount{Code: code, Name: s.names[code], Count: cnt})
 	}
 	s.mu.RUnlock()
-	for i := 0; i < len(out)-1; i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].Count > out[i].Count {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Count > out[j].Count })
 	if n > 0 && len(out) > n {
 		out = out[:n]
 	}
