@@ -737,7 +737,10 @@ func apiAudit(w http.ResponseWriter, r *http.Request) {
 
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// Response headers already sent; can't write an HTTP error at this point.
+		logger.Printf("ERROR: jsonOK encode failed: %v", err)
+	}
 }
 
 // decodeJSON decodes the request body into v using strict mode:

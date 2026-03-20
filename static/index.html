@@ -2054,8 +2054,8 @@ function renderUsersTable(users) {
       <td><strong>${escHtml(u.username)}</strong></td>
       <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span></td>
       <td>
-        <button class="btn ghost sm" onclick="openUserModal(${JSON.stringify(u.username)}, ${JSON.stringify(u.role)})">Edit</button>
-        ${u.username !== uiUsername ? `<button class="btn ghost sm" style="color:var(--red)" onclick="deleteUser(${JSON.stringify(u.username)})">Delete</button>` : '<span style="color:var(--muted);font-size:.75rem">  (you)</span>'}
+        <button class="btn ghost sm" onclick="openUserModal(${JSON.stringify(u.username).replace(/"/g,'&quot;')}, ${JSON.stringify(u.role).replace(/"/g,'&quot;')})">Edit</button>
+        ${u.username !== uiUsername ? `<button class="btn ghost sm" style="color:var(--red)" onclick="deleteUser(${JSON.stringify(u.username).replace(/"/g,'&quot;')})">Delete</button>` : '<span style="color:var(--muted);font-size:.75rem">  (you)</span>'}
       </td>
     </tr>`).join('');
 }
