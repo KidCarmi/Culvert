@@ -51,9 +51,10 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/events", apiEvents) // SSE live dashboard
 	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
-	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)    // GET/POST blocklist mode
-	mux.HandleFunc("/api/blocklist/feed", apiBlocklistFeed)    // GET/POST feed URL+interval
+	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)         // GET/POST blocklist mode
+	mux.HandleFunc("/api/blocklist/feed", apiBlocklistFeed)         // GET/POST feed URL+interval
 	mux.HandleFunc("/api/blocklist/feed/sync", apiBlocklistFeedSync) // POST force-sync
+	mux.HandleFunc("/api/blocklist/exceptions", apiBlocklistExceptions) // GET/POST/DELETE
 	mux.HandleFunc("/api/config/export", apiConfigExport)      // GET — download backup JSON
 	mux.HandleFunc("/api/config/import", apiConfigImport)      // POST — restore from backup JSON
 	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode) // PUT — toggle proxy auth requirement
@@ -838,55 +839,58 @@ func apiTopHosts(w http.ResponseWriter, r *http.Request) {
 func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		hosts := bl.List()
-		sort.Strings(hosts)
-		// Optional search/pagination: ?q=keyword&limit=N&offset=N
-		// Without params, returns full list (backward-compatible).
+		entries := bl.ListWithSource()
+		// Sort by host for stable output.
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Host < entries[j].Host })
+
+		// Optional filters: ?q=keyword&source=manual|feed&limit=N&offset=N
 		q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+		sourceFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 		limitStr := r.URL.Query().Get("limit")
 		offsetStr := r.URL.Query().Get("offset")
-		if q != "" || limitStr != "" || offsetStr != "" {
-			// Filter by query.
-			filtered := hosts
-			if q != "" {
-				filtered = make([]string, 0, 64)
-				for _, h := range hosts {
-					if strings.Contains(h, q) {
-						filtered = append(filtered, h)
-					}
+
+		// Apply filters.
+		filtered := entries
+		if q != "" || sourceFilter != "" {
+			filtered = make([]BlocklistEntry, 0, 64)
+			for _, e := range entries {
+				if q != "" && !strings.Contains(e.Host, q) {
+					continue
 				}
-			}
-			total := len(filtered)
-			// Apply offset.
-			offset := 0
-			if offsetStr != "" {
-				if v, err := strconv.Atoi(offsetStr); err == nil && v > 0 {
-					offset = v
+				if sourceFilter != "" && e.Source != sourceFilter {
+					continue
 				}
+				filtered = append(filtered, e)
 			}
-			if offset > total {
-				offset = total
-			}
-			filtered = filtered[offset:]
-			// Apply limit.
-			limit := 50
-			if limitStr != "" {
-				if v, err := strconv.Atoi(limitStr); err == nil && v > 0 {
-					limit = v
-				}
-			}
-			if limit > len(filtered) {
-				limit = len(filtered)
-			}
-			jsonOK(w, map[string]any{
-				"hosts":  filtered[:limit],
-				"count":  total,
-				"offset": offset,
-				"limit":  limit,
-			})
-			return
 		}
-		jsonOK(w, map[string]any{"hosts": hosts, "count": len(hosts)})
+		total := len(filtered)
+
+		// Apply offset.
+		offset := 0
+		if offsetStr != "" {
+			if v, err := strconv.Atoi(offsetStr); err == nil && v > 0 {
+				offset = v
+			}
+		}
+		if offset > total {
+			offset = total
+		}
+		filtered = filtered[offset:]
+
+		// Apply limit (default: all, for backward-compat with export/import).
+		limit := total
+		if limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v < limit {
+				limit = v
+			}
+		}
+
+		jsonOK(w, map[string]any{
+			"entries": filtered[:limit],
+			"count":   total,
+			"offset":  offset,
+			"limit":   limit,
+		})
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
@@ -907,7 +911,7 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		for _, h := range body.Hosts {
 			h = strings.TrimSpace(h)
 			if h != "" {
-				bl.Add(h)
+				bl.AddManual(h)
 				logger.Printf("UI: blocked %s", h)
 				added++
 			}
@@ -1027,6 +1031,63 @@ func apiBlocklistFeedSync(w http.ResponseWriter, r *http.Request) {
 	go blFeedSyncer.Sync()
 	auditEvent(r, "blocklist.feed.sync", "", "")
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// GET /api/blocklist/exceptions        → list all exception hosts
+// POST /api/blocklist/exceptions       → add exception(s)  body: {host} or {hosts:[]}
+// DELETE /api/blocklist/exceptions?host=X → remove one exception
+func apiBlocklistExceptions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		hosts := bl.ListExceptions()
+		sort.Strings(hosts)
+		jsonOK(w, map[string]any{"hosts": hosts, "count": len(hosts)})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Host  string   `json:"host"`
+			Hosts []string `json:"hosts"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Host != "" {
+			body.Hosts = append(body.Hosts, body.Host)
+		}
+		added := 0
+		for _, h := range body.Hosts {
+			h = strings.TrimSpace(h)
+			if h != "" {
+				bl.AddException(h)
+				added++
+			}
+		}
+		auditEvent(r, "blocklist.exception.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
+		jsonOK(w, map[string]any{"ok": true, "added": added})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		host := strings.TrimSpace(r.URL.Query().Get("host"))
+		if host == "" {
+			http.Error(w, "host required", http.StatusBadRequest)
+			return
+		}
+		bl.RemoveException(host)
+		auditEvent(r, "blocklist.exception.remove", host, "")
+		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // ── Alert Webhooks ─────────────────────────────────────────────────────────
