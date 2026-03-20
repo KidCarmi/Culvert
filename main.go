@@ -63,6 +63,7 @@ func main() {
 	yaraRulesDir := flag.String("yara-rules-dir", "", "Directory containing *.yar/*.yara YARA rule files")
 	threatFeedDB := flag.String("threat-feed-db", "", "Path for persisted threat feed JSON database")
 	uiUsersFile := flag.String("ui-users-file", "", "Path to persist admin UI users across restarts (e.g. /data/ui_users.json)")
+	fileProfilesFile := flag.String("fileprofiles-file", "", "Path to persist file extension profiles (e.g. /data/fileprofiles.json)")
 	uiNoTLS := flag.Bool("ui-no-tls", false, "Disable auto self-signed TLS; serve admin UI over plain HTTP")
 	catFeedDB := flag.String("cat-feed-db", "", "Directory for BadgerDB URL category community feed (empty=disabled)")
 	catFeedURL := flag.String("cat-feed-url", "", "Override URL for the UT1 category tarball (default: UT1 Capestat)")
@@ -396,6 +397,17 @@ func main() {
 		}
 	}
 	logger.Printf("FileBlock → %d extension(s) in profile", fileBlocker.Count())
+
+	// ── File extension profiles (for per-rule policy blocking) ────────────────
+	fpPath := firstStr(*fileProfilesFile, fc.Proxy.FileProfilesFile)
+	if fpPath == "" {
+		fpPath = "fileprofiles.json"
+	}
+	if err := globalProfileStore.Load(fpPath); err != nil {
+		logger.Printf("FileProfiles → load error (%v) — using in-memory defaults", err)
+	} else {
+		logger.Printf("FileProfiles → %d profile(s) loaded from %s", len(globalProfileStore.List()), fpPath)
+	}
 
 	// ── SSL Bypass patterns ───────────────────────────────────────────────────
 	// If ssl_bypass_file is set, load from the JSON file (dynamic — managed via

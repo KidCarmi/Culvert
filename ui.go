@@ -34,6 +34,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/top-hosts", apiTopHosts)
 	mux.HandleFunc("/api/blocklist", apiBlocklist)
 	mux.HandleFunc("/api/fileblock", apiFileblock)
+	mux.HandleFunc("/api/fileblock/profiles", apiFileblockProfiles)
 	mux.HandleFunc("/api/settings", apiSettings)
 	mux.HandleFunc("/api/security", apiSecurity)
 	mux.HandleFunc("/api/export", apiExport)
@@ -315,10 +316,14 @@ func requireRole(w http.ResponseWriter, r *http.Request, minRole UIRole) bool {
 // HTTP Basic Auth is accepted as a fallback for CLI / API clients.
 func uiAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Always public: setup bootstrap, auth endpoints, IdP callbacks,
-		// and /proxy.pac (Windows clients need it without credentials).
+		// Always public: setup bootstrap, specific auth endpoints (login/logout/status),
+		// IdP callbacks, and /proxy.pac (Windows clients need it without credentials).
+		// NOTE: /api/auth/users is intentionally NOT in this list — it requires admin role.
 		if strings.HasPrefix(r.URL.Path, "/api/setup") ||
-			strings.HasPrefix(r.URL.Path, "/api/auth/") ||
+			r.URL.Path == "/api/auth/login" ||
+			r.URL.Path == "/api/auth/logout" ||
+			r.URL.Path == "/api/auth/status" ||
+			strings.HasPrefix(r.URL.Path, "/api/auth/totp") ||
 			strings.HasPrefix(r.URL.Path, "/auth/") ||
 			r.URL.Path == "/proxy.pac" {
 			next.ServeHTTP(w, r)
@@ -2177,6 +2182,85 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 		fileBlocker.Remove(ext)
 		logger.Printf("UI: file block extension removed %s", ext)
 		auditEvent(r, "fileblock.remove", ext, "")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ── File Extension Profiles API ───────────────────────────────────────────────
+//
+// GET    /api/fileblock/profiles          → list all profiles
+// POST   /api/fileblock/profiles          → create profile {name, extensions[]}
+// PUT    /api/fileblock/profiles?id=X     → update profile
+// DELETE /api/fileblock/profiles?id=X     → delete profile
+func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, globalProfileStore.List())
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Name       string   `json:"name"`
+			Extensions []string `json:"extensions"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		prof, err := globalProfileStore.Create(body.Name, body.Extensions)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		auditEvent(r, "fileprofile.create", prof.Name, fmt.Sprintf("%d extensions", len(prof.Extensions)))
+		jsonOK(w, prof)
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			http.Error(w, "missing id param", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Name       string   `json:"name"`
+			Extensions []string `json:"extensions"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := globalProfileStore.Update(id, body.Name, body.Extensions); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "fileprofile.update", body.Name, fmt.Sprintf("%d extensions", len(body.Extensions)))
+		jsonOK(w, map[string]any{"ok": true})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			http.Error(w, "missing id param", http.StatusBadRequest)
+			return
+		}
+		if err := globalProfileStore.Delete(id); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "fileprofile.delete", id, "")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:

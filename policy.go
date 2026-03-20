@@ -592,15 +592,26 @@ func matchCountry(countries []string, code string) bool {
 
 // FileProfileBlocked returns true if the file extension of urlPath is blocked
 // by the rule's FileProfile, and FileFiltering is enabled.
+// Dynamic profiles from globalProfileStore take precedence over the legacy
+// hardcoded fileProfileExts map (backward-compatible fallback).
 func (r *PolicyRule) FileProfileBlocked(urlPath string) bool {
 	if !r.FileFiltering || r.FileProfile == FileProfileNone {
 		return false
 	}
-	exts, ok := fileProfileExts[r.FileProfile]
-	if !ok {
+	// Resolve extension list: check dynamic store first, then legacy map.
+	var exts []string
+	if p := globalProfileStore.GetByName(string(r.FileProfile)); p != nil {
+		exts = p.Extensions
+	} else if legacyExts, ok := fileProfileExts[r.FileProfile]; ok {
+		exts = legacyExts
+	} else {
 		return false
 	}
-	// Extract extension (path.Ext semantics).
+	return matchFileExt(urlPath, exts)
+}
+
+// matchFileExt returns true if urlPath ends with one of the given extensions.
+func matchFileExt(urlPath string, exts []string) bool {
 	ext := ""
 	for i := len(urlPath) - 1; i >= 0 && urlPath[i] != '/'; i-- {
 		if urlPath[i] == '.' {

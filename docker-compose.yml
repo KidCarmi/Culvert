@@ -79,7 +79,8 @@ services:
       "-clamav-addr",    "tcp:clamav:3310",
       "-yara-rules-dir", "/app/yara",
       "-threat-feed-db", "/data/threatfeeds.json",
-      "-ui-users-file",  "/data/ui_users.json"
+      "-ui-users-file",  "/data/ui_users.json",
+      "-fileprofiles-file", "/data/fileprofiles.json"
       # Optional extras — uncomment as needed:
       # "-syslog",          "udp://10.0.0.1:514",
       # "-ui-allow-ip",     "10.0.0.0/8,192.168.0.0/16",

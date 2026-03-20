@@ -675,13 +675,16 @@ tr.dragging  { opacity: .4; }
     <!-- ── IDENTITY PROVIDERS ─────────────────────────────────────────────── -->
     <div class="view" id="view-idproviders">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <h2 style="margin:0">Identity Providers</h2>
+        <div style="display:flex;align-items:center;gap:10px">
+          <h2 style="margin:0">Identity Providers</h2>
+          <span id="idp-count-badge" style="font-size:.72rem;background:var(--surface2);color:var(--muted);padding:2px 8px;border-radius:10px;display:none"></span>
+        </div>
         <button class="btn" onclick="openIdPModal()">+ Add Provider</button>
       </div>
-      <p style="color:var(--text-muted);font-size:13px;margin:0 0 20px;color:var(--muted)">
+      <p style="color:var(--muted);font-size:.82rem;margin:0 0 20px;line-height:1.6">
         Connect OIDC or SAML 2.0 providers for single sign-on. Group memberships from the IdP are available as conditions in policy rules.
       </p>
-      <div id="idp-list" style="display:grid;gap:12px"></div>
+      <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
     </div>
 
     <!-- ── IdP MODAL (wizard) ──────────────────────────────────────────────── -->
@@ -689,12 +692,23 @@ tr.dragging  { opacity: .4; }
       <div style="background:var(--surface1);border-radius:14px;max-width:660px;margin:40px auto 60px;box-shadow:0 32px 80px rgba(0,0,0,.6);overflow:hidden">
 
         <!-- Modal header -->
-        <div style="padding:20px 24px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-          <div>
-            <div style="font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:3px;font-weight:600" id="idp-step-label">Step 1 of 2 — Choose Provider</div>
-            <h3 id="idp-modal-title" style="margin:0;font-size:1.05rem;font-weight:700">Add Identity Provider</h3>
+        <div style="padding:18px 24px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+          <div style="flex:1;min-width:0">
+            <h3 id="idp-modal-title" style="margin:0 0 8px;font-size:1.05rem;font-weight:700">Add Identity Provider</h3>
+            <!-- Step pills -->
+            <div id="idp-step-label" style="display:flex;align-items:center;gap:6px;font-size:.78rem">
+              <span id="idp-pill-1" style="display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;background:var(--accent);color:#fff;font-weight:600">
+                <span style="width:16px;height:16px;border-radius:50%;background:rgba(255,255,255,.3);display:inline-flex;align-items:center;justify-content:center;font-size:.65rem;font-weight:700">1</span>
+                Choose Provider
+              </span>
+              <span style="color:var(--border);font-size:1rem">──</span>
+              <span id="idp-pill-2" style="display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;background:var(--surface2);color:var(--muted);font-weight:600">
+                <span style="width:16px;height:16px;border-radius:50%;background:var(--border);display:inline-flex;align-items:center;justify-content:center;font-size:.65rem;font-weight:700">2</span>
+                Configure
+              </span>
+            </div>
           </div>
-          <button onclick="closeIdPModal()" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.5rem;line-height:1;padding:4px;border-radius:6px;transition:color .15s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">&times;</button>
+          <button onclick="closeIdPModal()" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.5rem;line-height:1;padding:4px;border-radius:6px;transition:color .15s;flex-shrink:0;margin-left:12px" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">&times;</button>
         </div>
         <input type="hidden" id="idp-edit-id">
 
@@ -1207,9 +1221,13 @@ Firefox (all platforms):
           <span class="panel-title">Blocklist Feed Auto-Sync</span>
         </div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
-            Automatically import domains from a remote blocklist feed (one domain per line, # comments allowed).<br>
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:8px;line-height:1.65">
+            Automatically import <strong>blocked domains</strong> from a remote text feed (one domain per line, <code style="background:var(--surface2);padding:1px 4px;border-radius:3px;font-size:.75rem"># comments</code> allowed).
             New entries are merged — manually-added entries are never removed.
+            This is <strong>separate</strong> from URL Categories: domains imported here are fully blocked regardless of policy rules.
+          </p>
+          <p style="font-size:.75rem;color:var(--muted);margin-bottom:14px">
+            Free public feeds: <code style="background:var(--surface2);padding:1px 4px;border-radius:3px">https://urlhaus.abuse.ch/downloads/text/</code> (malware) · <code style="background:var(--surface2);padding:1px 4px;border-radius:3px">https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts</code> (ads/tracking)
           </p>
           <div style="display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;margin-bottom:10px">
             <input type="text" class="input wide" id="s-bl-feed-url" placeholder="https://example.com/blocklist.txt">
@@ -1456,11 +1474,6 @@ Firefox (all platforms):
               <label class="form-label">File Extension Profile</label>
               <select class="select" style="width:100%" id="pol-file-profile">
                 <option value="">— none —</option>
-                <option value="Executables">Executables (.exe .dll .bat…)</option>
-                <option value="Archives">Archives (.zip .rar .7z…)</option>
-                <option value="Documents">Macro Documents (.docm .xlsm…)</option>
-                <option value="Media">Media (.mp4 .avi .mkv…)</option>
-                <option value="Strict">Strict (all of the above)</option>
               </select>
             </div>
             <div style="display:flex;flex-direction:column;justify-content:flex-end;gap:10px">
@@ -1568,17 +1581,20 @@ Firefox (all platforms):
         Manage host lists for each URL category. Built-in categories are seeded automatically.
         Categories are matched by hostname suffix (e.g. adding <code>example.com</code> also matches <code>www.example.com</code>).
       </p>
-      <!-- URL Lookup Tool -->
-      <div class="panel" style="margin-bottom:20px">
-        <div class="panel-header"><span class="panel-title">URL Lookup</span></div>
+      <!-- URL Lookup Tool — highlighted with accent border so it's easy to spot -->
+      <div class="panel" style="margin-bottom:20px;border:1px solid var(--accent)">
+        <div class="panel-header" style="border-bottom:1px solid var(--accent)30">
+          <span class="panel-title">🔍 Domain Lookup</span>
+          <span style="font-size:.72rem;color:var(--muted)">Enter any FQDN to find its category</span>
+        </div>
         <div class="panel-body">
-          <p style="color:var(--text-muted);font-size:13px;margin:0 0 12px">
-            Paste any domain to see which category it resolves to. Checks admin-managed lists first, then the community feed.
-          </p>
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="text" class="input" id="urlcat-lookup-host" placeholder="e.g. casino-example.com"
+            <input type="text" class="input" id="urlcat-lookup-host" placeholder="e.g. casino.com, youtube.com, malware-site.ru"
               style="flex:1" onkeydown="if(event.key==='Enter')runURLLookup()">
-            <button class="btn" onclick="runURLLookup()">Look up</button>
+            <button class="btn" onclick="runURLLookup()">Look Up</button>
+          </div>
+          <div style="font-size:.72rem;color:var(--muted);margin-top:6px">
+            Checks admin-managed lists first, then the community feed. Suffix matching — <code style="background:var(--surface2);padding:1px 4px;border-radius:3px">example.com</code> also matches <code style="background:var(--surface2);padding:1px 4px;border-radius:3px">www.example.com</code>.
           </div>
           <div id="urlcat-lookup-result" style="margin-top:12px;display:none"></div>
         </div>
@@ -1589,50 +1605,52 @@ Firefox (all platforms):
 
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
     <div class="view" id="view-fileblock">
-      <div style="display:grid;grid-template-columns:300px 1fr;gap:18px;align-items:start">
+      <div style="margin-bottom:14px">
+        <p style="font-size:.82rem;color:var(--muted);margin:0;line-height:1.6">
+          Create named extension profiles and assign them to policy rules via <strong>File Extension Profile</strong>.
+          The <strong>Global Block List</strong> below applies to <em>all</em> traffic regardless of policy rules.
+        </p>
+      </div>
 
-        <!-- Left: Object Library -->
+      <!-- Extension Profiles manager -->
+      <div style="display:grid;grid-template-columns:280px 1fr;gap:18px;align-items:start;margin-bottom:18px">
+
+        <!-- Left: Profile list -->
         <div class="panel">
           <div class="panel-header">
-            <span class="panel-title">Extension Objects</span>
+            <span class="panel-title">Extension Profiles</span>
+            <button class="btn sm" onclick="openNewProfilePanel()">+ New</button>
           </div>
+          <div class="panel-body" style="padding:0">
+            <div id="fp-profile-list" style="display:flex;flex-direction:column"></div>
+          </div>
+        </div>
+
+        <!-- Right: Profile editor -->
+        <div class="panel" id="fp-editor-panel">
+          <div class="panel-header">
+            <span class="panel-title" id="fp-editor-title">Select a profile to edit</span>
+            <div style="display:flex;gap:6px" id="fp-editor-actions" style="display:none">
+              <button class="btn sm" onclick="saveProfile()">Save</button>
+              <button class="btn danger sm" id="fp-delete-btn" onclick="deleteProfile()">Delete</button>
+            </div>
+          </div>
+          <div class="panel-body" id="fp-editor-body">
+            <div style="color:var(--muted);font-size:.82rem;text-align:center;padding:32px 0">
+              Select a profile on the left, or click <strong>+ New</strong> to create one.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Global Block List (existing flat list) -->
+      <div style="display:grid;grid-template-columns:300px 1fr;gap:18px;align-items:start">
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Global Block List</span></div>
           <div class="panel-body">
             <p style="font-size:.78rem;color:var(--muted);margin-bottom:14px">
-              Click a profile to bulk-add its extensions, or add a custom extension below.
+              Extensions here are blocked for ALL traffic. Independent of policy rules.
             </p>
-
-            <div style="font-size:.68rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Quick Profiles</div>
-            <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:20px">
-              <button class="btn ghost sm" style="justify-content:flex-start;gap:10px;height:auto;padding:8px 10px" onclick="addProfile('executables')">
-                <span>⚙️</span>
-                <div style="text-align:left">
-                  <div style="font-weight:600;font-size:.82rem">Windows Executables</div>
-                  <div style="font-size:.7rem;color:var(--muted)">.exe .dll .com .scr .pif</div>
-                </div>
-              </button>
-              <button class="btn ghost sm" style="justify-content:flex-start;gap:10px;height:auto;padding:8px 10px" onclick="addProfile('scripts')">
-                <span>📜</span>
-                <div style="text-align:left">
-                  <div style="font-weight:600;font-size:.82rem">Scripts</div>
-                  <div style="font-size:.7rem;color:var(--muted)">.bat .cmd .ps1 .vbs .sh</div>
-                </div>
-              </button>
-              <button class="btn ghost sm" style="justify-content:flex-start;gap:10px;height:auto;padding:8px 10px" onclick="addProfile('installers')">
-                <span>📦</span>
-                <div style="text-align:left">
-                  <div style="font-weight:600;font-size:.82rem">Installers</div>
-                  <div style="font-size:.7rem;color:var(--muted)">.msi .msp .mst .cab</div>
-                </div>
-              </button>
-              <button class="btn ghost sm" style="justify-content:flex-start;gap:10px;height:auto;padding:8px 10px" onclick="addProfile('archives')">
-                <span>🗜️</span>
-                <div style="text-align:left">
-                  <div style="font-weight:600;font-size:.82rem">Archives</div>
-                  <div style="font-size:.7rem;color:var(--muted)">.zip .rar .7z .gz .tar</div>
-                </div>
-              </button>
-            </div>
-
             <div style="font-size:.68rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Custom Extension</div>
             <input type="text" class="input wide" id="fb-ext-input"
               placeholder=".exe or exe" style="margin-bottom:6px">
@@ -1640,10 +1658,9 @@ Firefox (all platforms):
           </div>
         </div>
 
-        <!-- Right: Active Profile -->
         <div class="panel">
           <div class="panel-header">
-            <span class="panel-title">Active Block Profile</span>
+            <span class="panel-title">Active Global Extensions</span>
             <div style="display:flex;align-items:center;gap:10px">
               <span id="fb-count-badge" style="font-size:.75rem;color:var(--muted)">0 extensions</span>
               <button class="btn danger sm" onclick="clearAllExts()">Clear All</button>
@@ -1653,7 +1670,6 @@ Firefox (all platforms):
             <div id="fb-ext-chips" style="display:flex;flex-wrap:wrap;gap:8px;min-height:80px"></div>
           </div>
         </div>
-
       </div>
     </div><!-- /view-fileblock -->
 
@@ -1795,7 +1811,7 @@ function switchView(name) {
   if (name === 'idproviders')    loadIdPList();
   if (name === 'audit')          loadAuditLog();
   if (name === 'settings')       loadSettings();
-  if (name === 'policy')         fetchPolicy();
+  if (name === 'policy')         { fetchPolicy(); loadFileProfileDropdown(); }
   if (name === 'urlcat')         loadURLCategories();
   if (name === 'fileblock')      fetchFileBlock();
   if (name === 'rewrite')        fetchRewrite();
@@ -3329,30 +3345,23 @@ async function saveSettings() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// File Block Profile
+// File Block — Global Extension List
 // ═══════════════════════════════════════════════════════════════════════════
-const FB_PROFILES = {
-  executables: { label: 'Executable', color: '#ef4444', exts: ['.exe','.dll','.com','.scr','.pif'] },
-  scripts:     { label: 'Script',     color: '#f97316', exts: ['.bat','.cmd','.ps1','.vbs','.sh'] },
-  installers:  { label: 'Installer',  color: '#a855f7', exts: ['.msi','.msp','.mst','.cab'] },
-  archives:    { label: 'Archive',    color: '#3b82f6', exts: ['.zip','.rar','.7z','.gz','.tar'] },
-};
-
-function fbCategory(ext) {
-  for (const p of Object.values(FB_PROFILES)) {
-    if (p.exts.includes(ext)) return p;
-  }
-  return { label: 'Custom', color: '#64748b' };
-}
-
 let fbExts = [];
+let fpProfiles = []; // dynamic profiles from backend
+let fpCurrentId = null; // currently selected profile id in the editor
 
 async function fetchFileBlock() {
   try {
-    const data = await api('/api/fileblock');
-    fbExts = (data.extensions || []).sort();
+    const [blockData, profiles] = await Promise.all([
+      api('/api/fileblock'),
+      api('/api/fileblock/profiles').catch(() => []),
+    ]);
+    fbExts = (blockData.extensions || []).sort();
+    fpProfiles = profiles || [];
     renderFileBlock();
-  } catch(e) { toast('Failed to load file block profile', 'error'); }
+    renderProfileList();
+  } catch(e) { toast('Failed to load file block data', 'error'); }
 }
 
 function renderFileBlock() {
@@ -3360,15 +3369,13 @@ function renderFileBlock() {
   document.getElementById('fb-count-badge').textContent = n + ' extension' + (n !== 1 ? 's' : '');
   const box = document.getElementById('fb-ext-chips');
   if (n === 0) {
-    box.innerHTML = '<div style="color:var(--muted);font-size:.82rem;width:100%;text-align:center;padding:30px 0">No extensions blocked. Add a Quick Profile or a custom extension.</div>';
+    box.innerHTML = '<div style="color:var(--muted);font-size:.82rem;width:100%;text-align:center;padding:30px 0">No extensions in global block list. Add an extension below.</div>';
     return;
   }
   box.innerHTML = fbExts.map(ext => {
-    const cat = fbCategory(ext);
-    return `<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-left:3px solid ${cat.color};border-radius:6px;padding:5px 10px;font-size:.82rem">
-      <span style="font-weight:700;font-family:monospace">${ext}</span>
-      <span style="font-size:.65rem;color:${cat.color};background:${cat.color}20;padding:1px 6px;border-radius:3px;font-weight:700;text-transform:uppercase;letter-spacing:.04em">${cat.label}</span>
-      <button onclick="removeFileExt('${ext}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1;padding:0;margin-left:2px" title="Remove ${ext}">&times;</button>
+    return `<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:.82rem">
+      <span style="font-weight:700;font-family:monospace">${escHtml(ext)}</span>
+      <button onclick="removeFileExt('${escHtml(ext)}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1;padding:0;margin-left:2px" title="Remove ${escHtml(ext)}">&times;</button>
     </div>`;
   }).join('');
 }
@@ -3397,20 +3404,6 @@ async function removeFileExt(ext) {
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
-async function addProfile(name) {
-  const p = FB_PROFILES[name];
-  if (!p) return;
-  try {
-    await api('/api/fileblock', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({extensions: p.exts})
-    });
-    toast('Added ' + p.label + ' profile (' + p.exts.length + ' extensions)', 'success');
-    fetchFileBlock();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
-}
-
 async function clearAllExts() {
   if (!fbExts.length) return;
   if (!confirm('Remove all ' + fbExts.length + ' blocked extension(s)?')) return;
@@ -3426,6 +3419,198 @@ async function clearAllExts() {
 document.getElementById('fb-ext-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); addFileExt(); }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// File Extension Profiles (dynamic, policy-assignable)
+// ═══════════════════════════════════════════════════════════════════════════
+const FP_COLORS = ['#6366f1','#3b82f6','#22c55e','#f59e0b','#ef4444','#a855f7','#f97316','#14b8a6'];
+
+function fpColor(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return FP_COLORS[h % FP_COLORS.length];
+}
+
+function renderProfileList() {
+  const el = document.getElementById('fp-profile-list');
+  if (!fpProfiles.length) {
+    el.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:.82rem;text-align:center">No profiles yet</div>';
+    return;
+  }
+  el.innerHTML = fpProfiles.map(p => {
+    const active = p.id === fpCurrentId;
+    const col = fpColor(p.name);
+    return `<button onclick="selectProfile('${escHtml(p.id)}')"
+      style="display:flex;align-items:center;gap:10px;padding:10px 14px;border:none;background:${active ? 'rgba(99,102,241,.12)' : 'transparent'};
+      border-left:3px solid ${active ? col : 'transparent'};cursor:pointer;text-align:left;width:100%;
+      color:var(--text);transition:background .15s;border-right:none;border-top:none;border-bottom:1px solid var(--border)"
+      onmouseover="if('${p.id}'!=='${fpCurrentId||''}')this.style.background='var(--surface2)'"
+      onmouseout="if('${p.id}'!=='${fpCurrentId||''}')this.style.background='transparent'">
+      <div style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0"></div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:.83rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(p.name)}</div>
+        <div style="font-size:.7rem;color:var(--muted)">${p.extensions.length} extension${p.extensions.length!==1?'s':''}</div>
+      </div>
+    </button>`;
+  }).join('');
+}
+
+function selectProfile(id) {
+  fpCurrentId = id;
+  const p = fpProfiles.find(x => x.id === id);
+  if (!p) return;
+  renderProfileList();
+  renderProfileEditor(p);
+}
+
+function renderProfileEditor(p) {
+  document.getElementById('fp-editor-title').textContent = p.name;
+  document.getElementById('fp-editor-actions').style.display = 'flex';
+  document.getElementById('fp-delete-btn').style.display = p.id.startsWith('builtin-') ? 'none' : '';
+  const col = fpColor(p.name);
+  document.getElementById('fp-editor-body').innerHTML = `
+    <div style="margin-bottom:14px">
+      <label class="form-label">Profile Name</label>
+      <input id="fp-edit-name" class="input" value="${escHtml(p.name)}" style="width:100%" placeholder="e.g. My Corp Profile"
+        oninput="document.getElementById('fp-editor-title').textContent=this.value||'Profile'">
+    </div>
+    <label class="form-label">Extensions</label>
+    <div id="fp-edit-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;min-height:40px">
+      ${p.extensions.map(ext => `
+        <span style="display:inline-flex;align-items:center;gap:5px;background:${col}18;border:1px solid ${col}40;border-radius:5px;padding:3px 9px;font-size:.8rem;font-family:monospace">
+          ${escHtml(ext)}
+          <button onclick="fpRemoveExt(this,'${escHtml(ext)}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1rem;line-height:1;padding:0">&times;</button>
+        </span>`).join('')}
+    </div>
+    <div style="display:flex;gap:6px">
+      <input id="fp-add-ext-input" class="input" placeholder=".exe or exe" style="flex:1"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();fpAddExt()}">
+      <button class="btn ghost sm" onclick="fpAddExt()">+ Add</button>
+    </div>`;
+}
+
+function fpAddExt() {
+  const input = document.getElementById('fp-add-ext-input');
+  let ext = input.value.trim().toLowerCase();
+  if (!ext) return;
+  if (!ext.startsWith('.')) ext = '.' + ext;
+  const chips = document.getElementById('fp-edit-chips');
+  // Check for duplicate
+  const existing = chips.querySelectorAll('span');
+  for (const s of existing) {
+    if (s.textContent.trim().split('\n')[0].trim() === ext) {
+      toast('Extension already in profile', 'error'); return;
+    }
+  }
+  const p = fpProfiles.find(x => x.id === fpCurrentId);
+  const col = p ? fpColor(p.name) : '#6366f1';
+  const span = document.createElement('span');
+  span.style.cssText = `display:inline-flex;align-items:center;gap:5px;background:${col}18;border:1px solid ${col}40;border-radius:5px;padding:3px 9px;font-size:.8rem;font-family:monospace`;
+  span.innerHTML = `${escHtml(ext)}<button onclick="fpRemoveExt(this,'${escHtml(ext)}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1rem;line-height:1;padding:0">&times;</button>`;
+  chips.appendChild(span);
+  input.value = '';
+}
+
+function fpRemoveExt(btn) {
+  btn.closest('span').remove();
+}
+
+function fpGetCurrentExts() {
+  const chips = document.getElementById('fp-edit-chips');
+  if (!chips) return [];
+  return Array.from(chips.querySelectorAll('span')).map(s => s.textContent.trim().split('\n')[0].trim()).filter(Boolean);
+}
+
+async function saveProfile() {
+  const nameEl = document.getElementById('fp-edit-name');
+  if (!nameEl) return;
+  const name = nameEl.value.trim();
+  const exts = fpGetCurrentExts();
+  if (!name) { toast('Profile name is required', 'error'); return; }
+  try {
+    if (fpCurrentId) {
+      await api('/api/fileblock/profiles?id=' + encodeURIComponent(fpCurrentId), {
+        method: 'PUT', body: {name, extensions: exts}
+      });
+      toast('Profile saved', 'success');
+    }
+    await reloadProfilesAndDropdowns();
+    if (fpCurrentId) {
+      const updated = fpProfiles.find(x => x.id === fpCurrentId);
+      if (updated) renderProfileEditor(updated);
+    }
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteProfile() {
+  if (!fpCurrentId) return;
+  const p = fpProfiles.find(x => x.id === fpCurrentId);
+  if (!p) return;
+  if (!confirm(`Delete profile "${p.name}"? Policy rules referencing it will no longer filter files.`)) return;
+  try {
+    await api('/api/fileblock/profiles?id=' + encodeURIComponent(fpCurrentId), {method:'DELETE'});
+    fpCurrentId = null;
+    document.getElementById('fp-editor-title').textContent = 'Select a profile to edit';
+    document.getElementById('fp-editor-actions').style.display = 'none';
+    document.getElementById('fp-editor-body').innerHTML = '<div style="color:var(--muted);font-size:.82rem;text-align:center;padding:32px 0">Select a profile on the left, or click <strong>+ New</strong> to create one.</div>';
+    toast('Profile deleted', 'success');
+    await reloadProfilesAndDropdowns();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+function openNewProfilePanel() {
+  fpCurrentId = '__new__';
+  document.getElementById('fp-editor-title').textContent = 'New Profile';
+  document.getElementById('fp-editor-actions').style.display = 'flex';
+  document.getElementById('fp-delete-btn').style.display = 'none';
+  document.getElementById('fp-editor-body').innerHTML = `
+    <div style="margin-bottom:14px">
+      <label class="form-label">Profile Name</label>
+      <input id="fp-edit-name" class="input" style="width:100%" placeholder="e.g. My Corp Profile"
+        oninput="document.getElementById('fp-editor-title').textContent=this.value||'New Profile'">
+    </div>
+    <label class="form-label">Extensions</label>
+    <div id="fp-edit-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;min-height:40px"></div>
+    <div style="display:flex;gap:6px">
+      <input id="fp-add-ext-input" class="input" placeholder=".exe or exe" style="flex:1"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();fpAddExt()}">
+      <button class="btn ghost sm" onclick="fpAddExt()">+ Add</button>
+    </div>`;
+  // Override saveProfile for create path
+  document.getElementById('fp-editor-actions').querySelector('.btn.sm').onclick = async function() {
+    const name = document.getElementById('fp-edit-name').value.trim();
+    const exts = fpGetCurrentExts();
+    if (!name) { toast('Profile name is required', 'error'); return; }
+    try {
+      const created = await api('/api/fileblock/profiles', {method:'POST', body:{name, extensions:exts}});
+      toast('Profile created', 'success');
+      fpCurrentId = created.id;
+      await reloadProfilesAndDropdowns();
+      const p = fpProfiles.find(x => x.id === created.id);
+      if (p) renderProfileEditor(p);
+      document.getElementById('fp-editor-actions').querySelector('.btn.sm').onclick = saveProfile;
+    } catch(e) { toast('Error: ' + e.message, 'error'); }
+  };
+  renderProfileList();
+}
+
+async function reloadProfilesAndDropdowns() {
+  fpProfiles = await api('/api/fileblock/profiles').catch(() => []);
+  renderProfileList();
+  loadFileProfileDropdown();
+}
+
+async function loadFileProfileDropdown() {
+  try {
+    const profiles = await api('/api/fileblock/profiles');
+    const sel = document.getElementById('pol-file-profile');
+    if (!sel) return;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">— none —</option>' +
+      (profiles || []).map(p => `<option value="${escHtml(p.name)}">${escHtml(p.name)} (${p.extensions.length} ext)</option>`).join('');
+    if (current) sel.value = current;
+  } catch(e) { /* dropdown stays with current options */ }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Toast
@@ -3679,6 +3864,27 @@ async function toggleDefaultAction() {
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
+// ── IdP step pill helper ──────────────────────────────────────────────────
+function idpSetStep(step, editMode) {
+  const p1 = document.getElementById('idp-pill-1');
+  const p2 = document.getElementById('idp-pill-2');
+  if (!p1 || !p2) return;
+  const active = 'background:var(--accent);color:#fff;font-weight:600';
+  const inactive = 'background:var(--surface2);color:var(--muted);font-weight:600';
+  if (editMode) {
+    // Edit mode: both pills dimmed, show "Edit" label
+    p1.style.cssText = `display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;${inactive}`;
+    p2.style.cssText = `display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;${active}`;
+    p2.querySelector('span:last-child') && (p2.lastChild.textContent = 'Edit');
+  } else if (step === 1) {
+    p1.style.cssText = `display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;${active}`;
+    p2.style.cssText = `display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;${inactive}`;
+  } else {
+    p1.style.cssText = `display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;${inactive}`;
+    p2.style.cssText = `display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;${active}`;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Certificate Management
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3800,8 +4006,18 @@ async function loadIdPList() {
   if (!res.ok) return;
   const list = await res.json();
   const el = document.getElementById('idp-list');
+  // Update count badge
+  const badge = document.getElementById('idp-count-badge');
+  if (badge) {
+    if (list && list.length > 0) {
+      badge.textContent = list.length + ' configured';
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
   if (!list || list.length === 0) {
-    el.innerHTML = `<div style="text-align:center;padding:48px 24px;color:var(--muted)">
+    el.innerHTML = `<div style="text-align:center;padding:48px 24px;color:var(--muted);background:var(--surface1);border-radius:10px;border:1px solid var(--border)">
       <div style="font-size:3rem;margin-bottom:12px">🪪</div>
       <div style="font-size:1rem;font-weight:600;margin-bottom:6px">No identity providers configured</div>
       <div style="font-size:.85rem">Click "+ Add Provider" to connect Okta, Azure AD, Google Workspace, ADFS or any OIDC/SAML provider.</div>
@@ -3831,17 +4047,24 @@ async function loadIdPList() {
       ? `<div style="font-size:.75rem;color:var(--muted);margin-top:3px">Groups: <span style="color:var(--text)">${p.knownGroups.slice(0,5).map(g => escHtml(g)).join(', ')}${p.knownGroups.length > 5 ? ` <span style="color:var(--muted)">+${p.knownGroups.length-5} more</span>` : ''}</span></div>`
       : '';
     return `
-    <div style="background:var(--surface1);border-radius:10px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;gap:16px;border:1px solid var(--border)">
+    <div style="background:var(--surface1);border-radius:10px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;gap:16px;border:1px solid var(--border);transition:border-color .15s"
+      onmouseover="this.style.borderColor='var(--accent)30'" onmouseout="this.style.borderColor='var(--border)'">
       <div style="display:flex;align-items:center;gap:14px;flex:1;min-width:0">
-        <div style="width:44px;height:44px;border-radius:10px;background:${meta.color}18;border:1px solid ${meta.color}30;display:flex;align-items:center;justify-content:center;font-size:.95rem;font-weight:800;color:${meta.color};flex-shrink:0;letter-spacing:-.02em">${escHtml(meta.label.slice(0,2))}</div>
+        <!-- Icon: use first letter of vendor name in a coloured circle -->
+        <div style="width:42px;height:42px;border-radius:10px;background:${meta.color}20;border:1.5px solid ${meta.color}40;
+          display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:800;
+          color:${meta.color};flex-shrink:0">${escHtml(meta.label.slice(0,1))}</div>
         <div style="flex:1;min-width:0">
-          <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:2px">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px">
             <strong style="font-size:.93rem">${escHtml(p.name)}</strong>
-            ${vendorBadge}
             ${protoBadge}
             ${statusBadge}
           </div>
-          ${metaLine}${domainsLine}${groupsLine}
+          <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+            ${vendorBadge}
+            ${metaLine ? `<span style="color:var(--muted);font-size:.7rem">·</span>${metaLine}` : ''}
+          </div>
+          ${domainsLine}${groupsLine}
         </div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0">
@@ -3999,7 +4222,7 @@ function selectIdPTemplate(tpl) {
   // Go to step 2
   document.getElementById('idp-step1').style.display = 'none';
   document.getElementById('idp-step2').style.display = '';
-  document.getElementById('idp-step-label').textContent = 'Step 2 of 2 — Configure';
+  idpSetStep(2);
   document.getElementById('idp-back-btn').style.display = '';
   document.getElementById('idp-modal-title').textContent = `Configure ${t.icon} ${t.name || 'Identity Provider'}`;
   toggleIdPTypeFields();
@@ -4008,7 +4231,7 @@ function selectIdPTemplate(tpl) {
 function idpGoBack() {
   document.getElementById('idp-step1').style.display = '';
   document.getElementById('idp-step2').style.display = 'none';
-  document.getElementById('idp-step-label').textContent = 'Step 1 of 2 — Choose Provider';
+  idpSetStep(1);
   document.getElementById('idp-back-btn').style.display = 'none';
   document.getElementById('idp-modal-title').textContent = 'Add Identity Provider';
 }
@@ -4026,7 +4249,7 @@ function openIdPModal(p) {
     // Edit mode — skip step 1, go straight to form
     document.getElementById('idp-step1').style.display = 'none';
     document.getElementById('idp-step2').style.display = '';
-    document.getElementById('idp-step-label').textContent = 'Edit Provider';
+    idpSetStep(2, true);
     document.getElementById('idp-back-btn').style.display = 'none';
     document.getElementById('idp-modal-title').textContent = 'Edit Identity Provider';
     document.getElementById('idp-type').value = p.type;
@@ -4057,7 +4280,7 @@ function openIdPModal(p) {
     // Add mode — show step 1 (provider picker)
     document.getElementById('idp-step1').style.display = '';
     document.getElementById('idp-step2').style.display = 'none';
-    document.getElementById('idp-step-label').textContent = 'Step 1 of 2 — Choose Provider';
+    idpSetStep(1);
     document.getElementById('idp-back-btn').style.display = 'none';
     document.getElementById('idp-modal-title').textContent = 'Add Identity Provider';
     document.getElementById('idp-sp-info').style.display = 'none';
@@ -4203,7 +4426,9 @@ async function savePACConfig() {
 
 async function refreshPACPreview() {
   try {
-    const resp = await fetch(pacHTTPURL());
+    // /proxy.pac is served on the admin HTTPS port too — use a relative URL
+    // to avoid mixed-content blocks when the UI is accessed over HTTPS.
+    const resp = await fetch('/proxy.pac');
     const text = await resp.text();
     document.getElementById('pac-preview').textContent = text;
   } catch(e) {
