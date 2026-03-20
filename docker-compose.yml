@@ -55,8 +55,7 @@ services:
     # The proxy still handles transient ClamAV unavailability gracefully
     # (per-request retry), so this just avoids "unreachable" log noise on startup.
     depends_on:
-      clamav:
-        condition: service_healthy
+      - clamav
     ports:
       - "8080:8080"   # Proxy (configure browsers / PAC file to point here)
       - "9090:9090"   # Admin Web UI (HTTPS — accept the self-signed cert on first visit)
