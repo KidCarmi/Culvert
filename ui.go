@@ -51,9 +51,10 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/events", apiEvents) // SSE live dashboard
 	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
-	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)    // GET/POST blocklist mode
-	mux.HandleFunc("/api/blocklist/feed", apiBlocklistFeed)    // GET/POST feed URL+interval
+	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)         // GET/POST blocklist mode
+	mux.HandleFunc("/api/blocklist/feed", apiBlocklistFeed)         // GET/POST feed URL+interval
 	mux.HandleFunc("/api/blocklist/feed/sync", apiBlocklistFeedSync) // POST force-sync
+	mux.HandleFunc("/api/blocklist/exceptions", apiBlocklistExceptions) // GET/POST/DELETE
 	mux.HandleFunc("/api/config/export", apiConfigExport)      // GET — download backup JSON
 	mux.HandleFunc("/api/config/import", apiConfigImport)      // POST — restore from backup JSON
 	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode) // PUT — toggle proxy auth requirement
@@ -1030,6 +1031,63 @@ func apiBlocklistFeedSync(w http.ResponseWriter, r *http.Request) {
 	go blFeedSyncer.Sync()
 	auditEvent(r, "blocklist.feed.sync", "", "")
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// GET /api/blocklist/exceptions        → list all exception hosts
+// POST /api/blocklist/exceptions       → add exception(s)  body: {host} or {hosts:[]}
+// DELETE /api/blocklist/exceptions?host=X → remove one exception
+func apiBlocklistExceptions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		hosts := bl.ListExceptions()
+		sort.Strings(hosts)
+		jsonOK(w, map[string]any{"hosts": hosts, "count": len(hosts)})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Host  string   `json:"host"`
+			Hosts []string `json:"hosts"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Host != "" {
+			body.Hosts = append(body.Hosts, body.Host)
+		}
+		added := 0
+		for _, h := range body.Hosts {
+			h = strings.TrimSpace(h)
+			if h != "" {
+				bl.AddException(h)
+				added++
+			}
+		}
+		auditEvent(r, "blocklist.exception.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
+		jsonOK(w, map[string]any{"ok": true, "added": added})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		host := strings.TrimSpace(r.URL.Query().Get("host"))
+		if host == "" {
+			http.Error(w, "host required", http.StatusBadRequest)
+			return
+		}
+		bl.RemoveException(host)
+		auditEvent(r, "blocklist.exception.remove", host, "")
+		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // ── Alert Webhooks ─────────────────────────────────────────────────────────

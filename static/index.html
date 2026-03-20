@@ -544,6 +544,31 @@ tr.dragging  { opacity: .4; }
           </div>
         </div>
       </div>
+
+      <!-- Exceptions card -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header">
+          <span class="panel-title">Exceptions — Never Blocked</span>
+          <span id="bl-exc-count" style="font-size:.75rem;color:var(--muted)"></span>
+        </div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin:0 0 14px;line-height:1.6">
+            Hosts listed here pass through even if they appear in the blocklist or are imported by a feed sync.
+            Wildcards are supported (e.g. <code>*.internal.example.com</code>).
+          </p>
+          <div class="add-row" style="margin-bottom:14px">
+            <input type="text" class="input wide" id="bl-exc-new"
+              placeholder="example.com or *.example.com">
+            <button class="btn" onclick="addException()">+ Add Exception</button>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>Host / Pattern</th><th></th></tr></thead>
+              <tbody id="bl-exc-table"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ── SECURITY ──────────────────────────────────────────────────────── -->
@@ -2634,6 +2659,7 @@ async function fetchBlocklist() {
     blEntries = d.entries || [];
     renderBlocklist();
   } catch(e) {}
+  fetchExceptions();
 }
 
 function setBlSource(src) {
@@ -2763,6 +2789,62 @@ function importBlocklist(input) {
 // Keyboard shortcut: Enter to add host
 document.getElementById('new-host').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addHost(); }
+});
+
+// ── Blocklist Exceptions ──────────────────────────────────────────────────
+async function fetchExceptions() {
+  try {
+    const d = await api('/api/blocklist/exceptions');
+    renderExceptions(d.hosts || []);
+  } catch(e) {}
+}
+
+function renderExceptions(hosts) {
+  document.getElementById('bl-exc-count').textContent =
+    hosts.length + ' exception' + (hosts.length !== 1 ? 's' : '');
+  const tbody = document.getElementById('bl-exc-table');
+  if (hosts.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="2"><div class="empty-state" style="padding:12px 0"><div class="empty-icon">✅</div>No exceptions — all blocklist entries are enforced</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = hosts.map(h => {
+    const jh = JSON.stringify(h).replace(/"/g, '&quot;');
+    const wild = h.startsWith('*.');
+    return `<tr>
+      <td class="host-td">${escHtml(h)}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
+      <td style="text-align:right">
+        <button class="btn danger sm" onclick="removeException(${jh})">Remove</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function addException() {
+  const input = document.getElementById('bl-exc-new');
+  const host = input.value.trim();
+  if (!host) return;
+  try {
+    await api('/api/blocklist/exceptions', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({host})
+    });
+    input.value = '';
+    toast('Exception added for ' + host, 'success');
+    fetchExceptions();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function removeException(host) {
+  try {
+    await api('/api/blocklist/exceptions?host=' + encodeURIComponent(host), {method: 'DELETE'});
+    toast('Exception removed for ' + host, 'success');
+    fetchExceptions();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+document.getElementById('bl-exc-new').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); addException(); }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

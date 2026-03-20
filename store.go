@@ -259,15 +259,21 @@ type BlocklistEntry struct {
 }
 
 type Blocklist struct {
-	mu        sync.RWMutex
-	exact     map[string]bool // exact hostnames
-	wildcards map[string]bool // dot-prefixes: ".example.com"
-	manual    map[string]bool // subset added by an admin (not the feed)
-	path      string
-	mode      string // "block" (default) or "allow"
+	mu         sync.RWMutex
+	exact      map[string]bool // exact hostnames
+	wildcards  map[string]bool // dot-prefixes: ".example.com"
+	manual     map[string]bool // subset added by an admin (not the feed)
+	exceptions map[string]bool // hosts that are NEVER blocked, even if listed
+	path       string
+	mode       string // "block" (default) or "allow"
 }
 
-var bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}, manual: map[string]bool{}}
+var bl = &Blocklist{
+	exact:      map[string]bool{},
+	wildcards:  map[string]bool{},
+	manual:     map[string]bool{},
+	exceptions: map[string]bool{},
+}
 
 func (b *Blocklist) Mode() string {
 	b.mu.RLock()
@@ -315,6 +321,16 @@ func (b *Blocklist) Load(path string) error {
 			}
 		}
 	}
+	// Load exceptions sidecar — hosts that are never blocked regardless of the list.
+	exceptions := map[string]bool{}
+	if data, err := os.ReadFile(path + ".exceptions"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.ToLower(strings.TrimSpace(line))
+			if line != "" {
+				exceptions[line] = true
+			}
+		}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -340,6 +356,7 @@ func (b *Blocklist) Load(path string) error {
 	b.exact = exact
 	b.wildcards = wildcards
 	b.manual = manual
+	b.exceptions = exceptions
 	b.mu.Unlock()
 	return sc.Err()
 }
@@ -380,13 +397,87 @@ func (b *Blocklist) isListed(host string) bool {
 	return b.wildcards["."+host]
 }
 
+// isExcepted returns true when host or any of its parent domains is in the
+// exceptions list. Must be called with b.mu held (at least RLock).
+func (b *Blocklist) isExcepted(host string) bool {
+	if b.exceptions[host] {
+		return true
+	}
+	// Walk parent domains: sub.example.com → example.com → com
+	for i, ch := range host {
+		if ch == '.' {
+			if b.exceptions[host[i+1:]] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// AddException marks host as permanently exempt from blocking.
+// Feed syncs will still add the host to the blocklist, but IsBlocked will
+// always return false for it.
+func (b *Blocklist) AddException(host string) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return
+	}
+	b.mu.Lock()
+	b.exceptions[host] = true
+	b.mu.Unlock()
+	b.saveExceptions()
+}
+
+// RemoveException removes an exception, allowing the host to be blocked again.
+func (b *Blocklist) RemoveException(host string) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	b.mu.Lock()
+	delete(b.exceptions, host)
+	b.mu.Unlock()
+	b.saveExceptions()
+}
+
+// ListExceptions returns a sorted list of all exception hosts.
+func (b *Blocklist) ListExceptions() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]string, 0, len(b.exceptions))
+	for h := range b.exceptions {
+		out = append(out, h)
+	}
+	return out
+}
+
+// saveExceptions persists the exceptions set to a sidecar file.
+func (b *Blocklist) saveExceptions() {
+	if b.path == "" {
+		return
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	tmp := b.path + ".exceptions.tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) // #nosec G304
+	if err != nil {
+		return
+	}
+	for h := range b.exceptions {
+		fmt.Fprintln(f, h)
+	}
+	f.Close()
+	os.Rename(tmp, b.path+".exceptions") //nolint:errcheck
+}
+
 // IsBlocked reports whether a request to host should be blocked.
 // In "block" mode (default): listed hosts are blocked.
 // In "allow" mode:           only listed hosts are allowed; all others blocked.
+// Exceptions always pass through regardless of mode or list membership.
 func (b *Blocklist) IsBlocked(host string) bool {
 	host = strings.ToLower(host)
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	if b.isExcepted(host) {
+		return false
+	}
 	listed := b.isListed(host)
 	if b.mode == "allow" {
 		return !listed
