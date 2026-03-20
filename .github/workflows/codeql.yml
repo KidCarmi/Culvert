@@ -14,13 +14,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
-  push:
-    branches: ["main", "master"]
-  pull_request:
-    branches: ["main", "master"]
-  schedule:
-    - cron: "0 4 * * 1"   # weekly Monday 04:00 UTC (offset from security gate)
-  workflow_dispatch:
+  workflow_dispatch:  # disabled — re-enable when tokens are configured
 
 concurrency:
   group: codeql-${{ github.ref }}

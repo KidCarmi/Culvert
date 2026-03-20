@@ -13,8 +13,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, review_requested]
+  workflow_dispatch:  # disabled — re-enable when tokens are configured
 
 concurrency:
   group: code-review-${{ github.head_ref }}
