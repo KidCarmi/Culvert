@@ -240,7 +240,7 @@ func securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://flagcdn.com; connect-src 'self'")
+			"default-src 'self'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://flagcdn.com; connect-src 'self'")
 
 		// ── CORS: allow same-origin requests (reflect the origin back) ───────
 		origin := r.Header.Get("Origin")
@@ -743,6 +743,35 @@ func jsonOK(w http.ResponseWriter, v any) {
 	}
 }
 
+// validatePolicyRule checks that a rule has a valid action, a non-empty name,
+// a safe redirect URL when required, and a parseable timezone.
+func validatePolicyRule(rule PolicyRule) error {
+	if rule.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	validActions := map[PolicyAction]bool{
+		ActionAllow: true, ActionDrop: true,
+		ActionBlockPage: true, ActionRedirect: true,
+	}
+	if !validActions[rule.Action] {
+		return fmt.Errorf("action must be Allow, Drop, Block_Page, or Redirect")
+	}
+	if rule.Action == ActionRedirect {
+		if rule.RedirectURL == "" {
+			return fmt.Errorf("redirectURL is required when action is Redirect")
+		}
+		if !isSafeRedirectURL(rule.RedirectURL) {
+			return fmt.Errorf("redirectURL must be an absolute http/https URL")
+		}
+	}
+	if rule.Schedule != nil && rule.Schedule.Timezone != "" {
+		if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
+			return fmt.Errorf("invalid schedule timezone: %s", rule.Schedule.Timezone)
+		}
+	}
+	return nil
+}
+
 // decodeJSON decodes the request body into v using strict mode:
 // unknown fields are rejected (prevents payload-inflation / field confusion).
 func decodeJSON(r *http.Request, v any) error {
@@ -913,11 +942,16 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, h := range body.Hosts {
 			h = strings.TrimSpace(h)
-			if h != "" {
-				bl.AddManual(h)
-				logger.Printf("UI: blocked %s", h)
-				added++
+			if h == "" {
+				continue
 			}
+			if len(h) > 253 {
+				logger.Printf("UI: blocklist entry too long, skipped: %s…", h[:50])
+				continue
+			}
+			bl.AddManual(h)
+			logger.Printf("UI: blocked %s", h)
+			added++
 		}
 		bl.Save()
 		auditEvent(r, "blocklist.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
@@ -1066,11 +1100,16 @@ func apiBlocklistExceptions(w http.ResponseWriter, r *http.Request) {
 		added := 0
 		for _, h := range body.Hosts {
 			h = strings.TrimSpace(h)
-			if h != "" {
-				bl.AddException(h)
-				logger.Printf("UI: blocklist exception added %s", h)
-				added++
+			if h == "" {
+				continue
 			}
+			if len(h) > 253 {
+				logger.Printf("UI: exception entry too long, skipped: %s…", h[:50])
+				continue
+			}
+			bl.AddException(h)
+			logger.Printf("UI: blocklist exception added %s", h)
+			added++
 		}
 		auditEvent(r, "blocklist.exception.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
 		jsonOK(w, map[string]any{"ok": true, "added": added})
@@ -1220,6 +1259,14 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 		}
 		if body.Name == "" {
 			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if len(body.Name) > 256 {
+			http.Error(w, "name must be 256 characters or fewer", http.StatusBadRequest)
+			return
+		}
+		if len(body.Hosts) > 10000 {
+			http.Error(w, "category cannot contain more than 10000 hosts", http.StatusBadRequest)
 			return
 		}
 		if err := catStore.Set(body.Name, body.Hosts, false); err != nil {
@@ -1436,8 +1483,12 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		bl.SetMode(b.BlocklistMode)
 	}
 
-	// Policy rules.
+	// Policy rules — validate each before importing.
 	for _, rule := range b.PolicyRules {
+		if err := validatePolicyRule(rule); err != nil {
+			logger.Printf("config import: skipping rule %q: %v", rule.Name, err)
+			continue
+		}
 		policyStore.Add(rule)
 	}
 	policyStore.Save()
@@ -1624,6 +1675,10 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if body.IPFilterMode != "" {
+			if body.IPFilterMode != "allow" && body.IPFilterMode != "block" {
+				http.Error(w, `ipFilterMode must be "allow" or "block"`, http.StatusBadRequest)
+				return
+			}
 			ipf.SetMode(body.IPFilterMode)
 		}
 		if body.IPAdd != "" {
@@ -1784,15 +1839,9 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
-		if rule.Action == "" {
-			http.Error(w, "action is required", http.StatusBadRequest)
+		if err := validatePolicyRule(rule); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
-		}
-		if rule.Schedule != nil && rule.Schedule.Timezone != "" {
-			if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
-				http.Error(w, "invalid schedule timezone: "+rule.Schedule.Timezone, http.StatusBadRequest)
-				return
-			}
 		}
 		added := policyStore.Add(rule)
 		policyStore.Save()
@@ -1825,11 +1874,9 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if rule.Schedule != nil && rule.Schedule.Timezone != "" {
-			if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
-				http.Error(w, "invalid schedule timezone: "+rule.Schedule.Timezone, http.StatusBadRequest)
-				return
-			}
+		if err := validatePolicyRule(rule); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		if !policyStore.Update(priority, rule) {
 			http.Error(w, "rule not found", http.StatusNotFound)

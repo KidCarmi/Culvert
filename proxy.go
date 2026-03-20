@@ -530,7 +530,9 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		logger.Printf("HTTP response copy error for %s: %v", r.Host, err)
+	}
 }
 
 // isSafeRedirectURL returns true only for absolute http/https URLs whose host
