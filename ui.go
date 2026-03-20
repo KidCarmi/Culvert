@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -839,6 +840,52 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		hosts := bl.List()
 		sort.Strings(hosts)
+		// Optional search/pagination: ?q=keyword&limit=N&offset=N
+		// Without params, returns full list (backward-compatible).
+		q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+		limitStr := r.URL.Query().Get("limit")
+		offsetStr := r.URL.Query().Get("offset")
+		if q != "" || limitStr != "" || offsetStr != "" {
+			// Filter by query.
+			filtered := hosts
+			if q != "" {
+				filtered = make([]string, 0, 64)
+				for _, h := range hosts {
+					if strings.Contains(h, q) {
+						filtered = append(filtered, h)
+					}
+				}
+			}
+			total := len(filtered)
+			// Apply offset.
+			offset := 0
+			if offsetStr != "" {
+				if v, err := strconv.Atoi(offsetStr); err == nil && v > 0 {
+					offset = v
+				}
+			}
+			if offset > total {
+				offset = total
+			}
+			filtered = filtered[offset:]
+			// Apply limit.
+			limit := 50
+			if limitStr != "" {
+				if v, err := strconv.Atoi(limitStr); err == nil && v > 0 {
+					limit = v
+				}
+			}
+			if limit > len(filtered) {
+				limit = len(filtered)
+			}
+			jsonOK(w, map[string]any{
+				"hosts":  filtered[:limit],
+				"count":  total,
+				"offset": offset,
+				"limit":  limit,
+			})
+			return
+		}
 		jsonOK(w, map[string]any{"hosts": hosts, "count": len(hosts)})
 
 	case http.MethodPost:

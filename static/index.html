@@ -1601,6 +1601,35 @@ Firefox (all platforms):
       </div>
 
       <div id="urlcat-list"></div>
+
+      <!-- Blocklist card — shows the global blocklist as a read-only category object -->
+      <div class="card" style="margin-top:16px" id="urlcat-blocklist-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <strong style="font-size:15px">⛔ Blocklist</strong>
+            <span class="badge" style="font-size:11px;background:rgba(239,68,68,.12);color:#f87171;border:1px solid rgba(239,68,68,.25)"
+              id="bl-cat-count">loading…</span>
+            <span class="badge" style="font-size:11px;background:var(--surface2);color:var(--muted)">read-only · managed in Settings</span>
+          </div>
+          <a href="#" onclick="event.preventDefault();showView('settings')"
+            style="font-size:.75rem;color:var(--accent)">Manage in Settings →</a>
+        </div>
+        <p style="font-size:.78rem;color:var(--muted);margin:0 0 12px;line-height:1.55">
+          All domains in the global blocklist (including feed-imported entries) are shown here.
+          These are always blocked regardless of policy rules. Managed via Settings → Blocklist.
+        </p>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+          <input type="text" class="input" id="bl-cat-search"
+            placeholder="Search blocklisted domains…"
+            style="flex:1;font-family:monospace;font-size:.82rem"
+            oninput="blCatSearch()">
+          <span id="bl-cat-match-count" style="font-size:.75rem;color:var(--muted);white-space:nowrap"></span>
+        </div>
+        <div id="bl-cat-results" style="display:flex;flex-direction:column;gap:2px;max-height:320px;overflow-y:auto;font-family:monospace;font-size:.82rem"></div>
+        <div id="bl-cat-load-more" style="display:none;margin-top:8px">
+          <button class="btn ghost sm" onclick="blCatLoadMore()">Load more…</button>
+        </div>
+      </div>
     </div><!-- /view-urlcat -->
 
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
@@ -2118,6 +2147,60 @@ async function loadURLCategories() {
     document.getElementById('urlcat-list').innerHTML =
       `<p style="color:var(--danger)">Failed to load categories: ${escHtml(err.message)}</p>`;
   }
+  loadBlCat();
+}
+
+// ── Blocklist-as-category card ────────────────────────────────────────────
+let _blCatAll = [];      // full sorted list
+let _blCatFiltered = []; // after search filter
+let _blCatOffset = 0;
+const BL_CAT_PAGE = 50;
+
+async function loadBlCat() {
+  try {
+    const d = await api('/api/blocklist');
+    _blCatAll = (d.hosts || []).slice().sort();
+    _blCatOffset = 0;
+    document.getElementById('bl-cat-search').value = '';
+    document.getElementById('bl-cat-match-count').textContent = '';
+    _blCatFiltered = _blCatAll;
+    _renderBlCat();
+  } catch (err) {
+    document.getElementById('bl-cat-results').innerHTML =
+      `<span style="color:var(--danger)">Failed to load: ${escHtml(err.message)}</span>`;
+  }
+}
+
+function blCatSearch() {
+  const q = document.getElementById('bl-cat-search').value.toLowerCase().trim();
+  _blCatFiltered = q ? _blCatAll.filter(h => h.includes(q)) : _blCatAll;
+  _blCatOffset = 0;
+  _renderBlCat();
+}
+
+function blCatLoadMore() {
+  _blCatOffset += BL_CAT_PAGE;
+  _renderBlCat(true);
+}
+
+function _renderBlCat(append) {
+  const total = _blCatFiltered.length;
+  document.getElementById('bl-cat-count').textContent = total + ' hosts';
+  const q = document.getElementById('bl-cat-search').value.trim();
+  document.getElementById('bl-cat-match-count').textContent =
+    q ? `${total} match${total !== 1 ? 'es' : ''}` : '';
+  const page = _blCatFiltered.slice(0, _blCatOffset + BL_CAT_PAGE);
+  const container = document.getElementById('bl-cat-results');
+  const html = page.map(h =>
+    `<span style="padding:2px 4px;border-radius:3px;background:var(--surface2)">${escHtml(h)}</span>`
+  ).join('');
+  if (append) {
+    container.insertAdjacentHTML('beforeend', html);
+  } else {
+    container.innerHTML = html || '<span style="color:var(--muted)">No matching hosts.</span>';
+  }
+  const hasMore = (page.length < total);
+  document.getElementById('bl-cat-load-more').style.display = hasMore ? '' : 'none';
 }
 
 function renderURLCatList(cats) {
