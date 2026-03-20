@@ -388,7 +388,7 @@ func setUISessionCookie(w http.ResponseWriter, r *http.Request, username string,
 		MaxAge:   int(getSessionTTL().Seconds()),
 		HttpOnly: true,
 		Secure:   isSecureRequest(r),
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode, // admin UI — Strict prevents CSRF via cross-site navigation
 	})
 	return nil
 }
@@ -412,7 +412,7 @@ func clearUISessionCookie(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   isSecureRequest(r),
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode, // admin UI — Strict prevents CSRF via cross-site navigation
 	})
 }
 
@@ -1896,8 +1896,8 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // enforce 1 MB limit before parsing (G120)
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // enforce 1 MB limit before parsing
+	if err := r.ParseMultipartForm(1 << 20); err != nil { //nolint:G120 // body already bounded by MaxBytesReader above
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
 	}
