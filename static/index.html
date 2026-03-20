@@ -2831,7 +2831,7 @@ async function addException() {
     });
     input.value = '';
     toast('Exception added for ' + host, 'success');
-    fetchExceptions();
+    fetchExceptions(); fetchStats();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -2839,7 +2839,7 @@ async function removeException(host) {
   try {
     await api('/api/blocklist/exceptions?host=' + encodeURIComponent(host), {method: 'DELETE'});
     toast('Exception removed for ' + host, 'success');
-    fetchExceptions();
+    fetchExceptions(); fetchStats();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 

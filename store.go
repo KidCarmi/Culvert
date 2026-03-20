@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -398,15 +399,23 @@ func (b *Blocklist) isListed(host string) bool {
 }
 
 // isExcepted returns true when host or any of its parent domains is in the
-// exceptions list. Must be called with b.mu held (at least RLock).
+// exceptions list. Supports exact hosts, parent-domain inheritance, and
+// wildcard entries (stored as "*.example.com").
+// Must be called with b.mu held (at least RLock).
 func (b *Blocklist) isExcepted(host string) bool {
 	if b.exceptions[host] {
 		return true
 	}
 	// Walk parent domains: sub.example.com → example.com → com
+	// Each dot boundary is also checked as a wildcard pattern *.parent.
 	for i, ch := range host {
 		if ch == '.' {
-			if b.exceptions[host[i+1:]] {
+			parent := host[i+1:]
+			if b.exceptions[parent] {
+				return true
+			}
+			// e.g. "*.example.com" stored literally in exceptions
+			if b.exceptions["*."+parent] {
 				return true
 			}
 		}
@@ -445,6 +454,7 @@ func (b *Blocklist) ListExceptions() []string {
 	for h := range b.exceptions {
 		out = append(out, h)
 	}
+	sort.Strings(out)
 	return out
 }
 

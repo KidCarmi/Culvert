@@ -1043,7 +1043,6 @@ func apiBlocklistExceptions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		hosts := bl.ListExceptions()
-		sort.Strings(hosts)
 		jsonOK(w, map[string]any{"hosts": hosts, "count": len(hosts)})
 
 	case http.MethodPost:
@@ -1066,6 +1065,7 @@ func apiBlocklistExceptions(w http.ResponseWriter, r *http.Request) {
 			h = strings.TrimSpace(h)
 			if h != "" {
 				bl.AddException(h)
+				logger.Printf("UI: blocklist exception added %s", h)
 				added++
 			}
 		}
@@ -1082,6 +1082,7 @@ func apiBlocklistExceptions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		bl.RemoveException(host)
+		logger.Printf("UI: blocklist exception removed %s", host)
 		auditEvent(r, "blocklist.exception.remove", host, "")
 		jsonOK(w, map[string]any{"ok": true})
 
