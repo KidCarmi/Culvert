@@ -630,3 +630,24 @@ func TestUNAUTH_CONNECT_EstablishesTunnel(t *testing.T) {
 		t.Errorf("CONNECT tunnel: expected 200, got %d", resp.StatusCode)
 	}
 }
+
+// ── sanitizeLog tests ─────────────────────────────────────────────────────────
+
+func TestSanitizeLog_StripNewlines(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"normal text", "normal text"},
+		{"line1\nline2", "line1_line2"},
+		{"line1\r\nline2", "line1__line2"},
+		{"tab\there", "tab_here"},
+		{"mixed\n\t\rchars", "mixed___chars"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := sanitizeLog(c.input); got != c.want {
+			t.Errorf("sanitizeLog(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
