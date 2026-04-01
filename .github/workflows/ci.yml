@@ -1,7 +1,12 @@
 name: CI
 
 on:
-  workflow_dispatch:  # disabled — re-enable when tokens are configured
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
