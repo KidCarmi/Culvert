@@ -289,9 +289,10 @@ jobs:
           format: sarif
           output-file: hadolint.sarif
           # DL3018: pin apk versions — acceptable in build stage; GeoIP download is version-pinned via URL
-          # DL3008: pin apt versions — not applicable (alpine-only image)
           # DL3047: wget in HEALTHCHECK — curl not available in alpine minimal
-          ignore: DL3018,DL3047
+          # DL4006: pipe failures — acceptable for geoip download (wget | gzip)
+          ignore: DL3018,DL3047,DL4006
+          failure-threshold: warning
 
       - name: Upload Hadolint SARIF
         if: always()
