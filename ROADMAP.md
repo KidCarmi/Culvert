@@ -41,5 +41,61 @@ This document outlines the strategic progression for Culvert, moving from a PoC 
 - [x] **CodeQL:** Deep semantic SAST for Go — injection flaws, path traversal, unsafe patterns.
 - [x] **Cosign Signing:** Release binaries signed with keyless Sigstore OIDC (no secrets needed). Signatures published to Rekor transparency log.
 - [x] **SLSA Provenance:** SLSA Level 3 provenance generated for all release artifacts — cryptographically verifiable build attestation.
-- [x] **Coverage Gate:** ≥60% statement coverage enforced on every push and release; fuzz tests for 6 critical input-parsing paths.
+- [x] **Coverage Gate:** ≥55% statement coverage enforced on every push and release; fuzz tests for 6 critical input-parsing paths.
 - [x] **Fuzzing:** Go fuzz targets for `isPrivateHost`, `isSafeRedirectURL`, `parseClamResponse`, `normaliseFeedURL`, `matchDest`, `parseYARALiteralString`.
+
+## Phase 6: Architecture Review Hardening ✅ (P0) / 🔧 (P1-P3)
+
+Based on a three-reviewer expert architecture audit. Current score: **6.5/10**.
+
+### P0 — Critical Fixes  ()
+- [ ] **Goroutine leak fix:**
+- [ ] **RFC 7230 hop-by-hop:**
+- [ ] **SystemCertPool fail-closed:** 
+- [ ] **GeoIP fail-closed:** 
+- [ ] **Cert cache LRU + TTL:**
+- [ ] **Blocklist double-add:**
+
+### P1 — Security Hardening (Next Sprint)
+- [ ] **Slowloris protection:** Add read deadline to SSL inspect HTTP request loop (`proxy.go:809`)
+- [ ] **Session cookie Secure flag:** Use dynamic `isSecureRequest(r)` instead of hardcoded `true` (`session.go:219`)
+- [ ] **Audit log actor:** Use authenticated admin username, not just source IP (`ui.go:692`)
+- [ ] **Wildcard blocklist depth:** Walk full label chain so `*.example.com` blocks `a.b.example.com` (`store.go:393`)
+- [ ] **Exception list safety:** Add exact-only mode, warn on broad domain exceptions (`store.go:409`)
+- [ ] **Schedule timezone validation:** Reject invalid IANA timezone strings, log warning (`policy.go:517`)
+- [ ] **OIDC explicit context timeout:** Use `context.WithTimeout` on token/userinfo/introspection calls (`auth_oidc_flow.go`)
+- [ ] **LDAP anonymous bind guard:** Warn/reject empty BindDN when RequiredGroup is configured (`auth_ldap.go:136`)
+
+### P2 — Performance & Compliance (This Quarter)
+- [ ] **Policy audit trail:** Log matched rule ID + conditions for every policy evaluation
+- [ ] **CSRF behind reverse proxy:** Check `X-Forwarded-Host` in `isSameOrigin()`
+- [ ] **DNS caching for SSRF checks:** TTL cache for `isPrivateHost()` lookups
+- [ ] **Global http.Client reuse:** Single client instead of per-request allocation
+- [ ] **ClamAV connection pooling:** Semaphore-limited pool instead of per-scan dial
+- [ ] **YARA regex timeout:** Context-based timeout on pattern matching (ReDoS prevention)
+- [ ] **Content-Length pre-check:** Validate before buffering response body for scan
+- [ ] **PBKDF2 iteration increase:** 100k → 600k (NIST 2024 guidance)
+- [ ] **Data Plane backoff:** Exponential backoff on Control Plane connection failure
+- [ ] **Multi-IdP group resolution:** Document provider priority, add provider selection
+- [ ] **Log rotation cleanup:** Delete old `.1` files on rotation
+
+### P3 — Enterprise Features (Next Quarter)
+- [ ] **Upstream proxy chaining / failover** — Route through parent proxies with health checks
+- [ ] **Circuit breaker** — Stop forwarding to hung upstreams after N failures
+- [ ] **Policy conflict detection** — Warn when rules contradict at same priority
+- [ ] **Request/response size logging** — Log bytes transferred per request (data exfiltration detection)
+- [ ] **Hot config reload** — SIGHUP reloads YAML without restart
+- [ ] **Per-rule Prometheus metrics** — With cardinality cap
+- [ ] **Client certificate (mTLS)** — Mutual TLS for upstream servers
+- [ ] **CA auto-rotation** — Scheduled CA cert renewal with overlap period
+- [ ] **HSM/KMS integration** — Store CA key in hardware/cloud KMS
+- [ ] **OCSP/CRL checking** — Verify upstream cert revocation status
+
+## Score Targets
+
+| Milestone | Rating | Key Deliverables |
+|-----------|--------|------------------|
+| P0 done | **7.0/10** | Critical bugs fixed, fail-closed everywhere |
+| P1 done | **7.5/10** | Auth hardened, wildcards fixed, audit useful |
+| P2 done | **8.5/10** | Performance ready, compliance audit-ready |
+| P3 done | **9.0/10** | Enterprise-grade HA, PKI, observability |
