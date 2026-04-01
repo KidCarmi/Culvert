@@ -41,10 +41,10 @@ jobs:
       actions: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
@@ -54,7 +54,7 @@ jobs:
 
       # Initialise CodeQL tooling — must happen before the build.
       - name: Initialise CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@5c8a8a642e79153f5d047b10ec1cba1d1cc65699 # v3
         with:
           languages: go
           # Use the extended security-and-quality query suite for maximum coverage.
@@ -66,7 +66,7 @@ jobs:
         run: CGO_ENABLED=0 go build -o /dev/null .
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@5c8a8a642e79153f5d047b10ec1cba1d1cc65699 # v3
         with:
           category: codeql-go
           # Separate upload step handles graceful failure for repos without
@@ -76,7 +76,7 @@ jobs:
 
       - name: Upload SARIF results
         continue-on-error: true   # skip gracefully if code scanning is not enabled
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@5c8a8a642e79153f5d047b10ec1cba1d1cc65699 # v3
         with:
           sarif_file: sarif-results/go.sarif
           category: codeql-go

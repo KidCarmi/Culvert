@@ -42,12 +42,12 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Run gosec
-        uses: securego/gosec@v2   # pinned to stable release — avoid @master
+        uses: securego/gosec@223e19b8856e00f02cc67804499a83f77e208f3c # v2.25.0
         with:
-          # Keep exclusions in sync with ci.yml — documented reasons in ci.yml.
+          # Keep exclusions in sync with .golangci.yml — documented reasons in ci.yml.
           args: >-
             -exclude=G104,G302,G304,G401,G402,G704
             -fmt=sarif
@@ -57,7 +57,7 @@ jobs:
       - name: Upload SARIF to GitHub Security tab
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4
         with:
           sarif_file: gosec-results.sarif
           category: gosec
@@ -67,9 +67,9 @@ jobs:
     name: "CVE · govulncheck"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
@@ -92,10 +92,10 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Scan source & dependencies with Trivy
-        uses: aquasecurity/trivy-action@0.31.0   # pinned — avoid @master
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           scan-type: "fs"
           scan-ref: "."
@@ -108,7 +108,7 @@ jobs:
       - name: Upload Trivy SARIF
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -121,13 +121,13 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Build image for scanning (no push)
         run: docker build -t proxyshield:scan .
 
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@0.31.0   # pinned — avoid @master
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: "proxyshield:scan"
           format: "sarif"
@@ -139,7 +139,7 @@ jobs:
       - name: Upload Trivy image SARIF
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
@@ -149,12 +149,12 @@ jobs:
     name: "Secrets · gitleaks"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0    # full history so gitleaks can scan all commits
 
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Set GITLEAKS_LICENSE in repo secrets for team/org plans.
@@ -164,9 +164,9 @@ jobs:
     name: "Licenses · go-licenses"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
@@ -187,7 +187,7 @@ jobs:
 
       - name: Upload license report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: license-report
           path: license-report.txt
@@ -200,10 +200,10 @@ jobs:
     # SBOM generation is informational — does not block the gate.
     # The artifact is attached to every release for supply-chain transparency.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Generate SBOM with Syft
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: "."
           format: "cyclonedx-json"
@@ -211,7 +211,7 @@ jobs:
           output-file: "proxyshield-sbom.json"
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom
           path: proxyshield-sbom.json
@@ -222,9 +222,9 @@ jobs:
     name: "SAST · staticcheck"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
@@ -233,7 +233,7 @@ jobs:
         run: go mod download
 
       - name: Run staticcheck
-        uses: dominikh/staticcheck-action@v1
+        uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1
         with:
           version: "2025.1"
           install-go: false
@@ -243,9 +243,9 @@ jobs:
     name: "Tests · race detector + coverage"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
@@ -266,7 +266,7 @@ jobs:
           fi
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
           path: coverage.out
@@ -280,10 +280,10 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Lint Dockerfile with Hadolint
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with:
           dockerfile: Dockerfile
           format: sarif
@@ -295,7 +295,7 @@ jobs:
       - name: Upload Hadolint SARIF
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@5c8a8a642e79153f5d047b10ec1cba1d1cc65699 # v3
         with:
           sarif_file: hadolint.sarif
           category: hadolint
