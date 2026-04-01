@@ -197,9 +197,10 @@ func TestOIDCCacheSetWithExp_PastExpiry(t *testing.T) {
 
 func TestMatchDest_CountryFilter_NoCacheHit(t *testing.T) {
 	rule := &PolicyRule{DestCountry: []string{"US"}}
-	// geo.LookupCached returns "" and false (no cache hit) so country filter is skipped
-	if !matchDest(rule, "example.com") {
-		t.Error("matchDest with country filter and no cache hit should return true")
+	// Fail-closed: geo.LookupCached returns "" and false (no cache hit),
+	// so the country filter rejects the match (unknown country = no match).
+	if matchDest(rule, "example.com") {
+		t.Error("matchDest with country filter and no cache hit should return false (fail-closed)")
 	}
 }
 
@@ -380,7 +381,7 @@ func TestAuditAdd_NoFile_NoSyslog(_ *testing.T) {
 // ─── CertManager.GetCert ─────────────────────────────────────────────────────
 
 func TestCertManager_GetCert(t *testing.T) {
-	cm := &CertManager{cache: make(map[string]*tls.Certificate)}
+	cm := &CertManager{cache: make(map[string]*certCacheEntry)}
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -400,7 +401,7 @@ func TestCertManager_GetCert(t *testing.T) {
 }
 
 func TestCertManager_GetCert_EmptyServerName(t *testing.T) {
-	cm := &CertManager{cache: make(map[string]*tls.Certificate)}
+	cm := &CertManager{cache: make(map[string]*certCacheEntry)}
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}

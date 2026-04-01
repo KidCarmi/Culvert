@@ -420,7 +420,9 @@ func (p *OIDCFlowProvider) ExchangeCode(code, state string) (*Identity, error) {
 		"client_secret": {p.cfg.ClientSecret},
 		"code_verifier": {entry.verifier},
 	}
-	req, err := http.NewRequestWithContext(context.Background(),
+	tokenCtx, tokenCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer tokenCancel()
+	req, err := http.NewRequestWithContext(tokenCtx,
 		http.MethodPost, p.disc.TokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
@@ -543,7 +545,9 @@ func (p *OIDCFlowProvider) validateIDToken(rawToken, expectedNonce string) (*Ide
 // ---------------------------------------------------------------------------
 
 func (p *OIDCFlowProvider) enrichFromUserinfo(id *Identity, accessToken string) error {
-	req, err := http.NewRequestWithContext(context.Background(),
+	uiCtx, uiCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer uiCancel()
+	req, err := http.NewRequestWithContext(uiCtx,
 		http.MethodGet, p.disc.UserinfoEndpoint, nil)
 	if err != nil {
 		return err
@@ -590,7 +594,9 @@ func (p *OIDCFlowProvider) introspect(username, token string) (*Identity, bool) 
 		"token":           {token},
 		"token_type_hint": {"access_token"},
 	}
-	req, err := http.NewRequestWithContext(context.Background(),
+	intrCtx, intrCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer intrCancel()
+	req, err := http.NewRequestWithContext(intrCtx,
 		http.MethodPost, p.disc.IntrospectionEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, false

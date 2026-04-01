@@ -197,7 +197,8 @@ func sessionMAC(data string) string {
 // ---------------------------------------------------------------------------
 
 // setSessionCookie writes a new signed session cookie to the response.
-func setSessionCookie(w http.ResponseWriter, id *Identity) error {
+// The Secure flag is set dynamically based on whether the request is HTTPS.
+func setSessionCookie(w http.ResponseWriter, r *http.Request, id *Identity) error {
 	s := &Session{
 		Sub:      id.Sub,
 		Email:    id.Email,
@@ -216,7 +217,7 @@ func setSessionCookie(w http.ResponseWriter, id *Identity) error {
 		Path:     "/",
 		MaxAge:   int(getSessionTTL().Seconds()),
 		HttpOnly: true,
-		Secure:   true, // set by proxy on HTTPS; harmless on plain HTTP
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
@@ -236,14 +237,14 @@ func readSessionCookie(r *http.Request) (*Session, error) {
 }
 
 // clearSessionCookie removes the session cookie.
-func clearSessionCookie(w http.ResponseWriter) {
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   isSecureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }

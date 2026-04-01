@@ -641,6 +641,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go relay(clientConn, br)       // target → client (br may have buffered bytes)
 	go relay(destConn, clientConn) // client → target
 	<-done
+	// Unblock the peer goroutine by closing write halves so io.Copy returns.
+	if tc, ok := clientConn.(interface{ CloseWrite() error }); ok {
+		tc.CloseWrite() //nolint:errcheck
+	}
+	if tc, ok := destConn.(interface{ CloseWrite() error }); ok {
+		tc.CloseWrite() //nolint:errcheck
+	}
+	<-done
 }
 
 // handleTunnel dispatches to SSL-bypass or SSL-inspect based on policy.
@@ -694,9 +702,17 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 	defer recordActiveConn(-1)
 
 	done := make(chan struct{}, 2)
-	relay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} }
+	relay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} } //nolint:errcheck
 	go relay(destConn, clientConn)
 	go relay(clientConn, destConn)
+	<-done
+	// Unblock the peer goroutine by closing write halves so io.Copy returns.
+	if tc, ok := destConn.(interface{ CloseWrite() error }); ok {
+		tc.CloseWrite() //nolint:errcheck
+	}
+	if tc, ok := clientConn.(interface{ CloseWrite() error }); ok {
+		tc.CloseWrite() //nolint:errcheck
+	}
 	<-done
 }
 
@@ -741,7 +757,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	} else {
 		systemRoots, err := x509.SystemCertPool()
 		if err != nil {
-			// Fall back to an empty pool; handshake will reject unknown CAs.
+			// Fail-closed: empty pool rejects all unknown CAs.
+			logger.Printf("WARN SystemCertPool unavailable, using empty pool (will reject all unknown CAs): %v", err)
 			systemRoots = x509.NewCertPool()
 		}
 		upstreamTLSCfg = &tls.Config{
@@ -805,11 +822,15 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 
 	for {
+		// Slowloris protection: enforce a read deadline so a slow client cannot
+		// hold the connection open indefinitely by trickling bytes.
+		clientTLS.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
 		// Read next HTTP/1.x request from the (decrypted) client stream.
 		req, err := http.ReadRequest(clientBR)
 		if err != nil {
 			break
 		}
+		clientTLS.SetReadDeadline(time.Time{}) //nolint:errcheck // clear deadline for forwarding
 		// Strip hop-by-hop headers before forwarding upstream.
 		removeHopHeaders(req.Header)
 
@@ -836,8 +857,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			go rawRelay(upstreamTLS, clientTLS)
 			go rawRelay(clientTLS, upstreamTLS)
 			<-done
+			// Unblock the peer goroutine by closing both TLS connections.
+			// tls.Conn has no CloseWrite, so full Close is used instead.
 			clientTLS.Close()
 			upstreamTLS.Close()
+			<-done
 			return
 		}
 
@@ -892,9 +916,18 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 }
 
 func removeHopHeaders(h http.Header) {
+	// RFC 7230 §6.1: the Connection header itself lists additional hop-by-hop
+	// headers that intermediaries MUST remove before forwarding.
+	for _, v := range h["Connection"] {
+		for _, f := range strings.Split(v, ",") {
+			if f = strings.TrimSpace(f); f != "" {
+				h.Del(f)
+			}
+		}
+	}
 	for _, hdr := range []string{
 		"Connection", "Keep-Alive", "Proxy-Authenticate",
-		"Proxy-Authorization", "TE", "Trailers", "Transfer-Encoding", "Upgrade",
+		"Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade",
 	} {
 		h.Del(hdr)
 	}
