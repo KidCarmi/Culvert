@@ -15,7 +15,7 @@ var metricsToken string
 
 // handleMetrics serves Prometheus-compatible text metrics on GET /metrics.
 // If metricsToken is set, the request must carry: Authorization: Bearer <token>
-func handleMetrics(w http.ResponseWriter, r *http.Request) {
+func handleMetrics(w http.ResponseWriter, r *http.Request) { //nolint:errcheck // writes to http.ResponseWriter; errors mean client disconnected
 	if metricsToken != "" {
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {

@@ -44,6 +44,9 @@ type caBundle struct {
 }
 
 // caMagic is a 4-byte file header so we can detect format errors early.
+// NOTE: The bytes 'P','S','C','A' are a legacy format identifier (originally
+// "ProxyShield CA"). Do NOT change — existing encrypted CA bundles on disk
+// use this magic and would fail to load if the value changes.
 var caMagic = [4]byte{'P', 'S', 'C', 'A'}
 
 const (

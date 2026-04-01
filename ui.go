@@ -2057,7 +2057,7 @@ func apiCACert(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		w.Header().Set("Content-Disposition", `attachment; filename="culvert-ca.pem"`)
-		w.Write(pem)
+		w.Write(pem) //nolint:errcheck // HTTP response write
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -2144,9 +2144,10 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-%s.csv"`, ts))
 		cw := csv.NewWriter(w)
-		cw.Write([]string{"timestamp", "time", "ip", "method", "host", "status"})
-		for _, e := range entries {
-			cw.Write([]string{
+		cw.Write([]string{"timestamp", "time", "ip", "method", "host", "status"}) //nolint:errcheck // CSV write
+		for i := range entries {
+			e := &entries[i]
+			cw.Write([]string{ //nolint:errcheck // CSV write
 				fmt.Sprintf("%d", e.TS),
 				e.Time, e.IP, e.Method, e.Host, e.Status,
 			})
@@ -2156,7 +2157,7 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 	default: // json
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-%s.json"`, ts))
-		json.NewEncoder(w).Encode(map[string]any{
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // HTTP response write
 			"exported": ts,
 			"count":    len(entries),
 			"logs":     entries,
