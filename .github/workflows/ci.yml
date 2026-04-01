@@ -8,6 +8,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -25,28 +29,15 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      - name: Tidy and download dependencies
-        run: go mod tidy && go mod download
+      - name: Download dependencies
+        run: go mod download
 
       - name: Vet
         run: go vet ./...
 
-      - name: staticcheck
-        uses: dominikh/staticcheck-action@v1
-        with:
-          version: "2025.1"
-          install-go: false
-
-      - name: gosec
-        uses: securego/gosec@master
-        with:
-          args: "-exclude=G104,G302,G304,G401,G402,G704 ./..."
-        # G104: unhandled errors on network writes/copies — intentional for streaming proxy paths
-        # G302: log file permissions — fixed to 0600; rule kept excluded for any residual hits
-        # G304: file path from variable — acceptable for blocklist/config/policy loading
-        # G401: MD5/SHA1 — we use SHA-256, gosec sometimes misidentifies
-        # G402: TLSSkipVerify — documented dev/test option, guarded by config flag
-        # G704: SSRF taint — a forward proxy must connect to arbitrary client-supplied hosts
+      # gosec and staticcheck are run by the Security Release Gate workflow
+      # (with SARIF upload) and by golangci-lint in Code Review (with inline
+      # PR comments). Running them here a third time adds no value.
 
       - name: Fuzz (short regression run)
         # Run each fuzz target for 15 s — long enough to replay the seed corpus
@@ -63,18 +54,8 @@ jobs:
             go test -run='^$' -fuzz="$target" -fuzztime=15s .
           done
 
-      - name: Test
-        run: go test -v -race -count=1 -coverprofile=coverage.out ./...
-
-      - name: Check coverage threshold (≥ 60%)
-        run: |
-          total=$(go tool cover -func=coverage.out | grep ^total | awk '{print $3}' | tr -d '%')
-          echo "Coverage: ${total}%"
-          if (( $(echo "$total < 60" | bc -l) )); then
-            echo "::error::Coverage ${total}% is below the 60% threshold"
-            exit 1
-          fi
-
+      # Tests with race detector and coverage are run by the Security Release
+      # Gate (tests-race job). Here we only build to verify compilation.
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags="-s -w" -o proxyshield .
 
@@ -187,6 +168,9 @@ jobs:
       contents: write
       id-token: write   # required for cosign keyless signing and SLSA provenance
 
+    outputs:
+      hashes: ${{ steps.collect-hashes.outputs.hashes }}
+
     strategy:
       matrix:
         include:
@@ -204,8 +188,8 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      - name: Tidy modules
-        run: go mod tidy
+      - name: Download dependencies
+        run: go mod download
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
@@ -215,6 +199,14 @@ jobs:
         run: |
           go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
             -o proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
+
+      # Compute SHA-256 hash for SLSA provenance.
+      - name: Compute binary hash
+        id: hash
+        run: |
+          BINARY="proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
+          HASH=$(sha256sum "$BINARY" | base64 -w0)
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
       - name: Install cosign
@@ -242,6 +234,11 @@ jobs:
             proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.sig
             proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.pem
 
+      # Collect hashes across matrix legs for SLSA provenance.
+      - name: Collect hashes for provenance
+        id: collect-hashes
+        run: echo "hashes=${{ steps.hash.outputs.hash }}" >> $GITHUB_OUTPUT
+
   # ─── SLSA provenance ──────────────────────────────────────────────────────
   # Generates SLSA Level 3 provenance for all release binaries, providing a
   # cryptographically verifiable record of what was built, when, and how.
@@ -255,6 +252,5 @@ jobs:
       contents: write
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      base64-subjects: |
-        ${{ needs.release.outputs.hashes || '' }}
+      base64-subjects: ${{ needs.release.outputs.hashes }}
       upload-assets: true

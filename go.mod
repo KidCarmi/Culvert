@@ -1,6 +1,6 @@
 module proxy
 
-go 1.24.7
+go 1.25
 
 require (
 	github.com/crewjam/saml v0.5.1
