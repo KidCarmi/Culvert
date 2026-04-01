@@ -8,7 +8,7 @@ import (
 // ─── CategoryStore tests ──────────────────────────────────────────────────────
 
 func newTestCatStore() *CategoryStore {
-	return &CategoryStore{entries: defaultCategoryEntries()}
+	return newCategoryStore(defaultCategoryEntries())
 }
 
 func TestCategoryStore_All(t *testing.T) {
