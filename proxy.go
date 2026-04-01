@@ -531,7 +531,9 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		logger.Printf("HTTP response copy error for %s: %v", r.Host, err)
+	}
 }
 
 // sanitizeLog replaces control characters (newlines, tabs, etc.) in a string
@@ -846,6 +848,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		if bodyNeedsBuffering(ct) {
 			origBody := resp.Body
 			body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
+			if readErr != nil {
+				origBody.Close()
+				logger.Printf("SSL_INSPECT: body read error for %s: %v", hostOnly, readErr)
+				break
+			}
 			if readErr == nil {
 				// DPI regex scan (text content only).
 				if dpiScanner.Enabled() && isTextContentType(ct) {

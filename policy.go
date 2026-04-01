@@ -52,13 +52,37 @@ type CategoryEntry struct {
 }
 
 // CategoryStore manages URL categories with thread-safe, file-backed persistence.
+// index maps lowercase(category-name) → set of lowercase host strings for O(1)
+// host membership checks during policy evaluation.
 type CategoryStore struct {
 	mu      sync.RWMutex
 	entries []*CategoryEntry
+	index   map[string]map[string]bool // lowercase cat → lowercase host set
 	path    string
 }
 
-var catStore = &CategoryStore{entries: defaultCategoryEntries()}
+var catStore = newCategoryStore(defaultCategoryEntries())
+
+func newCategoryStore(entries []*CategoryEntry) *CategoryStore {
+	cs := &CategoryStore{entries: entries}
+	cs.rebuildIndex()
+	return cs
+}
+
+// rebuildIndex reconstructs the category→hosts index from cs.entries.
+// Caller must hold cs.mu (write or be the sole owner).
+func (cs *CategoryStore) rebuildIndex() {
+	idx := make(map[string]map[string]bool, len(cs.entries))
+	for _, e := range cs.entries {
+		key := strings.ToLower(e.Name)
+		set := make(map[string]bool, len(e.Hosts))
+		for _, h := range e.Hosts {
+			set[strings.ToLower(strings.TrimSuffix(h, "."))] = true
+		}
+		idx[key] = set
+	}
+	cs.index = idx
+}
 
 // defaultCategoryEntries returns the built-in category seed list.
 func defaultCategoryEntries() []*CategoryEntry {
@@ -94,6 +118,7 @@ func (cs *CategoryStore) Load(path string) error {
 		if os.IsNotExist(err) {
 			cs.mu.Lock()
 			cs.entries = defaultCategoryEntries()
+			cs.rebuildIndex()
 			cs.mu.Unlock()
 			cs.Save()
 			return nil
@@ -106,6 +131,7 @@ func (cs *CategoryStore) Load(path string) error {
 	}
 	cs.mu.Lock()
 	cs.entries = entries
+	cs.rebuildIndex()
 	cs.mu.Unlock()
 	return nil
 }
@@ -150,15 +176,22 @@ func (cs *CategoryStore) Set(name string, hosts []string, builtIn bool) error {
 		hosts = []string{}
 	}
 	cs.mu.Lock()
+	key := strings.ToLower(name)
+	set := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		set[strings.ToLower(strings.TrimSuffix(h, "."))] = true
+	}
 	for _, e := range cs.entries {
 		if strings.EqualFold(e.Name, name) {
 			e.Hosts = hosts
+			cs.index[key] = set
 			cs.mu.Unlock()
 			cs.Save()
 			return nil
 		}
 	}
 	cs.entries = append(cs.entries, &CategoryEntry{Name: name, Hosts: hosts, BuiltIn: builtIn})
+	cs.index[key] = set
 	cs.mu.Unlock()
 	cs.Save()
 	return nil
@@ -167,9 +200,11 @@ func (cs *CategoryStore) Set(name string, hosts []string, builtIn bool) error {
 // Delete removes a category by name. Returns an error if not found.
 func (cs *CategoryStore) Delete(name string) error {
 	cs.mu.Lock()
+	key := strings.ToLower(name)
 	for i, e := range cs.entries {
 		if strings.EqualFold(e.Name, name) {
 			cs.entries = append(cs.entries[:i], cs.entries[i+1:]...)
+			delete(cs.index, key)
 			cs.mu.Unlock()
 			cs.Save()
 			return nil
@@ -182,18 +217,18 @@ func (cs *CategoryStore) Delete(name string) error {
 // AddHost appends a host to the named category (no-op if already present).
 func (cs *CategoryStore) AddHost(category, host string) error {
 	cs.mu.Lock()
+	key := strings.ToLower(category)
 	for _, e := range cs.entries {
 		if !strings.EqualFold(e.Name, category) {
 			continue
 		}
-		host = strings.ToLower(strings.TrimSpace(host))
-		for _, h := range e.Hosts {
-			if strings.EqualFold(h, host) {
-				cs.mu.Unlock()
-				return nil // already present
-			}
+		host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+		if cs.index[key][host] {
+			cs.mu.Unlock()
+			return nil // already present
 		}
 		e.Hosts = append(e.Hosts, host)
+		cs.index[key][host] = true
 		cs.mu.Unlock()
 		cs.Save()
 		return nil
@@ -205,12 +240,14 @@ func (cs *CategoryStore) AddHost(category, host string) error {
 // RemoveHost deletes a host from the named category.
 func (cs *CategoryStore) RemoveHost(category, host string) error {
 	cs.mu.Lock()
+	key := strings.ToLower(category)
 	for _, e := range cs.entries {
 		if strings.EqualFold(e.Name, category) {
-			host = strings.ToLower(strings.TrimSpace(host))
+			host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 			for i, h := range e.Hosts {
-				if strings.EqualFold(h, host) {
+				if strings.ToLower(strings.TrimSuffix(h, ".")) == host {
 					e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
+					delete(cs.index[key], host)
 					cs.mu.Unlock()
 					cs.Save()
 					return nil
@@ -697,23 +734,28 @@ func lookupHostCategory(host string) (category, tier, matchedBy string) {
 	return "", "none", ""
 }
 
-// matchCategoryInStore is the original single-layer lookup against catStore.
-// Retained as a named helper so Layer 2 can be added without duplicating logic.
+// matchCategoryInStore checks whether host belongs to the named URL category.
+// Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
 func matchCategoryInStore(cat URLCategory, host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	catKey := strings.ToLower(string(cat))
+
 	catStore.mu.RLock()
-	defer catStore.mu.RUnlock()
-	for _, e := range catStore.entries {
-		if !strings.EqualFold(e.Name, string(cat)) {
-			continue
-		}
-		for _, h := range e.Hosts {
-			h = strings.ToLower(h)
-			if host == h || strings.HasSuffix(host, "."+h) {
-				return true
-			}
-		}
+	hostSet := catStore.index[catKey]
+	catStore.mu.RUnlock()
+
+	if hostSet == nil {
 		return false
+	}
+	// Exact match.
+	if hostSet[host] {
+		return true
+	}
+	// Subdomain match: foo.example.com → check "example.com", "com", etc.
+	for i, ch := range host {
+		if ch == '.' && hostSet[host[i+1:]] {
+			return true
+		}
 	}
 	return false
 }
