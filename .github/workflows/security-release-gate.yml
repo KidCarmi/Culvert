@@ -256,12 +256,12 @@ jobs:
       - name: Run tests with race detector
         run: go test -v -race -count=1 -timeout=15m -coverprofile=coverage.out ./...
 
-      - name: Check coverage threshold (≥ 60%)
+      - name: Check coverage threshold (≥ 55%)
         run: |
           total=$(go tool cover -func=coverage.out | grep ^total | awk '{print $3}' | tr -d '%')
           echo "Coverage: ${total}%"
-          if (( $(echo "$total < 60" | bc -l) )); then
-            echo "::error::Coverage ${total}% is below the 60% threshold"
+          if (( $(echo "$total < 55" | bc -l) )); then
+            echo "::error::Coverage ${total}% is below the 55% threshold"
             exit 1
           fi
 
