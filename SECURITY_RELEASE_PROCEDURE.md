@@ -1,4 +1,4 @@
-# נוהל אבטחה לפני שחרור גרסה — ProxyShield
+# נוהל אבטחה לפני שחרור גרסה — Culvert
 # Security Release Procedure
 
 > **מדיניות:** אסור לשחרר גרסה (`git tag v*`) מבלי שכל שלבי הנוהל הזה הושלמו בהצלחה.
@@ -148,7 +148,7 @@ Repository → Settings → Branches → main → Edit
 ## 6. ניהול Secrets / Secret Management Rules
 
 - **אסור** לשמור secrets ב-`config.yaml` — השתמש במשתני סביבה
-- `PROXYSHIELD_CA_PASSPHRASE` — env var בלבד (מתועד ב-`main.go:17`)
+- `CULVERT_CA_PASSPHRASE` — env var בלבד (מתועד ב-`main.go:17`)
 - LDAP `bind_password` ו-OIDC `client_secret` — הוצא ל-secrets manager
 - SBOM מתפרסם עם כל release לשקיפות supply-chain
 
@@ -170,7 +170,7 @@ on:
 
 | Artifact | שמירה | תיאור |
 |----------|-------|-------|
-| `proxyshield-sbom.json` | 90 יום | Software Bill of Materials (CycloneDX) |
+| `culvert-sbom.json` | 90 יום | Software Bill of Materials (CycloneDX) |
 | `coverage.out` | 30 יום | דוח כיסוי בדיקות |
 | `license-report.txt` | 30 יום | רשימת רישיונות תלויות |
 | `gosec-results.sarif` | GitHub Security tab | ממצאי SAST |

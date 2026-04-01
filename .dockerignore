@@ -1,0 +1,12 @@
+.git
+.github
+.golangci.yml
+.dockerignore
+deploy
+docker-compose*.yml
+*.md
+*.out
+coverage.*
+*_test.go
+testdata
+fuzz_test.go

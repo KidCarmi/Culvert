@@ -44,6 +44,9 @@ type caBundle struct {
 }
 
 // caMagic is a 4-byte file header so we can detect format errors early.
+// NOTE: The bytes 'P','S','C','A' are a legacy format identifier (originally
+// "ProxyShield CA"). Do NOT change — existing encrypted CA bundles on disk
+// use this magic and would fail to load if the value changes.
 var caMagic = [4]byte{'P', 'S', 'C', 'A'}
 
 const (
@@ -63,8 +66,8 @@ func (cm *CertManager) InitCA() error {
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			Organization: []string{"ProxyShield"},
-			CommonName:   "ProxyShield Root CA",
+			Organization: []string{"Culvert"},
+			CommonName:   "Culvert Root CA",
 		},
 		NotBefore:             time.Now().Add(-time.Minute),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
@@ -92,7 +95,7 @@ func (cm *CertManager) InitCA() error {
 // passphrase) or, if the file does not exist, generates a fresh CA and saves
 // it. An empty passphrase disables encryption (development/testing only).
 //
-// The env var PROXYSHIELD_CA_PASSPHRASE is the recommended way to supply the
+// The env var CULVERT_CA_PASSPHRASE is the recommended way to supply the
 // passphrase so it never appears in CLI history or process listings.
 func (cm *CertManager) LoadOrInitCA(path, passphrase string) error {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {

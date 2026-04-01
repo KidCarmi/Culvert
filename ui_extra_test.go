@@ -138,7 +138,7 @@ func TestAPIPolicy_Put_NotFound(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPut, "/api/policy?priority=999999", map[string]any{
 		"name":   "updated",
-		"action": "deny",
+		"action": "Drop",
 	})
 	r = adminCtx(r)
 	apiPolicy(w, r)

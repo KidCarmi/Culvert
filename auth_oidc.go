@@ -19,7 +19,7 @@ import (
 //
 //	The client places an access token in the proxy password field:
 //	  Proxy-Authorization: Basic base64(username:access_token)
-//	ProxyShield calls the IDP's introspection endpoint (RFC 7662) to verify
+//	Culvert calls the IDP's introspection endpoint (RFC 7662) to verify
 //	the token, and optionally checks that a required scope/audience is present.
 //
 // Compatible IDPs: Okta, Azure AD, Keycloak, Auth0, any RFC 7662 IDP.

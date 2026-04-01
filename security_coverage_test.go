@@ -106,7 +106,7 @@ func TestFireAlert_EnabledAndDisabled(t *testing.T) {
 	// Use a test HTTP server as the webhook target.
 	received := make(chan string, 5)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		received <- r.Header.Get("X-ProxyShield-Signature")
+		received <- r.Header.Get("X-Culvert-Signature")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()

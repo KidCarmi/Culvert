@@ -16,7 +16,7 @@ import (
 // setupProxyTest resets all global state for a clean test run.
 func setupProxyTest(t *testing.T) {
 	t.Helper()
-	bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+	bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}, manual: map[string]bool{}, exceptions: map[string]bool{}}
 	ipf = &IPFilter{single: map[string]bool{}}
 	rl = &RateLimiter{clients: map[string]*clientBucket{}}
 	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
@@ -628,5 +628,26 @@ func TestUNAUTH_CONNECT_EstablishesTunnel(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("CONNECT tunnel: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ── sanitizeLog tests ─────────────────────────────────────────────────────────
+
+func TestSanitizeLog_StripNewlines(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"normal text", "normal text"},
+		{"line1\nline2", "line1_line2"},
+		{"line1\r\nline2", "line1__line2"},
+		{"tab\there", "tab_here"},
+		{"mixed\n\t\rchars", "mixed___chars"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := sanitizeLog(c.input); got != c.want {
+			t.Errorf("sanitizeLog(%q) = %q, want %q", c.input, got, c.want)
+		}
 	}
 }

@@ -67,7 +67,7 @@ var globalThreatFeed = &ThreatFeed{
 const (
 	urlHausTextFeed = "https://urlhaus.abuse.ch/downloads/text/"
 	openPhishFeed   = "https://openphish.com/feed.txt"
-	feedUserAgent   = "ProxyShield/1.0 (+https://github.com/KidCarmi/Claude-Test)"
+	feedUserAgent   = "Culvert/1.0 (+https://github.com/KidCarmi/Claude-Test)"
 	feedHTTPTimeout = 60 * time.Second
 	maxFeedLines    = 500_000 // safety cap per feed to limit memory usage
 )

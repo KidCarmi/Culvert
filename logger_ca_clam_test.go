@@ -252,7 +252,7 @@ func TestParseTLSPair_BadPEM(t *testing.T) {
 // ─── config.go — loadFileConfig ───────────────────────────────────────────────
 
 func TestLoadFileConfig_NonExistent(t *testing.T) {
-	_, err := loadFileConfig("/tmp/nonexistent_proxyshield_config_xyz.yaml")
+	_, err := loadFileConfig("/tmp/nonexistent_culvert_config_xyz.yaml")
 	if err == nil {
 		t.Error("loadFileConfig nonexistent file should return error")
 	}

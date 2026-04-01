@@ -684,7 +684,7 @@ func TestAPIPolicy_Post_Valid(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/policy", map[string]any{
 		"name":     "test-coverage-rule-xyz",
-		"action":   "block",
+		"action":   "Block_Page",
 		"destFQDN": "definitely-not-existing-test-xyz.internal.invalid",
 	})
 	r = adminCtx(r)

@@ -6,8 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o proxyshield .
+RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o culvert .
 
 # ── GeoIP stage ───────────────────────────────────────────────────────────────
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build
@@ -22,7 +21,7 @@ RUN apk add --no-cache wget && \
 # Security hardening (shift-left):
 #   • Non-root user (proxy:proxy) — no elevated privileges at runtime
 #   • Read-only root FS: run with --read-only + tmpfs mounts
-#       docker run --read-only --tmpfs /tmp --tmpfs /data proxyshield
+#       docker run --read-only --tmpfs /tmp --tmpfs /data culvert
 #   • Recommended seccomp profile: --security-opt seccomp=seccomp.json
 #       (see deploy/seccomp.json)
 #   • Drop all Linux capabilities: --cap-drop=ALL
@@ -37,7 +36,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
 # the start — no extra chown layer needed after the binary is written.
 USER proxy
 WORKDIR /app
-COPY --from=builder --chown=proxy:proxy /app/proxyshield .
+COPY --from=builder --chown=proxy:proxy /app/culvert .
 COPY --from=geoip   --chown=proxy:proxy /GeoLite2-Country.mmdb ./GeoLite2-Country.mmdb
 
 # Default config (mount your own at /app/config.yaml)
@@ -50,7 +49,7 @@ COPY --chown=proxy:proxy yara/ ./yara/
 
 # /data is the persistent volume for the Root CA bundle, policy rules, and
 # other state that must survive container restarts.
-# Mount with: docker run -v proxyshield_data:/data ...
+# Mount with: docker run -v culvert_data:/data ...
 VOLUME ["/data"]
 
 EXPOSE 8080 9090
@@ -58,7 +57,7 @@ EXPOSE 8080 9090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD wget -qO- http://localhost:8080/health || exit 1
 
-ENTRYPOINT ["./proxyshield"]
+ENTRYPOINT ["./culvert"]
 # All persistent state lives in /data (mount as a Docker volume):
 #   -ca-path        → Root CA bundle (ssl inspection)
 #   -policy         → Policy rules (CRITICAL: without this, rules are lost on restart)

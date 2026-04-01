@@ -1,7 +1,16 @@
 name: CI
 
 on:
-  workflow_dispatch:  # disabled — re-enable when tokens are configured
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -12,72 +21,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
 
-      - name: Tidy and download dependencies
-        run: go mod tidy && go mod download
+      - name: Download dependencies
+        run: go mod download
 
       - name: Vet
         run: go vet ./...
 
-      - name: staticcheck
-        uses: dominikh/staticcheck-action@v1
-        with:
-          version: "2025.1"
-          install-go: false
-
-      - name: gosec
-        uses: securego/gosec@master
-        with:
-          args: "-exclude=G104,G302,G304,G401,G402,G704 ./..."
-        # G104: unhandled errors on network writes/copies — intentional for streaming proxy paths
-        # G302: log file permissions — fixed to 0600; rule kept excluded for any residual hits
-        # G304: file path from variable — acceptable for blocklist/config/policy loading
-        # G401: MD5/SHA1 — we use SHA-256, gosec sometimes misidentifies
-        # G402: TLSSkipVerify — documented dev/test option, guarded by config flag
-        # G704: SSRF taint — a forward proxy must connect to arbitrary client-supplied hosts
-
-      - name: Fuzz (short regression run)
-        # Run each fuzz target for 15 s — long enough to replay the seed corpus
-        # and catch obvious regressions, short enough for CI to stay fast.
-        run: |
-          for target in \
-            FuzzIsPrivateHost \
-            FuzzIsSafeRedirectURL \
-            FuzzParseClamResponse \
-            FuzzNormaliseFeedURL \
-            FuzzMatchDest \
-            FuzzParseYARALiteral; do
-            echo "── $target ──"
-            go test -run='^$' -fuzz="$target" -fuzztime=15s .
-          done
-
-      - name: Test
-        run: go test -v -race -count=1 -coverprofile=coverage.out ./...
-
-      - name: Check coverage threshold (≥ 60%)
-        run: |
-          total=$(go tool cover -func=coverage.out | grep ^total | awk '{print $3}' | tr -d '%')
-          echo "Coverage: ${total}%"
-          if (( $(echo "$total < 60" | bc -l) )); then
-            echo "::error::Coverage ${total}% is below the 60% threshold"
-            exit 1
-          fi
-
+      # gosec, staticcheck, tests, and fuzz are run by the Security Release
+      # Gate workflow. This job only verifies compilation.
       - name: Build
-        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o proxyshield .
+        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: proxyshield-linux-amd64
-          path: proxyshield
+          name: culvert-linux-amd64
+          path: culvert
           retention-days: 7
 
   docker:
@@ -91,12 +58,12 @@ jobs:
       id-token: write      # cosign keyless image signing
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # ── Registry login ────────────────────────────────────────────────────
       # ghcr.io: always available, uses GITHUB_TOKEN — no secrets needed.
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -110,7 +77,7 @@ jobs:
       #   • SHA tag      (sha-abc1234)
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: |
             ghcr.io/${{ github.repository }}
@@ -122,21 +89,21 @@ jobs:
             type=ref,event=pr
             type=sha,prefix=sha-,format=short
           labels: |
-            org.opencontainers.image.title=ProxyShield
+            org.opencontainers.image.title=Culvert
             org.opencontainers.image.description=Enterprise-grade HTTP/HTTPS/SOCKS5 forward proxy
             org.opencontainers.image.vendor=KidCarmi
             org.opencontainers.image.licenses=MIT
 
       # ── Multi-arch build & push ───────────────────────────────────────────
       - name: Set up QEMU (for ARM emulation)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build and push image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -154,7 +121,7 @@ jobs:
       # Only runs when the image was actually pushed (not PRs).
       - name: Install cosign
         if: ${{ github.event_name != 'pull_request' }}
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign image (keyless via Sigstore)
         if: ${{ github.event_name != 'pull_request' }}
@@ -182,6 +149,9 @@ jobs:
       contents: write
       id-token: write   # required for cosign keyless signing and SLSA provenance
 
+    outputs:
+      hashes: ${{ steps.collect-hashes.outputs.hashes }}
+
     strategy:
       matrix:
         include:
@@ -192,15 +162,15 @@ jobs:
           - { goos: windows, goarch: amd64, ext: .exe }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
 
-      - name: Tidy modules
-        run: go mod tidy
+      - name: Download dependencies
+        run: go mod download
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
@@ -209,11 +179,19 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
+            -o culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
+
+      # Compute SHA-256 hash for SLSA provenance.
+      - name: Compute binary hash
+        id: hash
+        run: |
+          BINARY="culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
+          HASH=$(sha256sum "$BINARY" | base64 -w0)
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       # Sign the binary with cosign keyless signing.
       # The signature and certificate are stored in the Sigstore transparency log (Rekor).
@@ -222,7 +200,7 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          BINARY="proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
+          BINARY="culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
           cosign sign-blob \
             --yes \
             --output-certificate "${BINARY}.pem" \
@@ -230,12 +208,17 @@ jobs:
             "${BINARY}"
 
       - name: Upload release asset + signature
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           files: |
-            proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
-            proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.sig
-            proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.pem
+            culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
+            culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.sig
+            culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.pem
+
+      # Collect hashes across matrix legs for SLSA provenance.
+      - name: Collect hashes for provenance
+        id: collect-hashes
+        run: echo "hashes=${{ steps.hash.outputs.hash }}" >> $GITHUB_OUTPUT
 
   # ─── SLSA provenance ──────────────────────────────────────────────────────
   # Generates SLSA Level 3 provenance for all release binaries, providing a
@@ -250,6 +233,5 @@ jobs:
       contents: write
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      base64-subjects: |
-        ${{ needs.release.outputs.hashes || '' }}
+      base64-subjects: ${{ needs.release.outputs.hashes }}
       upload-assets: true

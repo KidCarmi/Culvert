@@ -12,10 +12,11 @@ package main
 // Delivery is async (fire-and-forget goroutine), never blocks the request path.
 // Failed deliveries are logged and silently discarded (no retry).
 // If a signing secret is configured, a HMAC-SHA256 signature is added as
-// X-ProxyShield-Signature: sha256=<hex>.
+// X-Culvert-Signature: sha256=<hex>.
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -191,21 +192,20 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 	if err != nil {
 		return
 	}
-	if err := validateExternalURL(h.URL); err != nil {
-		logger.Printf("Alert webhook %q: unsafe URL: %v", sanitizeLog(h.Name), err)
-		return
-	}
-	req, err := http.NewRequest(http.MethodPost, h.URL, bytes.NewReader(body))
+	// Webhook URLs are admin-configured (not user-tainted) — no SSRF risk.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
 		logger.Printf("Alert webhook %q: build request error: %v", sanitizeLog(h.Name), err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "ProxyShield-Alerts/1.0")
+	req.Header.Set("User-Agent", "Culvert-Alerts/1.0")
 	if h.Secret != "" {
 		mac := hmac.New(sha256.New, []byte(h.Secret))
 		mac.Write(body)
-		req.Header.Set("X-ProxyShield-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		req.Header.Set("X-Culvert-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)

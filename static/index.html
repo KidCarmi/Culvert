@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ProxyShield</title>
+<title>Culvert</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 /* ─── Reset & Variables ──────────────────────────────────────────────────── */
@@ -255,7 +255,7 @@ tr.dragging  { opacity: .4; }
   <div class="logo">
     <div class="logo-icon">🛡️</div>
     <div>
-      <div class="logo-text">ProxyShield</div>
+      <div class="logo-text">Culvert</div>
       <div class="logo-sub">v1.0 · Open Source</div>
     </div>
   </div>
@@ -1052,7 +1052,7 @@ tr.dragging  { opacity: .4; }
               Private keys are <strong>never</strong> sent to the browser.
             </p>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <a id="ca-download-btn" href="/api/ca-cert" class="btn" download="proxyshield-ca.pem">⬇ Download Root CA (.pem)</a>
+              <a id="ca-download-btn" href="/api/ca-cert" class="btn" download="culvert-ca.pem">⬇ Download Root CA (.pem)</a>
               <button class="btn ghost sm" onclick="copyCAInstallInstructions()">📋 Install Instructions</button>
             </div>
           </div>
@@ -1090,15 +1090,15 @@ tr.dragging  { opacity: .4; }
         <div style="background:var(--surface);border-radius:12px;padding:24px;max-width:540px;width:90%;box-shadow:0 24px 64px rgba(0,0,0,.4)">
           <div style="font-weight:700;font-size:1rem;margin-bottom:14px">🔑 Install Root CA — Instructions</div>
           <pre style="background:rgba(0,0,0,.2);padding:12px;border-radius:8px;font-size:.75rem;overflow:auto;line-height:1.6">Windows:
-  1. Double-click proxyshield-ca.pem → Install Certificate
+  1. Double-click culvert-ca.pem → Install Certificate
   2. Select "Local Machine" → Place in "Trusted Root CAs"
 
 macOS:
-  1. Double-click proxyshield-ca.pem → Keychain Access
-  2. Find "ProxyShield Root CA" → Get Info → Trust → Always Trust
+  1. Double-click culvert-ca.pem → Keychain Access
+  2. Find "Culvert Root CA" → Get Info → Trust → Always Trust
 
 Linux (Ubuntu/Debian):
-  sudo cp proxyshield-ca.pem /usr/local/share/ca-certificates/proxyshield.crt
+  sudo cp culvert-ca.pem /usr/local/share/ca-certificates/culvert.crt
   sudo update-ca-certificates
 
 Firefox (all platforms):
@@ -2390,7 +2390,7 @@ async function exportConfig() {
   const blob = await r.blob();
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'proxyshield-backup.json';
+  a.download = 'culvert-backup.json';
   a.click();
 }
 
@@ -5045,7 +5045,7 @@ function prettyJSON(str) {
 <div id="setup-overlay">
   <div class="setup-card" id="setup-card-inner">
     <div class="setup-logo">🛡️</div>
-    <h2>Welcome to ProxyShield</h2>
+    <h2>Welcome to Culvert</h2>
     <p>This is the first-time setup.<br>
        Set an admin username and password to secure this management interface.
        These credentials will be required every time you open the dashboard.</p>
@@ -5182,7 +5182,7 @@ pre.diff-block { margin:0;white-space:pre-wrap;word-break:break-all;font-size:.7
 <div id="login-overlay">
   <div class="setup-card">
     <div class="setup-logo">🛡️</div>
-    <h2>Sign in to ProxyShield</h2>
+    <h2>Sign in to Culvert</h2>
     <p>Enter your admin credentials to access the management dashboard.</p>
     <form id="login-form" autocomplete="on">
       <label for="li-user">Username</label>

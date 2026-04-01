@@ -1231,9 +1231,9 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 	go deliverWebhook(h, AlertPayload{
 		Event:     "test",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Actor:     "proxyshield",
+		Actor:     "culvert",
 		Host:      "test",
-		Detail:    "This is a test alert from ProxyShield",
+		Detail:    "This is a test alert from Culvert",
 		Source:    "test",
 	})
 	jsonOK(w, map[string]any{"ok": true})
@@ -1451,7 +1451,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		RateLimitRPM:        rl.Limit(),
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", `attachment; filename="proxyshield-backup.json"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="culvert-backup.json"`)
 	json.NewEncoder(w).Encode(b) //nolint:errcheck
 	auditEvent(r, "config.export", "backup", fmt.Sprintf("exported at %s", b.ExportedAt))
 }
@@ -2056,8 +2056,8 @@ func apiCACert(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/x-pem-file")
-		w.Header().Set("Content-Disposition", `attachment; filename="proxyshield-ca.pem"`)
-		w.Write(pem)
+		w.Header().Set("Content-Disposition", `attachment; filename="culvert-ca.pem"`)
+		w.Write(pem) //nolint:errcheck // HTTP response write
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -2142,11 +2142,12 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 	switch format {
 	case "csv":
 		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="proxyshield-%s.csv"`, ts))
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-%s.csv"`, ts))
 		cw := csv.NewWriter(w)
-		cw.Write([]string{"timestamp", "time", "ip", "method", "host", "status"})
-		for _, e := range entries {
-			cw.Write([]string{
+		cw.Write([]string{"timestamp", "time", "ip", "method", "host", "status"}) //nolint:errcheck // CSV write
+		for i := range entries {
+			e := &entries[i]
+			cw.Write([]string{ //nolint:errcheck // CSV write
 				fmt.Sprintf("%d", e.TS),
 				e.Time, e.IP, e.Method, e.Host, e.Status,
 			})
@@ -2155,8 +2156,8 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 
 	default: // json
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="proxyshield-%s.json"`, ts))
-		json.NewEncoder(w).Encode(map[string]any{
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-%s.json"`, ts))
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // HTTP response write
 			"exported": ts,
 			"count":    len(entries),
 			"logs":     entries,
@@ -2671,11 +2672,11 @@ func authSelectProvider(w http.ResponseWriter, r *http.Request) {
 	providers := idpRegistry.EnabledProviders()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!DOCTYPE html><html><head>
-<meta charset="utf-8"><title>ProxyShield — Sign In</title>
+<meta charset="utf-8"><title>Culvert — Sign In</title>
 <style>body{font-family:sans-serif;max-width:400px;margin:80px auto;padding:0 16px}
 h1{font-size:1.4rem}a.btn{display:block;padding:12px 16px;margin:8px 0;border-radius:6px;
 background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover{background:#1d4ed8}
-</style></head><body><h1>Sign in to ProxyShield</h1>`)
+</style></head><body><h1>Sign in to Culvert</h1>`)
 	for _, p := range providers {
 		loginURL := p.CaptiveLoginURL(relay)
 		if loginURL == "" {

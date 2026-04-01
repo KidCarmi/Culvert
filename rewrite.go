@@ -14,7 +14,7 @@ import (
 //	rewrite:
 //	  - host: "*.internal.corp"
 //	    req_set:
-//	      X-Forwarded-By: "ProxyShield"
+//	      X-Forwarded-By: "Culvert"
 //	    resp_remove:
 //	      - Server
 //	  - host: ""           # empty = match all hosts

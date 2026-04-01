@@ -134,7 +134,7 @@ func TestOIDCAuth_Verify_RequiredScopeMissing(t *testing.T) {
 func TestOIDCAuth_Verify_AudienceStringMatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Return audience as a plain string.
-		raw := `{"active":true,"aud":"proxyshield"}`
+		raw := `{"active":true,"aud":"culvert"}`
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(raw)) //nolint:errcheck
 	}))
@@ -143,7 +143,7 @@ func TestOIDCAuth_Verify_AudienceStringMatch(t *testing.T) {
 	a, _ := NewOIDCAuth(OIDCConfig{
 		IntrospectionURL: srv.URL,
 		ClientID:         "id",
-		RequiredAudience: "proxyshield",
+		RequiredAudience: "culvert",
 	})
 	if !a.Verify("alice", "tok") {
 		t.Error("expected Verify=true when string audience matches")
@@ -152,7 +152,7 @@ func TestOIDCAuth_Verify_AudienceStringMatch(t *testing.T) {
 
 func TestOIDCAuth_Verify_AudienceArrayMatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw := `{"active":true,"aud":["other","proxyshield"]}`
+		raw := `{"active":true,"aud":["other","culvert"]}`
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(raw)) //nolint:errcheck
 	}))
@@ -161,7 +161,7 @@ func TestOIDCAuth_Verify_AudienceArrayMatch(t *testing.T) {
 	a, _ := NewOIDCAuth(OIDCConfig{
 		IntrospectionURL: srv.URL,
 		ClientID:         "id",
-		RequiredAudience: "proxyshield",
+		RequiredAudience: "culvert",
 	})
 	if !a.Verify("alice", "tok") {
 		t.Error("expected Verify=true when audience array contains required value")
@@ -179,7 +179,7 @@ func TestOIDCAuth_Verify_AudienceMismatch(t *testing.T) {
 	a, _ := NewOIDCAuth(OIDCConfig{
 		IntrospectionURL: srv.URL,
 		ClientID:         "id",
-		RequiredAudience: "proxyshield",
+		RequiredAudience: "culvert",
 	})
 	if a.Verify("alice", "tok") {
 		t.Error("expected Verify=false when audience does not match")
@@ -259,12 +259,12 @@ func TestAudienceContains(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"proxyshield", "proxyshield", true},
-		{"other", "proxyshield", false},
-		{[]any{"a", "proxyshield", "b"}, "proxyshield", true},
-		{[]any{"a", "b"}, "proxyshield", false},
-		{nil, "proxyshield", false},
-		{42, "proxyshield", false},
+		{"culvert", "culvert", true},
+		{"other", "culvert", false},
+		{[]any{"a", "culvert", "b"}, "culvert", true},
+		{[]any{"a", "b"}, "culvert", false},
+		{nil, "culvert", false},
+		{42, "culvert", false},
 	}
 	for _, c := range cases {
 		got := audienceContains(c.aud, c.want)

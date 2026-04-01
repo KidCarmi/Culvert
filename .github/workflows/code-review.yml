@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## ProxyShield — Automated Code Review Checks
+## Culvert — Automated Code Review Checks
 ## ─────────────────────────────────────────────────────────────────────────────
 ## Runs on every Pull Request.  Provides inline review comments via reviewdog
 ## so developers see findings directly in the PR diff — not just in CI logs.
@@ -13,7 +13,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
-  workflow_dispatch:  # disabled — re-enable when tokens are configured
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: code-review-${{ github.head_ref }}
@@ -30,15 +32,15 @@ jobs:
       checks: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
 
       - name: golangci-lint + reviewdog
-        uses: reviewdog/action-golangci-lint@v2
+        uses: reviewdog/action-golangci-lint@c76cceaaab89abe74e649d2e34c6c9adc26662d2 # v2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           reporter: github-pr-review          # inline comments on the diff
@@ -56,7 +58,7 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
@@ -92,26 +94,31 @@ jobs:
           echo "Split into smaller PRs. Max for a single PR: 1500 changed lines."
           exit 1
 
-  # ─── 3. Coverage delta — don't regress ─────────────────────────────────────
+  # ─── 3. Coverage delta — advisory, don't block merge ───────────────────────
+  # The absolute coverage threshold (≥60%) is enforced by the Security Gate's
+  # tests-race job. This delta check catches regressions but is non-blocking
+  # because checking out base branch code can fail when go.mod changes.
   coverage-delta:
     name: "Review · coverage delta"
     runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 15
     permissions:
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
 
       - name: Coverage on PR branch
         run: |
-          go test -coverprofile=pr.out ./...
+          go test -short -timeout=5m -coverprofile=pr.out ./...
           PR_COV=$(go tool cover -func=pr.out | grep ^total | awk '{print $3}' | tr -d '%')
           echo "pr_coverage=$PR_COV" >> $GITHUB_ENV
 
@@ -119,7 +126,7 @@ jobs:
         run: |
           git stash
           git checkout ${{ github.event.pull_request.base.sha }} -- .
-          go test -coverprofile=base.out ./... 2>/dev/null || true
+          go test -short -timeout=5m -coverprofile=base.out ./... 2>/dev/null || true
           BASE_COV=$(go tool cover -func=base.out 2>/dev/null | grep ^total | awk '{print $3}' | tr -d '%')
           BASE_COV=${BASE_COV:-0}
           echo "base_coverage=$BASE_COV" >> $GITHUB_ENV
@@ -148,7 +155,7 @@ jobs:
     name: "Review · commit messages"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
@@ -168,34 +175,22 @@ jobs:
           # Advisory only — warn but don't block
           exit 0
 
-  # ─── 5. Secrets in new code — gitleaks on PR diff only ────────────────────
-  secrets-diff:
-    name: "Review · secrets in diff"
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+  # Secrets scanning is handled by the Security Release Gate (gitleaks full
+  # history scan). A PR-diff-only scan is strictly a subset — removed to
+  # avoid duplicate CI minutes.
 
-      - name: gitleaks on PR diff
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          args: >-
-            --log-opts="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
-
-  # ─── 6. Build verification ─────────────────────────────────────────────────
+  # ─── 5. Build verification ─────────────────────────────────────────────────
   build:
     name: "Review · build"
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.head_ref }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
           cache: true
@@ -203,19 +198,25 @@ jobs:
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags="-s -w" -o /dev/null .
 
-      - name: go mod tidy check
+      - name: go mod tidy and auto-fix
         run: |
           go mod tidy
-          git diff --exit-code go.mod go.sum || {
-            echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit."
-            exit 1
-          }
+          if git diff --exit-code go.mod go.sum; then
+            echo "go.mod and go.sum are tidy ✓"
+          else
+            echo "::notice::go.mod/go.sum were not tidy — auto-committing fix"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add go.mod go.sum
+            git commit -m "chore: go mod tidy (auto-fix)"
+            git push
+          fi
 
   # ─── Summary ───────────────────────────────────────────────────────────────
   review-summary:
     name: "✅ Code Review — Complete"
     runs-on: ubuntu-latest
-    needs: [lint, pr-size, coverage-delta, secrets-diff, build]
+    needs: [lint, pr-size, coverage-delta, build]
     if: always()
     steps:
       - name: Summarise results
@@ -227,5 +228,4 @@ jobs:
           echo "| golangci-lint | ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| PR size       | ${{ needs.pr-size.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Coverage delta| ${{ needs.coverage-delta.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Secrets scan  | ${{ needs.secrets-diff.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Build check   | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY

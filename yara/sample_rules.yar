@@ -1,5 +1,5 @@
 /*
- * ProxyShield Starter YARA Rules
+ * Culvert Starter YARA Rules
  *
  * These rules are applied to HTTP response bodies flowing through the proxy.
  * Add your own .yar / .yara files to this directory and reload via:

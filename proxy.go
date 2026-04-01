@@ -204,7 +204,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 				if !authed {
 					if !cfg.VerifyAuth(u, p) {
 						atomic.AddInt64(&statAuthFail, 1)
-						w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyShield"`)
+						w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
 						http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 						recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "")
 						logger.Printf("AUTH_FAIL %s", clientIP)
@@ -225,7 +225,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				atomic.AddInt64(&statAuthFail, 1)
-				w.Header().Set("Proxy-Authenticate", `Basic realm="ProxyShield"`)
+				w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
 				if u := cfg.OIDCLoginURL(); u != "" {
 					w.Header().Set("Link", `<`+u+`>; rel="authorization_endpoint"`)
 				}
@@ -251,7 +251,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Legacy blocklist check (still active alongside policy engine).
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
-		http.Error(w, "Forbidden by ProxyShield", http.StatusForbidden)
+		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
 		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "", "", authenticatedIdentity)
 		logger.Printf("BLOCKED %s -> %s", clientIP, host)
 		return

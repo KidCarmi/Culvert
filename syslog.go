@@ -31,13 +31,13 @@ type syslogWriter struct {
 func newSyslogWriter(network, addr string) (*syslogWriter, error) {
 	host, err := os.Hostname()
 	if err != nil {
-		host = "proxyshield"
+		host = "culvert"
 	}
 	sw := &syslogWriter{
 		network: network,
 		addr:    addr,
 		host:    host,
-		tag:     "proxyshield",
+		tag:     "culvert",
 	}
 	if err := sw.connect(); err != nil {
 		return nil, fmt.Errorf("syslog connect %s://%s: %w", network, addr, err)

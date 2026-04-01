@@ -252,7 +252,7 @@ func ensureSPKeyPair() (*rsa.PrivateKey, *x509.Certificate, error) {
 		serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 		tmpl := &x509.Certificate{
 			SerialNumber: serial,
-			Subject:      pkix.Name{CommonName: "ProxyShield SAML SP"},
+			Subject:      pkix.Name{CommonName: "Culvert SAML SP"},
 			NotBefore:    time.Now().Add(-time.Minute),
 			NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
 			KeyUsage:     x509.KeyUsageDigitalSignature,

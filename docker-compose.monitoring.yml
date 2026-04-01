@@ -6,7 +6,7 @@ version: "3.3"
 services:
   prometheus:
     image: prom/prometheus:v2.51.2
-    container_name: proxyshield-prometheus
+    container_name: culvert-prometheus
     restart: unless-stopped
     ports:
       - "9091:9090"
@@ -16,7 +16,7 @@ services:
 
   grafana:
     image: grafana/grafana:10.4.2
-    container_name: proxyshield-grafana
+    container_name: culvert-grafana
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -25,7 +25,7 @@ services:
       - ./deploy/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./deploy/grafana/datasources:/etc/grafana/provisioning/datasources:ro
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=proxyshield
+      - GF_SECURITY_ADMIN_PASSWORD=culvert
       - GF_USERS_ALLOW_SIGN_UP=false
 
 volumes:
