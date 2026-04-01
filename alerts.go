@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -192,7 +193,9 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 		return
 	}
 	// Webhook URLs are admin-configured (not user-tainted) — no SSRF risk.
-	req, err := http.NewRequest(http.MethodPost, h.URL, bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
 		logger.Printf("Alert webhook %q: build request error: %v", sanitizeLog(h.Name), err)
 		return
