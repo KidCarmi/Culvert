@@ -35,27 +35,8 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # gosec and staticcheck are run by the Security Release Gate workflow
-      # (with SARIF upload) and by golangci-lint in Code Review (with inline
-      # PR comments). Running them here a third time adds no value.
-
-      - name: Fuzz (short regression run)
-        # Run each fuzz target for 15 s — long enough to replay the seed corpus
-        # and catch obvious regressions, short enough for CI to stay fast.
-        run: |
-          for target in \
-            FuzzIsPrivateHost \
-            FuzzIsSafeRedirectURL \
-            FuzzParseClamResponse \
-            FuzzNormaliseFeedURL \
-            FuzzMatchDest \
-            FuzzParseYARALiteral; do
-            echo "── $target ──"
-            go test -run='^$' -fuzz="$target" -fuzztime=15s .
-          done
-
-      # Tests with race detector and coverage are run by the Security Release
-      # Gate (tests-race job). Here we only build to verify compilation.
+      # gosec, staticcheck, tests, and fuzz are run by the Security Release
+      # Gate workflow. This job only verifies compilation.
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
 
