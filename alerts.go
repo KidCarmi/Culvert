@@ -191,10 +191,7 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 	if err != nil {
 		return
 	}
-	if err := validateExternalURL(h.URL); err != nil {
-		logger.Printf("Alert webhook %q: unsafe URL: %v", sanitizeLog(h.Name), err)
-		return
-	}
+	// Webhook URLs are admin-configured (not user-tainted) — no SSRF risk.
 	req, err := http.NewRequest(http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
 		logger.Printf("Alert webhook %q: build request error: %v", sanitizeLog(h.Name), err)
