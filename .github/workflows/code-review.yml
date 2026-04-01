@@ -179,6 +179,8 @@ jobs:
   build:
     name: "Review · build"
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -190,16 +192,20 @@ jobs:
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags="-s -w" -o /dev/null .
 
-      - name: go mod tidy check
+      - name: go mod tidy and auto-fix
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           go mod tidy
-          if ! git diff --exit-code go.mod go.sum; then
-            echo "### go mod tidy diff" >> $GITHUB_STEP_SUMMARY
-            echo '```diff' >> $GITHUB_STEP_SUMMARY
-            git diff go.mod go.sum >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit."
-            exit 1
+          if git diff --exit-code go.mod go.sum; then
+            echo "go.mod and go.sum are tidy ✓"
+          else
+            echo "::notice::go.mod/go.sum were not tidy — auto-committing fix"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add go.mod go.sum
+            git commit -m "chore: go mod tidy (auto-fix)"
+            git push origin HEAD:${{ github.head_ref }}
           fi
 
   # ─── Summary ───────────────────────────────────────────────────────────────
