@@ -193,10 +193,14 @@ jobs:
       - name: go mod tidy check
         run: |
           go mod tidy
-          git diff --exit-code go.mod go.sum || {
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "### go mod tidy diff" >> $GITHUB_STEP_SUMMARY
+            echo '```diff' >> $GITHUB_STEP_SUMMARY
+            git diff go.mod go.sum >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
             echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit."
             exit 1
-          }
+          fi
 
   # ─── Summary ───────────────────────────────────────────────────────────────
   review-summary:
