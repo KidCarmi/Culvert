@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -380,7 +382,9 @@ func (b *Blocklist) Save() {
 	for suffix := range b.wildcards {
 		fmt.Fprintln(f, "*"+suffix) // ".example.com" → "*.example.com"
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		return
+	}
 	os.Rename(tmp, b.path) //nolint:errcheck
 }
 
@@ -463,7 +467,9 @@ func (b *Blocklist) saveExceptions() {
 	for h := range b.exceptions {
 		fmt.Fprintln(f, h)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		return
+	}
 	os.Rename(tmp, b.path+".exceptions") //nolint:errcheck
 }
 
@@ -526,7 +532,9 @@ func (b *Blocklist) saveManual() {
 	for h := range b.manual {
 		fmt.Fprintln(f, h)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		return
+	}
 	os.Rename(tmp, b.path+".manual") //nolint:errcheck
 }
 
@@ -692,11 +700,23 @@ func (a *authCacheStore) clear() {
 	a.mu.Unlock()
 }
 
-// cacheKey hashes (user+pass) with SHA-256 so we never store plaintext creds
-// as map keys in heap-visible memory.
+// cacheKeySecret is a per-process random key used to HMAC credential cache
+// lookups. Using HMAC instead of a bare hash prevents offline brute-force
+// if heap memory is ever dumped.
+var cacheKeySecret = func() []byte {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error())
+	}
+	return b
+}()
+
+// cacheKey derives an HMAC-SHA256 tag from (user+pass) so we never store
+// plaintext credentials as map keys in heap-visible memory.
 func cacheKey(user, pass string) string {
-	h := sha256.Sum256([]byte(user + ":" + pass))
-	return hex.EncodeToString(h[:])
+	mac := hmac.New(sha256.New, cacheKeySecret)
+	mac.Write([]byte(user + ":" + pass))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // ─── UI RBAC roles ────────────────────────────────────────────────────────────

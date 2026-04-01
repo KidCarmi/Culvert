@@ -912,7 +912,7 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 			h = strings.TrimSpace(h)
 			if h != "" {
 				bl.AddManual(h)
-				logger.Printf("UI: blocked %s", h)
+				logger.Printf("UI: blocked %s", sanitizeLog(h))
 				added++
 			}
 		}
@@ -931,7 +931,7 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		}
 		bl.Remove(host)
 		bl.Save()
-		logger.Printf("UI: unblocked %s", host)
+		logger.Printf("UI: unblocked %s", sanitizeLog(host))
 		auditEvent(r, "blocklist.remove", host, "")
 		w.WriteHeader(http.StatusNoContent)
 
@@ -1634,7 +1634,7 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 		if body.RateLimitRPM >= 0 {
 			rl.Configure(body.RateLimitRPM, time.Minute)
 		}
-		logger.Printf("UI: security config updated (ipMode=%s rateRPM=%d)", ipf.Mode(), rl.Limit())
+		logger.Printf("UI: security config updated (ipMode=%s rateRPM=%d)", sanitizeLog(ipf.Mode()), rl.Limit())
 		auditEvent(r, "security.update", "ip_filter+rate_limit",
 			fmt.Sprintf("mode=%s rpm=%d", ipf.Mode(), rl.Limit()))
 		jsonOK(w, map[string]any{"ok": true})
@@ -1672,7 +1672,7 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		logger.Printf("UI: auth settings updated (user=%s)", body.User)
+		logger.Printf("UI: auth settings updated (user=%s)", sanitizeLog(body.User))
 		auditEvent(r, "settings.update", "auth", fmt.Sprintf("user=%s", body.User))
 		jsonOK(w, map[string]any{"ok": true})
 
@@ -1725,7 +1725,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		added := rewriter.Add(rule)
-		logger.Printf("UI: rewrite rule added id=%d host=%q", added.ID, added.Host)
+		logger.Printf("UI: rewrite rule added id=%d host=%q", added.ID, sanitizeLog(added.Host))
 		auditEvent(r, "rewrite.add", fmt.Sprintf("id=%d host=%s", added.ID, added.Host), "")
 		jsonOK(w, added)
 
@@ -1792,7 +1792,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		added := policyStore.Add(rule)
 		policyStore.Save()
-		logger.Printf("UI: policy rule added priority=%d name=%q action=%s", added.Priority, added.Name, added.Action)
+		logger.Printf("UI: policy rule added priority=%d name=%q action=%s", added.Priority, sanitizeLog(added.Name), sanitizeLog(string(added.Action)))
 		auditEventDiff(r, "policy.add", added.Name,
 			fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
 		jsonOK(w, added)
@@ -1832,7 +1832,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		policyStore.Save()
-		logger.Printf("UI: policy rule updated priority=%d name=%q", priority, rule.Name)
+		logger.Printf("UI: policy rule updated priority=%d name=%q", priority, sanitizeLog(rule.Name))
 		auditEventDiff(r, "policy.update", rule.Name,
 			fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
 		jsonOK(w, map[string]any{"ok": true})
@@ -2279,7 +2279,7 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 			ext = strings.TrimSpace(ext)
 			if ext != "" {
 				fileBlocker.Add(ext)
-				logger.Printf("UI: file block extension added %s", ext)
+				logger.Printf("UI: file block extension added %s", sanitizeLog(ext))
 				added++
 			}
 		}
@@ -2296,7 +2296,7 @@ func apiFileblock(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fileBlocker.Remove(ext)
-		logger.Printf("UI: file block extension removed %s", ext)
+		logger.Printf("UI: file block extension removed %s", sanitizeLog(ext))
 		auditEvent(r, "fileblock.remove", ext, "")
 		w.WriteHeader(http.StatusNoContent)
 
@@ -2410,7 +2410,7 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		auditEventDiff(r, "idp.create", p.ID, p.Name, nil, &p)
-		logger.Printf("UI: IdP profile created id=%s name=%q type=%s", p.ID, p.Name, p.Type)
+		logger.Printf("UI: IdP profile created id=%s name=%q type=%s", sanitizeLog(p.ID), sanitizeLog(p.Name), sanitizeLog(string(p.Type)))
 		jsonOK(w, &p)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2463,7 +2463,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		auditEventDiff(r, "idp.update", id, p.Name, before, &p)
-		logger.Printf("UI: IdP profile updated id=%s name=%q", id, p.Name)
+		logger.Printf("UI: IdP profile updated id=%s name=%q", sanitizeLog(id), sanitizeLog(p.Name))
 		jsonOK(w, &p)
 	case http.MethodDelete:
 		if !requireRole(w, r, RoleAdmin) {
@@ -2475,7 +2475,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		auditEventDiff(r, "idp.delete", id, "", p, nil)
-		logger.Printf("UI: IdP profile deleted id=%s", id)
+		logger.Printf("UI: IdP profile deleted id=%s", sanitizeLog(id))
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2597,11 +2597,12 @@ func authSAMLCallback(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "session error", http.StatusInternalServerError)
 			return
 		}
-		if relayURL == "" || !isSafeRedirectURL(relayURL) {
-			relayURL = "/"
+		safeRelay := "/"
+		if relayURL != "" && isSafeRedirectURL(relayURL) {
+			safeRelay = relayURL
 		}
-		logger.Printf("SAML login OK: user=%s email=%s provider=%s", id.Sub, id.Email, id.Provider)
-		http.Redirect(w, r, relayURL, http.StatusFound)
+		logger.Printf("SAML login OK: user=%s email=%s provider=%s", sanitizeLog(id.Sub), sanitizeLog(id.Email), sanitizeLog(id.Provider))
+		http.Redirect(w, r, safeRelay, http.StatusFound)
 		return
 	}
 	http.Error(w, "SAML authentication failed", http.StatusUnauthorized)

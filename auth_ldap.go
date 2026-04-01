@@ -106,9 +106,9 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 	ok := a.verify(username, password)
 	a.cacheSet(k, ok)
 	if ok {
-		logger.Printf("LDAP auth OK: user=%s", username)
+		logger.Printf("LDAP auth OK: user=%s", sanitizeLog(username))
 	} else {
-		logger.Printf("LDAP auth FAIL: user=%s", username)
+		logger.Printf("LDAP auth FAIL: user=%s", sanitizeLog(username))
 	}
 	return ok
 }
