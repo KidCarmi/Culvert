@@ -10,6 +10,7 @@ package main
 //   - Replay detection via one-time use of the assertion ID.
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -137,7 +138,13 @@ func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 			return nil, fmt.Errorf("metadata URL: %w", err)
 		}
 		client := &http.Client{Timeout: 15 * time.Second}
-		resp, err := client.Get(cfg.MetadataURL) //nolint:noctx
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.MetadataURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("metadata request: %w", err)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("fetch: %w", err)
 		}

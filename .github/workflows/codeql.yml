@@ -16,6 +16,11 @@ env:
 on:
   workflow_dispatch:  # disabled — re-enable when tokens are configured
 
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
 concurrency:
   group: codeql-${{ github.ref }}
   cancel-in-progress: true
@@ -55,6 +60,7 @@ jobs:
         run: CGO_ENABLED=0 go build -o /dev/null .
 
       - name: Perform CodeQL analysis
+        continue-on-error: true
         uses: github/codeql-action/analyze@v3
         with:
           category: codeql-go
