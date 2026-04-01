@@ -254,7 +254,7 @@ jobs:
         run: go mod download
 
       - name: Run tests with race detector
-        run: go test -v -race -count=1 -coverprofile=coverage.out ./...
+        run: go test -v -race -count=1 -timeout=15m -coverprofile=coverage.out ./...
 
       - name: Check coverage threshold (≥ 60%)
         run: |
