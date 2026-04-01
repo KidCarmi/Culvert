@@ -60,7 +60,13 @@ func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(wellKnown) //nolint:noctx
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, nil)
+	if err != nil {
+		return nil, fmt.Errorf("oidc discovery request: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery fetch: %w", err)
 	}

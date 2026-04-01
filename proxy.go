@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 // defaultPolicyAction controls what happens when no PBAC rule matches a request.
@@ -295,7 +296,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			atomic.AddInt64(&statFileBlocked, 1)
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity)
-			logger.Printf("FILE_BLOCKED %s -> %s%s (ext=%s)", clientIP, host, r.URL.Path, ext)
+			logger.Printf("FILE_BLOCKED %s -> %s%s (ext=%s)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 			return
 		}
@@ -313,7 +314,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity)
-			logger.Printf("POLICY_DROP rule=%q %s -> %s", match.Rule.Name, clientIP, host)
+			logger.Printf("POLICY_DROP rule=%q %s -> %s", sanitizeLog(match.Rule.Name), clientIP, sanitizeLog(host))
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
 				conn, _, _ := hj.Hijack()
@@ -324,7 +325,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity)
-			logger.Printf("POLICY_BLOCK rule=%q %s -> %s", match.Rule.Name, clientIP, host)
+			logger.Printf("POLICY_BLOCK rule=%q %s -> %s", sanitizeLog(match.Rule.Name), clientIP, sanitizeLog(host))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return
 
@@ -332,17 +333,17 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity)
 			if !isSafeRedirectURL(match.Rule.RedirectURL) {
-				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", match.Rule.Name, match.Rule.RedirectURL)
+				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
-			logger.Printf("POLICY_REDIRECT rule=%q %s -> %s => %s", match.Rule.Name, clientIP, host, match.Rule.RedirectURL)
+			logger.Printf("POLICY_REDIRECT rule=%q %s -> %s => %s", sanitizeLog(match.Rule.Name), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL))
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
 			return
 
 		case ActionAllow:
 			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity)
-			logger.Printf("POLICY_ALLOW rule=%q %s %s %s", match.Rule.Name, clientIP, r.Method, r.Host)
+			logger.Printf("POLICY_ALLOW rule=%q %s %s %s", sanitizeLog(match.Rule.Name), clientIP, r.Method, sanitizeLog(r.Host))
 			// Fall through to normal handling below.
 		}
 	} else {
@@ -506,7 +507,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
 		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"))
-		logger.Printf("FILE_BLOCKED (resp cd) %s -> %s%s (ext=%s)", cip, r.Host, r.URL.Path, ext)
+		logger.Printf("FILE_BLOCKED (resp cd) %s -> %s%s (ext=%s)", cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 		serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 		return
 	}
@@ -531,6 +532,17 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// sanitizeLog replaces control characters (newlines, tabs, etc.) in a string
+// so that user-controlled input cannot forge log entries (CWE-117).
+func sanitizeLog(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, s)
 }
 
 // isSafeRedirectURL returns true only for absolute http/https URLs whose host
