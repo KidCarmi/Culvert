@@ -1,4 +1,4 @@
-# ProxyShield
+# Culvert
 
 **Enterprise-grade open-source HTTP/HTTPS/SOCKS5 forward proxy** — built in Go, single binary, zero runtime dependencies.
 
@@ -64,16 +64,16 @@ docker-compose up -d
 
 ```bash
 docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
-# Grafana → http://localhost:3000  (admin / proxyshield)
+# Grafana → http://localhost:3000  (admin / culvert)
 ```
 
 ### Binary
 
 ```bash
 # Download the latest release, then:
-./proxyshield                                  # proxy :8080, admin UI :9090
-./proxyshield -port 3128 -socks5-port 1080
-./proxyshield -config config.yaml
+./culvert                                  # proxy :8080, admin UI :9090
+./culvert -port 3128 -socks5-port 1080
+./culvert -config config.yaml
 ```
 
 ---
@@ -217,7 +217,7 @@ security:
 rewrite:
   - host: "*.internal.example.com"
     req_set:
-      X-Forwarded-By: ProxyShield
+      X-Forwarded-By: Culvert
     resp_remove:
       - Server
       - X-Powered-By
@@ -305,14 +305,14 @@ When SSL inspection is enabled, import the Root CA into your browser/OS trust st
 
 ```bash
 # Download CA from the Admin UI → Certificates, or:
-curl -k https://localhost:9090/api/ca-cert > proxyshield-ca.crt
+curl -k https://localhost:9090/api/ca-cert > culvert-ca.crt
 
 # Linux
-sudo cp proxyshield-ca.crt /usr/local/share/ca-certificates/
+sudo cp culvert-ca.crt /usr/local/share/ca-certificates/
 sudo update-ca-certificates
 
 # macOS
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain proxyshield-ca.crt
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain culvert-ca.crt
 ```
 
 ---
@@ -323,24 +323,24 @@ Available at `GET http://localhost:8080/metrics`:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `proxyshield_requests_total` | counter | All proxy requests |
-| `proxyshield_requests_allowed` | counter | Forwarded requests |
-| `proxyshield_requests_blocked` | counter | Blocked requests (all reasons) |
-| `proxyshield_requests_auth_fail` | counter | Authentication failures |
-| `proxyshield_av_scans_total` | counter | ClamAV scans performed |
-| `proxyshield_av_detections_total` | counter | Malware detections |
-| `proxyshield_yara_matches_total` | counter | YARA rule matches |
-| `proxyshield_threat_feed_blocks_total` | counter | Threat feed blocks |
-| `proxyshield_blocklist_size` | gauge | Blocklist entry count |
-| `proxyshield_policy_rules` | gauge | Active PBAC rule count |
-| `proxyshield_uptime_seconds` | gauge | Proxy uptime |
-| `proxyshield_rate_limit_rpm` | gauge | Configured rate limit |
-| `proxyshield_rate_limit_enabled` | gauge | 1 = rate limiting active |
+| `culvert_requests_total` | counter | All proxy requests |
+| `culvert_requests_allowed` | counter | Forwarded requests |
+| `culvert_requests_blocked` | counter | Blocked requests (all reasons) |
+| `culvert_requests_auth_fail` | counter | Authentication failures |
+| `culvert_av_scans_total` | counter | ClamAV scans performed |
+| `culvert_av_detections_total` | counter | Malware detections |
+| `culvert_yara_matches_total` | counter | YARA rule matches |
+| `culvert_threat_feed_blocks_total` | counter | Threat feed blocks |
+| `culvert_blocklist_size` | gauge | Blocklist entry count |
+| `culvert_policy_rules` | gauge | Active PBAC rule count |
+| `culvert_uptime_seconds` | gauge | Proxy uptime |
+| `culvert_rate_limit_rpm` | gauge | Configured rate limit |
+| `culvert_rate_limit_enabled` | gauge | 1 = rate limiting active |
 
 ```bash
 # Full monitoring stack (Prometheus + Grafana pre-configured)
 docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
-# Grafana → http://localhost:3000  (admin / proxyshield)
+# Grafana → http://localhost:3000  (admin / culvert)
 ```
 
 ---
@@ -382,8 +382,8 @@ Plugins run before every other check (blocklist, policy, etc.) and can short-cir
 ### Build & run
 
 ```bash
-go build -o proxyshield .
-./proxyshield
+go build -o culvert .
+./culvert
 ```
 
 ### Tests
@@ -401,8 +401,8 @@ go tool cover -html=cover.out        # open coverage report
 ### Docker build
 
 ```bash
-docker build -t proxyshield:dev .
-docker run -p 8080:8080 -p 9090:9090 proxyshield:dev
+docker build -t culvert:dev .
+docker run -p 8080:8080 -p 9090:9090 culvert:dev
 ```
 
 ---
@@ -453,7 +453,7 @@ yara/              — Starter YARA detection rules
 
 ## Self-Hosted CI Runner
 
-ProxyShield CI uses a self-hosted GitHub Actions runner for the Docker build step.
+Culvert CI uses a self-hosted GitHub Actions runner for the Docker build step.
 
 ```bash
 export RUNNER_TOKEN=<Settings → Actions → Runners → New self-hosted runner>

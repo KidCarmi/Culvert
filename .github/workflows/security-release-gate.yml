@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## ProxyShield — Security Release Gate
+## Culvert — Security Release Gate
 ## ─────────────────────────────────────────────────────────────────────────────
 ## This workflow is the mandatory security gate that must pass before any
 ## release is published.  It runs automatically on:
@@ -124,12 +124,12 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Build image for scanning (no push)
-        run: docker build -t proxyshield:scan .
+        run: docker build -t culvert:scan .
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
-          image-ref: "proxyshield:scan"
+          image-ref: "culvert:scan"
           format: "sarif"
           output: "trivy-image.sarif"
           severity: "CRITICAL,HIGH"
@@ -207,14 +207,14 @@ jobs:
         with:
           path: "."
           format: "cyclonedx-json"
-          artifact-name: "proxyshield-sbom.json"
-          output-file: "proxyshield-sbom.json"
+          artifact-name: "culvert-sbom.json"
+          output-file: "culvert-sbom.json"
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom
-          path: proxyshield-sbom.json
+          path: culvert-sbom.json
           retention-days: 90
 
   # ─── 8. Static analysis — staticcheck ──────────────────────────────────────
@@ -345,5 +345,5 @@ jobs:
           | Tests (race detector + coverage) | ✅ |
           | Dockerfile lint (hadolint) | ✅ |
 
-          **SBOM** attached as artifact (`proxyshield-sbom.json`).
+          **SBOM** attached as artifact (`culvert-sbom.json`).
           EOF

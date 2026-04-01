@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## ProxyShield — CodeQL SAST
+## Culvert — CodeQL SAST
 ## ─────────────────────────────────────────────────────────────────────────────
 ## GitHub CodeQL performs deep semantic analysis of Go source code, catching
 ## injection flaws, unsafe deserialization, path traversal, improper access

@@ -1,6 +1,6 @@
 # Compiled binaries
 proxy
-proxyshield
+culvert
 
 # Local configuration (may contain real passwords — never commit)
 config.yaml

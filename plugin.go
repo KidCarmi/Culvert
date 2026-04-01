@@ -10,7 +10,7 @@ const (
 	DecisionBlock                 // reject the request
 )
 
-// Middleware is the interface all ProxyShield plugins must implement.
+// Middleware is the interface all Culvert plugins must implement.
 //
 // Example:
 //

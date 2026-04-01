@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## ProxyShield — Automated Code Review Checks
+## Culvert — Automated Code Review Checks
 ## ─────────────────────────────────────────────────────────────────────────────
 ## Runs on every Pull Request.  Provides inline review comments via reviewdog
 ## so developers see findings directly in the PR diff — not just in CI logs.

@@ -292,7 +292,7 @@ func TestHandleMetrics_NoToken(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("handleMetrics status = %d, want 200", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "proxyshield_requests_total") {
+	if !strings.Contains(w.Body.String(), "culvert_requests_total") {
 		t.Error("handleMetrics should return Prometheus metrics")
 	}
 }

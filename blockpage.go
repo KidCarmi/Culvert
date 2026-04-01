@@ -12,7 +12,7 @@ const blockPageHTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Access Denied — ProxyShield</title>
+<title>Access Denied — Culvert</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0b0f1a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}
@@ -37,7 +37,7 @@ a:hover{text-decoration:underline}
 <div class="wrap">
   <div class="logo">
     <div class="logo-icon">🛡️</div>
-    <div class="logo-name">ProxyShield</div>
+    <div class="logo-name">Culvert</div>
   </div>
   <div class="card">
     <div class="icon-circle">🚫</div>
@@ -51,7 +51,7 @@ a:hover{text-decoration:underline}
     </div>
     <div class="footer">
       If you believe this is a mistake, please contact your IT administrator.<br>
-      Powered by <strong>ProxyShield Enterprise</strong>
+      Powered by <strong>Culvert Enterprise</strong>
     </div>
   </div>
 </div>

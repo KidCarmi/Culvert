@@ -1,9 +1,9 @@
-# ProxyShield Configuration
+# Culvert Configuration
 # Copy to config.yaml and edit as needed.
 # CLI flags always override values in this file.
 #
 # Usage:
-#   ./proxyshield -config config.yaml
+#   ./culvert -config config.yaml
 #   docker-compose up -d
 
 proxy:

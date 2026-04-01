@@ -12,7 +12,7 @@ package main
 // Delivery is async (fire-and-forget goroutine), never blocks the request path.
 // Failed deliveries are logged and silently discarded (no retry).
 // If a signing secret is configured, a HMAC-SHA256 signature is added as
-// X-ProxyShield-Signature: sha256=<hex>.
+// X-Culvert-Signature: sha256=<hex>.
 
 import (
 	"bytes"
@@ -201,11 +201,11 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "ProxyShield-Alerts/1.0")
+	req.Header.Set("User-Agent", "Culvert-Alerts/1.0")
 	if h.Secret != "" {
 		mac := hmac.New(sha256.New, []byte(h.Secret))
 		mac.Write(body)
-		req.Header.Set("X-ProxyShield-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		req.Header.Set("X-Culvert-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)

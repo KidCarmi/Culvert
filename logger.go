@@ -61,7 +61,7 @@ func (r *rotatingFile) Close() error {
 }
 
 // jsonLogWriter wraps an io.Writer and converts each log line into a JSON object.
-// The standard log package emits lines like "[ProxyShield] 2026/03/05 15:04:05 message".
+// The standard log package emits lines like "[Culvert] 2026/03/05 15:04:05 message".
 // jsonLogWriter drops that prefix and re-encodes the message with a proper RFC3339 timestamp.
 type jsonLogWriter struct {
 	mu  sync.Mutex
@@ -121,6 +121,6 @@ func setupLogger(logPath string, maxMB int, format string) (*log.Logger, io.Clos
 	if fileWriter != nil {
 		writers = append(writers, fileWriter)
 	}
-	l := log.New(io.MultiWriter(writers...), "[ProxyShield] ", log.LstdFlags)
+	l := log.New(io.MultiWriter(writers...), "[Culvert] ", log.LstdFlags)
 	return l, closer, nil
 }

@@ -51,69 +51,69 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _, cacheSize := globalSecScanner.cache.Stats()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	fmt.Fprintf(w, `# HELP proxyshield_requests_total Total proxy requests
-# TYPE proxyshield_requests_total counter
-proxyshield_requests_total %d
+	fmt.Fprintf(w, `# HELP culvert_requests_total Total proxy requests
+# TYPE culvert_requests_total counter
+culvert_requests_total %d
 
-# HELP proxyshield_requests_allowed Total allowed requests
-# TYPE proxyshield_requests_allowed counter
-proxyshield_requests_allowed %d
+# HELP culvert_requests_allowed Total allowed requests
+# TYPE culvert_requests_allowed counter
+culvert_requests_allowed %d
 
-# HELP proxyshield_requests_blocked Total blocked requests (domain + IP)
-# TYPE proxyshield_requests_blocked counter
-proxyshield_requests_blocked %d
+# HELP culvert_requests_blocked Total blocked requests (domain + IP)
+# TYPE culvert_requests_blocked counter
+culvert_requests_blocked %d
 
-# HELP proxyshield_requests_auth_fail Total auth failures
-# TYPE proxyshield_requests_auth_fail counter
-proxyshield_requests_auth_fail %d
+# HELP culvert_requests_auth_fail Total auth failures
+# TYPE culvert_requests_auth_fail counter
+culvert_requests_auth_fail %d
 
-# HELP proxyshield_blocklist_size Current number of blocked domains
-# TYPE proxyshield_blocklist_size gauge
-proxyshield_blocklist_size %d
+# HELP culvert_blocklist_size Current number of blocked domains
+# TYPE culvert_blocklist_size gauge
+culvert_blocklist_size %d
 
-# HELP proxyshield_uptime_seconds Proxy uptime in seconds
-# TYPE proxyshield_uptime_seconds gauge
-proxyshield_uptime_seconds %.0f
+# HELP culvert_uptime_seconds Proxy uptime in seconds
+# TYPE culvert_uptime_seconds gauge
+culvert_uptime_seconds %.0f
 
-# HELP proxyshield_rate_limit_rpm Configured rate limit (requests per minute, 0=disabled)
-# TYPE proxyshield_rate_limit_rpm gauge
-proxyshield_rate_limit_rpm %d
+# HELP culvert_rate_limit_rpm Configured rate limit (requests per minute, 0=disabled)
+# TYPE culvert_rate_limit_rpm gauge
+culvert_rate_limit_rpm %d
 
-# HELP proxyshield_rate_limit_enabled Whether rate limiting is active
-# TYPE proxyshield_rate_limit_enabled gauge
-proxyshield_rate_limit_enabled %d
+# HELP culvert_rate_limit_enabled Whether rate limiting is active
+# TYPE culvert_rate_limit_enabled gauge
+culvert_rate_limit_enabled %d
 
-# HELP proxyshield_file_blocked_total Total requests blocked by file-extension profile
-# TYPE proxyshield_file_blocked_total counter
-proxyshield_file_blocked_total %d
+# HELP culvert_file_blocked_total Total requests blocked by file-extension profile
+# TYPE culvert_file_blocked_total counter
+culvert_file_blocked_total %d
 
-# HELP proxyshield_file_block_profile_size Number of blocked file extensions
-# TYPE proxyshield_file_block_profile_size gauge
-proxyshield_file_block_profile_size %d
+# HELP culvert_file_block_profile_size Number of blocked file extensions
+# TYPE culvert_file_block_profile_size gauge
+culvert_file_block_profile_size %d
 
-# HELP proxyshield_dpi_blocked_total Total requests blocked by DPI content signatures
-# TYPE proxyshield_dpi_blocked_total counter
-proxyshield_dpi_blocked_total %d
+# HELP culvert_dpi_blocked_total Total requests blocked by DPI content signatures
+# TYPE culvert_dpi_blocked_total counter
+culvert_dpi_blocked_total %d
 
-# HELP proxyshield_clamav_blocked_total Total requests blocked by ClamAV antivirus
-# TYPE proxyshield_clamav_blocked_total counter
-proxyshield_clamav_blocked_total %d
+# HELP culvert_clamav_blocked_total Total requests blocked by ClamAV antivirus
+# TYPE culvert_clamav_blocked_total counter
+culvert_clamav_blocked_total %d
 
-# HELP proxyshield_yara_blocked_total Total requests blocked by YARA rules
-# TYPE proxyshield_yara_blocked_total counter
-proxyshield_yara_blocked_total %d
+# HELP culvert_yara_blocked_total Total requests blocked by YARA rules
+# TYPE culvert_yara_blocked_total counter
+culvert_yara_blocked_total %d
 
-# HELP proxyshield_threat_feed_blocked_total Total requests blocked by threat intelligence feeds
-# TYPE proxyshield_threat_feed_blocked_total counter
-proxyshield_threat_feed_blocked_total %d
+# HELP culvert_threat_feed_blocked_total Total requests blocked by threat intelligence feeds
+# TYPE culvert_threat_feed_blocked_total counter
+culvert_threat_feed_blocked_total %d
 
-# HELP proxyshield_threat_feed_entries Total URLs in threat feed database
-# TYPE proxyshield_threat_feed_entries gauge
-proxyshield_threat_feed_entries %d
+# HELP culvert_threat_feed_entries Total URLs in threat feed database
+# TYPE culvert_threat_feed_entries gauge
+culvert_threat_feed_entries %d
 
-# HELP proxyshield_scan_cache_size Current number of entries in the SHA256 scan result cache
-# TYPE proxyshield_scan_cache_size gauge
-proxyshield_scan_cache_size %d
+# HELP culvert_scan_cache_size Current number of entries in the SHA256 scan result cache
+# TYPE culvert_scan_cache_size gauge
+culvert_scan_cache_size %d
 `,
 		total, allowed, blocked, authFail,
 		int64(bl.Count()),

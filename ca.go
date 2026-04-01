@@ -63,8 +63,8 @@ func (cm *CertManager) InitCA() error {
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			Organization: []string{"ProxyShield"},
-			CommonName:   "ProxyShield Root CA",
+			Organization: []string{"Culvert"},
+			CommonName:   "Culvert Root CA",
 		},
 		NotBefore:             time.Now().Add(-time.Minute),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
@@ -92,7 +92,7 @@ func (cm *CertManager) InitCA() error {
 // passphrase) or, if the file does not exist, generates a fresh CA and saves
 // it. An empty passphrase disables encryption (development/testing only).
 //
-// The env var PROXYSHIELD_CA_PASSPHRASE is the recommended way to supply the
+// The env var CULVERT_CA_PASSPHRASE is the recommended way to supply the
 // passphrase so it never appears in CLI history or process listings.
 func (cm *CertManager) LoadOrInitCA(path, passphrase string) error {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {

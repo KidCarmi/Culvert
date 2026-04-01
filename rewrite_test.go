@@ -127,15 +127,15 @@ func TestRewriter_ApplyRequest_Set(t *testing.T) {
 	rw := newTestRewriter()
 	rw.Add(RewriteRule{
 		Host:   "example.com",
-		ReqSet: map[string]string{"X-Proxy": "ProxyShield", "X-Custom": "value"},
+		ReqSet: map[string]string{"X-Proxy": "Culvert", "X-Custom": "value"},
 	})
 
 	h := http.Header{}
 	h.Set("X-Proxy", "old-value")
 	rw.ApplyRequest("example.com", h)
 
-	if h.Get("X-Proxy") != "ProxyShield" {
-		t.Errorf("X-Proxy = %q, want ProxyShield", h.Get("X-Proxy"))
+	if h.Get("X-Proxy") != "Culvert" {
+		t.Errorf("X-Proxy = %q, want Culvert", h.Get("X-Proxy"))
 	}
 	if h.Get("X-Custom") != "value" {
 		t.Errorf("X-Custom = %q, want value", h.Get("X-Custom"))

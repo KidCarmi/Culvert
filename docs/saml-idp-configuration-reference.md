@@ -6,13 +6,13 @@ in the SAML assertion, so those values can be mapped to the `SAMLProfileConfig` 
 (`GroupsAttribute`, `EmailAttribute`, `NameAttribute`, `NameIDFormat`) in the IdP registry.
 
 **Last updated:** March 2026
-**Applies to:** ProxyShield SAML SP (`auth_saml.go`, `auth_idp.go`)
+**Applies to:** Culvert SAML SP (`auth_saml.go`, `auth_idp.go`)
 
 ---
 
 ## Common SP Values (What You Provide to Every IdP)
 
-Before configuring any IdP, collect these values from your running ProxyShield instance. They are
+Before configuring any IdP, collect these values from your running Culvert instance. They are
 derived from the `base_url` in `config.yaml`.
 
 | Field | Value Pattern | Description |
@@ -24,7 +24,7 @@ derived from the `base_url` in `config.yaml`.
 
 All ACS URLs **must** use HTTPS. HTTP is rejected by the SP and most IdPs.
 
-The crewjam/saml library used by ProxyShield enforces SP-initiated SSO only
+The crewjam/saml library used by Culvert enforces SP-initiated SSO only
 (`AllowIDPInitiated: false`), so IdP-initiated flows are not supported.
 
 ---
@@ -133,7 +133,7 @@ To send group memberships, add a **Group Attribute Statement** on the same tab:
 | **Name format** | Basic |
 | **Filter** | `Matches regex` → `.*` (sends all groups) or use `Starts with` to filter |
 
-The attribute name is admin-defined and must exactly match what ProxyShield expects in
+The attribute name is admin-defined and must exactly match what Culvert expects in
 `groupsAttribute`.
 
 ### Attributes Sent in the Assertion
@@ -441,7 +441,7 @@ ADFS publishes its IdP metadata at:
 `https://<adfs-hostname>/FederationMetadata/2007-06/FederationMetadata.xml`
 
 This URL is stable and can be used as `metadataUrl`. It is accessible only within the corporate
-network by default; firewall rules may need to be opened for the ProxyShield instance.
+network by default; firewall rules may need to be opened for the Culvert instance.
 
 ### SAMLProfileConfig Mapping
 
@@ -510,7 +510,7 @@ Keycloak does not send user attributes by default in SAML responses. Configure m
 For the group mapper, set **Single Group Attribute** to ON to send all groups as multiple values
 of a single attribute rather than one attribute per group.
 
-The attribute names in mappers must exactly match what ProxyShield expects in `groupsAttribute`,
+The attribute names in mappers must exactly match what Culvert expects in `groupsAttribute`,
 `emailAttribute`, and `nameAttribute`.
 
 #### Groups vs. Roles in Keycloak

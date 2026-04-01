@@ -57,13 +57,13 @@ jobs:
       # Tests with race detector and coverage are run by the Security Release
       # Gate (tests-race job). Here we only build to verify compilation.
       - name: Build
-        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o proxyshield .
+        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
 
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: proxyshield-linux-amd64
-          path: proxyshield
+          name: culvert-linux-amd64
+          path: culvert
           retention-days: 7
 
   docker:
@@ -108,7 +108,7 @@ jobs:
             type=ref,event=pr
             type=sha,prefix=sha-,format=short
           labels: |
-            org.opencontainers.image.title=ProxyShield
+            org.opencontainers.image.title=Culvert
             org.opencontainers.image.description=Enterprise-grade HTTP/HTTPS/SOCKS5 forward proxy
             org.opencontainers.image.vendor=KidCarmi
             org.opencontainers.image.licenses=MIT
@@ -198,13 +198,13 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
+            -o culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
 
       # Compute SHA-256 hash for SLSA provenance.
       - name: Compute binary hash
         id: hash
         run: |
-          BINARY="proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
+          BINARY="culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
           HASH=$(sha256sum "$BINARY" | base64 -w0)
           echo "hash=$HASH" >> $GITHUB_OUTPUT
 
@@ -219,7 +219,7 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          BINARY="proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
+          BINARY="culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
           cosign sign-blob \
             --yes \
             --output-certificate "${BINARY}.pem" \
@@ -230,9 +230,9 @@ jobs:
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
           files: |
-            proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
-            proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.sig
-            proxyshield-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.pem
+            culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
+            culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.sig
+            culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.pem
 
       # Collect hashes across matrix legs for SLSA provenance.
       - name: Collect hashes for provenance

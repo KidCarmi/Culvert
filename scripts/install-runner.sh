@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-runner.sh — set up a GitHub Actions self-hosted runner for ProxyShield CI
+# install-runner.sh — set up a GitHub Actions self-hosted runner for Culvert CI
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/KidCarmi/Claude-Test/main/scripts/install-runner.sh | bash

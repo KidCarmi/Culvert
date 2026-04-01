@@ -1,4 +1,4 @@
-# ProxyShield — golangci-lint configuration
+# Culvert — golangci-lint configuration
 # Runs in CI (code-review.yml) and locally: golangci-lint run
 # Docs: https://golangci-lint.run/usage/configuration/
 version: "2"

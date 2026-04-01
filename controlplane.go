@@ -120,7 +120,7 @@ func (s *ConfigStore) Subscribe() chan struct{} {
 // hand-written codec.  This avoids protoc as a build dependency.
 
 // configServiceName is the fully-qualified gRPC service name.
-const configServiceName = "proxyshield.ConfigService"
+const configServiceName = "culvert.ConfigService"
 
 // methodGetConfig and methodPushMetrics are the RPC method descriptors.
 var (
