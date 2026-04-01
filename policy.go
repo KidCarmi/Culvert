@@ -515,7 +515,9 @@ func matchSchedule(s *PolicySchedule) bool {
 	}
 	loc := time.UTC
 	if s.Timezone != "" {
-		if l, err := time.LoadLocation(s.Timezone); err == nil {
+		if l, err := time.LoadLocation(s.Timezone); err != nil {
+			logger.Printf("WARN invalid schedule timezone %q, falling back to UTC", sanitizeLog(s.Timezone))
+		} else {
 			loc = l
 		}
 	}
@@ -603,11 +605,11 @@ func matchDest(rule *PolicyRule, host string) bool {
 		return false
 	}
 	// Geo-IP country check — cache-only to avoid blocking the request goroutine.
-	// On a cache miss the country is unknown; skip the country filter so we do
-	// not inadvertently block traffic while the background poller catches up.
+	// Fail-closed: on a cache miss the country is unknown and the rule does NOT
+	// match, preventing unclassified traffic from matching geo-restricted rules.
 	if countrySet {
 		code, cached := geo.LookupCached(host)
-		if cached && !matchCountry(rule.DestCountry, code) {
+		if !cached || !matchCountry(rule.DestCountry, code) {
 			return false
 		}
 	}

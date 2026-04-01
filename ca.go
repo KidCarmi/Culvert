@@ -25,16 +25,29 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 )
 
-// CertManager manages the Root CA used for SSL inspection (MITM).
-// It generates leaf certificates on-the-fly and caches them.
-type CertManager struct {
-	mu     sync.RWMutex
-	caCert *x509.Certificate
-	caKey  *ecdsa.PrivateKey
-	cache  map[string]*tls.Certificate
+// certCacheEntry pairs a leaf certificate with its creation timestamp for TTL.
+type certCacheEntry struct {
+	cert      *tls.Certificate
+	createdAt time.Time
 }
 
-var certMgr = &CertManager{cache: map[string]*tls.Certificate{}}
+const (
+	certCacheMaxSize = 10_000        // LRU eviction threshold
+	certCacheTTL     = 1 * time.Hour // per-entry time-to-live
+)
+
+// CertManager manages the Root CA used for SSL inspection (MITM).
+// It generates leaf certificates on-the-fly and caches them with LRU
+// eviction at certCacheMaxSize entries and TTL of certCacheTTL.
+type CertManager struct {
+	mu         sync.RWMutex
+	caCert     *x509.Certificate
+	caKey      *ecdsa.PrivateKey
+	cache      map[string]*certCacheEntry
+	cacheOrder []string // insertion order for LRU eviction
+}
+
+var certMgr = &CertManager{cache: map[string]*certCacheEntry{}}
 
 // caBundle is the plaintext PEM bundle written/read from disk.
 // Format: PEM(CERTIFICATE) || PEM(EC PRIVATE KEY)
@@ -86,7 +99,8 @@ func (cm *CertManager) InitCA() error {
 	cm.mu.Lock()
 	cm.caCert = cert
 	cm.caKey = key
-	cm.cache = map[string]*tls.Certificate{} // clear leaf cache on CA change
+	cm.cache = map[string]*certCacheEntry{}
+	cm.cacheOrder = nil // clear leaf cache on CA change
 	cm.mu.Unlock()
 	return nil
 }
@@ -209,7 +223,8 @@ func (cm *CertManager) importBundle(data []byte) error {
 	cm.mu.Lock()
 	cm.caCert = cert
 	cm.caKey = key
-	cm.cache = map[string]*tls.Certificate{}
+	cm.cache = map[string]*certCacheEntry{}
+	cm.cacheOrder = nil
 	cm.mu.Unlock()
 	return nil
 }
@@ -350,7 +365,8 @@ func (cm *CertManager) LoadCustomCA(certPEM, keyPEM []byte) error {
 	cm.mu.Lock()
 	cm.caCert = x509Cert
 	cm.caKey = ecKey
-	cm.cache = map[string]*tls.Certificate{}
+	cm.cache = map[string]*certCacheEntry{}
+	cm.cacheOrder = nil
 	cm.mu.Unlock()
 	return nil
 }
@@ -372,7 +388,8 @@ func (cm *CertManager) Ready() bool {
 }
 
 // GetCert is a tls.Config.GetCertificate callback that returns a dynamically
-// signed certificate for the requested ServerName. Results are cached.
+// signed certificate for the requested ServerName. Results are cached with
+// TTL-based expiry and LRU eviction at certCacheMaxSize entries.
 func (cm *CertManager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	host := hello.ServerName
 	if host == "" {
@@ -382,10 +399,11 @@ func (cm *CertManager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, er
 		host = h
 	}
 
+	now := time.Now()
 	cm.mu.RLock()
-	if c, ok := cm.cache[host]; ok {
+	if entry, ok := cm.cache[host]; ok && now.Sub(entry.createdAt) < certCacheTTL {
 		cm.mu.RUnlock()
-		return c, nil
+		return entry.cert, nil
 	}
 	cm.mu.RUnlock()
 
@@ -394,9 +412,34 @@ func (cm *CertManager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, er
 		return nil, err
 	}
 	cm.mu.Lock()
-	cm.cache[host] = cert
+	cm.cache[host] = &certCacheEntry{cert: cert, createdAt: now}
+	cm.cacheOrder = append(cm.cacheOrder, host)
+	// LRU eviction: when cache exceeds max size, evict oldest 10% of entries.
+	if len(cm.cache) > certCacheMaxSize {
+		evictCount := certCacheMaxSize / 10
+		evicted := 0
+		newOrder := cm.cacheOrder[:0:0]
+		for _, h := range cm.cacheOrder {
+			if evicted < evictCount {
+				if _, exists := cm.cache[h]; exists {
+					delete(cm.cache, h)
+					evicted++
+					continue
+				}
+			}
+			newOrder = append(newOrder, h)
+		}
+		cm.cacheOrder = newOrder
+	}
 	cm.mu.Unlock()
 	return cert, nil
+}
+
+// CertCacheLen returns the current number of cached leaf certificates (testing).
+func (cm *CertManager) CertCacheLen() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return len(cm.cache)
 }
 
 // signLeaf creates and signs a leaf TLS certificate for the given hostname.

@@ -699,8 +699,17 @@ func auditEventDiff(r *http.Request, action, object, detail string, before, afte
 	if actor == "" {
 		actor = r.RemoteAddr
 	}
-	// Do NOT trust client-supplied headers for the audit actor identity;
-	// the remote IP is the only trustworthy identity at this layer.
+	// Enrich actor with authenticated admin identity from session cookie.
+	// The IP is always kept for accountability; the username adds readability.
+	if sess, err := readSessionCookie(r); err == nil && sess != nil {
+		name := sess.Sub
+		if name == "" {
+			name = sess.Email
+		}
+		if name != "" {
+			actor = name + "@" + actor
+		}
+	}
 	entry := AuditEntry{
 		TS:     time.Now().UnixMilli(),
 		Time:   time.Now().Format("2006-01-02 15:04:05"),
@@ -2620,7 +2629,7 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
 	}
-	if err := setSessionCookie(w, id); err != nil {
+	if err := setSessionCookie(w, r, id); err != nil {
 		http.Error(w, "session error", http.StatusInternalServerError)
 		return
 	}
@@ -2647,7 +2656,7 @@ func authSAMLCallback(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue // try next provider
 		}
-		if err := setSessionCookie(w, id); err != nil {
+		if err := setSessionCookie(w, r, id); err != nil {
 			http.Error(w, "session error", http.StatusInternalServerError)
 			return
 		}
@@ -2693,7 +2702,7 @@ background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover
 
 // POST /auth/logout — clear session cookie.
 func authLogout(w http.ResponseWriter, r *http.Request) {
-	clearSessionCookie(w)
+	clearSessionCookie(w, r)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 

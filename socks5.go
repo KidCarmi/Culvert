@@ -194,6 +194,14 @@ func handleSOCKS5(conn net.Conn) {
 	go relay(destConn, conn)
 	go relay(conn, destConn)
 	<-done
+	// Unblock the peer goroutine by closing write halves so io.Copy returns.
+	if tc, ok := destConn.(interface{ CloseWrite() error }); ok {
+		tc.CloseWrite() //nolint:errcheck
+	}
+	if tc, ok := conn.(interface{ CloseWrite() error }); ok {
+		tc.CloseWrite() //nolint:errcheck
+	}
+	<-done
 }
 
 // socks5Reply sends a minimal SOCKS5 reply (IPv4 bind address 0.0.0.0:0).

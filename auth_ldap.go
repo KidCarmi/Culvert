@@ -138,6 +138,8 @@ func (a *LDAPAuth) verify(username, password string) bool {
 			logger.Printf("LDAP service bind error: %v", err)
 			return false
 		}
+	} else if a.cfg.RequiredGroup != "" {
+		logger.Printf("WARN LDAP anonymous bind with RequiredGroup=%q — group resolution may fail", sanitizeLog(a.cfg.RequiredGroup))
 	}
 
 	filter := fmt.Sprintf(a.cfg.UserFilter, ldap.EscapeFilter(username))

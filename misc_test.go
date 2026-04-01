@@ -194,7 +194,8 @@ func TestEncodeDecodeSession(t *testing.T) {
 func TestSetClearSessionCookie(t *testing.T) {
 	w := httptest.NewRecorder()
 	id := &Identity{Sub: "u1", Email: "u@e.com", Name: "U", Provider: "local"}
-	if err := setSessionCookie(w, id); err != nil {
+	r := httptest.NewRequest("GET", "/", nil)
+	if err := setSessionCookie(w, r, id); err != nil {
 		t.Fatalf("setSessionCookie error: %v", err)
 	}
 	cookies := w.Result().Cookies()
@@ -209,7 +210,7 @@ func TestSetClearSessionCookie(t *testing.T) {
 	}
 
 	w2 := httptest.NewRecorder()
-	clearSessionCookie(w2)
+	clearSessionCookie(w2, r)
 	cookies2 := w2.Result().Cookies()
 	for _, c := range cookies2 {
 		if c.Name == sessionCookieName && c.MaxAge < 0 {

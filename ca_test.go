@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,7 +9,7 @@ import (
 // ── InitCA ────────────────────────────────────────────────────────────────────
 
 func TestInitCA_Ready(t *testing.T) {
-	cm := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm := &CertManager{cache: map[string]*certCacheEntry{}}
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -25,7 +24,7 @@ func TestInitCA_Ready(t *testing.T) {
 // ── SaveCA / LoadCA round-trip ────────────────────────────────────────────────
 
 func TestSaveLoadCA_WithPassphrase(t *testing.T) {
-	cm := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm := &CertManager{cache: map[string]*certCacheEntry{}}
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -50,7 +49,7 @@ func TestSaveLoadCA_WithPassphrase(t *testing.T) {
 	}
 
 	// Load into a fresh manager.
-	cm2 := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm2 := &CertManager{cache: map[string]*certCacheEntry{}}
 	if err := cm2.LoadCA(path, "s3cr3t-pa55phrase"); err != nil {
 		t.Fatalf("LoadCA: %v", err)
 	}
@@ -63,7 +62,7 @@ func TestSaveLoadCA_WithPassphrase(t *testing.T) {
 }
 
 func TestLoadCA_WrongPassphrase(t *testing.T) {
-	cm := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm := &CertManager{cache: map[string]*certCacheEntry{}}
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -73,7 +72,7 @@ func TestLoadCA_WrongPassphrase(t *testing.T) {
 		t.Fatalf("SaveCA: %v", err)
 	}
 
-	cm2 := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm2 := &CertManager{cache: map[string]*certCacheEntry{}}
 	err := cm2.LoadCA(path, "wrong-passphrase")
 	if err == nil {
 		t.Error("LoadCA with wrong passphrase should return an error")
@@ -81,7 +80,7 @@ func TestLoadCA_WrongPassphrase(t *testing.T) {
 }
 
 func TestSaveLoadCA_NoPassphrase(t *testing.T) {
-	cm := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm := &CertManager{cache: map[string]*certCacheEntry{}}
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -92,7 +91,7 @@ func TestSaveLoadCA_NoPassphrase(t *testing.T) {
 		t.Fatalf("SaveCA (no passphrase): %v", err)
 	}
 
-	cm2 := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm2 := &CertManager{cache: map[string]*certCacheEntry{}}
 	if err := cm2.LoadCA(path, ""); err != nil {
 		t.Fatalf("LoadCA (no passphrase): %v", err)
 	}
@@ -105,7 +104,7 @@ func TestSaveLoadCA_NoPassphrase(t *testing.T) {
 
 func TestLoadOrInitCA_CreatesFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ca.bundle")
-	cm := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm := &CertManager{cache: map[string]*certCacheEntry{}}
 
 	// File does not exist → should generate + save.
 	if err := cm.LoadOrInitCA(path, "mypassphrase"); err != nil {
@@ -117,7 +116,7 @@ func TestLoadOrInitCA_CreatesFile(t *testing.T) {
 
 	// Load it again → same cert.
 	origPEM := cm.CACertPEM()
-	cm2 := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm2 := &CertManager{cache: map[string]*certCacheEntry{}}
 	if err := cm2.LoadOrInitCA(path, "mypassphrase"); err != nil {
 		t.Fatalf("LoadOrInitCA (load): %v", err)
 	}
@@ -129,7 +128,7 @@ func TestLoadOrInitCA_CreatesFile(t *testing.T) {
 // ── signLeaf ──────────────────────────────────────────────────────────────────
 
 func TestSignLeaf_ValidCert(t *testing.T) {
-	cm := &CertManager{cache: map[string]*tls.Certificate{}}
+	cm := &CertManager{cache: map[string]*certCacheEntry{}}
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
