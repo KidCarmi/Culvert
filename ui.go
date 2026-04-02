@@ -1133,7 +1133,7 @@ func apiBlocklistExceptions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		bl.RemoveException(host)
-		logger.Printf("UI: blocklist exception removed %s", host)
+		logger.Printf("UI: blocklist exception removed %s", sanitizeLog(host))
 		auditEvent(r, "blocklist.exception.remove", host, "")
 		jsonOK(w, map[string]any{"ok": true})
 
@@ -2646,7 +2646,7 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if relayURL == "" || !isSafeRedirectURL(relayURL) {
 		relayURL = "/"
 	}
-	logger.Printf("OIDC login OK: user=%s email=%s provider=%s", id.Sub, id.Email, id.Provider)
+	logger.Printf("OIDC login OK: user=%s email=%s provider=%s", sanitizeLog(id.Sub), sanitizeLog(id.Email), sanitizeLog(id.Provider))
 	http.Redirect(w, r, relayURL, http.StatusFound)
 }
 

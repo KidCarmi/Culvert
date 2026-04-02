@@ -253,7 +253,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
 		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "", "", authenticatedIdentity)
-		logger.Printf("BLOCKED %s -> %s", clientIP, host)
+		logger.Printf("BLOCKED %s -> %s", clientIP, sanitizeLog(host))
 		return
 	}
 
@@ -264,7 +264,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		if result := globalSecScanner.CheckDomain(host); result != nil {
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity)
-			logger.Printf("THREAT_BLOCKED domain %s -> %s (%s)", clientIP, host, result.Reason)
+			logger.Printf("THREAT_BLOCKED domain %s -> %s (%s)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
 			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
 			return
 		}
@@ -273,7 +273,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			if result := globalSecScanner.CheckURL(r.URL.String()); result != nil {
 				atomic.AddInt64(&statBlocked, 1)
 				recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity)
-				logger.Printf("THREAT_BLOCKED url %s -> %s (%s)", clientIP, r.Host, result.Reason)
+				logger.Printf("THREAT_BLOCKED url %s -> %s (%s)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
 				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
 				return
 			}
@@ -356,7 +356,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			// end-users see a clear, branded explanation.
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity)
-			logger.Printf("POLICY_DEFAULT_DENY %s %s %s", clientIP, r.Method, r.Host)
+			logger.Printf("POLICY_DEFAULT_DENY %s %s %s", clientIP, r.Method, sanitizeLog(r.Host))
 			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
 			return
 		}
@@ -384,7 +384,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// override policy-based SSL inspection, regardless of rule SSLAction.
 	if sslAction == SSLInspect && sslBypass.Matches(host) {
 		sslAction = SSLBypass
-		logger.Printf("SSL_BYPASS_PATTERN %s -> %s", clientIP, host)
+		logger.Printf("SSL_BYPASS_PATTERN %s -> %s", clientIP, sanitizeLog(host))
 	}
 
 	if r.Method == http.MethodConnect {
@@ -520,7 +520,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)
 				atomic.AddInt64(&statBlocked, 1)
 				recordRequest(cip2, r.Method, r.Host, "SCAN_BLOCKED", result.Source, result.Reason, r.Header.Get("X-User-Identity"))
-				logger.Printf("SCAN_BLOCKED %s -> %s (%s: %s)", cip2, r.Host, result.Source, result.Reason)
+				logger.Printf("SCAN_BLOCKED %s -> %s (%s: %s)", cip2, sanitizeLog(r.Host), sanitizeLog(result.Source), sanitizeLog(result.Reason))
 				scanBlock(w, r.Host, result.Reason, result.Source)
 				return
 			}
@@ -532,7 +532,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		logger.Printf("HTTP response copy error for %s: %v", r.Host, err)
+		logger.Printf("HTTP response copy error for %s: %v", sanitizeLog(r.Host), err)
 	}
 }
 
@@ -580,13 +580,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := isPrivateHost(host); err != nil {
-		logger.Printf("WS SSRF block %s: %v", host, err)
+		logger.Printf("WS SSRF block %s: %v", sanitizeLog(host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 	destConn, err := net.DialTimeout("tcp", host, 10*time.Second)
 	if err != nil {
-		logger.Printf("WS dial error %s: %v", host, err)
+		logger.Printf("WS dial error %s: %v", sanitizeLog(host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -595,7 +595,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Forward the original request to the target (preserve Upgrade headers).
 	r.RequestURI = r.URL.RequestURI()
 	if err := r.Write(destConn); err != nil {
-		logger.Printf("WS write error %s: %v", host, err)
+		logger.Printf("WS write error %s: %v", sanitizeLog(host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -604,7 +604,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	br := bufio.NewReader(destConn)
 	resp, err := http.ReadResponse(br, r)
 	if err != nil {
-		logger.Printf("WS upstream response error %s: %v", host, err)
+		logger.Printf("WS upstream response error %s: %v", sanitizeLog(host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -630,7 +630,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Printf("WS tunnel established → %s", host)
+	logger.Printf("WS tunnel established → %s", sanitizeLog(host))
 
 	// Bridge: drain any buffered bytes from the target first.
 	done := make(chan struct{}, 2)
@@ -673,13 +673,13 @@ var upstreamTransport = &http.Transport{
 // handleTunnelBypass is the original transparent TCP tunnel (Bypass mode).
 func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 	if err := isPrivateHost(r.Host); err != nil {
-		logger.Printf("CONNECT SSRF block %s: %v", r.Host, err)
+		logger.Printf("CONNECT SSRF block %s: %v", sanitizeLog(r.Host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 	destConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
 	if err != nil {
-		logger.Printf("tunnel dial error %s: %v", r.Host, err)
+		logger.Printf("tunnel dial error %s: %v", sanitizeLog(r.Host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -730,13 +730,13 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 
 	// 1. Connect to the upstream server over plain TCP.
 	if err := isPrivateHost(targetHost); err != nil {
-		logger.Printf("inspect SSRF block %s: %v", targetHost, err)
+		logger.Printf("inspect SSRF block %s: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 	rawUpstream, err := net.DialTimeout("tcp", targetHost, 10*time.Second)
 	if err != nil {
-		logger.Printf("inspect dial error %s: %v", targetHost, err)
+		logger.Printf("inspect dial error %s: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -748,7 +748,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// logged as a warning so it is auditable.
 	var upstreamTLSCfg *tls.Config
 	if tlsSkipVerify {
-		logger.Printf("WARN SSL_INSPECT skipping upstream cert verify for %s (tlsSkipVerify rule)", hostOnly)
+		logger.Printf("WARN SSL_INSPECT skipping upstream cert verify for %s (tlsSkipVerify rule)", sanitizeLog(hostOnly))
 		upstreamTLSCfg = &tls.Config{
 			ServerName:         hostOnly,
 			MinVersion:         tls.VersionTLS12,
@@ -770,7 +770,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
 	if err := upstreamTLS.Handshake(); err != nil {
 		rawUpstream.Close()
-		logger.Printf("upstream TLS handshake error %s: %v", targetHost, err)
+		logger.Printf("upstream TLS handshake error %s: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -797,11 +797,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	if err := clientTLS.Handshake(); err != nil {
 		clientTLS.Close()
 		upstreamTLS.Close()
-		logger.Printf("SSL_INSPECT client TLS handshake error for %s: %v", hostOnly, err)
+		logger.Printf("SSL_INSPECT client TLS handshake error for %s: %v", sanitizeLog(hostOnly), err)
 		return
 	}
 
-	logger.Printf("SSL_INSPECT tunnel → %s", targetHost)
+	logger.Printf("SSL_INSPECT tunnel → %s", sanitizeLog(targetHost))
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
@@ -874,7 +874,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
 			if readErr != nil {
 				origBody.Close()
-				logger.Printf("SSL_INSPECT: body read error for %s: %v", hostOnly, readErr)
+				logger.Printf("SSL_INSPECT: body read error for %s: %v", sanitizeLog(hostOnly), readErr)
 				break
 			}
 			if readErr == nil {
