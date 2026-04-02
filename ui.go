@@ -951,17 +951,15 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, h := range body.Hosts {
 			h = strings.TrimSpace(h)
-			if h != "" {
-				bl.AddManual(h)
-				logger.Printf("UI: blocked %s", sanitizeLog(h))
-				added++
+			if h == "" {
+				continue
 			}
 			if len(h) > 253 {
-				logger.Printf("UI: blocklist entry too long, skipped: %s…", h[:50])
+				logger.Printf("UI: blocklist entry too long, skipped: %s…", sanitizeLog(h[:50]))
 				continue
 			}
 			bl.AddManual(h)
-			logger.Printf("UI: blocked %s", h)
+			logger.Printf("UI: blocked %s", sanitizeLog(h))
 			added++
 		}
 		bl.Save()
@@ -1115,11 +1113,11 @@ func apiBlocklistExceptions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if len(h) > 253 {
-				logger.Printf("UI: exception entry too long, skipped: %s…", h[:50])
+				logger.Printf("UI: exception entry too long, skipped: %s…", sanitizeLog(h[:50]))
 				continue
 			}
 			bl.AddException(h)
-			logger.Printf("UI: blocklist exception added %s", h)
+			logger.Printf("UI: blocklist exception added %s", sanitizeLog(h))
 			added++
 		}
 		auditEvent(r, "blocklist.exception.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
@@ -1171,6 +1169,10 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "url required", http.StatusBadRequest)
 			return
 		}
+		if err := validateWebhookURL(h.URL); err != nil {
+			http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		h.Enabled = true
 		created := globalAlertStore.Add(h)
 		auditEvent(r, "alert.webhook.create", created.ID, h.URL)
@@ -1189,6 +1191,12 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 		if err := decodeJSON(r, &h); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
+		}
+		if h.URL != "" {
+			if err := validateWebhookURL(h.URL); err != nil {
+				http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		if !globalAlertStore.Update(id, h) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -1497,7 +1505,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// Policy rules — validate each before importing.
 	for _, rule := range b.PolicyRules {
 		if err := validatePolicyRule(rule); err != nil {
-			logger.Printf("config import: skipping rule %q: %v", rule.Name, err)
+			logger.Printf("config import: skipping rule %q: %v", sanitizeLog(rule.Name), err)
 			continue
 		}
 		policyStore.Add(rule)

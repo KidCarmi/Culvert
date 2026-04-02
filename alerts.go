@@ -23,10 +23,32 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
 )
+
+// validateWebhookURL checks that a webhook URL is well-formed (http/https with
+// a non-empty host). Unlike validateExternalURL, it does not perform DNS
+// resolution at config time — the SSRF check is deferred to delivery time via
+// isPrivateHost so that operator-configured internal endpoints remain usable.
+func validateWebhookURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("URL is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("malformed URL: %w", err)
+	}
+	if !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("URL must use http:// or https:// scheme")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("URL must include a host")
+	}
+	return nil
+}
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -192,7 +214,8 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 	if err != nil {
 		return
 	}
-	// Webhook URLs are admin-configured (not user-tainted) — no SSRF risk.
+	// Webhook URLs are validated by validateWebhookURL() at creation/update time.
+	// No SSRF check here: operators may legitimately target internal endpoints.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
