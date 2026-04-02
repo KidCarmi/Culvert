@@ -6,6 +6,7 @@ package main
 
 import (
 	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -111,6 +112,11 @@ func TestFireAlert_EnabledAndDisabled(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Override ssrfSafeDialContext to allow localhost in tests.
+	origDial := ssrfSafeDialContext
+	ssrfSafeDialContext = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
+	defer func() { ssrfSafeDialContext = origDial }()
+
 	// Save and restore the global store.
 	orig := globalAlertStore
 	defer func() { globalAlertStore = orig }()
@@ -175,6 +181,11 @@ func TestFireAlert_WildcardEvent(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+
+	// Override ssrfSafeDialContext to allow localhost in tests.
+	origDial := ssrfSafeDialContext
+	ssrfSafeDialContext = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
+	defer func() { ssrfSafeDialContext = origDial }()
 
 	orig := globalAlertStore
 	defer func() { globalAlertStore = orig }()
