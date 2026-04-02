@@ -32,6 +32,9 @@ type FileConfig struct {
 		BlocklistFeedURL      string   `yaml:"blocklist_feed_url"`      // URL to auto-sync blocklist from (one domain per line)
 		BlocklistFeedInterval string   `yaml:"blocklist_feed_interval"` // sync interval (e.g. "24h"); default 24h
 		FileProfilesFile      string   `yaml:"fileprofiles_file"`       // JSON file for dynamic file extension profiles
+		ClientCertFile        string   `yaml:"client_cert_file"`        // Client TLS cert for upstream mTLS
+		ClientKeyFile         string   `yaml:"client_key_file"`         // Client TLS key for upstream mTLS
+		OCSPCheck             bool     `yaml:"ocsp_check"`              // Enable OCSP revocation checking for upstream certs
 	} `yaml:"proxy"`
 	Auth struct {
 		User string `yaml:"user"`
@@ -60,6 +63,9 @@ type FileConfig struct {
 	FileBlock struct {
 		Extensions []string `yaml:"extensions"`
 	} `yaml:"file_block"`
+
+	// Upstream proxy chaining with failover and circuit breaker.
+	Upstream UpstreamConfig `yaml:"upstream"`
 
 	// LogFormat controls the system-log output format: "text" (default) or "json".
 	LogFormat string `yaml:"log_format"`

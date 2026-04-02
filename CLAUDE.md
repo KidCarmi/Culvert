@@ -31,7 +31,9 @@ fileblock.go  — File extension/MIME blocking profiles
 fileprofile.go — Named file-type blocking profiles (Executables, Archives, etc.)
 geoip.go      — MaxMind GeoLite2 country lookup with background cache
 controlplane.go — gRPC-based Control Plane / Data Plane distributed architecture
-metrics.go    — Prometheus metrics (culvert_* namespace)
+upstream.go   — Upstream proxy chaining with failover, circuit breaker, round-robin health checks
+ocsp.go       — OCSP/CRL revocation checking for upstream TLS certificates
+metrics.go    — Prometheus metrics (culvert_* namespace, per-rule hit counters)
 alerts.go     — Webhook alerting for security events (HMAC-SHA256 signed)
 threatfeed.go — Threat intelligence feed integration (URLhaus, OpenPhish)
 feedsync.go   — UT1 URL category database syncer
