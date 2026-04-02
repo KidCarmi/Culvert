@@ -124,13 +124,14 @@ jobs:
 
       - name: Coverage on base branch
         run: |
+          CURRENT_REF=$(git rev-parse HEAD)
           git stash
           git checkout ${{ github.event.pull_request.base.sha }} -- .
           go test -short -timeout=5m -coverprofile=base.out ./... 2>/dev/null || true
           BASE_COV=$(go tool cover -func=base.out 2>/dev/null | grep ^total | awk '{print $3}' | tr -d '%')
           BASE_COV=${BASE_COV:-0}
           echo "base_coverage=$BASE_COV" >> $GITHUB_ENV
-          git checkout -
+          git checkout $CURRENT_REF -- .
 
       - name: Check coverage delta
         run: |

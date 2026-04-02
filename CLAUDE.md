@@ -79,7 +79,7 @@ docker compose up -d
 - **Package**: Everything is `package main` (flat layout)
 - **Go version**: 1.25
 - **Logging**: Use `logger.Printf()`, never `log.Printf()` or `fmt.Printf()`
-- **User input in logs**: Always wrap with `sanitizeLog(s)` (CWE-117 prevention)
+- **User input in logs**: Wrap with `sanitizeLog(s)` and use `%q` format verb (CWE-117 prevention; sanitizeLog uses strings.ReplaceAll which CodeQL recognises)
 - **HTTP contexts**: Use `http.NewRequestWithContext()`, never bare `http.NewRequest()`
 - **Errors**: Return `fmt.Errorf("context: %w", err)` for wrapping
 - **Concurrency**: Use `sync.RWMutex` for read-heavy stores, `atomic` for counters
