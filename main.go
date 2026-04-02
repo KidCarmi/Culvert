@@ -287,6 +287,7 @@ func main() {
 					return
 				case <-t.C:
 					rl.Cleanup()
+					ssrfDNSCache.Cleanup()
 				}
 			}
 		}()

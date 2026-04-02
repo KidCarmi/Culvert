@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -75,23 +76,33 @@ func isPrivateIP(ip net.IP) bool {
 // isPrivateHost resolves host (host or host:port) and returns an error if any
 // resolved IP falls within a private/internal range. This prevents SSRF via
 // proxy CONNECT to loopback, RFC 1918, link-local, or metadata endpoints.
+// Results are cached in ssrfDNSCache (30s TTL) to avoid redundant DNS lookups.
 func isPrivateHost(hostport string) error {
 	host, _, err := net.SplitHostPort(hostport)
 	if err != nil {
 		host = hostport // no port
 	}
-	ips, err := net.LookupHost(host)
+	// Check cache first.
+	if priv, ok := ssrfDNSCache.Lookup(host); ok {
+		if priv {
+			return fmt.Errorf("destination %s resolves to private address (cached)", host)
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupHost(context.Background(), host)
 	if err != nil {
 		// Fail closed: unresolvable hosts are rejected to prevent DNS-rebinding
 		// attacks where the check resolves to a public IP but Dial resolves to
-		// a private one after TTL expiry.
+		// a private one after TTL expiry. DNS errors are NOT cached.
 		return fmt.Errorf("destination %s: DNS resolution failed: %w", host, err)
 	}
 	for _, ipStr := range ips {
 		if ip := net.ParseIP(ipStr); ip != nil && isPrivateIP(ip) {
+			ssrfDNSCache.Store(host, true)
 			return fmt.Errorf("destination %s resolves to private address %s", host, ipStr)
 		}
 	}
+	ssrfDNSCache.Store(host, false)
 	return nil
 }
 
@@ -313,7 +324,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity)
-			logger.Printf("POLICY_DROP rule=%q %s -> %q", sanitizeLog(match.Rule.Name), clientIP, sanitizeLog(host))
+			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions))
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
 				conn, _, _ := hj.Hijack()
@@ -324,7 +335,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity)
-			logger.Printf("POLICY_BLOCK rule=%q %s -> %q", sanitizeLog(match.Rule.Name), clientIP, sanitizeLog(host))
+			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return
 
@@ -336,13 +347,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
-			logger.Printf("POLICY_REDIRECT rule=%q %s -> %q => %q", sanitizeLog(match.Rule.Name), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL))
+			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions))
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
 			return
 
 		case ActionAllow:
 			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity)
-			logger.Printf("POLICY_ALLOW rule=%q %s %s %q", sanitizeLog(match.Rule.Name), clientIP, r.Method, sanitizeLog(r.Host))
+			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions))
 			// Fall through to normal handling below.
 		}
 	} else {
@@ -513,7 +524,9 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Security body scan (ClamAV + YARA) for non-tunnel HTTP responses.
-	if globalSecScanner.BodyScanEnabled() {
+	// Skip buffering if Content-Length signals the response exceeds the
+	// scan limit — avoids wasting memory and I/O on oversized bodies.
+	if globalSecScanner.BodyScanEnabled() && (resp.ContentLength < 0 || resp.ContentLength <= globalSecScanner.MaxBytes()) {
 		buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
 		if readErr == nil {
 			if result := globalSecScanner.ScanBody(buffered); result != nil {

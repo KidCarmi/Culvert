@@ -42,7 +42,10 @@ func (r *rotatingFile) Write(p []byte) (int, error) {
 
 	if r.size+int64(len(p)) > r.maxBytes {
 		r.file.Close()
-		os.Rename(r.path, r.path+".1")
+		// Remove any previous rotated file before renaming the current one.
+		// This prevents unbounded growth from accumulating stale .1 files.
+		_ = os.Remove(r.path + ".1")
+		_ = os.Rename(r.path, r.path+".1")
 		f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			return 0, err

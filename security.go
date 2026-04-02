@@ -35,6 +35,59 @@ var ssrfSafeDialContext = func(ctx context.Context, network, addr string) (net.C
 	return (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, network, net.JoinHostPort(host, port))
 }
 
+// ─── DNS result cache for SSRF checks ────────────────────────────────────────
+// Avoids repeated DNS lookups in isPrivateHost() for the same host within a
+// short window. Entries expire after dnsSSRFCacheTTL. Negative results (DNS
+// errors) are NOT cached so that transient failures remain fail-closed.
+
+const dnsSSRFCacheTTL = 30 * time.Second
+
+type dnsSSRFEntry struct {
+	private bool // true if any resolved IP was private
+	expires time.Time
+}
+
+type dnsSSRFCache struct {
+	mu      sync.RWMutex
+	entries map[string]dnsSSRFEntry
+}
+
+var ssrfDNSCache = &dnsSSRFCache{entries: make(map[string]dnsSSRFEntry)}
+
+// Lookup returns (isPrivate, found). If found is false the caller must do a
+// live DNS lookup and call Store.
+func (c *dnsSSRFCache) Lookup(host string) (bool, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[host]
+	c.mu.RUnlock()
+	if !ok || time.Now().After(e.expires) {
+		return false, false
+	}
+	return e.private, true
+}
+
+// Store records a positive (resolved) result. DNS errors are not stored.
+func (c *dnsSSRFCache) Store(host string, private bool) {
+	c.mu.Lock()
+	c.entries[host] = dnsSSRFEntry{
+		private: private,
+		expires: time.Now().Add(dnsSSRFCacheTTL),
+	}
+	c.mu.Unlock()
+}
+
+// Cleanup evicts expired entries (called periodically from main tick loop).
+func (c *dnsSSRFCache) Cleanup() {
+	c.mu.Lock()
+	now := time.Now()
+	for k, e := range c.entries {
+		if now.After(e.expires) {
+			delete(c.entries, k)
+		}
+	}
+	c.mu.Unlock()
+}
+
 // ─── IP Filter ────────────────────────────────────────────────────────────────
 
 // IPFilter supports allowlist and blocklist mode with CIDR ranges.
