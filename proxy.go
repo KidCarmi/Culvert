@@ -387,11 +387,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		logger.Printf("SSL_BYPASS_PATTERN %s -> %s", clientIP, sanitizeLog(host))
 	}
 
-	if r.Method == http.MethodConnect {
+	switch {
+	case r.Method == http.MethodConnect:
 		handleTunnel(w, r, sslAction, tlsSkipVerify)
-	} else if isWebSocketUpgrade(r) {
+	case isWebSocketUpgrade(r):
 		handleWebSocket(w, r)
-	} else {
+	default:
 		handleHTTP(w, r)
 	}
 }
@@ -584,7 +585,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	destConn, err := net.DialTimeout("tcp", host, 10*time.Second)
+	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", host)
 	if err != nil {
 		logger.Printf("WS dial error %s: %v", sanitizeLog(host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
@@ -608,6 +609,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
+	defer resp.Body.Close()
 
 	// Hijack the client connection and replay the 101 response.
 	hijacker, ok := w.(http.Hijacker)
@@ -677,7 +679,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	destConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
+	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", r.Host)
 	if err != nil {
 		logger.Printf("tunnel dial error %s: %v", sanitizeLog(r.Host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
@@ -734,7 +736,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	rawUpstream, err := net.DialTimeout("tcp", targetHost, 10*time.Second)
+	rawUpstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", targetHost)
 	if err != nil {
 		logger.Printf("inspect dial error %s: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
@@ -768,7 +770,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		}
 	}
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
-	if err := upstreamTLS.Handshake(); err != nil {
+	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
 		rawUpstream.Close()
 		logger.Printf("upstream TLS handshake error %s: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
@@ -794,9 +796,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	clientTLS := tls.Server(rawClient, &tls.Config{
 		GetCertificate: certMgr.GetCert,
 	})
-	if err := clientTLS.Handshake(); err != nil {
-		clientTLS.Close()
-		upstreamTLS.Close()
+	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
+		clientTLS.Close()  //nolint:errcheck // best-effort cleanup on handshake failure
+		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup on handshake failure
 		logger.Printf("SSL_INSPECT client TLS handshake error for %s: %v", sanitizeLog(hostOnly), err)
 		return
 	}
