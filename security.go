@@ -14,7 +14,10 @@ import (
 // DNS and rejects connections to private/internal IP addresses. Use as the
 // DialContext in an http.Transport to prevent SSRF at the network level,
 // independent of URL validation.
-func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+//
+// Declared as a variable so that tests can temporarily replace it with a
+// plain dialer that permits localhost webhook targets.
+var ssrfSafeDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, fmt.Errorf("ssrf dial: invalid address %q: %w", addr, err)

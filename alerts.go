@@ -209,14 +209,6 @@ func fireAlert(event string, payload AlertPayload) {
 	}
 }
 
-// alertHTTPClient is the HTTP client used for webhook delivery.
-// It uses ssrfSafeDialContext to prevent SSRF at the network level.
-// Tests may replace this with a plain client for localhost test servers.
-var alertHTTPClient = &http.Client{
-	Timeout:   5 * time.Second,
-	Transport: &http.Transport{DialContext: ssrfSafeDialContext},
-}
-
 func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -244,7 +236,13 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 		mac.Write(body)
 		req.Header.Set("X-Culvert-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
-	resp, err := alertHTTPClient.Do(req)
+	// Construct client inline so CodeQL can verify the SSRF-safe transport
+	// at the call site (package-level vars are opaque to taint analysis).
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		logger.Printf("Alert webhook %q: delivery error: %v", h.Name, err)
 		return
