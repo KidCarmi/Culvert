@@ -29,6 +29,8 @@ var (
 	statBlocked     int64
 	statAuthFail    int64
 	statFileBlocked int64 // requests blocked by the file-extension profile
+	statBytesSent   int64 // total bytes sent upstream (request bodies)
+	statBytesRecv   int64 // total bytes received from upstream (response bodies)
 )
 
 // ─── Time-series: requests per minute, last 60 minutes ───────────────────────
@@ -111,6 +113,8 @@ type LogEntry struct {
 	Level       string `json:"level"`       // INFO | WARN | ERROR
 	RuleMatched string `json:"ruleMatched"` // policy rule name that matched, if any
 	ActionTaken string `json:"actionTaken"` // policy action taken, if any
+	BytesSent   int64  `json:"bytesSent,omitempty"`   // bytes sent to upstream (request body)
+	BytesRecv   int64  `json:"bytesRecv,omitempty"`   // bytes received from upstream (response body)
 }
 
 func levelForStatus(status string) string {
@@ -1185,6 +1189,10 @@ func uptime() string {
 }
 
 func recordRequest(ip, method, host, status, ruleMatched, actionTaken, identity string) {
+	recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0)
+}
+
+func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT" || status == "PAC_DOWNLOAD"
 	tsRecordResult(isAllowed)
@@ -1213,6 +1221,8 @@ func recordRequest(ip, method, host, status, ruleMatched, actionTaken, identity 
 		Level:       levelForStatus(status),
 		RuleMatched: ruleMatched,
 		ActionTaken: actionTaken,
+		BytesSent:   bytesSent,
+		BytesRecv:   bytesRecv,
 	})
 }
 

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -340,6 +341,10 @@ func main() {
 			logger.Printf("SSL CA   → Root CA ready in-memory (set -ca-path + %s for persistence)", caPassphraseEnv)
 		}
 	}
+	// Start CA auto-rotation background check.
+	if certMgr.Ready() {
+		StartCAAutoRotation(context.Background(), caPathVal, caPassphrase)
+	}
 
 	// ── Policy engine ─────────────────────────────────────────────────────────
 	polPath := firstStr(*policyFile, fc.Proxy.PolicyFile)
@@ -529,6 +534,53 @@ func main() {
 		}
 	}
 
+	// ── Upstream proxy chaining ──────────────────────────────────────────────
+	if len(fc.Upstream.Proxies) > 0 {
+		cbTimeout := 60 * time.Second
+		if fc.Upstream.CircuitBreaker.Timeout != "" {
+			if d, err := time.ParseDuration(fc.Upstream.CircuitBreaker.Timeout); err == nil {
+				cbTimeout = d
+			}
+		}
+		upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
+		applyUpstreamProxy()
+		logger.Printf("Upstream → %s", formatUpstreamSummary(fc.Upstream.Proxies))
+
+		// Start health check loop.
+		if hi := fc.Upstream.HealthInterval; hi != "" {
+			if d, err := time.ParseDuration(hi); err == nil && d > 0 {
+				go func() {
+					t := time.NewTicker(d)
+					defer t.Stop()
+					for range t.C {
+						upstreamPool.HealthCheck()
+					}
+				}()
+			}
+		}
+	}
+
+	// ── Client certificate (mTLS) for upstream servers ───────────────────────
+	if fc.Proxy.ClientCertFile != "" && fc.Proxy.ClientKeyFile != "" {
+		clientCert, err := tls.LoadX509KeyPair(fc.Proxy.ClientCertFile, fc.Proxy.ClientKeyFile)
+		if err != nil {
+			logger.Printf("mTLS     → failed to load client cert: %v", err)
+		} else {
+			if upstreamTransport.TLSClientConfig == nil {
+				upstreamTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+			}
+			upstreamTransport.TLSClientConfig.Certificates = []tls.Certificate{clientCert}
+			logger.Printf("mTLS     → client cert loaded (%s)", fc.Proxy.ClientCertFile)
+		}
+	}
+
+	// ── OCSP/CRL revocation checking ─────────────────────────────────────────
+	if fc.Proxy.OCSPCheck {
+		globalOCSP.Enable()
+		ConfigureTransportOCSP(upstreamTransport)
+		logger.Printf("OCSP     → upstream certificate revocation checking enabled")
+	}
+
 	// ── SSE live dashboard broadcaster ───────────────────────────────────────
 	startSSEBroadcaster()
 
@@ -576,6 +628,26 @@ func main() {
 	// ── Graceful shutdown ────────────────────────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// ── Hot config reload (SIGHUP) ──────────────────────────────────────────
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	go func() {
+		for range sighup {
+			if *configPath == "" {
+				logger.Println("SIGHUP received but no -config path set; ignoring")
+				continue
+			}
+			logger.Printf("SIGHUP received — reloading config from %s", *configPath)
+			reloaded, err := loadFileConfig(*configPath)
+			if err != nil {
+				logger.Printf("Config reload error: %v — keeping current config", err)
+				continue
+			}
+			applyHotReload(reloaded)
+			logger.Println("Config reloaded successfully")
+		}
+	}()
 
 	go func() {
 		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -669,4 +741,64 @@ func firstStr(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// applyHotReload applies safe-to-reload config values from a freshly parsed
+// FileConfig. It only touches settings that can be changed without restarting
+// listeners (blocklist, policy, rewrite rules, rate limit, default action, etc.).
+func applyHotReload(fc *FileConfig) {
+	// Blocklist
+	if fc.Proxy.Blocklist != "" {
+		if err := bl.Load(fc.Proxy.Blocklist); err != nil {
+			logger.Printf("Reload: blocklist error: %v", err)
+		} else {
+			logger.Printf("Reload: blocklist → %d entries", bl.Count())
+		}
+	}
+
+	// Policy rules
+	if fc.Proxy.PolicyFile != "" {
+		if err := policyStore.Load(fc.Proxy.PolicyFile); err != nil {
+			logger.Printf("Reload: policy error: %v", err)
+		} else {
+			logger.Printf("Reload: policy → %d rules", len(policyStore.List()))
+		}
+	}
+
+	// Default action
+	if fc.DefaultAction != "" {
+		setDefaultPolicyAction(fc.DefaultAction)
+		logger.Printf("Reload: default action → %s", fc.DefaultAction)
+	}
+
+	// Rate limit
+	if fc.Security.RateLimit > 0 {
+		rl.Configure(fc.Security.RateLimit, time.Minute)
+		logger.Printf("Reload: rate limit → %d req/min", fc.Security.RateLimit)
+	}
+
+	// IP filter
+	if fc.Security.IPFilterMode != "" {
+		ipf.SetMode(fc.Security.IPFilterMode)
+		logger.Printf("Reload: IP filter mode → %s", fc.Security.IPFilterMode)
+	}
+
+	// Rewrite rules
+	if len(fc.Rewrite) > 0 {
+		rewriter.SetRules(fc.Rewrite)
+		logger.Printf("Reload: rewrite → %d rules", len(fc.Rewrite))
+	}
+
+	// Upstream proxy pool
+	if len(fc.Upstream.Proxies) > 0 {
+		cbTimeout := 60 * time.Second
+		if fc.Upstream.CircuitBreaker.Timeout != "" {
+			if d, err := time.ParseDuration(fc.Upstream.CircuitBreaker.Timeout); err == nil {
+				cbTimeout = d
+			}
+		}
+		upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
+		applyUpstreamProxy()
+		logger.Printf("Reload: upstream → %s", formatUpstreamSummary(fc.Upstream.Proxies))
+	}
 }

@@ -404,6 +404,11 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	ps.sortLocked()
 	ps.bumpVersion()
 	ps.mu.Unlock()
+
+	// Detect policy conflicts after adding the new rule.
+	for _, w := range ps.DetectConflicts() {
+		logger.Printf("WARN policy: %s", sanitizeLog(w))
+	}
 	return nr
 }
 
@@ -459,6 +464,53 @@ func (ps *PolicyStore) Reorder(orderedPriorities []int) bool {
 	}
 	ps.sortLocked()
 	ps.bumpVersion()
+	return true
+}
+
+// DetectConflicts checks for rules at the same priority with overlapping
+// conditions but different actions. Returns human-readable warnings.
+func (ps *PolicyStore) DetectConflicts() []string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	var warnings []string
+	for i := 0; i < len(ps.rules); i++ {
+		for j := i + 1; j < len(ps.rules); j++ {
+			a, b := ps.rules[i], ps.rules[j]
+			if a.Priority != b.Priority {
+				continue
+			}
+			if a.Action == b.Action {
+				continue // same action = not a conflict
+			}
+			// Same priority, different actions — check for overlap.
+			if rulesOverlap(a, b) {
+				warnings = append(warnings, fmt.Sprintf(
+					"conflict: rules %q (pri %d, action %s) and %q (pri %d, action %s) overlap",
+					a.Name, a.Priority, a.Action, b.Name, b.Priority, b.Action,
+				))
+			}
+		}
+	}
+	return warnings
+}
+
+// rulesOverlap returns true if two rules could match the same request.
+func rulesOverlap(a, b *PolicyRule) bool {
+	// If either field is empty (wildcard), it overlaps with anything.
+	// If both are set, they must match for overlap.
+	if a.SourceIP != "" && b.SourceIP != "" && a.SourceIP != b.SourceIP {
+		return false
+	}
+	if a.SourceIdentity != "" && b.SourceIdentity != "" && !strings.EqualFold(a.SourceIdentity, b.SourceIdentity) {
+		return false
+	}
+	if a.DestFQDN != "" && b.DestFQDN != "" && a.DestFQDN != b.DestFQDN {
+		return false
+	}
+	if a.DestCategory != "" && b.DestCategory != "" && a.DestCategory != b.DestCategory {
+		return false
+	}
 	return true
 }
 

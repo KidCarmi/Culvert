@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -40,11 +41,12 @@ const (
 // It generates leaf certificates on-the-fly and caches them with LRU
 // eviction at certCacheMaxSize entries and TTL of certCacheTTL.
 type CertManager struct {
-	mu         sync.RWMutex
-	caCert     *x509.Certificate
-	caKey      *ecdsa.PrivateKey
-	cache      map[string]*certCacheEntry
-	cacheOrder []string // insertion order for LRU eviction
+	mu          sync.RWMutex
+	caCert      *x509.Certificate
+	caKey       *ecdsa.PrivateKey
+	keyProvider KeyProvider // optional external HSM/KMS signer
+	cache       map[string]*certCacheEntry
+	cacheOrder  []string // insertion order for LRU eviction
 }
 
 var certMgr = &CertManager{cache: map[string]*certCacheEntry{}}
@@ -369,6 +371,112 @@ func (cm *CertManager) LoadCustomCA(certPEM, keyPEM []byte) error {
 	cm.cacheOrder = nil
 	cm.mu.Unlock()
 	return nil
+}
+
+// ── CA Auto-Rotation ─────────────────────────────────────────────────────────
+
+const (
+	caRotationCheckInterval = 24 * time.Hour      // how often to check CA expiry
+	caRotationOverlap       = 30 * 24 * time.Hour // rotate 30 days before expiry
+)
+
+// CAExpiry returns the CA certificate NotAfter time, or zero if CA is not ready.
+func (cm *CertManager) CAExpiry() time.Time {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if cm.caCert == nil {
+		return time.Time{}
+	}
+	return cm.caCert.NotAfter
+}
+
+// RotateIfNeeded checks whether the CA cert is nearing expiry and generates
+// a new one. If caPath and passphrase are provided, the new CA is persisted.
+// Returns true if rotation occurred.
+func (cm *CertManager) RotateIfNeeded(caPath, passphrase string) bool {
+	expiry := cm.CAExpiry()
+	if expiry.IsZero() {
+		return false
+	}
+	if time.Until(expiry) > caRotationOverlap {
+		return false
+	}
+	logger.Printf("CA auto-rotation: cert expires %s (<%d days) — generating new CA",
+		expiry.Format("2006-01-02"), int(caRotationOverlap.Hours()/24))
+	if err := cm.InitCA(); err != nil {
+		logger.Printf("CA auto-rotation: init failed: %v", err)
+		return false
+	}
+	if caPath != "" {
+		if err := cm.SaveCA(caPath, passphrase); err != nil {
+			logger.Printf("CA auto-rotation: save failed: %v", err)
+		}
+	}
+	logger.Printf("CA auto-rotation: new CA generated, expires %s",
+		cm.CAExpiry().Format("2006-01-02"))
+	return true
+}
+
+// StartCAAutoRotation runs a background goroutine that periodically checks
+// CA certificate expiry and triggers rotation when needed.
+func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
+	go func() {
+		t := time.NewTicker(caRotationCheckInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				certMgr.RotateIfNeeded(caPath, passphrase)
+			}
+		}
+	}()
+}
+
+// ── HSM/KMS Key Provider Interface ───────────────────────────────────────────
+// KeyProvider abstracts CA private key operations so the signing key can live
+// in an HSM, cloud KMS, or local memory. Enterprise deployments can implement
+// this interface to integrate with AWS KMS, Azure Key Vault, GCP Cloud KMS,
+// or PKCS#11 HSMs.
+
+// KeyProvider signs certificate data using an externally managed private key.
+type KeyProvider interface {
+	// SignCertificate creates and signs a certificate using the provider's key.
+	SignCertificate(template, parent *x509.Certificate, pubKey any) ([]byte, error)
+	// PublicKey returns the public key corresponding to the signing key.
+	PublicKey() any
+	// Name returns a human-readable provider name (e.g. "local", "aws-kms").
+	Name() string
+}
+
+// localKeyProvider is the default in-memory key provider.
+type localKeyProvider struct {
+	key *ecdsa.PrivateKey
+}
+
+func (p *localKeyProvider) SignCertificate(template, parent *x509.Certificate, pubKey any) ([]byte, error) {
+	return x509.CreateCertificate(rand.Reader, template, parent, pubKey, p.key)
+}
+func (p *localKeyProvider) PublicKey() any { return &p.key.PublicKey }
+func (p *localKeyProvider) Name() string   { return "local" }
+
+// SetKeyProvider allows an external key provider (HSM/KMS) to be registered.
+func (cm *CertManager) SetKeyProvider(kp KeyProvider) {
+	cm.mu.Lock()
+	cm.keyProvider = kp
+	cm.mu.Unlock()
+	logger.Printf("CA key provider → %s", kp.Name())
+}
+
+// KeyProviderName returns the name of the active key provider.
+func (cm *CertManager) KeyProviderName() string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if cm.keyProvider != nil {
+		return cm.keyProvider.Name()
+	}
+	return "local"
 }
 
 // ParseTLSPair validates a PEM cert+key pair without storing it.
