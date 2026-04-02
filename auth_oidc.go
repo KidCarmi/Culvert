@@ -120,9 +120,9 @@ func (a *OIDCAuth) Verify(username, token string) bool {
 	ok, exp := a.introspect(token)
 	a.oidcCacheSetWithExp(k, ok, exp)
 	if ok {
-		logger.Printf("OIDC auth OK: user=%s", sanitizeLog(username))
+		logger.Printf("OIDC auth OK: user=%q", username)
 	} else {
-		logger.Printf("OIDC auth FAIL: user=%s", sanitizeLog(username))
+		logger.Printf("OIDC auth FAIL: user=%q", username)
 	}
 	return ok
 }

@@ -439,7 +439,7 @@ func (b *Blocklist) AddException(host string) {
 	bare := strings.TrimPrefix(host, "*.")
 	parts := strings.Split(bare, ".")
 	if len(parts) <= 1 || (len(parts) == 2 && strings.HasPrefix(host, "*.")) {
-		logger.Printf("WARN broad blocklist exception added: %s — may exempt many domains", sanitizeLog(host))
+		logger.Printf("WARN broad blocklist exception added: %q — may exempt many domains", host)
 	}
 	b.mu.Lock()
 	b.exceptions[host] = true

@@ -516,7 +516,7 @@ func matchSchedule(s *PolicySchedule) bool {
 	loc := time.UTC
 	if s.Timezone != "" {
 		if l, err := time.LoadLocation(s.Timezone); err != nil {
-			logger.Printf("WARN invalid schedule timezone %q, falling back to UTC", sanitizeLog(s.Timezone))
+			logger.Printf("WARN invalid schedule timezone %q, falling back to UTC", s.Timezone)
 		} else {
 			loc = l
 		}
