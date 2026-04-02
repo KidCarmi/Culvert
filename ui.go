@@ -1713,7 +1713,8 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			rl.Configure(body.RateLimitRPM, time.Minute)
 		}
 		logMode := strings.ReplaceAll(strings.ReplaceAll(ipf.Mode(), "\n", "_"), "\r", "_")
-		logger.Printf("UI: security config updated (ipMode=%q rateRPM=%d)", logMode, rl.Limit())
+		logRPM := strings.ReplaceAll(fmt.Sprintf("%d", rl.Limit()), "\n", "_")
+		logger.Printf("UI: security config updated (ipMode=%q rateRPM=%s)", logMode, logRPM)
 		auditEvent(r, "security.update", "ip_filter+rate_limit",
 			fmt.Sprintf("mode=%s rpm=%d", ipf.Mode(), rl.Limit()))
 		jsonOK(w, map[string]any{"ok": true})
@@ -1867,7 +1868,8 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		policyStore.Save()
 		logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
 		logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
-		logger.Printf("UI: policy rule added priority=%d name=%q action=%q", added.Priority, logName, logAction)
+		logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
+		logger.Printf("UI: policy rule added priority=%s name=%q action=%q", logPriority, logName, logAction)
 		auditEventDiff(r, "policy.add", added.Name,
 			fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
 		jsonOK(w, added)
