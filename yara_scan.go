@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -153,14 +154,35 @@ func evalYARARule(r *yaraCompiledRule, data []byte) bool {
 	}
 }
 
+// yaraRegexTimeout limits how long a single regex match may run.
+// Prevents ReDoS from pathological patterns or crafted input.
+const yaraRegexTimeout = 5 * time.Second
+
 func matchYARAString(s *yaraStringDef, data []byte) bool {
 	if s.re != nil {
-		return s.re.Match(data)
+		return matchRegexWithTimeout(s.re, data, yaraRegexTimeout)
 	}
 	if s.noCase {
 		return bytes.Contains(bytes.ToLower(data), bytes.ToLower(s.literal))
 	}
 	return bytes.Contains(data, s.literal)
+}
+
+// matchRegexWithTimeout runs re.Match(data) in a goroutine and returns false
+// if the match does not complete within the given timeout (ReDoS prevention).
+func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
+	type result struct{ matched bool }
+	ch := make(chan result, 1)
+	go func() {
+		ch <- result{re.Match(data)}
+	}()
+	select {
+	case r := <-ch:
+		return r.matched
+	case <-time.After(timeout):
+		logger.Printf("WARN YARA regex timeout after %s on pattern %q", timeout, sanitizeLog(re.String()))
+		return false
+	}
 }
 
 // ── Boolean condition evaluator ───────────────────────────────────────────────

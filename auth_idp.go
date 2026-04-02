@@ -30,6 +30,7 @@ type IdPProfile struct {
 	Type         IdPType  `json:"type"`         // "oidc" | "saml"
 	EmailDomains []string `json:"emailDomains"` // routing hints, e.g. ["corp.com"]
 	Enabled      bool     `json:"enabled"`
+	Priority     int      `json:"priority"`     // lower = higher priority; 0 = default
 
 	// KnownGroups is the admin-maintained list of group names available in
 	// this IdP.  Used by the policy UI to populate the group dropdown.
@@ -280,22 +281,45 @@ func (r *IdPRegistry) All() []*IdPProfile {
 
 // RouteByDomain returns the first enabled live provider whose EmailDomains
 // list contains domain (case-insensitive).  Returns nil if none match.
+// RouteByDomain returns the enabled provider whose email domain matches.
+// When multiple providers match the same domain, the one with the lowest
+// Priority value wins (0 is treated as default = max int for sorting).
 func (r *IdPRegistry) RouteByDomain(domain string) IdentityProvider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	var bestProfile *IdPProfile
+	var bestProv IdentityProvider
 	for _, p := range r.profiles {
 		if !p.Enabled {
 			continue
 		}
 		for _, d := range p.EmailDomains {
 			if stringsEqualFold(d, domain) {
-				if prov, ok := r.live[p.ID]; ok {
-					return prov
+				prov, ok := r.live[p.ID]
+				if !ok {
+					continue
+				}
+				pri := p.Priority
+				if pri == 0 {
+					pri = 1<<31 - 1 // treat 0 as lowest priority (default)
+				}
+				bestPri := bestProfile.effectivePriority()
+				if bestProfile == nil || pri < bestPri {
+					bestProfile = p
+					bestProv = prov
 				}
 			}
 		}
 	}
-	return nil
+	return bestProv
+}
+
+// effectivePriority returns the priority for sorting (0 → max int).
+func (p *IdPProfile) effectivePriority() int {
+	if p == nil || p.Priority == 0 {
+		return 1<<31 - 1
+	}
+	return p.Priority
 }
 
 // LiveProvider returns the compiled provider for a given profile ID.

@@ -233,9 +233,29 @@ func wrapUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error
 // DataPlaneClient polls the Control Plane for configuration and applies changes
 // to the local proxy state (blocklist, IP filter, rate limiter).
 type DataPlaneClient struct {
-	nodeID     string
-	conn       *grpc.ClientConn
+	nodeID      string
+	conn        *grpc.ClientConn
 	lastVersion int64
+	failCount   int // consecutive fetch failures for exponential backoff
+}
+
+// backoff sleeps for an exponentially increasing duration after consecutive
+// Control Plane failures: 2s, 4s, 8s, … capped at 60s.
+func (c *DataPlaneClient) backoff(ctx context.Context) {
+	c.failCount++
+	delay := time.Duration(1<<min(c.failCount, 6)) * time.Second // 2s…64s
+	if delay > 60*time.Second {
+		delay = 60 * time.Second
+	}
+	logger.Printf("DataPlane: backing off %s (failure #%d)", delay, c.failCount)
+	select {
+	case <-time.After(delay):
+	case <-ctx.Done():
+	}
+}
+
+func (c *DataPlaneClient) resetBackoff() {
+	c.failCount = 0
 }
 
 // NewDataPlaneClient connects to the Control Plane at addr.
@@ -286,9 +306,11 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	raw, err := c.call(ctx, methodGetConfig, json.RawMessage("{}"))
 	if err != nil {
+		c.backoff(ctx)
 		logger.Printf("DataPlane: GetConfig error: %v", err)
 		return
 	}
+	c.resetBackoff()
 	var snap ConfigSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		logger.Printf("DataPlane: parse config error: %v", err)

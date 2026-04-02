@@ -30,7 +30,12 @@ type ClamAV struct {
 	timeout time.Duration
 }
 
-const clamChunkSize = 4096 // bytes per INSTREAM chunk
+const clamChunkSize = 4096  // bytes per INSTREAM chunk
+const clamMaxConcurrent = 4 // max parallel ClamAV scans
+
+// clamSem limits concurrent ClamAV scans to prevent overwhelming the daemon
+// when multiple requests trigger scanning simultaneously.
+var clamSem = make(chan struct{}, clamMaxConcurrent)
 
 // NewClamAV creates a client from an address string.
 //
@@ -82,7 +87,11 @@ func (c *ClamAV) Ping() error {
 // Scan submits data to the ClamAV daemon via the INSTREAM command.
 // Returns (virusName, isMalicious, error).
 // virusName is non-empty only when isMalicious is true.
+// Concurrent scans are limited by clamSem to prevent overwhelming the daemon.
 func (c *ClamAV) Scan(data []byte) (string, bool, error) {
+	clamSem <- struct{}{} // acquire semaphore slot
+	defer func() { <-clamSem }()
+
 	conn, err := net.DialTimeout(c.network, c.addr, c.timeout)
 	if err != nil {
 		return "", false, fmt.Errorf("clamav: connect: %w", err)

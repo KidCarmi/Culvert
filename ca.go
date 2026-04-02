@@ -64,7 +64,7 @@ var caMagic = [4]byte{'P', 'S', 'C', 'A'}
 
 const (
 	caVersion      = byte(0x01)
-	pbkdf2Iter     = 100_000
+	pbkdf2Iter     = 600_000 // NIST SP 800-132 (2024) recommends ≥600k for PBKDF2-SHA256
 	pbkdf2SaltLen  = 32
 	aesGCMNonceLen = 12
 )

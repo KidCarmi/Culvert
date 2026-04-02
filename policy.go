@@ -474,6 +474,10 @@ type PolicyMatch struct {
 	Action        PolicyAction
 	SSLAction     SSLAction
 	TLSSkipVerify bool
+	// MatchedConditions is a human-readable summary of which rule conditions
+	// were satisfied (e.g. "srcIP=10.0.0.0/8 destFQDN=*.example.com").
+	// Populated by Evaluate for policy audit trail logging.
+	MatchedConditions string
 }
 
 // Evaluate iterates rules in priority order and returns the first match.
@@ -497,14 +501,50 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 			continue
 		}
 		atomic.AddInt64(&rule.HitCount, 1)
+		conds := buildMatchedConditions(rule, clientIP, identity, authSource, host, groups)
 		return &PolicyMatch{
-			Rule:          rule,
-			Action:        rule.Action,
-			SSLAction:     rule.SSLAction,
-			TLSSkipVerify: rule.TLSSkipVerify,
+			Rule:              rule,
+			Action:            rule.Action,
+			SSLAction:         rule.SSLAction,
+			TLSSkipVerify:     rule.TLSSkipVerify,
+			MatchedConditions: conds,
 		}
 	}
 	return nil
+}
+
+// buildMatchedConditions produces a compact summary of which rule conditions
+// contributed to the match. Only non-wildcard (configured) fields are listed.
+func buildMatchedConditions(rule *PolicyRule, clientIP, identity, authSource, host string, groups []string) string {
+	var parts []string
+	if rule.SourceIP != "" {
+		parts = append(parts, "srcIP="+rule.SourceIP)
+	}
+	if rule.SourceIdentity != "" {
+		parts = append(parts, "identity="+rule.SourceIdentity)
+	}
+	if rule.SourceGroup != "" {
+		parts = append(parts, "group="+rule.SourceGroup)
+	}
+	if rule.AuthSource != "" {
+		parts = append(parts, "authSrc="+rule.AuthSource)
+	}
+	if rule.DestFQDN != "" {
+		parts = append(parts, "destFQDN="+rule.DestFQDN)
+	}
+	if rule.DestCategory != "" && rule.DestCategory != CategoryAny {
+		parts = append(parts, "destCat="+string(rule.DestCategory))
+	}
+	if len(rule.DestCountry) > 0 {
+		parts = append(parts, "destCountry="+strings.Join(rule.DestCountry, ","))
+	}
+	if rule.Schedule != nil {
+		parts = append(parts, "schedule=active")
+	}
+	if len(parts) == 0 {
+		return "any"
+	}
+	return strings.Join(parts, " ")
 }
 
 // ─── Schedule matching ────────────────────────────────────────────────────────

@@ -279,6 +279,8 @@ func securityMiddleware(next http.Handler) http.Handler {
 // isSameOrigin returns true when the Origin header matches the request's Host.
 // This is the correct CSRF protection for single-origin admin UIs: any IP is
 // fine as long as the request comes from the same scheme+host+port as the UI.
+// When Culvert sits behind a reverse proxy, X-Forwarded-Host carries the
+// original Host header — we accept that as an alternative match target.
 func isSameOrigin(r *http.Request, origin string) bool {
 	if origin == "" {
 		return true // no Origin = direct tool access — not a browser cross-site request
@@ -287,7 +289,15 @@ func isSameOrigin(r *http.Request, origin string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(u.Host, r.Host)
+	originHost := u.Host
+	if strings.EqualFold(originHost, r.Host) {
+		return true
+	}
+	// Behind a reverse proxy the original Host is forwarded as X-Forwarded-Host.
+	if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" && strings.EqualFold(originHost, fwd) {
+		return true
+	}
+	return false
 }
 
 // uiRoleKey is the context key used to propagate the authenticated UI role.

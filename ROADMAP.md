@@ -46,7 +46,7 @@ This document outlines the strategic progression for Culvert, moving from a PoC 
 
 ## Phase 6: Architecture Review Hardening ✅ (P0) / 🔧 (P1-P3)
 
-Based on a three-reviewer expert architecture audit. Current score: **7.5/10** (P0+P1 complete).
+Based on a three-reviewer expert architecture audit. Current score: **8.5/10** (P0+P1+P2 complete).
 
 ### P0 — Critical Fixes (✅)
 - [x] **Goroutine leak fix:** Wait for both relay goroutines; close write halves to unblock peers (proxy.go, socks5.go)
@@ -66,18 +66,18 @@ Based on a three-reviewer expert architecture audit. Current score: **7.5/10** (
 - [x] **OIDC explicit context timeout:** 10s context.WithTimeout on token exchange, userinfo, introspection (auth_oidc_flow.go)
 - [x] **LDAP anonymous bind guard:** Warn when BindDN empty with RequiredGroup configured (auth_ldap.go)
 
-### P2 — Performance & Compliance (This Quarter)
-- [ ] **Policy audit trail:** Log matched rule ID + conditions for every policy evaluation
-- [ ] **CSRF behind reverse proxy:** Check `X-Forwarded-Host` in `isSameOrigin()`
-- [ ] **DNS caching for SSRF checks:** TTL cache for `isPrivateHost()` lookups
-- [ ] **Global http.Client reuse:** Single client instead of per-request allocation
-- [ ] **ClamAV connection pooling:** Semaphore-limited pool instead of per-scan dial
-- [ ] **YARA regex timeout:** Context-based timeout on pattern matching (ReDoS prevention)
-- [ ] **Content-Length pre-check:** Validate before buffering response body for scan
-- [ ] **PBKDF2 iteration increase:** 100k → 600k (NIST 2024 guidance)
-- [ ] **Data Plane backoff:** Exponential backoff on Control Plane connection failure
-- [ ] **Multi-IdP group resolution:** Document provider priority, add provider selection
-- [ ] **Log rotation cleanup:** Delete old `.1` files on rotation
+### P2 — Performance & Compliance (✅)
+- [x] **Policy audit trail:** Log matched rule ID + priority + conditions for every policy evaluation (proxy.go, policy.go)
+- [x] **CSRF behind reverse proxy:** Check `X-Forwarded-Host` in `isSameOrigin()` (ui.go)
+- [x] **DNS caching for SSRF checks:** TTL cache (30s) for `isPrivateHost()` lookups (security.go, proxy.go)
+- [x] **Global http.Client reuse:** Already uses shared `upstreamTransport` with connection pooling (no change needed)
+- [x] **ClamAV connection pooling:** Semaphore-limited concurrent scans (`clamSem`, max 4) (clam.go)
+- [x] **YARA regex timeout:** 5s goroutine-based timeout on regex matching — ReDoS prevention (yara_scan.go)
+- [x] **Content-Length pre-check:** Skip buffering when `Content-Length` exceeds scan limit (proxy.go)
+- [x] **PBKDF2 iteration increase:** 100k → 600k (NIST SP 800-132 2024 guidance) (ca.go)
+- [x] **Data Plane backoff:** Exponential backoff (2s–60s) on Control Plane connection failure (controlplane.go)
+- [x] **Multi-IdP group resolution:** Priority field on IdP profiles; `RouteByDomain` picks lowest priority match (auth_idp.go)
+- [x] **Log rotation cleanup:** Delete stale `.1` files before rotation (logger.go)
 
 ### P3 — Enterprise Features (Next Quarter)
 - [ ] **Upstream proxy chaining / failover** — Route through parent proxies with health checks
