@@ -236,13 +236,15 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 		mac.Write(body)
 		req.Header.Set("X-Culvert-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
-	// Construct client inline so CodeQL can verify the SSRF-safe transport
-	// at the call site (package-level vars are opaque to taint analysis).
+	// SSRF mitigation: scheme validated above (http/https only), and
+	// ssrfSafeDialContext rejects connections to private/loopback IPs at
+	// the dial level — preventing DNS-rebinding and internal network access.
+	// Webhook URLs are intentionally operator-controlled (arbitrary endpoints).
 	client := &http.Client{
 		Timeout:   5 * time.Second,
 		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
 	}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // codeql[go/request-forgery] SSRF mitigated by ssrfSafeDialContext (blocks private IPs at dial level)
 	if err != nil {
 		logger.Printf("Alert webhook %q: delivery error: %v", h.Name, err)
 		return
