@@ -220,7 +220,7 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
-		logger.Printf("Alert webhook %q: build request error: %v", h.Name, err)
+		logger.Printf("Alert webhook %q: build request error: %v", sanitizeLog(h.Name), err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")

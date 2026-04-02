@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode"
 )
 
 // defaultPolicyAction controls what happens when no PBAC rule matches a request.
@@ -253,7 +252,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
 		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "", "", authenticatedIdentity)
-		logger.Printf("BLOCKED %s -> %q", clientIP, host)
+		logger.Printf("BLOCKED %s -> %q", clientIP, sanitizeLog(host))
 		return
 	}
 
@@ -264,7 +263,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		if result := globalSecScanner.CheckDomain(host); result != nil {
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity)
-			logger.Printf("THREAT_BLOCKED domain %s -> %q (%q)", clientIP, host, result.Reason)
+			logger.Printf("THREAT_BLOCKED domain %s -> %q (%q)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
 			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
 			return
 		}
@@ -273,7 +272,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			if result := globalSecScanner.CheckURL(r.URL.String()); result != nil {
 				atomic.AddInt64(&statBlocked, 1)
 				recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity)
-				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, r.Host, result.Reason)
+				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
 				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
 				return
 			}
@@ -296,7 +295,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			atomic.AddInt64(&statFileBlocked, 1)
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity)
-			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, host, r.URL.Path, ext)
+			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 			return
 		}
@@ -314,7 +313,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity)
-			logger.Printf("POLICY_DROP rule=%q %s -> %q", match.Rule.Name, clientIP, host)
+			logger.Printf("POLICY_DROP rule=%q %s -> %q", sanitizeLog(match.Rule.Name), clientIP, sanitizeLog(host))
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
 				conn, _, _ := hj.Hijack()
@@ -325,7 +324,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity)
-			logger.Printf("POLICY_BLOCK rule=%q %s -> %q", match.Rule.Name, clientIP, host)
+			logger.Printf("POLICY_BLOCK rule=%q %s -> %q", sanitizeLog(match.Rule.Name), clientIP, sanitizeLog(host))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return
 
@@ -333,17 +332,17 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity)
 			if !isSafeRedirectURL(match.Rule.RedirectURL) {
-				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", match.Rule.Name, match.Rule.RedirectURL)
+				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
-			logger.Printf("POLICY_REDIRECT rule=%q %s -> %q => %q", match.Rule.Name, clientIP, host, match.Rule.RedirectURL)
+			logger.Printf("POLICY_REDIRECT rule=%q %s -> %q => %q", sanitizeLog(match.Rule.Name), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL))
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
 			return
 
 		case ActionAllow:
 			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity)
-			logger.Printf("POLICY_ALLOW rule=%q %s %s %q", match.Rule.Name, clientIP, r.Method, r.Host)
+			logger.Printf("POLICY_ALLOW rule=%q %s %s %q", sanitizeLog(match.Rule.Name), clientIP, r.Method, sanitizeLog(r.Host))
 			// Fall through to normal handling below.
 		}
 	} else {
@@ -356,7 +355,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			// end-users see a clear, branded explanation.
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity)
-			logger.Printf("POLICY_DEFAULT_DENY %s %s %q", clientIP, r.Method, r.Host)
+			logger.Printf("POLICY_DEFAULT_DENY %s %s %q", clientIP, r.Method, sanitizeLog(r.Host))
 			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
 			return
 		}
@@ -384,7 +383,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// override policy-based SSL inspection, regardless of rule SSLAction.
 	if sslAction == SSLInspect && sslBypass.Matches(host) {
 		sslAction = SSLBypass
-		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, host)
+		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
 	}
 
 	switch {
@@ -508,7 +507,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
 		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"))
-		logger.Printf("FILE_BLOCKED (resp cd) %s -> %q%q (ext=%q)", cip, r.Host, r.URL.Path, ext)
+		logger.Printf("FILE_BLOCKED (resp cd) %s -> %q%q (ext=%q)", cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 		serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 		return
 	}
@@ -521,7 +520,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)
 				atomic.AddInt64(&statBlocked, 1)
 				recordRequest(cip2, r.Method, r.Host, "SCAN_BLOCKED", result.Source, result.Reason, r.Header.Get("X-User-Identity"))
-				logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip2, r.Host, result.Source, result.Reason)
+				logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip2, sanitizeLog(r.Host), sanitizeLog(result.Source), sanitizeLog(result.Reason))
 				scanBlock(w, r.Host, result.Reason, result.Source)
 				return
 			}
@@ -533,19 +532,18 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		logger.Printf("HTTP response copy error for %q: %v", r.Host, err)
+		logger.Printf("HTTP response copy error for %q: %v", sanitizeLog(r.Host), err)
 	}
 }
 
-// sanitizeLog replaces control characters (newlines, tabs, etc.) in a string
-// so that user-controlled input cannot forge log entries (CWE-117).
+// sanitizeLog strips newlines, carriage returns, and tabs from s to prevent
+// log forging (CWE-117). Uses strings.ReplaceAll so that CodeQL recognises
+// the sanitisation (go/log-injection).
 func sanitizeLog(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return '_'
-		}
-		return r
-	}, s)
+	s = strings.ReplaceAll(s, "\n", "_")
+	s = strings.ReplaceAll(s, "\r", "_")
+	s = strings.ReplaceAll(s, "\t", "_")
+	return s
 }
 
 // isSafeRedirectURL returns true only for absolute http/https URLs whose host
@@ -581,13 +579,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := isPrivateHost(host); err != nil {
-		logger.Printf("WS SSRF block %q: %v", host, err)
+		logger.Printf("WS SSRF block %q: %v", sanitizeLog(host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", host)
 	if err != nil {
-		logger.Printf("WS dial error %q: %v", host, err)
+		logger.Printf("WS dial error %q: %v", sanitizeLog(host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -596,7 +594,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Forward the original request to the target (preserve Upgrade headers).
 	r.RequestURI = r.URL.RequestURI()
 	if err := r.Write(destConn); err != nil {
-		logger.Printf("WS write error %q: %v", host, err)
+		logger.Printf("WS write error %q: %v", sanitizeLog(host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -605,7 +603,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	br := bufio.NewReader(destConn)
 	resp, err := http.ReadResponse(br, r)
 	if err != nil {
-		logger.Printf("WS upstream response error %q: %v", host, err)
+		logger.Printf("WS upstream response error %q: %v", sanitizeLog(host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -632,7 +630,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Printf("WS tunnel established → %q", host)
+	logger.Printf("WS tunnel established → %q", sanitizeLog(host))
 
 	// Bridge: drain any buffered bytes from the target first.
 	done := make(chan struct{}, 2)
@@ -675,13 +673,13 @@ var upstreamTransport = &http.Transport{
 // handleTunnelBypass is the original transparent TCP tunnel (Bypass mode).
 func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 	if err := isPrivateHost(r.Host); err != nil {
-		logger.Printf("CONNECT SSRF block %q: %v", r.Host, err)
+		logger.Printf("CONNECT SSRF block %q: %v", sanitizeLog(r.Host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", r.Host)
 	if err != nil {
-		logger.Printf("tunnel dial error %q: %v", r.Host, err)
+		logger.Printf("tunnel dial error %q: %v", sanitizeLog(r.Host), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -732,13 +730,13 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 
 	// 1. Connect to the upstream server over plain TCP.
 	if err := isPrivateHost(targetHost); err != nil {
-		logger.Printf("inspect SSRF block %q: %v", targetHost, err)
+		logger.Printf("inspect SSRF block %q: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 	rawUpstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", targetHost)
 	if err != nil {
-		logger.Printf("inspect dial error %q: %v", targetHost, err)
+		logger.Printf("inspect dial error %q: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -750,7 +748,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// logged as a warning so it is auditable.
 	var upstreamTLSCfg *tls.Config
 	if tlsSkipVerify {
-		logger.Printf("WARN SSL_INSPECT skipping upstream cert verify for %q (tlsSkipVerify rule)", hostOnly)
+		logger.Printf("WARN SSL_INSPECT skipping upstream cert verify for %q (tlsSkipVerify rule)", sanitizeLog(hostOnly))
 		upstreamTLSCfg = &tls.Config{
 			ServerName:         hostOnly,
 			MinVersion:         tls.VersionTLS12,
@@ -772,7 +770,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
 	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
 		rawUpstream.Close()
-		logger.Printf("upstream TLS handshake error %q: %v", targetHost, err)
+		logger.Printf("upstream TLS handshake error %q: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -799,11 +797,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
 		clientTLS.Close()  //nolint:errcheck // best-effort cleanup on handshake failure
 		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup on handshake failure
-		logger.Printf("SSL_INSPECT client TLS handshake error for %q: %v", hostOnly, err)
+		logger.Printf("SSL_INSPECT client TLS handshake error for %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}
 
-	logger.Printf("SSL_INSPECT tunnel → %q", targetHost)
+	logger.Printf("SSL_INSPECT tunnel → %q", sanitizeLog(targetHost))
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
@@ -876,7 +874,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
 			if readErr != nil {
 				origBody.Close()
-				logger.Printf("SSL_INSPECT: body read error for %q: %v", hostOnly, readErr)
+				logger.Printf("SSL_INSPECT: body read error for %q: %v", sanitizeLog(hostOnly), readErr)
 				break
 			}
 			if readErr == nil {

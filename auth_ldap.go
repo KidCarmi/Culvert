@@ -106,9 +106,9 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 	ok := a.verify(username, password)
 	a.cacheSet(k, ok)
 	if ok {
-		logger.Printf("LDAP auth OK: user=%q", username)
+		logger.Printf("LDAP auth OK: user=%q", sanitizeLog(username))
 	} else {
-		logger.Printf("LDAP auth FAIL: user=%q", username)
+		logger.Printf("LDAP auth FAIL: user=%q", sanitizeLog(username))
 	}
 	return ok
 }
@@ -139,7 +139,7 @@ func (a *LDAPAuth) verify(username, password string) bool {
 			return false
 		}
 	} else if a.cfg.RequiredGroup != "" {
-		logger.Printf("WARN LDAP anonymous bind with RequiredGroup=%q — group resolution may fail", a.cfg.RequiredGroup)
+		logger.Printf("WARN LDAP anonymous bind with RequiredGroup=%q — group resolution may fail", sanitizeLog(a.cfg.RequiredGroup))
 	}
 
 	filter := fmt.Sprintf(a.cfg.UserFilter, ldap.EscapeFilter(username))
