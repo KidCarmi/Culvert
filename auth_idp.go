@@ -30,7 +30,7 @@ type IdPProfile struct {
 	Type         IdPType  `json:"type"`         // "oidc" | "saml"
 	EmailDomains []string `json:"emailDomains"` // routing hints, e.g. ["corp.com"]
 	Enabled      bool     `json:"enabled"`
-	Priority     int      `json:"priority"`     // lower = higher priority; 0 = default
+	Priority     int      `json:"priority"` // lower = higher priority; 0 = default
 
 	// KnownGroups is the admin-maintained list of group names available in
 	// this IdP.  Used by the policy UI to populate the group dropdown.
@@ -294,20 +294,17 @@ func (r *IdPRegistry) RouteByDomain(domain string) IdentityProvider {
 			continue
 		}
 		for _, d := range p.EmailDomains {
-			if stringsEqualFold(d, domain) {
-				prov, ok := r.live[p.ID]
-				if !ok {
-					continue
-				}
-				pri := p.Priority
-				if pri == 0 {
-					pri = 1<<31 - 1 // treat 0 as lowest priority (default)
-				}
-				bestPri := bestProfile.effectivePriority()
-				if bestProfile == nil || pri < bestPri {
-					bestProfile = p
-					bestProv = prov
-				}
+			if !stringsEqualFold(d, domain) {
+				continue
+			}
+			prov, ok := r.live[p.ID]
+			if !ok {
+				continue
+			}
+			pri := p.effectivePriority()
+			if bestProfile == nil || pri < bestProfile.effectivePriority() {
+				bestProfile = p
+				bestProv = prov
 			}
 		}
 	}

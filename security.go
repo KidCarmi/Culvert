@@ -43,8 +43,7 @@ var ssrfSafeDialContext = func(ctx context.Context, network, addr string) (net.C
 const dnsSSRFCacheTTL = 30 * time.Second
 
 type dnsSSRFEntry struct {
-	private bool   // true if any resolved IP was private
-	err     error  // non-nil if DNS resolution failed (not cached, kept for reference)
+	private bool // true if any resolved IP was private
 	expires time.Time
 }
 

@@ -501,7 +501,7 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 			continue
 		}
 		atomic.AddInt64(&rule.HitCount, 1)
-		conds := buildMatchedConditions(rule, clientIP, identity, authSource, host, groups)
+		conds := buildMatchedConditions(rule)
 		return &PolicyMatch{
 			Rule:              rule,
 			Action:            rule.Action,
@@ -515,7 +515,7 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 
 // buildMatchedConditions produces a compact summary of which rule conditions
 // contributed to the match. Only non-wildcard (configured) fields are listed.
-func buildMatchedConditions(rule *PolicyRule, clientIP, identity, authSource, host string, groups []string) string {
+func buildMatchedConditions(rule *PolicyRule) string {
 	var parts []string
 	if rule.SourceIP != "" {
 		parts = append(parts, "srcIP="+rule.SourceIP)

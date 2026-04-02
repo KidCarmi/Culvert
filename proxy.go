@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -88,7 +89,7 @@ func isPrivateHost(hostport string) error {
 		}
 		return nil
 	}
-	ips, err := net.LookupHost(host)
+	ips, err := net.DefaultResolver.LookupHost(context.Background(), host)
 	if err != nil {
 		// Fail closed: unresolvable hosts are rejected to prevent DNS-rebinding
 		// attacks where the check resolves to a public IP but Dial resolves to
@@ -323,7 +324,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity)
-			logger.Printf("POLICY_DROP rule=%q pri=%d %s -> %q [%s]", sanitizeLog(match.Rule.Name), match.Rule.Priority, clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions))
+			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions))
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
 				conn, _, _ := hj.Hijack()
@@ -334,7 +335,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity)
-			logger.Printf("POLICY_BLOCK rule=%q pri=%d %s -> %q [%s]", sanitizeLog(match.Rule.Name), match.Rule.Priority, clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions))
+			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return
 
@@ -346,13 +347,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
-			logger.Printf("POLICY_REDIRECT rule=%q pri=%d %s -> %q => %q [%s]", sanitizeLog(match.Rule.Name), match.Rule.Priority, clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions))
+			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions))
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
 			return
 
 		case ActionAllow:
 			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity)
-			logger.Printf("POLICY_ALLOW rule=%q pri=%d %s %s %q [%s]", sanitizeLog(match.Rule.Name), match.Rule.Priority, clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions))
+			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions))
 			// Fall through to normal handling below.
 		}
 	} else {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -88,11 +89,11 @@ func (c *ClamAV) Ping() error {
 // Returns (virusName, isMalicious, error).
 // virusName is non-empty only when isMalicious is true.
 // Concurrent scans are limited by clamSem to prevent overwhelming the daemon.
-func (c *ClamAV) Scan(data []byte) (string, bool, error) {
+func (c *ClamAV) Scan(data []byte) (virusName string, isMalicious bool, err error) {
 	clamSem <- struct{}{} // acquire semaphore slot
 	defer func() { <-clamSem }()
 
-	conn, err := net.DialTimeout(c.network, c.addr, c.timeout)
+	conn, err := (&net.Dialer{Timeout: c.timeout}).DialContext(context.Background(), c.network, c.addr)
 	if err != nil {
 		return "", false, fmt.Errorf("clamav: connect: %w", err)
 	}
