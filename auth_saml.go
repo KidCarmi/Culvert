@@ -134,13 +134,22 @@ func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 	var xmlData []byte
 
 	if cfg.MetadataURL != "" {
-		if err := validateExternalURL(cfg.MetadataURL); err != nil {
+		// Parse and validate the URL inline so CodeQL can verify the SSRF
+		// guard (scheme + private-IP check) at the call site.
+		metaURL, err := url.Parse(cfg.MetadataURL)
+		if err != nil {
+			return nil, fmt.Errorf("metadata URL parse: %w", err)
+		}
+		if metaURL.Scheme != "http" && metaURL.Scheme != "https" {
+			return nil, fmt.Errorf("metadata URL must use http or https scheme")
+		}
+		if err := isPrivateHost(metaURL.Host); err != nil {
 			return nil, fmt.Errorf("metadata URL: %w", err)
 		}
 		client := &http.Client{Timeout: 15 * time.Second}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.MetadataURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), nil)
 		if err != nil {
 			return nil, fmt.Errorf("metadata request: %w", err)
 		}
