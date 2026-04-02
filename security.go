@@ -1,10 +1,36 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
 )
+
+// ─── SSRF-safe dialer ────────────────────────────────────────────────────────
+
+// ssrfSafeDialContext is a net.Dialer.DialContext replacement that resolves
+// DNS and rejects connections to private/internal IP addresses. Use as the
+// DialContext in an http.Transport to prevent SSRF at the network level,
+// independent of URL validation.
+func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("ssrf dial: invalid address %q: %w", addr, err)
+	}
+	ips, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("ssrf dial: DNS resolution failed for %s: %w", host, err)
+	}
+	for _, ipStr := range ips {
+		if ip := net.ParseIP(ipStr); ip != nil && isPrivateIP(ip) {
+			return nil, fmt.Errorf("ssrf dial: %s resolves to private address %s", host, ipStr)
+		}
+	}
+	// All resolved IPs are public — dial the original address.
+	return (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, network, net.JoinHostPort(host, port))
+}
 
 // ─── IP Filter ────────────────────────────────────────────────────────────────
 

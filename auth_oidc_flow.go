@@ -59,7 +59,10 @@ func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, nil)
@@ -294,6 +297,7 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = ssrfSafeDialContext // SSRF guard at dial level
 	if cfg.TLSSkipVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
 	}
