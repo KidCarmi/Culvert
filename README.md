@@ -2,8 +2,9 @@
 
 **Enterprise-grade open-source HTTP/HTTPS/SOCKS5 forward proxy** — built in Go, single binary, zero runtime dependencies.
 
-[![CI](https://github.com/KidCarmi/Claude-Test/actions/workflows/ci.yml/badge.svg)](https://github.com/KidCarmi/Claude-Test/actions/workflows/ci.yml)
-[![Security Gate](https://github.com/KidCarmi/Claude-Test/actions/workflows/security-release-gate.yml/badge.svg)](https://github.com/KidCarmi/Claude-Test/actions/workflows/security-release-gate.yml)
+[![CI](https://github.com/KidCarmi/Culvert/actions/workflows/ci.yml/badge.svg)](https://github.com/KidCarmi/Culvert/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/KidCarmi/Culvert/actions/workflows/codeql.yml/badge.svg)](https://github.com/KidCarmi/Culvert/actions/workflows/codeql.yml)
+[![Security Gate](https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml/badge.svg)](https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml)
 
 ---
 
@@ -13,14 +14,15 @@
 |----------|---------|
 | **Protocols** | HTTP, HTTPS (CONNECT + SSL inspection), WebSocket, SOCKS5 |
 | **Policy engine** | PBAC rules: source IP/CIDR, identity, group, IdP, FQDN, URL category, GeoIP country, schedule |
-| **Authentication** | Local (bcrypt), LDAP, OIDC Authorization Code + PKCE, SAML 2.0; multi-IdP support |
-| **SSL inspection** | MITM with rotating CA; per-host bypass list; TLS fingerprinting |
+| **Authentication** | Local (bcrypt), LDAP, OIDC Authorization Code + PKCE, SAML 2.0; multi-IdP support; TOTP 2FA |
+| **SSL inspection** | MITM with rotating CA (ECDSA P-256); per-host bypass list; LRU cert cache (10k, 1h TTL) |
 | **Content filtering** | Domain blocklist (wildcards), file-type profiles, ClamAV antivirus, YARA rules, threat feeds |
-| **GeoIP** | Per-country allow/block rules via MaxMind GeoLite2; live country traffic map on dashboard |
+| **GeoIP** | Per-country allow/block rules via MaxMind GeoLite2; fail-closed on cache miss; live country map |
 | **Header rewriting** | Per-host request/response header set/add/remove (exact + `*.wildcard` patterns) |
 | **Admin Web UI** | 14-panel SPA: dashboard, live feed, blocklist, policy, security, certificates, audit log, … |
 | **Observability** | Prometheus metrics, real-time SSE dashboard, rotating request log, JSONL audit trail |
 | **SIEM** | Syslog forwarding (UDP/TCP, RFC 3164) compatible with Splunk, Elastic, QRadar |
+| **Security** | Zero Trust default deny, SSRF guards, CWE-117 log-injection prevention, brute-force lockout, Slowloris protection |
 | **Resilience** | Graceful shutdown, log rotation, persistent volumes, atomic file writes |
 | **Distributed** | Control Plane / Data Plane gRPC mode with mTLS for multi-node deployments |
 | **Extensibility** | Plugin middleware API (`Middleware` interface) |
@@ -32,8 +34,8 @@
 ### Docker (recommended)
 
 ```bash
-git clone https://github.com/KidCarmi/Claude-Test
-cd Claude-Test
+git clone https://github.com/KidCarmi/Culvert
+cd Culvert
 docker-compose up -d
 ```
 
@@ -379,6 +381,8 @@ Plugins run before every other check (blocklist, policy, etc.) and can short-cir
 
 ## Development
 
+Requires **Go 1.25+**.
+
 ### Build & run
 
 ```bash
@@ -396,7 +400,21 @@ go test -run TestSession ./...       # session / auth tests
 go test -run TestPAC ./...           # PAC generation tests
 go test -coverprofile=cover.out ./...
 go tool cover -html=cover.out        # open coverage report
+go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz SSRF guard
 ```
+
+### Security testing
+
+The project includes fuzz targets for critical input-parsing paths:
+
+| Fuzz Target | Coverage |
+|-------------|----------|
+| `FuzzIsPrivateHost` | SSRF guard (DNS resolution + private IP check) |
+| `FuzzIsSafeRedirectURL` | Open redirect prevention |
+| `FuzzParseClamResponse` | ClamAV response parser |
+| `FuzzNormaliseFeedURL` | Threat feed URL normalisation |
+| `FuzzMatchDest` | Policy destination matching |
+| `FuzzParseYARALiteralString` | YARA rule string parser |
 
 ### Docker build
 
@@ -411,30 +429,32 @@ docker run -p 8080:8080 -p 9090:9090 culvert:dev
 
 ```
 main.go            — CLI flags, startup, graceful shutdown (SIGTERM/SIGINT)
-proxy.go           — HTTP/HTTPS/WebSocket request handler, SSL inspection pipeline
+proxy.go           — HTTP/HTTPS/WebSocket request handler, SSL inspection pipeline, sanitizeLog
 socks5.go          — SOCKS5 server (CONNECT only; respects blocklist + rate limit)
-policy.go          — PBAC engine: rule store, evaluation, SSL bypass matcher
-session.go         — HMAC-SHA256 signed session cookies, revocation list, TTL
-ui.go              — Admin Web UI server (47 REST API endpoints, RBAC middleware)
-store.go           — Config, blocklist, request log, time-series stats, audit log
-security.go        — IP filter (allow/block mode + CIDR), per-IP rate limiter
+policy.go          — PBAC engine: rule store, evaluation, SSL bypass matcher, GeoIP fail-closed
+session.go         — HMAC-SHA256 signed session cookies, revocation list, TTL, dynamic Secure flag
+ui.go              — Admin Web UI server (47 REST API endpoints, RBAC middleware, audit actor enrichment)
+store.go           — Config, blocklist, request log, time-series stats, audit log, exception safety
+security.go        — IP filter (allow/block mode + CIDR), per-IP rate limiter, SSRF guard
 security_scan.go   — Scan orchestration: ClamAV + YARA + threat feed + hash cache
 clam.go            — ClamAV TCP/Unix socket client (INSTREAM protocol)
 yara_scan.go       — Pure-Go YARA rule engine (no libyara dependency)
 threatfeed.go      — URLhaus + OpenPhish threat feed sync and lookup
+feedsync.go        — UT1 URL category database syncer
 geoip.go           — MaxMind GeoLite2 country lookup with background cache refresh
 pac.go             — PAC file generation and persistence
 rewrite.go         — Per-host request/response header rewrite engine
 fileblock.go       — File-type blocking by extension profile
+fileprofile.go     — Named file-type blocking profiles (Executables, Archives, etc.)
 blockpage.go       — Branded block page HTML generator
 lockout.go         — Login rate-limiter / account lockout (5 failures → 15 min lock)
 auth.go            — Auth provider interface and dispatcher
-auth_idp.go        — Generic IdP profile store (OIDC + SAML multi-provider)
+auth_idp.go        — Generic IdP profile store (OIDC + SAML multi-provider), validateExternalURL
 auth_oidc.go       — OIDC token introspection (RFC 7662)
-auth_oidc_flow.go  — OIDC Authorization Code + PKCE full flow
-auth_saml.go       — SAML 2.0 SP-initiated SSO
-auth_ldap.go       — LDAP two-step bind with result caching
-ca.go              — Root CA generation, persistence (AES-256-GCM encrypted), MITM cert issuance
+auth_oidc_flow.go  — OIDC Authorization Code + PKCE full flow (context-bounded HTTP calls)
+auth_saml.go       — SAML 2.0 SP-initiated SSO (inline SSRF validation on metadata fetch)
+auth_ldap.go       — LDAP two-step bind with result caching, anonymous bind guard
+ca.go              — Root CA generation, persistence (AES-256-GCM encrypted), MITM cert issuance, LRU cert cache
 tls.go             — Self-signed TLS certificate for admin UI
 metrics.go         — Prometheus /metrics endpoint
 logger.go          — Structured log (text/JSON), rotation, write-through to syslog
@@ -444,10 +464,38 @@ hashcache.go       — SHA-256 scan result cache (configurable size + TTL)
 plugin.go          — Plugin middleware chain
 controlplane.go    — Control Plane / Data Plane gRPC config sync with mTLS
 config.go          — YAML config file loading and validation
+identity.go        — Identity model (Sub, Groups, Source, Provider)
+totp.go            — TOTP 2FA enrollment, validation, backup codes
+catdb.go           — URL category database
 static/            — Embedded single-page admin UI (vanilla JS, Chart.js)
 deploy/            — Prometheus + Grafana monitoring stack
 yara/              — Starter YARA detection rules
 ```
+
+---
+
+## Security
+
+Culvert follows a defence-in-depth approach. Key security properties:
+
+| Area | Implementation |
+|------|---------------|
+| **Zero Trust** | Default-deny policy engine; unmatched traffic is blocked |
+| **SSRF prevention** | `isPrivateHost()` resolves DNS and rejects private/loopback IPs before every outbound dial |
+| **Log injection (CWE-117)** | `sanitizeLog()` strips `\n`, `\r`, `\t` via `strings.ReplaceAll`; `%q` format verb for defence in depth |
+| **Open redirect** | `isSafeRedirectURL()` validates scheme + non-private host |
+| **Brute-force** | IP + user lockout after 5 failures (15 min cooldown) |
+| **Slowloris** | 60s read deadline on SSL-inspected client connections |
+| **Session security** | HMAC-SHA256 signed cookies; dynamic `Secure` flag based on TLS state |
+| **CA key protection** | AES-256-GCM + PBKDF2-SHA256 (100k iterations) at rest |
+| **Hop-by-hop** | RFC 7230 compliant — parses `Connection` header for dynamic hop-by-hop names |
+| **GeoIP** | Fail-closed on cache miss (unknown country = rule does not match) |
+| **Cert cache** | LRU eviction at 10k entries with 1h TTL prevents unbounded memory growth |
+| **Goroutine safety** | All relay goroutines (CONNECT, WebSocket, SOCKS5) wait for both directions; `CloseWrite` unblocks peers |
+
+### CI security pipeline
+
+Every push runs a 10-check security gate: gosec, govulncheck, trivy (filesystem + Docker image), gitleaks, staticcheck, hadolint, race-condition tests, coverage gate, license compliance, and SBOM generation. CodeQL provides deep semantic SAST analysis. Release binaries are Cosign-signed with SLSA Level 3 provenance.
 
 ---
 
