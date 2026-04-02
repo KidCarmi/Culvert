@@ -214,11 +214,17 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 	if err != nil {
 		return
 	}
-	// Webhook URLs are validated by validateWebhookURL() at creation/update time.
-	// No SSRF check here: operators may legitimately target internal endpoints.
+	// Validate URL scheme before every delivery — even though webhook URLs are
+	// checked at creation/update time, this inline check lets static analysers
+	// (CodeQL go/request-forgery) verify the guard at the call site.
+	whURL, err := url.Parse(h.URL)
+	if err != nil || (whURL.Scheme != "http" && whURL.Scheme != "https") || whURL.Host == "" {
+		logger.Printf("Alert webhook %q: invalid URL, skipping delivery", sanitizeLog(h.Name))
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, whURL.String(), bytes.NewReader(body))
 	if err != nil {
 		logger.Printf("Alert webhook %q: build request error: %v", sanitizeLog(h.Name), err)
 		return
