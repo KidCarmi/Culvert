@@ -134,8 +134,7 @@ func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 	var xmlData []byte
 
 	if cfg.MetadataURL != "" {
-		// Parse and validate the URL inline so CodeQL can verify the SSRF
-		// guard (scheme + private-IP check) at the call site.
+		// Validate scheme before making any request.
 		metaURL, err := url.Parse(cfg.MetadataURL)
 		if err != nil {
 			return nil, fmt.Errorf("metadata URL parse: %w", err)
@@ -143,10 +142,16 @@ func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 		if metaURL.Scheme != "http" && metaURL.Scheme != "https" {
 			return nil, fmt.Errorf("metadata URL must use http or https scheme")
 		}
-		if err := isPrivateHost(metaURL.Host); err != nil {
-			return nil, fmt.Errorf("metadata URL: %w", err)
+
+		// Use an SSRF-safe transport that rejects private/internal IPs at
+		// the dial level — even if DNS changes between validation and
+		// connection, the transport blocks the request.
+		client := &http.Client{
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				DialContext: ssrfSafeDialContext,
+			},
 		}
-		client := &http.Client{Timeout: 15 * time.Second}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), nil)
