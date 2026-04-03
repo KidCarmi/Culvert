@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -259,6 +260,12 @@ func main() {
 		}
 		dpClient.Run(context.Background(), 30*time.Second)
 		logger.Printf("DataPlane: polling ControlPlane at %s every 30s", *dpCPAddr)
+	}
+
+	// ── Security: Connection limit per IP ────────────────────────────────────
+	if fc.Security.MaxConnsPerIP > 0 {
+		connLimiter.Enable(fc.Security.MaxConnsPerIP)
+		logger.Printf("ConnLimit → max %d connections per IP", fc.Security.MaxConnsPerIP)
 	}
 
 	// ── Security: IP filter ──────────────────────────────────────────────────
@@ -641,10 +648,33 @@ func main() {
 		rlCleanupCancel()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := proxySrv.Shutdown(ctx); err != nil {
 		logger.Printf("Shutdown error: %v", err)
+	}
+
+	// Drain active tunnels (CONNECT/WebSocket). proxySrv.Shutdown only closes
+	// HTTP/1.x idle connections; hijacked tunnels need time to finish.
+	active := atomic.LoadInt64(&activeConns)
+	if active > 0 {
+		logger.Printf("Draining %d active tunnel(s)…", active)
+		drainDeadline := time.After(15 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+	drainLoop:
+		for {
+			select {
+			case <-drainDeadline:
+				logger.Printf("Drain timeout: %d tunnel(s) still active", atomic.LoadInt64(&activeConns))
+				break drainLoop
+			case <-ticker.C:
+				if atomic.LoadInt64(&activeConns) <= 0 {
+					logger.Println("All tunnels drained")
+					break drainLoop
+				}
+			}
+		}
 	}
 	if communityDB != nil {
 		if err := communityDB.Close(); err != nil {

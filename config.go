@@ -43,7 +43,8 @@ type FileConfig struct {
 	Security struct {
 		IPFilterMode string   `yaml:"ip_filter_mode"` // "allow" | "block" | ""
 		IPList       []string `yaml:"ip_list"`        // IPs or CIDRs
-		RateLimit    int      `yaml:"rate_limit"`     // max requests per minute (0=off)
+		RateLimit     int      `yaml:"rate_limit"`      // max requests per minute (0=off)
+		MaxConnsPerIP int      `yaml:"max_conns_per_ip"` // max concurrent connections per IP (0=off)
 	} `yaml:"security"`
 
 	// LDAP / Active Directory authentication backend.

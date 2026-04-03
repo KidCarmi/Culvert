@@ -46,7 +46,7 @@ This document outlines the strategic progression for Culvert, moving from a PoC 
 
 ## Phase 6: Architecture Review Hardening ✅ (P0) / 🔧 (P1-P3)
 
-Based on a three-reviewer expert architecture audit. Current score: **9.0/10** (P0+P1+P2+P3 complete).
+Based on a three-reviewer expert architecture audit. Current score: **9.5/10** (P0+P1+P2+P3+P4 complete).
 
 ### P0 — Critical Fixes (✅)
 - [x] **Goroutine leak fix:** Wait for both relay goroutines; close write halves to unblock peers (proxy.go, socks5.go)
@@ -91,6 +91,13 @@ Based on a three-reviewer expert architecture audit. Current score: **9.0/10** (
 - [x] **HSM/KMS integration** — `KeyProvider` interface for external key management (AWS KMS, Azure Key Vault, PKCS#11 HSMs); default local in-memory provider (ca.go)
 - [x] **OCSP/CRL checking** — OCSP responder queries with 1h result cache and 5s timeout; configurable via `ocsp_check` (ocsp.go)
 
+### P4 — Resilience & Observability Polish (✅)
+- [x] **P3 test coverage** — 30+ tests for upstream chaining, circuit breaker, OCSP checker, CA auto-rotation, per-rule metrics, byte counting, policy conflict detection, KeyProvider interface (upstream_test.go, ocsp_test.go, p4_test.go)
+- [x] **Request tracing** — X-Request-ID header auto-generated if absent; echoed to response for log correlation (proxy.go, connlimit.go)
+- [x] **Connection limiting** — Per-IP concurrent connection cap (`max_conns_per_ip`, default 256) with acquire/release tracking (connlimit.go)
+- [x] **Latency metrics** — Request duration histogram with 11 buckets (5ms–10s + Inf) in Prometheus exposition format (metrics.go)
+- [x] **Graceful drain** — 15s drain window waits for active tunnels (CONNECT/WebSocket) before forced shutdown (main.go)
+
 ## Score Targets
 
 | Milestone | Rating | Key Deliverables |
@@ -99,3 +106,4 @@ Based on a three-reviewer expert architecture audit. Current score: **9.0/10** (
 | P1 done | **7.5/10** | Auth hardened, wildcards fixed, audit useful |
 | P2 done | **8.5/10** | Performance ready, compliance audit-ready |
 | P3 done | **9.0/10** | Enterprise-grade HA, PKI, observability |
+| P4 done | **9.5/10** | Full test coverage, tracing, latency metrics |

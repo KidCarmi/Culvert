@@ -67,6 +67,61 @@ func (rm *ruleMetrics) WritePrometheus(w *strings.Builder) {
 	}
 }
 
+// ─── Latency histogram ──────────────────────────────────────────────────────
+// Fixed-bucket histogram for request latency (Prometheus text format).
+// Buckets: 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, +Inf
+
+type latencyHistogram struct {
+	mu      sync.Mutex
+	buckets []float64   // upper bounds
+	counts  []int64     // per-bucket counter
+	sum     float64     // total seconds
+	total   int64       // total observations
+}
+
+var latencyHist = newLatencyHistogram()
+
+func newLatencyHistogram() *latencyHistogram {
+	buckets := []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+	return &latencyHistogram{
+		buckets: buckets,
+		counts:  make([]int64, len(buckets)+1), // +1 for +Inf
+	}
+}
+
+// Observe records a latency observation in seconds.
+func (h *latencyHistogram) Observe(seconds float64) {
+	h.mu.Lock()
+	h.sum += seconds
+	h.total++
+	for i, bound := range h.buckets {
+		if seconds <= bound {
+			h.counts[i]++
+			h.mu.Unlock()
+			return
+		}
+	}
+	h.counts[len(h.buckets)]++ // +Inf bucket
+	h.mu.Unlock()
+}
+
+// WritePrometheus writes the histogram in Prometheus text exposition format.
+func (h *latencyHistogram) WritePrometheus(w *strings.Builder) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	w.WriteString("\n# HELP culvert_request_duration_seconds Request latency histogram\n")
+	w.WriteString("# TYPE culvert_request_duration_seconds histogram\n")
+	var cumulative int64
+	for i, bound := range h.buckets {
+		cumulative += h.counts[i]
+		fmt.Fprintf(w, "culvert_request_duration_seconds_bucket{le=\"%g\"} %d\n", bound, cumulative)
+	}
+	cumulative += h.counts[len(h.buckets)]
+	fmt.Fprintf(w, "culvert_request_duration_seconds_bucket{le=\"+Inf\"} %d\n", cumulative)
+	fmt.Fprintf(w, "culvert_request_duration_seconds_sum %f\n", h.sum)
+	fmt.Fprintf(w, "culvert_request_duration_seconds_count %d\n", h.total)
+}
+
 // metricsToken is the Bearer token required to access /metrics.
 // Empty string = open access (backward-compatible default; not recommended).
 var metricsToken string
@@ -202,7 +257,8 @@ culvert_bytes_recv_total %d
 		bytesRecv,
 	)
 
-	// Append per-rule hit counters.
+	// Append per-rule hit counters and latency histogram.
 	ruleMet.WritePrometheus(&ruleMetBuf)
+	latencyHist.WritePrometheus(&ruleMetBuf)
 	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
 }
