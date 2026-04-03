@@ -264,7 +264,7 @@ func TestLoadFileConfig_ValidYAML(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
-	_, _ = f.WriteString("listen: \":8080\"\n")
+	_, _ = f.WriteString("proxy:\n  port: 8080\n")
 	f.Close()
 
 	fc, err := loadFileConfig(f.Name())

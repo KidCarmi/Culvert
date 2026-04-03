@@ -272,6 +272,18 @@ func securityMiddleware(next http.Handler) http.Handler {
 			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 		}
 
+		// ── API rate limit on mutating requests ──────────────────────────────
+		if isMutating && strings.HasPrefix(r.URL.Path, "/api/") {
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			if ip == "" {
+				ip = r.RemoteAddr
+			}
+			if !apiLimiter.Allow(ip) {
+				http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+				return
+			}
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }

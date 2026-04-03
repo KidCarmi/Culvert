@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -142,9 +144,65 @@ func loadFileConfig(path string) (*FileConfig, error) {
 	}
 	defer f.Close()
 
+	dec := yaml.NewDecoder(f)
+	dec.KnownFields(true) // reject unknown fields (catch typos)
 	var fc FileConfig
-	if err := yaml.NewDecoder(f).Decode(&fc); err != nil {
-		return nil, err
+	if err := dec.Decode(&fc); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := fc.validate(); err != nil {
+		return nil, fmt.Errorf("validate %s: %w", path, err)
 	}
 	return &fc, nil
+}
+
+// validate checks FileConfig fields for invalid values at startup.
+func (fc *FileConfig) validate() error {
+	var errs []string
+
+	// default_action
+	if da := fc.DefaultAction; da != "" && da != "allow" && da != "deny" {
+		errs = append(errs, fmt.Sprintf("default_action: must be \"allow\" or \"deny\", got %q", da))
+	}
+
+	// ip_filter_mode
+	if m := fc.Security.IPFilterMode; m != "" && m != "allow" && m != "block" {
+		errs = append(errs, fmt.Sprintf("security.ip_filter_mode: must be \"allow\" or \"block\", got %q", m))
+	}
+
+	// log_format
+	if f := fc.LogFormat; f != "" && f != "text" && f != "json" {
+		errs = append(errs, fmt.Sprintf("log_format: must be \"text\" or \"json\", got %q", f))
+	}
+
+	// session_timeout_hours
+	if h := fc.SessionTimeoutHours; h != 0 && (h < 1 || h > 168) {
+		errs = append(errs, fmt.Sprintf("session_timeout_hours: must be 1–168, got %d", h))
+	}
+
+	// port ranges
+	if p := fc.Proxy.Port; p != 0 && (p < 1 || p > 65535) {
+		errs = append(errs, fmt.Sprintf("proxy.port: must be 1–65535, got %d", p))
+	}
+	if p := fc.Proxy.UIPort; p != 0 && (p < 1 || p > 65535) {
+		errs = append(errs, fmt.Sprintf("proxy.ui_port: must be 1–65535, got %d", p))
+	}
+	if p := fc.Proxy.SOCKS5Port; p != 0 && (p < 1 || p > 65535) {
+		errs = append(errs, fmt.Sprintf("proxy.socks5_port: must be 1–65535, got %d", p))
+	}
+
+	// max_conns_per_ip
+	if n := fc.Security.MaxConnsPerIP; n < 0 {
+		errs = append(errs, fmt.Sprintf("security.max_conns_per_ip: must be >= 0, got %d", n))
+	}
+
+	// rate_limit
+	if n := fc.Security.RateLimit; n < 0 {
+		errs = append(errs, fmt.Sprintf("security.rate_limit: must be >= 0, got %d", n))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
 }

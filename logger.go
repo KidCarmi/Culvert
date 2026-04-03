@@ -66,6 +66,10 @@ func (r *rotatingFile) Close() error {
 // jsonLogWriter wraps an io.Writer and converts each log line into a JSON object.
 // The standard log package emits lines like "[Culvert] 2026/03/05 15:04:05 message".
 // jsonLogWriter drops that prefix and re-encodes the message with a proper RFC3339 timestamp.
+//
+// Structured fields can be embedded in the log message using key=value pairs
+// enclosed in braces at the end: "msg {key1=val1 key2=val2}". The parser
+// extracts these and promotes them to top-level JSON fields.
 type jsonLogWriter struct {
 	mu  sync.Mutex
 	dst io.Writer
@@ -74,16 +78,23 @@ type jsonLogWriter struct {
 func (j *jsonLogWriter) Write(p []byte) (int, error) {
 	line := strings.TrimRight(string(p), "\n\r")
 
-	// Strip the standard log timestamp prefix "YYYY/MM/DD HH:MM:SS " (20 chars) if present.
-	// The go log package adds it before the user message when flags include date+time.
-	// In JSON mode we create the logger with no flags so there is no prefix to strip.
-	entry := struct {
-		Time string `json:"time"`
-		Msg  string `json:"msg"`
-	}{
-		Time: time.Now().UTC().Format(time.RFC3339),
-		Msg:  line,
+	entry := make(map[string]string)
+	entry["time"] = time.Now().UTC().Format(time.RFC3339)
+
+	// Extract structured fields from "{key=val key2=val2}" suffix.
+	if idx := strings.LastIndex(line, " {"); idx >= 0 && strings.HasSuffix(line, "}") {
+		fields := line[idx+2 : len(line)-1]
+		msg := line[:idx]
+		entry["msg"] = msg
+		for _, kv := range strings.Fields(fields) {
+			if eqIdx := strings.IndexByte(kv, '='); eqIdx > 0 {
+				entry[kv[:eqIdx]] = kv[eqIdx+1:]
+			}
+		}
+	} else {
+		entry["msg"] = line
 	}
+
 	b, _ := json.Marshal(entry)
 	b = append(b, '\n')
 

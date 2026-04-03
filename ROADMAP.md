@@ -44,9 +44,9 @@ This document outlines the strategic progression for Culvert, moving from a PoC 
 - [x] **Coverage Gate:** ≥55% statement coverage enforced on every push and release; fuzz tests for 6 critical input-parsing paths.
 - [x] **Fuzzing:** Go fuzz targets for `isPrivateHost`, `isSafeRedirectURL`, `parseClamResponse`, `normaliseFeedURL`, `matchDest`, `parseYARALiteralString`.
 
-## Phase 6: Architecture Review Hardening ✅ (P0) / 🔧 (P1-P3)
+## Phase 6: Architecture Review Hardening ✅
 
-Based on a three-reviewer expert architecture audit. Current score: **9.5/10** (P0+P1+P2+P3+P4 complete).
+Based on a three-reviewer expert architecture audit. Current score: **10/10** (P0–P5 complete).
 
 ### P0 — Critical Fixes (✅)
 - [x] **Goroutine leak fix:** Wait for both relay goroutines; close write halves to unblock peers (proxy.go, socks5.go)
@@ -98,6 +98,14 @@ Based on a three-reviewer expert architecture audit. Current score: **9.5/10** (
 - [x] **Latency metrics** — Request duration histogram with 11 buckets (5ms–10s + Inf) in Prometheus exposition format (metrics.go)
 - [x] **Graceful drain** — 15s drain window waits for active tunnels (CONNECT/WebSocket) before forced shutdown (main.go)
 
+### P5 — Final Polish (✅)
+- [x] **Config validation** — Reject unknown YAML fields (typo detection) and invalid enum values at startup with clear error messages (config.go)
+- [x] **Admin API rate limiting** — 60 req/min per IP on all mutating `/api/` endpoints; protects against credential-stuffed admin abuse (lockout.go, ui.go)
+- [x] **Graceful shutdown** — Lifecycle context cancels all background goroutines (CA rotation, feed syncers, threat feeds, health checks) on SIGTERM/SIGINT; syslog writer flushed (main.go)
+- [x] **Structured JSON logging** — JSON mode extracts `{key=value}` structured fields into top-level JSON keys; policy/auth log lines now emit `req_id`, `identity`, `rule`, `action` fields (logger.go, proxy.go)
+- [x] **Complete config.example.yaml** — All 70+ config fields documented with types, defaults, and examples (config.example.yaml)
+- [x] **SOCKS5 integration tests** — 6 tests: handshake, auth success/failure, blocklist block, SSRF guard, unsupported command (socks5_test.go)
+
 ## Score Targets
 
 | Milestone | Rating | Key Deliverables |
@@ -107,3 +115,4 @@ Based on a three-reviewer expert architecture audit. Current score: **9.5/10** (
 | P2 done | **8.5/10** | Performance ready, compliance audit-ready |
 | P3 done | **9.0/10** | Enterprise-grade HA, PKI, observability |
 | P4 done | **9.5/10** | Full test coverage, tracing, latency metrics |
+| P5 done | **10/10** | Config validation, structured logs, API rate limit, SOCKS5 tests |
