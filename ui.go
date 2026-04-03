@@ -1075,6 +1075,10 @@ func apiBlocklistFeed(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
+		if body.URL != "" && !strings.HasPrefix(body.URL, "http://") && !strings.HasPrefix(body.URL, "https://") {
+			http.Error(w, "feed URL must use http:// or https://", http.StatusBadRequest)
+			return
+		}
 		var interval time.Duration
 		if body.Interval == "" || body.Interval == "off" {
 			interval = 0 // disabled
