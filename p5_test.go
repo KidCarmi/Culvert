@@ -93,7 +93,7 @@ func TestLoadFileConfig_UnknownField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	_, _ = tmp.WriteString("proxy:\n  port: 8080\nunknown_field: true\n")
 	_ = tmp.Close()
 
@@ -111,7 +111,7 @@ func TestLoadFileConfig_InvalidValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	_, _ = tmp.WriteString("default_action: \"nope\"\n")
 	_ = tmp.Close()
 

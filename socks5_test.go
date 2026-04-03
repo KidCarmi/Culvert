@@ -2,57 +2,17 @@ package main
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 )
 
-// socks5Handshake performs a full SOCKS5 handshake (no auth) on conn and
-// returns the connection ready for tunnelled I/O.
-func socks5Handshake(t *testing.T, conn net.Conn, host string, port int) {
-	t.Helper()
-
-	// Greeting: VER=5, 1 method, NO AUTH (0x00)
-	_, err := conn.Write([]byte{0x05, 0x01, 0x00})
-	if err != nil {
-		t.Fatalf("socks5 greeting write: %v", err)
-	}
-
-	// Server response: VER=5, METHOD=0x00
-	resp := make([]byte, 2)
-	if _, err := io.ReadFull(conn, resp); err != nil {
-		t.Fatalf("socks5 greeting read: %v", err)
-	}
-	if resp[0] != 0x05 || resp[1] != 0x00 {
-		t.Fatalf("socks5 greeting: unexpected %x", resp)
-	}
-
-	// CONNECT request: VER=5, CMD=1, RSV=0, ATYP=3 (domain)
-	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
-	req = append(req, []byte(host)...)
-	portBuf := make([]byte, 2)
-	binary.BigEndian.PutUint16(portBuf, uint16(port))
-	req = append(req, portBuf...)
-	if _, err := conn.Write(req); err != nil {
-		t.Fatalf("socks5 connect write: %v", err)
-	}
-
-	// Read reply (10 bytes for IPv4 bind address)
-	reply := make([]byte, 10)
-	if _, err := io.ReadFull(conn, reply); err != nil {
-		t.Fatalf("socks5 connect read: %v", err)
-	}
-	if reply[1] != 0x00 {
-		t.Fatalf("socks5 connect failed: rep=0x%02x", reply[1])
-	}
-}
-
 // socks5HandshakeAuth performs a SOCKS5 handshake with username/password auth.
-func socks5HandshakeAuth(t *testing.T, conn net.Conn, user, pass, host string, port int) byte {
+func socks5HandshakeAuth(t *testing.T, conn net.Conn, user, pass string) byte {
 	t.Helper()
 
 	// Greeting: VER=5, 1 method, USER/PASS (0x02)
@@ -70,9 +30,9 @@ func socks5HandshakeAuth(t *testing.T, conn net.Conn, user, pass, host string, p
 	}
 
 	// Sub-negotiation: VER=1, ULEN, UNAME, PLEN, PASSWD
-	authReq := []byte{0x01, byte(len(user))}
+	authReq := []byte{0x01, byte(len(user))} // #nosec G115 -- test helper; user/pass always short
 	authReq = append(authReq, []byte(user)...)
-	authReq = append(authReq, byte(len(pass)))
+	authReq = append(authReq, byte(len(pass))) // #nosec G115
 	authReq = append(authReq, []byte(pass)...)
 	if _, err := conn.Write(authReq); err != nil {
 		t.Fatalf("socks5 auth write: %v", err)
@@ -85,21 +45,14 @@ func socks5HandshakeAuth(t *testing.T, conn net.Conn, user, pass, host string, p
 	return authResp[1] // 0x00 = success, 0x01 = failure
 }
 
-func TestSOCKS5_Connect_SSRF_Blocks_Loopback(t *testing.T) {
-	setupProxyTest(t)
-
-	// Start a target HTTP server on 127.0.0.1.
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "SOCKS5-OK")
-	}))
-	defer target.Close()
-
-	// Start SOCKS5 listener.
+// startSOCKS5Listener starts a SOCKS5 listener and returns it.
+// Caller must defer ln.Close().
+func startSOCKS5Listener(t *testing.T) net.Listener {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -109,8 +62,21 @@ func TestSOCKS5_Connect_SSRF_Blocks_Loopback(t *testing.T) {
 			go handleSOCKS5(conn)
 		}
 	}()
+	return ln
+}
 
-	// Connect through SOCKS5.
+func TestSOCKS5_Connect_SSRF_Blocks_Loopback(t *testing.T) {
+	setupProxyTest(t)
+
+	// Start a target HTTP server on 127.0.0.1.
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("SOCKS5-OK"))
+	}))
+	defer target.Close()
+
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
+
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +91,7 @@ func TestSOCKS5_Connect_SSRF_Blocks_Loopback(t *testing.T) {
 	// CONNECT to 127.0.0.1 — should be blocked by SSRF guard.
 	tHost, tPort := targetHostPort(t, target.URL)
 	portBuf := make([]byte, 2)
-	binary.BigEndian.PutUint16(portBuf, uint16(tPort))
+	binary.BigEndian.PutUint16(portBuf, uint16(tPort)) // #nosec G115 -- test port always < 65535
 	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(tHost))}
 	req = append(req, []byte(tHost)...)
 	req = append(req, portBuf...)
@@ -142,20 +108,8 @@ func TestSOCKS5_Connect_SSRF_Blocks_Loopback(t *testing.T) {
 func TestSOCKS5_Handshake_NoAuth(t *testing.T) {
 	setupProxyTest(t)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go handleSOCKS5(conn)
-		}
-	}()
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
 
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
 	if err != nil {
@@ -178,20 +132,8 @@ func TestSOCKS5_Handshake_NoAuth(t *testing.T) {
 func TestSOCKS5_UnsupportedCommand(t *testing.T) {
 	setupProxyTest(t)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go handleSOCKS5(conn)
-		}
-	}()
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
 
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
 	if err != nil {
@@ -220,20 +162,8 @@ func TestSOCKS5_Blocked_Host(t *testing.T) {
 	setupProxyTest(t)
 	bl.Add("blocked.example.com")
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go handleSOCKS5(conn)
-		}
-	}()
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
 
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
 	if err != nil {
@@ -267,25 +197,8 @@ func TestSOCKS5_Auth_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "AUTHED")
-	}))
-	defer target.Close()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go handleSOCKS5(conn)
-		}
-	}()
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
 
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
 	if err != nil {
@@ -293,7 +206,7 @@ func TestSOCKS5_Auth_Success(t *testing.T) {
 	}
 	defer conn.Close()
 
-	result := socks5HandshakeAuth(t, conn, "testuser", "testpass", "", 0)
+	result := socks5HandshakeAuth(t, conn, "testuser", "testpass")
 	if result != 0x00 {
 		t.Fatalf("auth failed: 0x%02x", result)
 	}
@@ -305,20 +218,8 @@ func TestSOCKS5_Auth_Failure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go handleSOCKS5(conn)
-		}
-	}()
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
 
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
 	if err != nil {
@@ -326,7 +227,7 @@ func TestSOCKS5_Auth_Failure(t *testing.T) {
 	}
 	defer conn.Close()
 
-	result := socks5HandshakeAuth(t, conn, "testuser", "wrongpass", "", 0)
+	result := socks5HandshakeAuth(t, conn, "testuser", "wrongpass")
 	if result != 0x01 {
 		t.Fatalf("expected auth failure 0x01, got 0x%02x", result)
 	}
@@ -339,20 +240,9 @@ func targetHostPort(t *testing.T, rawURL string) (string, int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var port int
-	fmt.Sscanf(portStr, "%d", &port)
-	return host, port
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsAt(s, substr))
-}
-
-func containsAt(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return false
+	return host, port
 }

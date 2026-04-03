@@ -158,7 +158,7 @@ func (cm *CertManager) SaveCA(path, passphrase string) error {
 	// 0600 — owner-readable only; CA private key material.
 	cleanPath := filepath.Clean(path)
 	tmpPath := cleanPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil { // #nosec G703
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil { // #nosec G703
 		return fmt.Errorf("CA write temp: %w", err)
 	}
 	if err := os.Rename(tmpPath, cleanPath); err != nil {

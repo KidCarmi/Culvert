@@ -157,7 +157,7 @@ func loadFileConfig(path string) (*FileConfig, error) {
 }
 
 // validate checks FileConfig fields for invalid values at startup.
-func (fc *FileConfig) validate() error {
+func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style validation; each branch is trivial
 	var errs []string
 
 	// default_action

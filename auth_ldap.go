@@ -119,7 +119,7 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 }
 
 func (a *LDAPAuth) verify(username, password string) bool {
-	tlsCfg := &tls.Config{InsecureSkipVerify: a.cfg.TLSSkipVerify} //nolint:gosec
+	tlsCfg := &tls.Config{InsecureSkipVerify: a.cfg.TLSSkipVerify} //nolint:gosec // TLSSkipVerify is an explicit admin opt-in for self-signed LDAP certs
 
 	// Dial with timeout to prevent DoS from hung LDAP servers.
 	conn, err := ldap.DialURL(a.cfg.URL,
