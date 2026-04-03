@@ -183,7 +183,7 @@ func ConfigureTransportOCSP(t *http.Transport) {
 	if t.TLSClientConfig == nil {
 		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12} // #nosec G402
 	}
-	t.TLSClientConfig.VerifyPeerCertificate = globalOCSP.VerifyPeerCertificate
+	t.TLSClientConfig.VerifyPeerCertificate = globalOCSP.VerifyPeerCertificate // #nosec G123 -- VerifyConnection is set immediately below
 	t.TLSClientConfig.VerifyConnection = func(cs tls.ConnectionState) error {
 		// For resumed sessions, VerifyPeerCertificate is not called, so we
 		// run the OCSP check here as well.
