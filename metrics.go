@@ -106,7 +106,7 @@ func (h *latencyHistogram) Observe(seconds float64) {
 }
 
 // WritePrometheus writes the histogram in Prometheus text exposition format.
-func (h *latencyHistogram) WritePrometheus(w *strings.Builder) {
+func (h *latencyHistogram) WritePrometheus(w *strings.Builder) { //nolint:errcheck // strings.Builder.Write never returns an error
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	w.WriteString("\n# HELP culvert_request_duration_seconds Request latency histogram\n")

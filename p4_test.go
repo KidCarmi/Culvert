@@ -271,7 +271,7 @@ func TestCountingReader(t *testing.T) {
 	if cr.count != int64(5+n) {
 		t.Fatalf("cumulative count wrong: got %d", cr.count)
 	}
-	cr.Close()
+	_ = cr.Close()
 }
 
 func TestRecordRequestBytes(t *testing.T) {

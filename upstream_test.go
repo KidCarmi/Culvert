@@ -244,6 +244,7 @@ func TestUpstreamConfig_Struct(t *testing.T) {
 
 // Ensure concurrency safety of circuit breaker under load.
 func TestCircuitBreaker_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	cb := newCircuitBreaker(100, time.Minute)
 	var wg atomic.Int64
 	done := make(chan struct{})
@@ -265,6 +266,7 @@ func TestCircuitBreaker_ConcurrentAccess(t *testing.T) {
 
 // Ensure pool concurrent access doesn't panic.
 func TestUpstreamPool_ConcurrentNext(t *testing.T) {
+	t.Parallel()
 	pool := &UpstreamPool{}
 	pool.Configure([]UpstreamEntry{
 		{URL: "http://a.test:3128"},
@@ -293,13 +295,9 @@ func TestApplyUpstreamProxy_SetsTransportProxy(t *testing.T) {
 	origProxy := upstreamTransport.Proxy
 	defer func() { upstreamTransport.Proxy = origProxy }()
 
-	pool := &UpstreamPool{}
-	pool.Configure([]UpstreamEntry{{URL: "http://test.proxy:8080"}}, 5, time.Minute)
-
-	// Save/restore global pool.
-	origPool := *upstreamPool
-	*upstreamPool = *pool
-	defer func() { *upstreamPool = origPool }()
+	// Configure the global pool directly (avoids copying mutex).
+	upstreamPool.Configure([]UpstreamEntry{{URL: "http://test.proxy:8080"}}, 5, time.Minute)
+	defer upstreamPool.Configure(nil, 0, 0) // cleanup
 
 	applyUpstreamProxy()
 
