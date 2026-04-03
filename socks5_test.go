@@ -92,7 +92,7 @@ func TestSOCKS5_Connect_SSRF_Blocks_Loopback(t *testing.T) {
 	tHost, tPort := targetHostPort(t, target.URL)
 	portBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(portBuf, uint16(tPort)) // #nosec G115 -- test port always < 65535
-	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(tHost))}
+	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(tHost))} // #nosec G115 -- test host always short
 	req = append(req, []byte(tHost)...)
 	req = append(req, portBuf...)
 	conn.Write(req) //nolint:errcheck
@@ -178,7 +178,7 @@ func TestSOCKS5_Blocked_Host(t *testing.T) {
 
 	// CONNECT to blocked host
 	host := "blocked.example.com"
-	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
+	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))} // #nosec G115 -- test host always short
 	req = append(req, []byte(host)...)
 	req = append(req, 0x00, 0x50) // port 80
 	conn.Write(req)               //nolint:errcheck
