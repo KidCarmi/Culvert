@@ -216,14 +216,17 @@ func (p *UpstreamPool) HealthCheck() {
 				DisableKeepAlives: true,
 			},
 		}
+		ctx, cancel := timeoutCtx(5 * time.Second)
 		req, err := http.NewRequestWithContext(
-			timeoutCtx(5*time.Second), http.MethodHead, "http://detectportal.firefox.com/success.txt", nil,
+			ctx, http.MethodHead, "http://detectportal.firefox.com/success.txt", nil,
 		)
 		if err != nil {
+			cancel()
 			up.Healthy.Store(false)
 			continue
 		}
 		resp, err := client.Do(req)
+		cancel()
 		if err != nil {
 			was := up.Healthy.Swap(false)
 			if was {
@@ -239,15 +242,9 @@ func (p *UpstreamPool) HealthCheck() {
 	}
 }
 
-// timeoutCtx returns a context with the given timeout.
-// The cancel func is deferred internally via a goroutine.
-func timeoutCtx(d time.Duration) context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), d)
-	go func() {
-		<-ctx.Done()
-		cancel()
-	}()
-	return ctx
+// timeoutCtx returns a context with the given timeout and its cancel func.
+func timeoutCtx(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), d)
 }
 
 // ─── Config types ────────────────────────────────────────────────────────────

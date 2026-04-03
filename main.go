@@ -536,28 +536,7 @@ func main() {
 
 	// ── Upstream proxy chaining ──────────────────────────────────────────────
 	if len(fc.Upstream.Proxies) > 0 {
-		cbTimeout := 60 * time.Second
-		if fc.Upstream.CircuitBreaker.Timeout != "" {
-			if d, err := time.ParseDuration(fc.Upstream.CircuitBreaker.Timeout); err == nil {
-				cbTimeout = d
-			}
-		}
-		upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
-		applyUpstreamProxy()
-		logger.Printf("Upstream → %s", formatUpstreamSummary(fc.Upstream.Proxies))
-
-		// Start health check loop.
-		if hi := fc.Upstream.HealthInterval; hi != "" {
-			if d, err := time.ParseDuration(hi); err == nil && d > 0 {
-				go func() {
-					t := time.NewTicker(d)
-					defer t.Stop()
-					for range t.C {
-						upstreamPool.HealthCheck()
-					}
-				}()
-			}
-		}
+		initUpstreamPool(fc)
 	}
 
 	// ── Client certificate (mTLS) for upstream servers ───────────────────────
@@ -741,6 +720,36 @@ func firstStr(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// initUpstreamPool configures upstream proxy chaining from the file config.
+func initUpstreamPool(fc *FileConfig) {
+	cbTimeout := 60 * time.Second
+	if fc.Upstream.CircuitBreaker.Timeout != "" {
+		if d, err := time.ParseDuration(fc.Upstream.CircuitBreaker.Timeout); err == nil {
+			cbTimeout = d
+		}
+	}
+	upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
+	applyUpstreamProxy()
+	logger.Printf("Upstream → %s", formatUpstreamSummary(fc.Upstream.Proxies))
+
+	// Start health check loop.
+	hi := fc.Upstream.HealthInterval
+	if hi == "" {
+		return
+	}
+	d, err := time.ParseDuration(hi)
+	if err != nil || d <= 0 {
+		return
+	}
+	go func() {
+		t := time.NewTicker(d)
+		defer t.Stop()
+		for range t.C {
+			upstreamPool.HealthCheck()
+		}
+	}()
 }
 
 // applyHotReload applies safe-to-reload config values from a freshly parsed
