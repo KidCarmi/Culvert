@@ -909,6 +909,10 @@ func (c *Config) SetUnauthMode(enabled bool) {
 	if enabled {
 		logger.Printf("Auth mode → UNAUTH (open proxy, no credentials required)")
 	}
+	// Persist so the setting survives restarts.
+	if err := c.SaveUIUsersFile(); err != nil {
+		logger.Printf("warning: failed to persist unauthMode: %v", err)
+	}
 }
 
 // ─── UI multi-user admin management ──────────────────────────────────────────
@@ -983,6 +987,13 @@ type uiUserRecord struct {
 	BackupCodes []string `json:"backup_codes,omitempty"`  // bcrypt-hashed one-time codes
 }
 
+// uiUsersFileEnvelope is the on-disk JSON structure that wraps the user
+// roster along with global settings that must survive restarts.
+type uiUsersFileEnvelope struct {
+	UnauthMode bool             `json:"unauth_mode,omitempty"`
+	Users      []uiUserRecord   `json:"users"`
+}
+
 // LoadUIUsersFile reads persisted UI users from disk and populates the roster.
 // Silently returns nil if the file does not exist yet (first run).
 func (c *Config) LoadUIUsersFile() error {
@@ -999,12 +1010,17 @@ func (c *Config) LoadUIUsersFile() error {
 	if err != nil {
 		return err
 	}
+	// Try new envelope format first, fall back to bare array for backward compat.
+	var env uiUsersFileEnvelope
 	var records []uiUserRecord
-	if err := json.Unmarshal(data, &records); err != nil {
+	if err := json.Unmarshal(data, &env); err == nil && env.Users != nil {
+		records = env.Users
+	} else if err := json.Unmarshal(data, &records); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.unauthMode = env.UnauthMode
 	if c.uiUsers == nil {
 		c.uiUsers = map[string]*uiAdminUser{}
 	}
@@ -1033,9 +1049,12 @@ func (c *Config) LoadUIUsersFile() error {
 func (c *Config) SaveUIUsersFile() error {
 	c.mu.RLock()
 	path := c.uiUsersFile
-	records := make([]uiUserRecord, 0, len(c.uiUsers))
+	env := uiUsersFileEnvelope{
+		UnauthMode: c.unauthMode,
+		Users:      make([]uiUserRecord, 0, len(c.uiUsers)),
+	}
 	for name, u := range c.uiUsers {
-		records = append(records, uiUserRecord{
+		env.Users = append(env.Users, uiUserRecord{
 			Username:    name,
 			PassHash:    hex.EncodeToString(u.passHash),
 			Role:        u.role,
@@ -1047,7 +1066,7 @@ func (c *Config) SaveUIUsersFile() error {
 	if path == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(records, "", "  ")
+	data, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		return err
 	}
