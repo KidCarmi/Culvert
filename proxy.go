@@ -144,7 +144,7 @@ func scrubForwardedHeaders(r *http.Request) {
 	r.Header.Del("X-User-Identity")
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request) {
+func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
 	start := time.Now()
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 
