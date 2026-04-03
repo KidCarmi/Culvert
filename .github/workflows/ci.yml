@@ -47,6 +47,13 @@ jobs:
           path: culvert
           retention-days: 7
 
+  dependency-obituary:
+    name: Dependency Obituary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: KidCarmi/Dependency-Obituary@main
+
   docker:
     name: Docker Build & Publish
     runs-on: ubuntu-latest
