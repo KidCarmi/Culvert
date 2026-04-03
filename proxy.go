@@ -144,8 +144,24 @@ func scrubForwardedHeaders(r *http.Request) {
 	r.Header.Del("X-User-Identity")
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request) {
+func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
+	start := time.Now()
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+	// ── Request tracing: generate X-Request-ID if not present ────────────
+	reqID := r.Header.Get("X-Request-ID")
+	if reqID == "" {
+		reqID = generateRequestID()
+		r.Header.Set("X-Request-ID", reqID)
+	}
+	w.Header().Set("X-Request-ID", reqID)
+
+	// ── Connection limit per IP ─────────────────────────────────────────
+	if !connLimiter.Acquire(clientIP) {
+		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
+		return
+	}
+	defer connLimiter.Release(clientIP)
 
 	// IP filter check.
 	if !ipf.Allowed(clientIP) {
@@ -406,6 +422,9 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	default:
 		handleHTTP(w, r)
 	}
+
+	// Record request latency for Prometheus histogram.
+	latencyHist.Observe(time.Since(start).Seconds())
 }
 
 const maxUsernameLen = 256

@@ -33,7 +33,8 @@ geoip.go      — MaxMind GeoLite2 country lookup with background cache
 controlplane.go — gRPC-based Control Plane / Data Plane distributed architecture
 upstream.go   — Upstream proxy chaining with failover, circuit breaker, round-robin health checks
 ocsp.go       — OCSP/CRL revocation checking for upstream TLS certificates
-metrics.go    — Prometheus metrics (culvert_* namespace, per-rule hit counters)
+metrics.go    — Prometheus metrics (culvert_* namespace, per-rule hit counters, latency histogram)
+connlimit.go  — Per-IP connection limiting and X-Request-ID generation
 alerts.go     — Webhook alerting for security events (HMAC-SHA256 signed)
 threatfeed.go — Threat intelligence feed integration (URLhaus, OpenPhish)
 feedsync.go   — UT1 URL category database syncer
