@@ -7,7 +7,7 @@
 #   docker-compose up -d
 
 proxy:
-  port: 8080          # HTTP proxy port
+  port: 8080          # HTTP proxy port (1–65535)
   ui_port: 9090       # Web UI port (HTTPS, self-signed cert by default)
   socks5_port: 0      # SOCKS5 proxy port (0 = disabled, e.g. 1080)
   blocklist: ""       # Path to blocklist file (one host per line; *.example.com wildcards supported)
@@ -16,29 +16,128 @@ proxy:
   tls_cert: ""        # Custom TLS certificate for Web UI (PEM, optional)
   tls_key: ""         # Custom TLS key for Web UI (PEM, optional)
   ca_path: "/data/ca.bundle"      # Persistent Root CA bundle (mount /data as Docker volume)
-  ssl_bypass_file: "/data/ssl-bypass.json"  # Dynamic bypass list — managed via /api/ssl-bypass (no restart needed)
-  ssl_bypass_patterns: []         # Initial bypass patterns — seeded into ssl_bypass_file on first run
-    # Glob examples (bare domain also matches all subdomains — Palo Alto style):
-    # - "*.co.il"
-    # - "bank.example.com"        # matches bank.example.com AND *.bank.example.com
-    # Regex examples (prefix with ~):
-    # - "~^.*\\.gov\\.il$"
-  content_scan_file: "/data/content-scan.json"  # DPI patterns — managed via /api/content-scan (no restart needed)
-  content_scan_patterns: []      # Initial DPI regex patterns — seeded into content_scan_file on first run
-    # Pattern examples (standard Go regex):
+  metrics_token: ""   # Bearer token for /metrics endpoint (empty = open access)
+  policy_file: ""     # JSON file for PBAC policy rules
+  base_url: ""        # External base URL for OIDC/SAML callbacks (e.g. "https://proxy.corp.com:9090")
+  geoip_db: "/app/GeoLite2-Country.mmdb"  # GeoIP database (db-ip.com CC BY 4.0)
+  idp_profiles_file: "" # JSON file for generic IdP profiles
+  url_categories_file: "" # JSON file for dynamic URL categories
+  fileprofiles_file: ""   # JSON file for file extension profiles
+
+  # SSL inspection bypass
+  ssl_bypass_file: "/data/ssl-bypass.json"  # Dynamic bypass list (managed via API)
+  ssl_bypass_patterns: []
+    # - "*.co.il"                 # Glob: bare domain matches all subdomains
+    # - "bank.example.com"       # Exact + wildcard subdomains
+    # - "~^.*\\.gov\\.il$"       # Regex (prefix with ~)
+
+  # DPI content scanner
+  content_scan_file: "/data/content-scan.json"
+  content_scan_patterns: []
     # - "(?i)malware-signature"
-    # - "eval\\(base64_decode"   # PHP webshell
-    # - "\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b"  # CC-like numbers
-  geoip_db: "/app/GeoLite2-Country.mmdb"  # Bundled at Docker build time from db-ip.com (CC BY 4.0 — https://db-ip.com)
-                                           # Override with your own MaxMind GeoLite2-Country.mmdb if preferred.
+    # - "eval\\(base64_decode"
+    # - "\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b"  # CC numbers
+
+  # Blocklist feed (auto-sync from URL)
+  blocklist_feed_url: ""           # URL to sync (one domain per line)
+  blocklist_feed_interval: "24h"   # Sync interval (Go duration)
+
+  # Client certificate for upstream mTLS
+  client_cert_file: ""  # PEM cert for upstream mutual TLS
+  client_key_file: ""   # PEM key for upstream mutual TLS
+
+  # OCSP revocation checking
+  ocsp_check: false     # Enable OCSP checks for upstream TLS certificates
+
+# ── Authentication ──────────────────────────────────────────────────────────
+# Only one auth backend is active at a time. Priority: LDAP > OIDC > local.
 
 auth:
-  user: ""            # Basic-auth username (empty = auth disabled for HTTP proxy & SOCKS5)
-  pass: ""
+  user: ""            # Local basic-auth username (empty = auth disabled)
+  pass: ""            # Local basic-auth password (bcrypt hashed internally)
+
+# LDAP / Active Directory
+ldap:
+  url: ""             # e.g. "ldaps://dc.corp.com:636"
+  bind_dn: ""         # Service account DN: "CN=svc-proxy,OU=ServiceAccounts,DC=corp,DC=com"
+  bind_password: ""   # Service account password
+  base_dn: ""         # Search base: "OU=Users,DC=corp,DC=com"
+  # user_filter: "(sAMAccountName=%s)"  # %s = escaped username
+  # required_group: "CN=ProxyUsers,OU=Groups,DC=corp,DC=com"
+
+# OIDC / OAuth2 token introspection (RFC 7662)
+oidc:
+  introspection_url: ""  # e.g. "https://your-domain.okta.com/oauth2/default/v1/introspect"
+  client_id: ""
+  client_secret: ""
+  # required_scope: "proxy:access"
+  # required_audience: ""
+  # login_url: ""         # OIDC authorization endpoint for browser redirect
+
+# ── Security ────────────────────────────────────────────────────────────────
 
 security:
-  ip_filter_mode: ""  # IP filter mode: "" (off) | "allow" (allowlist) | "block" (blocklist)
-  ip_list: []         # IPs or CIDRs governed by ip_filter_mode
+  ip_filter_mode: ""  # "" (off) | "allow" (allowlist) | "block" (blocklist)
+  ip_list: []
     # - 192.168.1.0/24
     # - 10.0.0.5
   rate_limit: 0       # Max requests per minute per IP (0 = disabled)
+  max_conns_per_ip: 0 # Max concurrent connections per IP (0 = disabled, e.g. 256)
+
+# ── Security Scanning ──────────────────────────────────────────────────────
+
+security_scan:
+  enabled: false
+  clamav_addr: ""        # "unix:/var/run/clamav/clamd.sock" or "tcp:localhost:3310"
+  yara_rules_dir: ""     # Directory with *.yar / *.yara rule files
+  threat_feed_db: ""     # Path for persistent threat feed JSON database
+  sync_interval: "6h"    # Threat feed re-download interval
+  cache_ttl: "1h"        # SHA-256 scan result cache TTL
+  cache_size: 10000      # Max entries in scan result cache
+  max_scan_mb: 5         # Max response size to buffer for scanning (MiB)
+
+# ── Upstream Proxy Chaining ────────────────────────────────────────────────
+
+upstream:
+  proxies: []
+    # - url: "http://parent1.corp.com:3128"
+    # - url: "http://parent2.corp.com:3128"
+  health_interval: ""    # Health check interval (e.g. "30s"); empty = disabled
+  circuit_breaker:
+    threshold: 5         # Consecutive failures before opening circuit
+    timeout: "60s"       # Time before half-open probe
+
+# ── Header Rewrite Rules ──────────────────────────────────────────────────
+
+rewrite: []
+  # - host: "api.example.com"     # Glob match (empty = all hosts)
+  #   req_set:                     # Set/overwrite request headers
+  #     X-Custom-Header: "value"
+  #   req_add:                     # Append request headers
+  #     X-Extra: "appended"
+  #   req_remove:                  # Remove request headers
+  #     - "X-Unwanted"
+  #   resp_set:                    # Set/overwrite response headers
+  #     X-Response-Header: "value"
+
+# ── File Extension Blocking ───────────────────────────────────────────────
+
+file_block:
+  extensions: []        # Custom extensions; empty = built-in defaults
+    # - ".exe"
+    # - ".msi"
+    # - ".bat"
+
+# ── Logging & Observability ───────────────────────────────────────────────
+
+log_format: "text"      # "text" (default) | "json" (structured, fields: time, msg, req_id, identity, rule, action)
+default_action: ""      # "allow" (passthrough) | "deny" (zero-trust); auto-detected if empty
+audit_log_file: ""      # Persistent JSONL audit log path (e.g. "/data/audit.jsonl")
+syslog_addr: ""         # Syslog forwarding: "udp://host:514" or "tcp://host:601"
+
+# ── Admin UI ──────────────────────────────────────────────────────────────
+
+ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all)
+  # - "10.0.0.0/8"
+  # - "192.168.1.100"
+session_timeout_hours: 8  # Admin session lifetime (1–168 hours)

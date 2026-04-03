@@ -109,3 +109,54 @@ func (l *LoginLimiter) AttemptsLeft(username string) int {
 func LockoutMsg(seconds int) string {
 	return fmt.Sprintf("Account temporarily locked. Try again in %d seconds.", seconds)
 }
+
+// ---------------------------------------------------------------------------
+// Admin API rate limiter — protects mutation endpoints against abuse.
+//
+// A sliding window of apiRateBurst requests is allowed per IP per apiRateWindow.
+// This runs *after* session auth, so it limits authenticated admin actions.
+// ---------------------------------------------------------------------------
+
+const (
+	apiRateBurst  = 60               // max API mutations per window
+	apiRateWindow = 1 * time.Minute  // sliding window width
+)
+
+type apiRateEntry struct {
+	count     int
+	windowStart time.Time
+}
+
+// APIRateLimiter limits mutating admin API calls per client IP.
+type APIRateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*apiRateEntry
+}
+
+var apiLimiter = &APIRateLimiter{entries: map[string]*apiRateEntry{}}
+
+// Allow returns true if the IP is within the rate limit for API mutations.
+func (a *APIRateLimiter) Allow(ip string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e := a.entries[ip]
+	now := time.Now()
+	if e == nil || now.Sub(e.windowStart) > apiRateWindow {
+		a.entries[ip] = &apiRateEntry{count: 1, windowStart: now}
+		return true
+	}
+	e.count++
+	return e.count <= apiRateBurst
+}
+
+// Cleanup removes expired entries.
+func (a *APIRateLimiter) Cleanup() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	for k, e := range a.entries {
+		if now.Sub(e.windowStart) > apiRateWindow {
+			delete(a.entries, k)
+		}
+	}
+}

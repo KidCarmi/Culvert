@@ -149,7 +149,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 
 	// ── Request tracing: generate X-Request-ID if not present ────────────
-	reqID := r.Header.Get("X-Request-ID")
+	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get("X-Request-ID"), "\n", ""), "\r", "") // sanitize for CWE-117
 	if reqID == "" {
 		reqID = generateRequestID()
 		r.Header.Set("X-Request-ID", reqID)
@@ -168,7 +168,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED", "", "", "")
-		logger.Printf("IP_BLOCKED %s", clientIP)
+		logger.Printf("IP_BLOCKED %s {req_id=%s action=block}", clientIP, reqID)
 		return
 	}
 
@@ -176,7 +176,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	if !rl.Allow(clientIP) {
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "", "")
-		logger.Printf("RATE_LIMITED %s", clientIP)
+		logger.Printf("RATE_LIMITED %s {req_id=%s action=block}", clientIP, reqID)
 		return
 	}
 
@@ -233,7 +233,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 						w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
 						http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 						recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "")
-						logger.Printf("AUTH_FAIL %s", clientIP)
+						logger.Printf("AUTH_FAIL %s {req_id=%s action=block}", clientIP, reqID)
 						return
 					}
 					authenticatedIdentity = u
@@ -257,7 +257,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				}
 				http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 				recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "")
-				logger.Printf("AUTH_FAIL (no-credentials) %s", clientIP)
+				logger.Printf("AUTH_FAIL (no-credentials) %s {req_id=%s action=block}", clientIP, reqID)
 				return
 			}
 		}
@@ -279,7 +279,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
 		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "", "", authenticatedIdentity)
-		logger.Printf("BLOCKED %s -> %q", clientIP, sanitizeLog(host))
+		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
 		return
 	}
 
@@ -341,7 +341,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity)
-			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions))
+			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
 				conn, _, _ := hj.Hijack()
@@ -352,7 +352,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity)
-			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions))
+			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return
 
@@ -364,13 +364,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
-			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions))
+			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
 			return
 
 		case ActionAllow:
 			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity)
-			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s]", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions))
+			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Fall through to normal handling below.
 		}
 	} else {
@@ -383,7 +383,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			// end-users see a clear, branded explanation.
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity)
-			logger.Printf("POLICY_DEFAULT_DENY %s %s %q", clientIP, r.Method, sanitizeLog(r.Host))
+			logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
 			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
 			return
 		}

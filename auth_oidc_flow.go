@@ -506,6 +506,7 @@ func (p *OIDCFlowProvider) validateIDToken(rawToken, expectedNonce string) (*Ide
 		jwtv5.WithIssuedAt(),
 		jwtv5.WithAudience(p.cfg.ClientID),
 		jwtv5.WithExpirationRequired(),
+		jwtv5.WithLeeway(60*time.Second), // tolerate clock skew between IdP and proxy
 	).Parse(rawToken, func(t *jwtv5.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwtv5.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])

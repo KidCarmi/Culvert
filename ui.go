@@ -272,6 +272,18 @@ func securityMiddleware(next http.Handler) http.Handler {
 			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 		}
 
+		// ── API rate limit on mutating requests ──────────────────────────────
+		if isMutating && strings.HasPrefix(r.URL.Path, "/api/") {
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			if ip == "" {
+				ip = r.RemoteAddr
+			}
+			if !apiLimiter.Allow(ip) {
+				http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+				return
+			}
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -488,6 +500,9 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		loginLimiter.RecordSuccess(body.User)
+		// Clear any pre-existing session cookie before issuing a new one
+		// to prevent session fixation attacks (defense-in-depth).
+		clearUISessionCookie(w, r)
 		if err := setUISessionCookie(w, r, body.User, role); err != nil {
 			http.Error(w, "session error", http.StatusInternalServerError)
 			return

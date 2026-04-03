@@ -104,6 +104,10 @@ func main() {
 		log.Fatalf("Logger setup failed: %v", err)
 	}
 
+	// ── Lifecycle context for all background goroutines ─────────────────────
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	defer lifecycleCancel()
+
 	// ── Config ───────────────────────────────────────────────────────────────
 	cfg.ProxyPort = pPort
 	cfg.UIPort = uPort
@@ -258,7 +262,7 @@ func main() {
 		if err != nil {
 			logger.Fatalf("DataPlane client: %v", err)
 		}
-		dpClient.Run(context.Background(), 30*time.Second)
+		dpClient.Run(lifecycleCtx, 30*time.Second)
 		logger.Printf("DataPlane: polling ControlPlane at %s every 30s", *dpCPAddr)
 	}
 
@@ -285,7 +289,7 @@ func main() {
 		rl.Configure(rlRPM, time.Minute)
 		logger.Printf("Rate limit → %d req/min per IP", rlRPM)
 		var rlCtx context.Context
-		rlCtx, rlCleanupCancel = context.WithCancel(context.Background())
+		rlCtx, rlCleanupCancel = context.WithCancel(lifecycleCtx)
 		go func() {
 			t := time.NewTicker(5 * time.Minute)
 			defer t.Stop()
@@ -324,7 +328,7 @@ func main() {
 			}
 		}
 		blFeedSyncer = newBlocklistSyncer(bl, blFeedURL, blFeedInterval)
-		blFeedSyncer.Start(context.Background())
+		blFeedSyncer.Start(lifecycleCtx)
 		logger.Printf("BlocklistFeed → syncing from %s every %s", blFeedURL, blFeedInterval)
 	} else {
 		blFeedSyncer = newBlocklistSyncer(bl, "", blFeedDefaultInterval)
@@ -350,7 +354,7 @@ func main() {
 	}
 	// Start CA auto-rotation background check.
 	if certMgr.Ready() {
-		StartCAAutoRotation(context.Background(), caPathVal, caPassphrase)
+		StartCAAutoRotation(lifecycleCtx, caPathVal, caPassphrase)
 	}
 
 	// ── Policy engine ─────────────────────────────────────────────────────────
@@ -395,7 +399,7 @@ func main() {
 			}
 		}
 		feedSyncer = newFeedSyncer(communityDB, *catFeedURL, syncD)
-		feedSyncer.Start(context.Background())
+		feedSyncer.Start(lifecycleCtx)
 		logger.Printf("CatFeedDB → BadgerDB at %s, sync every %s", *catFeedDB, syncD)
 	}
 
@@ -536,7 +540,7 @@ func main() {
 		// Threat feeds.
 		if feedDB != "" || secCfg.Enabled {
 			globalThreatFeed.Init(feedDB, syncInterval)
-			globalThreatFeed.Start(context.Background())
+			globalThreatFeed.Start(lifecycleCtx)
 			logger.Printf("ThreatFeed → sync every %s, db=%q", syncInterval, feedDB)
 		}
 	}
@@ -644,6 +648,9 @@ func main() {
 	<-quit
 	logger.Println("Shutting down gracefully…")
 
+	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.)
+	lifecycleCancel()
+
 	if rlCleanupCancel != nil {
 		rlCleanupCancel()
 	}
@@ -675,6 +682,9 @@ func main() {
 				}
 			}
 		}
+	}
+	if globalSyslog != nil {
+		globalSyslog.Close() //nolint:errcheck // best-effort flush on shutdown
 	}
 	if communityDB != nil {
 		if err := communityDB.Close(); err != nil {

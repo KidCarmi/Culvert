@@ -129,13 +129,24 @@ func (oc *OCSPChecker) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [
 }
 
 // checkResponders queries each OCSP responder listed in the leaf certificate.
+// Fail-closed: returns true (revoked) if ALL responders fail, preventing
+// acceptance of certificates when revocation status cannot be determined.
 func (oc *OCSPChecker) checkResponders(leaf, issuer *x509.Certificate) bool {
+	anyResponded := false
 	for _, responderURL := range leaf.OCSPServer {
 		rev, err := oc.queryOCSP(leaf, issuer, responderURL)
 		if err != nil {
 			continue
 		}
-		return rev
+		anyResponded = true
+		if rev {
+			return true // confirmed revoked
+		}
+	}
+	if !anyResponded && len(leaf.OCSPServer) > 0 {
+		logger.Printf("OCSP: all %d responder(s) unreachable for cert %s — fail-closed (treating as revoked)",
+			len(leaf.OCSPServer), leaf.SerialNumber.Text(16))
+		return true // fail-closed: treat as revoked when no responder reachable
 	}
 	return false
 }
