@@ -216,7 +216,7 @@ func (p *UpstreamPool) HealthCheck() {
 				DisableKeepAlives: true,
 			},
 		}
-		ctx, cancel := timeoutCtx(5 * time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		req, err := http.NewRequestWithContext(
 			ctx, http.MethodHead, "http://detectportal.firefox.com/success.txt", nil,
 		)
@@ -240,11 +240,6 @@ func (p *UpstreamPool) HealthCheck() {
 			logger.Printf("Upstream: %s recovered (healthy)", up.URL.Redacted())
 		}
 	}
-}
-
-// timeoutCtx returns a context with the given timeout and its cancel func.
-func timeoutCtx(d time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), d)
 }
 
 // ─── Config types ────────────────────────────────────────────────────────────
