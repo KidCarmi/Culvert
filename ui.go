@@ -500,6 +500,9 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		loginLimiter.RecordSuccess(body.User)
+		// Clear any pre-existing session cookie before issuing a new one
+		// to prevent session fixation attacks (defense-in-depth).
+		clearUISessionCookie(w, r)
 		if err := setUISessionCookie(w, r, body.User, role); err != nil {
 			http.Error(w, "session error", http.StatusInternalServerError)
 			return

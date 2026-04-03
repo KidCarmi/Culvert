@@ -78,8 +78,14 @@ func (cm *CertManager) InitCA() error {
 	if err != nil {
 		return err
 	}
+	// RFC 5280 requires unique serial numbers per CA. Use 128-bit random
+	// serial to avoid collisions across CA rotations and multiple instances.
+	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("ca: serial generation: %w", err)
+	}
 	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
+		SerialNumber: caSerial,
 		Subject: pkix.Name{
 			Organization: []string{"Culvert"},
 			CommonName:   "Culvert Root CA",
@@ -147,9 +153,19 @@ func (cm *CertManager) SaveCA(path, passphrase string) error {
 			return fmt.Errorf("CA encrypt: %w", err)
 		}
 	}
+	// Atomic write: write to temp file, then rename. This prevents the CA bundle
+	// from being corrupted if the process crashes mid-write or disk fills up.
 	// 0600 — owner-readable only; CA private key material.
-	// filepath.Clean normalises the path; the value comes from operator config, not user input.
-	return os.WriteFile(filepath.Clean(path), data, 0600) // #nosec G703
+	cleanPath := filepath.Clean(path)
+	tmpPath := cleanPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil { // #nosec G703
+		return fmt.Errorf("CA write temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, cleanPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("CA rename: %w", err)
+	}
+	return nil
 }
 
 // LoadCA reads and decrypts a CA bundle previously written by SaveCA.

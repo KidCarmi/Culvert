@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -82,6 +83,10 @@ func NewLDAPAuth(cfg LDAPConfig) (*LDAPAuth, error) {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
+	// Warn about plaintext LDAP connections.
+	if strings.HasPrefix(strings.ToLower(cfg.URL), "ldap://") && !cfg.StartTLS {
+		logger.Printf("WARN LDAP: using plaintext ldap:// without StartTLS — credentials will be transmitted unencrypted. Use ldaps:// or set start_tls: true")
+	}
 	return &LDAPAuth{cfg: cfg, ttl: ttl, cache: map[string]*ldapCacheEntry{}}, nil
 }
 
@@ -116,8 +121,11 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 func (a *LDAPAuth) verify(username, password string) bool {
 	tlsCfg := &tls.Config{InsecureSkipVerify: a.cfg.TLSSkipVerify} //nolint:gosec
 
-	// Dial.
-	conn, err := ldap.DialURL(a.cfg.URL, ldap.DialWithTLSConfig(tlsCfg))
+	// Dial with timeout to prevent DoS from hung LDAP servers.
+	conn, err := ldap.DialURL(a.cfg.URL,
+		ldap.DialWithTLSConfig(tlsCfg),
+		ldap.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}),
+	)
 	if err != nil {
 		logger.Printf("LDAP dial error: %v", err)
 		return false
