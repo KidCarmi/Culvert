@@ -1075,11 +1075,13 @@ func apiBlocklistFeed(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		interval := blFeedDefaultInterval
-		if body.Interval != "" {
-			if d, err := time.ParseDuration(body.Interval); err == nil && d > 0 {
-				interval = d
-			}
+		var interval time.Duration
+		if body.Interval == "" || body.Interval == "off" {
+			interval = 0 // disabled
+		} else if d, err := time.ParseDuration(body.Interval); err == nil && d > 0 {
+			interval = d
+		} else {
+			interval = blFeedDefaultInterval
 		}
 		blFeedSyncer.SetFeed(body.URL, interval)
 		auditEvent(r, "blocklist.feed.set", body.URL, "")

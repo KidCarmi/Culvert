@@ -47,6 +47,15 @@ func (bs *BlocklistSyncer) Start(ctx context.Context) {
 		bs.Sync()
 		for {
 			d := bs.interval.Load().(time.Duration)
+			if d <= 0 {
+				// Sync disabled — poll every 60s to check if re-enabled.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(60 * time.Second):
+					continue
+				}
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -93,9 +102,7 @@ func (bs *BlocklistSyncer) Sync() {
 // SetFeed updates the feed URL and sync interval at runtime.
 func (bs *BlocklistSyncer) SetFeed(url string, interval time.Duration) {
 	bs.feedURL.Store(url)
-	if interval <= 0 {
-		interval = blFeedDefaultInterval
-	}
+	// interval 0 means "disabled" — auto-sync will not run.
 	bs.interval.Store(interval)
 }
 
