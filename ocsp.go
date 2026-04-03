@@ -5,9 +5,6 @@ package main
 // When enabled, the proxy verifies that upstream server certificates have not
 // been revoked by checking OCSP stapled responses and, as a fallback, querying
 // OCSP responders listed in the certificate's AIA extension.
-//
-// CRL checking is done via Go's built-in x509.RevocationList support when
-// CRL distribution points are present in the certificate.
 
 import (
 	"bytes"
@@ -54,56 +51,33 @@ func (oc *OCSPChecker) Enabled() bool {
 	return oc.enabled.Load()
 }
 
-// VerifyPeerCertificate is a tls.Config.VerifyPeerCertificate callback that
-// checks OCSP revocation status for the peer's leaf certificate.
-func (oc *OCSPChecker) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-	if !oc.Enabled() || len(rawCerts) == 0 {
-		return nil
-	}
-	leaf, err := x509.ParseCertificate(rawCerts[0])
-	if err != nil {
-		return fmt.Errorf("ocsp: parse leaf: %w", err)
-	}
-
-	// Find issuer from verified chains or raw certs.
-	var issuer *x509.Certificate
+// resolveIssuer extracts the issuer certificate from verified chains or raw certs.
+func resolveIssuer(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) *x509.Certificate {
 	if len(verifiedChains) > 0 && len(verifiedChains[0]) > 1 {
-		issuer = verifiedChains[0][1]
-	} else if len(rawCerts) > 1 {
-		issuer, _ = x509.ParseCertificate(rawCerts[1])
+		return verifiedChains[0][1]
 	}
-	if issuer == nil {
-		return nil // can't check without issuer; allow (fail-open for OCSP)
+	if len(rawCerts) > 1 {
+		issuer, _ := x509.ParseCertificate(rawCerts[1])
+		return issuer
 	}
+	return nil
+}
 
-	serialHex := leaf.SerialNumber.Text(16)
-
-	// Check cache.
+// checkCached returns (revoked, found). If found, the caller can return early.
+func (oc *OCSPChecker) checkCached(serialHex string) (bool, bool) {
 	oc.mu.RLock()
 	entry, ok := oc.cache[serialHex]
 	oc.mu.RUnlock()
 	if ok && time.Now().Before(entry.expiresAt) {
-		if entry.revoked {
-			return fmt.Errorf("ocsp: certificate %s is revoked (cached)", serialHex)
-		}
-		return nil
+		return entry.revoked, true
 	}
+	return false, false
+}
 
-	// Check OCSP responders.
-	revoked := false
-	for _, responderURL := range leaf.OCSPServer {
-		rev, err := oc.queryOCSP(leaf, issuer, responderURL)
-		if err != nil {
-			continue // try next responder
-		}
-		revoked = rev
-		break
-	}
-
-	// Cache result.
+// cacheResult stores an OCSP result with TTL and evicts if needed.
+func (oc *OCSPChecker) cacheResult(serialHex string, revoked bool) {
 	oc.mu.Lock()
 	if len(oc.cache) >= ocspCacheMaxSize {
-		// Evict oldest 10%.
 		count := 0
 		for k := range oc.cache {
 			delete(oc.cache, k)
@@ -118,11 +92,52 @@ func (oc *OCSPChecker) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [
 		expiresAt: time.Now().Add(ocspCacheTTL),
 	}
 	oc.mu.Unlock()
+}
+
+// VerifyPeerCertificate is a tls.Config.VerifyPeerCertificate callback that
+// checks OCSP revocation status for the peer's leaf certificate.
+func (oc *OCSPChecker) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	if !oc.Enabled() || len(rawCerts) == 0 {
+		return nil
+	}
+	leaf, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return fmt.Errorf("ocsp: parse leaf: %w", err)
+	}
+
+	issuer := resolveIssuer(rawCerts, verifiedChains)
+	if issuer == nil {
+		return nil // can't check without issuer; fail-open for OCSP
+	}
+
+	serialHex := leaf.SerialNumber.Text(16)
+
+	if revoked, found := oc.checkCached(serialHex); found {
+		if revoked {
+			return fmt.Errorf("ocsp: certificate %s is revoked (cached)", serialHex)
+		}
+		return nil
+	}
+
+	revoked := oc.checkResponders(leaf, issuer)
+	oc.cacheResult(serialHex, revoked)
 
 	if revoked {
 		return fmt.Errorf("ocsp: certificate %s is revoked", serialHex)
 	}
 	return nil
+}
+
+// checkResponders queries each OCSP responder listed in the leaf certificate.
+func (oc *OCSPChecker) checkResponders(leaf, issuer *x509.Certificate) bool {
+	for _, responderURL := range leaf.OCSPServer {
+		rev, err := oc.queryOCSP(leaf, issuer, responderURL)
+		if err != nil {
+			continue
+		}
+		return rev
+	}
+	return false
 }
 
 // queryOCSP sends an OCSP request to the responder and returns whether the
@@ -162,15 +177,32 @@ func (oc *OCSPChecker) queryOCSP(leaf, issuer *x509.Certificate, responderURL st
 }
 
 // ConfigureTransportOCSP adds OCSP verification to the upstream transport's
-// TLS configuration.
+// TLS configuration. VerifyConnection is set alongside VerifyPeerCertificate
+// to ensure resumed sessions also undergo revocation checks (gosec G123).
 func ConfigureTransportOCSP(t *http.Transport) {
 	if t.TLSClientConfig == nil {
-		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12} // #nosec G402
 	}
 	t.TLSClientConfig.VerifyPeerCertificate = globalOCSP.VerifyPeerCertificate
+	t.TLSClientConfig.VerifyConnection = func(cs tls.ConnectionState) error {
+		// For resumed sessions, VerifyPeerCertificate is not called, so we
+		// run the OCSP check here as well.
+		if len(cs.PeerCertificates) == 0 {
+			return nil
+		}
+		rawCerts := make([][]byte, len(cs.PeerCertificates))
+		for i, c := range cs.PeerCertificates {
+			rawCerts[i] = c.Raw
+		}
+		var chains [][]*x509.Certificate
+		if len(cs.VerifiedChains) > 0 {
+			chains = cs.VerifiedChains
+		}
+		return globalOCSP.VerifyPeerCertificate(rawCerts, chains)
+	}
 }
 
-// CleanupOCSPCache evicts expired entries from the OCSP cache.
+// CleanupCache evicts expired entries from the OCSP cache.
 func (oc *OCSPChecker) CleanupCache() {
 	oc.mu.Lock()
 	now := time.Now()

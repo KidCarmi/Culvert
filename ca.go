@@ -455,6 +455,9 @@ type localKeyProvider struct {
 	key *ecdsa.PrivateKey
 }
 
+// Compile-time interface check.
+var _ KeyProvider = (*localKeyProvider)(nil)
+
 func (p *localKeyProvider) SignCertificate(template, parent *x509.Certificate, pubKey any) ([]byte, error) {
 	return x509.CreateCertificate(rand.Reader, template, parent, pubKey, p.key)
 }
@@ -480,7 +483,7 @@ func (cm *CertManager) KeyProviderName() string {
 }
 
 // ParseTLSPair validates a PEM cert+key pair without storing it.
-func (cm *CertManager) ParseTLSPair(certPEM, keyPEM []byte) (*tls.Certificate, error) {
+func (cm *CertManager) ParseTLSPair(certPEM, keyPEM []byte) (*tls.Certificate, error) { //nolint:unparam // result used by callers in ui.go
 	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, err

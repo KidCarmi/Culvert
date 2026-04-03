@@ -319,7 +319,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	identity := r.Header.Get("X-User-Identity")
 	match := policyStore.Evaluate(clientIP, identity, authenticatedSource, host, authenticatedGroups)
 
-	if match != nil {
+	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
 		ruleMet.RecordHit(match.Rule.Name)
 		switch match.Action {
 		case ActionDrop:
