@@ -319,7 +319,8 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	identity := r.Header.Get("X-User-Identity")
 	match := policyStore.Evaluate(clientIP, identity, authenticatedSource, host, authenticatedGroups)
 
-	if match != nil {
+	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
+		ruleMet.RecordHit(match.Rule.Name)
 		switch match.Action {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
@@ -473,10 +474,31 @@ func parseProxyAuth(r *http.Request) (string, string, bool) {
 // CONNECT tunnels and WebSocket upgrades bypass this limit (they stream raw TCP).
 const maxRequestBody = 64 << 20 // 64 MB
 
+// countingReader wraps an io.ReadCloser and counts bytes read through it.
+type countingReader struct {
+	r     io.ReadCloser
+	count int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	cr.count += int64(n)
+	return n, err
+}
+func (cr *countingReader) Close() error { return cr.r.Close() }
+
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	}
+
+	// Wrap request body to count bytes sent upstream.
+	var reqCounter countingReader
+	if r.Body != nil {
+		reqCounter.r = r.Body
+		r.Body = &reqCounter
+	}
+
 	removeHopHeaders(r.Header)
 
 	// Scrub internal/private headers before forwarding upstream (shift-left:
@@ -544,9 +566,14 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	respBytes, err := io.Copy(w, resp.Body)
+	if err != nil {
 		logger.Printf("HTTP response copy error for %q: %v", sanitizeLog(r.Host), err)
 	}
+
+	// Track bytes transferred for data exfiltration detection.
+	atomic.AddInt64(&statBytesSent, reqCounter.count)
+	atomic.AddInt64(&statBytesRecv, respBytes)
 }
 
 // sanitizeLog strips newlines, carriage returns, and tabs from s to prevent
@@ -681,6 +708,14 @@ var upstreamTransport = &http.Transport{
 	MaxIdleConnsPerHost: 16,
 	MaxConnsPerHost:     64,
 	IdleConnTimeout:     90 * time.Second,
+}
+
+// applyUpstreamProxy configures the shared transport to route through parent
+// proxies when the upstream pool is active.
+func applyUpstreamProxy() {
+	if upstreamPool.Enabled() {
+		upstreamTransport.Proxy = upstreamPool.ProxyFunc()
+	}
 }
 
 // handleTunnelBypass is the original transparent TCP tunnel (Bypass mode).

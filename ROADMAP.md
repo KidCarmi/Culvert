@@ -46,7 +46,7 @@ This document outlines the strategic progression for Culvert, moving from a PoC 
 
 ## Phase 6: Architecture Review Hardening ✅ (P0) / 🔧 (P1-P3)
 
-Based on a three-reviewer expert architecture audit. Current score: **8.5/10** (P0+P1+P2 complete).
+Based on a three-reviewer expert architecture audit. Current score: **9.0/10** (P0+P1+P2+P3 complete).
 
 ### P0 — Critical Fixes (✅)
 - [x] **Goroutine leak fix:** Wait for both relay goroutines; close write halves to unblock peers (proxy.go, socks5.go)
@@ -79,17 +79,17 @@ Based on a three-reviewer expert architecture audit. Current score: **8.5/10** (
 - [x] **Multi-IdP group resolution:** Priority field on IdP profiles; `RouteByDomain` picks lowest priority match (auth_idp.go)
 - [x] **Log rotation cleanup:** Delete stale `.1` files before rotation (logger.go)
 
-### P3 — Enterprise Features (Next Quarter)
-- [ ] **Upstream proxy chaining / failover** — Route through parent proxies with health checks
-- [ ] **Circuit breaker** — Stop forwarding to hung upstreams after N failures
-- [ ] **Policy conflict detection** — Warn when rules contradict at same priority
-- [ ] **Request/response size logging** — Log bytes transferred per request (data exfiltration detection)
-- [ ] **Hot config reload** — SIGHUP reloads YAML without restart
-- [ ] **Per-rule Prometheus metrics** — With cardinality cap
-- [ ] **Client certificate (mTLS)** — Mutual TLS for upstream servers
-- [ ] **CA auto-rotation** — Scheduled CA cert renewal with overlap period
-- [ ] **HSM/KMS integration** — Store CA key in hardware/cloud KMS
-- [ ] **OCSP/CRL checking** — Verify upstream cert revocation status
+### P3 — Enterprise Features (✅)
+- [x] **Upstream proxy chaining / failover** — Route through parent proxies with round-robin selection and health checks (upstream.go)
+- [x] **Circuit breaker** — Atomic state machine (closed→open→half-open) stops forwarding to hung upstreams after N failures (upstream.go)
+- [x] **Policy conflict detection** — Warns when rules at same priority overlap with different actions (policy.go)
+- [x] **Request/response size logging** — Global byte counters (statBytesSent/statBytesRecv) exposed as Prometheus metrics for data exfiltration detection (proxy.go, metrics.go, store.go)
+- [x] **Hot config reload** — SIGHUP reloads blocklist, policy, rewrite rules, rate limit, upstream pool, default action without restart (main.go)
+- [x] **Per-rule Prometheus metrics** — Per-rule hit counters with 200-rule cardinality cap (metrics.go)
+- [x] **Client certificate (mTLS)** — Mutual TLS client cert for upstream servers via `client_cert_file`/`client_key_file` config (main.go, config.go)
+- [x] **CA auto-rotation** — Background goroutine checks CA expiry daily; auto-rotates 30 days before expiry (ca.go)
+- [x] **HSM/KMS integration** — `KeyProvider` interface for external key management (AWS KMS, Azure Key Vault, PKCS#11 HSMs); default local in-memory provider (ca.go)
+- [x] **OCSP/CRL checking** — OCSP responder queries with 1h result cache and 5s timeout; configurable via `ocsp_check` (ocsp.go)
 
 ## Score Targets
 

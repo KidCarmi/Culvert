@@ -5,9 +5,67 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// ─── Per-rule hit counter ────────────────────────────────────────────────────
+// Cardinality is capped at maxRuleMetrics to prevent unbounded label growth.
+
+const maxRuleMetrics = 200
+
+type ruleMetrics struct {
+	mu    sync.RWMutex
+	hits  map[string]*int64 // rule name → hit count
+	order []string          // insertion order for cap enforcement
+}
+
+var ruleMet = &ruleMetrics{hits: make(map[string]*int64)}
+
+// RecordHit increments the hit counter for the given policy rule name.
+func (rm *ruleMetrics) RecordHit(ruleName string) {
+	if ruleName == "" {
+		return
+	}
+	rm.mu.RLock()
+	ctr, ok := rm.hits[ruleName]
+	rm.mu.RUnlock()
+	if ok {
+		atomic.AddInt64(ctr, 1)
+		return
+	}
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	// Double-check after acquiring write lock.
+	if ctr, ok = rm.hits[ruleName]; ok {
+		atomic.AddInt64(ctr, 1)
+		return
+	}
+	if len(rm.hits) >= maxRuleMetrics {
+		return // cardinality cap reached; ignore new rules
+	}
+	v := int64(1)
+	rm.hits[ruleName] = &v
+	rm.order = append(rm.order, ruleName)
+}
+
+// WritePrometheus writes per-rule metrics lines to the given builder.
+func (rm *ruleMetrics) WritePrometheus(w *strings.Builder) {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	if len(rm.hits) == 0 {
+		return
+	}
+	w.WriteString("\n# HELP culvert_policy_rule_hits_total Per-rule hit count (capped at 200 rules)\n")
+	w.WriteString("# TYPE culvert_policy_rule_hits_total counter\n")
+	for _, name := range rm.order {
+		ctr := rm.hits[name]
+		// Sanitise label value: escape backslash, double-quote, newline.
+		safe := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(name)
+		fmt.Fprintf(w, "culvert_policy_rule_hits_total{rule=%q} %d\n", safe, atomic.LoadInt64(ctr))
+	}
+}
 
 // metricsToken is the Bearer token required to access /metrics.
 // Empty string = open access (backward-compatible default; not recommended).
@@ -47,10 +105,16 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) { //nolint:errcheck /
 	yaraBlocked    := atomic.LoadInt64(&statYARABlocked)
 	feedBlocked    := atomic.LoadInt64(&statThreatFeedBlocked)
 	dpiBlocked     := atomic.LoadInt64(&statDPIBlocked)
+	bytesSent      := atomic.LoadInt64(&statBytesSent)
+	bytesRecv      := atomic.LoadInt64(&statBytesRecv)
 	feedEntries, _, _ := globalThreatFeed.Stats()
 	_, _, cacheSize := globalSecScanner.cache.Stats()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+	// Per-rule metrics (appended after the main block).
+	var ruleMetBuf strings.Builder
+
 	fmt.Fprintf(w, `# HELP culvert_requests_total Total proxy requests
 # TYPE culvert_requests_total counter
 culvert_requests_total %d
@@ -114,6 +178,14 @@ culvert_threat_feed_entries %d
 # HELP culvert_scan_cache_size Current number of entries in the SHA256 scan result cache
 # TYPE culvert_scan_cache_size gauge
 culvert_scan_cache_size %d
+
+# HELP culvert_bytes_sent_total Total bytes sent upstream (request bodies)
+# TYPE culvert_bytes_sent_total counter
+culvert_bytes_sent_total %d
+
+# HELP culvert_bytes_recv_total Total bytes received from upstream (response bodies)
+# TYPE culvert_bytes_recv_total counter
+culvert_bytes_recv_total %d
 `,
 		total, allowed, blocked, authFail,
 		int64(bl.Count()),
@@ -126,5 +198,11 @@ culvert_scan_cache_size %d
 		feedBlocked,
 		feedEntries,
 		int64(cacheSize),
+		bytesSent,
+		bytesRecv,
 	)
+
+	// Append per-rule hit counters.
+	ruleMet.WritePrometheus(&ruleMetBuf)
+	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
 }
