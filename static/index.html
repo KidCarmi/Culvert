@@ -356,6 +356,24 @@ tr.dragging  { opacity: .4; }
       <!-- CA cert expiry warning — hidden until JS populates it -->
       <div id="ca-expiry-banner" style="display:none;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:.85rem;font-weight:500"></div>
 
+      <!-- Getting Started banner — shown when no traffic yet -->
+      <div id="getting-started-banner" style="display:none;padding:18px 22px;border-radius:8px;margin-bottom:18px;background:linear-gradient(135deg,rgba(59,130,246,.08),rgba(16,185,129,.08));border:1px solid rgba(59,130,246,.2)">
+        <div style="display:flex;justify-content:space-between;align-items:start">
+          <div>
+            <strong style="font-size:1rem;color:var(--text)">Getting Started</strong>
+            <p style="font-size:.82rem;color:var(--muted);margin:8px 0 14px;line-height:1.6">
+              Your proxy is running. Complete these steps to start filtering traffic:
+            </p>
+            <div style="display:flex;flex-direction:column;gap:8px;font-size:.82rem">
+              <div><span style="color:var(--accent);font-weight:600">1.</span> <a href="#" onclick="event.preventDefault();switchView('pac')" style="color:var(--accent)">Configure a PAC file</a> or set your browser proxy to <code style="background:var(--surface2);padding:1px 6px;border-radius:3px">http://localhost:8080</code></div>
+              <div><span style="color:var(--accent);font-weight:600">2.</span> <a href="#" onclick="event.preventDefault();switchView('certs')" style="color:var(--accent)">Install the Root CA</a> if using SSL inspection</div>
+              <div><span style="color:var(--accent);font-weight:600">3.</span> <a href="#" onclick="event.preventDefault();switchView('policy')" style="color:var(--accent)">Create your first policy rule</a> to control access</div>
+            </div>
+          </div>
+          <button class="btn ghost sm" onclick="this.parentElement.parentElement.style.display='none'" title="Dismiss" style="flex-shrink:0">&times;</button>
+        </div>
+      </div>
+
       <div class="cards">
         <div class="card c-blue">
           <div class="card-label">📥 Total Requests</div>
@@ -748,6 +766,9 @@ tr.dragging  { opacity: .4; }
             <button class="btn ghost sm" onclick="reloadYARA()">↻ Reload YARA Rules</button>
           </div>
           <div id="sec-scan-action-status" style="display:none;margin-top:10px;font-size:.8rem"></div>
+          <div style="margin-top:12px;font-size:.75rem;color:var(--muted)">
+            Looking for the blocklist domain feed? <a href="#" onclick="event.preventDefault();switchView('blocklist')" style="color:var(--accent)">Manage in Blocklist →</a>
+          </div>
         </div>
       </div>
 
@@ -2535,6 +2556,9 @@ async function fetchStats() {
     const nb = document.getElementById('nav-blocked-count');
     if (s.blocked > 0) { nb.textContent = fmt(s.blocked); nb.style.display = ''; }
     updateBreakdownChart(s.allowed, s.blocked, s.authFail);
+    // Show/hide Getting Started banner
+    const gsb = document.getElementById('getting-started-banner');
+    if (gsb) gsb.style.display = s.total === 0 ? '' : 'none';
   } catch(e) {}
   // CA cert expiry check
   checkCACertExpiry();
@@ -2771,6 +2795,7 @@ async function addHost() {
 }
 
 async function removeHost(host) {
+  if (!confirm('Remove "' + host + '" from the blocklist?')) return;
   try {
     await api('/api/blocklist?host=' + encodeURIComponent(host), {method:'DELETE'});
     toast('Removed ' + host, 'success');
@@ -2865,6 +2890,7 @@ async function addException() {
 }
 
 async function removeException(host) {
+  if (!confirm('Remove exception for "' + host + '"? This domain will be blocked again if it appears in the blocklist.')) return;
   try {
     await api('/api/blocklist/exceptions?host=' + encodeURIComponent(host), {method: 'DELETE'});
     toast('Exception removed for ' + host, 'success');
@@ -3026,6 +3052,7 @@ async function addSSLBypass() {
 }
 
 async function removeSSLBypass(pattern) {
+  if (!confirm('Remove SSL bypass for "' + pattern + '"? Traffic to this host will be inspected.')) return;
   try {
     await api('/api/ssl-bypass?pattern=' + encodeURIComponent(pattern), { method: 'DELETE' });
     toast('Pattern removed', 'success');
@@ -3230,6 +3257,7 @@ function cancelPolicyEdit() {
 }
 
 async function deletePolicy(priority) {
+  if (!confirm('Delete this policy rule? This cannot be undone.')) return;
   try {
     await api('/api/policy?priority=' + priority, { method: 'DELETE' });
     toast('Rule deleted', 'success');
@@ -3573,6 +3601,9 @@ async function fetchBlocklistFeed() {
 async function saveBlocklistFeed() {
   const url      = document.getElementById('s-bl-feed-url').value.trim();
   const interval = document.getElementById('s-bl-feed-interval').value;
+  if (url && !url.startsWith('https://') && !url.startsWith('http://')) {
+    toast('Feed URL must start with http:// or https://', 'error'); return;
+  }
   try {
     await api('/api/blocklist/feed', {
       method: 'POST', headers: {'Content-Type':'application/json'},
