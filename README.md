@@ -14,6 +14,7 @@
   <a href="https://github.com/KidCarmi/Culvert/actions/workflows/ci.yml"><img src="https://github.com/KidCarmi/Culvert/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/KidCarmi/Culvert/actions/workflows/codeql.yml"><img src="https://github.com/KidCarmi/Culvert/actions/workflows/codeql.yml/badge.svg" alt="CodeQL" /></a>
   <a href="https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml"><img src="https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml/badge.svg" alt="Security Gate" /></a>
+  <a href="https://github.com/KidCarmi/Dependency-Obituary"><img src="https://img.shields.io/badge/deps-Dependency%20Obituary-blueviolet" alt="Dependency Obituary" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://goreportcard.com/report/github.com/KidCarmi/Culvert"><img src="https://goreportcard.com/badge/github.com/KidCarmi/Culvert" alt="Go Report Card" /></a>
 </p>
@@ -64,14 +65,14 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 - **SAML 2.0** SP-initiated SSO (Okta, Azure AD, ADFS)
 - **LDAP** bind + search with group resolution (Active Directory, OpenLDAP, FreeIPA)
 - **Multi-IdP** — simultaneous providers with email-domain routing
-- **TOTP 2FA** with backup codes for admin accounts
+- **TOTP 2FA** (RFC 6238, inline stdlib implementation) with backup codes for admin accounts
 - **RBAC** — admin / operator / viewer roles
 
 ### Content Security
 
 - **ClamAV** antivirus (INSTREAM protocol, connection pooling, auto-detection)
 - **YARA rules** — pure-Go engine (no libyara), runtime reload, ReDoS-safe (5s timeout)
-- **Threat feeds** — URLhaus + OpenPhish with hourly sync
+- **Threat feeds** — URLhaus + OpenPhish with hourly sync, dynamic domain allowlist for hosting platforms (GitHub, Google Drive, etc.)
 - **DPI** — regex content scanning on decrypted HTTPS responses
 - **File-type blocking** — 5 named profiles (Executables, Archives, Documents, Media, Strict)
 - **Domain blocklist** with wildcard matching and allow-list mode
@@ -85,7 +86,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 | Panel | Description |
 |-------|-------------|
 | Dashboard | Live stats, timeseries chart, top domains, country traffic map |
-| Live Feed | Real-time request log with filtering and CSV/JSON export |
+| Live Feed | Real-time request log with per-status badges (OK, Threat, File Block, Scan, Rate Limit, IP Block, Policy Deny, Auth Fail), filtering, CSV/JSON export |
 | Blocklist | Domain entries with wildcards; allow-list / deny-list toggle |
 | Policy | Visual PBAC rule editor with all 8 condition types |
 | Policy Tester | Dry-run evaluation against any host/user/IP |
@@ -427,7 +428,7 @@ Every push runs a **10-check security gate**:
 9. **License compliance** — no GPL/AGPL/LGPL/CPAL dependencies
 10. **SBOM generation** — CycloneDX JSON via Syft
 
-Plus: **CodeQL** semantic SAST, **Cosign** keyless signing, and **SLSA Level 3** provenance on all releases.
+Plus: **CodeQL** semantic SAST, **Dependency Obituary** dependency health scoring, **Cosign** keyless signing, and **SLSA Level 3** provenance on all releases.
 
 ---
 
@@ -445,7 +446,7 @@ security.go        — IP filter, rate limiter, SSRF guard, DNS cache
 security_scan.go   — ClamAV + YARA + threat feed scan coordinator
 clam.go            — ClamAV INSTREAM client with connection pooling
 yara_scan.go       — Pure-Go YARA engine with ReDoS timeout
-threatfeed.go      — URLhaus + OpenPhish sync
+threatfeed.go      — URLhaus + OpenPhish sync, domain allowlist
 feedsync.go        — UT1 URL category syncer
 geoip.go           — MaxMind GeoLite2 with background cache
 upstream.go        — Proxy chaining, failover, circuit breaker, health checks
@@ -457,7 +458,7 @@ auth_oidc_flow.go  — OIDC Authorization Code + PKCE
 auth_saml.go       — SAML 2.0 SP-initiated SSO
 auth_idp.go        — Multi-IdP registry with domain routing
 identity.go        — Identity model (Sub, Groups, Source, Provider)
-totp.go            — TOTP 2FA with backup codes
+totp.go            — TOTP 2FA (RFC 6238, stdlib HMAC-SHA1)
 lockout.go         — Brute-force + API rate limiting
 connlimit.go       — Per-IP connection limiter, X-Request-ID
 metrics.go         — Prometheus metrics (per-rule, latency, bytes)
@@ -465,7 +466,7 @@ logger.go          — Structured text/JSON logging with rotation
 syslog.go          — RFC 3164 syslog forwarding
 alerts.go          — HMAC-SHA256 signed webhook alerts
 events.go          — SSE live dashboard stream
-config.go          — YAML config loading + validation
+config.go          — YAML config loading + validation (goccy/go-yaml)
 rewrite.go         — Per-host header rewrite engine
 fileblock.go       — File extension/MIME blocking
 pac.go             — PAC file generation
