@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/subtle"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -72,11 +73,10 @@ func (rm *ruleMetrics) WritePrometheus(w *strings.Builder) {
 // Buckets: 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, +Inf
 
 type latencyHistogram struct {
-	mu      sync.Mutex
-	buckets []float64   // upper bounds
-	counts  []int64     // per-bucket counter
-	sum     float64     // total seconds
-	total   int64       // total observations
+	buckets []float64 // upper bounds (immutable after init)
+	counts  []int64   // per-bucket atomic counter
+	sumBits int64     // atomic float64 stored as int64 bits
+	total   int64     // atomic total observations
 }
 
 var latencyHist = newLatencyHistogram()
@@ -89,37 +89,39 @@ func newLatencyHistogram() *latencyHistogram {
 	}
 }
 
-// Observe records a latency observation in seconds.
+// Observe records a latency observation in seconds (lock-free).
 func (h *latencyHistogram) Observe(seconds float64) {
-	h.mu.Lock()
-	h.sum += seconds
-	h.total++
+	// Atomic float64 add via CAS loop.
+	for {
+		old := atomic.LoadInt64(&h.sumBits)
+		newVal := math.Float64frombits(uint64(old)) + seconds
+		if atomic.CompareAndSwapInt64(&h.sumBits, old, int64(math.Float64bits(newVal))) {
+			break
+		}
+	}
+	atomic.AddInt64(&h.total, 1)
 	for i, bound := range h.buckets {
 		if seconds <= bound {
-			h.counts[i]++
-			h.mu.Unlock()
+			atomic.AddInt64(&h.counts[i], 1)
 			return
 		}
 	}
-	h.counts[len(h.buckets)]++ // +Inf bucket
-	h.mu.Unlock()
+	atomic.AddInt64(&h.counts[len(h.buckets)], 1) // +Inf bucket
 }
 
 // WritePrometheus writes the histogram in Prometheus text exposition format.
 func (h *latencyHistogram) WritePrometheus(w *strings.Builder) { //nolint:errcheck // strings.Builder.Write never returns an error
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	w.WriteString("\n# HELP culvert_request_duration_seconds Request latency histogram\n")
 	w.WriteString("# TYPE culvert_request_duration_seconds histogram\n")
 	var cumulative int64
 	for i, bound := range h.buckets {
-		cumulative += h.counts[i]
+		cumulative += atomic.LoadInt64(&h.counts[i])
 		fmt.Fprintf(w, "culvert_request_duration_seconds_bucket{le=\"%g\"} %d\n", bound, cumulative)
 	}
-	cumulative += h.counts[len(h.buckets)]
+	cumulative += atomic.LoadInt64(&h.counts[len(h.buckets)])
 	fmt.Fprintf(w, "culvert_request_duration_seconds_bucket{le=\"+Inf\"} %d\n", cumulative)
-	fmt.Fprintf(w, "culvert_request_duration_seconds_sum %f\n", h.sum)
-	fmt.Fprintf(w, "culvert_request_duration_seconds_count %d\n", h.total)
+	fmt.Fprintf(w, "culvert_request_duration_seconds_sum %f\n", math.Float64frombits(uint64(atomic.LoadInt64(&h.sumBits))))
+	fmt.Fprintf(w, "culvert_request_duration_seconds_count %d\n", atomic.LoadInt64(&h.total))
 }
 
 // metricsToken is the Bearer token required to access /metrics.

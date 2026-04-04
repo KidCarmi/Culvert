@@ -24,7 +24,7 @@ func generateRequestID() string {
 // Prevents a single IP from consuming all proxy resources via many concurrent
 // connections (e.g. HTTP flood, slow-read attacks).
 
-const defaultMaxConnsPerIP = 256
+const defaultMaxConnsPerIP = 1024
 
 // ConnLimiter tracks active connections per client IP.
 type ConnLimiter struct {
