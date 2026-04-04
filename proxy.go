@@ -413,6 +413,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		sslAction = SSLBypass
 		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
 	}
+	// Non-TLS protocols (SSH, etc.) must bypass SSL inspection — attempting
+	// a TLS handshake on a non-TLS connection will crash the tunnel.
+	if sslAction == SSLInspect {
+		_, portStr, _ := net.SplitHostPort(r.Host)
+		if portStr != "" && portStr != "443" && portStr != "8443" {
+			sslAction = SSLBypass
+		}
+	}
 
 	switch {
 	case r.Method == http.MethodConnect:
