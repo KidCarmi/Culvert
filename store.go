@@ -121,7 +121,8 @@ func levelForStatus(status string) string {
 	switch status {
 	case "OK", "POLICY_ALLOW":
 		return "INFO"
-	case "BLOCKED", "RATE_LIMITED", "IP_BLOCKED",
+	case "BLOCKED", "THREAT_BLOCKED", "FILE_BLOCKED", "SCAN_BLOCKED",
+		"RATE_LIMITED", "IP_BLOCKED",
 		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT":
 		return "WARN"
 	default: // AUTH_FAIL and anything unexpected
