@@ -1,0 +1,2 @@
+# Single-purpose security fix, transitive of crewjam/saml
+github.com/mattermost/xml-roundtrip-validator

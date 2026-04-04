@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/goccy/go-yaml"
 )
 
 // FileConfig mirrors the YAML structure of config.yaml.
@@ -144,8 +144,7 @@ func loadFileConfig(path string) (*FileConfig, error) {
 	}
 	defer f.Close()
 
-	dec := yaml.NewDecoder(f)
-	dec.KnownFields(true) // reject unknown fields (catch typos)
+	dec := yaml.NewDecoder(f, yaml.DisallowUnknownField())
 	var fc FileConfig
 	if err := dec.Decode(&fc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)

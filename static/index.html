@@ -742,6 +742,22 @@ tr.dragging  { opacity: .4; }
             <button class="btn ghost sm" onclick="reloadYARA()">↻ Reload YARA Rules</button>
           </div>
           <div id="sec-scan-action-status" style="display:none;margin-top:10px;font-size:.8rem"></div>
+
+          <!-- Domain allowlist for threat feeds -->
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <div>
+                <div style="font-weight:600;font-size:.88rem">Domain Allowlist</div>
+                <div style="font-size:.72rem;color:var(--muted);margin-top:2px">Domains exempt from domain-level threat feed blocking. URL-level blocking still applies. Prevents popular hosting platforms (GitHub, Google Drive, etc.) from being blocked due to a single malicious file.</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:10px">
+              <input id="tf-allowlist-input" type="text" placeholder="e.g. github.com" style="flex:1;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.82rem">
+              <button class="btn ghost sm" onclick="addTFAllowlistDomain()">+ Add</button>
+            </div>
+            <div id="tf-allowlist-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+          </div>
+
           <div style="margin-top:12px;font-size:.75rem;color:var(--muted)">
             Looking for the blocklist domain feed? <a href="#" onclick="event.preventDefault();switchView('blocklist')" style="color:var(--accent)">Manage in Blocklist →</a>
           </div>
@@ -2926,6 +2942,7 @@ async function loadSecurity() {
   } catch(e) {}
   loadSSLBypass();
   loadSecScanStatus();
+  loadTFAllowlist();
 }
 
 function renderSecIPList() {
@@ -3126,6 +3143,54 @@ async function reloadYARA() {
     statusEl.style.color = 'var(--red)';
     statusEl.textContent = 'Reload failed: ' + e.message;
   }
+}
+
+// ── Threat Feed Domain Allowlist ─────────────────────────────────────────
+let tfAllowlistDomains = [];
+
+async function loadTFAllowlist() {
+  try {
+    const d = await api('/api/security-scan/feeds/domain-allowlist');
+    tfAllowlistDomains = d.domains || [];
+    renderTFAllowlist();
+  } catch(e) {}
+}
+
+function renderTFAllowlist() {
+  const el = document.getElementById('tf-allowlist-list');
+  if (!el) return;
+  el.innerHTML = tfAllowlistDomains.map(d =>
+    `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);padding:3px 10px;border-radius:14px;font-size:.78rem">
+      ${esc(d)}
+      <span onclick="removeTFAllowlistDomain('${esc(d)}')" style="cursor:pointer;color:var(--muted);font-weight:700;margin-left:2px" title="Remove">&times;</span>
+    </span>`
+  ).join('');
+}
+
+async function addTFAllowlistDomain() {
+  const inp = document.getElementById('tf-allowlist-input');
+  const domain = inp.value.trim().toLowerCase();
+  if (!domain) return;
+  if (tfAllowlistDomains.includes(domain)) { inp.value = ''; return; }
+  tfAllowlistDomains.push(domain);
+  tfAllowlistDomains.sort();
+  inp.value = '';
+  renderTFAllowlist();
+  await api('/api/security-scan/feeds/domain-allowlist', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ domains: tfAllowlistDomains })
+  });
+}
+
+async function removeTFAllowlistDomain(domain) {
+  tfAllowlistDomains = tfAllowlistDomains.filter(d => d !== domain);
+  renderTFAllowlist();
+  await api('/api/security-scan/feeds/domain-allowlist', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ domains: tfAllowlistDomains })
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

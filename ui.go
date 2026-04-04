@@ -64,8 +64,9 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 
 	// ── Security scanning (ClamAV / YARA / Threat Feeds) ─────────────────
 	mux.HandleFunc("/api/security-scan/status", apiSecScanStatus)      // GET
-	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)   // POST — force immediate sync
-	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload) // POST — reload YARA rules from dir
+	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)             // POST — force immediate sync
+	mux.HandleFunc("/api/security-scan/feeds/domain-allowlist", apiDomainAllowlist) // GET/PUT — threat feed domain allowlist
+	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)            // POST — reload YARA rules from dir
 
 	// ── URL Categories (dynamic host-list management) ─────────────────────
 	mux.HandleFunc("/api/urlcat", apiURLCat)            // GET/POST/PUT/DELETE categories
@@ -2781,6 +2782,35 @@ func apiSecFeedsSync(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(secScanStatusMap()); err != nil {
 		logger.Printf("apiSecFeedsSync: encode error: %v", err)
+	}
+}
+
+// GET /api/security-scan/feeds/domain-allowlist — list domains exempt from
+// domain-level threat feed blocking (URL-level blocking still applies).
+// PUT /api/security-scan/feeds/domain-allowlist — replace the allowlist.
+func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		list := globalThreatFeed.DomainAllowlist()
+		if list == nil {
+			list = []string{}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"domains": list})
+	case http.MethodPut:
+		var body struct {
+			Domains []string `json:"domains"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+		globalThreatFeed.SetDomainAllowlist(body.Domains)
+		logger.Printf("threat feed domain allowlist updated (%d entries)", len(body.Domains))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "count": len(body.Domains)})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
