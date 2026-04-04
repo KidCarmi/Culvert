@@ -205,10 +205,46 @@ func (tf *ThreatFeed) Stats() (int64, time.Time, time.Duration) {
 	return tf.totalEntries.Load(), tf.lastSync, tf.syncInterval
 }
 
+// popularHostingDomains lists platforms where user-uploaded content is common.
+// A single malicious file on these domains must NOT block the entire domain;
+// only the specific URL is recorded in the threat feed.
+var popularHostingDomains = map[string]bool{
+	"github.com":               true,
+	"raw.githubusercontent.com": true,
+	"gist.githubusercontent.com": true,
+	"objects.githubusercontent.com": true,
+	"gitlab.com":               true,
+	"bitbucket.org":            true,
+	"drive.google.com":         true,
+	"docs.google.com":          true,
+	"storage.googleapis.com":   true,
+	"s3.amazonaws.com":         true,
+	"dropbox.com":              true,
+	"dl.dropboxusercontent.com": true,
+	"onedrive.live.com":        true,
+	"1drv.ms":                  true,
+	"cdn.discordapp.com":       true,
+	"discord.com":              true,
+	"mediafire.com":            true,
+	"mega.nz":                  true,
+	"transfer.sh":              true,
+	"pastebin.com":             true,
+	"anonfiles.com":            true,
+	"catbox.moe":               true,
+	"files.catbox.moe":         true,
+	"archive.org":              true,
+	"web.archive.org":          true,
+	"t.me":                     true,
+	"cdn.jsdelivr.net":         true,
+	"unpkg.com":                true,
+}
+
 // ── Feed fetching ─────────────────────────────────────────────────────────────
 
 // fetchTextFeed downloads a plain-text URL list (one URL per line; lines
 // beginning with '#' are comments) and populates the urls and domains maps.
+// Domains in popularHostingDomains are only recorded at the URL level, not
+// the domain level, to avoid blocking entire platforms due to one bad file.
 func fetchTextFeed(feedURL, source string, urls, domains map[string]feedEntry) (int, error) {
 	client := &http.Client{Timeout: feedHTTPTimeout}
 	req, err := http.NewRequest(http.MethodGet, feedURL, nil)
@@ -244,7 +280,9 @@ func fetchTextFeed(feedURL, source string, urls, domains map[string]feedEntry) (
 		}
 		entry := feedEntry{Source: source, AddedAt: now}
 		urls[normURL] = entry
-		domains[host] = entry
+		if !popularHostingDomains[host] {
+			domains[host] = entry
+		}
 		count++
 	}
 	return count, sc.Err()
