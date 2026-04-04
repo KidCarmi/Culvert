@@ -415,6 +415,11 @@ func (b *Blocklist) isExcepted(host string) bool {
 	if b.exceptions[host] {
 		return true
 	}
+		// Check if a wildcard exception covers this exact host
+	// e.g. "*.raw.githubusercontent.com" should match "raw.githubusercontent.com"
+	if b.exceptions["*."+host] {
+		return true
+	}
 	// Check if a wildcard exception covers this exact host
 	// e.g. "*.raw.githubusercontent.com" should match "raw.githubusercontent.com"
 	if b.exceptions["*."+host] {
