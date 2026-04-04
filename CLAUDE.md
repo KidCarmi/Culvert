@@ -36,18 +36,18 @@ ocsp.go       — OCSP/CRL revocation checking for upstream TLS certificates
 metrics.go    — Prometheus metrics (culvert_* namespace, per-rule hit counters, latency histogram)
 connlimit.go  — Per-IP connection limiting and X-Request-ID generation
 alerts.go     — Webhook alerting for security events (HMAC-SHA256 signed)
-threatfeed.go — Threat intelligence feed integration (URLhaus, OpenPhish)
+threatfeed.go — Threat intelligence feed integration (URLhaus, OpenPhish), domain allowlist for hosting platforms
 feedsync.go   — UT1 URL category database syncer
 blocklist_feed.go — Blocklist URL feed syncer
 rewrite.go    — HTTP header rewrite rules (per-host, wildcard)
 plugin.go     — Middleware plugin API
 logger.go     — Rotating file logger with JSON mode
 syslog.go     — Syslog SIEM forwarding (UDP/TCP, RFC 3164)
-config.go     — YAML + CLI flag configuration
+config.go     — YAML + CLI flag configuration (goccy/go-yaml)
 pac.go        — PAC file generator
 hashcache.go  — SHA-256 scan result cache with TTL
 lockout.go    — Brute-force lockout (IP + user)
-totp.go       — TOTP 2FA support with backup codes
+totp.go       — TOTP 2FA (RFC 6238, inline stdlib HMAC-SHA1, no external dep)
 tls.go        — TLS helpers (self-signed cert for admin UI)
 blockpage.go  — Block page HTML template
 events.go     — SSE event stream for live UI dashboard
@@ -97,7 +97,7 @@ docker compose up -d
 
 ## CI Pipelines
 
-- `.github/workflows/ci.yml` — Build, test, SLSA provenance, release
+- `.github/workflows/ci.yml` — Build, test, Dependency Obituary, SLSA provenance, release
 - `.github/workflows/codeql.yml` — CodeQL SAST (security-and-quality query suite)
 - `.github/workflows/code-review.yml` — PR lint (golangci-lint via reviewdog), coverage delta, auto go-mod-tidy
 - `.github/workflows/security-release-gate.yml` — 10-check security gate (gosec, govulncheck, trivy, gitleaks, staticcheck, hadolint, race tests, coverage, licenses, SBOM)
@@ -114,3 +114,5 @@ docker compose up -d
 - **Session**: HMAC-SHA256 signed cookies with configurable TTL (default 8h); dynamic Secure flag based on TLS state
 - **Slowloris**: 60s read deadline on SSL-inspected client connections
 - **Audit actor**: Enriched with authenticated admin identity from session cookie
+- **Threat feed allowlist**: Popular hosting domains (GitHub, Google Drive, etc.) are exempt from domain-level blocking; URL-level blocking still applies. Managed via admin API + UI, persisted in threat feed DB.
+- **UnauthMode persistence**: Open/Policy-Only mode survives restarts via JSON envelope format in ui_users.json

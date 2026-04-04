@@ -473,8 +473,12 @@ tr.dragging  { opacity: .4; }
           <option value="">All statuses</option>
           <option value="OK">OK</option>
           <option value="BLOCKED">Blocked</option>
+          <option value="THREAT_BLOCKED">Threat Feed</option>
+          <option value="FILE_BLOCKED">File Block</option>
+          <option value="SCAN_BLOCKED">Scan Block</option>
           <option value="RATE_LIMITED">Rate Limited</option>
           <option value="IP_BLOCKED">IP Blocked</option>
+          <option value="POLICY_DEFAULT_DENY">Policy Deny</option>
           <option value="AUTH_FAIL">Auth Fail</option>
         </select>
         <select class="select" id="log-level" onchange="applyLogFilter()">
@@ -2643,9 +2647,16 @@ let polEditPriority = null; // null = adding new rule
 let logFilter = '', logStatusFilter = '', logLevelFilter = '', logMethodFilter = '', logIdentityFilter = '';
 
 function badgeHTML(status) {
-  if (status === 'OK')       return '<span class="badge ok">OK</span>';
-  if (status === 'BLOCKED')  return '<span class="badge blocked">BLOCKED</span>';
-  return '<span class="badge auth">AUTH FAIL</span>';
+  if (status === 'OK')              return '<span class="badge ok">OK</span>';
+  if (status === 'BLOCKED')         return '<span class="badge blocked">BLOCKED</span>';
+  if (status === 'THREAT_BLOCKED')  return '<span class="badge blocked" title="Threat Intelligence">THREAT</span>';
+  if (status === 'FILE_BLOCKED')    return '<span class="badge blocked" title="File Extension Blocked">FILE BLOCK</span>';
+  if (status === 'SCAN_BLOCKED')    return '<span class="badge blocked" title="ClamAV/YARA Scan">SCAN BLOCK</span>';
+  if (status === 'RATE_LIMITED')    return '<span class="badge auth" title="Rate Limit Exceeded">RATE LIMIT</span>';
+  if (status === 'IP_BLOCKED')      return '<span class="badge blocked" title="IP Filter">IP BLOCK</span>';
+  if (status === 'POLICY_DEFAULT_DENY') return '<span class="badge blocked" title="No matching policy rule">POLICY DENY</span>';
+  if (status === 'AUTH_FAIL')       return '<span class="badge auth">AUTH FAIL</span>';
+  return '<span class="badge auth">' + escHtml(status) + '</span>';
 }
 
 function levelBadge(level) {
@@ -3161,8 +3172,8 @@ function renderTFAllowlist() {
   if (!el) return;
   el.innerHTML = tfAllowlistDomains.map(d =>
     `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);padding:3px 10px;border-radius:14px;font-size:.78rem">
-      ${esc(d)}
-      <span onclick="removeTFAllowlistDomain('${esc(d)}')" style="cursor:pointer;color:var(--muted);font-weight:700;margin-left:2px" title="Remove">&times;</span>
+      ${escHtml(d)}
+      <span onclick="removeTFAllowlistDomain('${escHtml(d)}')" style="cursor:pointer;color:var(--muted);font-weight:700;margin-left:2px" title="Remove">&times;</span>
     </span>`
   ).join('');
 }
@@ -3178,8 +3189,7 @@ async function addTFAllowlistDomain() {
   renderTFAllowlist();
   await api('/api/security-scan/feeds/domain-allowlist', {
     method: 'PUT',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ domains: tfAllowlistDomains })
+    body: { domains: tfAllowlistDomains }
   });
 }
 
@@ -3188,8 +3198,7 @@ async function removeTFAllowlistDomain(domain) {
   renderTFAllowlist();
   await api('/api/security-scan/feeds/domain-allowlist', {
     method: 'PUT',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ domains: tfAllowlistDomains })
+    body: { domains: tfAllowlistDomains }
   });
 }
 
