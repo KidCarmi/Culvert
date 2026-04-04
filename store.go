@@ -415,6 +415,16 @@ func (b *Blocklist) isExcepted(host string) bool {
 	if b.exceptions[host] {
 		return true
 	}
+		// Check if a wildcard exception covers this exact host
+	// e.g. "*.raw.githubusercontent.com" should match "raw.githubusercontent.com"
+	if b.exceptions["*."+host] {
+		return true
+	}
+	// Check if a wildcard exception covers this exact host
+	// e.g. "*.raw.githubusercontent.com" should match "raw.githubusercontent.com"
+	if b.exceptions["*."+host] {
+		return true
+	}
 	// Walk parent domains: sub.example.com → example.com → com
 	// Each dot boundary is also checked as a wildcard pattern *.parent.
 	for i, ch := range host {
