@@ -278,8 +278,8 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "", "", authenticatedIdentity)
-		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
+		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity)
+		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
 		return
 	}
 
@@ -310,7 +310,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	if pluginDecision(clientIP, r.Method, host) == DecisionBlock {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by plugin", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "", "", authenticatedIdentity)
+		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity)
 		return
 	}
 

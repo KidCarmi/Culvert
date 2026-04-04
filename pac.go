@@ -225,13 +225,6 @@ func servePACFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Log the PAC download so admins can see which clients are fetching the config.
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if clientIP == "" {
-		clientIP = r.RemoteAddr
-	}
-	recordRequest(clientIP, r.Method, "/proxy.pac", "PAC_DOWNLOAD", "", "", "")
-	logger.Printf("PAC_DOWNLOAD %s", clientIP)
 
 	pac := pacStore.GeneratePAC(r.Host)
 	w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")

@@ -455,7 +455,7 @@ tr.dragging  { opacity: .4; }
           <div class="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Time</th><th>IP</th><th>User</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
+                <tr><th>Time</th><th>IP</th><th>User</th><th>Method</th><th>Host</th><th>Status</th><th>Reason</th><th>Level</th></tr>
               </thead>
               <tbody id="dash-log"></tbody>
             </table>
@@ -512,7 +512,7 @@ tr.dragging  { opacity: .4; }
         <div class="tbl-wrap" style="max-height:60vh;overflow-y:auto" id="log-scroll">
           <table>
             <thead>
-              <tr><th>Time</th><th>IP</th><th>User</th><th>Method</th><th>Host</th><th>Status</th><th>Level</th></tr>
+              <tr><th>Time</th><th>IP</th><th>User</th><th>Method</th><th>Host</th><th>Status</th><th>Reason</th><th>Level</th></tr>
             </thead>
             <tbody id="live-log"></tbody>
           </table>
@@ -2677,6 +2677,7 @@ function rowHTML(e) {
     <td><code style="font-size:.78rem">${e.method}</code></td>
     <td style="font-family:monospace;font-size:.8rem">${e.host}</td>
     <td>${badgeHTML(e.status)}</td>
+    <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}">${escHtml(e.ruleMatched||'')}</td>
     <td>${levelBadge(e.level)}</td>
   </tr>`;
 }

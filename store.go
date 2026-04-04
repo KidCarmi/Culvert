@@ -119,9 +119,10 @@ type LogEntry struct {
 
 func levelForStatus(status string) string {
 	switch status {
-	case "OK", "POLICY_ALLOW", "PAC_DOWNLOAD":
+	case "OK", "POLICY_ALLOW":
 		return "INFO"
-	case "BLOCKED", "RATE_LIMITED", "IP_BLOCKED",
+	case "BLOCKED", "THREAT_BLOCKED", "FILE_BLOCKED", "SCAN_BLOCKED",
+		"RATE_LIMITED", "IP_BLOCKED",
 		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT":
 		return "WARN"
 	default: // AUTH_FAIL and anything unexpected
@@ -1213,7 +1214,7 @@ func recordRequest(ip, method, host, status, ruleMatched, actionTaken, identity 
 
 func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64) {
 	atomic.AddInt64(&statTotal, 1)
-	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT" || status == "PAC_DOWNLOAD"
+	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
 	tsRecordResult(isAllowed)
 	// Fire webhook alerts for security events (async, non-blocking).
 	switch status {
