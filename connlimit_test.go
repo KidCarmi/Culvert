@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -115,11 +116,9 @@ func TestLatencyHistogram_Observe(t *testing.T) {
 	h.Observe(0.05)  // 50ms bucket
 	h.Observe(100)   // +Inf bucket
 
-	h.mu.Lock()
-	if h.total != 3 {
-		t.Fatalf("total = %d, want 3", h.total)
+	if total := atomic.LoadInt64(&h.total); total != 3 {
+		t.Fatalf("total = %d, want 3", total)
 	}
-	h.mu.Unlock()
 }
 
 func TestLatencyHistogram_WritePrometheus(t *testing.T) {
