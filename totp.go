@@ -6,7 +6,7 @@ package main
 
 import (
 	"crypto/hmac"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G505 — RFC 6238 TOTP mandates HMAC-SHA1
 	"encoding/base32"
 	"encoding/binary"
 	"fmt"
@@ -49,7 +49,7 @@ func verifyTOTP(secret, code string) bool {
 // hotp computes an HOTP value per RFC 4226.
 func hotp(key []byte, counter int64) string {
 	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(counter))
+	binary.BigEndian.PutUint64(buf, uint64(counter)) // #nosec G115 — counter is always positive (Unix timestamp / 30)
 
 	mac := hmac.New(sha1.New, key)
 	mac.Write(buf)
