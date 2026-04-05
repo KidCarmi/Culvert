@@ -122,10 +122,11 @@ func (s *ConfigStore) Subscribe() chan struct{} {
 // configServiceName is the fully-qualified gRPC service name.
 const configServiceName = "culvert.ConfigService"
 
-// methodGetConfig and methodPushMetrics are the RPC method descriptors.
+// methodGetConfig, methodPushMetrics, and methodEnroll are the RPC method descriptors.
 var (
 	methodGetConfig   = fmt.Sprintf("/%s/GetConfig", configServiceName)
 	methodPushMetrics = fmt.Sprintf("/%s/PushMetrics", configServiceName)
+	methodEnroll      = fmt.Sprintf("/%s/Enroll", configServiceName)
 )
 
 // MetricsReport is sent by Data Plane nodes to the Control Plane.
@@ -179,11 +180,86 @@ func (s *controlPlaneServer) PushMetrics(_ context.Context, raw json.RawMessage)
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
+
+	// Check if node is revoked.
+	if node, ok := globalClusterStore.GetNode(report.NodeID); ok {
+		if globalClusterStore.IsRevoked(node.CertSerial) {
+			return nil, status.Errorf(codes.PermissionDenied, "node %s is revoked", report.NodeID)
+		}
+	}
+
 	nodeMetricsMu.Lock()
 	nodeMetrics[report.NodeID] = report
 	nodeMetricsMu.Unlock()
+
+	// Update heartbeat.
+	globalClusterStore.UpdateNodeSeen(report.NodeID, "")
+
 	logger.Printf("ControlPlane: metrics from node %s (total=%d)", report.NodeID, report.Total)
 	return json.RawMessage(`{"ok":true}`), nil
+}
+
+// Enroll handles node enrollment: validates token, signs CSR, registers node.
+func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var req EnrollRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
+	}
+
+	if req.Token == "" || req.CSR == "" || req.NodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "token, csr, and node_id are required")
+	}
+
+	// Check if node ID is already registered and not revoked.
+	if existing, ok := globalClusterStore.GetNode(req.NodeID); ok && existing.Status != "revoked" {
+		return nil, status.Errorf(codes.AlreadyExists, "node %q is already enrolled", req.NodeID)
+	}
+
+	// Validate the enrollment token (also marks it as consumed).
+	if err := globalClusterStore.ValidateToken(req.Token, req.NodeID, ""); err != nil {
+		logger.Printf("Enrollment: rejected node %q: %v", req.NodeID, err)
+		return nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
+	}
+
+	// Sign the CSR.
+	if !globalClusterCA.Ready() {
+		return nil, status.Errorf(codes.FailedPrecondition, "cluster CA not initialized")
+	}
+	certPEM, serial, expiry, err := globalClusterCA.SignCSR([]byte(req.CSR), req.NodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "sign CSR: %v", err)
+	}
+
+	// Register the node.
+	node := &EnrolledNode{
+		NodeID:     req.NodeID,
+		CertSerial: serial,
+		CertExpiry: expiry,
+		EnrolledAt: time.Now(),
+		LastSeen:   time.Now(),
+		Status:     "connected",
+	}
+	// Find who created the token to record as enrolledBy.
+	hash := hashToken(req.Token)
+	if tok, exists := globalClusterStore.st.Tokens[hash]; exists {
+		node.EnrolledBy = tok.CreatedBy
+	}
+	globalClusterStore.RegisterNode(node)
+
+	if err := globalClusterStore.Save(); err != nil {
+		logger.Printf("Enrollment: failed to persist state: %v", err)
+	}
+
+	logger.Printf("Enrollment: node %q enrolled (serial=%s, expires=%s)", req.NodeID, serial, expiry.Format("2006-01-02"))
+
+	resp := EnrollResponse{
+		CertPEM: string(certPEM),
+		CAPEM:   string(globalClusterCA.CACertPEM()),
+		NodeID:  req.NodeID,
+		CPAddr:  clusterRole.grpcAddr,
+	}
+	b, _ := json.Marshal(resp)
+	return b, nil
 }
 
 // StartControlPlaneGRPC starts the gRPC server for the Control Plane.
@@ -218,6 +294,10 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 			{
 				MethodName: "PushMetrics",
 				Handler:    wrapUnary(svc.PushMetrics),
+			},
+			{
+				MethodName: "Enroll",
+				Handler:    wrapUnary(svc.Enroll),
 			},
 		},
 		Streams: []grpc.StreamDesc{},
@@ -427,8 +507,14 @@ func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 		if err != nil {
 			return nil, err
 		}
+		// Also add cluster CA to the pool so enrolled nodes are accepted.
+		if globalClusterCA.Ready() {
+			pool.AppendCertsFromPEM(globalClusterCA.CACertPEM())
+		}
 		tlsCfg.ClientCAs = pool
-		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert // mTLS
+		// VerifyClientCertIfGiven allows unenrolled nodes to call Enroll
+		// without a client cert, while still verifying certs from enrolled nodes.
+		tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
 	}
 	return credentials.NewTLS(tlsCfg), nil
 }
