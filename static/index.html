@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Culvert</title>
+<link rel="icon" type="image/png" href="logo.png">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 /* ─── Reset & Variables ──────────────────────────────────────────────────── */
@@ -13,8 +14,8 @@
   --surface:   #111827;
   --surface2:  #1a2235;
   --border:    #1f2d45;
-  --accent:    #3b82f6;
-  --accent2:   #60a5fa;
+  --accent:    #14b8a6;
+  --accent2:   #2dd4bf;
   --green:     #22c55e;
   --red:       #ef4444;
   --orange:    #f97316;
@@ -41,10 +42,9 @@ body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   display: flex; align-items: center; gap: 10px;
 }
 .logo-icon {
-  width: 32px; height: 32px; background: var(--accent);
-  border-radius: 8px; display: flex; align-items: center; justify-content: center;
-  font-size: 16px; flex-shrink: 0;
+  width: 36px; height: 36px; flex-shrink: 0;
 }
+.logo-icon img { width: 100%; height: 100%; object-fit: contain; }
 .logo-text { font-size: 1rem; font-weight: 700; color: var(--text); }
 .logo-sub  { font-size: .65rem; color: var(--muted); }
 nav { flex: 1; padding: 12px 10px; }
@@ -57,7 +57,7 @@ nav { flex: 1; padding: 12px 10px; }
   font-size: .85rem; color: var(--muted); transition: all .15s; margin-bottom: 1px;
 }
 .nav-item:hover  { background: var(--surface2); color: var(--text); }
-.nav-item.active { background: rgba(59,130,246,.15); color: var(--accent2);
+.nav-item.active { background: rgba(20,184,166,.15); color: var(--accent2);
                    font-weight: 600; }
 .nav-item .icon  { width: 18px; text-align: center; flex-shrink: 0; }
 .nav-badge {
@@ -210,12 +210,12 @@ tbody tr:hover { background: var(--surface2); }
 .badge.drop     { background: rgba(239,68,68,.12);  color: var(--red); }
 .badge.blockpg  { background: rgba(239,68,68,.12);  color: var(--red); }
 .badge.redirect { background: rgba(249,115,22,.12); color: var(--orange); }
-.badge.inspect  { background: rgba(59,130,246,.12); color: var(--accent2); }
+.badge.inspect  { background: rgba(20,184,166,.12); color: var(--accent2); }
 .badge.bypass   { background: rgba(100,116,139,.12);color: var(--muted); }
 /* ─── Drag & drop ────────────────────────────────────────────────────────── */
 .drag-handle { cursor: grab; color: var(--muted); padding: 0 4px; user-select: none; font-size:1rem; }
 .drag-handle:active { cursor: grabbing; }
-tr.drag-over { background: rgba(59,130,246,.08) !important; outline: 1px dashed var(--accent); }
+tr.drag-over { background: rgba(20,184,166,.08) !important; outline: 1px dashed var(--accent); }
 tr.dragging  { opacity: .4; }
 /* ─── Policy pickers (group / country) ──────────────────────────────────── */
 .picker-dropdown {
@@ -228,11 +228,11 @@ tr.dragging  { opacity: .4; }
   padding: 7px 12px; cursor: pointer; font-size: .82rem;
   display: flex; align-items: center; gap: 8px;
 }
-.picker-option:hover { background: rgba(59,130,246,.1); color: var(--accent2); }
+.picker-option:hover { background: rgba(20,184,166,.1); color: var(--accent2); }
 .picker-empty { padding: 12px; text-align: center; color: var(--muted); font-size: .78rem; }
 .picker-chip {
   display: inline-flex; align-items: center; gap: 4px;
-  background: rgba(59,130,246,.15); border: 1px solid rgba(59,130,246,.3);
+  background: rgba(20,184,166,.15); border: 1px solid rgba(20,184,166,.3);
   color: var(--accent2); padding: 2px 8px 2px 6px; border-radius: 999px;
   font-size: .75rem; font-weight: 600;
 }
@@ -242,7 +242,7 @@ tr.dragging  { opacity: .4; }
 }
 .group-chip-row {
   display: flex; align-items: center; gap: 6px; padding: 5px 10px;
-  background: rgba(59,130,246,.12); border: 1px solid rgba(59,130,246,.3);
+  background: rgba(20,184,166,.12); border: 1px solid rgba(20,184,166,.3);
   border-radius: 7px; font-size: .82rem;
 }
 .country-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
@@ -253,7 +253,7 @@ tr.dragging  { opacity: .4; }
 <!-- ═══ SIDEBAR ════════════════════════════════════════════════════════════ -->
 <aside id="sidebar">
   <div class="logo">
-    <div class="logo-icon">🛡️</div>
+    <div class="logo-icon"><img src="logo.png" alt="Culvert"></div>
     <div>
       <div class="logo-text">Culvert</div>
       <div class="logo-sub">v1.0 · Open Source</div>
@@ -357,7 +357,7 @@ tr.dragging  { opacity: .4; }
       <div id="ca-expiry-banner" style="display:none;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:.85rem;font-weight:500"></div>
 
       <!-- Getting Started banner — shown when no traffic yet -->
-      <div id="getting-started-banner" style="display:none;padding:18px 22px;border-radius:8px;margin-bottom:18px;background:linear-gradient(135deg,rgba(59,130,246,.08),rgba(16,185,129,.08));border:1px solid rgba(59,130,246,.2)">
+      <div id="getting-started-banner" style="display:none;padding:18px 22px;border-radius:8px;margin-bottom:18px;background:linear-gradient(135deg,rgba(20,184,166,.08),rgba(16,185,129,.08));border:1px solid rgba(20,184,166,.2)">
         <div style="display:flex;justify-content:space-between;align-items:start">
           <div>
             <strong style="font-size:1rem;color:var(--text)">Getting Started</strong>
@@ -1038,7 +1038,7 @@ tr.dragging  { opacity: .4; }
       font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
       padding:2px 7px;border-radius:4px;flex-shrink:0;
     }
-    .idp-proto-badge.saml { background:rgba(59,130,246,.15);color:#60a5fa; }
+    .idp-proto-badge.saml { background:rgba(20,184,166,.15);color:#2dd4bf; }
     .idp-proto-badge.oidc { background:rgba(16,185,129,.15);color:#34d399; }
     /* Copy button in SP info panel */
     .idp-copy-btn {
@@ -1302,7 +1302,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">🔑 Proxy Authentication Mode</span></div>
         <div class="panel-body">
-          <div id="s-unauth-status-bar" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.85rem;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2)">
+          <div id="s-unauth-status-bar" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.85rem;background:rgba(20,184,166,.08);border:1px solid rgba(20,184,166,.2)">
             <span id="s-unauth-mode-icon" style="font-size:1.2rem">🔒</span>
             <div>
               <div id="s-unauth-mode-label" style="font-weight:600">Credentials Required</div>
@@ -1631,7 +1631,7 @@ Firefox (all platforms):
           <span class="panel-title">Active Policy Rules</span>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <span class="topbar-meta" id="pol-count">0 rules</span>
-            <span id="pol-version-badge" style="display:none;background:rgba(59,130,246,.15);color:#60a5fa;border:1px solid rgba(59,130,246,.3);border-radius:4px;padding:2px 8px;font-size:.68rem;font-weight:700;font-family:monospace" title="Policy revision. Increments on every add/edit/delete/reorder."></span>
+            <span id="pol-version-badge" style="display:none;background:rgba(20,184,166,.15);color:#2dd4bf;border:1px solid rgba(20,184,166,.3);border-radius:4px;padding:2px 8px;font-size:.68rem;font-weight:700;font-family:monospace" title="Policy revision. Increments on every add/edit/delete/reorder."></span>
             <span id="pol-updated-badge" style="font-size:.68rem;color:var(--muted)" title="Last policy change"></span>
             <span style="font-size:.72rem;color:var(--muted)">⠿ drag rows to reorder</span>
           </div>
@@ -1967,8 +1967,8 @@ function initChart() {
         {
           label: 'Total',
           data: new Array(60).fill(0),
-          borderColor: '#3b82f6',
-          backgroundColor: 'rgba(59,130,246,.06)',
+          borderColor: '#14b8a6',
+          backgroundColor: 'rgba(20,184,166,.06)',
           fill: true,
           tension: .4,
           pointRadius: 0,
@@ -2226,7 +2226,7 @@ async function runURLLookup() {
       </div>`;
     } else {
       const tierLabel = d.tier === 'admin' ? '★ Admin-managed' : d.tier === 'community' ? 'Community feed' : '';
-      const tierColor = d.tier === 'admin' ? '#60a5fa' : '#a78bfa';
+      const tierColor = d.tier === 'admin' ? '#2dd4bf' : '#a78bfa';
       const viaStr    = d.matchedBy && d.matchedBy !== d.host
         ? ` <span style="color:var(--muted);font-size:.78rem">(via ${escHtml(d.matchedBy)})</span>`
         : '';
@@ -2782,7 +2782,7 @@ function _blRenderPage(append) {
     const jh = JSON.stringify(e.host).replace(/"/g, '&quot;');
     const wild = e.host.startsWith('*.');
     const srcBadge = e.source === 'manual'
-      ? '<span class="badge" style="background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.25);font-size:10px">Admin</span>'
+      ? '<span class="badge" style="background:rgba(20,184,166,.12);color:#2dd4bf;border:1px solid rgba(20,184,166,.25);font-size:10px">Admin</span>'
       : '<span class="badge" style="background:var(--surface2);color:var(--muted);font-size:10px">Feed</span>';
     return `<tr>
       <td class="host-td">${h}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
@@ -3418,8 +3418,8 @@ function renderUnauthModeUI(enabled) {
     btn.textContent = 'Switch to Credentials Required';
     btn.className = 'btn danger';
   } else {
-    bar.style.background = 'rgba(59,130,246,.08)';
-    bar.style.borderColor = 'rgba(59,130,246,.2)';
+    bar.style.background = 'rgba(20,184,166,.08)';
+    bar.style.borderColor = 'rgba(20,184,166,.2)';
     icon.textContent = '🔒';
     lbl.textContent = 'Credentials Required';
     desc.textContent = 'Proxy requires Proxy-Authorization. Clients must authenticate before any traffic is forwarded.';
@@ -3794,7 +3794,7 @@ document.getElementById('fb-ext-input').addEventListener('keydown', e => {
 // ═══════════════════════════════════════════════════════════════════════════
 // File Extension Profiles (dynamic, policy-assignable)
 // ═══════════════════════════════════════════════════════════════════════════
-const FP_COLORS = ['#6366f1','#3b82f6','#22c55e','#f59e0b','#ef4444','#a855f7','#f97316','#14b8a6'];
+const FP_COLORS = ['#6366f1','#38bdf8','#22c55e','#f59e0b','#ef4444','#a855f7','#f97316','#14b8a6'];
 
 function fpColor(name) {
   let h = 0;
@@ -4032,8 +4032,8 @@ function renderCountryChart(countries) {
     const name = c.name || c.code;
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:.8rem">
       <div style="width:28px;text-align:right;font-family:monospace;font-size:.72rem;color:var(--muted)">${countryFlag(c.code)}${c.code}</div>
-      <div style="flex:1;background:rgba(59,130,246,.1);border-radius:4px;overflow:hidden">
-        <div style="height:20px;background:rgba(59,130,246,.55);width:${pct}%;border-radius:4px;transition:width .3s;display:flex;align-items:center;padding:0 6px;min-width:24px">
+      <div style="flex:1;background:rgba(20,184,166,.1);border-radius:4px;overflow:hidden">
+        <div style="height:20px;background:rgba(20,184,166,.55);width:${pct}%;border-radius:4px;transition:width .3s;display:flex;align-items:center;padding:0 6px;min-width:24px">
         </div>
       </div>
       <div style="width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)" title="${name}">${name}</div>
@@ -4177,7 +4177,7 @@ function renderPolicy() {
     const destParts = [r.destFQDN, r.destCategory].filter(Boolean);
     const dest = destParts.join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const countryCell = r.destCountry && r.destCountry.length
-      ? r.destCountry.map(c => `<span style="font-family:monospace;font-size:.72rem;background:rgba(59,130,246,.15);padding:1px 5px;border-radius:4px">${countryFlag(c)}${c}</span>`).join(' ')
+      ? r.destCountry.map(c => `<span style="font-family:monospace;font-size:.72rem;background:rgba(20,184,166,.15);padding:1px 5px;border-radius:4px">${countryFlag(c)}${c}</span>`).join(' ')
       : '<span style="color:var(--muted)">Any</span>';
     const fileProfileCell = r.fileProfile
       ? `<span style="font-size:.72rem;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 6px;border-radius:4px">${r.fileProfile}</span>`
@@ -4373,7 +4373,7 @@ function idpProviderMeta(p) {
   if (src.includes('jumpcloud'))    return { label: 'JumpCloud',    color: '#16ad62', icon: '☁️' };
   if (src.includes('gsuite') || src.includes('workspace')) return { label: 'Google Workspace', color: '#fbbc04', icon: '📧' };
   if (src.includes('adfs') || src.includes('active directory')) return { label: 'ADFS', color: '#0078d4', icon: '🏢' };
-  return { label: p.type === 'saml' ? 'SAML 2.0' : 'OIDC',  color: '#3b82f6', icon: p.type === 'saml' ? '🔐' : '🌐' };
+  return { label: p.type === 'saml' ? 'SAML 2.0' : 'OIDC',  color: '#14b8a6', icon: p.type === 'saml' ? '🔐' : '🌐' };
 }
 
 async function loadIdPList() {
@@ -4402,7 +4402,7 @@ async function loadIdPList() {
   el.innerHTML = list.map(p => {
     const meta = idpProviderMeta(p);
     const protoBadge = p.type === 'saml'
-      ? `<span style="background:rgba(59,130,246,.12);color:#60a5fa;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">SAML</span>`
+      ? `<span style="background:rgba(20,184,166,.12);color:#2dd4bf;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">SAML</span>`
       : `<span style="background:rgba(16,185,129,.12);color:#34d399;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">OIDC</span>`;
     const statusBadge = p.enabled
       ? `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,.1);color:#22c55e;border-radius:4px;padding:2px 8px;font-size:.7rem;font-weight:600"><span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block"></span>Enabled</span>`
@@ -5020,7 +5020,7 @@ async function runPolicyTest() {
   if (data.hostCategory && data.hostCategory.tier !== 'none') {
     const hc = data.hostCategory;
     const tierLabel = hc.tier === 'admin' ? '★ Admin-managed' : 'Community feed';
-    const tierColor = hc.tier === 'admin' ? '#60a5fa' : '#a78bfa';
+    const tierColor = hc.tier === 'admin' ? '#2dd4bf' : '#a78bfa';
     const viaStr = hc.matchedBy && hc.matchedBy !== host
       ? ` <span style="color:var(--text-muted);font-size:.75rem">via ${escHtml(hc.matchedBy)}</span>`
       : '';
@@ -5282,7 +5282,7 @@ function prettyJSON(str) {
 <!-- ── User Modal / Role Badges ─────────────────────────────────────────── -->
 <style>
 .role-badge-admin    { background:rgba(239,68,68,.15);  color:#f87171; }
-.role-badge-operator { background:rgba(59,130,246,.15); color:#60a5fa; }
+.role-badge-operator { background:rgba(20,184,166,.15); color:#2dd4bf; }
 .role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }
 #user-modal { display:none }
 #user-modal.open { display:flex }
@@ -5292,7 +5292,7 @@ function prettyJSON(str) {
   background:var(--surface);transition:background .1s,border-color .1s;
 }
 .sched-day-lbl:has(input:checked) {
-  background:rgba(59,130,246,.2);border-color:var(--accent);color:var(--accent2);
+  background:rgba(20,184,166,.2);border-color:var(--accent);color:var(--accent2);
 }
 #blocklist-mode-bar {
   display:flex;align-items:center;gap:10px;padding:8px 12px;
