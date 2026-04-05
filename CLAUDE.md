@@ -94,6 +94,9 @@ docker compose up -d
 - **Security**: SSRF checks via `isPrivateHost()` before any outbound dial
 - **Tests**: Test files use `_test.go` suffix, same package (whitebox)
 - **Lint suppressions**: Use `//nolint:errcheck` with reason comment; `// #nosec G402` for gosec
+- **GUI parity**: Every new CLI flag or config option MUST have a corresponding admin API endpoint AND a UI panel/section so the user can manage it from the GUI. CLI-only features are not acceptable — the admin must have full control from the web interface.
+- **API pattern**: Admin API handlers follow `apiXxx(w, r)` naming, registered in `startUI()` in `ui.go`. Use `requireRole(w, r, "admin")` for write operations, `requireRole(w, r, "viewer")` for reads.
+- **UI pattern**: SPA panels in `static/index.html` use `data-view="name"` attributes. New panels need a nav-item in the sidebar, a view div, and JS load/render functions.
 
 ## CI Pipelines
 
@@ -116,3 +119,6 @@ docker compose up -d
 - **Audit actor**: Enriched with authenticated admin identity from session cookie
 - **Threat feed allowlist**: Popular hosting domains (GitHub, Google Drive, etc.) are exempt from domain-level blocking; URL-level blocking still applies. Managed via admin API + UI, persisted in threat feed DB.
 - **UnauthMode persistence**: Open/Policy-Only mode survives restarts via JSON envelope format in ui_users.json
+- **Performance tuning**: Transport pool uses 512 max idle conns, 64 per host, 128KB relay buffers (sync.Pool), sharded rate limiter (64 shards), lock-free latency histogram
+- **Relay buffers**: All tunnel relays (bypass, inspect, WebSocket) use `relayBufPool` (128 KB pooled buffers) via `io.CopyBuffer`
+- **Roadmap**: See `roadmap/ROADMAP.md` for production deployment action items, `roadmap/FEATURE-COVERAGE.md` for GUI coverage audit, `roadmap/UI-DESIGN.md` for new panel wireframes

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -189,13 +190,23 @@ func (f *IPFilter) Allowed(ipStr string) bool {
 
 // ─── Rate Limiter ─────────────────────────────────────────────────────────────
 
+// RateLimiter is a per-IP sliding-window rate limiter using sharded locks to
+// minimise contention in the hot path. 64 shards are chosen so that concurrent
+// requests from different IPs almost never compete for the same lock.
+
+const rlShardCount = 64
+
+type rlShard struct {
+	mu      sync.Mutex
+	clients map[string]*clientBucket
+}
+
 // RateLimiter is a per-IP sliding-window rate limiter.
 type RateLimiter struct {
-	mu      sync.Mutex
-	limit   int           // max requests per window
-	window  time.Duration // window size
-	clients map[string]*clientBucket
-	enabled bool
+	shards  [rlShardCount]rlShard
+	limit   atomic.Int64
+	window  atomic.Int64 // nanoseconds
+	enabled atomic.Bool
 }
 
 type clientBucket struct {
@@ -203,38 +214,54 @@ type clientBucket struct {
 	lastSeen   time.Time
 }
 
-var rl = &RateLimiter{
-	clients: map[string]*clientBucket{},
+var rl = newRateLimiter()
+
+func newRateLimiter() *RateLimiter {
+	r := &RateLimiter{}
+	for i := range r.shards {
+		r.shards[i].clients = make(map[string]*clientBucket)
+	}
+	return r
+}
+
+func (r *RateLimiter) shard(ip string) *rlShard {
+	// FNV-1a inspired hash — fast, good distribution.
+	h := uint64(14695981039346656037)
+	for i := 0; i < len(ip); i++ {
+		h ^= uint64(ip[i])
+		h *= 1099511628211
+	}
+	return &r.shards[h%rlShardCount]
 }
 
 func (r *RateLimiter) Configure(limit int, window time.Duration) {
-	r.mu.Lock()
-	r.limit = limit
-	r.window = window
-	r.enabled = limit > 0
-	r.mu.Unlock()
+	r.limit.Store(int64(limit))
+	r.window.Store(int64(window))
+	r.enabled.Store(limit > 0)
 }
 
 func (r *RateLimiter) Enabled() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.enabled
+	return r.enabled.Load()
 }
 
 // Allow returns true if the IP is within its rate limit.
 func (r *RateLimiter) Allow(ip string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.enabled {
+	if !r.enabled.Load() {
 		return true
 	}
+	limit := int(r.limit.Load())
+	window := time.Duration(r.window.Load())
 	now := time.Now()
-	cutoff := now.Add(-r.window)
+	cutoff := now.Add(-window)
 
-	b, ok := r.clients[ip]
+	s := r.shard(ip)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, ok := s.clients[ip]
 	if !ok {
 		b = &clientBucket{}
-		r.clients[ip] = b
+		s.clients[ip] = b
 	}
 	b.lastSeen = now
 
@@ -247,7 +274,7 @@ func (r *RateLimiter) Allow(ip string) bool {
 	}
 	b.timestamps = valid
 
-	if len(b.timestamps) >= r.limit {
+	if len(b.timestamps) >= limit {
 		return false
 	}
 	b.timestamps = append(b.timestamps, now)
@@ -256,24 +283,24 @@ func (r *RateLimiter) Allow(ip string) bool {
 
 // Cleanup removes stale client entries (call periodically).
 func (r *RateLimiter) Cleanup() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	cutoff := time.Now().Add(-r.window * 2)
-	for ip, b := range r.clients {
-		if b.lastSeen.Before(cutoff) {
-			delete(r.clients, ip)
+	window := time.Duration(r.window.Load())
+	cutoff := time.Now().Add(-window * 2)
+	for i := range r.shards {
+		s := &r.shards[i]
+		s.mu.Lock()
+		for ip, b := range s.clients {
+			if b.lastSeen.Before(cutoff) {
+				delete(s.clients, ip)
+			}
 		}
+		s.mu.Unlock()
 	}
 }
 
 func (r *RateLimiter) Limit() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.limit
+	return int(r.limit.Load())
 }
 
 func (r *RateLimiter) Window() time.Duration {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.window
+	return time.Duration(r.window.Load())
 }

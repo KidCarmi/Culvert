@@ -13,9 +13,16 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// relayBufPool provides reusable 128 KB buffers for tunnel relays, replacing
+// io.Copy's default 32 KB allocation and reducing GC pressure under load.
+var relayBufPool = sync.Pool{
+	New: func() any { b := make([]byte, 128*1024); return &b },
+}
 
 // defaultPolicyAction controls what happens when no PBAC rule matches a request.
 // "allow" = passthrough mode (initial setup), "deny" = zero-trust (production).
@@ -694,7 +701,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Bridge: drain any buffered bytes from the target first.
 	done := make(chan struct{}, 2)
 	relay := func(dst net.Conn, src io.Reader) {
-		io.Copy(dst, src) //nolint:errcheck
+		bp := relayBufPool.Get().(*[]byte)
+		io.CopyBuffer(dst, src, *bp) //nolint:errcheck
+		relayBufPool.Put(bp)
 		done <- struct{}{}
 	}
 	go relay(clientConn, br)       // target → client (br may have buffered bytes)
@@ -723,10 +732,15 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, t
 // connections to upstream servers are pooled across requests, avoiding the
 // overhead of a new TCP/TLS handshake per proxied request.
 var upstreamTransport = &http.Transport{
-	MaxIdleConns:        256,
-	MaxIdleConnsPerHost: 16,
-	MaxConnsPerHost:     64,
-	IdleConnTimeout:     90 * time.Second,
+	MaxIdleConns:          512,
+	MaxIdleConnsPerHost:   64,
+	MaxConnsPerHost:       0, // unlimited — let the OS handle it
+	IdleConnTimeout:       120 * time.Second,
+	TLSHandshakeTimeout:  10 * time.Second,
+	ResponseHeaderTimeout: 30 * time.Second,
+	DisableCompression:    false,
+	WriteBufferSize:       64 * 1024, // 64 KB
+	ReadBufferSize:        64 * 1024, // 64 KB
 }
 
 // applyUpstreamProxy configures the shared transport to route through parent
@@ -769,7 +783,12 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 	defer recordActiveConn(-1)
 
 	done := make(chan struct{}, 2)
-	relay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} } //nolint:errcheck
+	relay := func(dst, src net.Conn) {
+		bp := relayBufPool.Get().(*[]byte)
+		io.CopyBuffer(dst, src, *bp) //nolint:errcheck
+		relayBufPool.Put(bp)
+		done <- struct{}{}
+	}
 	go relay(destConn, clientConn)
 	go relay(clientConn, destConn)
 	<-done
@@ -920,7 +939,12 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			resp.Write(clientTLS) //nolint:errcheck
 			resp.Body.Close()
 			done := make(chan struct{}, 2)
-			rawRelay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} } //nolint:errcheck
+			rawRelay := func(dst, src net.Conn) {
+				bp := relayBufPool.Get().(*[]byte)
+				io.CopyBuffer(dst, src, *bp) //nolint:errcheck
+				relayBufPool.Put(bp)
+				done <- struct{}{}
+			}
 			go rawRelay(upstreamTLS, clientTLS)
 			go rawRelay(clientTLS, upstreamTLS)
 			<-done

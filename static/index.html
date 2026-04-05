@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Culvert</title>
+<link rel="icon" type="image/png" href="logo.png">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 /* ─── Reset & Variables ──────────────────────────────────────────────────── */
@@ -13,8 +14,8 @@
   --surface:   #111827;
   --surface2:  #1a2235;
   --border:    #1f2d45;
-  --accent:    #3b82f6;
-  --accent2:   #60a5fa;
+  --accent:    #14b8a6;
+  --accent2:   #2dd4bf;
   --green:     #22c55e;
   --red:       #ef4444;
   --orange:    #f97316;
@@ -41,10 +42,9 @@ body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   display: flex; align-items: center; gap: 10px;
 }
 .logo-icon {
-  width: 32px; height: 32px; background: var(--accent);
-  border-radius: 8px; display: flex; align-items: center; justify-content: center;
-  font-size: 16px; flex-shrink: 0;
+  width: 36px; height: 36px; flex-shrink: 0;
 }
+.logo-icon img { width: 100%; height: 100%; object-fit: contain; }
 .logo-text { font-size: 1rem; font-weight: 700; color: var(--text); }
 .logo-sub  { font-size: .65rem; color: var(--muted); }
 nav { flex: 1; padding: 12px 10px; }
@@ -57,7 +57,7 @@ nav { flex: 1; padding: 12px 10px; }
   font-size: .85rem; color: var(--muted); transition: all .15s; margin-bottom: 1px;
 }
 .nav-item:hover  { background: var(--surface2); color: var(--text); }
-.nav-item.active { background: rgba(59,130,246,.15); color: var(--accent2);
+.nav-item.active { background: rgba(20,184,166,.15); color: var(--accent2);
                    font-weight: 600; }
 .nav-item .icon  { width: 18px; text-align: center; flex-shrink: 0; }
 .nav-badge {
@@ -210,12 +210,12 @@ tbody tr:hover { background: var(--surface2); }
 .badge.drop     { background: rgba(239,68,68,.12);  color: var(--red); }
 .badge.blockpg  { background: rgba(239,68,68,.12);  color: var(--red); }
 .badge.redirect { background: rgba(249,115,22,.12); color: var(--orange); }
-.badge.inspect  { background: rgba(59,130,246,.12); color: var(--accent2); }
+.badge.inspect  { background: rgba(20,184,166,.12); color: var(--accent2); }
 .badge.bypass   { background: rgba(100,116,139,.12);color: var(--muted); }
 /* ─── Drag & drop ────────────────────────────────────────────────────────── */
 .drag-handle { cursor: grab; color: var(--muted); padding: 0 4px; user-select: none; font-size:1rem; }
 .drag-handle:active { cursor: grabbing; }
-tr.drag-over { background: rgba(59,130,246,.08) !important; outline: 1px dashed var(--accent); }
+tr.drag-over { background: rgba(20,184,166,.08) !important; outline: 1px dashed var(--accent); }
 tr.dragging  { opacity: .4; }
 /* ─── Policy pickers (group / country) ──────────────────────────────────── */
 .picker-dropdown {
@@ -228,11 +228,11 @@ tr.dragging  { opacity: .4; }
   padding: 7px 12px; cursor: pointer; font-size: .82rem;
   display: flex; align-items: center; gap: 8px;
 }
-.picker-option:hover { background: rgba(59,130,246,.1); color: var(--accent2); }
+.picker-option:hover { background: rgba(20,184,166,.1); color: var(--accent2); }
 .picker-empty { padding: 12px; text-align: center; color: var(--muted); font-size: .78rem; }
 .picker-chip {
   display: inline-flex; align-items: center; gap: 4px;
-  background: rgba(59,130,246,.15); border: 1px solid rgba(59,130,246,.3);
+  background: rgba(20,184,166,.15); border: 1px solid rgba(20,184,166,.3);
   color: var(--accent2); padding: 2px 8px 2px 6px; border-radius: 999px;
   font-size: .75rem; font-weight: 600;
 }
@@ -242,7 +242,7 @@ tr.dragging  { opacity: .4; }
 }
 .group-chip-row {
   display: flex; align-items: center; gap: 6px; padding: 5px 10px;
-  background: rgba(59,130,246,.12); border: 1px solid rgba(59,130,246,.3);
+  background: rgba(20,184,166,.12); border: 1px solid rgba(20,184,166,.3);
   border-radius: 7px; font-size: .82rem;
 }
 .country-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
@@ -253,7 +253,7 @@ tr.dragging  { opacity: .4; }
 <!-- ═══ SIDEBAR ════════════════════════════════════════════════════════════ -->
 <aside id="sidebar">
   <div class="logo">
-    <div class="logo-icon">🛡️</div>
+    <div class="logo-icon"><img src="logo.png" alt="Culvert"></div>
     <div>
       <div class="logo-text">Culvert</div>
       <div class="logo-sub">v1.0 · Open Source</div>
@@ -286,17 +286,33 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="fileblock">
       <span class="icon">🛡️</span> File Block
     </div>
+    <div class="nav-section">Network</div>
     <div class="nav-item" data-view="rewrite">
       <span class="icon">✏️</span> Rewrite
     </div>
-    <div class="nav-item" data-view="idproviders">
-      <span class="icon">🪪</span> Identity Providers
+    <div class="nav-item" data-view="upstream">
+      <span class="icon">🔗</span> Upstream Proxies
     </div>
     <div class="nav-item" data-view="pac">
       <span class="icon">📡</span> PAC File
     </div>
+
+    <div class="nav-section">Identity</div>
+    <div class="nav-item" data-view="idproviders">
+      <span class="icon">🪪</span> Identity Providers
+    </div>
+
+    <div class="nav-section">Certificates</div>
     <div class="nav-item" data-view="certificates">
-      <span class="icon">🔑</span> Certificates
+      <span class="icon">🔑</span> SSL / TLS
+    </div>
+    <div class="nav-item" data-view="ca-mgmt">
+      <span class="icon">🏛️</span> CA Management
+    </div>
+
+    <div class="nav-section">Infrastructure</div>
+    <div class="nav-item" data-view="cluster">
+      <span class="icon">🖥️</span> Cluster Nodes
     </div>
     <div class="nav-item" data-view="settings">
       <span class="icon">⚙️</span> Settings
@@ -357,7 +373,7 @@ tr.dragging  { opacity: .4; }
       <div id="ca-expiry-banner" style="display:none;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:.85rem;font-weight:500"></div>
 
       <!-- Getting Started banner — shown when no traffic yet -->
-      <div id="getting-started-banner" style="display:none;padding:18px 22px;border-radius:8px;margin-bottom:18px;background:linear-gradient(135deg,rgba(59,130,246,.08),rgba(16,185,129,.08));border:1px solid rgba(59,130,246,.2)">
+      <div id="getting-started-banner" style="display:none;padding:18px 22px;border-radius:8px;margin-bottom:18px;background:linear-gradient(135deg,rgba(20,184,166,.08),rgba(16,185,129,.08));border:1px solid rgba(20,184,166,.2)">
         <div style="display:flex;justify-content:space-between;align-items:start">
           <div>
             <strong style="font-size:1rem;color:var(--text)">Getting Started</strong>
@@ -768,6 +784,37 @@ tr.dragging  { opacity: .4; }
         </div>
       </div>
 
+      <!-- Connection Limits -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Connection Limits</span></div>
+        <div class="panel-body">
+          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer">
+              <input type="checkbox" id="connlimit-enabled" checked> Enabled
+            </label>
+            <div style="display:flex;align-items:center;gap:6px;font-size:.85rem">
+              <span>Max per IP:</span>
+              <input type="number" class="input" id="connlimit-max" value="1024" style="width:100px" min="1">
+            </div>
+            <span style="font-size:.8rem;color:var(--muted)">Active IPs: <strong id="connlimit-active">—</strong></span>
+            <button class="btn sm" onclick="saveConnLimit()">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Block Page Template -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Block Page Template</span></div>
+        <div class="panel-body">
+          <textarea id="blockpage-html" class="input" style="width:100%;height:200px;font-family:monospace;font-size:.78rem;resize:vertical" placeholder="Loading..."></textarea>
+          <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
+            <button class="btn sm" onclick="saveBlockPage()">Save Template</button>
+            <button class="btn sm ghost" onclick="resetBlockPage()">Reset to Default</button>
+            <span style="font-size:.75rem;color:var(--muted)">Variables: {{.URL}} {{.Category}} {{.RuleName}} {{.Timestamp}}</span>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- ── IDENTITY PROVIDERS ─────────────────────────────────────────────── -->
@@ -1038,7 +1085,7 @@ tr.dragging  { opacity: .4; }
       font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
       padding:2px 7px;border-radius:4px;flex-shrink:0;
     }
-    .idp-proto-badge.saml { background:rgba(59,130,246,.15);color:#60a5fa; }
+    .idp-proto-badge.saml { background:rgba(20,184,166,.15);color:#2dd4bf; }
     .idp-proto-badge.oidc { background:rgba(16,185,129,.15);color:#34d399; }
     /* Copy button in SP info panel */
     .idp-copy-btn {
@@ -1302,7 +1349,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">🔑 Proxy Authentication Mode</span></div>
         <div class="panel-body">
-          <div id="s-unauth-status-bar" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.85rem;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2)">
+          <div id="s-unauth-status-bar" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.85rem;background:rgba(20,184,166,.08);border:1px solid rgba(20,184,166,.2)">
             <span id="s-unauth-mode-icon" style="font-size:1.2rem">🔒</span>
             <div>
               <div id="s-unauth-mode-label" style="font-weight:600">Credentials Required</div>
@@ -1631,7 +1678,7 @@ Firefox (all platforms):
           <span class="panel-title">Active Policy Rules</span>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <span class="topbar-meta" id="pol-count">0 rules</span>
-            <span id="pol-version-badge" style="display:none;background:rgba(59,130,246,.15);color:#60a5fa;border:1px solid rgba(59,130,246,.3);border-radius:4px;padding:2px 8px;font-size:.68rem;font-weight:700;font-family:monospace" title="Policy revision. Increments on every add/edit/delete/reorder."></span>
+            <span id="pol-version-badge" style="display:none;background:rgba(20,184,166,.15);color:#2dd4bf;border:1px solid rgba(20,184,166,.3);border-radius:4px;padding:2px 8px;font-size:.68rem;font-weight:700;font-family:monospace" title="Policy revision. Increments on every add/edit/delete/reorder."></span>
             <span id="pol-updated-badge" style="font-size:.68rem;color:var(--muted)" title="Last policy change"></span>
             <span style="font-size:.72rem;color:var(--muted)">⠿ drag rows to reorder</span>
           </div>
@@ -1888,6 +1935,115 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-audit -->
 
+    <!-- ═══ CA MANAGEMENT ════════════════════════════════════════════════ -->
+    <div class="view" id="view-ca-mgmt">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">CA Management</span>
+          <button class="btn ghost sm" onclick="loadCAMgmt()">↺ Refresh</button>
+        </div>
+        <div class="cards" id="ca-cards" style="grid-template-columns:repeat(3,1fr)">
+          <div class="card"><div class="card-label">Status</div><div class="card-value" id="ca-status">—</div></div>
+          <div class="card"><div class="card-label">Expires</div><div class="card-value" id="ca-expiry">—</div></div>
+          <div class="card"><div class="card-label">Key Provider</div><div class="card-value" id="ca-provider">—</div></div>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Root CA Certificate</span></div>
+        <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+          <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;font-size:.85rem" id="ca-details"></div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button class="btn sm" onclick="downloadCA()">Download CA Cert (PEM)</button>
+            <button class="btn sm danger" onclick="forceRotateCA()">Force Rotate Now</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Leaf Certificate Cache</span></div>
+        <div style="padding:16px;display:flex;align-items:center;gap:16px;font-size:.85rem">
+          <span>Cached: <strong id="ca-cache-size">—</strong> / <span id="ca-cache-max">—</span></span>
+          <span>TTL: <span id="ca-cache-ttl">—</span></span>
+          <span>Leaf validity: <span id="ca-leaf-validity">—</span></span>
+          <button class="btn sm ghost" onclick="clearCACache()">Clear Cache</button>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">OCSP / CRL Revocation</span></div>
+        <div style="padding:16px;display:flex;align-items:center;gap:16px;font-size:.85rem">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="ocsp-toggle" onchange="toggleOCSP(this.checked)"> Enable OCSP checking
+          </label>
+          <span>Cache entries: <strong id="ocsp-cache-len">—</strong></span>
+        </div>
+      </div>
+    </div><!-- /view-ca-mgmt -->
+
+    <!-- ═══ UPSTREAM PROXIES ══════════════════════════════════════════════ -->
+    <div class="view" id="view-upstream">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Upstream Proxies</span>
+          <div style="display:flex;gap:8px">
+            <button class="btn sm ghost" onclick="upstreamHealthCheck()">Health Check</button>
+            <button class="btn sm" onclick="showUpstreamAdd()">+ Add Proxy</button>
+          </div>
+        </div>
+        <div id="upstream-empty" style="padding:32px;text-align:center;color:var(--muted);font-size:.85rem">
+          No upstream proxies configured. Traffic goes directly to the internet.
+        </div>
+        <div class="tbl-wrap">
+          <table id="upstream-table" style="display:none">
+            <thead><tr><th>URL</th><th>Health</th><th>Circuit</th><th>Actions</th></tr></thead>
+            <tbody id="upstream-tbody"></tbody>
+          </table>
+        </div>
+        <div id="upstream-add-form" style="display:none;padding:16px;border-top:1px solid var(--border)">
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" class="input" id="upstream-url-input" placeholder="http://parent-proxy:3128" style="flex:1">
+            <button class="btn sm" onclick="addUpstreamProxy()">Add</button>
+            <button class="btn sm ghost" onclick="document.getElementById('upstream-add-form').style.display='none'">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-upstream -->
+
+    <!-- ═══ CLUSTER NODES ════════════════════════════════════════════════ -->
+    <div class="view" id="view-cluster">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Cluster Nodes</span>
+          <button class="btn ghost sm" onclick="loadCluster()">↺ Refresh</button>
+        </div>
+        <div class="cards" id="cluster-cards" style="grid-template-columns:repeat(3,1fr)">
+          <div class="card"><div class="card-label">Role</div><div class="card-value" id="cluster-role">—</div></div>
+          <div class="card"><div class="card-label">Node ID</div><div class="card-value" id="cluster-node-id">—</div></div>
+          <div class="card"><div class="card-label">gRPC Address</div><div class="card-value" id="cluster-grpc">—</div></div>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:16px" id="cluster-nodes-panel">
+        <div class="panel-header"><span class="panel-title">Connected Data Plane Nodes</span></div>
+        <div id="cluster-no-nodes" style="padding:24px;text-align:center;color:var(--muted);font-size:.85rem">
+          No Data Plane nodes connected. This node is running in standalone mode.
+        </div>
+        <div class="tbl-wrap">
+          <table id="cluster-nodes-table" style="display:none">
+            <thead><tr><th>Node ID</th><th>Total Requests</th><th>Blocked</th><th>Auth Failures</th><th>Uptime</th></tr></thead>
+            <tbody id="cluster-nodes-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:16px" id="cluster-enrollment-panel" style="display:none">
+        <div class="panel-header"><span class="panel-title">Enrollment</span></div>
+        <div style="padding:16px;font-size:.85rem">
+          <p style="color:var(--muted);margin-bottom:12px">To add a Data Plane node, start Culvert with:</p>
+          <pre id="cluster-enroll-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.78rem;overflow-x:auto;color:var(--accent2)"></pre>
+        </div>
+      </div>
+    </div><!-- /view-cluster -->
+
+    <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
+    <!-- (embedded inside Security panel later, but available as standalone) -->
+
   </div><!-- /content -->
 </div><!-- /main -->
 
@@ -1923,6 +2079,9 @@ const viewMeta = {
   idproviders:  { title: 'Identity Providers', meta: 'OIDC & SAML 2.0 identity provider profiles' },
   pac:          { title: 'PAC File',      meta: 'Proxy Auto-Configuration — serve /proxy.pac to Windows/macOS clients' },
   certificates: { title: 'Certificates', meta: 'Root CA management & custom TLS certificates' },
+  'ca-mgmt':    { title: 'CA Management', meta: 'Root CA lifecycle, rotation, OCSP, and HSM/KMS key provider' },
+  upstream:     { title: 'Upstream Proxies', meta: 'Parent proxy chaining with failover and circuit breaker' },
+  cluster:      { title: 'Cluster Nodes', meta: 'Multi-node Control Plane / Data Plane management' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
   users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
@@ -1952,6 +2111,9 @@ function switchView(name) {
   if (name === 'rewrite')        fetchRewrite();
   if (name === 'pac')            loadPACConfig();
   if (name === 'policy-tester')  loadPolicyProviderOptions();
+  if (name === 'ca-mgmt')        loadCAMgmt();
+  if (name === 'upstream')       loadUpstream();
+  if (name === 'cluster')        loadCluster();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1967,8 +2129,8 @@ function initChart() {
         {
           label: 'Total',
           data: new Array(60).fill(0),
-          borderColor: '#3b82f6',
-          backgroundColor: 'rgba(59,130,246,.06)',
+          borderColor: '#14b8a6',
+          backgroundColor: 'rgba(20,184,166,.06)',
           fill: true,
           tension: .4,
           pointRadius: 0,
@@ -2226,7 +2388,7 @@ async function runURLLookup() {
       </div>`;
     } else {
       const tierLabel = d.tier === 'admin' ? '★ Admin-managed' : d.tier === 'community' ? 'Community feed' : '';
-      const tierColor = d.tier === 'admin' ? '#60a5fa' : '#a78bfa';
+      const tierColor = d.tier === 'admin' ? '#2dd4bf' : '#a78bfa';
       const viaStr    = d.matchedBy && d.matchedBy !== d.host
         ? ` <span style="color:var(--muted);font-size:.78rem">(via ${escHtml(d.matchedBy)})</span>`
         : '';
@@ -2782,7 +2944,7 @@ function _blRenderPage(append) {
     const jh = JSON.stringify(e.host).replace(/"/g, '&quot;');
     const wild = e.host.startsWith('*.');
     const srcBadge = e.source === 'manual'
-      ? '<span class="badge" style="background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.25);font-size:10px">Admin</span>'
+      ? '<span class="badge" style="background:rgba(20,184,166,.12);color:#2dd4bf;border:1px solid rgba(20,184,166,.25);font-size:10px">Admin</span>'
       : '<span class="badge" style="background:var(--surface2);color:var(--muted);font-size:10px">Feed</span>';
     return `<tr>
       <td class="host-td">${h}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
@@ -3418,8 +3580,8 @@ function renderUnauthModeUI(enabled) {
     btn.textContent = 'Switch to Credentials Required';
     btn.className = 'btn danger';
   } else {
-    bar.style.background = 'rgba(59,130,246,.08)';
-    bar.style.borderColor = 'rgba(59,130,246,.2)';
+    bar.style.background = 'rgba(20,184,166,.08)';
+    bar.style.borderColor = 'rgba(20,184,166,.2)';
     icon.textContent = '🔒';
     lbl.textContent = 'Credentials Required';
     desc.textContent = 'Proxy requires Proxy-Authorization. Clients must authenticate before any traffic is forwarded.';
@@ -3794,7 +3956,7 @@ document.getElementById('fb-ext-input').addEventListener('keydown', e => {
 // ═══════════════════════════════════════════════════════════════════════════
 // File Extension Profiles (dynamic, policy-assignable)
 // ═══════════════════════════════════════════════════════════════════════════
-const FP_COLORS = ['#6366f1','#3b82f6','#22c55e','#f59e0b','#ef4444','#a855f7','#f97316','#14b8a6'];
+const FP_COLORS = ['#6366f1','#38bdf8','#22c55e','#f59e0b','#ef4444','#a855f7','#f97316','#14b8a6'];
 
 function fpColor(name) {
   let h = 0;
@@ -4032,8 +4194,8 @@ function renderCountryChart(countries) {
     const name = c.name || c.code;
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:.8rem">
       <div style="width:28px;text-align:right;font-family:monospace;font-size:.72rem;color:var(--muted)">${countryFlag(c.code)}${c.code}</div>
-      <div style="flex:1;background:rgba(59,130,246,.1);border-radius:4px;overflow:hidden">
-        <div style="height:20px;background:rgba(59,130,246,.55);width:${pct}%;border-radius:4px;transition:width .3s;display:flex;align-items:center;padding:0 6px;min-width:24px">
+      <div style="flex:1;background:rgba(20,184,166,.1);border-radius:4px;overflow:hidden">
+        <div style="height:20px;background:rgba(20,184,166,.55);width:${pct}%;border-radius:4px;transition:width .3s;display:flex;align-items:center;padding:0 6px;min-width:24px">
         </div>
       </div>
       <div style="width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)" title="${name}">${name}</div>
@@ -4177,7 +4339,7 @@ function renderPolicy() {
     const destParts = [r.destFQDN, r.destCategory].filter(Boolean);
     const dest = destParts.join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const countryCell = r.destCountry && r.destCountry.length
-      ? r.destCountry.map(c => `<span style="font-family:monospace;font-size:.72rem;background:rgba(59,130,246,.15);padding:1px 5px;border-radius:4px">${countryFlag(c)}${c}</span>`).join(' ')
+      ? r.destCountry.map(c => `<span style="font-family:monospace;font-size:.72rem;background:rgba(20,184,166,.15);padding:1px 5px;border-radius:4px">${countryFlag(c)}${c}</span>`).join(' ')
       : '<span style="color:var(--muted)">Any</span>';
     const fileProfileCell = r.fileProfile
       ? `<span style="font-size:.72rem;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 6px;border-radius:4px">${r.fileProfile}</span>`
@@ -4337,7 +4499,7 @@ setInterval(tick, 3000);
 // Reload panels when switching views
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
-    if (el.dataset.view === 'security')      loadSecurity();
+    if (el.dataset.view === 'security')      { loadSecurity(); loadConnLimit(); loadBlockPage(); }
     if (el.dataset.view === 'fileblock')     fetchFileBlock();
     if (el.dataset.view === 'rewrite')       fetchRewrite();
     if (el.dataset.view === 'dashboard')     fetchTopHosts();
@@ -4373,7 +4535,7 @@ function idpProviderMeta(p) {
   if (src.includes('jumpcloud'))    return { label: 'JumpCloud',    color: '#16ad62', icon: '☁️' };
   if (src.includes('gsuite') || src.includes('workspace')) return { label: 'Google Workspace', color: '#fbbc04', icon: '📧' };
   if (src.includes('adfs') || src.includes('active directory')) return { label: 'ADFS', color: '#0078d4', icon: '🏢' };
-  return { label: p.type === 'saml' ? 'SAML 2.0' : 'OIDC',  color: '#3b82f6', icon: p.type === 'saml' ? '🔐' : '🌐' };
+  return { label: p.type === 'saml' ? 'SAML 2.0' : 'OIDC',  color: '#14b8a6', icon: p.type === 'saml' ? '🔐' : '🌐' };
 }
 
 async function loadIdPList() {
@@ -4402,7 +4564,7 @@ async function loadIdPList() {
   el.innerHTML = list.map(p => {
     const meta = idpProviderMeta(p);
     const protoBadge = p.type === 'saml'
-      ? `<span style="background:rgba(59,130,246,.12);color:#60a5fa;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">SAML</span>`
+      ? `<span style="background:rgba(20,184,166,.12);color:#2dd4bf;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">SAML</span>`
       : `<span style="background:rgba(16,185,129,.12);color:#34d399;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">OIDC</span>`;
     const statusBadge = p.enabled
       ? `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,.1);color:#22c55e;border-radius:4px;padding:2px 8px;font-size:.7rem;font-weight:600"><span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block"></span>Enabled</span>`
@@ -5020,7 +5182,7 @@ async function runPolicyTest() {
   if (data.hostCategory && data.hostCategory.tier !== 'none') {
     const hc = data.hostCategory;
     const tierLabel = hc.tier === 'admin' ? '★ Admin-managed' : 'Community feed';
-    const tierColor = hc.tier === 'admin' ? '#60a5fa' : '#a78bfa';
+    const tierColor = hc.tier === 'admin' ? '#2dd4bf' : '#a78bfa';
     const viaStr = hc.matchedBy && hc.matchedBy !== host
       ? ` <span style="color:var(--text-muted);font-size:.75rem">via ${escHtml(hc.matchedBy)}</span>`
       : '';
@@ -5138,6 +5300,215 @@ function toggleAuditDiff(idx) {
 
 function prettyJSON(str) {
   try { return JSON.stringify(JSON.parse(str), null, 2); } catch { return str; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CA Management Panel
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadCAMgmt() {
+  const [ca, ocsp] = await Promise.all([
+    api('/api/ca/status'),
+    api('/api/ocsp'),
+  ]);
+  if (!ca || ca.error) return;
+  document.getElementById('ca-status').textContent = ca.ready ? 'Ready' : 'Not Initialized';
+  document.getElementById('ca-expiry').textContent = ca.expiresIn || '—';
+  document.getElementById('ca-provider').textContent = ca.keyProvider || 'local';
+  const det = document.getElementById('ca-details');
+  if (ca.ready) {
+    det.innerHTML = `
+      <span style="color:var(--muted)">Subject</span><span>${escHtml(ca.subject||'')}</span>
+      <span style="color:var(--muted)">Issuer</span><span>${escHtml(ca.issuer||'')}</span>
+      <span style="color:var(--muted)">Not Before</span><span>${ca.notBefore||''}</span>
+      <span style="color:var(--muted)">Not After</span><span>${ca.notAfter||''}</span>
+      <span style="color:var(--muted)">Fingerprint</span><span style="font-family:monospace;font-size:.75rem">${escHtml(ca.fingerprint||'')}</span>
+      <span style="color:var(--muted)">Auto-Rotation</span><span>${ca.autoRotation ? 'Enabled ('+ca.rotationOverlapDays+'d before expiry)' : 'Disabled'}</span>
+    `;
+  }
+  document.getElementById('ca-cache-size').textContent = ca.cacheSize ?? '—';
+  document.getElementById('ca-cache-max').textContent = ca.cacheMax ?? '—';
+  document.getElementById('ca-cache-ttl').textContent = ca.cacheTTL ?? '—';
+  document.getElementById('ca-leaf-validity').textContent = ca.leafValidity ?? '—';
+  if (ocsp) {
+    document.getElementById('ocsp-toggle').checked = !!ocsp.enabled;
+    document.getElementById('ocsp-cache-len').textContent = ocsp.cacheLen ?? 0;
+  }
+}
+
+async function downloadCA() {
+  const a = document.createElement('a');
+  a.href = '/api/ca/download';
+  a.download = 'culvert-ca.pem';
+  a.click();
+}
+
+async function clearCACache() {
+  if (!confirm('Clear all cached leaf certificates?')) return;
+  await api('/api/ca/cache-clear', {method:'POST'});
+  toast('Leaf certificate cache cleared','success');
+  loadCAMgmt();
+}
+
+async function forceRotateCA() {
+  if (!confirm('Force-rotate the Root CA now? All clients will need the new CA cert.')) return;
+  const r = await api('/api/ca/rotate', {method:'POST'});
+  if (r && !r.error) { toast('Root CA rotated successfully','success'); loadCAMgmt(); }
+  else toast('Rotation failed: '+(r?.error||'unknown'),'error');
+}
+
+async function toggleOCSP(enabled) {
+  await api('/api/ocsp', {method:'POST', body:{enabled}});
+  toast('OCSP checking '+(enabled?'enabled':'disabled'),'success');
+  loadCAMgmt();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Upstream Proxies Panel
+// ═══════════════════════════════════════════════════════════════════════════
+let upstreamData = [];
+async function loadUpstream() {
+  const r = await api('/api/upstream');
+  if (!r) return;
+  upstreamData = r.proxies || [];
+  renderUpstream();
+}
+
+function renderUpstream() {
+  const empty = document.getElementById('upstream-empty');
+  const table = document.getElementById('upstream-table');
+  const tbody = document.getElementById('upstream-tbody');
+  if (!upstreamData.length) {
+    empty.style.display = '';
+    table.style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  table.style.display = '';
+  tbody.innerHTML = upstreamData.map((p,i) => `<tr>
+    <td style="font-family:monospace;font-size:.82rem">${escHtml(p.url)}</td>
+    <td><span class="badge ${p.healthy?'ok':'blocked'}">${p.healthy?'Healthy':'Down'}</span></td>
+    <td><span class="badge ${p.circuit==='closed'?'ok':p.circuit==='open'?'blocked':'auth'}">${escHtml(p.circuit)}</span></td>
+    <td><button class="btn sm danger" onclick="removeUpstreamProxy(${i})">Remove</button></td>
+  </tr>`).join('');
+}
+
+function showUpstreamAdd() {
+  document.getElementById('upstream-add-form').style.display = '';
+  document.getElementById('upstream-url-input').focus();
+}
+
+async function addUpstreamProxy() {
+  const url = document.getElementById('upstream-url-input').value.trim();
+  if (!url) return;
+  const newList = [...upstreamData.map(p=>({url:p.url})), {url}];
+  await api('/api/upstream', {method:'POST', body:{proxies: newList}});
+  document.getElementById('upstream-url-input').value = '';
+  document.getElementById('upstream-add-form').style.display = 'none';
+  toast('Upstream proxy added','success');
+  loadUpstream();
+}
+
+async function removeUpstreamProxy(idx) {
+  const newList = upstreamData.filter((_,i) => i !== idx).map(p=>({url:p.url}));
+  await api('/api/upstream', {method:'POST', body:{proxies: newList}});
+  toast('Upstream proxy removed','success');
+  loadUpstream();
+}
+
+async function upstreamHealthCheck() {
+  await api('/api/upstream/health', {method:'POST'});
+  toast('Health check complete','success');
+  loadUpstream();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cluster Nodes Panel
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadCluster() {
+  const r = await api('/api/cluster/status');
+  if (!r) return;
+  document.getElementById('cluster-role').textContent = r.role || 'standalone';
+  document.getElementById('cluster-node-id').textContent = r.nodeID || '—';
+  document.getElementById('cluster-grpc').textContent = r.grpcAddr || '—';
+
+  const nodes = r.nodes || [];
+  const noNodes = document.getElementById('cluster-no-nodes');
+  const table = document.getElementById('cluster-nodes-table');
+  const tbody = document.getElementById('cluster-nodes-tbody');
+  const enrollPanel = document.getElementById('cluster-enrollment-panel');
+
+  if (r.role === 'control-plane' && nodes.length > 0) {
+    noNodes.style.display = 'none';
+    table.style.display = '';
+    tbody.innerHTML = nodes.map(n => `<tr>
+      <td style="font-weight:600">${escHtml(n.node_id)}</td>
+      <td>${n.total.toLocaleString()}</td>
+      <td>${n.blocked.toLocaleString()}</td>
+      <td>${n.auth_fail.toLocaleString()}</td>
+      <td>${escHtml(n.uptime)}</td>
+    </tr>`).join('');
+  } else {
+    noNodes.style.display = '';
+    table.style.display = 'none';
+    if (r.role === 'standalone') {
+      noNodes.textContent = 'No Data Plane nodes connected. This node is running in standalone mode.';
+    }
+  }
+
+  if (r.role === 'control-plane' && r.grpcAddr) {
+    enrollPanel.style.display = '';
+    document.getElementById('cluster-enroll-cmd').textContent =
+      `./culvert -dp-cp-addr ${r.grpcAddr} \\\n  -dp-node-id dp-new-node \\\n  -dp-cert /certs/dp.crt \\\n  -dp-key /certs/dp.key \\\n  -dp-ca /certs/ca.crt`;
+  } else {
+    enrollPanel.style.display = 'none';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Connection Limit (added to Security panel)
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadConnLimit() {
+  const r = await api('/api/connlimit');
+  if (!r) return;
+  const el = document.getElementById('connlimit-max');
+  if (el) el.value = r.maxPerIP || 1024;
+  const en = document.getElementById('connlimit-enabled');
+  if (en) en.checked = !!r.enabled;
+  const ips = document.getElementById('connlimit-active');
+  if (ips) ips.textContent = r.activeIPs || 0;
+}
+
+async function saveConnLimit() {
+  const max = parseInt(document.getElementById('connlimit-max').value) || 1024;
+  const enabled = document.getElementById('connlimit-enabled').checked;
+  await api('/api/connlimit', {method:'POST', body:{enabled, maxPerIP: max}});
+  toast('Connection limit updated','success');
+  loadConnLimit();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Block Page Template
+// ═══════════════════════════════════════════════════════════════════════════
+let blockPageDefault = '';
+async function loadBlockPage() {
+  const r = await api('/api/blockpage');
+  if (!r) return;
+  document.getElementById('blockpage-html').value = r.html || '';
+  if (!blockPageDefault) blockPageDefault = r.html || '';
+}
+
+async function saveBlockPage() {
+  const html = document.getElementById('blockpage-html').value.trim();
+  if (!html) { toast('Template cannot be empty','error'); return; }
+  const r = await api('/api/blockpage', {method:'PUT', body:{html}});
+  if (r && r.ok) toast('Block page template saved','success');
+  else toast('Save failed: '+(r?.error||'invalid template'),'error');
+}
+
+function resetBlockPage() {
+  if (!blockPageDefault) return;
+  document.getElementById('blockpage-html').value = blockPageDefault;
+  toast('Reset to default — click Save to apply','success');
 }
 </script>
 
@@ -5282,7 +5653,7 @@ function prettyJSON(str) {
 <!-- ── User Modal / Role Badges ─────────────────────────────────────────── -->
 <style>
 .role-badge-admin    { background:rgba(239,68,68,.15);  color:#f87171; }
-.role-badge-operator { background:rgba(59,130,246,.15); color:#60a5fa; }
+.role-badge-operator { background:rgba(20,184,166,.15); color:#2dd4bf; }
 .role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }
 #user-modal { display:none }
 #user-modal.open { display:flex }
@@ -5292,7 +5663,7 @@ function prettyJSON(str) {
   background:var(--surface);transition:background .1s,border-color .1s;
 }
 .sched-day-lbl:has(input:checked) {
-  background:rgba(59,130,246,.2);border-color:var(--accent);color:var(--accent2);
+  background:rgba(20,184,166,.2);border-color:var(--accent);color:var(--accent2);
 }
 #blocklist-mode-bar {
   display:flex;align-items:center;gap:10px;padding:8px 12px;

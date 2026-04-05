@@ -81,24 +81,27 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 ### Admin Web UI
 
-14-panel single-page application with real-time updates:
+18-panel single-page application with real-time updates:
 
 | Panel | Description |
 |-------|-------------|
 | Dashboard | Live stats, timeseries chart, top domains, country traffic map |
-| Live Feed | Real-time request log with per-status badges (OK, Threat, File Block, Scan, Rate Limit, IP Block, Policy Deny, Auth Fail), filtering, CSV/JSON export |
+| Live Feed | Real-time request log with per-status badges, filtering, CSV/JSON export |
 | Blocklist | Domain entries with wildcards; allow-list / deny-list toggle |
 | Policy | Visual PBAC rule editor with all 8 condition types |
 | Policy Tester | Dry-run evaluation against any host/user/IP |
-| Security | IP filter, rate limiting, SSL bypass, scanner status |
+| Security | IP filter, rate limiting, connection limits, block page editor, scanner status |
 | File Block | File-type blocking profile selector |
 | Rewrite | Per-host header rewrite rules (request + response) |
+| Upstream Proxies | Parent proxy chaining with health checks and circuit breaker |
 | IdP Providers | Step-by-step wizard for OIDC, SAML, LDAP |
-| Certificates | Root CA viewer, rotation, custom TLS upload |
+| SSL / TLS | Root CA viewer, custom TLS upload, SSL bypass patterns |
+| CA Management | CA lifecycle, PEM download, cache stats, OCSP toggle, force rotation |
+| Cluster Nodes | Multi-node role display, DP node metrics, enrollment command generator |
 | PAC | PAC file generator with custom exclusions |
 | Audit Log | Tamper-evident JSONL trail of all admin actions |
 | Users | User management with RBAC role assignment |
-| Settings | Session timeout, UI access control, SIEM, config export/import |
+| Settings | Session timeout, UI access control, syslog, config export/import |
 
 ### Observability & SIEM
 
@@ -117,7 +120,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 - **Graceful shutdown** — lifecycle context + 15s drain window for active tunnels
 - **CA auto-rotation** — daily expiry check, auto-rotates 30 days before expiry
 - **OCSP/CRL checking** on upstream TLS certificates (fail-closed)
-- **Per-IP connection limiting** (default 256 concurrent)
+- **Per-IP connection limiting** (configurable, default 1024) with runtime admin API
 - **Brute-force lockout** — 5 failures triggers 15-min IP + user lock
 - **Admin API rate limiting** — 60 req/min per IP on mutating endpoints
 - **Atomic file writes** for CA bundle and config persistence
@@ -125,9 +128,11 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 ### Distributed Architecture
 
-- **Control Plane / Data Plane** — gRPC config sync with mTLS
+- **Control Plane / Data Plane** — gRPC config sync with mTLS, per-node metrics aggregation
+- **Cluster dashboard** — connected node list, health, request counts, enrollment wizard
 - **Exponential backoff** on connection failures (2s–60s)
 - **Client mTLS** for upstream proxy authentication
+- See **[Deployment Guide](docs/deployment-guide.md)** for single-node, multi-node, and upstream chaining setup
 
 ### Extensibility
 
@@ -323,12 +328,21 @@ Metrics:
   -metrics-token string  Bearer token protecting /metrics (empty = open)
   -rate-limit int        Max requests/min per source IP (0 = off)
 
-Distributed:
+Distributed (Control Plane):
   -cp-grpc-addr string   Control Plane gRPC listen address (e.g. :50051)
   -cp-grpc-cert string   Control Plane gRPC TLS certificate
   -cp-grpc-key string    Control Plane gRPC TLS key
   -cp-grpc-ca string     Control Plane gRPC CA for mTLS client validation
+
+Distributed (Data Plane):
+  -dp-cp-addr string     ControlPlane gRPC address to connect to (e.g. cp.corp:50051)
+  -dp-node-id string     Unique node identifier (default: hostname)
+  -dp-cert string        Data Plane gRPC client TLS certificate
+  -dp-key string         Data Plane gRPC client TLS key
+  -dp-ca string          Data Plane gRPC CA certificate
 ```
+
+> See **[docs/deployment-guide.md](docs/deployment-guide.md)** for complete single-node, multi-node, and upstream chaining examples.
 
 ### Environment Variables
 

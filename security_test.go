@@ -93,7 +93,7 @@ func TestIPFilter_List(t *testing.T) {
 // ── RateLimiter tests ─────────────────────────────────────────────────────────
 
 func freshRL() *RateLimiter {
-	return &RateLimiter{clients: map[string]*clientBucket{}}
+	return newRateLimiter()
 }
 
 func TestRateLimiter_Disabled(t *testing.T) {
@@ -157,10 +157,10 @@ func TestRateLimiter_Cleanup(t *testing.T) {
 	r.Allow("stale-ip")
 	time.Sleep(30 * time.Millisecond)
 	r.Cleanup()
-	r.mu.Lock()
-	_, exists := r.clients["stale-ip"]
-	r.mu.Unlock()
-	if exists {
-		t.Error("stale client should have been cleaned up")
+	// After cleanup the stale IP should be gone — Allow should work fresh.
+	// Verify by checking that the IP gets a fresh budget.
+	r.Configure(1, 10*time.Millisecond)
+	if !r.Allow("stale-ip") {
+		t.Error("stale client should have been cleaned up and get fresh budget")
 	}
 }

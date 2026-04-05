@@ -51,6 +51,13 @@ type CertManager struct {
 
 var certMgr = &CertManager{cache: map[string]*certCacheEntry{}}
 
+// caRuntime holds the CA bundle path and passphrase for runtime operations
+// (rotation, re-persist) after startup initialisation.
+var caRuntime struct {
+	path       string
+	passphrase string
+}
+
 // caBundle is the plaintext PEM bundle written/read from disk.
 // Format: PEM(CERTIFICATE) || PEM(EC PRIVATE KEY)
 type caBundle struct {
@@ -428,8 +435,13 @@ func (cm *CertManager) RotateIfNeeded(caPath, passphrase string) bool {
 			logger.Printf("CA auto-rotation: save failed: %v", err)
 		}
 	}
-	logger.Printf("CA auto-rotation: new CA generated, expires %s",
-		cm.CAExpiry().Format("2006-01-02"))
+	newExpiry := cm.CAExpiry().Format("2006-01-02")
+	logger.Printf("CA auto-rotation: new CA generated, expires %s", newExpiry)
+	fireAlert("cert_expiry", AlertPayload{
+		Host:   "culvert-ca",
+		Detail: fmt.Sprintf("Root CA rotated — old cert expired %s, new cert expires %s", expiry.Format("2006-01-02"), newExpiry),
+		Source: "ca",
+	})
 	return true
 }
 
@@ -567,6 +579,14 @@ func (cm *CertManager) CertCacheLen() int {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	return len(cm.cache)
+}
+
+// ClearCache removes all cached leaf certificates.
+func (cm *CertManager) ClearCache() {
+	cm.mu.Lock()
+	cm.cache = make(map[string]*certCacheEntry)
+	cm.cacheOrder = nil
+	cm.mu.Unlock()
 }
 
 // signLeaf creates and signs a leaf TLS certificate for the given hostname.

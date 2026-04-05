@@ -24,7 +24,7 @@ func generateRequestID() string {
 // Prevents a single IP from consuming all proxy resources via many concurrent
 // connections (e.g. HTTP flood, slow-read attacks).
 
-const defaultMaxConnsPerIP = 256
+const defaultMaxConnsPerIP = 1024
 
 // ConnLimiter tracks active connections per client IP.
 type ConnLimiter struct {
@@ -46,6 +46,23 @@ func (cl *ConnLimiter) Enable(maxPerIP int) {
 	}
 	cl.maxPerIP = maxPerIP
 	cl.enabled.Store(true)
+}
+
+// Disable turns off connection limiting.
+func (cl *ConnLimiter) Disable() { cl.enabled.Store(false) }
+
+// MaxPerIP returns the current per-IP limit.
+func (cl *ConnLimiter) MaxPerIP() int {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return cl.maxPerIP
+}
+
+// ActiveIPs returns the number of IPs currently tracked.
+func (cl *ConnLimiter) ActiveIPs() int {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return len(cl.conns)
 }
 
 // Acquire increments the connection count for ip. Returns false if the limit

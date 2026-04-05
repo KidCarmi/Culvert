@@ -46,9 +46,21 @@ func (oc *OCSPChecker) Enable() {
 	oc.enabled.Store(true)
 }
 
+// Disable turns off OCSP checking.
+func (oc *OCSPChecker) Disable() {
+	oc.enabled.Store(false)
+}
+
 // Enabled returns whether OCSP checking is active.
 func (oc *OCSPChecker) Enabled() bool {
 	return oc.enabled.Load()
+}
+
+// CacheLen returns the number of entries in the OCSP cache.
+func (oc *OCSPChecker) CacheLen() int {
+	oc.mu.RLock()
+	defer oc.mu.RUnlock()
+	return len(oc.cache)
 }
 
 // resolveIssuer extracts the issuer certificate from verified chains or raw certs.
