@@ -162,10 +162,56 @@ export CULVERT_CA_PASSPHRASE="your-strong-passphrase"
 > **Note:** The Control Plane can also proxy traffic itself (if you set `-port`).
 > Omit `-port` to run it as a config-only node.
 
-### Step 3: Start Data Plane Nodes
+### Step 3: Add Data Plane Nodes (GUI Enrollment)
 
-Each Data Plane node handles proxy traffic and pulls config from the
-Control Plane.
+The easiest way to add nodes is through the Admin UI enrollment system.
+No manual certificate management needed.
+
+1. Open the Admin UI at `https://control-plane:9090`
+2. Navigate to **Infrastructure > Cluster**
+3. Click **+ Enroll Node**
+4. Configure optional constraints (node ID prefix, allowed CIDR, TTL)
+5. Click **Generate Token**
+6. Copy the enrollment command
+
+On the new server:
+
+```bash
+# Download the Culvert binary (same binary used everywhere)
+# Then paste the enrollment command from the GUI:
+
+./culvert -enroll "culvert://enroll/control-plane.corp:50051/TOKEN?ca-fp=sha256:..."
+```
+
+The node will:
+- Generate an ECDSA P-256 keypair
+- Send a CSR to the Control Plane
+- Receive a signed certificate + cluster CA
+- Save certs locally (`dp-node.crt`, `dp-node.key`, `cluster-ca.crt`)
+
+Then start the node normally:
+
+```bash
+export CULVERT_CA_PASSPHRASE="your-strong-passphrase"
+
+./culvert \
+  -port 8080 \
+  -socks5-port 1080 \
+  -dp-cp-addr control-plane.corp:50051 \
+  -dp-node-id $(hostname) \
+  -dp-cert dp-node.crt \
+  -dp-key dp-node.key \
+  -dp-ca cluster-ca.crt \
+  -ca-path /data/ca.bundle \
+  -logfile /data/culvert.log
+```
+
+> **Enrollment tokens are one-time use and expire** (default: 24 hours).
+> Generate a new token for each node.
+
+### Step 3b: Manual Data Plane Setup (without enrollment)
+
+If you prefer to manage certificates manually:
 
 ```bash
 export CULVERT_CA_PASSPHRASE="your-strong-passphrase"
@@ -184,6 +230,14 @@ export CULVERT_CA_PASSPHRASE="your-strong-passphrase"
 
 Repeat for each node, changing `-dp-node-id` to a unique identifier
 (e.g. `dp-east-2`, `dp-west-1`).
+
+### Node Management
+
+From the Admin UI cluster panel you can:
+- **View all enrolled nodes** with their status (connected/disconnected/revoked)
+- **Revoke nodes** instantly — the node is immediately rejected on the next gRPC heartbeat
+- **Monitor heartbeats** — nodes missing 3 consecutive polls (90s) are marked "disconnected"
+- **Manage enrollment tokens** — view active/consumed/expired tokens
 
 ### Docker Compose (multi-node)
 
