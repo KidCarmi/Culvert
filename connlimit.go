@@ -48,6 +48,23 @@ func (cl *ConnLimiter) Enable(maxPerIP int) {
 	cl.enabled.Store(true)
 }
 
+// Disable turns off connection limiting.
+func (cl *ConnLimiter) Disable() { cl.enabled.Store(false) }
+
+// MaxPerIP returns the current per-IP limit.
+func (cl *ConnLimiter) MaxPerIP() int {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return cl.maxPerIP
+}
+
+// ActiveIPs returns the number of IPs currently tracked.
+func (cl *ConnLimiter) ActiveIPs() int {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return len(cl.conns)
+}
+
 // Acquire increments the connection count for ip. Returns false if the limit
 // is exceeded (caller should reject the request).
 func (cl *ConnLimiter) Acquire(ip string) bool {

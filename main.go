@@ -243,8 +243,14 @@ func main() {
 	}
 
 	// ── Control Plane / Data Plane gRPC ──────────────────────────────────────
+	clusterRole.role = "standalone"
+	if h, err2 := os.Hostname(); err2 == nil {
+		clusterRole.nodeID = h
+	}
 	if *cpGRPCAddr != "" {
 		// This process is (also) a Control Plane.
+		clusterRole.role = "control-plane"
+		clusterRole.grpcAddr = *cpGRPCAddr
 		globalConfigStore.Update(CurrentConfigSnapshot())
 		if err := StartControlPlaneGRPC(*cpGRPCAddr, *cpGRPCCert, *cpGRPCKey, *cpGRPCCA); err != nil {
 			logger.Fatalf("ControlPlane gRPC: %v", err)
@@ -252,12 +258,13 @@ func main() {
 	}
 	if *dpCPAddr != "" {
 		// This process is a Data Plane node.
+		clusterRole.role = "data-plane"
+		clusterRole.grpcAddr = *dpCPAddr
 		nodeID := *dpNodeID
 		if nodeID == "" {
-			if h, err2 := os.Hostname(); err2 == nil {
-				nodeID = h
-			}
+			nodeID = clusterRole.nodeID
 		}
+		clusterRole.nodeID = nodeID
 		dpClient, err := NewDataPlaneClient(nodeID, *dpCPAddr, *dpCert, *dpKey, *dpCA)
 		if err != nil {
 			logger.Fatalf("DataPlane client: %v", err)
@@ -352,6 +359,9 @@ func main() {
 			logger.Printf("SSL CA   → Root CA ready in-memory (set -ca-path + %s for persistence)", caPassphraseEnv)
 		}
 	}
+	// Store CA runtime config for API-driven rotation.
+	caRuntime.path = caPathVal
+	caRuntime.passphrase = caPassphrase
 	// Start CA auto-rotation background check.
 	if certMgr.Ready() {
 		StartCAAutoRotation(lifecycleCtx, caPathVal, caPassphrase)

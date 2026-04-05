@@ -88,6 +88,29 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/alerts/webhooks", apiAlertsWebhooks)         // GET list / POST create
 	mux.HandleFunc("/api/alerts/webhooks/test", apiAlertsWebhookTest) // POST — test-fire
 
+	// ── CA management ────────────────────────────────────────────────────
+	mux.HandleFunc("/api/ca/status", apiCAStatus)           // GET — CA info + cache + rotation
+	mux.HandleFunc("/api/ca/download", apiCADownload)       // GET — PEM download
+	mux.HandleFunc("/api/ca/cache-clear", apiCACacheClear)  // POST — clear leaf cert cache
+	mux.HandleFunc("/api/ca/rotate", apiCARotate)           // POST — force CA rotation
+
+	// ── OCSP management ─────────────────────────────────────────────────
+	mux.HandleFunc("/api/ocsp", apiOCSPConfig) // GET status / POST toggle
+
+	// ── Connection limit ─────────────────────────────────────────────────
+	mux.HandleFunc("/api/connlimit", apiConnLimit) // GET status / POST update
+
+	// ── Block page template ──────────────────────────────────────────────
+	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update
+
+	// ── Upstream proxy chaining ──────────────────────────────────────────
+	mux.HandleFunc("/api/upstream", apiUpstream)              // GET list / POST add
+	mux.HandleFunc("/api/upstream/settings", apiUpstreamSettings) // GET/PUT circuit breaker
+	mux.HandleFunc("/api/upstream/health", apiUpstreamHealth)     // POST force health check
+
+	// ── Cluster / multi-node ─────────────────────────────────────────────
+	mux.HandleFunc("/api/cluster/status", apiClusterStatus) // GET this node + connected nodes
+
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
 	mux.HandleFunc("/api/pac-config", apiPACConfig)
@@ -2840,4 +2863,257 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		logger.Printf("apiSecYARAReload: encode error: %v", err)
 	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CA Management API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiCAStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	info := certMgr.CACertInfo()
+	info["cacheSize"] = certMgr.CertCacheLen()
+	info["cacheMax"] = 10_000
+	info["cacheTTL"] = "1h"
+	info["leafValidity"] = "24h"
+	info["autoRotation"] = true
+	info["rotationOverlapDays"] = 30
+	info["keyProvider"] = certMgr.KeyProviderName()
+	expiry := certMgr.CAExpiry()
+	if !expiry.IsZero() {
+		info["expiresIn"] = time.Until(expiry).Round(time.Hour).String()
+	}
+	jsonOK(w, info)
+}
+
+func apiCADownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	pem := certMgr.CACertPEM()
+	if pem == nil {
+		http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", `attachment; filename="culvert-ca.pem"`)
+	w.Write(pem) //nolint:errcheck
+}
+
+func apiCACacheClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	certMgr.ClearCache()
+	auditEvent(r, "ca.cache_clear", "leaf_cert_cache", "")
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+func apiCARotate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	if err := certMgr.InitCA(); err != nil {
+		http.Error(w, "rotation failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if caRuntime.path != "" {
+		if err := certMgr.SaveCA(caRuntime.path, caRuntime.passphrase); err != nil {
+			logger.Printf("CA force-rotate: save failed: %v", err)
+		}
+	}
+	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API")
+	jsonOK(w, certMgr.CACertInfo())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OCSP Management API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiOCSPConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, map[string]any{
+			"enabled":  globalOCSP.Enabled(),
+			"cacheLen": globalOCSP.CacheLen(),
+		})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Enabled {
+			globalOCSP.Enable()
+			ConfigureTransportOCSP(upstreamTransport)
+		} else {
+			globalOCSP.Disable()
+		}
+		auditEvent(r, "ocsp.toggle", fmt.Sprintf("enabled=%v", body.Enabled), "")
+		jsonOK(w, map[string]any{"ok": true, "enabled": globalOCSP.Enabled()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Connection Limit API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiConnLimit(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, map[string]any{
+			"enabled":   connLimiter.enabled.Load(),
+			"maxPerIP":  connLimiter.MaxPerIP(),
+			"activeIPs": connLimiter.ActiveIPs(),
+		})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Enabled  *bool `json:"enabled"`
+			MaxPerIP int   `json:"maxPerIP"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Enabled != nil && !*body.Enabled {
+			connLimiter.Disable()
+		} else if body.MaxPerIP > 0 {
+			connLimiter.Enable(body.MaxPerIP)
+		}
+		auditEvent(r, "connlimit.update", fmt.Sprintf("enabled=%v max=%d", connLimiter.enabled.Load(), connLimiter.MaxPerIP()), "")
+		jsonOK(w, map[string]any{"ok": true, "enabled": connLimiter.enabled.Load(), "maxPerIP": connLimiter.MaxPerIP()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Block Page Template API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiBlockPage(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, map[string]any{"html": getBlockPageHTML()})
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			HTML string `json:"html"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.HTML == "" {
+			http.Error(w, "html is required", http.StatusBadRequest)
+			return
+		}
+		if err := setBlockPageHTML(body.HTML); err != nil {
+			http.Error(w, "invalid template: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEvent(r, "blockpage.update", "block_page_template", "")
+		jsonOK(w, map[string]any{"ok": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Upstream Proxy Chaining API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiUpstream(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, map[string]any{
+			"enabled": upstreamPool.Enabled(),
+			"proxies": upstreamPool.List(),
+		})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Proxies []UpstreamEntry `json:"proxies"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		upstreamPool.Configure(body.Proxies, 5, 60*time.Second)
+		applyUpstreamProxy()
+		auditEvent(r, "upstream.update", fmt.Sprintf("%d proxies", len(body.Proxies)), "")
+		jsonOK(w, map[string]any{"ok": true, "proxies": upstreamPool.List()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func apiUpstreamSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"enabled": upstreamPool.Enabled(),
+		"proxies": upstreamPool.List(),
+	})
+}
+
+func apiUpstreamHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	upstreamPool.HealthCheck()
+	jsonOK(w, map[string]any{"ok": true, "proxies": upstreamPool.List()})
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Cluster / Multi-Node API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	result := map[string]any{
+		"role":     clusterRole.role,
+		"nodeID":   clusterRole.nodeID,
+		"grpcAddr": clusterRole.grpcAddr,
+		"uptime":   time.Since(startTime).Round(time.Second).String(),
+	}
+	if clusterRole.role == "control-plane" {
+		result["nodes"] = NodeMetricsList()
+	}
+	jsonOK(w, result)
 }

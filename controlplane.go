@@ -143,6 +143,24 @@ var (
 	nodeMetrics   = map[string]MetricsReport{}
 )
 
+// clusterRole tracks this node's role for the admin UI.
+var clusterRole struct {
+	role     string // "standalone", "control-plane", "data-plane"
+	grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
+	nodeID   string // this node's identifier
+}
+
+// NodeMetricsList returns a copy of all connected Data Plane node metrics.
+func NodeMetricsList() []MetricsReport {
+	nodeMetricsMu.RLock()
+	defer nodeMetricsMu.RUnlock()
+	list := make([]MetricsReport, 0, len(nodeMetrics))
+	for _, m := range nodeMetrics {
+		list = append(list, m)
+	}
+	return list
+}
+
 // ─── Control Plane gRPC server ────────────────────────────────────────────────
 
 type controlPlaneServer struct{}
