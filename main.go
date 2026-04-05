@@ -4,8 +4,14 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"log"
@@ -16,6 +22,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // caPassphraseEnv holds the name of the environment variable that supplies the
@@ -70,7 +79,17 @@ func main() {
 	catFeedDB := flag.String("cat-feed-db", "", "Directory for BadgerDB URL category community feed (empty=disabled)")
 	catFeedURL := flag.String("cat-feed-url", "", "Override URL for the UT1 category tarball (default: UT1 Capestat)")
 	catSyncIntvl := flag.String("cat-sync-interval", "24h", "How often to re-sync the URL category feed (e.g. 12h, 24h)")
+	enrollURL := flag.String("enroll", "", "Enrollment URL from Control Plane (e.g. culvert://enroll/host:50051/TOKEN?ca-fp=sha256:...)")
+	clusterDB := flag.String("cluster-db", "", "Path to persist cluster state (e.g. /data/cluster.json)")
 	flag.Parse()
+
+	// ── Enrollment mode (one-shot, exits after enrolling) ────────────────
+	if *enrollURL != "" {
+		if err := runEnrollment(*enrollURL); err != nil {
+			log.Fatalf("Enrollment failed: %v", err)
+		}
+		return
+	}
 
 	// ── Load file config (if provided) ──────────────────────────────────────
 	fc := &FileConfig{}
@@ -247,14 +266,41 @@ func main() {
 	if h, err2 := os.Hostname(); err2 == nil {
 		clusterRole.nodeID = h
 	}
+	// ── Cluster state persistence ────────────────────────────────────────
+	clusterDBPath := firstStr(*clusterDB, "cluster.json")
+	if err := globalClusterStore.Load(clusterDBPath); err != nil {
+		logger.Printf("ClusterDB → load error: %v — starting fresh", err)
+	} else {
+		nodes := globalClusterStore.ListNodes()
+		if len(nodes) > 0 {
+			logger.Printf("ClusterDB → loaded %d enrolled node(s) from %s", len(nodes), clusterDBPath)
+		}
+	}
+
 	if *cpGRPCAddr != "" {
 		// This process is (also) a Control Plane.
 		clusterRole.role = "control-plane"
 		clusterRole.grpcAddr = *cpGRPCAddr
 		globalConfigStore.Update(CurrentConfigSnapshot())
+
+		// Initialize cluster CA for node enrollment.
+		caDir := "."
+		if clusterDBPath != "" {
+			// Use same directory as cluster.json for CA files.
+			if idx := strings.LastIndex(clusterDBPath, "/"); idx >= 0 {
+				caDir = clusterDBPath[:idx]
+			}
+		}
+		if err := globalClusterCA.InitOrLoad(caDir); err != nil {
+			logger.Printf("ClusterCA: init error: %v — enrollment disabled", err)
+		}
+
 		if err := StartControlPlaneGRPC(*cpGRPCAddr, *cpGRPCCert, *cpGRPCKey, *cpGRPCCA); err != nil {
 			logger.Fatalf("ControlPlane gRPC: %v", err)
 		}
+
+		// Start heartbeat monitor for enrolled nodes.
+		globalClusterStore.StartHeartbeatMonitor(lifecycleCtx.Done())
 	}
 	if *dpCPAddr != "" {
 		// This process is a Data Plane node.
@@ -800,6 +846,109 @@ func initUpstreamPool(fc *FileConfig) {
 			upstreamPool.HealthCheck()
 		}
 	}()
+}
+
+// runEnrollment handles the one-shot enrollment flow: generates a keypair+CSR,
+// contacts the Control Plane, and persists the signed certificate.
+func runEnrollment(enrollURLStr string) error {
+	// Parse enrollment URL: culvert://enroll/host:port/TOKEN?ca-fp=sha256:...
+	enrollURLStr = strings.TrimPrefix(enrollURLStr, "culvert://enroll/")
+	parts := strings.SplitN(enrollURLStr, "/", 2)
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid enrollment URL format — expected culvert://enroll/host:port/TOKEN")
+	}
+	cpAddr := parts[0]
+	tokenAndParams := parts[1]
+	token := tokenAndParams
+	if idx := strings.Index(tokenAndParams, "?"); idx >= 0 {
+		token = tokenAndParams[:idx]
+	}
+
+	// Determine node ID (hostname by default).
+	nodeID, _ := os.Hostname()
+	if nodeID == "" {
+		nodeID = "dp-node"
+	}
+
+	fmt.Printf("[Culvert] Enrolling as node %q with Control Plane at %s\n", nodeID, cpAddr)
+
+	// Generate ECDSA P-256 keypair.
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+
+	// Create CSR.
+	csrTemplate := &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: nodeID, Organization: []string{"Culvert Data Plane"}},
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, privKey)
+	if err != nil {
+		return fmt.Errorf("create CSR: %w", err)
+	}
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+
+	// Connect to CP (insecure for enrollment — token provides auth).
+	conn, err := grpc.NewClient(cpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("connect to CP: %w", err)
+	}
+	defer conn.Close()
+
+	// Call Enroll RPC.
+	enrollReq := EnrollRequest{
+		Token:  token,
+		CSR:    string(csrPEM),
+		NodeID: nodeID,
+	}
+	reqBytes, _ := json.Marshal(enrollReq)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var respRaw json.RawMessage
+	err = conn.Invoke(ctx, methodEnroll, json.RawMessage(reqBytes), &respRaw)
+	if err != nil {
+		return fmt.Errorf("enrollment RPC failed: %w", err)
+	}
+
+	var resp EnrollResponse
+	if err := json.Unmarshal(respRaw, &resp); err != nil {
+		return fmt.Errorf("parse enrollment response: %w", err)
+	}
+
+	// Persist certificate, key, and CA to local files.
+	certDir := "."
+	certPath := certDir + "/dp-node.crt"
+	keyPath := certDir + "/dp-node.key"
+	caPath := certDir + "/cluster-ca.crt"
+
+	keyDER, err := x509.MarshalECPrivateKey(privKey)
+	if err != nil {
+		return fmt.Errorf("marshal private key: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	if err := os.WriteFile(certPath, []byte(resp.CertPEM), 0644); err != nil {
+		return fmt.Errorf("write cert: %w", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		return fmt.Errorf("write key: %w", err)
+	}
+	if err := os.WriteFile(caPath, []byte(resp.CAPEM), 0644); err != nil {
+		return fmt.Errorf("write CA: %w", err)
+	}
+
+	fmt.Printf("[Culvert] Enrollment successful!\n")
+	fmt.Printf("[Culvert] Certificate: %s\n", certPath)
+	fmt.Printf("[Culvert] Key:         %s\n", keyPath)
+	fmt.Printf("[Culvert] CA:          %s\n", caPath)
+	fmt.Printf("[Culvert]\n")
+	fmt.Printf("[Culvert] Start this node with:\n")
+	fmt.Printf("[Culvert]   ./culvert -port 8080 -dp-cp-addr %s -dp-node-id %s -dp-cert %s -dp-key %s -dp-ca %s\n",
+		cpAddr, nodeID, certPath, keyPath, caPath)
+
+	return nil
 }
 
 // applyHotReload applies safe-to-reload config values from a freshly parsed
