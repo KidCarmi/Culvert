@@ -91,11 +91,11 @@ func newLatencyHistogram() *latencyHistogram {
 
 // Observe records a latency observation in seconds (lock-free).
 func (h *latencyHistogram) Observe(seconds float64) {
-	// Atomic float64 add via CAS loop.
+	// Atomic float64 add via CAS loop — bit reinterpretation, not numeric conversion.
 	for {
 		old := atomic.LoadInt64(&h.sumBits)
-		newVal := math.Float64frombits(uint64(old)) + seconds
-		if atomic.CompareAndSwapInt64(&h.sumBits, old, int64(math.Float64bits(newVal))) {
+		newVal := math.Float64frombits(uint64(old)) + seconds                              // #nosec G115 -- bit reinterpret, not numeric conversion
+		if atomic.CompareAndSwapInt64(&h.sumBits, old, int64(math.Float64bits(newVal))) { // #nosec G115 -- bit reinterpret, not numeric conversion
 			break
 		}
 	}
@@ -120,7 +120,7 @@ func (h *latencyHistogram) WritePrometheus(w *strings.Builder) { //nolint:errche
 	}
 	cumulative += atomic.LoadInt64(&h.counts[len(h.buckets)])
 	fmt.Fprintf(w, "culvert_request_duration_seconds_bucket{le=\"+Inf\"} %d\n", cumulative)
-	fmt.Fprintf(w, "culvert_request_duration_seconds_sum %f\n", math.Float64frombits(uint64(atomic.LoadInt64(&h.sumBits))))
+	fmt.Fprintf(w, "culvert_request_duration_seconds_sum %f\n", math.Float64frombits(uint64(atomic.LoadInt64(&h.sumBits)))) // #nosec G115 -- bit reinterpret
 	fmt.Fprintf(w, "culvert_request_duration_seconds_count %d\n", atomic.LoadInt64(&h.total))
 }
 
