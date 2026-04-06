@@ -538,13 +538,9 @@ func buildClientTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 }
 
 func loadCertPool(caFile string) (*x509.CertPool, error) {
-	// Sanitize path: resolve symlinks, remove traversal components (CWE-22).
-	safePath, err := filepath.EvalSymlinks(filepath.Clean(caFile))
-	if err != nil {
-		return nil, fmt.Errorf("resolve CA path %q: %w", sanitizeLog(caFile), err)
-	}
 	pool := x509.NewCertPool()
-	pemData, err := os.ReadFile(safePath) // #nosec G304 -- path is admin-configured, sanitised above
+	cleaned := filepath.Clean(caFile)
+	pemData, err := os.ReadFile(cleaned) // #nosec G304 -- callers validate path (no ".." traversal)
 	if err != nil {
 		return nil, err
 	}

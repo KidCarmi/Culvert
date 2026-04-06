@@ -3239,6 +3239,13 @@ func apiClusterMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "grpc_addr is required (e.g. \":50051\")", http.StatusBadRequest)
 		return
 	}
+	// Reject path traversal in file paths (CWE-22).
+	for _, p := range []string{req.CertFile, req.KeyFile, req.CAFile} {
+		if strings.Contains(p, "..") {
+			http.Error(w, "path traversal not allowed", http.StatusBadRequest)
+			return
+		}
+	}
 
 	if err := enableControlPlane(req.GRPCAddr, req.CertFile, req.KeyFile, req.CAFile, clusterDBPathGlobal); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
