@@ -35,8 +35,15 @@ const caPassphraseEnv = "CULVERT_CA_PASSPHRASE" // #nosec G101 -- env-var name, 
 
 var logger *log.Logger
 
+// appLifecycleCtx is the lifecycle context for all background goroutines.
+// Cancelled on graceful shutdown. Exposed at package level so that API
+// handlers (e.g. enabling CP mode at runtime) can start background tasks.
+var appLifecycleCtx context.Context
+var appLifecycleCancel context.CancelFunc
+
 // blFeedSyncer is the process-wide blocklist feed syncer, set in main().
 var blFeedSyncer *BlocklistSyncer
+var clusterDBPathGlobal string // persisted cluster state path, set at startup
 
 func main() {
 	// ── CLI flags ────────────────────────────────────────────────────────────
@@ -124,8 +131,8 @@ func main() {
 	}
 
 	// ── Lifecycle context for all background goroutines ─────────────────────
-	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
-	defer lifecycleCancel()
+	appLifecycleCtx, appLifecycleCancel = context.WithCancel(context.Background())
+	defer appLifecycleCancel()
 
 	// ── Config ───────────────────────────────────────────────────────────────
 	cfg.ProxyPort = pPort
@@ -267,7 +274,8 @@ func main() {
 		clusterRole.nodeID = h
 	}
 	// ── Cluster state persistence ────────────────────────────────────────
-	clusterDBPath := firstStr(*clusterDB, "cluster.json")
+	clusterDBPath := firstStr(*clusterDB, fc.Cluster.StateDB, "cluster.json")
+	clusterDBPathGlobal = clusterDBPath
 	if err := globalClusterStore.Load(clusterDBPath); err != nil {
 		logger.Printf("ClusterDB → load error: %v — starting fresh", err)
 	} else {
@@ -277,16 +285,16 @@ func main() {
 		}
 	}
 
-	if *cpGRPCAddr != "" {
-		// This process is (also) a Control Plane.
-		clusterRole.role = "control-plane"
-		clusterRole.grpcAddr = *cpGRPCAddr
-		globalConfigStore.Update(CurrentConfigSnapshot())
-		initClusterCA(clusterDBPath)
-		if err := StartControlPlaneGRPC(*cpGRPCAddr, *cpGRPCCert, *cpGRPCKey, *cpGRPCCA); err != nil {
+	// Merge CLI flags with YAML cluster config (CLI wins).
+	cpAddr := firstStr(*cpGRPCAddr, fc.Cluster.GRPCAddr)
+	cpCert := firstStr(*cpGRPCCert, fc.Cluster.CertFile)
+	cpKey := firstStr(*cpGRPCKey, fc.Cluster.KeyFile)
+	cpCA := firstStr(*cpGRPCCA, fc.Cluster.CAFile)
+
+	if cpAddr != "" || fc.Cluster.Role == "control-plane" {
+		if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
 			logger.Fatalf("ControlPlane gRPC: %v", err)
 		}
-		globalClusterStore.StartHeartbeatMonitor(lifecycleCtx.Done())
 	}
 	if *dpCPAddr != "" {
 		// This process is a Data Plane node.
@@ -301,7 +309,7 @@ func main() {
 		if err != nil {
 			logger.Fatalf("DataPlane client: %v", err)
 		}
-		dpClient.Run(lifecycleCtx, 30*time.Second)
+		dpClient.Run(appLifecycleCtx, 30*time.Second)
 		logger.Printf("DataPlane: polling ControlPlane at %s every 30s", *dpCPAddr)
 	}
 
@@ -328,7 +336,7 @@ func main() {
 		rl.Configure(rlRPM, time.Minute)
 		logger.Printf("Rate limit → %d req/min per IP", rlRPM)
 		var rlCtx context.Context
-		rlCtx, rlCleanupCancel = context.WithCancel(lifecycleCtx)
+		rlCtx, rlCleanupCancel = context.WithCancel(appLifecycleCtx)
 		go func() {
 			t := time.NewTicker(5 * time.Minute)
 			defer t.Stop()
@@ -367,7 +375,7 @@ func main() {
 			}
 		}
 		blFeedSyncer = newBlocklistSyncer(bl, blFeedURL, blFeedInterval)
-		blFeedSyncer.Start(lifecycleCtx)
+		blFeedSyncer.Start(appLifecycleCtx)
 		logger.Printf("BlocklistFeed → syncing from %s every %s", blFeedURL, blFeedInterval)
 	} else {
 		blFeedSyncer = newBlocklistSyncer(bl, "", blFeedDefaultInterval)
@@ -396,7 +404,7 @@ func main() {
 	caRuntime.passphrase = caPassphrase
 	// Start CA auto-rotation background check.
 	if certMgr.Ready() {
-		StartCAAutoRotation(lifecycleCtx, caPathVal, caPassphrase)
+		StartCAAutoRotation(appLifecycleCtx, caPathVal, caPassphrase)
 	}
 
 	// ── Policy engine ─────────────────────────────────────────────────────────
@@ -441,7 +449,7 @@ func main() {
 			}
 		}
 		feedSyncer = newFeedSyncer(communityDB, *catFeedURL, syncD)
-		feedSyncer.Start(lifecycleCtx)
+		feedSyncer.Start(appLifecycleCtx)
 		logger.Printf("CatFeedDB → BadgerDB at %s, sync every %s", *catFeedDB, syncD)
 	}
 
@@ -582,7 +590,7 @@ func main() {
 		// Threat feeds.
 		if feedDB != "" || secCfg.Enabled {
 			globalThreatFeed.Init(feedDB, syncInterval)
-			globalThreatFeed.Start(lifecycleCtx)
+			globalThreatFeed.Start(appLifecycleCtx)
 			logger.Printf("ThreatFeed → sync every %s, db=%q", syncInterval, feedDB)
 		}
 	}
@@ -843,6 +851,29 @@ func initClusterCA(clusterDBPath string) {
 	if err := globalClusterCA.InitOrLoad(caDir); err != nil {
 		logger.Printf("ClusterCA: init error: %v — enrollment disabled", err)
 	}
+}
+
+// enableControlPlane activates Control Plane mode: starts the gRPC server,
+// initialises the cluster CA, and starts the heartbeat monitor.
+// Safe to call at runtime from the admin API (idempotent — returns error if already CP).
+func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
+	if clusterRole.role == "control-plane" {
+		return fmt.Errorf("already running as control-plane")
+	}
+	if grpcAddr == "" {
+		return fmt.Errorf("gRPC listen address is required")
+	}
+	clusterRole.role = "control-plane"
+	clusterRole.grpcAddr = grpcAddr
+	globalConfigStore.Update(CurrentConfigSnapshot())
+	initClusterCA(clusterDBPath)
+	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
+		clusterRole.role = "standalone" // rollback
+		return err
+	}
+	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
+	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", grpcAddr)
+	return nil
 }
 
 // runEnrollment handles the one-shot enrollment flow: generates a keypair+CSR,

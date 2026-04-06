@@ -110,6 +110,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 
 	// ── Cluster / multi-node ─────────────────────────────────────────────
 	mux.HandleFunc("/api/cluster/status", apiClusterStatus)   // GET this node + connected nodes
+	mux.HandleFunc("/api/cluster/mode", apiClusterMode)       // POST enable control-plane mode
 	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)   // GET list / POST create / DELETE remove
 	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)     // GET enrolled nodes
 	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)   // POST revoke a node
@@ -3149,6 +3150,47 @@ func countActiveTokens() int {
 		}
 	}
 	return count
+}
+
+// apiClusterMode enables Control Plane mode at runtime from the admin GUI.
+func apiClusterMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "admin") {
+		return
+	}
+
+	var req struct {
+		GRPCAddr string `json:"grpc_addr"`
+		CertFile string `json:"cert_file"`
+		KeyFile  string `json:"key_file"`
+		CAFile   string `json:"ca_file"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.GRPCAddr == "" {
+		http.Error(w, "grpc_addr is required (e.g. \":50051\")", http.StatusBadRequest)
+		return
+	}
+
+	if err := enableControlPlane(req.GRPCAddr, req.CertFile, req.KeyFile, req.CAFile, clusterDBPathGlobal); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	auditAdd(AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  sessionAdmin(r),
+		Action: "cluster.enable-cp",
+		Object: req.GRPCAddr,
+		Detail: "Control Plane enabled via GUI",
+	})
+	jsonOK(w, map[string]any{"ok": true, "role": "control-plane", "grpcAddr": req.GRPCAddr})
 }
 
 // apiClusterTokens handles enrollment token CRUD.

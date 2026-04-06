@@ -2022,6 +2022,34 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Enable Control Plane (shown only in standalone mode) -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-enable-cp-panel">
+        <div class="panel-header"><span class="panel-title">Enable Control Plane</span></div>
+        <div style="padding:20px">
+          <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">
+            Switch this node to Control Plane mode to manage Data Plane nodes, distribute configuration,
+            and handle enrollment — all from this GUI. No CLI flags needed.
+          </p>
+          <div style="display:grid;gap:12px;max-width:480px">
+            <label style="font-size:.8rem;color:var(--muted)">gRPC Listen Address <span style="color:#ef4444">*</span>
+              <input id="cp-grpc-addr" class="input" placeholder=":50051" value=":50051" style="margin-top:4px">
+            </label>
+            <label style="font-size:.8rem;color:var(--muted)">TLS Certificate <span style="opacity:.5">(optional — leave blank for insecure dev mode)</span>
+              <input id="cp-cert-file" class="input" placeholder="/path/to/cert.pem" style="margin-top:4px">
+            </label>
+            <label style="font-size:.8rem;color:var(--muted)">TLS Key
+              <input id="cp-key-file" class="input" placeholder="/path/to/key.pem" style="margin-top:4px">
+            </label>
+            <label style="font-size:.8rem;color:var(--muted)">CA Certificate <span style="opacity:.5">(for mTLS client validation)</span>
+              <input id="cp-ca-file" class="input" placeholder="/path/to/ca.pem" style="margin-top:4px">
+            </label>
+            <div style="margin-top:4px">
+              <button class="btn" onclick="enableControlPlane()">Enable Control Plane</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Enrolled Nodes Table -->
       <div class="panel" style="margin-top:16px" id="cluster-nodes-panel">
         <div class="panel-header">
@@ -5484,6 +5512,10 @@ async function loadCluster() {
   const isCP = r.role === 'control-plane';
   const enrollBtn = document.getElementById('cluster-enroll-btn');
   const tokensPanel = document.getElementById('cluster-tokens-panel');
+  const enableCPPanel = document.getElementById('cluster-enable-cp-panel');
+
+  // Show "Enable Control Plane" panel only in standalone mode
+  enableCPPanel.style.display = r.role === 'standalone' ? '' : 'none';
 
   // Show enroll button and tokens panel only on Control Plane
   enrollBtn.style.display = isCP && r.enrollEnabled ? '' : 'none';
@@ -5529,7 +5561,7 @@ async function loadCluster() {
     noNodes.style.display = '';
     noNodes.textContent = r.role === 'data-plane'
       ? 'This node is a Data Plane worker. Manage enrollment from the Control Plane.'
-      : 'No Data Plane nodes connected. Start in Control Plane mode (-cp-grpc-addr) to enable enrollment.';
+      : 'Enable Control Plane mode above to start managing Data Plane nodes.';
     table.style.display = 'none';
   }
 
@@ -5567,6 +5599,23 @@ async function loadClusterTokens() {
     noTok.style.display = '';
     table.style.display = 'none';
   }
+}
+
+async function enableControlPlane() {
+  const addr = document.getElementById('cp-grpc-addr').value.trim();
+  if (!addr) { toast('gRPC listen address is required', 'error'); return; }
+  const certFile = document.getElementById('cp-cert-file').value.trim();
+  const keyFile = document.getElementById('cp-key-file').value.trim();
+  const caFile = document.getElementById('cp-ca-file').value.trim();
+
+  const r = await api('/api/cluster/mode', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ grpc_addr: addr, cert_file: certFile, key_file: keyFile, ca_file: caFile })
+  });
+  if (!r) return;
+  toast('Control Plane enabled on ' + addr, 'success');
+  loadCluster();
 }
 
 function timeAgo(date) {
