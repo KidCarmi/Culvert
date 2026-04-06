@@ -3115,7 +3115,7 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]any{
 		"enabled": geoEnabled(),
-		"dbPath":  cfg.GeoIPDB,
+		"dbPath":  cfg.Proxy.GeoIPDB,
 	})
 }
 
@@ -3130,8 +3130,8 @@ func apiLoggerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"logFile":   cfg.LogFile,
-			"logMaxMB":  cfg.LogMaxMB,
+			"logFile":   cfg.Proxy.LogFile,
+			"logMaxMB":  cfg.Proxy.LogMaxMB,
 			"logFormat": cfg.LogFormat,
 		})
 	default:
