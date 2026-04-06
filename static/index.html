@@ -1544,6 +1544,77 @@ Firefox (all platforms):
         </div>
       </div>
 
+    <!-- GeoIP Database -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">GeoIP Database</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            MaxMind GeoLite2-Country database for country-level policy rules and traffic analytics.
+            Configure via <code>-geoip-db</code> flag or <code>proxy.geoip_db</code> in config YAML.
+          </p>
+          <div style="display:flex;gap:16px;flex-wrap:wrap">
+            <div class="info-item" style="flex:1;min-width:140px">
+              <span class="info-label">Status</span>
+              <span class="info-val" id="geoip-status" style="color:var(--muted)">Loading...</span>
+            </div>
+            <div class="info-item" style="flex:1;min-width:140px">
+              <span class="info-label">Database Path</span>
+              <span class="info-val" id="geoip-path" style="font-size:.78rem;word-break:break-all">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Logger Configuration -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">Logger Configuration</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Log output settings. Changes require a restart to take effect.
+          </p>
+          <div style="display:flex;gap:16px;flex-wrap:wrap">
+            <div class="info-item" style="flex:1;min-width:140px">
+              <span class="info-label">Log File</span>
+              <span class="info-val" id="logger-file" style="font-size:.78rem">—</span>
+            </div>
+            <div class="info-item" style="flex:1;min-width:120px">
+              <span class="info-label">Format</span>
+              <span class="info-val" id="logger-format">—</span>
+            </div>
+            <div class="info-item" style="flex:1;min-width:120px">
+              <span class="info-label">Rotation</span>
+              <span class="info-val" id="logger-rotation">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Metrics Endpoint -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">Prometheus Metrics</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Prometheus-compatible <code>/metrics</code> endpoint served on the proxy port.
+            Optionally protect with a Bearer token.
+          </p>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px">
+            <div class="info-item" style="flex:1;min-width:140px">
+              <span class="info-label">Endpoint</span>
+              <span class="info-val"><code>/metrics</code> (proxy port)</span>
+            </div>
+            <div class="info-item" style="flex:1;min-width:140px">
+              <span class="info-label">Auth</span>
+              <span class="info-val" id="metrics-auth-status">—</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input type="text" class="input" id="metrics-token-input" style="flex:1;font-family:monospace;font-size:.8rem" placeholder="Bearer token (empty = public access)">
+            <button class="btn" onclick="saveMetricsToken()">Apply</button>
+            <button class="btn ghost sm" onclick="clearMetricsToken()">Clear</button>
+          </div>
+        </div>
+      </div>
+
     </div>
     </div><!-- /view-settings -->
 
@@ -3855,6 +3926,10 @@ async function loadSettings() {
   fetchBlocklistFeed();
   // Alert webhooks
   loadWebhooks();
+  // Infrastructure panels
+  loadGeoIPStatus();
+  loadLoggerStatus();
+  loadMetricsConfig();
 }
 
 // ── Session Timeout ───────────────────────────────────────────────────────
@@ -3980,6 +4055,66 @@ async function disableSyslog() {
     el.textContent = 'Syslog disabled';
     el.style.color = 'var(--muted)';
     toast('Syslog disabled', 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── GeoIP Status ────────────────────────────────────────────────────────────
+async function loadGeoIPStatus() {
+  try {
+    const g = await api('/api/geoip');
+    setText('geoip-status', g.enabled ? 'Enabled' : 'Disabled');
+    document.getElementById('geoip-status').style.color = g.enabled ? 'var(--green)' : 'var(--muted)';
+    setText('geoip-path', g.dbPath || '(not configured)');
+  } catch(_) {}
+}
+
+// ── Logger Status ───────────────────────────────────────────────────────────
+async function loadLoggerStatus() {
+  try {
+    const l = await api('/api/logger');
+    setText('logger-file', l.logFile || 'stdout');
+    setText('logger-format', (l.logFormat || 'text').toUpperCase());
+    setText('logger-rotation', (l.logMaxMB || 50) + ' MB');
+  } catch(_) {}
+}
+
+// ── Metrics Config ──────────────────────────────────────────────────────────
+async function loadMetricsConfig() {
+  try {
+    const m = await api('/api/metrics-config');
+    const el = document.getElementById('metrics-auth-status');
+    if (m.tokenSet) {
+      el.textContent = 'Bearer token configured';
+      el.style.color = 'var(--green)';
+    } else {
+      el.textContent = 'Public (no auth)';
+      el.style.color = 'var(--orange)';
+    }
+  } catch(_) {}
+}
+
+async function saveMetricsToken() {
+  const token = document.getElementById('metrics-token-input').value.trim();
+  if (!token) { toast('Enter a bearer token', 'error'); return; }
+  try {
+    await api('/api/metrics-config', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({token: token})
+    });
+    document.getElementById('metrics-token-input').value = '';
+    toast('Metrics bearer token updated', 'success');
+    loadMetricsConfig();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function clearMetricsToken() {
+  try {
+    await api('/api/metrics-config', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({token: ''})
+    });
+    toast('Metrics token cleared — endpoint is now public', 'success');
+    loadMetricsConfig();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 

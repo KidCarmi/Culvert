@@ -104,6 +104,15 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	// ── OCSP management ─────────────────────────────────────────────────
 	mux.HandleFunc("/api/ocsp", apiOCSPConfig) // GET status / POST toggle
 
+	// ── GeoIP status ────────────────────────────────────────────────────
+	mux.HandleFunc("/api/geoip", apiGeoIPConfig)
+
+	// ── Logger config ───────────────────────────────────────────────────
+	mux.HandleFunc("/api/logger", apiLoggerConfig)
+
+	// ── Metrics config ──────────────────────────────────────────────────
+	mux.HandleFunc("/api/metrics-config", apiMetricsConfig)
+
 	// ── Connection limit ─────────────────────────────────────────────────
 	mux.HandleFunc("/api/connlimit", apiConnLimit) // GET status / POST update
 
@@ -3091,6 +3100,73 @@ func apiOCSPConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		auditEvent(r, "ocsp.toggle", fmt.Sprintf("enabled=%v", body.Enabled), "")
 		jsonOK(w, map[string]any{"ok": true, "enabled": globalOCSP.Enabled()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GeoIP Config API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	jsonOK(w, map[string]any{
+		"enabled": geoEnabled(),
+		"dbPath":  cfg.GeoIPDB,
+	})
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Logger Config API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiLoggerConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"logFile":   cfg.LogFile,
+			"logMaxMB":  cfg.LogMaxMB,
+			"logFormat": cfg.LogFormat,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Metrics Config API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiMetricsConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"tokenSet": metricsToken != "",
+			"path":     "/metrics",
+		})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Token string `json:"token"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		metricsToken = body.Token
+		auditEvent(r, "settings.metrics_token", "updated", "")
+		jsonOK(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
