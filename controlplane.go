@@ -499,6 +499,9 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 // ─── TLS helpers ──────────────────────────────────────────────────────────────
 
 func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCredentials, error) {
+	if strings.Contains(certFile, "..") || strings.Contains(keyFile, "..") {
+		return nil, fmt.Errorf("invalid cert/key path: directory traversal not allowed")
+	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, err
@@ -538,9 +541,12 @@ func buildClientTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 }
 
 func loadCertPool(caFile string) (*x509.CertPool, error) {
+	if strings.Contains(caFile, "..") {
+		return nil, fmt.Errorf("invalid CA path: directory traversal not allowed")
+	}
 	pool := x509.NewCertPool()
 	cleaned := filepath.Clean(caFile)
-	pemData, err := os.ReadFile(cleaned) // #nosec G304 -- callers validate path (no ".." traversal)
+	pemData, err := os.ReadFile(cleaned) // #nosec G304 -- guarded above: ".." rejected
 	if err != nil {
 		return nil, err
 	}
