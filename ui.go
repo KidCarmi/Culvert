@@ -941,7 +941,7 @@ func apiDashboardTopRules(w http.ResponseWriter, r *http.Request) {
 			if name == "" {
 				name = fmt.Sprintf("Rule #%d", r.Priority)
 			}
-			result = append(result, ruleHit{Name: name, Action: r.Action, Hits: r.HitCount})
+			result = append(result, ruleHit{Name: name, Action: string(r.Action), Hits: r.HitCount})
 		}
 	}
 	jsonOK(w, map[string]any{"rules": result})
