@@ -168,19 +168,33 @@ func matchYARAString(s *yaraStringDef, data []byte) bool {
 	return bytes.Contains(data, s.literal)
 }
 
+// yaraInflight tracks abandoned regex goroutines to prevent unbounded accumulation.
+var yaraInflight atomic.Int64
+
+// maxYARAInflight caps the number of concurrent timed-out regex goroutines.
+// Beyond this limit, new regex matches are skipped entirely.
+const maxYARAInflight = 50
+
 // matchRegexWithTimeout runs re.Match(data) in a goroutine and returns false
 // if the match does not complete within the given timeout (ReDoS prevention).
+// Abandoned goroutines are tracked and capped at maxYARAInflight to prevent leaks.
 func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
-	type result struct{ matched bool }
-	ch := make(chan result, 1)
+	if yaraInflight.Load() >= maxYARAInflight {
+		logger.Printf("WARN YARA regex skipped: too many in-flight goroutines (%d)", yaraInflight.Load())
+		return false
+	}
+	ch := make(chan bool, 1)
+	yaraInflight.Add(1)
 	go func() {
-		ch <- result{re.Match(data)}
+		defer yaraInflight.Add(-1)
+		ch <- re.Match(data)
 	}()
 	select {
-	case r := <-ch:
-		return r.matched
+	case matched := <-ch:
+		return matched
 	case <-time.After(timeout):
-		logger.Printf("WARN YARA regex timeout after %s on pattern %q", timeout, sanitizeLog(re.String()))
+		logger.Printf("WARN YARA regex timeout after %s on pattern %q (inflight: %d)",
+			timeout, sanitizeLog(re.String()), yaraInflight.Load())
 		return false
 	}
 }

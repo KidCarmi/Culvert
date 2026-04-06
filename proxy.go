@@ -163,6 +163,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	}
 	w.Header().Set("X-Request-ID", reqID)
 
+	// ── W3C Trace Context: propagate or generate traceparent ────────────
+	if r.Header.Get("Traceparent") == "" {
+		r.Header.Set("Traceparent", generateTraceparent())
+	}
+
 	// ── Connection limit per IP ─────────────────────────────────────────
 	if !connLimiter.Acquire(clientIP) {
 		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
@@ -577,12 +582,13 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if globalSecScanner.BodyScanEnabled() && (resp.ContentLength < 0 || resp.ContentLength <= globalSecScanner.MaxBytes()) {
 		buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
 		if readErr == nil {
-			if result := globalSecScanner.ScanBody(buffered); result != nil {
+			scanResult := safeScanBody(buffered)
+			if scanResult != nil {
 				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)
 				atomic.AddInt64(&statBlocked, 1)
-				recordRequest(cip2, r.Method, r.Host, "SCAN_BLOCKED", result.Source, result.Reason, r.Header.Get("X-User-Identity"))
-				logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip2, sanitizeLog(r.Host), sanitizeLog(result.Source), sanitizeLog(result.Reason))
-				scanBlock(w, r.Host, result.Reason, result.Source)
+				recordRequest(cip2, r.Method, r.Host, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, r.Header.Get("X-User-Identity"))
+				logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip2, sanitizeLog(r.Host), sanitizeLog(scanResult.Source), sanitizeLog(scanResult.Reason))
+				scanBlock(w, r.Host, scanResult.Reason, scanResult.Source)
 				return
 			}
 			// Reassemble: buffered prefix + any remaining bytes beyond the limit.
@@ -971,7 +977,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			if readErr == nil {
 				// DPI regex scan (text content only).
 				if dpiScanner.Enabled() && isTextContentType(ct) {
-					if pattern, matched := dpiScanner.Scan(body); matched {
+					if pattern, matched := safeDPIScan(body); matched {
 						origBody.Close()
 						recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern, "")
 						dpiBlock(clientTLS, hostOnly, pattern)
@@ -979,11 +985,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					}
 				}
 				// ClamAV + YARA body scan (all content types).
-				if result := globalSecScanner.ScanBody(body); result != nil {
+				if scanResult := safeScanBody(body); scanResult != nil {
 					origBody.Close()
 					atomic.AddInt64(&statBlocked, 1)
-					recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", result.Source, result.Reason, "")
-					scanBlockConn(clientTLS, hostOnly, result.Reason, result.Source)
+					recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "")
+					scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
 					break
 				}
 				// No match: reassemble the body (buffered prefix + remaining bytes).
