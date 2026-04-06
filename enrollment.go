@@ -776,6 +776,66 @@ func (ca *clusterCA) AllCACertsPEM() []byte {
 	return buf
 }
 
+// RotateIfNeeded checks cluster CA expiry and auto-rotates if it expires
+// within 30 days. Preserves the old CA as secondary for dual-CA overlap.
+func (ca *clusterCA) RotateIfNeeded() {
+	ca.mu.RLock()
+	if ca.cert == nil {
+		ca.mu.RUnlock()
+		return
+	}
+	daysLeft := time.Until(ca.cert.NotAfter).Hours() / 24
+	ca.mu.RUnlock()
+
+	if daysLeft > 30 {
+		return
+	}
+	logger.Printf("ClusterCA: expires in %.0f days — auto-rotating", daysLeft)
+
+	// Generate new CA.
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		logger.Printf("ClusterCA: auto-rotation failed (keygen): %v", err)
+		return
+	}
+	serialMax := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialMax)
+	if err != nil {
+		logger.Printf("ClusterCA: auto-rotation failed (serial): %v", err)
+		return
+	}
+	template := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "Culvert Cluster CA", Organization: []string{"Culvert"}},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            1,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privKey.PublicKey, privKey)
+	if err != nil {
+		logger.Printf("ClusterCA: auto-rotation failed (create cert): %v", err)
+		return
+	}
+	newCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalECPrivateKey(privKey)
+	if err != nil {
+		logger.Printf("ClusterCA: auto-rotation failed (marshal key): %v", err)
+		return
+	}
+	newKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	// ImportCA handles dual-CA overlap, backup, persistence, and TLS pool rebuild.
+	if err := ca.ImportCA(newCertPEM, newKeyPEM); err != nil {
+		logger.Printf("ClusterCA: auto-rotation failed (import): %v", err)
+		return
+	}
+	logger.Printf("ClusterCA: auto-rotated successfully (new CA expires %s)",
+		template.NotAfter.Format("2006-01-02"))
+}
+
 // Info returns cluster CA metadata for the admin API.
 func (ca *clusterCA) Info() map[string]any {
 	ca.mu.RLock()

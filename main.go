@@ -90,7 +90,11 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	catSyncIntvl := flag.String("cat-sync-interval", "24h", "How often to re-sync the URL category feed (e.g. 12h, 24h)")
 	enrollURL := flag.String("enroll", "", "Enrollment URL from Control Plane (e.g. culvert://enroll/host:50051/TOKEN?ca-fp=sha256:...)")
 	clusterDB := flag.String("cluster-db", "", "Path to persist cluster state (e.g. /data/cluster.json)")
+	clusterInsecureFlag := flag.Bool("cluster-insecure", false, "Allow insecure (non-TLS) gRPC for development — NEVER use in production")
+	revocationsFile := flag.String("revocations-file", "", "Path to persist session revocations across restarts (e.g. /data/revocations.json)")
 	flag.Parse()
+
+	clusterInsecure = *clusterInsecureFlag
 
 	// ── Enrollment mode (one-shot, exits after enrolling) ────────────────
 	if *enrollURL != "" {
@@ -158,6 +162,14 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	// ── Session secret ───────────────────────────────────────────────────────
 	initSessionSecret()
 	initSessionSecretFromConfig(fc.SessionSecret) // overrides random if config provides one
+
+	// ── Session revocation persistence ──────────────────────────────────────
+	if *revocationsFile != "" {
+		revocationFilePath = *revocationsFile
+		if err := sessionRevoked.LoadRevocations(); err != nil {
+			logger.Printf("Session  → failed to load revocations: %v", err)
+		}
+	}
 
 	// ── Session timeout ───────────────────────────────────────────────────────
 	hrs := firstNonZero(*sessionHrs, fc.SessionTimeoutHours)

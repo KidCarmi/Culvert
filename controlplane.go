@@ -344,7 +344,46 @@ func NodeMetricsList() []MetricsReport {
 
 type controlPlaneServer struct{}
 
-func (s *controlPlaneServer) GetConfig(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+// verifyNode extracts the peer TLS certificate from the gRPC context,
+// matches it to an enrolled node by cert serial, verifies the self-reported
+// nodeID matches the certificate identity, and checks revocation status.
+// Returns the verified node ID or an error.
+func verifyNode(ctx context.Context, claimedNodeID string) (string, error) {
+	if claimedNodeID == "" {
+		return "", status.Errorf(codes.InvalidArgument, "node_id required")
+	}
+
+	// In insecure dev mode (no mTLS), skip cert pinning but still check revocation.
+	p, ok := peer.FromContext(ctx)
+	if ok && p.AuthInfo != nil {
+		if tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo); ok && len(tlsInfo.State.PeerCertificates) > 0 {
+			peerSerial := tlsInfo.State.PeerCertificates[0].SerialNumber.Text(16)
+			// Verify claimed node ID matches the cert's enrolled serial.
+			node, exists := globalClusterStore.GetNode(claimedNodeID)
+			if !exists {
+				return "", status.Errorf(codes.NotFound, "node %q not enrolled", claimedNodeID)
+			}
+			if node.CertSerial != peerSerial {
+				return "", status.Errorf(codes.PermissionDenied,
+					"cert serial mismatch: node %q expects %s, peer presented %s",
+					claimedNodeID, node.CertSerial, peerSerial)
+			}
+		}
+	}
+
+	// Check revocation regardless of TLS mode.
+	if node, exists := globalClusterStore.GetNode(claimedNodeID); exists {
+		if globalClusterStore.IsRevoked(node.CertSerial) {
+			return "", status.Errorf(codes.PermissionDenied, "node %q is revoked", claimedNodeID)
+		}
+	}
+	return claimedNodeID, nil
+}
+
+func (s *controlPlaneServer) GetConfig(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	// GetConfig is called during initial poll before enrollment completes.
+	// No node identity check required — config is not secret, and unenrolled
+	// nodes need it to bootstrap.
 	snap := globalConfigStore.Get()
 	b, err := json.Marshal(snap)
 	if err != nil {
@@ -353,17 +392,15 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, _ json.RawMessage) (
 	return b, nil
 }
 
-func (s *controlPlaneServer) PushMetrics(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) PushMetrics(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var report MetricsReport
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
 
-	// Check if node is revoked.
-	if node, ok := globalClusterStore.GetNode(report.NodeID); ok {
-		if globalClusterStore.IsRevoked(node.CertSerial) {
-			return nil, status.Errorf(codes.PermissionDenied, "node %s is revoked", report.NodeID)
-		}
+	// Verify node identity (cert pinning) and check revocation.
+	if _, err := verifyNode(ctx, report.NodeID); err != nil {
+		return nil, err
 	}
 
 	nodeMetricsMu.Lock()
@@ -379,13 +416,13 @@ func (s *controlPlaneServer) PushMetrics(_ context.Context, raw json.RawMessage)
 
 // SyncRateLimits receives hot-IP deltas from a DP node and returns cluster-wide
 // totals (excluding the requesting node) for distributed rate limiting.
-func (s *controlPlaneServer) SyncRateLimits(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) SyncRateLimits(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var gossip RateLimitGossip
 	if err := json.Unmarshal(raw, &gossip); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
-	if gossip.NodeID == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "node_id required")
+	if _, err := verifyNode(ctx, gossip.NodeID); err != nil {
+		return nil, err
 	}
 
 	// Store this node's hot-IP counts.
@@ -403,7 +440,7 @@ func (s *controlPlaneServer) SyncRateLimits(_ context.Context, raw json.RawMessa
 
 // SyncRevocations receives revoked session tokens from a DP node and returns
 // the merged list from all other nodes, enabling cluster-wide session invalidation.
-func (s *controlPlaneServer) SyncRevocations(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		NodeID  string            `json:"node_id"`
 		Entries []RevocationEntry `json:"entries"`
@@ -411,8 +448,8 @@ func (s *controlPlaneServer) SyncRevocations(_ context.Context, raw json.RawMess
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
-	if req.NodeID == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "node_id required")
+	if _, err := verifyNode(ctx, req.NodeID); err != nil {
+		return nil, err
 	}
 	globalRevAggregator.Update(req.NodeID, req.Entries)
 	remote := globalRevAggregator.MergedExcluding(req.NodeID)
@@ -424,7 +461,7 @@ func (s *controlPlaneServer) SyncRevocations(_ context.Context, raw json.RawMess
 }
 
 // PushAuditEvents receives audit events from a DP node for centralized logging.
-func (s *controlPlaneServer) PushAuditEvents(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) PushAuditEvents(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		NodeID string       `json:"node_id"`
 		Events []AuditEntry `json:"events"`
@@ -432,8 +469,8 @@ func (s *controlPlaneServer) PushAuditEvents(_ context.Context, raw json.RawMess
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
-	if req.NodeID == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "node_id required")
+	if _, err := verifyNode(ctx, req.NodeID); err != nil {
+		return nil, err
 	}
 	if len(req.Events) > 0 {
 		globalClusterAudit.Append(req.NodeID, req.Events)
@@ -508,6 +545,11 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 // addr example: ":50051"
 // certFile/keyFile: mTLS certificate paths.  Pass empty strings for insecure
 // (development only — never in production).
+// clusterInsecure controls whether the CP allows insecure (non-TLS) gRPC.
+// Set via --cluster-insecure flag. When false (default), CP startup fails
+// without TLS certificates to prevent accidental production exposure.
+var clusterInsecure bool
+
 func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 	var serverOpt grpc.ServerOption
 	if certFile != "" && keyFile != "" {
@@ -517,9 +559,11 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		}
 		serverOpt = grpc.Creds(creds)
 		logger.Printf("ControlPlane gRPC → %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
-	} else {
+	} else if clusterInsecure {
 		serverOpt = grpc.EmptyServerOption{}
-		logger.Printf("ControlPlane gRPC → %s (insecure — dev only!)", strings.ReplaceAll(addr, "\n", ""))
+		logger.Printf("WARNING: ControlPlane gRPC → %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
+	} else {
+		return fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
 	}
 
 	srv := grpc.NewServer(serverOpt)
@@ -787,6 +831,9 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 			}
 			if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
 				logger.Printf("DataPlane: merged %d remote session revocations", added)
+				if err := sessionRevoked.SaveRevocations(); err != nil {
+					logger.Printf("DataPlane: failed to persist revocations: %v", err)
+				}
 			}
 		}
 	}
