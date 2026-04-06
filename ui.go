@@ -3264,7 +3264,7 @@ func apiClusterMode(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiClusterTokens handles enrollment token CRUD.
-func apiClusterTokens(w http.ResponseWriter, r *http.Request) {
+func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop // split into sub-handlers
 	switch r.Method {
 	case http.MethodGet:
 		if !requireRole(w, r, "viewer") {
@@ -3274,54 +3274,7 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"tokens": tokens})
 
 	case http.MethodPost:
-		if !requireRole(w, r, "admin") {
-			return
-		}
-		if clusterRole.role != "control-plane" {
-			http.Error(w, "enrollment only available on Control Plane", http.StatusBadRequest)
-			return
-		}
-		if !globalClusterCA.Ready() {
-			http.Error(w, "cluster CA not initialized", http.StatusServiceUnavailable)
-			return
-		}
-
-		var req struct {
-			NodePrefix string `json:"node_prefix"`
-			AllowCIDR  string `json:"allow_cidr"`
-			TTLHours   int    `json:"ttl_hours"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		ttl := 24 * time.Hour
-		if req.TTLHours > 0 {
-			ttl = time.Duration(req.TTLHours) * time.Hour
-		}
-
-		admin := sessionAdmin(r)
-		plaintext, err := globalClusterStore.GenerateToken(req.NodePrefix, req.AllowCIDR, admin, ttl)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		// Build enrollment URL.
-		cpAddr := clusterRole.grpcAddr
-		caFP := globalClusterCA.CACertFingerprint()
-		enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
-		enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
-
-		auditEvent(r, "enrollment.token_created", req.NodePrefix,
-			fmt.Sprintf("cidr=%s ttl=%dh", req.AllowCIDR, int(ttl.Hours())))
-
-		jsonOK(w, map[string]any{
-			"token":      plaintext,
-			"enroll_url": enrollURL,
-			"enroll_cmd": enrollCmd,
-			"expires_at": time.Now().Add(ttl).Format(time.RFC3339),
-		})
+		apiClusterTokenCreate(w, r)
 
 	case http.MethodDelete:
 		if !requireRole(w, r, "admin") {
@@ -3344,6 +3297,57 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, "admin") {
+		return
+	}
+	if clusterRole.role != "control-plane" {
+		http.Error(w, "enrollment only available on Control Plane", http.StatusBadRequest)
+		return
+	}
+	if !globalClusterCA.Ready() {
+		http.Error(w, "cluster CA not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		NodePrefix string `json:"node_prefix"`
+		AllowCIDR  string `json:"allow_cidr"`
+		TTLHours   int    `json:"ttl_hours"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	ttl := 24 * time.Hour
+	if req.TTLHours > 0 {
+		ttl = time.Duration(req.TTLHours) * time.Hour
+	}
+
+	admin := sessionAdmin(r)
+	plaintext, err := globalClusterStore.GenerateToken(req.NodePrefix, req.AllowCIDR, admin, ttl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Build enrollment URL.
+	cpAddr := clusterRole.grpcAddr
+	caFP := globalClusterCA.CACertFingerprint()
+	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
+	enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
+
+	auditEvent(r, "enrollment.token_created", req.NodePrefix,
+		fmt.Sprintf("cidr=%s ttl=%dh", req.AllowCIDR, int(ttl.Hours())))
+
+	jsonOK(w, map[string]any{
+		"token":      plaintext,
+		"enroll_url": enrollURL,
+		"enroll_cmd": enrollCmd,
+		"expires_at": time.Now().Add(ttl).Format(time.RFC3339),
+	})
 }
 
 // apiClusterNodes returns enrolled nodes with their status.
