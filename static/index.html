@@ -6173,11 +6173,16 @@ async function loadClusterCA() {
   try {
     const r = await api('/api/cluster/ca');
     if (!r) return;
-    document.getElementById('cca-status').textContent = r.initialized ? 'Active' : 'Not Initialized';
+    const status = r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized';
+    document.getElementById('cca-status').textContent = status;
     document.getElementById('cca-status').style.color = r.initialized ? '#22c55e' : 'var(--muted)';
     document.getElementById('cca-subject').textContent = r.subject || '—';
     document.getElementById('cca-expires').textContent = r.expires ? new Date(r.expires).toLocaleDateString() : '—';
-    document.getElementById('cca-fingerprint').textContent = r.fingerprint || '—';
+    const fpText = r.fingerprint || '—';
+    const secInfo = r.secondaryCA
+      ? '\nOld CA: ' + (r.secondaryCA.subject || '') + ' (expires ' + new Date(r.secondaryCA.expires).toLocaleDateString() + ')'
+      : '';
+    document.getElementById('cca-fingerprint').textContent = fpText + secInfo;
   } catch(_) {}
 }
 

@@ -393,11 +393,15 @@ func (cs *ClusterStore) checkHeartbeats() {
 // It is auto-generated on first use and persisted alongside cluster.json.
 
 type clusterCA struct {
-	mu      sync.RWMutex
-	cert    *x509.Certificate
-	key     *ecdsa.PrivateKey
-	certPEM []byte
-	dir     string // persisted directory for cluster-ca.crt/key
+	mu            sync.RWMutex
+	cert          *x509.Certificate
+	key           *ecdsa.PrivateKey
+	certPEM       []byte
+	dir           string // persisted directory for cluster-ca.crt/key
+	secondaryCert *x509.Certificate
+	secondaryPEM  []byte
+	secondaryExp  time.Time // when secondary CA expires (auto-cleanup)
+	onRotate      func()    // callback to rebuild TLS cert pool after import
 }
 
 var globalClusterCA = &clusterCA{}
@@ -571,11 +575,14 @@ func (ca *clusterCA) Ready() bool {
 }
 
 // ImportCA validates and replaces the cluster CA with user-provided PEM cert+key.
-// The new CA is persisted to disk and takes effect immediately. Existing enrolled
-// nodes will continue to work until their certificates expire (1 year), at which
-// point they will re-enroll and receive certs signed by the new CA.
+//
+// Dual-CA overlap: the old CA is preserved as a secondary so that existing
+// enrolled nodes (whose certs were signed by the old CA) continue to be
+// accepted until their certificates expire. New enrollments get certs
+// signed by the new CA. The secondary is auto-cleaned when the old CA
+// certificate expires.
 func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
-	// Validate PEM before taking the lock.
+	// ── Validate PEM before taking the lock ──
 	certBlock, _ := pem.Decode(certPEM)
 	if certBlock == nil {
 		return fmt.Errorf("no PEM certificate block found")
@@ -587,13 +594,26 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	if !cert.IsCA {
 		return fmt.Errorf("certificate is not a CA (BasicConstraints.IsCA = false)")
 	}
+	// Reject expired certificates.
+	if time.Now().After(cert.NotAfter) {
+		return fmt.Errorf("certificate has already expired (%s)", cert.NotAfter.Format("2006-01-02"))
+	}
+
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
 		return fmt.Errorf("no PEM private key block found")
 	}
+	// Try ECDSA first, then give a clear error for RSA/other key types.
 	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
 	if err != nil {
-		return fmt.Errorf("parse EC private key: %w", err)
+		// Detect RSA keys for a clearer error message.
+		if _, rsaErr := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); rsaErr == nil {
+			return fmt.Errorf("RSA keys are not supported; cluster CA requires an ECDSA P-256 private key")
+		}
+		if _, pkcs8Err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); pkcs8Err == nil {
+			return fmt.Errorf("key is PKCS#8 but not ECDSA; cluster CA requires an ECDSA P-256 private key (EC PRIVATE KEY PEM block)")
+		}
+		return fmt.Errorf("parse private key: %w — cluster CA requires an ECDSA P-256 key", err)
 	}
 	// Verify cert/key match.
 	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(&key.PublicKey) {
@@ -603,11 +623,29 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
-	// Persist to disk.
 	dir := ca.dir
 	if dir == "" {
 		dir = "."
 	}
+
+	// ── Backup old CA before overwriting ──
+	if ca.certPEM != nil {
+		_ = os.WriteFile(dir+"/cluster-ca.crt.bak", ca.certPEM, 0o600)
+		if oldKey, err := os.ReadFile(dir + "/cluster-ca.key"); err == nil {
+			_ = os.WriteFile(dir+"/cluster-ca.key.bak", oldKey, 0o600)
+		}
+	}
+
+	// ── Dual-CA overlap: preserve old CA as secondary ──
+	if ca.cert != nil {
+		ca.secondaryCert = ca.cert
+		ca.secondaryPEM = ca.certPEM
+		ca.secondaryExp = ca.cert.NotAfter
+		logger.Printf("ClusterCA: old CA preserved as secondary (expires %s)",
+			ca.cert.NotAfter.Format("2006-01-02"))
+	}
+
+	// ── Persist new CA to disk ──
 	if err := os.WriteFile(dir+"/cluster-ca.crt", certPEM, 0o600); err != nil {
 		return fmt.Errorf("write cluster CA cert: %w", err)
 	}
@@ -618,9 +656,53 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	ca.cert = cert
 	ca.key = key
 	ca.certPEM = certPEM
+
+	fp := sha256.Sum256(cert.Raw)
 	logger.Printf("ClusterCA: imported custom CA (expires %s, fingerprint %s)",
-		cert.NotAfter.Format("2006-01-02"), sanitizeLog(hex.EncodeToString(sha256.Sum256(cert.Raw)[:])))
+		cert.NotAfter.Format("2006-01-02"), sanitizeLog(hex.EncodeToString(fp[:])))
+
+	// Notify TLS layer to rebuild cert pool with both CAs.
+	if ca.onRotate != nil {
+		ca.onRotate()
+	}
 	return nil
+}
+
+// SecondaryActive returns true if a secondary (old) CA is still in the overlap period.
+func (ca *clusterCA) SecondaryActive() bool {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
+	return ca.secondaryCert != nil && time.Now().Before(ca.secondaryExp)
+}
+
+// CleanupSecondary removes the secondary CA if it has expired.
+func (ca *clusterCA) CleanupSecondary() {
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+	if ca.secondaryCert != nil && time.Now().After(ca.secondaryExp) {
+		logger.Printf("ClusterCA: secondary CA expired, removing overlap")
+		ca.secondaryCert = nil
+		ca.secondaryPEM = nil
+		ca.secondaryExp = time.Time{}
+		if ca.onRotate != nil {
+			ca.onRotate()
+		}
+	}
+}
+
+// AllCACertsPEM returns PEM blocks for all active CAs (primary + secondary if overlapping).
+// Used by buildServerTLS to populate the client cert pool.
+func (ca *clusterCA) AllCACertsPEM() []byte {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
+	var buf []byte
+	if ca.certPEM != nil {
+		buf = append(buf, ca.certPEM...)
+	}
+	if ca.secondaryCert != nil && time.Now().Before(ca.secondaryExp) && ca.secondaryPEM != nil {
+		buf = append(buf, ca.secondaryPEM...)
+	}
+	return buf
 }
 
 // Info returns cluster CA metadata for the admin API.
@@ -631,13 +713,23 @@ func (ca *clusterCA) Info() map[string]any {
 		return map[string]any{"initialized": false}
 	}
 	fp := sha256.Sum256(ca.cert.Raw)
-	return map[string]any{
+	info := map[string]any{
 		"initialized": true,
 		"subject":     ca.cert.Subject.CommonName,
 		"expires":     ca.cert.NotAfter.Format(time.RFC3339),
 		"fingerprint": hex.EncodeToString(fp[:]),
 		"serial":      ca.cert.SerialNumber.Text(16),
 	}
+	if ca.secondaryCert != nil && time.Now().Before(ca.secondaryExp) {
+		sfp := sha256.Sum256(ca.secondaryCert.Raw)
+		info["dualCAActive"] = true
+		info["secondaryCA"] = map[string]any{
+			"subject":     ca.secondaryCert.Subject.CommonName,
+			"expires":     ca.secondaryCert.NotAfter.Format(time.RFC3339),
+			"fingerprint": hex.EncodeToString(sfp[:]),
+		}
+	}
+	return info
 }
 
 // ─── Enrollment Request/Response (gRPC) ──────────────────────────────────────

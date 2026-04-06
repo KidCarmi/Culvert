@@ -860,6 +860,36 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 
 // ─── TLS helpers ──────────────────────────────────────────────────────────────
 
+// cpTLSConfig holds a reference to the server TLS config so that the cert
+// pool can be rebuilt dynamically when the cluster CA is rotated.
+var cpTLSConfig struct {
+	mu      sync.Mutex
+	cfg     *tls.Config
+	baseCAF string // path to base CA file (operator-provided)
+}
+
+// rebuildCPCertPool rebuilds the TLS client CA pool with the base CA file
+// plus all active cluster CAs (primary + secondary overlap).
+// Called by globalClusterCA.onRotate after import or cleanup.
+func rebuildCPCertPool() {
+	cpTLSConfig.mu.Lock()
+	defer cpTLSConfig.mu.Unlock()
+	if cpTLSConfig.cfg == nil {
+		return
+	}
+	pool := x509.NewCertPool()
+	if cpTLSConfig.baseCAF != "" {
+		if pem, err := os.ReadFile(cpTLSConfig.baseCAF); err == nil {
+			pool.AppendCertsFromPEM(pem)
+		}
+	}
+	if allCA := globalClusterCA.AllCACertsPEM(); len(allCA) > 0 {
+		pool.AppendCertsFromPEM(allCA)
+	}
+	cpTLSConfig.cfg.ClientCAs = pool
+	logger.Printf("ControlPlane: TLS client CA pool rebuilt (%d CAs)", len(pool.Subjects())) //nolint:staticcheck // Subjects() deprecated but fine for count
+}
+
 func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCredentials, error) {
 	if strings.Contains(certFile, "..") || strings.Contains(keyFile, "..") {
 		return nil, fmt.Errorf("invalid cert/key path: directory traversal not allowed")
@@ -874,14 +904,26 @@ func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 		if err != nil {
 			return nil, err
 		}
-		// Also add cluster CA to the pool so enrolled nodes are accepted.
-		if globalClusterCA.Ready() {
-			pool.AppendCertsFromPEM(globalClusterCA.CACertPEM())
+		// Add all active cluster CAs (primary + secondary overlap).
+		if allCA := globalClusterCA.AllCACertsPEM(); len(allCA) > 0 {
+			pool.AppendCertsFromPEM(allCA)
 		}
 		tlsCfg.ClientCAs = pool
 		// VerifyClientCertIfGiven allows unenrolled nodes to call Enroll
 		// without a client cert, while still verifying certs from enrolled nodes.
 		tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
+
+		// Store reference for dynamic cert pool rebuild on CA rotation.
+		cpTLSConfig.mu.Lock()
+		cpTLSConfig.cfg = tlsCfg
+		cpTLSConfig.baseCAF = caFile
+		cpTLSConfig.mu.Unlock()
+
+		// Wire up the rotation callback so ImportCA/CleanupSecondary
+		// rebuild the pool automatically.
+		globalClusterCA.mu.Lock()
+		globalClusterCA.onRotate = rebuildCPCertPool
+		globalClusterCA.mu.Unlock()
 	}
 	return credentials.NewTLS(tlsCfg), nil
 }
