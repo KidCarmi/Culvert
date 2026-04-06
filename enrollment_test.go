@@ -69,7 +69,7 @@ func TestClusterStore_LoadSave(t *testing.T) {
 func TestClusterStore_LoadCorruptedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cluster.json")
-	os.WriteFile(path, []byte("not json"), 0o600)
+	_ = os.WriteFile(path, []byte("not json"), 0o600)
 
 	cs := &ClusterStore{
 		st: ClusterState{
@@ -96,7 +96,7 @@ func newTestClusterStore(t *testing.T) *ClusterStore {
 			Revoked: []RevokedCert{},
 		},
 	}
-	cs.Load(filepath.Join(dir, "cluster.json"))
+	_ = cs.Load(filepath.Join(dir, "cluster.json"))
 	return cs
 }
 
@@ -197,8 +197,8 @@ func TestTokenGenerate_InvalidCIDR(t *testing.T) {
 func TestTokenList_And_Delete(t *testing.T) {
 	cs := newTestClusterStore(t)
 
-	cs.GenerateToken("a-", "", "admin", 1*time.Hour)
-	cs.GenerateToken("b-", "", "admin", 1*time.Hour)
+	_, _ = cs.GenerateToken("a-", "", "admin", 1*time.Hour)
+	_, _ = cs.GenerateToken("b-", "", "admin", 1*time.Hour)
 
 	tokens := cs.ListTokens()
 	if len(tokens) != 2 {
@@ -295,7 +295,7 @@ func TestRevocation_DoubleRevoke(t *testing.T) {
 	cs := newTestClusterStore(t)
 
 	cs.RegisterNode(&EnrolledNode{NodeID: "dp-1", Status: "connected", CertSerial: "ser1"})
-	cs.RevokeNode("dp-1", "admin", "test")
+	_ = cs.RevokeNode("dp-1", "admin", "test")
 
 	err := cs.RevokeNode("dp-1", "admin", "again")
 	if err == nil {
@@ -317,7 +317,7 @@ func TestRevocation_ListRevoked(t *testing.T) {
 
 	cs.RegisterNode(&EnrolledNode{NodeID: "dp-1", Status: "connected", CertSerial: "s1"})
 	cs.RegisterNode(&EnrolledNode{NodeID: "dp-2", Status: "connected", CertSerial: "s2"})
-	cs.RevokeNode("dp-1", "admin", "test")
+	_ = cs.RevokeNode("dp-1", "admin", "test")
 
 	revoked := cs.ListRevoked()
 	if len(revoked) != 1 {
@@ -470,7 +470,7 @@ func TestClusterCA_SignCSR_InvalidCSR(t *testing.T) {
 	dir := t.TempDir()
 
 	ca := &clusterCA{}
-	ca.InitOrLoad(dir)
+	_ = ca.InitOrLoad(dir)
 
 	_, _, _, err := ca.SignCSR([]byte("not a pem"), "node")
 	if err == nil {
@@ -601,11 +601,11 @@ func TestClusterStore_PersistenceRoundTrip(t *testing.T) {
 			Revoked: []RevokedCert{},
 		},
 	}
-	cs1.Load(path)
+	_ = cs1.Load(path)
 
 	// Generate token.
 	plaintext, _ := cs1.GenerateToken("dp-", "10.0.0.0/8", "admin", 24*time.Hour)
-	cs1.ValidateToken(plaintext, "dp-1", "10.0.0.1")
+	_ = cs1.ValidateToken(plaintext, "dp-1", "10.0.0.1")
 
 	// Register and revoke a node.
 	cs1.RegisterNode(&EnrolledNode{
@@ -615,8 +615,8 @@ func TestClusterStore_PersistenceRoundTrip(t *testing.T) {
 	cs1.RegisterNode(&EnrolledNode{
 		NodeID: "dp-2", CertSerial: "s2", Status: "connected",
 	})
-	cs1.RevokeNode("dp-2", "admin", "test")
-	cs1.Save()
+	_ = cs1.RevokeNode("dp-2", "admin", "test")
+	_ = cs1.Save()
 
 	// Load into fresh store.
 	cs2 := &ClusterStore{
