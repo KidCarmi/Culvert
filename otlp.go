@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -111,6 +112,15 @@ func (o *OTLPExporter) push(ctx context.Context) error {
 
 	if endpoint == "" {
 		return nil
+	}
+
+	// Inline SSRF guard: validate scheme + reject private hosts (CodeQL CWE-918).
+	u, err := url.Parse(endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("invalid OTLP endpoint scheme: %q", endpoint)
+	}
+	if isPrivateHost(u.Hostname()) {
+		return fmt.Errorf("OTLP endpoint resolves to private network: %q", endpoint)
 	}
 
 	payload := o.buildPayload()
