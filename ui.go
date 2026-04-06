@@ -4,12 +4,14 @@ import (
 	"context"
 	"embed"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"net/url"
 	"runtime"
 	"sort"
@@ -22,6 +24,15 @@ import (
 
 //go:embed static
 var staticFiles embed.FS
+
+// uiCfg* hold startup config values for read-only display in the admin UI.
+// Set once in main() after config is loaded; safe to read without locks.
+var (
+	uiCfgGeoIPDB   string
+	uiCfgLogFile   string
+	uiCfgLogMaxMB  int
+	uiCfgLogFormat string
+)
 
 func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen // route registration; each line is one endpoint
 	sub, _ := fs.Sub(staticFiles, "static")
@@ -63,6 +74,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/config/import", apiConfigImport)      // POST — restore from backup JSON
 	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode) // PUT — toggle proxy auth requirement
 	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)  // GET/POST session TTL (hours)
+	mux.HandleFunc("/api/session-secret", apiSessionSecret)    // GET/POST shared signing key
 	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)         // GET/POST UI access IP allowlist
 	mux.HandleFunc("/api/syslog", apiSyslogConfig)             // GET/POST syslog forwarding
 
@@ -100,6 +112,15 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 
 	// ── OCSP management ─────────────────────────────────────────────────
 	mux.HandleFunc("/api/ocsp", apiOCSPConfig) // GET status / POST toggle
+
+	// ── GeoIP status ────────────────────────────────────────────────────
+	mux.HandleFunc("/api/geoip", apiGeoIPConfig)
+
+	// ── Logger config ───────────────────────────────────────────────────
+	mux.HandleFunc("/api/logger", apiLoggerConfig)
+
+	// ── Metrics config ──────────────────────────────────────────────────
+	mux.HandleFunc("/api/metrics-config", apiMetricsConfig)
 
 	// ── Connection limit ─────────────────────────────────────────────────
 	mux.HandleFunc("/api/connlimit", apiConnLimit) // GET status / POST update
@@ -1690,6 +1711,43 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": true, "exportedAt": b.ExportedAt})
 }
 
+// GET/POST /api/session-secret — shared session signing key management.
+func apiSessionSecret(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		shared := os.Getenv("CULVERT_SESSION_SECRET") != ""
+		jsonOK(w, map[string]any{"shared": shared})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Secret string `json:"secret"` // hex-encoded, ≥64 chars (32 bytes)
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Secret == "" {
+			http.Error(w, "secret is required (64+ hex chars)", http.StatusBadRequest)
+			return
+		}
+		key, err := hex.DecodeString(body.Secret)
+		if err != nil || len(key) < 32 {
+			http.Error(w, "secret must be ≥32 bytes of hex (64 hex chars)", http.StatusBadRequest)
+			return
+		}
+		sessionSecret = key
+		auditEvent(r, "settings.session_secret", "rotated", "shared session key updated via GUI")
+		jsonOK(w, map[string]any{"ok": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // GET/POST /api/session-timeout — read or change the UI session lifetime.
 func apiSessionTimeout(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -3051,6 +3109,73 @@ func apiOCSPConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		auditEvent(r, "ocsp.toggle", fmt.Sprintf("enabled=%v", body.Enabled), "")
 		jsonOK(w, map[string]any{"ok": true, "enabled": globalOCSP.Enabled()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GeoIP Config API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	jsonOK(w, map[string]any{
+		"enabled": geoEnabled(),
+		"dbPath":  uiCfgGeoIPDB,
+	})
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Logger Config API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiLoggerConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"logFile":   uiCfgLogFile,
+			"logMaxMB":  uiCfgLogMaxMB,
+			"logFormat": uiCfgLogFormat,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Metrics Config API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+func apiMetricsConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"tokenSet": metricsToken != "",
+			"path":     "/metrics",
+		})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Token string `json:"token"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		metricsToken = body.Token
+		auditEvent(r, "settings.metrics_token", "updated", "")
+		jsonOK(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

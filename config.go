@@ -94,6 +94,12 @@ type FileConfig struct {
 	// Must be 1–168 (one hour to one week). Zero = use the default (8h).
 	SessionTimeoutHours int `yaml:"session_timeout_hours"`
 
+	// SessionSecret is a hex-encoded HMAC key for signing session cookies.
+	// When set, all nodes behind a load balancer share the same signing key
+	// so sessions are valid across nodes. If empty, a random key is generated
+	// at startup (single-node only). Also readable from CULVERT_SESSION_SECRET.
+	SessionSecret string `yaml:"session_secret"`
+
 	// Cluster configures Control Plane / Data Plane multi-node mode.
 	// When Cluster.Role is "control-plane", this node starts a gRPC server
 	// for Data Plane enrollment and config distribution.

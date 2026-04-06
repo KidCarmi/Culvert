@@ -155,6 +155,7 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 
 	// ── Session secret ───────────────────────────────────────────────────────
 	initSessionSecret()
+	initSessionSecretFromConfig(fc.SessionSecret) // overrides random if config provides one
 
 	// ── Session timeout ───────────────────────────────────────────────────────
 	hrs := firstNonZero(*sessionHrs, fc.SessionTimeoutHours)
@@ -631,6 +632,10 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	}
 
 	// ── Web UI ────────────────────────────────────────────────────────────
+	uiCfgGeoIPDB = geoDBVal
+	uiCfgLogFile = lPath
+	uiCfgLogMaxMB = lMaxMB
+	uiCfgLogFormat = fc.LogFormat
 	go startUI(uPort, cert, key, *uiNoTLS)
 
 	// ── Proxy server ─────────────────────────────────────────────────────────

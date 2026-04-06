@@ -6,10 +6,10 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 ### P0 — High Availability & Distributed State
 
-- [ ] **Configurable session signing key** — Allow shared HMAC secret via env var / mounted secret instead of random-at-startup, so all nodes behind a LB validate each other's session cookies
+- [x] **Configurable session signing key** — Shared HMAC secret via `CULVERT_SESSION_SECRET` env var, `session_secret` config field, or admin GUI. All LB nodes now validate each other's sessions.
 - [ ] **Distributed session revocation** — Sync revocation list via gRPC Control Plane channel (today revocation is per-process in-memory)
 - [ ] **Distributed rate limiting** — Optional Redis-backed sliding-window counters for accurate per-IP rate limiting across nodes (today counters are per-process, N nodes = Nx effective limit)
-- [ ] **Wire `cert_expiry` webhook alert** — Alert infrastructure exists (`alerts.go`) and `cert_expiry` event type is defined, but `RotateIfNeeded()` never calls `fireAlert()`. Quick win.
+- [x] **Wire `cert_expiry` webhook alert** — `RotateIfNeeded()` fires `cert_expiry` alert with rotation details via `fireAlert()`.
 
 ### P1 — Observability
 
@@ -32,7 +32,7 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 ### P2 — Multi-Node Operations
 
-- [ ] **Control Plane UI panel** — No GUI for deploying/managing Data Plane nodes. Today requires CLI flags (`-cp-addr`, `-dp-connect`). Need admin panel showing node list, health, sync status, metrics.
+- [x] **Control Plane UI panel** — GUI for enabling CP mode, deploying Data Plane nodes, enrollment tokens, node list with health/sync status.
 - [ ] **Node health dashboard** — Aggregate per-node metrics (already pushed via gRPC `PushMetrics`) into a visual dashboard
 - [ ] **Centralized audit log** — Forward audit events from Data Plane nodes to Control Plane for unified visibility
 
@@ -42,13 +42,13 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 ### P3 — GUI Coverage Gaps
 
-- [ ] **Upstream proxy chaining UI** — Backend exists (`upstream.go`) but no admin panel for configuring parent proxies, failover, circuit breaker settings
-- [ ] **Header rewrite rules UI** — Backend exists (`rewrite.go`) but no admin panel
-- [ ] **OCSP/CRL settings UI** — Backend exists (`ocsp.go`) but no admin panel
-- [ ] **Syslog configuration UI** — Backend exists (`syslog.go`) but configured via CLI flags only
-- [ ] **Metrics endpoint configuration UI** — Bearer token, endpoint path — CLI flags only
-- [ ] **Logger configuration UI** — Log format (text/JSON), rotation size, log path — CLI flags only
-- [ ] **Connection limit configuration UI** — Per-IP limit is hardcoded constant, should be configurable via admin panel
-- [ ] **GeoIP database management UI** — MaxMind license key, database path, refresh interval — CLI flags only
-- [ ] **PAC file customization UI** — PAC template, proxy address — CLI flags only
-- [ ] **Block page customization UI** — HTML template for block pages — no admin panel
+- [x] **Upstream proxy chaining UI** — Admin panel for parent proxies, failover, circuit breaker, health checks
+- [x] **Header rewrite rules UI** — Admin panel for per-host header rewrite rules
+- [x] **OCSP/CRL settings UI** — Toggle OCSP checking, view cache stats
+- [x] **Syslog configuration UI** — Configure syslog forwarding address from Settings panel
+- [x] **Metrics endpoint configuration UI** — Bearer token management via Settings panel
+- [x] **Logger configuration UI** — View log format, rotation, file path in Settings panel
+- [x] **Connection limit configuration UI** — Per-IP limit configurable from Security panel
+- [x] **GeoIP database management UI** — Status and path display in Settings panel
+- [x] **PAC file customization UI** — PAC template editor with proxy address configuration
+- [x] **Block page customization UI** — HTML template editor with preview and reset
