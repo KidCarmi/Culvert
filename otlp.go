@@ -215,12 +215,7 @@ type otlpAnyValue struct {
 	StringValue string `json:"stringValue,omitempty"`
 }
 
-func (o *OTLPExporter) buildPayload() otlpExportRequest {
-	now := fmt.Sprintf("%d", time.Now().UnixNano())
-
-	var metrics []otlpMetric
-
-	// ── Counters ──
+func otlpCounterMetrics(now string) []otlpMetric {
 	counters := []struct {
 		name string
 		desc string
@@ -237,6 +232,7 @@ func (o *OTLPExporter) buildPayload() otlpExportRequest {
 		{"culvert.bytes.sent", "Bytes sent upstream", atomic.LoadInt64(&statBytesSent)},
 		{"culvert.bytes.recv", "Bytes received", atomic.LoadInt64(&statBytesRecv)},
 	}
+	metrics := make([]otlpMetric, 0, len(counters))
 	for _, c := range counters {
 		v := c.val
 		metrics = append(metrics, otlpMetric{
@@ -252,8 +248,10 @@ func (o *OTLPExporter) buildPayload() otlpExportRequest {
 			},
 		})
 	}
+	return metrics
+}
 
-	// ── Gauges ──
+func otlpGaugeMetrics(now string) []otlpMetric {
 	uptimeSec := time.Since(startTime).Seconds()
 	feedEntries, _, _ := globalThreatFeed.Stats()
 	_, _, cacheSize := globalSecScanner.cache.Stats()
@@ -268,6 +266,7 @@ func (o *OTLPExporter) buildPayload() otlpExportRequest {
 		{"culvert.threat_feed.entries", "Threat feed entries", float64(feedEntries)},
 		{"culvert.scan_cache.size", "Scan cache entries", float64(cacheSize)},
 	}
+	metrics := make([]otlpMetric, 0, len(gauges))
 	for _, g := range gauges {
 		v := g.val
 		metrics = append(metrics, otlpMetric{
@@ -282,14 +281,16 @@ func (o *OTLPExporter) buildPayload() otlpExportRequest {
 			},
 		})
 	}
+	return metrics
+}
 
-	// ── Latency histogram ──
+func otlpHistogramMetric(now string) otlpMetric {
 	bucketCounts := make([]string, len(latencyHist.buckets)+1)
 	for i := range latencyHist.counts {
 		bucketCounts[i] = fmt.Sprintf("%d", atomic.LoadInt64(&latencyHist.counts[i]))
 	}
 	histSum := math.Float64frombits(uint64(atomic.LoadInt64(&latencyHist.sumBits))) // #nosec G115
-	metrics = append(metrics, otlpMetric{
+	return otlpMetric{
 		Name:        "culvert.request.duration",
 		Description: "Request latency",
 		Unit:        "s",
@@ -303,10 +304,13 @@ func (o *OTLPExporter) buildPayload() otlpExportRequest {
 				ExplicitBounds: latencyHist.buckets,
 			}},
 		},
-	})
+	}
+}
 
-	// ── Per-rule hit counters ──
+func otlpRuleMetrics(now string) []otlpMetric {
 	ruleMet.mu.RLock()
+	defer ruleMet.mu.RUnlock()
+	metrics := make([]otlpMetric, 0, len(ruleMet.order))
 	for _, name := range ruleMet.order {
 		ctr := ruleMet.hits[name]
 		v := atomic.LoadInt64(ctr)
@@ -327,7 +331,16 @@ func (o *OTLPExporter) buildPayload() otlpExportRequest {
 			},
 		})
 	}
-	ruleMet.mu.RUnlock()
+	return metrics
+}
+
+func (o *OTLPExporter) buildPayload() otlpExportRequest {
+	now := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	metrics := otlpCounterMetrics(now)
+	metrics = append(metrics, otlpGaugeMetrics(now)...)
+	metrics = append(metrics, otlpHistogramMetric(now))
+	metrics = append(metrics, otlpRuleMetrics(now)...)
 
 	return otlpExportRequest{
 		ResourceMetrics: []otlpResourceMetrics{{
