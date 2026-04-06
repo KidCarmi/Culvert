@@ -109,7 +109,10 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/upstream/health", apiUpstreamHealth)     // POST force health check
 
 	// ── Cluster / multi-node ─────────────────────────────────────────────
-	mux.HandleFunc("/api/cluster/status", apiClusterStatus) // GET this node + connected nodes
+	mux.HandleFunc("/api/cluster/status", apiClusterStatus)   // GET this node + connected nodes
+	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)   // GET list / POST create / DELETE remove
+	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)     // GET enrolled nodes
+	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)   // POST revoke a node
 
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
@@ -346,6 +349,22 @@ func uiRole(r *http.Request) UIRole {
 		return role
 	}
 	return RoleViewer
+}
+
+// sessionAdmin returns the authenticated admin username from the session cookie.
+// Falls back to "unknown" if no session is found.
+func sessionAdmin(r *http.Request) string {
+	sess, err := readSessionCookie(r)
+	if err != nil || sess == nil {
+		return "unknown"
+	}
+	if sess.Sub != "" {
+		return sess.Sub
+	}
+	if sess.Email != "" {
+		return sess.Email
+	}
+	return "unknown"
 }
 
 // requireRole returns true when the current session has at least minRole.
@@ -3107,13 +3126,161 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := map[string]any{
-		"role":     clusterRole.role,
-		"nodeID":   clusterRole.nodeID,
-		"grpcAddr": clusterRole.grpcAddr,
-		"uptime":   time.Since(startTime).Round(time.Second).String(),
+		"role":           clusterRole.role,
+		"nodeID":         clusterRole.nodeID,
+		"grpcAddr":       clusterRole.grpcAddr,
+		"uptime":         time.Since(startTime).Round(time.Second).String(),
+		"enrollEnabled":  globalClusterCA.Ready(),
+		"caFingerprint":  globalClusterCA.CACertFingerprint(),
 	}
 	if clusterRole.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()
+		result["enrolledNodes"] = globalClusterStore.ListNodes()
+		result["activeTokens"] = countActiveTokens()
 	}
 	jsonOK(w, result)
+}
+
+func countActiveTokens() int {
+	count := 0
+	for _, t := range globalClusterStore.ListTokens() {
+		if !t.Used && time.Now().Before(t.ExpiresAt) {
+			count++
+		}
+	}
+	return count
+}
+
+// apiClusterTokens handles enrollment token CRUD.
+func apiClusterTokens(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, "viewer") {
+			return
+		}
+		tokens := globalClusterStore.ListTokens()
+		jsonOK(w, map[string]any{"tokens": tokens})
+
+	case http.MethodPost:
+		if !requireRole(w, r, "admin") {
+			return
+		}
+		if clusterRole.role != "control-plane" {
+			http.Error(w, "enrollment only available on Control Plane", http.StatusBadRequest)
+			return
+		}
+		if !globalClusterCA.Ready() {
+			http.Error(w, "cluster CA not initialized", http.StatusServiceUnavailable)
+			return
+		}
+
+		var req struct {
+			NodePrefix string `json:"node_prefix"`
+			AllowCIDR  string `json:"allow_cidr"`
+			TTLHours   int    `json:"ttl_hours"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		ttl := 24 * time.Hour
+		if req.TTLHours > 0 {
+			ttl = time.Duration(req.TTLHours) * time.Hour
+		}
+
+		admin := sessionAdmin(r)
+		plaintext, err := globalClusterStore.GenerateToken(req.NodePrefix, req.AllowCIDR, admin, ttl)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Build enrollment URL.
+		cpAddr := clusterRole.grpcAddr
+		caFP := globalClusterCA.CACertFingerprint()
+		enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
+		enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
+
+		auditEvent(r, "enrollment.token_created", req.NodePrefix,
+			fmt.Sprintf("cidr=%s ttl=%dh", req.AllowCIDR, int(ttl.Hours())))
+
+		jsonOK(w, map[string]any{
+			"token":      plaintext,
+			"enroll_url": enrollURL,
+			"enroll_cmd": enrollCmd,
+			"expires_at": time.Now().Add(ttl).Format(time.RFC3339),
+		})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, "admin") {
+			return
+		}
+		tokenHash := r.URL.Query().Get("hash")
+		if tokenHash == "" {
+			http.Error(w, "hash parameter required", http.StatusBadRequest)
+			return
+		}
+		if !globalClusterStore.DeleteToken(tokenHash) {
+			http.Error(w, "token not found", http.StatusNotFound)
+			return
+		}
+		if err := globalClusterStore.Save(); err != nil {
+			logger.Printf("ClusterDB save error: %v", err)
+		}
+		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiClusterNodes returns enrolled nodes with their status.
+func apiClusterNodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "viewer") {
+		return
+	}
+	nodes := globalClusterStore.ListNodes()
+	jsonOK(w, map[string]any{"nodes": nodes})
+}
+
+// apiClusterRevoke revokes an enrolled node.
+func apiClusterRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "admin") {
+		return
+	}
+	var req struct {
+		NodeID string `json:"node_id"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.NodeID == "" {
+		http.Error(w, "node_id required", http.StatusBadRequest)
+		return
+	}
+
+	admin := sessionAdmin(r)
+	if err := globalClusterStore.RevokeNode(req.NodeID, admin, req.Reason); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := globalClusterStore.Save(); err != nil {
+		logger.Printf("ClusterDB save error: %v", err)
+	}
+
+	auditEvent(r, "enrollment.node_revoked", req.NodeID,
+		fmt.Sprintf("reason=%s", req.Reason))
+
+	logger.Printf("Enrollment: node %q revoked by %s (reason: %s)", req.NodeID, admin, req.Reason)
+	jsonOK(w, map[string]any{"ok": true})
 }

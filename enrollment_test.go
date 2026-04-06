@@ -6,7 +6,10 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +17,7 @@ import (
 	"time"
 )
 
-// ── ClusterStore Tests ──────────────────────────────────────────────────────
+// ── ClusterStore Tests ─────────────────────────────────────────────────────���
 
 func TestClusterStore_LoadSave(t *testing.T) {
 	dir := t.TempDir()
@@ -501,6 +504,135 @@ func TestHashToken_Deterministic(t *testing.T) {
 	}
 }
 
+// ── API Endpoint Tests ──────────────────────────────────────────────────────
+
+func TestAPIClusterTokens_RequiresCP(t *testing.T) {
+	// Save and restore cluster role.
+	origRole := clusterRole.role
+	defer func() { clusterRole.role = origRole }()
+	clusterRole.role = "standalone"
+
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"ttl_hours": 1}`)
+	r := httptest.NewRequest(http.MethodPost, "/api/cluster/tokens", body)
+	r.Header.Set("Content-Type", "application/json")
+	// Inject admin role.
+	r = adminCtx(r)
+
+	apiClusterTokens(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestAPIClusterNodes_GET(t *testing.T) {
+	// Swap global store.
+	origStore := globalClusterStore
+	defer func() { globalClusterStore = origStore }()
+	globalClusterStore = newTestClusterStore(t)
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-api-1", Status: "connected"})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/cluster/nodes", nil)
+	r = adminCtx(r)
+
+	apiClusterNodes(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp struct {
+		Nodes []EnrolledNode `json:"nodes"`
+	}
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if len(resp.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(resp.Nodes))
+	}
+}
+
+func TestAPIClusterRevoke_POST(t *testing.T) {
+	origStore := globalClusterStore
+	defer func() { globalClusterStore = origStore }()
+	globalClusterStore = newTestClusterStore(t)
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-rev-1", Status: "connected", CertSerial: "s1"})
+
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"node_id":"dp-rev-1","reason":"test"}`)
+	r := httptest.NewRequest(http.MethodPost, "/api/cluster/revoke", body)
+	r.Header.Set("Content-Type", "application/json")
+	r = adminCtx(r)
+
+	apiClusterRevoke(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	n, _ := globalClusterStore.GetNode("dp-rev-1")
+	if n.Status != "revoked" {
+		t.Fatalf("status = %q, want revoked", n.Status)
+	}
+}
+
+func TestAPIClusterRevoke_MissingNodeID(t *testing.T) {
+	w := httptest.NewRecorder()
+	body := strings.NewReader(`{"reason":"test"}`)
+	r := httptest.NewRequest(http.MethodPost, "/api/cluster/revoke", body)
+	r.Header.Set("Content-Type", "application/json")
+	r = adminCtx(r)
+
+	apiClusterRevoke(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestAPIClusterStatus_IncludesEnrollInfo(t *testing.T) {
+	origRole := clusterRole.role
+	origStore := globalClusterStore
+	origCA := globalClusterCA
+	defer func() {
+		clusterRole.role = origRole
+		globalClusterStore = origStore
+		globalClusterCA = origCA
+	}()
+
+	clusterRole.role = "control-plane"
+	clusterRole.grpcAddr = ":50051"
+	globalClusterStore = newTestClusterStore(t)
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-1", Status: "connected"})
+
+	// Init a test CA.
+	dir := t.TempDir()
+	testCA := &clusterCA{}
+	_ = testCA.InitOrLoad(dir)
+	globalClusterCA = testCA
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/cluster/status", nil)
+	apiClusterStatus(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["enrollEnabled"] != true {
+		t.Fatal("enrollEnabled should be true")
+	}
+	if resp["caFingerprint"] == "" {
+		t.Fatal("caFingerprint should not be empty")
+	}
+	enrolled, ok := resp["enrolledNodes"].([]any)
+	if !ok || len(enrolled) != 1 {
+		t.Fatalf("expected 1 enrolledNode, got %v", resp["enrolledNodes"])
+	}
+}
+
 // ── End-to-End Enrollment Flow Test ─────────────────────────────────────────
 
 func TestEnrollmentFlow_TokenToCSRToNode(t *testing.T) {
@@ -654,3 +786,35 @@ func TestClusterStore_PersistenceRoundTrip(t *testing.T) {
 	}
 }
 
+// ── Concurrent Access Test ──────────────────────────────────────────────────
+
+func TestClusterStore_ConcurrentAccess(t *testing.T) {
+	cs := newTestClusterStore(t)
+
+	// Register some initial nodes.
+	for i := 0; i < 10; i++ {
+		cs.RegisterNode(&EnrolledNode{
+			NodeID: "dp-" + string(rune('a'+i)),
+			Status: "connected",
+		})
+	}
+
+	// Run concurrent operations.
+	done := make(chan struct{})
+	for i := 0; i < 20; i++ {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < 50; j++ {
+				cs.ListNodes()
+				cs.ListTokens()
+				cs.ListRevoked()
+				cs.UpdateNodeSeen("dp-a", "10.0.0.1")
+				cs.GetNode("dp-b")
+				cs.IsRevoked("serial-x")
+			}
+		}(i)
+	}
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+}

@@ -2011,32 +2011,82 @@ Firefox (all platforms):
     <div class="view" id="view-cluster">
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Cluster Nodes</span>
+          <span class="panel-title">Cluster Overview</span>
           <button class="btn ghost sm" onclick="loadCluster()">↺ Refresh</button>
         </div>
-        <div class="cards" id="cluster-cards" style="grid-template-columns:repeat(3,1fr)">
+        <div class="cards" id="cluster-cards" style="grid-template-columns:repeat(4,1fr)">
           <div class="card"><div class="card-label">Role</div><div class="card-value" id="cluster-role">—</div></div>
           <div class="card"><div class="card-label">Node ID</div><div class="card-value" id="cluster-node-id">—</div></div>
           <div class="card"><div class="card-label">gRPC Address</div><div class="card-value" id="cluster-grpc">—</div></div>
+          <div class="card"><div class="card-label">Enrolled Nodes</div><div class="card-value" id="cluster-enrolled-count">0</div></div>
         </div>
       </div>
+
+      <!-- Enrolled Nodes Table -->
       <div class="panel" style="margin-top:16px" id="cluster-nodes-panel">
-        <div class="panel-header"><span class="panel-title">Connected Data Plane Nodes</span></div>
+        <div class="panel-header">
+          <span class="panel-title">Enrolled Nodes</span>
+          <button class="btn sm" id="cluster-enroll-btn" onclick="showEnrollModal()" style="display:none">+ Enroll Node</button>
+        </div>
         <div id="cluster-no-nodes" style="padding:24px;text-align:center;color:var(--muted);font-size:.85rem">
-          No Data Plane nodes connected. This node is running in standalone mode.
+          No nodes enrolled. This node is running in standalone mode.
         </div>
         <div class="tbl-wrap">
           <table id="cluster-nodes-table" style="display:none">
-            <thead><tr><th>Node ID</th><th>Total Requests</th><th>Blocked</th><th>Auth Failures</th><th>Uptime</th></tr></thead>
+            <thead><tr><th>Node ID</th><th>Status</th><th>Last Seen</th><th>Total Requests</th><th>Blocked</th><th>Enrolled</th><th>Actions</th></tr></thead>
             <tbody id="cluster-nodes-tbody"></tbody>
           </table>
         </div>
       </div>
-      <div class="panel" style="margin-top:16px" id="cluster-enrollment-panel" style="display:none">
-        <div class="panel-header"><span class="panel-title">Enrollment</span></div>
-        <div style="padding:16px;font-size:.85rem">
-          <p style="color:var(--muted);margin-bottom:12px">To add a Data Plane node, start Culvert with:</p>
-          <pre id="cluster-enroll-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.78rem;overflow-x:auto;color:var(--accent2)"></pre>
+
+      <!-- Active Tokens -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-tokens-panel">
+        <div class="panel-header"><span class="panel-title">Enrollment Tokens</span></div>
+        <div id="cluster-no-tokens" style="padding:24px;text-align:center;color:var(--muted);font-size:.85rem">
+          No enrollment tokens.
+        </div>
+        <div class="tbl-wrap">
+          <table id="cluster-tokens-table" style="display:none">
+            <thead><tr><th>Created By</th><th>Node Prefix</th><th>CIDR</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="cluster-tokens-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Enrollment Modal (hidden by default) -->
+      <div id="enroll-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;max-width:560px;width:90%">
+          <h3 style="margin:0 0 18px;font-size:1rem;color:var(--fg)">Enroll New Node</h3>
+          <div style="display:grid;gap:12px">
+            <label style="font-size:.8rem;color:var(--muted)">Node ID Prefix <span style="opacity:.5">(optional — restrict which node IDs can use this token)</span>
+              <input id="enroll-prefix" class="input" placeholder="e.g. dp-east-" style="margin-top:4px">
+            </label>
+            <label style="font-size:.8rem;color:var(--muted)">Allowed Source CIDR <span style="opacity:.5">(optional — restrict by IP range)</span>
+              <input id="enroll-cidr" class="input" placeholder="e.g. 10.0.0.0/8" style="margin-top:4px">
+            </label>
+            <label style="font-size:.8rem;color:var(--muted)">Token Expires In
+              <select id="enroll-ttl" class="input" style="margin-top:4px">
+                <option value="1">1 hour</option>
+                <option value="6">6 hours</option>
+                <option value="24" selected>24 hours</option>
+                <option value="168">7 days</option>
+              </select>
+            </label>
+          </div>
+
+          <!-- Token result (shown after generation) -->
+          <div id="enroll-result" style="display:none;margin-top:18px">
+            <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">Enrollment Command <span style="opacity:.5">(copy and run on the new server)</span></div>
+            <pre id="enroll-result-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="copyEnrollCmd()" title="Click to copy"></pre>
+            <div style="margin-top:8px;font-size:.75rem;color:var(--muted)">
+              Or manually: <code id="enroll-result-manual" style="color:var(--accent);font-size:.72rem"></code>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:10px;margin-top:20px;justify-content:flex-end">
+            <button class="btn ghost sm" onclick="hideEnrollModal()">Close</button>
+            <button class="btn sm" id="enroll-generate-btn" onclick="generateEnrollToken()">Generate Token</button>
+          </div>
         </div>
       </div>
     </div><!-- /view-cluster -->
@@ -5431,36 +5481,164 @@ async function loadCluster() {
   document.getElementById('cluster-node-id').textContent = r.nodeID || '—';
   document.getElementById('cluster-grpc').textContent = r.grpcAddr || '—';
 
-  const nodes = r.nodes || [];
+  const isCP = r.role === 'control-plane';
+  const enrollBtn = document.getElementById('cluster-enroll-btn');
+  const tokensPanel = document.getElementById('cluster-tokens-panel');
+
+  // Show enroll button and tokens panel only on Control Plane
+  enrollBtn.style.display = isCP && r.enrollEnabled ? '' : 'none';
+  tokensPanel.style.display = isCP ? '' : 'none';
+
+  // Enrolled nodes
+  const enrolled = r.enrolledNodes || [];
+  const metrics = r.nodes || [];
+  const metricsMap = {};
+  metrics.forEach(m => { metricsMap[m.node_id] = m; });
+
+  document.getElementById('cluster-enrolled-count').textContent = enrolled.length;
+
   const noNodes = document.getElementById('cluster-no-nodes');
   const table = document.getElementById('cluster-nodes-table');
   const tbody = document.getElementById('cluster-nodes-tbody');
-  const enrollPanel = document.getElementById('cluster-enrollment-panel');
 
-  if (r.role === 'control-plane' && nodes.length > 0) {
+  if (enrolled.length > 0) {
     noNodes.style.display = 'none';
     table.style.display = '';
-    tbody.innerHTML = nodes.map(n => `<tr>
-      <td style="font-weight:600">${escHtml(n.node_id)}</td>
-      <td>${n.total.toLocaleString()}</td>
-      <td>${n.blocked.toLocaleString()}</td>
-      <td>${n.auth_fail.toLocaleString()}</td>
-      <td>${escHtml(n.uptime)}</td>
-    </tr>`).join('');
+    tbody.innerHTML = enrolled.map(n => {
+      const m = metricsMap[n.node_id] || {};
+      const statusColor = n.status === 'connected' ? '#22c55e' : n.status === 'revoked' ? '#ef4444' : '#f59e0b';
+      const statusIcon = n.status === 'connected' ? '\u25cf' : n.status === 'revoked' ? '\u25cf' : '\u25cb';
+      const lastSeen = n.last_seen ? timeAgo(new Date(n.last_seen)) : 'never';
+      const enrolledAt = n.enrolled_at ? new Date(n.enrolled_at).toLocaleDateString() : '—';
+      const canRevoke = n.status !== 'revoked';
+      return `<tr>
+        <td style="font-weight:600">${escHtml(n.node_id)}</td>
+        <td><span style="color:${statusColor}">${statusIcon}</span> ${escHtml(n.status)}</td>
+        <td>${lastSeen}</td>
+        <td>${(m.total || 0).toLocaleString()}</td>
+        <td>${(m.blocked || 0).toLocaleString()}</td>
+        <td>${enrolledAt}</td>
+        <td>${canRevoke ? `<button class="btn ghost sm" style="color:#ef4444;font-size:.75rem" onclick="revokeNode('${escHtml(n.node_id)}')">Revoke</button>` : '<span style="color:var(--muted);font-size:.75rem">Revoked</span>'}</td>
+      </tr>`;
+    }).join('');
+  } else if (isCP) {
+    noNodes.style.display = '';
+    noNodes.textContent = 'No nodes enrolled yet. Click "+ Enroll Node" to add a Data Plane node.';
+    table.style.display = 'none';
   } else {
     noNodes.style.display = '';
+    noNodes.textContent = r.role === 'data-plane'
+      ? 'This node is a Data Plane worker. Manage enrollment from the Control Plane.'
+      : 'No Data Plane nodes connected. Start in Control Plane mode (-cp-grpc-addr) to enable enrollment.';
     table.style.display = 'none';
-    if (r.role === 'standalone') {
-      noNodes.textContent = 'No Data Plane nodes connected. This node is running in standalone mode.';
-    }
   }
 
-  if (r.role === 'control-plane' && r.grpcAddr) {
-    enrollPanel.style.display = '';
-    document.getElementById('cluster-enroll-cmd').textContent =
-      `./culvert -dp-cp-addr ${r.grpcAddr} \\\n  -dp-node-id dp-new-node \\\n  -dp-cert /certs/dp.crt \\\n  -dp-key /certs/dp.key \\\n  -dp-ca /certs/ca.crt`;
+  // Load tokens if CP
+  if (isCP) loadClusterTokens();
+}
+
+async function loadClusterTokens() {
+  const r = await api('/api/cluster/tokens');
+  if (!r) return;
+  const tokens = r.tokens || [];
+  const noTok = document.getElementById('cluster-no-tokens');
+  const table = document.getElementById('cluster-tokens-table');
+  const tbody = document.getElementById('cluster-tokens-tbody');
+
+  if (tokens.length > 0) {
+    noTok.style.display = 'none';
+    table.style.display = '';
+    const now = new Date();
+    tbody.innerHTML = tokens.map(t => {
+      const expired = new Date(t.expires_at) < now;
+      let status = t.used ? `Used by ${escHtml(t.used_by_node)}` : expired ? 'Expired' : 'Active';
+      const statusColor = t.used ? 'var(--muted)' : expired ? '#ef4444' : '#22c55e';
+      const canDelete = t.used || expired;
+      return `<tr>
+        <td>${escHtml(t.created_by)}</td>
+        <td>${escHtml(t.node_prefix) || '<em style="color:var(--muted)">any</em>'}</td>
+        <td>${escHtml(t.allow_cidr) || '<em style="color:var(--muted)">any</em>'}</td>
+        <td>${new Date(t.expires_at).toLocaleString()}</td>
+        <td style="color:${statusColor}">${status}</td>
+        <td>${canDelete ? `<button class="btn ghost sm" style="font-size:.75rem" onclick="deleteToken('${escHtml(t.token_hash)}')">Delete</button>` : '—'}</td>
+      </tr>`;
+    }).join('');
   } else {
-    enrollPanel.style.display = 'none';
+    noTok.style.display = '';
+    table.style.display = 'none';
+  }
+}
+
+function timeAgo(date) {
+  const seconds = Math.floor((new Date() - date) / 1000);
+  if (seconds < 60) return seconds + 's ago';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm ago';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + 'h ago';
+  const days = Math.floor(hours / 24);
+  return days + 'd ago';
+}
+
+function showEnrollModal() {
+  const modal = document.getElementById('enroll-modal');
+  modal.style.display = 'flex';
+  document.getElementById('enroll-result').style.display = 'none';
+  document.getElementById('enroll-generate-btn').style.display = '';
+  document.getElementById('enroll-prefix').value = '';
+  document.getElementById('enroll-cidr').value = '';
+  document.getElementById('enroll-ttl').value = '24';
+}
+
+function hideEnrollModal() {
+  document.getElementById('enroll-modal').style.display = 'none';
+  loadCluster(); // refresh to show new token
+}
+
+async function generateEnrollToken() {
+  const prefix = document.getElementById('enroll-prefix').value.trim();
+  const cidr = document.getElementById('enroll-cidr').value.trim();
+  const ttl = parseInt(document.getElementById('enroll-ttl').value);
+
+  const r = await api('/api/cluster/tokens', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ node_prefix: prefix, allow_cidr: cidr, ttl_hours: ttl })
+  });
+  if (!r) return;
+
+  // Show result
+  document.getElementById('enroll-result').style.display = '';
+  document.getElementById('enroll-generate-btn').style.display = 'none';
+  document.getElementById('enroll-result-cmd').textContent = r.enroll_cmd;
+  document.getElementById('enroll-result-manual').textContent = r.enroll_url;
+  toast('Enrollment token generated', 'success');
+}
+
+function copyEnrollCmd() {
+  const cmd = document.getElementById('enroll-result-cmd').textContent;
+  navigator.clipboard.writeText(cmd).then(() => toast('Copied to clipboard', 'success'));
+}
+
+async function revokeNode(nodeId) {
+  if (!confirm(`Revoke node "${nodeId}"? This will immediately disconnect it from the cluster.`)) return;
+  const reason = prompt('Reason for revocation (optional):') || 'manual revocation';
+  const r = await api('/api/cluster/revoke', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ node_id: nodeId, reason: reason })
+  });
+  if (r && r.ok) {
+    toast('Node revoked', 'success');
+    loadCluster();
+  }
+}
+
+async function deleteToken(hash) {
+  const r = await api('/api/cluster/tokens?hash=' + encodeURIComponent(hash), { method: 'DELETE' });
+  if (r && r.ok) {
+    toast('Token deleted', 'success');
+    loadClusterTokens();
   }
 }
 
