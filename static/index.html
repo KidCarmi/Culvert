@@ -13,7 +13,8 @@
   --bg:        #0b0f1a;
   --surface:   #111827;
   --surface2:  #1a2235;
-  --border:    #1f2d45;
+  --border:    #1e2d42;
+  --border-hi: #2d3f5a;
   --accent:    #14b8a6;
   --accent2:   #2dd4bf;
   --green:     #22c55e;
@@ -21,11 +22,12 @@
   --orange:    #f97316;
   --yellow:    #eab308;
   --text:      #e2e8f0;
-  --muted:     #64748b;
-  --text-muted:#64748b;
-  --sidebar-w: 220px;
+  --muted:     #8892a8;
+  --text-muted:#8892a8;
+  --sidebar-w: 230px;
   --radius:    10px;
   --shadow:    0 4px 24px rgba(0,0,0,.4);
+  --focus-ring: 0 0 0 3px rgba(20,184,166,.25);
 }
 body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
        background: var(--bg); color: var(--text); height: 100vh;
@@ -35,6 +37,7 @@ body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   width: var(--sidebar-w); min-height: 100vh; background: var(--surface);
   border-right: 1px solid var(--border); display: flex; flex-direction: column;
   flex-shrink: 0; position: fixed; left: 0; top: 0; bottom: 0; z-index: 100;
+  transition: transform .2s ease;
 }
 .logo {
   padding: 20px 20px 16px;
@@ -47,19 +50,20 @@ body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
 .logo-icon img { width: 100%; height: 100%; object-fit: contain; }
 .logo-text { font-size: 1rem; font-weight: 700; color: var(--text); }
 .logo-sub  { font-size: .65rem; color: var(--muted); }
-nav { flex: 1; padding: 12px 10px; }
-.nav-section { font-size: .65rem; font-weight: 700; color: var(--muted);
-               letter-spacing: .08em; text-transform: uppercase;
-               padding: 12px 10px 4px; }
+nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
+.nav-section { font-size: .6rem; font-weight: 700; color: var(--muted);
+               letter-spacing: .1em; text-transform: uppercase;
+               padding: 14px 10px 4px; }
 .nav-item {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 12px; border-radius: 7px; cursor: pointer;
-  font-size: .85rem; color: var(--muted); transition: all .15s; margin-bottom: 1px;
+  font-size: .82rem; color: var(--muted); transition: all .15s; margin-bottom: 1px;
+  border-left: 3px solid transparent;
 }
 .nav-item:hover  { background: var(--surface2); color: var(--text); }
-.nav-item.active { background: rgba(20,184,166,.15); color: var(--accent2);
-                   font-weight: 600; }
-.nav-item .icon  { width: 18px; text-align: center; flex-shrink: 0; }
+.nav-item.active { background: rgba(20,184,166,.12); color: var(--accent2);
+                   font-weight: 600; border-left-color: var(--accent); }
+.nav-item .icon  { width: 18px; text-align: center; flex-shrink: 0; font-size: .9rem; }
 .nav-badge {
   margin-left: auto; background: var(--red); color: #fff;
   font-size: .65rem; font-weight: 700; padding: 2px 6px;
@@ -73,11 +77,21 @@ nav { flex: 1; padding: 12px 10px; }
 .dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .dot.gray  { background: var(--muted); }
 .status-label { color: var(--muted); }
+/* ─── Mobile sidebar ───────────────────────────────────────────────────── */
+#sidebar-toggle { display: none; background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); padding: 6px 10px; border-radius: 6px; cursor: pointer;
+  font-size: 1.1rem; line-height: 1; }
+@media(max-width:860px) {
+  #sidebar { transform: translateX(-100%); }
+  #sidebar.open { transform: translateX(0); }
+  #sidebar-toggle { display: inline-flex; }
+  #main { margin-left: 0 !important; }
+}
 /* ─── Main content ──────────────────────────────────────────────────────── */
 #main { margin-left: var(--sidebar-w); flex: 1; height: 100vh;
         overflow-y: auto; display: flex; flex-direction: column; }
 .topbar {
-  padding: 16px 28px; border-bottom: 1px solid var(--border);
+  padding: 14px 28px; border-bottom: 1px solid var(--border);
   display: flex; align-items: center; justify-content: space-between;
   background: var(--surface); position: sticky; top: 0; z-index: 50;
 }
@@ -90,22 +104,30 @@ nav { flex: 1; padding: 12px 10px; }
 .pill.live { background: rgba(34,197,94,.12); color: var(--green);
              border: 1px solid rgba(34,197,94,.3); }
 .content { padding: 24px 28px; flex: 1; }
+@media(max-width:640px) { .content { padding: 16px 14px; } }
 /* ─── Views ─────────────────────────────────────────────────────────────── */
 .view { display: none; }
 .view.active { display: block; }
 /* ─── Cards ─────────────────────────────────────────────────────────────── */
-.cards { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px;
+.cards { display: grid; grid-template-columns: repeat(5,1fr); gap: 14px;
          margin-bottom: 22px; }
-@media(max-width:1100px){ .cards { grid-template-columns: repeat(2,1fr); } }
+@media(max-width:1200px){ .cards { grid-template-columns: repeat(3,1fr); } }
+@media(max-width:860px) { .cards { grid-template-columns: repeat(2,1fr); } }
+@media(max-width:500px) { .cards { grid-template-columns: 1fr; } }
 .card {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 18px 20px;
+  transition: border-color .15s;
 }
-.card-label { font-size: .72rem; color: var(--muted); font-weight: 500;
+.card:hover { border-color: var(--border-hi); }
+.card-label { font-size: .68rem; color: var(--muted); font-weight: 600;
               text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px;
               display: flex; align-items: center; gap: 6px; }
-.card-value { font-size: 1.9rem; font-weight: 700; line-height: 1; }
-.card-sub   { font-size: .72rem; color: var(--muted); margin-top: 4px; }
+.card-value { font-size: 2rem; font-weight: 700; line-height: 1; }
+.card-sub   { font-size: .72rem; color: var(--muted); margin-top: 6px; }
+.card-trend { font-size: .7rem; font-weight: 600; margin-top: 4px; }
+.card-trend.up   { color: var(--green); }
+.card-trend.down { color: var(--red); }
 .c-blue   .card-value { color: var(--accent2); }
 .c-green  .card-value { color: var(--green); }
 .c-red    .card-value { color: var(--red); }
@@ -122,7 +144,7 @@ nav { flex: 1; padding: 12px 10px; }
 .panel-title { font-size: .85rem; font-weight: 600; }
 .panel-body  { padding: 18px 20px; }
 /* ─── Chart ──────────────────────────────────────────────────────────────── */
-.chart-wrap { height: 160px; }
+.chart-wrap { height: 200px; }
 /* ─── Table ──────────────────────────────────────────────────────────────── */
 .tbl-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .82rem; }
@@ -146,23 +168,28 @@ tbody tr:hover { background: var(--surface2); }
 /* ─── Blocklist ──────────────────────────────────────────────────────────── */
 .add-row { display: flex; gap: 8px; margin-bottom: 16px; }
 .input {
-  background: var(--bg); border: 1px solid var(--border);
+  background: var(--bg); border: 1.5px solid var(--border);
   color: var(--text); padding: 8px 12px; border-radius: 7px;
-  font-size: .85rem; outline: none; transition: border-color .15s;
+  font-size: .85rem; outline: none; transition: border-color .15s, box-shadow .15s;
 }
-.input:focus { border-color: var(--accent); }
+.input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
 .input.wide { flex: 1; }
+select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238892a8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px; }
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--accent); color: #fff; border: none;
   padding: 8px 16px; border-radius: 7px; cursor: pointer;
-  font-size: .82rem; font-weight: 600; transition: opacity .15s;
+  font-size: .82rem; font-weight: 600; transition: background .15s, opacity .15s;
   white-space: nowrap;
 }
-.btn:hover   { opacity: .85; }
+.btn:hover   { background: #0ea395; }
+.btn:active  { background: #0d9488; }
+.btn:disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
+.btn:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 .btn.danger  { background: var(--red); }
+.btn.danger:hover { background: #dc2626; }
 .btn.ghost   { background: transparent; border: 1px solid var(--border); color: var(--muted); }
-.btn.ghost:hover { color: var(--text); border-color: var(--text); }
+.btn.ghost:hover { color: var(--text); border-color: var(--border-hi); background: var(--surface2); }
 .btn.sm      { padding: 5px 10px; font-size: .75rem; }
 /* host chips in blocklist table */
 .host-td { font-family: monospace; font-size: .82rem; }
@@ -201,10 +228,21 @@ tbody tr:hover { background: var(--surface2); }
 @keyframes slideIn { from { opacity:0; transform: translateX(20px); } }
 /* ─── Empty state ────────────────────────────────────────────────────────── */
 .empty-state {
-  text-align: center; padding: 40px 20px;
+  display: flex; flex-direction: column; align-items: center;
+  text-align: center; padding: 48px 20px;
   color: var(--muted); font-size: .85rem;
 }
-.empty-icon { font-size: 2rem; margin-bottom: 8px; }
+.empty-icon { font-size: 2.5rem; margin-bottom: 12px; opacity: .6; }
+.empty-hint { font-size: .78rem; color: var(--muted); margin-top: 6px; }
+/* ─── Loading spinner ────────────────────────────────────────────────────── */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { width: 20px; height: 20px; border: 2px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin .6s linear infinite; display: inline-block; }
+.loading-overlay { display: flex; align-items: center; justify-content: center;
+  padding: 40px; color: var(--muted); gap: 10px; font-size: .82rem; }
+/* ─── Responsive tables ──────────────────────────────────────────────────── */
+@media(max-width:860px) { .tbl-wrap { font-size: .75rem; } }
 /* ─── Policy badges ──────────────────────────────────────────────────────── */
 .badge.allow    { background: rgba(34,197,94,.12);  color: var(--green); }
 .badge.drop     { background: rgba(239,68,68,.12);  color: var(--red); }
@@ -350,9 +388,12 @@ tr.dragging  { opacity: .4; }
 <!-- ═══ MAIN ════════════════════════════════════════════════════════════════ -->
 <div id="main">
   <div class="topbar">
-    <div>
-      <div class="topbar-title" id="topbar-title">Dashboard</div>
-      <div class="topbar-meta" id="topbar-meta">Real-time proxy overview</div>
+    <div style="display:flex;align-items:center;gap:12px">
+      <button id="sidebar-toggle" onclick="document.getElementById('sidebar').classList.toggle('open')" aria-label="Toggle menu">&#9776;</button>
+      <div>
+        <div class="topbar-title" id="topbar-title">Dashboard</div>
+        <div class="topbar-meta" id="topbar-meta">Real-time proxy overview</div>
+      </div>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <span class="topbar-meta" id="server-time"></span>
@@ -392,27 +433,27 @@ tr.dragging  { opacity: .4; }
 
       <div class="cards">
         <div class="card c-blue">
-          <div class="card-label">📥 Total Requests</div>
+          <div class="card-label">Total Requests</div>
           <div class="card-value" id="d-total">0</div>
           <div class="card-sub">all time</div>
         </div>
         <div class="card c-green">
-          <div class="card-label">✅ Allowed</div>
+          <div class="card-label">Allowed</div>
           <div class="card-value" id="d-allowed">0</div>
           <div class="card-sub">passed through</div>
         </div>
         <div class="card c-red">
-          <div class="card-label">🚫 Blocked</div>
+          <div class="card-label">Blocked</div>
           <div class="card-value" id="d-blocked">0</div>
-          <div class="card-sub">by blocklist</div>
+          <div class="card-sub">by policy &amp; blocklist</div>
         </div>
         <div class="card c-orange">
-          <div class="card-label">🔐 Auth Failures</div>
+          <div class="card-label">Auth Failures</div>
           <div class="card-value" id="d-auth">0</div>
           <div class="card-sub">bad credentials</div>
         </div>
         <div class="card c-blue">
-          <div class="card-label">⚡ Active Connections</div>
+          <div class="card-label">Active Connections</div>
           <div class="card-value" id="d-active">0</div>
           <div class="card-sub" id="d-rps">0.0 req/s</div>
         </div>
@@ -421,8 +462,8 @@ tr.dragging  { opacity: .4; }
       <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:18px">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
-            <span class="panel-title">Request Rate — last 60 minutes</span>
-            <span style="font-size:.75rem;color:var(--muted)">req/min</span>
+            <span class="panel-title">Request Rate</span>
+            <span style="font-size:.72rem;color:var(--muted)">last 60 min · req/min</span>
           </div>
           <div class="panel-body">
             <div class="chart-wrap">
@@ -434,30 +475,111 @@ tr.dragging  { opacity: .4; }
           <div class="panel-header">
             <span class="panel-title">Traffic Breakdown</span>
           </div>
-          <div class="panel-body" style="display:flex;align-items:center;justify-content:center;height:160px">
-            <canvas id="breakdownChart" style="max-height:150px"></canvas>
+          <div class="panel-body" style="display:flex;align-items:center;justify-content:center;height:200px">
+            <canvas id="breakdownChart" style="max-height:190px"></canvas>
           </div>
         </div>
       </div>
 
-      <div class="panel">
-        <div class="panel-header">
-          <span class="panel-title">Top Hosts</span>
-          <span style="font-size:.75rem;color:var(--muted)">by allowed requests</span>
+      <!-- ── New: Threat Breakdown + System Health ─────────────────────────── -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
+        <div class="panel" style="margin-bottom:0">
+          <div class="panel-header">
+            <span class="panel-title">Threat Engine Breakdown</span>
+            <span style="font-size:.72rem;color:var(--muted)">blocked by engine</span>
+          </div>
+          <div class="panel-body" id="threat-breakdown-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">ClamAV</div>
+                <div style="font-size:1.4rem;font-weight:700;color:var(--red)" id="d-clam">0</div>
+              </div>
+              <div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">YARA</div>
+                <div style="font-size:1.4rem;font-weight:700;color:var(--orange)" id="d-yara">0</div>
+              </div>
+              <div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">DPI Signatures</div>
+                <div style="font-size:1.4rem;font-weight:700;color:var(--yellow)" id="d-dpi">0</div>
+              </div>
+              <div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Threat Feeds</div>
+                <div style="font-size:1.4rem;font-weight:700;color:var(--accent2)" id="d-feed">0</div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="tbl-wrap">
-          <table>
-            <thead><tr><th>#</th><th>Host</th><th style="text-align:right">Requests</th></tr></thead>
-            <tbody id="top-hosts-table"></tbody>
-          </table>
+        <div class="panel" style="margin-bottom:0">
+          <div class="panel-header">
+            <span class="panel-title">System Health</span>
+            <span style="font-size:.72rem;color:var(--muted)" id="health-goroutines"></span>
+          </div>
+          <div class="panel-body">
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:.8rem;color:var(--muted)">Memory (Alloc)</span>
+                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-mem-alloc">—</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:.8rem;color:var(--muted)">Memory (System)</span>
+                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-mem-sys">—</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:.8rem;color:var(--muted)">Goroutines</span>
+                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-goroutines">—</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:.8rem;color:var(--muted)">GC Cycles</span>
+                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-gc">—</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:.8rem;color:var(--muted)">SSE Clients</span>
+                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-sse">—</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:.8rem;color:var(--muted)">Blocklist Entries</span>
+                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-bl-size">—</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Top Policy Rules + Top Hosts ──────────────────────────────────── -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
+        <div class="panel" style="margin-bottom:0">
+          <div class="panel-header">
+            <span class="panel-title">Top Policy Rules</span>
+            <span style="font-size:.72rem;color:var(--muted)">by hit count</span>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>Rule</th><th>Action</th><th style="text-align:right">Hits</th></tr></thead>
+              <tbody id="top-rules-table">
+                <tr><td colspan="3" style="text-align:center;color:var(--muted);padding:20px;font-size:.82rem">No policy rule hits yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel" style="margin-bottom:0">
+          <div class="panel-header">
+            <span class="panel-title">Top Hosts</span>
+            <span style="font-size:.72rem;color:var(--muted)">by allowed requests</span>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>#</th><th>Host</th><th style="text-align:right">Requests</th></tr></thead>
+              <tbody id="top-hosts-table"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
-            <span class="panel-title">🌍 Destination Countries</span>
-            <span style="font-size:.75rem;color:var(--muted)">top 10 by traffic</span>
+            <span class="panel-title">Destination Countries</span>
+            <span style="font-size:.72rem;color:var(--muted)">top 10 by traffic</span>
           </div>
           <div class="panel-body" id="country-chart-wrap" style="min-height:180px">
             <div class="empty-state" style="padding:30px 0">No geo data yet</div>
@@ -4235,6 +4357,52 @@ function toast(msg, type='success') {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Dashboard: System Health, Threats, Top Rules
+// ═══════════════════════════════════════════════════════════════════════════
+function setText(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
+
+async function fetchDashboardHealth() {
+  try {
+    const h = await api('/api/dashboard/health');
+    setText('d-mem-alloc', (h.memAllocMB || 0).toFixed(1) + ' MB');
+    setText('d-mem-sys',   (h.memSysMB || 0).toFixed(1) + ' MB');
+    setText('d-goroutines', h.goroutines || 0);
+    setText('d-gc',         h.numGC || 0);
+    setText('d-sse',        h.sseClients || 0);
+    setText('d-bl-size',    fmt(h.blocklistSize || 0));
+  } catch(_) {}
+}
+
+async function fetchDashboardThreats() {
+  try {
+    const t = await api('/api/dashboard/threats');
+    setText('d-clam', fmt(t.clamav || 0));
+    setText('d-yara', fmt(t.yara || 0));
+    setText('d-dpi',  fmt(t.dpi || 0));
+    setText('d-feed', fmt(t.threatFeed || 0));
+  } catch(_) {}
+}
+
+async function fetchTopRules() {
+  try {
+    const data = await api('/api/dashboard/top-rules');
+    const tbody = document.getElementById('top-rules-table');
+    if (!tbody) return;
+    const rules = data.rules || [];
+    if (!rules.length) {
+      tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:16px">No policy rule hits yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rules.map(r => {
+      const badge = r.action === 'allow'
+        ? '<span style="color:#22c55e;font-weight:600">allow</span>'
+        : '<span style="color:var(--red);font-weight:600">deny</span>';
+      return `<tr><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.name}">${r.name}</td><td>${badge}</td><td style="font-family:monospace;font-weight:700;text-align:right">${fmt(r.hits)}</td></tr>`;
+    }).join('');
+  } catch(_) {}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SSE Live Dashboard
 // ═══════════════════════════════════════════════════════════════════════════
 let sseConnected = false;
@@ -4246,8 +4414,16 @@ function connectSSE() {
     try {
       const d = JSON.parse(e.data);
       document.getElementById('d-active').textContent = d.activeConns || 0;
+      document.getElementById('d-total').textContent = fmt(d.totalRequests || 0);
+      document.getElementById('d-blocked').textContent = fmt(d.blocked || 0);
+      document.getElementById('d-auth').textContent = fmt(d.authFail || 0);
       document.getElementById('d-rps').textContent = (d.rps || 0).toFixed(1) + ' req/s';
       renderCountryChart(d.topCountries || []);
+      // Threat engine breakdown (live from SSE)
+      setText('d-clam', fmt(d.clamBlocked || 0));
+      setText('d-yara', fmt(d.yaraBlocked || 0));
+      setText('d-dpi',  fmt(d.dpiBlocked || 0));
+      setText('d-feed', fmt(d.threatFeedBlocked || 0));
     } catch(_) {}
   };
   es.onerror = () => { sseConnected = false; setTimeout(connectSSE, 5000); };
@@ -4552,7 +4728,12 @@ async function uploadCustomCert() {
 // ═══════════════════════════════════════════════════════════════════════════
 async function tick() {
   await Promise.all([fetchStats(), fetchTimeseries(), fetchLogs()]);
-  if (currentView === 'dashboard') fetchTopHosts();
+  if (currentView === 'dashboard') {
+    fetchTopHosts();
+    fetchDashboardHealth();
+    fetchDashboardThreats();
+    fetchTopRules();
+  }
   if (currentView === 'blocklist') fetchBlocklist();
   if (currentView === 'fileblock') fetchFileBlock();
   if (currentView === 'rewrite')   fetchRewrite();
@@ -4571,6 +4752,9 @@ loadSettings();
 loadSecurity();
 fetchTopHosts();
 loadDefaultAction();
+fetchDashboardHealth();
+fetchDashboardThreats();
+fetchTopRules();
 connectSSE();
 tick();
 setInterval(tick, 3000);
@@ -4580,7 +4764,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.view === 'security')      { loadSecurity(); loadConnLimit(); loadBlockPage(); }
     if (el.dataset.view === 'fileblock')     fetchFileBlock();
     if (el.dataset.view === 'rewrite')       fetchRewrite();
-    if (el.dataset.view === 'dashboard')     fetchTopHosts();
+    if (el.dataset.view === 'dashboard')     { fetchTopHosts(); fetchDashboardHealth(); fetchDashboardThreats(); fetchTopRules(); }
     if (el.dataset.view === 'policy')        { fetchPolicy(); loadDefaultAction(); loadPolicyProviderOptions(); }
     if (el.dataset.view === 'certificates')  { loadCACertInfo(); loadSSLBypass(); }
     if (el.dataset.view === 'idproviders')   loadIdPList();

@@ -56,7 +56,11 @@ type DashboardPayload struct {
 	AuthFail      int64          `json:"authFail"`
 	RPS           float64        `json:"rps"`         // requests per second (1-min avg)
 	TopCountries  []CountryCount `json:"topCountries"`
-	UptimeSec     int64          `json:"uptimeSec"`
+	UptimeSec         int64          `json:"uptimeSec"`
+	ClamBlocked       int64          `json:"clamBlocked"`
+	YARABlocked       int64          `json:"yaraBlocked"`
+	DPIBlocked        int64          `json:"dpiBlocked"`
+	ThreatFeedBlocked int64          `json:"threatFeedBlocked"`
 }
 
 // startSSEBroadcaster runs the ticker that pushes stats to all SSE clients.
@@ -81,7 +85,11 @@ func startSSEBroadcaster() {
 				AuthFail:      atomic.LoadInt64(&statAuthFail),
 				RPS:           rps,
 				TopCountries:  countryTraffic.Top(15),
-				UptimeSec:     int64(time.Since(startTime).Seconds()),
+				UptimeSec:         int64(time.Since(startTime).Seconds()),
+				ClamBlocked:       atomic.LoadInt64(&statClamBlocked),
+				YARABlocked:       atomic.LoadInt64(&statYARABlocked),
+				DPIBlocked:        atomic.LoadInt64(&statDPIBlocked),
+				ThreatFeedBlocked: atomic.LoadInt64(&statThreatFeedBlocked),
 			}
 			data, _ := json.Marshal(payload)
 			hub.broadcast(data)

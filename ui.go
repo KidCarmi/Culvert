@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,9 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/setup/status", apiSetupStatus)
 	mux.HandleFunc("/api/setup/complete", apiSetupComplete)
 	mux.HandleFunc("/api/stats", apiStats)
+	mux.HandleFunc("/api/dashboard/health", apiDashboardHealth)
+	mux.HandleFunc("/api/dashboard/threats", apiDashboardThreats)
+	mux.HandleFunc("/api/dashboard/top-rules", apiDashboardTopRules)
 	mux.HandleFunc("/api/timeseries", apiTimeseries)
 	mux.HandleFunc("/api/logs", apiLogs)
 	mux.HandleFunc("/api/top-hosts", apiTopHosts)
@@ -882,6 +886,65 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		"authEnabled": cfg.AuthEnabled(),
 		"serverTime":  time.Now().Format("2006-01-02 15:04:05"),
 	})
+}
+
+// GET /api/dashboard/health — System health data
+func apiDashboardHealth(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	jsonOK(w, map[string]any{
+		"memAllocMB":    float64(mem.Alloc) / 1024 / 1024,
+		"memSysMB":      float64(mem.Sys) / 1024 / 1024,
+		"goroutines":    runtime.NumGoroutine(),
+		"numGC":         mem.NumGC,
+		"sseClients":    hub.ClientCount(),
+		"blocklistSize": bl.Count(),
+	})
+}
+
+// GET /api/dashboard/threats — Threat engine breakdown
+func apiDashboardThreats(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	jsonOK(w, map[string]any{
+		"clamav":     atomic.LoadInt64(&statClamBlocked),
+		"yara":       atomic.LoadInt64(&statYARABlocked),
+		"dpi":        atomic.LoadInt64(&statDPIBlocked),
+		"threatFeed": atomic.LoadInt64(&statThreatFeedBlocked),
+	})
+}
+
+// GET /api/dashboard/top-rules — Top policy rules by hit count
+func apiDashboardTopRules(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	rules := policyStore.List()
+	// Sort by HitCount descending, take top 10
+	sort.Slice(rules, func(i, j int) bool { return rules[i].HitCount > rules[j].HitCount })
+	if len(rules) > 10 {
+		rules = rules[:10]
+	}
+	type ruleHit struct {
+		Name   string `json:"name"`
+		Action string `json:"action"`
+		Hits   int64  `json:"hits"`
+	}
+	result := make([]ruleHit, 0, len(rules))
+	for _, r := range rules {
+		if r.HitCount > 0 {
+			name := r.Comment
+			if name == "" {
+				name = fmt.Sprintf("Rule #%d", r.Priority)
+			}
+			result = append(result, ruleHit{Name: name, Action: r.Action, Hits: r.HitCount})
+		}
+	}
+	jsonOK(w, map[string]any{"rules": result})
 }
 
 // GET /api/timeseries
