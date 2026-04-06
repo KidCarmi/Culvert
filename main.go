@@ -45,7 +45,7 @@ var appLifecycleCancel context.CancelFunc
 var blFeedSyncer *BlocklistSyncer
 var clusterDBPathGlobal string // persisted cluster state path, set at startup
 
-func main() {
+func main() { //nolint:gocognit,cyclop // main wires everything; refactoring deferred
 	// ── CLI flags ────────────────────────────────────────────────────────────
 	configPath := flag.String("config", "", "Path to config.yaml (optional)")
 	proxyPort := flag.Int("port", 0, "Proxy port (overrides config)")

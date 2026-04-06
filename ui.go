@@ -935,13 +935,13 @@ func apiDashboardTopRules(w http.ResponseWriter, r *http.Request) {
 		Hits   int64  `json:"hits"`
 	}
 	result := make([]ruleHit, 0, len(rules))
-	for _, r := range rules {
-		if r.HitCount > 0 {
-			name := r.Name
+	for i := range rules {
+		if rules[i].HitCount > 0 {
+			name := rules[i].Name
 			if name == "" {
-				name = fmt.Sprintf("Rule #%d", r.Priority)
+				name = fmt.Sprintf("Rule #%d", rules[i].Priority)
 			}
-			result = append(result, ruleHit{Name: name, Action: string(r.Action), Hits: r.HitCount})
+			result = append(result, ruleHit{Name: name, Action: string(rules[i].Action), Hits: rules[i].HitCount})
 		}
 	}
 	jsonOK(w, map[string]any{"rules": result})
