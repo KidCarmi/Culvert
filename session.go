@@ -5,25 +5,53 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
 // ---------------------------------------------------------------------------
-// Session secret — generated once at startup
+// Session secret — configurable for multi-node deployments
 // ---------------------------------------------------------------------------
 
 var sessionSecret []byte
 
+// initSessionSecret sets the HMAC key for session cookies.
+// Priority: CULVERT_SESSION_SECRET env > config file > random.
 func initSessionSecret() {
+	if s := os.Getenv("CULVERT_SESSION_SECRET"); s != "" {
+		key, err := hex.DecodeString(s)
+		if err != nil || len(key) < 32 {
+			panic("CULVERT_SESSION_SECRET must be at least 32 bytes of hex (64 hex chars)")
+		}
+		sessionSecret = key
+		logger.Printf("Session: using shared signing key from CULVERT_SESSION_SECRET")
+		return
+	}
 	sessionSecret = make([]byte, 32)
 	if _, err := rand.Read(sessionSecret); err != nil {
 		panic(fmt.Sprintf("session: failed to generate secret: %v", err))
 	}
+}
+
+// initSessionSecretFromConfig applies a config-file session secret.
+// Called after config is loaded, before the UI starts.
+func initSessionSecretFromConfig(hexKey string) {
+	if hexKey == "" {
+		return // keep env or random key
+	}
+	key, err := hex.DecodeString(hexKey)
+	if err != nil || len(key) < 32 {
+		logger.Printf("WARNING: session_secret must be ≥32 bytes hex — ignoring, using random key")
+		return
+	}
+	sessionSecret = key
+	logger.Printf("Session: using shared signing key from config file")
 }
 
 // ---------------------------------------------------------------------------

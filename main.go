@@ -155,6 +155,7 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 
 	// ── Session secret ───────────────────────────────────────────────────────
 	initSessionSecret()
+	initSessionSecretFromConfig(fc.SessionSecret) // overrides random if config provides one
 
 	// ── Session timeout ───────────────────────────────────────────────────────
 	hrs := firstNonZero(*sessionHrs, fc.SessionTimeoutHours)

@@ -1449,9 +1449,26 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Session Signing Key (multi-node) -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">Session Signing Key</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            For multi-node deployments behind a load balancer, all nodes must share the same HMAC signing key so session cookies are valid across nodes.
+            Set via <code>CULVERT_SESSION_SECRET</code> env var, <code>session_secret</code> in config YAML, or paste below. Must be 64+ hex characters (32 bytes).
+          </p>
+          <div id="s-session-key-status" style="margin-bottom:10px;font-size:.8rem"></div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input type="text" class="input" id="s-session-key" style="flex:1;font-family:monospace;font-size:.8rem" placeholder="64+ hex characters (e.g. openssl rand -hex 32)">
+            <button class="btn" onclick="saveSessionSecret()">Apply</button>
+            <button class="btn ghost sm" onclick="generateSessionSecret()">Generate</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Admin UI IP Allowlist -->
       <div class="panel" style="margin-top:18px">
-        <div class="panel-header"><span class="panel-title">🛡️ Admin Panel IP Restriction</span></div>
+        <div class="panel-header"><span class="panel-title">Admin Panel IP Restriction</span></div>
         <div class="panel-body">
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
             Restrict access to this admin panel to specific IP addresses or CIDR ranges.<br>
@@ -3815,6 +3832,8 @@ async function loadSettings() {
     const t = await api('/api/session-timeout');
     document.getElementById('s-session-hrs').value = t.hours || 8;
   } catch(e) {}
+  // Session signing key
+  loadSessionSecret();
   // Syslog
   try {
     const sl = await api('/api/syslog');
@@ -3853,6 +3872,40 @@ async function saveSessionTimeout() {
     el.style.color = 'var(--green)';
     toast('Session timeout updated', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Session Signing Key ──────────────────────────────────────────────────
+async function loadSessionSecret() {
+  try {
+    const d = await api('/api/session-secret');
+    const el = document.getElementById('s-session-key-status');
+    if (d.shared) {
+      el.innerHTML = '<span style="color:var(--green)">Shared signing key is active (multi-node ready)</span>';
+    } else {
+      el.innerHTML = '<span style="color:var(--orange)">Using random key (single-node only — sessions lost on restart)</span>';
+    }
+  } catch(_) {}
+}
+
+async function saveSessionSecret() {
+  const secret = document.getElementById('s-session-key').value.trim();
+  if (!secret || secret.length < 64) { toast('Secret must be 64+ hex characters', 'error'); return; }
+  try {
+    await api('/api/session-secret', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({secret: secret})
+    });
+    document.getElementById('s-session-key').value = '';
+    toast('Session signing key updated', 'success');
+    loadSessionSecret();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+function generateSessionSecret() {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  const hex = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+  document.getElementById('s-session-key').value = hex;
 }
 
 // ── Admin UI IP Allowlist ─────────────────────────────────────────────────

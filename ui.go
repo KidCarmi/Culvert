@@ -4,12 +4,14 @@ import (
 	"context"
 	"embed"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"net/url"
 	"runtime"
 	"sort"
@@ -63,6 +65,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/config/import", apiConfigImport)      // POST — restore from backup JSON
 	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode) // PUT — toggle proxy auth requirement
 	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)  // GET/POST session TTL (hours)
+	mux.HandleFunc("/api/session-secret", apiSessionSecret)    // GET/POST shared signing key
 	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)         // GET/POST UI access IP allowlist
 	mux.HandleFunc("/api/syslog", apiSyslogConfig)             // GET/POST syslog forwarding
 
@@ -1688,6 +1691,43 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 
 	auditEvent(r, "config.import", "restore", fmt.Sprintf("from backup exported %s", b.ExportedAt))
 	jsonOK(w, map[string]any{"ok": true, "exportedAt": b.ExportedAt})
+}
+
+// GET/POST /api/session-secret — shared session signing key management.
+func apiSessionSecret(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		shared := os.Getenv("CULVERT_SESSION_SECRET") != ""
+		jsonOK(w, map[string]any{"shared": shared})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Secret string `json:"secret"` // hex-encoded, ≥64 chars (32 bytes)
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Secret == "" {
+			http.Error(w, "secret is required (64+ hex chars)", http.StatusBadRequest)
+			return
+		}
+		key, err := hex.DecodeString(body.Secret)
+		if err != nil || len(key) < 32 {
+			http.Error(w, "secret must be ≥32 bytes of hex (64 hex chars)", http.StatusBadRequest)
+			return
+		}
+		sessionSecret = key
+		auditEvent(r, "settings.session_secret", "rotated", "shared session key updated via GUI")
+		jsonOK(w, map[string]any{"ok": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // GET/POST /api/session-timeout — read or change the UI session lifetime.
