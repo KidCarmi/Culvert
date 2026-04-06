@@ -699,7 +699,7 @@ func main() {
 	logger.Println("Shutting down gracefully…")
 
 	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.)
-	lifecycleCancel()
+	appLifecycleCancel()
 
 	if rlCleanupCancel != nil {
 		rlCleanupCancel()
