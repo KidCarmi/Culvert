@@ -115,6 +115,8 @@ func (o *OTLPExporter) push(ctx context.Context) error {
 	}
 
 	// Inline SSRF guard: validate scheme + reject private hosts (CodeQL CWE-918).
+	// Reconstruct URL from parsed components so the value used in the HTTP
+	// request is derived from the validated url.URL, breaking the taint chain.
 	u, err := url.Parse(endpoint)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("invalid OTLP endpoint scheme: %q", endpoint)
@@ -122,6 +124,7 @@ func (o *OTLPExporter) push(ctx context.Context) error {
 	if err := isPrivateHost(u.Hostname()); err != nil {
 		return fmt.Errorf("OTLP endpoint resolves to private network: %w", err)
 	}
+	metricsURL := u.JoinPath("/v1/metrics").String()
 
 	payload := o.buildPayload()
 	body, err := json.Marshal(payload)
@@ -130,7 +133,7 @@ func (o *OTLPExporter) push(ctx context.Context) error {
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		endpoint+"/v1/metrics", bytes.NewReader(body))
+		metricsURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("request: %w", err)
 	}
