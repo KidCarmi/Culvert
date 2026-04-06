@@ -937,7 +937,7 @@ func apiDashboardTopRules(w http.ResponseWriter, r *http.Request) {
 	result := make([]ruleHit, 0, len(rules))
 	for _, r := range rules {
 		if r.HitCount > 0 {
-			name := r.Comment
+			name := r.Name
 			if name == "" {
 				name = fmt.Sprintf("Rule #%d", r.Priority)
 			}
