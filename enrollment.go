@@ -690,6 +690,22 @@ func (ca *clusterCA) Ready() bool {
 // accepted until their certificates expire. New enrollments get certs
 // signed by the new CA. The secondary is auto-cleaned when the old CA
 // certificate expires.
+// backupCAFiles copies the current CA cert and key to .bak files.
+// keyFile must already be validated by safeCAPath. Best-effort, errors ignored.
+func backupCAFiles(dir string, certPEM []byte, keyFile string) {
+	certBak, e1 := safeCAPath(dir, "cluster-ca.crt.bak")
+	keyBak, e2 := safeCAPath(dir, "cluster-ca.key.bak")
+	if e1 != nil || e2 != nil {
+		return
+	}
+	_ = os.WriteFile(certBak, certPEM, 0o600)
+	// keyFile is already sanitised by safeCAPath in the caller.
+	oldKey, err := os.ReadFile(keyFile) // #nosec G304 -- keyFile from safeCAPath
+	if err == nil {
+		_ = os.WriteFile(keyBak, oldKey, 0o600)
+	}
+}
+
 // parseAndValidateCACert parses and validates a CA certificate PEM block.
 func parseAndValidateCACert(certPEM []byte) (*x509.Certificate, error) {
 	certBlock, _ := pem.Decode(certPEM)
@@ -759,18 +775,7 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 
 	// ── Backup old CA before overwriting ──
 	if ca.certPEM != nil {
-		if bakPath, e := safeCAPath(dir, "cluster-ca.crt.bak"); e == nil {
-			_ = os.WriteFile(bakPath, ca.certPEM, 0o600)
-		}
-		if bakPath, e := safeCAPath(dir, "cluster-ca.key.bak"); e == nil {
-			// Re-derive keyFile path inline so gosec sees the sanitiser chain.
-			safeKeyFile := filepath.Clean(filepath.Join(dir, "cluster-ca.key"))
-			if !strings.Contains(safeKeyFile, "..") {
-				if oldKey, readErr := os.ReadFile(safeKeyFile); readErr == nil { // #nosec G304 -- ".." rejected
-					_ = os.WriteFile(bakPath, oldKey, 0o600)
-				}
-			}
-		}
+		backupCAFiles(dir, ca.certPEM, keyFile)
 	}
 
 	// ── Dual-CA overlap: preserve old CA as secondary ──
