@@ -349,36 +349,45 @@ type controlPlaneServer struct{}
 // matches it to an enrolled node by cert serial, verifies the self-reported
 // nodeID matches the certificate identity, and checks revocation status.
 // Returns the verified node ID or an error.
-func verifyNode(ctx context.Context, claimedNodeID string) (string, error) {
+func verifyNode(ctx context.Context, claimedNodeID string) error {
 	if claimedNodeID == "" {
-		return "", status.Errorf(codes.InvalidArgument, "node_id required")
+		return status.Errorf(codes.InvalidArgument, "node_id required")
 	}
 
-	// In insecure dev mode (no mTLS), skip cert pinning but still check revocation.
-	p, ok := peer.FromContext(ctx)
-	if ok && p.AuthInfo != nil {
-		if tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo); ok && len(tlsInfo.State.PeerCertificates) > 0 {
-			peerSerial := tlsInfo.State.PeerCertificates[0].SerialNumber.Text(16)
-			// Verify claimed node ID matches the cert's enrolled serial.
-			node, exists := globalClusterStore.GetNode(claimedNodeID)
-			if !exists {
-				return "", status.Errorf(codes.NotFound, "node %q not enrolled", claimedNodeID)
-			}
-			if node.CertSerial != peerSerial {
-				return "", status.Errorf(codes.PermissionDenied,
-					"cert serial mismatch: node %q expects %s, peer presented %s",
-					claimedNodeID, node.CertSerial, peerSerial)
-			}
-		}
+	// In mTLS mode, verify cert serial matches enrolled node.
+	if err := verifyNodeCert(ctx, claimedNodeID); err != nil {
+		return err
 	}
 
 	// Check revocation regardless of TLS mode.
-	if node, exists := globalClusterStore.GetNode(claimedNodeID); exists {
-		if globalClusterStore.IsRevoked(node.CertSerial) {
-			return "", status.Errorf(codes.PermissionDenied, "node %q is revoked", claimedNodeID)
-		}
+	node, exists := globalClusterStore.GetNode(claimedNodeID)
+	if exists && globalClusterStore.IsRevoked(node.CertSerial) {
+		return status.Errorf(codes.PermissionDenied, "node %q is revoked", claimedNodeID)
 	}
-	return claimedNodeID, nil
+	return nil
+}
+
+// verifyNodeCert extracts the peer TLS cert serial and matches it to the enrolled node.
+func verifyNodeCert(ctx context.Context, claimedNodeID string) error {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.AuthInfo == nil {
+		return nil // insecure dev mode — skip cert pinning
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
+		return nil
+	}
+	peerSerial := tlsInfo.State.PeerCertificates[0].SerialNumber.Text(16)
+	node, exists := globalClusterStore.GetNode(claimedNodeID)
+	if !exists {
+		return status.Errorf(codes.NotFound, "node %q not enrolled", claimedNodeID)
+	}
+	if node.CertSerial != peerSerial {
+		return status.Errorf(codes.PermissionDenied,
+			"cert serial mismatch: node %q expects %s, peer presented %s",
+			claimedNodeID, node.CertSerial, peerSerial)
+	}
+	return nil
 }
 
 func (s *controlPlaneServer) GetConfig(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
@@ -400,7 +409,7 @@ func (s *controlPlaneServer) PushMetrics(ctx context.Context, raw json.RawMessag
 	}
 
 	// Verify node identity (cert pinning) and check revocation.
-	if _, err := verifyNode(ctx, report.NodeID); err != nil {
+	if err := verifyNode(ctx, report.NodeID); err != nil {
 		return nil, err
 	}
 
@@ -422,7 +431,7 @@ func (s *controlPlaneServer) SyncRateLimits(ctx context.Context, raw json.RawMes
 	if err := json.Unmarshal(raw, &gossip); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
-	if _, err := verifyNode(ctx, gossip.NodeID); err != nil {
+	if err := verifyNode(ctx, gossip.NodeID); err != nil {
 		return nil, err
 	}
 
@@ -449,7 +458,7 @@ func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMe
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
-	if _, err := verifyNode(ctx, req.NodeID); err != nil {
+	if err := verifyNode(ctx, req.NodeID); err != nil {
 		return nil, err
 	}
 	globalRevAggregator.Update(req.NodeID, req.Entries)
@@ -470,7 +479,7 @@ func (s *controlPlaneServer) PushAuditEvents(ctx context.Context, raw json.RawMe
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
-	if _, err := verifyNode(ctx, req.NodeID); err != nil {
+	if err := verifyNode(ctx, req.NodeID); err != nil {
 		return nil, err
 	}
 	if len(req.Events) > 0 {
@@ -557,7 +566,7 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 	}
 
 	// Verify the caller is the enrolled node (cert pinning).
-	if _, err := verifyNode(ctx, req.NodeID); err != nil {
+	if err := verifyNode(ctx, req.NodeID); err != nil {
 		return nil, fmt.Errorf("RenewCert: %w", err)
 	}
 
@@ -597,20 +606,29 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 // without TLS certificates to prevent accidental production exposure.
 var clusterInsecure bool
 
-func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
-	var serverOpt grpc.ServerOption
-	if certFile != "" && keyFile != "" {
+// cpServerOption returns the gRPC server option for the Control Plane based on
+// available TLS certs or the --cluster-insecure flag.
+func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, error) {
+	switch {
+	case certFile != "" && keyFile != "":
 		creds, err := buildServerTLS(certFile, keyFile, caFile)
 		if err != nil {
-			return fmt.Errorf("gRPC TLS: %w", err)
+			return nil, fmt.Errorf("gRPC TLS: %w", err)
 		}
-		serverOpt = grpc.Creds(creds)
 		logger.Printf("ControlPlane gRPC → %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
-	} else if clusterInsecure {
-		serverOpt = grpc.EmptyServerOption{}
+		return grpc.Creds(creds), nil
+	case clusterInsecure:
 		logger.Printf("WARNING: ControlPlane gRPC → %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
-	} else {
-		return fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
+		return grpc.EmptyServerOption{}, nil
+	default:
+		return nil, fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
+	}
+}
+
+func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
+	serverOpt, err := cpServerOption(addr, certFile, keyFile, caFile)
+	if err != nil {
+		return err
 	}
 
 	srv := grpc.NewServer(serverOpt)
@@ -993,8 +1011,11 @@ func rebuildCPCertPool() {
 	}
 	pool := x509.NewCertPool()
 	if cpTLSConfig.baseCAF != "" {
-		if pem, err := os.ReadFile(cpTLSConfig.baseCAF); err == nil {
-			pool.AppendCertsFromPEM(pem)
+		caPath := filepath.Clean(cpTLSConfig.baseCAF)
+		if !strings.Contains(caPath, "..") {
+			if pemData, err := os.ReadFile(caPath); err == nil { // #nosec G304 -- admin CLI flag, ".." rejected
+				pool.AppendCertsFromPEM(pemData)
+			}
 		}
 	}
 	if allCA := globalClusterCA.AllCACertsPEM(); len(allCA) > 0 {
@@ -1005,8 +1026,8 @@ func rebuildCPCertPool() {
 }
 
 func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCredentials, error) {
-	if strings.Contains(certFile, "..") || strings.Contains(keyFile, "..") {
-		return nil, fmt.Errorf("invalid cert/key path: directory traversal not allowed")
+	if strings.Contains(certFile, "..") || strings.Contains(keyFile, "..") || strings.Contains(caFile, "..") {
+		return nil, fmt.Errorf("invalid cert/key/ca path: directory traversal not allowed")
 	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {

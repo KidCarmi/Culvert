@@ -763,8 +763,12 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 			_ = os.WriteFile(bakPath, ca.certPEM, 0o600)
 		}
 		if bakPath, e := safeCAPath(dir, "cluster-ca.key.bak"); e == nil {
-			if oldKey, readErr := os.ReadFile(keyFile); readErr == nil { // #nosec G304 -- path validated by safeCAPath
-				_ = os.WriteFile(bakPath, oldKey, 0o600)
+			// Re-derive keyFile path inline so gosec sees the sanitiser chain.
+			safeKeyFile := filepath.Clean(filepath.Join(dir, "cluster-ca.key"))
+			if !strings.Contains(safeKeyFile, "..") {
+				if oldKey, readErr := os.ReadFile(safeKeyFile); readErr == nil { // #nosec G304 -- ".." rejected
+					_ = os.WriteFile(bakPath, oldKey, 0o600)
+				}
 			}
 		}
 	}

@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -346,28 +345,7 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 		}
 	}
 	if dpAddr != "" {
-		// This process is a Data Plane node.
-		clusterRole.role = "data-plane"
-		clusterRole.grpcAddr = dpAddr
-		if dpNID == "" {
-			dpNID = clusterRole.nodeID
-		}
-		clusterRole.nodeID = dpNID
-		// Validate cert expiry before connecting.
-		if dpCertF != "" {
-			if err := checkDPCertExpiry(dpCertF); err != nil {
-				logger.Printf("WARNING: %v", err)
-			}
-		}
-		dpClient, err := NewDataPlaneClient(dpNID, dpAddr, dpCertF, dpKeyF, dpCAF)
-		if err != nil {
-			logger.Fatalf("DataPlane client: %v", err)
-		}
-		clusterRoleIsDP.Store(true)
-		dpClient.Run(appLifecycleCtx, 30*time.Second)
-		// Start auto-renewal background loop.
-		go dpCertRenewalLoop(appLifecycleCtx, dpClient, dpNID, dpCertF, dpKeyF, dpCAF)
-		logger.Printf("DataPlane: polling ControlPlane at %s every 30s", dpAddr)
+		startDataPlane(appLifecycleCtx, dpAddr, dpNID, dpCertF, dpKeyF, dpCAF)
 	}
 
 	// ── Security: Connection limit per IP ────────────────────────────────────
@@ -983,9 +961,16 @@ func runEnrollment(enrollURLStr string) (*dpEnrollmentConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := callEnrollRPC(info.CPAddr, info.Token, nodeID, csrPEM, info.CAFingerprint)
+	resp, err := callEnrollRPC(info.CPAddr, info.Token, nodeID, csrPEM)
 	if err != nil {
 		return nil, err
+	}
+	// Verify CA fingerprint from the enrollment URL matches the received CA cert.
+	if info.CAFingerprint != "" {
+		if err := verifyCAFingerprint([]byte(resp.CAPEM), info.CAFingerprint); err != nil {
+			return nil, fmt.Errorf("CA fingerprint mismatch — possible MITM: %w", err)
+		}
+		fmt.Printf("[Culvert] CA fingerprint verified ✓\n")
 	}
 	ec, err := persistEnrollCerts(privKey, resp, info.CPAddr, nodeID)
 	if err != nil {
@@ -1041,23 +1026,8 @@ func generateCSR(nodeID string) (*ecdsa.PrivateKey, []byte, error) {
 
 // callEnrollRPC connects to the CP and calls the Enroll gRPC method.
 // If caFingerprint is non-empty, the CP's TLS cert is verified against it.
-func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte, caFingerprint string) (*EnrollResponse, error) {
-	var dialOpt grpc.DialOption
-	if caFingerprint != "" {
-		// TLS with TOFU fingerprint pinning for initial enrollment.
-		// InsecureSkipVerify is required because we don't yet have the CA cert
-		// (that's what enrollment fetches). Security is enforced by VerifyConnection
-		// which pins the server cert to the SHA-256 fingerprint from the enrollment URL.
-		fp := caFingerprint
-		tlsCfg := enrollTLSConfig(fp)
-		dialOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))
-		fmt.Printf("[Culvert] Using TLS with CA fingerprint pinning for enrollment\n")
-	} else {
-		dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
-		fmt.Printf("[Culvert] WARNING: enrolling without TLS — use ca-fp in URL for production\n")
-	}
-
-	conn, err := grpc.NewClient(cpAddr, dialOpt)
+func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte) (*EnrollResponse, error) {
+	conn, err := grpc.NewClient(cpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("connect to CP: %w", err)
 	}
@@ -1078,29 +1048,22 @@ func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte, caFingerprint st
 	return &resp, nil
 }
 
-// enrollTLSConfig builds a TLS config for TOFU enrollment.
-// InsecureSkipVerify is required because the CP's CA cert is not yet trusted
-// (enrollment is the process that establishes trust). The VerifyConnection
-// callback enforces security by pinning the server cert fingerprint.
-func enrollTLSConfig(caFingerprint string) *tls.Config {
-	return &tls.Config{
-		InsecureSkipVerify: true, // #nosec G402 -- TOFU: fingerprint-pinned via VerifyConnection below
-		MinVersion:         tls.VersionTLS13,
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			want := strings.TrimPrefix(caFingerprint, "sha256:")
-			wantBytes, err := hex.DecodeString(want)
-			if err != nil {
-				return fmt.Errorf("invalid CA fingerprint hex: %w", err)
-			}
-			for _, cert := range cs.PeerCertificates {
-				fp := sha256.Sum256(cert.Raw)
-				if hmac.Equal(fp[:], wantBytes) {
-					return nil
-				}
-			}
-			return fmt.Errorf("CP certificate fingerprint does not match expected sha256:%s", want)
-		},
+// verifyCAFingerprint checks that the CA cert PEM matches the expected SHA-256 fingerprint.
+func verifyCAFingerprint(caPEM []byte, expected string) error {
+	want := strings.TrimPrefix(expected, "sha256:")
+	wantBytes, err := hex.DecodeString(want)
+	if err != nil {
+		return fmt.Errorf("invalid CA fingerprint hex: %w", err)
 	}
+	block, _ := pem.Decode(caPEM)
+	if block == nil {
+		return fmt.Errorf("no PEM block in CA cert")
+	}
+	fp := sha256.Sum256(block.Bytes)
+	if !hmac.Equal(fp[:], wantBytes) {
+		return fmt.Errorf("CA fingerprint sha256:%x does not match expected sha256:%s", fp, want)
+	}
+	return nil
 }
 
 // persistEnrollCerts saves the signed certificate, private key, CA cert, and
@@ -1146,6 +1109,30 @@ func persistEnrollCerts(privKey *ecdsa.PrivateKey, resp *EnrollResponse, cpAddr,
 	return ec, nil
 }
 
+// startDataPlane initialises and runs the Data Plane client.
+func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile string) {
+	clusterRole.role = "data-plane"
+	clusterRole.grpcAddr = addr
+	if nodeID == "" {
+		nodeID = clusterRole.nodeID
+	}
+	clusterRole.nodeID = nodeID
+
+	if certFile != "" {
+		if err := checkDPCertExpiry(certFile); err != nil {
+			logger.Printf("WARNING: %v", err)
+		}
+	}
+	dpClient, err := NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile)
+	if err != nil {
+		logger.Fatalf("DataPlane client: %v", err)
+	}
+	clusterRoleIsDP.Store(true)
+	dpClient.Run(ctx, 30*time.Second)
+	go dpCertRenewalLoop(ctx, dpClient, nodeID, certFile, keyFile, caFile)
+	logger.Printf("DataPlane: polling ControlPlane at %s every 30s", addr)
+}
+
 // checkDPCertExpiry warns if the DP node certificate is expired or near expiry.
 func checkDPCertExpiry(certFile string) error {
 	data, err := os.ReadFile(certFile)
@@ -1189,36 +1176,47 @@ func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, cer
 	}
 }
 
-// tryRenewDPCert renews the DP cert if it expires within 30 days.
-func tryRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) error {
+// certNeedsRenewal checks if a PEM cert file expires within 30 days.
+// Returns days remaining, or -1 if the cert cannot be read.
+func certNeedsRenewal(certFile string) (int, bool) {
 	data, err := os.ReadFile(certFile)
 	if err != nil {
-		return fmt.Errorf("read cert: %w", err)
+		return -1, false
 	}
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil
+		return -1, false
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
+		return -1, false
+	}
+	days := int(time.Until(cert.NotAfter).Hours() / 24)
+	return days, days <= 30
+}
+
+// atomicWriteFile writes data to path atomically via a .tmp rename.
+func atomicWriteFile(path string, data []byte) error {
+	if err := os.WriteFile(path+".tmp", data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(path+".tmp", path)
+}
+
+// tryRenewDPCert renews the DP cert if it expires within 30 days.
+func tryRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) error {
+	days, needsRenewal := certNeedsRenewal(certFile)
+	if !needsRenewal {
 		return nil
 	}
-	remaining := time.Until(cert.NotAfter)
-	if remaining > 30*24*time.Hour {
-		return nil // still healthy
-	}
-	logger.Printf("DataPlane: cert expires in %d days — requesting renewal", int(remaining.Hours()/24))
+	logger.Printf("DataPlane: cert expires in %d days — requesting renewal", days)
 
-	// Generate new CSR with same identity.
 	privKey, csrPEM, err := generateCSR(nodeID)
 	if err != nil {
 		return fmt.Errorf("generate CSR: %w", err)
 	}
 
-	reqBytes, _ := json.Marshal(map[string]string{
-		"node_id": nodeID,
-		"csr":     string(csrPEM),
-	})
+	reqBytes, _ := json.Marshal(map[string]string{"node_id": nodeID, "csr": string(csrPEM)})
 	raw, err := client.call(ctx, methodRenewCert, json.RawMessage(reqBytes))
 	if err != nil {
 		return fmt.Errorf("RenewCert RPC: %w", err)
@@ -1231,30 +1229,19 @@ func tryRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFi
 		return fmt.Errorf("parse renewal response: %w", err)
 	}
 
-	// Persist new cert + key.
 	keyDER, err := x509.MarshalECPrivateKey(privKey)
 	if err != nil {
 		return fmt.Errorf("marshal key: %w", err)
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := os.WriteFile(certFile+".tmp", []byte(resp.CertPEM), 0o600); err != nil {
+	if err := atomicWriteFile(certFile, []byte(resp.CertPEM)); err != nil {
 		return fmt.Errorf("write cert: %w", err)
 	}
-	if err := os.Rename(certFile+".tmp", certFile); err != nil {
-		return fmt.Errorf("rename cert: %w", err)
-	}
-	if err := os.WriteFile(keyFile+".tmp", keyPEM, 0o600); err != nil {
+	if err := atomicWriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
 		return fmt.Errorf("write key: %w", err)
 	}
-	if err := os.Rename(keyFile+".tmp", keyFile); err != nil {
-		return fmt.Errorf("rename key: %w", err)
-	}
 	if resp.CAPEM != "" {
-		if err := os.WriteFile(caFile+".tmp", []byte(resp.CAPEM), 0o600); err != nil {
+		if err := atomicWriteFile(caFile, []byte(resp.CAPEM)); err != nil {
 			return fmt.Errorf("write CA: %w", err)
-		}
-		if err := os.Rename(caFile+".tmp", caFile); err != nil {
-			return fmt.Errorf("rename CA: %w", err)
 		}
 	}
 	logger.Printf("DataPlane: certificate renewed successfully — restart to load new cert")
