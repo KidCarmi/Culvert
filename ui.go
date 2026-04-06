@@ -105,7 +105,8 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/alerts/webhooks/test", apiAlertsWebhookTest) // POST — test-fire
 
 	// ── CA management ────────────────────────────────────────────────────
-	mux.HandleFunc("/api/ca/status", apiCAStatus)           // GET — CA info + cache + rotation
+	mux.HandleFunc("/api/ca/status", apiCAStatus)           // GET — CA info + cache + rotation + dual-CA
+	mux.HandleFunc("/api/ca/key-provider", apiCAKeyProvider) // GET key provider status
 	mux.HandleFunc("/api/ca/download", apiCADownload)       // GET — PEM download
 	mux.HandleFunc("/api/ca/cache-clear", apiCACacheClear)  // POST — clear leaf cert cache
 	mux.HandleFunc("/api/ca/rotate", apiCARotate)           // POST — force CA rotation
@@ -121,6 +122,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 
 	// ── Metrics config ──────────────────────────────────────────────────
 	mux.HandleFunc("/api/metrics-config", apiMetricsConfig)
+	mux.HandleFunc("/api/otlp", apiOTLPConfig)
 
 	// ── Connection limit ─────────────────────────────────────────────────
 	mux.HandleFunc("/api/connlimit", apiConnLimit) // GET status / POST update
@@ -139,7 +141,9 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)   // GET list / POST create / DELETE remove
 	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)     // GET enrolled nodes
 	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)   // POST revoke a node
-	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits) // GET distributed RL status
+	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits)   // GET distributed RL status
+	mux.HandleFunc("/api/cluster/audit", apiClusterAudit)             // GET centralized audit log
+	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations) // GET revocation sync status
 
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
@@ -3038,6 +3042,11 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	if !expiry.IsZero() {
 		info["expiresIn"] = time.Until(expiry).Round(time.Hour).String()
 	}
+	// Dual-CA overlap status.
+	info["dualCAActive"] = certMgr.SecondaryCAActive()
+	if secInfo := certMgr.SecondaryCAInfo(); secInfo != nil {
+		info["secondaryCA"] = secInfo
+	}
 	jsonOK(w, info)
 }
 
@@ -3088,6 +3097,24 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API")
 	jsonOK(w, certMgr.CACertInfo())
+}
+
+// apiCAKeyProvider returns the current key provider status for HSM/KMS UI.
+func apiCAKeyProvider(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "viewer") {
+		return
+	}
+	providerName := certMgr.KeyProviderName()
+	jsonOK(w, map[string]any{
+		"provider":     providerName,
+		"isExternal":   providerName != "local",
+		"caReady":      certMgr.Ready(),
+		"dualCAActive": certMgr.SecondaryCAActive(),
+	})
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3556,4 +3583,79 @@ func apiClusterRateLimits(w http.ResponseWriter, r *http.Request) {
 		"rate_limit_rpm": rl.Limit(),
 		"threshold_pct":  hotThresholdPct,
 	})
+}
+
+// apiClusterAudit returns the centralized audit log from all Data Plane nodes.
+func apiClusterAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "viewer") {
+		return
+	}
+	entries := globalClusterAudit.Recent(200)
+	jsonOK(w, map[string]any{"entries": entries, "total": globalClusterAudit.Count()})
+}
+
+// apiClusterRevocations returns distributed session revocation sync status.
+func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "viewer") {
+		return
+	}
+	jsonOK(w, map[string]any{
+		"local_revoked":  sessionRevoked.Count(),
+		"cluster_mode":   clusterRoleIsDP.Load() || clusterRole.role == "control-plane",
+	})
+}
+
+// GET/POST /api/otlp — configure OpenTelemetry OTLP/HTTP metrics export.
+func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"enabled":  globalOTLP.Enabled(),
+			"endpoint": globalOTLP.Endpoint(),
+		})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Endpoint string `json:"endpoint"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		body.Endpoint = strings.TrimSpace(body.Endpoint)
+		if body.Endpoint == "" {
+			globalOTLP.Stop()
+			auditEvent(r, "settings.otlp", "disabled", "")
+			jsonOK(w, map[string]any{"ok": true, "enabled": false})
+			return
+		}
+		// Inline SSRF guard: validate scheme + reject private hosts (CodeQL CWE-918).
+		epURL, err := url.Parse(body.Endpoint)
+		if err != nil || (epURL.Scheme != "http" && epURL.Scheme != "https") {
+			http.Error(w, "endpoint must use http or https scheme", http.StatusBadRequest)
+			return
+		}
+		if err := isPrivateHost(epURL.Hostname()); err != nil {
+			http.Error(w, "endpoint must not resolve to a private network", http.StatusBadRequest)
+			return
+		}
+		globalOTLP.Configure(body.Endpoint, nil)
+		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled")
+		jsonOK(w, map[string]any{"ok": true, "enabled": true, "endpoint": body.Endpoint})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }

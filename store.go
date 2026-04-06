@@ -185,6 +185,10 @@ var (
 	auditLogFile *os.File // persistent JSONL file; nil = in-memory only
 )
 
+// clusterRoleIsDP is set to true when this node is a Data Plane in a cluster.
+// Enables audit event queuing for centralized logging on the Control Plane.
+var clusterRoleIsDP atomic.Bool
+
 // InitAuditLog opens path for append-only JSONL persistence.
 // Existing entries are loaded into the in-memory ring buffer on startup.
 // If path is empty this is a no-op (backwards-compatible).
@@ -237,6 +241,41 @@ func auditAdd(e AuditEntry) {
 	if globalSyslog != nil {
 		globalSyslog.WriteAudit(e)
 	}
+	// Queue for CP push when running as Data Plane.
+	if clusterRoleIsDP.Load() {
+		queueAuditForCluster(e)
+	}
+}
+
+// ─── Pending audit events for Data Plane → Control Plane push ───────────────
+
+var (
+	pendingAuditMu     sync.Mutex
+	pendingAuditEvents []AuditEntry
+)
+
+// queueAuditForCluster adds an audit event to the pending queue for CP push.
+// Called by auditAdd when running in data-plane mode.
+func queueAuditForCluster(e AuditEntry) {
+	pendingAuditMu.Lock()
+	pendingAuditEvents = append(pendingAuditEvents, e)
+	// Cap at 1000 to prevent unbounded growth if CP is unreachable.
+	if len(pendingAuditEvents) > 1000 {
+		pendingAuditEvents = pendingAuditEvents[len(pendingAuditEvents)-1000:]
+	}
+	pendingAuditMu.Unlock()
+}
+
+// drainPendingAuditEvents returns and clears the pending audit event queue.
+func drainPendingAuditEvents() []AuditEntry {
+	pendingAuditMu.Lock()
+	defer pendingAuditMu.Unlock()
+	if len(pendingAuditEvents) == 0 {
+		return nil
+	}
+	events := pendingAuditEvents
+	pendingAuditEvents = nil
+	return events
 }
 
 // auditGet returns a newest-first snapshot of the audit log.

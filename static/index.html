@@ -1619,6 +1619,23 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- OTLP Metrics Export -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">OpenTelemetry (OTLP) Export</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Push all Culvert metrics to an OpenTelemetry Collector via OTLP/HTTP JSON (every 15s).<br>
+            Compatible with Grafana, Datadog, New Relic, Jaeger, and any OTLP-compatible backend.
+          </p>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input type="text" class="input wide" id="s-otlp-endpoint" placeholder="http://otel-collector:4318">
+            <button class="btn" onclick="saveOTLP()">Enable</button>
+            <button class="btn ghost sm" onclick="disableOTLP()">Disable</button>
+          </div>
+          <div id="s-otlp-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
+        </div>
+      </div>
+
     </div>
     </div><!-- /view-settings -->
 
@@ -2190,6 +2207,40 @@ Firefox (all platforms):
           <span>Cache entries: <strong id="ocsp-cache-len">—</strong></span>
         </div>
       </div>
+      <!-- Dual-CA Overlap -->
+      <div class="panel" style="margin-top:16px" id="dual-ca-panel">
+        <div class="panel-header"><span class="panel-title">Dual-CA Overlap</span></div>
+        <div class="panel-body" style="font-size:.85rem">
+          <p style="color:var(--muted);margin-bottom:12px">
+            During CA rotation, both old and new Root CAs are served in the leaf cert chain.
+            Clients trusting either CA can validate connections — zero-downtime rotation.
+          </p>
+          <div id="dual-ca-status" style="display:flex;gap:24px">
+            <div class="stat-card"><div class="stat-val" id="dca-status">—</div><div class="stat-label">Status</div></div>
+            <div class="stat-card"><div class="stat-val" id="dca-expiry">—</div><div class="stat-label">Old CA Expires</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- HSM / KMS Key Provider -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">HSM / KMS Key Provider</span></div>
+        <div class="panel-body" style="font-size:.85rem">
+          <p style="color:var(--muted);margin-bottom:12px">
+            The KeyProvider interface allows CA signing keys to live in an external HSM or cloud KMS
+            (AWS KMS, Azure Key Vault, GCP Cloud KMS, PKCS#11) instead of local memory.
+          </p>
+          <div style="display:flex;gap:24px">
+            <div class="stat-card"><div class="stat-val" id="kms-provider">—</div><div class="stat-label">Active Provider</div></div>
+            <div class="stat-card"><div class="stat-val" id="kms-ca-ready">—</div><div class="stat-label">CA Ready</div></div>
+          </div>
+          <p style="color:var(--muted);margin-top:12px;font-size:.78rem">
+            To configure an external KMS provider, implement the <code>KeyProvider</code> interface
+            and register it via <code>SetKeyProvider()</code> in a custom build or plugin.
+          </p>
+        </div>
+      </div>
+
     </div><!-- /view-ca-mgmt -->
 
     <!-- ═══ UPSTREAM PROXIES ══════════════════════════════════════════════ -->
@@ -2309,6 +2360,49 @@ Firefox (all platforms):
             <div class="stat-card"><div class="stat-val" id="crl-hot">—</div><div class="stat-label">Hot IPs</div></div>
             <div class="stat-card"><div class="stat-val" id="crl-rpm">—</div><div class="stat-label">Limit (RPM)</div></div>
           </div>
+        </div>
+      </div>
+
+      <!-- Node Health Dashboard -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-health-panel">
+        <div class="panel-header"><span class="panel-title">Node Health Dashboard</span></div>
+        <div class="panel-body">
+          <div id="cluster-health-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px"></div>
+          <div id="cluster-health-empty" style="padding:18px;text-align:center;color:var(--muted);font-size:.85rem">
+            No node metrics available.
+          </div>
+        </div>
+      </div>
+
+      <!-- Distributed Session Revocation -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-revocation-panel">
+        <div class="panel-header"><span class="panel-title">Session Revocation Sync</span></div>
+        <div class="panel-body" style="font-size:.85rem">
+          <p style="color:var(--muted);margin-bottom:12px">
+            Session revocations are synced across all cluster nodes every 3s.
+            When an admin logs out on any node, all nodes enforce the revocation.
+          </p>
+          <div style="display:flex;gap:24px">
+            <div class="stat-card"><div class="stat-val" id="crev-local">—</div><div class="stat-label">Local Revoked</div></div>
+            <div class="stat-card"><div class="stat-val" id="crev-mode">—</div><div class="stat-label">Cluster Mode</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Centralized Audit Log -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-audit-panel">
+        <div class="panel-header">
+          <span class="panel-title">Centralized Audit Log</span>
+          <span style="font-size:.75rem;color:var(--muted)" id="cluster-audit-count"></span>
+        </div>
+        <div class="tbl-wrap">
+          <table id="cluster-audit-table" style="display:none">
+            <thead><tr><th>Time</th><th>Node</th><th>Actor</th><th>Action</th><th>Object</th><th>Detail</th></tr></thead>
+            <tbody id="cluster-audit-tbody"></tbody>
+          </table>
+        </div>
+        <div id="cluster-audit-empty" style="padding:18px;text-align:center;color:var(--muted);font-size:.85rem">
+          No audit events from Data Plane nodes yet.
         </div>
       </div>
 
@@ -3953,6 +4047,7 @@ async function loadSettings() {
   loadGeoIPStatus();
   loadLoggerStatus();
   loadMetricsConfig();
+  loadOTLPConfig();
 }
 
 // ── Session Timeout ───────────────────────────────────────────────────────
@@ -4141,6 +4236,53 @@ async function clearMetricsToken() {
     });
     toast('Metrics token cleared — endpoint is now public', 'success');
     loadMetricsConfig();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── OTLP Export ────────────────────────────────────────────────────────────
+async function loadOTLPConfig() {
+  try {
+    const r = await api('/api/otlp');
+    document.getElementById('s-otlp-endpoint').value = r.endpoint || '';
+    const el = document.getElementById('s-otlp-status');
+    if (r.enabled) {
+      el.style.display = '';
+      el.textContent = '✅ Exporting to ' + r.endpoint;
+      el.style.color = 'var(--green)';
+    } else {
+      el.style.display = 'none';
+    }
+  } catch(e) {}
+}
+
+async function saveOTLP() {
+  const endpoint = document.getElementById('s-otlp-endpoint').value.trim();
+  if (!endpoint) { toast('Enter an OTLP endpoint', 'error'); return; }
+  try {
+    await api('/api/otlp', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({endpoint})
+    });
+    const el = document.getElementById('s-otlp-status');
+    el.style.display = '';
+    el.textContent = '✅ Exporting to ' + endpoint;
+    el.style.color = 'var(--green)';
+    toast('OTLP export enabled', 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function disableOTLP() {
+  try {
+    await api('/api/otlp', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({endpoint: ''})
+    });
+    document.getElementById('s-otlp-endpoint').value = '';
+    const el = document.getElementById('s-otlp-status');
+    el.style.display = '';
+    el.textContent = 'OTLP export disabled';
+    el.style.color = 'var(--muted)';
+    toast('OTLP export disabled', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -5809,6 +5951,22 @@ async function loadCAMgmt() {
     document.getElementById('ocsp-toggle').checked = !!ocsp.enabled;
     document.getElementById('ocsp-cache-len').textContent = ocsp.cacheLen ?? 0;
   }
+  // Dual-CA overlap status.
+  const dcaStatus = document.getElementById('dca-status');
+  const dcaExpiry = document.getElementById('dca-expiry');
+  if (ca.dualCAActive) {
+    dcaStatus.textContent = 'Active';
+    dcaStatus.style.color = 'var(--green)';
+    dcaExpiry.textContent = ca.secondaryCA ? ca.secondaryCA.overlapEnd : '—';
+  } else {
+    dcaStatus.textContent = 'Inactive';
+    dcaStatus.style.color = 'var(--muted)';
+    dcaExpiry.textContent = 'N/A';
+  }
+  // HSM/KMS key provider.
+  document.getElementById('kms-provider').textContent = ca.keyProvider || 'local';
+  document.getElementById('kms-ca-ready').textContent = ca.ready ? 'Yes' : 'No';
+  document.getElementById('kms-ca-ready').style.color = ca.ready ? 'var(--green)' : 'var(--muted)';
 }
 
 async function downloadCA() {
@@ -5966,8 +6124,12 @@ async function loadCluster() {
   // Load tokens if CP
   if (isCP) loadClusterTokens();
 
-  // Load distributed rate limiting status (visible on CP with enrolled nodes)
-  loadClusterRateLimits(isCP || r.role === 'data-plane');
+  // Load cluster subsystem panels (visible on CP or DP)
+  const showCluster = isCP || r.role === 'data-plane';
+  loadClusterRateLimits(showCluster);
+  loadClusterHealth(isCP);
+  loadClusterRevocations(showCluster);
+  loadClusterAudit(isCP);
 }
 
 async function loadClusterTokens() {
@@ -6014,6 +6176,86 @@ async function loadClusterRateLimits(show) {
     document.getElementById('crl-nodes').textContent = r.syncing_nodes || 0;
     document.getElementById('crl-hot').textContent = r.hot_ips || 0;
     document.getElementById('crl-rpm').textContent = r.rate_limit_rpm || 'Off';
+  } catch(e) { panel.style.display = 'none'; }
+}
+
+async function loadClusterHealth(show) {
+  const panel = document.getElementById('cluster-health-panel');
+  if (!show) { panel.style.display = 'none'; return; }
+  try {
+    const r = await api('/api/cluster/status');
+    const nodes = r.nodes || [];
+    const enrolled = r.enrolledNodes || [];
+    const metricsMap = {};
+    nodes.forEach(m => { metricsMap[m.node_id] = m; });
+    const cards = document.getElementById('cluster-health-cards');
+    const empty = document.getElementById('cluster-health-empty');
+    if (enrolled.length === 0) { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    empty.style.display = 'none';
+    cards.innerHTML = enrolled.filter(n => n.status !== 'revoked').map(n => {
+      const m = metricsMap[n.node_id] || {};
+      const statusColor = n.status === 'connected' ? '#22c55e' : '#f59e0b';
+      const lastSeen = n.last_seen ? timeAgo(new Date(n.last_seen)) : 'never';
+      return `<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="font-weight:600;font-size:.9rem">${escHtml(n.node_id)}</span>
+          <span style="color:${statusColor};font-size:.75rem">\u25cf ${escHtml(n.status)}</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:.8rem">
+          <div><span style="color:var(--muted)">Total:</span> ${(m.total||0).toLocaleString()}</div>
+          <div><span style="color:var(--muted)">Blocked:</span> ${(m.blocked||0).toLocaleString()}</div>
+          <div><span style="color:var(--muted)">Auth Fail:</span> ${(m.auth_fail||0).toLocaleString()}</div>
+          <div><span style="color:var(--muted)">Last Seen:</span> ${lastSeen}</div>
+          <div><span style="color:var(--muted)">Uptime:</span> ${escHtml(m.uptime||'—')}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { panel.style.display = 'none'; }
+}
+
+async function loadClusterRevocations(show) {
+  const panel = document.getElementById('cluster-revocation-panel');
+  if (!show) { panel.style.display = 'none'; return; }
+  try {
+    const r = await api('/api/cluster/revocations');
+    panel.style.display = '';
+    document.getElementById('crev-local').textContent = r.local_revoked || 0;
+    document.getElementById('crev-mode').textContent = r.cluster_mode ? 'Active' : 'Standalone';
+    document.getElementById('crev-mode').style.color = r.cluster_mode ? 'var(--green)' : 'var(--muted)';
+  } catch(e) { panel.style.display = 'none'; }
+}
+
+async function loadClusterAudit(show) {
+  const panel = document.getElementById('cluster-audit-panel');
+  if (!show) { panel.style.display = 'none'; return; }
+  try {
+    const r = await api('/api/cluster/audit');
+    const entries = r.entries || [];
+    panel.style.display = '';
+    document.getElementById('cluster-audit-count').textContent = entries.length > 0 ? `(${r.total} total)` : '';
+    const table = document.getElementById('cluster-audit-table');
+    const tbody = document.getElementById('cluster-audit-tbody');
+    const empty = document.getElementById('cluster-audit-empty');
+    if (entries.length > 0) {
+      empty.style.display = 'none';
+      table.style.display = '';
+      tbody.innerHTML = entries.reverse().map(ce => {
+        const e = ce.entry;
+        const ts = e.time || new Date(e.ts).toLocaleString();
+        return `<tr>
+          <td style="font-size:.75rem;white-space:nowrap">${escHtml(ts)}</td>
+          <td style="font-weight:600">${escHtml(ce.node_id)}</td>
+          <td>${escHtml(e.actor)}</td>
+          <td><code style="font-size:.75rem">${escHtml(e.action)}</code></td>
+          <td>${escHtml(e.object)}</td>
+          <td style="font-size:.75rem;color:var(--muted)">${escHtml(e.detail||'')}</td>
+        </tr>`;
+      }).join('');
+    } else {
+      empty.style.display = '';
+      table.style.display = 'none';
+    }
   } catch(e) { panel.style.display = 'none'; }
 }
 

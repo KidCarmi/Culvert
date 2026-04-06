@@ -91,6 +91,11 @@ type FileConfig struct {
 	// Modern SIEMs (Splunk HEC, Elastic, QRadar) prefer RFC 5424.
 	SyslogFormat string `yaml:"syslog_format"`
 
+	// OTLPEndpoint is the URL of an OpenTelemetry Collector OTLP/HTTP receiver.
+	// Metrics are pushed as JSON to POST {endpoint}/v1/metrics every 15s.
+	// Example: "http://otel-collector:4318"
+	OTLPEndpoint string `yaml:"otlp_endpoint"`
+
 	// UIAllowIPs is an optional list of CIDRs/IPs allowed to access the admin
 	// panel. Empty = allow from any IP address (default).
 	UIAllowIPs []string `yaml:"ui_allow_ips"`
