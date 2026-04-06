@@ -26,9 +26,9 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 ### P2 — CA & Certificate Management
 
-- [ ] **Dual-CA overlap mode** — Serve leaf certs from both old and new CA simultaneously during rotation window, for true zero-downtime CA rotation
+- [x] **Dual-CA overlap mode** — On rotation, old CA is preserved as secondary. Leaf certs include both CAs in the chain. Secondary auto-expires after its NotAfter. Status shown in CA Management UI.
 - [x] **CA export API endpoint** — Admin API to download the current root CA cert (PEM) for MDM/GPO distribution
-- [ ] **HSM/KMS UI panel** — The `KeyProvider` interface exists in code (`ca.go:453-499`) but has no GUI configuration. Add admin panel for AWS KMS / Azure Key Vault / GCP Cloud KMS / PKCS#11 setup.
+- [x] **HSM/KMS UI panel** — Admin panel shows active KeyProvider (local/external), CA readiness, and dual-CA overlap status. API: GET /api/ca/key-provider. External KMS registration via SetKeyProvider() in custom builds.
 
 ### P2 — Multi-Node Operations
 

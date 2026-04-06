@@ -2207,6 +2207,40 @@ Firefox (all platforms):
           <span>Cache entries: <strong id="ocsp-cache-len">—</strong></span>
         </div>
       </div>
+      <!-- Dual-CA Overlap -->
+      <div class="panel" style="margin-top:16px" id="dual-ca-panel">
+        <div class="panel-header"><span class="panel-title">Dual-CA Overlap</span></div>
+        <div class="panel-body" style="font-size:.85rem">
+          <p style="color:var(--muted);margin-bottom:12px">
+            During CA rotation, both old and new Root CAs are served in the leaf cert chain.
+            Clients trusting either CA can validate connections — zero-downtime rotation.
+          </p>
+          <div id="dual-ca-status" style="display:flex;gap:24px">
+            <div class="stat-card"><div class="stat-val" id="dca-status">—</div><div class="stat-label">Status</div></div>
+            <div class="stat-card"><div class="stat-val" id="dca-expiry">—</div><div class="stat-label">Old CA Expires</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- HSM / KMS Key Provider -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">HSM / KMS Key Provider</span></div>
+        <div class="panel-body" style="font-size:.85rem">
+          <p style="color:var(--muted);margin-bottom:12px">
+            The KeyProvider interface allows CA signing keys to live in an external HSM or cloud KMS
+            (AWS KMS, Azure Key Vault, GCP Cloud KMS, PKCS#11) instead of local memory.
+          </p>
+          <div style="display:flex;gap:24px">
+            <div class="stat-card"><div class="stat-val" id="kms-provider">—</div><div class="stat-label">Active Provider</div></div>
+            <div class="stat-card"><div class="stat-val" id="kms-ca-ready">—</div><div class="stat-label">CA Ready</div></div>
+          </div>
+          <p style="color:var(--muted);margin-top:12px;font-size:.78rem">
+            To configure an external KMS provider, implement the <code>KeyProvider</code> interface
+            and register it via <code>SetKeyProvider()</code> in a custom build or plugin.
+          </p>
+        </div>
+      </div>
+
     </div><!-- /view-ca-mgmt -->
 
     <!-- ═══ UPSTREAM PROXIES ══════════════════════════════════════════════ -->
@@ -5917,6 +5951,22 @@ async function loadCAMgmt() {
     document.getElementById('ocsp-toggle').checked = !!ocsp.enabled;
     document.getElementById('ocsp-cache-len').textContent = ocsp.cacheLen ?? 0;
   }
+  // Dual-CA overlap status.
+  const dcaStatus = document.getElementById('dca-status');
+  const dcaExpiry = document.getElementById('dca-expiry');
+  if (ca.dualCAActive) {
+    dcaStatus.textContent = 'Active';
+    dcaStatus.style.color = 'var(--green)';
+    dcaExpiry.textContent = ca.secondaryCA ? ca.secondaryCA.overlapEnd : '—';
+  } else {
+    dcaStatus.textContent = 'Inactive';
+    dcaStatus.style.color = 'var(--muted)';
+    dcaExpiry.textContent = 'N/A';
+  }
+  // HSM/KMS key provider.
+  document.getElementById('kms-provider').textContent = ca.keyProvider || 'local';
+  document.getElementById('kms-ca-ready').textContent = ca.ready ? 'Yes' : 'No';
+  document.getElementById('kms-ca-ready').style.color = ca.ready ? 'var(--green)' : 'var(--muted)';
 }
 
 async function downloadCA() {

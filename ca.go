@@ -47,6 +47,13 @@ type CertManager struct {
 	keyProvider KeyProvider // optional external HSM/KMS signer
 	cache       map[string]*certCacheEntry
 	cacheOrder  []string // insertion order for LRU eviction
+
+	// Dual-CA overlap: secondary (old) CA kept during rotation window.
+	// Leaf certs include both CAs in the chain so clients trusting either
+	// CA can validate. Secondary is cleared after overlap window expires.
+	secondaryCACert *x509.Certificate
+	secondaryCAKey  *ecdsa.PrivateKey
+	secondaryExpiry time.Time // when to stop using the secondary CA
 }
 
 var certMgr = &CertManager{cache: map[string]*certCacheEntry{}}
@@ -414,8 +421,9 @@ func (cm *CertManager) CAExpiry() time.Time {
 }
 
 // RotateIfNeeded checks whether the CA cert is nearing expiry and generates
-// a new one. If caPath and passphrase are provided, the new CA is persisted.
-// Returns true if rotation occurred.
+// a new one with dual-CA overlap: the old CA is kept as secondary for the
+// remaining lifetime of its certificate, so leaf certs signed by either CA
+// remain valid during the transition. Returns true if rotation occurred.
 func (cm *CertManager) RotateIfNeeded(caPath, passphrase string) bool {
 	expiry := cm.CAExpiry()
 	if expiry.IsZero() {
@@ -424,25 +432,80 @@ func (cm *CertManager) RotateIfNeeded(caPath, passphrase string) bool {
 	if time.Until(expiry) > caRotationOverlap {
 		return false
 	}
-	logger.Printf("CA auto-rotation: cert expires %s (<%d days) — generating new CA",
+
+	// Preserve the current CA as secondary for dual-CA overlap.
+	cm.mu.Lock()
+	oldCert := cm.caCert
+	oldKey := cm.caKey
+	cm.mu.Unlock()
+
+	logger.Printf("CA auto-rotation: cert expires %s (<%d days) — generating new CA with dual-CA overlap",
 		expiry.Format("2006-01-02"), int(caRotationOverlap.Hours()/24))
 	if err := cm.InitCA(); err != nil {
 		logger.Printf("CA auto-rotation: init failed: %v", err)
 		return false
 	}
+
+	// Install old CA as secondary, valid until its original expiry.
+	cm.mu.Lock()
+	cm.secondaryCACert = oldCert
+	cm.secondaryCAKey = oldKey
+	cm.secondaryExpiry = expiry
+	cm.mu.Unlock()
+
 	if caPath != "" {
 		if err := cm.SaveCA(caPath, passphrase); err != nil {
 			logger.Printf("CA auto-rotation: save failed: %v", err)
 		}
 	}
 	newExpiry := cm.CAExpiry().Format("2006-01-02")
-	logger.Printf("CA auto-rotation: new CA generated, expires %s", newExpiry)
+	logger.Printf("CA auto-rotation: new CA generated (expires %s), old CA retained until %s",
+		newExpiry, expiry.Format("2006-01-02"))
 	fireAlert("cert_expiry", AlertPayload{
 		Host:   "culvert-ca",
-		Detail: fmt.Sprintf("Root CA rotated — old cert expired %s, new cert expires %s", expiry.Format("2006-01-02"), newExpiry),
+		Detail: fmt.Sprintf("Root CA rotated — old CA valid until %s, new CA expires %s (dual-CA overlap active)", expiry.Format("2006-01-02"), newExpiry),
 		Source: "ca",
 	})
 	return true
+}
+
+// SecondaryCAActive returns whether a secondary (old) CA is still in the
+// overlap window.
+func (cm *CertManager) SecondaryCAActive() bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.secondaryCACert != nil && time.Now().Before(cm.secondaryExpiry)
+}
+
+// SecondaryCAInfo returns info about the secondary CA, or nil if inactive.
+func (cm *CertManager) SecondaryCAInfo() map[string]any {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if cm.secondaryCACert == nil {
+		return nil
+	}
+	if time.Now().After(cm.secondaryExpiry) {
+		return nil
+	}
+	return map[string]any{
+		"subject":    cm.secondaryCACert.Subject.CommonName,
+		"notAfter":   cm.secondaryCACert.NotAfter.Format("2006-01-02"),
+		"overlapEnd": cm.secondaryExpiry.Format("2006-01-02"),
+		"expiresIn":  time.Until(cm.secondaryExpiry).Round(time.Second).String(),
+	}
+}
+
+// cleanupSecondaryCA removes the secondary CA when its overlap window expires.
+// Called periodically by StartCAAutoRotation.
+func (cm *CertManager) cleanupSecondaryCA() {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if cm.secondaryCACert != nil && time.Now().After(cm.secondaryExpiry) {
+		logger.Printf("CA dual-overlap: secondary CA expired, removing")
+		cm.secondaryCACert = nil
+		cm.secondaryCAKey = nil
+		cm.secondaryExpiry = time.Time{}
+	}
 }
 
 // StartCAAutoRotation runs a background goroutine that periodically checks
@@ -457,6 +520,7 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 				return
 			case <-t.C:
 				certMgr.RotateIfNeeded(caPath, passphrase)
+				certMgr.cleanupSecondaryCA()
 			}
 		}
 	}()
@@ -590,10 +654,14 @@ func (cm *CertManager) ClearCache() {
 }
 
 // signLeaf creates and signs a leaf TLS certificate for the given hostname.
+// When dual-CA overlap is active, the secondary (old) CA cert is included in
+// the certificate chain so clients trusting either CA can validate.
 func (cm *CertManager) signLeaf(host string) (*tls.Certificate, error) {
 	cm.mu.RLock()
 	caCert := cm.caCert
 	caKey := cm.caKey
+	secondaryCert := cm.secondaryCACert
+	secondaryActive := secondaryCert != nil && time.Now().Before(cm.secondaryExpiry)
 	cm.mu.RUnlock()
 
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -621,10 +689,16 @@ func (cm *CertManager) signLeaf(host string) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
-	tlsCert, err := tls.X509KeyPair(
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}),
-		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
-	)
+
+	// Build PEM chain: leaf cert + primary CA + (optional) secondary CA.
+	var chainPEM []byte
+	chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})...)
+	if secondaryActive {
+		chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secondaryCert.Raw})...)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	tlsCert, err := tls.X509KeyPair(chainPEM, keyPEM)
 	if err != nil {
 		return nil, err
 	}

@@ -105,7 +105,8 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/alerts/webhooks/test", apiAlertsWebhookTest) // POST — test-fire
 
 	// ── CA management ────────────────────────────────────────────────────
-	mux.HandleFunc("/api/ca/status", apiCAStatus)           // GET — CA info + cache + rotation
+	mux.HandleFunc("/api/ca/status", apiCAStatus)           // GET — CA info + cache + rotation + dual-CA
+	mux.HandleFunc("/api/ca/key-provider", apiCAKeyProvider) // GET key provider status
 	mux.HandleFunc("/api/ca/download", apiCADownload)       // GET — PEM download
 	mux.HandleFunc("/api/ca/cache-clear", apiCACacheClear)  // POST — clear leaf cert cache
 	mux.HandleFunc("/api/ca/rotate", apiCARotate)           // POST — force CA rotation
@@ -3041,6 +3042,11 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	if !expiry.IsZero() {
 		info["expiresIn"] = time.Until(expiry).Round(time.Hour).String()
 	}
+	// Dual-CA overlap status.
+	info["dualCAActive"] = certMgr.SecondaryCAActive()
+	if secInfo := certMgr.SecondaryCAInfo(); secInfo != nil {
+		info["secondaryCA"] = secInfo
+	}
 	jsonOK(w, info)
 }
 
@@ -3091,6 +3097,24 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API")
 	jsonOK(w, certMgr.CACertInfo())
+}
+
+// apiCAKeyProvider returns the current key provider status for HSM/KMS UI.
+func apiCAKeyProvider(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "viewer") {
+		return
+	}
+	providerName := certMgr.KeyProviderName()
+	jsonOK(w, map[string]any{
+		"provider":     providerName,
+		"isExternal":   providerName != "local",
+		"caReady":      certMgr.Ready(),
+		"dualCAActive": certMgr.SecondaryCAActive(),
+	})
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
