@@ -133,6 +133,7 @@ var (
 	methodSyncRateLimits     = fmt.Sprintf("/%s/SyncRateLimits", configServiceName)
 	methodSyncRevocations    = fmt.Sprintf("/%s/SyncRevocations", configServiceName)
 	methodPushAuditEvents    = fmt.Sprintf("/%s/PushAuditEvents", configServiceName)
+	methodRenewCert          = fmt.Sprintf("/%s/RenewCert", configServiceName)
 )
 
 // MetricsReport is sent by Data Plane nodes to the Control Plane.
@@ -541,6 +542,52 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	return b, nil
 }
 
+// RenewCert handles certificate renewal requests from enrolled DP nodes.
+// The node must be enrolled and not revoked. A new cert is signed from the CSR.
+func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		NodeID string `json:"node_id"`
+		CSR    string `json:"csr"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, fmt.Errorf("invalid request: %w", err)
+	}
+	if req.NodeID == "" || req.CSR == "" {
+		return nil, fmt.Errorf("node_id and csr are required")
+	}
+
+	// Verify the caller is the enrolled node (cert pinning).
+	if _, err := verifyNode(ctx, req.NodeID); err != nil {
+		return nil, fmt.Errorf("RenewCert: %w", err)
+	}
+
+	// Sign the new CSR.
+	certPEM, serial, expiry, err := globalClusterCA.SignCSR([]byte(req.CSR), req.NodeID)
+	if err != nil {
+		return nil, fmt.Errorf("sign CSR: %w", err)
+	}
+
+	// Update the enrolled node's cert serial and expiry.
+	globalClusterStore.mu.Lock()
+	if node, ok := globalClusterStore.st.Nodes[req.NodeID]; ok {
+		node.CertSerial = serial
+		node.CertExpiry = expiry
+		globalClusterStore.st.Nodes[req.NodeID] = node
+	}
+	globalClusterStore.mu.Unlock()
+	if err := globalClusterStore.Save(); err != nil {
+		logger.Printf("RenewCert: failed to persist updated node: %v", err)
+	}
+
+	logger.Printf("RenewCert: renewed cert for node %q (serial=%s, expires=%s)", req.NodeID, serial, expiry.Format("2006-01-02"))
+
+	resp, _ := json.Marshal(map[string]string{
+		"cert_pem": string(certPEM),
+		"ca_pem":   string(globalClusterCA.AllCACertsPEM()),
+	})
+	return resp, nil
+}
+
 // StartControlPlaneGRPC starts the gRPC server for the Control Plane.
 // addr example: ":50051"
 // certFile/keyFile: mTLS certificate paths.  Pass empty strings for insecure
@@ -596,6 +643,10 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 			{
 				MethodName: "PushAuditEvents",
 				Handler:    wrapUnary(svc.PushAuditEvents),
+			},
+			{
+				MethodName: "RenewCert",
+				Handler:    wrapUnary(svc.RenewCert),
 			},
 		},
 		Streams: []grpc.StreamDesc{},
