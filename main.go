@@ -632,6 +632,10 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	}
 
 	// ── Web UI ────────────────────────────────────────────────────────────
+	uiCfgGeoIPDB = geoDBVal
+	uiCfgLogFile = lPath
+	uiCfgLogMaxMB = lMaxMB
+	uiCfgLogFormat = fc.LogFormat
 	go startUI(uPort, cert, key, *uiNoTLS)
 
 	// ── Proxy server ─────────────────────────────────────────────────────────

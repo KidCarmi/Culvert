@@ -25,6 +25,15 @@ import (
 //go:embed static
 var staticFiles embed.FS
 
+// uiCfg* hold startup config values for read-only display in the admin UI.
+// Set once in main() after config is loaded; safe to read without locks.
+var (
+	uiCfgGeoIPDB   string
+	uiCfgLogFile   string
+	uiCfgLogMaxMB  int
+	uiCfgLogFormat string
+)
+
 func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen // route registration; each line is one endpoint
 	sub, _ := fs.Sub(staticFiles, "static")
 
@@ -3115,7 +3124,7 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]any{
 		"enabled": geoEnabled(),
-		"dbPath":  cfg.Proxy.GeoIPDB,
+		"dbPath":  uiCfgGeoIPDB,
 	})
 }
 
@@ -3130,9 +3139,9 @@ func apiLoggerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"logFile":   cfg.Proxy.LogFile,
-			"logMaxMB":  cfg.Proxy.LogMaxMB,
-			"logFormat": cfg.LogFormat,
+			"logFile":   uiCfgLogFile,
+			"logMaxMB":  uiCfgLogMaxMB,
+			"logFormat": uiCfgLogFormat,
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
