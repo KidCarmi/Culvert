@@ -98,7 +98,7 @@ func (o *OTLPExporter) pushLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := o.push(ctx); err != nil {
-				logger.Printf("OTLP push error: %v", err)
+				logger.Printf("OTLP push error: %s", sanitizeLog(err.Error()))
 			}
 		}
 	}
