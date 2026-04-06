@@ -69,7 +69,7 @@ func TestClusterStore_LoadSave(t *testing.T) {
 func TestClusterStore_LoadCorruptedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cluster.json")
-	os.WriteFile(path, []byte("not json"), 0600)
+	os.WriteFile(path, []byte("not json"), 0o600)
 
 	cs := &ClusterStore{
 		st: ClusterState{
