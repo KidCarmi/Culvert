@@ -3642,6 +3642,16 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			jsonOK(w, map[string]any{"ok": true, "enabled": false})
 			return
 		}
+		// Inline SSRF guard: validate scheme + reject private hosts (CodeQL CWE-918).
+		epURL, err := url.Parse(body.Endpoint)
+		if err != nil || (epURL.Scheme != "http" && epURL.Scheme != "https") {
+			http.Error(w, "endpoint must use http or https scheme", http.StatusBadRequest)
+			return
+		}
+		if err := isPrivateHost(epURL.Hostname()); err != nil {
+			http.Error(w, "endpoint must not resolve to a private network", http.StatusBadRequest)
+			return
+		}
 		globalOTLP.Configure(body.Endpoint, nil)
 		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled")
 		jsonOK(w, map[string]any{"ok": true, "enabled": true, "endpoint": body.Endpoint})
