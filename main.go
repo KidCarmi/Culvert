@@ -312,6 +312,7 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 		if err != nil {
 			logger.Fatalf("DataPlane client: %v", err)
 		}
+		clusterRoleIsDP.Store(true)
 		dpClient.Run(appLifecycleCtx, 30*time.Second)
 		logger.Printf("DataPlane: polling ControlPlane at %s every 30s", *dpCPAddr)
 	}

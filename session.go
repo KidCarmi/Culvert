@@ -86,6 +86,55 @@ func (r *revocationList) IsRevoked(token string) bool {
 	return true
 }
 
+// RevocationEntry is a single revoked session token for gRPC gossip.
+type RevocationEntry struct {
+	Token  string `json:"token"`
+	Expiry int64  `json:"expiry"` // Unix timestamp
+}
+
+// ExportRevocations returns all non-expired revocation entries for syncing.
+func (r *revocationList) ExportRevocations() []RevocationEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	entries := make([]RevocationEntry, 0, len(r.tokens))
+	for tok, exp := range r.tokens {
+		if now.After(exp) {
+			delete(r.tokens, tok)
+			continue
+		}
+		entries = append(entries, RevocationEntry{Token: tok, Expiry: exp.Unix()})
+	}
+	return entries
+}
+
+// MergeRevocations imports remote revocation entries (from other cluster nodes).
+// Only adds entries that are not yet expired and not already present.
+func (r *revocationList) MergeRevocations(entries []RevocationEntry) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	added := 0
+	for _, e := range entries {
+		exp := time.Unix(e.Expiry, 0)
+		if now.After(exp) {
+			continue // already expired
+		}
+		if _, exists := r.tokens[e.Token]; !exists {
+			r.tokens[e.Token] = exp
+			added++
+		}
+	}
+	return added
+}
+
+// Count returns the number of active revoked sessions.
+func (r *revocationList) Count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.tokens)
+}
+
 // revokeSessionCookie adds the cookie from r to the revocation list.
 func revokeSessionCookie(cookieName string, r *http.Request) {
 	c, err := r.Cookie(cookieName)

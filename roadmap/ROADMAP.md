@@ -7,7 +7,7 @@ Sourced from production deployment evaluation feedback (April 2026).
 ### P0 — High Availability & Distributed State
 
 - [x] **Configurable session signing key** — Shared HMAC secret via `CULVERT_SESSION_SECRET` env var, `session_secret` config field, or admin GUI. All LB nodes now validate each other's sessions.
-- [ ] **Distributed session revocation** — Sync revocation list via gRPC Control Plane channel (today revocation is per-process in-memory)
+- [x] **Distributed session revocation** — Sync revocation list via gRPC Control Plane channel every 3s. Each node exports local revocations; CP merges and broadcasts. Logout on any node is enforced cluster-wide.
 - [x] **Distributed rate limiting** — Gossip-based approximate counters via existing gRPC Control Plane channel. Each DP syncs hot-IP deltas (>50% of limit) every 5s; CP aggregates and broadcasts cluster-wide totals. No Redis dependency.
 - [x] **Wire `cert_expiry` webhook alert** — `RotateIfNeeded()` fires `cert_expiry` alert with rotation details via `fireAlert()`.
 
@@ -33,8 +33,8 @@ Sourced from production deployment evaluation feedback (April 2026).
 ### P2 — Multi-Node Operations
 
 - [x] **Control Plane UI panel** — GUI for enabling CP mode, deploying Data Plane nodes, enrollment tokens, node list with health/sync status.
-- [ ] **Node health dashboard** — Aggregate per-node metrics (already pushed via gRPC `PushMetrics`) into a visual dashboard
-- [ ] **Centralized audit log** — Forward audit events from Data Plane nodes to Control Plane for unified visibility
+- [x] **Node health dashboard** — Per-node health cards in Cluster view showing total/blocked/auth-fail counts, uptime, status, and last-seen time from existing PushMetrics data.
+- [x] **Centralized audit log** — DP nodes push audit events to CP via PushAuditEvents RPC every 10s. CP stores in ring buffer (5000 max). Admin UI shows unified table with node ID, actor, action, object.
 
 ### P3 — Protocol Handling
 

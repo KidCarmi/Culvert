@@ -139,7 +139,9 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)   // GET list / POST create / DELETE remove
 	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)     // GET enrolled nodes
 	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)   // POST revoke a node
-	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits) // GET distributed RL status
+	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits)   // GET distributed RL status
+	mux.HandleFunc("/api/cluster/audit", apiClusterAudit)             // GET centralized audit log
+	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations) // GET revocation sync status
 
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
@@ -3555,5 +3557,33 @@ func apiClusterRateLimits(w http.ResponseWriter, r *http.Request) {
 		"remote_ips":     clusterCounts.Count(),
 		"rate_limit_rpm": rl.Limit(),
 		"threshold_pct":  hotThresholdPct,
+	})
+}
+
+// apiClusterAudit returns the centralized audit log from all Data Plane nodes.
+func apiClusterAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "viewer") {
+		return
+	}
+	entries := globalClusterAudit.Recent(200)
+	jsonOK(w, map[string]any{"entries": entries, "total": globalClusterAudit.Count()})
+}
+
+// apiClusterRevocations returns distributed session revocation sync status.
+func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "viewer") {
+		return
+	}
+	jsonOK(w, map[string]any{
+		"local_revoked":  sessionRevoked.Count(),
+		"cluster_mode":   clusterRoleIsDP.Load() || clusterRole.role == "control-plane",
 	})
 }

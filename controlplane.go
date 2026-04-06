@@ -126,10 +126,12 @@ const configServiceName = "culvert.ConfigService"
 
 // methodGetConfig, methodPushMetrics, and methodEnroll are the RPC method descriptors.
 var (
-	methodGetConfig      = fmt.Sprintf("/%s/GetConfig", configServiceName)
-	methodPushMetrics    = fmt.Sprintf("/%s/PushMetrics", configServiceName)
-	methodEnroll         = fmt.Sprintf("/%s/Enroll", configServiceName)
-	methodSyncRateLimits = fmt.Sprintf("/%s/SyncRateLimits", configServiceName)
+	methodGetConfig          = fmt.Sprintf("/%s/GetConfig", configServiceName)
+	methodPushMetrics        = fmt.Sprintf("/%s/PushMetrics", configServiceName)
+	methodEnroll             = fmt.Sprintf("/%s/Enroll", configServiceName)
+	methodSyncRateLimits     = fmt.Sprintf("/%s/SyncRateLimits", configServiceName)
+	methodSyncRevocations    = fmt.Sprintf("/%s/SyncRevocations", configServiceName)
+	methodPushAuditEvents    = fmt.Sprintf("/%s/PushAuditEvents", configServiceName)
 )
 
 // MetricsReport is sent by Data Plane nodes to the Control Plane.
@@ -217,6 +219,107 @@ func (a *rateLimitAggregator) Stats() (nodes int, hotIPs int) {
 	return len(a.perNode), len(seen)
 }
 
+// ─── Distributed session revocation aggregation ─────────────────────────────
+//
+// Each node sends its revocation list to the CP. The CP merges all lists and
+// returns the unified set so every node can enforce logouts from any node.
+
+type revocationAggregator struct {
+	mu      sync.Mutex
+	perNode map[string][]RevocationEntry // nodeID → latest entries
+}
+
+var globalRevAggregator = &revocationAggregator{
+	perNode: map[string][]RevocationEntry{},
+}
+
+// Update stores the latest revocation entries from a node.
+func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) {
+	a.mu.Lock()
+	a.perNode[nodeID] = entries
+	a.mu.Unlock()
+}
+
+// MergedExcluding returns all revocation entries from other nodes.
+func (a *revocationAggregator) MergedExcluding(nodeID string) []RevocationEntry {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	var merged []RevocationEntry
+	seen := map[string]bool{}
+	for nid, entries := range a.perNode {
+		if nid == nodeID {
+			continue
+		}
+		for _, e := range entries {
+			if time.Unix(e.Expiry, 0).Before(now) {
+				continue // expired
+			}
+			if !seen[e.Token] {
+				seen[e.Token] = true
+				merged = append(merged, e)
+			}
+		}
+	}
+	return merged
+}
+
+// ─── Centralized audit log ──────────────────────────────────────────────────
+//
+// Data Plane nodes push audit events to the Control Plane, which stores them
+// in a ring buffer for the admin UI. This provides unified visibility across
+// all nodes without requiring each node to have its own audit log viewer.
+
+// ClusterAuditEntry wraps an AuditEntry with the originating node ID.
+type ClusterAuditEntry struct {
+	NodeID string     `json:"node_id"`
+	Entry  AuditEntry `json:"entry"`
+}
+
+type clusterAuditLog struct {
+	mu      sync.Mutex
+	entries []ClusterAuditEntry
+	maxSize int
+}
+
+var globalClusterAudit = &clusterAuditLog{maxSize: 5000}
+
+// Append adds entries from a Data Plane node.
+func (c *clusterAuditLog) Append(nodeID string, events []AuditEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range events {
+		c.entries = append(c.entries, ClusterAuditEntry{NodeID: nodeID, Entry: e})
+	}
+	// Ring buffer: trim to maxSize.
+	if len(c.entries) > c.maxSize {
+		c.entries = c.entries[len(c.entries)-c.maxSize:]
+	}
+}
+
+// Recent returns the last n entries.
+func (c *clusterAuditLog) Recent(n int) []ClusterAuditEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n <= 0 || len(c.entries) == 0 {
+		return nil
+	}
+	if n > len(c.entries) {
+		n = len(c.entries)
+	}
+	start := len(c.entries) - n
+	out := make([]ClusterAuditEntry, n)
+	copy(out, c.entries[start:])
+	return out
+}
+
+// Count returns total entries.
+func (c *clusterAuditLog) Count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
+}
+
 // clusterRole tracks this node's role for the admin UI.
 var clusterRole struct {
 	role     string // "standalone", "control-plane", "data-plane"
@@ -294,6 +397,46 @@ func (s *controlPlaneServer) SyncRateLimits(_ context.Context, raw json.RawMessa
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
 	return b, nil
+}
+
+// SyncRevocations receives revoked session tokens from a DP node and returns
+// the merged list from all other nodes, enabling cluster-wide session invalidation.
+func (s *controlPlaneServer) SyncRevocations(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		NodeID  string            `json:"node_id"`
+		Entries []RevocationEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
+	}
+	if req.NodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "node_id required")
+	}
+	globalRevAggregator.Update(req.NodeID, req.Entries)
+	remote := globalRevAggregator.MergedExcluding(req.NodeID)
+	b, err := json.Marshal(map[string]any{"entries": remote})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
+	}
+	return b, nil
+}
+
+// PushAuditEvents receives audit events from a DP node for centralized logging.
+func (s *controlPlaneServer) PushAuditEvents(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		NodeID string       `json:"node_id"`
+		Events []AuditEntry `json:"events"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
+	}
+	if req.NodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "node_id required")
+	}
+	if len(req.Events) > 0 {
+		globalClusterAudit.Append(req.NodeID, req.Events)
+	}
+	return json.RawMessage(`{"ok":true}`), nil
 }
 
 // Enroll handles node enrollment: validates token, signs CSR, registers node.
@@ -400,6 +543,14 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 				MethodName: "SyncRateLimits",
 				Handler:    wrapUnary(svc.SyncRateLimits),
 			},
+			{
+				MethodName: "SyncRevocations",
+				Handler:    wrapUnary(svc.SyncRevocations),
+			},
+			{
+				MethodName: "PushAuditEvents",
+				Handler:    wrapUnary(svc.PushAuditEvents),
+			},
 		},
 		Streams: []grpc.StreamDesc{},
 	}, svc)
@@ -479,14 +630,13 @@ func NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile string) (*DataPl
 	return &DataPlaneClient{nodeID: nodeID, conn: conn}, nil
 }
 
-// Run starts three background loops:
-//  1. Config polling — fetches config every interval and applies changes.
-//  2. Metrics push  — reports local stats to the Control Plane every 2×interval.
-//  3. Rate limit gossip — syncs hot-IP deltas every 5s for distributed rate limiting.
+// Run starts background loops for config sync, metrics, and cluster gossip.
 func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
 	go c.pollLoop(ctx, pollInterval)
 	go c.metricsLoop(ctx, pollInterval*2)
 	go c.rateLimitGossipLoop(ctx, 5*time.Second)
+	go c.revocationSyncLoop(ctx, 3*time.Second)
+	go c.auditPushLoop(ctx, 10*time.Second)
 }
 
 func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) {
@@ -584,6 +734,76 @@ func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time
 				continue
 			}
 			clusterCounts.Apply(broadcast.RemoteCounts)
+		}
+	}
+}
+
+// revocationSyncLoop syncs session revocation entries with the CP every few
+// seconds, enabling cluster-wide session invalidation on logout.
+func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	logger.Printf("DataPlane: distributed session revocation enabled (sync every %s)", interval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			local := sessionRevoked.ExportRevocations()
+			req := struct {
+				NodeID  string            `json:"node_id"`
+				Entries []RevocationEntry `json:"entries"`
+			}{
+				NodeID:  c.nodeID,
+				Entries: local,
+			}
+			b, _ := json.Marshal(req)
+			raw, err := c.call(ctx, methodSyncRevocations, b)
+			if err != nil {
+				logger.Printf("DataPlane: SyncRevocations error: %v", err)
+				continue
+			}
+			var resp struct {
+				Entries []RevocationEntry `json:"entries"`
+			}
+			if err := json.Unmarshal(raw, &resp); err != nil {
+				logger.Printf("DataPlane: SyncRevocations parse error: %v", err)
+				continue
+			}
+			if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
+				logger.Printf("DataPlane: merged %d remote session revocations", added)
+			}
+		}
+	}
+}
+
+// auditPushLoop forwards local audit events to the CP for centralized logging.
+func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	logger.Printf("DataPlane: centralized audit log enabled (push every %s)", interval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			events := drainPendingAuditEvents()
+			if len(events) == 0 {
+				continue
+			}
+			req := struct {
+				NodeID string       `json:"node_id"`
+				Events []AuditEntry `json:"events"`
+			}{
+				NodeID: c.nodeID,
+				Events: events,
+			}
+			b, _ := json.Marshal(req)
+			if _, err := c.call(ctx, methodPushAuditEvents, b); err != nil {
+				logger.Printf("DataPlane: PushAuditEvents error (%d events): %v", len(events), err)
+			}
 		}
 	}
 }
