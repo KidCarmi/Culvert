@@ -2315,6 +2315,41 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Cluster CA Management -->
+      <div class="panel" style="margin-top:16px" id="cluster-ca-panel">
+        <div class="panel-header">
+          <span class="panel-title">Cluster CA</span>
+          <button class="btn ghost sm" onclick="loadClusterCA()">↺ Refresh</button>
+        </div>
+        <div style="padding:20px">
+          <div id="cluster-ca-info" style="margin-bottom:16px">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px" id="cluster-ca-cards">
+              <div class="stat-card"><div class="stat-val" id="cca-status">—</div><div class="stat-label">Status</div></div>
+              <div class="stat-card"><div class="stat-val" id="cca-subject">—</div><div class="stat-label">Subject</div></div>
+              <div class="stat-card"><div class="stat-val" id="cca-expires">—</div><div class="stat-label">Expires</div></div>
+              <div class="stat-card"><div class="stat-val" id="cca-fingerprint" style="font-size:.65rem;word-break:break-all">—</div><div class="stat-label">SHA-256 Fingerprint</div></div>
+            </div>
+          </div>
+          <details style="margin-top:12px">
+            <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;font-weight:600">Import Custom Cluster CA</summary>
+            <p style="color:var(--muted);font-size:.8rem;margin:8px 0">
+              Replace the auto-generated cluster CA with your own enterprise CA.
+              Existing enrolled nodes continue working until their certificates expire (1 year),
+              then re-enroll with the new CA.
+            </p>
+            <div style="display:grid;gap:12px;max-width:560px;margin-top:12px">
+              <label style="font-size:.8rem;color:var(--muted)">CA Certificate (PEM)
+                <textarea id="cca-cert-pem" class="input" rows="5" placeholder="-----BEGIN CERTIFICATE-----&#10;..." style="margin-top:4px;font-family:monospace;font-size:.75rem"></textarea>
+              </label>
+              <label style="font-size:.8rem;color:var(--muted)">CA Private Key (PEM, ECDSA P-256)
+                <textarea id="cca-key-pem" class="input" rows="5" placeholder="-----BEGIN EC PRIVATE KEY-----&#10;..." style="margin-top:4px;font-family:monospace;font-size:.75rem"></textarea>
+              </label>
+              <div><button class="btn" onclick="importClusterCA()">Import Cluster CA</button></div>
+            </div>
+          </details>
+        </div>
+      </div>
+
       <!-- Enrolled Nodes Table -->
       <div class="panel" style="margin-top:16px" id="cluster-nodes-panel">
         <div class="panel-header">
@@ -4750,9 +4785,10 @@ async function fetchTopRules() {
       return;
     }
     tbody.innerHTML = rules.map(r => {
-      const badge = r.action === 'allow'
+      const act = (r.action || '').toLowerCase();
+      const badge = act === 'allow'
         ? '<span style="color:#22c55e;font-weight:600">allow</span>'
-        : '<span style="color:var(--red);font-weight:600">deny</span>';
+        : `<span style="color:var(--red);font-weight:600">${act || 'deny'}</span>`;
       return `<tr><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.name}">${r.name}</td><td>${badge}</td><td style="font-family:monospace;font-weight:700;text-align:right">${fmt(r.hits)}</td></tr>`;
     }).join('');
   } catch(_) {}
@@ -6126,10 +6162,36 @@ async function loadCluster() {
 
   // Load cluster subsystem panels (visible on CP or DP)
   const showCluster = isCP || r.role === 'data-plane';
+  loadClusterCA();
   loadClusterRateLimits(showCluster);
   loadClusterHealth(isCP);
   loadClusterRevocations(showCluster);
   loadClusterAudit(isCP);
+}
+
+async function loadClusterCA() {
+  try {
+    const r = await api('/api/cluster/ca');
+    if (!r) return;
+    document.getElementById('cca-status').textContent = r.initialized ? 'Active' : 'Not Initialized';
+    document.getElementById('cca-status').style.color = r.initialized ? '#22c55e' : 'var(--muted)';
+    document.getElementById('cca-subject').textContent = r.subject || '—';
+    document.getElementById('cca-expires').textContent = r.expires ? new Date(r.expires).toLocaleDateString() : '—';
+    document.getElementById('cca-fingerprint').textContent = r.fingerprint || '—';
+  } catch(_) {}
+}
+
+async function importClusterCA() {
+  const cert = document.getElementById('cca-cert-pem').value.trim();
+  const key = document.getElementById('cca-key-pem').value.trim();
+  if (!cert || !key) { alert('Both certificate and key PEM are required.'); return; }
+  const r = await api('/api/cluster/ca', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({cert, key})});
+  if (r) {
+    document.getElementById('cca-cert-pem').value = '';
+    document.getElementById('cca-key-pem').value = '';
+    loadClusterCA();
+    alert('Cluster CA imported successfully.');
+  }
 }
 
 async function loadClusterTokens() {

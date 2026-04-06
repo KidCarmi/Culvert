@@ -397,6 +397,7 @@ type clusterCA struct {
 	cert    *x509.Certificate
 	key     *ecdsa.PrivateKey
 	certPEM []byte
+	dir     string // persisted directory for cluster-ca.crt/key
 }
 
 var globalClusterCA = &clusterCA{}
@@ -406,6 +407,7 @@ func (ca *clusterCA) InitOrLoad(dir string) error {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
+	ca.dir = dir
 	certPath := dir + "/cluster-ca.crt"
 	keyPath := dir + "/cluster-ca.key"
 
@@ -566,6 +568,76 @@ func (ca *clusterCA) Ready() bool {
 	ca.mu.RLock()
 	defer ca.mu.RUnlock()
 	return ca.cert != nil && ca.key != nil
+}
+
+// ImportCA validates and replaces the cluster CA with user-provided PEM cert+key.
+// The new CA is persisted to disk and takes effect immediately. Existing enrolled
+// nodes will continue to work until their certificates expire (1 year), at which
+// point they will re-enroll and receive certs signed by the new CA.
+func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
+	// Validate PEM before taking the lock.
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
+		return fmt.Errorf("no PEM certificate block found")
+	}
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse certificate: %w", err)
+	}
+	if !cert.IsCA {
+		return fmt.Errorf("certificate is not a CA (BasicConstraints.IsCA = false)")
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return fmt.Errorf("no PEM private key block found")
+	}
+	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse EC private key: %w", err)
+	}
+	// Verify cert/key match.
+	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(&key.PublicKey) {
+		return fmt.Errorf("certificate and private key do not match")
+	}
+
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+
+	// Persist to disk.
+	dir := ca.dir
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.WriteFile(dir+"/cluster-ca.crt", certPEM, 0o600); err != nil {
+		return fmt.Errorf("write cluster CA cert: %w", err)
+	}
+	if err := os.WriteFile(dir+"/cluster-ca.key", keyPEM, 0o600); err != nil {
+		return fmt.Errorf("write cluster CA key: %w", err)
+	}
+
+	ca.cert = cert
+	ca.key = key
+	ca.certPEM = certPEM
+	logger.Printf("ClusterCA: imported custom CA (expires %s, fingerprint %s)",
+		cert.NotAfter.Format("2006-01-02"), sanitizeLog(hex.EncodeToString(sha256.Sum256(cert.Raw)[:])))
+	return nil
+}
+
+// Info returns cluster CA metadata for the admin API.
+func (ca *clusterCA) Info() map[string]any {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
+	if ca.cert == nil {
+		return map[string]any{"initialized": false}
+	}
+	fp := sha256.Sum256(ca.cert.Raw)
+	return map[string]any{
+		"initialized": true,
+		"subject":     ca.cert.Subject.CommonName,
+		"expires":     ca.cert.NotAfter.Format(time.RFC3339),
+		"fingerprint": hex.EncodeToString(fp[:]),
+		"serial":      ca.cert.SerialNumber.Text(16),
+	}
 }
 
 // ─── Enrollment Request/Response (gRPC) ──────────────────────────────────────

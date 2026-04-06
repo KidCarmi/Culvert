@@ -141,6 +141,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)   // GET list / POST create / DELETE remove
 	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)     // GET enrolled nodes
 	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)   // POST revoke a node
+	mux.HandleFunc("/api/cluster/ca", apiClusterCA)                   // GET info / POST import cluster CA
 	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits)   // GET distributed RL status
 	mux.HandleFunc("/api/cluster/audit", apiClusterAudit)             // GET centralized audit log
 	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations) // GET revocation sync status
@@ -3562,6 +3563,41 @@ func apiClusterRevoke(w http.ResponseWriter, r *http.Request) {
 
 	logger.Printf("Enrollment: node %q revoked by %s (reason: %s)", req.NodeID, admin, req.Reason)
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// apiClusterCA returns cluster CA info (GET) or imports a custom CA (POST).
+func apiClusterCA(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, "viewer") {
+			return
+		}
+		jsonOK(w, globalClusterCA.Info())
+	case http.MethodPost:
+		if !requireRole(w, r, "admin") {
+			return
+		}
+		var body struct {
+			Cert string `json:"cert"`
+			Key  string `json:"key"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Cert == "" || body.Key == "" {
+			http.Error(w, "cert and key are required", http.StatusBadRequest)
+			return
+		}
+		if err := globalClusterCA.ImportCA([]byte(body.Cert), []byte(body.Key)); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEvent(r, "cluster.ca", "imported", "Custom cluster CA imported")
+		jsonOK(w, globalClusterCA.Info())
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // apiClusterRateLimits returns distributed rate limiting status.
