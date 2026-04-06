@@ -918,8 +918,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	peekBuf := bufio.NewReaderSize(rawClient, 1)
 	firstByte, err := peekBuf.Peek(1)
 	if err != nil {
-		rawClient.Close()
-		upstreamTLS.Close()
+		rawClient.Close()              //nolint:errcheck // best-effort cleanup on peek failure
+		upstreamTLS.Close()            //nolint:errcheck // best-effort cleanup on peek failure
 		logger.Printf("SSL_INSPECT peek error for %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}
