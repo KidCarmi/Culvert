@@ -8,7 +8,7 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 - [x] **Configurable session signing key** — Shared HMAC secret via `CULVERT_SESSION_SECRET` env var, `session_secret` config field, or admin GUI. All LB nodes now validate each other's sessions.
 - [ ] **Distributed session revocation** — Sync revocation list via gRPC Control Plane channel (today revocation is per-process in-memory)
-- [ ] **Distributed rate limiting** — Optional Redis-backed sliding-window counters for accurate per-IP rate limiting across nodes (today counters are per-process, N nodes = Nx effective limit)
+- [x] **Distributed rate limiting** — Gossip-based approximate counters via existing gRPC Control Plane channel. Each DP syncs hot-IP deltas (>50% of limit) every 5s; CP aggregates and broadcasts cluster-wide totals. No Redis dependency.
 - [x] **Wire `cert_expiry` webhook alert** — `RotateIfNeeded()` fires `cert_expiry` alert with rotation details via `fireAlert()`.
 
 ### P1 — Observability

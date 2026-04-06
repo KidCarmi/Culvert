@@ -185,7 +185,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	}
 
 	// Rate limit check.
-	if !rl.Allow(clientIP) {
+	if !rl.AllowAuto(clientIP) {
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "", "")
 		logger.Printf("RATE_LIMITED %s {req_id=%s action=block}", clientIP, reqID)

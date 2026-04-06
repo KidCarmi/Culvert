@@ -2295,6 +2295,23 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Distributed Rate Limiting Status -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-ratelimit-panel">
+        <div class="panel-header"><span class="panel-title">Distributed Rate Limiting</span></div>
+        <div class="panel-body" style="font-size:.85rem">
+          <p style="color:var(--muted);margin-bottom:12px">
+            Gossip-based rate limiting: each Data Plane node syncs hot-IP counts (IPs at &gt;50% of limit)
+            to the Control Plane every 5s. The CP aggregates and broadcasts cluster-wide totals back.
+          </p>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px">
+            <div class="stat-card"><div class="stat-val" id="crl-status">—</div><div class="stat-label">Status</div></div>
+            <div class="stat-card"><div class="stat-val" id="crl-nodes">—</div><div class="stat-label">Syncing Nodes</div></div>
+            <div class="stat-card"><div class="stat-val" id="crl-hot">—</div><div class="stat-label">Hot IPs</div></div>
+            <div class="stat-card"><div class="stat-val" id="crl-rpm">—</div><div class="stat-label">Limit (RPM)</div></div>
+          </div>
+        </div>
+      </div>
+
       <!-- Enrollment Modal (hidden by default) -->
       <div id="enroll-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center">
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;max-width:560px;width:90%">
@@ -5948,6 +5965,9 @@ async function loadCluster() {
 
   // Load tokens if CP
   if (isCP) loadClusterTokens();
+
+  // Load distributed rate limiting status (visible on CP with enrolled nodes)
+  loadClusterRateLimits(isCP || r.role === 'data-plane');
 }
 
 async function loadClusterTokens() {
@@ -5980,6 +6000,21 @@ async function loadClusterTokens() {
     noTok.style.display = '';
     table.style.display = 'none';
   }
+}
+
+async function loadClusterRateLimits(show) {
+  const panel = document.getElementById('cluster-ratelimit-panel');
+  if (!show) { panel.style.display = 'none'; return; }
+  try {
+    const r = await api('/api/cluster/rate-limits');
+    if (!r) { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    document.getElementById('crl-status').textContent = r.enabled ? 'Active' : 'Inactive';
+    document.getElementById('crl-status').style.color = r.enabled ? 'var(--green)' : 'var(--muted)';
+    document.getElementById('crl-nodes').textContent = r.syncing_nodes || 0;
+    document.getElementById('crl-hot').textContent = r.hot_ips || 0;
+    document.getElementById('crl-rpm').textContent = r.rate_limit_rpm || 'Off';
+  } catch(e) { panel.style.display = 'none'; }
 }
 
 async function enableControlPlane() {

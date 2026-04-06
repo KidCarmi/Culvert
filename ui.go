@@ -139,6 +139,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)   // GET list / POST create / DELETE remove
 	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)     // GET enrolled nodes
 	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)   // POST revoke a node
+	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits) // GET distributed RL status
 
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
@@ -3534,4 +3535,25 @@ func apiClusterRevoke(w http.ResponseWriter, r *http.Request) {
 
 	logger.Printf("Enrollment: node %q revoked by %s (reason: %s)", req.NodeID, admin, req.Reason)
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// apiClusterRateLimits returns distributed rate limiting status.
+// Shows whether gossip is active, how many nodes are syncing, and hot IP count.
+func apiClusterRateLimits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "viewer") {
+		return
+	}
+	nodes, hotIPs := globalRLAggregator.Stats()
+	jsonOK(w, map[string]any{
+		"enabled":        clusterRateLimitEnabled.Load(),
+		"syncing_nodes":  nodes,
+		"hot_ips":        hotIPs,
+		"remote_ips":     clusterCounts.Count(),
+		"rate_limit_rpm": rl.Limit(),
+		"threshold_pct":  hotThresholdPct,
+	})
 }
