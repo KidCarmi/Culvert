@@ -40,6 +40,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -274,10 +276,10 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 			return fmt.Errorf("gRPC TLS: %w", err)
 		}
 		serverOpt = grpc.Creds(creds)
-		logger.Printf("ControlPlane gRPC → %s (mTLS)", addr)
+		logger.Printf("ControlPlane gRPC → %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
 	} else {
 		serverOpt = grpc.EmptyServerOption{}
-		logger.Printf("ControlPlane gRPC → %s (insecure — dev only!)", addr)
+		logger.Printf("ControlPlane gRPC → %s (insecure — dev only!)", strings.ReplaceAll(addr, "\n", ""))
 	}
 
 	srv := grpc.NewServer(serverOpt)
@@ -497,6 +499,9 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 // ─── TLS helpers ──────────────────────────────────────────────────────────────
 
 func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCredentials, error) {
+	if strings.Contains(certFile, "..") || strings.Contains(keyFile, "..") {
+		return nil, fmt.Errorf("invalid cert/key path: directory traversal not allowed")
+	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, err
@@ -536,13 +541,17 @@ func buildClientTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 }
 
 func loadCertPool(caFile string) (*x509.CertPool, error) {
+	if strings.Contains(caFile, "..") {
+		return nil, fmt.Errorf("invalid CA path: directory traversal not allowed")
+	}
 	pool := x509.NewCertPool()
-	pem, err := os.ReadFile(caFile)
+	cleaned := filepath.Clean(caFile)
+	pemData, err := os.ReadFile(cleaned) // #nosec G304 -- guarded above: ".." rejected
 	if err != nil {
 		return nil, err
 	}
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("no valid certificates in %s", caFile)
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("no valid certificates in %s", sanitizeLog(caFile))
 	}
 	return pool, nil
 }

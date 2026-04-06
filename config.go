@@ -94,6 +94,18 @@ type FileConfig struct {
 	// Must be 1–168 (one hour to one week). Zero = use the default (8h).
 	SessionTimeoutHours int `yaml:"session_timeout_hours"`
 
+	// Cluster configures Control Plane / Data Plane multi-node mode.
+	// When Cluster.Role is "control-plane", this node starts a gRPC server
+	// for Data Plane enrollment and config distribution.
+	Cluster struct {
+		Role     string `yaml:"role"`      // "control-plane" or "" (standalone); DP mode uses -enroll CLI
+		GRPCAddr string `yaml:"grpc_addr"` // gRPC listen address (e.g. ":50051")
+		CertFile string `yaml:"cert_file"` // TLS cert for gRPC mTLS (optional)
+		KeyFile  string `yaml:"key_file"`  // TLS key for gRPC mTLS (optional)
+		CAFile   string `yaml:"ca_file"`   // CA cert for client validation (optional)
+		StateDB  string `yaml:"state_db"`  // Path to cluster.json (default: "cluster.json")
+	} `yaml:"cluster"`
+
 	// SecurityScan configures the local security scanning stack:
 	// ClamAV antivirus, YARA rule-based detection, and threat-intelligence
 	// feed lookups — all running locally with no external API dependency.
@@ -198,6 +210,14 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 	// rate_limit
 	if n := fc.Security.RateLimit; n < 0 {
 		errs = append(errs, fmt.Sprintf("security.rate_limit: must be >= 0, got %d", n))
+	}
+
+	// cluster.role
+	if r := fc.Cluster.Role; r != "" && r != "control-plane" {
+		errs = append(errs, fmt.Sprintf("cluster.role: must be \"control-plane\" or empty, got %q", r))
+	}
+	if fc.Cluster.Role == "control-plane" && fc.Cluster.GRPCAddr == "" {
+		errs = append(errs, "cluster.grpc_addr is required when cluster.role is \"control-plane\"")
 	}
 
 	if len(errs) > 0 {

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,9 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/setup/status", apiSetupStatus)
 	mux.HandleFunc("/api/setup/complete", apiSetupComplete)
 	mux.HandleFunc("/api/stats", apiStats)
+	mux.HandleFunc("/api/dashboard/health", apiDashboardHealth)
+	mux.HandleFunc("/api/dashboard/threats", apiDashboardThreats)
+	mux.HandleFunc("/api/dashboard/top-rules", apiDashboardTopRules)
 	mux.HandleFunc("/api/timeseries", apiTimeseries)
 	mux.HandleFunc("/api/logs", apiLogs)
 	mux.HandleFunc("/api/top-hosts", apiTopHosts)
@@ -110,6 +114,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 
 	// ── Cluster / multi-node ─────────────────────────────────────────────
 	mux.HandleFunc("/api/cluster/status", apiClusterStatus)   // GET this node + connected nodes
+	mux.HandleFunc("/api/cluster/mode", apiClusterMode)       // POST enable control-plane mode
 	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)   // GET list / POST create / DELETE remove
 	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)     // GET enrolled nodes
 	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)   // POST revoke a node
@@ -881,6 +886,65 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		"authEnabled": cfg.AuthEnabled(),
 		"serverTime":  time.Now().Format("2006-01-02 15:04:05"),
 	})
+}
+
+// GET /api/dashboard/health — System health data
+func apiDashboardHealth(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	jsonOK(w, map[string]any{
+		"memAllocMB":    float64(mem.Alloc) / 1024 / 1024,
+		"memSysMB":      float64(mem.Sys) / 1024 / 1024,
+		"goroutines":    runtime.NumGoroutine(),
+		"numGC":         mem.NumGC,
+		"sseClients":    hub.ClientCount(),
+		"blocklistSize": bl.Count(),
+	})
+}
+
+// GET /api/dashboard/threats — Threat engine breakdown
+func apiDashboardThreats(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	jsonOK(w, map[string]any{
+		"clamav":     atomic.LoadInt64(&statClamBlocked),
+		"yara":       atomic.LoadInt64(&statYARABlocked),
+		"dpi":        atomic.LoadInt64(&statDPIBlocked),
+		"threatFeed": atomic.LoadInt64(&statThreatFeedBlocked),
+	})
+}
+
+// GET /api/dashboard/top-rules — Top policy rules by hit count
+func apiDashboardTopRules(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	rules := policyStore.List()
+	// Sort by HitCount descending, take top 10
+	sort.Slice(rules, func(i, j int) bool { return rules[i].HitCount > rules[j].HitCount })
+	if len(rules) > 10 {
+		rules = rules[:10]
+	}
+	type ruleHit struct {
+		Name   string `json:"name"`
+		Action string `json:"action"`
+		Hits   int64  `json:"hits"`
+	}
+	result := make([]ruleHit, 0, len(rules))
+	for i := range rules {
+		if rules[i].HitCount > 0 {
+			name := rules[i].Name
+			if name == "" {
+				name = fmt.Sprintf("Rule #%d", rules[i].Priority)
+			}
+			result = append(result, ruleHit{Name: name, Action: string(rules[i].Action), Hits: rules[i].HitCount})
+		}
+	}
+	jsonOK(w, map[string]any{"rules": result})
 }
 
 // GET /api/timeseries
@@ -3151,8 +3215,56 @@ func countActiveTokens() int {
 	return count
 }
 
+// apiClusterMode enables Control Plane mode at runtime from the admin GUI.
+func apiClusterMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "admin") {
+		return
+	}
+
+	var req struct {
+		GRPCAddr string `json:"grpc_addr"`
+		CertFile string `json:"cert_file"`
+		KeyFile  string `json:"key_file"`
+		CAFile   string `json:"ca_file"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.GRPCAddr == "" {
+		http.Error(w, "grpc_addr is required (e.g. \":50051\")", http.StatusBadRequest)
+		return
+	}
+	// Reject path traversal in file paths (CWE-22).
+	for _, p := range []string{req.CertFile, req.KeyFile, req.CAFile} {
+		if strings.Contains(p, "..") {
+			http.Error(w, "path traversal not allowed", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if err := enableControlPlane(req.GRPCAddr, req.CertFile, req.KeyFile, req.CAFile, clusterDBPathGlobal); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	auditAdd(AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  sessionAdmin(r),
+		Action: "cluster.enable-cp",
+		Object: req.GRPCAddr,
+		Detail: "Control Plane enabled via GUI",
+	})
+	jsonOK(w, map[string]any{"ok": true, "role": "control-plane", "grpcAddr": req.GRPCAddr})
+}
+
 // apiClusterTokens handles enrollment token CRUD.
-func apiClusterTokens(w http.ResponseWriter, r *http.Request) {
+func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop // split into sub-handlers
 	switch r.Method {
 	case http.MethodGet:
 		if !requireRole(w, r, "viewer") {
@@ -3162,54 +3274,7 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"tokens": tokens})
 
 	case http.MethodPost:
-		if !requireRole(w, r, "admin") {
-			return
-		}
-		if clusterRole.role != "control-plane" {
-			http.Error(w, "enrollment only available on Control Plane", http.StatusBadRequest)
-			return
-		}
-		if !globalClusterCA.Ready() {
-			http.Error(w, "cluster CA not initialized", http.StatusServiceUnavailable)
-			return
-		}
-
-		var req struct {
-			NodePrefix string `json:"node_prefix"`
-			AllowCIDR  string `json:"allow_cidr"`
-			TTLHours   int    `json:"ttl_hours"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		ttl := 24 * time.Hour
-		if req.TTLHours > 0 {
-			ttl = time.Duration(req.TTLHours) * time.Hour
-		}
-
-		admin := sessionAdmin(r)
-		plaintext, err := globalClusterStore.GenerateToken(req.NodePrefix, req.AllowCIDR, admin, ttl)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		// Build enrollment URL.
-		cpAddr := clusterRole.grpcAddr
-		caFP := globalClusterCA.CACertFingerprint()
-		enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
-		enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
-
-		auditEvent(r, "enrollment.token_created", req.NodePrefix,
-			fmt.Sprintf("cidr=%s ttl=%dh", req.AllowCIDR, int(ttl.Hours())))
-
-		jsonOK(w, map[string]any{
-			"token":      plaintext,
-			"enroll_url": enrollURL,
-			"enroll_cmd": enrollCmd,
-			"expires_at": time.Now().Add(ttl).Format(time.RFC3339),
-		})
+		apiClusterTokenCreate(w, r)
 
 	case http.MethodDelete:
 		if !requireRole(w, r, "admin") {
@@ -3232,6 +3297,57 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, "admin") {
+		return
+	}
+	if clusterRole.role != "control-plane" {
+		http.Error(w, "enrollment only available on Control Plane", http.StatusBadRequest)
+		return
+	}
+	if !globalClusterCA.Ready() {
+		http.Error(w, "cluster CA not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		NodePrefix string `json:"node_prefix"`
+		AllowCIDR  string `json:"allow_cidr"`
+		TTLHours   int    `json:"ttl_hours"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	ttl := 24 * time.Hour
+	if req.TTLHours > 0 {
+		ttl = time.Duration(req.TTLHours) * time.Hour
+	}
+
+	admin := sessionAdmin(r)
+	plaintext, err := globalClusterStore.GenerateToken(req.NodePrefix, req.AllowCIDR, admin, ttl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Build enrollment URL.
+	cpAddr := clusterRole.grpcAddr
+	caFP := globalClusterCA.CACertFingerprint()
+	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
+	enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
+
+	auditEvent(r, "enrollment.token_created", req.NodePrefix,
+		fmt.Sprintf("cidr=%s ttl=%dh", req.AllowCIDR, int(ttl.Hours())))
+
+	jsonOK(w, map[string]any{
+		"token":      plaintext,
+		"enroll_url": enrollURL,
+		"enroll_cmd": enrollCmd,
+		"expires_at": time.Now().Add(ttl).Format(time.RFC3339),
+	})
 }
 
 // apiClusterNodes returns enrolled nodes with their status.
