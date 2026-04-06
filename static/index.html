@@ -1511,11 +1511,15 @@ Firefox (all platforms):
         <div class="panel-header"><span class="panel-title">📡 Syslog / SIEM Forwarding</span></div>
         <div class="panel-body">
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
-            Forward all log lines and audit events to a remote syslog server (RFC 3164).<br>
+            Forward all log lines and audit events to a remote syslog server.<br>
             Compatible with Splunk, Elastic, QRadar, rsyslog, syslog-ng.
           </p>
-          <div style="display:flex;gap:10px;align-items:center">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <input type="text" class="input wide" id="s-syslog-addr" placeholder="udp://10.0.0.1:514 or tcp://logs.corp.com:601">
+            <select class="input" id="s-syslog-format" style="width:auto;min-width:120px">
+              <option value="rfc3164">RFC 3164 (BSD)</option>
+              <option value="rfc5424">RFC 5424 (IETF)</option>
+            </select>
             <button class="btn" onclick="saveSyslog()">Save</button>
             <button class="btn ghost sm" onclick="disableSyslog()">Disable</button>
           </div>
@@ -3909,10 +3913,12 @@ async function loadSettings() {
   try {
     const sl = await api('/api/syslog');
     document.getElementById('s-syslog-addr').value = sl.addr || '';
+    document.getElementById('s-syslog-format').value = sl.format || 'rfc3164';
     if (sl.addr) {
       const el = document.getElementById('s-syslog-status');
       el.style.display = '';
-      el.textContent = '✅ Forwarding to ' + sl.addr;
+      const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
+      el.textContent = '✅ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
       el.style.color = 'var(--green)';
     }
   } catch(e) {}
@@ -4029,15 +4035,17 @@ async function saveUIAllowIPs() {
 // ── Syslog / SIEM ─────────────────────────────────────────────────────────
 async function saveSyslog() {
   const addr = document.getElementById('s-syslog-addr').value.trim();
+  const format = document.getElementById('s-syslog-format').value;
   const el = document.getElementById('s-syslog-status');
   if (!addr) { toast('Enter a syslog address', 'error'); return; }
   try {
-    await api('/api/syslog', {
+    const res = await api('/api/syslog', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({addr})
+      body: JSON.stringify({addr, format})
     });
     el.style.display = '';
-    el.textContent = '✅ Forwarding to ' + addr;
+    const fmtLabel = (res.format || format) === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
+    el.textContent = '✅ Forwarding to ' + addr + ' (' + fmtLabel + ')';
     el.style.color = 'var(--green)';
     toast('Syslog configured', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
@@ -4051,6 +4059,7 @@ async function disableSyslog() {
       body: JSON.stringify({addr: ''})
     });
     document.getElementById('s-syslog-addr').value = '';
+    document.getElementById('s-syslog-format').value = 'rfc3164';
     el.style.display = '';
     el.textContent = 'Syslog disabled';
     el.style.color = 'var(--muted)';

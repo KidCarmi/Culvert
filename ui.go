@@ -1817,8 +1817,8 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 var syslogConfigured string // the addr string, empty = not configured
 
 // GET/POST /api/syslog — configure remote syslog/SIEM forwarding at runtime.
-// GET  → returns current syslog address (empty string = disabled).
-// POST → {"addr": "udp://10.0.0.1:514"} — reconnects immediately.
+// GET  → returns current syslog address and format.
+// POST → {"addr": "udp://10.0.0.1:514", "format": "rfc5424"} — reconnects immediately.
 //
 //	Send addr="" to disable forwarding.
 func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
@@ -1827,19 +1827,29 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured})
+		format := "rfc3164"
+		if globalSyslog != nil {
+			format = globalSyslog.Format()
+		}
+		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		var body struct {
-			Addr string `json:"addr"`
+			Addr   string `json:"addr"`
+			Format string `json:"format"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
 		body.Addr = strings.TrimSpace(body.Addr)
+		body.Format = strings.TrimSpace(body.Format)
+		if body.Format != "" && body.Format != "rfc3164" && body.Format != "rfc5424" {
+			http.Error(w, "format must be \"rfc3164\" or \"rfc5424\"", http.StatusBadRequest)
+			return
+		}
 		if body.Addr == "" {
 			// Disable syslog.
 			if globalSyslog != nil {
@@ -1848,16 +1858,16 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			syslogConfigured = ""
 			auditEvent(r, "settings.syslog", "disabled", "")
-			jsonOK(w, map[string]any{"ok": true, "addr": ""})
+			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
 			return
 		}
-		if err := InitSyslog(body.Addr); err != nil {
+		if err := InitSyslog(body.Addr, body.Format); err != nil {
 			http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		syslogConfigured = body.Addr
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled")
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr})
+		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
+		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

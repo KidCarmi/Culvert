@@ -725,6 +725,35 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	<-done
 }
 
+// readerConn wraps a net.Conn with a bufio.Reader so that bytes already peeked
+// (e.g. for protocol detection) are not lost when the conn is handed to tls.Server.
+type readerConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (c readerConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+// detectProtocolName returns a human-readable name for the protocol identified
+// by its first byte on the wire. Used for logging when a non-TLS protocol is
+// detected inside a CONNECT tunnel under SSL inspection.
+func detectProtocolName(b byte) string {
+	switch {
+	case b == 0x16:
+		return "TLS"
+	case b == 'S': // "SSH-..." banner
+		return "SSH"
+	case b == 0x03: // RDP TPKT header (version 3)
+		return "RDP"
+	case b >= 0x14 && b <= 0x17: // other TLS content types (change_cipher_spec, alert, application_data)
+		return "TLS"
+	case b == 'G' || b == 'P' || b == 'H' || b == 'D' || b == 'O' || b == 'C' || b == 'T':
+		return "HTTP" // GET, POST, HEAD, DELETE, OPTIONS, CONNECT, TRACE
+	default:
+		return "unknown"
+	}
+}
+
 // handleTunnel dispatches to SSL-bypass or SSL-inspect based on policy.
 func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, tlsSkipVerify bool) {
 	if sslAction == SSLInspect && certMgr.Ready() {
@@ -882,8 +911,42 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		return
 	}
 
+	// 3b. Peek the first byte from the client to detect the protocol.
+	// TLS ClientHello starts with 0x16 (handshake record). If the client
+	// is sending SSH, RDP, or another non-TLS protocol through CONNECT,
+	// fall back to raw relay instead of crashing on TLS handshake.
+	peekBuf := bufio.NewReaderSize(rawClient, 1)
+	firstByte, err := peekBuf.Peek(1)
+	if err != nil {
+		rawClient.Close()
+		upstreamTLS.Close()
+		logger.Printf("SSL_INSPECT peek error for %q: %v", sanitizeLog(hostOnly), err)
+		return
+	}
+	if firstByte[0] != 0x16 { // not a TLS handshake record
+		proto := detectProtocolName(firstByte[0])
+		logger.Printf("SSL_INSPECT non-TLS protocol detected for %q (first byte=0x%02x, proto=%s) — falling back to raw relay",
+			sanitizeLog(hostOnly), firstByte[0], proto)
+		// Raw relay: splice the peeked reader (client) ↔ upstream (already TLS-connected)
+		done := make(chan struct{}, 2)
+		relay := func(dst io.Writer, src io.Reader) {
+			bp := relayBufPool.Get().(*[]byte)
+			io.CopyBuffer(dst, src, *bp) //nolint:errcheck
+			relayBufPool.Put(bp)
+			done <- struct{}{}
+		}
+		go relay(upstreamTLS, peekBuf) // client → upstream
+		go relay(rawClient, upstreamTLS) // upstream → client
+		<-done
+		rawClient.Close()
+		upstreamTLS.Close()
+		<-done
+		return
+	}
+
 	// 4. Perform TLS handshake with the client using a dynamically-signed cert.
-	clientTLS := tls.Server(rawClient, &tls.Config{
+	// Wrap rawClient with the peek buffer so the already-peeked byte isn't lost.
+	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, &tls.Config{
 		GetCertificate: certMgr.GetCert,
 	})
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
