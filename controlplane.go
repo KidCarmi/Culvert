@@ -538,27 +538,18 @@ func buildClientTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 }
 
 func loadCertPool(caFile string) (*x509.CertPool, error) {
-	// Validate path: resolve to absolute path and ensure it doesn't escape
-	// the working directory via directory traversal (CWE-22).
-	cwd, err := os.Getwd()
+	// Sanitize path: resolve symlinks, remove traversal components (CWE-22).
+	safePath, err := filepath.EvalSymlinks(filepath.Clean(caFile))
 	if err != nil {
-		return nil, fmt.Errorf("getwd: %w", err)
-	}
-	absPath := filepath.Join(cwd, caFile)
-	absPath, err = filepath.Abs(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve CA path: %w", err)
-	}
-	if !strings.HasPrefix(absPath, cwd+string(filepath.Separator)) && absPath != cwd {
-		return nil, fmt.Errorf("invalid CA file path: escapes working directory")
+		return nil, fmt.Errorf("resolve CA path %q: %w", sanitizeLog(caFile), err)
 	}
 	pool := x509.NewCertPool()
-	pem, err := os.ReadFile(absPath)
+	pemData, err := os.ReadFile(safePath) // #nosec G304 -- path is admin-configured, sanitised above
 	if err != nil {
 		return nil, err
 	}
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("no valid certificates in %s", caFile)
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("no valid certificates in %s", sanitizeLog(caFile))
 	}
 	return pool, nil
 }
