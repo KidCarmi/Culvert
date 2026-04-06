@@ -304,3 +304,161 @@ func (r *RateLimiter) Limit() int {
 func (r *RateLimiter) Window() time.Duration {
 	return time.Duration(r.window.Load())
 }
+
+// ─── Distributed rate limiting (gossip-based) ────────────────────────────────
+//
+// Each Data Plane node tracks local per-IP request counts. Periodically, "hot"
+// IPs (those exceeding hotThresholdPct of the limit) are reported as deltas to
+// the Control Plane. The CP aggregates cluster-wide totals and broadcasts them
+// back. Each DP node's Allow() checks: localCount + clusterRemoteCount >= limit.
+//
+// This avoids Redis: counters stay in-memory, only delta gossip crosses the
+// wire, and only for IPs that actually matter.
+
+// hotThresholdPct is the percentage of the rate limit an IP must reach before
+// its counts are synced to the Control Plane. Keeps gossip traffic minimal.
+const hotThresholdPct = 50
+
+// RateLimitDelta is a per-IP request count delta sent from DP → CP.
+type RateLimitDelta struct {
+	IP    string `json:"ip"`
+	Count int    `json:"count"` // requests since last sync
+}
+
+// RateLimitGossip is the DP → CP message containing hot-IP deltas.
+type RateLimitGossip struct {
+	NodeID string           `json:"node_id"`
+	Deltas []RateLimitDelta `json:"deltas"`
+}
+
+// RateLimitBroadcast is the CP → DP response with cluster-wide totals
+// (excluding the requesting node's own counts, so the DP can add them locally).
+type RateLimitBroadcast struct {
+	// RemoteCounts maps IP → total requests from OTHER nodes in the current window.
+	RemoteCounts map[string]int `json:"remote_counts"`
+}
+
+// clusterCounts holds per-IP request totals received from the Control Plane
+// (other nodes' aggregated counts). Protected by its own mutex to avoid
+// contention with the hot-path Allow() sharded locks.
+type clusterCountStore struct {
+	mu     sync.RWMutex
+	counts map[string]int // IP → remote cluster count in current window
+}
+
+var clusterCounts = &clusterCountStore{counts: map[string]int{}}
+
+// Get returns the cluster-remote count for an IP.
+func (c *clusterCountStore) Get(ip string) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.counts[ip]
+}
+
+// Apply replaces the cluster-remote counts with a new broadcast.
+func (c *clusterCountStore) Apply(remote map[string]int) {
+	c.mu.Lock()
+	c.counts = remote
+	c.mu.Unlock()
+}
+
+// Count returns the number of IPs tracked.
+func (c *clusterCountStore) Count() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.counts)
+}
+
+// ExportHotDeltas returns per-IP request count deltas for IPs that have
+// reached at least hotThresholdPct of the configured limit since the last
+// call. Counts are reset after export (delta, not absolute).
+func (r *RateLimiter) ExportHotDeltas() []RateLimitDelta {
+	if !r.enabled.Load() {
+		return nil
+	}
+	limit := int(r.limit.Load())
+	if limit <= 0 {
+		return nil
+	}
+	threshold := limit * hotThresholdPct / 100
+	if threshold < 1 {
+		threshold = 1
+	}
+	window := time.Duration(r.window.Load())
+	cutoff := time.Now().Add(-window)
+
+	var deltas []RateLimitDelta
+	for i := range r.shards {
+		s := &r.shards[i]
+		s.mu.Lock()
+		for ip, b := range s.clients {
+			// Count only in-window timestamps.
+			count := 0
+			for _, t := range b.timestamps {
+				if t.After(cutoff) {
+					count++
+				}
+			}
+			if count >= threshold {
+				deltas = append(deltas, RateLimitDelta{IP: ip, Count: count})
+			}
+		}
+		s.mu.Unlock()
+	}
+	return deltas
+}
+
+// clusterRateLimitEnabled is set to true when this node is a Data Plane
+// receiving cluster-wide rate limit gossip. Checked by AllowAuto().
+var clusterRateLimitEnabled atomic.Bool
+
+// AllowAuto dispatches to AllowClusterAware when cluster rate limiting is
+// active, or plain Allow when running standalone. This is the method that
+// proxy.go and socks5.go should call.
+func (r *RateLimiter) AllowAuto(ip string) bool {
+	if clusterRateLimitEnabled.Load() {
+		return r.AllowClusterAware(ip)
+	}
+	return r.Allow(ip)
+}
+
+// AllowClusterAware is like Allow but also considers cluster-remote counts.
+// Used when the node is operating as a Data Plane in a cluster.
+func (r *RateLimiter) AllowClusterAware(ip string) bool {
+	if !r.enabled.Load() {
+		return true
+	}
+	limit := int(r.limit.Load())
+	window := time.Duration(r.window.Load())
+	now := time.Now()
+	cutoff := now.Add(-window)
+
+	s := r.shard(ip)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, ok := s.clients[ip]
+	if !ok {
+		b = &clientBucket{}
+		s.clients[ip] = b
+	}
+	b.lastSeen = now
+
+	// Evict old timestamps.
+	valid := b.timestamps[:0]
+	for _, t := range b.timestamps {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+	b.timestamps = valid
+
+	// Check local + remote cluster count against limit.
+	localCount := len(b.timestamps)
+	remoteCount := clusterCounts.Get(ip)
+	if localCount+remoteCount >= limit {
+		return false
+	}
+	b.timestamps = append(b.timestamps, now)
+	return true
+}

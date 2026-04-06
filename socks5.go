@@ -41,7 +41,7 @@ func handleSOCKS5(conn net.Conn) {
 	}
 
 	// ── Rate limit ───────────────────────────────────────────────────────────
-	if !rl.Allow(clientIP) {
+	if !rl.AllowAuto(clientIP) {
 		recordRequest(clientIP, "SOCKS5", "", "RATE_LIMITED", "", "", "")
 		return
 	}

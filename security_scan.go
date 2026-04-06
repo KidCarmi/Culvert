@@ -210,6 +210,33 @@ func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 	return nil
 }
 
+// ── Panic-safe scan wrappers ────────────────────────────────────────────────
+// These wrappers prevent panics in scan engines (ClamAV, YARA, DPI regex)
+// from crashing the request handler goroutine.
+
+// safeScanBody wraps globalSecScanner.ScanBody with panic recovery.
+func safeScanBody(data []byte) (result *SecurityScanResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Printf("PANIC in ScanBody recovered: %v", r)
+			result = nil
+		}
+	}()
+	return globalSecScanner.ScanBody(data)
+}
+
+// safeDPIScan wraps dpiScanner.Scan with panic recovery.
+func safeDPIScan(data []byte) (pattern string, matched bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Printf("PANIC in DPI Scan recovered: %v", r)
+			pattern = ""
+			matched = false
+		}
+	}()
+	return dpiScanner.Scan(data)
+}
+
 // ── HTTP response helpers ─────────────────────────────────────────────────────
 
 // scanBlock sends a 403 Forbidden response to a plain http.ResponseWriter.

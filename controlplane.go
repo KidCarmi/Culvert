@@ -126,9 +126,10 @@ const configServiceName = "culvert.ConfigService"
 
 // methodGetConfig, methodPushMetrics, and methodEnroll are the RPC method descriptors.
 var (
-	methodGetConfig   = fmt.Sprintf("/%s/GetConfig", configServiceName)
-	methodPushMetrics = fmt.Sprintf("/%s/PushMetrics", configServiceName)
-	methodEnroll      = fmt.Sprintf("/%s/Enroll", configServiceName)
+	methodGetConfig      = fmt.Sprintf("/%s/GetConfig", configServiceName)
+	methodPushMetrics    = fmt.Sprintf("/%s/PushMetrics", configServiceName)
+	methodEnroll         = fmt.Sprintf("/%s/Enroll", configServiceName)
+	methodSyncRateLimits = fmt.Sprintf("/%s/SyncRateLimits", configServiceName)
 )
 
 // MetricsReport is sent by Data Plane nodes to the Control Plane.
@@ -145,6 +146,76 @@ var (
 	nodeMetricsMu sync.RWMutex
 	nodeMetrics   = map[string]MetricsReport{}
 )
+
+// ─── Distributed rate limit aggregation ──────────────────────────────────────
+//
+// The CP aggregates per-IP request counts from all DP nodes. Each DP sends
+// delta counts for "hot" IPs (those near their limit). The CP stores the
+// latest snapshot per node, and on each SyncRateLimits call returns the
+// cluster-wide total minus the requesting node's own counts.
+
+type rateLimitAggregator struct {
+	mu       sync.Mutex
+	perNode  map[string]map[string]int // nodeID → {IP → count}
+	expireAt map[string]time.Time      // nodeID → last update time
+}
+
+var globalRLAggregator = &rateLimitAggregator{
+	perNode:  map[string]map[string]int{},
+	expireAt: map[string]time.Time{},
+}
+
+// Update stores the latest rate limit snapshot from a node.
+func (a *rateLimitAggregator) Update(nodeID string, deltas []RateLimitDelta) {
+	counts := make(map[string]int, len(deltas))
+	for _, d := range deltas {
+		counts[d.IP] = d.Count
+	}
+	a.mu.Lock()
+	a.perNode[nodeID] = counts
+	a.expireAt[nodeID] = time.Now()
+	a.mu.Unlock()
+}
+
+// ClusterTotalsExcluding returns per-IP totals across all nodes except excludeNode.
+// Stale entries (>2 minutes without update) are pruned.
+func (a *rateLimitAggregator) ClusterTotalsExcluding(excludeNode string) map[string]int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Prune stale nodes.
+	cutoff := time.Now().Add(-2 * time.Minute)
+	for nid, t := range a.expireAt {
+		if t.Before(cutoff) {
+			delete(a.perNode, nid)
+			delete(a.expireAt, nid)
+		}
+	}
+
+	totals := map[string]int{}
+	for nid, counts := range a.perNode {
+		if nid == excludeNode {
+			continue
+		}
+		for ip, count := range counts {
+			totals[ip] += count
+		}
+	}
+	return totals
+}
+
+// Stats returns the number of tracked nodes and total hot IPs.
+func (a *rateLimitAggregator) Stats() (nodes int, hotIPs int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	seen := map[string]bool{}
+	for _, counts := range a.perNode {
+		for ip := range counts {
+			seen[ip] = true
+		}
+	}
+	return len(a.perNode), len(seen)
+}
 
 // clusterRole tracks this node's role for the admin UI.
 var clusterRole struct {
@@ -199,6 +270,30 @@ func (s *controlPlaneServer) PushMetrics(_ context.Context, raw json.RawMessage)
 
 	logger.Printf("ControlPlane: metrics from node %s (total=%d)", report.NodeID, report.Total)
 	return json.RawMessage(`{"ok":true}`), nil
+}
+
+// SyncRateLimits receives hot-IP deltas from a DP node and returns cluster-wide
+// totals (excluding the requesting node) for distributed rate limiting.
+func (s *controlPlaneServer) SyncRateLimits(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var gossip RateLimitGossip
+	if err := json.Unmarshal(raw, &gossip); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
+	}
+	if gossip.NodeID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "node_id required")
+	}
+
+	// Store this node's hot-IP counts.
+	globalRLAggregator.Update(gossip.NodeID, gossip.Deltas)
+
+	// Return cluster totals minus this node's own counts.
+	remote := globalRLAggregator.ClusterTotalsExcluding(gossip.NodeID)
+	broadcast := RateLimitBroadcast{RemoteCounts: remote}
+	b, err := json.Marshal(broadcast)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
+	}
+	return b, nil
 }
 
 // Enroll handles node enrollment: validates token, signs CSR, registers node.
@@ -301,6 +396,10 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 				MethodName: "Enroll",
 				Handler:    wrapUnary(svc.Enroll),
 			},
+			{
+				MethodName: "SyncRateLimits",
+				Handler:    wrapUnary(svc.SyncRateLimits),
+			},
 		},
 		Streams: []grpc.StreamDesc{},
 	}, svc)
@@ -380,12 +479,14 @@ func NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile string) (*DataPl
 	return &DataPlaneClient{nodeID: nodeID, conn: conn}, nil
 }
 
-// Run starts two background loops:
+// Run starts three background loops:
 //  1. Config polling — fetches config every interval and applies changes.
-//  2. Metrics push  — reports local stats to the Control Plane every interval.
+//  2. Metrics push  — reports local stats to the Control Plane every 2×interval.
+//  3. Rate limit gossip — syncs hot-IP deltas every 5s for distributed rate limiting.
 func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
 	go c.pollLoop(ctx, pollInterval)
 	go c.metricsLoop(ctx, pollInterval*2)
+	go c.rateLimitGossipLoop(ctx, 5*time.Second)
 }
 
 func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) {
@@ -442,6 +543,47 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 			if _, err := c.call(ctx, methodPushMetrics, b); err != nil {
 				logger.Printf("DataPlane: PushMetrics error: %v", err)
 			}
+		}
+	}
+}
+
+// rateLimitGossipLoop periodically syncs hot-IP rate limit deltas with the
+// Control Plane. Only sends data when the rate limiter is enabled and there
+// are IPs exceeding the hot threshold (>50% of limit).
+func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Enable cluster-aware rate limiting now that we're connected to CP.
+	clusterRateLimitEnabled.Store(true)
+	logger.Printf("DataPlane: distributed rate limiting enabled (gossip every %s)", interval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			clusterRateLimitEnabled.Store(false)
+			return
+		case <-ticker.C:
+			if !rl.Enabled() {
+				continue
+			}
+			deltas := rl.ExportHotDeltas()
+			gossip := RateLimitGossip{
+				NodeID: c.nodeID,
+				Deltas: deltas,
+			}
+			b, _ := json.Marshal(gossip)
+			raw, err := c.call(ctx, methodSyncRateLimits, b)
+			if err != nil {
+				logger.Printf("DataPlane: SyncRateLimits error: %v", err)
+				continue
+			}
+			var broadcast RateLimitBroadcast
+			if err := json.Unmarshal(raw, &broadcast); err != nil {
+				logger.Printf("DataPlane: SyncRateLimits parse error: %v", err)
+				continue
+			}
+			clusterCounts.Apply(broadcast.RemoteCounts)
 		}
 	}
 }

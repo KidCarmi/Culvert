@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ─── DPI Content Scanner ──────────────────────────────────────────────────────
@@ -144,17 +145,38 @@ func (s *ContentScanner) List() []string {
 	return out
 }
 
+// dpiRegexTimeout limits how long a single DPI regex match may run.
+// Prevents ReDoS from pathological patterns or crafted input.
+const dpiRegexTimeout = 5 * time.Second
+
 // Scan checks data against all compiled patterns.
 // Returns the first matching raw pattern string and true, or ("", false).
+// Each regex match is bounded by dpiRegexTimeout to prevent ReDoS hangs.
 func (s *ContentScanner) Scan(data []byte) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for i, re := range s.compiled {
-		if re.Match(data) {
+		if matchDPIRegexWithTimeout(re, data, dpiRegexTimeout) {
 			return s.raw[i], true
 		}
 	}
 	return "", false
+}
+
+// matchDPIRegexWithTimeout runs re.Match(data) with a deadline.
+// Returns false if the match does not complete in time (ReDoS prevention).
+func matchDPIRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
+	ch := make(chan bool, 1)
+	go func() {
+		ch <- re.Match(data)
+	}()
+	select {
+	case matched := <-ch:
+		return matched
+	case <-time.After(timeout):
+		logger.Printf("WARN DPI regex timeout after %s on pattern %q", timeout, sanitizeLog(re.String()))
+		return false
+	}
 }
 
 // isTextContentType reports whether a Content-Type header value indicates

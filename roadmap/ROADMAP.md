@@ -8,26 +8,26 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 - [x] **Configurable session signing key** — Shared HMAC secret via `CULVERT_SESSION_SECRET` env var, `session_secret` config field, or admin GUI. All LB nodes now validate each other's sessions.
 - [ ] **Distributed session revocation** — Sync revocation list via gRPC Control Plane channel (today revocation is per-process in-memory)
-- [ ] **Distributed rate limiting** — Optional Redis-backed sliding-window counters for accurate per-IP rate limiting across nodes (today counters are per-process, N nodes = Nx effective limit)
+- [x] **Distributed rate limiting** — Gossip-based approximate counters via existing gRPC Control Plane channel. Each DP syncs hot-IP deltas (>50% of limit) every 5s; CP aggregates and broadcasts cluster-wide totals. No Redis dependency.
 - [x] **Wire `cert_expiry` webhook alert** — `RotateIfNeeded()` fires `cert_expiry` alert with rotation details via `fireAlert()`.
 
 ### P1 — Observability
 
 - [ ] **OpenTelemetry (OTLP) export** — Export metrics + traces via OTLP gRPC/HTTP. Today only Prometheus text format is supported.
-- [ ] **W3C Traceparent propagation** — Forward `traceparent`/`tracestate` headers through proxied requests for distributed tracing across multi-node setups
-- [ ] **RFC 5424 syslog** — Currently only RFC 3164 (BSD syslog). Modern SIEMs prefer RFC 5424 structured data.
+- [x] **W3C Traceparent propagation** — Forward `traceparent`/`tracestate` headers through proxied requests for distributed tracing across multi-node setups
+- [x] **RFC 5424 syslog** — Currently only RFC 3164 (BSD syslog). Modern SIEMs prefer RFC 5424 structured data.
 
 ### P1 — Process Isolation & Stability
 
-- [ ] **DPI scanner timeout** — Add per-pattern timeout to DPI regex matching (YARA has 5s timeout, DPI has none)
-- [ ] **YARA timeout goroutine leak fix** — Timed-out regex goroutines currently leak indefinitely. Add context cancellation or goroutine tracking.
+- [x] **DPI scanner timeout** — Add per-pattern timeout to DPI regex matching (YARA has 5s timeout, DPI has none)
+- [x] **YARA timeout goroutine leak fix** — Timed-out regex goroutines currently leak indefinitely. Add context cancellation or goroutine tracking.
 - [ ] **Optional scan microservice mode** — Allow YARA + DPI to run as a sidecar HTTP service instead of in-process, for deployments that need process isolation
-- [ ] **Panic recovery around scanning** — Add `defer recover()` in scan call sites (`proxy.go` scan paths) to prevent one bad file from killing a request goroutine
+- [x] **Panic recovery around scanning** — Add `defer recover()` in scan call sites (`proxy.go` scan paths) to prevent one bad file from killing a request goroutine
 
 ### P2 — CA & Certificate Management
 
 - [ ] **Dual-CA overlap mode** — Serve leaf certs from both old and new CA simultaneously during rotation window, for true zero-downtime CA rotation
-- [ ] **CA export API endpoint** — Admin API to download the current root CA cert (PEM) for MDM/GPO distribution
+- [x] **CA export API endpoint** — Admin API to download the current root CA cert (PEM) for MDM/GPO distribution
 - [ ] **HSM/KMS UI panel** — The `KeyProvider` interface exists in code (`ca.go:453-499`) but has no GUI configuration. Add admin panel for AWS KMS / Azure Key Vault / GCP Cloud KMS / PKCS#11 setup.
 
 ### P2 — Multi-Node Operations
@@ -38,7 +38,7 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 ### P3 — Protocol Handling
 
-- [ ] **TLS protocol detection in SSL inspection** — Peek first byte of CONNECT tunnel to detect non-TLS protocols (SSH, RDP, databases). Fall back to raw relay instead of crashing. Approach designed but deferred.
+- [x] **TLS protocol detection in SSL inspection** — Peek first byte of CONNECT tunnel to detect non-TLS protocols (SSH, RDP, databases). Fall back to raw relay instead of crashing. Approach designed but deferred.
 
 ### P3 — GUI Coverage Gaps
 

@@ -86,6 +86,11 @@ type FileConfig struct {
 	// remote syslog server. Format: "udp://host:514" or "tcp://host:601".
 	SyslogAddr string `yaml:"syslog_addr"`
 
+	// SyslogFormat selects the syslog message format.
+	// "rfc3164" (BSD syslog, default) or "rfc5424" (IETF structured syslog).
+	// Modern SIEMs (Splunk HEC, Elastic, QRadar) prefer RFC 5424.
+	SyslogFormat string `yaml:"syslog_format"`
+
 	// UIAllowIPs is an optional list of CIDRs/IPs allowed to access the admin
 	// panel. Empty = allow from any IP address (default).
 	UIAllowIPs []string `yaml:"ui_allow_ips"`
@@ -190,6 +195,11 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 	// log_format
 	if f := fc.LogFormat; f != "" && f != "text" && f != "json" {
 		errs = append(errs, fmt.Sprintf("log_format: must be \"text\" or \"json\", got %q", f))
+	}
+
+	// syslog_format
+	if f := fc.SyslogFormat; f != "" && f != "rfc3164" && f != "rfc5424" {
+		errs = append(errs, fmt.Sprintf("syslog_format: must be \"rfc3164\" or \"rfc5424\", got %q", f))
 	}
 
 	// session_timeout_hours
