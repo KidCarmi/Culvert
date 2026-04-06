@@ -538,9 +538,22 @@ func buildClientTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 }
 
 func loadCertPool(caFile string) (*x509.CertPool, error) {
-	cleaned := filepath.Clean(caFile)
+	// Validate path: resolve to absolute path and ensure it doesn't escape
+	// the working directory via directory traversal (CWE-22).
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("getwd: %w", err)
+	}
+	absPath := filepath.Join(cwd, caFile)
+	absPath, err = filepath.Abs(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve CA path: %w", err)
+	}
+	if !strings.HasPrefix(absPath, cwd+string(filepath.Separator)) && absPath != cwd {
+		return nil, fmt.Errorf("invalid CA file path: escapes working directory")
+	}
 	pool := x509.NewCertPool()
-	pem, err := os.ReadFile(cleaned)
+	pem, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, err
 	}
