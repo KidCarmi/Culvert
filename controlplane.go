@@ -40,6 +40,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -274,10 +276,10 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 			return fmt.Errorf("gRPC TLS: %w", err)
 		}
 		serverOpt = grpc.Creds(creds)
-		logger.Printf("ControlPlane gRPC → %s (mTLS)", addr)
+		logger.Printf("ControlPlane gRPC → %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
 	} else {
 		serverOpt = grpc.EmptyServerOption{}
-		logger.Printf("ControlPlane gRPC → %s (insecure — dev only!)", addr)
+		logger.Printf("ControlPlane gRPC → %s (insecure — dev only!)", strings.ReplaceAll(addr, "\n", ""))
 	}
 
 	srv := grpc.NewServer(serverOpt)
@@ -536,8 +538,9 @@ func buildClientTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 }
 
 func loadCertPool(caFile string) (*x509.CertPool, error) {
+	cleaned := filepath.Clean(caFile)
 	pool := x509.NewCertPool()
-	pem, err := os.ReadFile(caFile)
+	pem, err := os.ReadFile(cleaned)
 	if err != nil {
 		return nil, err
 	}

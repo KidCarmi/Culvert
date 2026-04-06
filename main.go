@@ -872,7 +872,7 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 		return err
 	}
 	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
-	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", grpcAddr)
+	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil
 }
 
