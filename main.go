@@ -713,6 +713,9 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	<-quit
 	logger.Println("Shutting down gracefully…")
 
+	// Gracefully stop gRPC server first (drains in-flight RPCs).
+	StopControlPlaneGRPC()
+
 	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.)
 	appLifecycleCancel()
 

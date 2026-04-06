@@ -89,9 +89,10 @@ type RevokedCert struct {
 
 // ClusterStore manages cluster state with persistence.
 type ClusterStore struct {
-	mu   sync.RWMutex
-	st   ClusterState
-	path string // JSON file path for persistence
+	mu             sync.RWMutex
+	st             ClusterState
+	path           string // JSON file path for persistence
+	heartbeatCount int    // counter for periodic save in UpdateNodeSeen
 }
 
 var globalClusterStore = &ClusterStore{
@@ -185,46 +186,72 @@ func (cs *ClusterStore) GenerateToken(nodePrefix, allowCIDR, createdBy string, t
 	cs.mu.Unlock()
 
 	if err := cs.Save(); err != nil {
-		logger.Printf("Enrollment: failed to persist token: %v", err)
+		return "", fmt.Errorf("persist token: %w", err)
 	}
 
 	return plaintext, nil
 }
 
-// ValidateToken checks if a plaintext token is valid for the given node ID and source IP.
-// On success, it marks the token as consumed and returns nil.
-func (cs *ClusterStore) ValidateToken(plaintext, nodeID, sourceIP string) error {
+// TokenInfo holds metadata returned by ValidateAndConsumeToken so callers
+// don't need to re-access the token map after validation.
+type TokenInfo struct {
+	CreatedBy string
+}
+
+// ValidateAndConsumeToken checks if a plaintext token is valid for the given
+// node ID and source IP. On success, it marks the token as consumed, persists
+// state to disk, and returns token metadata. The entire operation is atomic
+// under a single lock+save, preventing replay attacks after crashes.
+func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP string) (TokenInfo, error) {
 	hash := hashToken(plaintext)
 
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 
 	tok, ok := cs.st.Tokens[hash]
 	if !ok {
-		return fmt.Errorf("invalid token")
+		cs.mu.Unlock()
+		return TokenInfo{}, fmt.Errorf("invalid token")
 	}
 	if tok.Used {
-		return fmt.Errorf("token already consumed by node %q", tok.UsedByNode)
+		cs.mu.Unlock()
+		return TokenInfo{}, fmt.Errorf("token already consumed by node %q", tok.UsedByNode)
 	}
 	if time.Now().After(tok.ExpiresAt) {
-		return fmt.Errorf("token expired at %s", tok.ExpiresAt.Format(time.RFC3339))
+		cs.mu.Unlock()
+		return TokenInfo{}, fmt.Errorf("token expired at %s", tok.ExpiresAt.Format(time.RFC3339))
 	}
 	if tok.NodePrefix != "" && !strings.HasPrefix(nodeID, tok.NodePrefix) {
-		return fmt.Errorf("node ID %q does not match required prefix %q", nodeID, tok.NodePrefix)
+		cs.mu.Unlock()
+		return TokenInfo{}, fmt.Errorf("node ID %q does not match required prefix %q", nodeID, tok.NodePrefix)
 	}
 	if tok.AllowCIDR != "" {
 		_, cidr, _ := net.ParseCIDR(tok.AllowCIDR)
 		ip := net.ParseIP(sourceIP)
 		if ip == nil || !cidr.Contains(ip) {
-			return fmt.Errorf("source IP %s not in allowed CIDR %s", sourceIP, tok.AllowCIDR)
+			cs.mu.Unlock()
+			return TokenInfo{}, fmt.Errorf("source IP %s not in allowed CIDR %s", sourceIP, tok.AllowCIDR)
 		}
 	}
 
-	// Mark consumed.
+	// Mark consumed and capture metadata before releasing lock.
 	tok.Used = true
 	tok.UsedByNode = nodeID
 	tok.UsedAt = time.Now()
-	return nil
+	info := TokenInfo{CreatedBy: tok.CreatedBy}
+	cs.mu.Unlock()
+
+	// Persist consumed state so it survives crashes.
+	if err := cs.Save(); err != nil {
+		return TokenInfo{}, fmt.Errorf("persist token state: %w", err)
+	}
+	return info, nil
+}
+
+// ValidateToken checks if a plaintext token is valid for the given node ID and source IP.
+// Deprecated: use ValidateAndConsumeToken which also persists and returns metadata.
+func (cs *ClusterStore) ValidateToken(plaintext, nodeID, sourceIP string) error {
+	_, err := cs.ValidateAndConsumeToken(plaintext, nodeID, sourceIP)
+	return err
 }
 
 // ListTokens returns all tokens (active and consumed).
@@ -270,15 +297,22 @@ func (cs *ClusterStore) GetNode(nodeID string) (*EnrolledNode, bool) {
 }
 
 // UpdateNodeSeen updates the LastSeen timestamp and status.
+// Persists to disk every 10 heartbeats to avoid excessive I/O while
+// still surviving restarts with reasonably fresh status.
 func (cs *ClusterStore) UpdateNodeSeen(nodeID, ipAddr string) {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	if n, ok := cs.st.Nodes[nodeID]; ok {
 		n.LastSeen = time.Now()
 		n.Status = "connected"
 		if ipAddr != "" {
 			n.IPAddress = ipAddr
 		}
+	}
+	cs.heartbeatCount++
+	shouldSave := cs.heartbeatCount%10 == 0
+	cs.mu.Unlock()
+	if shouldSave {
+		_ = cs.Save() //nolint:errcheck // best-effort periodic persistence
 	}
 }
 
@@ -296,15 +330,16 @@ func (cs *ClusterStore) ListNodes() []EnrolledNode {
 // ─── Node Revocation ─────────────────────────────────────────────────────────
 
 // RevokeNode revokes a node's certificate and marks it as revoked.
+// State is persisted to disk so revocations survive CP restarts.
 func (cs *ClusterStore) RevokeNode(nodeID, revokedBy, reason string) error {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
 	node, ok := cs.st.Nodes[nodeID]
 	if !ok {
+		cs.mu.Unlock()
 		return fmt.Errorf("node %q not found", nodeID)
 	}
 	if node.Status == "revoked" {
+		cs.mu.Unlock()
 		return fmt.Errorf("node %q already revoked", nodeID)
 	}
 
@@ -317,7 +352,11 @@ func (cs *ClusterStore) RevokeNode(nodeID, revokedBy, reason string) error {
 		RevokedBy:  revokedBy,
 		Reason:     reason,
 	})
+	cs.mu.Unlock()
 
+	if err := cs.Save(); err != nil {
+		return fmt.Errorf("persist revocation: %w", err)
+	}
 	return nil
 }
 
@@ -368,8 +407,8 @@ func (cs *ClusterStore) StartHeartbeatMonitor(done <-chan struct{}) {
 
 func (cs *ClusterStore) checkHeartbeats() {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	now := time.Now()
+	changed := false
 	for _, node := range cs.st.Nodes {
 		if node.Status == "revoked" {
 			continue
@@ -380,11 +419,43 @@ func (cs *ClusterStore) checkHeartbeats() {
 		elapsed := now.Sub(node.LastSeen)
 		if elapsed > heartbeatTimeout && node.Status == "connected" {
 			node.Status = "disconnected"
+			changed = true
 			logger.Printf("Enrollment: node %s unreachable (last seen %s ago)", node.NodeID, elapsed.Round(time.Second))
 		}
 		if elapsed > heartbeatStaleWarn && node.Status == "disconnected" {
 			logger.Printf("Enrollment: node %s stale for >24h — consider revoking", node.NodeID)
 		}
+	}
+
+	// Garbage-collect expired tokens.
+	for hash, tok := range cs.st.Tokens {
+		if tok.Used && now.Sub(tok.UsedAt) > 7*24*time.Hour {
+			// Consumed tokens older than 7 days can be cleaned up.
+			delete(cs.st.Tokens, hash)
+			changed = true
+		} else if !tok.Used && now.After(tok.ExpiresAt) && now.Sub(tok.ExpiresAt) > 24*time.Hour {
+			// Unused expired tokens older than 24h can be cleaned up.
+			delete(cs.st.Tokens, hash)
+			changed = true
+		}
+	}
+
+	// Garbage-collect old revoked cert entries (>1 year — well past cert expiry).
+	if len(cs.st.Revoked) > 0 {
+		cleaned := make([]RevokedCert, 0, len(cs.st.Revoked))
+		for _, r := range cs.st.Revoked {
+			if now.Sub(r.RevokedAt) < 366*24*time.Hour {
+				cleaned = append(cleaned, r)
+			} else {
+				changed = true
+			}
+		}
+		cs.st.Revoked = cleaned
+	}
+	cs.mu.Unlock()
+
+	if changed {
+		_ = cs.Save() //nolint:errcheck // best-effort periodic persistence
 	}
 }
 

@@ -50,6 +50,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -325,6 +326,7 @@ var clusterRole struct {
 	role     string // "standalone", "control-plane", "data-plane"
 	grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
 	nodeID   string // this node's identifier
+	grpcSrv  *grpc.Server
 }
 
 // NodeMetricsList returns a copy of all connected Data Plane node metrics.
@@ -440,7 +442,7 @@ func (s *controlPlaneServer) PushAuditEvents(_ context.Context, raw json.RawMess
 }
 
 // Enroll handles node enrollment: validates token, signs CSR, registers node.
-func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var req EnrollRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
@@ -455,9 +457,17 @@ func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (jso
 		return nil, status.Errorf(codes.AlreadyExists, "node %q is already enrolled", req.NodeID)
 	}
 
-	// Validate the enrollment token (also marks it as consumed).
-	if err := globalClusterStore.ValidateToken(req.Token, req.NodeID, ""); err != nil {
-		logger.Printf("Enrollment: rejected node %q: %v", req.NodeID, err)
+	// Extract peer IP for CIDR validation.
+	sourceIP := ""
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		sourceIP, _, _ = net.SplitHostPort(p.Addr.String())
+	}
+
+	// Validate and consume the enrollment token atomically (persisted to disk).
+	// Returns token metadata so we don't need to re-access the map.
+	tokInfo, err := globalClusterStore.ValidateAndConsumeToken(req.Token, req.NodeID, sourceIP)
+	if err != nil {
+		logger.Printf("Enrollment: rejected node %q: %v", sanitizeLog(req.NodeID), err)
 		return nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
 	}
 
@@ -470,7 +480,7 @@ func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (jso
 		return nil, status.Errorf(codes.Internal, "sign CSR: %v", err)
 	}
 
-	// Register the node.
+	// Register the node (persists to disk).
 	node := &EnrolledNode{
 		NodeID:     req.NodeID,
 		CertSerial: serial,
@@ -478,17 +488,9 @@ func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (jso
 		EnrolledAt: time.Now(),
 		LastSeen:   time.Now(),
 		Status:     "connected",
-	}
-	// Find who created the token to record as enrolledBy.
-	hash := hashToken(req.Token)
-	if tok, exists := globalClusterStore.st.Tokens[hash]; exists {
-		node.EnrolledBy = tok.CreatedBy
+		EnrolledBy: tokInfo.CreatedBy,
 	}
 	globalClusterStore.RegisterNode(node)
-
-	if err := globalClusterStore.Save(); err != nil {
-		logger.Printf("Enrollment: failed to persist state: %v", err)
-	}
 
 	logger.Printf("Enrollment: node %q enrolled (serial=%s, expires=%s)", req.NodeID, serial, expiry.Format("2006-01-02"))
 
@@ -559,12 +561,24 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 	if err != nil {
 		return fmt.Errorf("gRPC listen: %w", err)
 	}
+	clusterRole.grpcSrv = srv
+
 	go func() {
 		if err := srv.Serve(ln); err != nil {
 			logger.Printf("ControlPlane gRPC error: %v", err)
 		}
 	}()
 	return nil
+}
+
+// StopControlPlaneGRPC gracefully stops the gRPC server, draining in-flight
+// RPCs before closing. Called during SIGTERM/SIGINT shutdown.
+func StopControlPlaneGRPC() {
+	if clusterRole.grpcSrv != nil {
+		logger.Printf("ControlPlane: graceful gRPC shutdown...")
+		clusterRole.grpcSrv.GracefulStop()
+		logger.Printf("ControlPlane: gRPC stopped")
+	}
 }
 
 // wrapUnary adapts our JSON handler signature to grpc.methodHandler.
@@ -803,6 +817,8 @@ func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Durat
 			b, _ := json.Marshal(req)
 			if _, err := c.call(ctx, methodPushAuditEvents, b); err != nil {
 				logger.Printf("DataPlane: PushAuditEvents error (%d events): %v", len(events), err)
+				// Re-queue events so they're retried on the next interval.
+				requeueAuditEvents(events)
 			}
 		}
 	}

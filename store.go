@@ -278,6 +278,19 @@ func drainPendingAuditEvents() []AuditEntry {
 	return events
 }
 
+// requeueAuditEvents prepends failed events back into the pending queue
+// so they are retried on the next push interval instead of being lost.
+func requeueAuditEvents(events []AuditEntry) {
+	pendingAuditMu.Lock()
+	// Prepend old events before any new ones that arrived since drain.
+	pendingAuditEvents = append(events, pendingAuditEvents...)
+	// Cap at 1000 (keep newest).
+	if len(pendingAuditEvents) > 1000 {
+		pendingAuditEvents = pendingAuditEvents[len(pendingAuditEvents)-1000:]
+	}
+	pendingAuditMu.Unlock()
+}
+
 // auditGet returns a newest-first snapshot of the audit log.
 func auditGet() []AuditEntry {
 	auditMu.Lock()
