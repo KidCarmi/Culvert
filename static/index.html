@@ -1619,6 +1619,23 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- OTLP Metrics Export -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">OpenTelemetry (OTLP) Export</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Push all Culvert metrics to an OpenTelemetry Collector via OTLP/HTTP JSON (every 15s).<br>
+            Compatible with Grafana, Datadog, New Relic, Jaeger, and any OTLP-compatible backend.
+          </p>
+          <div style="display:flex;gap:10px;align-items:center">
+            <input type="text" class="input wide" id="s-otlp-endpoint" placeholder="http://otel-collector:4318">
+            <button class="btn" onclick="saveOTLP()">Enable</button>
+            <button class="btn ghost sm" onclick="disableOTLP()">Disable</button>
+          </div>
+          <div id="s-otlp-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
+        </div>
+      </div>
+
     </div>
     </div><!-- /view-settings -->
 
@@ -3996,6 +4013,7 @@ async function loadSettings() {
   loadGeoIPStatus();
   loadLoggerStatus();
   loadMetricsConfig();
+  loadOTLPConfig();
 }
 
 // ── Session Timeout ───────────────────────────────────────────────────────
@@ -4184,6 +4202,53 @@ async function clearMetricsToken() {
     });
     toast('Metrics token cleared — endpoint is now public', 'success');
     loadMetricsConfig();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── OTLP Export ────────────────────────────────────────────────────────────
+async function loadOTLPConfig() {
+  try {
+    const r = await api('/api/otlp');
+    document.getElementById('s-otlp-endpoint').value = r.endpoint || '';
+    const el = document.getElementById('s-otlp-status');
+    if (r.enabled) {
+      el.style.display = '';
+      el.textContent = '✅ Exporting to ' + r.endpoint;
+      el.style.color = 'var(--green)';
+    } else {
+      el.style.display = 'none';
+    }
+  } catch(e) {}
+}
+
+async function saveOTLP() {
+  const endpoint = document.getElementById('s-otlp-endpoint').value.trim();
+  if (!endpoint) { toast('Enter an OTLP endpoint', 'error'); return; }
+  try {
+    await api('/api/otlp', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({endpoint})
+    });
+    const el = document.getElementById('s-otlp-status');
+    el.style.display = '';
+    el.textContent = '✅ Exporting to ' + endpoint;
+    el.style.color = 'var(--green)';
+    toast('OTLP export enabled', 'success');
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function disableOTLP() {
+  try {
+    await api('/api/otlp', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({endpoint: ''})
+    });
+    document.getElementById('s-otlp-endpoint').value = '';
+    const el = document.getElementById('s-otlp-status');
+    el.style.display = '';
+    el.textContent = 'OTLP export disabled';
+    el.style.color = 'var(--muted)';
+    toast('OTLP export disabled', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 

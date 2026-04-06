@@ -75,6 +75,7 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	auditLog := flag.String("audit-log", "", "Persistent audit log file path (JSONL, appended)")
 	syslogAddr := flag.String("syslog", "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
 	syslogFormat := flag.String("syslog-format", "", "Syslog message format: rfc3164 (default) or rfc5424")
+	otlpEndpoint := flag.String("otlp-endpoint", "", "OTLP/HTTP endpoint for metrics export (e.g. http://otel-collector:4318)")
 	uiAllowIP := flag.String("ui-allow-ip", "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
 	sessionHrs := flag.Int("session-timeout", 0, "Admin UI session lifetime in hours (1-168, 0=default 8h)")
 	geoIPDB := flag.String("geoip-db", "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
@@ -174,6 +175,12 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 		} else {
 			syslogConfigured = syslogVal
 		}
+	}
+
+	// ── OTLP metrics export ─────────────────────────────────────────────────
+	otlpVal := firstStr(*otlpEndpoint, fc.OTLPEndpoint)
+	if otlpVal != "" {
+		globalOTLP.Configure(otlpVal, nil)
 	}
 
 	// ── Persistent audit log ──────────────────────────────────────────────────

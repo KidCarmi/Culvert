@@ -13,7 +13,7 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 ### P1 — Observability
 
-- [ ] **OpenTelemetry (OTLP) export** — Export metrics + traces via OTLP gRPC/HTTP. Today only Prometheus text format is supported.
+- [x] **OpenTelemetry (OTLP) export** — Push all culvert_* metrics to any OTLP/HTTP collector as JSON every 15s. Counters, gauges, histogram, per-rule hits. Zero SDK dependency — uses plain net/http. CLI flag, config field, and admin GUI panel.
 - [x] **W3C Traceparent propagation** — Forward `traceparent`/`tracestate` headers through proxied requests for distributed tracing across multi-node setups
 - [x] **RFC 5424 syslog** — Currently only RFC 3164 (BSD syslog). Modern SIEMs prefer RFC 5424 structured data.
 

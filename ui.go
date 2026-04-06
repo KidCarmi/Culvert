@@ -121,6 +121,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 
 	// ── Metrics config ──────────────────────────────────────────────────
 	mux.HandleFunc("/api/metrics-config", apiMetricsConfig)
+	mux.HandleFunc("/api/otlp", apiOTLPConfig)
 
 	// ── Connection limit ─────────────────────────────────────────────────
 	mux.HandleFunc("/api/connlimit", apiConnLimit) // GET status / POST update
@@ -3586,4 +3587,41 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 		"local_revoked":  sessionRevoked.Count(),
 		"cluster_mode":   clusterRoleIsDP.Load() || clusterRole.role == "control-plane",
 	})
+}
+
+// GET/POST /api/otlp — configure OpenTelemetry OTLP/HTTP metrics export.
+func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"enabled":  globalOTLP.Enabled(),
+			"endpoint": globalOTLP.Endpoint(),
+		})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Endpoint string `json:"endpoint"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		body.Endpoint = strings.TrimSpace(body.Endpoint)
+		if body.Endpoint == "" {
+			globalOTLP.Stop()
+			auditEvent(r, "settings.otlp", "disabled", "")
+			jsonOK(w, map[string]any{"ok": true, "enabled": false})
+			return
+		}
+		globalOTLP.Configure(body.Endpoint, nil)
+		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled")
+		jsonOK(w, map[string]any{"ok": true, "enabled": true, "endpoint": body.Endpoint})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
