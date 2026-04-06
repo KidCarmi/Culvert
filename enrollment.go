@@ -35,6 +35,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -247,8 +248,7 @@ func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP stri
 	return info, nil
 }
 
-// ValidateToken checks if a plaintext token is valid for the given node ID and source IP.
-// Deprecated: use ValidateAndConsumeToken which also persists and returns metadata.
+// Deprecated: Use ValidateAndConsumeToken instead, which also persists and returns metadata.
 func (cs *ClusterStore) ValidateToken(plaintext, nodeID, sourceIP string) error {
 	_, err := cs.ValidateAndConsumeToken(plaintext, nodeID, sourceIP)
 	return err
@@ -408,12 +408,25 @@ func (cs *ClusterStore) StartHeartbeatMonitor(done <-chan struct{}) {
 func (cs *ClusterStore) checkHeartbeats() {
 	cs.mu.Lock()
 	now := time.Now()
+	changed := cs.checkNodeLiveness(now)
+	if cs.gcExpiredTokens(now) {
+		changed = true
+	}
+	if cs.gcOldRevocations(now) {
+		changed = true
+	}
+	cs.mu.Unlock()
+
+	if changed {
+		_ = cs.Save() //nolint:errcheck // best-effort periodic persistence
+	}
+}
+
+// checkNodeLiveness marks unreachable nodes as disconnected. Caller holds mu.
+func (cs *ClusterStore) checkNodeLiveness(now time.Time) bool {
 	changed := false
 	for _, node := range cs.st.Nodes {
-		if node.Status == "revoked" {
-			continue
-		}
-		if node.LastSeen.IsZero() {
+		if node.Status == "revoked" || node.LastSeen.IsZero() {
 			continue
 		}
 		elapsed := now.Sub(node.LastSeen)
@@ -426,37 +439,44 @@ func (cs *ClusterStore) checkHeartbeats() {
 			logger.Printf("Enrollment: node %s stale for >24h — consider revoking", node.NodeID)
 		}
 	}
+	return changed
+}
 
-	// Garbage-collect expired tokens.
+// gcExpiredTokens removes consumed (>7d) and unused-expired (>24h) tokens. Caller holds mu.
+func (cs *ClusterStore) gcExpiredTokens(now time.Time) bool {
+	changed := false
 	for hash, tok := range cs.st.Tokens {
-		if tok.Used && now.Sub(tok.UsedAt) > 7*24*time.Hour {
-			// Consumed tokens older than 7 days can be cleaned up.
-			delete(cs.st.Tokens, hash)
-			changed = true
-		} else if !tok.Used && now.After(tok.ExpiresAt) && now.Sub(tok.ExpiresAt) > 24*time.Hour {
-			// Unused expired tokens older than 24h can be cleaned up.
+		if tokenExpired(tok, now) {
 			delete(cs.st.Tokens, hash)
 			changed = true
 		}
 	}
+	return changed
+}
 
-	// Garbage-collect old revoked cert entries (>1 year — well past cert expiry).
-	if len(cs.st.Revoked) > 0 {
-		cleaned := make([]RevokedCert, 0, len(cs.st.Revoked))
-		for _, r := range cs.st.Revoked {
-			if now.Sub(r.RevokedAt) < 366*24*time.Hour {
-				cleaned = append(cleaned, r)
-			} else {
-				changed = true
-			}
+func tokenExpired(tok *EnrollToken, now time.Time) bool {
+	if tok.Used {
+		return now.Sub(tok.UsedAt) > 7*24*time.Hour
+	}
+	return now.After(tok.ExpiresAt) && now.Sub(tok.ExpiresAt) > 24*time.Hour
+}
+
+// gcOldRevocations removes revoked cert entries older than 1 year. Caller holds mu.
+func (cs *ClusterStore) gcOldRevocations(now time.Time) bool {
+	if len(cs.st.Revoked) == 0 {
+		return false
+	}
+	changed := false
+	cleaned := make([]RevokedCert, 0, len(cs.st.Revoked))
+	for _, r := range cs.st.Revoked {
+		if now.Sub(r.RevokedAt) < 366*24*time.Hour {
+			cleaned = append(cleaned, r)
+		} else {
+			changed = true
 		}
-		cs.st.Revoked = cleaned
 	}
-	cs.mu.Unlock()
-
-	if changed {
-		_ = cs.Save() //nolint:errcheck // best-effort periodic persistence
-	}
+	cs.st.Revoked = cleaned
+	return changed
 }
 
 // ─── Cluster CA (separate from MITM CA) ──────────────────────────────────────
@@ -477,14 +497,32 @@ type clusterCA struct {
 
 var globalClusterCA = &clusterCA{}
 
+// safeCAPath returns filepath.Join(dir, name) after rejecting directory traversal.
+func safeCAPath(dir, name string) (string, error) {
+	if strings.Contains(dir, "..") {
+		return "", fmt.Errorf("invalid CA directory: path traversal not allowed")
+	}
+	cleaned := filepath.Clean(filepath.Join(dir, name))
+	if strings.Contains(cleaned, "..") {
+		return "", fmt.Errorf("invalid CA path: directory traversal not allowed")
+	}
+	return cleaned, nil
+}
+
 // InitOrLoad initializes or loads the cluster CA from disk.
 func (ca *clusterCA) InitOrLoad(dir string) error {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
-	ca.dir = dir
-	certPath := dir + "/cluster-ca.crt"
-	keyPath := dir + "/cluster-ca.key"
+	ca.dir = filepath.Clean(dir)
+	certPath, err := safeCAPath(ca.dir, "cluster-ca.crt")
+	if err != nil {
+		return err
+	}
+	keyPath, err := safeCAPath(ca.dir, "cluster-ca.key")
+	if err != nil {
+		return err
+	}
 
 	// Try loading existing CA.
 	certPEM, err1 := os.ReadFile(certPath)
@@ -652,43 +690,55 @@ func (ca *clusterCA) Ready() bool {
 // accepted until their certificates expire. New enrollments get certs
 // signed by the new CA. The secondary is auto-cleaned when the old CA
 // certificate expires.
-func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
-	// ── Validate PEM before taking the lock ──
+// parseAndValidateCACert parses and validates a CA certificate PEM block.
+func parseAndValidateCACert(certPEM []byte) (*x509.Certificate, error) {
 	certBlock, _ := pem.Decode(certPEM)
 	if certBlock == nil {
-		return fmt.Errorf("no PEM certificate block found")
+		return nil, fmt.Errorf("no PEM certificate block found")
 	}
 	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
-		return fmt.Errorf("parse certificate: %w", err)
+		return nil, fmt.Errorf("parse certificate: %w", err)
 	}
 	if !cert.IsCA {
-		return fmt.Errorf("certificate is not a CA (BasicConstraints.IsCA = false)")
+		return nil, fmt.Errorf("certificate is not a CA (BasicConstraints.IsCA = false)")
 	}
-	// Reject expired certificates.
 	if time.Now().After(cert.NotAfter) {
-		return fmt.Errorf("certificate has already expired (%s)", cert.NotAfter.Format("2006-01-02"))
+		return nil, fmt.Errorf("certificate has already expired (%s)", cert.NotAfter.Format("2006-01-02"))
 	}
+	return cert, nil
+}
 
+// parseAndValidateCAKey parses an ECDSA private key PEM block with descriptive errors.
+func parseAndValidateCAKey(keyPEM []byte, certPub *ecdsa.PublicKey) (*ecdsa.PrivateKey, error) {
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
-		return fmt.Errorf("no PEM private key block found")
+		return nil, fmt.Errorf("no PEM private key block found")
 	}
-	// Try ECDSA first, then give a clear error for RSA/other key types.
 	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
 	if err != nil {
-		// Detect RSA keys for a clearer error message.
 		if _, rsaErr := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); rsaErr == nil {
-			return fmt.Errorf("RSA keys are not supported; cluster CA requires an ECDSA P-256 private key")
+			return nil, fmt.Errorf("RSA keys are not supported; cluster CA requires an ECDSA P-256 private key")
 		}
 		if _, pkcs8Err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); pkcs8Err == nil {
-			return fmt.Errorf("key is PKCS#8 but not ECDSA; cluster CA requires an ECDSA P-256 private key (EC PRIVATE KEY PEM block)")
+			return nil, fmt.Errorf("key is PKCS#8 but not ECDSA; cluster CA requires an ECDSA P-256 private key (EC PRIVATE KEY PEM block)")
 		}
-		return fmt.Errorf("parse private key: %w — cluster CA requires an ECDSA P-256 key", err)
+		return nil, fmt.Errorf("parse private key: %w — cluster CA requires an ECDSA P-256 key", err)
 	}
-	// Verify cert/key match.
-	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(&key.PublicKey) {
-		return fmt.Errorf("certificate and private key do not match")
+	if !certPub.Equal(&key.PublicKey) {
+		return nil, fmt.Errorf("certificate and private key do not match")
+	}
+	return key, nil
+}
+
+func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
+	cert, err := parseAndValidateCACert(certPEM)
+	if err != nil {
+		return err
+	}
+	key, err := parseAndValidateCAKey(keyPEM, cert.PublicKey.(*ecdsa.PublicKey))
+	if err != nil {
+		return err
 	}
 
 	ca.mu.Lock()
@@ -698,12 +748,24 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	if dir == "" {
 		dir = "."
 	}
+	certFile, pathErr := safeCAPath(dir, "cluster-ca.crt")
+	if pathErr != nil {
+		return pathErr
+	}
+	keyFile, pathErr := safeCAPath(dir, "cluster-ca.key")
+	if pathErr != nil {
+		return pathErr
+	}
 
 	// ── Backup old CA before overwriting ──
 	if ca.certPEM != nil {
-		_ = os.WriteFile(dir+"/cluster-ca.crt.bak", ca.certPEM, 0o600)
-		if oldKey, err := os.ReadFile(dir + "/cluster-ca.key"); err == nil {
-			_ = os.WriteFile(dir+"/cluster-ca.key.bak", oldKey, 0o600)
+		if bakPath, e := safeCAPath(dir, "cluster-ca.crt.bak"); e == nil {
+			_ = os.WriteFile(bakPath, ca.certPEM, 0o600)
+		}
+		if bakPath, e := safeCAPath(dir, "cluster-ca.key.bak"); e == nil {
+			if oldKey, readErr := os.ReadFile(keyFile); readErr == nil { // #nosec G304 -- path validated by safeCAPath
+				_ = os.WriteFile(bakPath, oldKey, 0o600)
+			}
 		}
 	}
 
@@ -717,10 +779,10 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	}
 
 	// ── Persist new CA to disk ──
-	if err := os.WriteFile(dir+"/cluster-ca.crt", certPEM, 0o600); err != nil {
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
 		return fmt.Errorf("write cluster CA cert: %w", err)
 	}
-	if err := os.WriteFile(dir+"/cluster-ca.key", keyPEM, 0o600); err != nil {
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
 		return fmt.Errorf("write cluster CA key: %w", err)
 	}
 

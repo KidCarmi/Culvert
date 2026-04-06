@@ -1044,14 +1044,12 @@ func generateCSR(nodeID string) (*ecdsa.PrivateKey, []byte, error) {
 func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte, caFingerprint string) (*EnrollResponse, error) {
 	var dialOpt grpc.DialOption
 	if caFingerprint != "" {
-		// TLS with server-cert fingerprint pinning (TOFU).
-		tlsCfg := &tls.Config{
-			InsecureSkipVerify: true, // #nosec G402 -- we verify fingerprint below
-			MinVersion:         tls.VersionTLS13,
-			VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-				return verifyFingerprint(rawCerts, caFingerprint)
-			},
-		}
+		// TLS with TOFU fingerprint pinning for initial enrollment.
+		// InsecureSkipVerify is required because we don't yet have the CA cert
+		// (that's what enrollment fetches). Security is enforced by VerifyConnection
+		// which pins the server cert to the SHA-256 fingerprint from the enrollment URL.
+		fp := caFingerprint
+		tlsCfg := enrollTLSConfig(fp)
 		dialOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg))
 		fmt.Printf("[Culvert] Using TLS with CA fingerprint pinning for enrollment\n")
 	} else {
@@ -1080,21 +1078,29 @@ func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte, caFingerprint st
 	return &resp, nil
 }
 
-// verifyFingerprint checks that at least one presented cert matches the expected
-// SHA-256 fingerprint (format: "sha256:hex").
-func verifyFingerprint(rawCerts [][]byte, expected string) error {
-	expected = strings.TrimPrefix(expected, "sha256:")
-	expectedBytes, err := hex.DecodeString(expected)
-	if err != nil {
-		return fmt.Errorf("invalid CA fingerprint hex: %w", err)
+// enrollTLSConfig builds a TLS config for TOFU enrollment.
+// InsecureSkipVerify is required because the CP's CA cert is not yet trusted
+// (enrollment is the process that establishes trust). The VerifyConnection
+// callback enforces security by pinning the server cert fingerprint.
+func enrollTLSConfig(caFingerprint string) *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true, // #nosec G402 -- TOFU: fingerprint-pinned via VerifyConnection below
+		MinVersion:         tls.VersionTLS13,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			want := strings.TrimPrefix(caFingerprint, "sha256:")
+			wantBytes, err := hex.DecodeString(want)
+			if err != nil {
+				return fmt.Errorf("invalid CA fingerprint hex: %w", err)
+			}
+			for _, cert := range cs.PeerCertificates {
+				fp := sha256.Sum256(cert.Raw)
+				if hmac.Equal(fp[:], wantBytes) {
+					return nil
+				}
+			}
+			return fmt.Errorf("CP certificate fingerprint does not match expected sha256:%s", want)
+		},
 	}
-	for _, raw := range rawCerts {
-		fp := sha256.Sum256(raw)
-		if hmac.Equal(fp[:], expectedBytes) {
-			return nil
-		}
-	}
-	return fmt.Errorf("CP certificate fingerprint does not match expected %s", expected)
 }
 
 // persistEnrollCerts saves the signed certificate, private key, CA cert, and

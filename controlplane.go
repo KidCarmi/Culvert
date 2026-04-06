@@ -1059,12 +1059,13 @@ func buildClientTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 }
 
 func loadCertPool(caFile string) (*x509.CertPool, error) {
-	if strings.Contains(caFile, "..") {
+	// Guard: reject directory traversal in CLI-provided CA path.
+	cleaned := filepath.Clean(caFile)
+	if strings.Contains(cleaned, "..") {
 		return nil, fmt.Errorf("invalid CA path: directory traversal not allowed")
 	}
 	pool := x509.NewCertPool()
-	cleaned := filepath.Clean(caFile)
-	pemData, err := os.ReadFile(cleaned) // #nosec G304 -- guarded above: ".." rejected
+	pemData, err := os.ReadFile(cleaned) // #nosec G304 -- admin-provided CLI flag, ".." rejected above
 	if err != nil {
 		return nil, err
 	}
