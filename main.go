@@ -131,7 +131,7 @@ func main() {
 	}
 
 	// ── Lifecycle context for all background goroutines ─────────────────────
-	appLifecycleCtx, appLifecycleCancel = context.WithCancel(context.Background()) // #nosec G104 -- cancel is deferred on the next line
+	appLifecycleCtx, appLifecycleCancel = context.WithCancel(context.Background()) // #nosec G118 -- cancel is deferred on the next line
 	defer appLifecycleCancel()
 
 	// ── Config ───────────────────────────────────────────────────────────────
