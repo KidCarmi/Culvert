@@ -333,7 +333,7 @@ func TestBodyNeedsBuffering(t *testing.T) {
 	}
 }
 
-func TestMaxScanBufferBytes(t *testing.T) {
+func TestMaxScanBufferBytes_DPIvsSec(t *testing.T) {
 	origDPI := dpiScanner
 	origSec := globalSecScanner
 	defer func() {
