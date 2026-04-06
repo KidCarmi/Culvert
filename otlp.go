@@ -119,8 +119,8 @@ func (o *OTLPExporter) push(ctx context.Context) error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("invalid OTLP endpoint scheme: %q", endpoint)
 	}
-	if isPrivateHost(u.Hostname()) {
-		return fmt.Errorf("OTLP endpoint resolves to private network: %q", endpoint)
+	if err := isPrivateHost(u.Hostname()); err != nil {
+		return fmt.Errorf("OTLP endpoint resolves to private network: %w", err)
 	}
 
 	payload := o.buildPayload()
