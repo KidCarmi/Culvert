@@ -45,10 +45,23 @@ import (
 
 // ClusterState holds all enrollment-related state persisted to cluster.json.
 type ClusterState struct {
-	Nodes   map[string]*EnrolledNode `json:"nodes"`
-	Tokens  map[string]*EnrollToken  `json:"tokens"`  // key = SHA-256(token)
-	Revoked []RevokedCert            `json:"revoked"`
-	Version int64                    `json:"version"` // monotonic config version
+	Nodes      map[string]*EnrolledNode `json:"nodes"`
+	Tokens     map[string]*EnrollToken  `json:"tokens"`  // key = SHA-256(token)
+	Revoked    []RevokedCert            `json:"revoked"`
+	Version    int64                    `json:"version"` // monotonic config version
+	CARotation *CARotationState         `json:"ca_rotation,omitempty"`
+}
+
+// CARotationState tracks the progress of an active CA rotation.
+// Created when a new CA is imported during dual-CA overlap, cleared when
+// all nodes have renewed or the overlap period ends.
+type CARotationState struct {
+	StartedAt       time.Time         `json:"started_at"`
+	NewFingerprint  string            `json:"new_fingerprint"`  // SHA-256 of new CA cert
+	OldFingerprint  string            `json:"old_fingerprint"`  // SHA-256 of old (secondary) CA cert
+	OldExpires      time.Time         `json:"old_expires"`      // when secondary CA expires
+	RenewedNodes    map[string]string `json:"renewed_nodes"`    // nodeID → timestamp of renewal
+	TotalNodes      int               `json:"total_nodes"`      // snapshot of enrolled (non-revoked) count at start
 }
 
 // EnrolledNode represents a registered Data Plane node.
@@ -137,6 +150,11 @@ func (cs *ClusterStore) Load(path string) error {
 func (cs *ClusterStore) Save() error {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
+	return cs.saveLocked()
+}
+
+// saveLocked persists state without acquiring locks — caller must hold mu.
+func (cs *ClusterStore) saveLocked() error {
 	if cs.path == "" {
 		return nil // no persistence path set
 	}
@@ -379,6 +397,80 @@ func (cs *ClusterStore) ListRevoked() []RevokedCert {
 	result := make([]RevokedCert, len(cs.st.Revoked))
 	copy(result, cs.st.Revoked)
 	return result
+}
+
+// ─── CA Rotation Tracking ───────────────────────────────────────────────────
+
+// StartCARotation records the beginning of a CA rotation. Called from ImportCA
+// when dual-CA overlap begins. Counts only non-revoked nodes.
+func (cs *ClusterStore) StartCARotation(newFP, oldFP string, oldExpires time.Time) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	total := 0
+	for _, n := range cs.st.Nodes {
+		if n.Status != "revoked" {
+			total++
+		}
+	}
+	cs.st.CARotation = &CARotationState{
+		StartedAt:      time.Now(),
+		NewFingerprint: newFP,
+		OldFingerprint: oldFP,
+		OldExpires:     oldExpires,
+		RenewedNodes:   make(map[string]string),
+		TotalNodes:     total,
+	}
+	if err := cs.saveLocked(); err != nil {
+		logger.Printf("CARotation: failed to persist start: %v", err)
+	}
+	logger.Printf("CARotation: started — %d nodes pending renewal", total)
+}
+
+// RecordNodeRenewed marks a node as having renewed its cert during active rotation.
+func (cs *ClusterStore) RecordNodeRenewed(nodeID string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.st.CARotation == nil {
+		return
+	}
+	cs.st.CARotation.RenewedNodes[nodeID] = time.Now().UTC().Format(time.RFC3339)
+	renewed := len(cs.st.CARotation.RenewedNodes)
+	total := cs.st.CARotation.TotalNodes
+	logger.Printf("CARotation: node %q renewed (%d/%d complete)", sanitizeLog(nodeID), renewed, total)
+	if renewed >= total {
+		logger.Printf("CARotation: all %d nodes renewed — rotation complete", total)
+	}
+	if err := cs.saveLocked(); err != nil {
+		logger.Printf("CARotation: failed to persist renewal: %v", err)
+	}
+}
+
+// CARotationStatus returns the current rotation state, or nil if no rotation is active.
+func (cs *ClusterStore) CARotationStatus() *CARotationState {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.st.CARotation == nil {
+		return nil
+	}
+	// Return a copy.
+	rot := *cs.st.CARotation
+	rot.RenewedNodes = make(map[string]string, len(cs.st.CARotation.RenewedNodes))
+	for k, v := range cs.st.CARotation.RenewedNodes {
+		rot.RenewedNodes[k] = v
+	}
+	return &rot
+}
+
+// ClearCARotation clears the rotation state (e.g. when overlap ends).
+func (cs *ClusterStore) ClearCARotation() {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.st.CARotation != nil {
+		cs.st.CARotation = nil
+		if err := cs.saveLocked(); err != nil {
+			logger.Printf("CARotation: failed to persist clear: %v", err)
+		}
+	}
 }
 
 // ─── Heartbeat Monitor ───────────────────────────────────────────────────────
@@ -808,6 +900,19 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	if ca.onRotate != nil {
 		ca.onRotate()
 	}
+
+	// Start CA rotation tracking (old fingerprint from secondary).
+	oldFP := sha256.Sum256(ca.secondaryCert.Raw)
+	newFP := sha256.Sum256(cert.Raw)
+	globalClusterStore.StartCARotation(
+		hex.EncodeToString(newFP[:]),
+		hex.EncodeToString(oldFP[:]),
+		ca.secondaryExp,
+	)
+
+	// Bump config version so DP nodes pick up the new CA fingerprint on next poll.
+	globalConfigStore.Update(CurrentConfigSnapshot())
+
 	return nil
 }
 
@@ -830,6 +935,8 @@ func (ca *clusterCA) CleanupSecondary() {
 		if ca.onRotate != nil {
 			ca.onRotate()
 		}
+		// Clear rotation tracking — overlap period is over.
+		globalClusterStore.ClearCARotation()
 	}
 }
 
