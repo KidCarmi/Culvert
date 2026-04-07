@@ -15,7 +15,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -407,27 +406,60 @@ func updateCPDirect(targetTag string) {
 func updateCPWithHA(targetTag string, ha HAStatus) {
 	logger.Printf("cluster update HA: updating standby at %s first", sanitizeLog(ha.PeerAddr))
 
-	// Step 1: Tell standby to update via TriggerUpdate.
-	// The standby runs its own updater sidecar, so we deliver the command
-	// via the pending-commands mechanism (same as DPs).
-	// But the standby doesn't poll GetConfig like DPs — it syncs via HASync.
-	// So we need a different approach: call the standby's updater directly.
-	// The standby's updater listens on :7123 on the standby host.
-	standbyUpdaterURL := buildStandbyUpdaterURL(ha.PeerAddr)
-	if standbyUpdaterURL == "" {
-		logger.Printf("cluster update HA: cannot determine standby updater URL, falling back to direct update")
+	// Extract just the host from the gRPC peer address (strip port).
+	standbyHost := extractStandbyHost(ha.PeerAddr)
+	if standbyHost == "" {
+		logger.Printf("cluster update HA: cannot determine standby host, falling back to direct update")
 		updateCPDirect(targetTag)
 		return
 	}
 
-	// Call standby's updater to apply the update.
-	// SSRF guard: parse and validate the constructed URL before use.
-	applyURL, err := url.Parse(standbyUpdaterURL + "/api/update/apply")
-	if err != nil || (applyURL.Scheme != "http" && applyURL.Scheme != "https") || applyURL.Hostname() == "" {
-		logger.Printf("cluster update HA: invalid standby URL — falling back to direct")
+	// Step 1: Call standby's updater to apply the update.
+	if !callStandbyApply(standbyHost, targetTag) {
 		updateCPDirect(targetTag)
 		return
 	}
+
+	// Step 2: Wait for standby to come back healthy (120s timeout).
+	if !waitForStandbyHealth(standbyHost, 120*time.Second) {
+		logger.Printf("cluster update HA: standby did not come back healthy — falling back to direct")
+		updateCPDirect(targetTag)
+		return
+	}
+
+	// Step 3: 30s settling period + final HASync verification.
+	settleAndVerifySync()
+
+	// Step 4: Update leader (self). After restart, standby auto-promotes
+	// because leader stops responding to HASync (3 missed polls = promotion).
+	logger.Printf("cluster update HA: updating leader (self) — standby will auto-promote")
+	updateCPDirect(targetTag)
+}
+
+// extractStandbyHost extracts and validates the hostname from a gRPC peer address.
+// Returns "" if invalid. Only allows alphanumeric, dots, dashes, colons (IPv6).
+func extractStandbyHost(peerAddr string) string {
+	host := peerAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "" {
+		return ""
+	}
+	// Allowlist: hostname chars only (letters, digits, dots, dashes, colons for IPv6).
+	for _, c := range host {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':') {
+			return ""
+		}
+	}
+	return host
+}
+
+// callStandbyApply sends the update command to the standby's updater sidecar.
+// The updater always listens on port 7123. Returns true if the request succeeded.
+func callStandbyApply(host, targetTag string) bool {
+	// Construct URL from validated host + hardcoded scheme/port/path.
+	target := "http://" + net.JoinHostPort(host, "7123") + "/api/update/apply"
 
 	body, _ := json.Marshal(map[string]string{
 		"container":  "culvert",
@@ -436,11 +468,10 @@ func updateCPWithHA(targetTag string, ha HAStatus) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, applyURL.String(), strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
 	if err != nil {
 		logger.Printf("cluster update HA: standby request error: %v", err)
-		updateCPDirect(targetTag)
-		return
+		return false
 	}
 	tok := updaterToken()
 	if tok != "" {
@@ -451,33 +482,47 @@ func updateCPWithHA(targetTag string, ha HAStatus) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		logger.Printf("cluster update HA: standby update failed: %v — falling back to direct", err)
-		updateCPDirect(targetTag)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 	drainSSE(resp.Body)
 
 	if resp.StatusCode >= 400 {
 		logger.Printf("cluster update HA: standby returned %d — falling back to direct", resp.StatusCode)
-		updateCPDirect(targetTag)
-		return
+		return false
 	}
-
 	logger.Printf("cluster update HA: standby update initiated, waiting for it to come back")
+	return true
+}
 
-	// Step 2: Wait for standby to come back healthy (120s timeout).
-	standbyHealthy := waitForStandbyHealth(standbyUpdaterURL, 120*time.Second)
-	if !standbyHealthy {
-		logger.Printf("cluster update HA: standby did not come back healthy — falling back to direct")
-		updateCPDirect(targetTag)
-		return
+// waitForStandbyHealth polls the standby's updater /healthz until it responds 200.
+// The updater always listens on port 7123.
+func waitForStandbyHealth(host string, timeout time.Duration) bool {
+	// Construct health URL from validated host + hardcoded scheme/port/path.
+	target := "http://" + net.JoinHostPort(host, "7123") + "/healthz"
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		resp, doErr := http.DefaultClient.Do(req)
+		cancel()
+		if doErr == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				return true
+			}
+		}
+		time.Sleep(5 * time.Second)
 	}
+	return false
+}
 
-	// Step 3: 30s settling period + final HASync verification.
+// settleAndVerifySync runs the 30s settling period and HA sync verification.
+func settleAndVerifySync() {
 	logger.Printf("cluster update HA: standby healthy, settling for 30s")
 	time.Sleep(30 * time.Second)
 
-	// Push final HASync to ensure standby has latest state.
 	syncOK := false
 	for attempt := range 3 {
 		if performHASyncPush() {
@@ -490,58 +535,6 @@ func updateCPWithHA(targetTag string, ha HAStatus) {
 	if !syncOK {
 		logger.Printf("cluster update HA: HASync verification failed — proceeding anyway (standby has recent state)")
 	}
-
-	// Step 4: Update leader (self). After restart, standby auto-promotes
-	// because leader stops responding to HASync (3 missed polls = promotion).
-	logger.Printf("cluster update HA: updating leader (self) — standby will auto-promote")
-	updateCPDirect(targetTag)
-}
-
-// buildStandbyUpdaterURL derives the standby's updater URL from the gRPC peer address.
-// e.g. "standby.host:50051" → "http://standby.host:7123"
-// Returns "" if the address is empty or fails SSRF validation.
-func buildStandbyUpdaterURL(peerAddr string) string {
-	host := peerAddr
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = host[:i]
-	}
-	if host == "" {
-		return ""
-	}
-	// Validate: construct URL, parse it, and verify scheme + host.
-	raw := "http://" + host + ":7123"
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "http" || u.Hostname() == "" {
-		return ""
-	}
-	return u.String()
-}
-
-// waitForStandbyHealth polls the standby's updater /healthz until it responds 200.
-func waitForStandbyHealth(baseURL string, timeout time.Duration) bool {
-	// Validate the base URL before making any requests (SSRF guard).
-	u, err := url.Parse(baseURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		return false
-	}
-	safeBase := u.String()
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		healthURL, _ := url.Parse(safeBase + "/healthz")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, healthURL.String(), nil)
-		resp, doErr := http.DefaultClient.Do(req)
-		cancel()
-		if doErr == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				return true
-			}
-		}
-		time.Sleep(5 * time.Second)
-	}
-	return false
 }
 
 // performHASyncPush triggers the HA sync mechanism so the standby gets latest state.

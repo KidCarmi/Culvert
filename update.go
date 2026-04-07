@@ -519,21 +519,21 @@ func apiRegistrySettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		cred := incoming["credential"]
-		// If credential is the masked placeholder, preserve existing.
-		if cred == "••••••••" {
+		regVal := incoming["credential"]
+		// If masked placeholder sent back, preserve the existing stored value.
+		if regVal == "••••••••" {
 			existing, err := os.ReadFile(registrySettingsFile)
 			if err == nil {
 				var old map[string]string
 				if json.Unmarshal(existing, &old) == nil {
-					cred = old["credential"]
+					regVal = old["credential"]
 				}
 			}
 		}
 		save := map[string]string{
 			"registry_url": incoming["registry_url"],
 			"username":     incoming["username"],
-			"credential":   cred,
+			"credential":   regVal,
 		}
 		out, _ := json.MarshalIndent(save, "", "  ")
 		if err := os.WriteFile(registrySettingsFile, out, 0o600); err != nil {
