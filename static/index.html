@@ -2344,7 +2344,8 @@ Firefox (all platforms):
               <label style="font-size:.8rem;color:var(--muted)">CA Private Key (PEM, ECDSA P-256)
                 <textarea id="cca-key-pem" class="input" rows="5" placeholder="-----BEGIN EC PRIVATE KEY-----&#10;..." style="margin-top:4px;font-family:monospace;font-size:.75rem"></textarea>
               </label>
-              <div><button class="btn" onclick="importClusterCA()">Import Cluster CA</button></div>
+              <div><button class="btn" id="cca-import-btn" onclick="importClusterCA()">Import Cluster CA</button></div>
+              <div style="font-size:.75rem;color:#f59e0b;margin-top:4px">&#9888; Rotating the CA invalidates all existing enrollment tokens and node certificates. Nodes must re-enroll after rotation.</div>
             </div>
           </details>
         </div>
@@ -2361,7 +2362,7 @@ Firefox (all platforms):
         </div>
         <div class="tbl-wrap">
           <table id="cluster-nodes-table" style="display:none">
-            <thead><tr><th>Node ID</th><th>Status</th><th>Last Seen</th><th>Total Requests</th><th>Blocked</th><th>Enrolled</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Node ID</th><th>Status</th><th>Last Seen</th><th>Total Requests</th><th>Blocked</th><th>Enrolled</th><th>Cert Expires</th><th>Actions</th></tr></thead>
             <tbody id="cluster-nodes-tbody"></tbody>
           </table>
         </div>
@@ -2369,13 +2370,13 @@ Firefox (all platforms):
 
       <!-- Active Tokens -->
       <div class="panel" style="margin-top:16px;display:none" id="cluster-tokens-panel">
-        <div class="panel-header"><span class="panel-title">Enrollment Tokens</span></div>
+        <div class="panel-header"><span class="panel-title">Enrollment Tokens</span><button class="btn ghost sm" id="cluster-bulk-delete-btn" style="display:none;font-size:.7rem;color:#ef4444" onclick="bulkDeleteExpiredTokens()">Delete Expired</button></div>
         <div id="cluster-no-tokens" style="padding:24px;text-align:center;color:var(--muted);font-size:.85rem">
           No enrollment tokens.
         </div>
         <div class="tbl-wrap">
           <table id="cluster-tokens-table" style="display:none">
-            <thead><tr><th>Created By</th><th>Node Prefix</th><th>CIDR</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Created By</th><th>Node Prefix</th><th>CIDR</th><th>Created</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody id="cluster-tokens-tbody"></tbody>
           </table>
         </div>
@@ -2442,7 +2443,7 @@ Firefox (all platforms):
       </div>
 
       <!-- Enrollment Modal (hidden by default) -->
-      <div id="enroll-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center">
+      <div id="enroll-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;max-width:560px;width:90%">
           <h3 style="margin:0 0 18px;font-size:1rem;color:var(--fg)">Enroll New Node</h3>
           <div style="display:grid;gap:12px">
@@ -2466,8 +2467,9 @@ Firefox (all platforms):
           <div id="enroll-result" style="display:none;margin-top:18px">
             <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">Enrollment Command <span style="opacity:.5">(copy and run on the new server)</span></div>
             <pre id="enroll-result-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="copyEnrollCmd()" title="Click to copy"></pre>
-            <div style="margin-top:8px;font-size:.75rem;color:var(--muted)">
+            <div style="margin-top:8px;font-size:.75rem;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
               Or manually: <code id="enroll-result-manual" style="color:var(--accent);font-size:.72rem"></code>
+              <button class="btn ghost sm" style="font-size:.65rem;padding:2px 6px" onclick="copyEnrollManual()" title="Copy URL">Copy</button>
             </div>
           </div>
 
@@ -5130,6 +5132,7 @@ async function tick() {
   if (currentView === 'fileblock') fetchFileBlock();
   if (currentView === 'rewrite')   fetchRewrite();
   if (currentView === 'policy')    fetchPolicy();
+  if (currentView === 'cluster')   loadCluster();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -6095,78 +6098,85 @@ async function upstreamHealthCheck() {
 // Cluster Nodes Panel
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadCluster() {
-  const r = await api('/api/cluster/status');
-  if (!r) return;
-  document.getElementById('cluster-role').textContent = r.role || 'standalone';
-  document.getElementById('cluster-node-id').textContent = r.nodeID || '—';
-  document.getElementById('cluster-grpc').textContent = r.grpcAddr || '—';
+  try {
+    const r = await api('/api/cluster/status');
+    if (!r) return;
+    document.getElementById('cluster-role').textContent = r.role || 'standalone';
+    document.getElementById('cluster-node-id').textContent = r.nodeID || '—';
+    document.getElementById('cluster-grpc').textContent = r.grpcAddr || '—';
 
-  const isCP = r.role === 'control-plane';
-  const enrollBtn = document.getElementById('cluster-enroll-btn');
-  const tokensPanel = document.getElementById('cluster-tokens-panel');
-  const enableCPPanel = document.getElementById('cluster-enable-cp-panel');
+    const isCP = r.role === 'control-plane';
+    const enrollBtn = document.getElementById('cluster-enroll-btn');
+    const tokensPanel = document.getElementById('cluster-tokens-panel');
+    const enableCPPanel = document.getElementById('cluster-enable-cp-panel');
 
-  // Show "Enable Control Plane" panel only in standalone mode
-  enableCPPanel.style.display = r.role === 'standalone' ? '' : 'none';
+    // Show "Enable Control Plane" panel only in standalone mode
+    enableCPPanel.style.display = r.role === 'standalone' ? '' : 'none';
 
-  // Show enroll button and tokens panel only on Control Plane
-  enrollBtn.style.display = isCP && r.enrollEnabled ? '' : 'none';
-  tokensPanel.style.display = isCP ? '' : 'none';
+    // Show enroll button and tokens panel only on Control Plane
+    enrollBtn.style.display = isCP && r.enrollEnabled ? '' : 'none';
+    tokensPanel.style.display = isCP ? '' : 'none';
 
-  // Enrolled nodes
-  const enrolled = r.enrolledNodes || [];
-  const metrics = r.nodes || [];
-  const metricsMap = {};
-  metrics.forEach(m => { metricsMap[m.node_id] = m; });
+    // Enrolled nodes
+    const enrolled = r.enrolledNodes || [];
+    const metrics = r.nodes || [];
+    const metricsMap = {};
+    metrics.forEach(m => { metricsMap[m.node_id] = m; });
 
-  document.getElementById('cluster-enrolled-count').textContent = enrolled.length;
+    document.getElementById('cluster-enrolled-count').textContent = enrolled.length;
 
-  const noNodes = document.getElementById('cluster-no-nodes');
-  const table = document.getElementById('cluster-nodes-table');
-  const tbody = document.getElementById('cluster-nodes-tbody');
+    const noNodes = document.getElementById('cluster-no-nodes');
+    const table = document.getElementById('cluster-nodes-table');
+    const tbody = document.getElementById('cluster-nodes-tbody');
 
-  if (enrolled.length > 0) {
-    noNodes.style.display = 'none';
-    table.style.display = '';
-    tbody.innerHTML = enrolled.map(n => {
-      const m = metricsMap[n.node_id] || {};
-      const statusColor = n.status === 'connected' ? '#22c55e' : n.status === 'revoked' ? '#ef4444' : '#f59e0b';
-      const statusIcon = n.status === 'connected' ? '\u25cf' : n.status === 'revoked' ? '\u25cf' : '\u25cb';
-      const lastSeen = n.last_seen ? timeAgo(new Date(n.last_seen)) : 'never';
-      const enrolledAt = n.enrolled_at ? new Date(n.enrolled_at).toLocaleDateString() : '—';
-      const canRevoke = n.status !== 'revoked';
-      return `<tr>
-        <td style="font-weight:600">${escHtml(n.node_id)}</td>
-        <td><span style="color:${statusColor}">${statusIcon}</span> ${escHtml(n.status)}</td>
-        <td>${lastSeen}</td>
-        <td>${(m.total || 0).toLocaleString()}</td>
-        <td>${(m.blocked || 0).toLocaleString()}</td>
-        <td>${enrolledAt}</td>
-        <td>${canRevoke ? `<button class="btn ghost sm" style="color:#ef4444;font-size:.75rem" onclick="revokeNode('${escHtml(n.node_id)}')">Revoke</button>` : '<span style="color:var(--muted);font-size:.75rem">Revoked</span>'}</td>
-      </tr>`;
-    }).join('');
-  } else if (isCP) {
-    noNodes.style.display = '';
-    noNodes.textContent = 'No nodes enrolled yet. Click "+ Enroll Node" to add a Data Plane node.';
-    table.style.display = 'none';
-  } else {
-    noNodes.style.display = '';
-    noNodes.textContent = r.role === 'data-plane'
-      ? 'This node is a Data Plane worker. Manage enrollment from the Control Plane.'
-      : 'Enable Control Plane mode above to start managing Data Plane nodes.';
-    table.style.display = 'none';
+    if (enrolled.length > 0) {
+      noNodes.style.display = 'none';
+      table.style.display = '';
+      tbody.innerHTML = enrolled.map(n => {
+        const m = metricsMap[n.node_id] || {};
+        const statusColor = n.status === 'connected' ? '#22c55e' : n.status === 'revoked' ? '#ef4444' : '#f59e0b';
+        const statusIcon = n.status === 'connected' ? '\u25cf' : n.status === 'revoked' ? '\u2715' : '\u25cb';
+        const lastSeen = n.last_seen ? timeAgo(new Date(n.last_seen)) : 'never';
+        const enrolledAt = n.enrolled_at ? new Date(n.enrolled_at).toLocaleDateString() : '—';
+        const certExpiry = n.cert_expiry ? new Date(n.cert_expiry).toLocaleDateString() : '—';
+        const certWarn = n.cert_expiry && (new Date(n.cert_expiry) - new Date()) < 7*24*3600*1000;
+        const canRevoke = n.status !== 'revoked';
+        return `<tr>
+          <td style="font-weight:600">${escHtml(n.node_id)}</td>
+          <td><span style="color:${statusColor}">${statusIcon}</span> ${escHtml(n.status)}</td>
+          <td>${lastSeen}</td>
+          <td>${(m.total || 0).toLocaleString()}</td>
+          <td>${(m.blocked || 0).toLocaleString()}</td>
+          <td>${enrolledAt}</td>
+          <td style="${certWarn ? 'color:#ef4444;font-weight:600' : ''}">${certExpiry}</td>
+          <td>${canRevoke ? `<button class="btn ghost sm" style="color:#ef4444;font-size:.75rem" onclick="revokeNode('${escHtml(n.node_id)}')">Revoke</button>` : '<span style="color:var(--muted);font-size:.75rem">Revoked</span>'}</td>
+        </tr>`;
+      }).join('');
+    } else if (isCP) {
+      noNodes.style.display = '';
+      noNodes.textContent = 'No nodes enrolled yet. Click "+ Enroll Node" to add a Data Plane node.';
+      table.style.display = 'none';
+    } else {
+      noNodes.style.display = '';
+      noNodes.textContent = r.role === 'data-plane'
+        ? 'This node is a Data Plane worker. Manage enrollment from the Control Plane.'
+        : 'Enable Control Plane mode above to start managing Data Plane nodes.';
+      table.style.display = 'none';
+    }
+
+    // Load tokens if CP
+    if (isCP) loadClusterTokens();
+
+    // Load cluster subsystem panels (visible on CP or DP)
+    const showCluster = isCP || r.role === 'data-plane';
+    loadClusterCA();
+    loadClusterRateLimits(showCluster);
+    loadClusterHealth(isCP);
+    loadClusterRevocations(showCluster);
+    loadClusterAudit(isCP);
+  } catch(e) {
+    toast('Failed to load cluster status: ' + e.message, 'error');
   }
-
-  // Load tokens if CP
-  if (isCP) loadClusterTokens();
-
-  // Load cluster subsystem panels (visible on CP or DP)
-  const showCluster = isCP || r.role === 'data-plane';
-  loadClusterCA();
-  loadClusterRateLimits(showCluster);
-  loadClusterHealth(isCP);
-  loadClusterRevocations(showCluster);
-  loadClusterAudit(isCP);
 }
 
 async function loadClusterCA() {
@@ -6183,51 +6193,73 @@ async function loadClusterCA() {
       ? '\nOld CA: ' + (r.secondaryCA.subject || '') + ' (expires ' + new Date(r.secondaryCA.expires).toLocaleDateString() + ')'
       : '';
     document.getElementById('cca-fingerprint').textContent = fpText + secInfo;
-  } catch(_) {}
+  } catch(e) {
+    if (e.message !== 'Unauthorized') toast('Failed to load cluster CA: ' + e.message, 'error');
+  }
 }
 
 async function importClusterCA() {
   const cert = document.getElementById('cca-cert-pem').value.trim();
   const key = document.getElementById('cca-key-pem').value.trim();
-  if (!cert || !key) { alert('Both certificate and key PEM are required.'); return; }
-  const r = await api('/api/cluster/ca', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({cert, key})});
-  if (r) {
-    document.getElementById('cca-cert-pem').value = '';
-    document.getElementById('cca-key-pem').value = '';
-    loadClusterCA();
-    alert('Cluster CA imported successfully.');
+  if (!cert || !key) { toast('Both certificate and key PEM are required', 'error'); return; }
+  const btn = document.getElementById('cca-import-btn');
+  btn.disabled = true; btn.textContent = 'Importing…';
+  try {
+    const r = await api('/api/cluster/ca', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({cert, key})});
+    if (r) {
+      document.getElementById('cca-cert-pem').value = '';
+      document.getElementById('cca-key-pem').value = '';
+      loadClusterCA();
+      toast('Cluster CA imported successfully', 'success');
+    }
+  } catch(e) {
+    toast('CA import failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Import Cluster CA';
   }
 }
 
 async function loadClusterTokens() {
-  const r = await api('/api/cluster/tokens');
-  if (!r) return;
-  const tokens = r.tokens || [];
-  const noTok = document.getElementById('cluster-no-tokens');
-  const table = document.getElementById('cluster-tokens-table');
-  const tbody = document.getElementById('cluster-tokens-tbody');
+  try {
+    const r = await api('/api/cluster/tokens');
+    if (!r) return;
+    const tokens = r.tokens || [];
+    const noTok = document.getElementById('cluster-no-tokens');
+    const table = document.getElementById('cluster-tokens-table');
+    const tbody = document.getElementById('cluster-tokens-tbody');
+    const bulkBtn = document.getElementById('cluster-bulk-delete-btn');
 
-  if (tokens.length > 0) {
-    noTok.style.display = 'none';
-    table.style.display = '';
-    const now = new Date();
-    tbody.innerHTML = tokens.map(t => {
-      const expired = new Date(t.expires_at) < now;
-      let status = t.used ? `Used by ${escHtml(t.used_by_node)}` : expired ? 'Expired' : 'Active';
-      const statusColor = t.used ? 'var(--muted)' : expired ? '#ef4444' : '#22c55e';
-      const canDelete = t.used || expired;
-      return `<tr>
-        <td>${escHtml(t.created_by)}</td>
-        <td>${escHtml(t.node_prefix) || '<em style="color:var(--muted)">any</em>'}</td>
-        <td>${escHtml(t.allow_cidr) || '<em style="color:var(--muted)">any</em>'}</td>
-        <td>${new Date(t.expires_at).toLocaleString()}</td>
-        <td style="color:${statusColor}">${status}</td>
-        <td>${canDelete ? `<button class="btn ghost sm" style="font-size:.75rem" onclick="deleteToken('${escHtml(t.token_hash)}')">Delete</button>` : '—'}</td>
-      </tr>`;
-    }).join('');
-  } else {
-    noTok.style.display = '';
-    table.style.display = 'none';
+    if (tokens.length > 0) {
+      noTok.style.display = 'none';
+      table.style.display = '';
+      const now = new Date();
+      const hasExpired = tokens.some(t => !t.used && new Date(t.expires_at) < now);
+      bulkBtn.style.display = hasExpired ? '' : 'none';
+      tbody.innerHTML = tokens.map(t => {
+        const expiresAt = new Date(t.expires_at);
+        const expired = expiresAt < now;
+        let status = t.used ? `Used by ${escHtml(t.used_by_node)}` : expired ? 'Expired' : 'Active';
+        const statusColor = t.used ? 'var(--muted)' : expired ? '#ef4444' : '#22c55e';
+        const canDelete = t.used || expired;
+        const createdAt = t.created_at ? new Date(t.created_at).toLocaleString() : '—';
+        const expiryText = expired ? 'Expired ' + timeAgo(expiresAt) : 'in ' + timeUntil(expiresAt);
+        return `<tr>
+          <td>${escHtml(t.created_by)}</td>
+          <td>${escHtml(t.node_prefix) || '<em style="color:var(--muted)">any</em>'}</td>
+          <td>${escHtml(t.allow_cidr) || '<em style="color:var(--muted)">any</em>'}</td>
+          <td style="font-size:.75rem">${createdAt}</td>
+          <td style="font-size:.75rem" title="${expiresAt.toLocaleString()}">${expiryText}</td>
+          <td style="color:${statusColor}">${status}</td>
+          <td>${canDelete ? `<button class="btn ghost sm" style="font-size:.75rem" onclick="deleteToken('${escHtml(t.token_hash)}')">Delete</button>` : '—'}</td>
+        </tr>`;
+      }).join('');
+    } else {
+      noTok.style.display = '';
+      table.style.display = 'none';
+      bulkBtn.style.display = 'none';
+    }
+  } catch(e) {
+    toast('Failed to load tokens: ' + e.message, 'error');
   }
 }
 
@@ -6329,18 +6361,27 @@ async function loadClusterAudit(show) {
 async function enableControlPlane() {
   const addr = document.getElementById('cp-grpc-addr').value.trim();
   if (!addr) { toast('gRPC listen address is required', 'error'); return; }
+  // Validate host:port format
+  if (!addr.includes(':')) { toast('gRPC address must be in host:port format (e.g. :50051)', 'error'); return; }
   const certFile = document.getElementById('cp-cert-file').value.trim();
   const keyFile = document.getElementById('cp-key-file').value.trim();
   const caFile = document.getElementById('cp-ca-file').value.trim();
 
-  const r = await api('/api/cluster/mode', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ grpc_addr: addr, cert_file: certFile, key_file: keyFile, ca_file: caFile })
-  });
-  if (!r) return;
-  toast('Control Plane enabled on ' + addr, 'success');
-  loadCluster();
+  const btn = event.target; btn.disabled = true; btn.textContent = 'Enabling…';
+  try {
+    const r = await api('/api/cluster/mode', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ grpc_addr: addr, cert_file: certFile, key_file: keyFile, ca_file: caFile })
+    });
+    if (!r) return;
+    toast('Control Plane enabled on ' + addr, 'success');
+    loadCluster();
+  } catch(e) {
+    toast('Failed to enable Control Plane: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Enable Control Plane';
+  }
 }
 
 function timeAgo(date) {
@@ -6374,19 +6415,35 @@ async function generateEnrollToken() {
   const cidr = document.getElementById('enroll-cidr').value.trim();
   const ttl = parseInt(document.getElementById('enroll-ttl').value);
 
-  const r = await api('/api/cluster/tokens', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ node_prefix: prefix, allow_cidr: cidr, ttl_hours: ttl })
-  });
-  if (!r) return;
+  // Client-side validation
+  if (prefix && !/^[a-zA-Z0-9_-]+$/.test(prefix)) {
+    toast('Node prefix must contain only alphanumeric, dash, underscore', 'error'); return;
+  }
+  if (cidr && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}$/.test(cidr)) {
+    toast('CIDR must be in format like 10.0.0.0/8', 'error'); return;
+  }
 
-  // Show result
-  document.getElementById('enroll-result').style.display = '';
-  document.getElementById('enroll-generate-btn').style.display = 'none';
-  document.getElementById('enroll-result-cmd').textContent = r.enroll_cmd;
-  document.getElementById('enroll-result-manual').textContent = r.enroll_url;
-  toast('Enrollment token generated', 'success');
+  const btn = document.getElementById('enroll-generate-btn');
+  btn.disabled = true; btn.textContent = 'Generating…';
+  try {
+    const r = await api('/api/cluster/tokens', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ node_prefix: prefix, allow_cidr: cidr, ttl_hours: ttl })
+    });
+    if (!r) return;
+
+    // Show result
+    document.getElementById('enroll-result').style.display = '';
+    btn.style.display = 'none';
+    document.getElementById('enroll-result-cmd').textContent = r.enroll_cmd;
+    document.getElementById('enroll-result-manual').textContent = r.enroll_url;
+    toast('Enrollment token generated', 'success');
+  } catch(e) {
+    toast('Token generation failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Generate Token';
+  }
 }
 
 function copyEnrollCmd() {
@@ -6395,25 +6452,74 @@ function copyEnrollCmd() {
 }
 
 async function revokeNode(nodeId) {
-  if (!confirm(`Revoke node "${nodeId}"? This will immediately disconnect it from the cluster.`)) return;
-  const reason = prompt('Reason for revocation (optional):') || 'manual revocation';
-  const r = await api('/api/cluster/revoke', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ node_id: nodeId, reason: reason })
-  });
-  if (r && r.ok) {
-    toast('Node revoked', 'success');
-    loadCluster();
+  if (!confirm(`Revoke node "${nodeId}"? This will immediately disconnect it from the cluster and invalidate its certificate.`)) return;
+  let reason = prompt('Reason for revocation (optional, max 1000 chars):') || 'manual revocation';
+  if (reason.length > 1000) { toast('Reason must be 1000 characters or less', 'error'); return; }
+  try {
+    const r = await api('/api/cluster/revoke', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ node_id: nodeId, reason: reason })
+    });
+    if (r && r.ok) {
+      toast('Node revoked', 'success');
+      loadCluster();
+    }
+  } catch(e) {
+    toast('Revocation failed: ' + e.message, 'error');
   }
 }
 
 async function deleteToken(hash) {
-  const r = await api('/api/cluster/tokens?hash=' + encodeURIComponent(hash), { method: 'DELETE' });
-  if (r && r.ok) {
-    toast('Token deleted', 'success');
-    loadClusterTokens();
+  if (!confirm('Delete this enrollment token? This cannot be undone.')) return;
+  try {
+    const r = await api('/api/cluster/tokens?hash=' + encodeURIComponent(hash), { method: 'DELETE' });
+    if (r && r.ok) {
+      toast('Token deleted', 'success');
+      loadClusterTokens();
+    }
+  } catch(e) {
+    toast('Failed to delete token: ' + e.message, 'error');
   }
+}
+
+async function bulkDeleteExpiredTokens() {
+  if (!confirm('Delete all expired and used tokens? This cannot be undone.')) return;
+  try {
+    const r = await api('/api/cluster/tokens');
+    if (!r) return;
+    const tokens = r.tokens || [];
+    const now = new Date();
+    const toDelete = tokens.filter(t => t.used || new Date(t.expires_at) < now);
+    if (toDelete.length === 0) { toast('No expired tokens to delete', 'error'); return; }
+    let deleted = 0;
+    for (const t of toDelete) {
+      try {
+        await api('/api/cluster/tokens?hash=' + encodeURIComponent(t.token_hash), { method: 'DELETE' });
+        deleted++;
+      } catch(_) {}
+    }
+    toast(`Deleted ${deleted} expired/used token(s)`, 'success');
+    loadClusterTokens();
+  } catch(e) {
+    toast('Bulk delete failed: ' + e.message, 'error');
+  }
+}
+
+function copyEnrollManual() {
+  const url = document.getElementById('enroll-result-manual').textContent;
+  navigator.clipboard.writeText(url).then(() => toast('URL copied to clipboard', 'success'));
+}
+
+function timeUntil(date) {
+  const seconds = Math.floor((date - new Date()) / 1000);
+  if (seconds < 60) return seconds + 's';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + 'h';
+  const days = Math.floor(hours / 24);
+  return days + 'd';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
