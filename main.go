@@ -899,20 +899,25 @@ func initClusterCA(clusterDBPath string) {
 // initialises the cluster CA, and starts the heartbeat monitor.
 // Safe to call at runtime from the admin API (idempotent — returns error if already CP).
 func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
+	clusterRoleMu.Lock()
+	defer clusterRoleMu.Unlock()
+
 	if clusterRole.role == "control-plane" {
 		return fmt.Errorf("already running as control-plane")
 	}
 	if grpcAddr == "" {
 		return fmt.Errorf("gRPC listen address is required")
 	}
-	clusterRole.role = "control-plane"
-	clusterRole.grpcAddr = grpcAddr
+
 	globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
 	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
-		clusterRole.role = "standalone" // rollback
 		return err
 	}
+
+	// Only set role after gRPC is successfully started.
+	clusterRole.role = "control-plane"
+	clusterRole.grpcAddr = grpcAddr
 	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
 	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil
