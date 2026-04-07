@@ -80,6 +80,12 @@ type ConfigSnapshot struct {
 	RewriteRules      []RewriteRule    `json:"rewrite_rules,omitempty"`
 	DPIPatterns       []string         `json:"dpi_patterns,omitempty"`
 	MaxConnsPerIP     int              `json:"max_conns_per_ip"`
+
+	// HA: CP addresses that DPs should know about for automatic failover.
+	// Populated by the leader with its own address + standby address.
+	// DPs update their connection list on every config sync — no manual
+	// --dp-cp-addr configuration needed.
+	CPAddresses []string `json:"cp_addresses,omitempty"`
 }
 
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
@@ -1161,6 +1167,40 @@ func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawM
 	return resp, err
 }
 
+// activeDPClient is a reference to the running DP client so that config sync
+// can dynamically update the CP address list for HA failover discovery.
+var activeDPClient atomic.Pointer[DataPlaneClient]
+
+// updateDPAddresses updates the active DP client's CP address list.
+// Called from applyConfigSnapshot when the CP pushes new HA addresses.
+func updateDPAddresses(addrs []string) {
+	c := activeDPClient.Load()
+	if c == nil || len(addrs) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Only update if the addresses actually changed.
+	if slicesEqual(c.addrs, addrs) {
+		return
+	}
+	old := c.addrs
+	c.addrs = addrs
+	logger.Printf("DataPlane: CP address list updated: %v → %v", old, addrs)
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // lastSeenCAFingerprint tracks the most recent cluster CA fingerprint the DP has seen.
 // When this changes, the DP knows the CP rotated the CA and triggers immediate cert renewal.
 var lastSeenCAFingerprint atomic.Value // string
@@ -1250,6 +1290,11 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		lastSeenCAFingerprint.Store(snap.CAFingerprint)
 	}
 
+	// HA: update DP's CP address list for automatic failover discovery.
+	if len(snap.CPAddresses) > 0 {
+		updateDPAddresses(snap.CPAddresses)
+	}
+
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
 }
@@ -1287,7 +1332,32 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	snap.DPIPatterns = dpiScanner.List()
 	snap.MaxConnsPerIP = connLimiter.MaxPerIP()
 
+	// HA: include all CP addresses so DPs auto-discover failover targets.
+	snap.CPAddresses = buildCPAddressList()
+
 	return snap
+}
+
+// buildCPAddressList returns the list of all CP gRPC addresses for DP failover.
+// Includes this leader's address + the HA standby address (if HA is enabled).
+func buildCPAddressList() []string {
+	haStatus := globalHA.Status()
+	if !haStatus.Enabled {
+		return nil // no HA = no address list needed
+	}
+	clusterRoleMu.RLock()
+	myAddr := clusterRole.grpcAddr
+	clusterRoleMu.RUnlock()
+
+	// haStatus.PeerAddr is the leader's externally reachable address (set during Enable HA).
+	// For the leader, we include: [leader_addr, standby_addr]
+	// The leader's reachable addr is stored as peerAddr in the HA state.
+	addrs := []string{haStatus.PeerAddr}
+	// Also include the local listen addr if it's different and looks reachable.
+	if myAddr != "" && myAddr != haStatus.PeerAddr {
+		addrs = append(addrs, myAddr)
+	}
+	return addrs
 }
 
 // ─── TLS helpers ──────────────────────────────────────────────────────────────

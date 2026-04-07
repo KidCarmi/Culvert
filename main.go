@@ -1155,6 +1155,7 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	if err != nil {
 		logger.Fatalf("DataPlane client: %v", err)
 	}
+	activeDPClient.Store(dpClient) // for HA address discovery
 	clusterRoleIsDP.Store(true)
 	dpClient.Run(ctx, 30*time.Second)
 	go dpCertRenewalLoop(ctx, dpClient, nodeID, certFile, keyFile, caFile)

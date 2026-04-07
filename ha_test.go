@@ -428,10 +428,101 @@ func TestClusterStore_ExportImport(t *testing.T) {
 // ── CA Key Export ───────────────────────────────────────────────────────────
 
 func TestClusterCA_CAKeyPEM(t *testing.T) {
-	// globalClusterCA may or may not be initialized in tests.
-	// Just verify the method doesn't panic when CA is not ready.
 	ca := &clusterCA{}
 	if keyPEM := ca.CAKeyPEM(); keyPEM != nil {
 		t.Error("expected nil when CA not initialized")
+	}
+}
+
+// ── DP Auto-Discovery of CP Addresses ───────────────────────────────────────
+
+func TestUpdateDPAddresses(t *testing.T) {
+	c := &DataPlaneClient{
+		addrs: []string{"cp1:50051"},
+	}
+	activeDPClient.Store(c)
+	defer activeDPClient.Store(nil)
+
+	// Update with new addresses.
+	updateDPAddresses([]string{"cp1:50051", "cp2:50051"})
+
+	c.mu.Lock()
+	got := c.addrs
+	c.mu.Unlock()
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 addrs, got %d", len(got))
+	}
+	if got[0] != "cp1:50051" || got[1] != "cp2:50051" {
+		t.Errorf("unexpected addrs: %v", got)
+	}
+}
+
+func TestUpdateDPAddresses_NoChange(t *testing.T) {
+	c := &DataPlaneClient{
+		addrs: []string{"cp1:50051", "cp2:50051"},
+	}
+	activeDPClient.Store(c)
+	defer activeDPClient.Store(nil)
+
+	// Same addresses — should not log or change.
+	updateDPAddresses([]string{"cp1:50051", "cp2:50051"})
+
+	c.mu.Lock()
+	got := c.addrs
+	c.mu.Unlock()
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 addrs, got %d", len(got))
+	}
+}
+
+func TestBuildCPAddressList_NoHA(t *testing.T) {
+	origHA := *globalHA
+	defer func() { *globalHA = origHA }()
+	*globalHA = HAState{} // HA disabled
+
+	addrs := buildCPAddressList()
+	if addrs != nil {
+		t.Errorf("expected nil when HA disabled, got %v", addrs)
+	}
+}
+
+func TestBuildCPAddressList_WithHA(t *testing.T) {
+	origHA := *globalHA
+	defer func() { *globalHA = origHA }()
+	globalHA.mu.Lock()
+	globalHA.role = "leader"
+	globalHA.peerAddr = "cp1.internal:50051"
+	globalHA.mu.Unlock()
+
+	clusterRoleMu.Lock()
+	origAddr := clusterRole.grpcAddr
+	clusterRole.grpcAddr = ":50051"
+	clusterRoleMu.Unlock()
+	defer func() {
+		clusterRoleMu.Lock()
+		clusterRole.grpcAddr = origAddr
+		clusterRoleMu.Unlock()
+	}()
+
+	addrs := buildCPAddressList()
+	if len(addrs) < 1 {
+		t.Fatal("expected at least 1 address")
+	}
+	if addrs[0] != "cp1.internal:50051" {
+		t.Errorf("expected cp1.internal:50051 first, got %v", addrs)
+	}
+}
+
+func TestSlicesEqual(t *testing.T) {
+	if !slicesEqual([]string{"a", "b"}, []string{"a", "b"}) {
+		t.Error("expected equal")
+	}
+	if slicesEqual([]string{"a"}, []string{"a", "b"}) {
+		t.Error("expected not equal (different length)")
+	}
+	if slicesEqual([]string{"a", "b"}, []string{"a", "c"}) {
+		t.Error("expected not equal (different content)")
 	}
 }
