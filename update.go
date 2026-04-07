@@ -18,15 +18,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
-
-// reportIDRe validates update report IDs: alphanumeric, hyphens, dots only.
-// Example valid ID: "upd-20260407-143022.json"
-var reportIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.\-]*$`)
 
 // version is set via ldflags at build time: -X main.version=v1.2.3
 var version = "dev"
@@ -347,20 +342,20 @@ func apiUpdateReports(w http.ResponseWriter, r *http.Request) {
 	reportDir := "/data/update_reports"
 
 	// If an ID is specified, return that specific report.
+	// To avoid path traversal taint (gosec G703), we never use the user-supplied
+	// value in a file path. Instead we list the directory and match by name.
 	if id := r.URL.Query().Get("id"); id != "" {
-		// Strict allowlist: report IDs are "upd-YYYYMMDD-HHMMSS.json" — only
-		// alphanumeric, hyphens, and dots. Reject everything else so CodeQL
-		// sees a regex guard before the path expression.
-		if !reportIDRe.MatchString(id) {
-			http.Error(w, "invalid report id", http.StatusBadRequest)
+		found := findReportFile(reportDir, id)
+		if found == "" {
+			http.Error(w, "report not found", http.StatusNotFound)
 			return
 		}
-		raw, err := os.ReadFile(filepath.Join(reportDir, id))
+		raw, err := os.ReadFile(found)
 		if err != nil {
 			http.Error(w, "report not found", http.StatusNotFound)
 			return
 		}
-		// Re-encode to break gosec taint chain (os.ReadFile → w.Write).
+		// Re-encode to break gosec XSS taint chain (os.ReadFile → w.Write).
 		var parsed json.RawMessage
 		if err := json.Unmarshal(raw, &parsed); err != nil {
 			http.Error(w, "corrupt report", http.StatusInternalServerError)
@@ -398,6 +393,22 @@ func apiUpdateReports(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(reports) //nolint:errcheck
+}
+
+// findReportFile lists the report directory and returns the full path of the
+// file whose name matches id. Returns "" if no match.  This avoids using
+// user-supplied values directly in file paths (gosec G703 path traversal).
+func findReportFile(dir, id string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() && e.Name() == id {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+	return ""
 }
 
 // apiUpdateRollbackStatus proxies rollback status from updater.
