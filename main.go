@@ -6,10 +6,13 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
@@ -90,14 +93,20 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	catSyncIntvl := flag.String("cat-sync-interval", "24h", "How often to re-sync the URL category feed (e.g. 12h, 24h)")
 	enrollURL := flag.String("enroll", "", "Enrollment URL from Control Plane (e.g. culvert://enroll/host:50051/TOKEN?ca-fp=sha256:...)")
 	clusterDB := flag.String("cluster-db", "", "Path to persist cluster state (e.g. /data/cluster.json)")
+	clusterInsecureFlag := flag.Bool("cluster-insecure", false, "Allow insecure (non-TLS) gRPC for development — NEVER use in production")
+	revocationsFile := flag.String("revocations-file", "", "Path to persist session revocations across restarts (e.g. /data/revocations.json)")
 	flag.Parse()
 
-	// ── Enrollment mode (one-shot, exits after enrolling) ────────────────
+	clusterInsecure = *clusterInsecureFlag
+
+	// ── Enrollment mode — enroll then continue as DP ────────────────────
+	var enrolledConfig *dpEnrollmentConfig
 	if *enrollURL != "" {
-		if err := runEnrollment(*enrollURL); err != nil {
+		ec, err := runEnrollment(*enrollURL)
+		if err != nil {
 			log.Fatalf("Enrollment failed: %v", err)
 		}
-		return
+		enrolledConfig = ec
 	}
 
 	// ── Load file config (if provided) ──────────────────────────────────────
@@ -158,6 +167,14 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	// ── Session secret ───────────────────────────────────────────────────────
 	initSessionSecret()
 	initSessionSecretFromConfig(fc.SessionSecret) // overrides random if config provides one
+
+	// ── Session revocation persistence ──────────────────────────────────────
+	if *revocationsFile != "" {
+		revocationFilePath = *revocationsFile
+		if err := sessionRevoked.LoadRevocations(); err != nil {
+			logger.Printf("Session  → failed to load revocations: %v", err)
+		}
+	}
 
 	// ── Session timeout ───────────────────────────────────────────────────────
 	hrs := firstNonZero(*sessionHrs, fc.SessionTimeoutHours)
@@ -306,22 +323,29 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 			logger.Fatalf("ControlPlane gRPC: %v", err)
 		}
 	}
-	if *dpCPAddr != "" {
-		// This process is a Data Plane node.
-		clusterRole.role = "data-plane"
-		clusterRole.grpcAddr = *dpCPAddr
-		nodeID := *dpNodeID
-		if nodeID == "" {
-			nodeID = clusterRole.nodeID
+	// ── Data Plane startup: from flags, enrollment, or saved config ─────────
+	dpAddr, dpNID, dpCertF, dpKeyF, dpCAF := *dpCPAddr, *dpNodeID, *dpCert, *dpKey, *dpCA
+	// Priority 1: fresh enrollment from this run.
+	if enrolledConfig != nil && dpAddr == "" {
+		dpAddr = enrolledConfig.CPAddr
+		dpNID = enrolledConfig.NodeID
+		dpCertF = enrolledConfig.CertFile
+		dpKeyF = enrolledConfig.KeyFile
+		dpCAF = enrolledConfig.CAFile
+	}
+	// Priority 2: saved enrollment config from a previous run.
+	if dpAddr == "" {
+		if ec, err := loadEnrollmentConfig(); err == nil {
+			dpAddr = ec.CPAddr
+			dpNID = ec.NodeID
+			dpCertF = ec.CertFile
+			dpKeyF = ec.KeyFile
+			dpCAF = ec.CAFile
+			logger.Printf("DataPlane: loaded enrollment config from %s", enrollmentConfigFile)
 		}
-		clusterRole.nodeID = nodeID
-		dpClient, err := NewDataPlaneClient(nodeID, *dpCPAddr, *dpCert, *dpKey, *dpCA)
-		if err != nil {
-			logger.Fatalf("DataPlane client: %v", err)
-		}
-		clusterRoleIsDP.Store(true)
-		dpClient.Run(appLifecycleCtx, 30*time.Second)
-		logger.Printf("DataPlane: polling ControlPlane at %s every 30s", *dpCPAddr)
+	}
+	if dpAddr != "" {
+		startDataPlane(appLifecycleCtx, dpAddr, dpNID, dpCertF, dpKeyF, dpCAF)
 	}
 
 	// ── Security: Connection limit per IP ────────────────────────────────────
@@ -713,6 +737,9 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	<-quit
 	logger.Println("Shutting down gracefully…")
 
+	// Gracefully stop gRPC server first (drains in-flight RPCs).
+	StopControlPlaneGRPC()
+
 	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.)
 	appLifecycleCancel()
 
@@ -891,42 +918,94 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	return nil
 }
 
-// runEnrollment handles the one-shot enrollment flow: generates a keypair+CSR,
-// contacts the Control Plane, and persists the signed certificate.
-func runEnrollment(enrollURLStr string) error {
-	cpAddr, token, err := parseEnrollURL(enrollURLStr)
+// dpEnrollmentConfig is persisted to disk after successful enrollment so the
+// DP can auto-start on subsequent restarts without manual cert flags.
+type dpEnrollmentConfig struct {
+	CPAddr   string `json:"cp_addr"`
+	NodeID   string `json:"node_id"`
+	CertFile string `json:"cert_file"`
+	KeyFile  string `json:"key_file"`
+	CAFile   string `json:"ca_file"`
+}
+
+const enrollmentConfigFile = "dp_enrollment.json"
+
+// loadEnrollmentConfig reads a previously persisted enrollment config.
+func loadEnrollmentConfig() (*dpEnrollmentConfig, error) {
+	data, err := os.ReadFile(enrollmentConfigFile)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	var ec dpEnrollmentConfig
+	if err := json.Unmarshal(data, &ec); err != nil {
+		return nil, err
+	}
+	return &ec, nil
+}
+
+// runEnrollment handles the enrollment flow: generates a keypair+CSR,
+// contacts the Control Plane, and persists the signed certificate.
+// Returns the enrollment config so the caller can start as a DP node.
+func runEnrollment(enrollURLStr string) (*dpEnrollmentConfig, error) {
+	info, err := parseEnrollURL(enrollURLStr)
+	if err != nil {
+		return nil, err
 	}
 	nodeID, _ := os.Hostname()
 	if nodeID == "" {
 		nodeID = "dp-node"
 	}
-	fmt.Printf("[Culvert] Enrolling as node %q with Control Plane at %s\n", nodeID, cpAddr)
+	fmt.Printf("[Culvert] Enrolling as node %q with Control Plane at %s\n", nodeID, info.CPAddr)
 
 	privKey, csrPEM, err := generateCSR(nodeID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	resp, err := callEnrollRPC(cpAddr, token, nodeID, csrPEM)
+	resp, err := callEnrollRPC(info.CPAddr, info.Token, nodeID, csrPEM)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return persistEnrollCerts(privKey, resp, cpAddr, nodeID)
+	// Verify CA fingerprint from the enrollment URL matches the received CA cert.
+	if info.CAFingerprint != "" {
+		if err := verifyCAFingerprint([]byte(resp.CAPEM), info.CAFingerprint); err != nil {
+			return nil, fmt.Errorf("CA fingerprint mismatch — possible MITM: %w", err)
+		}
+		fmt.Printf("[Culvert] CA fingerprint verified ✓\n")
+	}
+	ec, err := persistEnrollCerts(privKey, resp, info.CPAddr, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	return ec, nil
 }
 
-// parseEnrollURL extracts CP address and token from the enrollment URL.
-func parseEnrollURL(raw string) (cpAddr, token string, err error) {
+// enrollmentInfo holds parsed enrollment URL components.
+type enrollmentInfo struct {
+	CPAddr      string
+	Token       string
+	CAFingerprint string // sha256:hex (from ?ca-fp= query param)
+}
+
+// parseEnrollURL extracts CP address, token, and CA fingerprint from the enrollment URL.
+func parseEnrollURL(raw string) (*enrollmentInfo, error) {
 	raw = strings.TrimPrefix(raw, "culvert://enroll/")
 	parts := strings.SplitN(raw, "/", 2)
 	if len(parts) < 2 {
-		return "", "", fmt.Errorf("invalid enrollment URL format — expected culvert://enroll/host:port/TOKEN")
+		return nil, fmt.Errorf("invalid enrollment URL format — expected culvert://enroll/host:port/TOKEN")
 	}
-	token = parts[1]
-	if idx := strings.Index(token, "?"); idx >= 0 {
-		token = token[:idx]
+	info := &enrollmentInfo{CPAddr: parts[0]}
+	info.Token = parts[1]
+	if idx := strings.Index(info.Token, "?"); idx >= 0 {
+		query := info.Token[idx+1:]
+		info.Token = info.Token[:idx]
+		// Parse ca-fp= parameter.
+		for _, kv := range strings.Split(query, "&") {
+			if strings.HasPrefix(kv, "ca-fp=") {
+				info.CAFingerprint = strings.TrimPrefix(kv, "ca-fp=")
+			}
+		}
 	}
-	return parts[0], token, nil
+	return info, nil
 }
 
 // generateCSR creates an ECDSA P-256 keypair and CSR for enrollment.
@@ -946,6 +1025,7 @@ func generateCSR(nodeID string) (*ecdsa.PrivateKey, []byte, error) {
 }
 
 // callEnrollRPC connects to the CP and calls the Enroll gRPC method.
+// If caFingerprint is non-empty, the CP's TLS cert is verified against it.
 func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte) (*EnrollResponse, error) {
 	conn, err := grpc.NewClient(cpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -968,34 +1048,203 @@ func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte) (*EnrollResponse
 	return &resp, nil
 }
 
-// persistEnrollCerts saves the signed certificate, private key, and CA cert to disk.
-func persistEnrollCerts(privKey *ecdsa.PrivateKey, resp *EnrollResponse, cpAddr, nodeID string) error {
+// verifyCAFingerprint checks that the CA cert PEM matches the expected SHA-256 fingerprint.
+func verifyCAFingerprint(caPEM []byte, expected string) error {
+	want := strings.TrimPrefix(expected, "sha256:")
+	wantBytes, err := hex.DecodeString(want)
+	if err != nil {
+		return fmt.Errorf("invalid CA fingerprint hex: %w", err)
+	}
+	block, _ := pem.Decode(caPEM)
+	if block == nil {
+		return fmt.Errorf("no PEM block in CA cert")
+	}
+	fp := sha256.Sum256(block.Bytes)
+	if !hmac.Equal(fp[:], wantBytes) {
+		return fmt.Errorf("CA fingerprint sha256:%x does not match expected sha256:%s", fp, want)
+	}
+	return nil
+}
+
+// persistEnrollCerts saves the signed certificate, private key, CA cert, and
+// enrollment config to disk. Returns the config so the caller can start as DP.
+func persistEnrollCerts(privKey *ecdsa.PrivateKey, resp *EnrollResponse, cpAddr, nodeID string) (*dpEnrollmentConfig, error) {
 	certPath, keyPath, caPath := "./dp-node.crt", "./dp-node.key", "./cluster-ca.crt"
 
 	keyDER, err := x509.MarshalECPrivateKey(privKey)
 	if err != nil {
-		return fmt.Errorf("marshal private key: %w", err)
+		return nil, fmt.Errorf("marshal private key: %w", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
 	if err := os.WriteFile(certPath, []byte(resp.CertPEM), 0o600); err != nil {
-		return fmt.Errorf("write cert: %w", err)
+		return nil, fmt.Errorf("write cert: %w", err)
 	}
 	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		return fmt.Errorf("write key: %w", err)
+		return nil, fmt.Errorf("write key: %w", err)
 	}
 	if err := os.WriteFile(caPath, []byte(resp.CAPEM), 0o600); err != nil {
-		return fmt.Errorf("write CA: %w", err)
+		return nil, fmt.Errorf("write CA: %w", err)
+	}
+
+	// Persist enrollment config for automatic restarts.
+	ec := &dpEnrollmentConfig{
+		CPAddr:   cpAddr,
+		NodeID:   nodeID,
+		CertFile: certPath,
+		KeyFile:  keyPath,
+		CAFile:   caPath,
+	}
+	ecJSON, _ := json.MarshalIndent(ec, "", "  ")
+	if err := os.WriteFile(enrollmentConfigFile, ecJSON, 0o600); err != nil {
+		return nil, fmt.Errorf("write enrollment config: %w", err)
 	}
 
 	fmt.Printf("[Culvert] Enrollment successful!\n")
 	fmt.Printf("[Culvert] Certificate: %s\n", certPath)
 	fmt.Printf("[Culvert] Key:         %s\n", keyPath)
 	fmt.Printf("[Culvert] CA:          %s\n", caPath)
-	fmt.Printf("[Culvert]\n")
-	fmt.Printf("[Culvert] Start this node with:\n")
-	fmt.Printf("[Culvert]   ./culvert -port 8080 -dp-cp-addr %s -dp-node-id %s -dp-cert %s -dp-key %s -dp-ca %s\n",
-		cpAddr, nodeID, certPath, keyPath, caPath)
+	fmt.Printf("[Culvert] Config:      %s\n", enrollmentConfigFile)
+	fmt.Printf("[Culvert] Starting as Data Plane node — connecting to %s\n", cpAddr)
+	return ec, nil
+}
+
+// startDataPlane initialises and runs the Data Plane client.
+func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile string) {
+	clusterRole.role = "data-plane"
+	clusterRole.grpcAddr = addr
+	if nodeID == "" {
+		nodeID = clusterRole.nodeID
+	}
+	clusterRole.nodeID = nodeID
+
+	if certFile != "" {
+		if err := checkDPCertExpiry(certFile); err != nil {
+			logger.Printf("WARNING: %v", err)
+		}
+	}
+	dpClient, err := NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile)
+	if err != nil {
+		logger.Fatalf("DataPlane client: %v", err)
+	}
+	clusterRoleIsDP.Store(true)
+	dpClient.Run(ctx, 30*time.Second)
+	go dpCertRenewalLoop(ctx, dpClient, nodeID, certFile, keyFile, caFile)
+	logger.Printf("DataPlane: polling ControlPlane at %s every 30s", addr)
+}
+
+// checkDPCertExpiry warns if the DP node certificate is expired or near expiry.
+func checkDPCertExpiry(certFile string) error {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return fmt.Errorf("DP cert read: %w", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return fmt.Errorf("DP cert: no PEM block found in %s", certFile)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("DP cert parse: %w", err)
+	}
+	now := time.Now()
+	if now.After(cert.NotAfter) {
+		return fmt.Errorf("DP certificate expired at %s — re-enroll to get a new cert", cert.NotAfter.Format(time.RFC3339))
+	}
+	remaining := time.Until(cert.NotAfter)
+	if remaining < 30*24*time.Hour {
+		return fmt.Errorf("DP certificate expires in %d days — auto-renewal will attempt before expiry", int(remaining.Hours()/24))
+	}
+	return nil
+}
+
+// dpCertRenewalLoop checks cert expiry periodically and requests a new cert
+// from the CP before the current one expires.
+func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) {
+	// Check every 6 hours.
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := tryRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
+				logger.Printf("DataPlane: cert renewal check: %v", err)
+			}
+		}
+	}
+}
+
+// certNeedsRenewal checks if a PEM cert file expires within 30 days.
+// Returns days remaining, or -1 if the cert cannot be read.
+func certNeedsRenewal(certFile string) (int, bool) {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return -1, false
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return -1, false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return -1, false
+	}
+	days := int(time.Until(cert.NotAfter).Hours() / 24)
+	return days, days <= 30
+}
+
+// atomicWriteFile writes data to path atomically via a .tmp rename.
+func atomicWriteFile(path string, data []byte) error {
+	if err := os.WriteFile(path+".tmp", data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(path+".tmp", path)
+}
+
+// tryRenewDPCert renews the DP cert if it expires within 30 days.
+func tryRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) error {
+	days, needsRenewal := certNeedsRenewal(certFile)
+	if !needsRenewal {
+		return nil
+	}
+	logger.Printf("DataPlane: cert expires in %d days — requesting renewal", days)
+
+	privKey, csrPEM, err := generateCSR(nodeID)
+	if err != nil {
+		return fmt.Errorf("generate CSR: %w", err)
+	}
+
+	reqBytes, _ := json.Marshal(map[string]string{"node_id": nodeID, "csr": string(csrPEM)})
+	raw, err := client.call(ctx, methodRenewCert, json.RawMessage(reqBytes))
+	if err != nil {
+		return fmt.Errorf("RenewCert RPC: %w", err)
+	}
+	var resp struct {
+		CertPEM string `json:"cert_pem"`
+		CAPEM   string `json:"ca_pem"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return fmt.Errorf("parse renewal response: %w", err)
+	}
+
+	keyDER, err := x509.MarshalECPrivateKey(privKey)
+	if err != nil {
+		return fmt.Errorf("marshal key: %w", err)
+	}
+	if err := atomicWriteFile(certFile, []byte(resp.CertPEM)); err != nil {
+		return fmt.Errorf("write cert: %w", err)
+	}
+	if err := atomicWriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
+		return fmt.Errorf("write key: %w", err)
+	}
+	if resp.CAPEM != "" {
+		if err := atomicWriteFile(caFile, []byte(resp.CAPEM)); err != nil {
+			return fmt.Errorf("write CA: %w", err)
+		}
+	}
+	logger.Printf("DataPlane: certificate renewed successfully — restart to load new cert")
 	return nil
 }
 

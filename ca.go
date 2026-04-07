@@ -521,6 +521,8 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 			case <-t.C:
 				certMgr.RotateIfNeeded(caPath, passphrase)
 				certMgr.cleanupSecondaryCA()
+				globalClusterCA.RotateIfNeeded()
+				globalClusterCA.CleanupSecondary()
 			}
 		}
 	}()

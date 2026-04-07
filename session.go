@@ -135,6 +135,50 @@ func (r *revocationList) Count() int {
 	return len(r.tokens)
 }
 
+// revocationFilePath is the path used to persist revocations to disk.
+// Set via --revocations-file flag; empty means no persistence.
+var revocationFilePath string
+
+// SaveRevocations writes all non-expired revocations to disk as JSON.
+func (r *revocationList) SaveRevocations() error {
+	if revocationFilePath == "" {
+		return nil
+	}
+	entries := r.ExportRevocations()
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return fmt.Errorf("marshal revocations: %w", err)
+	}
+	tmp := revocationFilePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write revocations: %w", err)
+	}
+	return os.Rename(tmp, revocationFilePath)
+}
+
+// LoadRevocations reads revocations from disk and merges them.
+func (r *revocationList) LoadRevocations() error {
+	if revocationFilePath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(revocationFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read revocations: %w", err)
+	}
+	var entries []RevocationEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return fmt.Errorf("unmarshal revocations: %w", err)
+	}
+	added := r.MergeRevocations(entries)
+	if added > 0 {
+		logger.Printf("Session  → loaded %d revocations from disk", added)
+	}
+	return nil
+}
+
 // revokeSessionCookie adds the cookie from r to the revocation list.
 func revokeSessionCookie(cookieName string, r *http.Request) {
 	c, err := r.Cookie(cookieName)
@@ -151,6 +195,9 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 		var s Session
 		if json.Unmarshal(payload, &s) == nil {
 			sessionRevoked.Revoke(b64part, time.Unix(s.Exp, 0))
+			if err := sessionRevoked.SaveRevocations(); err != nil {
+				logger.Printf("Session  → failed to persist revocations: %v", err)
+			}
 		}
 	}
 }

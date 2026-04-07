@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -231,6 +232,153 @@ func TestSOCKS5_Auth_Failure(t *testing.T) {
 	if result != 0x01 {
 		t.Fatalf("expected auth failure 0x01, got 0x%02x", result)
 	}
+}
+
+func TestSOCKS5_IPv6_ATYP04(t *testing.T) {
+	setupProxyTest(t)
+
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Greeting
+	conn.Write([]byte{0x05, 0x01, 0x00}) //nolint:errcheck
+	resp := make([]byte, 2)
+	io.ReadFull(conn, resp) //nolint:errcheck
+
+	// CONNECT with ATYP=0x04 (IPv6), address ::1, port 80.
+	// The handler should parse 16 bytes and format with brackets.
+	// ::1 is loopback so SSRF guard will block it with reply 0x02.
+	ipv6 := net.ParseIP("::1").To16()
+	req := []byte{0x05, 0x01, 0x00, 0x04}
+	req = append(req, ipv6...)
+	req = append(req, 0x00, 0x50) // port 80
+	conn.Write(req)               //nolint:errcheck
+
+	reply := make([]byte, 10)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+	io.ReadFull(conn, reply)                               //nolint:errcheck
+	// 0x02 = connection not allowed (SSRF blocks loopback IPv6)
+	if reply[1] != 0x02 {
+		t.Errorf("expected SOCKS5 reply 0x02 (SSRF blocked IPv6 loopback), got 0x%02x", reply[1])
+	}
+}
+
+func TestSOCKS5_UnsupportedAddressType(t *testing.T) {
+	setupProxyTest(t)
+
+	for _, atyp := range []byte{0x02, 0xFF} {
+		t.Run(fmt.Sprintf("ATYP_0x%02x", atyp), func(t *testing.T) {
+			ln := startSOCKS5Listener(t)
+			defer func() { _ = ln.Close() }()
+
+			conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+
+			// Greeting
+			conn.Write([]byte{0x05, 0x01, 0x00}) //nolint:errcheck
+			resp := make([]byte, 2)
+			io.ReadFull(conn, resp) //nolint:errcheck
+
+			// CONNECT with unsupported ATYP
+			req := []byte{0x05, 0x01, 0x00, atyp, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50}
+			conn.Write(req) //nolint:errcheck
+
+			reply := make([]byte, 10)
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+			io.ReadFull(conn, reply)                               //nolint:errcheck
+			if reply[1] != 0x08 {
+				t.Errorf("expected SOCKS5 reply 0x08 (address type not supported), got 0x%02x", reply[1])
+			}
+		})
+	}
+}
+
+func TestSOCKS5_AuthRequired_ClientNoAuth(t *testing.T) {
+	setupProxyTest(t)
+	if err := cfg.SetAuth("testuser", "testpass"); err != nil {
+		t.Fatal(err)
+	}
+
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Greeting: only offer NO_AUTH (0x00) when server requires auth
+	conn.Write([]byte{0x05, 0x01, 0x00}) //nolint:errcheck
+
+	resp := make([]byte, 2)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		t.Fatalf("read greeting response: %v", err)
+	}
+	// Server should reply {0x05, 0xFF} — no acceptable method
+	if resp[0] != 0x05 || resp[1] != 0xFF {
+		t.Errorf("expected [05 FF] (no acceptable method), got %x", resp)
+	}
+}
+
+func TestSOCKS5_BindCommand_Rejected(t *testing.T) {
+	setupProxyTest(t)
+
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Greeting
+	conn.Write([]byte{0x05, 0x01, 0x00}) //nolint:errcheck
+	resp := make([]byte, 2)
+	io.ReadFull(conn, resp) //nolint:errcheck
+
+	// BIND (CMD=0x02) — should be rejected with 0x07
+	req := []byte{0x05, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50}
+	conn.Write(req) //nolint:errcheck
+
+	reply := make([]byte, 10)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+	io.ReadFull(conn, reply)                               //nolint:errcheck
+	if reply[1] != 0x07 {
+		t.Errorf("expected SOCKS5 reply 0x07 (command not supported), got 0x%02x", reply[1])
+	}
+}
+
+func TestSOCKS5_PartialGreeting_CloseCleanly(t *testing.T) {
+	setupProxyTest(t)
+
+	ln := startSOCKS5Listener(t)
+	defer func() { _ = ln.Close() }()
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Send only the version byte then close the connection.
+	// The handler should exit cleanly without panicking.
+	conn.Write([]byte{0x05}) //nolint:errcheck
+	conn.Close()
+
+	// If the handler panicked, the test runner would catch it.
+	// Give a moment for the goroutine to process the partial read.
+	time.Sleep(100 * time.Millisecond)
 }
 
 // targetHostPort extracts host and port from a test server URL.

@@ -50,6 +50,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -132,6 +133,7 @@ var (
 	methodSyncRateLimits     = fmt.Sprintf("/%s/SyncRateLimits", configServiceName)
 	methodSyncRevocations    = fmt.Sprintf("/%s/SyncRevocations", configServiceName)
 	methodPushAuditEvents    = fmt.Sprintf("/%s/PushAuditEvents", configServiceName)
+	methodRenewCert          = fmt.Sprintf("/%s/RenewCert", configServiceName)
 )
 
 // MetricsReport is sent by Data Plane nodes to the Control Plane.
@@ -325,6 +327,7 @@ var clusterRole struct {
 	role     string // "standalone", "control-plane", "data-plane"
 	grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
 	nodeID   string // this node's identifier
+	grpcSrv  *grpc.Server
 }
 
 // NodeMetricsList returns a copy of all connected Data Plane node metrics.
@@ -342,7 +345,55 @@ func NodeMetricsList() []MetricsReport {
 
 type controlPlaneServer struct{}
 
-func (s *controlPlaneServer) GetConfig(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+// verifyNode extracts the peer TLS certificate from the gRPC context,
+// matches it to an enrolled node by cert serial, verifies the self-reported
+// nodeID matches the certificate identity, and checks revocation status.
+// Returns the verified node ID or an error.
+func verifyNode(ctx context.Context, claimedNodeID string) error {
+	if claimedNodeID == "" {
+		return status.Errorf(codes.InvalidArgument, "node_id required")
+	}
+
+	// In mTLS mode, verify cert serial matches enrolled node.
+	if err := verifyNodeCert(ctx, claimedNodeID); err != nil {
+		return err
+	}
+
+	// Check revocation regardless of TLS mode.
+	node, exists := globalClusterStore.GetNode(claimedNodeID)
+	if exists && globalClusterStore.IsRevoked(node.CertSerial) {
+		return status.Errorf(codes.PermissionDenied, "node %q is revoked", claimedNodeID)
+	}
+	return nil
+}
+
+// verifyNodeCert extracts the peer TLS cert serial and matches it to the enrolled node.
+func verifyNodeCert(ctx context.Context, claimedNodeID string) error {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.AuthInfo == nil {
+		return nil // insecure dev mode — skip cert pinning
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
+		return nil
+	}
+	peerSerial := tlsInfo.State.PeerCertificates[0].SerialNumber.Text(16)
+	node, exists := globalClusterStore.GetNode(claimedNodeID)
+	if !exists {
+		return status.Errorf(codes.NotFound, "node %q not enrolled", claimedNodeID)
+	}
+	if node.CertSerial != peerSerial {
+		return status.Errorf(codes.PermissionDenied,
+			"cert serial mismatch: node %q expects %s, peer presented %s",
+			claimedNodeID, node.CertSerial, peerSerial)
+	}
+	return nil
+}
+
+func (s *controlPlaneServer) GetConfig(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	// GetConfig is called during initial poll before enrollment completes.
+	// No node identity check required — config is not secret, and unenrolled
+	// nodes need it to bootstrap.
 	snap := globalConfigStore.Get()
 	b, err := json.Marshal(snap)
 	if err != nil {
@@ -351,17 +402,15 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, _ json.RawMessage) (
 	return b, nil
 }
 
-func (s *controlPlaneServer) PushMetrics(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) PushMetrics(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var report MetricsReport
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
 
-	// Check if node is revoked.
-	if node, ok := globalClusterStore.GetNode(report.NodeID); ok {
-		if globalClusterStore.IsRevoked(node.CertSerial) {
-			return nil, status.Errorf(codes.PermissionDenied, "node %s is revoked", report.NodeID)
-		}
+	// Verify node identity (cert pinning) and check revocation.
+	if err := verifyNode(ctx, report.NodeID); err != nil {
+		return nil, err
 	}
 
 	nodeMetricsMu.Lock()
@@ -377,13 +426,13 @@ func (s *controlPlaneServer) PushMetrics(_ context.Context, raw json.RawMessage)
 
 // SyncRateLimits receives hot-IP deltas from a DP node and returns cluster-wide
 // totals (excluding the requesting node) for distributed rate limiting.
-func (s *controlPlaneServer) SyncRateLimits(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) SyncRateLimits(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var gossip RateLimitGossip
 	if err := json.Unmarshal(raw, &gossip); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
-	if gossip.NodeID == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "node_id required")
+	if err := verifyNode(ctx, gossip.NodeID); err != nil {
+		return nil, err
 	}
 
 	// Store this node's hot-IP counts.
@@ -401,7 +450,7 @@ func (s *controlPlaneServer) SyncRateLimits(_ context.Context, raw json.RawMessa
 
 // SyncRevocations receives revoked session tokens from a DP node and returns
 // the merged list from all other nodes, enabling cluster-wide session invalidation.
-func (s *controlPlaneServer) SyncRevocations(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		NodeID  string            `json:"node_id"`
 		Entries []RevocationEntry `json:"entries"`
@@ -409,8 +458,8 @@ func (s *controlPlaneServer) SyncRevocations(_ context.Context, raw json.RawMess
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
-	if req.NodeID == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "node_id required")
+	if err := verifyNode(ctx, req.NodeID); err != nil {
+		return nil, err
 	}
 	globalRevAggregator.Update(req.NodeID, req.Entries)
 	remote := globalRevAggregator.MergedExcluding(req.NodeID)
@@ -422,7 +471,7 @@ func (s *controlPlaneServer) SyncRevocations(_ context.Context, raw json.RawMess
 }
 
 // PushAuditEvents receives audit events from a DP node for centralized logging.
-func (s *controlPlaneServer) PushAuditEvents(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) PushAuditEvents(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var req struct {
 		NodeID string       `json:"node_id"`
 		Events []AuditEntry `json:"events"`
@@ -430,8 +479,8 @@ func (s *controlPlaneServer) PushAuditEvents(_ context.Context, raw json.RawMess
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
-	if req.NodeID == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "node_id required")
+	if err := verifyNode(ctx, req.NodeID); err != nil {
+		return nil, err
 	}
 	if len(req.Events) > 0 {
 		globalClusterAudit.Append(req.NodeID, req.Events)
@@ -440,7 +489,7 @@ func (s *controlPlaneServer) PushAuditEvents(_ context.Context, raw json.RawMess
 }
 
 // Enroll handles node enrollment: validates token, signs CSR, registers node.
-func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var req EnrollRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
@@ -455,9 +504,17 @@ func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (jso
 		return nil, status.Errorf(codes.AlreadyExists, "node %q is already enrolled", req.NodeID)
 	}
 
-	// Validate the enrollment token (also marks it as consumed).
-	if err := globalClusterStore.ValidateToken(req.Token, req.NodeID, ""); err != nil {
-		logger.Printf("Enrollment: rejected node %q: %v", req.NodeID, err)
+	// Extract peer IP for CIDR validation.
+	sourceIP := ""
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		sourceIP, _, _ = net.SplitHostPort(p.Addr.String())
+	}
+
+	// Validate and consume the enrollment token atomically (persisted to disk).
+	// Returns token metadata so we don't need to re-access the map.
+	tokInfo, err := globalClusterStore.ValidateAndConsumeToken(req.Token, req.NodeID, sourceIP)
+	if err != nil {
+		logger.Printf("Enrollment: rejected node %q: %v", sanitizeLog(req.NodeID), err)
 		return nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
 	}
 
@@ -470,7 +527,7 @@ func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (jso
 		return nil, status.Errorf(codes.Internal, "sign CSR: %v", err)
 	}
 
-	// Register the node.
+	// Register the node (persists to disk).
 	node := &EnrolledNode{
 		NodeID:     req.NodeID,
 		CertSerial: serial,
@@ -478,17 +535,9 @@ func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (jso
 		EnrolledAt: time.Now(),
 		LastSeen:   time.Now(),
 		Status:     "connected",
-	}
-	// Find who created the token to record as enrolledBy.
-	hash := hashToken(req.Token)
-	if tok, exists := globalClusterStore.st.Tokens[hash]; exists {
-		node.EnrolledBy = tok.CreatedBy
+		EnrolledBy: tokInfo.CreatedBy,
 	}
 	globalClusterStore.RegisterNode(node)
-
-	if err := globalClusterStore.Save(); err != nil {
-		logger.Printf("Enrollment: failed to persist state: %v", err)
-	}
 
 	logger.Printf("Enrollment: node %q enrolled (serial=%s, expires=%s)", req.NodeID, serial, expiry.Format("2006-01-02"))
 
@@ -502,22 +551,84 @@ func (s *controlPlaneServer) Enroll(_ context.Context, raw json.RawMessage) (jso
 	return b, nil
 }
 
+// RenewCert handles certificate renewal requests from enrolled DP nodes.
+// The node must be enrolled and not revoked. A new cert is signed from the CSR.
+func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		NodeID string `json:"node_id"`
+		CSR    string `json:"csr"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, fmt.Errorf("invalid request: %w", err)
+	}
+	if req.NodeID == "" || req.CSR == "" {
+		return nil, fmt.Errorf("node_id and csr are required")
+	}
+
+	// Verify the caller is the enrolled node (cert pinning).
+	if err := verifyNode(ctx, req.NodeID); err != nil {
+		return nil, fmt.Errorf("RenewCert: %w", err)
+	}
+
+	// Sign the new CSR.
+	certPEM, serial, expiry, err := globalClusterCA.SignCSR([]byte(req.CSR), req.NodeID)
+	if err != nil {
+		return nil, fmt.Errorf("sign CSR: %w", err)
+	}
+
+	// Update the enrolled node's cert serial and expiry.
+	globalClusterStore.mu.Lock()
+	if node, ok := globalClusterStore.st.Nodes[req.NodeID]; ok {
+		node.CertSerial = serial
+		node.CertExpiry = expiry
+		globalClusterStore.st.Nodes[req.NodeID] = node
+	}
+	globalClusterStore.mu.Unlock()
+	if err := globalClusterStore.Save(); err != nil {
+		logger.Printf("RenewCert: failed to persist updated node: %v", err)
+	}
+
+	logger.Printf("RenewCert: renewed cert for node %q (serial=%s, expires=%s)", req.NodeID, serial, expiry.Format("2006-01-02"))
+
+	resp, _ := json.Marshal(map[string]string{
+		"cert_pem": string(certPEM),
+		"ca_pem":   string(globalClusterCA.AllCACertsPEM()),
+	})
+	return resp, nil
+}
+
 // StartControlPlaneGRPC starts the gRPC server for the Control Plane.
 // addr example: ":50051"
 // certFile/keyFile: mTLS certificate paths.  Pass empty strings for insecure
 // (development only — never in production).
-func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
-	var serverOpt grpc.ServerOption
-	if certFile != "" && keyFile != "" {
+// clusterInsecure controls whether the CP allows insecure (non-TLS) gRPC.
+// Set via --cluster-insecure flag. When false (default), CP startup fails
+// without TLS certificates to prevent accidental production exposure.
+var clusterInsecure bool
+
+// cpServerOption returns the gRPC server option for the Control Plane based on
+// available TLS certs or the --cluster-insecure flag.
+func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, error) {
+	switch {
+	case certFile != "" && keyFile != "":
 		creds, err := buildServerTLS(certFile, keyFile, caFile)
 		if err != nil {
-			return fmt.Errorf("gRPC TLS: %w", err)
+			return nil, fmt.Errorf("gRPC TLS: %w", err)
 		}
-		serverOpt = grpc.Creds(creds)
 		logger.Printf("ControlPlane gRPC → %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
-	} else {
-		serverOpt = grpc.EmptyServerOption{}
-		logger.Printf("ControlPlane gRPC → %s (insecure — dev only!)", strings.ReplaceAll(addr, "\n", ""))
+		return grpc.Creds(creds), nil
+	case clusterInsecure:
+		logger.Printf("WARNING: ControlPlane gRPC → %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
+		return grpc.EmptyServerOption{}, nil
+	default:
+		return nil, fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
+	}
+}
+
+func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
+	serverOpt, err := cpServerOption(addr, certFile, keyFile, caFile)
+	if err != nil {
+		return err
 	}
 
 	srv := grpc.NewServer(serverOpt)
@@ -551,6 +662,10 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 				MethodName: "PushAuditEvents",
 				Handler:    wrapUnary(svc.PushAuditEvents),
 			},
+			{
+				MethodName: "RenewCert",
+				Handler:    wrapUnary(svc.RenewCert),
+			},
 		},
 		Streams: []grpc.StreamDesc{},
 	}, svc)
@@ -559,12 +674,24 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 	if err != nil {
 		return fmt.Errorf("gRPC listen: %w", err)
 	}
+	clusterRole.grpcSrv = srv
+
 	go func() {
 		if err := srv.Serve(ln); err != nil {
 			logger.Printf("ControlPlane gRPC error: %v", err)
 		}
 	}()
 	return nil
+}
+
+// StopControlPlaneGRPC gracefully stops the gRPC server, draining in-flight
+// RPCs before closing. Called during SIGTERM/SIGINT shutdown.
+func StopControlPlaneGRPC() {
+	if clusterRole.grpcSrv != nil {
+		logger.Printf("ControlPlane: graceful gRPC shutdown...")
+		clusterRole.grpcSrv.GracefulStop()
+		logger.Printf("ControlPlane: gRPC stopped")
+	}
 }
 
 // wrapUnary adapts our JSON handler signature to grpc.methodHandler.
@@ -773,6 +900,9 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 			}
 			if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
 				logger.Printf("DataPlane: merged %d remote session revocations", added)
+				if err := sessionRevoked.SaveRevocations(); err != nil {
+					logger.Printf("DataPlane: failed to persist revocations: %v", err)
+				}
 			}
 		}
 	}
@@ -803,6 +933,8 @@ func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Durat
 			b, _ := json.Marshal(req)
 			if _, err := c.call(ctx, methodPushAuditEvents, b); err != nil {
 				logger.Printf("DataPlane: PushAuditEvents error (%d events): %v", len(events), err)
+				// Re-queue events so they're retried on the next interval.
+				requeueAuditEvents(events)
 			}
 		}
 	}
@@ -860,9 +992,42 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 
 // ─── TLS helpers ──────────────────────────────────────────────────────────────
 
+// cpTLSConfig holds a reference to the server TLS config so that the cert
+// pool can be rebuilt dynamically when the cluster CA is rotated.
+var cpTLSConfig struct {
+	mu      sync.Mutex
+	cfg     *tls.Config
+	baseCAF string // path to base CA file (operator-provided)
+}
+
+// rebuildCPCertPool rebuilds the TLS client CA pool with the base CA file
+// plus all active cluster CAs (primary + secondary overlap).
+// Called by globalClusterCA.onRotate after import or cleanup.
+func rebuildCPCertPool() {
+	cpTLSConfig.mu.Lock()
+	defer cpTLSConfig.mu.Unlock()
+	if cpTLSConfig.cfg == nil {
+		return
+	}
+	pool := x509.NewCertPool()
+	if cpTLSConfig.baseCAF != "" {
+		caPath := filepath.Clean(cpTLSConfig.baseCAF)
+		if !strings.Contains(caPath, "..") {
+			if pemData, err := os.ReadFile(caPath); err == nil { // #nosec G304 -- admin CLI flag, ".." rejected
+				pool.AppendCertsFromPEM(pemData)
+			}
+		}
+	}
+	if allCA := globalClusterCA.AllCACertsPEM(); len(allCA) > 0 {
+		pool.AppendCertsFromPEM(allCA)
+	}
+	cpTLSConfig.cfg.ClientCAs = pool
+	logger.Printf("ControlPlane: TLS client CA pool rebuilt")
+}
+
 func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCredentials, error) {
-	if strings.Contains(certFile, "..") || strings.Contains(keyFile, "..") {
-		return nil, fmt.Errorf("invalid cert/key path: directory traversal not allowed")
+	if strings.Contains(certFile, "..") || strings.Contains(keyFile, "..") || strings.Contains(caFile, "..") {
+		return nil, fmt.Errorf("invalid cert/key/ca path: directory traversal not allowed")
 	}
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
@@ -874,14 +1039,26 @@ func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 		if err != nil {
 			return nil, err
 		}
-		// Also add cluster CA to the pool so enrolled nodes are accepted.
-		if globalClusterCA.Ready() {
-			pool.AppendCertsFromPEM(globalClusterCA.CACertPEM())
+		// Add all active cluster CAs (primary + secondary overlap).
+		if allCA := globalClusterCA.AllCACertsPEM(); len(allCA) > 0 {
+			pool.AppendCertsFromPEM(allCA)
 		}
 		tlsCfg.ClientCAs = pool
 		// VerifyClientCertIfGiven allows unenrolled nodes to call Enroll
 		// without a client cert, while still verifying certs from enrolled nodes.
 		tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
+
+		// Store reference for dynamic cert pool rebuild on CA rotation.
+		cpTLSConfig.mu.Lock()
+		cpTLSConfig.cfg = tlsCfg
+		cpTLSConfig.baseCAF = caFile
+		cpTLSConfig.mu.Unlock()
+
+		// Wire up the rotation callback so ImportCA/CleanupSecondary
+		// rebuild the pool automatically.
+		globalClusterCA.mu.Lock()
+		globalClusterCA.onRotate = rebuildCPCertPool
+		globalClusterCA.mu.Unlock()
 	}
 	return credentials.NewTLS(tlsCfg), nil
 }
@@ -903,12 +1080,13 @@ func buildClientTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 }
 
 func loadCertPool(caFile string) (*x509.CertPool, error) {
-	if strings.Contains(caFile, "..") {
+	// Guard: reject directory traversal in CLI-provided CA path.
+	cleaned := filepath.Clean(caFile)
+	if strings.Contains(cleaned, "..") {
 		return nil, fmt.Errorf("invalid CA path: directory traversal not allowed")
 	}
 	pool := x509.NewCertPool()
-	cleaned := filepath.Clean(caFile)
-	pemData, err := os.ReadFile(cleaned) // #nosec G304 -- guarded above: ".." rejected
+	pemData, err := os.ReadFile(cleaned) // #nosec G304 -- admin-provided CLI flag, ".." rejected above
 	if err != nil {
 		return nil, err
 	}
