@@ -2279,11 +2279,12 @@ Firefox (all platforms):
           <span class="panel-title">Cluster Overview</span>
           <button class="btn ghost sm" onclick="loadCluster()">↺ Refresh</button>
         </div>
-        <div class="cards" id="cluster-cards" style="grid-template-columns:repeat(4,1fr)">
+        <div class="cards" id="cluster-cards" style="grid-template-columns:repeat(5,1fr)">
           <div class="card"><div class="card-label">Role</div><div class="card-value" id="cluster-role">—</div></div>
           <div class="card"><div class="card-label">Node ID</div><div class="card-value" id="cluster-node-id">—</div></div>
           <div class="card"><div class="card-label">gRPC Address</div><div class="card-value" id="cluster-grpc">—</div></div>
           <div class="card"><div class="card-label">Enrolled Nodes</div><div class="card-value" id="cluster-enrolled-count">0</div></div>
+          <div class="card" id="cluster-ha-card" style="display:none"><div class="card-label">HA Status</div><div class="card-value" id="cluster-ha-status">—</div></div>
         </div>
       </div>
 
@@ -6135,6 +6136,20 @@ async function loadCluster() {
     document.getElementById('cluster-role').textContent = r.role || 'standalone';
     document.getElementById('cluster-node-id').textContent = r.nodeID || '—';
     document.getElementById('cluster-grpc').textContent = r.grpcAddr || '—';
+
+    // HA status card
+    const ha = r.ha || {};
+    const haCard = document.getElementById('cluster-ha-card');
+    const haStatus = document.getElementById('cluster-ha-status');
+    if (ha.enabled) {
+      haCard.style.display = '';
+      const haColor = ha.role === 'leader' ? '#22c55e' : '#f59e0b';
+      const haIcon = ha.role === 'leader' ? '\u25cf' : '\u25cb';
+      haStatus.innerHTML = `<span style="color:${haColor}">${haIcon}</span> ${escHtml(ha.role)}` +
+        (ha.peer_addr ? `<br><span style="font-size:.65rem;color:var(--muted)">peer: ${escHtml(ha.peer_addr)}</span>` : '');
+    } else {
+      haCard.style.display = 'none';
+    }
 
     const isCP = r.role === 'control-plane';
     const enrollBtn = document.getElementById('cluster-enroll-btn');

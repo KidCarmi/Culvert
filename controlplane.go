@@ -788,9 +788,18 @@ func wrapUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error
 
 // DataPlaneClient polls the Control Plane for configuration and applies changes
 // to the local proxy state (blocklist, IP filter, rate limiter).
+//
+// When multiple CP addresses are configured (HA mode), the client automatically
+// fails over to the next address on connection failure, trying each in order.
 type DataPlaneClient struct {
 	nodeID      string
 	conn        *grpc.ClientConn
+	addrs       []string // all CP addresses (for HA failover)
+	activeIdx   int      // index into addrs of current connection
+	certFile    string   // TLS cert for reconnection
+	keyFile     string   // TLS key for reconnection
+	caFile      string   // CA cert for reconnection
+	mu          sync.Mutex
 	lastVersion int64
 	failCount   int // consecutive fetch failures for exponential backoff
 }
@@ -814,13 +823,41 @@ func (c *DataPlaneClient) resetBackoff() {
 	c.failCount = 0
 }
 
-// NewDataPlaneClient connects to the Control Plane at addr.
+// NewDataPlaneClient connects to the Control Plane at addr. The addr parameter
+// may contain multiple comma-separated addresses for HA failover (e.g.
+// "cp1:50051,cp2:50051"). The client connects to the first reachable address
+// and automatically fails over to the next on connection failure.
 func NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile string) (*DataPlaneClient, error) {
+	addrs := strings.Split(addr, ",")
+	for i := range addrs {
+		addrs[i] = strings.TrimSpace(addrs[i])
+	}
+
+	c := &DataPlaneClient{
+		nodeID:   nodeID,
+		addrs:    addrs,
+		certFile: certFile,
+		keyFile:  keyFile,
+		caFile:   caFile,
+	}
+
+	// Connect to the first reachable CP.
+	if err := c.connect(addrs[0]); err != nil {
+		return nil, err
+	}
+	if len(addrs) > 1 {
+		logger.Printf("DataPlane: HA mode — %d CP addresses configured, failover enabled", len(addrs))
+	}
+	return c, nil
+}
+
+// connect establishes a gRPC connection to the given address.
+func (c *DataPlaneClient) connect(addr string) error {
 	var dialOpt grpc.DialOption
-	if certFile != "" && keyFile != "" {
-		creds, err := buildClientTLS(certFile, keyFile, caFile)
+	if c.certFile != "" && c.keyFile != "" {
+		creds, err := buildClientTLS(c.certFile, c.keyFile, c.caFile)
 		if err != nil {
-			return nil, fmt.Errorf("gRPC client TLS: %w", err)
+			return fmt.Errorf("gRPC client TLS: %w", err)
 		}
 		dialOpt = grpc.WithTransportCredentials(creds)
 	} else {
@@ -830,10 +867,39 @@ func NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile string) (*DataPl
 
 	conn, err := grpc.NewClient(addr, dialOpt)
 	if err != nil {
-		return nil, fmt.Errorf("gRPC dial: %w", err)
+		return fmt.Errorf("gRPC dial %s: %w", addr, err)
 	}
+	// Close old connection if any.
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.conn = conn
 	logger.Printf("DataPlane: connected to ControlPlane at %s", addr)
-	return &DataPlaneClient{nodeID: nodeID, conn: conn}, nil
+	return nil
+}
+
+// failover tries the next CP address in the list. Returns true if a new
+// connection was established, false if all addresses have been tried.
+func (c *DataPlaneClient) failover() bool {
+	if len(c.addrs) <= 1 {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Try each address once (round-robin).
+	for i := 1; i < len(c.addrs); i++ {
+		nextIdx := (c.activeIdx + i) % len(c.addrs)
+		nextAddr := c.addrs[nextIdx]
+		logger.Printf("DataPlane: failing over to CP at %s", nextAddr)
+		if err := c.connect(nextAddr); err != nil {
+			logger.Printf("DataPlane: failover to %s failed: %v", nextAddr, err)
+			continue
+		}
+		c.activeIdx = nextIdx
+		c.failCount = 0
+		return true
+	}
+	return false
 }
 
 // Run starts background loops for config sync, metrics, and cluster gossip.
@@ -863,9 +929,28 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	raw, err := c.call(ctx, methodGetConfig, json.RawMessage("{}"))
 	if err != nil {
-		c.backoff(ctx)
+		c.failCount++
 		logger.Printf("DataPlane: GetConfig error: %v", err)
-		return
+		// After 3 consecutive failures, attempt failover to another CP.
+		if c.failCount >= 3 && len(c.addrs) > 1 {
+			if c.failover() {
+				logger.Printf("DataPlane: failover succeeded — retrying GetConfig")
+				// Retry immediately on the new connection.
+				raw, err = c.call(ctx, methodGetConfig, json.RawMessage("{}"))
+				if err != nil {
+					logger.Printf("DataPlane: GetConfig error after failover: %v", err)
+					c.backoff(ctx)
+					return
+				}
+				// Fall through to apply.
+			} else {
+				c.backoff(ctx)
+				return
+			}
+		} else {
+			c.backoff(ctx)
+			return
+		}
 	}
 	c.resetBackoff()
 	var snap ConfigSnapshot

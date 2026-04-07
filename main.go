@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -68,7 +69,8 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	cpGRPCCert := flag.String("cp-grpc-cert", "", "ControlPlane gRPC TLS cert (mTLS)")
 	cpGRPCKey := flag.String("cp-grpc-key", "", "ControlPlane gRPC TLS key")
 	cpGRPCCA := flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
-	dpCPAddr := flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to")
+	haPeer := flag.String("ha-peer", "", "HA: address of the other CP instance (enables Active/Passive HA)")
+	dpCPAddr := flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
 	dpNodeID := flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
 	dpCert := flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
 	dpKey := flag.String("dp-key", "", "DataPlane gRPC client TLS key")
@@ -317,10 +319,30 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	cpCert := firstStr(*cpGRPCCert, fc.Cluster.CertFile)
 	cpKey := firstStr(*cpGRPCKey, fc.Cluster.KeyFile)
 	cpCA := firstStr(*cpGRPCCA, fc.Cluster.CAFile)
+	haPeerAddr := firstStr(*haPeer, fc.Cluster.HAPeer)
 
 	if cpAddr != "" || fc.Cluster.Role == "control-plane" {
-		if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
-			logger.Fatalf("ControlPlane gRPC: %v", err)
+		if haPeerAddr != "" {
+			// HA mode: use flock-based leader election before starting gRPC.
+			lockPath := filepath.Join(filepath.Dir(clusterDBPath), "cp-leader.lock")
+			globalConfigStore.Update(CurrentConfigSnapshot())
+			initClusterCA(clusterDBPath)
+			globalHA.StartLeaderElection(lockPath, haPeerAddr, 3*time.Second,
+				func() error {
+					return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
+				},
+				func() {
+					StopControlPlaneGRPC()
+					clusterRoleMu.Lock()
+					clusterRole.role = ""
+					clusterRoleMu.Unlock()
+					logger.Printf("HA: gRPC server stopped (standby mode)")
+				},
+			)
+		} else {
+			if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
+				logger.Fatalf("ControlPlane gRPC: %v", err)
+			}
 		}
 	}
 	// ── Data Plane startup: from flags, enrollment, or saved config ─────────
@@ -736,6 +758,9 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 
 	<-quit
 	logger.Println("Shutting down gracefully…")
+
+	// Stop HA leader election and release lock before gRPC shutdown.
+	globalHA.Stop()
 
 	// Gracefully stop gRPC server first (drains in-flight RPCs).
 	StopControlPlaneGRPC()

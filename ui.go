@@ -150,6 +150,8 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/audit", apiClusterAudit)             // GET centralized audit log
 	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations) // GET revocation sync status
 	mux.HandleFunc("/api/cluster/rotation", apiClusterRotation)       // GET CA rotation progress
+	mux.HandleFunc("/api/cluster/ha", apiClusterHA)                   // GET HA status
+	mux.HandleFunc("/healthz", apiHealthz)                            // GET unauthenticated health check (LB probe)
 
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
@@ -3417,6 +3419,7 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 		"uptime":         time.Since(startTime).Round(time.Second).String(),
 		"enrollEnabled":  globalClusterCA.Ready(),
 		"caFingerprint":  globalClusterCA.CACertFingerprint(),
+		"ha":             globalHA.Status(),
 	}
 	if clusterRole.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()
