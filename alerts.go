@@ -3,10 +3,12 @@ package main
 // alerts.go — Webhook alert delivery for security events.
 //
 // Supported events:
-//   "threat_detected"   — ClamAV / YARA / threat-feed block
-//   "policy_block"      — PBAC policy blocked a request
-//   "auth_lockout"      — admin UI brute-force lockout
-//   "cert_expiry"       — CA certificate nearing expiry (fired on startup if ≤30 days)
+//   "threat_detected"       — ClamAV / YARA / threat-feed block
+//   "policy_block"          — PBAC policy blocked a request
+//   "auth_lockout"          — admin UI brute-force lockout
+//   "cert_expiry"           — CA certificate nearing expiry (fired on startup if ≤30 days)
+//   "cluster_updated"       — cluster rolling update completed successfully
+//   "cluster_update_halted" — cluster rolling update halted due to error budget
 //
 // Each webhook is stored in an in-memory list backed by a JSON file.
 // Delivery is async (fire-and-forget goroutine), never blocks the request path.

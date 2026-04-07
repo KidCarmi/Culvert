@@ -802,6 +802,10 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 				MethodName: "HASync",
 				Handler:    wrapUnary(svc.HASync),
 			},
+			{
+				MethodName: "TriggerUpdate",
+				Handler:    wrapUnary(svc.TriggerUpdate),
+			},
 		},
 		Streams: []grpc.StreamDesc{},
 	}, svc)

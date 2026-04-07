@@ -106,6 +106,17 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/alerts/webhooks", apiAlertsWebhooks)         // GET list / POST create
 	mux.HandleFunc("/api/alerts/webhooks/test", apiAlertsWebhookTest) // POST — test-fire
 
+	// ── Updates ──────────────────────────────────────────────────────────
+	mux.HandleFunc("/api/update/status", apiUpdateStatus)                   // GET — version info
+	mux.HandleFunc("/api/update/check", apiUpdateCheck)                     // POST — trigger version check
+	mux.HandleFunc("/api/update/apply", apiUpdateApply)                     // POST — apply update (SSE)
+	mux.HandleFunc("/api/update/preview", apiUpdatePreview)                 // POST — config diff preview
+	mux.HandleFunc("/api/update/reports", apiUpdateReports)                 // GET — list/download reports
+	mux.HandleFunc("/api/update/rollback", apiUpdateRollback)               // POST — rollback
+	mux.HandleFunc("/api/update/rollback/status", apiUpdateRollbackStatus)  // GET — rollback availability
+	mux.HandleFunc("/api/update/cluster", apiClusterUpdate)                 // POST — start rolling update
+	mux.HandleFunc("/api/update/cluster/status", apiClusterUpdateStatus)    // GET — rolling update progress
+
 	// ── CA management ────────────────────────────────────────────────────
 	mux.HandleFunc("/api/ca/status", apiCAStatus)           // GET — CA info + cache + rotation + dual-CA
 	mux.HandleFunc("/api/ca/key-provider", apiCAKeyProvider) // GET key provider status

@@ -41,6 +41,24 @@ services:
       retries: 5
       start_period: 300s
 
+  # ── Culvert updater sidecar ──────────────────────────────────────────────
+  updater:
+    build:
+      context: .
+      dockerfile: Dockerfile.updater
+    container_name: culvert-updater
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - proxy-data:/data:ro
+    ports:
+      - "7123:7123"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   # ── Culvert proxy (CP, Standby, or DP — configured at runtime via GUI) ─────
   proxy:
     build: .
@@ -99,6 +117,25 @@ services:
       '
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── DP updater sidecar (activate with --profile dp) ────────────────────────
+  dp-updater:
+    build:
+      context: .
+      dockerfile: Dockerfile.updater
+    container_name: culvert-dp-updater
+    restart: unless-stopped
+    profiles: ["dp"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - dp-data:/data:ro
+    ports:
+      - "7123:7123"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

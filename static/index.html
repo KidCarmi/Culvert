@@ -355,6 +355,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="settings">
       <span class="icon">⚙️</span> Settings
     </div>
+    <div class="nav-item" data-view="updates">
+      <span class="icon">&#x2B06;</span> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
+    </div>
 
     <div class="nav-section">Tools</div>
     <div class="nav-item" data-view="policy-tester">
@@ -2561,6 +2564,115 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-cluster -->
 
+    <!-- ═══ UPDATES ══════════════════════════════════════════════════════ -->
+    <div class="view" id="view-updates">
+      <!-- Version Status -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Version Status</span>
+          <button class="btn sm ghost" onclick="updateCheckNow()">Check Now</button>
+        </div>
+        <div class="card-grid" id="update-status-cards">
+          <div class="card"><div class="card-label">Current Version</div><div class="card-value" id="upd-current">—</div></div>
+          <div class="card"><div class="card-label">Latest Available</div><div class="card-value" id="upd-latest">—</div></div>
+          <div class="card"><div class="card-label">Last Checked</div><div class="card-value" id="upd-last-checked">—</div></div>
+          <div class="card"><div class="card-label">Updater Status</div><div class="card-value" id="upd-updater-status">—</div></div>
+        </div>
+      </div>
+
+      <!-- Standalone Update -->
+      <div class="panel" id="upd-standalone-panel">
+        <div class="panel-header">
+          <span class="panel-title">Standalone Update</span>
+        </div>
+        <div style="padding:16px" id="upd-standalone-content">
+          <div id="upd-no-update" style="color:var(--muted);font-size:.85rem">No update available. You are running the latest version.</div>
+          <div id="upd-available" style="display:none">
+            <p style="margin:0 0 12px 0;font-size:.9rem">A new version is available. Review changes before applying.</p>
+            <div style="display:flex;gap:8px">
+              <button class="btn sm" onclick="updatePreview()">Preview Changes</button>
+              <button class="btn sm" id="upd-apply-btn" style="display:none" onclick="updateApply()">Apply Update</button>
+            </div>
+          </div>
+          <!-- Preview diff -->
+          <div id="upd-preview" style="display:none;margin-top:16px">
+            <div style="font-weight:600;margin-bottom:8px;font-size:.85rem">Container Config Changes</div>
+            <div id="upd-preview-content" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:.8rem;max-height:300px;overflow:auto;white-space:pre-wrap"></div>
+          </div>
+          <!-- Progress -->
+          <div id="upd-progress" style="display:none;margin-top:16px">
+            <div style="font-weight:600;margin-bottom:8px;font-size:.85rem">Update Progress</div>
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+              <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:8px">
+                <div id="upd-progress-bar" style="height:100%;background:var(--accent);width:0%;transition:width .3s"></div>
+              </div>
+              <div id="upd-progress-step" style="font-size:.82rem;color:var(--muted)">Waiting...</div>
+              <div id="upd-progress-log" style="margin-top:8px;font-family:monospace;font-size:.78rem;max-height:200px;overflow:auto;white-space:pre-wrap"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Rollback -->
+      <div class="panel" id="upd-rollback-panel" style="display:none">
+        <div class="panel-header">
+          <span class="panel-title">Rollback</span>
+        </div>
+        <div style="padding:16px">
+          <p style="margin:0 0 8px 0;font-size:.85rem" id="upd-rollback-info">—</p>
+          <button class="btn sm danger" onclick="updateRollback()">Rollback Now</button>
+        </div>
+      </div>
+
+      <!-- Cluster Rolling Update (CP only) -->
+      <div class="panel" id="upd-cluster-panel" style="display:none">
+        <div class="panel-header">
+          <span class="panel-title">Cluster Rolling Update</span>
+          <button class="btn sm ghost" onclick="loadClusterUpdateStatus()">Refresh</button>
+        </div>
+        <div style="padding:16px">
+          <div id="upd-cluster-idle">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+              <input type="text" class="input" id="upd-cluster-tag" placeholder="Target tag (e.g. v2.0.0)" style="width:200px">
+              <select class="input" id="upd-cluster-budget" style="width:160px">
+                <option value="conservative">Conservative (2/10%)</option>
+                <option value="normal" selected>Normal (3/20%)</option>
+                <option value="aggressive">Aggressive (5/50%)</option>
+              </select>
+              <button class="btn sm" onclick="clusterUpdateStart()">Update Cluster</button>
+            </div>
+          </div>
+          <div id="upd-cluster-active" style="display:none">
+            <div style="margin-bottom:8px;font-size:.85rem">
+              Phase: <strong id="upd-cluster-phase">—</strong> &nbsp;|&nbsp;
+              Target: <code id="upd-cluster-target">—</code>
+            </div>
+            <div class="tbl-wrap">
+              <table>
+                <thead><tr><th>Node</th><th>Status</th><th>Detail</th><th>Duration</th></tr></thead>
+                <tbody id="upd-cluster-nodes"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Update Reports -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Update Reports</span>
+          <button class="btn sm ghost" onclick="loadUpdateReports()">Refresh</button>
+        </div>
+        <div id="upd-reports-empty" style="padding:16px;color:var(--muted);font-size:.85rem">No update reports yet.</div>
+        <div class="tbl-wrap">
+          <table id="upd-reports-table" style="display:none">
+            <thead><tr><th>Report</th><th>Created</th><th>Actions</th></tr></thead>
+            <tbody id="upd-reports-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div><!-- /view-updates -->
+
     <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
     <!-- (embedded inside Security panel later, but available as standalone) -->
 
@@ -2603,6 +2715,7 @@ const viewMeta = {
   upstream:     { title: 'Upstream Proxies', meta: 'Parent proxy chaining with failover and circuit breaker' },
   cluster:      { title: 'Cluster Nodes', meta: 'Multi-node Control Plane / Data Plane management' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
+  updates:      { title: 'Updates',       meta: 'Docker-based self-update system' },
   users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
@@ -2634,6 +2747,7 @@ function switchView(name) {
   if (name === 'ca-mgmt')        loadCAMgmt();
   if (name === 'upstream')       loadUpstream();
   if (name === 'cluster')        loadCluster();
+  if (name === 'updates')        loadUpdates();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4921,6 +5035,12 @@ function connectSSE() {
       setText('d-yara', fmt(d.yaraBlocked || 0));
       setText('d-dpi',  fmt(d.dpiBlocked || 0));
       setText('d-feed', fmt(d.threatFeedBlocked || 0));
+      // Update nav badge from SSE
+      const badge = document.getElementById('nav-update-badge');
+      if (badge) {
+        if (d.updateAvailable) { badge.style.display = ''; badge.textContent = 'NEW'; }
+        else badge.style.display = 'none';
+      }
     } catch(_) {}
   };
   es.onerror = () => { sseConnected = false; setTimeout(connectSSE, 5000); };
@@ -6846,6 +6966,204 @@ function resetBlockPage() {
   document.getElementById('blockpage-html').value = blockPageDefault;
   toast('Reset to default — click Save to apply','success');
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Updates Panel
+// ═══════════════════════════════════════════════════════════════════════════
+let updatesData = null;
+
+async function loadUpdates() {
+  const r = await api('/api/update/status');
+  if (!r) return;
+  updatesData = r;
+  renderUpdateStatus(r);
+  loadRollbackStatus();
+  loadUpdateReports();
+  // Show cluster panel only for CP nodes
+  const cs = await api('/api/cluster/status');
+  if (cs && cs.role === 'control-plane') {
+    document.getElementById('upd-cluster-panel').style.display = '';
+    loadClusterUpdateStatus();
+  }
+}
+
+function renderUpdateStatus(d) {
+  document.getElementById('upd-current').textContent = d.current_version || 'dev';
+  document.getElementById('upd-latest').textContent = d.latest_version || '—';
+  document.getElementById('upd-last-checked').textContent = d.last_checked ? new Date(d.last_checked).toLocaleString() : '—';
+  const st = d.updater_status || 'unknown';
+  const stEl = document.getElementById('upd-updater-status');
+  stEl.textContent = st;
+  stEl.className = 'card-value';
+  if (st === 'connected') stEl.style.color = 'var(--ok)';
+  else if (st === 'unavailable') stEl.style.color = 'var(--blocked)';
+  else stEl.style.color = 'var(--muted)';
+
+  if (d.update_available) {
+    document.getElementById('upd-no-update').style.display = 'none';
+    document.getElementById('upd-available').style.display = '';
+  } else {
+    document.getElementById('upd-no-update').style.display = '';
+    document.getElementById('upd-available').style.display = 'none';
+  }
+
+  // Nav badge
+  const badge = document.getElementById('nav-update-badge');
+  if (d.update_available) { badge.style.display = ''; badge.textContent = 'NEW'; }
+  else badge.style.display = 'none';
+}
+
+async function updateCheckNow() {
+  const r = await api('/api/update/check', { method: 'POST' });
+  if (r) toast('Version check started', 'success');
+  setTimeout(loadUpdates, 3000);
+}
+
+async function updatePreview() {
+  const tag = updatesData?.latest_version;
+  if (!tag) { toast('No target version', 'error'); return; }
+  const r = await api('/api/update/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ container: 'culvert', target_tag: tag })
+  });
+  if (!r) return;
+  document.getElementById('upd-preview').style.display = '';
+  const pre = document.getElementById('upd-preview-content');
+  if (r.changes && r.changes.length) {
+    pre.textContent = r.changes.map(c => `${c.field}: ${c.old || '(none)'} → ${c.new || '(none)'}`).join('\n');
+  } else {
+    pre.textContent = 'No configuration changes detected (image update only).';
+  }
+  document.getElementById('upd-apply-btn').style.display = '';
+}
+
+async function updateApply() {
+  const tag = updatesData?.latest_version;
+  if (!tag) return;
+  if (!confirm('Apply update to ' + tag + '? The container will be restarted.')) return;
+  document.getElementById('upd-progress').style.display = '';
+  document.getElementById('upd-apply-btn').style.display = 'none';
+  const progressBar = document.getElementById('upd-progress-bar');
+  const progressStep = document.getElementById('upd-progress-step');
+  const progressLog = document.getElementById('upd-progress-log');
+  progressLog.textContent = '';
+  try {
+    const resp = await fetch(BASE + '/api/update/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ target_tag: tag, container: 'culvert' })
+    });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          progressStep.textContent = evt.step + (evt.detail ? ': ' + evt.detail : '');
+          if (evt.percent) progressBar.style.width = evt.percent + '%';
+          progressLog.textContent += evt.step + ': ' + (evt.detail||'') + '\n';
+          progressLog.scrollTop = progressLog.scrollHeight;
+          if (evt.step === 'complete') { toast('Update complete!', 'success'); loadUpdates(); }
+          if (evt.step === 'rolled_back') { toast('Update failed — rolled back', 'error'); }
+          if (evt.step === 'error') { toast('Update error: ' + evt.detail, 'error'); }
+        } catch(e) {}
+      }
+    }
+  } catch(e) {
+    toast('Connection lost during update', 'error');
+  }
+}
+
+async function loadRollbackStatus() {
+  const r = await api('/api/update/rollback/status');
+  if (!r) return;
+  const panel = document.getElementById('upd-rollback-panel');
+  if (r.available) {
+    panel.style.display = '';
+    document.getElementById('upd-rollback-info').textContent =
+      'Rollback to ' + (r.rollback_tag||'previous version') + ' available' +
+      (r.expires_at ? ' (expires ' + new Date(r.expires_at).toLocaleTimeString() + ')' : '');
+  } else {
+    panel.style.display = 'none';
+  }
+}
+
+async function updateRollback() {
+  if (!confirm('Rollback to the previous version?')) return;
+  const r = await api('/api/update/rollback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ container: 'culvert' })
+  });
+  if (r) {
+    toast(r.status === 'rolled_back' ? 'Rollback complete' : 'Rollback: ' + (r.status||'done'), 'success');
+    loadUpdates();
+  }
+}
+
+async function loadClusterUpdateStatus() {
+  const r = await api('/api/update/cluster/status');
+  if (!r) return;
+  const idle = document.getElementById('upd-cluster-idle');
+  const active = document.getElementById('upd-cluster-active');
+  if (r.active) {
+    idle.style.display = 'none';
+    active.style.display = '';
+    document.getElementById('upd-cluster-phase').textContent = r.phase || '—';
+    document.getElementById('upd-cluster-target').textContent = r.target_tag || '—';
+    const tbody = document.getElementById('upd-cluster-nodes');
+    const nodes = r.nodes ? Object.values(r.nodes) : [];
+    tbody.innerHTML = nodes.map(n => {
+      const cls = n.status === 'complete' ? 'ok' : n.status === 'failed' ? 'blocked' : 'auth';
+      return `<tr><td>${escHtml(n.node_id)}</td><td><span class="badge ${cls}">${escHtml(n.status)}</span></td><td style="font-size:.82rem">${escHtml(n.detail||'')}</td><td>${n.duration_s ? n.duration_s + 's' : '—'}</td></tr>`;
+    }).join('');
+  } else {
+    idle.style.display = '';
+    active.style.display = 'none';
+  }
+}
+
+async function clusterUpdateStart() {
+  const tag = document.getElementById('upd-cluster-tag').value.trim();
+  if (!tag) { toast('Enter a target tag', 'error'); return; }
+  const budgetSel = document.getElementById('upd-cluster-budget').value;
+  let mc = 3, mp = 20;
+  if (budgetSel === 'conservative') { mc = 2; mp = 10; }
+  else if (budgetSel === 'aggressive') { mc = 5; mp = 50; }
+  if (!confirm('Start cluster rolling update to ' + tag + '?')) return;
+  const r = await api('/api/update/cluster', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_tag: tag, max_consecutive: mc, max_percent: mp })
+  });
+  if (r) { toast('Cluster update started', 'success'); loadClusterUpdateStatus(); }
+}
+
+async function loadUpdateReports() {
+  const r = await api('/api/update/reports');
+  if (!r) return;
+  const reports = Array.isArray(r) ? r : [];
+  const empty = document.getElementById('upd-reports-empty');
+  const table = document.getElementById('upd-reports-table');
+  const tbody = document.getElementById('upd-reports-tbody');
+  if (!reports.length) { empty.style.display = ''; table.style.display = 'none'; return; }
+  empty.style.display = 'none';
+  table.style.display = '';
+  tbody.innerHTML = reports.map(rp =>
+    `<tr><td style="font-family:monospace;font-size:.82rem">${escHtml(rp.id)}</td><td>${rp.created_at ? new Date(rp.created_at).toLocaleString() : '—'}</td><td><a href="${BASE}/api/update/reports?id=${encodeURIComponent(rp.id)}" target="_blank" class="btn sm ghost">Download</a></td></tr>`
+  ).join('');
+}
+
+
 </script>
 
 <!-- ── First-time Setup Wizard ─────────────────────────────────────────── -->

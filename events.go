@@ -61,6 +61,8 @@ type DashboardPayload struct {
 	YARABlocked       int64          `json:"yaraBlocked"`
 	DPIBlocked        int64          `json:"dpiBlocked"`
 	ThreatFeedBlocked int64          `json:"threatFeedBlocked"`
+	UpdateAvailable   bool           `json:"updateAvailable,omitempty"`
+	LatestVersion     string         `json:"latestVersion,omitempty"`
 }
 
 // startSSEBroadcaster runs the ticker that pushes stats to all SSE clients.
@@ -78,6 +80,11 @@ func startSSEBroadcaster() {
 			}
 			rps := float64(sum) / 60.0
 
+			globalUpdateInfo.mu.RLock()
+			updAvail := globalUpdateInfo.updateAvailable
+			updLatest := globalUpdateInfo.latestVersion
+			globalUpdateInfo.mu.RUnlock()
+
 			payload := DashboardPayload{
 				ActiveConns:   getActiveConns(),
 				TotalRequests: atomic.LoadInt64(&statTotal),
@@ -90,6 +97,8 @@ func startSSEBroadcaster() {
 				YARABlocked:       atomic.LoadInt64(&statYARABlocked),
 				DPIBlocked:        atomic.LoadInt64(&statDPIBlocked),
 				ThreatFeedBlocked: atomic.LoadInt64(&statThreatFeedBlocked),
+				UpdateAvailable:   updAvail,
+				LatestVersion:     updLatest,
 			}
 			data, _ := json.Marshal(payload)
 			hub.broadcast(data)
