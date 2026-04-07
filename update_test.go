@@ -112,11 +112,12 @@ func TestAPIUpdateReports_EmptyDir(t *testing.T) {
 }
 
 func TestAPIUpdateReports_InvalidID(t *testing.T) {
+	// Path traversal attempts return 404 — the ID won't match any directory entry.
 	req := httptest.NewRequest(http.MethodGet, "/api/update/reports?id=../../../etc/passwd", nil)
 	w := httptest.NewRecorder()
 	apiUpdateReports(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
 

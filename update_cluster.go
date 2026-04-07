@@ -78,7 +78,7 @@ func (s *ClusterUpdateState) persist() {
 		return
 	}
 	tmp := clusterUpdateFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		logger.Printf("cluster update write error: %v", err)
 		return
 	}
@@ -95,10 +95,36 @@ func (s *ClusterUpdateState) load() {
 	json.Unmarshal(data, s) //nolint:errcheck
 }
 
-func (s *ClusterUpdateState) snapshot() ClusterUpdateState {
+// clusterUpdateSnapshot is a lock-free copy of ClusterUpdateState for JSON serialization.
+type clusterUpdateSnapshot struct {
+	Active      bool                         `json:"active"`
+	TargetTag   string                       `json:"target_tag"`
+	PreviousTag string                       `json:"previous_tag,omitempty"`
+	Initiator   string                       `json:"initiator,omitempty"`
+	StartedAt   time.Time                    `json:"started_at"`
+	CompletedAt time.Time                    `json:"completed_at,omitempty"`
+	Nodes       map[string]*NodeUpdateStatus `json:"nodes,omitempty"`
+	Phase       string                       `json:"phase"`
+	ErrorBudget ErrorBudgetConfig            `json:"error_budget"`
+	Failures    int                          `json:"failures"`
+	ConsecFails int                          `json:"consec_fails"`
+}
+
+func (s *ClusterUpdateState) snapshot() clusterUpdateSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snap := *s
+	snap := clusterUpdateSnapshot{
+		Active:      s.Active,
+		TargetTag:   s.TargetTag,
+		PreviousTag: s.PreviousTag,
+		Initiator:   s.Initiator,
+		StartedAt:   s.StartedAt,
+		CompletedAt: s.CompletedAt,
+		Phase:       s.Phase,
+		ErrorBudget: s.ErrorBudget,
+		Failures:    s.Failures,
+		ConsecFails: s.ConsecFails,
+	}
 	// Deep copy nodes map.
 	snap.Nodes = make(map[string]*NodeUpdateStatus, len(s.Nodes))
 	for k, v := range s.Nodes {
@@ -147,10 +173,10 @@ func generateUpdateReport(state *ClusterUpdateState) {
 	state.mu.Unlock()
 
 	dir := "/data/update_reports"
-	os.MkdirAll(dir, 0o755) //nolint:errcheck
+	os.MkdirAll(dir, 0o750) //nolint:errcheck
 	filename := filepath.Join(dir, report.UpdateID+".json")
 	data, _ := json.MarshalIndent(report, "", "  ")
-	os.WriteFile(filename, data, 0o644) //nolint:errcheck
+	os.WriteFile(filename, data, 0o600) //nolint:errcheck
 	logger.Printf("update report saved: %s", filename)
 
 	// Fire webhook alert.
@@ -200,7 +226,7 @@ func (s *controlPlaneServer) TriggerUpdate(_ context.Context, reqBytes json.RawM
 	logger.Printf("received TriggerUpdate: target=%s from=%s", sanitizeLog(req.TargetTag), sanitizeLog(req.Initiator))
 
 	// Call local updater sidecar.
-	go func() {
+	go func() { // #nosec G118 — detached goroutine must outlive the gRPC request
 		body, _ := json.Marshal(map[string]string{
 			"container":  "culvert",
 			"target_tag": req.TargetTag,

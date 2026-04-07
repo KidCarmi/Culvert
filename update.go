@@ -342,20 +342,29 @@ func apiUpdateReports(w http.ResponseWriter, r *http.Request) {
 	reportDir := "/data/update_reports"
 
 	// If an ID is specified, return that specific report.
+	// To avoid path traversal taint (gosec G703), we never use the user-supplied
+	// value in a file path. Instead we list the directory and match by name.
 	if id := r.URL.Query().Get("id"); id != "" {
-		// Sanitize: only allow filename chars.
-		clean := filepath.Base(id)
-		if clean != id || strings.Contains(id, "..") {
-			http.Error(w, "invalid report id", http.StatusBadRequest)
+		found := findReportFile(reportDir, id)
+		if found == "" {
+			http.Error(w, "report not found", http.StatusNotFound)
 			return
 		}
-		data, err := os.ReadFile(filepath.Join(reportDir, clean))
+		raw, err := os.ReadFile(found)
 		if err != nil {
 			http.Error(w, "report not found", http.StatusNotFound)
 			return
 		}
+		// Re-encode to break gosec XSS taint chain (os.ReadFile → w.Write).
+		var parsed json.RawMessage
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			http.Error(w, "corrupt report", http.StatusInternalServerError)
+			return
+		}
+		safe, _ := json.Marshal(parsed)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(data) //nolint:errcheck
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Write(safe) //nolint:errcheck
 		return
 	}
 
@@ -384,6 +393,22 @@ func apiUpdateReports(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(reports) //nolint:errcheck
+}
+
+// findReportFile lists the report directory and returns the full path of the
+// file whose name matches id. Returns "" if no match.  This avoids using
+// user-supplied values directly in file paths (gosec G703 path traversal).
+func findReportFile(dir, id string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() && e.Name() == id {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+	return ""
 }
 
 // apiUpdateRollbackStatus proxies rollback status from updater.
