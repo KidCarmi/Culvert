@@ -21,7 +21,7 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 - [x] **DPI scanner timeout** — Add per-pattern timeout to DPI regex matching (YARA has 5s timeout, DPI has none)
 - [x] **YARA timeout goroutine leak fix** — Timed-out regex goroutines currently leak indefinitely. Add context cancellation or goroutine tracking.
-- [ ] **Optional scan microservice mode** — Allow YARA + DPI to run as a sidecar HTTP service instead of in-process, for deployments that need process isolation
+- [x] **Optional scan microservice mode** — Allow YARA + DPI to run as a sidecar HTTP service instead of in-process, for deployments that need process isolation
 - [x] **Panic recovery around scanning** — Add `defer recover()` in scan call sites (`proxy.go` scan paths) to prevent one bad file from killing a request goroutine
 
 ### P2 — CA & Certificate Management

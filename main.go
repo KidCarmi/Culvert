@@ -68,7 +68,9 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	cpGRPCCert := flag.String("cp-grpc-cert", "", "ControlPlane gRPC TLS cert (mTLS)")
 	cpGRPCKey := flag.String("cp-grpc-key", "", "ControlPlane gRPC TLS key")
 	cpGRPCCA := flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
-	dpCPAddr := flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to")
+	haJoin := flag.String("ha-join", "", "HA standby: leader CP gRPC address to sync from (e.g. cp1:50051)")
+	haToken := flag.String("ha-token", "", "HA standby: authentication token (from leader's deploy command)")
+	dpCPAddr := flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
 	dpNodeID := flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
 	dpCert := flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
 	dpKey := flag.String("dp-key", "", "DataPlane gRPC client TLS key")
@@ -95,6 +97,8 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	clusterDB := flag.String("cluster-db", "", "Path to persist cluster state (e.g. /data/cluster.json)")
 	clusterInsecureFlag := flag.Bool("cluster-insecure", false, "Allow insecure (non-TLS) gRPC for development — NEVER use in production")
 	revocationsFile := flag.String("revocations-file", "", "Path to persist session revocations across restarts (e.g. /data/revocations.json)")
+	scanSvcListen := flag.String("scan-svc-listen", "", "Run as scan microservice sidecar on this address (e.g. :8484)")
+	scanSvcURL := flag.String("scan-svc-url", "", "Remote scan service URL (e.g. http://scan-svc:8484) — disables local ClamAV/YARA")
 	flag.Parse()
 
 	clusterInsecure = *clusterInsecureFlag
@@ -318,9 +322,27 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	cpKey := firstStr(*cpGRPCKey, fc.Cluster.KeyFile)
 	cpCA := firstStr(*cpGRPCCA, fc.Cluster.CAFile)
 
-	if cpAddr != "" || fc.Cluster.Role == "control-plane" {
+	if *haJoin != "" && *haToken != "" {
+		// ── HA Standby: sync state from leader, then stand by ────────
+		initClusterCA(clusterDBPath)
+		globalHA.StartAsStandby(appLifecycleCtx, *haJoin, *haToken,
+			cpAddr, cpCert, cpKey, cpCA,
+			func() error {
+				return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
+			},
+		)
+	} else if cpAddr != "" || fc.Cluster.Role == "control-plane" {
+		// ── Normal CP startup ────────────────────────────────────────
 		if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
 			logger.Fatalf("ControlPlane gRPC: %v", err)
+		}
+		// Check for persisted HA config (leader restart).
+		if haCfg, err := loadHAConfig(); err == nil && haCfg.Enabled {
+			globalHA.EnableAsLeader(haCfg.PeerAddr)
+			globalHA.mu.Lock()
+			globalHA.token = haCfg.Token // restore original token
+			globalHA.mu.Unlock()
+			logger.Printf("HA: restored leader state from %s (peer=%s)", haConfigFile, haCfg.PeerAddr)
 		}
 	}
 	// ── Data Plane startup: from flags, enrollment, or saved config ─────────
@@ -583,7 +605,24 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	yaraDir := firstStr(*yaraRulesDir, secCfg.YARARulesDir)
 	feedDB := firstStr(*threatFeedDB, secCfg.ThreatFeedDB)
 
-	if secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "" {
+	// Remote scan service mode: delegate body scanning to a sidecar.
+	remoteScanURL := firstStr(*scanSvcURL, secCfg.ScanSvcURL)
+	if remoteScanURL != "" {
+		globalRemoteScanner.Init(remoteScanURL)
+		logger.Printf("ScanSvc  → remote mode, delegating to %s", remoteScanURL)
+		// Threat feeds still run locally (URL/domain checks are cheap).
+		if feedDB != "" || secCfg.Enabled {
+			syncInterval := 6 * time.Hour
+			if secCfg.SyncInterval != "" {
+				if d, err := time.ParseDuration(secCfg.SyncInterval); err == nil {
+					syncInterval = d
+				}
+			}
+			globalThreatFeed.Init(feedDB, syncInterval)
+			globalThreatFeed.Start(appLifecycleCtx)
+			logger.Printf("ThreatFeed → sync every %s, db=%q", syncInterval, feedDB)
+		}
+	} else if secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "" {
 		// Scan result cache TTL.
 		cacheTTL := time.Hour
 		if secCfg.CacheTTL != "" {
@@ -627,6 +666,22 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 			globalThreatFeed.Init(feedDB, syncInterval)
 			globalThreatFeed.Start(appLifecycleCtx)
 			logger.Printf("ThreatFeed → sync every %s, db=%q", syncInterval, feedDB)
+		}
+	}
+
+	// Scan microservice sidecar: expose local scanners as an HTTP service.
+	var scanSvc *ScanService
+	svcListenAddr := firstStr(*scanSvcListen, secCfg.ScanSvcListen)
+	if svcListenAddr != "" {
+		scanSvc = NewScanService(svcListenAddr)
+		if err := scanSvc.Listen(); err != nil {
+			logger.Printf("ScanSvc  → listen error: %v", err)
+		} else {
+			go func() {
+				if err := scanSvc.Start(); err != nil {
+					logger.Printf("ScanSvc  → error: %v", err)
+				}
+			}()
 		}
 	}
 
@@ -737,6 +792,9 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	<-quit
 	logger.Println("Shutting down gracefully…")
 
+	// Stop HA leader election and release lock before gRPC shutdown.
+	globalHA.Stop()
+
 	// Gracefully stop gRPC server first (drains in-flight RPCs).
 	StopControlPlaneGRPC()
 
@@ -749,6 +807,12 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Shut down scan microservice sidecar if running.
+	if scanSvc != nil {
+		scanSvc.Shutdown(ctx) //nolint:errcheck -- best-effort shutdown
+	}
+
 	if err := proxySrv.Shutdown(ctx); err != nil {
 		logger.Printf("Shutdown error: %v", err)
 	}
@@ -918,6 +982,9 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// Only set role after gRPC is successfully started.
 	clusterRole.role = "control-plane"
 	clusterRole.grpcAddr = grpcAddr
+	clusterRole.certFile = certFile
+	clusterRole.keyFile = keyFile
+	clusterRole.caFile = caFile
 	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
 	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil
@@ -1132,6 +1199,7 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	if err != nil {
 		logger.Fatalf("DataPlane client: %v", err)
 	}
+	activeDPClient.Store(dpClient) // for HA address discovery
 	clusterRoleIsDP.Store(true)
 	dpClient.Run(ctx, 30*time.Second)
 	go dpCertRenewalLoop(ctx, dpClient, nodeID, certFile, keyFile, caFile)

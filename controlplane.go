@@ -80,6 +80,12 @@ type ConfigSnapshot struct {
 	RewriteRules      []RewriteRule    `json:"rewrite_rules,omitempty"`
 	DPIPatterns       []string         `json:"dpi_patterns,omitempty"`
 	MaxConnsPerIP     int              `json:"max_conns_per_ip"`
+
+	// HA: CP addresses that DPs should know about for automatic failover.
+	// Populated by the leader with its own address + standby address.
+	// DPs update their connection list on every config sync — no manual
+	// --dp-cp-addr configuration needed.
+	CPAddresses []string `json:"cp_addresses,omitempty"`
 }
 
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
@@ -147,6 +153,7 @@ var (
 	methodSyncRevocations    = fmt.Sprintf("/%s/SyncRevocations", configServiceName)
 	methodPushAuditEvents    = fmt.Sprintf("/%s/PushAuditEvents", configServiceName)
 	methodRenewCert          = fmt.Sprintf("/%s/RenewCert", configServiceName)
+	methodHASync             = fmt.Sprintf("/%s/HASync", configServiceName)
 )
 
 // MetricsReport is sent by Data Plane nodes to the Control Plane.
@@ -344,6 +351,9 @@ var (
 		grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
 		nodeID   string // this node's identifier
 		grpcSrv  *grpc.Server
+		certFile string // TLS cert path (for HA deploy command)
+		keyFile  string // TLS key path (for HA deploy command)
+		caFile   string // CA cert path (for HA deploy command)
 	}
 )
 
@@ -676,6 +686,49 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 	return resp, nil
 }
 
+// HAStateBundle is the full state package sent from leader to standby CP.
+// Contains everything the standby needs to promote to leader if needed.
+type HAStateBundle struct {
+	ClusterState json.RawMessage `json:"cluster_state"`
+	CACertPEM    string          `json:"ca_cert_pem"`
+	CAKeyPEM     string          `json:"ca_key_pem"`
+	Config       ConfigSnapshot  `json:"config"`
+	Version      int64           `json:"version"`
+}
+
+// HASync returns the full state bundle for HA standby replication.
+// Authenticated via a shared HA token (not node cert pinning).
+func (s *controlPlaneServer) HASync(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, fmt.Errorf("invalid request: %w", err)
+	}
+
+	// Verify HA token.
+	if !globalHA.VerifyToken(req.Token) {
+		return nil, status.Errorf(codes.PermissionDenied, "invalid HA token")
+	}
+
+	// Build state bundle.
+	stateJSON, err := globalClusterStore.ExportState()
+	if err != nil {
+		return nil, fmt.Errorf("export cluster state: %w", err)
+	}
+
+	bundle := HAStateBundle{
+		ClusterState: stateJSON,
+		CACertPEM:    string(globalClusterCA.CACertPEM()),
+		CAKeyPEM:     string(globalClusterCA.CAKeyPEM()),
+		Config:       CurrentConfigSnapshot(),
+		Version:      globalConfigStore.Get().Version,
+	}
+
+	resp, _ := json.Marshal(bundle)
+	return resp, nil
+}
+
 // StartControlPlaneGRPC starts the gRPC server for the Control Plane.
 // addr example: ":50051"
 // certFile/keyFile: mTLS certificate paths.  Pass empty strings for insecure
@@ -745,6 +798,10 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 				MethodName: "RenewCert",
 				Handler:    wrapUnary(svc.RenewCert),
 			},
+			{
+				MethodName: "HASync",
+				Handler:    wrapUnary(svc.HASync),
+			},
 		},
 		Streams: []grpc.StreamDesc{},
 	}, svc)
@@ -788,9 +845,18 @@ func wrapUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error
 
 // DataPlaneClient polls the Control Plane for configuration and applies changes
 // to the local proxy state (blocklist, IP filter, rate limiter).
+//
+// When multiple CP addresses are configured (HA mode), the client automatically
+// fails over to the next address on connection failure, trying each in order.
 type DataPlaneClient struct {
 	nodeID      string
 	conn        *grpc.ClientConn
+	addrs       []string // all CP addresses (for HA failover)
+	activeIdx   int      // index into addrs of current connection
+	certFile    string   // TLS cert for reconnection
+	keyFile     string   // TLS key for reconnection
+	caFile      string   // CA cert for reconnection
+	mu          sync.Mutex
 	lastVersion int64
 	failCount   int // consecutive fetch failures for exponential backoff
 }
@@ -814,13 +880,41 @@ func (c *DataPlaneClient) resetBackoff() {
 	c.failCount = 0
 }
 
-// NewDataPlaneClient connects to the Control Plane at addr.
+// NewDataPlaneClient connects to the Control Plane at addr. The addr parameter
+// may contain multiple comma-separated addresses for HA failover (e.g.
+// "cp1:50051,cp2:50051"). The client connects to the first reachable address
+// and automatically fails over to the next on connection failure.
 func NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile string) (*DataPlaneClient, error) {
+	addrs := strings.Split(addr, ",")
+	for i := range addrs {
+		addrs[i] = strings.TrimSpace(addrs[i])
+	}
+
+	c := &DataPlaneClient{
+		nodeID:   nodeID,
+		addrs:    addrs,
+		certFile: certFile,
+		keyFile:  keyFile,
+		caFile:   caFile,
+	}
+
+	// Connect to the first reachable CP.
+	if err := c.connect(addrs[0]); err != nil {
+		return nil, err
+	}
+	if len(addrs) > 1 {
+		logger.Printf("DataPlane: HA mode — %d CP addresses configured, failover enabled", len(addrs))
+	}
+	return c, nil
+}
+
+// connect establishes a gRPC connection to the given address.
+func (c *DataPlaneClient) connect(addr string) error {
 	var dialOpt grpc.DialOption
-	if certFile != "" && keyFile != "" {
-		creds, err := buildClientTLS(certFile, keyFile, caFile)
+	if c.certFile != "" && c.keyFile != "" {
+		creds, err := buildClientTLS(c.certFile, c.keyFile, c.caFile)
 		if err != nil {
-			return nil, fmt.Errorf("gRPC client TLS: %w", err)
+			return fmt.Errorf("gRPC client TLS: %w", err)
 		}
 		dialOpt = grpc.WithTransportCredentials(creds)
 	} else {
@@ -830,10 +924,39 @@ func NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile string) (*DataPl
 
 	conn, err := grpc.NewClient(addr, dialOpt)
 	if err != nil {
-		return nil, fmt.Errorf("gRPC dial: %w", err)
+		return fmt.Errorf("gRPC dial %s: %w", addr, err)
 	}
+	// Close old connection if any.
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.conn = conn
 	logger.Printf("DataPlane: connected to ControlPlane at %s", addr)
-	return &DataPlaneClient{nodeID: nodeID, conn: conn}, nil
+	return nil
+}
+
+// failover tries the next CP address in the list. Returns true if a new
+// connection was established, false if all addresses have been tried.
+func (c *DataPlaneClient) failover() bool {
+	if len(c.addrs) <= 1 {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Try each address once (round-robin).
+	for i := 1; i < len(c.addrs); i++ {
+		nextIdx := (c.activeIdx + i) % len(c.addrs)
+		nextAddr := c.addrs[nextIdx]
+		logger.Printf("DataPlane: failing over to CP at %s", nextAddr)
+		if err := c.connect(nextAddr); err != nil {
+			logger.Printf("DataPlane: failover to %s failed: %v", nextAddr, err)
+			continue
+		}
+		c.activeIdx = nextIdx
+		c.failCount = 0
+		return true
+	}
+	return false
 }
 
 // Run starts background loops for config sync, metrics, and cluster gossip.
@@ -863,9 +986,28 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	raw, err := c.call(ctx, methodGetConfig, json.RawMessage("{}"))
 	if err != nil {
-		c.backoff(ctx)
+		c.failCount++
 		logger.Printf("DataPlane: GetConfig error: %v", err)
-		return
+		// After 3 consecutive failures, attempt failover to another CP.
+		if c.failCount >= 3 && len(c.addrs) > 1 {
+			if c.failover() {
+				logger.Printf("DataPlane: failover succeeded — retrying GetConfig")
+				// Retry immediately on the new connection.
+				raw, err = c.call(ctx, methodGetConfig, json.RawMessage("{}"))
+				if err != nil {
+					logger.Printf("DataPlane: GetConfig error after failover: %v", err)
+					c.backoff(ctx)
+					return
+				}
+				// Fall through to apply.
+			} else {
+				c.backoff(ctx)
+				return
+			}
+		} else {
+			c.backoff(ctx)
+			return
+		}
 	}
 	c.resetBackoff()
 	var snap ConfigSnapshot
@@ -1028,6 +1170,40 @@ func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawM
 	return resp, err
 }
 
+// activeDPClient is a reference to the running DP client so that config sync
+// can dynamically update the CP address list for HA failover discovery.
+var activeDPClient atomic.Pointer[DataPlaneClient]
+
+// updateDPAddresses updates the active DP client's CP address list.
+// Called from applyConfigSnapshot when the CP pushes new HA addresses.
+func updateDPAddresses(addrs []string) {
+	c := activeDPClient.Load()
+	if c == nil || len(addrs) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Only update if the addresses actually changed.
+	if slicesEqual(c.addrs, addrs) {
+		return
+	}
+	old := c.addrs
+	c.addrs = addrs
+	logger.Printf("DataPlane: CP address list updated: %v → %v", old, addrs)
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // lastSeenCAFingerprint tracks the most recent cluster CA fingerprint the DP has seen.
 // When this changes, the DP knows the CP rotated the CA and triggers immediate cert renewal.
 var lastSeenCAFingerprint atomic.Value // string
@@ -1117,6 +1293,11 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		lastSeenCAFingerprint.Store(snap.CAFingerprint)
 	}
 
+	// HA: update DP's CP address list for automatic failover discovery.
+	if len(snap.CPAddresses) > 0 {
+		updateDPAddresses(snap.CPAddresses)
+	}
+
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
 }
@@ -1154,7 +1335,32 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	snap.DPIPatterns = dpiScanner.List()
 	snap.MaxConnsPerIP = connLimiter.MaxPerIP()
 
+	// HA: include all CP addresses so DPs auto-discover failover targets.
+	snap.CPAddresses = buildCPAddressList()
+
 	return snap
+}
+
+// buildCPAddressList returns the list of all CP gRPC addresses for DP failover.
+// Includes this leader's address + the HA standby address (if HA is enabled).
+func buildCPAddressList() []string {
+	haStatus := globalHA.Status()
+	if !haStatus.Enabled {
+		return nil // no HA = no address list needed
+	}
+	clusterRoleMu.RLock()
+	myAddr := clusterRole.grpcAddr
+	clusterRoleMu.RUnlock()
+
+	// haStatus.PeerAddr is the leader's externally reachable address (set during Enable HA).
+	// For the leader, we include: [leader_addr, standby_addr]
+	// The leader's reachable addr is stored as peerAddr in the HA state.
+	addrs := []string{haStatus.PeerAddr}
+	// Also include the local listen addr if it's different and looks reachable.
+	if myAddr != "" && myAddr != haStatus.PeerAddr {
+		addrs = append(addrs, myAddr)
+	}
+	return addrs
 }
 
 // ─── TLS helpers ──────────────────────────────────────────────────────────────

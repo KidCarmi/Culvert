@@ -861,6 +861,16 @@ tr.dragging  { opacity: .4; }
           <span id="sec-scan-enabled-badge" style="font-size:.72rem;font-weight:600;padding:2px 8px;border-radius:99px;margin-left:8px"></span>
         </div>
         <div class="panel-body">
+          <div id="scan-svc-banner" style="display:none;background:var(--surface2);border-radius:8px;padding:12px 14px;margin-bottom:14px;border-left:3px solid var(--accent)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <span style="font-weight:600;font-size:.85rem">Scan Service Mode</span>
+              <span id="scan-svc-mode-badge" style="font-size:.68rem;font-weight:600;padding:1px 8px;border-radius:99px;background:rgba(20,184,166,.15);color:var(--accent2)"></span>
+            </div>
+            <div style="font-size:.78rem;color:var(--muted)">
+              <span id="scan-svc-url-display"></span>
+              <span id="scan-svc-status-display" style="margin-left:8px"></span>
+            </div>
+          </div>
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
             <div style="background:var(--surface2);border-radius:8px;padding:12px">
               <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">ClamAV</div>
@@ -2279,11 +2289,12 @@ Firefox (all platforms):
           <span class="panel-title">Cluster Overview</span>
           <button class="btn ghost sm" onclick="loadCluster()">↺ Refresh</button>
         </div>
-        <div class="cards" id="cluster-cards" style="grid-template-columns:repeat(4,1fr)">
+        <div class="cards" id="cluster-cards" style="grid-template-columns:repeat(5,1fr)">
           <div class="card"><div class="card-label">Role</div><div class="card-value" id="cluster-role">—</div></div>
           <div class="card"><div class="card-label">Node ID</div><div class="card-value" id="cluster-node-id">—</div></div>
           <div class="card"><div class="card-label">gRPC Address</div><div class="card-value" id="cluster-grpc">—</div></div>
           <div class="card"><div class="card-label">Enrolled Nodes</div><div class="card-value" id="cluster-enrolled-count">0</div></div>
+          <div class="card" id="cluster-ha-card" style="display:none"><div class="card-label">HA Status</div><div class="card-value" id="cluster-ha-status">—</div></div>
         </div>
       </div>
 
@@ -2311,6 +2322,44 @@ Firefox (all platforms):
             <div style="margin-top:4px">
               <button class="btn" onclick="enableControlPlane()">Enable Control Plane</button>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- HA Panel (shown only on CP when HA is not yet enabled) -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-ha-panel">
+        <div class="panel-header"><span class="panel-title">High Availability</span></div>
+        <div style="padding:20px">
+          <div id="ha-disabled-section">
+            <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">
+              Enable Active/Passive HA to run a standby Control Plane that automatically takes over
+              if this instance goes down. No shared filesystem needed — Culvert replicates state
+              to the standby over the existing gRPC channel automatically.
+            </p>
+            <div style="display:grid;gap:12px;max-width:480px">
+              <label style="font-size:.8rem;color:var(--muted)">This Server's Reachable Address <span style="color:#ef4444">*</span>
+                <input id="ha-leader-addr" class="input" placeholder="e.g. cp1.internal:50051" style="margin-top:4px">
+                <span style="font-size:.7rem;color:var(--muted);margin-top:2px;display:block">The hostname/IP that the standby server can reach this CP on</span>
+              </label>
+              <div style="margin-top:4px">
+                <button class="btn" id="ha-enable-btn" onclick="enableHA()">Enable HA</button>
+              </div>
+            </div>
+          </div>
+          <!-- Shown after HA is enabled -->
+          <div id="ha-enabled-section" style="display:none">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px">
+              <div class="stat-card"><div class="stat-val" id="ha-role-val">—</div><div class="stat-label">This Node</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-peer-val">—</div><div class="stat-label">Peer</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-since-val">—</div><div class="stat-label">Since</div></div>
+            </div>
+            <details style="margin-top:12px">
+              <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;font-weight:600">Deploy Standby CP</summary>
+              <p style="color:var(--muted);font-size:.8rem;margin:8px 0">
+                Run this command on the standby server. It must have access to the same shared storage directory.
+              </p>
+              <pre id="ha-deploy-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="copyHADeployCmd()" title="Click to copy"></pre>
+            </details>
           </div>
         </div>
       </div>
@@ -3737,9 +3786,32 @@ async function loadSecScanStatus() {
       badge.style.background = s.enabled ? 'rgba(34,197,94,.15)' : 'rgba(100,116,139,.15)';
       badge.style.color      = s.enabled ? 'var(--green)' : 'var(--muted)';
     }
+
+    // Scan Service Mode banner
+    const svcBanner = document.getElementById('scan-svc-banner');
+    if (svcBanner && s.scan_svc_mode) {
+      const isRemote = s.scan_svc_mode === 'remote';
+      svcBanner.style.display = isRemote ? 'block' : 'none';
+      if (isRemote) {
+        const modeBadge = document.getElementById('scan-svc-mode-badge');
+        if (modeBadge) modeBadge.textContent = 'REMOTE';
+        const urlEl = document.getElementById('scan-svc-url-display');
+        if (urlEl) urlEl.textContent = s.scan_svc_url || '';
+        const statusEl = document.getElementById('scan-svc-status-display');
+        if (statusEl) {
+          const st = s.scan_svc_status;
+          if (st && st.startsWith('unreachable')) {
+            statusEl.innerHTML = '<span style="color:var(--red)">&#9679; ' + escHtml(st) + '</span>';
+          } else {
+            statusEl.innerHTML = '<span style="color:var(--green)">&#9679; connected</span>';
+          }
+        }
+      }
+    }
+
     const clamEl = document.getElementById('sec-clamav-status');
     if (clamEl) {
-      const ok = s.clamav_status === 'ok';
+      const ok = s.clamav_status === 'ok' || s.clamav_status === 'connected';
       clamEl.textContent  = s.clamav_status || '—';
       clamEl.style.color  = ok ? 'var(--green)' : (s.clamav_status === 'disabled' ? 'var(--muted)' : 'var(--red)');
     }
@@ -6136,6 +6208,20 @@ async function loadCluster() {
     document.getElementById('cluster-node-id').textContent = r.nodeID || '—';
     document.getElementById('cluster-grpc').textContent = r.grpcAddr || '—';
 
+    // HA status card
+    const ha = r.ha || {};
+    const haCard = document.getElementById('cluster-ha-card');
+    const haStatus = document.getElementById('cluster-ha-status');
+    if (ha.enabled) {
+      haCard.style.display = '';
+      const haColor = ha.role === 'leader' ? '#22c55e' : '#f59e0b';
+      const haIcon = ha.role === 'leader' ? '\u25cf' : '\u25cb';
+      haStatus.innerHTML = `<span style="color:${haColor}">${haIcon}</span> ${escHtml(ha.role)}` +
+        (ha.peer_addr ? `<br><span style="font-size:.65rem;color:var(--muted)">peer: ${escHtml(ha.peer_addr)}</span>` : '');
+    } else {
+      haCard.style.display = 'none';
+    }
+
     const isCP = r.role === 'control-plane';
     const enrollBtn = document.getElementById('cluster-enroll-btn');
     const tokensPanel = document.getElementById('cluster-tokens-panel');
@@ -6220,6 +6306,7 @@ async function loadCluster() {
     const showCluster = isCP || r.role === 'data-plane';
     loadClusterCA();
     loadCARotation();
+    loadHA(isCP);
     loadClusterMetrics(isCP);
     loadClusterRateLimits(showCluster);
     loadClusterHealth(isCP);
@@ -6460,6 +6547,61 @@ async function enableControlPlane() {
   } finally {
     btn.disabled = false; btn.textContent = 'Enable Control Plane';
   }
+}
+
+// ── HA Functions ──────────────────────────────────────────────────────────
+async function enableHA() {
+  const leaderAddr = document.getElementById('ha-leader-addr').value.trim();
+  if (!leaderAddr) { toast('This server\'s reachable address is required', 'error'); return; }
+  const btn = document.getElementById('ha-enable-btn');
+  btn.disabled = true; btn.textContent = 'Enabling…';
+  try {
+    const r = await api('/api/cluster/ha', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ leader_addr: leaderAddr })
+    });
+    if (!r) return;
+    toast('HA enabled — this node is now the leader', 'success');
+    loadCluster();
+  } catch(e) {
+    toast('Failed to enable HA: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Enable HA';
+  }
+}
+
+async function loadHA(isCP) {
+  const panel = document.getElementById('cluster-ha-panel');
+  if (!isCP) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  try {
+    const r = await api('/api/cluster/ha');
+    if (!r) return;
+    const disabledSec = document.getElementById('ha-disabled-section');
+    const enabledSec = document.getElementById('ha-enabled-section');
+    if (r.enabled) {
+      disabledSec.style.display = 'none';
+      enabledSec.style.display = '';
+      const roleColor = r.role === 'leader' ? '#22c55e' : '#f59e0b';
+      document.getElementById('ha-role-val').innerHTML = `<span style="color:${roleColor}">${escHtml(r.role)}</span>`;
+      document.getElementById('ha-peer-val').textContent = r.peer_addr || '—';
+      document.getElementById('ha-since-val').textContent = r.since ? timeAgo(new Date(r.since)) : '—';
+      if (r.deploy_cmd) {
+        document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
+      }
+    } else {
+      disabledSec.style.display = '';
+      enabledSec.style.display = 'none';
+    }
+  } catch(e) {
+    // silent — panel is informational
+  }
+}
+
+function copyHADeployCmd() {
+  const cmd = document.getElementById('ha-deploy-cmd').textContent;
+  navigator.clipboard.writeText(cmd).then(() => toast('Deploy command copied', 'success'));
 }
 
 function timeAgo(date) {

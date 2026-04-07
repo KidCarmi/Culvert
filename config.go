@@ -120,6 +120,9 @@ type FileConfig struct {
 		KeyFile  string `yaml:"key_file"`  // TLS key for gRPC mTLS (optional)
 		CAFile   string `yaml:"ca_file"`   // CA cert for client validation (optional)
 		StateDB  string `yaml:"state_db"`  // Path to cluster.json (default: "cluster.json")
+		// HA is configured at runtime from the admin GUI (Enable HA button) or
+		// via --ha-join/--ha-token flags on the standby. No shared filesystem needed —
+		// state is replicated over the existing mTLS gRPC channel.
 	} `yaml:"cluster"`
 
 	// SecurityScan configures the local security scanning stack:
@@ -162,6 +165,16 @@ type FileConfig struct {
 		// scanning.  Responses larger than this are forwarded unscanned.
 		// Default: 5 (5 MiB).
 		MaxScanMB int `yaml:"max_scan_mb"`
+
+		// ScanSvcListen starts the scan microservice sidecar on this address.
+		// When set, this process runs ClamAV/YARA/DPI as an HTTP service that
+		// other proxy instances can call. Example: ":8484".
+		ScanSvcListen string `yaml:"scan_svc_listen"`
+
+		// ScanSvcURL is the URL of a remote scan microservice.
+		// When set, the proxy delegates body scanning to this service instead of
+		// running ClamAV/YARA/DPI in-process. Example: "http://scan-svc:8484".
+		ScanSvcURL string `yaml:"scan_svc_url"`
 	} `yaml:"security_scan"`
 }
 

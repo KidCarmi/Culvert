@@ -84,6 +84,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)             // POST — force immediate sync
 	mux.HandleFunc("/api/security-scan/feeds/domain-allowlist", apiDomainAllowlist) // GET/PUT — threat feed domain allowlist
 	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)            // POST — reload YARA rules from dir
+	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                   // GET — scan service mode info
 
 	// ── URL Categories (dynamic host-list management) ─────────────────────
 	mux.HandleFunc("/api/urlcat", apiURLCat)            // GET/POST/PUT/DELETE categories
@@ -150,6 +151,8 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/audit", apiClusterAudit)             // GET centralized audit log
 	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations) // GET revocation sync status
 	mux.HandleFunc("/api/cluster/rotation", apiClusterRotation)       // GET CA rotation progress
+	mux.HandleFunc("/api/cluster/ha", apiClusterHA)                   // GET HA status
+	mux.HandleFunc("/healthz", apiHealthz)                            // GET unauthenticated health check (LB probe)
 
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
@@ -3064,6 +3067,29 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET /api/security-scan/svc — returns scan microservice configuration.
+func apiScanSvcConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	resp := map[string]interface{}{
+		"remote_enabled": globalRemoteScanner.Enabled(),
+		"remote_url":     globalRemoteScanner.URL(),
+	}
+	if globalRemoteScanner.Enabled() {
+		if err := globalRemoteScanner.Health(); err != nil {
+			resp["remote_status"] = "unreachable: " + err.Error()
+		} else {
+			resp["remote_status"] = "connected"
+		}
+	}
+	jsonOK(w, resp)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CA Management API
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3417,6 +3443,7 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 		"uptime":         time.Since(startTime).Round(time.Second).String(),
 		"enrollEnabled":  globalClusterCA.Ready(),
 		"caFingerprint":  globalClusterCA.CACertFingerprint(),
+		"ha":             globalHA.Status(),
 	}
 	if clusterRole.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()
