@@ -2528,23 +2528,27 @@ Firefox (all platforms):
       <!-- Enrollment Modal (hidden by default) -->
       <div id="enroll-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;max-width:560px;width:90%">
-          <h3 style="margin:0 0 18px;font-size:1rem;color:var(--fg)">Enroll New Node</h3>
-          <div style="display:grid;gap:12px">
-            <label style="font-size:.8rem;color:var(--muted)">Node ID Prefix <span style="opacity:.5">(optional — restrict which node IDs can use this token)</span>
-              <input id="enroll-prefix" class="input" placeholder="e.g. dp-east-" style="margin-top:4px">
-            </label>
-            <label style="font-size:.8rem;color:var(--muted)">Allowed Source CIDR <span style="opacity:.5">(optional — restrict by IP range)</span>
-              <input id="enroll-cidr" class="input" placeholder="e.g. 10.0.0.0/8" style="margin-top:4px">
-            </label>
-            <label style="font-size:.8rem;color:var(--muted)">Token Expires In
-              <select id="enroll-ttl" class="input" style="margin-top:4px">
-                <option value="1">1 hour</option>
-                <option value="6">6 hours</option>
-                <option value="24" selected>24 hours</option>
-                <option value="168">7 days</option>
-              </select>
-            </label>
-          </div>
+          <h3 style="margin:0 0 10px;font-size:1rem;color:var(--fg)">Enroll New Node</h3>
+          <p style="font-size:.85rem;color:var(--muted);margin:0 0 16px">Generate a one-time token and get a single command to deploy a new Data Plane node.</p>
+          <details style="margin-bottom:4px">
+            <summary style="font-size:.78rem;color:var(--muted);cursor:pointer">Advanced options</summary>
+            <div style="display:grid;gap:12px;margin-top:10px;padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+              <label style="font-size:.8rem;color:var(--muted)">Node ID Prefix <span style="opacity:.5">(restrict which hostnames can use this token)</span>
+                <input id="enroll-prefix" class="input" placeholder="e.g. dp-east-" style="margin-top:4px">
+              </label>
+              <label style="font-size:.8rem;color:var(--muted)">Allowed Source CIDR <span style="opacity:.5">(restrict by IP range)</span>
+                <input id="enroll-cidr" class="input" placeholder="e.g. 10.0.0.0/8" style="margin-top:4px">
+              </label>
+              <label style="font-size:.8rem;color:var(--muted)">Token Expires In
+                <select id="enroll-ttl" class="input" style="margin-top:4px">
+                  <option value="1">1 hour</option>
+                  <option value="6">6 hours</option>
+                  <option value="24" selected>24 hours</option>
+                  <option value="168">7 days</option>
+                </select>
+              </label>
+            </div>
+          </details>
 
           <!-- Token result (shown after generation) -->
           <div id="enroll-result" style="display:none;margin-top:18px">
