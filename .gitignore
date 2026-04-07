@@ -17,8 +17,9 @@ dp-node.crt
 dp-node.key
 dp_enrollment.json
 
-# HA leader lock (runtime file on shared storage)
+# HA runtime files
 cp-leader.lock
+ha_config.json
 
 # Sensitive runtime state (these live in /data volume, not in git)
 data/
