@@ -187,7 +187,7 @@ func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 	if clam != nil {
 		name, found, err := clam.Scan(data)
 		if err != nil {
-			logger.Printf("SecurityScan: ClamAV error: %v", err)
+			logger.Printf("SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
 		} else if found {
 			atomic.AddInt64(&statClamBlocked, 1)
 			ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: name, Source: "clamav"})

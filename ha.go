@@ -101,7 +101,7 @@ func (h *HAState) EnableAsLeader(peerAddr string) string {
 		Role:     "leader",
 	})
 
-	logger.Printf("HA: enabled as leader (peer=%s)", peerAddr)
+	logger.Printf("HA: enabled as leader (peer=%s)", sanitizeLog(peerAddr))
 	return h.token
 }
 
@@ -130,7 +130,7 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 		Role:     "standby",
 	})
 
-	logger.Printf("HA: starting as standby (leader=%s)", leaderAddr)
+	logger.Printf("HA: starting as standby (leader=%s)", sanitizeLog(leaderAddr))
 
 	go h.standbyLoop(ctx, leaderAddr, token, grpcAddr, certFile, keyFile, caFile, onPromote)
 }
