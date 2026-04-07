@@ -311,8 +311,8 @@ func TestInitSessionSecretFromConfig_Valid(t *testing.T) {
 	origSecret := sessionSecret
 	defer func() { sessionSecret = origSecret }()
 
-	// 32 bytes = 64 hex chars
-	hexKey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	// 32 bytes = 64 hex chars (test-only, not a real key)
+	hexKey := "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff0000000011111111" //nolint:gosec // test value
 	initSessionSecretFromConfig(hexKey)
 	if len(sessionSecret) != 32 {
 		t.Fatalf("session secret length = %d, want 32", len(sessionSecret))
