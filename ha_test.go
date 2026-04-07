@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+// swapGlobalHA replaces globalHA with a fresh HAState and returns a cleanup
+// function that restores the original pointer. This avoids copying the
+// sync.RWMutex (which go vet forbids).
+func swapGlobalHA(t *testing.T) func() {
+	t.Helper()
+	orig := globalHA
+	globalHA = &HAState{}
+	return func() { globalHA = orig }
+}
+
 // ── HAState ─────────────────────────────────────────────────────────────────
 
 func TestHAState_Status_Disabled(t *testing.T) {
@@ -117,7 +127,6 @@ func TestGenerateHAToken(t *testing.T) {
 // ── HA Config Persistence ───────────────────────────────────────────────────
 
 func TestHAConfigPersistence(t *testing.T) {
-	// Save original and restore after test.
 	origPath := clusterDBPathGlobal
 	clusterDBPathGlobal = t.TempDir() + "/cluster.json"
 	defer func() { clusterDBPathGlobal = origPath }()
@@ -153,9 +162,7 @@ func TestHAConfigPersistence(t *testing.T) {
 // ── Health Endpoint ─────────────────────────────────────────────────────────
 
 func TestAPIHealthz_Standalone(t *testing.T) {
-	origHA := *globalHA
-	defer func() { *globalHA = origHA }()
-	*globalHA = HAState{}
+	defer swapGlobalHA(t)()
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -175,8 +182,7 @@ func TestAPIHealthz_Standalone(t *testing.T) {
 }
 
 func TestAPIHealthz_Leader(t *testing.T) {
-	origHA := *globalHA
-	defer func() { *globalHA = origHA }()
+	defer swapGlobalHA(t)()
 	globalHA.mu.Lock()
 	globalHA.role = "leader"
 	globalHA.since = time.Now()
@@ -197,8 +203,7 @@ func TestAPIHealthz_Leader(t *testing.T) {
 }
 
 func TestAPIHealthz_Standby(t *testing.T) {
-	origHA := *globalHA
-	defer func() { *globalHA = origHA }()
+	defer swapGlobalHA(t)()
 	globalHA.mu.Lock()
 	globalHA.role = "standby"
 	globalHA.since = time.Now()
@@ -237,8 +242,7 @@ func TestDataPlaneClient_MultiAddr(t *testing.T) {
 // ── HA API ──────────────────────────────────────────────────────────────────
 
 func TestAPIClusterHA_GET(t *testing.T) {
-	origHA := *globalHA
-	defer func() { *globalHA = origHA }()
+	defer swapGlobalHA(t)()
 	globalHA.mu.Lock()
 	globalHA.role = "leader"
 	globalHA.peerAddr = "cp1:50051"
@@ -268,9 +272,7 @@ func TestAPIClusterHA_GET(t *testing.T) {
 }
 
 func TestAPIClusterHA_EnableRequiresCP(t *testing.T) {
-	origHA := *globalHA
-	defer func() { *globalHA = origHA }()
-	*globalHA = HAState{}
+	defer swapGlobalHA(t)()
 
 	clusterRoleMu.Lock()
 	origRole := clusterRole.role
@@ -295,15 +297,14 @@ func TestAPIClusterHA_EnableRequiresCP(t *testing.T) {
 }
 
 func TestAPIClusterHA_Enable(t *testing.T) {
-	origHA := *globalHA
+	cleanup := swapGlobalHA(t)
 	origPath := clusterDBPathGlobal
+	clusterDBPathGlobal = t.TempDir() + "/cluster.json"
 	defer func() {
 		globalHA.Stop()
-		*globalHA = origHA
+		cleanup()
 		clusterDBPathGlobal = origPath
 	}()
-	*globalHA = HAState{}
-	clusterDBPathGlobal = t.TempDir() + "/cluster.json"
 
 	clusterRoleMu.Lock()
 	origRole := clusterRole.role
@@ -353,8 +354,7 @@ func TestAPIClusterHA_Enable(t *testing.T) {
 // ── HASync RPC ──────────────────────────────────────────────────────────────
 
 func TestHASync_InvalidToken(t *testing.T) {
-	origHA := *globalHA
-	defer func() { *globalHA = origHA }()
+	defer swapGlobalHA(t)()
 	globalHA.mu.Lock()
 	globalHA.role = "leader"
 	globalHA.token = "correct-token"
@@ -369,8 +369,7 @@ func TestHASync_InvalidToken(t *testing.T) {
 }
 
 func TestHASync_ValidToken(t *testing.T) {
-	origHA := *globalHA
-	defer func() { *globalHA = origHA }()
+	defer swapGlobalHA(t)()
 	globalHA.mu.Lock()
 	globalHA.role = "leader"
 	globalHA.token = "correct-token"
@@ -404,7 +403,6 @@ func TestClusterStore_ExportImport(t *testing.T) {
 		t.Fatalf("ExportState: %v", err)
 	}
 
-	// Import into a new store.
 	cs2 := newTestClusterStore(t)
 	if err := cs2.ImportFullState(exported); err != nil {
 		t.Fatalf("ImportFullState: %v", err)
@@ -443,7 +441,6 @@ func TestUpdateDPAddresses(t *testing.T) {
 	activeDPClient.Store(c)
 	defer activeDPClient.Store(nil)
 
-	// Update with new addresses.
 	updateDPAddresses([]string{"cp1:50051", "cp2:50051"})
 
 	c.mu.Lock()
@@ -465,7 +462,6 @@ func TestUpdateDPAddresses_NoChange(t *testing.T) {
 	activeDPClient.Store(c)
 	defer activeDPClient.Store(nil)
 
-	// Same addresses — should not log or change.
 	updateDPAddresses([]string{"cp1:50051", "cp2:50051"})
 
 	c.mu.Lock()
@@ -478,9 +474,7 @@ func TestUpdateDPAddresses_NoChange(t *testing.T) {
 }
 
 func TestBuildCPAddressList_NoHA(t *testing.T) {
-	origHA := *globalHA
-	defer func() { *globalHA = origHA }()
-	*globalHA = HAState{} // HA disabled
+	defer swapGlobalHA(t)()
 
 	addrs := buildCPAddressList()
 	if addrs != nil {
@@ -489,8 +483,7 @@ func TestBuildCPAddressList_NoHA(t *testing.T) {
 }
 
 func TestBuildCPAddressList_WithHA(t *testing.T) {
-	origHA := *globalHA
-	defer func() { *globalHA = origHA }()
+	defer swapGlobalHA(t)()
 	globalHA.mu.Lock()
 	globalHA.role = "leader"
 	globalHA.peerAddr = "cp1.internal:50051"
