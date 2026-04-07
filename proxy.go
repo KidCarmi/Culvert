@@ -579,10 +579,11 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Security body scan (ClamAV + YARA) for non-tunnel HTTP responses.
 	// Skip buffering if Content-Length signals the response exceeds the
 	// scan limit — avoids wasting memory and I/O on oversized bodies.
-	if globalSecScanner.BodyScanEnabled() && (resp.ContentLength < 0 || resp.ContentLength <= globalSecScanner.MaxBytes()) {
+	scanActive := globalRemoteScanner.Enabled() || globalSecScanner.BodyScanEnabled()
+	if scanActive && (resp.ContentLength < 0 || resp.ContentLength <= globalSecScanner.MaxBytes()) {
 		buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
 		if readErr == nil {
-			scanResult := safeScanBody(buffered)
+			scanResult := safeScanBodyWithCT(buffered, resp.Header.Get("Content-Type"))
 			if scanResult != nil {
 				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)
 				atomic.AddInt64(&statBlocked, 1)
@@ -1038,22 +1039,34 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 				break
 			}
 			if readErr == nil {
-				// DPI regex scan (text content only).
-				if dpiScanner.Enabled() && isTextContentType(ct) {
-					if pattern, matched := safeDPIScan(body); matched {
+				// When remote scan service is active, delegate all scanning
+				// (ClamAV + YARA + DPI) in a single remote call.
+				if globalRemoteScanner.Enabled() {
+					if scanResult := safeScanBodyWithCT(body, ct); scanResult != nil {
 						origBody.Close()
-						recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern, "")
-						dpiBlock(clientTLS, hostOnly, pattern)
+						atomic.AddInt64(&statBlocked, 1)
+						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "")
+						scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
 						break
 					}
-				}
-				// ClamAV + YARA body scan (all content types).
-				if scanResult := safeScanBody(body); scanResult != nil {
-					origBody.Close()
-					atomic.AddInt64(&statBlocked, 1)
-					recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "")
-					scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
-					break
+				} else {
+					// DPI regex scan (text content only).
+					if dpiScanner.Enabled() && isTextContentType(ct) {
+						if pattern, matched := safeDPIScan(body); matched {
+							origBody.Close()
+							recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern, "")
+							dpiBlock(clientTLS, hostOnly, pattern)
+							break
+						}
+					}
+					// ClamAV + YARA body scan (all content types).
+					if scanResult := safeScanBody(body); scanResult != nil {
+						origBody.Close()
+						atomic.AddInt64(&statBlocked, 1)
+						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "")
+						scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
+						break
+					}
 				}
 				// No match: reassemble the body (buffered prefix + remaining bytes).
 				resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), origBody))

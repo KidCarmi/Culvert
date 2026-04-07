@@ -97,6 +97,8 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	clusterDB := flag.String("cluster-db", "", "Path to persist cluster state (e.g. /data/cluster.json)")
 	clusterInsecureFlag := flag.Bool("cluster-insecure", false, "Allow insecure (non-TLS) gRPC for development — NEVER use in production")
 	revocationsFile := flag.String("revocations-file", "", "Path to persist session revocations across restarts (e.g. /data/revocations.json)")
+	scanSvcListen := flag.String("scan-svc-listen", "", "Run as scan microservice sidecar on this address (e.g. :8484)")
+	scanSvcURL := flag.String("scan-svc-url", "", "Remote scan service URL (e.g. http://scan-svc:8484) — disables local ClamAV/YARA")
 	flag.Parse()
 
 	clusterInsecure = *clusterInsecureFlag
@@ -603,7 +605,24 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	yaraDir := firstStr(*yaraRulesDir, secCfg.YARARulesDir)
 	feedDB := firstStr(*threatFeedDB, secCfg.ThreatFeedDB)
 
-	if secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "" {
+	// Remote scan service mode: delegate body scanning to a sidecar.
+	remoteScanURL := firstStr(*scanSvcURL, secCfg.ScanSvcURL)
+	if remoteScanURL != "" {
+		globalRemoteScanner.Init(remoteScanURL)
+		logger.Printf("ScanSvc  → remote mode, delegating to %s", remoteScanURL)
+		// Threat feeds still run locally (URL/domain checks are cheap).
+		if feedDB != "" || secCfg.Enabled {
+			syncInterval := 6 * time.Hour
+			if secCfg.SyncInterval != "" {
+				if d, err := time.ParseDuration(secCfg.SyncInterval); err == nil {
+					syncInterval = d
+				}
+			}
+			globalThreatFeed.Init(feedDB, syncInterval)
+			globalThreatFeed.Start(appLifecycleCtx)
+			logger.Printf("ThreatFeed → sync every %s, db=%q", syncInterval, feedDB)
+		}
+	} else if secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "" {
 		// Scan result cache TTL.
 		cacheTTL := time.Hour
 		if secCfg.CacheTTL != "" {
@@ -648,6 +667,17 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 			globalThreatFeed.Start(appLifecycleCtx)
 			logger.Printf("ThreatFeed → sync every %s, db=%q", syncInterval, feedDB)
 		}
+	}
+
+	// Scan microservice sidecar: expose local scanners as an HTTP service.
+	svcListenAddr := firstStr(*scanSvcListen, secCfg.ScanSvcListen)
+	if svcListenAddr != "" {
+		svc := NewScanService(svcListenAddr)
+		go func() {
+			if err := svc.Start(appLifecycleCtx); err != nil {
+				logger.Printf("ScanSvc  → error: %v", err)
+			}
+		}()
 	}
 
 	// ── Upstream proxy chaining ──────────────────────────────────────────────

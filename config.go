@@ -165,6 +165,16 @@ type FileConfig struct {
 		// scanning.  Responses larger than this are forwarded unscanned.
 		// Default: 5 (5 MiB).
 		MaxScanMB int `yaml:"max_scan_mb"`
+
+		// ScanSvcListen starts the scan microservice sidecar on this address.
+		// When set, this process runs ClamAV/YARA/DPI as an HTTP service that
+		// other proxy instances can call. Example: ":8484".
+		ScanSvcListen string `yaml:"scan_svc_listen"`
+
+		// ScanSvcURL is the URL of a remote scan microservice.
+		// When set, the proxy delegates body scanning to this service instead of
+		// running ClamAV/YARA/DPI in-process. Example: "http://scan-svc:8484".
+		ScanSvcURL string `yaml:"scan_svc_url"`
 	} `yaml:"security_scan"`
 }
 

@@ -84,6 +84,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)             // POST — force immediate sync
 	mux.HandleFunc("/api/security-scan/feeds/domain-allowlist", apiDomainAllowlist) // GET/PUT — threat feed domain allowlist
 	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)            // POST — reload YARA rules from dir
+	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                   // GET — scan service mode info
 
 	// ── URL Categories (dynamic host-list management) ─────────────────────
 	mux.HandleFunc("/api/urlcat", apiURLCat)            // GET/POST/PUT/DELETE categories
@@ -3064,6 +3065,29 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		logger.Printf("apiSecYARAReload: encode error: %v", err)
 	}
+}
+
+// GET /api/security-scan/svc — returns scan microservice configuration.
+func apiScanSvcConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	resp := map[string]interface{}{
+		"remote_enabled": globalRemoteScanner.Enabled(),
+		"remote_url":     globalRemoteScanner.URL(),
+	}
+	if globalRemoteScanner.Enabled() {
+		if err := globalRemoteScanner.Health(); err != nil {
+			resp["remote_status"] = "unreachable: " + err.Error()
+		} else {
+			resp["remote_status"] = "connected"
+		}
+	}
+	jsonOK(w, resp)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

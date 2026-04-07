@@ -215,6 +215,7 @@ func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 // from crashing the request handler goroutine.
 
 // safeScanBody wraps globalSecScanner.ScanBody with panic recovery.
+// When a remote scan service is configured, it delegates to the sidecar instead.
 func safeScanBody(data []byte) (result *SecurityScanResult) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -222,10 +223,29 @@ func safeScanBody(data []byte) (result *SecurityScanResult) {
 			result = nil
 		}
 	}()
+	if globalRemoteScanner.Enabled() {
+		return globalRemoteScanner.ScanBody(data, "")
+	}
+	return globalSecScanner.ScanBody(data)
+}
+
+// safeScanBodyWithCT is like safeScanBody but passes a content type hint
+// to the remote scanner so it can also apply DPI checks.
+func safeScanBodyWithCT(data []byte, contentType string) (result *SecurityScanResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Printf("PANIC in ScanBody recovered: %v", r)
+			result = nil
+		}
+	}()
+	if globalRemoteScanner.Enabled() {
+		return globalRemoteScanner.ScanBody(data, contentType)
+	}
 	return globalSecScanner.ScanBody(data)
 }
 
 // safeDPIScan wraps dpiScanner.Scan with panic recovery.
+// When a remote scan service is configured, DPI is handled by safeScanBodyWithCT.
 func safeDPIScan(data []byte) (pattern string, matched bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -277,6 +297,10 @@ func maxScanBufferBytes() int64 {
 // bodyNeedsBuffering reports whether a response body must be fully buffered
 // before forwarding, based on the active scanners and the content type.
 func bodyNeedsBuffering(contentType string) bool {
+	// Remote scan service handles all scan types.
+	if globalRemoteScanner.Enabled() {
+		return true
+	}
 	if dpiScanner.Enabled() && isTextContentType(contentType) {
 		return true
 	}
@@ -291,10 +315,34 @@ func bodyNeedsBuffering(contentType string) bool {
 // secScanStatusMap returns a map suitable for JSON serialisation by the
 // /api/security-scan/status endpoint.
 func secScanStatusMap() map[string]interface{} {
+	// When remote scanner is active, fetch status from the sidecar.
+	if globalRemoteScanner.Enabled() {
+		m := map[string]interface{}{
+			"enabled":      true,
+			"scan_svc_mode": "remote",
+			"scan_svc_url":  globalRemoteScanner.URL(),
+		}
+		if status, err := globalRemoteScanner.Status(); err == nil {
+			for k, v := range status {
+				m[k] = v
+			}
+		} else {
+			m["scan_svc_status"] = fmt.Sprintf("unreachable: %v", err)
+		}
+		// Always include local threat feed stats (feeds run locally even with remote scanning).
+		feedTotal, feedLastSync, feedInterval := globalThreatFeed.Stats()
+		m["threat_feed_entries"] = feedTotal
+		m["threat_feed_last_sync"] = feedLastSync
+		m["threat_feed_interval"] = feedInterval.String()
+		m["stat_feed_blocked"] = atomic.LoadInt64(&statThreatFeedBlocked)
+		return m
+	}
+
 	feedTotal, feedLastSync, feedInterval := globalThreatFeed.Stats()
 	hits, misses, cacheSize := globalSecScanner.cache.Stats()
 	return map[string]interface{}{
 		"enabled":               globalSecScanner.Enabled(),
+		"scan_svc_mode":         "local",
 		"clamav_status":         globalSecScanner.ClamAVStatus(),
 		"yara_rules":            globalYARA.Count(),
 		"threat_feed_entries":   feedTotal,
