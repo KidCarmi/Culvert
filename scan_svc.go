@@ -81,7 +81,9 @@ func (ss *ScanService) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Parent ctx is already cancelled here; we need an independent context
+		// with a deadline for the graceful shutdown window.
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // #nosec G118 -- shutdown needs independent context after parent cancellation
 		defer cancel()
 		ss.server.Shutdown(shutCtx) //nolint:errcheck
 	}()
