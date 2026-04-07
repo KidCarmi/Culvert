@@ -1,6 +1,7 @@
 # Compiled binaries
 proxy
 culvert
+updater/culvert-updater
 
 # Local configuration (may contain real passwords — never commit)
 config.yaml

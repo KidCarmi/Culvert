@@ -295,6 +295,19 @@ func (cs *ClusterStore) DeleteToken(tokenHash string) bool {
 	return true
 }
 
+// TokenExists checks whether a plaintext token is valid (exists, unused, not expired).
+// It does NOT consume the token.
+func (cs *ClusterStore) TokenExists(plaintext string) bool {
+	hash := hashToken(plaintext)
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	tok, ok := cs.st.Tokens[hash]
+	if !ok || tok.Used || time.Now().After(tok.ExpiresAt) {
+		return false
+	}
+	return true
+}
+
 // ─── Node Registry ───────────────────────────────────────────────────────────
 
 // RegisterNode adds a newly enrolled node to the registry.

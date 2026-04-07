@@ -2528,32 +2528,40 @@ Firefox (all platforms):
       <!-- Enrollment Modal (hidden by default) -->
       <div id="enroll-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px;max-width:560px;width:90%">
-          <h3 style="margin:0 0 18px;font-size:1rem;color:var(--fg)">Enroll New Node</h3>
-          <div style="display:grid;gap:12px">
-            <label style="font-size:.8rem;color:var(--muted)">Node ID Prefix <span style="opacity:.5">(optional — restrict which node IDs can use this token)</span>
-              <input id="enroll-prefix" class="input" placeholder="e.g. dp-east-" style="margin-top:4px">
-            </label>
-            <label style="font-size:.8rem;color:var(--muted)">Allowed Source CIDR <span style="opacity:.5">(optional — restrict by IP range)</span>
-              <input id="enroll-cidr" class="input" placeholder="e.g. 10.0.0.0/8" style="margin-top:4px">
-            </label>
-            <label style="font-size:.8rem;color:var(--muted)">Token Expires In
-              <select id="enroll-ttl" class="input" style="margin-top:4px">
-                <option value="1">1 hour</option>
-                <option value="6">6 hours</option>
-                <option value="24" selected>24 hours</option>
-                <option value="168">7 days</option>
-              </select>
-            </label>
-          </div>
+          <h3 style="margin:0 0 10px;font-size:1rem;color:var(--fg)">Enroll New Node</h3>
+          <p style="font-size:.85rem;color:var(--muted);margin:0 0 16px">Generate a one-time token and get a single command to deploy a new Data Plane node.</p>
+          <details style="margin-bottom:4px">
+            <summary style="font-size:.78rem;color:var(--muted);cursor:pointer">Advanced options</summary>
+            <div style="display:grid;gap:12px;margin-top:10px;padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+              <label style="font-size:.8rem;color:var(--muted)">Node ID Prefix <span style="opacity:.5">(restrict which hostnames can use this token)</span>
+                <input id="enroll-prefix" class="input" placeholder="e.g. dp-east-" style="margin-top:4px">
+              </label>
+              <label style="font-size:.8rem;color:var(--muted)">Allowed Source CIDR <span style="opacity:.5">(restrict by IP range)</span>
+                <input id="enroll-cidr" class="input" placeholder="e.g. 10.0.0.0/8" style="margin-top:4px">
+              </label>
+              <label style="font-size:.8rem;color:var(--muted)">Token Expires In
+                <select id="enroll-ttl" class="input" style="margin-top:4px">
+                  <option value="1">1 hour</option>
+                  <option value="6">6 hours</option>
+                  <option value="24" selected>24 hours</option>
+                  <option value="168">7 days</option>
+                </select>
+              </label>
+            </div>
+          </details>
 
           <!-- Token result (shown after generation) -->
           <div id="enroll-result" style="display:none;margin-top:18px">
-            <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">Enrollment Command <span style="opacity:.5">(copy and run on the new server)</span></div>
+            <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">One-Click Bootstrap <span style="opacity:.5">(installs Docker + starts DP node automatically)</span></div>
             <pre id="enroll-result-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="copyEnrollCmd()" title="Click to copy"></pre>
-            <div style="margin-top:8px;font-size:.75rem;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-              Or manually: <code id="enroll-result-manual" style="color:var(--accent);font-size:.72rem"></code>
-              <button class="btn ghost sm" style="font-size:.65rem;padding:2px 6px" onclick="copyEnrollManual()" title="Copy URL">Copy</button>
-            </div>
+            <div style="font-size:.7rem;color:var(--muted);margin-top:4px;opacity:.7">Click to copy. Paste and run on any Linux server — Docker will be installed if needed.</div>
+            <details style="margin-top:12px">
+              <summary style="font-size:.78rem;color:var(--muted);cursor:pointer">Advanced: manual binary enrollment</summary>
+              <div style="margin-top:8px;font-size:.75rem;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <code id="enroll-result-manual" style="color:var(--accent);font-size:.72rem"></code>
+                <button class="btn ghost sm" style="font-size:.65rem;padding:2px 6px" onclick="copyEnrollManual()" title="Copy URL">Copy</button>
+              </div>
+            </details>
           </div>
 
           <div style="display:flex;gap:10px;margin-top:20px;justify-content:flex-end">
@@ -2671,6 +2679,31 @@ Firefox (all platforms):
           </table>
         </div>
       </div>
+
+      <!-- Registry Settings (admin only) -->
+      <div class="panel" id="upd-registry-panel">
+        <div class="panel-header">
+          <span class="panel-title">Registry Settings</span>
+        </div>
+        <div style="padding:16px">
+          <p style="font-size:.85rem;color:var(--muted);margin-bottom:14px">Configure a custom container registry for enterprise or air-gapped environments. Leave empty to use the default (ghcr.io).</p>
+          <div class="form-row" style="margin-bottom:10px">
+            <label for="upd-reg-url" style="display:block;font-size:.82rem;color:var(--muted);margin-bottom:4px">Registry URL</label>
+            <input id="upd-reg-url" type="text" placeholder="e.g. registry.corp.internal/culvert" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
+          </div>
+          <div style="display:flex;gap:12px;margin-bottom:12px">
+            <div style="flex:1">
+              <label for="upd-reg-user" style="display:block;font-size:.82rem;color:var(--muted);margin-bottom:4px">Username</label>
+              <input id="upd-reg-user" type="text" placeholder="(optional)" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
+            </div>
+            <div style="flex:1">
+              <label for="upd-reg-pass" style="display:block;font-size:.82rem;color:var(--muted);margin-bottom:4px">Password</label>
+              <input id="upd-reg-pass" type="password" placeholder="(optional)" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
+            </div>
+          </div>
+          <button class="btn accent" onclick="saveRegistrySettings()">Save Registry Settings</button>
+        </div>
+      </div>
     </div><!-- /view-updates -->
 
     <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
@@ -2678,6 +2711,20 @@ Firefox (all platforms):
 
   </div><!-- /content -->
 </div><!-- /main -->
+
+<!-- ── CP Updating Overlay ─────────────────────────────────────────────── -->
+<div id="cp-updating-overlay" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(11,15,26,.97);align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:48px 44px;width:100%;max-width:440px;box-shadow:0 24px 64px rgba(0,0,0,.6);text-align:center">
+    <div style="font-size:2.4rem;margin-bottom:12px">&#8635;</div>
+    <h2 style="font-size:1.35rem;font-weight:700;margin-bottom:8px">Control Plane Updating</h2>
+    <p style="color:var(--muted);font-size:.9rem;margin-bottom:20px;line-height:1.55">The proxy container is restarting with the new version. This page will reload automatically when the update is complete.</p>
+    <div id="cp-upd-status" style="font-size:.9rem;color:var(--accent);margin-bottom:16px">Waiting for container restart...</div>
+    <div style="width:100%;height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:24px">
+      <div id="cp-upd-bar" style="width:0%;height:100%;background:var(--accent);transition:width .3s"></div>
+    </div>
+    <p style="font-size:.78rem;color:var(--muted)">If this takes more than 2 minutes, check Docker logs.</p>
+  </div>
+</div>
 
 <div id="toasts"></div>
 
@@ -6776,8 +6823,8 @@ async function generateEnrollToken() {
     // Show result
     document.getElementById('enroll-result').style.display = '';
     btn.style.display = 'none';
-    document.getElementById('enroll-result-cmd').textContent = r.enroll_cmd;
-    document.getElementById('enroll-result-manual').textContent = r.enroll_url;
+    document.getElementById('enroll-result-cmd').textContent = r.bootstrap_cmd || r.enroll_cmd;
+    document.getElementById('enroll-result-manual').textContent = r.enroll_cmd;
     toast('Enrollment token generated', 'success');
   } catch(e) {
     toast('Token generation failed: ' + e.message, 'error');
@@ -6979,6 +7026,7 @@ async function loadUpdates() {
   renderUpdateStatus(r);
   loadRollbackStatus();
   loadUpdateReports();
+  loadRegistrySettings();
   // Show cluster panel only for CP nodes
   const cs = await api('/api/cluster/status');
   if (cs && cs.role === 'control-plane') {
@@ -7079,7 +7127,8 @@ async function updateApply() {
       }
     }
   } catch(e) {
-    toast('Connection lost during update', 'error');
+    // Connection lost — CP container likely restarting. Show overlay.
+    showCPUpdatingOverlay();
   }
 }
 
@@ -7161,6 +7210,67 @@ async function loadUpdateReports() {
   tbody.innerHTML = reports.map(rp =>
     `<tr><td style="font-family:monospace;font-size:.82rem">${escHtml(rp.id)}</td><td>${rp.created_at ? new Date(rp.created_at).toLocaleString() : '—'}</td><td><a href="${BASE}/api/update/reports?id=${encodeURIComponent(rp.id)}" target="_blank" class="btn sm ghost">Download</a></td></tr>`
   ).join('');
+}
+
+// ── Registry Settings ────────────────────────────────────────────────────
+async function loadRegistrySettings() {
+  const r = await api('/api/update/registry');
+  if (!r) return;
+  document.getElementById('upd-reg-url').value = r.registry_url || '';
+  document.getElementById('upd-reg-user').value = r.username || '';
+  document.getElementById('upd-reg-pass').value = r.credential || '';
+}
+
+async function saveRegistrySettings() {
+  const body = {
+    registry_url: document.getElementById('upd-reg-url').value.trim(),
+    username: document.getElementById('upd-reg-user').value.trim(),
+    credential: document.getElementById('upd-reg-pass').value
+  };
+  const r = await api('/api/update/registry', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (r) toast('Registry settings saved', 'success');
+}
+
+// ── CP Updating Overlay ─────────────────────────────────────────────────
+let cpUpdOverlayActive = false;
+function showCPUpdatingOverlay() {
+  if (cpUpdOverlayActive) return;
+  cpUpdOverlayActive = true;
+  const ov = document.getElementById('cp-updating-overlay');
+  ov.style.display = 'flex';
+  const status = document.getElementById('cp-upd-status');
+  const bar = document.getElementById('cp-upd-bar');
+  let attempts = 0;
+  const maxAttempts = 60; // 2 minutes at 2s interval
+  const poll = setInterval(async () => {
+    attempts++;
+    bar.style.width = Math.min(90, (attempts / maxAttempts) * 100) + '%';
+    try {
+      const resp = await fetch(BASE + '/api/dashboard/health', { credentials: 'include', signal: AbortSignal.timeout(3000) });
+      if (resp.ok) {
+        clearInterval(poll);
+        status.textContent = 'Update complete! Reloading...';
+        status.style.color = 'var(--ok)';
+        bar.style.width = '100%';
+        setTimeout(() => location.reload(), 1500);
+        return;
+      }
+    } catch(e) { /* still down */ }
+    if (attempts <= 5) status.textContent = 'Container stopping...';
+    else if (attempts <= 15) status.textContent = 'Starting new container...';
+    else if (attempts <= 40) status.textContent = 'Verifying health...';
+    else status.textContent = 'Still waiting... check Docker logs if this persists.';
+    if (attempts >= maxAttempts) {
+      clearInterval(poll);
+      status.textContent = 'Timeout — the container may have rolled back. Try refreshing.';
+      status.style.color = 'var(--blocked)';
+      cpUpdOverlayActive = false;
+    }
+  }, 2000);
 }
 
 

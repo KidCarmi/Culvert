@@ -176,3 +176,58 @@ func TestUpdaterToken_Empty(t *testing.T) {
 		t.Logf("unexpected token: %s (ok if /data/updater_token.txt exists)", tok)
 	}
 }
+
+func TestAPIRegistrySettings_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/api/update/registry", nil)
+	w := httptest.NewRecorder()
+	apiRegistrySettings(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
+func TestAPIRegistrySettings_GetEmpty(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/update/registry", nil)
+	w := httptest.NewRecorder()
+	apiRegistrySettings(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var rs map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&rs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rs["registry_url"] != "" {
+		t.Errorf("expected empty registry_url, got %q", rs["registry_url"])
+	}
+}
+
+func TestAPIRegistrySettings_PostUnauthorized(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/update/registry",
+		strings.NewReader(`{"registry_url":"test"}`))
+	w := httptest.NewRecorder()
+	apiRegistrySettings(w, req)
+	// Without admin session → 403
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+func TestAPIUpdateRollbackStatus_NoUpdater(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/update/rollback/status", nil)
+	w := httptest.NewRecorder()
+	apiUpdateRollbackStatus(w, req)
+	// Returns 502 (updater unavailable) or 200 depending on updater
+	if w.Code != http.StatusOK && w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 200 or 502", w.Code)
+	}
+}
+
+func TestAPIUpdateReports_GETList(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/update/reports", nil)
+	w := httptest.NewRecorder()
+	apiUpdateReports(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}

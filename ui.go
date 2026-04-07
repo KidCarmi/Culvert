@@ -116,6 +116,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/update/rollback/status", apiUpdateRollbackStatus)  // GET — rollback availability
 	mux.HandleFunc("/api/update/cluster", apiClusterUpdate)                 // POST — start rolling update
 	mux.HandleFunc("/api/update/cluster/status", apiClusterUpdateStatus)    // GET — rolling update progress
+	mux.HandleFunc("/api/update/registry", apiRegistrySettings)             // GET/POST — registry settings
 
 	// ── CA management ────────────────────────────────────────────────────
 	mux.HandleFunc("/api/ca/status", apiCAStatus)           // GET — CA info + cache + rotation + dual-CA
@@ -163,6 +164,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations) // GET revocation sync status
 	mux.HandleFunc("/api/cluster/rotation", apiClusterRotation)       // GET CA rotation progress
 	mux.HandleFunc("/api/cluster/ha", apiClusterHA)                   // GET HA status
+	mux.HandleFunc("/api/cluster/bootstrap/", apiBootstrapRouter)    // GET bootstrap script/compose (token-authed)
 	mux.HandleFunc("/healthz", apiHealthz)                            // GET unauthenticated health check (LB probe)
 
 	// ── PAC file ─────────────────────────────────────────────────────────
@@ -3627,16 +3629,21 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	cpAddr := clusterRole.grpcAddr
 	caFP := globalClusterCA.CACertFingerprint()
 	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
+
+	// Build bootstrap command (curl | bash).
+	cpBase := cpBaseURL(r)
+	bootstrapCmd := fmt.Sprintf("curl -fsSL -k %s/api/cluster/bootstrap/%s | sudo bash", cpBase, plaintext)
 	enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
 
 	auditEvent(r, "enrollment.token_created", sanitizeLog(req.NodePrefix),
 		fmt.Sprintf("cidr=%s ttl=%dh", sanitizeLog(req.AllowCIDR), int(ttl.Hours())))
 
 	jsonOK(w, map[string]any{
-		"token":      plaintext,
-		"enroll_url": enrollURL,
-		"enroll_cmd": enrollCmd,
-		"expires_at": time.Now().Add(ttl).Format(time.RFC3339),
+		"token":         plaintext,
+		"enroll_url":    enrollURL,
+		"enroll_cmd":    enrollCmd,
+		"bootstrap_cmd": bootstrapCmd,
+		"expires_at":    time.Now().Add(ttl).Format(time.RFC3339),
 	})
 }
 
