@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"embed"
 	"encoding/csv"
 	"encoding/hex"
@@ -3149,7 +3150,7 @@ func apiCAKeyProvider(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireRole(w, r, "viewer") {
+	if !requireRole(w, r, RoleViewer) {
 		return
 	}
 	providerName := certMgr.KeyProviderName()
@@ -3437,7 +3438,7 @@ func apiClusterMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireRole(w, r, "admin") {
+	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
 
@@ -3453,6 +3454,11 @@ func apiClusterMode(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.GRPCAddr == "" {
 		http.Error(w, "grpc_addr is required (e.g. \":50051\")", http.StatusBadRequest)
+		return
+	}
+	// Validate gRPC address format.
+	if _, _, err := net.SplitHostPort(req.GRPCAddr); err != nil {
+		http.Error(w, fmt.Sprintf("grpc_addr must be a valid host:port (e.g. \":50051\"): %v", err), http.StatusBadRequest)
 		return
 	}
 	// Reject path traversal in file paths (CWE-22). Only allow simple file names.
@@ -3486,7 +3492,7 @@ func apiClusterMode(w http.ResponseWriter, r *http.Request) {
 func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop // split into sub-handlers
 	switch r.Method {
 	case http.MethodGet:
-		if !requireRole(w, r, "viewer") {
+		if !requireRole(w, r, RoleViewer) {
 			return
 		}
 		tokens := globalClusterStore.ListTokens()
@@ -3496,7 +3502,7 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop 
 		apiClusterTokenCreate(w, r)
 
 	case http.MethodDelete:
-		if !requireRole(w, r, "admin") {
+		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		tokenHash := r.URL.Query().Get("hash")
@@ -3510,6 +3516,8 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop 
 		}
 		if err := globalClusterStore.Save(); err != nil {
 			logger.Printf("ClusterDB save error: %v", err)
+			http.Error(w, "failed to persist token deletion", http.StatusInternalServerError)
+			return
 		}
 		jsonOK(w, map[string]any{"ok": true})
 
@@ -3519,7 +3527,7 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop 
 }
 
 func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
-	if !requireRole(w, r, "admin") {
+	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
 	if clusterRole.role != "control-plane" {
@@ -3540,8 +3548,29 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+
+	// Validate node_prefix: alphanumeric + _- only, max 255 chars.
+	if req.NodePrefix != "" {
+		if len(req.NodePrefix) > 255 {
+			http.Error(w, "node_prefix must be <= 255 characters", http.StatusBadRequest)
+			return
+		}
+		for _, c := range req.NodePrefix {
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+				http.Error(w, "node_prefix must contain only alphanumeric characters, underscores, and dashes", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
+	// Cap TTL at 8760 hours (1 year).
+	const maxTTLHours = 8760
 	ttl := 24 * time.Hour
 	if req.TTLHours > 0 {
+		if req.TTLHours > maxTTLHours {
+			http.Error(w, fmt.Sprintf("ttl_hours must be <= %d (1 year)", maxTTLHours), http.StatusBadRequest)
+			return
+		}
 		ttl = time.Duration(req.TTLHours) * time.Hour
 	}
 
@@ -3558,8 +3587,8 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
 	enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
 
-	auditEvent(r, "enrollment.token_created", req.NodePrefix,
-		fmt.Sprintf("cidr=%s ttl=%dh", req.AllowCIDR, int(ttl.Hours())))
+	auditEvent(r, "enrollment.token_created", sanitizeLog(req.NodePrefix),
+		fmt.Sprintf("cidr=%s ttl=%dh", sanitizeLog(req.AllowCIDR), int(ttl.Hours())))
 
 	jsonOK(w, map[string]any{
 		"token":      plaintext,
@@ -3575,7 +3604,7 @@ func apiClusterNodes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireRole(w, r, "viewer") {
+	if !requireRole(w, r, RoleViewer) {
 		return
 	}
 	nodes := globalClusterStore.ListNodes()
@@ -3588,7 +3617,7 @@ func apiClusterRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireRole(w, r, "admin") {
+	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
 	var req struct {
@@ -3603,20 +3632,27 @@ func apiClusterRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node_id required", http.StatusBadRequest)
 		return
 	}
+	if len(req.Reason) > 1000 {
+		http.Error(w, "reason must be <= 1000 characters", http.StatusBadRequest)
+		return
+	}
 
 	admin := sessionAdmin(r)
 	if err := globalClusterStore.RevokeNode(req.NodeID, admin, req.Reason); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// RevokeNode calls Save() internally. Distinguish persistence errors
+		// (500) from logical errors like "not found" or "already revoked" (400).
+		if strings.Contains(err.Error(), "persist") {
+			http.Error(w, "failed to persist node revocation", http.StatusInternalServerError)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
-	if err := globalClusterStore.Save(); err != nil {
-		logger.Printf("ClusterDB save error: %v", err)
-	}
 
-	auditEvent(r, "enrollment.node_revoked", req.NodeID,
-		fmt.Sprintf("reason=%s", req.Reason))
+	auditEvent(r, "enrollment.node_revoked", sanitizeLog(req.NodeID),
+		fmt.Sprintf("reason=%s", sanitizeLog(req.Reason)))
 
-	logger.Printf("Enrollment: node %q revoked by %s (reason: %s)", req.NodeID, admin, req.Reason)
+	logger.Printf("Enrollment: node %q revoked by %s (reason: %s)", sanitizeLog(req.NodeID), sanitizeLog(admin), sanitizeLog(req.Reason))
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -3624,12 +3660,12 @@ func apiClusterRevoke(w http.ResponseWriter, r *http.Request) {
 func apiClusterCA(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if !requireRole(w, r, "viewer") {
+		if !requireRole(w, r, RoleViewer) {
 			return
 		}
 		jsonOK(w, globalClusterCA.Info())
 	case http.MethodPost:
-		if !requireRole(w, r, "admin") {
+		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		var body struct {
@@ -3642,6 +3678,21 @@ func apiClusterCA(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Cert == "" || body.Key == "" {
 			http.Error(w, "cert and key are required", http.StatusBadRequest)
+			return
+		}
+		// Pre-validate PEM format and cert:key match before importing.
+		cert, err := parseAndValidateCACert([]byte(body.Cert))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid certificate: %v", err), http.StatusBadRequest)
+			return
+		}
+		ecPub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+		if !ok {
+			http.Error(w, "certificate must use an ECDSA key", http.StatusBadRequest)
+			return
+		}
+		if _, err := parseAndValidateCAKey([]byte(body.Key), ecPub); err != nil {
+			http.Error(w, fmt.Sprintf("invalid key: %v", err), http.StatusBadRequest)
 			return
 		}
 		if err := globalClusterCA.ImportCA([]byte(body.Cert), []byte(body.Key)); err != nil {
@@ -3662,7 +3713,7 @@ func apiClusterRateLimits(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireRole(w, r, "viewer") {
+	if !requireRole(w, r, RoleViewer) {
 		return
 	}
 	nodes, hotIPs := globalRLAggregator.Stats()
@@ -3682,7 +3733,7 @@ func apiClusterAudit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireRole(w, r, "viewer") {
+	if !requireRole(w, r, RoleViewer) {
 		return
 	}
 	entries := globalClusterAudit.Recent(200)
@@ -3695,7 +3746,7 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireRole(w, r, "viewer") {
+	if !requireRole(w, r, RoleViewer) {
 		return
 	}
 	jsonOK(w, map[string]any{

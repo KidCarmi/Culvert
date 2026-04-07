@@ -37,6 +37,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"os"
@@ -323,11 +324,52 @@ func (c *clusterAuditLog) Count() int {
 }
 
 // clusterRole tracks this node's role for the admin UI.
-var clusterRole struct {
-	role     string // "standalone", "control-plane", "data-plane"
-	grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
-	nodeID   string // this node's identifier
-	grpcSrv  *grpc.Server
+// Protected by clusterRoleMu for concurrent reads during enableControlPlane transitions.
+var (
+	clusterRoleMu sync.RWMutex
+	clusterRole   struct {
+		role     string // "standalone", "control-plane", "data-plane"
+		grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
+		nodeID   string // this node's identifier
+		grpcSrv  *grpc.Server
+	}
+)
+
+// enrollRateLimit tracks per-IP enrollment attempt timestamps for rate limiting.
+// Limits to 5 attempts per minute per IP to prevent brute-force token guessing.
+var enrollRateLimit struct {
+	mu      sync.Mutex
+	attempts map[string][]time.Time
+}
+
+func init() {
+	enrollRateLimit.attempts = make(map[string][]time.Time)
+}
+
+// enrollRateLimitAllow returns true if the IP is allowed to attempt enrollment.
+func enrollRateLimitAllow(ip string) bool {
+	const (
+		maxAttempts = 5
+		window      = time.Minute
+	)
+	enrollRateLimit.mu.Lock()
+	defer enrollRateLimit.mu.Unlock()
+
+	now := time.Now()
+	// Prune old entries.
+	recent := enrollRateLimit.attempts[ip][:0]
+	for _, t := range enrollRateLimit.attempts[ip] {
+		if now.Sub(t) < window {
+			recent = append(recent, t)
+		}
+	}
+	enrollRateLimit.attempts[ip] = recent
+
+	if len(recent) >= maxAttempts {
+		return false
+	}
+	enrollRateLimit.attempts[ip] = append(enrollRateLimit.attempts[ip], now)
+	return true
 }
 
 // NodeMetricsList returns a copy of all connected Data Plane node metrics.
@@ -499,15 +541,19 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 		return nil, status.Errorf(codes.InvalidArgument, "token, csr, and node_id are required")
 	}
 
-	// Check if node ID is already registered and not revoked.
-	if existing, ok := globalClusterStore.GetNode(req.NodeID); ok && existing.Status != "revoked" {
-		return nil, status.Errorf(codes.AlreadyExists, "node %q is already enrolled", req.NodeID)
-	}
-
-	// Extract peer IP for CIDR validation.
+	// Rate limit enrollment attempts per IP.
 	sourceIP := ""
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
 		sourceIP, _, _ = net.SplitHostPort(p.Addr.String())
+	}
+	if sourceIP != "" && !enrollRateLimitAllow(sourceIP) {
+		return nil, status.Errorf(codes.ResourceExhausted, "enrollment rate limited — try again later")
+	}
+
+	// Check if node ID is already registered and not revoked.
+	// Use a generic error message to avoid leaking enrolled node names.
+	if existing, ok := globalClusterStore.GetNode(req.NodeID); ok && existing.Status != "revoked" {
+		return nil, status.Errorf(codes.PermissionDenied, "enrollment denied")
 	}
 
 	// Validate and consume the enrollment token atomically (persisted to disk).
@@ -516,6 +562,20 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	if err != nil {
 		logger.Printf("Enrollment: rejected node %q: %v", sanitizeLog(req.NodeID), err)
 		return nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
+	}
+
+	// Validate CSR CommonName matches claimed node ID to prevent identity spoofing.
+	csrBlock, _ := pem.Decode([]byte(req.CSR))
+	if csrBlock == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid CSR: no PEM block found")
+	}
+	csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid CSR: %v", err)
+	}
+	if csr.Subject.CommonName != req.NodeID {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"CSR CommonName %q does not match claimed node_id %q", csr.Subject.CommonName, req.NodeID)
 	}
 
 	// Sign the CSR.

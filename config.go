@@ -240,6 +240,16 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 	if fc.Cluster.Role == "control-plane" && fc.Cluster.GRPCAddr == "" {
 		errs = append(errs, "cluster.grpc_addr is required when cluster.role is \"control-plane\"")
 	}
+	// Validate cert/key/ca paths don't contain path traversal.
+	for _, p := range []struct{ name, val string }{
+		{"cluster.cert_file", fc.Cluster.CertFile},
+		{"cluster.key_file", fc.Cluster.KeyFile},
+		{"cluster.ca_file", fc.Cluster.CAFile},
+	} {
+		if p.val != "" && strings.Contains(p.val, "..") {
+			errs = append(errs, fmt.Sprintf("%s: must not contain path traversal (..)", p.name))
+		}
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))

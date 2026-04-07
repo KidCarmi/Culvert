@@ -8,6 +8,15 @@ config.yaml
 # CA bundles contain private keys
 *.bundle
 
+# Cluster CA files (generated at runtime)
+cluster-ca.crt
+cluster-ca.key
+
+# Data Plane enrollment files
+dp-node.crt
+dp-node.key
+dp_enrollment.json
+
 # Sensitive runtime state (these live in /data volume, not in git)
 data/
 
