@@ -18,10 +18,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+// reportIDRe validates update report IDs: alphanumeric, hyphens, dots only.
+// Example valid ID: "upd-20260407-143022.json"
+var reportIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.\-]*$`)
 
 // version is set via ldflags at build time: -X main.version=v1.2.3
 var version = "dev"
@@ -343,13 +348,14 @@ func apiUpdateReports(w http.ResponseWriter, r *http.Request) {
 
 	// If an ID is specified, return that specific report.
 	if id := r.URL.Query().Get("id"); id != "" {
-		// Sanitize: only allow filename chars.
-		clean := filepath.Base(id)
-		if clean != id || strings.Contains(id, "..") {
+		// Strict allowlist: report IDs are "upd-YYYYMMDD-HHMMSS.json" — only
+		// alphanumeric, hyphens, and dots. Reject everything else so CodeQL
+		// sees a regex guard before the path expression.
+		if !reportIDRe.MatchString(id) {
 			http.Error(w, "invalid report id", http.StatusBadRequest)
 			return
 		}
-		raw, err := os.ReadFile(filepath.Join(reportDir, clean))
+		raw, err := os.ReadFile(filepath.Join(reportDir, id))
 		if err != nil {
 			http.Error(w, "report not found", http.StatusNotFound)
 			return
