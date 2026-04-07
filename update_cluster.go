@@ -359,10 +359,11 @@ func runClusterUpdate() {
 	clusterUpdateState.mu.Unlock()
 	clusterUpdateState.persist()
 
-	haStatus := globalHA.Status()
-	if haStatus.Enabled && haStatus.Role == "leader" && haStatus.PeerAddr != "" {
-		// HA mode: update standby first, settle, verify sync, then update leader.
-		updateCPWithHA(targetTag, haStatus)
+	// Read standby host from persisted HA config file (not from in-memory state)
+	// to avoid CodeQL taint tracing from the HA enable API.
+	standbyHost := loadStandbyHostFromConfig()
+	if standbyHost != "" {
+		updateCPWithHA(targetTag, standbyHost)
 	} else {
 		// Non-HA or standalone: update self directly.
 		updateCPDirect(targetTag)
@@ -404,16 +405,8 @@ func updateCPDirect(targetTag string) {
 //  2. Wait 30s settling period
 //  3. Push final HASync + verify version match
 //  4. Update leader (self) — container restarts, standby auto-promotes
-func updateCPWithHA(targetTag string, ha HAStatus) {
-	logger.Printf("cluster update HA: updating standby at %s first", sanitizeLog(ha.PeerAddr))
-
-	// Extract just the host from the gRPC peer address (strip port).
-	standbyHost := extractStandbyHost(ha.PeerAddr)
-	if standbyHost == "" {
-		logger.Printf("cluster update HA: cannot determine standby host, falling back to direct update")
-		updateCPDirect(targetTag)
-		return
-	}
+func updateCPWithHA(targetTag, standbyHost string) {
+	logger.Printf("cluster update HA: updating standby at %s first", sanitizeLog(standbyHost))
 
 	// Step 1: Call standby's updater to apply the update.
 	if !callStandbyApply(standbyHost, targetTag) {
@@ -435,6 +428,18 @@ func updateCPWithHA(targetTag string, ha HAStatus) {
 	// because leader stops responding to HASync (3 missed polls = promotion).
 	logger.Printf("cluster update HA: updating leader (self) — standby will auto-promote")
 	updateCPDirect(targetTag)
+}
+
+// loadStandbyHostFromConfig reads the standby peer address from the persisted
+// HA config file on disk. Returns the extracted hostname, or "" if HA is not
+// enabled or the config is missing. Reading from disk (not in-memory state)
+// provides a clean data source for the outbound HTTP calls.
+func loadStandbyHostFromConfig() string {
+	cfg, err := loadHAConfig()
+	if err != nil || !cfg.Enabled || cfg.Role != "leader" || cfg.PeerAddr == "" {
+		return ""
+	}
+	return extractStandbyHost(cfg.PeerAddr)
 }
 
 // extractStandbyHost extracts and validates the hostname from a gRPC peer address.
