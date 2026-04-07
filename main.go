@@ -99,6 +99,7 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	revocationsFile := flag.String("revocations-file", "", "Path to persist session revocations across restarts (e.g. /data/revocations.json)")
 	scanSvcListen := flag.String("scan-svc-listen", "", "Run as scan microservice sidecar on this address (e.g. :8484)")
 	scanSvcURL := flag.String("scan-svc-url", "", "Remote scan service URL (e.g. http://scan-svc:8484) — disables local ClamAV/YARA")
+	updaterURLFlag := flag.String("updater-url", "", "Updater sidecar URL (default http://culvert-updater:7123)")
 	flag.Parse()
 
 	clusterInsecure = *clusterInsecureFlag
@@ -714,6 +715,14 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	// ── SSE live dashboard broadcaster ───────────────────────────────────────
 	startSSEBroadcaster()
 
+	// ── Docker self-update system ────────────────────────────────────────────
+	if u := firstStr(*updaterURLFlag, fc.Update.UpdaterURL); u != "" {
+		updaterURL = u
+	}
+	ensureUpdaterToken()
+	go startUpdateChecker(appLifecycleCtx)
+	recoverClusterUpdate()
+
 	// ── SOCKS5 server (optional) ─────────────────────────────────────────────
 	s5Port := firstNonZero(*socks5Port, fc.Proxy.SOCKS5Port)
 	if s5Port > 0 {
@@ -888,7 +897,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := healthResponse{
 		Status:            "ok",
 		Uptime:            uptime(),
-		Version:           "1.0.0",
+		Version:           version,
 		ClamAV:            clamStatus,
 		CAExpiresDays:     caExpiresDays,
 		ThreatFeedEntries: tfEntries,

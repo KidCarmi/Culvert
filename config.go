@@ -110,6 +110,11 @@ type FileConfig struct {
 	// at startup (single-node only). Also readable from CULVERT_SESSION_SECRET.
 	SessionSecret string `yaml:"session_secret"`
 
+	// Update configures the Docker self-update system.
+	Update struct {
+		UpdaterURL string `yaml:"updater_url"` // URL of the updater sidecar (default: http://culvert-updater:7123)
+	} `yaml:"update"`
+
 	// Cluster configures Control Plane / Data Plane multi-node mode.
 	// When Cluster.Role is "control-plane", this node starts a gRPC server
 	// for Data Plane enrollment and config distribution.

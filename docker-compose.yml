@@ -46,6 +46,27 @@ services:
       retries: 5
       start_period: 300s  # first run downloads ~250 MB of signatures
 
+  # ── Culvert updater sidecar ──────────────────────────────────────────────
+  # Lightweight Go service (~5 MB idle) with Docker socket access.
+  # Handles container pull/recreate/rollback when triggered from the GUI.
+  # Idle 99.99% of the time — only wakes for update operations.
+  updater:
+    build:
+      context: .
+      dockerfile: Dockerfile.updater
+    container_name: culvert-updater
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - proxy-data:/data:ro   # read shared updater token
+    ports:
+      - "7123:7123"           # exposed for GUI resilience during CP update (auth required)
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   # ── Culvert proxy + admin UI ────────────────────────────────────────────
   proxy:
     build: .
