@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -230,14 +232,106 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(resp)
 }
 
-// apiClusterHA returns the HA status for the admin UI.
+// apiClusterHA handles GET (status) and POST (enable HA) for the admin UI.
 func apiClusterHA(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		status := globalHA.Status()
+		// Include the deploy command for the standby CP.
+		resp := map[string]any{
+			"enabled":   status.Enabled,
+			"role":      status.Role,
+			"since":     status.Since,
+			"peer_addr": status.PeerAddr,
+			"lock_path": status.LockPath,
+		}
+		if status.Enabled {
+			resp["deploy_cmd"] = haDeployCommand(status.PeerAddr)
+		}
+		jsonOK(w, resp)
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		apiClusterHAEnable(w, r)
+
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiClusterHAEnable enables HA mode at runtime from the admin GUI.
+func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PeerAddr string `json:"peer_addr"` // address of the standby CP
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if !requireRole(w, r, RoleViewer) {
+	if req.PeerAddr == "" {
+		http.Error(w, "peer_addr is required (e.g. \"cp2:50051\")", http.StatusBadRequest)
 		return
 	}
-	jsonOK(w, globalHA.Status())
+
+	// Check that we're already running as CP.
+	clusterRoleMu.RLock()
+	role := clusterRole.role
+	grpcAddr := clusterRole.grpcAddr
+	clusterRoleMu.RUnlock()
+	if role != "control-plane" {
+		http.Error(w, "must be running as Control Plane to enable HA", http.StatusConflict)
+		return
+	}
+
+	// Check if HA is already enabled.
+	if globalHA.IsLeader() || globalHA.Status().Enabled {
+		http.Error(w, "HA is already enabled", http.StatusConflict)
+		return
+	}
+
+	// Determine lock path from cluster DB.
+	lockPath := filepath.Join(filepath.Dir(clusterDBPathGlobal), "cp-leader.lock")
+
+	// Start leader election. Since we're already running as CP, the onPromote
+	// callback is a no-op (we're already serving). We just acquire the lock.
+	globalHA.StartLeaderElection(lockPath, req.PeerAddr, 3*time.Second,
+		func() error {
+			// Already running as CP — just log.
+			logger.Printf("HA: this instance confirmed as leader (already serving gRPC on %s)",
+				strings.ReplaceAll(grpcAddr, "\n", ""))
+			return nil
+		},
+		func() {
+			StopControlPlaneGRPC()
+			clusterRoleMu.Lock()
+			clusterRole.role = ""
+			clusterRoleMu.Unlock()
+			logger.Printf("HA: gRPC server stopped (standby mode)")
+		},
+	)
+
+	deployCmd := haDeployCommand(req.PeerAddr)
+	jsonOK(w, map[string]any{
+		"ok":         true,
+		"role":       "leader",
+		"peer_addr":  req.PeerAddr,
+		"lock_path":  lockPath,
+		"deploy_cmd": deployCmd,
+	})
+}
+
+// haDeployCommand generates the CLI command for deploying the standby CP.
+func haDeployCommand(peerAddr string) string {
+	clusterRoleMu.RLock()
+	grpcAddr := clusterRole.grpcAddr
+	clusterRoleMu.RUnlock()
+
+	cmd := fmt.Sprintf("./culvert --cp-grpc-addr %s --cluster-db %s --ha-peer %s",
+		grpcAddr, clusterDBPathGlobal, peerAddr)
+	return cmd
 }

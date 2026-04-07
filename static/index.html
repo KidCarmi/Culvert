@@ -2316,6 +2316,43 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- HA Panel (shown only on CP when HA is not yet enabled) -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-ha-panel">
+        <div class="panel-header"><span class="panel-title">High Availability</span></div>
+        <div style="padding:20px">
+          <div id="ha-disabled-section">
+            <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">
+              Enable Active/Passive HA to run a standby Control Plane that automatically takes over
+              if this instance goes down. Both CPs must share the same storage directory (NFS, EFS, etc.).
+              Split-brain is prevented by kernel-level file locking (flock).
+            </p>
+            <div style="display:grid;gap:12px;max-width:480px">
+              <label style="font-size:.8rem;color:var(--muted)">Standby CP Address <span style="color:#ef4444">*</span>
+                <input id="ha-peer-addr" class="input" placeholder="e.g. cp2.internal:50051" style="margin-top:4px">
+              </label>
+              <div style="margin-top:4px">
+                <button class="btn" id="ha-enable-btn" onclick="enableHA()">Enable HA</button>
+              </div>
+            </div>
+          </div>
+          <!-- Shown after HA is enabled -->
+          <div id="ha-enabled-section" style="display:none">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px">
+              <div class="stat-card"><div class="stat-val" id="ha-role-val">—</div><div class="stat-label">This Node</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-peer-val">—</div><div class="stat-label">Peer</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-since-val">—</div><div class="stat-label">Since</div></div>
+            </div>
+            <details style="margin-top:12px">
+              <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;font-weight:600">Deploy Standby CP</summary>
+              <p style="color:var(--muted);font-size:.8rem;margin:8px 0">
+                Run this command on the standby server. It must have access to the same shared storage directory.
+              </p>
+              <pre id="ha-deploy-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="copyHADeployCmd()" title="Click to copy"></pre>
+            </details>
+          </div>
+        </div>
+      </div>
+
       <!-- Cluster CA Management -->
       <div class="panel" style="margin-top:16px" id="cluster-ca-panel">
         <div class="panel-header">
@@ -6235,6 +6272,7 @@ async function loadCluster() {
     const showCluster = isCP || r.role === 'data-plane';
     loadClusterCA();
     loadCARotation();
+    loadHA(isCP);
     loadClusterMetrics(isCP);
     loadClusterRateLimits(showCluster);
     loadClusterHealth(isCP);
@@ -6475,6 +6513,61 @@ async function enableControlPlane() {
   } finally {
     btn.disabled = false; btn.textContent = 'Enable Control Plane';
   }
+}
+
+// ── HA Functions ──────────────────────────────────────────────────────────
+async function enableHA() {
+  const peerAddr = document.getElementById('ha-peer-addr').value.trim();
+  if (!peerAddr) { toast('Standby CP address is required', 'error'); return; }
+  const btn = document.getElementById('ha-enable-btn');
+  btn.disabled = true; btn.textContent = 'Enabling…';
+  try {
+    const r = await api('/api/cluster/ha', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ peer_addr: peerAddr })
+    });
+    if (!r) return;
+    toast('HA enabled — this node is now the leader', 'success');
+    loadCluster();
+  } catch(e) {
+    toast('Failed to enable HA: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Enable HA';
+  }
+}
+
+async function loadHA(isCP) {
+  const panel = document.getElementById('cluster-ha-panel');
+  if (!isCP) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  try {
+    const r = await api('/api/cluster/ha');
+    if (!r) return;
+    const disabledSec = document.getElementById('ha-disabled-section');
+    const enabledSec = document.getElementById('ha-enabled-section');
+    if (r.enabled) {
+      disabledSec.style.display = 'none';
+      enabledSec.style.display = '';
+      const roleColor = r.role === 'leader' ? '#22c55e' : '#f59e0b';
+      document.getElementById('ha-role-val').innerHTML = `<span style="color:${roleColor}">${escHtml(r.role)}</span>`;
+      document.getElementById('ha-peer-val').textContent = r.peer_addr || '—';
+      document.getElementById('ha-since-val').textContent = r.since ? timeAgo(new Date(r.since)) : '—';
+      if (r.deploy_cmd) {
+        document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
+      }
+    } else {
+      disabledSec.style.display = '';
+      enabledSec.style.display = 'none';
+    }
+  } catch(e) {
+    // silent — panel is informational
+  }
+}
+
+function copyHADeployCmd() {
+  const cmd = document.getElementById('ha-deploy-cmd').textContent;
+  navigator.clipboard.writeText(cmd).then(() => toast('Deploy command copied', 'success'));
 }
 
 function timeAgo(date) {

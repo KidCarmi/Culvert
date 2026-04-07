@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -322,7 +323,7 @@ func trimSpace(s string) string {
 
 // ── HA API ──────────────────────────────────────────────────────────────────
 
-func TestAPIClusterHA(t *testing.T) {
+func TestAPIClusterHA_GET(t *testing.T) {
 	origHA := *globalHA
 	defer func() { *globalHA = origHA }()
 	globalHA.mu.Lock()
@@ -339,17 +340,102 @@ func TestAPIClusterHA(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var status HAStatus
-	if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil {
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("JSON: %v", err)
 	}
-	if !status.Enabled {
-		t.Error("expected enabled")
+	if resp["enabled"] != true {
+		t.Error("expected enabled=true")
 	}
-	if status.Role != "leader" {
-		t.Errorf("expected leader, got %q", status.Role)
+	if resp["role"] != "leader" {
+		t.Errorf("expected leader, got %v", resp["role"])
 	}
-	if status.PeerAddr != "cp2:50051" {
-		t.Errorf("expected cp2:50051, got %q", status.PeerAddr)
+	if resp["peer_addr"] != "cp2:50051" {
+		t.Errorf("expected cp2:50051, got %v", resp["peer_addr"])
+	}
+	if resp["deploy_cmd"] == nil || resp["deploy_cmd"] == "" {
+		t.Error("expected non-empty deploy_cmd")
+	}
+}
+
+func TestAPIClusterHA_EnableRequiresCP(t *testing.T) {
+	origHA := *globalHA
+	defer func() { *globalHA = origHA }()
+	*globalHA = HAState{}
+
+	// Save and restore cluster role.
+	clusterRoleMu.Lock()
+	origRole := clusterRole.role
+	clusterRole.role = "" // not a CP
+	clusterRoleMu.Unlock()
+	defer func() {
+		clusterRoleMu.Lock()
+		clusterRole.role = origRole
+		clusterRoleMu.Unlock()
+	}()
+
+	body := `{"peer_addr":"cp2:50051"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/cluster/ha", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	w := httptest.NewRecorder()
+	apiClusterHA(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 (not CP), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPIClusterHA_Enable(t *testing.T) {
+	origHA := *globalHA
+	defer func() {
+		globalHA.Stop()
+		*globalHA = origHA
+	}()
+	*globalHA = HAState{}
+
+	// Pretend we're a CP.
+	clusterRoleMu.Lock()
+	origRole := clusterRole.role
+	origAddr := clusterRole.grpcAddr
+	clusterRole.role = "control-plane"
+	clusterRole.grpcAddr = ":50051"
+	clusterRoleMu.Unlock()
+	defer func() {
+		clusterRoleMu.Lock()
+		clusterRole.role = origRole
+		clusterRole.grpcAddr = origAddr
+		clusterRoleMu.Unlock()
+	}()
+
+	body := `{"peer_addr":"cp2:50051"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/cluster/ha", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	w := httptest.NewRecorder()
+	apiClusterHA(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	if resp["ok"] != true {
+		t.Error("expected ok=true")
+	}
+	if resp["role"] != "leader" {
+		t.Errorf("expected leader, got %v", resp["role"])
+	}
+	if resp["deploy_cmd"] == nil || resp["deploy_cmd"] == "" {
+		t.Error("expected non-empty deploy_cmd")
+	}
+
+	// Wait for election loop to promote.
+	time.Sleep(200 * time.Millisecond)
+	if !globalHA.IsLeader() {
+		t.Error("expected HA to be leader after enable")
 	}
 }
