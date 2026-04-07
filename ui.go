@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -34,6 +35,20 @@ var (
 	uiCfgLogMaxMB  int
 	uiCfgLogFormat string
 )
+
+// tlsErrorFilter is an io.Writer that suppresses noisy TLS handshake errors
+// from Go's http.Server.ErrorLog. These are expected when clients connect to
+// a self-signed admin UI and reject the certificate.
+type tlsErrorFilter struct{}
+
+func (f *tlsErrorFilter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "TLS handshake error") {
+		return len(p), nil // silently discard
+	}
+	// Forward non-TLS errors to the application logger.
+	logger.Printf("http: %s", strings.TrimSpace(string(p)))
+	return len(p), nil
+}
 
 func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen // route registration; each line is one endpoint
 	sub, _ := fs.Sub(staticFiles, "static")
@@ -185,6 +200,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // SSE (/api/events) requires long-lived write streams; no write deadline
 		IdleTimeout:  60 * time.Second,
+		ErrorLog:     log.New(&tlsErrorFilter{}, "", 0), // suppress noisy TLS handshake errors
 	}
 
 	if certFile != "" && keyFile != "" {
