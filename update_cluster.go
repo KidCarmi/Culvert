@@ -226,12 +226,12 @@ func (s *controlPlaneServer) TriggerUpdate(_ context.Context, reqBytes json.RawM
 	logger.Printf("received TriggerUpdate: target=%s from=%s", sanitizeLog(req.TargetTag), sanitizeLog(req.Initiator))
 
 	// Call local updater sidecar.
-	go func() {
+	go func() { // #nosec G118 — detached goroutine must outlive the gRPC request
 		body, _ := json.Marshal(map[string]string{
 			"container":  "culvert",
 			"target_tag": req.TargetTag,
 		})
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second) // #nosec G601 — detached goroutine must outlive the gRPC request
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		defer cancel()
 		resp, err := updaterRequest(ctx, http.MethodPost, "/api/update/apply", strings.NewReader(string(body)))
 		if err != nil {
