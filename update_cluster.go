@@ -448,7 +448,10 @@ func extractStandbyHost(peerAddr string) string {
 	}
 	// Allowlist: hostname chars only (letters, digits, dots, dashes, colons for IPv6).
 	for _, c := range host {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':') {
+		isAlpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		isDigit := c >= '0' && c <= '9'
+		isSep := c == '.' || c == '-' || c == ':'
+		if !isAlpha && !isDigit && !isSep {
 			return ""
 		}
 	}
