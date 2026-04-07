@@ -1022,7 +1022,7 @@ func rebuildCPCertPool() {
 		pool.AppendCertsFromPEM(allCA)
 	}
 	cpTLSConfig.cfg.ClientCAs = pool
-	logger.Printf("ControlPlane: TLS client CA pool rebuilt (%d CAs)", len(pool.Subjects())) //nolint:staticcheck // Subjects() deprecated but fine for count
+	logger.Printf("ControlPlane: TLS client CA pool rebuilt")
 }
 
 func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCredentials, error) {

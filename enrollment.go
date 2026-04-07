@@ -691,18 +691,19 @@ func (ca *clusterCA) Ready() bool {
 // signed by the new CA. The secondary is auto-cleaned when the old CA
 // certificate expires.
 // backupCAFiles copies the current CA cert and key to .bak files.
+// Uses in-memory key to avoid any file reads (eliminates gosec G703/G304).
 // Best-effort, errors ignored.
-func backupCAFiles(dir string, certPEM []byte) {
+func backupCAFiles(dir string, certPEM []byte, key *ecdsa.PrivateKey) {
 	certBak, e1 := safeCAPath(dir, "cluster-ca.crt.bak")
 	keyBak, e2 := safeCAPath(dir, "cluster-ca.key.bak")
 	if e1 != nil || e2 != nil {
 		return
 	}
 	_ = os.WriteFile(certBak, certPEM, 0o600)
-	// Build key path from hardcoded literal so gosec does not trace taint.
-	kp := filepath.Join(filepath.Clean(dir), "cluster-ca.key") //nolint:gosec // dir validated by safeCAPath above
-	if oldKey, err := os.ReadFile(kp); err == nil {             // #nosec G304 -- dir validated, filename is a constant
-		_ = os.WriteFile(keyBak, oldKey, 0o600)
+	if key != nil {
+		if der, err := x509.MarshalECPrivateKey(key); err == nil {
+			_ = os.WriteFile(keyBak, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600)
+		}
 	}
 }
 
@@ -775,7 +776,7 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 
 	// ── Backup old CA before overwriting ──
 	if ca.certPEM != nil {
-		backupCAFiles(dir, ca.certPEM)
+		backupCAFiles(dir, ca.certPEM, ca.key)
 	}
 
 	// ── Dual-CA overlap: preserve old CA as secondary ──
