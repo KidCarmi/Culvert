@@ -674,11 +674,15 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	svcListenAddr := firstStr(*scanSvcListen, secCfg.ScanSvcListen)
 	if svcListenAddr != "" {
 		scanSvc = NewScanService(svcListenAddr)
-		go func() {
-			if err := scanSvc.Start(); err != nil {
-				logger.Printf("ScanSvc  → error: %v", err)
-			}
-		}()
+		if err := scanSvc.Listen(); err != nil {
+			logger.Printf("ScanSvc  → listen error: %v", err)
+		} else {
+			go func() {
+				if err := scanSvc.Start(); err != nil {
+					logger.Printf("ScanSvc  → error: %v", err)
+				}
+			}()
+		}
 	}
 
 	// ── Upstream proxy chaining ──────────────────────────────────────────────

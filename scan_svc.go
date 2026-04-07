@@ -59,28 +59,40 @@ func NewScanService(addr string) *ScanService {
 	return &ScanService{addr: addr}
 }
 
-// Start begins listening and serving. Blocks until the server is shut down.
-// Call Shutdown to stop the server gracefully.
-func (ss *ScanService) Start() error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/scan", ss.handleScan)
-	mux.HandleFunc("/health", ss.handleHealth)
-	mux.HandleFunc("/status", ss.handleStatus)
-
+// Listen creates the TCP listener. Call this before Start() so the address is
+// available via Addr() without a data race.
+func (ss *ScanService) Listen() error {
 	ln, err := net.Listen("tcp", ss.addr)
 	if err != nil {
 		return err
 	}
 	ss.listener = ln
+	return nil
+}
+
+// Start begins serving on the listener created by Listen(). Blocks until the
+// server is shut down. If Listen() was not called, Start calls it internally.
+func (ss *ScanService) Start() error {
+	if ss.listener == nil {
+		if err := ss.Listen(); err != nil {
+			return err
+		}
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/scan", ss.handleScan)
+	mux.HandleFunc("/health", ss.handleHealth)
+	mux.HandleFunc("/status", ss.handleStatus)
+
 	ss.server = &http.Server{
 		Handler:      mux,
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 60 * time.Second,
 	}
 
-	logger.Printf("ScanSvc  → listening on %s", ln.Addr())
+	logger.Printf("ScanSvc  → listening on %s", ss.listener.Addr())
 
-	if err := ss.server.Serve(ln); err != nil && err != http.ErrServerClosed {
+	if err := ss.server.Serve(ss.listener); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil

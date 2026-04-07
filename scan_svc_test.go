@@ -28,11 +28,12 @@ func directClient() *http.Client {
 
 func TestScanService_Health(t *testing.T) {
 	svc := NewScanService(":0")
+	if err := svc.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
 	go svc.Start() //nolint:errcheck
-	// Wait for listener.
-	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
 	if addr == "" {
 		t.Fatal("scan service did not start")
@@ -59,10 +60,12 @@ func TestScanService_Health(t *testing.T) {
 
 func TestScanService_ScanClean(t *testing.T) {
 	svc := NewScanService(":0")
+	if err := svc.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
 	go svc.Start() //nolint:errcheck
-	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
 
 	client := directClient()
@@ -94,10 +97,12 @@ func TestScanService_ScanDPIBlock(t *testing.T) {
 	dpiScanner.Set([]string{"EVIL_PATTERN"})   //nolint:errcheck
 
 	svc := NewScanService(":0")
+	if err := svc.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
 	go svc.Start() //nolint:errcheck
-	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
 
 	client := directClient()
@@ -128,10 +133,12 @@ func TestScanService_ScanDPIBlock(t *testing.T) {
 
 func TestScanService_MethodNotAllowed(t *testing.T) {
 	svc := NewScanService(":0")
+	if err := svc.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
 	go svc.Start() //nolint:errcheck
-	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
 
 	client := directClient()
@@ -147,10 +154,12 @@ func TestScanService_MethodNotAllowed(t *testing.T) {
 
 func TestScanService_Status(t *testing.T) {
 	svc := NewScanService(":0")
+	if err := svc.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
 	go svc.Start() //nolint:errcheck
-	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
 
 	client := directClient()
