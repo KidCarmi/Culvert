@@ -95,10 +95,36 @@ func (s *ClusterUpdateState) load() {
 	json.Unmarshal(data, s) //nolint:errcheck
 }
 
-func (s *ClusterUpdateState) snapshot() ClusterUpdateState {
+// clusterUpdateSnapshot is a lock-free copy of ClusterUpdateState for JSON serialization.
+type clusterUpdateSnapshot struct {
+	Active      bool                         `json:"active"`
+	TargetTag   string                       `json:"target_tag"`
+	PreviousTag string                       `json:"previous_tag,omitempty"`
+	Initiator   string                       `json:"initiator,omitempty"`
+	StartedAt   time.Time                    `json:"started_at"`
+	CompletedAt time.Time                    `json:"completed_at,omitempty"`
+	Nodes       map[string]*NodeUpdateStatus `json:"nodes,omitempty"`
+	Phase       string                       `json:"phase"`
+	ErrorBudget ErrorBudgetConfig            `json:"error_budget"`
+	Failures    int                          `json:"failures"`
+	ConsecFails int                          `json:"consec_fails"`
+}
+
+func (s *ClusterUpdateState) snapshot() clusterUpdateSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snap := *s
+	snap := clusterUpdateSnapshot{
+		Active:      s.Active,
+		TargetTag:   s.TargetTag,
+		PreviousTag: s.PreviousTag,
+		Initiator:   s.Initiator,
+		StartedAt:   s.StartedAt,
+		CompletedAt: s.CompletedAt,
+		Phase:       s.Phase,
+		ErrorBudget: s.ErrorBudget,
+		Failures:    s.Failures,
+		ConsecFails: s.ConsecFails,
+	}
 	// Deep copy nodes map.
 	snap.Nodes = make(map[string]*NodeUpdateStatus, len(s.Nodes))
 	for k, v := range s.Nodes {
