@@ -140,8 +140,11 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/status", apiClusterStatus)   // GET this node + connected nodes
 	mux.HandleFunc("/api/cluster/mode", apiClusterMode)       // POST enable control-plane mode
 	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)   // GET list / POST create / DELETE remove
-	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)     // GET enrolled nodes
-	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)   // POST revoke a node
+	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)       // GET enrolled nodes
+	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)     // POST revoke a node
+	mux.HandleFunc("/api/cluster/labels", apiClusterLabels)     // POST set node labels
+	mux.HandleFunc("/api/cluster/drain", apiClusterDrain)       // POST toggle node drain mode
+	mux.HandleFunc("/api/cluster/metrics", apiClusterMetrics)   // GET aggregated cluster metrics
 	mux.HandleFunc("/api/cluster/ca", apiClusterCA)                   // GET info / POST import cluster CA
 	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits)   // GET distributed RL status
 	mux.HandleFunc("/api/cluster/audit", apiClusterAudit)             // GET centralized audit log
@@ -3793,6 +3796,112 @@ func apiClusterRotation(w http.ResponseWriter, r *http.Request) {
 		"renewed_nodes":   rot.RenewedNodes,
 		"pending_nodes":   pending,
 		"complete":        len(rot.RenewedNodes) >= rot.TotalNodes,
+	})
+}
+
+// POST /api/cluster/labels — set labels on a node.
+func apiClusterLabels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var req struct {
+		NodeID string            `json:"node_id"`
+		Labels map[string]string `json:"labels"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	// Validate label keys/values.
+	for k, v := range req.Labels {
+		if len(k) > 63 || len(v) > 255 {
+			http.Error(w, "label key max 63 chars, value max 255 chars", http.StatusBadRequest)
+			return
+		}
+	}
+	if err := globalClusterStore.SetNodeLabels(req.NodeID, req.Labels); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	auditEvent(r, "cluster.labels", sanitizeLog(req.NodeID), fmt.Sprintf("labels updated (%d keys)", len(req.Labels)))
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// POST /api/cluster/drain — toggle node drain/maintenance mode.
+func apiClusterDrain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var req struct {
+		NodeID   string `json:"node_id"`
+		Draining bool   `json:"draining"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	if err := globalClusterStore.SetNodeDraining(req.NodeID, req.Draining); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	action := "cluster.drain"
+	detail := "node set to draining (maintenance mode)"
+	if !req.Draining {
+		action = "cluster.undrain"
+		detail = "node returned to active service"
+	}
+	auditEvent(r, action, sanitizeLog(req.NodeID), detail)
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// GET /api/cluster/metrics — aggregated cluster-wide metrics.
+func apiClusterMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	nodeMetricsMu.RLock()
+	var totalReqs, totalBlocked, totalAuthFail int64
+	nodes := make([]map[string]any, 0, len(nodeMetrics))
+	for nid, m := range nodeMetrics {
+		totalReqs += m.Total
+		totalBlocked += m.Blocked
+		totalAuthFail += m.AuthFail
+		nodes = append(nodes, map[string]any{
+			"node_id":   nid,
+			"total":     m.Total,
+			"blocked":   m.Blocked,
+			"auth_fail": m.AuthFail,
+			"uptime":    m.Uptime,
+		})
+	}
+	nodeMetricsMu.RUnlock()
+
+	jsonOK(w, map[string]any{
+		"cluster_total":     totalReqs,
+		"cluster_blocked":   totalBlocked,
+		"cluster_auth_fail": totalAuthFail,
+		"node_count":        len(nodes),
+		"nodes":             nodes,
 	})
 }
 

@@ -167,6 +167,19 @@ func (cs *CategoryStore) All() []CategoryEntry {
 	return out
 }
 
+// ReplaceAll atomically replaces all categories (used by cluster config sync).
+func (cs *CategoryStore) ReplaceAll(cats []CategoryEntry) {
+	cs.mu.Lock()
+	cs.entries = make([]*CategoryEntry, len(cats))
+	for i := range cats {
+		cp := cats[i]
+		cp.Hosts = append([]string(nil), cats[i].Hosts...)
+		cs.entries[i] = &cp
+	}
+	cs.rebuildIndex()
+	cs.mu.Unlock()
+}
+
 // Set creates or replaces the host list for a named category.
 func (cs *CategoryStore) Set(name string, hosts []string, builtIn bool) error {
 	if name == "" {
@@ -393,6 +406,20 @@ func (ps *PolicyStore) List() []PolicyRule {
 		out[i] = *r
 	}
 	return out
+}
+
+// ReplaceAll atomically replaces all rules (used by cluster config sync).
+func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
+	ps.mu.Lock()
+	ps.rules = make([]*PolicyRule, len(rules))
+	for i := range rules {
+		r := rules[i]
+		r.HitCount = 0
+		ps.rules[i] = &r
+	}
+	ps.sortLocked()
+	ps.bumpVersion()
+	ps.mu.Unlock()
 }
 
 // Add inserts a new rule and re-sorts by priority.
