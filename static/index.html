@@ -2371,6 +2371,17 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Cluster-Wide Metrics Summary -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-metrics-panel">
+        <div class="panel-header"><span class="panel-title">Cluster Metrics</span></div>
+        <div style="padding:20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px">
+          <div class="stat-card"><div class="stat-val" id="cm-total">0</div><div class="stat-label">Total Requests</div></div>
+          <div class="stat-card"><div class="stat-val" id="cm-blocked">0</div><div class="stat-label">Blocked</div></div>
+          <div class="stat-card"><div class="stat-val" id="cm-authfail">0</div><div class="stat-label">Auth Failures</div></div>
+          <div class="stat-card"><div class="stat-val" id="cm-nodes">0</div><div class="stat-label">Reporting Nodes</div></div>
+        </div>
+      </div>
+
       <!-- Enrolled Nodes Table -->
       <div class="panel" style="margin-top:16px" id="cluster-nodes-panel">
         <div class="panel-header">
@@ -2382,7 +2393,7 @@ Firefox (all platforms):
         </div>
         <div class="tbl-wrap">
           <table id="cluster-nodes-table" style="display:none">
-            <thead><tr><th>Node ID</th><th>Status</th><th>Last Seen</th><th>Total Requests</th><th>Blocked</th><th>Enrolled</th><th>Cert Expires</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Node ID</th><th>Status</th><th>Labels</th><th>Last Seen</th><th>Total Requests</th><th>Blocked</th><th>Enrolled</th><th>Cert Expires</th><th>Actions</th></tr></thead>
             <tbody id="cluster-nodes-tbody"></tbody>
           </table>
         </div>
@@ -6154,22 +6165,40 @@ async function loadCluster() {
       table.style.display = '';
       tbody.innerHTML = enrolled.map(n => {
         const m = metricsMap[n.node_id] || {};
-        const statusColor = n.status === 'connected' ? '#22c55e' : n.status === 'revoked' ? '#ef4444' : '#f59e0b';
-        const statusIcon = n.status === 'connected' ? '\u25cf' : n.status === 'revoked' ? '\u2715' : '\u25cb';
+        const statusColor = n.status === 'connected' ? '#22c55e' : n.status === 'revoked' ? '#ef4444' : n.status === 'draining' ? '#a855f7' : '#f59e0b';
+        const statusIcon = n.status === 'connected' ? '\u25cf' : n.status === 'revoked' ? '\u2715' : n.status === 'draining' ? '\u29bf' : '\u25cb';
         const lastSeen = n.last_seen ? timeAgo(new Date(n.last_seen)) : 'never';
         const enrolledAt = n.enrolled_at ? new Date(n.enrolled_at).toLocaleDateString() : '—';
         const certExpiry = n.cert_expiry ? new Date(n.cert_expiry).toLocaleDateString() : '—';
         const certWarn = n.cert_expiry && (new Date(n.cert_expiry) - new Date()) < 7*24*3600*1000;
         const canRevoke = n.status !== 'revoked';
+        const isDraining = n.status === 'draining';
+        const labels = n.labels || {};
+        const labelHtml = Object.keys(labels).length > 0
+          ? Object.entries(labels).map(([k,v]) => `<span style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:.65rem;margin:1px">${escHtml(k)}=${escHtml(v)}</span>`).join(' ')
+          : '<em style="color:var(--muted);font-size:.7rem">none</em>';
+        let actions = '';
+        if (canRevoke) {
+          actions += `<button class="btn ghost sm" style="color:#ef4444;font-size:.7rem" onclick="revokeNode('${escHtml(n.node_id)}')">Revoke</button>`;
+          if (isDraining) {
+            actions += ` <button class="btn ghost sm" style="font-size:.7rem;color:#22c55e" onclick="toggleDrain('${escHtml(n.node_id)}',false)">Undrain</button>`;
+          } else {
+            actions += ` <button class="btn ghost sm" style="font-size:.7rem;color:#a855f7" onclick="toggleDrain('${escHtml(n.node_id)}',true)">Drain</button>`;
+          }
+          actions += ` <button class="btn ghost sm" style="font-size:.7rem" onclick="editLabels('${escHtml(n.node_id)}')">Labels</button>`;
+        } else {
+          actions = '<span style="color:var(--muted);font-size:.75rem">Revoked</span>';
+        }
         return `<tr>
           <td style="font-weight:600">${escHtml(n.node_id)}</td>
           <td><span style="color:${statusColor}">${statusIcon}</span> ${escHtml(n.status)}</td>
+          <td style="max-width:200px">${labelHtml}</td>
           <td>${lastSeen}</td>
           <td>${(m.total || 0).toLocaleString()}</td>
           <td>${(m.blocked || 0).toLocaleString()}</td>
           <td>${enrolledAt}</td>
           <td style="${certWarn ? 'color:#ef4444;font-weight:600' : ''}">${certExpiry}</td>
-          <td>${canRevoke ? `<button class="btn ghost sm" style="color:#ef4444;font-size:.75rem" onclick="revokeNode('${escHtml(n.node_id)}')">Revoke</button>` : '<span style="color:var(--muted);font-size:.75rem">Revoked</span>'}</td>
+          <td style="white-space:nowrap">${actions}</td>
         </tr>`;
       }).join('');
     } else if (isCP) {
@@ -6191,6 +6220,7 @@ async function loadCluster() {
     const showCluster = isCP || r.role === 'data-plane';
     loadClusterCA();
     loadCARotation();
+    loadClusterMetrics(isCP);
     loadClusterRateLimits(showCluster);
     loadClusterHealth(isCP);
     loadClusterRevocations(showCluster);
@@ -6568,6 +6598,64 @@ function timeUntil(date) {
   if (hours < 24) return hours + 'h';
   const days = Math.floor(hours / 24);
   return days + 'd';
+}
+
+async function toggleDrain(nodeId, draining) {
+  const action = draining ? 'drain (maintenance mode)' : 'return to active service';
+  if (!confirm(`${draining ? 'Drain' : 'Undrain'} node "${nodeId}"? This will ${action}.`)) return;
+  try {
+    const r = await api('/api/cluster/drain', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ node_id: nodeId, draining })
+    });
+    if (r && r.ok) {
+      toast(draining ? 'Node set to draining' : 'Node returned to active', 'success');
+      loadCluster();
+    }
+  } catch(e) {
+    toast('Failed: ' + e.message, 'error');
+  }
+}
+
+async function editLabels(nodeId) {
+  const input = prompt(`Labels for "${nodeId}" (comma-separated key=value pairs, e.g. region=us-east,tier=dmz):`);
+  if (input === null) return;
+  const labels = {};
+  if (input.trim()) {
+    for (const pair of input.split(',')) {
+      const [k, ...vParts] = pair.trim().split('=');
+      if (!k) continue;
+      labels[k.trim()] = (vParts.join('=') || '').trim();
+    }
+  }
+  try {
+    const r = await api('/api/cluster/labels', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ node_id: nodeId, labels })
+    });
+    if (r && r.ok) {
+      toast('Labels updated', 'success');
+      loadCluster();
+    }
+  } catch(e) {
+    toast('Failed: ' + e.message, 'error');
+  }
+}
+
+async function loadClusterMetrics(show) {
+  const panel = document.getElementById('cluster-metrics-panel');
+  if (!show) { panel.style.display = 'none'; return; }
+  try {
+    const r = await api('/api/cluster/metrics');
+    if (!r) { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    document.getElementById('cm-total').textContent = (r.cluster_total || 0).toLocaleString();
+    document.getElementById('cm-blocked').textContent = (r.cluster_blocked || 0).toLocaleString();
+    document.getElementById('cm-authfail').textContent = (r.cluster_auth_fail || 0).toLocaleString();
+    document.getElementById('cm-nodes').textContent = r.node_count || 0;
+  } catch(e) { panel.style.display = 'none'; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -66,15 +66,16 @@ type CARotationState struct {
 
 // EnrolledNode represents a registered Data Plane node.
 type EnrolledNode struct {
-	NodeID     string    `json:"node_id"`
-	CertSerial string    `json:"cert_serial"`
-	CertExpiry time.Time `json:"cert_expiry"`
-	EnrolledAt time.Time `json:"enrolled_at"`
-	EnrolledBy string    `json:"enrolled_by"` // admin username
-	LastSeen   time.Time `json:"last_seen"`
-	Status     string    `json:"status"` // "connected", "disconnected", "revoked"
-	IPAddress  string    `json:"ip_address"`
-	Version    string    `json:"version"` // culvert version on node
+	NodeID     string            `json:"node_id"`
+	CertSerial string            `json:"cert_serial"`
+	CertExpiry time.Time         `json:"cert_expiry"`
+	EnrolledAt time.Time         `json:"enrolled_at"`
+	EnrolledBy string            `json:"enrolled_by"` // admin username
+	LastSeen   time.Time         `json:"last_seen"`
+	Status     string            `json:"status"` // "connected", "disconnected", "revoked", "draining"
+	IPAddress  string            `json:"ip_address"`
+	Version    string            `json:"version"` // culvert version on node
+	Labels     map[string]string `json:"labels,omitempty"` // admin-assigned labels (e.g. "region":"us-east", "tier":"dmz")
 }
 
 // EnrollToken represents an enrollment token (plaintext never stored).
@@ -343,6 +344,47 @@ func (cs *ClusterStore) ListNodes() []EnrolledNode {
 		result = append(result, *n)
 	}
 	return result
+}
+
+// SetNodeLabels replaces the label set on a node. Pass nil or empty map to clear.
+func (cs *ClusterStore) SetNodeLabels(nodeID string, labels map[string]string) error {
+	cs.mu.Lock()
+	node, ok := cs.st.Nodes[nodeID]
+	if !ok {
+		cs.mu.Unlock()
+		return fmt.Errorf("node %q not found", nodeID)
+	}
+	if len(labels) == 0 {
+		node.Labels = nil
+	} else {
+		node.Labels = make(map[string]string, len(labels))
+		for k, v := range labels {
+			node.Labels[k] = v
+		}
+	}
+	cs.mu.Unlock()
+	return cs.Save()
+}
+
+// SetNodeDraining sets a node's status to "draining" for maintenance mode.
+func (cs *ClusterStore) SetNodeDraining(nodeID string, draining bool) error {
+	cs.mu.Lock()
+	node, ok := cs.st.Nodes[nodeID]
+	if !ok {
+		cs.mu.Unlock()
+		return fmt.Errorf("node %q not found", nodeID)
+	}
+	if node.Status == "revoked" {
+		cs.mu.Unlock()
+		return fmt.Errorf("node %q is revoked", nodeID)
+	}
+	if draining {
+		node.Status = "draining"
+	} else {
+		node.Status = "connected"
+	}
+	cs.mu.Unlock()
+	return cs.Save()
 }
 
 // ─── Node Revocation ─────────────────────────────────────────────────────────

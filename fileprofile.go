@@ -119,6 +119,17 @@ func (s *FileProfileStore) List() []*FileExtProfile {
 	return out
 }
 
+// ReplaceAll atomically replaces all profiles (used by cluster config sync).
+func (s *FileProfileStore) ReplaceAll(profiles []FileExtProfile) {
+	s.mu.Lock()
+	s.profiles = make([]*FileExtProfile, len(profiles))
+	for i := range profiles {
+		p := profiles[i]
+		s.profiles[i] = &p
+	}
+	s.mu.Unlock()
+}
+
 // GetByName returns the profile with the given name (case-insensitive), or nil.
 func (s *FileProfileStore) GetByName(name string) *FileExtProfile {
 	lower := strings.ToLower(name)

@@ -69,6 +69,17 @@ type ConfigSnapshot struct {
 	UnauthMode    bool     `json:"unauth_mode"`
 	UpdatedAt     string   `json:"updated_at"`
 	CAFingerprint string   `json:"ca_fingerprint,omitempty"` // cluster CA SHA-256 fingerprint; DP triggers renewal when this changes
+
+	// Full policy sync — all policy state pushed from CP to DP.
+	DefaultAction     string           `json:"default_action"`               // "allow" or "deny"
+	PolicyRules       []PolicyRule     `json:"policy_rules,omitempty"`       // ordered policy rules
+	PolicyVersion     int64            `json:"policy_version"`               // monotonic policy version
+	SSLBypassPatterns []string         `json:"ssl_bypass_patterns,omitempty"`
+	URLCategories     []CategoryEntry  `json:"url_categories,omitempty"`
+	FileProfiles      []FileExtProfile `json:"file_profiles,omitempty"`
+	RewriteRules      []RewriteRule    `json:"rewrite_rules,omitempty"`
+	DPIPatterns       []string         `json:"dpi_patterns,omitempty"`
+	MaxConnsPerIP     int              `json:"max_conns_per_ip"`
 }
 
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
@@ -1049,6 +1060,50 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		rl.Configure(snap.RateLimitRPM, time.Minute)
 	}
 
+	// Default policy action.
+	if snap.DefaultAction != "" {
+		setDefaultPolicyAction(snap.DefaultAction)
+	}
+
+	// Policy rules.
+	if snap.PolicyRules != nil {
+		policyStore.ReplaceAll(snap.PolicyRules)
+	}
+
+	// SSL bypass patterns.
+	if snap.SSLBypassPatterns != nil {
+		if err := sslBypass.Set(snap.SSLBypassPatterns); err != nil {
+			logger.Printf("DataPlane: SSL bypass patterns: %v", err)
+		}
+	}
+
+	// URL categories.
+	if snap.URLCategories != nil {
+		catStore.ReplaceAll(snap.URLCategories)
+	}
+
+	// File profiles.
+	if snap.FileProfiles != nil {
+		globalProfileStore.ReplaceAll(snap.FileProfiles)
+	}
+
+	// Rewrite rules.
+	if snap.RewriteRules != nil {
+		rewriter.SetRules(snap.RewriteRules)
+	}
+
+	// DPI patterns.
+	if snap.DPIPatterns != nil {
+		if err := dpiScanner.Set(snap.DPIPatterns); err != nil {
+			logger.Printf("DataPlane: DPI patterns: %v", err)
+		}
+	}
+
+	// Connection limits.
+	if snap.MaxConnsPerIP > 0 {
+		connLimiter.Enable(snap.MaxConnsPerIP)
+	}
+
 	// Detect cluster CA rotation: if the fingerprint changed, trigger immediate cert renewal.
 	if snap.CAFingerprint != "" {
 		prev, _ := lastSeenCAFingerprint.Load().(string)
@@ -1062,8 +1117,8 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		lastSeenCAFingerprint.Store(snap.CAFingerprint)
 	}
 
-	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, ip_mode=%s, rate=%d rpm)",
-		snap.Version, len(snap.BlockedHosts), snap.IPFilterMode, snap.RateLimitRPM)
+	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
+		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
 }
 
 // CurrentConfigSnapshot builds a ConfigSnapshot from the current live state.
@@ -1080,6 +1135,25 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
 		snap.CAFingerprint = fp
 	}
+
+	// Full policy sync.
+	snap.DefaultAction = defaultPolicyAction()
+	snap.PolicyRules = policyStore.List()
+	pv, _ := policyStore.policyVersion()
+	snap.PolicyVersion = pv
+	snap.SSLBypassPatterns = sslBypass.List()
+	cats := catStore.All()
+	snap.URLCategories = cats
+	profiles := globalProfileStore.List()
+	fpSnap := make([]FileExtProfile, len(profiles))
+	for i, p := range profiles {
+		fpSnap[i] = *p
+	}
+	snap.FileProfiles = fpSnap
+	snap.RewriteRules = rewriter.List()
+	snap.DPIPatterns = dpiScanner.List()
+	snap.MaxConnsPerIP = connLimiter.MaxPerIP()
+
 	return snap
 }
 
