@@ -1,2 +1,4 @@
 # Single-purpose security fix, transitive of crewjam/saml
 github.com/mattermost/xml-roundtrip-validator
+# Mature hash library, transitive of badger/ristretto — no updates needed
+github.com/cespare/xxhash/v2
