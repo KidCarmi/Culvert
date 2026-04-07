@@ -116,6 +116,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/update/rollback/status", apiUpdateRollbackStatus)  // GET — rollback availability
 	mux.HandleFunc("/api/update/cluster", apiClusterUpdate)                 // POST — start rolling update
 	mux.HandleFunc("/api/update/cluster/status", apiClusterUpdateStatus)    // GET — rolling update progress
+	mux.HandleFunc("/api/update/registry", apiRegistrySettings)             // GET/POST — registry settings
 
 	// ── CA management ────────────────────────────────────────────────────
 	mux.HandleFunc("/api/ca/status", apiCAStatus)           // GET — CA info + cache + rotation + dual-CA

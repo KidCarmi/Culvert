@@ -141,6 +141,7 @@ func main() {
 	mux.HandleFunc("/api/update/rollback/status", authMiddleware(handleRollbackStatus))
 	mux.HandleFunc("/api/update/session", authMiddleware(handleSession))
 	mux.HandleFunc("/api/update/load", authMiddleware(handleLoad(cli)))
+	mux.HandleFunc("/api/self-update", authMiddleware(handleSelfUpdate(cli)))
 
 	srv := &http.Server{
 		Addr:         listenAddr,
@@ -986,6 +987,123 @@ func failureLogCleanup() {
 			os.Remove(filepath.Join(dir, e.Name())) //nolint:errcheck
 		}
 	}
+}
+
+// ── Self-update via reaper pattern ──────────────────────────────────────────
+//
+// The updater can't restart itself (container suicide). Instead it spawns a
+// short-lived "reaper" container that:
+//   1. Sleeps 5s (let this response flush)
+//   2. Stops the old updater container
+//   3. Removes it
+//   4. Creates + starts a new updater with the same config + new image
+//   5. Exits (auto-removed by --rm)
+
+func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			TargetTag string `json:"target_tag"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TargetTag == "" {
+			http.Error(w, `{"error":"target_tag required"}`, http.StatusBadRequest)
+			return
+		}
+
+		ctx := r.Context()
+
+		// Get our own container info.
+		hostname, _ := os.Hostname()
+		self, err := cli.ContainerInspect(ctx, hostname)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"inspect self: %s"}`, err), http.StatusInternalServerError)
+			return
+		}
+
+		currentImage := self.Config.Image
+		newImage := imageWithTag(currentImage, req.TargetTag)
+
+		// Pull the new image.
+		pullOut, err := cli.ImagePull(ctx, newImage, image.PullOptions{})
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"pull: %s"}`, err), http.StatusInternalServerError)
+			return
+		}
+		io.Copy(io.Discard, pullOut) //nolint:errcheck
+		pullOut.Close()
+
+		// Build reaper script.
+		selfName := strings.TrimPrefix(self.Name, "/")
+		reaperScript := fmt.Sprintf(`
+sleep 5
+docker stop -t 10 %s 2>/dev/null || true
+docker rm %s 2>/dev/null || true
+docker create --name %s \
+  --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v %s \
+  -p 7123:7123 \
+  %s
+docker start %s
+`, selfName, selfName, selfName,
+			buildVolumeArg(self.HostConfig.Binds),
+			newImage, selfName)
+
+		// Spawn the reaper container using the Docker CLI image (small, has docker binary).
+		reaperCfg := &container.Config{
+			Image: "docker:cli",
+			Cmd:   []string{"sh", "-c", reaperScript},
+		}
+		reaperHostCfg := &container.HostConfig{
+			AutoRemove: true,
+			Binds:      []string{"/var/run/docker.sock:/var/run/docker.sock"},
+		}
+
+		reaperResp, err := cli.ContainerCreate(ctx, reaperCfg, reaperHostCfg, nil, nil, "culvert-updater-reaper")
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"create reaper: %s"}`, err), http.StatusInternalServerError)
+			return
+		}
+
+		if err := cli.ContainerStart(ctx, reaperResp.ID, container.StartOptions{}); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"start reaper: %s"}`, err), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("self-update: reaper started, will swap to %s", newImage)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+			"status":    "reaper_started",
+			"new_image": newImage,
+			"reaper_id": reaperResp.ID[:12],
+		})
+	}
+}
+
+// imageWithTag replaces the tag in an image reference.
+func imageWithTag(img, tag string) string {
+	if i := strings.LastIndex(img, ":"); i != -1 {
+		return img[:i] + ":" + tag
+	}
+	return img + ":" + tag
+}
+
+// buildVolumeArg converts bind mounts to a comma-separated -v arg string.
+func buildVolumeArg(binds []string) string {
+	if len(binds) == 0 {
+		return ""
+	}
+	// Return the first data volume bind (skip docker.sock, handled separately)
+	for _, b := range binds {
+		if !strings.Contains(b, "docker.sock") {
+			return b
+		}
+	}
+	return binds[0]
 }
 
 // ── Environment helpers ─────────────────────────────────────────────────────

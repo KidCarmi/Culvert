@@ -176,3 +176,28 @@ func TestUpdaterToken_Empty(t *testing.T) {
 		t.Logf("unexpected token: %s (ok if /data/updater_token.txt exists)", tok)
 	}
 }
+
+func TestAPIRegistrySettings_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/api/update/registry", nil)
+	w := httptest.NewRecorder()
+	apiRegistrySettings(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
+func TestAPIRegistrySettings_GetEmpty(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/update/registry", nil)
+	w := httptest.NewRecorder()
+	apiRegistrySettings(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var rs RegistrySettings
+	if err := json.NewDecoder(w.Body).Decode(&rs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rs.RegistryURL != "" {
+		t.Errorf("expected empty registry_url, got %q", rs.RegistryURL)
+	}
+}

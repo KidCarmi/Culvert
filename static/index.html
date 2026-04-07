@@ -2671,6 +2671,31 @@ Firefox (all platforms):
           </table>
         </div>
       </div>
+
+      <!-- Registry Settings (admin only) -->
+      <div class="panel" id="upd-registry-panel">
+        <div class="panel-header">
+          <span class="panel-title">Registry Settings</span>
+        </div>
+        <div style="padding:16px">
+          <p style="font-size:.85rem;color:var(--muted);margin-bottom:14px">Configure a custom container registry for enterprise or air-gapped environments. Leave empty to use the default (ghcr.io).</p>
+          <div class="form-row" style="margin-bottom:10px">
+            <label for="upd-reg-url" style="display:block;font-size:.82rem;color:var(--muted);margin-bottom:4px">Registry URL</label>
+            <input id="upd-reg-url" type="text" placeholder="e.g. registry.corp.internal/culvert" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
+          </div>
+          <div style="display:flex;gap:12px;margin-bottom:12px">
+            <div style="flex:1">
+              <label for="upd-reg-user" style="display:block;font-size:.82rem;color:var(--muted);margin-bottom:4px">Username</label>
+              <input id="upd-reg-user" type="text" placeholder="(optional)" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
+            </div>
+            <div style="flex:1">
+              <label for="upd-reg-pass" style="display:block;font-size:.82rem;color:var(--muted);margin-bottom:4px">Password</label>
+              <input id="upd-reg-pass" type="password" placeholder="(optional)" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
+            </div>
+          </div>
+          <button class="btn accent" onclick="saveRegistrySettings()">Save Registry Settings</button>
+        </div>
+      </div>
     </div><!-- /view-updates -->
 
     <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
@@ -2678,6 +2703,20 @@ Firefox (all platforms):
 
   </div><!-- /content -->
 </div><!-- /main -->
+
+<!-- ── CP Updating Overlay ─────────────────────────────────────────────── -->
+<div id="cp-updating-overlay" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(11,15,26,.97);align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:48px 44px;width:100%;max-width:440px;box-shadow:0 24px 64px rgba(0,0,0,.6);text-align:center">
+    <div style="font-size:2.4rem;margin-bottom:12px">&#8635;</div>
+    <h2 style="font-size:1.35rem;font-weight:700;margin-bottom:8px">Control Plane Updating</h2>
+    <p style="color:var(--muted);font-size:.9rem;margin-bottom:20px;line-height:1.55">The proxy container is restarting with the new version. This page will reload automatically when the update is complete.</p>
+    <div id="cp-upd-status" style="font-size:.9rem;color:var(--accent);margin-bottom:16px">Waiting for container restart...</div>
+    <div style="width:100%;height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:24px">
+      <div id="cp-upd-bar" style="width:0%;height:100%;background:var(--accent);transition:width .3s"></div>
+    </div>
+    <p style="font-size:.78rem;color:var(--muted)">If this takes more than 2 minutes, check Docker logs.</p>
+  </div>
+</div>
 
 <div id="toasts"></div>
 
@@ -6979,6 +7018,7 @@ async function loadUpdates() {
   renderUpdateStatus(r);
   loadRollbackStatus();
   loadUpdateReports();
+  loadRegistrySettings();
   // Show cluster panel only for CP nodes
   const cs = await api('/api/cluster/status');
   if (cs && cs.role === 'control-plane') {
@@ -7079,7 +7119,8 @@ async function updateApply() {
       }
     }
   } catch(e) {
-    toast('Connection lost during update', 'error');
+    // Connection lost — CP container likely restarting. Show overlay.
+    showCPUpdatingOverlay();
   }
 }
 
@@ -7161,6 +7202,67 @@ async function loadUpdateReports() {
   tbody.innerHTML = reports.map(rp =>
     `<tr><td style="font-family:monospace;font-size:.82rem">${escHtml(rp.id)}</td><td>${rp.created_at ? new Date(rp.created_at).toLocaleString() : '—'}</td><td><a href="${BASE}/api/update/reports?id=${encodeURIComponent(rp.id)}" target="_blank" class="btn sm ghost">Download</a></td></tr>`
   ).join('');
+}
+
+// ── Registry Settings ────────────────────────────────────────────────────
+async function loadRegistrySettings() {
+  const r = await api('/api/update/registry');
+  if (!r) return;
+  document.getElementById('upd-reg-url').value = r.registry_url || '';
+  document.getElementById('upd-reg-user').value = r.username || '';
+  document.getElementById('upd-reg-pass').value = r.password || '';
+}
+
+async function saveRegistrySettings() {
+  const body = {
+    registry_url: document.getElementById('upd-reg-url').value.trim(),
+    username: document.getElementById('upd-reg-user').value.trim(),
+    password: document.getElementById('upd-reg-pass').value
+  };
+  const r = await api('/api/update/registry', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (r) toast('Registry settings saved', 'success');
+}
+
+// ── CP Updating Overlay ─────────────────────────────────────────────────
+let cpUpdOverlayActive = false;
+function showCPUpdatingOverlay() {
+  if (cpUpdOverlayActive) return;
+  cpUpdOverlayActive = true;
+  const ov = document.getElementById('cp-updating-overlay');
+  ov.style.display = 'flex';
+  const status = document.getElementById('cp-upd-status');
+  const bar = document.getElementById('cp-upd-bar');
+  let attempts = 0;
+  const maxAttempts = 60; // 2 minutes at 2s interval
+  const poll = setInterval(async () => {
+    attempts++;
+    bar.style.width = Math.min(90, (attempts / maxAttempts) * 100) + '%';
+    try {
+      const resp = await fetch(BASE + '/api/dashboard/health', { credentials: 'include', signal: AbortSignal.timeout(3000) });
+      if (resp.ok) {
+        clearInterval(poll);
+        status.textContent = 'Update complete! Reloading...';
+        status.style.color = 'var(--ok)';
+        bar.style.width = '100%';
+        setTimeout(() => location.reload(), 1500);
+        return;
+      }
+    } catch(e) { /* still down */ }
+    if (attempts <= 5) status.textContent = 'Container stopping...';
+    else if (attempts <= 15) status.textContent = 'Starting new container...';
+    else if (attempts <= 40) status.textContent = 'Verifying health...';
+    else status.textContent = 'Still waiting... check Docker logs if this persists.';
+    if (attempts >= maxAttempts) {
+      clearInterval(poll);
+      status.textContent = 'Timeout — the container may have rolled back. Try refreshing.';
+      status.style.color = 'var(--blocked)';
+      cpUpdOverlayActive = false;
+    }
+  }, 2000);
 }
 
 
