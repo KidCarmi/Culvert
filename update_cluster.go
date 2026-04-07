@@ -78,7 +78,7 @@ func (s *ClusterUpdateState) persist() {
 		return
 	}
 	tmp := clusterUpdateFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		logger.Printf("cluster update write error: %v", err)
 		return
 	}
@@ -173,10 +173,10 @@ func generateUpdateReport(state *ClusterUpdateState) {
 	state.mu.Unlock()
 
 	dir := "/data/update_reports"
-	os.MkdirAll(dir, 0o755) //nolint:errcheck
+	os.MkdirAll(dir, 0o750) //nolint:errcheck
 	filename := filepath.Join(dir, report.UpdateID+".json")
 	data, _ := json.MarshalIndent(report, "", "  ")
-	os.WriteFile(filename, data, 0o644) //nolint:errcheck
+	os.WriteFile(filename, data, 0o600) //nolint:errcheck
 	logger.Printf("update report saved: %s", filename)
 
 	// Fire webhook alert.
@@ -231,7 +231,7 @@ func (s *controlPlaneServer) TriggerUpdate(_ context.Context, reqBytes json.RawM
 			"container":  "culvert",
 			"target_tag": req.TargetTag,
 		})
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second) // #nosec G601 — detached goroutine must outlive the gRPC request
 		defer cancel()
 		resp, err := updaterRequest(ctx, http.MethodPost, "/api/update/apply", strings.NewReader(string(body)))
 		if err != nil {

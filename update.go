@@ -354,7 +354,13 @@ func apiUpdateReports(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "report not found", http.StatusNotFound)
 			return
 		}
+		// Validate JSON before serving to prevent XSS from corrupted files.
+		if !json.Valid(data) {
+			http.Error(w, "corrupt report", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Write(data) //nolint:errcheck
 		return
 	}
