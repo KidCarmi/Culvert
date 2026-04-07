@@ -28,10 +28,9 @@ func directClient() *http.Client {
 
 func TestScanService_Health(t *testing.T) {
 	svc := NewScanService(":0")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
-	go svc.Start(ctx) //nolint:errcheck
+	go svc.Start() //nolint:errcheck
 	// Wait for listener.
 	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
@@ -60,10 +59,9 @@ func TestScanService_Health(t *testing.T) {
 
 func TestScanService_ScanClean(t *testing.T) {
 	svc := NewScanService(":0")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
-	go svc.Start(ctx) //nolint:errcheck
+	go svc.Start() //nolint:errcheck
 	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
 
@@ -96,16 +94,15 @@ func TestScanService_ScanDPIBlock(t *testing.T) {
 	dpiScanner.Set([]string{"EVIL_PATTERN"})   //nolint:errcheck
 
 	svc := NewScanService(":0")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
-	go svc.Start(ctx) //nolint:errcheck
+	go svc.Start() //nolint:errcheck
 	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
 
 	client := directClient()
 	data := []byte("This contains EVIL_PATTERN inside text.")
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/scan", bytes.NewReader(data))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+addr+"/scan", bytes.NewReader(data))
 	req.Header.Set("X-Content-Type", "text/html")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -131,10 +128,9 @@ func TestScanService_ScanDPIBlock(t *testing.T) {
 
 func TestScanService_MethodNotAllowed(t *testing.T) {
 	svc := NewScanService(":0")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
-	go svc.Start(ctx) //nolint:errcheck
+	go svc.Start() //nolint:errcheck
 	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
 
@@ -151,10 +147,9 @@ func TestScanService_MethodNotAllowed(t *testing.T) {
 
 func TestScanService_Status(t *testing.T) {
 	svc := NewScanService(":0")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer svc.Shutdown(context.Background()) //nolint:errcheck
 
-	go svc.Start(ctx) //nolint:errcheck
+	go svc.Start() //nolint:errcheck
 	time.Sleep(100 * time.Millisecond)
 	addr := svc.Addr()
 

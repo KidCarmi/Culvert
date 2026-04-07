@@ -670,11 +670,12 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	}
 
 	// Scan microservice sidecar: expose local scanners as an HTTP service.
+	var scanSvc *ScanService
 	svcListenAddr := firstStr(*scanSvcListen, secCfg.ScanSvcListen)
 	if svcListenAddr != "" {
-		svc := NewScanService(svcListenAddr)
+		scanSvc = NewScanService(svcListenAddr)
 		go func() {
-			if err := svc.Start(appLifecycleCtx); err != nil {
+			if err := scanSvc.Start(); err != nil {
 				logger.Printf("ScanSvc  → error: %v", err)
 			}
 		}()
@@ -802,6 +803,12 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Shut down scan microservice sidecar if running.
+	if scanSvc != nil {
+		scanSvc.Shutdown(ctx) //nolint:errcheck -- best-effort shutdown
+	}
+
 	if err := proxySrv.Shutdown(ctx); err != nil {
 		logger.Printf("Shutdown error: %v", err)
 	}

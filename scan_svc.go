@@ -59,8 +59,9 @@ func NewScanService(addr string) *ScanService {
 	return &ScanService{addr: addr}
 }
 
-// Start begins listening. Call in a goroutine.
-func (ss *ScanService) Start(ctx context.Context) error {
+// Start begins listening and serving. Blocks until the server is shut down.
+// Call Shutdown to stop the server gracefully.
+func (ss *ScanService) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scan", ss.handleScan)
 	mux.HandleFunc("/health", ss.handleHealth)
@@ -79,19 +80,18 @@ func (ss *ScanService) Start(ctx context.Context) error {
 
 	logger.Printf("ScanSvc  → listening on %s", ln.Addr())
 
-	go func() {
-		<-ctx.Done()
-		// Parent ctx is already cancelled here; we need an independent context
-		// with a deadline for the graceful shutdown window.
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // #nosec G118 -- shutdown needs independent context after parent cancellation
-		defer cancel()
-		ss.server.Shutdown(shutCtx) //nolint:errcheck
-	}()
-
 	if err := ss.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+// Shutdown gracefully stops the scan service with the given context deadline.
+func (ss *ScanService) Shutdown(ctx context.Context) error {
+	if ss.server == nil {
+		return nil
+	}
+	return ss.server.Shutdown(ctx)
 }
 
 // Addr returns the listener address (useful when binding to :0 for tests).
