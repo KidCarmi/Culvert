@@ -1164,7 +1164,8 @@ func checkDPCertExpiry(certFile string) error {
 }
 
 // dpCertRenewalLoop checks cert expiry periodically and requests a new cert
-// from the CP before the current one expires.
+// from the CP before the current one expires. Also listens for CA rotation
+// notifications to trigger immediate renewal (zero-touch CA rotation).
 func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) {
 	// Check every 6 hours.
 	ticker := time.NewTicker(6 * time.Hour)
@@ -1176,6 +1177,12 @@ func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, cer
 		case <-ticker.C:
 			if err := tryRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
 				logger.Printf("DataPlane: cert renewal check: %v", err)
+			}
+		case <-caRotationNotify:
+			// CP rotated its CA — renew immediately regardless of cert expiry.
+			logger.Printf("DataPlane: CA rotation detected — initiating immediate cert renewal")
+			if err := forceRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
+				logger.Printf("DataPlane: CA rotation renewal failed: %v", err)
 			}
 		}
 	}
@@ -1208,13 +1215,23 @@ func atomicWriteFile(path string, data []byte) error {
 	return os.Rename(path+".tmp", path)
 }
 
+// forceRenewDPCert renews the DP cert unconditionally (triggered by CA rotation).
+func forceRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) error {
+	return renewDPCert(ctx, client, nodeID, certFile, keyFile, caFile, "CA rotation")
+}
+
 // tryRenewDPCert renews the DP cert if it expires within 30 days.
 func tryRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) error {
 	days, needsRenewal := certNeedsRenewal(certFile)
 	if !needsRenewal {
 		return nil
 	}
-	logger.Printf("DataPlane: cert expires in %d days — requesting renewal", days)
+	return renewDPCert(ctx, client, nodeID, certFile, keyFile, caFile, fmt.Sprintf("cert expires in %d days", days))
+}
+
+// renewDPCert performs the actual cert renewal via RenewCert RPC.
+func renewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile, reason string) error {
+	logger.Printf("DataPlane: requesting cert renewal (%s)", reason)
 
 	privKey, csrPEM, err := generateCSR(nodeID)
 	if err != nil {
@@ -1249,7 +1266,7 @@ func tryRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFi
 			return fmt.Errorf("write CA: %w", err)
 		}
 	}
-	logger.Printf("DataPlane: certificate renewed successfully — restart to load new cert")
+	logger.Printf("DataPlane: certificate renewed successfully (%s)", reason)
 	return nil
 }
 

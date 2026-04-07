@@ -60,14 +60,15 @@ import (
 // ConfigSnapshot is the canonical, immutable view of proxy configuration that
 // the Control Plane distributes to Data Plane nodes.
 type ConfigSnapshot struct {
-	Version      int64    `json:"version"`
-	BlockedHosts []string `json:"blocked_hosts"`
-	IPFilterMode string   `json:"ip_filter_mode"`
-	IPList       []string `json:"ip_list"`
-	RateLimitRPM int      `json:"rate_limit_rpm"`
-	AuthEnabled  bool     `json:"auth_enabled"`
-	UnauthMode   bool     `json:"unauth_mode"`
-	UpdatedAt    string   `json:"updated_at"`
+	Version       int64    `json:"version"`
+	BlockedHosts  []string `json:"blocked_hosts"`
+	IPFilterMode  string   `json:"ip_filter_mode"`
+	IPList        []string `json:"ip_list"`
+	RateLimitRPM  int      `json:"rate_limit_rpm"`
+	AuthEnabled   bool     `json:"auth_enabled"`
+	UnauthMode    bool     `json:"unauth_mode"`
+	UpdatedAt     string   `json:"updated_at"`
+	CAFingerprint string   `json:"ca_fingerprint,omitempty"` // cluster CA SHA-256 fingerprint; DP triggers renewal when this changes
 }
 
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
@@ -437,6 +438,10 @@ func (s *controlPlaneServer) GetConfig(_ context.Context, _ json.RawMessage) (js
 	// No node identity check required — config is not secret, and unenrolled
 	// nodes need it to bootstrap.
 	snap := globalConfigStore.Get()
+	// Include cluster CA fingerprint so DP nodes detect CA rotation.
+	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
+		snap.CAFingerprint = fp
+	}
 	b, err := json.Marshal(snap)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
@@ -649,6 +654,9 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 	}
 
 	logger.Printf("RenewCert: renewed cert for node %q (serial=%s, expires=%s)", req.NodeID, serial, expiry.Format("2006-01-02"))
+
+	// Track renewal progress if a CA rotation is active.
+	globalClusterStore.RecordNodeRenewed(req.NodeID)
 
 	resp, _ := json.Marshal(map[string]string{
 		"cert_pem": string(certPEM),
@@ -1009,6 +1017,14 @@ func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawM
 	return resp, err
 }
 
+// lastSeenCAFingerprint tracks the most recent cluster CA fingerprint the DP has seen.
+// When this changes, the DP knows the CP rotated the CA and triggers immediate cert renewal.
+var lastSeenCAFingerprint atomic.Value // string
+
+// caRotationNotify is signaled when the DP detects a CA rotation from the CP.
+// The dpCertRenewalLoop listens on this channel to trigger immediate renewal.
+var caRotationNotify = make(chan struct{}, 1)
+
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
 func applyConfigSnapshot(snap ConfigSnapshot) {
 	// Blocklist.
@@ -1033,6 +1049,19 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		rl.Configure(snap.RateLimitRPM, time.Minute)
 	}
 
+	// Detect cluster CA rotation: if the fingerprint changed, trigger immediate cert renewal.
+	if snap.CAFingerprint != "" {
+		prev, _ := lastSeenCAFingerprint.Load().(string)
+		if prev != "" && prev != snap.CAFingerprint {
+			logger.Printf("DataPlane: cluster CA rotated (fingerprint changed) — triggering immediate cert renewal")
+			select {
+			case caRotationNotify <- struct{}{}:
+			default:
+			}
+		}
+		lastSeenCAFingerprint.Store(snap.CAFingerprint)
+	}
+
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), snap.IPFilterMode, snap.RateLimitRPM)
 }
@@ -1040,7 +1069,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 // CurrentConfigSnapshot builds a ConfigSnapshot from the current live state.
 // Used by the Control Plane to serve the initial configuration.
 func CurrentConfigSnapshot() ConfigSnapshot {
-	return ConfigSnapshot{
+	snap := ConfigSnapshot{
 		BlockedHosts: bl.List(),
 		IPFilterMode: ipf.Mode(),
 		IPList:       ipf.List(),
@@ -1048,6 +1077,10 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 		AuthEnabled:  cfg.AuthEnabled(),
 		UnauthMode:   cfg.UnauthMode(),
 	}
+	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
+		snap.CAFingerprint = fp
+	}
+	return snap
 }
 
 // ─── TLS helpers ──────────────────────────────────────────────────────────────

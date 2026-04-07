@@ -146,6 +146,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits)   // GET distributed RL status
 	mux.HandleFunc("/api/cluster/audit", apiClusterAudit)             // GET centralized audit log
 	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations) // GET revocation sync status
+	mux.HandleFunc("/api/cluster/rotation", apiClusterRotation)       // GET CA rotation progress
 
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
@@ -3752,6 +3753,46 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{
 		"local_revoked":  sessionRevoked.Count(),
 		"cluster_mode":   clusterRoleIsDP.Load() || clusterRole.role == "control-plane",
+	})
+}
+
+// GET /api/cluster/rotation — CA rotation progress.
+func apiClusterRotation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	rot := globalClusterStore.CARotationStatus()
+	if rot == nil {
+		jsonOK(w, map[string]any{"active": false})
+		return
+	}
+
+	// Build list of pending nodes.
+	pending := []string{}
+	for _, n := range globalClusterStore.ListNodes() {
+		if n.Status == "revoked" {
+			continue
+		}
+		if _, ok := rot.RenewedNodes[n.NodeID]; !ok {
+			pending = append(pending, n.NodeID)
+		}
+	}
+
+	jsonOK(w, map[string]any{
+		"active":          true,
+		"started_at":      rot.StartedAt,
+		"new_fingerprint": rot.NewFingerprint,
+		"old_fingerprint": rot.OldFingerprint,
+		"old_expires":     rot.OldExpires,
+		"total_nodes":     rot.TotalNodes,
+		"renewed_count":   len(rot.RenewedNodes),
+		"renewed_nodes":   rot.RenewedNodes,
+		"pending_nodes":   pending,
+		"complete":        len(rot.RenewedNodes) >= rot.TotalNodes,
 	})
 }
 
