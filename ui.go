@@ -1213,6 +1213,19 @@ func apiBlocklistFeed(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "feed URL must use http:// or https://", http.StatusBadRequest)
 			return
 		}
+		// SSRF guard: reject URLs pointing at private/loopback addresses.
+		if body.URL != "" {
+			u, err := url.Parse(body.URL)
+			if err != nil {
+				http.Error(w, "invalid feed URL", http.StatusBadRequest)
+				return
+			}
+			host := u.Hostname()
+			if err := isPrivateHost(host); err != nil {
+				http.Error(w, "feed URL must not point to private/loopback addresses", http.StatusBadRequest)
+				return
+			}
+		}
 		var interval time.Duration
 		if body.Interval == "" || body.Interval == "off" {
 			interval = 0 // disabled
@@ -1883,6 +1896,9 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 func apiSecurity(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
 		jsonOK(w, map[string]any{
 			"ipFilterMode": ipf.Mode(),
 			"ipList":       ipf.List(),
@@ -2278,6 +2294,9 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 func apiCACert(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
 		pem := certMgr.CACertPEM()
 		if pem == nil {
 			http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
@@ -2369,6 +2388,9 @@ func apiDefaultAction(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/export?format=json|csv — download all logs
 func apiExport(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	entries := logGet()
 	format := r.URL.Query().Get("format")
 	ts := time.Now().Format("20060102-150405")
@@ -2940,6 +2962,9 @@ func apiSecScanStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(secScanStatusMap()); err != nil {
 		logger.Printf("apiSecScanStatus: encode error: %v", err)
@@ -2951,6 +2976,9 @@ func apiSecScanStatus(w http.ResponseWriter, r *http.Request) {
 func apiSecFeedsSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
 	if !globalThreatFeed.Enabled() {
@@ -2971,6 +2999,9 @@ func apiSecFeedsSync(w http.ResponseWriter, r *http.Request) {
 func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		list := globalThreatFeed.DomainAllowlist()
 		if list == nil {
@@ -2978,6 +3009,9 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"domains": list})
 	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
 		var body struct {
 			Domains []string `json:"domains"`
 		}
@@ -2999,6 +3033,9 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
 	globalYARA.mu.RLock()
@@ -3031,6 +3068,9 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	info := certMgr.CACertInfo()
 	info["cacheSize"] = certMgr.CertCacheLen()
 	info["cacheMax"] = 10_000
@@ -3054,6 +3094,9 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 func apiCADownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
 		return
 	}
 	pem := certMgr.CACertPEM()
@@ -3227,6 +3270,9 @@ func apiMetricsConfig(w http.ResponseWriter, r *http.Request) {
 func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
 		jsonOK(w, map[string]any{
 			"enabled":   connLimiter.enabled.Load(),
 			"maxPerIP":  connLimiter.MaxPerIP(),
@@ -3263,6 +3309,9 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 func apiBlockPage(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
 		jsonOK(w, map[string]any{"html": getBlockPageHTML()})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
@@ -3351,6 +3400,9 @@ func apiUpstreamHealth(w http.ResponseWriter, r *http.Request) {
 func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
 		return
 	}
 	result := map[string]any{

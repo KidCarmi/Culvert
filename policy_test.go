@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // ─── matchFQDN ────────────────────────────────────────────────────────────────
@@ -566,5 +568,252 @@ func TestPolicyStore_SaveNoHitCount(t *testing.T) {
 	}
 	if rules[0].HitCount != 0 {
 		t.Errorf("HitCount should not be persisted, got %d", rules[0].HitCount)
+	}
+}
+
+// ─── Edge-case tests ─────────────────────────────────────────────────────────
+
+func TestMatchSchedule_OvernightInside(t *testing.T) {
+	// Construct an overnight schedule (TimeStart > TimeEnd) where the current
+	// UTC time falls inside the active window. The overnight condition:
+	//   match when cur >= TimeStart OR cur < TimeEnd
+	now := time.Now().UTC()
+	cur := fmt.Sprintf("%02d:%02d", now.Hour(), now.Minute())
+
+	// For overnight (start > end), the active window is [start,24:00) ∪ [00:00,end).
+	// Place TimeStart 1 hour before now. For overnight we need startStr > endStr,
+	// so set endHour = startHour - 1 (wrapping). This gives a 23-hour wide window
+	// that includes the current time.
+	startHour := (now.Hour() - 1 + 24) % 24
+	endHour := (now.Hour() - 2 + 24) % 24
+	startStr := fmt.Sprintf("%02d:00", startHour)
+	endStr := fmt.Sprintf("%02d:00", endHour)
+
+	// Verify this is actually an overnight schedule (start > end).
+	if startStr <= endStr {
+		t.Skip("could not construct overnight schedule for this UTC hour")
+	}
+
+	s := &PolicySchedule{
+		Days:      []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+		TimeStart: startStr,
+		TimeEnd:   endStr,
+		Timezone:  "UTC",
+	}
+	got := matchSchedule(s)
+	if !got {
+		t.Errorf("matchSchedule(overnight %s–%s UTC) at %s should match (inside window)", startStr, endStr, cur)
+	}
+}
+
+func TestMatchSchedule_OvernightOutside(t *testing.T) {
+	// Construct an overnight schedule (TimeStart > TimeEnd) where the current
+	// UTC time falls outside the active window.
+	now := time.Now().UTC()
+	cur := fmt.Sprintf("%02d:%02d", now.Hour(), now.Minute())
+
+	// Place TimeStart 2 hours ahead, TimeEnd 2 hours behind.
+	// Current time is in the "dead zone" between end and start.
+	startHour := (now.Hour() + 2) % 24
+	endHour := (now.Hour() - 2 + 24) % 24
+	startStr := fmt.Sprintf("%02d:00", startHour)
+	endStr := fmt.Sprintf("%02d:00", endHour)
+
+	// Verify this is actually overnight (start > end).
+	if startStr <= endStr {
+		t.Skip("could not construct overnight schedule for this UTC hour")
+	}
+
+	s := &PolicySchedule{
+		Days:      []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+		TimeStart: startStr,
+		TimeEnd:   endStr,
+		Timezone:  "UTC",
+	}
+	got := matchSchedule(s)
+	if got {
+		t.Errorf("matchSchedule(overnight %s–%s UTC) at %s should NOT match (outside window)", startStr, endStr, cur)
+	}
+}
+
+func TestMatchSchedule_BoundaryEndExclusive(t *testing.T) {
+	// TimeEnd is exclusive (>= comparison). When cur == TimeEnd the schedule
+	// should NOT match. Construct a normal range ending exactly at the current minute.
+	now := time.Now().UTC()
+	cur := fmt.Sprintf("%02d:%02d", now.Hour(), now.Minute())
+
+	// Normal range: some earlier start, end = now.
+	startHour := (now.Hour() - 2 + 24) % 24
+	startStr := fmt.Sprintf("%02d:00", startHour)
+
+	// Must be a normal range (start <= end).
+	if startStr > cur {
+		t.Skip("cannot construct normal range at this UTC hour")
+	}
+
+	s := &PolicySchedule{
+		Days:      []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+		TimeStart: startStr,
+		TimeEnd:   cur,
+		Timezone:  "UTC",
+	}
+	got := matchSchedule(s)
+	if got {
+		t.Errorf("matchSchedule with TimeEnd=%s at cur=%s should NOT match (end is exclusive)", cur, cur)
+	}
+}
+
+func TestMatchSchedule_BoundaryStartInclusive(t *testing.T) {
+	// TimeStart is inclusive. When cur == TimeStart the schedule should match.
+	now := time.Now().UTC()
+	cur := fmt.Sprintf("%02d:%02d", now.Hour(), now.Minute())
+
+	// Normal range: start = now, end = 1 minute later.
+	endMin := (now.Minute() + 1) % 60
+	endHour := now.Hour()
+	if endMin == 0 {
+		endHour = (endHour + 1) % 24
+	}
+	endStr := fmt.Sprintf("%02d:%02d", endHour, endMin)
+
+	// Must be a normal range (start <= end).
+	if cur > endStr {
+		t.Skip("cannot construct normal range at this exact minute")
+	}
+
+	s := &PolicySchedule{
+		Days:      []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+		TimeStart: cur,
+		TimeEnd:   endStr,
+		Timezone:  "UTC",
+	}
+	got := matchSchedule(s)
+	if !got {
+		t.Errorf("matchSchedule at exactly TimeStart=%s (end=%s) should match (start is inclusive)", cur, endStr)
+	}
+}
+
+func TestEvaluate_MultiConditionAND(t *testing.T) {
+	// Rule requires BOTH DestFQDN AND DestCategory to match (AND logic).
+	ps := newTestPolicyStore()
+	ps.Add(PolicyRule{
+		Priority:     1,
+		Name:         "social-facebook-only",
+		DestFQDN:     "facebook.com",
+		DestCategory: CategorySocial,
+		Action:       ActionDrop,
+	})
+
+	// facebook.com is in the Social category — both conditions met — match.
+	m := ps.Evaluate("", "", "", "facebook.com", nil)
+	if m == nil || m.Action != ActionDrop {
+		t.Error("expected Drop when both FQDN and category match")
+	}
+
+	// twitter.com IS Social but does NOT match DestFQDN "facebook.com" — no match.
+	m = ps.Evaluate("", "", "", "twitter.com", nil)
+	if m != nil {
+		t.Errorf("expected no match for twitter.com (FQDN mismatch despite correct category), got %+v", m)
+	}
+
+	// google.com matches neither FQDN nor category — no match.
+	m = ps.Evaluate("", "", "", "google.com", nil)
+	if m != nil {
+		t.Errorf("expected no match for google.com, got %+v", m)
+	}
+
+	// netflix.com is Streaming, not Social — FQDN also doesn't match — no match.
+	m = ps.Evaluate("", "", "", "netflix.com", nil)
+	if m != nil {
+		t.Errorf("expected no match for netflix.com (wrong category), got %+v", m)
+	}
+}
+
+func TestMatchFQDN_EmptyHost(t *testing.T) {
+	// Empty host should not match domain/wildcard patterns.
+	cases := []struct {
+		pattern string
+		host    string
+		want    bool
+	}{
+		// Universal wildcard matches even empty host.
+		{"*", "", true},
+		// Wildcard prefix should not match empty host.
+		{"*.example.com", "", false},
+		// Bare domain should not match empty host.
+		{"example.com", "", false},
+	}
+	for _, c := range cases {
+		got := matchFQDN(c.pattern, c.host)
+		if got != c.want {
+			t.Errorf("matchFQDN(%q, %q) = %v, want %v", c.pattern, c.host, got, c.want)
+		}
+	}
+}
+
+func TestReorder_DuplicatePriorities(t *testing.T) {
+	ps := newTestPolicyStore()
+	ps.Add(PolicyRule{Priority: 1, Name: "first"})
+	ps.Add(PolicyRule{Priority: 2, Name: "second"})
+	ps.Add(PolicyRule{Priority: 3, Name: "third"})
+
+	// Duplicate values in orderedPriorities — priority 1 appears twice, 3 missing.
+	// The function uses a map lookup so duplicate old-priorities will find the
+	// same rule twice (already reassigned). It must not panic.
+	ok := ps.Reorder([]int{1, 2, 1})
+	_ = ok // may or may not return true; the key is no panic
+
+	// Non-existent priority in the list should return false.
+	ps2 := newTestPolicyStore()
+	ps2.Add(PolicyRule{Priority: 1, Name: "first"})
+	ps2.Add(PolicyRule{Priority: 2, Name: "second"})
+	ok2 := ps2.Reorder([]int{1, 999})
+	if ok2 {
+		t.Error("Reorder with non-existent priority should return false")
+	}
+}
+
+func TestEvaluate_CategoryAnyMatchesAll(t *testing.T) {
+	// A rule with DestCategory="Any" should behave as "match any category"
+	// (the category condition is effectively a no-op).
+	ps := newTestPolicyStore()
+	ps.Add(PolicyRule{
+		Priority:     1,
+		Name:         "any-category",
+		DestCategory: CategoryAny,
+		Action:       ActionAllow,
+	})
+
+	// Should match any host regardless of its actual category.
+	hosts := []string{"facebook.com", "google.com", "unknown-host.example", "netflix.com"}
+	for _, h := range hosts {
+		m := ps.Evaluate("", "", "", h, nil)
+		if m == nil || m.Action != ActionAllow {
+			t.Errorf("Evaluate(host=%q) with DestCategory=Any: expected Allow, got %v", h, m)
+		}
+	}
+}
+
+func TestEvaluate_CategoryAnyWithFQDN(t *testing.T) {
+	// DestCategory="Any" combined with a specific DestFQDN — only FQDN gates.
+	ps := newTestPolicyStore()
+	ps.Add(PolicyRule{
+		Priority:     1,
+		Name:         "any-cat-fqdn",
+		DestFQDN:     "specific.example.com",
+		DestCategory: CategoryAny,
+		Action:       ActionDrop,
+	})
+
+	// FQDN matches — should match (category Any is not checked).
+	m := ps.Evaluate("", "", "", "specific.example.com", nil)
+	if m == nil || m.Action != ActionDrop {
+		t.Error("expected Drop for matching FQDN with CategoryAny")
+	}
+
+	// FQDN doesn't match — should NOT match.
+	m = ps.Evaluate("", "", "", "other.example.com", nil)
+	if m != nil {
+		t.Errorf("expected no match for non-matching FQDN with CategoryAny, got %+v", m)
 	}
 }
