@@ -1,0 +1,152 @@
+version: "3.4"
+
+# Culvert HA Cluster — Control Plane + Standby + Data Plane workers
+#
+# Deploy:
+#   1. Copy this file to BOTH CP servers (Server A + Server B)
+#   2. On Server A:  docker compose -f docker-compose.ha.yml up -d
+#   3. Open GUI at https://server-a:9090
+#      → Enable Control Plane (gRPC :50051)
+#      → Import enterprise certs (optional)
+#      → Enable HA → enter server-a's reachable address
+#      → Copy the standby deploy command
+#   4. On Server B:  set HA_JOIN + HA_TOKEN env vars, then:
+#      docker compose -f docker-compose.ha.yml up -d
+#   5. On DP servers: set ENROLL_URL env var, then:
+#      docker compose -f docker-compose.ha.yml --profile dp up -d
+#
+# Everything after step 2 is configured from the GUI.
+# The GUI generates the exact env vars you need for steps 4-5.
+#
+# Enterprise TLS certs:
+#   Mount your certs into /certs/ and set CP_CERT/CP_KEY/CP_CA env vars.
+#   The GUI "Enable Control Plane" form also accepts cert paths.
+
+services:
+
+  # ── ClamAV antivirus daemon ─────────────────────────────────────────────────
+  clamav:
+    image: clamav/clamav:1.4
+    container_name: culvert-clamav
+    restart: unless-stopped
+    volumes:
+      - clamav-db:/var/lib/clamav
+    environment:
+      - CLAMAV_NO_FRESHCLAMD=false
+      - CLAMAV_NO_MILTERD=true
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "3"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+  # ── Culvert proxy (CP, Standby, or DP — configured at runtime via GUI) ─────
+  proxy:
+    build: .
+    container_name: culvert
+    restart: unless-stopped
+    depends_on:
+      - clamav
+    ports:
+      - "8080:8080"   # HTTP/HTTPS proxy
+      - "1080:1080"   # SOCKS5 proxy (optional)
+      - "9090:9090"   # Admin Web UI
+      - "50051:50051" # gRPC (cluster communication)
+    volumes:
+      - proxy-data:/data
+      # Mount enterprise certs (optional):
+      # - ./certs:/certs:ro
+    environment:
+      - TZ=UTC
+      # ── HA Standby (set these on Server B only) ────────────────
+      # Get these values from the GUI "Enable HA" deploy command.
+      - HA_JOIN=${HA_JOIN:-}         # e.g. server-a.internal:50051
+      - HA_TOKEN=${HA_TOKEN:-}       # e.g. a3f8c1d2...
+      # ── Enterprise TLS (optional) ─────────────────────────────
+      - CP_CERT=${CP_CERT:-}         # e.g. /certs/grpc-cert.pem
+      - CP_KEY=${CP_KEY:-}           # e.g. /certs/grpc-key.pem
+      - CP_CA=${CP_CA:-}             # e.g. /certs/grpc-ca.pem
+      - CULVERT_CA_PASSPHRASE=${CULVERT_CA_PASSPHRASE:-}
+    command: >
+      sh -c '
+        ARGS="-port 8080
+          -ui-port 9090
+          -ca-path /data/ca.bundle
+          -blocklist /data/blocklist.txt
+          -policy /data/policy.json
+          -logfile /data/proxy.log
+          -audit-log /data/audit.jsonl
+          -geoip-db /app/GeoLite2-Country.mmdb
+          -clamav-addr tcp:clamav:3310
+          -yara-rules-dir /app/yara
+          -threat-feed-db /data/threatfeeds.json
+          -ui-users-file /data/ui_users.json
+          -fileprofiles-file /data/fileprofiles.json
+          -cluster-db /data/cluster.json"
+
+        if [ -n "$$CP_CERT" ]; then
+          ARGS="$$ARGS -cp-grpc-cert $$CP_CERT -cp-grpc-key $$CP_KEY"
+        fi
+        if [ -n "$$CP_CA" ]; then
+          ARGS="$$ARGS -cp-grpc-ca $$CP_CA"
+        fi
+        if [ -n "$$HA_JOIN" ]; then
+          ARGS="$$ARGS -cp-grpc-addr :50051 --ha-join $$HA_JOIN --ha-token $$HA_TOKEN"
+        fi
+
+        exec ./culvert $$ARGS
+      '
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Data Plane worker (activate with --profile dp) ─────────────────────────
+  # Usage: ENROLL_URL=culvert://TOKEN@cp:50051 docker compose --profile dp up -d
+  dp:
+    build: .
+    container_name: culvert-dp
+    restart: unless-stopped
+    profiles: ["dp"]
+    depends_on:
+      - clamav
+    ports:
+      - "8080:8080"
+      - "1080:1080"
+    volumes:
+      - dp-data:/data
+    environment:
+      - TZ=UTC
+      - ENROLL_URL=${ENROLL_URL:-}
+    command: >
+      sh -c '
+        ARGS="-port 8080
+          -ca-path /data/ca.bundle
+          -blocklist /data/blocklist.txt
+          -policy /data/policy.json
+          -logfile /data/proxy.log
+          -audit-log /data/audit.jsonl
+          -geoip-db /app/GeoLite2-Country.mmdb
+          -clamav-addr tcp:clamav:3310
+          -yara-rules-dir /app/yara
+          -threat-feed-db /data/threatfeeds.json
+          -fileprofiles-file /data/fileprofiles.json"
+
+        if [ -n "$$ENROLL_URL" ]; then
+          ARGS="$$ARGS --enroll $$ENROLL_URL"
+        fi
+
+        exec ./culvert $$ARGS
+      '
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  proxy-data:
+  dp-data:
+  clamav-db:
