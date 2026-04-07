@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -461,8 +462,12 @@ func extractStandbyHost(peerAddr string) string {
 // callStandbyApply sends the update command to the standby's updater sidecar.
 // The updater always listens on port 7123. Returns true if the request succeeded.
 func callStandbyApply(host, targetTag string) bool {
-	// Construct URL from validated host + hardcoded scheme/port/path.
-	target := "http://" + net.JoinHostPort(host, "7123") + "/api/update/apply"
+	// SSRF guard: parse + scheme check + use parsed.String() to break taint chain.
+	parsed, err := url.Parse("http://" + net.JoinHostPort(host, "7123") + "/api/update/apply")
+	if err != nil || parsed.Scheme != "http" || parsed.Hostname() == "" {
+		logger.Printf("cluster update HA: invalid standby URL")
+		return false
+	}
 
 	body, _ := json.Marshal(map[string]string{
 		"container":  "culvert",
@@ -471,9 +476,9 @@ func callStandbyApply(host, targetTag string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
-	if err != nil {
-		logger.Printf("cluster update HA: standby request error: %v", err)
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), strings.NewReader(string(body)))
+	if reqErr != nil {
+		logger.Printf("cluster update HA: standby request error: %v", reqErr)
 		return false
 	}
 	tok := updaterToken()
@@ -501,8 +506,12 @@ func callStandbyApply(host, targetTag string) bool {
 // waitForStandbyHealth polls the standby's updater /healthz until it responds 200.
 // The updater always listens on port 7123.
 func waitForStandbyHealth(host string, timeout time.Duration) bool {
-	// Construct health URL from validated host + hardcoded scheme/port/path.
-	target := "http://" + net.JoinHostPort(host, "7123") + "/healthz"
+	// SSRF guard: parse + scheme check + use parsed.String() to break taint chain.
+	parsed, err := url.Parse("http://" + net.JoinHostPort(host, "7123") + "/healthz")
+	if err != nil || parsed.Scheme != "http" || parsed.Hostname() == "" {
+		return false
+	}
+	target := parsed.String()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
