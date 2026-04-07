@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -420,6 +421,14 @@ func updateCPWithHA(targetTag string, ha HAStatus) {
 	}
 
 	// Call standby's updater to apply the update.
+	// SSRF guard: parse and validate the constructed URL before use.
+	applyURL, err := url.Parse(standbyUpdaterURL + "/api/update/apply")
+	if err != nil || (applyURL.Scheme != "http" && applyURL.Scheme != "https") || applyURL.Hostname() == "" {
+		logger.Printf("cluster update HA: invalid standby URL — falling back to direct")
+		updateCPDirect(targetTag)
+		return
+	}
+
 	body, _ := json.Marshal(map[string]string{
 		"container":  "culvert",
 		"target_tag": targetTag,
@@ -427,7 +436,7 @@ func updateCPWithHA(targetTag string, ha HAStatus) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, standbyUpdaterURL+"/api/update/apply", strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, applyURL.String(), strings.NewReader(string(body)))
 	if err != nil {
 		logger.Printf("cluster update HA: standby request error: %v", err)
 		updateCPDirect(targetTag)
@@ -490,6 +499,7 @@ func updateCPWithHA(targetTag string, ha HAStatus) {
 
 // buildStandbyUpdaterURL derives the standby's updater URL from the gRPC peer address.
 // e.g. "standby.host:50051" → "http://standby.host:7123"
+// Returns "" if the address is empty or fails SSRF validation.
 func buildStandbyUpdaterURL(peerAddr string) string {
 	host := peerAddr
 	if i := strings.LastIndex(host, ":"); i >= 0 {
@@ -498,18 +508,32 @@ func buildStandbyUpdaterURL(peerAddr string) string {
 	if host == "" {
 		return ""
 	}
-	return "http://" + host + ":7123"
+	// Validate: construct URL, parse it, and verify scheme + host.
+	raw := "http://" + host + ":7123"
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" || u.Hostname() == "" {
+		return ""
+	}
+	return u.String()
 }
 
 // waitForStandbyHealth polls the standby's updater /healthz until it responds 200.
 func waitForStandbyHealth(baseURL string, timeout time.Duration) bool {
+	// Validate the base URL before making any requests (SSRF guard).
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return false
+	}
+	safeBase := u.String()
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		healthURL, _ := url.Parse(safeBase + "/healthz")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/healthz", nil)
-		resp, err := http.DefaultClient.Do(req)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, healthURL.String(), nil)
+		resp, doErr := http.DefaultClient.Do(req)
 		cancel()
-		if err == nil {
+		if doErr == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
 				return true

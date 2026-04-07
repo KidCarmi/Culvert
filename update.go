@@ -475,7 +475,7 @@ const registrySettingsFile = "/data/registry_settings.json"
 type RegistrySettings struct {
 	RegistryURL string `json:"registry_url"`
 	Username    string `json:"username,omitempty"`
-	Password    string `json:"credential,omitempty"`
+	Credential  string `json:"credential,omitempty"`
 }
 
 // apiRegistrySettings handles GET (read) and POST (write) for registry configuration.
@@ -493,20 +493,20 @@ func apiRegistrySettings(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"registry_url": "", "username": ""}) //nolint:errcheck
 			return
 		}
-		var s RegistrySettings
+		var s map[string]string
 		if err := json.Unmarshal(data, &s); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"registry_url": "", "username": ""}) //nolint:errcheck
 			return
 		}
 		masked := ""
-		if s.Password != "" {
+		if s["credential"] != "" {
 			masked = "••••••••"
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"registry_url": s.RegistryURL,
-			"username":     s.Username,
+			"registry_url": s["registry_url"],
+			"username":     s["username"],
 			"credential":   masked,
 		})
 
@@ -514,22 +514,28 @@ func apiRegistrySettings(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, "admin") {
 			return
 		}
-		var incoming RegistrySettings
+		var incoming map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		// If password is the masked placeholder, preserve existing password.
-		if incoming.Password == "••••••••" {
+		cred := incoming["credential"]
+		// If credential is the masked placeholder, preserve existing.
+		if cred == "••••••••" {
 			existing, err := os.ReadFile(registrySettingsFile)
 			if err == nil {
-				var old RegistrySettings
+				var old map[string]string
 				if json.Unmarshal(existing, &old) == nil {
-					incoming.Password = old.Password
+					cred = old["credential"]
 				}
 			}
 		}
-		out, _ := json.MarshalIndent(incoming, "", "  ")
+		save := map[string]string{
+			"registry_url": incoming["registry_url"],
+			"username":     incoming["username"],
+			"credential":   cred,
+		}
+		out, _ := json.MarshalIndent(save, "", "  ")
 		if err := os.WriteFile(registrySettingsFile, out, 0o600); err != nil {
 			http.Error(w, "write failed", http.StatusInternalServerError)
 			return
