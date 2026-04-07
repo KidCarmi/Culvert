@@ -122,4 +122,4 @@ docker compose up -d
 - **UnauthMode persistence**: Open/Policy-Only mode survives restarts via JSON envelope format in ui_users.json
 - **Performance tuning**: Transport pool uses 512 max idle conns, 64 per host, 128KB relay buffers (sync.Pool), sharded rate limiter (64 shards), lock-free latency histogram
 - **Relay buffers**: All tunnel relays (bypass, inspect, WebSocket) use `relayBufPool` (128 KB pooled buffers) via `io.CopyBuffer`
-- **Roadmap**: See `roadmap/PHASES.md` for development phases (1–6), `roadmap/ROADMAP.md` for production deployment action items, `roadmap/FEATURE-COVERAGE.md` for GUI coverage audit, `roadmap/UI-DESIGN.md` for panel design reference, `roadmap/CLUSTER-GAPS.md` for cluster gap analysis
+- **Roadmap**: See `roadmap/PHASES.md` for development phases (1–6), `roadmap/ROADMAP.md` for production deployment action items, `roadmap/FEATURE-COVERAGE.md` for GUI coverage audit, `roadmap/UI-DESIGN.md` for panel design reference, `roadmap/CLUSTER-GAPS.md` for cluster gap analysis, `roadmap/docker-system-update.md` for Docker self-update system design
