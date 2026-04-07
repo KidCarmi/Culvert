@@ -591,24 +591,17 @@ func updateSingleNode(nodeID, targetTag string) bool {
 	clusterUpdateState.mu.Unlock()
 	clusterUpdateState.persist()
 
-	deadline := time.Now().Add(120 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-		nodes := globalClusterStore.ListNodes()
-		for _, n := range nodes {
-			if n.NodeID == nodeID && n.Version == targetTag && n.Status == "connected" {
-				clusterUpdateState.mu.Lock()
-				if ns, ok := clusterUpdateState.Nodes[nodeID]; ok {
-					ns.Status = "complete"
-					ns.NewVersion = targetTag
-					ns.DurationS = int(time.Since(start).Seconds())
-				}
-				clusterUpdateState.mu.Unlock()
-				globalClusterStore.SetNodeDraining(nodeID, false) //nolint:errcheck
-				logger.Printf("node %s updated successfully to %s", sanitizeLog(nodeID), sanitizeLog(targetTag))
-				return true
-			}
+	if waitForNodeVersion(nodeID, targetTag, 120*time.Second) {
+		clusterUpdateState.mu.Lock()
+		if ns, ok := clusterUpdateState.Nodes[nodeID]; ok {
+			ns.Status = "complete"
+			ns.NewVersion = targetTag
+			ns.DurationS = int(time.Since(start).Seconds())
 		}
+		clusterUpdateState.mu.Unlock()
+		globalClusterStore.SetNodeDraining(nodeID, false) //nolint:errcheck
+		logger.Printf("node %s updated successfully to %s", sanitizeLog(nodeID), sanitizeLog(targetTag))
+		return true
 	}
 
 	// Timeout.
@@ -621,6 +614,22 @@ func updateSingleNode(nodeID, targetTag string) bool {
 	clusterUpdateState.mu.Unlock()
 	globalClusterStore.SetNodeDraining(nodeID, false) //nolint:errcheck
 	logger.Printf("node %s update timeout", sanitizeLog(nodeID))
+	return false
+}
+
+// waitForNodeVersion polls the cluster store until the given node reports the
+// expected version and a "connected" status, or until the timeout elapses.
+func waitForNodeVersion(nodeID, targetTag string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		nodes := globalClusterStore.ListNodes()
+		for _, n := range nodes {
+			if n.NodeID == nodeID && n.Version == targetTag && n.Status == "connected" {
+				return true
+			}
+		}
+	}
 	return false
 }
 

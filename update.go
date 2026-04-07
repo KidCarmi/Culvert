@@ -475,7 +475,7 @@ const registrySettingsFile = "/data/registry_settings.json"
 type RegistrySettings struct {
 	RegistryURL string `json:"registry_url"`
 	Username    string `json:"username,omitempty"`
-	Password    string `json:"password,omitempty"`
+	Password    string `json:"credential,omitempty"`
 }
 
 // apiRegistrySettings handles GET (read) and POST (write) for registry configuration.
@@ -490,20 +490,25 @@ func apiRegistrySettings(w http.ResponseWriter, r *http.Request) {
 		data, err := os.ReadFile(registrySettingsFile)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(RegistrySettings{}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"registry_url": "", "username": ""}) //nolint:errcheck
 			return
 		}
 		var s RegistrySettings
 		if err := json.Unmarshal(data, &s); err != nil {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(RegistrySettings{}) //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]string{"registry_url": "", "username": ""}) //nolint:errcheck
 			return
 		}
+		masked := ""
 		if s.Password != "" {
-			s.Password = "••••••••"
+			masked = "••••••••"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+			"registry_url": s.RegistryURL,
+			"username":     s.Username,
+			"credential":   masked,
+		})
 
 	case http.MethodPost:
 		if !requireRole(w, r, "admin") {

@@ -7210,14 +7210,14 @@ async function loadRegistrySettings() {
   if (!r) return;
   document.getElementById('upd-reg-url').value = r.registry_url || '';
   document.getElementById('upd-reg-user').value = r.username || '';
-  document.getElementById('upd-reg-pass').value = r.password || '';
+  document.getElementById('upd-reg-pass').value = r.credential || '';
 }
 
 async function saveRegistrySettings() {
   const body = {
     registry_url: document.getElementById('upd-reg-url').value.trim(),
     username: document.getElementById('upd-reg-user').value.trim(),
-    password: document.getElementById('upd-reg-pass').value
+    credential: document.getElementById('upd-reg-pass').value
   };
   const r = await api('/api/update/registry', {
     method: 'POST',
