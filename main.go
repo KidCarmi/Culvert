@@ -941,6 +941,9 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// Only set role after gRPC is successfully started.
 	clusterRole.role = "control-plane"
 	clusterRole.grpcAddr = grpcAddr
+	clusterRole.certFile = certFile
+	clusterRole.keyFile = keyFile
+	clusterRole.caFile = caFile
 	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
 	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil

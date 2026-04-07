@@ -418,20 +418,31 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 }
 
 // haDeployCommand generates the CLI command for deploying the standby CP.
-// The peerAddr stored in globalHA is the leader's externally reachable address
-// (what the admin entered when enabling HA).
+// Includes enterprise TLS cert paths when the leader was started with them,
+// so the admin knows exactly which cert files to stage on the standby server.
 func haDeployCommand() string {
 	clusterRoleMu.RLock()
-	grpcAddr := clusterRole.grpcAddr // standby uses same listen port
+	grpcAddr := clusterRole.grpcAddr
+	certFile := clusterRole.certFile
+	keyFile := clusterRole.keyFile
+	caFile := clusterRole.caFile
 	clusterRoleMu.RUnlock()
 
 	globalHA.mu.RLock()
 	token := globalHA.token
-	leaderAddr := globalHA.peerAddr // leader's reachable address
+	leaderAddr := globalHA.peerAddr
 	globalHA.mu.RUnlock()
 
 	cmd := fmt.Sprintf("./culvert --cp-grpc-addr %s --ha-join %s --ha-token %s",
 		grpcAddr, leaderAddr, token)
+
+	// Include enterprise TLS paths so standby uses the same cert setup.
+	if certFile != "" {
+		cmd += fmt.Sprintf(" \\\n  --cp-grpc-cert %s --cp-grpc-key %s", certFile, keyFile)
+	}
+	if caFile != "" {
+		cmd += fmt.Sprintf(" \\\n  --cp-grpc-ca %s", caFile)
+	}
 	return cmd
 }
 
