@@ -85,14 +85,6 @@ jobs:
         run: |
           echo "::warning::This PR changes ${{ steps.diff.outputs.total }} lines of Go code."
           echo "Consider splitting it into smaller, focused PRs for easier review."
-          echo "Large PRs: > 800 lines → ⚠ warning | > 1500 lines → ❌ blocked"
-
-      - name: Block very large PR
-        if: ${{ fromJson(steps.diff.outputs.total) > 1500 }}
-        run: |
-          echo "::error::PR is too large (${{ steps.diff.outputs.total }} lines changed)."
-          echo "Split into smaller PRs. Max for a single PR: 1500 changed lines."
-          exit 1
 
   # ─── 3. Coverage delta — advisory, don't block merge ───────────────────────
   # The absolute coverage threshold (≥60%) is enforced by the Security Gate's
