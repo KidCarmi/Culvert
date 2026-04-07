@@ -195,3 +195,81 @@ func TestStartClusterUpdate_AlreadyActive(t *testing.T) {
 	clusterUpdateState.Phase = ""
 	clusterUpdateState.mu.Unlock()
 }
+
+func TestExtractStandbyHost(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"standby.host:50051", "standby.host"},
+		{"10.0.0.5:50051", "10.0.0.5"},
+		{"[::1]:50051", "::1"},
+		{"simple-host", "simple-host"},
+		{"host-with-dash.example.com:9090", "host-with-dash.example.com"},
+		{"", ""},
+		{"host with spaces:50051", ""},
+		{"evil;rm -rf:50051", ""},
+		{"127.0.0.1", "127.0.0.1"},
+	}
+	for _, tt := range tests {
+		got := extractStandbyHost(tt.input)
+		if got != tt.want {
+			t.Errorf("extractStandbyHost(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestLoadStandbyHostFromConfig(t *testing.T) {
+	// Just verify it doesn't panic; result depends on test environment state
+	host := loadStandbyHostFromConfig()
+	t.Logf("loadStandbyHostFromConfig = %q", host)
+}
+
+func TestDrainSSE(t *testing.T) {
+	r := strings.NewReader("data: {\"step\":\"complete\"}\n\ndata: done\n\n")
+	drainSSE(r)
+	// Should not panic or hang
+}
+
+func TestClusterUpdateSnapshot(t *testing.T) {
+	clusterUpdateState.mu.Lock()
+	clusterUpdateState.Active = true
+	clusterUpdateState.Phase = "updating_dps"
+	clusterUpdateState.TargetTag = "v3.0.0"
+	clusterUpdateState.Nodes = map[string]*NodeUpdateStatus{
+		"dp-1": {NodeID: "dp-1", Status: "complete"},
+	}
+	clusterUpdateState.mu.Unlock()
+
+	snap := clusterUpdateState.snapshot()
+	if !snap.Active {
+		t.Error("snapshot Active should be true")
+	}
+	if snap.Phase != "updating_dps" {
+		t.Errorf("snapshot Phase = %q", snap.Phase)
+	}
+	if snap.TargetTag != "v3.0.0" {
+		t.Errorf("snapshot TargetTag = %q", snap.TargetTag)
+	}
+	if len(snap.Nodes) != 1 {
+		t.Errorf("snapshot Nodes len = %d", len(snap.Nodes))
+	}
+
+	// Cleanup
+	clusterUpdateState.mu.Lock()
+	clusterUpdateState.Active = false
+	clusterUpdateState.Phase = ""
+	clusterUpdateState.Nodes = nil
+	clusterUpdateState.mu.Unlock()
+}
+
+func TestGetPendingUpdate_NoPending(t *testing.T) {
+	tag := GetPendingUpdate("dp-unknown")
+	if tag != "" {
+		t.Errorf("expected empty pending update, got %q", tag)
+	}
+}
+
+func TestRecoverClusterUpdate_NoFile(t *testing.T) {
+	// Should not panic when no state file exists
+	recoverClusterUpdate()
+}
