@@ -1,0 +1,9 @@
+# Gitleaks configuration — allowlist false positives.
+# https://github.com/gitleaks/gitleaks#configuration
+
+[allowlist]
+  description = "Global allowlist for test fixtures"
+
+  # Test hex string used in TestInitSessionSecretFromConfig_Valid.
+  # Not a real secret — repeating pattern used to exercise hex-decode path.
+  commits = ["7778b3bae6b3e3e4d7cb898a89c1799ec80b162c"]
