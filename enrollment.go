@@ -613,6 +613,32 @@ func (cs *ClusterStore) gcOldRevocations(now time.Time) bool {
 	return changed
 }
 
+// ExportState returns the full cluster state as JSON for HA replication.
+func (cs *ClusterStore) ExportState() (json.RawMessage, error) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return json.Marshal(cs.st)
+}
+
+// ImportFullState replaces the entire cluster state from HA leader replication.
+func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
+	var st ClusterState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return fmt.Errorf("parse replicated state: %w", err)
+	}
+	if st.Nodes == nil {
+		st.Nodes = make(map[string]*EnrolledNode)
+	}
+	if st.Tokens == nil {
+		st.Tokens = make(map[string]*EnrollToken)
+	}
+	cs.mu.Lock()
+	cs.st = st
+	_ = cs.saveLocked()
+	cs.mu.Unlock()
+	return nil
+}
+
 // ─── Cluster CA (separate from MITM CA) ──────────────────────────────────────
 // The cluster CA signs node certificates for mTLS enrollment.
 // It is auto-generated on first use and persisted alongside cluster.json.
@@ -797,6 +823,22 @@ func (ca *clusterCA) CACertPEM() []byte {
 	ca.mu.RLock()
 	defer ca.mu.RUnlock()
 	return ca.certPEM
+}
+
+// CAKeyPEM returns the PEM-encoded CA private key for HA state replication.
+// SECURITY: This is sensitive material — only transmitted over mTLS to
+// authenticated HA peers.
+func (ca *clusterCA) CAKeyPEM() []byte {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
+	if ca.key == nil {
+		return nil
+	}
+	keyBytes, err := x509.MarshalECPrivateKey(ca.key)
+	if err != nil {
+		return nil
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
 }
 
 // CACertFingerprint returns the SHA-256 fingerprint of the CA cert.

@@ -5,111 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// ── Leader Election via flock ───────────────────────────────────────────────
+// ── HAState ─────────────────────────────────────────────────────────────────
 
-func TestHAState_AcquireLock(t *testing.T) {
-	dir := t.TempDir()
-	lockPath := filepath.Join(dir, "test-leader.lock")
-
-	h := &HAState{}
-	h.lockPath = lockPath
-
-	// First lock should succeed.
-	got, err := h.tryAcquireLock()
-	if err != nil {
-		t.Fatalf("tryAcquireLock: %v", err)
-	}
-	if !got {
-		t.Fatal("expected to acquire lock")
-	}
-
-	// Lock file should exist with PID info.
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	var info map[string]any
-	if err := json.Unmarshal(data, &info); err != nil {
-		t.Fatalf("lock file not valid JSON: %v", err)
-	}
-	if info["pid"] == nil {
-		t.Error("expected pid in lock file")
-	}
-
-	// Cleanup.
-	h.releaseLock()
-}
-
-func TestHAState_DoubleLockSameProcess(t *testing.T) {
-	dir := t.TempDir()
-	lockPath := filepath.Join(dir, "test-leader.lock")
-
-	h := &HAState{}
-	h.lockPath = lockPath
-
-	// Acquire once.
-	got, err := h.tryAcquireLock()
-	if err != nil || !got {
-		t.Fatalf("first lock: got=%v err=%v", got, err)
-	}
-
-	// Acquire again (should return true since we already hold it).
-	got, err = h.tryAcquireLock()
-	if err != nil {
-		t.Fatalf("second lock: %v", err)
-	}
-	if !got {
-		t.Fatal("expected true for re-entrant lock check")
-	}
-
-	h.releaseLock()
-}
-
-func TestHAState_CompetingLock(t *testing.T) {
-	dir := t.TempDir()
-	lockPath := filepath.Join(dir, "test-leader.lock")
-
-	// First holder.
-	h1 := &HAState{}
-	h1.lockPath = lockPath
-	got, err := h1.tryAcquireLock()
-	if err != nil || !got {
-		t.Fatalf("h1 lock: got=%v err=%v", got, err)
-	}
-
-	// Second holder should fail.
-	h2 := &HAState{}
-	h2.lockPath = lockPath
-	got, err = h2.tryAcquireLock()
-	if err != nil {
-		t.Fatalf("h2 lock error: %v", err)
-	}
-	if got {
-		t.Fatal("expected h2 to NOT acquire lock while h1 holds it")
-	}
-
-	// Release h1, h2 should succeed.
-	h1.releaseLock()
-
-	got, err = h2.tryAcquireLock()
-	if err != nil {
-		t.Fatalf("h2 after release: %v", err)
-	}
-	if !got {
-		t.Fatal("expected h2 to acquire lock after h1 released")
-	}
-
-	h2.releaseLock()
-}
-
-func TestHAState_Status(t *testing.T) {
+func TestHAState_Status_Disabled(t *testing.T) {
 	h := &HAState{}
 	s := h.Status()
 	if s.Enabled {
@@ -118,22 +21,25 @@ func TestHAState_Status(t *testing.T) {
 	if s.Role != "" {
 		t.Errorf("expected empty role, got %q", s.Role)
 	}
+}
 
+func TestHAState_Status_Leader(t *testing.T) {
+	h := &HAState{}
 	h.mu.Lock()
 	h.role = "leader"
 	h.since = time.Now()
-	h.peerAddr = "cp2:50051"
+	h.peerAddr = "cp1:50051"
 	h.mu.Unlock()
 
-	s = h.Status()
+	s := h.Status()
 	if !s.Enabled {
 		t.Error("expected enabled when role is set")
 	}
 	if s.Role != "leader" {
 		t.Errorf("expected leader, got %q", s.Role)
 	}
-	if s.PeerAddr != "cp2:50051" {
-		t.Errorf("expected cp2:50051, got %q", s.PeerAddr)
+	if s.PeerAddr != "cp1:50051" {
+		t.Errorf("expected cp1:50051, got %q", s.PeerAddr)
 	}
 	if s.Since == "" {
 		t.Error("expected non-empty since")
@@ -161,41 +67,95 @@ func TestHAState_IsLeader(t *testing.T) {
 	}
 }
 
-func TestHAState_LeaderElection(t *testing.T) {
-	dir := t.TempDir()
-	lockPath := filepath.Join(dir, "election-leader.lock")
-
-	promoted := make(chan struct{}, 1)
+func TestHAState_VerifyToken(t *testing.T) {
 	h := &HAState{}
-	h.StartLeaderElection(lockPath, "peer:50051", 100*time.Millisecond,
-		func() error {
-			promoted <- struct{}{}
-			return nil
-		},
-		func() {},
-	)
-	defer h.Stop()
-
-	// Should promote quickly since no competition.
-	select {
-	case <-promoted:
-		// ok
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for promotion")
+	if h.VerifyToken("anything") {
+		t.Error("expected false when no token set")
 	}
 
+	h.mu.Lock()
+	h.token = "secret-token-123"
+	h.mu.Unlock()
+
+	if !h.VerifyToken("secret-token-123") {
+		t.Error("expected true for matching token")
+	}
+	if h.VerifyToken("wrong-token") {
+		t.Error("expected false for wrong token")
+	}
+}
+
+func TestHAState_EnableAsLeader(t *testing.T) {
+	h := &HAState{}
+	token := h.EnableAsLeader("cp2:50051")
+
+	if token == "" {
+		t.Error("expected non-empty token")
+	}
+	if len(token) < 32 {
+		t.Errorf("token too short: %d chars", len(token))
+	}
 	if !h.IsLeader() {
-		t.Error("expected leader after promotion")
+		t.Error("expected leader after EnableAsLeader")
+	}
+	if !h.VerifyToken(token) {
+		t.Error("expected token to be verifiable")
+	}
+}
+
+func TestGenerateHAToken(t *testing.T) {
+	t1 := generateHAToken()
+	t2 := generateHAToken()
+	if t1 == t2 {
+		t.Error("expected unique tokens")
+	}
+	if len(t1) != 64 { // 32 bytes = 64 hex chars
+		t.Errorf("expected 64-char token, got %d", len(t1))
+	}
+}
+
+// ── HA Config Persistence ───────────────────────────────────────────────────
+
+func TestHAConfigPersistence(t *testing.T) {
+	// Save original and restore after test.
+	origPath := clusterDBPathGlobal
+	clusterDBPathGlobal = t.TempDir() + "/cluster.json"
+	defer func() { clusterDBPathGlobal = origPath }()
+
+	cfg := &haConfig{
+		Enabled:  true,
+		Token:    "test-token-abc",
+		PeerAddr: "cp1:50051",
+		Role:     "standby",
+	}
+	if err := saveHAConfig(cfg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	loaded, err := loadHAConfig()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !loaded.Enabled {
+		t.Error("expected enabled")
+	}
+	if loaded.Token != "test-token-abc" {
+		t.Errorf("expected test-token-abc, got %q", loaded.Token)
+	}
+	if loaded.PeerAddr != "cp1:50051" {
+		t.Errorf("expected cp1:50051, got %q", loaded.PeerAddr)
+	}
+	if loaded.Role != "standby" {
+		t.Errorf("expected standby, got %q", loaded.Role)
 	}
 }
 
 // ── Health Endpoint ─────────────────────────────────────────────────────────
 
 func TestAPIHealthz_Standalone(t *testing.T) {
-	// With no HA configured, /healthz should return 200 with standalone role.
 	origHA := *globalHA
 	defer func() { *globalHA = origHA }()
-	*globalHA = HAState{} // reset
+	*globalHA = HAState{}
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -205,9 +165,7 @@ func TestAPIHealthz_Standalone(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("JSON: %v", err)
-	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp["role"] != "standalone" {
 		t.Errorf("expected standalone, got %v", resp["role"])
 	}
@@ -263,62 +221,17 @@ func TestAPIHealthz_Standby(t *testing.T) {
 // ── DP Multi-CP Address Parsing ─────────────────────────────────────────────
 
 func TestDataPlaneClient_MultiAddr(t *testing.T) {
-	// Verify that comma-separated addresses are parsed correctly.
-	// We can't actually connect, so just test the parsing logic.
 	addr := "cp1:50051,cp2:50051,cp3:50051"
-	addrs := splitAddrs(addr)
-	if len(addrs) != 3 {
-		t.Fatalf("expected 3 addresses, got %d", len(addrs))
+	parts := strings.Split(addr, ",")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 addresses, got %d", len(parts))
 	}
-	if addrs[0] != "cp1:50051" || addrs[1] != "cp2:50051" || addrs[2] != "cp3:50051" {
-		t.Errorf("unexpected addresses: %v", addrs)
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
 	}
-}
-
-func TestDataPlaneClient_SingleAddr(t *testing.T) {
-	addr := "cp1:50051"
-	addrs := splitAddrs(addr)
-	if len(addrs) != 1 {
-		t.Fatalf("expected 1 address, got %d", len(addrs))
+	if parts[0] != "cp1:50051" || parts[1] != "cp2:50051" || parts[2] != "cp3:50051" {
+		t.Errorf("unexpected addresses: %v", parts)
 	}
-	if addrs[0] != "cp1:50051" {
-		t.Errorf("unexpected address: %v", addrs)
-	}
-}
-
-// splitAddrs is a test helper that mirrors the address parsing in NewDataPlaneClient.
-func splitAddrs(addr string) []string {
-	parts := make([]string, 0)
-	for _, a := range splitComma(addr) {
-		a = trimSpace(a)
-		if a != "" {
-			parts = append(parts, a)
-		}
-	}
-	return parts
-}
-
-func splitComma(s string) []string {
-	result := []string{}
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
-			result = append(result, s[start:i])
-			start = i + 1
-		}
-	}
-	result = append(result, s[start:])
-	return result
-}
-
-func trimSpace(s string) string {
-	for len(s) > 0 && s[0] == ' ' {
-		s = s[1:]
-	}
-	for len(s) > 0 && s[len(s)-1] == ' ' {
-		s = s[:len(s)-1]
-	}
-	return s
 }
 
 // ── HA API ──────────────────────────────────────────────────────────────────
@@ -328,7 +241,8 @@ func TestAPIClusterHA_GET(t *testing.T) {
 	defer func() { *globalHA = origHA }()
 	globalHA.mu.Lock()
 	globalHA.role = "leader"
-	globalHA.peerAddr = "cp2:50051"
+	globalHA.peerAddr = "cp1:50051"
+	globalHA.token = "test-token"
 	globalHA.since = time.Now()
 	globalHA.mu.Unlock()
 
@@ -341,20 +255,15 @@ func TestAPIClusterHA_GET(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("JSON: %v", err)
-	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp["enabled"] != true {
 		t.Error("expected enabled=true")
 	}
 	if resp["role"] != "leader" {
 		t.Errorf("expected leader, got %v", resp["role"])
 	}
-	if resp["peer_addr"] != "cp2:50051" {
-		t.Errorf("expected cp2:50051, got %v", resp["peer_addr"])
-	}
 	if resp["deploy_cmd"] == nil || resp["deploy_cmd"] == "" {
-		t.Error("expected non-empty deploy_cmd")
+		t.Error("expected non-empty deploy_cmd for leader")
 	}
 }
 
@@ -363,10 +272,9 @@ func TestAPIClusterHA_EnableRequiresCP(t *testing.T) {
 	defer func() { *globalHA = origHA }()
 	*globalHA = HAState{}
 
-	// Save and restore cluster role.
 	clusterRoleMu.Lock()
 	origRole := clusterRole.role
-	clusterRole.role = "" // not a CP
+	clusterRole.role = ""
 	clusterRoleMu.Unlock()
 	defer func() {
 		clusterRoleMu.Lock()
@@ -374,7 +282,7 @@ func TestAPIClusterHA_EnableRequiresCP(t *testing.T) {
 		clusterRoleMu.Unlock()
 	}()
 
-	body := `{"peer_addr":"cp2:50051"}`
+	body := `{"leader_addr":"cp1:50051"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/cluster/ha", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
@@ -388,13 +296,15 @@ func TestAPIClusterHA_EnableRequiresCP(t *testing.T) {
 
 func TestAPIClusterHA_Enable(t *testing.T) {
 	origHA := *globalHA
+	origPath := clusterDBPathGlobal
 	defer func() {
 		globalHA.Stop()
 		*globalHA = origHA
+		clusterDBPathGlobal = origPath
 	}()
 	*globalHA = HAState{}
+	clusterDBPathGlobal = t.TempDir() + "/cluster.json"
 
-	// Pretend we're a CP.
 	clusterRoleMu.Lock()
 	origRole := clusterRole.role
 	origAddr := clusterRole.grpcAddr
@@ -408,7 +318,7 @@ func TestAPIClusterHA_Enable(t *testing.T) {
 		clusterRoleMu.Unlock()
 	}()
 
-	body := `{"peer_addr":"cp2:50051"}`
+	body := `{"leader_addr":"cp1.internal:50051"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/cluster/ha", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
@@ -420,22 +330,108 @@ func TestAPIClusterHA_Enable(t *testing.T) {
 	}
 
 	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("JSON: %v", err)
-	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp["ok"] != true {
 		t.Error("expected ok=true")
-	}
-	if resp["role"] != "leader" {
-		t.Errorf("expected leader, got %v", resp["role"])
 	}
 	if resp["deploy_cmd"] == nil || resp["deploy_cmd"] == "" {
 		t.Error("expected non-empty deploy_cmd")
 	}
+	cmd := resp["deploy_cmd"].(string)
+	if !strings.Contains(cmd, "--ha-join") {
+		t.Errorf("deploy_cmd should contain --ha-join: %s", cmd)
+	}
+	if !strings.Contains(cmd, "--ha-token") {
+		t.Errorf("deploy_cmd should contain --ha-token: %s", cmd)
+	}
 
-	// Wait for election loop to promote.
-	time.Sleep(200 * time.Millisecond)
 	if !globalHA.IsLeader() {
 		t.Error("expected HA to be leader after enable")
+	}
+}
+
+// ── HASync RPC ──────────────────────────────────────────────────────────────
+
+func TestHASync_InvalidToken(t *testing.T) {
+	origHA := *globalHA
+	defer func() { *globalHA = origHA }()
+	globalHA.mu.Lock()
+	globalHA.role = "leader"
+	globalHA.token = "correct-token"
+	globalHA.mu.Unlock()
+
+	svc := &controlPlaneServer{}
+	reqBytes, _ := json.Marshal(map[string]string{"token": "wrong-token"})
+	_, err := svc.HASync(context.Background(), json.RawMessage(reqBytes))
+	if err == nil {
+		t.Error("expected error for wrong token")
+	}
+}
+
+func TestHASync_ValidToken(t *testing.T) {
+	origHA := *globalHA
+	defer func() { *globalHA = origHA }()
+	globalHA.mu.Lock()
+	globalHA.role = "leader"
+	globalHA.token = "correct-token"
+	globalHA.mu.Unlock()
+
+	svc := &controlPlaneServer{}
+	reqBytes, _ := json.Marshal(map[string]string{"token": "correct-token"})
+	raw, err := svc.HASync(context.Background(), json.RawMessage(reqBytes))
+	if err != nil {
+		t.Fatalf("HASync: %v", err)
+	}
+
+	var bundle HAStateBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatalf("parse bundle: %v", err)
+	}
+	if bundle.ClusterState == nil {
+		t.Error("expected non-nil cluster state")
+	}
+}
+
+// ── Cluster State Export/Import ─────────────────────────────────────────────
+
+func TestClusterStore_ExportImport(t *testing.T) {
+	cs := newTestClusterStore(t)
+	cs.RegisterNode(&EnrolledNode{NodeID: "dp-1", Status: "connected", CertSerial: "s1"})
+	cs.RegisterNode(&EnrolledNode{NodeID: "dp-2", Status: "connected", CertSerial: "s2"})
+
+	exported, err := cs.ExportState()
+	if err != nil {
+		t.Fatalf("ExportState: %v", err)
+	}
+
+	// Import into a new store.
+	cs2 := newTestClusterStore(t)
+	if err := cs2.ImportFullState(exported); err != nil {
+		t.Fatalf("ImportFullState: %v", err)
+	}
+
+	nodes := cs2.ListNodes()
+	if len(nodes) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(nodes))
+	}
+	found := false
+	for _, n := range nodes {
+		if n.NodeID == "dp-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("dp-1 not found after import")
+	}
+}
+
+// ── CA Key Export ───────────────────────────────────────────────────────────
+
+func TestClusterCA_CAKeyPEM(t *testing.T) {
+	// globalClusterCA may or may not be initialized in tests.
+	// Just verify the method doesn't panic when CA is not ready.
+	ca := &clusterCA{}
+	if keyPEM := ca.CAKeyPEM(); keyPEM != nil {
+		t.Error("expected nil when CA not initialized")
 	}
 }

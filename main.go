@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -69,7 +68,8 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	cpGRPCCert := flag.String("cp-grpc-cert", "", "ControlPlane gRPC TLS cert (mTLS)")
 	cpGRPCKey := flag.String("cp-grpc-key", "", "ControlPlane gRPC TLS key")
 	cpGRPCCA := flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
-	haPeer := flag.String("ha-peer", "", "HA: address of the other CP instance (enables Active/Passive HA)")
+	haJoin := flag.String("ha-join", "", "HA standby: leader CP gRPC address to sync from (e.g. cp1:50051)")
+	haToken := flag.String("ha-token", "", "HA standby: authentication token (from leader's deploy command)")
 	dpCPAddr := flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
 	dpNodeID := flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
 	dpCert := flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
@@ -319,30 +319,28 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	cpCert := firstStr(*cpGRPCCert, fc.Cluster.CertFile)
 	cpKey := firstStr(*cpGRPCKey, fc.Cluster.KeyFile)
 	cpCA := firstStr(*cpGRPCCA, fc.Cluster.CAFile)
-	haPeerAddr := firstStr(*haPeer, fc.Cluster.HAPeer)
 
-	if cpAddr != "" || fc.Cluster.Role == "control-plane" {
-		if haPeerAddr != "" {
-			// HA mode: use flock-based leader election before starting gRPC.
-			lockPath := filepath.Join(filepath.Dir(clusterDBPath), "cp-leader.lock")
-			globalConfigStore.Update(CurrentConfigSnapshot())
-			initClusterCA(clusterDBPath)
-			globalHA.StartLeaderElection(lockPath, haPeerAddr, 3*time.Second,
-				func() error {
-					return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
-				},
-				func() {
-					StopControlPlaneGRPC()
-					clusterRoleMu.Lock()
-					clusterRole.role = ""
-					clusterRoleMu.Unlock()
-					logger.Printf("HA: gRPC server stopped (standby mode)")
-				},
-			)
-		} else {
-			if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
-				logger.Fatalf("ControlPlane gRPC: %v", err)
-			}
+	if *haJoin != "" && *haToken != "" {
+		// ── HA Standby: sync state from leader, then stand by ────────
+		initClusterCA(clusterDBPath)
+		globalHA.StartAsStandby(appLifecycleCtx, *haJoin, *haToken,
+			cpAddr, cpCert, cpKey, cpCA,
+			func() error {
+				return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
+			},
+		)
+	} else if cpAddr != "" || fc.Cluster.Role == "control-plane" {
+		// ── Normal CP startup ────────────────────────────────────────
+		if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
+			logger.Fatalf("ControlPlane gRPC: %v", err)
+		}
+		// Check for persisted HA config (leader restart).
+		if haCfg, err := loadHAConfig(); err == nil && haCfg.Enabled {
+			globalHA.EnableAsLeader(haCfg.PeerAddr)
+			globalHA.mu.Lock()
+			globalHA.token = haCfg.Token // restore original token
+			globalHA.mu.Unlock()
+			logger.Printf("HA: restored leader state from %s (peer=%s)", haConfigFile, haCfg.PeerAddr)
 		}
 	}
 	// ── Data Plane startup: from flags, enrollment, or saved config ─────────

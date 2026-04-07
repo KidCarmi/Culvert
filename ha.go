@@ -1,34 +1,43 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
-// ── Leader Election via flock() ─────────────────────────────────────────────
+// ── Control Plane High Availability ─────────────────────────────────────────
 //
-// Active/Passive HA for the Control Plane. Both CP instances share the same
-// storage directory (NFS, EFS, GlusterFS, etc.). Leadership is determined by
-// an exclusive file lock (flock) on a lock file — the kernel guarantees only
-// one process can hold the lock at any time, eliminating split-brain.
+// Active/Passive HA with built-in state replication. No shared filesystem
+// required — the leader CP replicates all state (cluster.json, CA cert+key,
+// config snapshot) to the standby CP over the existing mTLS gRPC channel.
 //
-// When the active CP crashes, the OS releases the flock automatically. The
-// standby CP acquires it within seconds and promotes itself to leader.
+// Flow:
+//   1. Admin enables CP from GUI, clicks "Enable HA" → generates HA token
+//   2. GUI shows a deploy command for the standby (includes --ha-join URL)
+//   3. Admin runs command on Server B → standby syncs state, stands by
+//   4. If leader dies → standby promotes after 3 failed sync attempts
+//   5. DPs automatically failover (--dp-cp-addr supports comma-separated addrs)
+//
+// Leader failback: when the original leader restarts, it loads its persisted
+// HA config, detects the peer is already serving, and becomes standby.
+//
+// Authentication: standby presents a shared HA token in every HASync RPC.
+// The leader verifies it against the stored token.
 
 // HAState tracks the HA status of this Control Plane instance.
 type HAState struct {
 	mu       sync.RWMutex
 	role     string    // "leader", "standby", or "" (HA disabled)
-	lockFile *os.File  // held while leader
-	lockPath string    // path to the lock file
-	peerAddr string    // optional: address of the other CP for display
+	token    string    // shared HA token for authentication
+	peerAddr string    // address of the other CP
 	since    time.Time // when current role was acquired
 	stopCh   chan struct{}
 }
@@ -41,7 +50,6 @@ type HAStatus struct {
 	Role     string `json:"role"`               // "leader", "standby", or ""
 	Since    string `json:"since,omitempty"`     // RFC3339
 	PeerAddr string `json:"peer_addr,omitempty"` // other CP address
-	LockPath string `json:"lock_path,omitempty"` // lock file path
 }
 
 func (h *HAState) Status() HAStatus {
@@ -51,7 +59,6 @@ func (h *HAState) Status() HAStatus {
 		Enabled:  h.role != "",
 		Role:     h.role,
 		PeerAddr: h.peerAddr,
-		LockPath: h.lockPath,
 	}
 	if !h.since.IsZero() {
 		s.Since = h.since.Format(time.RFC3339)
@@ -59,143 +66,198 @@ func (h *HAState) Status() HAStatus {
 	return s
 }
 
-// IsLeader returns true if this CP holds the leader lock.
+// IsLeader returns true if this CP is the HA leader.
 func (h *HAState) IsLeader() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.role == "leader"
 }
 
-// tryAcquireLock attempts a non-blocking flock on the lock file.
-// Returns true if the lock was acquired (this instance is now leader).
-func (h *HAState) tryAcquireLock() (bool, error) {
-	if h.lockFile != nil {
-		return true, nil // already holding the lock
-	}
-	f, err := os.OpenFile(h.lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return false, fmt.Errorf("open lock file: %w", err)
-	}
-	// LOCK_EX | LOCK_NB: exclusive, non-blocking.
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if err != nil {
-		f.Close()
-		// EWOULDBLOCK means another process holds the lock.
-		if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
-			return false, nil
-		}
-		return false, fmt.Errorf("flock: %w", err)
-	}
-	// Write our PID + timestamp into the lock file for debugging.
-	_ = f.Truncate(0)
-	_, _ = f.Seek(0, 0)
-	info := map[string]any{
-		"pid":       os.Getpid(),
-		"acquired":  time.Now().Format(time.RFC3339),
-		"grpc_addr": clusterRole.grpcAddr,
-	}
-	enc, _ := json.Marshal(info)
-	_, _ = f.Write(enc)
-	_ = f.Sync()
-
-	h.lockFile = f
-	return true, nil
+// VerifyToken checks if the provided token matches the stored HA token.
+func (h *HAState) VerifyToken(token string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.token != "" && h.token == token
 }
 
-// releaseLock releases the flock and closes the lock file.
-func (h *HAState) releaseLock() {
-	if h.lockFile != nil {
-		_ = syscall.Flock(int(h.lockFile.Fd()), syscall.LOCK_UN)
-		_ = h.lockFile.Close()
-		h.lockFile = nil
-	}
-}
+// ── Leader Mode ─────────────────────────────────────────────────────────────
 
-// StartLeaderElection begins the leader election loop. It tries to acquire
-// the flock immediately. If successful, onPromote is called to start the gRPC
-// server. If not, it retries every pollInterval until the lock is acquired.
-//
-// When the leader lock is lost (e.g. lock file deleted), the CP demotes
-// itself and calls onDemote.
-func (h *HAState) StartLeaderElection(lockPath, peerAddr string, pollInterval time.Duration,
-	onPromote func() error, onDemote func()) {
+// EnableAsLeader marks this node as the HA leader and generates an HA token.
+// Returns the generated token for inclusion in the standby deploy command.
+func (h *HAState) EnableAsLeader(peerAddr string) string {
 	h.mu.Lock()
-	h.lockPath = lockPath
+	defer h.mu.Unlock()
+	h.role = "leader"
 	h.peerAddr = peerAddr
+	h.since = time.Now()
+	h.token = generateHAToken()
+	h.stopCh = make(chan struct{})
+
+	// Persist HA config so leader restarts know HA is enabled.
+	_ = saveHAConfig(&haConfig{
+		Enabled:  true,
+		Token:    h.token,
+		PeerAddr: peerAddr,
+		Role:     "leader",
+	})
+
+	logger.Printf("HA: enabled as leader (peer=%s)", peerAddr)
+	return h.token
+}
+
+// ── Standby Mode ────────────────────────────────────────────────────────────
+
+// StartAsStandby connects to the leader CP and begins state replication.
+// When the leader becomes unreachable (3 consecutive failures), the standby
+// promotes itself to leader by calling onPromote.
+func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
+	grpcAddr, certFile, keyFile, caFile string,
+	onPromote func() error) {
+
+	h.mu.Lock()
 	h.role = "standby"
+	h.peerAddr = leaderAddr
+	h.token = token
 	h.since = time.Now()
 	h.stopCh = make(chan struct{})
 	h.mu.Unlock()
 
-	logger.Printf("HA: starting leader election (lock=%s, poll=%s)", lockPath, pollInterval)
+	// Persist HA config so standby restarts know HA is enabled.
+	_ = saveHAConfig(&haConfig{
+		Enabled:  true,
+		Token:    token,
+		PeerAddr: leaderAddr,
+		Role:     "standby",
+	})
 
-	go h.electionLoop(pollInterval, onPromote, onDemote)
+	logger.Printf("HA: starting as standby (leader=%s)", leaderAddr)
+
+	go h.standbyLoop(ctx, leaderAddr, token, grpcAddr, certFile, keyFile, caFile, onPromote)
 }
 
-func (h *HAState) electionLoop(interval time.Duration, onPromote func() error, onDemote func()) {
-	ticker := time.NewTicker(interval)
+func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
+	grpcAddr, certFile, keyFile, caFile string,
+	onPromote func() error) {
+
+	// Connect to leader using the same gRPC client infrastructure as DPs.
+	client, err := NewDataPlaneClient("ha-standby", leaderAddr, certFile, keyFile, caFile)
+	if err != nil {
+		logger.Printf("HA: failed to connect to leader: %v — will retry", err)
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	// Try immediately on startup.
-	h.tryPromote(onPromote)
+	failCount := 0
+	const maxFail = 3
+
+	// Try immediately.
+	if client != nil {
+		if h.syncFromLeader(ctx, client, token) {
+			failCount = 0
+		} else {
+			failCount++
+		}
+	} else {
+		failCount++
+	}
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-h.stopCh:
 			return
 		case <-ticker.C:
-			h.mu.RLock()
-			role := h.role
-			h.mu.RUnlock()
-
-			if role == "leader" {
-				// Verify we still hold the lock by re-checking.
-				// If someone deleted the lock file, we need to re-acquire.
-				if _, err := os.Stat(h.lockPath); os.IsNotExist(err) {
-					logger.Printf("HA: lock file disappeared — demoting")
-					h.demote(onDemote)
+			if client == nil {
+				// Retry connection.
+				client, err = NewDataPlaneClient("ha-standby", leaderAddr, certFile, keyFile, caFile)
+				if err != nil {
+					failCount++
+					logger.Printf("HA: reconnect to leader failed (%d/%d): %v", failCount, maxFail, err)
+					if failCount >= maxFail {
+						h.promote(grpcAddr, certFile, keyFile, caFile, onPromote)
+						return
+					}
+					continue
 				}
+			}
+
+			if h.syncFromLeader(ctx, client, token) {
+				failCount = 0
 			} else {
-				h.tryPromote(onPromote)
+				failCount++
+				logger.Printf("HA: sync failed (%d/%d)", failCount, maxFail)
+				if failCount >= maxFail {
+					h.promote(grpcAddr, certFile, keyFile, caFile, onPromote)
+					return
+				}
 			}
 		}
 	}
 }
 
-func (h *HAState) tryPromote(onPromote func() error) {
-	acquired, err := h.tryAcquireLock()
+// syncFromLeader calls HASync on the leader and applies the state bundle.
+func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) bool {
+	reqBytes, _ := json.Marshal(map[string]string{"token": token})
+	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
-		logger.Printf("HA: lock attempt error: %v", err)
-		return
+		logger.Printf("HA: HASync RPC error: %v", err)
+		return false
 	}
-	if !acquired {
-		return
+
+	var bundle HAStateBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		logger.Printf("HA: parse state bundle error: %v", err)
+		return false
 	}
-	// We got the lock — promote to leader.
-	logger.Printf("HA: acquired leader lock — promoting to active CP")
+
+	// Apply cluster state.
+	if err := globalClusterStore.ImportFullState(bundle.ClusterState); err != nil {
+		logger.Printf("HA: import cluster state error: %v", err)
+		return false
+	}
+
+	// Apply CA cert + key.
+	if bundle.CACertPEM != "" && bundle.CAKeyPEM != "" {
+		if err := globalClusterCA.ImportCASilent([]byte(bundle.CACertPEM), []byte(bundle.CAKeyPEM)); err != nil {
+			logger.Printf("HA: import CA error: %v", err)
+			// Non-fatal — state sync still succeeded.
+		}
+	}
+
+	// Apply config snapshot.
+	applyConfigSnapshot(bundle.Config)
+
+	return true
+}
+
+// promote switches this standby to leader mode.
+func (h *HAState) promote(grpcAddr, certFile, keyFile, caFile string, onPromote func() error) {
+	logger.Printf("HA: leader unreachable — promoting to leader")
+
 	if err := onPromote(); err != nil {
-		logger.Printf("HA: promote callback failed: %v — releasing lock", err)
-		h.releaseLock()
+		logger.Printf("HA: promote failed: %v — staying as standby", err)
 		return
 	}
+
 	h.mu.Lock()
 	h.role = "leader"
 	h.since = time.Now()
 	h.mu.Unlock()
-	logger.Printf("HA: now serving as leader")
+
+	// Update persisted config.
+	_ = saveHAConfig(&haConfig{
+		Enabled:  true,
+		Token:    h.token,
+		PeerAddr: h.peerAddr,
+		Role:     "leader",
+	})
+
+	logger.Printf("HA: now serving as leader (promoted from standby)")
 }
 
-func (h *HAState) demote(onDemote func()) {
-	h.mu.Lock()
-	h.role = "standby"
-	h.since = time.Now()
-	h.mu.Unlock()
-	h.releaseLock()
-	onDemote()
-	logger.Printf("HA: demoted to standby")
-}
-
-// Stop terminates the election loop and releases the lock.
+// Stop terminates the sync loop.
 func (h *HAState) Stop() {
 	h.mu.Lock()
 	if h.stopCh != nil {
@@ -203,7 +265,50 @@ func (h *HAState) Stop() {
 		h.stopCh = nil
 	}
 	h.mu.Unlock()
-	h.releaseLock()
+}
+
+// ── HA Config Persistence ───────────────────────────────────────────────────
+
+const haConfigFile = "ha_config.json"
+
+type haConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Token    string `json:"token"`
+	PeerAddr string `json:"peer_addr"`
+	Role     string `json:"role"` // "leader" or "standby"
+}
+
+func haConfigPath() string {
+	dir := filepath.Dir(clusterDBPathGlobal)
+	return filepath.Join(dir, haConfigFile)
+}
+
+func saveHAConfig(cfg *haConfig) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(haConfigPath(), data, 0o600)
+}
+
+func loadHAConfig() (*haConfig, error) {
+	data, err := os.ReadFile(haConfigPath())
+	if err != nil {
+		return nil, err
+	}
+	var cfg haConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// ── Token Generation ────────────────────────────────────────────────────────
+
+func generateHAToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // ── Health Endpoint ─────────────────────────────────────────────────────────
@@ -240,16 +345,14 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status := globalHA.Status()
-		// Include the deploy command for the standby CP.
 		resp := map[string]any{
 			"enabled":   status.Enabled,
 			"role":      status.Role,
 			"since":     status.Since,
 			"peer_addr": status.PeerAddr,
-			"lock_path": status.LockPath,
 		}
-		if status.Enabled {
-			resp["deploy_cmd"] = haDeployCommand(status.PeerAddr)
+		if status.Enabled && status.Role == "leader" {
+			resp["deploy_cmd"] = haDeployCommand()
 		}
 		jsonOK(w, resp)
 
@@ -267,21 +370,20 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 // apiClusterHAEnable enables HA mode at runtime from the admin GUI.
 func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		PeerAddr string `json:"peer_addr"` // address of the standby CP
+		LeaderAddr string `json:"leader_addr"` // this leader's externally reachable gRPC address
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if req.PeerAddr == "" {
-		http.Error(w, "peer_addr is required (e.g. \"cp2:50051\")", http.StatusBadRequest)
+	if req.LeaderAddr == "" {
+		http.Error(w, "leader_addr is required (e.g. \"cp1.internal:50051\")", http.StatusBadRequest)
 		return
 	}
 
 	// Check that we're already running as CP.
 	clusterRoleMu.RLock()
 	role := clusterRole.role
-	grpcAddr := clusterRole.grpcAddr
 	clusterRoleMu.RUnlock()
 	if role != "control-plane" {
 		http.Error(w, "must be running as Control Plane to enable HA", http.StatusConflict)
@@ -289,49 +391,56 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if HA is already enabled.
-	if globalHA.IsLeader() || globalHA.Status().Enabled {
+	if globalHA.Status().Enabled {
 		http.Error(w, "HA is already enabled", http.StatusConflict)
 		return
 	}
 
-	// Determine lock path from cluster DB.
-	lockPath := filepath.Join(filepath.Dir(clusterDBPathGlobal), "cp-leader.lock")
+	// Enable as leader and generate token.
+	token := globalHA.EnableAsLeader(req.LeaderAddr)
 
-	// Start leader election. Since we're already running as CP, the onPromote
-	// callback is a no-op (we're already serving). We just acquire the lock.
-	globalHA.StartLeaderElection(lockPath, req.PeerAddr, 3*time.Second,
-		func() error {
-			// Already running as CP — just log.
-			logger.Printf("HA: this instance confirmed as leader (already serving gRPC on %s)",
-				strings.ReplaceAll(grpcAddr, "\n", ""))
-			return nil
-		},
-		func() {
-			StopControlPlaneGRPC()
-			clusterRoleMu.Lock()
-			clusterRole.role = ""
-			clusterRoleMu.Unlock()
-			logger.Printf("HA: gRPC server stopped (standby mode)")
-		},
-	)
-
-	deployCmd := haDeployCommand(req.PeerAddr)
+	deployCmd := haDeployCommand()
 	jsonOK(w, map[string]any{
 		"ok":         true,
 		"role":       "leader",
-		"peer_addr":  req.PeerAddr,
-		"lock_path":  lockPath,
+		"leader_addr": req.LeaderAddr,
 		"deploy_cmd": deployCmd,
+	})
+
+	auditAdd(AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  sessionAdmin(r),
+		Action: "cluster.ha-enable",
+		Object: req.LeaderAddr,
+		Detail: fmt.Sprintf("HA enabled, token generated (token=%s…)", token[:8]),
 	})
 }
 
 // haDeployCommand generates the CLI command for deploying the standby CP.
-func haDeployCommand(peerAddr string) string {
+// The peerAddr stored in globalHA is the leader's externally reachable address
+// (what the admin entered when enabling HA).
+func haDeployCommand() string {
 	clusterRoleMu.RLock()
-	grpcAddr := clusterRole.grpcAddr
+	grpcAddr := clusterRole.grpcAddr // standby uses same listen port
 	clusterRoleMu.RUnlock()
 
-	cmd := fmt.Sprintf("./culvert --cp-grpc-addr %s --cluster-db %s --ha-peer %s",
-		grpcAddr, clusterDBPathGlobal, peerAddr)
+	globalHA.mu.RLock()
+	token := globalHA.token
+	leaderAddr := globalHA.peerAddr // leader's reachable address
+	globalHA.mu.RUnlock()
+
+	cmd := fmt.Sprintf("./culvert --cp-grpc-addr %s --ha-join %s --ha-token %s",
+		grpcAddr, leaderAddr, token)
 	return cmd
+}
+
+// ── ImportCASilent ──────────────────────────────────────────────────────────
+
+// ImportCASilent loads a CA cert+key without triggering rotation tracking or
+// config version bumps. Used by HA standby to silently replicate leader state.
+func (ca *clusterCA) ImportCASilent(certPEM, keyPEM []byte) error {
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+	return ca.loadFromPEM(certPEM, keyPEM)
 }

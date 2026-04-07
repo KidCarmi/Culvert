@@ -120,10 +120,9 @@ type FileConfig struct {
 		KeyFile  string `yaml:"key_file"`  // TLS key for gRPC mTLS (optional)
 		CAFile   string `yaml:"ca_file"`   // CA cert for client validation (optional)
 		StateDB  string `yaml:"state_db"`  // Path to cluster.json (default: "cluster.json")
-		// HA configures Active/Passive high availability for the Control Plane.
-		// Both CP instances must share the same StateDB directory (NFS/EFS/etc.).
-		// Leadership is determined by an exclusive file lock (flock) — no split-brain possible.
-		HAPeer string `yaml:"ha_peer"` // Address of the other CP instance (for display/monitoring)
+		// HA is configured at runtime from the admin GUI (Enable HA button) or
+		// via --ha-join/--ha-token flags on the standby. No shared filesystem needed —
+		// state is replicated over the existing mTLS gRPC channel.
 	} `yaml:"cluster"`
 
 	// SecurityScan configures the local security scanning stack:

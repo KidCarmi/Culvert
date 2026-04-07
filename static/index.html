@@ -2323,12 +2323,13 @@ Firefox (all platforms):
           <div id="ha-disabled-section">
             <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">
               Enable Active/Passive HA to run a standby Control Plane that automatically takes over
-              if this instance goes down. Both CPs must share the same storage directory (NFS, EFS, etc.).
-              Split-brain is prevented by kernel-level file locking (flock).
+              if this instance goes down. No shared filesystem needed — Culvert replicates state
+              to the standby over the existing gRPC channel automatically.
             </p>
             <div style="display:grid;gap:12px;max-width:480px">
-              <label style="font-size:.8rem;color:var(--muted)">Standby CP Address <span style="color:#ef4444">*</span>
-                <input id="ha-peer-addr" class="input" placeholder="e.g. cp2.internal:50051" style="margin-top:4px">
+              <label style="font-size:.8rem;color:var(--muted)">This Server's Reachable Address <span style="color:#ef4444">*</span>
+                <input id="ha-leader-addr" class="input" placeholder="e.g. cp1.internal:50051" style="margin-top:4px">
+                <span style="font-size:.7rem;color:var(--muted);margin-top:2px;display:block">The hostname/IP that the standby server can reach this CP on</span>
               </label>
               <div style="margin-top:4px">
                 <button class="btn" id="ha-enable-btn" onclick="enableHA()">Enable HA</button>
@@ -6517,15 +6518,15 @@ async function enableControlPlane() {
 
 // ── HA Functions ──────────────────────────────────────────────────────────
 async function enableHA() {
-  const peerAddr = document.getElementById('ha-peer-addr').value.trim();
-  if (!peerAddr) { toast('Standby CP address is required', 'error'); return; }
+  const leaderAddr = document.getElementById('ha-leader-addr').value.trim();
+  if (!leaderAddr) { toast('This server\'s reachable address is required', 'error'); return; }
   const btn = document.getElementById('ha-enable-btn');
   btn.disabled = true; btn.textContent = 'Enabling…';
   try {
     const r = await api('/api/cluster/ha', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ peer_addr: peerAddr })
+      body: JSON.stringify({ leader_addr: leaderAddr })
     });
     if (!r) return;
     toast('HA enabled — this node is now the leader', 'success');

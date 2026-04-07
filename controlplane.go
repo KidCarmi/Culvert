@@ -147,6 +147,7 @@ var (
 	methodSyncRevocations    = fmt.Sprintf("/%s/SyncRevocations", configServiceName)
 	methodPushAuditEvents    = fmt.Sprintf("/%s/PushAuditEvents", configServiceName)
 	methodRenewCert          = fmt.Sprintf("/%s/RenewCert", configServiceName)
+	methodHASync             = fmt.Sprintf("/%s/HASync", configServiceName)
 )
 
 // MetricsReport is sent by Data Plane nodes to the Control Plane.
@@ -676,6 +677,49 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 	return resp, nil
 }
 
+// HAStateBundle is the full state package sent from leader to standby CP.
+// Contains everything the standby needs to promote to leader if needed.
+type HAStateBundle struct {
+	ClusterState json.RawMessage `json:"cluster_state"`
+	CACertPEM    string          `json:"ca_cert_pem"`
+	CAKeyPEM     string          `json:"ca_key_pem"`
+	Config       ConfigSnapshot  `json:"config"`
+	Version      int64           `json:"version"`
+}
+
+// HASync returns the full state bundle for HA standby replication.
+// Authenticated via a shared HA token (not node cert pinning).
+func (s *controlPlaneServer) HASync(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, fmt.Errorf("invalid request: %w", err)
+	}
+
+	// Verify HA token.
+	if !globalHA.VerifyToken(req.Token) {
+		return nil, status.Errorf(codes.PermissionDenied, "invalid HA token")
+	}
+
+	// Build state bundle.
+	stateJSON, err := globalClusterStore.ExportState()
+	if err != nil {
+		return nil, fmt.Errorf("export cluster state: %w", err)
+	}
+
+	bundle := HAStateBundle{
+		ClusterState: stateJSON,
+		CACertPEM:    string(globalClusterCA.CACertPEM()),
+		CAKeyPEM:     string(globalClusterCA.CAKeyPEM()),
+		Config:       CurrentConfigSnapshot(),
+		Version:      globalConfigStore.Get().Version,
+	}
+
+	resp, _ := json.Marshal(bundle)
+	return resp, nil
+}
+
 // StartControlPlaneGRPC starts the gRPC server for the Control Plane.
 // addr example: ":50051"
 // certFile/keyFile: mTLS certificate paths.  Pass empty strings for insecure
@@ -744,6 +788,10 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 			{
 				MethodName: "RenewCert",
 				Handler:    wrapUnary(svc.RenewCert),
+			},
+			{
+				MethodName: "HASync",
+				Handler:    wrapUnary(svc.HASync),
 			},
 		},
 		Streams: []grpc.StreamDesc{},
