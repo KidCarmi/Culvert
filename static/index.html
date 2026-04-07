@@ -2548,12 +2548,16 @@ Firefox (all platforms):
 
           <!-- Token result (shown after generation) -->
           <div id="enroll-result" style="display:none;margin-top:18px">
-            <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">Enrollment Command <span style="opacity:.5">(copy and run on the new server)</span></div>
+            <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">One-Click Bootstrap <span style="opacity:.5">(installs Docker + starts DP node automatically)</span></div>
             <pre id="enroll-result-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="copyEnrollCmd()" title="Click to copy"></pre>
-            <div style="margin-top:8px;font-size:.75rem;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-              Or manually: <code id="enroll-result-manual" style="color:var(--accent);font-size:.72rem"></code>
-              <button class="btn ghost sm" style="font-size:.65rem;padding:2px 6px" onclick="copyEnrollManual()" title="Copy URL">Copy</button>
-            </div>
+            <div style="font-size:.7rem;color:var(--muted);margin-top:4px;opacity:.7">Click to copy. Paste and run on any Linux server — Docker will be installed if needed.</div>
+            <details style="margin-top:12px">
+              <summary style="font-size:.78rem;color:var(--muted);cursor:pointer">Advanced: manual binary enrollment</summary>
+              <div style="margin-top:8px;font-size:.75rem;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <code id="enroll-result-manual" style="color:var(--accent);font-size:.72rem"></code>
+                <button class="btn ghost sm" style="font-size:.65rem;padding:2px 6px" onclick="copyEnrollManual()" title="Copy URL">Copy</button>
+              </div>
+            </details>
           </div>
 
           <div style="display:flex;gap:10px;margin-top:20px;justify-content:flex-end">
@@ -6815,8 +6819,8 @@ async function generateEnrollToken() {
     // Show result
     document.getElementById('enroll-result').style.display = '';
     btn.style.display = 'none';
-    document.getElementById('enroll-result-cmd').textContent = r.enroll_cmd;
-    document.getElementById('enroll-result-manual').textContent = r.enroll_url;
+    document.getElementById('enroll-result-cmd').textContent = r.bootstrap_cmd || r.enroll_cmd;
+    document.getElementById('enroll-result-manual').textContent = r.enroll_cmd;
     toast('Enrollment token generated', 'success');
   } catch(e) {
     toast('Token generation failed: ' + e.message, 'error');
