@@ -98,22 +98,28 @@ func updaterToken() string {
 }
 
 // ensureUpdaterToken generates the token file if it doesn't exist.
+// Also verifies the file is readable and non-empty (handles permission/mount issues).
 func ensureUpdaterToken() {
 	path := "/data/updater_token.txt"
-	if _, err := os.Stat(path); err == nil {
-		return // already exists
+	// Check if token already exists and is readable.
+	if data, err := os.ReadFile(path); err == nil {
+		if strings.TrimSpace(string(data)) != "" {
+			return // valid token exists
+		}
+		logger.Printf("Update: token file exists but is empty, regenerating")
 	}
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		logger.Printf("updater token generation failed: %v", err)
+		logger.Printf("Update: token generation failed: %v", err)
 		return
 	}
 	token := hex.EncodeToString(b)
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
-		logger.Printf("updater token write failed: %v", err)
+	// #nosec G306 -- 0640 allows the updater sidecar (same group) to read the shared token
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o640); err != nil {
+		logger.Printf("Update: token write failed: %v", err)
 		return
 	}
-	logger.Printf("generated updater token at %s", path)
+	logger.Printf("Update: generated updater token at %s", path)
 }
 
 // updaterRequest makes an authenticated HTTP request to the updater sidecar.
@@ -187,6 +193,13 @@ func checkUpdateNow() {
 		globalUpdateInfo.updaterStatus = "token_pending"
 		globalUpdateInfo.lastChecked = time.Now()
 		globalUpdateInfo.mu.Unlock()
+		// Log details: the updater can't read the shared token file.
+		tok := updaterToken()
+		if tok == "" {
+			logger.Printf("Update: token_pending — proxy has no token (/data/updater_token.txt missing or empty)")
+		} else {
+			logger.Printf("Update: token_pending — proxy has token but updater returned 503 (check updater logs)")
+		}
 		return
 	}
 
