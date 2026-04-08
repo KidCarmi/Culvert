@@ -493,7 +493,7 @@ func (b *Blocklist) isExcepted(host string) bool {
 // Feed syncs will still add the host to the blocklist, but IsBlocked will
 // always return false for it.
 func (b *Blocklist) AddException(host string) {
-	host = strings.ToLower(strings.TrimSpace(host))
+	host = normalizeHost(strings.TrimSpace(host))
 	if host == "" {
 		return
 	}
@@ -556,7 +556,7 @@ func (b *Blocklist) saveExceptions() {
 // In "allow" mode:           only listed hosts are allowed; all others blocked.
 // Exceptions always pass through regardless of mode or list membership.
 func (b *Blocklist) IsBlocked(host string) bool {
-	host = strings.ToLower(host)
+	host = normalizeHost(host)
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.isExcepted(host) {

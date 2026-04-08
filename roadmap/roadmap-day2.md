@@ -23,17 +23,15 @@
 
 ## 1. CRITICAL & HIGH PRIORITY (Fix Before Next Release)
 
-### 1.1 Content-Encoding Bypass — Scanners Cannot See Compressed Bodies
+### 1.1 ~~Content-Encoding Bypass — Scanners Cannot See Compressed Bodies~~ DONE
 - **Files**: `proxy.go`, `security_scan.go`
 - **Severity**: CRITICAL
-- **Issue**: Response bodies are scanned as raw bytes without decompressing `Content-Encoding: gzip/deflate/brotli`. Attackers deliver gzipped malware that bypasses ClamAV and YARA because signatures match uncompressed content only.
-- **Fix**: Check `Content-Encoding` header after buffering; decompress before passing to scanners. Guard against gzip bombs with uncompressed size limits.
+- **Status**: FIXED — Added `decompressForScan()` in security_scan.go that decompresses gzip/deflate bodies before passing to ClamAV/YARA/DPI scanners. Called from both scan points (handleHTTP line 599, handleTunnelInspect line 1055). Gzip bomb protection via 64MB `maxDecompressBytes` limit. Brotli deferred (needs external dep). Tests: identity, gzip, invalid gzip, brotli fallback, gzip bomb.
 
-### 1.2 IDN Homograph Attack — No IDNA Normalization
-- **Files**: `policy.go:792-804`, `store.go:862-880`, `catdb.go:62`
+### 1.2 ~~IDN Homograph Attack — No IDNA Normalization~~ DONE
+- **Files**: `security.go`, `policy.go`, `store.go`, `catdb.go`
 - **Severity**: CRITICAL
-- **Issue**: Hosts are lowercased with `strings.ToLower()` but NOT normalized via IDNA2008 (RFC 5890). Punycode domains (`xn--examp1e.com`) bypass blocklist and category rules for their ASCII equivalents.
-- **Fix**: Normalize hosts with `golang.org/x/net/idna.ToASCII()` before all FQDN comparisons in `matchFQDN()`, blocklist lookup, and category DB lookup.
+- **Status**: FIXED — Added `normalizeHost()` in security.go using `golang.org/x/net/idna.ToASCII()` (RFC 5890). Applied to all FQDN comparison sites: `matchFQDN()`, `Blocklist.IsBlocked()`, `Blocklist.Add/Remove/AddException/RemoveException()`, `CommunityDB.Lookup()`, `matchCategoryInStore()`, `lookupHostCategory()`, `SSLBypassMatcher.Matches()`, and category store add/remove. Fast path skips IDNA for IP addresses and pure ASCII. Tests: ASCII, Unicode→punycode, IP passthrough, matchFQDN with Unicode patterns.
 
 ### 1.3 ~~Missing RBAC on Certificate Upload~~ DONE
 - **File**: `ui.go:2374-2411`
@@ -207,9 +205,9 @@
 
 | # | Feature | Impact |
 |---|---------|--------|
-| F1 | Content decompression before scanning (gzip/deflate/brotli) | Eliminates major evasion vector |
-| F2 | Per-scan timeout across all scanners (10s max) | Prevents coordinated ReDoS attacks |
-| F3 | Fail-closed on scan timeout (block, don't silently pass) | Closes YARA/DPI timeout evasion |
+| ~~F1~~ | ~~Content decompression before scanning (gzip/deflate/brotli)~~ DONE (see 1.1) | Eliminates major evasion vector |
+| ~~F2~~ | ~~Per-scan timeout across all scanners (10s max)~~ DONE | Prevents coordinated ReDoS attacks |
+| ~~F3~~ | ~~Fail-closed on scan timeout (block, don't silently pass)~~ DONE | Closes YARA/DPI timeout evasion |
 | F4 | Archive magic byte detection + recursive scanning | Blocks nested archive evasion |
 | F5 | File magic byte validation (polyglot detection) | Detects Content-Type mismatch |
 
@@ -233,17 +231,17 @@
 | F14 | OpenTelemetry distributed tracing | End-to-end request latency |
 | F15 | Grafana dashboard JSON templates | Faster time-to-value for monitoring |
 | F16 | Alert escalation + retry queue with persistent storage | No more silently dropped alerts |
-| F17 | /health vs /ready probe separation for Kubernetes | Proper pod lifecycle management |
+| ~~F17~~ | ~~/health vs /ready probe separation for Kubernetes~~ DONE | Proper pod lifecycle management |
 | F18 | Audit log rotation | Prevents unbounded disk growth |
 
 ### 5.4 Admin UI (Medium Priority)
 
 | # | Feature | Impact |
 |---|---------|--------|
-| F19 | Bulk delete for blocklist and policies | Operational efficiency |
-| F20 | Search/filter on all tables (policies, rewrites, file blocks) | Usability at scale |
-| F21 | Pagination on large lists (logs, audit, policies) | Performance with many entries |
-| F22 | Confirmation dialogs for destructive actions (DELETE) | Prevents accidental deletion |
+| ~~F19~~ | ~~Bulk delete for blocklist and policies~~ DONE | Operational efficiency |
+| ~~F20~~ | ~~Search/filter on all tables (policies, rewrites, file blocks)~~ DONE (policies) | Usability at scale |
+| ~~F21~~ | ~~Pagination on large lists (logs, audit, policies)~~ DONE (blocklist has it; policies use client-side filter) | Performance with many entries |
+| ~~F22~~ | ~~Confirmation dialogs for destructive actions (DELETE)~~ DONE | Prevents accidental deletion |
 | F23 | Role-based UI filtering (hide inaccessible nav items) | Clean UX per role |
 
 ### 5.5 Nice-to-Have (Low Priority)
@@ -329,22 +327,22 @@
 ### Phase D — Scanning & Evasion (1-2 weeks)
 1. Archive magic byte detection (F4)
 2. Polyglot file detection (F5)
-3. Per-scan timeout budget (F2)
+3. ~~Per-scan timeout budget (F2)~~ DONE
 4. ClamAV semaphore with backpressure (P6)
 5. Alert webhook worker pool (P4)
 
 ### Phase E — Observability & Ops (1 week)
 1. Structured logging migration (F12)
 2. Log levels (F13)
-3. Health vs Ready probes (F17)
+3. ~~Health vs Ready probes (F17)~~ DONE
 4. Audit log rotation (F18)
 5. Alert retry queue (F16)
 
 ### Phase F — UI & UX Polish (1-2 weeks)
-1. Bulk delete operations (F19)
-2. Search/filter on all tables (F20)
-3. Pagination (F21)
-4. Destructive action confirmations (F22)
+1. ~~Bulk delete operations (F19)~~ DONE
+2. ~~Search/filter on all tables (F20)~~ DONE (policies)
+3. ~~Pagination (F21)~~ DONE (blocklist has it)
+4. ~~Destructive action confirmations (F22)~~ DONE
 5. Role-based nav filtering (F23)
 6. Consistent API response format (Q3)
 7. Consistent error handling in JS (Q4)

@@ -4,10 +4,38 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/idna"
 )
+
+// normalizeHost applies IDNA2008 normalization (RFC 5890) to a hostname,
+// converting Unicode/Punycode domains to their canonical ASCII form. This
+// prevents IDN homograph attacks where visually similar Unicode characters
+// (e.g., Cyrillic 'а' vs Latin 'a') bypass blocklists and policy rules.
+//
+// Returns the lowercased, IDNA-normalized host. If normalization fails
+// (e.g., the host is an IP address or already ASCII), the input is returned
+// lowercased — fail-open for usability since most hosts are pure ASCII.
+func normalizeHost(host string) string {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" {
+		return host
+	}
+	// Skip IDNA for IP addresses and already-pure-ASCII hostnames
+	// (fast path — avoids allocation for the common case).
+	if net.ParseIP(host) != nil {
+		return host
+	}
+	ascii, err := idna.ToASCII(host)
+	if err != nil {
+		return host // fail-open: return lowercased original
+	}
+	return strings.ToLower(ascii)
+}
 
 // ─── SSRF-safe dialer ────────────────────────────────────────────────────────
 

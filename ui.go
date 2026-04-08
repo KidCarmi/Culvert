@@ -1189,8 +1189,29 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		host := strings.TrimSpace(r.URL.Query().Get("host"))
+		// F19: support bulk delete via JSON body with hosts array.
 		if host == "" {
-			http.Error(w, "missing host param", http.StatusBadRequest)
+			var body struct {
+				Hosts []string `json:"hosts"`
+			}
+			if err := decodeJSON(r, &body); err == nil && len(body.Hosts) > 0 {
+				removed := 0
+				for _, h := range body.Hosts {
+					h = strings.TrimSpace(h)
+					if h == "" {
+						continue
+					}
+					bl.Remove(h)
+					removed++
+				}
+				bl.Save()
+				logger.Printf("UI: bulk unblocked %d host(s)", removed)
+				auditEvent(r, "blocklist.bulk_remove", fmt.Sprintf("%d host(s)", removed), "")
+				saveConfigVersion(sessionAdmin(r), "blocklist.bulk_remove")
+				jsonOK(w, map[string]any{"removed": removed})
+				return
+			}
+			http.Error(w, "missing host param or hosts body", http.StatusBadRequest)
 			return
 		}
 		bl.Remove(host)
@@ -2211,6 +2232,28 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
+		// F19: support bulk delete via JSON body with priorities array.
+		if priorityStr == "" {
+			var body struct {
+				Priorities []int `json:"priorities"`
+			}
+			if err := decodeJSON(r, &body); err == nil && len(body.Priorities) > 0 {
+				deleted := 0
+				for _, p := range body.Priorities {
+					if policyStore.Delete(p) {
+						deleted++
+					}
+				}
+				policyStore.Save()
+				logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
+				auditEvent(r, "policy.bulk_delete", fmt.Sprintf("%d rule(s)", deleted), "")
+				saveConfigVersion(sessionAdmin(r), "policy.bulk_delete")
+				jsonOK(w, map[string]any{"deleted": deleted})
+				return
+			}
+			http.Error(w, "missing priority param or priorities body", http.StatusBadRequest)
+			return
+		}
 		var priority int
 		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
 			http.Error(w, "missing or invalid priority param", http.StatusBadRequest)

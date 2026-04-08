@@ -52,6 +52,25 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
+// ─── handleReady ──────────────────────────────────────────────────────────────
+
+func TestHandleReady_DefaultOK(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/ready", http.NoBody)
+	handleReady(w, r)
+	// With no ClamAV configured, readiness should pass.
+	if w.Code != http.StatusOK {
+		t.Errorf("handleReady status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"status":"ready"`) {
+		t.Errorf("handleReady body missing status:ready, got %q", body)
+	}
+	if !strings.Contains(body, `"checks"`) {
+		t.Errorf("handleReady body missing checks, got %q", body)
+	}
+}
+
 // ─── matchCountry ─────────────────────────────────────────────────────────────
 
 func TestMatchCountry(t *testing.T) {
@@ -358,6 +377,36 @@ func TestConfig_SetUIUser_RoleUpdate(t *testing.T) {
 	for _, u := range users {
 		if u.Username == "op1" && u.Role != RoleViewer {
 			t.Errorf("role update failed, got %v want viewer", u.Role)
+		}
+	}
+}
+
+// ── normalizeHost tests (1.2 fix) ────────────────────────────────────────────
+
+func TestNormalizeHost(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		// Basic ASCII — unchanged.
+		{"example.com", "example.com"},
+		{"EXAMPLE.COM", "example.com"},
+		// Trailing dot removed.
+		{"example.com.", "example.com"},
+		// IP addresses — passed through unchanged.
+		{"192.168.1.1", "192.168.1.1"},
+		{"::1", "::1"},
+		// Empty string.
+		{"", ""},
+		// Already punycode — normalized to lowercase.
+		{"xn--mnchen-3ya.de", "xn--mnchen-3ya.de"},
+		// Unicode IDN — converted to punycode (IDNA2008).
+		{"münchen.de", "xn--mnchen-3ya.de"},
+	}
+	for _, c := range cases {
+		got := normalizeHost(c.input)
+		if got != c.want {
+			t.Errorf("normalizeHost(%q) = %q, want %q", c.input, got, c.want)
 		}
 	}
 }

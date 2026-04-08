@@ -693,11 +693,14 @@ tr.dragging  { opacity: .4; }
               <button class="btn sm ghost" id="bl-src-feed"   onclick="setBlSource('feed')"   >Feed only</button>
             </div>
           </div>
-          <div id="bl-count" style="font-size:.75rem;color:var(--muted);margin:8px 0 10px;"></div>
+          <div style="display:flex;align-items:center;gap:10px;margin:8px 0 10px">
+            <span id="bl-count" style="font-size:.75rem;color:var(--muted)"></span>
+            <button class="btn danger sm" id="bl-bulk-del" style="display:none" onclick="bulkDeleteBL()">Delete Selected</button>
+          </div>
           <div class="tbl-wrap">
             <table>
               <thead>
-                <tr><th>Host / Pattern</th><th>Type</th><th>Added by</th><th></th></tr>
+                <tr><th style="width:28px"><input type="checkbox" id="bl-check-all" onchange="blToggleAll(this.checked)"></th><th>Host / Pattern</th><th>Type</th><th>Added by</th><th></th></tr>
               </thead>
               <tbody id="bl-table"></tbody>
             </table>
@@ -1941,6 +1944,15 @@ Firefox (all platforms):
             <span style="font-size:.72rem;color:var(--muted)">⠿ drag rows to reorder</span>
           </div>
         </div>
+        <div style="padding:8px 16px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" class="input" style="width:260px" id="pol-filter"
+            placeholder="Search rules…" oninput="renderPolicy()">
+          <div style="display:flex;gap:4px" id="pol-action-tabs">
+            <button class="btn sm active" id="pol-act-all" onclick="setPolActionFilter('')">All</button>
+            <button class="btn sm ghost" id="pol-act-allow" onclick="setPolActionFilter('allow')">Allow</button>
+            <button class="btn sm ghost" id="pol-act-block" onclick="setPolActionFilter('block')">Block</button>
+          </div>
+        </div>
         <div class="tbl-wrap">
           <table id="policy-table">
             <thead>
@@ -2835,6 +2847,18 @@ Firefox (all platforms):
   </div>
 </div>
 
+<!-- Confirmation dialog (F22) -->
+<div id="confirm-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
+    <h3 id="confirm-dialog-title" style="margin:0 0 8px;font-size:1.05rem;font-weight:700;color:var(--danger)">Confirm</h3>
+    <p id="confirm-dialog-msg" style="margin:0 0 20px;font-size:.88rem;color:var(--muted);line-height:1.6"></p>
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn ghost" onclick="confirmDialogResolve(false)">Cancel</button>
+      <button class="btn danger" id="confirm-dialog-ok" onclick="confirmDialogResolve(true)">Delete</button>
+    </div>
+  </div>
+</div>
+
 <div id="toasts"></div>
 
 <script>
@@ -3144,7 +3168,7 @@ function showUserErr(msg) {
 }
 
 async function deleteUser(username) {
-  if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+  if (!await confirmAction('Delete User', `Delete user "${username}"? This cannot be undone.`)) return;
   try {
     await api('/api/auth/users?username=' + encodeURIComponent(username), {method:'DELETE'});
     fetchUsers();
@@ -3495,7 +3519,7 @@ async function diffConfigVersions(from, to) {
 }
 
 async function rollbackConfigVersion(version) {
-  if (!confirm(`Roll back to config version v${version}?\n\nThis will replace ALL current settings with the snapshot from v${version}. A new version will be created to record this rollback.`)) return;
+  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? This will replace ALL current settings with the snapshot from v${version}. A new version will be created to record this rollback.`, 'Rollback')) return;
   try {
     const data = await api('/api/config/versions', {
       method: 'POST',
@@ -3657,6 +3681,7 @@ function fmt(n) {
 // ═══════════════════════════════════════════════════════════════════════════
 let polRules = [];
 let polEditPriority = null; // null = adding new rule
+let polActionFilter = ''; // F20: filter by action (allow/block/'')
 let logFilter = '', logStatusFilter = '', logLevelFilter = '', logMethodFilter = '', logIdentityFilter = '';
 
 function badgeHTML(status) {
@@ -3798,6 +3823,7 @@ function _blRenderPage(append) {
       ? '<span class="badge" style="background:rgba(20,184,166,.12);color:#2dd4bf;border:1px solid rgba(20,184,166,.25);font-size:10px">Admin</span>'
       : '<span class="badge" style="background:var(--surface2);color:var(--muted);font-size:10px">Feed</span>';
     return `<tr>
+      <td><input type="checkbox" class="bl-check" value="${jh}" onchange="blUpdateBulk()"></td>
       <td class="host-td">${h}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
       <td style="color:var(--muted);font-size:.75rem">${wild ? 'Wildcard' : 'Exact'}</td>
       <td>${srcBadge}</td>
@@ -3815,6 +3841,7 @@ function _blRenderPage(append) {
   blOffset += page.length;
   document.getElementById('bl-load-more').style.display =
     blOffset < blVisible.length ? '' : 'none';
+  blUpdateBulk();
 }
 
 function blLoadMore() {
@@ -3839,10 +3866,33 @@ async function addHost() {
 }
 
 async function removeHost(host) {
-  if (!confirm('Remove "' + host + '" from the blocklist?')) return;
+  if (!await confirmAction('Remove Host', 'Remove "' + host + '" from the blocklist?')) return;
   try {
     await api('/api/blocklist?host=' + encodeURIComponent(host), {method:'DELETE'});
     toast('Removed ' + host, 'success');
+    fetchBlocklist();
+    fetchStats();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// F19: Bulk delete support for blocklist
+function blToggleAll(checked) {
+  document.querySelectorAll('.bl-check').forEach(cb => { cb.checked = checked; });
+  blUpdateBulk();
+}
+function blUpdateBulk() {
+  const sel = document.querySelectorAll('.bl-check:checked').length;
+  const btn = document.getElementById('bl-bulk-del');
+  btn.style.display = sel > 0 ? '' : 'none';
+  if (sel > 0) btn.textContent = 'Delete Selected (' + sel + ')';
+}
+async function bulkDeleteBL() {
+  const hosts = [...document.querySelectorAll('.bl-check:checked')].map(cb => cb.value.replace(/&quot;/g, '"'));
+  if (!hosts.length) return;
+  if (!await confirmAction('Bulk Delete', 'Remove ' + hosts.length + ' host(s) from the blocklist?', 'Delete ' + hosts.length)) return;
+  try {
+    await api('/api/blocklist', {method:'DELETE', body:{hosts}});
+    toast('Removed ' + hosts.length + ' host(s)', 'success');
     fetchBlocklist();
     fetchStats();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
@@ -3934,7 +3984,7 @@ async function addException() {
 }
 
 async function removeException(host) {
-  if (!confirm('Remove exception for "' + host + '"? This domain will be blocked again if it appears in the blocklist.')) return;
+  if (!await confirmAction('Remove Exception', 'Remove exception for "' + host + '"? This domain will be blocked again if it appears in the blocklist.')) return;
   try {
     await api('/api/blocklist/exceptions?host=' + encodeURIComponent(host), {method: 'DELETE'});
     toast('Exception removed for ' + host, 'success');
@@ -4372,7 +4422,9 @@ function cancelPolicyEdit() {
 }
 
 async function deletePolicy(priority) {
-  if (!confirm('Delete this policy rule? This cannot be undone.')) return;
+  const rule = polRules.find(r => r.priority === priority);
+  const name = rule ? rule.name || ('Rule #' + priority) : ('Rule #' + priority);
+  if (!await confirmAction('Delete Policy Rule', 'Delete "' + name + '"? This cannot be undone.')) return;
   try {
     await api('/api/policy?priority=' + priority, { method: 'DELETE' });
     toast('Rule deleted', 'success');
@@ -4968,7 +5020,7 @@ async function removeFileExt(ext) {
 
 async function clearAllExts() {
   if (!fbExts.length) return;
-  if (!confirm('Remove all ' + fbExts.length + ' blocked extension(s)?')) return;
+  if (!await confirmAction('Clear All Extensions', 'Remove all ' + fbExts.length + ' blocked extension(s)?', 'Remove All')) return;
   try {
     await Promise.all(fbExts.map(ext =>
       api('/api/fileblock?ext=' + encodeURIComponent(ext), {method:'DELETE'})
@@ -5183,6 +5235,24 @@ function toast(msg, type='success') {
   el.innerHTML = (type === 'success' ? '✅' : '❌') + ' ' + msg;
   document.getElementById('toasts').appendChild(el);
   setTimeout(() => el.remove(), 3000);
+}
+
+// ── F22: Styled confirmation dialog ──────────────────────────────────────
+let _confirmResolver = null;
+function confirmDialogResolve(val) {
+  const d = document.getElementById('confirm-dialog');
+  d.style.display = 'none';
+  if (_confirmResolver) { _confirmResolver(val); _confirmResolver = null; }
+}
+function confirmAction(title, msg, okLabel='Delete') {
+  return new Promise(resolve => {
+    _confirmResolver = resolve;
+    document.getElementById('confirm-dialog-title').textContent = title;
+    document.getElementById('confirm-dialog-msg').textContent = msg;
+    document.getElementById('confirm-dialog-ok').textContent = okLabel;
+    const d = document.getElementById('confirm-dialog');
+    d.style.display = 'flex';
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5414,16 +5484,43 @@ async function submitPolicyRule() {
 }
 
 // Extend renderPolicy to show country and file profile columns
+function setPolActionFilter(f) {
+  polActionFilter = f;
+  document.querySelectorAll('#pol-action-tabs button').forEach(b => b.className = 'btn sm ghost');
+  const id = f === 'allow' ? 'pol-act-allow' : f === 'block' ? 'pol-act-block' : 'pol-act-all';
+  document.getElementById(id).className = 'btn sm active';
+  renderPolicy();
+}
+
 function renderPolicy() {
   const tbody = document.getElementById('pol-table');
-  const count = polRules.length;
-  document.getElementById('pol-count').textContent = count + ' rule' + (count !== 1 ? 's' : '');
+  const total = polRules.length;
   updateDefaultActionBadge();
-  if (!count) {
+  if (!total) {
+    document.getElementById('pol-count').textContent = '0 rules';
     tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">📋</div>No policy rules yet — default action applies to all traffic</div></td></tr>';
     return;
   }
-  tbody.innerHTML = polRules.map((r, idx) => {
+
+  // F20: client-side search + action filter
+  const q = (document.getElementById('pol-filter')?.value || '').toLowerCase().trim();
+  const filtered = polRules.filter(r => {
+    if (polActionFilter && r.action !== polActionFilter) return false;
+    if (!q) return true;
+    const haystack = [r.name, r.sourceIP, r.sourceIdentity, r.sourceGroup, r.authSource,
+      r.destFQDN, r.destCategory, r.action, r.fileProfile,
+      ...(r.destCountry || [])].filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(q);
+  });
+
+  const showing = filtered.length < total ? `${filtered.length} of ${total} rules` : `${total} rule${total !== 1 ? 's' : ''}`;
+  document.getElementById('pol-count').textContent = showing;
+
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state">No rules match the current filter</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = filtered.map((r, idx) => {
     const schedBadge = r.schedule ? ` <span title="Schedule active" style="font-size:.8em">⏰</span>` : '';
     const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`, r.authSource && `via:${r.authSource}`].filter(Boolean).map(escHtml).join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const destParts = [r.destFQDN, r.destCategory].filter(Boolean).map(escHtml);
@@ -5476,9 +5573,9 @@ function updateDefaultActionBadge() {
 async function toggleDefaultAction() {
   const next = _defaultAction === 'allow' ? 'deny' : 'allow';
   const warn = next === 'allow'
-    ? 'Change default action to ALLOW?\n\nAll traffic that does not match any policy rule will be permitted. This disables Zero Trust default-deny.'
-    : 'Change default action to DENY?\n\nAll traffic that does not match any policy rule will be blocked (Zero Trust).';
-  if (!confirm(warn)) return;
+    ? 'All traffic that does not match any policy rule will be permitted. This disables Zero Trust default-deny.'
+    : 'All traffic that does not match any policy rule will be blocked (Zero Trust).';
+  if (!await confirmAction('Change Default Action', warn, next === 'allow' ? 'Switch to Allow' : 'Switch to Deny')) return;
   try {
     await api('/api/default-action', {
       method: 'POST',
@@ -6465,7 +6562,7 @@ async function clearCACache() {
 }
 
 async function forceRotateCA() {
-  if (!confirm('Force-rotate the Root CA now? All clients will need the new CA cert.')) return;
+  if (!await confirmAction('Rotate Root CA', 'Force-rotate the Root CA now? All clients will need the new CA certificate.', 'Rotate')) return;
   const r = await api('/api/ca/rotate', {method:'POST'});
   if (r && !r.error) { toast('Root CA rotated successfully','success'); loadCAMgmt(); }
   else toast('Rotation failed: '+(r?.error||'unknown'),'error');
@@ -7160,7 +7257,7 @@ function copyEnrollCmd() {
 }
 
 async function revokeNode(nodeId) {
-  if (!confirm(`Revoke node "${nodeId}"? This will immediately disconnect it from the cluster and invalidate its certificate.`)) return;
+  if (!await confirmAction('Revoke Node', `Revoke node "${nodeId}"? This will immediately disconnect it from the cluster and invalidate its certificate.`, 'Revoke')) return;
   let reason = prompt('Reason for revocation (optional, max 1000 chars):') || 'manual revocation';
   if (reason.length > 1000) { toast('Reason must be 1000 characters or less', 'error'); return; }
   try {

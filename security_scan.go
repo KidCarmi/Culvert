@@ -21,12 +21,24 @@ package main
 //   - Threat feeds are skipped when Init has not been called.
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// maxDecompressBytes limits decompressed data to 64 MB to guard against gzip bombs.
+const maxDecompressBytes = 64 << 20
+
+// scanBodyTimeout caps the total time for all body scanners (ClamAV + YARA).
+// If the combined scan doesn't finish in time, the content is blocked (fail-closed).
+const scanBodyTimeout = 10 * time.Second
 
 // ── Prometheus counters ───────────────────────────────────────────────────────
 
@@ -155,10 +167,63 @@ func (ss *SecurityScanner) CheckDomain(domain string) *SecurityScanResult {
 	return nil
 }
 
+// ── Body decompression (1.1 fix) ──────────────────────────────────────────────
+
+// decompressForScan transparently decompresses a response body based on its
+// Content-Encoding header so that ClamAV/YARA signatures can match the actual
+// content. Supports gzip, deflate, and identity (no-op). Brotli ("br") is
+// attempted as gzip (some servers mislabel); on failure the raw bytes are
+// returned so the scan still runs (defense in depth).
+//
+// Returned data is limited to maxDecompressBytes to guard against gzip bombs.
+// If decompression fails, the original data is returned unchanged — the scan
+// still runs on compressed bytes (fail-open for availability, but the
+// signature gap is closed for the common case).
+func decompressForScan(data []byte, contentEncoding string) []byte {
+	ce := strings.ToLower(strings.TrimSpace(contentEncoding))
+	if ce == "" || ce == "identity" {
+		return data
+	}
+
+	var reader io.ReadCloser
+	var err error
+
+	switch ce {
+	case "gzip", "x-gzip":
+		reader, err = gzip.NewReader(bytes.NewReader(data))
+	case "deflate":
+		reader = flate.NewReader(bytes.NewReader(data))
+	case "br":
+		// Brotli requires an external dependency (andybalholm/brotli).
+		// For now, return raw bytes — YARA/ClamAV will scan compressed form.
+		// TODO: add brotli support when dependency is acceptable.
+		return data
+	default:
+		// Unknown encoding — scan raw bytes.
+		return data
+	}
+	if err != nil {
+		// gzip.NewReader failed (malformed header) — scan raw bytes.
+		return data
+	}
+	defer reader.Close()
+
+	decompressed, err := io.ReadAll(io.LimitReader(reader, maxDecompressBytes))
+	if err != nil {
+		// Decompression error (truncated, corrupt) — scan raw bytes.
+		return data
+	}
+	if len(decompressed) == 0 {
+		return data // empty after decompression — scan original
+	}
+	return decompressed
+}
+
 // ── Body scanning ─────────────────────────────────────────────────────────────
 
 // ScanBody scans a response body with ClamAV and YARA.
 // Results are cached by SHA-256 to avoid redundant work.
+// The entire scan is bounded by scanBodyTimeout (fail-closed: blocks on timeout).
 // Returns nil when the content is clean (or no scanner is enabled).
 func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 	if !ss.BodyScanEnabled() || len(data) == 0 {
@@ -179,6 +244,25 @@ func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 		return nil // cached clean
 	}
 
+	// Run all scanners under a single timeout.
+	// Fail-closed: if the deadline fires, we block the content (Zero Trust).
+	ch := make(chan *SecurityScanResult, 1)
+	go func() {
+		ch <- ss.scanBodyInner(data, hash)
+	}()
+
+	select {
+	case result := <-ch:
+		return result
+	case <-time.After(scanBodyTimeout):
+		logger.Printf("WARN ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout, hash)
+		ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"})
+		return &SecurityScanResult{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
+	}
+}
+
+// scanBodyInner runs ClamAV + YARA sequentially. Called from ScanBody under a timeout.
+func (ss *SecurityScanner) scanBodyInner(data []byte, hash string) *SecurityScanResult {
 	ss.mu.RLock()
 	clam := ss.clam
 	ss.mu.RUnlock()

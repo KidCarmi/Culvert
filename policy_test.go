@@ -41,6 +41,11 @@ func TestMatchFQDN(t *testing.T) {
 		// Case-insensitivity.
 		{"Example.COM", "example.com", true},
 		{"*.EXAMPLE.COM", "sub.example.com", true},
+
+		// 1.2 fix: IDNA normalization — Punycode hosts must match ASCII rules.
+		{"example.com", "xn--exmple-cua.com", false},              // punycode host ≠ example.com
+		{"münchen.de", "xn--mnchen-3ya.de", true},                  // both normalize to punycode
+		{"xn--mnchen-3ya.de", "münchen.de", true},                  // reverse also matches
 	}
 	for _, c := range cases {
 		got := matchFQDN(c.pattern, c.host)

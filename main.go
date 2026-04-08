@@ -758,6 +758,8 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		switch r.URL.Path {
 		case "/health":
 			handleHealth(w, r)
+		case "/ready":
+			handleReady(w, r)
 		case "/metrics":
 			handleMetrics(w, r)
 		case "/proxy.pac":
@@ -917,6 +919,75 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		logger.Printf("handleHealth encode: %v", err)
+	}
+}
+
+// handleReady is a readiness probe — returns 200 only when all configured
+// subsystems are operational. Use for Kubernetes readinessProbe / startup gate.
+// Unlike /health (liveness), this returns 503 when dependencies are degraded.
+func handleReady(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	type checkResult struct {
+		Status string `json:"status"`           // "ok" or "fail"
+		Detail string `json:"detail,omitempty"`
+	}
+	checks := map[string]*checkResult{}
+	allOK := true
+
+	// 1. CA: report status but don't fail readiness — proxy still works
+	// as a plain forward proxy if the CA didn't load.
+	if certMgr.Ready() {
+		checks["ca"] = &checkResult{Status: "ok"}
+	}
+
+	// 2. ClamAV: if scanner is initialised, verify connectivity.
+	if globalSecScanner != nil {
+		st := globalSecScanner.ClamAVStatus()
+		switch st {
+		case "disabled":
+			// Not configured — skip.
+		case "connected":
+			checks["clamav"] = &checkResult{Status: "ok"}
+		default:
+			checks["clamav"] = &checkResult{Status: "fail", Detail: st}
+			allOK = false
+		}
+	}
+
+	// 3. GeoIP: if configured, verify DB is loaded.
+	if geoEnabled() {
+		checks["geoip"] = &checkResult{Status: "ok"}
+	}
+	// GeoIP is optional — absence is not a failure.
+
+	// 4. YARA rules: if configured, verify loaded.
+	if globalYARA.Enabled() {
+		checks["yara"] = &checkResult{Status: "ok"}
+	}
+
+	status := "ready"
+	code := http.StatusOK
+	if !allOK {
+		status = "not_ready"
+		code = http.StatusServiceUnavailable
+	}
+
+	resp := struct {
+		Status  string                  `json:"status"`
+		Uptime  string                  `json:"uptime"`
+		Version string                  `json:"version"`
+		Checks  map[string]*checkResult `json:"checks"`
+	}{
+		Status:  status,
+		Uptime:  uptime(),
+		Version: version,
+		Checks:  checks,
+	}
+
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Printf("handleReady encode: %v", err)
 	}
 }
 

@@ -235,7 +235,7 @@ func (cs *CategoryStore) AddHost(category, host string) error {
 		if !strings.EqualFold(e.Name, category) {
 			continue
 		}
-		host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+		host = normalizeHost(strings.TrimSpace(host))
 		if cs.index[key][host] {
 			cs.mu.Unlock()
 			return nil // already present
@@ -256,9 +256,9 @@ func (cs *CategoryStore) RemoveHost(category, host string) error {
 	key := strings.ToLower(category)
 	for _, e := range cs.entries {
 		if strings.EqualFold(e.Name, category) {
-			host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+			host = normalizeHost(strings.TrimSpace(host))
 			for i, h := range e.Hosts {
-				if strings.ToLower(strings.TrimSuffix(h, ".")) == host {
+				if normalizeHost(h) == host {
 					e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
 					delete(cs.index[key], host)
 					cs.mu.Unlock()
@@ -800,8 +800,8 @@ func matchFileExt(urlPath string, exts []string) bool {
 }
 
 func matchFQDN(pattern, host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	pattern = strings.ToLower(strings.TrimSuffix(pattern, "."))
+	host = normalizeHost(host)
+	pattern = normalizeHost(pattern)
 	if pattern == "*" {
 		return true
 	}
@@ -832,7 +832,7 @@ func matchCategory(cat URLCategory, host string) bool {
 // Returns (category, tier, matchedBy) where tier is "admin", "community", or "none".
 // Used by the admin URL-lookup API endpoint and policy test response enrichment.
 func lookupHostCategory(host string) (category, tier, matchedBy string) {
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	h := normalizeHost(host)
 
 	// Layer 1: admin-managed catStore — exact + suffix match.
 	catStore.mu.RLock()
@@ -869,7 +869,7 @@ func lookupHostCategory(host string) (category, tier, matchedBy string) {
 // matchCategoryInStore checks whether host belongs to the named URL category.
 // Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
 func matchCategoryInStore(cat URLCategory, host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host = normalizeHost(host)
 	catKey := strings.ToLower(string(cat))
 
 	catStore.mu.RLock()
@@ -1034,7 +1034,7 @@ func (m *SSLBypassMatcher) List() []string {
 func (m *SSLBypassMatcher) Matches(host string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	h := normalizeHost(host)
 	for _, p := range m.compiled {
 		if p.isRE {
 			if p.re.MatchString(h) {

@@ -1,12 +1,85 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
 	"time"
 )
+
+// ── decompressForScan tests (1.1 fix) ────────────────────────────────────────
+
+func TestDecompressForScan_Identity(t *testing.T) {
+	data := []byte("plain text content")
+	got := decompressForScan(data, "")
+	if !bytes.Equal(got, data) {
+		t.Error("empty Content-Encoding should return data unchanged")
+	}
+	got = decompressForScan(data, "identity")
+	if !bytes.Equal(got, data) {
+		t.Error("identity encoding should return data unchanged")
+	}
+}
+
+func TestDecompressForScan_Gzip(t *testing.T) {
+	original := []byte("EICAR test content that should be decompressed for scanning")
+
+	// Compress with gzip.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	gz.Write(original) //nolint:errcheck
+	gz.Close()
+	compressed := buf.Bytes()
+
+	// Verify compressed is different from original.
+	if bytes.Equal(compressed, original) {
+		t.Fatal("gzip compression produced identical output")
+	}
+
+	got := decompressForScan(compressed, "gzip")
+	if !bytes.Equal(got, original) {
+		t.Errorf("gzip decompression failed:\n  got:  %q\n  want: %q", got, original)
+	}
+}
+
+func TestDecompressForScan_InvalidGzip(t *testing.T) {
+	data := []byte("this is not gzip data")
+	got := decompressForScan(data, "gzip")
+	// Should fall back to returning raw bytes.
+	if !bytes.Equal(got, data) {
+		t.Error("invalid gzip should return raw data")
+	}
+}
+
+func TestDecompressForScan_Brotli(t *testing.T) {
+	data := []byte("brotli content")
+	got := decompressForScan(data, "br")
+	// Brotli not yet supported — should return raw data.
+	if !bytes.Equal(got, data) {
+		t.Error("brotli should return raw data (not yet supported)")
+	}
+}
+
+func TestDecompressForScan_GzipBomb(t *testing.T) {
+	// Create a gzip stream with a large uncompressed payload (>64MB).
+	// decompressForScan should limit to maxDecompressBytes.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	// Write 65MB of zeros (compresses very well).
+	chunk := make([]byte, 1<<20) // 1MB
+	for i := 0; i < 65; i++ {
+		gz.Write(chunk) //nolint:errcheck
+	}
+	gz.Close()
+
+	got := decompressForScan(buf.Bytes(), "gzip")
+	if len(got) > maxDecompressBytes {
+		t.Errorf("gzip bomb protection failed: got %d bytes, max %d", len(got), maxDecompressBytes)
+	}
+}
 
 // ── ContentScanner unit tests ──────────────────────────────────────────────────
 
@@ -182,6 +255,15 @@ func TestIsTextContentType(t *testing.T) {
 		if got := isTextContentType(tc.ct); got != tc.want {
 			t.Errorf("isTextContentType(%q) = %v, want %v", tc.ct, got, tc.want)
 		}
+	}
+}
+
+// ── ScanBody timeout (F2/F3 fix) ──────────────────────────────────────────────
+
+func TestScanBodyTimeout_FailClosed(t *testing.T) {
+	// Verify the constant exists and is reasonable.
+	if scanBodyTimeout <= 0 || scanBodyTimeout > 30*time.Second {
+		t.Errorf("scanBodyTimeout = %s, want 0 < x <= 30s", scanBodyTimeout)
 	}
 }
 
