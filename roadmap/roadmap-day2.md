@@ -406,6 +406,14 @@
 |---|-------|------|-------------|
 | ~~U27~~ | ~~No resource limits in compose~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `mem_limit: 256m`, `cpus: "0.5"`, `pids_limit: 64` to all updater services. |
 | ~~U28~~ | ~~Updater depends_on missing~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `depends_on: updater` to proxy service in both compose files. |
+| ~~U29~~ | ~~CI: No semver Docker image tags on main push~~ DONE | .github/workflows/ci.yml | `auto-tag` pushes git tags via GITHUB_TOKEN which can't trigger new workflows. Docker job now computes next version inline and adds `type=raw` semver tags. Both `vX.Y.Z` and `X.Y.Z` tags pushed. |
+| ~~U30~~ | ~~Updater getCurrentTag() returns "latest" for local builds~~ DONE | updater/main.go:682, main.go, Dockerfile | Proxy writes version to `/data/version.txt` on startup; updater reads it first. Falls back to image tag, then OCI labels. Dockerfile also persists `/app/VERSION` at build time. |
+| ~~U31~~ | ~~Token file 0600 unreadable by cap_drop:ALL updater~~ DONE | update.go:118 | Changed to 0644 with `#nosec G306` — required because `cap_drop: ALL` removes `DAC_OVERRIDE`. |
+| ~~U32~~ | ~~No retry on token_pending at startup~~ DONE | update.go:164-190 | Added 15s retry loop for 3 minutes before falling back to 6h cycle. |
+
+### 8.6 Edge Case Audit
+
+> See `roadmap/edge-case-audit.md` for the comprehensive operator-perspective audit (20 areas, 60+ findings).
 
 ---
 

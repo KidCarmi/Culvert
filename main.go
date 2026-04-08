@@ -732,6 +732,12 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		}
 	}
 	ensureUpdaterToken()
+	// Write current version to shared volume so the updater sidecar can read
+	// it without inspecting Docker image tags (which show "latest" for local builds).
+	if version != "" && version != "dev" {
+		// #nosec G306 -- 0644 required: updater sidecar runs with cap_drop:ALL (no DAC_OVERRIDE)
+		_ = os.WriteFile("/data/version.txt", []byte(version+"\n"), 0o644)
+	}
 	go startUpdateChecker(appLifecycleCtx)
 	recoverClusterUpdate()
 

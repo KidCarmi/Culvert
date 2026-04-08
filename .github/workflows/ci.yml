@@ -68,6 +68,26 @@ jobs:
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0   # full history needed for tag-based version computation
+
+      # ── Compute next semver on main push ──────────────────────────────────
+      # GITHUB_TOKEN tag pushes (from auto-tag) can't trigger new workflows,
+      # so the docker job must compute and apply semver tags in the same run.
+      - name: Compute next version
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        id: next-ver
+        run: |
+          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$LATEST" ]; then LATEST="v0.0.0"; fi
+          VER="${LATEST#v}"
+          MAJOR=$(echo "$VER" | cut -d. -f1)
+          MINOR=$(echo "$VER" | cut -d. -f2)
+          PATCH=$(echo "$VER" | cut -d. -f3)
+          NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          echo "version=$NEXT" >> $GITHUB_OUTPUT
+          echo "version_bare=${NEXT#v}" >> $GITHUB_OUTPUT
+          echo "Next version: $NEXT"
 
       # ── Registry login ────────────────────────────────────────────────────
       # ghcr.io: always available, uses GITHUB_TOKEN — no secrets needed.
@@ -80,7 +100,8 @@ jobs:
 
       # ── Image metadata ────────────────────────────────────────────────────
       # Generates tags and labels automatically:
-      #   • version tags (v1.2.3 → 1.2.3, 1.2, 1, latest)
+      #   • version tags (v1.2.3 → 1.2.3, 1.2, 1, latest)  [tag-ref events]
+      #   • computed next version                            [main push]
       #   • branch tags  (main → main)
       #   • PR tags      (pr-42)
       #   • SHA tag      (sha-abc1234)
@@ -94,6 +115,9 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=raw,value=${{ steps.next-ver.outputs.version }},enable=${{ steps.next-ver.outputs.version != '' }}
+            type=raw,value=${{ steps.next-ver.outputs.version_bare }},enable=${{ steps.next-ver.outputs.version_bare != '' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=ref,event=branch
             type=ref,event=pr
             type=sha,prefix=sha-,format=short
@@ -121,7 +145,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=${{ steps.next-ver.outputs.version || steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # Embed provenance + SBOM attestations directly in the image manifest.
