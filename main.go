@@ -720,9 +720,16 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	// ── SSE live dashboard broadcaster ───────────────────────────────────────
 	startSSEBroadcaster()
 
+	// ── F16: Alert retry queue ──────────────────────────────────────────────
+	go startAlertRetryLoop(appLifecycleCtx)
+
 	// ── Docker self-update system ────────────────────────────────────────────
 	if u := firstStr(*updaterURLFlag, fc.Update.UpdaterURL); u != "" {
-		updaterURL = u
+		if err := validateUpdaterURL(u); err != nil {
+			logger.Printf("WARNING: invalid updater URL %q: %v — using default", u, err)
+		} else {
+			updaterURL = u
+		}
 	}
 	ensureUpdaterToken()
 	go startUpdateChecker(appLifecycleCtx)

@@ -52,14 +52,9 @@ func initConfigVersioning() {
 
 // saveConfigVersion captures the current configuration state.
 // Called after any mutating config operation.
-func saveConfigVersion(actor, action string) {
-	configVersionMu.Lock()
-	defer configVersionMu.Unlock()
-
-	configVersionSeq++
-	seq := configVersionSeq
-
-	snap := configBackup{
+// captureConfigBackup takes a point-in-time snapshot of all config stores.
+func captureConfigBackup() *configBackup {
+	return &configBackup{
 		Version:             1,
 		ExportedAt:          time.Now().UTC().Format(time.RFC3339),
 		BlocklistMode:       bl.Mode(),
@@ -74,6 +69,16 @@ func saveConfigVersion(actor, action string) {
 		IPList:              ipf.List(),
 		RateLimitRPM:        rl.Limit(),
 	}
+}
+
+func saveConfigVersion(actor, action string) {
+	configVersionMu.Lock()
+	defer configVersionMu.Unlock()
+
+	configVersionSeq++
+	seq := configVersionSeq
+
+	snap := captureConfigBackup()
 
 	meta := ConfigVersion{
 		Version:   seq,
@@ -85,7 +90,7 @@ func saveConfigVersion(actor, action string) {
 	envelope := struct {
 		Meta   ConfigVersion `json:"meta"`
 		Config configBackup  `json:"config"`
-	}{Meta: meta, Config: snap}
+	}{Meta: meta, Config: *snap}
 
 	data, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
@@ -193,7 +198,8 @@ func listConfigVersions(w http.ResponseWriter) {
 
 func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Version int `json:"version"`
+		Version int  `json:"version"`
+		DryRun  bool `json:"dry_run"` // F7: pre-flight validation only
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -220,6 +226,24 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// F7: Pre-flight validation — check snapshot before applying.
+	warnings := validateConfigBackup(&envelope.Config)
+
+	if req.DryRun {
+		// Compare against current config for a preview diff.
+		current := captureConfigBackup()
+		changes := diffConfigs(current, &envelope.Config)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"status":   "dry_run",
+			"version":  req.Version,
+			"warnings": warnings,
+			"changes":  changes,
+			"valid":    len(warnings) == 0,
+		})
+		return
+	}
+
 	applyConfigBackup(&envelope.Config)
 
 	actor := sessionAdmin(r)
@@ -235,9 +259,49 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-		"status":  "rolled_back",
-		"version": req.Version,
+		"status":   "rolled_back",
+		"version":  req.Version,
+		"warnings": warnings,
 	})
+}
+
+// validateConfigBackup performs pre-flight checks on a config snapshot (F7).
+// Returns a list of human-readable warnings; empty slice means all checks pass.
+func validateConfigBackup(b *configBackup) []string {
+	var warnings []string
+
+	// Check blocklist mode is valid.
+	if b.BlocklistMode != "" && b.BlocklistMode != "allow" && b.BlocklistMode != "block" {
+		warnings = append(warnings, fmt.Sprintf("invalid blocklist mode %q", b.BlocklistMode))
+	}
+
+	// Check default policy action is valid.
+	if b.DefaultAction != "" && b.DefaultAction != "allow" && b.DefaultAction != "block" {
+		warnings = append(warnings, fmt.Sprintf("invalid default action %q", b.DefaultAction))
+	}
+
+	// Validate each policy rule.
+	var invalidRules int
+	for i := range b.PolicyRules {
+		if err := validatePolicyRule(b.PolicyRules[i]); err != nil {
+			invalidRules++
+		}
+	}
+	if invalidRules > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d of %d policy rules are invalid (will be skipped)", invalidRules, len(b.PolicyRules)))
+	}
+
+	// Check IP filter mode is valid.
+	if b.IPFilterMode != "" && b.IPFilterMode != "allow" && b.IPFilterMode != "block" {
+		warnings = append(warnings, fmt.Sprintf("invalid IP filter mode %q", b.IPFilterMode))
+	}
+
+	// Check rate limit is non-negative.
+	if b.RateLimitRPM < 0 {
+		warnings = append(warnings, "negative rate limit RPM")
+	}
+
+	return warnings
 }
 
 // configRollbackMu serializes config rollback operations (B17) so concurrent
@@ -326,7 +390,8 @@ func loadConfigVersion(ver int) (*configBackup, error) {
 	return &envelope.Config, nil
 }
 
-// diffConfigs compares two config backups and returns the field-level changes.
+// diffConfigs compares two config backups and returns field-level changes.
+// F11: element-level diffs showing added/removed items, not just counts.
 func diffConfigs(a, b *configBackup) []configChange {
 	var changes []configChange
 	cmp := func(field string, from, to any) {
@@ -344,28 +409,113 @@ func diffConfigs(a, b *configBackup) []configChange {
 	if a.RateLimitRPM != b.RateLimitRPM {
 		cmp("rate_limit_rpm", a.RateLimitRPM, b.RateLimitRPM)
 	}
-	if len(a.Blocklist) != len(b.Blocklist) {
-		cmp("blocklist_count", len(a.Blocklist), len(b.Blocklist))
-	}
-	if len(a.PolicyRules) != len(b.PolicyRules) {
-		cmp("policy_rules_count", len(a.PolicyRules), len(b.PolicyRules))
-	}
-	if len(a.RewriteRules) != len(b.RewriteRules) {
-		cmp("rewrite_rules_count", len(a.RewriteRules), len(b.RewriteRules))
-	}
-	if len(a.SSLBypass) != len(b.SSLBypass) {
-		cmp("ssl_bypass_count", len(a.SSLBypass), len(b.SSLBypass))
-	}
-	if len(a.ContentScanPatterns) != len(b.ContentScanPatterns) {
-		cmp("content_scan_count", len(a.ContentScanPatterns), len(b.ContentScanPatterns))
-	}
-	if len(a.FileBlockExtensions) != len(b.FileBlockExtensions) {
-		cmp("file_block_count", len(a.FileBlockExtensions), len(b.FileBlockExtensions))
-	}
-	if len(a.IPList) != len(b.IPList) {
-		cmp("ip_list_count", len(a.IPList), len(b.IPList))
-	}
+
+	// Element-level diffs for list fields.
+	diffStringList("blocklist", a.Blocklist, b.Blocklist, &changes)
+	diffStringList("ssl_bypass", a.SSLBypass, b.SSLBypass, &changes)
+	diffStringList("content_scan_patterns", a.ContentScanPatterns, b.ContentScanPatterns, &changes)
+	diffStringList("file_block_extensions", a.FileBlockExtensions, b.FileBlockExtensions, &changes)
+	diffStringList("ip_list", a.IPList, b.IPList, &changes)
+
+	// Policy rules: diff by priority key.
+	diffPolicyRules(a.PolicyRules, b.PolicyRules, &changes)
+
+	// Rewrite rules: diff by host key.
+	diffRewriteRules(a.RewriteRules, b.RewriteRules, &changes)
+
 	return changes
+}
+
+// diffStringList produces added/removed element-level diffs for string slices.
+func diffStringList(field string, a, b []string, out *[]configChange) {
+	setA := make(map[string]struct{}, len(a))
+	for _, v := range a {
+		setA[v] = struct{}{}
+	}
+	setB := make(map[string]struct{}, len(b))
+	for _, v := range b {
+		setB[v] = struct{}{}
+	}
+	var added, removed []string
+	for _, v := range b {
+		if _, ok := setA[v]; !ok {
+			added = append(added, v)
+		}
+	}
+	for _, v := range a {
+		if _, ok := setB[v]; !ok {
+			removed = append(removed, v)
+		}
+	}
+	if len(added) > 0 || len(removed) > 0 {
+		*out = append(*out, configChange{
+			Field: field,
+			From:  map[string]any{"count": len(a), "removed": removed},
+			To:    map[string]any{"count": len(b), "added": added},
+		})
+	}
+}
+
+// diffPolicyRules compares policy rules by priority.
+func diffPolicyRules(a, b []PolicyRule, out *[]configChange) {
+	mapA := make(map[int]string, len(a))
+	for i := range a {
+		mapA[a[i].Priority] = a[i].Name
+	}
+	mapB := make(map[int]string, len(b))
+	for i := range b {
+		mapB[b[i].Priority] = b[i].Name
+	}
+	var added, removed, changed []string
+	for pri, name := range mapB {
+		if oldName, ok := mapA[pri]; !ok {
+			added = append(added, fmt.Sprintf("p%d:%s", pri, name))
+		} else if oldName != name {
+			changed = append(changed, fmt.Sprintf("p%d:%s->%s", pri, oldName, name))
+		}
+	}
+	for pri, name := range mapA {
+		if _, ok := mapB[pri]; !ok {
+			removed = append(removed, fmt.Sprintf("p%d:%s", pri, name))
+		}
+	}
+	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {
+		*out = append(*out, configChange{
+			Field: "policy_rules",
+			From:  map[string]any{"count": len(a), "removed": removed, "changed": changed},
+			To:    map[string]any{"count": len(b), "added": added},
+		})
+	}
+}
+
+// diffRewriteRules compares rewrite rules by host.
+func diffRewriteRules(a, b []RewriteRule, out *[]configChange) {
+	setA := make(map[string]struct{}, len(a))
+	for i := range a {
+		setA[a[i].Host] = struct{}{}
+	}
+	setB := make(map[string]struct{}, len(b))
+	for i := range b {
+		setB[b[i].Host] = struct{}{}
+	}
+	var added, removed []string
+	for i := range b {
+		if _, ok := setA[b[i].Host]; !ok {
+			added = append(added, b[i].Host)
+		}
+	}
+	for i := range a {
+		if _, ok := setB[a[i].Host]; !ok {
+			removed = append(removed, a[i].Host)
+		}
+	}
+	if len(added) > 0 || len(removed) > 0 {
+		*out = append(*out, configChange{
+			Field: "rewrite_rules",
+			From:  map[string]any{"count": len(a), "removed": removed},
+			To:    map[string]any{"count": len(b), "added": added},
+		})
+	}
 }
 
 // apiConfigDiff returns the differences between two config versions.

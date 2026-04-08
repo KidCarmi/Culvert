@@ -177,6 +177,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)     // POST revoke a node
 	mux.HandleFunc("/api/cluster/labels", apiClusterLabels)           // POST set node labels
 	mux.HandleFunc("/api/cluster/node-groups", apiNodeGroups)        // GET list / POST create / DELETE remove
+	mux.HandleFunc("/api/cluster/node-groups/membership", apiNodeGroupMembership) // GET group membership (F9)
 	mux.HandleFunc("/api/cluster/drain", apiClusterDrain)       // POST toggle node drain mode
 	mux.HandleFunc("/api/cluster/metrics", apiClusterMetrics)   // GET aggregated cluster metrics
 	mux.HandleFunc("/api/cluster/ca", apiClusterCA)                   // GET info / POST import cluster CA
@@ -2157,7 +2158,7 @@ func apiLogLevel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		SetLogLevel(ParseLogLevel(upper))
-		logger.Printf("UI: log level changed to %s", upper)
+		logger.Printf("UI: log level changed to %s", strings.ReplaceAll(upper, "\n", ""))
 		auditEvent(r, "settings.log_level", upper, "")
 		jsonOK(w, map[string]string{"level": upper})
 	default:

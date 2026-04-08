@@ -215,11 +215,11 @@
 | # | Feature | Impact |
 |---|---------|--------|
 | F6 | Canary deployment pattern for rolling updates | Safe incremental rollout |
-| F7 | Config rollback validation (pre-flight check) | Prevents broken rollback |
+| ~~F7~~ | ~~Config rollback validation (pre-flight check)~~ DONE — dry_run mode with validateConfigBackup() checks mode enums, invalid policy rules, rate limit sign; returns warnings + diff preview | Prevents broken rollback |
 | F8 | Automatic rollback triggers on health threshold breach | Self-healing cluster |
-| F9 | Node group membership monitoring API | "Which nodes are in group X?" |
-| F10 | Bandwidth policy conflict validation | Prevents undefined priority behavior |
-| F11 | Config diff depth — element-level diffs, not just counts | Meaningful rollback previews |
+| ~~F9~~ | ~~Node group membership monitoring API~~ DONE — GET /api/cluster/node-groups/membership?name=X returns group details + member nodes with IP, status, labels, version | "Which nodes are in group X?" |
+| ~~F10~~ | ~~Bandwidth policy conflict validation~~ DONE — selectorsOverlap() detects same-priority policies with overlapping label selectors at Add() time | Prevents undefined priority behavior |
+| ~~F11~~ | ~~Config diff depth — element-level diffs, not just counts~~ DONE — diffStringList, diffPolicyRules, diffRewriteRules show added/removed elements instead of just count changes | Meaningful rollback previews |
 
 ### 5.3 Observability (Medium Priority)
 
@@ -229,7 +229,7 @@
 | ~~F13~~ | ~~Log level support (DEBUG/INFO/WARN/ERROR)~~ DONE | Production noise reduction |
 | F14 | OpenTelemetry distributed tracing | End-to-end request latency |
 | F15 | Grafana dashboard JSON templates | Faster time-to-value for monitoring |
-| F16 | Alert escalation + retry queue with persistent storage | No more silently dropped alerts |
+| ~~F16~~ | ~~Alert escalation + retry queue with persistent storage~~ DONE — 3 retries with exponential backoff (5s/15s/45s), 500-entry queue persisted to /data/alert_retry_queue.json, background retry loop every 10s | No more silently dropped alerts |
 | ~~F17~~ | ~~/health vs /ready probe separation for Kubernetes~~ DONE | Proper pod lifecycle management |
 | ~~F18~~ | ~~Audit log rotation~~ DONE | Prevents unbounded disk growth |
 
@@ -241,7 +241,7 @@
 | ~~F20~~ | ~~Search/filter on all tables (policies, rewrites, file blocks)~~ DONE (policies) | Usability at scale |
 | ~~F21~~ | ~~Pagination on large lists (logs, audit, policies)~~ DONE (blocklist has it; policies use client-side filter) | Performance with many entries |
 | ~~F22~~ | ~~Confirmation dialogs for destructive actions (DELETE)~~ DONE | Prevents accidental deletion |
-| F23 | Role-based UI filtering (hide inaccessible nav items) | Clean UX per role |
+| ~~F23~~ | ~~Role-based UI filtering (hide inaccessible nav items)~~ DONE — data-min-role attributes on nav items + sections; applySession() filters by role hierarchy (admin>operator>viewer); viewer sees Monitor+Tools, operator adds Control+Network, admin sees all | Clean UX per role |
 
 ### 5.5 Nice-to-Have (Low Priority)
 
@@ -371,7 +371,7 @@
 | U6 | ~~No tag format validation in update endpoints~~ DONE | update.go:239, updater/main.go, update_cluster.go | Added `tagRe` validation (`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`) in all endpoints: `apiUpdateApply`, `handlePreview`, `handleApply`, `handleSelfUpdate`, and `apiClusterUpdate`. |
 | U7 | ~~Unbounded io.Copy in update proxy responses~~ DONE | update.go:334,444,474 | All three `io.Copy(w, resp.Body)` calls now use `io.LimitReader(resp.Body, 10<<20)` (10MB limit). |
 | U8 | ~~Error detail leakage in updater responses~~ DONE | updater/main.go:258, 270 | Changed `handlePreview` container-not-found and pull-failed responses to generic messages. Internal details logged server-side only. Also fixed `handleSelfUpdate` error responses. |
-| U9 | Missing SSRF guard on updaterURL | update.go:55-88 | `updaterURL` is used directly in HTTP requests without any scheme/host validation or `isPrivateHost()` check. If the URL is configurable via config file (config.go has `Update.UpdaterURL`), an admin with config access could point it at internal services. Add URL validation at startup. |
+| ~~U9~~ | ~~Missing SSRF guard on updaterURL~~ DONE | update.go:55-88 | Added `validateUpdaterURL()` — validates scheme (http/https only), rejects metadata endpoint (169.254.169.254), allows loopback (expected for sidecar). Called at startup from main.go; invalid URLs fall back to default. |
 | U10 | ~~Missing upper bound on error budget params~~ DONE | update_cluster.go:784-789 | Added upper bounds: `MaxConsecutive` capped at 10, `MaxPercent` capped at 50. |
 | U11 | ~~Reaper container name collision~~ DONE | updater/main.go:1066 | Reaper name now includes `time.Now().UnixNano()` suffix for uniqueness. |
 
@@ -396,16 +396,16 @@
 | U21 | newRotatingFile unused in updater | updater/main.go | The updater uses `log.Printf` (stdlib) instead of a rotating logger. For a long-lived sidecar, logs will accumulate without rotation. Consider adding log rotation or documenting reliance on Docker log driver rotation. |
 | U22 | ~~envIntOr uses custom atoi~~ DONE | updater/main.go:1118-1124 | `envIntOr` now validates each character is a digit and falls back to default on invalid input. Logs a warning for malformed env vars. |
 | U23 | performHASyncPush is a stub | update_cluster.go:568-574 | `performHASyncPush()` just sleeps 10s and returns true. It doesn't actually verify the sync succeeded. This is documented but should be flagged as incomplete. |
-| U24 | Docker Compose updater port exposed to all interfaces | docker-compose.yml:63, docker-compose.ha.yml:55 | Port 7123 is exposed as `"7123:7123"` (all interfaces). If the host is network-accessible, anyone can attempt to reach the updater (blocked by bearer auth, but still increases attack surface). Consider `"127.0.0.1:7123:7123"` or document the risk. |
-| U25 | Missing security_opt in compose | docker-compose.yml:49-68 | Updater container lacks `security_opt: ["no-new-privileges:true"]` and `cap_drop: [ALL]`. While the socket is mounted read-only, adding these hardening options reduces the blast radius of a container compromise. |
+| ~~U24~~ | ~~Docker Compose updater port exposed to all interfaces~~ DONE | docker-compose.yml, docker-compose.ha.yml | Changed all updater port bindings to `"127.0.0.1:7123:7123"` (localhost only). Applied to updater, dp-updater. |
+| ~~U25~~ | ~~Missing security_opt in compose~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `security_opt: ["no-new-privileges:true"]` and `cap_drop: [ALL]` to all updater services. |
 | U26 | SSE reconnection not implemented in UI | static/index.html (updates panel) | The update progress UI connects once to the SSE stream. If the connection drops mid-update (network blip), there's no automatic reconnection with state resume from `/api/update/session`. The CP overlay handles the full-restart case but not transient disconnects. |
 
 ### 8.5 Compose & Dockerfile
 
 | # | Issue | File | Description |
 |---|-------|------|-------------|
-| U27 | No resource limits in compose | docker-compose.yml, docker-compose.ha.yml | The updater service has no `mem_limit`, `cpus`, or `pids_limit`. A runaway image pull or prune could consume excessive host resources. |
-| U28 | Updater depends_on missing | docker-compose.yml | The proxy container doesn't declare `depends_on: updater`. On first startup, the proxy's initial update check (30s delay) may fire before the updater is ready. This is handled gracefully (503 retry) but `depends_on` would improve startup order. |
+| ~~U27~~ | ~~No resource limits in compose~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `mem_limit: 256m`, `cpus: "0.5"`, `pids_limit: 64` to all updater services. |
+| ~~U28~~ | ~~Updater depends_on missing~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `depends_on: updater` to proxy service in both compose files. |
 
 ---
 

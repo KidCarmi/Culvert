@@ -328,54 +328,54 @@ tr.dragging  { opacity: .4; }
       <span class="nav-badge" id="nav-blocked-count" style="display:none">0</span>
     </div>
 
-    <div class="nav-section">Control</div>
-    <div class="nav-item" data-view="blocklist">
+    <div class="nav-section" data-min-role="operator">Control</div>
+    <div class="nav-item" data-view="blocklist" data-min-role="operator">
       <span class="icon">🚫</span> Blocklist
     </div>
-    <div class="nav-item" data-view="security">
+    <div class="nav-item" data-view="security" data-min-role="operator">
       <span class="icon">🔒</span> Security
     </div>
-    <div class="nav-item" data-view="policy">
+    <div class="nav-item" data-view="policy" data-min-role="operator">
       <span class="icon">📋</span> Policy
     </div>
-    <div class="nav-item" data-view="urlcat">
+    <div class="nav-item" data-view="urlcat" data-min-role="operator">
       <span class="icon">🏷️</span> URL Categories
     </div>
-    <div class="nav-item" data-view="fileblock">
+    <div class="nav-item" data-view="fileblock" data-min-role="operator">
       <span class="icon">🛡️</span> File Block
     </div>
-    <div class="nav-section">Network</div>
-    <div class="nav-item" data-view="rewrite">
+    <div class="nav-section" data-min-role="operator">Network</div>
+    <div class="nav-item" data-view="rewrite" data-min-role="operator">
       <span class="icon">✏️</span> Rewrite
     </div>
-    <div class="nav-item" data-view="upstream">
+    <div class="nav-item" data-view="upstream" data-min-role="operator">
       <span class="icon">🔗</span> Upstream Proxies
     </div>
-    <div class="nav-item" data-view="pac">
+    <div class="nav-item" data-view="pac" data-min-role="operator">
       <span class="icon">📡</span> PAC File
     </div>
 
-    <div class="nav-section">Identity</div>
-    <div class="nav-item" data-view="idproviders">
+    <div class="nav-section" data-min-role="admin">Identity</div>
+    <div class="nav-item" data-view="idproviders" data-min-role="admin">
       <span class="icon">🪪</span> Identity Providers
     </div>
 
-    <div class="nav-section">Certificates</div>
-    <div class="nav-item" data-view="certificates">
+    <div class="nav-section" data-min-role="admin">Certificates</div>
+    <div class="nav-item" data-view="certificates" data-min-role="admin">
       <span class="icon">🔑</span> SSL / TLS
     </div>
-    <div class="nav-item" data-view="ca-mgmt">
+    <div class="nav-item" data-view="ca-mgmt" data-min-role="admin">
       <span class="icon">🏛️</span> CA Management
     </div>
 
-    <div class="nav-section">Infrastructure</div>
-    <div class="nav-item" data-view="cluster">
+    <div class="nav-section" data-min-role="admin">Infrastructure</div>
+    <div class="nav-item" data-view="cluster" data-min-role="admin">
       <span class="icon">🖥️</span> Cluster Nodes
     </div>
-    <div class="nav-item" data-view="settings">
+    <div class="nav-item" data-view="settings" data-min-role="admin">
       <span class="icon">⚙️</span> Settings
     </div>
-    <div class="nav-item" data-view="updates">
+    <div class="nav-item" data-view="updates" data-min-role="admin">
       <span class="icon">&#x2B06;</span> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
     </div>
 
@@ -387,8 +387,8 @@ tr.dragging  { opacity: .4; }
       <span class="icon">📋</span> Audit Log
     </div>
 
-    <div class="nav-section" id="nav-section-admin" style="display:none">Admin</div>
-    <div class="nav-item" data-view="users" id="nav-users" style="display:none">
+    <div class="nav-section" data-min-role="admin" id="nav-section-admin">Admin</div>
+    <div class="nav-item" data-view="users" data-min-role="admin" id="nav-users">
       <span class="icon">👥</span> Users &amp; Roles
     </div>
   </nav>
@@ -3162,10 +3162,13 @@ function applySession(user, role) {
     info.style.display = 'none';
   }
 
-  // Admin-only nav items
-  const isAdmin = role === 'admin';
-  document.getElementById('nav-users').style.display         = isAdmin ? '' : 'none';
-  document.getElementById('nav-section-admin').style.display = isAdmin ? '' : 'none';
+  // Role-based nav filtering (F23)
+  const roleLevel = { admin: 3, operator: 2, viewer: 1 };
+  const myLevel = roleLevel[role] || 0;
+  document.querySelectorAll('[data-min-role]').forEach(el => {
+    const required = roleLevel[el.getAttribute('data-min-role')] || 0;
+    el.style.display = myLevel >= required ? '' : 'none';
+  });
 
   // Logout button
   document.getElementById('logout-btn').style.display = (user || role) ? '' : 'none';

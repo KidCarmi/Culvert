@@ -60,7 +60,14 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - proxy-data:/data:ro   # read shared updater token
     ports:
-      - "7123:7123"           # exposed for GUI resilience during CP update (auth required)
+      - "127.0.0.1:7123:7123" # localhost only; exposed for GUI resilience during CP update (auth required)
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 64
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
       interval: 30s
@@ -77,6 +84,7 @@ services:
     # (per-request retry), so this just avoids "unreachable" log noise on startup.
     depends_on:
       - clamav
+      - updater
     ports:
       - "8080:8080"   # Proxy (configure browsers / PAC file to point here)
       - "9090:9090"   # Admin Web UI (HTTPS — accept the self-signed cert on first visit)

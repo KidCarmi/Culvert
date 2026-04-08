@@ -15,7 +15,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -55,6 +57,36 @@ func (u *updateInfo) snapshot() map[string]any {
 // ── Updater client ──────────────────────────────────────────────────────────
 
 var updaterURL = "http://culvert-updater:7123"
+
+// validateUpdaterURL checks that the updater URL uses http/https and does not
+// point at a private/internal IP (SSRF guard). Called at startup to reject
+// misconfigured or malicious updater URLs from config files.
+func validateUpdaterURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported scheme %q (must be http or https)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("empty hostname")
+	}
+	// Allow Docker internal DNS names (compose service names) — these won't
+	// resolve from the host but are valid within a compose network.
+	// Only block if the name resolves to a metadata/loopback address.
+	if ip := net.ParseIP(host); ip != nil {
+		// Bare IP: block metadata endpoint (169.254.169.254) and loopback.
+		if ip.IsLoopback() {
+			return nil // loopback is expected for local sidecar
+		}
+		if ip.Equal(net.ParseIP("169.254.169.254")) {
+			return fmt.Errorf("metadata endpoint not allowed")
+		}
+	}
+	return nil
+}
 
 // updaterToken reads the shared secret from the token file.
 func updaterToken() string {

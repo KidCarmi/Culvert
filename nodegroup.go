@@ -55,6 +55,18 @@ func NewNodeGroupStore(path string) *NodeGroupStore {
 	return s
 }
 
+// Get returns a copy of a named group and true if found.
+func (s *NodeGroupStore) Get(name string) (NodeGroup, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, g := range s.groups {
+		if g.Name == name {
+			return g, true
+		}
+	}
+	return NodeGroup{}, false
+}
+
 // List returns a copy of all node groups.
 func (s *NodeGroupStore) List() []NodeGroup {
 	s.mu.RLock()
@@ -264,4 +276,59 @@ func deleteNodeGroupAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "nodegroup.delete", sanitizeLog(name), "deleted")
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// apiNodeGroupMembership returns detailed membership info for a specific group (F9).
+// GET /api/node-groups/membership?name=GroupName
+func apiNodeGroupMembership(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "name query parameter is required", http.StatusBadRequest)
+		return
+	}
+	group, ok := globalNodeGroups.Get(name)
+	if !ok {
+		http.Error(w, "group not found", http.StatusNotFound)
+		return
+	}
+
+	var nodes []EnrolledNode
+	if globalClusterStore != nil {
+		nodes = globalClusterStore.ListNodes()
+	}
+
+	type memberInfo struct {
+		NodeID    string            `json:"node_id"`
+		IPAddress string            `json:"ip_address"`
+		Status    string            `json:"status"`
+		Labels    map[string]string `json:"labels"`
+		Version   string            `json:"version"`
+	}
+	var members []memberInfo
+	for i := range nodes {
+		if labelsMatch(group.LabelSelector, nodes[i].Labels) {
+			members = append(members, memberInfo{
+				NodeID:    nodes[i].NodeID,
+				IPAddress: nodes[i].IPAddress,
+				Status:    nodes[i].Status,
+				Labels:    nodes[i].Labels,
+				Version:   nodes[i].Version,
+			})
+		}
+	}
+	if members == nil {
+		members = []memberInfo{}
+	}
+	jsonOK(w, map[string]any{
+		"group":   group,
+		"members": members,
+		"count":   len(members),
+	})
 }
