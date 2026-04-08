@@ -227,3 +227,60 @@ func TestThreatFeed_Stats(t *testing.T) {
 		t.Errorf("Stats count = %d, want 42", count)
 	}
 }
+
+func TestThreatFeed_ExportURLs(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.urls["http://evil.com/payload"] = feedEntry{Source: "urlhaus", AddedAt: time.Unix(1700000000, 0)}
+	tf.urls["http://bad.com/malware"] = feedEntry{Source: "openphish", AddedAt: time.Unix(1700000001, 0)}
+
+	exported := tf.ExportURLs()
+	if len(exported) != 2 {
+		t.Fatalf("ExportURLs len = %d, want 2", len(exported))
+	}
+	if exported["http://evil.com/payload"] != 1700000000 {
+		t.Errorf("evil.com timestamp = %d", exported["http://evil.com/payload"])
+	}
+}
+
+func TestThreatFeed_ExportDomains(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.domains["evil.com"] = feedEntry{Source: "urlhaus", AddedAt: time.Unix(1700000000, 0)}
+
+	exported := tf.ExportDomains()
+	if len(exported) != 1 {
+		t.Fatalf("ExportDomains len = %d, want 1", len(exported))
+	}
+	if exported["evil.com"] != 1700000000 {
+		t.Errorf("evil.com timestamp = %d", exported["evil.com"])
+	}
+}
+
+func TestThreatFeed_ImportFeedData(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.urls["old.com/page"] = feedEntry{Source: "urlhaus", AddedAt: time.Unix(1600000000, 0)}
+
+	urls := map[string]int64{
+		"http://new.com/bad": 1700000000,
+	}
+	domains := map[string]int64{
+		"new-domain.com": 1700000001,
+	}
+
+	tf.ImportFeedData(urls, domains)
+
+	if len(tf.urls) != 1 {
+		t.Errorf("after import, urls len = %d, want 1", len(tf.urls))
+	}
+	if _, ok := tf.urls["http://new.com/bad"]; !ok {
+		t.Error("expected new URL to be present")
+	}
+	if _, ok := tf.urls["old.com/page"]; ok {
+		t.Error("old URL should have been replaced")
+	}
+	if len(tf.domains) != 1 {
+		t.Errorf("after import, domains len = %d, want 1", len(tf.domains))
+	}
+	if tf.domains["new-domain.com"].Source != "cluster-sync" {
+		t.Errorf("source = %q, want cluster-sync", tf.domains["new-domain.com"].Source)
+	}
+}

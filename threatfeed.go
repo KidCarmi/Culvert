@@ -438,3 +438,47 @@ func (tf *ThreatFeed) saveToDisk() error {
 	}
 	return os.Rename(tmp, tf.dbPath)
 }
+
+// ExportURLs returns a copy of the URL threat map as url→unix-timestamp.
+// Used by the Control Plane to include feed data in config sync.
+func (tf *ThreatFeed) ExportURLs() map[string]int64 {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	out := make(map[string]int64, len(tf.urls))
+	for u, e := range tf.urls {
+		out[u] = e.AddedAt.Unix()
+	}
+	return out
+}
+
+// ExportDomains returns a copy of the domain threat map as domain→unix-timestamp.
+// Used by the Control Plane to include feed data in config sync.
+func (tf *ThreatFeed) ExportDomains() map[string]int64 {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	out := make(map[string]int64, len(tf.domains))
+	for d, e := range tf.domains {
+		out[d] = e.AddedAt.Unix()
+	}
+	return out
+}
+
+// ImportFeedData replaces the in-memory URL and domain maps with data received
+// from the Control Plane config sync. Each value is a unix timestamp (added_at).
+// The source is set to "cluster-sync" to distinguish from direct feed downloads.
+func (tf *ThreatFeed) ImportFeedData(urls map[string]int64, domains map[string]int64) {
+	newURLs := make(map[string]feedEntry, len(urls))
+	for u, ts := range urls {
+		newURLs[u] = feedEntry{Source: "cluster-sync", AddedAt: time.Unix(ts, 0)}
+	}
+	newDomains := make(map[string]feedEntry, len(domains))
+	for d, ts := range domains {
+		newDomains[d] = feedEntry{Source: "cluster-sync", AddedAt: time.Unix(ts, 0)}
+	}
+	tf.mu.Lock()
+	tf.urls = newURLs
+	tf.domains = newDomains
+	tf.lastSync = time.Now()
+	tf.mu.Unlock()
+	tf.totalEntries.Store(int64(len(newURLs)))
+}

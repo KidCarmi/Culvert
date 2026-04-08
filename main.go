@@ -729,6 +729,9 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 		go startSOCKS5(s5Port)
 	}
 
+	// ── Config versioning ────────────────────────────────────────────────
+	initConfigVersioning()
+
 	// ── Web UI ────────────────────────────────────────────────────────────
 	uiCfgGeoIPDB = geoDBVal
 	uiCfgLogFile = lPath

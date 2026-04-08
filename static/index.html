@@ -1446,6 +1446,20 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Config Versioning -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">Config Versions</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Every configuration change creates a numbered snapshot. You can compare versions and roll back to any previous state.
+          </p>
+          <div id="config-versions-list" style="margin-bottom:12px">
+            <em style="color:var(--muted);font-size:.82rem">Loading versions...</em>
+          </div>
+          <div id="config-diff-result" style="display:none;margin-top:12px"></div>
+        </div>
+      </div>
+
       <!-- Session Timeout -->
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">🕐 Session Timeout</span></div>
@@ -3340,6 +3354,67 @@ async function importConfig(input) {
   input.value = '';
 }
 
+// ── Config Versioning ────────────────────────────────────────────────────
+async function loadConfigVersions() {
+  const el = document.getElementById('config-versions-list');
+  try {
+    const versions = await api('/api/config/versions');
+    if (!versions || versions.length === 0) {
+      el.innerHTML = '<em style="color:var(--muted);font-size:.82rem">No config versions yet. Versions are created automatically when you change settings.</em>';
+      return;
+    }
+    let html = '<table class="table" style="font-size:.82rem"><thead><tr><th>Ver</th><th>Date</th><th>Action</th><th>Actor</th><th></th></tr></thead><tbody>';
+    versions.forEach((v, i) => {
+      const date = new Date(v.created_at).toLocaleString();
+      const prev = i < versions.length - 1 ? versions[i + 1].version : null;
+      const diffBtn = prev ? `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px" onclick="diffConfigVersions(${prev},${v.version})">Diff</button>` : '';
+      const rollbackBtn = `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px;color:var(--yellow)" onclick="rollbackConfigVersion(${v.version})">Rollback</button>`;
+      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${esc(v.action)}</td><td>${esc(v.actor)}</td><td style="text-align:right">${diffBtn} ${rollbackBtn}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch (err) {
+    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed to load versions: ${esc(err.message)}</em>`;
+  }
+}
+
+async function diffConfigVersions(from, to) {
+  const el = document.getElementById('config-diff-result');
+  el.style.display = 'block';
+  el.innerHTML = '<em style="color:var(--muted)">Loading diff...</em>';
+  try {
+    const data = await api(`/api/config/diff?from=${from}&to=${to}`);
+    if (!data.changes || data.changes.length === 0) {
+      el.innerHTML = `<div style="padding:10px;background:var(--surface);border-radius:6px;font-size:.82rem">No differences between v${from} and v${to}.</div>`;
+      return;
+    }
+    let html = `<div style="padding:10px;background:var(--surface);border-radius:6px"><strong style="font-size:.85rem">Diff: v${from} → v${to}</strong><table class="table" style="font-size:.8rem;margin-top:8px"><thead><tr><th>Field</th><th>From</th><th>To</th></tr></thead><tbody>`;
+    data.changes.forEach(c => {
+      html += `<tr><td>${esc(c.field)}</td><td style="color:var(--red)">${esc(String(c.from))}</td><td style="color:var(--green)">${esc(String(c.to))}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+  } catch (err) {
+    el.innerHTML = `<em style="color:var(--red)">Diff failed: ${esc(err.message)}</em>`;
+  }
+}
+
+async function rollbackConfigVersion(version) {
+  if (!confirm(`Roll back to config version v${version}?\n\nThis will replace ALL current settings with the snapshot from v${version}. A new version will be created to record this rollback.`)) return;
+  try {
+    const data = await api('/api/config/versions', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({version})
+    });
+    alert(`Rolled back to v${version} successfully.`);
+    loadConfigVersions();
+    fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
+  } catch (err) {
+    alert('Rollback failed: ' + err.message);
+  }
+}
+
 // ── Schedule helpers ─────────────────────────────────────────────────────
 function getScheduleFromForm(prefix) {
   // prefix = '' for add form, or the edit modal's IDs
@@ -4349,6 +4424,8 @@ async function loadSettings() {
   loadLoggerStatus();
   loadMetricsConfig();
   loadOTLPConfig();
+  // Config versioning
+  loadConfigVersions();
 }
 
 // ── Session Timeout ───────────────────────────────────────────────────────
