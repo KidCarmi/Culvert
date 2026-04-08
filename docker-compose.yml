@@ -65,9 +65,12 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    mem_limit: 256m
-    cpus: "0.5"
-    pids_limit: 64
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+          pids: 64
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
       interval: 30s
