@@ -335,7 +335,7 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, id *Identity) erro
 	if err != nil {
 		return err
 	}
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure is dynamic: true when TLS, false for plain HTTP (by design)
 		Name:     sessionCookieName,
 		Value:    value,
 		Path:     "/",
@@ -362,7 +362,7 @@ func readSessionCookie(r *http.Request) (*Session, error) {
 
 // clearSessionCookie removes the session cookie.
 func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure is dynamic: true when TLS, false for plain HTTP (by design)
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",

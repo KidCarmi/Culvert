@@ -97,7 +97,7 @@ type ConfigSnapshot struct {
 	ThreatDomainAllowlist []string     `json:"threat_domain_allowlist,omitempty"`
 
 	// Session secret sync: shared HMAC key so sessions are valid across nodes.
-	SessionSecret string `json:"session_secret,omitempty"`
+	SessionHMAC string `json:"session_hmac,omitempty"`
 
 	// Bandwidth / QoS policies synced from CP to DP.
 	BandwidthPolicies []BandwidthPolicy `json:"bandwidth_policies,omitempty"`
@@ -1340,8 +1340,8 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	}
 
 	// Session secret.
-	if snap.SessionSecret != "" {
-		key, err := hex.DecodeString(snap.SessionSecret)
+	if snap.SessionHMAC != "" {
+		key, err := hex.DecodeString(snap.SessionHMAC)
 		if err == nil && len(key) >= 32 {
 			sessionSecret = key
 			logger.Printf("DataPlane: session secret synced from control plane")
@@ -1413,7 +1413,7 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 
 	// Session secret (hex-encoded for safe JSON transport).
 	if len(sessionSecret) > 0 {
-		snap.SessionSecret = hex.EncodeToString(sessionSecret)
+		snap.SessionHMAC = hex.EncodeToString(sessionSecret)
 	}
 
 	// Bandwidth / QoS policies.
