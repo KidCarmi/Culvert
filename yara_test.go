@@ -451,11 +451,16 @@ func TestMatchRegexWithTimeout_TimeoutFailsClosed(t *testing.T) {
 }
 
 func TestMatchRegexWithTimeout_InflightCap(t *testing.T) {
-	// Verify the inflight cap prevents unbounded goroutine accumulation.
+	// Let any abandoned goroutines from prior tests drain before we
+	// manipulate the global inflight counter.
+	time.Sleep(10 * time.Millisecond)
+
 	old := yaraInflight.Load()
 	defer yaraInflight.Store(old)
 
-	yaraInflight.Store(int64(maxYARAInflight))
+	// Store a value well above the cap so straggler Add(-1) calls from
+	// previous tests can't drop it below maxYARAInflight.
+	yaraInflight.Store(int64(maxYARAInflight) + 100)
 	re := regexp.MustCompile(`test`)
 	// Should return false immediately because inflight cap is reached.
 	if matchRegexWithTimeout(re, []byte("test data"), time.Second) {
