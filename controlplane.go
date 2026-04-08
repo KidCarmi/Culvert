@@ -98,6 +98,12 @@ type ConfigSnapshot struct {
 
 	// Session secret sync: shared HMAC key so sessions are valid across nodes.
 	SessionSecret string `json:"session_secret,omitempty"`
+
+	// Bandwidth / QoS policies synced from CP to DP.
+	BandwidthPolicies []BandwidthPolicy `json:"bandwidth_policies,omitempty"`
+
+	// Node group definitions synced from CP to DP.
+	NodeGroups []NodeGroup `json:"node_groups,omitempty"`
 }
 
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
@@ -1344,6 +1350,16 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		}
 	}
 
+	// Bandwidth / QoS policies.
+	if snap.BandwidthPolicies != nil && globalBandwidth != nil {
+		globalBandwidth.ReplaceAll(snap.BandwidthPolicies)
+	}
+
+	// Node groups.
+	if snap.NodeGroups != nil && globalNodeGroups != nil {
+		globalNodeGroups.ReplaceAll(snap.NodeGroups)
+	}
+
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
 }
@@ -1398,6 +1414,16 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	// Session secret (hex-encoded for safe JSON transport).
 	if len(sessionSecret) > 0 {
 		snap.SessionSecret = hex.EncodeToString(sessionSecret)
+	}
+
+	// Bandwidth / QoS policies.
+	if globalBandwidth != nil {
+		snap.BandwidthPolicies = globalBandwidth.List()
+	}
+
+	// Node groups.
+	if globalNodeGroups != nil {
+		snap.NodeGroups = globalNodeGroups.List()
 	}
 
 	return snap

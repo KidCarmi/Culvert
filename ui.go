@@ -174,7 +174,8 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)   // GET list / POST create / DELETE remove
 	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)       // GET enrolled nodes
 	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)     // POST revoke a node
-	mux.HandleFunc("/api/cluster/labels", apiClusterLabels)     // POST set node labels
+	mux.HandleFunc("/api/cluster/labels", apiClusterLabels)           // POST set node labels
+	mux.HandleFunc("/api/cluster/node-groups", apiNodeGroups)        // GET list / POST create / DELETE remove
 	mux.HandleFunc("/api/cluster/drain", apiClusterDrain)       // POST toggle node drain mode
 	mux.HandleFunc("/api/cluster/metrics", apiClusterMetrics)   // GET aggregated cluster metrics
 	mux.HandleFunc("/api/cluster/ca", apiClusterCA)                   // GET info / POST import cluster CA
@@ -183,6 +184,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations) // GET revocation sync status
 	mux.HandleFunc("/api/cluster/rotation", apiClusterRotation)       // GET CA rotation progress
 	mux.HandleFunc("/api/cluster/ha", apiClusterHA)                   // GET HA status
+	mux.HandleFunc("/api/cluster/bandwidth", apiBandwidthPolicies)   // GET/POST/DELETE bandwidth QoS policies
 	mux.HandleFunc("/api/cluster/bootstrap/", apiBootstrapRouter)    // GET bootstrap script/compose (token-authed)
 	mux.HandleFunc("/healthz", apiHealthz)                            // GET unauthenticated health check (LB probe)
 

@@ -310,8 +310,27 @@ func (cs *ClusterStore) TokenExists(plaintext string) bool {
 
 // ─── Node Registry ───────────────────────────────────────────────────────────
 
+// autoGeoLabel sets geo:country and geo:country_name labels on a node when
+// GeoIP is enabled and the node has a non-empty IPAddress.  Existing labels
+// are preserved; geo labels are only added, never overwritten by the caller's
+// explicit values.
+func autoGeoLabel(node *EnrolledNode) {
+	if node.IPAddress == "" {
+		return
+	}
+	if code, name := geo.LookupFull(node.IPAddress); code != "" {
+		if node.Labels == nil {
+			node.Labels = make(map[string]string)
+		}
+		node.Labels["geo:country"] = code
+		node.Labels["geo:country_name"] = name
+	}
+}
+
 // RegisterNode adds a newly enrolled node to the registry.
+// If GeoIP is enabled, auto-populates geo:country and geo:country_name labels.
 func (cs *ClusterStore) RegisterNode(node *EnrolledNode) {
+	autoGeoLabel(node)
 	cs.mu.Lock()
 	cs.st.Nodes[node.NodeID] = node
 	cs.mu.Unlock()
@@ -338,6 +357,7 @@ func (cs *ClusterStore) UpdateNodeSeen(nodeID, ipAddr string) {
 		n.Status = "connected"
 		if ipAddr != "" {
 			n.IPAddress = ipAddr
+			autoGeoLabel(n)
 		}
 	}
 	cs.heartbeatCount++

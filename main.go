@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -47,6 +48,9 @@ var appLifecycleCancel context.CancelFunc
 // blFeedSyncer is the process-wide blocklist feed syncer, set in main().
 var blFeedSyncer *BlocklistSyncer
 var clusterDBPathGlobal string // persisted cluster state path, set at startup
+
+// dataDir is the base directory for persisted runtime state (node groups, bandwidth policies, etc.).
+var dataDir = "/data"
 
 func main() { //nolint:gocognit,cyclop // main wires everything; refactoring deferred
 	// ── CLI flags ────────────────────────────────────────────────────────────
@@ -731,6 +735,12 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 
 	// ── Config versioning ────────────────────────────────────────────────
 	initConfigVersioning()
+
+	// ── Node Groups ─────────────────────────────────────────────────────
+	globalNodeGroups = NewNodeGroupStore(filepath.Join(dataDir, "node_groups.json"))
+
+	// ── Bandwidth / QoS ─────────────────────────────────────────────────
+	globalBandwidth = NewBandwidthManager(filepath.Join(dataDir, "bandwidth.json"))
 
 	// ── Web UI ────────────────────────────────────────────────────────────
 	uiCfgGeoIPDB = geoDBVal
