@@ -129,7 +129,7 @@ func pruneConfigVersions() {
 
 	// Remove oldest.
 	for i := 0; i < len(versions)-maxConfigVersions; i++ {
-		os.Remove(filepath.Join(configVersionsDir, versions[i]))
+		_ = os.Remove(filepath.Join(configVersionsDir, versions[i]))
 	}
 }
 
@@ -220,10 +220,28 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b := envelope.Config
+	applyConfigBackup(&envelope.Config)
 
-	// Apply config — use bulk-replace where available, individual remove+add otherwise.
+	actor := sessionAdmin(r)
+	auditEvent(r, "config.rollback", "system",
+		fmt.Sprintf("rolled back to version %d (from %s by %s)",
+			req.Version, envelope.Meta.CreatedAt, sanitizeLog(envelope.Meta.Actor)))
 
+	saveConfigVersion(actor, fmt.Sprintf("rollback to v%d", req.Version))
+
+	if globalConfigStore != nil {
+		globalConfigStore.Update(CurrentConfigSnapshot())
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"status":  "rolled_back",
+		"version": req.Version,
+	})
+}
+
+// applyConfigBackup restores all config stores from a backup snapshot.
+func applyConfigBackup(b *configBackup) {
 	// Blocklist: remove all, then add snapshot entries.
 	for _, h := range bl.List() {
 		bl.Remove(h)
@@ -246,17 +264,14 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	policyStore.ReplaceAll(validRules)
 	policyStore.Save()
-
 	setDefaultPolicyAction(b.DefaultAction)
 
 	// Rewrite rules: replace all.
 	rewriter.SetRules(b.RewriteRules)
 
-	// SSL bypass: replace all.
+	// SSL bypass + content scan: replace all.
 	_ = sslBypass.Set(b.SSLBypass)
 	sslBypass.Save()
-
-	// Content scan patterns: replace all.
 	_ = dpiScanner.Set(b.ContentScanPatterns)
 	dpiScanner.Save()
 
@@ -277,29 +292,74 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		_ = ipf.Add(ip)
 	}
 
-	// Rate limiter.
 	if b.RateLimitRPM > 0 {
 		rl.Configure(b.RateLimitRPM, time.Minute)
 	}
+}
 
-	actor := sessionAdmin(r)
-	auditEvent(r, "config.rollback", "system",
-		fmt.Sprintf("rolled back to version %d (from %s by %s)",
-			req.Version, envelope.Meta.CreatedAt, sanitizeLog(envelope.Meta.Actor)))
+// configChange is a single field-level difference between two config versions.
+type configChange struct {
+	Field string `json:"field"`
+	From  any    `json:"from"`
+	To    any    `json:"to"`
+}
 
-	// Save a new version recording the rollback itself.
-	saveConfigVersion(actor, fmt.Sprintf("rollback to v%d", req.Version))
-
-	// Bump config store version to trigger DP sync.
-	if globalConfigStore != nil {
-		globalConfigStore.Update(CurrentConfigSnapshot())
+// loadConfigVersion reads and parses a stored config version file.
+func loadConfigVersion(ver int) (*configBackup, error) {
+	path := filepath.Join(configVersionsDir, fmt.Sprintf("v%d.json", ver))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
+	var envelope struct {
+		Config configBackup `json:"config"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, err
+	}
+	return &envelope.Config, nil
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-		"status":  "rolled_back",
-		"version": req.Version,
-	})
+// diffConfigs compares two config backups and returns the field-level changes.
+func diffConfigs(a, b *configBackup) []configChange {
+	var changes []configChange
+	cmp := func(field string, from, to any) {
+		changes = append(changes, configChange{field, from, to})
+	}
+	if a.DefaultAction != b.DefaultAction {
+		cmp("default_action", a.DefaultAction, b.DefaultAction)
+	}
+	if a.BlocklistMode != b.BlocklistMode {
+		cmp("blocklist_mode", a.BlocklistMode, b.BlocklistMode)
+	}
+	if a.IPFilterMode != b.IPFilterMode {
+		cmp("ip_filter_mode", a.IPFilterMode, b.IPFilterMode)
+	}
+	if a.RateLimitRPM != b.RateLimitRPM {
+		cmp("rate_limit_rpm", a.RateLimitRPM, b.RateLimitRPM)
+	}
+	if len(a.Blocklist) != len(b.Blocklist) {
+		cmp("blocklist_count", len(a.Blocklist), len(b.Blocklist))
+	}
+	if len(a.PolicyRules) != len(b.PolicyRules) {
+		cmp("policy_rules_count", len(a.PolicyRules), len(b.PolicyRules))
+	}
+	if len(a.RewriteRules) != len(b.RewriteRules) {
+		cmp("rewrite_rules_count", len(a.RewriteRules), len(b.RewriteRules))
+	}
+	if len(a.SSLBypass) != len(b.SSLBypass) {
+		cmp("ssl_bypass_count", len(a.SSLBypass), len(b.SSLBypass))
+	}
+	if len(a.ContentScanPatterns) != len(b.ContentScanPatterns) {
+		cmp("content_scan_count", len(a.ContentScanPatterns), len(b.ContentScanPatterns))
+	}
+	if len(a.FileBlockExtensions) != len(b.FileBlockExtensions) {
+		cmp("file_block_count", len(a.FileBlockExtensions), len(b.FileBlockExtensions))
+	}
+	if len(a.IPList) != len(b.IPList) {
+		cmp("ip_list_count", len(a.IPList), len(b.IPList))
+	}
+	return changes
 }
 
 // apiConfigDiff returns the differences between two config versions.
@@ -313,87 +373,28 @@ func apiConfigDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromStr := r.URL.Query().Get("from")
-	toStr := r.URL.Query().Get("to")
-	from, _ := strconv.Atoi(fromStr)
-	to, _ := strconv.Atoi(toStr)
+	from, _ := strconv.Atoi(r.URL.Query().Get("from"))
+	to, _ := strconv.Atoi(r.URL.Query().Get("to"))
 	if from <= 0 || to <= 0 {
 		http.Error(w, "from and to must be positive integers", http.StatusBadRequest)
 		return
 	}
 
-	loadConfig := func(ver int) (*configBackup, error) {
-		path := filepath.Join(configVersionsDir, fmt.Sprintf("v%d.json", ver))
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		var envelope struct {
-			Config configBackup `json:"config"`
-		}
-		if err := json.Unmarshal(data, &envelope); err != nil {
-			return nil, err
-		}
-		return &envelope.Config, nil
-	}
-
-	fromCfg, err := loadConfig(from)
+	fromCfg, err := loadConfigVersion(from)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("version %d not found", from), http.StatusNotFound)
 		return
 	}
-	toCfg, err := loadConfig(to)
+	toCfg, err := loadConfigVersion(to)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("version %d not found", to), http.StatusNotFound)
 		return
-	}
-
-	// Build diff as list of changes.
-	type Change struct {
-		Field string `json:"field"`
-		From  any    `json:"from"`
-		To    any    `json:"to"`
-	}
-	var changes []Change
-
-	if fromCfg.DefaultAction != toCfg.DefaultAction {
-		changes = append(changes, Change{"default_action", fromCfg.DefaultAction, toCfg.DefaultAction})
-	}
-	if fromCfg.BlocklistMode != toCfg.BlocklistMode {
-		changes = append(changes, Change{"blocklist_mode", fromCfg.BlocklistMode, toCfg.BlocklistMode})
-	}
-	if fromCfg.IPFilterMode != toCfg.IPFilterMode {
-		changes = append(changes, Change{"ip_filter_mode", fromCfg.IPFilterMode, toCfg.IPFilterMode})
-	}
-	if fromCfg.RateLimitRPM != toCfg.RateLimitRPM {
-		changes = append(changes, Change{"rate_limit_rpm", fromCfg.RateLimitRPM, toCfg.RateLimitRPM})
-	}
-	if len(fromCfg.Blocklist) != len(toCfg.Blocklist) {
-		changes = append(changes, Change{"blocklist_count", len(fromCfg.Blocklist), len(toCfg.Blocklist)})
-	}
-	if len(fromCfg.PolicyRules) != len(toCfg.PolicyRules) {
-		changes = append(changes, Change{"policy_rules_count", len(fromCfg.PolicyRules), len(toCfg.PolicyRules)})
-	}
-	if len(fromCfg.RewriteRules) != len(toCfg.RewriteRules) {
-		changes = append(changes, Change{"rewrite_rules_count", len(fromCfg.RewriteRules), len(toCfg.RewriteRules)})
-	}
-	if len(fromCfg.SSLBypass) != len(toCfg.SSLBypass) {
-		changes = append(changes, Change{"ssl_bypass_count", len(fromCfg.SSLBypass), len(toCfg.SSLBypass)})
-	}
-	if len(fromCfg.ContentScanPatterns) != len(toCfg.ContentScanPatterns) {
-		changes = append(changes, Change{"content_scan_count", len(fromCfg.ContentScanPatterns), len(toCfg.ContentScanPatterns)})
-	}
-	if len(fromCfg.FileBlockExtensions) != len(toCfg.FileBlockExtensions) {
-		changes = append(changes, Change{"file_block_count", len(fromCfg.FileBlockExtensions), len(toCfg.FileBlockExtensions)})
-	}
-	if len(fromCfg.IPList) != len(toCfg.IPList) {
-		changes = append(changes, Change{"ip_list_count", len(fromCfg.IPList), len(toCfg.IPList)})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 		"from":    from,
 		"to":      to,
-		"changes": changes,
+		"changes": diffConfigs(fromCfg, toCfg),
 	})
 }

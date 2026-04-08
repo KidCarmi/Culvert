@@ -89,15 +89,15 @@ func TestNodeGroupStore_MatchingGroups(t *testing.T) {
 	dir := t.TempDir()
 	s := NewNodeGroupStore(filepath.Join(dir, "ng.json"))
 
-	s.Add(NodeGroup{
+	_, _ = s.Add(NodeGroup{
 		Name:          "us-dmz",
 		LabelSelector: map[string]string{"geo:country": "US", "tier": "dmz"},
 	})
-	s.Add(NodeGroup{
+	_, _ = s.Add(NodeGroup{
 		Name:          "all-us",
 		LabelSelector: map[string]string{"geo:country": "US"},
 	})
-	s.Add(NodeGroup{
+	_, _ = s.Add(NodeGroup{
 		Name:          "eu-prod",
 		LabelSelector: map[string]string{"geo:country": "DE", "tier": "prod"},
 	})
@@ -126,7 +126,7 @@ func TestNodeGroupStore_NodesInGroup(t *testing.T) {
 	dir := t.TempDir()
 	s := NewNodeGroupStore(filepath.Join(dir, "ng.json"))
 
-	s.Add(NodeGroup{
+	_, _ = s.Add(NodeGroup{
 		Name:          "us-nodes",
 		LabelSelector: map[string]string{"geo:country": "US"},
 	})
@@ -198,7 +198,7 @@ func TestNodeGroupStore_ReplaceAll(t *testing.T) {
 	dir := t.TempDir()
 	s := NewNodeGroupStore(filepath.Join(dir, "ng.json"))
 
-	s.Add(NodeGroup{
+	_, _ = s.Add(NodeGroup{
 		Name:          "old",
 		LabelSelector: map[string]string{"a": "1"},
 	})
@@ -267,7 +267,7 @@ func TestApiNodeGroups_GET(t *testing.T) {
 	}
 
 	// Add a group.
-	globalNodeGroups.Add(NodeGroup{
+	_, _ = globalNodeGroups.Add(NodeGroup{
 		Name:          "test-group",
 		LabelSelector: map[string]string{"env": "test"},
 	})

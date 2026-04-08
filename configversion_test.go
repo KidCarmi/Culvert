@@ -11,7 +11,7 @@ import (
 )
 
 func TestPruneConfigVersions(t *testing.T) {
-	// Just verify it doesn't panic with a non-existent directory.
+	t.Log("verifying pruneConfigVersions does not panic")
 	pruneConfigVersions()
 }
 
@@ -124,8 +124,7 @@ func TestConfigVersionStruct_JSON(t *testing.T) {
 }
 
 func TestInitConfigVersioning_CreatesDir(t *testing.T) {
-	// The real initConfigVersioning uses /data/config_versions which may or may not exist.
-	// Just verify it doesn't panic.
+	t.Log("verifying initConfigVersioning does not panic")
 	initConfigVersioning()
 }
 

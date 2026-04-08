@@ -321,9 +321,7 @@ func TestApiBandwidthPolicies_GET(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/cluster/bandwidth", http.NoBody)
-	r.RemoteAddr = "127.0.0.1:9999"
-	r = adminCtx(r)
+	r := getReq("/api/cluster/bandwidth")
 
 	apiBandwidthPolicies(w, r)
 	assertStatus(t, w, http.StatusOK)
@@ -350,9 +348,7 @@ func TestApiBandwidthPolicies_MethodNotAllowed(t *testing.T) {
 	globalBandwidth = NewBandwidthManager(filepath.Join(t.TempDir(), "bw.json"))
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPut, "/api/cluster/bandwidth", http.NoBody)
-	r.RemoteAddr = "127.0.0.1:9999"
-	r = adminCtx(r)
+	r := jsonReq(http.MethodPut, "/api/cluster/bandwidth", nil)
 
 	apiBandwidthPolicies(w, r)
 	assertStatus(t, w, http.StatusMethodNotAllowed)
@@ -392,9 +388,8 @@ func TestApiBandwidthPolicies_DELETE(t *testing.T) {
 	_, _ = globalBandwidth.Add(BandwidthPolicy{Name: "to-delete"})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/cluster/bandwidth?name=to-delete", http.NoBody)
-	r.RemoteAddr = "127.0.0.1:9999"
-	r = adminCtx(r)
+	r := getReq("/api/cluster/bandwidth?name=to-delete")
+	r.Method = http.MethodDelete
 
 	apiBandwidthPolicies(w, r)
 	assertStatus(t, w, http.StatusOK)
@@ -412,9 +407,7 @@ func TestApiBandwidthPolicies_NilManager(t *testing.T) {
 	globalBandwidth = nil
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/cluster/bandwidth", http.NoBody)
-	r.RemoteAddr = "127.0.0.1:9999"
-	r = adminCtx(r)
+	r := getReq("/api/cluster/bandwidth")
 
 	apiBandwidthPolicies(w, r)
 	assertStatus(t, w, http.StatusServiceUnavailable)

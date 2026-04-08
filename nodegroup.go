@@ -185,66 +185,74 @@ func apiNodeGroups(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		groups := globalNodeGroups.List()
-		// Enrich with node membership counts.
-		var nodes []EnrolledNode
-		if globalClusterStore != nil {
-			nodes = globalClusterStore.ListNodes()
-		}
-		infos := make([]NodeGroupInfo, len(groups))
-		for i, g := range groups {
-			var ids []string
-			for _, n := range nodes {
-				if labelsMatch(g.LabelSelector, n.Labels) {
-					ids = append(ids, n.NodeID)
-				}
-			}
-			if ids == nil {
-				ids = []string{}
-			}
-			sort.Strings(ids)
-			infos[i] = NodeGroupInfo{
-				NodeGroup: g,
-				NodeCount: len(ids),
-				NodeIDs:   ids,
-			}
-		}
-		jsonOK(w, map[string]any{"groups": infos})
-
+		listNodeGroupsAPI(w)
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		var g NodeGroup
-		if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		created, err := globalNodeGroups.Add(g)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		auditEvent(r, "nodegroup.add", sanitizeLog(created.Name), fmt.Sprintf("label_selector=%v", created.LabelSelector))
-		jsonOK(w, map[string]any{"ok": true, "group": created})
-
+		createNodeGroupAPI(w, r)
 	case http.MethodDelete:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		name := r.URL.Query().Get("name")
-		if name == "" {
-			http.Error(w, "name query parameter is required", http.StatusBadRequest)
-			return
-		}
-		if !globalNodeGroups.Delete(name) {
-			http.Error(w, "group not found", http.StatusNotFound)
-			return
-		}
-		auditEvent(r, "nodegroup.delete", sanitizeLog(name), "deleted")
-		jsonOK(w, map[string]any{"ok": true})
-
+		deleteNodeGroupAPI(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func listNodeGroupsAPI(w http.ResponseWriter) {
+	groups := globalNodeGroups.List()
+	var nodes []EnrolledNode
+	if globalClusterStore != nil {
+		nodes = globalClusterStore.ListNodes()
+	}
+	infos := make([]NodeGroupInfo, len(groups))
+	for i, g := range groups {
+		var ids []string
+		for _, n := range nodes {
+			if labelsMatch(g.LabelSelector, n.Labels) {
+				ids = append(ids, n.NodeID)
+			}
+		}
+		if ids == nil {
+			ids = []string{}
+		}
+		sort.Strings(ids)
+		infos[i] = NodeGroupInfo{
+			NodeGroup: g,
+			NodeCount: len(ids),
+			NodeIDs:   ids,
+		}
+	}
+	jsonOK(w, map[string]any{"groups": infos})
+}
+
+func createNodeGroupAPI(w http.ResponseWriter, r *http.Request) {
+	var g NodeGroup
+	if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	created, err := globalNodeGroups.Add(g)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	auditEvent(r, "nodegroup.add", sanitizeLog(created.Name), fmt.Sprintf("label_selector=%v", created.LabelSelector))
+	jsonOK(w, map[string]any{"ok": true, "group": created})
+}
+
+func deleteNodeGroupAPI(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "name query parameter is required", http.StatusBadRequest)
+		return
+	}
+	if !globalNodeGroups.Delete(name) {
+		http.Error(w, "group not found", http.StatusNotFound)
+		return
+	}
+	auditEvent(r, "nodegroup.delete", sanitizeLog(name), "deleted")
+	jsonOK(w, map[string]any{"ok": true})
 }
