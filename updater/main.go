@@ -233,7 +233,7 @@ func handleCheck(cli *client.Client) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"current":          currentTag,
 			"latest":           latest,
-			"update_available": latest != "" && latest != currentTag && semverNewer(latest, currentTag),
+			"update_available": latest != "" && cleanSemver(latest) != cleanSemver(currentTag) && semverNewer(latest, currentTag),
 			"tags":             tags,
 		})
 	}
@@ -822,7 +822,15 @@ func extractAuthParam(header, param string) string {
 }
 
 // semver regex: v1.2.3 or 1.2.3
-var semverRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)$`)
+var semverRe = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)`)
+
+// cleanSemver strips pre-release suffixes (e.g. "-dirty", "-rc1") for comparison.
+func cleanSemver(s string) string {
+	if idx := strings.IndexByte(s, '-'); idx >= 0 {
+		return s[:idx]
+	}
+	return s
+}
 
 func latestSemver(tags []string) string {
 	var semverTags []string
@@ -841,9 +849,9 @@ func latestSemver(tags []string) string {
 }
 
 func semverNewer(a, b string) bool {
-	aParts := semverRe.FindStringSubmatch(a)
-	bParts := semverRe.FindStringSubmatch(b)
-	if len(aParts) != 4 || len(bParts) != 4 {
+	aParts := semverRe.FindStringSubmatch(cleanSemver(a))
+	bParts := semverRe.FindStringSubmatch(cleanSemver(b))
+	if len(aParts) < 4 || len(bParts) < 4 {
 		return false
 	}
 	for i := 1; i <= 3; i++ {
