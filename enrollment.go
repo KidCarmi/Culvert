@@ -577,11 +577,12 @@ func (cs *ClusterStore) checkHeartbeats() {
 	if cs.gcOldRevocations(now) {
 		changed = true
 	}
-	cs.mu.Unlock()
-
+	// B16: Persist under held lock to prevent concurrent mutations from
+	// overwriting heartbeat status transitions between unlock and save.
 	if changed {
-		_ = cs.Save() //nolint:errcheck // best-effort periodic persistence
+		_ = cs.saveLocked() //nolint:errcheck // best-effort periodic persistence
 	}
+	cs.mu.Unlock()
 }
 
 // checkNodeLiveness marks unreachable nodes as disconnected. Caller holds mu.

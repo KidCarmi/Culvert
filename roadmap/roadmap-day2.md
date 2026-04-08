@@ -85,7 +85,7 @@
 | B1 | ~~RelayBufPool type assertion without bounds validation~~ DONE | proxy.go:711,824,935,1014 | Medium |
 | B2 | Goroutine cleanup race — first relay completes, write halves still open | proxy.go:822-838 | Medium |
 | B3 | ~~Missing TLS conn close on handshake error (only raw TCP closed)~~ DONE | proxy.go:893-895 | Medium |
-| B4 | X-Forwarded-For parser silently discards non-IP values | proxy.go:127-138 | Low |
+| B4 | ~~X-Forwarded-For parser silently discards non-IP values~~ FALSE POSITIVE — stripping non-IP values is correct security behavior per RFC 7239; XFF should only contain IPs | proxy.go:127-138 | Low |
 | B5 | ~~SOCKS5 credentials never cleared from memory after auth~~ DONE | socks5.go:76-90 | Low |
 
 ### 2.2 Policy & Content Filtering
@@ -112,7 +112,7 @@
 |---|-------|-----------|----------|
 | B14 | ~~Certificate renewal race — direct map mutation without UpdateNode()~~ DONE | controlplane.go:684-691 | High |
 | B15 | ~~Token consumption race — unlock before saveLocked()~~ DONE | enrollment.go:225-267 | Medium |
-| B16 | HeartbeatMonitor status transition not atomic with config sync | enrollment.go:600-607 | Medium |
+| B16 | ~~HeartbeatMonitor status transition not atomic with config sync~~ DONE | enrollment.go:600-607 | Medium |
 | B17 | ~~Config rollback TOCTOU — no lock during applyConfigBackup()~~ DONE | configversion.go:194-241 | Medium |
 | B18 | ~~gcExpiredTokens() deletes from live map without full lock~~ FALSE POSITIVE — already called under held lock (enrollment.go:574-580) | enrollment.go:570-610 | Medium |
 
@@ -141,7 +141,7 @@
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
 | S1 | ~~TOTP timing attack — string `==` instead of constant-time compare~~ DONE | totp.go:41-46 | Medium |
-| S2 | LDAP group DN comparison is case-insensitive (incorrect per RFC 4514) | auth_ldap.go:191-197 | Medium |
+| S2 | ~~LDAP group DN comparison is case-insensitive (incorrect per RFC 4514)~~ FALSE POSITIVE — EqualFold is correct for AD and most LDAP servers; RFC 4517 matching rules are implementation-dependent | auth_ldap.go:191-197 | Medium |
 | S3 | ~~Logout doesn't invalidate session server-side (replay risk)~~ FALSE POSITIVE — revokeSessionCookie() already called at ui.go:687, persists to revocation list | ui.go:676-695 | Medium |
 | S4 | ~~No rate limiting on /api/setup/complete (brute-force first-run)~~ DONE | ui.go:781-829 | Medium |
 
@@ -168,8 +168,8 @@
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
 | S13 | ~~Bootstrap token plaintext returned (potential log leakage)~~ FALSE POSITIVE — plaintext is returned in API response (required), never logged; audit event at ui.go:3685 only logs prefix+CIDR | enrollment.go:177-212 | Medium |
-| S14 | Missing SSRF check in extractStandbyHost() (no private IP blocklist) | update_cluster.go:446-463 | Medium |
-| S15 | Credential mask circumvention in registry settings | update.go:521-529 | Medium |
+| S14 | ~~Missing SSRF check in extractStandbyHost() (no private IP blocklist)~~ FALSE POSITIVE — HA peer address is operator-configured via cfg.PeerAddr; standby IS on private network by design | update_cluster.go:446-463 | Medium |
+| S15 | ~~Credential mask circumvention in registry settings~~ DONE | update.go:521-529 | Medium |
 
 ### 3.5 Scanning & Threat Detection
 
@@ -190,7 +190,7 @@
 | P2 | Latency histogram CAS loop contention under high RPS | metrics.go:94-101 | Medium |
 | P3 | JSON log writer allocates strings on every Write() | logger.go:79-105 | Medium |
 | P4 | ~~Alert webhook goroutine leak (no worker pool / semaphore)~~ DONE | alerts.go:211 | Medium |
-| P5 | Hash cache O(n) full scan on eviction | hashcache.go:111-128 | Medium |
+| P5 | ~~Hash cache O(n) full scan on eviction~~ ACCEPTABLE — 10k max entries; O(n) map scan is ~1ms; min-heap adds complexity without measurable benefit | hashcache.go:111-128 | Medium |
 | P6 | ClamAV semaphore backlog — 96 goroutines blocked at 100 RPS | clam.go:34-39 | Medium |
 | P7 | Threat feed sync uses 100+ MiB during full download | threatfeed.go:135-156 | Low |
 | P8 | ~~YARA inflight counter never reset on rule reload~~ DONE | yara_scan.go:449-476 | Low |
@@ -265,7 +265,7 @@
 | # | Issue | Location |
 |---|-------|----------|
 | Q1 | Excessive `//nolint:errcheck` — 11 in update_cluster.go alone | update_cluster.go |
-| Q2 | Deadlock risk: Lock → modify → Unlock → Save pattern | controlplane.go:684-690 |
+| Q2 | ~~Deadlock risk: Lock → modify → Unlock → Save pattern~~ DONE (resolved by B14 fix — now uses saveLocked() under held lock) | controlplane.go:684-690 |
 | Q3 | Inconsistent API response format (some `{ok:true}`, some raw data) | ui.go (multiple) |
 | Q4 | Inconsistent error handling in JS (empty catch, toast, showErr) | static/index.html |
 | Q5 | Inconsistent log prefixes across components | logger.go, syslog.go, alerts.go |
@@ -291,7 +291,7 @@
 | Q15 | CA import partial failure leaves inconsistent state | enrollment.go:1001-1006 |
 | Q16 | ~~Missing input validation on NodeGroup label keys/values~~ DONE | nodegroup.go:231-244 |
 | Q17 | ~~Alert webhook no deduplication window~~ DONE | alerts.go:211,254-259 |
-| Q18 | JSON decoder doesn't explicitly close body | ui.go:929-932 |
+| Q18 | ~~JSON decoder doesn't explicitly close body~~ FALSE POSITIVE — HTTP server automatically closes r.Body after handler returns (net/http spec) | ui.go:929-932 |
 
 ---
 

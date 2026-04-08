@@ -520,8 +520,11 @@ func apiRegistrySettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		regVal := incoming["credential"]
-		// If masked placeholder sent back, preserve the existing stored value.
-		if regVal == "••••••••" {
+		// S15: If masked placeholder sent back, preserve the existing stored value.
+		// Check for any string consisting only of bullet characters to prevent
+		// circumvention via different-length mask strings.
+		isMasked := regVal != "" && strings.Trim(regVal, "•") == ""
+		if isMasked {
 			existing, err := os.ReadFile(registrySettingsFile)
 			if err == nil {
 				var old map[string]string
