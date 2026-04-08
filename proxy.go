@@ -18,10 +18,23 @@ import (
 	"time"
 )
 
+// relayBufSize is the size of each pooled relay buffer.
+const relayBufSize = 128 * 1024
+
 // relayBufPool provides reusable 128 KB buffers for tunnel relays, replacing
 // io.Copy's default 32 KB allocation and reducing GC pressure under load.
 var relayBufPool = sync.Pool{
-	New: func() any { b := make([]byte, 128*1024); return &b },
+	New: func() any { b := make([]byte, relayBufSize); return &b },
+}
+
+// getRelayBuf retrieves a relay buffer from the pool with a type-safe assertion.
+func getRelayBuf() *[]byte {
+	bp, ok := relayBufPool.Get().(*[]byte)
+	if !ok || bp == nil || len(*bp) < relayBufSize {
+		b := make([]byte, relayBufSize)
+		bp = &b
+	}
+	return bp
 }
 
 // defaultPolicyAction controls what happens when no PBAC rule matches a request.
@@ -708,7 +721,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Bridge: drain any buffered bytes from the target first.
 	done := make(chan struct{}, 2)
 	relay := func(dst net.Conn, src io.Reader) {
-		bp := relayBufPool.Get().(*[]byte)
+		bp := getRelayBuf()
 		io.CopyBuffer(dst, src, *bp) //nolint:errcheck
 		relayBufPool.Put(bp)
 		done <- struct{}{}
@@ -820,7 +833,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 
 	done := make(chan struct{}, 2)
 	relay := func(dst, src net.Conn) {
-		bp := relayBufPool.Get().(*[]byte)
+		bp := getRelayBuf()
 		io.CopyBuffer(dst, src, *bp) //nolint:errcheck
 		relayBufPool.Put(bp)
 		done <- struct{}{}
@@ -931,7 +944,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		// Raw relay: splice the peeked reader (client) ↔ upstream (already TLS-connected)
 		done := make(chan struct{}, 2)
 		relay := func(dst io.Writer, src io.Reader) {
-			bp := relayBufPool.Get().(*[]byte)
+			bp := getRelayBuf()
 			io.CopyBuffer(dst, src, *bp) //nolint:errcheck
 			relayBufPool.Put(bp)
 			done <- struct{}{}
@@ -1010,7 +1023,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			resp.Body.Close()
 			done := make(chan struct{}, 2)
 			rawRelay := func(dst, src net.Conn) {
-				bp := relayBufPool.Get().(*[]byte)
+				bp := getRelayBuf()
 				io.CopyBuffer(dst, src, *bp) //nolint:errcheck
 				relayBufPool.Put(bp)
 				done <- struct{}{}

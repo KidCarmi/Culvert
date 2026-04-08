@@ -681,16 +681,17 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 	}
 
 	// Update the enrolled node's cert serial and expiry.
+	// Hold lock through saveLocked() to prevent race with concurrent mutations (B14).
 	globalClusterStore.mu.Lock()
 	if node, ok := globalClusterStore.st.Nodes[req.NodeID]; ok {
 		node.CertSerial = serial
 		node.CertExpiry = expiry
 		globalClusterStore.st.Nodes[req.NodeID] = node
 	}
-	globalClusterStore.mu.Unlock()
-	if err := globalClusterStore.Save(); err != nil {
+	if err := globalClusterStore.saveLocked(); err != nil {
 		logger.Printf("RenewCert: failed to persist updated node: %v", err)
 	}
+	globalClusterStore.mu.Unlock()
 
 	logger.Printf("RenewCert: renewed cert for node %q (serial=%s, expires=%s)", req.NodeID, serial, expiry.Format("2006-01-02"))
 

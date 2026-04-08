@@ -82,7 +82,7 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| B1 | RelayBufPool type assertion without bounds validation | proxy.go:711,824,935,1014 | Medium |
+| B1 | ~~RelayBufPool type assertion without bounds validation~~ DONE | proxy.go:711,824,935,1014 | Medium |
 | B2 | Goroutine cleanup race — first relay completes, write halves still open | proxy.go:822-838 | Medium |
 | B3 | ~~Missing TLS conn close on handshake error (only raw TCP closed)~~ DONE | proxy.go:893-895 | Medium |
 | B4 | X-Forwarded-For parser silently discards non-IP values | proxy.go:127-138 | Low |
@@ -110,17 +110,17 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| B14 | Certificate renewal race — direct map mutation without UpdateNode() | controlplane.go:684-691 | High |
+| B14 | ~~Certificate renewal race — direct map mutation without UpdateNode()~~ DONE | controlplane.go:684-691 | High |
 | B15 | ~~Token consumption race — unlock before saveLocked()~~ DONE | enrollment.go:225-267 | Medium |
 | B16 | HeartbeatMonitor status transition not atomic with config sync | enrollment.go:600-607 | Medium |
 | B17 | Config rollback TOCTOU — no lock during applyConfigBackup() | configversion.go:194-241 | Medium |
-| B18 | gcExpiredTokens() deletes from live map without full lock | enrollment.go:570-610 | Medium |
+| B18 | ~~gcExpiredTokens() deletes from live map without full lock~~ FALSE POSITIVE — already called under held lock (enrollment.go:574-580) | enrollment.go:570-610 | Medium |
 
 ### 2.5 Observability & Ops
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| B19 | Log rotation TOCTOU — size check races with write | logger.go:43-55 | Medium |
+| B19 | ~~Log rotation TOCTOU — size check races with write~~ FALSE POSITIVE — Write() is entirely under r.mu.Lock (logger.go:40-41) | logger.go:43-55 | Medium |
 | B20 | ~~Syslog reconnect has no backoff (CPU waste on failure)~~ DONE | syslog.go:104-106 | Medium |
 | B21 | SSE hub drops messages for slow clients silently | events.go:33-42 | Low |
 
