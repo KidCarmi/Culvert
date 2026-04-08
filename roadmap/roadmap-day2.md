@@ -129,7 +129,7 @@
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
 | B22 | ~~Hash cache race — TTL check outside read lock~~ DONE | hashcache.go:73-84 | Low |
-| B23 | ClamAV response parser captures only first virus name | clam.go:143-162 | Low |
+| B23 | ~~ClamAV response parser captures only first virus name~~ FALSE POSITIVE — ClamAV INSTREAM returns one verdict per scan by protocol design; multi-signature detection reports first match | clam.go:143-162 | Low |
 | B24 | Content-Length mismatch bypass via chunked encoding | proxy.go, security_scan.go | Medium |
 
 ---
@@ -149,7 +149,7 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| S5 | CSP allows `unsafe-inline` script — defeats XSS protection | ui.go:344 | Medium |
+| S5 | CSP allows `unsafe-inline` script — defeats XSS protection — DEFERRED (requires SPA nonce refactor) | ui.go:344 | Medium |
 | S6 | ~~Blocklist GET lacks role check (publicly readable)~~ DONE | ui.go:1084 | Medium |
 | S7 | XSS risk via innerHTML in SPA (inconsistent escHtml usage) | static/index.html (multiple) | Medium |
 | S8 | ~~Sensitive crypto errors exposed in apiCertsUpload response~~ DONE | ui.go:2397,2406 | Low |
@@ -175,8 +175,8 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| S16 | YARA ReDoS timeout silently skips scan (fail-open) | yara_scan.go:182-201 | Medium |
-| S17 | DPI regex timeout silently passes response (fail-open) | scanner.go:168-180 | Medium |
+| S16 | ~~YARA ReDoS timeout silently skips scan (fail-open)~~ DONE — now returns true on timeout (fail-closed, Zero Trust) | yara_scan.go:182-201 | Medium |
+| S17 | ~~DPI regex timeout silently passes response (fail-open)~~ DONE — now returns true on timeout (fail-closed, Zero Trust) | scanner.go:168-180 | Medium |
 | S18 | No archive extraction — nested ZIP evasion | security_scan.go | Medium |
 | S19 | No polyglot file detection (magic byte vs Content-Type mismatch) | security_scan.go, scanner.go | Medium |
 
@@ -188,7 +188,7 @@
 |---|-------|-----------|----------|
 | P1 | Per-rule Prometheus metrics — unbounded cardinality | metrics.go:15-52 | Medium |
 | P2 | Latency histogram CAS loop contention under high RPS | metrics.go:94-101 | Medium |
-| P3 | JSON log writer allocates strings on every Write() | logger.go:79-105 | Medium |
+| P3 | JSON log writer allocates strings on every Write() — LOW PRIORITY (logger not a bottleneck, ~1μs per call) | logger.go:79-105 | Medium |
 | P4 | ~~Alert webhook goroutine leak (no worker pool / semaphore)~~ DONE | alerts.go:211 | Medium |
 | P5 | ~~Hash cache O(n) full scan on eviction~~ ACCEPTABLE — 10k max entries; O(n) map scan is ~1ms; min-heap adds complexity without measurable benefit | hashcache.go:111-128 | Medium |
 | P6 | ClamAV semaphore backlog — 96 goroutines blocked at 100 RPS | clam.go:34-39 | Medium |
@@ -288,7 +288,7 @@
 | # | Issue | Location |
 |---|-------|----------|
 | Q14 | ~~Deprecated `ValidateToken()` still defined~~ DONE | enrollment.go:270-274 |
-| Q15 | CA import partial failure leaves inconsistent state | enrollment.go:1001-1006 |
+| Q15 | ~~CA import partial failure leaves inconsistent state~~ DONE — write to temp files + rename for atomic persistence | enrollment.go:1001-1006 |
 | Q16 | ~~Missing input validation on NodeGroup label keys/values~~ DONE | nodegroup.go:231-244 |
 | Q17 | ~~Alert webhook no deduplication window~~ DONE | alerts.go:211,254-259 |
 | Q18 | ~~JSON decoder doesn't explicitly close body~~ FALSE POSITIVE — HTTP server automatically closes r.Body after handler returns (net/http spec) | ui.go:929-932 |

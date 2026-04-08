@@ -200,7 +200,7 @@ func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration
 	case <-time.After(timeout):
 		logger.Printf("WARN YARA regex timeout after %s on pattern %q (inflight: %d)",
 			timeout, sanitizeLog(re.String()), yaraInflight.Load())
-		return false
+		return true // S16: fail-closed — treat timeout as suspicious match (Zero Trust)
 	}
 }
 
