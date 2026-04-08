@@ -36,6 +36,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -86,6 +87,23 @@ type ConfigSnapshot struct {
 	// DPs update their connection list on every config sync — no manual
 	// --dp-cp-addr configuration needed.
 	CPAddresses []string `json:"cp_addresses,omitempty"`
+
+	// PAC distribution: sync PAC exclusions from CP to DPs.
+	PACExclusions []string `json:"pac_exclusions,omitempty"`
+
+	// Threat feed sync: include feed data so DPs don't fetch independently.
+	ThreatFeedURLs    map[string]int64 `json:"threat_feed_urls,omitempty"`
+	ThreatFeedDomains map[string]int64 `json:"threat_feed_domains,omitempty"`
+	ThreatDomainAllowlist []string     `json:"threat_domain_allowlist,omitempty"`
+
+	// Session secret sync: shared HMAC key so sessions are valid across nodes.
+	SessionHMAC string `json:"session_hmac,omitempty"`
+
+	// Bandwidth / QoS policies synced from CP to DP.
+	BandwidthPolicies []BandwidthPolicy `json:"bandwidth_policies,omitempty"`
+
+	// Node group definitions synced from CP to DP.
+	NodeGroups []NodeGroup `json:"node_groups,omitempty"`
 }
 
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
@@ -1302,6 +1320,46 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		updateDPAddresses(snap.CPAddresses)
 	}
 
+	// PAC exclusions.
+	if snap.PACExclusions != nil {
+		cur := pacStore.Get()
+		cur.Exclusions = snap.PACExclusions
+		if err := pacStore.Set(cur); err != nil {
+			logger.Printf("DataPlane: PAC exclusions: %v", err)
+		}
+	}
+
+	// Threat feed data (only if populated — can be large).
+	if len(snap.ThreatFeedURLs) > 0 || len(snap.ThreatFeedDomains) > 0 {
+		globalThreatFeed.ImportFeedData(snap.ThreatFeedURLs, snap.ThreatFeedDomains)
+		logger.Printf("DataPlane: imported threat feed (%d URLs, %d domains)",
+			len(snap.ThreatFeedURLs), len(snap.ThreatFeedDomains))
+	}
+	if snap.ThreatDomainAllowlist != nil {
+		globalThreatFeed.SetDomainAllowlist(snap.ThreatDomainAllowlist)
+	}
+
+	// Session secret.
+	if snap.SessionHMAC != "" {
+		key, err := hex.DecodeString(snap.SessionHMAC)
+		if err == nil && len(key) >= 32 {
+			sessionSecret = key
+			logger.Printf("DataPlane: session secret synced from control plane")
+		} else if err != nil {
+			logger.Printf("DataPlane: invalid session secret hex: %v", err)
+		}
+	}
+
+	// Bandwidth / QoS policies.
+	if snap.BandwidthPolicies != nil && globalBandwidth != nil {
+		globalBandwidth.ReplaceAll(snap.BandwidthPolicies)
+	}
+
+	// Node groups.
+	if snap.NodeGroups != nil && globalNodeGroups != nil {
+		globalNodeGroups.ReplaceAll(snap.NodeGroups)
+	}
+
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
 }
@@ -1341,6 +1399,32 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 
 	// HA: include all CP addresses so DPs auto-discover failover targets.
 	snap.CPAddresses = buildCPAddressList()
+
+	// PAC exclusions.
+	pacCfg := pacStore.Get()
+	snap.PACExclusions = pacCfg.Exclusions
+
+	// Threat feed data.
+	if globalThreatFeed.Enabled() {
+		snap.ThreatFeedURLs = globalThreatFeed.ExportURLs()
+		snap.ThreatFeedDomains = globalThreatFeed.ExportDomains()
+		snap.ThreatDomainAllowlist = globalThreatFeed.DomainAllowlist()
+	}
+
+	// Session secret (hex-encoded for safe JSON transport).
+	if len(sessionSecret) > 0 {
+		snap.SessionHMAC = hex.EncodeToString(sessionSecret)
+	}
+
+	// Bandwidth / QoS policies.
+	if globalBandwidth != nil {
+		snap.BandwidthPolicies = globalBandwidth.List()
+	}
+
+	// Node groups.
+	if globalNodeGroups != nil {
+		snap.NodeGroups = globalNodeGroups.List()
+	}
 
 	return snap
 }

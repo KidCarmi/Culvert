@@ -44,14 +44,25 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Run gosec
-        uses: securego/gosec@223e19b8856e00f02cc67804499a83f77e208f3c # v2.25.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          # Keep exclusions in sync with .golangci.yml — documented reasons in ci.yml.
-          args: >-
-            -exclude=G104,G302,G304,G401,G402,G704
-            -fmt=sarif
-            -out=gosec-results.sarif
+          go-version: "1.25"
+
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+      - name: Run gosec (SARIF for upload)
+        # Generate SARIF for GitHub Security tab; continue even if findings exist.
+        run: |
+          gosec -exclude=G104,G302,G304,G401,G402,G704 \
+            -fmt=sarif -out=gosec-results.sarif \
+            ./... || true
+
+      - name: Run gosec (text for log visibility)
+        # Re-run with text output so findings are visible in CI logs.
+        run: |
+          gosec -exclude=G104,G302,G304,G401,G402,G704 \
+            -fmt=text \
             ./...
 
       - name: Upload SARIF to GitHub Security tab

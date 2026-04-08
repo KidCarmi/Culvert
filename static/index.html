@@ -1446,6 +1446,20 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Config Versioning -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">Config Versions</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Every configuration change creates a numbered snapshot. You can compare versions and roll back to any previous state.
+          </p>
+          <div id="config-versions-list" style="margin-bottom:12px">
+            <em style="color:var(--muted);font-size:.82rem">Loading versions...</em>
+          </div>
+          <div id="config-diff-result" style="display:none;margin-top:12px"></div>
+        </div>
+      </div>
+
       <!-- Session Timeout -->
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">🕐 Session Timeout</span></div>
@@ -2482,6 +2496,101 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Node Groups -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-groups-panel">
+        <div class="panel-header">
+          <span class="panel-title">Node Groups</span>
+          <button class="btn sm" onclick="showAddGroupModal()">+ Add Group</button>
+        </div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Group nodes by labels (e.g. region, tier). Groups enable geo-aware policies and bandwidth limits.
+            Nodes are auto-tagged with <code>geo:country</code> when GeoIP is enabled.
+          </p>
+          <div id="node-groups-list">
+            <em style="color:var(--muted);font-size:.82rem">Loading groups...</em>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add Group Modal -->
+      <div id="add-group-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border-radius:10px;padding:28px;max-width:480px;width:90%">
+          <h3 style="margin:0 0 16px">Create Node Group</h3>
+          <div style="margin-bottom:12px">
+            <label style="font-size:.8rem;color:var(--muted)">Group Name</label>
+            <input class="input" id="ng-name" placeholder="e.g. us-east-nodes" style="width:100%">
+          </div>
+          <div style="margin-bottom:12px">
+            <label style="font-size:.8rem;color:var(--muted)">Description</label>
+            <input class="input" id="ng-desc" placeholder="e.g. US East Coast data plane nodes" style="width:100%">
+          </div>
+          <div style="margin-bottom:12px">
+            <label style="font-size:.8rem;color:var(--muted)">Label Selector (key=value, one per line)</label>
+            <textarea class="input" id="ng-labels" rows="3" placeholder="geo:country=US&#10;tier=production" style="width:100%;font-family:monospace;font-size:.82rem"></textarea>
+          </div>
+          <div style="margin-bottom:12px">
+            <label style="font-size:.8rem;color:var(--muted)">Priority (higher = preferred for failover)</label>
+            <input class="input" id="ng-priority" type="number" value="0" min="0" style="width:100px">
+          </div>
+          <div style="display:flex;gap:10px;justify-content:flex-end">
+            <button class="btn ghost" onclick="hideAddGroupModal()">Cancel</button>
+            <button class="btn" onclick="createNodeGroup()">Create</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bandwidth Policies -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-bandwidth-panel">
+        <div class="panel-header">
+          <span class="panel-title">Bandwidth / QoS</span>
+          <button class="btn sm" onclick="showAddBandwidthModal()">+ Add Policy</button>
+        </div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+            Set per-group bandwidth limits using token bucket rate limiting. Higher priority policies take precedence.
+          </p>
+          <div id="bandwidth-policies-list">
+            <em style="color:var(--muted);font-size:.82rem">Loading policies...</em>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add Bandwidth Modal -->
+      <div id="add-bw-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border-radius:10px;padding:28px;max-width:480px;width:90%">
+          <h3 style="margin:0 0 16px">Create Bandwidth Policy</h3>
+          <div style="margin-bottom:12px">
+            <label style="font-size:.8rem;color:var(--muted)">Policy Name</label>
+            <input class="input" id="bw-name" placeholder="e.g. branch-office-cap" style="width:100%">
+          </div>
+          <div style="margin-bottom:12px">
+            <label style="font-size:.8rem;color:var(--muted)">Label Selector (key=value, one per line)</label>
+            <textarea class="input" id="bw-labels" rows="3" placeholder="tier=branch&#10;geo:country=JP" style="width:100%;font-family:monospace;font-size:.82rem"></textarea>
+          </div>
+          <div style="margin-bottom:12px">
+            <label style="font-size:.8rem;color:var(--muted)">Max Bandwidth</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input class="input" id="bw-value" type="number" min="0" value="10" style="width:100px">
+              <select class="input" id="bw-unit" style="width:100px">
+                <option value="1048576">MB/s</option>
+                <option value="1073741824">GB/s</option>
+                <option value="1024">KB/s</option>
+              </select>
+              <span style="font-size:.8rem;color:var(--muted)">(0 = unlimited)</span>
+            </div>
+          </div>
+          <div style="margin-bottom:12px">
+            <label style="font-size:.8rem;color:var(--muted)">Priority (higher = takes precedence)</label>
+            <input class="input" id="bw-priority" type="number" value="0" min="0" style="width:100px">
+          </div>
+          <div style="display:flex;gap:10px;justify-content:flex-end">
+            <button class="btn ghost" onclick="hideAddBandwidthModal()">Cancel</button>
+            <button class="btn" onclick="createBandwidthPolicy()">Create</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Node Health Dashboard -->
       <div class="panel" style="margin-top:16px;display:none" id="cluster-health-panel">
         <div class="panel-header"><span class="panel-title">Node Health Dashboard</span></div>
@@ -3338,6 +3447,67 @@ async function importConfig(input) {
     statusEl.textContent = '✗ ' + err.message;
   }
   input.value = '';
+}
+
+// ── Config Versioning ────────────────────────────────────────────────────
+async function loadConfigVersions() {
+  const el = document.getElementById('config-versions-list');
+  try {
+    const versions = await api('/api/config/versions');
+    if (!versions || versions.length === 0) {
+      el.innerHTML = '<em style="color:var(--muted);font-size:.82rem">No config versions yet. Versions are created automatically when you change settings.</em>';
+      return;
+    }
+    let html = '<table class="table" style="font-size:.82rem"><thead><tr><th>Ver</th><th>Date</th><th>Action</th><th>Actor</th><th></th></tr></thead><tbody>';
+    versions.forEach((v, i) => {
+      const date = new Date(v.created_at).toLocaleString();
+      const prev = i < versions.length - 1 ? versions[i + 1].version : null;
+      const diffBtn = prev ? `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px" onclick="diffConfigVersions(${prev},${v.version})">Diff</button>` : '';
+      const rollbackBtn = `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px;color:var(--yellow)" onclick="rollbackConfigVersion(${v.version})">Rollback</button>`;
+      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${esc(v.action)}</td><td>${esc(v.actor)}</td><td style="text-align:right">${diffBtn} ${rollbackBtn}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch (err) {
+    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed to load versions: ${esc(err.message)}</em>`;
+  }
+}
+
+async function diffConfigVersions(from, to) {
+  const el = document.getElementById('config-diff-result');
+  el.style.display = 'block';
+  el.innerHTML = '<em style="color:var(--muted)">Loading diff...</em>';
+  try {
+    const data = await api(`/api/config/diff?from=${from}&to=${to}`);
+    if (!data.changes || data.changes.length === 0) {
+      el.innerHTML = `<div style="padding:10px;background:var(--surface);border-radius:6px;font-size:.82rem">No differences between v${from} and v${to}.</div>`;
+      return;
+    }
+    let html = `<div style="padding:10px;background:var(--surface);border-radius:6px"><strong style="font-size:.85rem">Diff: v${from} → v${to}</strong><table class="table" style="font-size:.8rem;margin-top:8px"><thead><tr><th>Field</th><th>From</th><th>To</th></tr></thead><tbody>`;
+    data.changes.forEach(c => {
+      html += `<tr><td>${esc(c.field)}</td><td style="color:var(--red)">${esc(String(c.from))}</td><td style="color:var(--green)">${esc(String(c.to))}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    el.innerHTML = html;
+  } catch (err) {
+    el.innerHTML = `<em style="color:var(--red)">Diff failed: ${esc(err.message)}</em>`;
+  }
+}
+
+async function rollbackConfigVersion(version) {
+  if (!confirm(`Roll back to config version v${version}?\n\nThis will replace ALL current settings with the snapshot from v${version}. A new version will be created to record this rollback.`)) return;
+  try {
+    const data = await api('/api/config/versions', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({version})
+    });
+    alert(`Rolled back to v${version} successfully.`);
+    loadConfigVersions();
+    fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
+  } catch (err) {
+    alert('Rollback failed: ' + err.message);
+  }
 }
 
 // ── Schedule helpers ─────────────────────────────────────────────────────
@@ -4349,6 +4519,8 @@ async function loadSettings() {
   loadLoggerStatus();
   loadMetricsConfig();
   loadOTLPConfig();
+  // Config versioning
+  loadConfigVersions();
 }
 
 // ── Session Timeout ───────────────────────────────────────────────────────
@@ -6476,6 +6648,8 @@ async function loadCluster() {
     loadHA(isCP);
     loadClusterMetrics(isCP);
     loadClusterRateLimits(showCluster);
+    loadNodeGroups(showCluster);
+    loadBandwidthPolicies(showCluster);
     loadClusterHealth(isCP);
     loadClusterRevocations(showCluster);
     loadClusterAudit(isCP);
@@ -6608,6 +6782,153 @@ async function loadClusterRateLimits(show) {
     document.getElementById('crl-hot').textContent = r.hot_ips || 0;
     document.getElementById('crl-rpm').textContent = r.rate_limit_rpm || 'Off';
   } catch(e) { panel.style.display = 'none'; }
+}
+
+// ── Node Groups ──────────────────────────────────────────────────────────
+async function loadNodeGroups(show) {
+  const panel = document.getElementById('cluster-groups-panel');
+  if (!show) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  const el = document.getElementById('node-groups-list');
+  try {
+    const groups = await api('/api/cluster/node-groups');
+    if (!groups || groups.length === 0) {
+      el.innerHTML = '<em style="color:var(--muted);font-size:.82rem">No node groups defined. Create groups to organize nodes by region, tier, or function.</em>';
+      return;
+    }
+    let html = '<table class="table" style="font-size:.82rem"><thead><tr><th>Name</th><th>Labels</th><th>Priority</th><th>Nodes</th><th></th></tr></thead><tbody>';
+    groups.forEach(g => {
+      const labels = Object.entries(g.label_selector || {}).map(([k,v]) => `${esc(k)}=${esc(v)}`).join(', ');
+      const nodeIds = (g.node_ids || []).map(id => esc(id)).join(', ') || '—';
+      html += `<tr>
+        <td><strong>${esc(g.name)}</strong>${g.description ? '<br><span style="color:var(--muted);font-size:.75rem">' + esc(g.description) + '</span>' : ''}</td>
+        <td><code style="font-size:.75rem">${labels || '—'}</code></td>
+        <td>${g.priority || 0}</td>
+        <td title="${nodeIds}">${g.node_count || 0}</td>
+        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" onclick="deleteNodeGroup('${esc(g.name)}')">Delete</button></td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed: ${esc(e.message)}</em>`;
+  }
+}
+
+function showAddGroupModal() {
+  const m = document.getElementById('add-group-modal');
+  m.style.display = 'flex';
+  document.getElementById('ng-name').value = '';
+  document.getElementById('ng-desc').value = '';
+  document.getElementById('ng-labels').value = '';
+  document.getElementById('ng-priority').value = '0';
+}
+function hideAddGroupModal() { document.getElementById('add-group-modal').style.display = 'none'; }
+
+async function createNodeGroup() {
+  const name = document.getElementById('ng-name').value.trim();
+  if (!name) { toast('Name is required', 'error'); return; }
+  const labelLines = document.getElementById('ng-labels').value.trim().split('\n').filter(l => l.includes('='));
+  const labelSelector = {};
+  labelLines.forEach(l => { const [k,...v] = l.split('='); labelSelector[k.trim()] = v.join('=').trim(); });
+  try {
+    await api('/api/cluster/node-groups', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        name,
+        description: document.getElementById('ng-desc').value.trim(),
+        label_selector: labelSelector,
+        priority: parseInt(document.getElementById('ng-priority').value) || 0
+      })
+    });
+    hideAddGroupModal();
+    loadNodeGroups(true);
+    toast('Node group created');
+  } catch(e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function deleteNodeGroup(name) {
+  if (!confirm(`Delete node group "${name}"?`)) return;
+  try {
+    await api('/api/cluster/node-groups?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    loadNodeGroups(true);
+    toast('Node group deleted');
+  } catch(e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+// ── Bandwidth / QoS ─────────────────────────────────────────────────────
+async function loadBandwidthPolicies(show) {
+  const panel = document.getElementById('cluster-bandwidth-panel');
+  if (!show) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+  const el = document.getElementById('bandwidth-policies-list');
+  try {
+    const policies = await api('/api/cluster/bandwidth');
+    if (!policies || policies.length === 0) {
+      el.innerHTML = '<em style="color:var(--muted);font-size:.82rem">No bandwidth policies. Create policies to set per-group bandwidth limits.</em>';
+      return;
+    }
+    let html = '<table class="table" style="font-size:.82rem"><thead><tr><th>Name</th><th>Labels</th><th>Bandwidth</th><th>Priority</th><th></th></tr></thead><tbody>';
+    policies.forEach(p => {
+      const labels = Object.entries(p.label_selector || {}).map(([k,v]) => `${esc(k)}=${esc(v)}`).join(', ');
+      html += `<tr>
+        <td><strong>${esc(p.name)}</strong></td>
+        <td><code style="font-size:.75rem">${labels || '—'}</code></td>
+        <td>${esc(p.human_rate || 'unlimited')}</td>
+        <td>${p.priority || 0}</td>
+        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" onclick="deleteBandwidthPolicy('${esc(p.name)}')">Delete</button></td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed: ${esc(e.message)}</em>`;
+  }
+}
+
+function showAddBandwidthModal() {
+  const m = document.getElementById('add-bw-modal');
+  m.style.display = 'flex';
+  document.getElementById('bw-name').value = '';
+  document.getElementById('bw-labels').value = '';
+  document.getElementById('bw-value').value = '10';
+  document.getElementById('bw-unit').value = '1048576';
+  document.getElementById('bw-priority').value = '0';
+}
+function hideAddBandwidthModal() { document.getElementById('add-bw-modal').style.display = 'none'; }
+
+async function createBandwidthPolicy() {
+  const name = document.getElementById('bw-name').value.trim();
+  if (!name) { toast('Name is required', 'error'); return; }
+  const labelLines = document.getElementById('bw-labels').value.trim().split('\n').filter(l => l.includes('='));
+  const labelSelector = {};
+  labelLines.forEach(l => { const [k,...v] = l.split('='); labelSelector[k.trim()] = v.join('=').trim(); });
+  const bwValue = parseFloat(document.getElementById('bw-value').value) || 0;
+  const bwUnit = parseInt(document.getElementById('bw-unit').value);
+  const maxBytesPerSec = Math.round(bwValue * bwUnit);
+  try {
+    await api('/api/cluster/bandwidth', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        name,
+        label_selector: labelSelector,
+        max_bytes_per_sec: maxBytesPerSec,
+        priority: parseInt(document.getElementById('bw-priority').value) || 0
+      })
+    });
+    hideAddBandwidthModal();
+    loadBandwidthPolicies(true);
+    toast('Bandwidth policy created');
+  } catch(e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function deleteBandwidthPolicy(name) {
+  if (!confirm(`Delete bandwidth policy "${name}"?`)) return;
+  try {
+    await api('/api/cluster/bandwidth?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    loadBandwidthPolicies(true);
+    toast('Bandwidth policy deleted');
+  } catch(e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 async function loadClusterHealth(show) {

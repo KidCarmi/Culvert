@@ -29,21 +29,21 @@ Enterprise proxy cluster comparison (vs. Zscaler, Palo Alto Prisma, McAfee/Skyhi
 
 | # | Feature | Description | Effort | Status |
 |---|---|---|---|---|
-| 1 | **Cluster-wide PAC distribution** | Push PAC files and browser config cluster-wide, not just per-node | Easy | ⏳ Planned |
+| 1 | **Cluster-wide PAC distribution** | Push PAC files and browser config cluster-wide, not just per-node | Easy | ✅ Done |
 
 ### Tier 2: Differentiators in Enterprise Market
 
 | # | Feature | Description | Effort | Status |
 |---|---|---|---|---|
-| 2 | **Rolling upgrade orchestration** | CP tracks DP versions, staged rollouts (canary → 10% → 100%), block incompatible versions | Medium | ⏳ Planned |
-| 3 | **Config versioning / rollback** | History of config snapshots, one-click rollback to previous known-good | Medium | ⏳ Planned |
+| 2 | **Rolling upgrade orchestration** | CP tracks DP versions, staged rollouts (canary → 10% → 100%), block incompatible versions | Medium | ✅ Done |
+| 3 | **Config versioning / rollback** | History of config snapshots, one-click rollback to previous known-good | Medium | ✅ Done |
 
 ### Tier 3: Advanced / Nice-to-Have
 
 | # | Feature | Description | Effort | Status |
 |---|---|---|---|---|
-| 4 | Geo-aware node grouping | Route users to nearest DP by GeoIP, failover to next-closest | Hard | ⏳ Planned |
-| 5 | Bandwidth / QoS across nodes | Per-group bandwidth caps, traffic prioritization | Hard | ⏳ Planned |
-| 6 | Secrets sync | Session keys, LDAP passwords synced cluster-wide | Easy | ⏳ Planned |
-| 7 | Cluster-wide threat feed | Sync threat feed from CP instead of each DP fetching independently | Easy | ⏳ Planned |
-| 8 | Config diff / change audit | Show what changed between config versions, who changed it | Medium | ⏳ Planned |
+| 4 | Geo-aware node grouping | Route users to nearest DP by GeoIP, failover to next-closest | Hard | ✅ Done |
+| 5 | Bandwidth / QoS across nodes | Per-group bandwidth caps, traffic prioritization | Hard | ✅ Done |
+| 6 | Secrets sync | Session keys, LDAP passwords synced cluster-wide | Easy | ✅ Done |
+| 7 | Cluster-wide threat feed | Sync threat feed from CP instead of each DP fetching independently | Easy | ✅ Done |
+| 8 | Config diff / change audit | Show what changed between config versions, who changed it | Medium | ✅ Done |

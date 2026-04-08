@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -48,7 +49,10 @@ var appLifecycleCancel context.CancelFunc
 var blFeedSyncer *BlocklistSyncer
 var clusterDBPathGlobal string // persisted cluster state path, set at startup
 
-func main() { //nolint:gocognit,cyclop // main wires everything; refactoring deferred
+// dataDir is the base directory for persisted runtime state (node groups, bandwidth policies, etc.).
+var dataDir = "/data"
+
+func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactoring deferred
 	// ── CLI flags ────────────────────────────────────────────────────────────
 	configPath := flag.String("config", "", "Path to config.yaml (optional)")
 	proxyPort := flag.Int("port", 0, "Proxy port (overrides config)")
@@ -728,6 +732,15 @@ func main() { //nolint:gocognit,cyclop // main wires everything; refactoring def
 	if s5Port > 0 {
 		go startSOCKS5(s5Port)
 	}
+
+	// ── Config versioning ────────────────────────────────────────────────
+	initConfigVersioning()
+
+	// ── Node Groups ─────────────────────────────────────────────────────
+	globalNodeGroups = NewNodeGroupStore(filepath.Join(dataDir, "node_groups.json"))
+
+	// ── Bandwidth / QoS ─────────────────────────────────────────────────
+	globalBandwidth = NewBandwidthManager(filepath.Join(dataDir, "bandwidth.json"))
 
 	// ── Web UI ────────────────────────────────────────────────────────────
 	uiCfgGeoIPDB = geoDBVal
