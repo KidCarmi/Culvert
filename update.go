@@ -114,8 +114,8 @@ func ensureUpdaterToken() {
 		return
 	}
 	token := hex.EncodeToString(b)
-	// #nosec G306 -- 0640 allows the updater sidecar (same group) to read the shared token
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o640); err != nil {
+	// #nosec G306 -- 0644 required: updater sidecar runs with cap_drop:ALL (no DAC_OVERRIDE), so root cannot read 0600 files owned by the proxy user
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o644); err != nil {
 		logger.Printf("Update: token write failed: %v", err)
 		return
 	}
