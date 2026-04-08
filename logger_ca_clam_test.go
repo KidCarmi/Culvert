@@ -167,6 +167,53 @@ func TestSetupLogger_JSONWithFile(t *testing.T) {
 
 // ─── clam.go — parseClamResponse ─────────────────────────────────────────────
 
+// ── Log level tests ──────────────────────────────────────────────────────────
+
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		in   string
+		want LogLevel
+	}{
+		{"DEBUG", LevelDebug},
+		{"debug", LevelDebug},
+		{"INFO", LevelInfo},
+		{"info", LevelInfo},
+		{"", LevelInfo},
+		{"WARN", LevelWarn},
+		{"WARNING", LevelWarn},
+		{"ERROR", LevelError},
+		{"unknown", LevelInfo},
+	}
+	for _, tt := range tests {
+		if got := ParseLogLevel(tt.in); got != tt.want {
+			t.Errorf("ParseLogLevel(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestLogLevelString(t *testing.T) {
+	if LevelDebug.String() != "DEBUG" {
+		t.Error("LevelDebug.String() != DEBUG")
+	}
+	if LevelError.String() != "ERROR" {
+		t.Error("LevelError.String() != ERROR")
+	}
+}
+
+func TestSetGetLogLevel(t *testing.T) {
+	old := GetLogLevel()
+	defer SetLogLevel(old)
+
+	SetLogLevel(LevelWarn)
+	if GetLogLevel() != LevelWarn {
+		t.Errorf("GetLogLevel() = %v after SetLogLevel(WARN)", GetLogLevel())
+	}
+	SetLogLevel(LevelDebug)
+	if GetLogLevel() != LevelDebug {
+		t.Errorf("GetLogLevel() = %v after SetLogLevel(DEBUG)", GetLogLevel())
+	}
+}
+
 func TestParseClamResponse_OK(t *testing.T) {
 	name, found, err := parseClamResponse("stream: OK")
 	if err != nil || found || name != "" {
@@ -344,7 +391,7 @@ func TestInitAuditLog_ValidPath(t *testing.T) {
 	if auditLogFile == nil {
 		t.Error("InitAuditLog should set auditLogFile")
 	}
-	auditLogFile.Close()
+	if auditCloser != nil { auditCloser.Close() }
 	auditLogFile = nil
 }
 

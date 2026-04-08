@@ -219,10 +219,18 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	}
 
 	// Apply CA cert + key.
-	if bundle.CACertPEM != "" && bundle.CAKeyPEM != "" {
-		if err := globalClusterCA.ImportCASilent([]byte(bundle.CACertPEM), []byte(bundle.CAKeyPEM)); err != nil {
+	// 1.6 fix: CA key is now encrypted; decrypt with the HA token.
+	if bundle.CACertPEM != "" && bundle.CAKeyEncrypted != "" {
+		keyPEM, decErr := haDecryptKey(bundle.CAKeyEncrypted, token)
+		if decErr != nil {
+			logger.Printf("HA: decrypt CA key error: %v", decErr)
+		} else if err := globalClusterCA.ImportCASilent([]byte(bundle.CACertPEM), keyPEM); err != nil {
 			logger.Printf("HA: import CA error: %v", err)
-			// Non-fatal — state sync still succeeded.
+		}
+	} else if bundle.CACertPEM != "" && bundle.CAKeyPEM != "" {
+		// Backward compat: accept plaintext key from older leaders during upgrade.
+		if err := globalClusterCA.ImportCASilent([]byte(bundle.CACertPEM), []byte(bundle.CAKeyPEM)); err != nil {
+			logger.Printf("HA: import CA error (legacy plaintext): %v", err)
 		}
 	}
 

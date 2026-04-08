@@ -81,6 +81,21 @@ func (fb *FileBlocker) CheckPath(urlPath string) string {
 	return ""
 }
 
+// CheckExt checks if a specific extension is in the block list.
+// Extension should include the dot (e.g., ".exe").
+func (fb *FileBlocker) CheckExt(ext string) string {
+	ext = fb.norm(ext)
+	if ext == "" {
+		return ""
+	}
+	fb.mu.RLock()
+	defer fb.mu.RUnlock()
+	if fb.extensions[ext] {
+		return ext
+	}
+	return ""
+}
+
 // CheckContentDisposition returns the blocked extension if the
 // Content-Disposition response header carries a filename with a blocked
 // extension (catches downloads that use a generic URL but declare the real

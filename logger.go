@@ -2,13 +2,101 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ── Log levels ───────────────────────────────────────────────────────────────
+
+// LogLevel represents the severity of a log message.
+type LogLevel int32
+
+const (
+	LevelDebug LogLevel = iota
+	LevelInfo
+	LevelWarn
+	LevelError
+)
+
+func (l LogLevel) String() string {
+	switch l {
+	case LevelDebug:
+		return "DEBUG"
+	case LevelInfo:
+		return "INFO"
+	case LevelWarn:
+		return "WARN"
+	case LevelError:
+		return "ERROR"
+	default:
+		return "INFO"
+	}
+}
+
+// ParseLogLevel converts a string to a LogLevel.
+func ParseLogLevel(s string) LogLevel {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "DEBUG":
+		return LevelDebug
+	case "INFO", "":
+		return LevelInfo
+	case "WARN", "WARNING":
+		return LevelWarn
+	case "ERROR":
+		return LevelError
+	default:
+		return LevelInfo
+	}
+}
+
+// logLevel is the global minimum log level. Atomically accessed.
+var logLevel atomic.Int32
+
+// SetLogLevel sets the global minimum log level.
+func SetLogLevel(l LogLevel) {
+	logLevel.Store(int32(l))
+}
+
+// GetLogLevel returns the current global minimum log level.
+func GetLogLevel() LogLevel {
+	return LogLevel(logLevel.Load())
+}
+
+// ── Leveled logging helpers ──────────────────────────────────────────────────
+// These wrap the global logger with level filtering.
+// Printf remains an alias for Infof (backward compatibility — all 418 existing
+// logger.Printf calls continue to work at INFO level).
+
+func logDebugf(format string, args ...any) {
+	if GetLogLevel() <= LevelDebug {
+		logger.Printf("DEBUG "+format, args...)
+	}
+}
+
+func logInfof(format string, args ...any) {
+	if GetLogLevel() <= LevelInfo {
+		logger.Printf("INFO "+format, args...)
+	}
+}
+
+func logWarnf(format string, args ...any) {
+	if GetLogLevel() <= LevelWarn {
+		logger.Printf("WARN "+format, args...)
+	}
+}
+
+func logErrorf(format string, args ...any) {
+	// Error is always logged regardless of level.
+	logger.Printf("ERROR "+format, args...)
+}
+
+// ── Rotating file writer ─────────────────────────────────────────────────────
 
 // rotatingFile wraps a log file and rotates it when it exceeds maxBytes.
 type rotatingFile struct {
@@ -63,6 +151,8 @@ func (r *rotatingFile) Close() error {
 	return r.file.Close()
 }
 
+// ── JSON log writer ──────────────────────────────────────────────────────────
+
 // jsonLogWriter wraps an io.Writer and converts each log line into a JSON object.
 // The standard log package emits lines like "[Culvert] 2026/03/05 15:04:05 message".
 // jsonLogWriter drops that prefix and re-encodes the message with a proper RFC3339 timestamp.
@@ -80,6 +170,17 @@ func (j *jsonLogWriter) Write(p []byte) (int, error) {
 
 	entry := make(map[string]string)
 	entry["time"] = time.Now().UTC().Format(time.RFC3339)
+
+	// Extract log level prefix if present (e.g., "DEBUG ...", "WARN ...").
+	level := "INFO"
+	for _, lvl := range []string{"DEBUG", "INFO", "WARN", "ERROR"} {
+		if strings.HasPrefix(line, lvl+" ") {
+			level = lvl
+			line = line[len(lvl)+1:]
+			break
+		}
+	}
+	entry["level"] = level
 
 	// Extract structured fields from "{key=val key2=val2}" suffix.
 	if idx := strings.LastIndex(line, " {"); idx >= 0 && strings.HasSuffix(line, "}") {
@@ -103,6 +204,8 @@ func (j *jsonLogWriter) Write(p []byte) (int, error) {
 	j.mu.Unlock()
 	return len(p), err // always return original length so log.Logger doesn't retry
 }
+
+// ── Logger setup ─────────────────────────────────────────────────────────────
 
 // setupLogger builds a *log.Logger that writes to stdout and optionally a
 // rotating file. format controls output style: "" or "text" → plain text,
@@ -137,4 +240,9 @@ func setupLogger(logPath string, maxMB int, format string) (*log.Logger, io.Clos
 	}
 	l := log.New(io.MultiWriter(writers...), "[Culvert] ", log.LstdFlags)
 	return l, closer, nil
+}
+
+// fmtLogLevel returns the formatted log line prefix for display in UI/API.
+func fmtLogLevel() string {
+	return fmt.Sprintf("%s", GetLogLevel())
 }

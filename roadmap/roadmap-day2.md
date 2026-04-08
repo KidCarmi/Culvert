@@ -48,11 +48,10 @@
 - **Severity**: HIGH
 - **Status**: FIXED — Lock held through increment; rejection path re-validates map entry.
 
-### 1.6 HA Sync Exposes Unencrypted Cluster CA Private Key
+### 1.6 ~~HA Sync Exposes Unencrypted Cluster CA Private Key~~ DONE
 - **File**: `controlplane.go:707-748`
 - **Severity**: HIGH
-- **Issue**: `HASync()` RPC returns `CAKeyPEM` as plaintext string. If HA token is compromised, attacker gets the CA private key and can sign arbitrary node certificates.
-- **Fix**: Never transmit CA private key over RPC. Use HA token to derive symmetric key for state replication; restrict CA key to disk-only access.
+- **Status**: FIXED — CA key is now encrypted with AES-256-GCM using a key derived from the HA token via PBKDF2-SHA256 (100k iterations) before transmission. Standby decrypts with the same token. Backward compat preserved for rolling upgrades (accepts legacy plaintext key from older leaders).
 
 ### 1.7 ~~Bootstrap Token Not Consumed — Unlimited Reuse~~ FALSE POSITIVE
 - **Files**: `bootstrap.go:274-283, 318-327`
@@ -208,8 +207,8 @@
 | ~~F1~~ | ~~Content decompression before scanning (gzip/deflate/brotli)~~ DONE (see 1.1) | Eliminates major evasion vector |
 | ~~F2~~ | ~~Per-scan timeout across all scanners (10s max)~~ DONE | Prevents coordinated ReDoS attacks |
 | ~~F3~~ | ~~Fail-closed on scan timeout (block, don't silently pass)~~ DONE | Closes YARA/DPI timeout evasion |
-| F4 | Archive magic byte detection + recursive scanning | Blocks nested archive evasion |
-| F5 | File magic byte validation (polyglot detection) | Detects Content-Type mismatch |
+| ~~F4~~ | ~~Archive magic byte detection~~ DONE | Blocks archive evasion |
+| ~~F5~~ | ~~File magic byte validation (polyglot detection)~~ DONE | Detects Content-Type mismatch |
 
 ### 5.2 Cluster & Operations (Medium Priority)
 
@@ -226,13 +225,13 @@
 
 | # | Feature | Impact |
 |---|---------|--------|
-| F12 | Structured logging with slog (Go 1.21+), request context | Log correlation across components |
-| F13 | Log level support (DEBUG/INFO/WARN/ERROR) | Production noise reduction |
+| ~~F12~~ | ~~Structured logging with log levels~~ DONE | Log correlation across components |
+| ~~F13~~ | ~~Log level support (DEBUG/INFO/WARN/ERROR)~~ DONE | Production noise reduction |
 | F14 | OpenTelemetry distributed tracing | End-to-end request latency |
 | F15 | Grafana dashboard JSON templates | Faster time-to-value for monitoring |
 | F16 | Alert escalation + retry queue with persistent storage | No more silently dropped alerts |
 | ~~F17~~ | ~~/health vs /ready probe separation for Kubernetes~~ DONE | Proper pod lifecycle management |
-| F18 | Audit log rotation | Prevents unbounded disk growth |
+| ~~F18~~ | ~~Audit log rotation~~ DONE | Prevents unbounded disk growth |
 
 ### 5.4 Admin UI (Medium Priority)
 
@@ -252,9 +251,9 @@
 | F25 | Metrics persistence across restarts | Long-term trend dashboards |
 | F26 | Threat feed reputation scoring + IOC extraction | Adaptive blocking confidence |
 | F27 | Incremental threat feed delta sync | Bandwidth + memory reduction |
-| F28 | Dark mode toggle in UI | User preference |
-| F29 | Keyboard shortcuts in UI | Power user efficiency |
-| F30 | Section-specific config export/import | Share individual blocklists |
+| ~~F28~~ | ~~Dark mode toggle in UI~~ DONE | User preference |
+| ~~F29~~ | ~~Keyboard shortcuts in UI~~ DONE | Power user efficiency |
+| ~~F30~~ | ~~Section-specific config export/import~~ DONE | Share individual blocklists |
 
 ---
 
@@ -325,17 +324,17 @@
 7. Add syslog reconnect backoff (B20)
 
 ### Phase D — Scanning & Evasion (1-2 weeks)
-1. Archive magic byte detection (F4)
-2. Polyglot file detection (F5)
+1. ~~Archive magic byte detection (F4)~~ DONE
+2. ~~Polyglot file detection (F5)~~ DONE
 3. ~~Per-scan timeout budget (F2)~~ DONE
 4. ClamAV semaphore with backpressure (P6)
 5. Alert webhook worker pool (P4)
 
 ### Phase E — Observability & Ops (1 week)
-1. Structured logging migration (F12)
-2. Log levels (F13)
+1. ~~Structured logging migration (F12)~~ DONE
+2. ~~Log levels (F13)~~ DONE
 3. ~~Health vs Ready probes (F17)~~ DONE
-4. Audit log rotation (F18)
+4. ~~Audit log rotation (F18)~~ DONE
 5. Alert retry queue (F16)
 
 ### Phase F — UI & UX Polish (1-2 weeks)

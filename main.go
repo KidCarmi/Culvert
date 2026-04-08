@@ -149,6 +149,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if err != nil {
 		log.Fatalf("Logger setup failed: %v", err)
 	}
+	SetLogLevel(ParseLogLevel(fc.LogLevel))
 
 	// ── Lifecycle context for all background goroutines ─────────────────────
 	appLifecycleCtx, appLifecycleCancel = context.WithCancel(context.Background()) // #nosec G118 -- cancel is deferred on the next line

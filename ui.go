@@ -89,6 +89,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/config/export", apiConfigExport)      // GET — download backup JSON
 	mux.HandleFunc("/api/config/import", apiConfigImport)      // POST — restore from backup JSON
 	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode) // PUT — toggle proxy auth requirement
+	mux.HandleFunc("/api/settings/log-level", apiLogLevel)     // GET/PUT runtime log level
 	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)  // GET/POST session TTL (hours)
 	mux.HandleFunc("/api/session-secret", apiSessionSecret)    // GET/POST shared signing key
 	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)         // GET/POST UI access IP allowlist
@@ -1711,25 +1712,57 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
+
+	// F30: Section-specific export via ?section= query parameter.
+	// Supported: blocklist, policy, rewrite, sslbypass, fileblock, ipfilter, all (default).
+	section := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("section")))
+
 	b := configBackup{
-		Version:             1,
-		ExportedAt:          time.Now().UTC().Format(time.RFC3339),
-		BlocklistMode:       bl.Mode(),
-		Blocklist:           bl.List(),
-		PolicyRules:         policyStore.List(),
-		DefaultAction:       defaultPolicyAction(),
-		RewriteRules:        rewriter.List(),
-		SSLBypass:           sslBypass.List(),
-		ContentScanPatterns: dpiScanner.List(),
-		FileBlockExtensions: fileBlocker.List(),
-		IPFilterMode:        ipf.Mode(),
-		IPList:              ipf.List(),
-		RateLimitRPM:        rl.Limit(),
+		Version:    1,
+		ExportedAt: time.Now().UTC().Format(time.RFC3339),
 	}
+	filename := "culvert-backup"
+
+	switch section {
+	case "blocklist":
+		b.BlocklistMode = bl.Mode()
+		b.Blocklist = bl.List()
+		filename = "culvert-blocklist"
+	case "policy":
+		b.PolicyRules = policyStore.List()
+		b.DefaultAction = defaultPolicyAction()
+		filename = "culvert-policy"
+	case "rewrite":
+		b.RewriteRules = rewriter.List()
+		filename = "culvert-rewrite"
+	case "sslbypass":
+		b.SSLBypass = sslBypass.List()
+		filename = "culvert-sslbypass"
+	case "fileblock":
+		b.FileBlockExtensions = fileBlocker.List()
+		filename = "culvert-fileblock"
+	case "ipfilter":
+		b.IPFilterMode = ipf.Mode()
+		b.IPList = ipf.List()
+		filename = "culvert-ipfilter"
+	default: // "all" or empty — full export
+		b.BlocklistMode = bl.Mode()
+		b.Blocklist = bl.List()
+		b.PolicyRules = policyStore.List()
+		b.DefaultAction = defaultPolicyAction()
+		b.RewriteRules = rewriter.List()
+		b.SSLBypass = sslBypass.List()
+		b.ContentScanPatterns = dpiScanner.List()
+		b.FileBlockExtensions = fileBlocker.List()
+		b.IPFilterMode = ipf.Mode()
+		b.IPList = ipf.List()
+		b.RateLimitRPM = rl.Limit()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", `attachment; filename="culvert-backup.json"`)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.json"`, filename))
 	json.NewEncoder(w).Encode(b) //nolint:errcheck
-	auditEvent(r, "config.export", "backup", fmt.Sprintf("exported at %s", b.ExportedAt))
+	auditEvent(r, "config.export", filename, fmt.Sprintf("section=%s exported at %s", section, b.ExportedAt))
 }
 
 // POST /api/config/import — restore configuration from a backup JSON.
@@ -2097,6 +2130,39 @@ func apiUnauthMode(w http.ResponseWriter, r *http.Request) {
 		logger.Printf("UI: unauth mode disabled — proxy requires credentials")
 	}
 	jsonOK(w, map[string]any{"ok": true, "unauthMode": body.Enabled})
+}
+
+// GET/PUT /api/settings/log-level — view/change runtime log level.
+func apiLogLevel(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]string{"level": GetLogLevel().String()})
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Level string `json:"level"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		upper := strings.ToUpper(strings.TrimSpace(body.Level))
+		if upper != "DEBUG" && upper != "INFO" && upper != "WARN" && upper != "ERROR" {
+			http.Error(w, "level must be DEBUG/INFO/WARN/ERROR", http.StatusBadRequest)
+			return
+		}
+		SetLogLevel(ParseLogLevel(upper))
+		logger.Printf("UI: log level changed to %s", upper)
+		auditEvent(r, "settings.log_level", upper, "")
+		jsonOK(w, map[string]string{"level": upper})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // GET/POST/DELETE /api/rewrite — manage header rewrite rules

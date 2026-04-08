@@ -391,6 +391,59 @@ func TestHASync_ValidToken(t *testing.T) {
 	}
 }
 
+// ── HA encrypt/decrypt (1.6 fix) ──────────────────────────────────────────
+
+func TestHAEncryptDecryptKey(t *testing.T) {
+	token := "my-ha-secret-token-12345"
+	plaintext := []byte("-----BEGIN EC PRIVATE KEY-----\nfake-key-data\n-----END EC PRIVATE KEY-----\n")
+
+	encrypted, err := haEncryptKey(plaintext, token)
+	if err != nil {
+		t.Fatalf("haEncryptKey: %v", err)
+	}
+	if encrypted == "" {
+		t.Fatal("expected non-empty encrypted string")
+	}
+
+	decrypted, err := haDecryptKey(encrypted, token)
+	if err != nil {
+		t.Fatalf("haDecryptKey: %v", err)
+	}
+	if string(decrypted) != string(plaintext) {
+		t.Errorf("decrypted = %q, want %q", decrypted, plaintext)
+	}
+
+	// Wrong token should fail.
+	_, err = haDecryptKey(encrypted, "wrong-token")
+	if err == nil {
+		t.Error("expected error with wrong token")
+	}
+}
+
+func TestHASync_EncryptsCAKey(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA.mu.Lock()
+	globalHA.role = "leader"
+	globalHA.token = "test-token-123"
+	globalHA.mu.Unlock()
+
+	svc := &controlPlaneServer{}
+	reqBytes, _ := json.Marshal(map[string]string{"token": "test-token-123"})
+	raw, err := svc.HASync(context.Background(), json.RawMessage(reqBytes))
+	if err != nil {
+		t.Fatalf("HASync: %v", err)
+	}
+
+	var bundle HAStateBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatalf("parse bundle: %v", err)
+	}
+	// CAKeyPEM should be empty (no longer sent in plaintext).
+	if bundle.CAKeyPEM != "" {
+		t.Error("CAKeyPEM should be empty in new format (1.6 fix)")
+	}
+}
+
 // ── Cluster State Export/Import ─────────────────────────────────────────────
 
 func TestClusterStore_ExportImport(t *testing.T) {
