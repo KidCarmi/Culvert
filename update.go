@@ -114,8 +114,8 @@ func ensureUpdaterToken() {
 		return
 	}
 	token := hex.EncodeToString(b)
-	// #nosec G306 -- 0640 allows the updater sidecar (same group) to read the shared token
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o640); err != nil {
+	// #nosec G306 -- 0644 required: updater sidecar runs with cap_drop:ALL (no DAC_OVERRIDE), so root cannot read 0600 files owned by the proxy user
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o644); err != nil {
 		logger.Printf("Update: token write failed: %v", err)
 		return
 	}
@@ -158,6 +158,36 @@ func startUpdateChecker(ctx context.Context) {
 	}
 
 	checkUpdateNow()
+
+	// If the updater is not yet ready (token_pending/unavailable), retry
+	// every 15s for up to 3 minutes before falling back to the 6h cycle.
+	globalUpdateInfo.mu.RLock()
+	status := globalUpdateInfo.updaterStatus
+	globalUpdateInfo.mu.RUnlock()
+	if status == "token_pending" || status == "unavailable" {
+		retryTicker := time.NewTicker(15 * time.Second)
+		retryDeadline := time.After(3 * time.Minute)
+	retryLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				retryTicker.Stop()
+				return
+			case <-retryDeadline:
+				retryTicker.Stop()
+				break retryLoop
+			case <-retryTicker.C:
+				checkUpdateNow()
+				globalUpdateInfo.mu.RLock()
+				s := globalUpdateInfo.updaterStatus
+				globalUpdateInfo.mu.RUnlock()
+				if s == "connected" {
+					retryTicker.Stop()
+					break retryLoop
+				}
+			}
+		}
+	}
 
 	// Then check every 6 hours.
 	ticker := time.NewTicker(6 * time.Hour)
