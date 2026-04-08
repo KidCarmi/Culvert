@@ -84,7 +84,9 @@ func (s *ClusterUpdateState) persist() {
 		logger.Printf("cluster update write error: %v", err)
 		return
 	}
-	os.Rename(tmp, clusterUpdateFile) //nolint:errcheck
+	if err := os.Rename(tmp, clusterUpdateFile); err != nil {
+		logger.Printf("cluster update rename error: %v", err)
+	}
 }
 
 func (s *ClusterUpdateState) load() {
@@ -94,7 +96,9 @@ func (s *ClusterUpdateState) load() {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	json.Unmarshal(data, s) //nolint:errcheck
+	if err := json.Unmarshal(data, s); err != nil {
+		logger.Printf("cluster update load: parse error: %v", err)
+	}
 }
 
 // clusterUpdateSnapshot is a lock-free copy of ClusterUpdateState for JSON serialization.
@@ -175,11 +179,16 @@ func generateUpdateReport(state *ClusterUpdateState) {
 	state.mu.Unlock()
 
 	dir := "/data/update_reports"
-	os.MkdirAll(dir, 0o750) //nolint:errcheck
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		logger.Printf("update report: mkdir error: %v", err)
+	}
 	filename := filepath.Join(dir, report.UpdateID+".json")
 	data, _ := json.MarshalIndent(report, "", "  ")
-	os.WriteFile(filename, data, 0o600) //nolint:errcheck
-	logger.Printf("update report saved: %s", filename)
+	if err := os.WriteFile(filename, data, 0o600); err != nil {
+		logger.Printf("update report: write error: %v", err)
+	} else {
+		logger.Printf("update report saved: %s", filename)
+	}
 
 	// Fire webhook alert.
 	fireAlert("cluster_updated", AlertPayload{
@@ -587,7 +596,9 @@ func updateSingleNode(nodeID, targetTag string) bool {
 	clusterUpdateState.mu.Unlock()
 	clusterUpdateState.persist()
 
-	globalClusterStore.SetNodeDraining(nodeID, true) //nolint:errcheck
+	if err := globalClusterStore.SetNodeDraining(nodeID, true); err != nil {
+		logger.Printf("update node %s: failed to set draining: %v", sanitizeLog(nodeID), err)
+	}
 	time.Sleep(10 * time.Second) // grace period for in-flight requests
 
 	// Send TriggerUpdate via gRPC.
@@ -612,7 +623,9 @@ func updateSingleNode(nodeID, targetTag string) bool {
 			ns.DurationS = int(time.Since(start).Seconds())
 		}
 		clusterUpdateState.mu.Unlock()
-		globalClusterStore.SetNodeDraining(nodeID, false) //nolint:errcheck
+		if drainErr := globalClusterStore.SetNodeDraining(nodeID, false); drainErr != nil {
+			logger.Printf("update node %s: failed to clear drain: %v", sanitizeLog(nodeID), drainErr)
+		}
 		logger.Printf("update node %s failed: %v", sanitizeLog(nodeID), err)
 		return false
 	}
@@ -633,7 +646,9 @@ func updateSingleNode(nodeID, targetTag string) bool {
 			ns.DurationS = int(time.Since(start).Seconds())
 		}
 		clusterUpdateState.mu.Unlock()
-		globalClusterStore.SetNodeDraining(nodeID, false) //nolint:errcheck
+		if drainErr := globalClusterStore.SetNodeDraining(nodeID, false); drainErr != nil {
+			logger.Printf("update node %s: failed to clear drain: %v", sanitizeLog(nodeID), drainErr)
+		}
 		logger.Printf("node %s updated successfully to %s", sanitizeLog(nodeID), sanitizeLog(targetTag))
 		return true
 	}
@@ -646,7 +661,9 @@ func updateSingleNode(nodeID, targetTag string) bool {
 		ns.DurationS = int(time.Since(start).Seconds())
 	}
 	clusterUpdateState.mu.Unlock()
-	globalClusterStore.SetNodeDraining(nodeID, false) //nolint:errcheck
+	if drainErr := globalClusterStore.SetNodeDraining(nodeID, false); drainErr != nil {
+		logger.Printf("update node %s: failed to clear drain: %v", sanitizeLog(nodeID), drainErr)
+	}
 	logger.Printf("node %s update timeout", sanitizeLog(nodeID))
 	return false
 }

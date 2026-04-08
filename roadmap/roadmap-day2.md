@@ -122,7 +122,7 @@
 |---|-------|-----------|----------|
 | B19 | ~~Log rotation TOCTOU — size check races with write~~ FALSE POSITIVE — Write() is entirely under r.mu.Lock (logger.go:40-41) | logger.go:43-55 | Medium |
 | B20 | ~~Syslog reconnect has no backoff (CPU waste on failure)~~ DONE | syslog.go:104-106 | Medium |
-| B21 | SSE hub drops messages for slow clients silently | events.go:33-42 | Low |
+| B21 | ~~SSE hub drops messages for slow clients silently~~ DONE — slow clients now disconnected (channel closed) instead of silently dropping | events.go:33-42 | Low |
 
 ### 2.6 Threat Detection & Scanning
 
@@ -153,7 +153,7 @@
 | S6 | ~~Blocklist GET lacks role check (publicly readable)~~ DONE | ui.go:1084 | Medium |
 | S7 | XSS risk via innerHTML in SPA (inconsistent escHtml usage) | static/index.html (multiple) | Medium |
 | S8 | ~~Sensitive crypto errors exposed in apiCertsUpload response~~ DONE | ui.go:2397,2406 | Low |
-| S9 | No CSRF protection on SSE connection | events.go:110 | Low |
+| S9 | ~~No CSRF protection on SSE connection~~ FALSE POSITIVE — SSE requires session auth (requireRole), CORS same-origin check exists, and SSE is read-only dashboard data | events.go:110 | Low |
 
 ### 3.3 TLS & Certificates
 
@@ -191,7 +191,7 @@
 | P3 | JSON log writer allocates strings on every Write() — LOW PRIORITY (logger not a bottleneck, ~1μs per call) | logger.go:79-105 | Medium |
 | P4 | ~~Alert webhook goroutine leak (no worker pool / semaphore)~~ DONE | alerts.go:211 | Medium |
 | P5 | ~~Hash cache O(n) full scan on eviction~~ ACCEPTABLE — 10k max entries; O(n) map scan is ~1ms; min-heap adds complexity without measurable benefit | hashcache.go:111-128 | Medium |
-| P6 | ClamAV semaphore backlog — 96 goroutines blocked at 100 RPS | clam.go:34-39 | Medium |
+| P6 | ~~ClamAV semaphore backlog — 96 goroutines blocked at 100 RPS~~ DONE — semaphore now has 5s timeout; returns error instead of blocking indefinitely | clam.go:34-39 | Medium |
 | P7 | Threat feed sync uses 100+ MiB during full download | threatfeed.go:135-156 | Low |
 | P8 | ~~YARA inflight counter never reset on rule reload~~ DONE | yara_scan.go:449-476 | Low |
 | P9 | Syslog synchronous DNS on every reconnection | syslog.go:61 | Low |
@@ -264,7 +264,7 @@
 
 | # | Issue | Location |
 |---|-------|----------|
-| Q1 | Excessive `//nolint:errcheck` — 11 in update_cluster.go alone | update_cluster.go |
+| Q1 | ~~Excessive `//nolint:errcheck` — 11 in update_cluster.go alone~~ DONE — replaced 8 of 11 with proper error handling + logging; remaining 3 are HTTP response encoders (acceptable) | update_cluster.go |
 | Q2 | ~~Deadlock risk: Lock → modify → Unlock → Save pattern~~ DONE (resolved by B14 fix — now uses saveLocked() under held lock) | controlplane.go:684-690 |
 | Q3 | Inconsistent API response format (some `{ok:true}`, some raw data) | ui.go (multiple) |
 | Q4 | Inconsistent error handling in JS (empty catch, toast, showErr) | static/index.html |

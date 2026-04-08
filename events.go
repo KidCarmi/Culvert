@@ -35,7 +35,11 @@ func (h *sseHub) broadcast(msg []byte) {
 	for ch := range h.clients {
 		select {
 		case ch <- msg:
-		default: // skip slow clients
+		default:
+			// B21: Close and remove slow clients instead of silently dropping messages.
+			// This prevents stale connections from accumulating and missing state updates.
+			close(ch)
+			delete(h.clients, ch)
 		}
 	}
 	h.mu.Unlock()

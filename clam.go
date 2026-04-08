@@ -90,7 +90,12 @@ func (c *ClamAV) Ping() error {
 // virusName is non-empty only when isMalicious is true.
 // Concurrent scans are limited by clamSem to prevent overwhelming the daemon.
 func (c *ClamAV) Scan(data []byte) (virusName string, isMalicious bool, err error) {
-	clamSem <- struct{}{} // acquire semaphore slot
+	// P6: Non-blocking semaphore with timeout to prevent goroutine backlog.
+	select {
+	case clamSem <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		return "", false, fmt.Errorf("clamav: scan queue full (%d concurrent), timed out", clamMaxConcurrent)
+	}
 	defer func() { <-clamSem }()
 
 	conn, err := (&net.Dialer{Timeout: c.timeout}).DialContext(context.Background(), c.network, c.addr)
