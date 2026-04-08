@@ -128,7 +128,7 @@ func (tf *ThreatFeed) Start(ctx context.Context) {
 // Sync downloads all configured feeds and atomically replaces the in-memory
 // lookup tables. Safe to call concurrently; calls run sequentially.
 func (tf *ThreatFeed) Sync() {
-	logger.Printf("ThreatFeed: starting sync")
+	logDebugf("ThreatFeed: starting sync")
 	newURLs := make(map[string]feedEntry, 50_000)
 	newDomains := make(map[string]feedEntry, 20_000)
 

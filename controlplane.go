@@ -34,11 +34,17 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -48,6 +54,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/crypto/pbkdf2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -707,12 +714,68 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 
 // HAStateBundle is the full state package sent from leader to standby CP.
 // Contains everything the standby needs to promote to leader if needed.
+// The CA private key is encrypted with AES-256-GCM using the HA token as
+// passphrase (1.6 fix: never transmit CA key in plaintext).
 type HAStateBundle struct {
-	ClusterState json.RawMessage `json:"cluster_state"`
-	CACertPEM    string          `json:"ca_cert_pem"`
-	CAKeyPEM     string          `json:"ca_key_pem"`
-	Config       ConfigSnapshot  `json:"config"`
-	Version      int64           `json:"version"`
+	ClusterState    json.RawMessage `json:"cluster_state"`
+	CACertPEM       string          `json:"ca_cert_pem"`
+	CAKeyPEM        string          `json:"ca_key_pem,omitempty"`         // deprecated: plaintext CA key (removed)
+	CAKeyEncrypted  string          `json:"ca_key_encrypted,omitempty"`   // base64(salt + nonce + ciphertext)
+	Config          ConfigSnapshot  `json:"config"`
+	Version         int64           `json:"version"`
+}
+
+// haEncryptKey encrypts data with AES-256-GCM using a key derived from the
+// HA token via PBKDF2-SHA256. Returns base64(salt + nonce + ciphertext).
+func haEncryptKey(plaintext []byte, token string) (string, error) {
+	salt := make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	aesKey := pbkdf2.Key([]byte(token), salt, 100_000, 32, sha256.New)
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ct := gcm.Seal(nil, nonce, plaintext, nil)
+	out := make([]byte, 0, len(salt)+len(nonce)+len(ct))
+	out = append(out, salt...)
+	out = append(out, nonce...)
+	out = append(out, ct...)
+	return base64.StdEncoding.EncodeToString(out), nil
+}
+
+// haDecryptKey decrypts a base64-encoded (salt + nonce + ciphertext) blob
+// using the HA token as passphrase.
+func haDecryptKey(encoded string, token string) ([]byte, error) {
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < 32+12 {
+		return nil, errors.New("ha decrypt: data too short")
+	}
+	salt := data[:32]
+	nonce := data[32:44]
+	ct := data[44:]
+	aesKey := pbkdf2.Key([]byte(token), salt, 100_000, 32, sha256.New)
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Open(nil, nonce, ct, nil)
 }
 
 // HASync returns the full state bundle for HA standby replication.
@@ -736,12 +799,22 @@ func (s *controlPlaneServer) HASync(_ context.Context, raw json.RawMessage) (jso
 		return nil, fmt.Errorf("export cluster state: %w", err)
 	}
 
+	// 1.6 fix: encrypt CA private key with HA token before transmission.
+	var caKeyEncrypted string
+	if keyPEM := globalClusterCA.CAKeyPEM(); len(keyPEM) > 0 {
+		enc, encErr := haEncryptKey(keyPEM, req.Token)
+		if encErr != nil {
+			return nil, fmt.Errorf("encrypt CA key for HA sync: %w", encErr)
+		}
+		caKeyEncrypted = enc
+	}
+
 	bundle := HAStateBundle{
-		ClusterState: stateJSON,
-		CACertPEM:    string(globalClusterCA.CACertPEM()),
-		CAKeyPEM:     string(globalClusterCA.CAKeyPEM()),
-		Config:       CurrentConfigSnapshot(),
-		Version:      globalConfigStore.Get().Version,
+		ClusterState:   stateJSON,
+		CACertPEM:      string(globalClusterCA.CACertPEM()),
+		CAKeyEncrypted: caKeyEncrypted,
+		Config:         CurrentConfigSnapshot(),
+		Version:        globalConfigStore.Get().Version,
 	}
 
 	resp, _ := json.Marshal(bundle)

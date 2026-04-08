@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -182,16 +183,18 @@ const maxAuditLogs = 500
 var (
 	auditMu      sync.Mutex
 	auditLog     []AuditEntry
-	auditLogFile *os.File // persistent JSONL file; nil = in-memory only
+	auditLogFile io.Writer // persistent JSONL file; nil = in-memory only
+	auditCloser  io.Closer // close on shutdown
 )
 
 // clusterRoleIsDP is set to true when this node is a Data Plane in a cluster.
 // Enables audit event queuing for centralized logging on the Control Plane.
 var clusterRoleIsDP atomic.Bool
 
-// InitAuditLog opens path for append-only JSONL persistence.
+// InitAuditLog opens path for append-only JSONL persistence with rotation.
 // Existing entries are loaded into the in-memory ring buffer on startup.
 // If path is empty this is a no-op (backwards-compatible).
+// F18: Rotates at 50 MB (same as system log) to prevent unbounded disk growth.
 func InitAuditLog(path string) error {
 	if path == "" {
 		return nil
@@ -211,11 +214,12 @@ func InitAuditLog(path string) error {
 			auditLog = auditLog[len(auditLog)-maxAuditLogs:]
 		}
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	rf, err := newRotatingFile(path, 50) // 50 MB max before rotation
 	if err != nil {
 		return fmt.Errorf("audit log open %s: %w", path, err)
 	}
-	auditLogFile = f
+	auditLogFile = rf
+	auditCloser = rf
 	return nil
 }
 

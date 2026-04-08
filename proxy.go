@@ -599,6 +599,31 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 			// 1.1 fix: decompress gzip/deflate bodies before scanning so
 			// ClamAV/YARA signatures match the actual content.
 			scanData := decompressForScan(buffered, resp.Header.Get("Content-Encoding"))
+
+			// F4: Archive magic byte detection — block archives even if
+			// the URL/Content-Disposition doesn't reveal the true format.
+			if archType := IsBlockedArchive(scanData); archType != "" {
+				cip3, _, _ := net.SplitHostPort(r.RemoteAddr)
+				atomic.AddInt64(&statFileBlocked, 1)
+				atomic.AddInt64(&statBlocked, 1)
+				recordRequest(cip3, r.Method, r.Host, "FILE_BLOCKED", "magic:"+archType, "", r.Header.Get("X-User-Identity"))
+				logger.Printf("FILE_BLOCKED (magic) %s -> %q (type=%s)", cip3, sanitizeLog(r.Host), archType)
+				serveBlockPage(w, r.Host+r.URL.Path, "File Block", "magic:"+archType)
+				return
+			}
+
+			// F5: Polyglot detection — block files whose Content-Type
+			// doesn't match their actual magic bytes (disguised executables).
+			if reason := CheckMagicVsContentType(scanData, resp.Header.Get("Content-Type")); reason != "" {
+				cip3, _, _ := net.SplitHostPort(r.RemoteAddr)
+				atomic.AddInt64(&statFileBlocked, 1)
+				atomic.AddInt64(&statBlocked, 1)
+				recordRequest(cip3, r.Method, r.Host, "POLYGLOT_BLOCKED", reason, "", r.Header.Get("X-User-Identity"))
+				logger.Printf("POLYGLOT_BLOCKED %s -> %q (%s)", cip3, sanitizeLog(r.Host), sanitizeLog(reason))
+				serveBlockPage(w, r.Host+r.URL.Path, "Polyglot Detection", reason)
+				return
+			}
+
 			scanResult := safeScanBodyWithCT(scanData, resp.Header.Get("Content-Type"))
 			if scanResult != nil {
 				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)

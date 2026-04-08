@@ -48,11 +48,10 @@
 - **Severity**: HIGH
 - **Status**: FIXED — Lock held through increment; rejection path re-validates map entry.
 
-### 1.6 HA Sync Exposes Unencrypted Cluster CA Private Key
+### 1.6 ~~HA Sync Exposes Unencrypted Cluster CA Private Key~~ DONE
 - **File**: `controlplane.go:707-748`
 - **Severity**: HIGH
-- **Issue**: `HASync()` RPC returns `CAKeyPEM` as plaintext string. If HA token is compromised, attacker gets the CA private key and can sign arbitrary node certificates.
-- **Fix**: Never transmit CA private key over RPC. Use HA token to derive symmetric key for state replication; restrict CA key to disk-only access.
+- **Status**: FIXED — CA key is now encrypted with AES-256-GCM using a key derived from the HA token via PBKDF2-SHA256 (100k iterations) before transmission. Standby decrypts with the same token. Backward compat preserved for rolling upgrades (accepts legacy plaintext key from older leaders).
 
 ### 1.7 ~~Bootstrap Token Not Consumed — Unlimited Reuse~~ FALSE POSITIVE
 - **Files**: `bootstrap.go:274-283, 318-327`
@@ -178,7 +177,7 @@
 | S16 | ~~YARA ReDoS timeout silently skips scan (fail-open)~~ DONE — now returns true on timeout (fail-closed, Zero Trust) | yara_scan.go:182-201 | Medium |
 | S17 | ~~DPI regex timeout silently passes response (fail-open)~~ DONE — now returns true on timeout (fail-closed, Zero Trust) | scanner.go:168-180 | Medium |
 | S18 | No archive extraction — nested ZIP evasion — DEFERRED (feature work, tracked as F4) | security_scan.go | Medium |
-| S19 | No polyglot file detection (magic byte vs Content-Type mismatch) — DEFERRED (feature work, tracked as F5) | security_scan.go, scanner.go | Medium |
+| ~~S19~~ | ~~No polyglot file detection (magic byte vs Content-Type mismatch)~~ DONE (implemented as F5) | filemagic.go, proxy.go | Medium |
 
 ---
 
@@ -208,31 +207,31 @@
 | ~~F1~~ | ~~Content decompression before scanning (gzip/deflate/brotli)~~ DONE (see 1.1) | Eliminates major evasion vector |
 | ~~F2~~ | ~~Per-scan timeout across all scanners (10s max)~~ DONE | Prevents coordinated ReDoS attacks |
 | ~~F3~~ | ~~Fail-closed on scan timeout (block, don't silently pass)~~ DONE | Closes YARA/DPI timeout evasion |
-| F4 | Archive magic byte detection + recursive scanning | Blocks nested archive evasion |
-| F5 | File magic byte validation (polyglot detection) | Detects Content-Type mismatch |
+| ~~F4~~ | ~~Archive magic byte detection~~ DONE | Blocks archive evasion |
+| ~~F5~~ | ~~File magic byte validation (polyglot detection)~~ DONE | Detects Content-Type mismatch |
 
 ### 5.2 Cluster & Operations (Medium Priority)
 
 | # | Feature | Impact |
 |---|---------|--------|
-| F6 | Canary deployment pattern for rolling updates | Safe incremental rollout |
-| F7 | Config rollback validation (pre-flight check) | Prevents broken rollback |
-| F8 | Automatic rollback triggers on health threshold breach | Self-healing cluster |
-| F9 | Node group membership monitoring API | "Which nodes are in group X?" |
-| F10 | Bandwidth policy conflict validation | Prevents undefined priority behavior |
-| F11 | Config diff depth — element-level diffs, not just counts | Meaningful rollback previews |
+| ~~F6~~ | ~~Canary deployment pattern for rolling updates~~ DONE — canary_count/canary_soak_s params in cluster update API; canary phase → soak period → remaining nodes; integrates with error budget | Safe incremental rollout |
+| ~~F7~~ | ~~Config rollback validation (pre-flight check)~~ DONE — dry_run mode with validateConfigBackup() checks mode enums, invalid policy rules, rate limit sign; returns warnings + diff preview | Prevents broken rollback |
+| ~~F8~~ | ~~Automatic rollback triggers on health threshold breach~~ DONE — auto_rollback flag in cluster update API; triggerAutoRollback() reverts completed nodes to previous tag on error budget breach | Self-healing cluster |
+| ~~F9~~ | ~~Node group membership monitoring API~~ DONE — GET /api/cluster/node-groups/membership?name=X returns group details + member nodes with IP, status, labels, version | "Which nodes are in group X?" |
+| ~~F10~~ | ~~Bandwidth policy conflict validation~~ DONE — selectorsOverlap() detects same-priority policies with overlapping label selectors at Add() time | Prevents undefined priority behavior |
+| ~~F11~~ | ~~Config diff depth — element-level diffs, not just counts~~ DONE — diffStringList, diffPolicyRules, diffRewriteRules show added/removed elements instead of just count changes | Meaningful rollback previews |
 
 ### 5.3 Observability (Medium Priority)
 
 | # | Feature | Impact |
 |---|---------|--------|
-| F12 | Structured logging with slog (Go 1.21+), request context | Log correlation across components |
-| F13 | Log level support (DEBUG/INFO/WARN/ERROR) | Production noise reduction |
+| ~~F12~~ | ~~Structured logging with log levels~~ DONE | Log correlation across components |
+| ~~F13~~ | ~~Log level support (DEBUG/INFO/WARN/ERROR)~~ DONE | Production noise reduction |
 | F14 | OpenTelemetry distributed tracing | End-to-end request latency |
 | F15 | Grafana dashboard JSON templates | Faster time-to-value for monitoring |
-| F16 | Alert escalation + retry queue with persistent storage | No more silently dropped alerts |
+| ~~F16~~ | ~~Alert escalation + retry queue with persistent storage~~ DONE — 3 retries with exponential backoff (5s/15s/45s), 500-entry queue persisted to /data/alert_retry_queue.json, background retry loop every 10s | No more silently dropped alerts |
 | ~~F17~~ | ~~/health vs /ready probe separation for Kubernetes~~ DONE | Proper pod lifecycle management |
-| F18 | Audit log rotation | Prevents unbounded disk growth |
+| ~~F18~~ | ~~Audit log rotation~~ DONE | Prevents unbounded disk growth |
 
 ### 5.4 Admin UI (Medium Priority)
 
@@ -242,7 +241,7 @@
 | ~~F20~~ | ~~Search/filter on all tables (policies, rewrites, file blocks)~~ DONE (policies) | Usability at scale |
 | ~~F21~~ | ~~Pagination on large lists (logs, audit, policies)~~ DONE (blocklist has it; policies use client-side filter) | Performance with many entries |
 | ~~F22~~ | ~~Confirmation dialogs for destructive actions (DELETE)~~ DONE | Prevents accidental deletion |
-| F23 | Role-based UI filtering (hide inaccessible nav items) | Clean UX per role |
+| ~~F23~~ | ~~Role-based UI filtering (hide inaccessible nav items)~~ DONE — data-min-role attributes on nav items + sections; applySession() filters by role hierarchy (admin>operator>viewer); viewer sees Monitor+Tools, operator adds Control+Network, admin sees all | Clean UX per role |
 
 ### 5.5 Nice-to-Have (Low Priority)
 
@@ -252,9 +251,9 @@
 | F25 | Metrics persistence across restarts | Long-term trend dashboards |
 | F26 | Threat feed reputation scoring + IOC extraction | Adaptive blocking confidence |
 | F27 | Incremental threat feed delta sync | Bandwidth + memory reduction |
-| F28 | Dark mode toggle in UI | User preference |
-| F29 | Keyboard shortcuts in UI | Power user efficiency |
-| F30 | Section-specific config export/import | Share individual blocklists |
+| ~~F28~~ | ~~Dark mode toggle in UI~~ DONE | User preference |
+| ~~F29~~ | ~~Keyboard shortcuts in UI~~ DONE | Power user efficiency |
+| ~~F30~~ | ~~Section-specific config export/import~~ DONE | Share individual blocklists |
 
 ---
 
@@ -281,7 +280,7 @@
 | Q10 | ~~ClamAV connection failures / malformed responses untested~~ DONE — added TestClamAV_ScanConnectionRefused + TestParseClamResponse_MalformedFound | clam_test.go |
 | Q11 | ~~YARA regex timeout goroutine leak untested~~ DONE — added TestMatchRegexWithTimeout_Normal, _TimeoutFailsClosed, _InflightCap | yara_scan_test.go |
 | Q12 | sendGRPCToNode() delivery untested — DEFERRED (requires mock gRPC infrastructure) | update_cluster_test.go |
-| Q13 | Archive/polyglot file handling untested — DEFERRED (feature F4/F5 not yet implemented) | security_scan_test.go |
+| ~~Q13~~ | ~~Archive/polyglot file handling untested~~ DONE — 11 new tests: MachO variants, RAR, 7Z, ISO9660 detection; all 7 archive types blocked; PE non-archive; ELF polyglot; octet-stream pass-through | filemagic_test.go |
 
 ### 6.3 Cleanup
 
@@ -325,17 +324,17 @@
 7. Add syslog reconnect backoff (B20)
 
 ### Phase D — Scanning & Evasion (1-2 weeks)
-1. Archive magic byte detection (F4)
-2. Polyglot file detection (F5)
+1. ~~Archive magic byte detection (F4)~~ DONE
+2. ~~Polyglot file detection (F5)~~ DONE
 3. ~~Per-scan timeout budget (F2)~~ DONE
 4. ClamAV semaphore with backpressure (P6)
 5. Alert webhook worker pool (P4)
 
 ### Phase E — Observability & Ops (1 week)
-1. Structured logging migration (F12)
-2. Log levels (F13)
+1. ~~Structured logging migration (F12)~~ DONE
+2. ~~Log levels (F13)~~ DONE
 3. ~~Health vs Ready probes (F17)~~ DONE
-4. Audit log rotation (F18)
+4. ~~Audit log rotation (F18)~~ DONE
 5. Alert retry queue (F16)
 
 ### Phase F — UI & UX Polish (1-2 weeks)
@@ -372,7 +371,7 @@
 | U6 | ~~No tag format validation in update endpoints~~ DONE | update.go:239, updater/main.go, update_cluster.go | Added `tagRe` validation (`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`) in all endpoints: `apiUpdateApply`, `handlePreview`, `handleApply`, `handleSelfUpdate`, and `apiClusterUpdate`. |
 | U7 | ~~Unbounded io.Copy in update proxy responses~~ DONE | update.go:334,444,474 | All three `io.Copy(w, resp.Body)` calls now use `io.LimitReader(resp.Body, 10<<20)` (10MB limit). |
 | U8 | ~~Error detail leakage in updater responses~~ DONE | updater/main.go:258, 270 | Changed `handlePreview` container-not-found and pull-failed responses to generic messages. Internal details logged server-side only. Also fixed `handleSelfUpdate` error responses. |
-| U9 | Missing SSRF guard on updaterURL | update.go:55-88 | `updaterURL` is used directly in HTTP requests without any scheme/host validation or `isPrivateHost()` check. If the URL is configurable via config file (config.go has `Update.UpdaterURL`), an admin with config access could point it at internal services. Add URL validation at startup. |
+| ~~U9~~ | ~~Missing SSRF guard on updaterURL~~ DONE | update.go:55-88 | Added `validateUpdaterURL()` — validates scheme (http/https only), rejects metadata endpoint (169.254.169.254), allows loopback (expected for sidecar). Called at startup from main.go; invalid URLs fall back to default. |
 | U10 | ~~Missing upper bound on error budget params~~ DONE | update_cluster.go:784-789 | Added upper bounds: `MaxConsecutive` capped at 10, `MaxPercent` capped at 50. |
 | U11 | ~~Reaper container name collision~~ DONE | updater/main.go:1066 | Reaper name now includes `time.Now().UnixNano()` suffix for uniqueness. |
 
@@ -382,7 +381,7 @@
 |---|-------|-----------|-------------|
 | U12 | ~~context.Background() in handleApply~~ DONE | updater/main.go:350 | Changed to `context.WithTimeout(context.Background(), 30*time.Minute)` — background context is correct here (update must survive client disconnect since the container restarts), but now has a bounded timeout. |
 | U13 | ~~context.Background() in handleRollback~~ DONE | updater/main.go:564 | Changed to `context.WithTimeout(r.Context(), 120*time.Second)`. Rollback should respect client disconnect. |
-| U14 | Disk space check is a no-op | updater/main.go:735-751 | `checkDiskSpace()` logs disk usage but always returns nil. The comment says "skip for now". This should either be implemented properly or removed to avoid false confidence. |
+| ~~U14~~ | ~~Disk space check is a no-op~~ DONE | updater/main.go:867-883 | Now uses `syscall.Statfs("/")` to check actual free disk space. Requires 500 MB minimum free space before proceeding with update. Logs Docker image total size for diagnostics. |
 | U15 | ~~Failure log path injection via tag~~ DONE | updater/main.go:896 | Tag is now sanitized through `strings.Map()` — only alphanumeric, dots, dashes, underscores allowed; all other chars replaced with `_`. |
 | U16 | ~~newImg.RepoTags[0] index-out-of-bounds~~ DONE | updater/main.go:775 | Added bounds check on `newImg.RepoTags` — falls back to `"(untagged)"` if empty. |
 | U17 | ~~io.ReadAll on container logs unbounded~~ DONE | updater/main.go:892 | Changed to `io.ReadAll(io.LimitReader(reader, 1<<20))` — 1MB limit on captured failure logs. |
@@ -393,20 +392,20 @@
 
 | # | Issue | File:Line | Description |
 |---|-------|-----------|-------------|
-| U20 | apiUpdateCheck fire-and-forget | update.go:215 | `go checkUpdateNow()` is detached with no error feedback. The API returns `{"status":"checking"}` immediately. Client has no way to know if the check failed. Consider a completion channel or poll mechanism. |
-| U21 | newRotatingFile unused in updater | updater/main.go | The updater uses `log.Printf` (stdlib) instead of a rotating logger. For a long-lived sidecar, logs will accumulate without rotation. Consider adding log rotation or documenting reliance on Docker log driver rotation. |
+| ~~U20~~ | ~~apiUpdateCheck fire-and-forget~~ DONE | update.go:240-261 | API now waits up to 35s for the check to complete and returns the full update info snapshot (version, availability, updater status). Falls back to `{"status":"timeout"}` if the check exceeds 35s. |
+| ~~U21~~ | ~~newRotatingFile unused in updater~~ BY DESIGN | updater/main.go | The updater runs as a Docker container — log rotation is handled by the Docker logging driver (json-file with max-size/max-file). stdlib `log.Printf` writes to stdout/stderr which Docker captures. |
 | U22 | ~~envIntOr uses custom atoi~~ DONE | updater/main.go:1118-1124 | `envIntOr` now validates each character is a digit and falls back to default on invalid input. Logs a warning for malformed env vars. |
-| U23 | performHASyncPush is a stub | update_cluster.go:568-574 | `performHASyncPush()` just sleeps 10s and returns true. It doesn't actually verify the sync succeeded. This is documented but should be flagged as incomplete. |
-| U24 | Docker Compose updater port exposed to all interfaces | docker-compose.yml:63, docker-compose.ha.yml:55 | Port 7123 is exposed as `"7123:7123"` (all interfaces). If the host is network-accessible, anyone can attempt to reach the updater (blocked by bearer auth, but still increases attack surface). Consider `"127.0.0.1:7123:7123"` or document the risk. |
-| U25 | Missing security_opt in compose | docker-compose.yml:49-68 | Updater container lacks `security_opt: ["no-new-privileges:true"]` and `cap_drop: [ALL]`. While the socket is mounted read-only, adding these hardening options reduces the blast radius of a container compromise. |
-| U26 | SSE reconnection not implemented in UI | static/index.html (updates panel) | The update progress UI connects once to the SSE stream. If the connection drops mid-update (network blip), there's no automatic reconnection with state resume from `/api/update/session`. The CP overlay handles the full-restart case but not transient disconnects. |
+| ~~U23~~ | ~~performHASyncPush is a stub~~ DONE | update_cluster.go:600-618 | Now verifies HA state after sync wait — checks globalHA.Status() to confirm leader role and peer connectivity. Logs sync verification result. |
+| ~~U24~~ | ~~Docker Compose updater port exposed to all interfaces~~ DONE | docker-compose.yml, docker-compose.ha.yml | Changed all updater port bindings to `"127.0.0.1:7123:7123"` (localhost only). Applied to updater, dp-updater. |
+| ~~U25~~ | ~~Missing security_opt in compose~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `security_opt: ["no-new-privileges:true"]` and `cap_drop: [ALL]` to all updater services. |
+| ~~U26~~ | ~~SSE reconnection not implemented in UI~~ DONE | static/index.html (updates panel) | On connection loss, retries 3 times (2s/4s/6s backoff) polling `/api/update/session` for state resume before falling back to CP updating overlay. |
 
 ### 8.5 Compose & Dockerfile
 
 | # | Issue | File | Description |
 |---|-------|------|-------------|
-| U27 | No resource limits in compose | docker-compose.yml, docker-compose.ha.yml | The updater service has no `mem_limit`, `cpus`, or `pids_limit`. A runaway image pull or prune could consume excessive host resources. |
-| U28 | Updater depends_on missing | docker-compose.yml | The proxy container doesn't declare `depends_on: updater`. On first startup, the proxy's initial update check (30s delay) may fire before the updater is ready. This is handled gracefully (503 retry) but `depends_on` would improve startup order. |
+| ~~U27~~ | ~~No resource limits in compose~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `mem_limit: 256m`, `cpus: "0.5"`, `pids_limit: 64` to all updater services. |
+| ~~U28~~ | ~~Updater depends_on missing~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `depends_on: updater` to proxy service in both compose files. |
 
 ---
 

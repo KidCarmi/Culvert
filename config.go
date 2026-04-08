@@ -73,6 +73,9 @@ type FileConfig struct {
 	// LogFormat controls the system-log output format: "text" (default) or "json".
 	LogFormat string `yaml:"log_format"`
 
+	// LogLevel sets the minimum log level: "DEBUG", "INFO" (default), "WARN", "ERROR".
+	LogLevel string `yaml:"log_level"`
+
 	// DefaultAction controls what happens when no policy rule matches a request.
 	// "allow" (passthrough mode) or "deny" (zero-trust, default).
 	// Use "allow" for initial setup; switch to "deny" once rules are configured.
@@ -218,6 +221,14 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 	// log_format
 	if f := fc.LogFormat; f != "" && f != "text" && f != "json" {
 		errs = append(errs, fmt.Sprintf("log_format: must be \"text\" or \"json\", got %q", f))
+	}
+
+	// log_level
+	if l := fc.LogLevel; l != "" {
+		upper := strings.ToUpper(l)
+		if upper != "DEBUG" && upper != "INFO" && upper != "WARN" && upper != "WARNING" && upper != "ERROR" {
+			errs = append(errs, fmt.Sprintf("log_level: must be DEBUG/INFO/WARN/ERROR, got %q", l))
+		}
 	}
 
 	// syslog_format

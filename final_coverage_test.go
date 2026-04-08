@@ -822,23 +822,27 @@ func TestInitAuditLog_WithManyEntries(t *testing.T) {
 	f.Close()
 
 	oldFile := auditLogFile
+	oldCloser := auditCloser
 	oldLog := auditLog
 	auditLogFile = nil
+	auditCloser = nil
 	auditLog = nil
 	defer func() {
 		auditLogFile = oldFile
+		auditCloser = oldCloser
 		auditLog = oldLog
-		if auditLogFile != nil {
-			auditLogFile.Close()
+		if auditCloser != nil {
+			auditCloser.Close()
 		}
 	}()
 
 	if err := InitAuditLog(f.Name()); err != nil {
 		t.Fatalf("InitAuditLog: %v", err)
 	}
-	if auditLogFile != nil {
-		auditLogFile.Close()
+	if auditCloser != nil {
+		auditCloser.Close()
 		auditLogFile = nil
+		auditCloser = nil
 	}
 }
 

@@ -11,8 +11,9 @@ package main
 //   "cluster_update_halted" — cluster rolling update halted due to error budget
 //
 // Each webhook is stored in an in-memory list backed by a JSON file.
-// Delivery is async (fire-and-forget goroutine), never blocks the request path.
-// Failed deliveries are logged and silently discarded (no retry).
+// Delivery is async, never blocks the request path.
+// F16: Failed deliveries are retried with exponential backoff (3 attempts,
+// 5s/15s/45s). Retry queue persists to disk for restart survival.
 // If a signing secret is configured, a HMAC-SHA256 signature is added as
 // X-Culvert-Signature: sha256=<hex>.
 
@@ -239,14 +240,18 @@ func fireAlert(event string, payload AlertPayload) {
 			continue
 		}
 		// Use semaphore to bound concurrent deliveries (P4).
+		hookCopy := h
+		pCopy := payload
 		select {
 		case webhookSem <- struct{}{}:
 			go func() {
 				defer func() { <-webhookSem }()
-				deliverWebhook(h, payload)
+				if ok := deliverWebhook(hookCopy, pCopy); !ok {
+					enqueueRetry(hookCopy.ID, pCopy, 1) // F16: retry on failure
+				}
 			}()
 		default:
-			logger.Printf("Alert webhook %q: delivery queue full, skipping", sanitizeLog(h.Name))
+			enqueueRetry(hookCopy.ID, pCopy, 0) // F16: queue when semaphore full
 		}
 	}
 }
@@ -257,23 +262,23 @@ func fireAlert(event string, payload AlertPayload) {
 // as a sanitiser in both branches).
 var validWebhookURL = regexp.MustCompile(`^https?://[^/]`)
 
-func deliverWebhook(h AlertWebhook, payload AlertPayload) {
+func deliverWebhook(h AlertWebhook, payload AlertPayload) bool {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return false
 	}
 	// Regexp barrier: CodeQL recognises Regexp.MatchString as an SSRF
 	// sanitiser, breaking the taint chain on h.URL.
 	if !validWebhookURL.MatchString(h.URL) {
 		logger.Printf("Alert webhook %q: invalid URL, skipping delivery", sanitizeLog(h.Name))
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
 		logger.Printf("Alert webhook %q: build request error: %v", sanitizeLog(h.Name), err)
-		return
+		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Culvert-Alerts/1.0")
@@ -291,10 +296,128 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) {
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.Printf("Alert webhook %q: delivery error: %v", h.Name, err)
-		return
+		return false
 	}
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		logger.Printf("Alert webhook %q: non-2xx response %d", h.Name, resp.StatusCode)
+		return false
 	}
+	return true
+}
+
+// ── F16: Alert Retry Queue ────────────────────────────────────────────────────
+
+const (
+	alertRetryMax      = 3
+	alertRetryBaseSec  = 5 // exponential: 5s, 15s, 45s
+	alertRetryQueueMax = 500
+	alertRetryFile     = "/data/alert_retry_queue.json"
+)
+
+// retryEntry represents a failed webhook delivery queued for retry.
+type retryEntry struct {
+	WebhookID string       `json:"webhook_id"`
+	Payload   AlertPayload `json:"payload"`
+	Attempt   int          `json:"attempt"`
+	NextRetry time.Time    `json:"next_retry"`
+}
+
+var (
+	alertRetryMu    sync.Mutex
+	alertRetryQueue []retryEntry
+)
+
+// enqueueRetry adds a failed delivery to the retry queue.
+func enqueueRetry(hookID string, payload AlertPayload, attempt int) {
+	if attempt >= alertRetryMax {
+		logger.Printf("Alert retry exhausted for webhook %q event %q after %d attempts",
+			sanitizeLog(hookID), sanitizeLog(payload.Event), attempt)
+		return
+	}
+	backoff := time.Duration(alertRetryBaseSec) * time.Second
+	for i := 0; i < attempt; i++ {
+		backoff *= 3
+	}
+	entry := retryEntry{
+		WebhookID: hookID,
+		Payload:   payload,
+		Attempt:   attempt,
+		NextRetry: time.Now().Add(backoff),
+	}
+	alertRetryMu.Lock()
+	if len(alertRetryQueue) < alertRetryQueueMax {
+		alertRetryQueue = append(alertRetryQueue, entry)
+	}
+	saveAlertRetryQueueLocked()
+	alertRetryMu.Unlock()
+}
+
+// startAlertRetryLoop runs a background loop that retries failed deliveries.
+func startAlertRetryLoop(ctx context.Context) {
+	// Load persisted retry queue on startup.
+	alertRetryMu.Lock()
+	if data, err := os.ReadFile(alertRetryFile); err == nil {
+		_ = json.Unmarshal(data, &alertRetryQueue)
+	}
+	alertRetryMu.Unlock()
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			processRetryQueue()
+		}
+	}
+}
+
+func processRetryQueue() {
+	now := time.Now()
+
+	alertRetryMu.Lock()
+	var ready []retryEntry
+	var remaining []retryEntry
+	for _, e := range alertRetryQueue {
+		if now.After(e.NextRetry) {
+			ready = append(ready, e)
+		} else {
+			remaining = append(remaining, e)
+		}
+	}
+	alertRetryQueue = remaining
+	if len(ready) > 0 {
+		saveAlertRetryQueueLocked()
+	}
+	alertRetryMu.Unlock()
+
+	for _, e := range ready {
+		globalAlertStore.mu.RLock()
+		var hook *AlertWebhook
+		for i := range globalAlertStore.hooks {
+			if globalAlertStore.hooks[i].ID == e.WebhookID {
+				h := globalAlertStore.hooks[i]
+				hook = &h
+				break
+			}
+		}
+		globalAlertStore.mu.RUnlock()
+
+		if hook == nil || !hook.Enabled {
+			continue
+		}
+		if ok := deliverWebhook(*hook, e.Payload); !ok {
+			enqueueRetry(e.WebhookID, e.Payload, e.Attempt+1)
+		}
+	}
+}
+
+func saveAlertRetryQueueLocked() {
+	data, err := json.Marshal(alertRetryQueue)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(alertRetryFile, data, 0o600)
 }

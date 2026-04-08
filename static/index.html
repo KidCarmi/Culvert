@@ -29,6 +29,26 @@
   --shadow:    0 4px 24px rgba(0,0,0,.4);
   --focus-ring: 0 0 0 3px rgba(20,184,166,.25);
 }
+/* Light mode overrides */
+html[data-theme="light"] {
+  --bg:        #f3f4f6;
+  --surface:   #ffffff;
+  --surface2:  #f9fafb;
+  --border:    #e5e7eb;
+  --border-hi: #d1d5db;
+  --accent:    #0d9488;
+  --accent2:   #0f766e;
+  --green:     #16a34a;
+  --red:       #dc2626;
+  --orange:    #ea580c;
+  --yellow:    #ca8a04;
+  --text:      #1f2937;
+  --muted:     #6b7280;
+  --text-muted:#6b7280;
+  --shadow:    0 4px 24px rgba(0,0,0,.08);
+  --card:      #ffffff;
+  --danger:    #dc2626;
+}
 body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
        background: var(--bg); color: var(--text); height: 100vh;
        display: flex; overflow: hidden; }
@@ -308,54 +328,54 @@ tr.dragging  { opacity: .4; }
       <span class="nav-badge" id="nav-blocked-count" style="display:none">0</span>
     </div>
 
-    <div class="nav-section">Control</div>
-    <div class="nav-item" data-view="blocklist">
+    <div class="nav-section" data-min-role="operator">Control</div>
+    <div class="nav-item" data-view="blocklist" data-min-role="operator">
       <span class="icon">🚫</span> Blocklist
     </div>
-    <div class="nav-item" data-view="security">
+    <div class="nav-item" data-view="security" data-min-role="operator">
       <span class="icon">🔒</span> Security
     </div>
-    <div class="nav-item" data-view="policy">
+    <div class="nav-item" data-view="policy" data-min-role="operator">
       <span class="icon">📋</span> Policy
     </div>
-    <div class="nav-item" data-view="urlcat">
+    <div class="nav-item" data-view="urlcat" data-min-role="operator">
       <span class="icon">🏷️</span> URL Categories
     </div>
-    <div class="nav-item" data-view="fileblock">
+    <div class="nav-item" data-view="fileblock" data-min-role="operator">
       <span class="icon">🛡️</span> File Block
     </div>
-    <div class="nav-section">Network</div>
-    <div class="nav-item" data-view="rewrite">
+    <div class="nav-section" data-min-role="operator">Network</div>
+    <div class="nav-item" data-view="rewrite" data-min-role="operator">
       <span class="icon">✏️</span> Rewrite
     </div>
-    <div class="nav-item" data-view="upstream">
+    <div class="nav-item" data-view="upstream" data-min-role="operator">
       <span class="icon">🔗</span> Upstream Proxies
     </div>
-    <div class="nav-item" data-view="pac">
+    <div class="nav-item" data-view="pac" data-min-role="operator">
       <span class="icon">📡</span> PAC File
     </div>
 
-    <div class="nav-section">Identity</div>
-    <div class="nav-item" data-view="idproviders">
+    <div class="nav-section" data-min-role="admin">Identity</div>
+    <div class="nav-item" data-view="idproviders" data-min-role="admin">
       <span class="icon">🪪</span> Identity Providers
     </div>
 
-    <div class="nav-section">Certificates</div>
-    <div class="nav-item" data-view="certificates">
+    <div class="nav-section" data-min-role="admin">Certificates</div>
+    <div class="nav-item" data-view="certificates" data-min-role="admin">
       <span class="icon">🔑</span> SSL / TLS
     </div>
-    <div class="nav-item" data-view="ca-mgmt">
+    <div class="nav-item" data-view="ca-mgmt" data-min-role="admin">
       <span class="icon">🏛️</span> CA Management
     </div>
 
-    <div class="nav-section">Infrastructure</div>
-    <div class="nav-item" data-view="cluster">
+    <div class="nav-section" data-min-role="admin">Infrastructure</div>
+    <div class="nav-item" data-view="cluster" data-min-role="admin">
       <span class="icon">🖥️</span> Cluster Nodes
     </div>
-    <div class="nav-item" data-view="settings">
+    <div class="nav-item" data-view="settings" data-min-role="admin">
       <span class="icon">⚙️</span> Settings
     </div>
-    <div class="nav-item" data-view="updates">
+    <div class="nav-item" data-view="updates" data-min-role="admin">
       <span class="icon">&#x2B06;</span> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
     </div>
 
@@ -367,8 +387,8 @@ tr.dragging  { opacity: .4; }
       <span class="icon">📋</span> Audit Log
     </div>
 
-    <div class="nav-section" id="nav-section-admin" style="display:none">Admin</div>
-    <div class="nav-item" data-view="users" id="nav-users" style="display:none">
+    <div class="nav-section" data-min-role="admin" id="nav-section-admin">Admin</div>
+    <div class="nav-item" data-view="users" data-min-role="admin" id="nav-users">
       <span class="icon">👥</span> Users &amp; Roles
     </div>
   </nav>
@@ -382,8 +402,10 @@ tr.dragging  { opacity: .4; }
       <div class="dot green"></div>
       <span class="status-label">Web UI &nbsp;<strong id="ui-port">:9090</strong></span>
     </div>
-    <div style="margin-top:8px; color:var(--muted); font-size:.68rem;">
-      Up <span id="uptime">0s</span>
+    <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between">
+      <span style="color:var(--muted); font-size:.68rem;">Up <span id="uptime">0s</span></span>
+      <button onclick="toggleTheme()" id="theme-toggle-btn" title="Toggle light/dark mode"
+        style="background:none;border:1px solid var(--border);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:.78rem;color:var(--muted)">🌙</button>
     </div>
   </div>
 </aside>
@@ -1430,6 +1452,28 @@ Firefox (all platforms):
           </div>
         </div>
 
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Logging</span></div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label class="form-label">Log Level</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <select class="input" style="width:160px" id="s-log-level" onchange="setLogLevel(this.value)">
+                  <option value="DEBUG">DEBUG</option>
+                  <option value="INFO">INFO</option>
+                  <option value="WARN">WARN</option>
+                  <option value="ERROR">ERROR</option>
+                </select>
+                <span style="font-size:.72rem;color:var(--muted)">Changes apply immediately (runtime only)</span>
+              </div>
+            </div>
+            <p style="font-size:.72rem;color:var(--muted);margin-top:6px;line-height:1.5">
+              <strong>DEBUG</strong> — Verbose, includes request details. <strong>INFO</strong> — Normal operations (default).
+              <strong>WARN</strong> — Warnings &amp; degraded state. <strong>ERROR</strong> — Errors only.
+            </p>
+          </div>
+        </div>
+
       <!-- Backup & Restore -->
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">Backup &amp; Restore</span></div>
@@ -1446,6 +1490,17 @@ Firefox (all platforms):
             </label>
           </div>
           <div id="backup-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
+          <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">
+            <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;font-weight:600">Export Individual Sections</p>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button class="btn ghost sm" onclick="exportSection('blocklist')">Blocklist</button>
+              <button class="btn ghost sm" onclick="exportSection('policy')">Policy</button>
+              <button class="btn ghost sm" onclick="exportSection('rewrite')">Rewrite</button>
+              <button class="btn ghost sm" onclick="exportSection('sslbypass')">SSL Bypass</button>
+              <button class="btn ghost sm" onclick="exportSection('fileblock')">File Block</button>
+              <button class="btn ghost sm" onclick="exportSection('ipfilter')">IP Filter</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -2866,6 +2921,60 @@ Firefox (all platforms):
 // State
 // ═══════════════════════════════════════════════════════════════════════════
 const BASE = '';
+
+// ── F28: Theme toggle (dark/light mode) ──────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('culvert-theme');
+  if (saved === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    document.getElementById('theme-toggle-btn').textContent = '☀️';
+  }
+}
+function toggleTheme() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  if (isLight) {
+    document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem('culvert-theme', 'dark');
+    document.getElementById('theme-toggle-btn').textContent = '🌙';
+  } else {
+    document.documentElement.setAttribute('data-theme', 'light');
+    localStorage.setItem('culvert-theme', 'light');
+    document.getElementById('theme-toggle-btn').textContent = '☀️';
+  }
+}
+initTheme();
+
+// ── F29: Keyboard shortcuts ──────────────────────────────────────────────
+// Alt+1..9 = navigate to panel, Alt+/ = show help, Esc = close modals
+const _kbShortcuts = {
+  '1': 'dashboard', '2': 'blocklist', '3': 'policy', '4': 'log',
+  '5': 'settings',  '6': 'rewrite',   '7': 'fileblock', '8': 'cluster',
+  '9': 'updates'
+};
+document.addEventListener('keydown', e => {
+  // Skip if user is typing in an input/textarea/select
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+  // Escape = close confirm dialog
+  if (e.key === 'Escape') {
+    if (_confirmResolver) confirmDialogResolve(false);
+    return;
+  }
+
+  // Alt+number = panel navigation
+  if (e.altKey && _kbShortcuts[e.key]) {
+    e.preventDefault();
+    switchView(_kbShortcuts[e.key]);
+    return;
+  }
+
+  // Alt+/ = show shortcut help
+  if (e.altKey && e.key === '/') {
+    e.preventDefault();
+    toast('Shortcuts: Alt+1 Dashboard, Alt+2 Blocklist, Alt+3 Policy, Alt+4 Log, Alt+5 Settings, Alt+6 Rewrite, Alt+7 FileBlock, Alt+8 Cluster, Alt+9 Updates, Esc Close', 'success');
+  }
+});
 let currentView = 'dashboard';
 let blEntries = [];
 let blSourceFilter = '';
@@ -3053,10 +3162,13 @@ function applySession(user, role) {
     info.style.display = 'none';
   }
 
-  // Admin-only nav items
-  const isAdmin = role === 'admin';
-  document.getElementById('nav-users').style.display         = isAdmin ? '' : 'none';
-  document.getElementById('nav-section-admin').style.display = isAdmin ? '' : 'none';
+  // Role-based nav filtering (F23)
+  const roleLevel = { admin: 3, operator: 2, viewer: 1 };
+  const myLevel = roleLevel[role] || 0;
+  document.querySelectorAll('[data-min-role]').forEach(el => {
+    const required = roleLevel[el.getAttribute('data-min-role')] || 0;
+    el.style.display = myLevel >= required ? '' : 'none';
+  });
 
   // Logout button
   document.getElementById('logout-btn').style.display = (user || role) ? '' : 'none';
@@ -3440,12 +3552,23 @@ async function exportConfig() {
   a.click();
 }
 
+// F30: Section-specific export
+async function exportSection(section) {
+  const r = await fetch('/api/config/export?section=' + encodeURIComponent(section));
+  if (!r.ok) { toast('Export failed: ' + await r.text(), 'error'); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'culvert-' + section + '.json';
+  a.click();
+  toast('Exported ' + section, 'success');
+}
+
 async function importConfig(input) {
   const file = input.files[0];
   if (!file) return;
-  if (!confirm('Import configuration backup?\n\nImported rules will be MERGED with existing config (not replaced). Duplicate rules may accumulate. This cannot be undone.')) {
-    input.value = ''; return;
-  }
+  const ok = await confirmAction('Import Configuration', 'Imported rules will be MERGED with existing config (not replaced). Duplicate rules may accumulate. This cannot be undone.', 'Import');
+  if (!ok) { input.value = ''; return; }
   const statusEl = document.getElementById('backup-status');
   statusEl.style.display = 'none';
   try {
@@ -4556,6 +4679,11 @@ async function loadSettings() {
       el.style.color = 'var(--green)';
     }
   } catch(e) {}
+  // Log level
+  try {
+    const ll = await api('/api/settings/log-level');
+    document.getElementById('s-log-level').value = ll.level || 'INFO';
+  } catch(e) {}
   // UI allow IPs
   try {
     const ip = await api('/api/ui-allow-ips');
@@ -4955,6 +5083,13 @@ async function saveSettings() {
     });
     toast('Settings saved', 'success');
     fetchStats();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function setLogLevel(level) {
+  try {
+    await api('/api/settings/log-level', { method: 'PUT', body: { level } });
+    toast('Log level set to ' + level, 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -7545,8 +7680,32 @@ async function updateApply() {
       }
     }
   } catch(e) {
-    // Connection lost — CP container likely restarting. Show overlay.
-    showCPUpdatingOverlay();
+    // U26: Connection lost — attempt SSE reconnection before showing overlay.
+    let reconnected = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      try {
+        const sessionResp = await fetch(BASE + '/api/update/session', { credentials: 'include' });
+        if (sessionResp.ok) {
+          const session = await sessionResp.json();
+          if (session.status === 'complete') {
+            toast('Update complete!', 'success');
+            loadUpdates();
+            reconnected = true;
+            break;
+          } else if (session.status === 'rolled_back' || session.status === 'error') {
+            toast('Update failed: ' + (session.detail || 'unknown'), 'error');
+            reconnected = true;
+            break;
+          }
+          // Still in progress — continue retry loop.
+          progressStep.textContent = 'Reconnecting... (' + session.status + ')';
+        }
+      } catch(_) { /* server still down */ }
+    }
+    if (!reconnected) {
+      showCPUpdatingOverlay();
+    }
   }
 }
 

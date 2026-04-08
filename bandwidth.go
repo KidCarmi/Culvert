@@ -147,6 +147,13 @@ func (m *BandwidthManager) Add(p BandwidthPolicy) (BandwidthPolicy, error) {
 		}
 	}
 
+	// F10: Check for priority conflicts with overlapping selectors.
+	for _, existing := range m.policies {
+		if existing.Priority == p.Priority && selectorsOverlap(existing.LabelSelector, p.LabelSelector) {
+			return BandwidthPolicy{}, fmt.Errorf("priority %d conflicts with policy %q (overlapping label selectors)", p.Priority, existing.Name)
+		}
+	}
+
 	p.Name = name
 	if p.CreatedAt == "" {
 		p.CreatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -216,6 +223,23 @@ func (m *BandwidthManager) FindPolicy(labels map[string]string) *BandwidthPolicy
 	// Return a copy so the caller can't mutate internal state.
 	cp := *best
 	return &cp
+}
+
+// selectorsOverlap returns true if two label selectors could match the same node.
+// Two selectors overlap when their shared keys have matching values (or when one
+// is a subset of the other). This detects potential priority ambiguity (F10).
+func selectorsOverlap(a, b map[string]string) bool {
+	// If either is empty, it matches everything — always overlaps.
+	if len(a) == 0 || len(b) == 0 {
+		return true
+	}
+	// Check if any shared key has a conflicting value.
+	for k, va := range a {
+		if vb, ok := b[k]; ok && va != vb {
+			return false // disjoint on this key
+		}
+	}
+	return true
 }
 
 // matchLabels returns true if every key-value pair in selector exists in labels.

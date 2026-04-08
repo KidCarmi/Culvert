@@ -864,21 +864,33 @@ func atoi(s string) int {
 	return n
 }
 
+// minDiskSpaceMB is the minimum free disk space (MB) required to proceed with
+// an update. Docker image pulls can be 100-500 MB; 500 MB gives safe headroom.
+const minDiskSpaceMB = 500
+
 func checkDiskSpace(ctx context.Context, cli *client.Client, _ string) error {
+	// Check Docker data root filesystem via Docker disk usage API.
 	usage, err := cli.DiskUsage(ctx, types.DiskUsageOptions{})
 	if err != nil {
 		return fmt.Errorf("disk usage check failed: %w", err)
 	}
-	// Calculate available space from images + containers.
-	var totalSize int64
+	var totalImageMB int64
 	for _, img := range usage.Images {
-		totalSize += img.Size
+		totalImageMB += img.Size / (1024 * 1024)
 	}
-	// Simple heuristic: if total image size > 90% of what we've seen, warn.
-	// In practice we just check that there's some headroom.
-	_ = totalSize // We can't reliably get free disk space from Docker API alone.
-	// The real check would use the host filesystem — skip for now and just log.
-	log.Printf("disk usage check: %d images totaling %d MB", len(usage.Images), totalSize/(1024*1024))
+
+	// Check host filesystem free space via syscall.
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err != nil {
+		log.Printf("disk space: syscall.Statfs failed: %v — proceeding anyway", err)
+		return nil
+	}
+	freeMB := int64(stat.Bavail) * int64(stat.Bsize) / (1024 * 1024)
+	log.Printf("disk space: %d MB free, %d MB in Docker images", freeMB, totalImageMB)
+
+	if freeMB < minDiskSpaceMB {
+		return fmt.Errorf("insufficient disk space: %d MB free (minimum %d MB required)", freeMB, minDiskSpaceMB)
+	}
 	return nil
 }
 
