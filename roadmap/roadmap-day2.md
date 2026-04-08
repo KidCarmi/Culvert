@@ -214,9 +214,9 @@
 
 | # | Feature | Impact |
 |---|---------|--------|
-| F6 | Canary deployment pattern for rolling updates | Safe incremental rollout |
+| ~~F6~~ | ~~Canary deployment pattern for rolling updates~~ DONE — canary_count/canary_soak_s params in cluster update API; canary phase → soak period → remaining nodes; integrates with error budget | Safe incremental rollout |
 | ~~F7~~ | ~~Config rollback validation (pre-flight check)~~ DONE — dry_run mode with validateConfigBackup() checks mode enums, invalid policy rules, rate limit sign; returns warnings + diff preview | Prevents broken rollback |
-| F8 | Automatic rollback triggers on health threshold breach | Self-healing cluster |
+| ~~F8~~ | ~~Automatic rollback triggers on health threshold breach~~ DONE — auto_rollback flag in cluster update API; triggerAutoRollback() reverts completed nodes to previous tag on error budget breach | Self-healing cluster |
 | ~~F9~~ | ~~Node group membership monitoring API~~ DONE — GET /api/cluster/node-groups/membership?name=X returns group details + member nodes with IP, status, labels, version | "Which nodes are in group X?" |
 | ~~F10~~ | ~~Bandwidth policy conflict validation~~ DONE — selectorsOverlap() detects same-priority policies with overlapping label selectors at Add() time | Prevents undefined priority behavior |
 | ~~F11~~ | ~~Config diff depth — element-level diffs, not just counts~~ DONE — diffStringList, diffPolicyRules, diffRewriteRules show added/removed elements instead of just count changes | Meaningful rollback previews |
@@ -280,7 +280,7 @@
 | Q10 | ~~ClamAV connection failures / malformed responses untested~~ DONE — added TestClamAV_ScanConnectionRefused + TestParseClamResponse_MalformedFound | clam_test.go |
 | Q11 | ~~YARA regex timeout goroutine leak untested~~ DONE — added TestMatchRegexWithTimeout_Normal, _TimeoutFailsClosed, _InflightCap | yara_scan_test.go |
 | Q12 | sendGRPCToNode() delivery untested — DEFERRED (requires mock gRPC infrastructure) | update_cluster_test.go |
-| Q13 | Archive/polyglot file handling untested — DEFERRED (feature F4/F5 not yet implemented) | security_scan_test.go |
+| ~~Q13~~ | ~~Archive/polyglot file handling untested~~ DONE — 11 new tests: MachO variants, RAR, 7Z, ISO9660 detection; all 7 archive types blocked; PE non-archive; ELF polyglot; octet-stream pass-through | filemagic_test.go |
 
 ### 6.3 Cleanup
 
@@ -381,7 +381,7 @@
 |---|-------|-----------|-------------|
 | U12 | ~~context.Background() in handleApply~~ DONE | updater/main.go:350 | Changed to `context.WithTimeout(context.Background(), 30*time.Minute)` — background context is correct here (update must survive client disconnect since the container restarts), but now has a bounded timeout. |
 | U13 | ~~context.Background() in handleRollback~~ DONE | updater/main.go:564 | Changed to `context.WithTimeout(r.Context(), 120*time.Second)`. Rollback should respect client disconnect. |
-| U14 | Disk space check is a no-op | updater/main.go:735-751 | `checkDiskSpace()` logs disk usage but always returns nil. The comment says "skip for now". This should either be implemented properly or removed to avoid false confidence. |
+| ~~U14~~ | ~~Disk space check is a no-op~~ DONE | updater/main.go:867-883 | Now uses `syscall.Statfs("/")` to check actual free disk space. Requires 500 MB minimum free space before proceeding with update. Logs Docker image total size for diagnostics. |
 | U15 | ~~Failure log path injection via tag~~ DONE | updater/main.go:896 | Tag is now sanitized through `strings.Map()` — only alphanumeric, dots, dashes, underscores allowed; all other chars replaced with `_`. |
 | U16 | ~~newImg.RepoTags[0] index-out-of-bounds~~ DONE | updater/main.go:775 | Added bounds check on `newImg.RepoTags` — falls back to `"(untagged)"` if empty. |
 | U17 | ~~io.ReadAll on container logs unbounded~~ DONE | updater/main.go:892 | Changed to `io.ReadAll(io.LimitReader(reader, 1<<20))` — 1MB limit on captured failure logs. |
@@ -398,7 +398,7 @@
 | U23 | performHASyncPush is a stub | update_cluster.go:568-574 | `performHASyncPush()` just sleeps 10s and returns true. It doesn't actually verify the sync succeeded. This is documented but should be flagged as incomplete. |
 | ~~U24~~ | ~~Docker Compose updater port exposed to all interfaces~~ DONE | docker-compose.yml, docker-compose.ha.yml | Changed all updater port bindings to `"127.0.0.1:7123:7123"` (localhost only). Applied to updater, dp-updater. |
 | ~~U25~~ | ~~Missing security_opt in compose~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `security_opt: ["no-new-privileges:true"]` and `cap_drop: [ALL]` to all updater services. |
-| U26 | SSE reconnection not implemented in UI | static/index.html (updates panel) | The update progress UI connects once to the SSE stream. If the connection drops mid-update (network blip), there's no automatic reconnection with state resume from `/api/update/session`. The CP overlay handles the full-restart case but not transient disconnects. |
+| ~~U26~~ | ~~SSE reconnection not implemented in UI~~ DONE | static/index.html (updates panel) | On connection loss, retries 3 times (2s/4s/6s backoff) polling `/api/update/session` for state resume before falling back to CP updating overlay. |
 
 ### 8.5 Compose & Dockerfile
 

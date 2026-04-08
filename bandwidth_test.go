@@ -234,21 +234,23 @@ func TestBandwidthManager_AllowBytes(t *testing.T) {
 	}
 
 	// Add policy with 0 rate (unlimited) — no limiter created.
-	_, _ = m.Add(BandwidthPolicy{Name: "unlimited", MaxBytesPerSec: 0})
+	_, _ = m.Add(BandwidthPolicy{Name: "unlimited", MaxBytesPerSec: 0, Priority: 1})
 	if !m.AllowBytes("unlimited", 999999) {
 		t.Fatal("AllowBytes for unlimited policy should return true")
 	}
 
-	// Add policy with a real limit.
-	_, _ = m.Add(BandwidthPolicy{Name: "limited", MaxBytesPerSec: 100})
-	if !m.AllowBytes("limited", 50) {
-		t.Fatal("AllowBytes(50) should succeed within 100 token bucket")
+	// Add policy with a small rate. Drain bucket fully, then request more
+	// than could refill in the few microseconds between calls.
+	_, err := m.Add(BandwidthPolicy{Name: "limited", MaxBytesPerSec: 10, Priority: 2})
+	if err != nil {
+		t.Fatalf("Add limited policy failed: %v", err)
 	}
-	if !m.AllowBytes("limited", 50) {
-		t.Fatal("AllowBytes(50) should succeed — 50 remaining")
+	if !m.AllowBytes("limited", 10) {
+		t.Fatal("AllowBytes(10) should succeed — bucket starts full at 10")
 	}
-	if m.AllowBytes("limited", 1) {
-		t.Fatal("AllowBytes(1) should fail — bucket empty")
+	// Even if ~1ms elapses at 10 B/s, that's ~0.01 tokens — not enough for 5.
+	if m.AllowBytes("limited", 5) {
+		t.Fatal("AllowBytes(5) should fail — bucket just drained, refill too slow")
 	}
 }
 

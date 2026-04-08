@@ -7680,8 +7680,32 @@ async function updateApply() {
       }
     }
   } catch(e) {
-    // Connection lost — CP container likely restarting. Show overlay.
-    showCPUpdatingOverlay();
+    // U26: Connection lost — attempt SSE reconnection before showing overlay.
+    let reconnected = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      try {
+        const sessionResp = await fetch(BASE + '/api/update/session', { credentials: 'include' });
+        if (sessionResp.ok) {
+          const session = await sessionResp.json();
+          if (session.status === 'complete') {
+            toast('Update complete!', 'success');
+            loadUpdates();
+            reconnected = true;
+            break;
+          } else if (session.status === 'rolled_back' || session.status === 'error') {
+            toast('Update failed: ' + (session.detail || 'unknown'), 'error');
+            reconnected = true;
+            break;
+          }
+          // Still in progress — continue retry loop.
+          progressStep.textContent = 'Reconnecting... (' + session.status + ')';
+        }
+      } catch(_) { /* server still down */ }
+    }
+    if (!reconnected) {
+      showCPUpdatingOverlay();
+    }
   }
 }
 

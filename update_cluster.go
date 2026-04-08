@@ -36,10 +36,13 @@ type ClusterUpdateState struct {
 	StartedAt   time.Time                     `json:"started_at"`
 	CompletedAt time.Time                     `json:"completed_at,omitempty"`
 	Nodes       map[string]*NodeUpdateStatus  `json:"nodes"`
-	Phase       string                        `json:"phase"` // "updating_dps", "updating_cp", "complete", "failed", "halted", "cp_rolled_back"
+	Phase       string                        `json:"phase"` // "canary", "canary_soak", "updating_dps", "updating_cp", "complete", "failed", "halted", "cp_rolled_back", "auto_rollback"
 	ErrorBudget ErrorBudgetConfig             `json:"error_budget"`
 	Failures    int                           `json:"failures"`
 	ConsecFails int                           `json:"consec_fails"`
+	CanaryCount int                           `json:"canary_count,omitempty"` // F6: number of canary nodes (0 = skip canary)
+	CanarySoak  int                           `json:"canary_soak_s,omitempty"` // F6: soak period seconds after canary phase
+	AutoRollback bool                         `json:"auto_rollback,omitempty"` // F8: auto-rollback on health breach
 }
 
 // NodeUpdateStatus tracks per-node update progress.
@@ -285,11 +288,16 @@ func startClusterUpdate(targetTag, initiator string, budget ErrorBudgetConfig) e
 	clusterUpdateState.PreviousTag = version
 	clusterUpdateState.Initiator = initiator
 	clusterUpdateState.StartedAt = time.Now()
-	clusterUpdateState.Phase = "updating_dps"
 	clusterUpdateState.ErrorBudget = budget
 	clusterUpdateState.Failures = 0
 	clusterUpdateState.ConsecFails = 0
 	clusterUpdateState.Nodes = make(map[string]*NodeUpdateStatus, len(nodes))
+	// F6: Set canary phase if canary count > 0.
+	if clusterUpdateState.CanaryCount > 0 {
+		clusterUpdateState.Phase = "canary"
+	} else {
+		clusterUpdateState.Phase = "updating_dps"
+	}
 
 	for _, n := range nodes {
 		clusterUpdateState.Nodes[n.NodeID] = &NodeUpdateStatus{
@@ -320,46 +328,69 @@ func runClusterUpdate() {
 	nodes := globalClusterStore.ListNodes()
 	totalNodes := len(nodes)
 
-	for _, node := range nodes {
-		// Check error budget.
-		clusterUpdateState.mu.Lock()
-		if clusterUpdateState.ConsecFails >= clusterUpdateState.ErrorBudget.MaxConsecutive {
-			clusterUpdateState.Phase = "halted"
-			clusterUpdateState.mu.Unlock()
-			logger.Printf("cluster update HALTED: %d consecutive failures", clusterUpdateState.ConsecFails)
-			fireAlert("cluster_update_halted", AlertPayload{
-				Event:  "cluster_update_halted",
-				Detail: fmt.Sprintf("halted after %d consecutive failures", clusterUpdateState.ConsecFails),
-			})
-			return
-		}
-		if totalNodes > 0 {
-			failPct := (clusterUpdateState.Failures * 100) / totalNodes
-			if failPct >= clusterUpdateState.ErrorBudget.MaxPercent {
-				clusterUpdateState.Phase = "halted"
-				clusterUpdateState.mu.Unlock()
-				logger.Printf("cluster update HALTED: %d%% failure rate", failPct)
-				fireAlert("cluster_update_halted", AlertPayload{
-					Event:  "cluster_update_halted",
-					Detail: fmt.Sprintf("halted: %d%% failure rate exceeds %d%% budget", failPct, clusterUpdateState.ErrorBudget.MaxPercent),
-				})
-				return
-			}
-		}
-		targetTag := clusterUpdateState.TargetTag
-		clusterUpdateState.mu.Unlock()
+	// F6: Canary deployment — split nodes into canary batch and remainder.
+	clusterUpdateState.mu.Lock()
+	canaryCount := clusterUpdateState.CanaryCount
+	canarySoakSec := clusterUpdateState.CanarySoak
+	autoRollback := clusterUpdateState.AutoRollback
+	clusterUpdateState.mu.Unlock()
 
-		success := updateSingleNode(node.NodeID, targetTag)
+	canaryNodes := nodes
+	var remainingNodes []EnrolledNode
+	if canaryCount > 0 && canaryCount < len(nodes) {
+		canaryNodes = nodes[:canaryCount]
+		remainingNodes = nodes[canaryCount:]
+	} else {
+		canaryCount = 0 // no canary phase
+	}
 
-		clusterUpdateState.mu.Lock()
-		if success {
-			clusterUpdateState.ConsecFails = 0
-		} else {
-			clusterUpdateState.Failures++
-			clusterUpdateState.ConsecFails++
+	// Update canary nodes (or all nodes if no canary).
+	if !updateNodeBatch(canaryNodes, totalNodes, autoRollback) {
+		return // halted or auto-rolled back
+	}
+
+	// F6: Canary soak period — wait and verify health.
+	if canaryCount > 0 && len(remainingNodes) > 0 {
+		soakDur := time.Duration(canarySoakSec) * time.Second
+		if soakDur < 30*time.Second {
+			soakDur = 30 * time.Second
 		}
+		clusterUpdateState.mu.Lock()
+		clusterUpdateState.Phase = "canary_soak"
 		clusterUpdateState.mu.Unlock()
 		clusterUpdateState.persist()
+
+		logger.Printf("cluster update: canary soak period (%s) — monitoring %d canary nodes",
+			soakDur, len(canaryNodes))
+		time.Sleep(soakDur)
+
+		// F8: After soak, verify canary nodes are still healthy.
+		clusterUpdateState.mu.Lock()
+		canaryFails := clusterUpdateState.Failures
+		clusterUpdateState.mu.Unlock()
+		if canaryFails > 0 {
+			if autoRollback {
+				triggerAutoRollback("canary soak failed: %d failures during soak period", canaryFails)
+			} else {
+				clusterUpdateState.mu.Lock()
+				clusterUpdateState.Phase = "halted"
+				clusterUpdateState.mu.Unlock()
+				clusterUpdateState.persist()
+				logger.Printf("cluster update HALTED: canary soak failed (%d failures)", canaryFails)
+			}
+			return
+		}
+
+		// Canary passed — continue with remaining nodes.
+		clusterUpdateState.mu.Lock()
+		clusterUpdateState.Phase = "updating_dps"
+		clusterUpdateState.mu.Unlock()
+		clusterUpdateState.persist()
+		logger.Printf("cluster update: canary soak passed — proceeding with %d remaining nodes", len(remainingNodes))
+
+		if !updateNodeBatch(remainingNodes, totalNodes, autoRollback) {
+			return
+		}
 	}
 
 	// Phase 2: Update CP.
@@ -585,6 +616,116 @@ func drainSSE(body io.Reader) {
 	}
 }
 
+// updateNodeBatch updates a batch of nodes sequentially, checking the error
+// budget after each. Returns false if the update was halted or auto-rolled back.
+func updateNodeBatch(nodes []EnrolledNode, totalNodes int, autoRollback bool) bool {
+	for i := range nodes {
+		nodeID := nodes[i].NodeID
+		// Check error budget.
+		clusterUpdateState.mu.Lock()
+		if clusterUpdateState.ConsecFails >= clusterUpdateState.ErrorBudget.MaxConsecutive {
+			clusterUpdateState.mu.Unlock()
+			if autoRollback {
+				triggerAutoRollback("%d consecutive failures", clusterUpdateState.ConsecFails)
+			} else {
+				clusterUpdateState.mu.Lock()
+				clusterUpdateState.Phase = "halted"
+				clusterUpdateState.mu.Unlock()
+				clusterUpdateState.persist()
+				logger.Printf("cluster update HALTED: %d consecutive failures", clusterUpdateState.ConsecFails)
+				fireAlert("cluster_update_halted", AlertPayload{
+					Detail: fmt.Sprintf("halted after %d consecutive failures", clusterUpdateState.ConsecFails),
+				})
+			}
+			return false
+		}
+		if totalNodes > 0 {
+			failPct := (clusterUpdateState.Failures * 100) / totalNodes
+			if failPct >= clusterUpdateState.ErrorBudget.MaxPercent {
+				clusterUpdateState.mu.Unlock()
+				if autoRollback {
+					triggerAutoRollback("%d%% failure rate exceeds %d%% budget", failPct, clusterUpdateState.ErrorBudget.MaxPercent)
+				} else {
+					clusterUpdateState.mu.Lock()
+					clusterUpdateState.Phase = "halted"
+					clusterUpdateState.mu.Unlock()
+					clusterUpdateState.persist()
+					logger.Printf("cluster update HALTED: %d%% failure rate", failPct)
+					fireAlert("cluster_update_halted", AlertPayload{
+						Detail: fmt.Sprintf("halted: %d%% failure rate exceeds %d%% budget", failPct, clusterUpdateState.ErrorBudget.MaxPercent),
+					})
+				}
+				return false
+			}
+		}
+		targetTag := clusterUpdateState.TargetTag
+		clusterUpdateState.mu.Unlock()
+
+		success := updateSingleNode(nodeID, targetTag)
+
+		clusterUpdateState.mu.Lock()
+		if success {
+			clusterUpdateState.ConsecFails = 0
+		} else {
+			clusterUpdateState.Failures++
+			clusterUpdateState.ConsecFails++
+		}
+		clusterUpdateState.mu.Unlock()
+		clusterUpdateState.persist()
+	}
+	return true
+}
+
+// triggerAutoRollback marks the update as auto-rolled-back and fires an alert (F8).
+func triggerAutoRollback(reasonFmt string, args ...any) {
+	reason := fmt.Sprintf(reasonFmt, args...)
+	clusterUpdateState.mu.Lock()
+	clusterUpdateState.Phase = "auto_rollback"
+	previousTag := clusterUpdateState.PreviousTag
+	clusterUpdateState.mu.Unlock()
+	clusterUpdateState.persist()
+
+	logger.Printf("cluster update AUTO-ROLLBACK: %s — reverting to %s",
+		strings.ReplaceAll(reason, "\n", ""), sanitizeLog(previousTag))
+	fireAlert("cluster_update_halted", AlertPayload{
+		Detail: fmt.Sprintf("auto-rollback triggered: %s — reverting to %s", reason, previousTag),
+	})
+
+	// Attempt to rollback updated nodes to previous tag.
+	clusterUpdateState.mu.Lock()
+	for _, ns := range clusterUpdateState.Nodes {
+		if ns.Status == "complete" {
+			ns.Status = "rolling_back"
+		}
+	}
+	clusterUpdateState.mu.Unlock()
+	clusterUpdateState.persist()
+
+	// Send rollback to nodes that were successfully updated.
+	clusterUpdateState.mu.Lock()
+	rollbackNodes := make([]string, 0)
+	for id, ns := range clusterUpdateState.Nodes {
+		if ns.Status == "rolling_back" {
+			rollbackNodes = append(rollbackNodes, id)
+		}
+	}
+	clusterUpdateState.mu.Unlock()
+
+	for _, nodeID := range rollbackNodes {
+		ok := updateSingleNode(nodeID, previousTag)
+		clusterUpdateState.mu.Lock()
+		if ns, exists := clusterUpdateState.Nodes[nodeID]; exists {
+			if ok {
+				ns.Status = "rolled_back"
+			} else {
+				ns.Status = "rollback_failed"
+			}
+		}
+		clusterUpdateState.mu.Unlock()
+	}
+	clusterUpdateState.persist()
+}
+
 func updateSingleNode(nodeID, targetTag string) bool {
 	start := time.Now()
 
@@ -773,6 +914,9 @@ func apiClusterUpdate(w http.ResponseWriter, r *http.Request) {
 		TargetTag      string `json:"target_tag"`
 		MaxConsecutive int    `json:"max_consecutive"`
 		MaxPercent     int    `json:"max_percent"`
+		CanaryCount    int    `json:"canary_count"`     // F6: number of canary nodes (0 = skip)
+		CanarySoakSec  int    `json:"canary_soak_s"`    // F6: soak period in seconds (min 30)
+		AutoRollback   bool   `json:"auto_rollback"`    // F8: auto-rollback on health breach
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -810,6 +954,11 @@ func apiClusterUpdate(w http.ResponseWriter, r *http.Request) {
 		MaxConsecutive: req.MaxConsecutive,
 		MaxPercent:     req.MaxPercent,
 	}
+
+	// F6/F8: Set canary and auto-rollback params before starting.
+	clusterUpdateState.CanaryCount = req.CanaryCount
+	clusterUpdateState.CanarySoak = req.CanarySoakSec
+	clusterUpdateState.AutoRollback = req.AutoRollback
 
 	if err := startClusterUpdate(req.TargetTag, actor, budget); err != nil {
 		w.Header().Set("Content-Type", "application/json")
