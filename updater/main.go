@@ -694,16 +694,37 @@ func getCurrentTag(cli *client.Client) string {
 }
 
 // fetchRegistryTags queries the OCI distribution API for available tags.
+// Handles the Docker registry v2 OAuth2 token exchange (required by ghcr.io
+// even for public repositories).
 func fetchRegistryTags() ([]string, error) {
-	url := "https://" + strings.SplitN(registry, "/", 2)[0] + "/v2/" + strings.SplitN(registry, "/", 2)[1] + "/tags/list"
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	parts := strings.SplitN(registry, "/", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid registry format: %s", registry)
+	}
+	host, repo := parts[0], parts[1]
+	tagsURL := "https://" + host + "/v2/" + repo + "/tags/list"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+
+	// If explicit auth is configured, try it directly first.
+	token := registryAuth
+	if token == "" {
+		// Obtain a bearer token via the registry's token endpoint.
+		// Step 1: Probe /v2/ to get the Www-Authenticate challenge.
+		var err error
+		token, err = fetchRegistryToken(ctx, host, repo)
+		if err != nil {
+			return nil, fmt.Errorf("registry auth: %w", err)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	if registryAuth != "" {
-		req.Header.Set("Authorization", "Bearer "+registryAuth)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -720,6 +741,84 @@ func fetchRegistryTags() ([]string, error) {
 		return nil, err
 	}
 	return result.Tags, nil
+}
+
+// fetchRegistryToken obtains a bearer token from a Docker v2 registry.
+// It probes /v2/ to discover the token endpoint from the Www-Authenticate
+// header, then requests a pull-scoped token for the given repository.
+func fetchRegistryToken(ctx context.Context, host, repo string) (string, error) {
+	// Probe /v2/ to get the auth challenge.
+	probeURL := "https://" + host + "/v2/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		// No auth required — unusual but handle gracefully.
+		return "", nil
+	}
+
+	// Parse Www-Authenticate: Bearer realm="...",service="...",scope="..."
+	authHeader := resp.Header.Get("Www-Authenticate")
+	if authHeader == "" {
+		return "", fmt.Errorf("no Www-Authenticate header from %s", host)
+	}
+
+	realm := extractAuthParam(authHeader, "realm")
+	service := extractAuthParam(authHeader, "service")
+	if realm == "" {
+		return "", fmt.Errorf("no realm in Www-Authenticate: %s", authHeader)
+	}
+
+	// Request a token with pull scope for our repository.
+	tokenURL := realm + "?service=" + service + "&scope=repository:" + repo + ":pull"
+	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodGet, tokenURL, nil)
+	if err != nil {
+		return "", err
+	}
+	tokenResp, err := http.DefaultClient.Do(tokenReq)
+	if err != nil {
+		return "", fmt.Errorf("token request: %w", err)
+	}
+	defer tokenResp.Body.Close()
+
+	if tokenResp.StatusCode != 200 {
+		return "", fmt.Errorf("token endpoint returned %d", tokenResp.StatusCode)
+	}
+
+	var tokenResult struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"` // some registries use this field
+	}
+	if err := json.NewDecoder(tokenResp.Body).Decode(&tokenResult); err != nil {
+		return "", fmt.Errorf("token decode: %w", err)
+	}
+	if tokenResult.Token != "" {
+		return tokenResult.Token, nil
+	}
+	return tokenResult.AccessToken, nil
+}
+
+// extractAuthParam extracts a parameter value from a Www-Authenticate header.
+// Example: Bearer realm="https://ghcr.io/token",service="ghcr.io"
+func extractAuthParam(header, param string) string {
+	key := param + "=\""
+	idx := strings.Index(header, key)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(key)
+	end := strings.Index(header[start:], "\"")
+	if end < 0 {
+		return ""
+	}
+	return header[start : start+end]
 }
 
 // semver regex: v1.2.3 or 1.2.3
