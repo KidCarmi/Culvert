@@ -97,6 +97,19 @@ nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
 .dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .dot.gray  { background: var(--muted); }
 .status-label { color: var(--muted); }
+/* ─── Utility classes (extracted from inline styles) ───────────────────── */
+.w-full        { width: 100%; }
+.text-muted    { color: var(--muted); }
+.text-sm-muted { font-size: .8rem; color: var(--muted); }
+.d-none        { display: none; }
+.muted-light   { color: var(--muted); font-weight: 400; }
+.hint          { font-size: .8rem; color: var(--muted); margin-bottom: 14px; }
+.text-xs-muted { font-size: .75rem; color: var(--muted); }
+.text-right    { text-align: right; }
+.text-accent   { color: var(--accent); }
+.text-red      { color: var(--red); }
+.mono-value    { font-size: .85rem; font-weight: 600; font-family: monospace; }
+.flex-between  { display: flex; justify-content: space-between; align-items: center; }
 /* ─── Mobile sidebar ───────────────────────────────────────────────────── */
 #sidebar-toggle { display: none; background: var(--surface); border: 1px solid var(--border);
   color: var(--text); padding: 6px 10px; border-radius: 6px; cursor: pointer;
@@ -541,29 +554,29 @@ tr.dragging  { opacity: .4; }
           </div>
           <div class="panel-body">
             <div style="display:flex;flex-direction:column;gap:14px">
-              <div style="display:flex;justify-content:space-between;align-items:center">
+              <div class="flex-between">
                 <span style="font-size:.8rem;color:var(--muted)">Memory (Alloc)</span>
-                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-mem-alloc">—</span>
+                <span class="mono-value" id="d-mem-alloc">—</span>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center">
+              <div class="flex-between">
                 <span style="font-size:.8rem;color:var(--muted)">Memory (System)</span>
-                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-mem-sys">—</span>
+                <span class="mono-value" id="d-mem-sys">—</span>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center">
+              <div class="flex-between">
                 <span style="font-size:.8rem;color:var(--muted)">Goroutines</span>
-                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-goroutines">—</span>
+                <span class="mono-value" id="d-goroutines">—</span>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center">
+              <div class="flex-between">
                 <span style="font-size:.8rem;color:var(--muted)">GC Cycles</span>
-                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-gc">—</span>
+                <span class="mono-value" id="d-gc">—</span>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center">
+              <div class="flex-between">
                 <span style="font-size:.8rem;color:var(--muted)">SSE Clients</span>
-                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-sse">—</span>
+                <span class="mono-value" id="d-sse">—</span>
               </div>
-              <div style="display:flex;justify-content:space-between;align-items:center">
+              <div class="flex-between">
                 <span style="font-size:.8rem;color:var(--muted)">Blocklist Entries</span>
-                <span style="font-size:.85rem;font-weight:600;font-family:monospace" id="d-bl-size">—</span>
+                <span class="mono-value" id="d-bl-size">—</span>
               </div>
             </div>
           </div>
@@ -579,7 +592,7 @@ tr.dragging  { opacity: .4; }
           </div>
           <div class="tbl-wrap">
             <table>
-              <thead><tr><th>Rule</th><th>Action</th><th style="text-align:right">Hits</th></tr></thead>
+              <thead><tr><th>Rule</th><th>Action</th><th class="text-right">Hits</th></tr></thead>
               <tbody id="top-rules-table">
                 <tr><td colspan="3" style="text-align:center;color:var(--muted);padding:20px;font-size:.82rem">No policy rule hits yet</td></tr>
               </tbody>
@@ -593,7 +606,7 @@ tr.dragging  { opacity: .4; }
           </div>
           <div class="tbl-wrap">
             <table>
-              <thead><tr><th>#</th><th>Host</th><th style="text-align:right">Requests</th></tr></thead>
+              <thead><tr><th>#</th><th>Host</th><th class="text-right">Requests</th></tr></thead>
               <tbody id="top-hosts-table"></tbody>
             </table>
           </div>
@@ -1363,7 +1376,7 @@ tr.dragging  { opacity: .4; }
           <span class="panel-title">SSL Inspection Bypass</span>
         </div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Domains listed here bypass TLS interception entirely — traffic passes through opaque. Useful for banking, certificate-pinned apps, and internal CAs.
             Supports exact domains (<code style="font-size:.78rem;background:var(--surface2);padding:1px 5px;border-radius:4px">api.example.com</code>), wildcards (<code style="font-size:.78rem;background:var(--surface2);padding:1px 5px;border-radius:4px">*.example.com</code>), and regex (prefix <code style="font-size:.78rem;background:var(--surface2);padding:1px 5px;border-radius:4px">~</code>).
           </p>
@@ -1508,7 +1521,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">Config Versions</span></div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Every configuration change creates a numbered snapshot. You can compare versions and roll back to any previous state.
           </p>
           <div id="config-versions-list" style="margin-bottom:12px">
@@ -1522,7 +1535,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">🕐 Session Timeout</span></div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             How long admin UI sessions remain valid without activity. Existing sessions are not revoked when this is changed.
           </p>
           <div style="display:flex;gap:10px;align-items:center">
@@ -1538,7 +1551,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">Session Signing Key</span></div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             For multi-node deployments behind a load balancer, all nodes must share the same HMAC signing key so session cookies are valid across nodes.
             Set via <code>CULVERT_SESSION_SECRET</code> env var, <code>session_secret</code> in config YAML, or paste below. Must be 64+ hex characters (32 bytes).
           </p>
@@ -1555,7 +1568,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">Admin Panel IP Restriction</span></div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Restrict access to this admin panel to specific IP addresses or CIDR ranges.<br>
             <strong style="color:var(--red)">Warning:</strong> Adding your own IP before applying is strongly recommended to avoid locking yourself out. Leave empty to allow all IPs.
           </p>
@@ -1580,7 +1593,7 @@ Firefox (all platforms):
               <div id="s-unauth-mode-desc" style="font-size:.75rem;color:var(--muted)">Proxy requires Proxy-Authorization. Clients must authenticate before any traffic is forwarded.</div>
             </div>
           </div>
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             <strong>Credentials Required</strong> — Proxy port demands authentication (407). Use when all clients authenticate via local/LDAP/OIDC credentials.<br>
             <strong>Open / Policy-Only</strong> — Proxy accepts all clients without credentials. Identity is set to <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> for unauthenticated traffic. <strong>Policy rules</strong> control access — create a rule with Auth Source = <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> to allow or block unauthenticated users. Recommended when using a PAC file with PBAC.
           </p>
@@ -1595,7 +1608,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">📡 Syslog / SIEM Forwarding</span></div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Forward all log lines and audit events to a remote syslog server.<br>
             Compatible with Splunk, Elastic, QRadar, rsyslog, syslog-ng.
           </p>
@@ -1619,7 +1632,7 @@ Firefox (all platforms):
           <button class="btn sm" onclick="openAddWebhookModal()">+ Add Webhook</button>
         </div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Receive real-time push notifications when threats are detected, policies block traffic, or auth lockouts occur.<br>
             Supports any HTTP endpoint (Slack, Teams, PagerDuty, custom).
           </p>
@@ -1637,7 +1650,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">GeoIP Database</span></div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             MaxMind GeoLite2-Country database for country-level policy rules and traffic analytics.
             Configure via <code>-geoip-db</code> flag or <code>proxy.geoip_db</code> in config YAML.
           </p>
@@ -1658,7 +1671,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">Logger Configuration</span></div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Log output settings. Changes require a restart to take effect.
           </p>
           <div style="display:flex;gap:16px;flex-wrap:wrap">
@@ -1682,7 +1695,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">Prometheus Metrics</span></div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Prometheus-compatible <code>/metrics</code> endpoint served on the proxy port.
             Optionally protect with a Bearer token.
           </p>
@@ -1708,7 +1721,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">OpenTelemetry (OTLP) Export</span></div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Push all Culvert metrics to an OpenTelemetry Collector via OTLP/HTTP JSON (every 15s).<br>
             Compatible with Grafana, Datadog, New Relic, Jaeger, and any OTLP-compatible backend.
           </p>
@@ -1732,7 +1745,7 @@ Firefox (all platforms):
           <button class="btn" onclick="openUserModal()">+ Add User</button>
         </div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Manage who can access this dashboard and what they can do.
             <strong>admin</strong> — full access &nbsp;·&nbsp;
             <strong>operator</strong> — manage policy/blocklist/filters &nbsp;·&nbsp;
@@ -2021,7 +2034,7 @@ Firefox (all platforms):
                 <th>File Profile</th>
                 <th>SSL</th>
                 <th>Action</th>
-                <th style="text-align:right">Hits</th>
+                <th class="text-right">Hits</th>
                 <th></th>
               </tr>
             </thead>
@@ -2570,7 +2583,7 @@ Firefox (all platforms):
           <button class="btn sm" onclick="showAddGroupModal()">+ Add Group</button>
         </div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Group nodes by labels (e.g. region, tier). Groups enable geo-aware policies and bandwidth limits.
             Nodes are auto-tagged with <code>geo:country</code> when GeoIP is enabled.
           </p>
@@ -2614,7 +2627,7 @@ Firefox (all platforms):
           <button class="btn sm" onclick="showAddBandwidthModal()">+ Add Policy</button>
         </div>
         <div class="panel-body">
-          <p style="font-size:.8rem;color:var(--muted);margin-bottom:14px">
+          <p class="hint">
             Set per-group bandwidth limits using token bucket rate limiting. Higher priority policies take precedence.
           </p>
           <div id="bandwidth-policies-list">
@@ -3285,7 +3298,7 @@ async function deleteUser(username) {
     await api('/api/auth/users?username=' + encodeURIComponent(username), {method:'DELETE'});
     fetchUsers();
   } catch (err) {
-    alert('Delete failed: ' + err.message);
+    toast('Delete failed: ' + err.message, 'error');
   }
 }
 
@@ -3537,14 +3550,14 @@ async function toggleBlocklistMode() {
     });
     applyBlocklistMode(d.mode);
   } catch(err) {
-    alert('Failed: ' + err.message);
+    toast('Failed: ' + err.message, 'error');
   }
 }
 
 // ── Config Backup / Restore ──────────────────────────────────────────────
 async function exportConfig() {
   const r = await fetch('/api/config/export');
-  if (!r.ok) { alert('Export failed: ' + await r.text()); return; }
+  if (!r.ok) { toast('Export failed: ' + await r.text(), 'error'); return; }
   const blob = await r.blob();
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -3611,7 +3624,7 @@ async function loadConfigVersions() {
       const prev = i < versions.length - 1 ? versions[i + 1].version : null;
       const diffBtn = prev ? `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px" onclick="diffConfigVersions(${prev},${v.version})">Diff</button>` : '';
       const rollbackBtn = `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px;color:var(--yellow)" onclick="rollbackConfigVersion(${v.version})">Rollback</button>`;
-      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${esc(v.action)}</td><td>${esc(v.actor)}</td><td style="text-align:right">${diffBtn} ${rollbackBtn}</td></tr>`;
+      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${esc(v.action)}</td><td>${esc(v.actor)}</td><td class="text-right">${diffBtn} ${rollbackBtn}</td></tr>`;
     });
     html += '</tbody></table>';
     el.innerHTML = html;
@@ -3649,11 +3662,11 @@ async function rollbackConfigVersion(version) {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({version})
     });
-    alert(`Rolled back to v${version} successfully.`);
+    toast(`Rolled back to v${version} successfully.`, 'ok');
     loadConfigVersions();
     fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
   } catch (err) {
-    alert('Rollback failed: ' + err.message);
+    toast('Rollback failed: ' + err.message, 'error');
   }
 }
 
@@ -3742,7 +3755,7 @@ async function fetchStats() {
     // Show/hide Getting Started banner
     const gsb = document.getElementById('getting-started-banner');
     if (gsb) gsb.style.display = s.total === 0 ? '' : 'none';
-  } catch(e) {}
+  } catch(e) { console.error(e); }
   // CA cert expiry check
   checkCACertExpiry();
 }
@@ -3762,7 +3775,7 @@ async function checkCACertExpiry() {
     banner.style.color       = isCritical ? '#e74c3c' : '#b8860b';
     banner.textContent       = `⚠ CA certificate expires in ${days} day${days===1?'':'s'} (${info.notAfter}) — renew via the Certificates page`;
     banner.style.display     = 'block';
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 async function fetchTopHosts() {
@@ -3778,19 +3791,19 @@ async function fetchTopHosts() {
     tbody.innerHTML = hosts.map((h, i) => `<tr>
       <td style="color:var(--muted);font-size:.75rem">${i+1}</td>
       <td style="font-family:monospace;font-size:.82rem">${escHtml(h.host)}</td>
-      <td style="text-align:right">
+      <td class="text-right">
         <span style="font-weight:600;margin-right:8px">${fmt(h.count)}</span>
         <span style="display:inline-block;height:6px;width:${Math.round(h.count/max*100)}px;max-width:120px;background:var(--accent);border-radius:3px;vertical-align:middle"></span>
       </td>
     </tr>`).join('');
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 async function fetchTimeseries() {
   try {
     const d = await api('/api/timeseries');
     updateChart(d);
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 function fmt(n) {
@@ -3856,7 +3869,7 @@ async function fetchLogs() {
     const d = await api(url);
     logEntries = d.logs || [];
     renderLogs();
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 function renderLogs() {
@@ -3903,7 +3916,7 @@ async function fetchBlocklist() {
     const d = await api('/api/blocklist');
     blEntries = d.entries || [];
     renderBlocklist();
-  } catch(e) {}
+  } catch(e) { console.error(e); }
   fetchExceptions();
 }
 
@@ -3950,7 +3963,7 @@ function _blRenderPage(append) {
       <td class="host-td">${h}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
       <td style="color:var(--muted);font-size:.75rem">${wild ? 'Wildcard' : 'Exact'}</td>
       <td>${srcBadge}</td>
-      <td style="text-align:right">
+      <td class="text-right">
         <button class="btn danger sm" onclick="removeHost(${jh})">Remove</button>
       </td>
     </tr>`;
@@ -4067,7 +4080,7 @@ async function fetchExceptions() {
   try {
     const d = await api('/api/blocklist/exceptions');
     renderExceptions(d.hosts || []);
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 function renderExceptions(hosts) {
@@ -4083,7 +4096,7 @@ function renderExceptions(hosts) {
     const wild = h.startsWith('*.');
     return `<tr>
       <td class="host-td">${escHtml(h)}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
-      <td style="text-align:right">
+      <td class="text-right">
         <button class="btn danger sm" onclick="removeException(${jh})">Remove</button>
       </td>
     </tr>`;
@@ -4137,7 +4150,7 @@ async function loadSecurity() {
     document.getElementById('sec-rpm').value  = s.rateLimitRPM || 0;
     document.getElementById('sec-rpm-cur').textContent  = s.rateLimitRPM ? s.rateLimitRPM + ' req/min' : '—';
     document.getElementById('sec-rl-status').textContent = s.rateLimitOn ? 'Enabled' : 'Disabled';
-  } catch(e) {}
+  } catch(e) { console.error(e); }
   loadSSLBypass();
   loadSecScanStatus();
   loadTFAllowlist();
@@ -4153,7 +4166,7 @@ function renderSecIPList() {
   }
   tbody.innerHTML = secIPList.map(ip => `<tr>
     <td style="font-family:monospace;font-size:.82rem">${ip}</td>
-    <td style="text-align:right">
+    <td class="text-right">
       <button class="btn danger sm" onclick="secRemoveIP('${ip}')">Remove</button>
     </td>
   </tr>`).join('');
@@ -4235,7 +4248,7 @@ async function loadSSLBypass() {
     const d = await api('/api/ssl-bypass');
     _sslBypassList = d.patterns || [];
     renderSSLBypass();
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 function renderSSLBypass() {
@@ -4249,7 +4262,7 @@ function renderSSLBypass() {
   }
   tbody.innerHTML = _sslBypassList.map(p => `<tr>
     <td style="font-family:monospace;font-size:.82rem">${escHtml(p)}</td>
-    <td style="text-align:right"><button class="btn danger sm" onclick="removeSSLBypass('${escHtml(p)}')">Remove</button></td>
+    <td class="text-right"><button class="btn danger sm" onclick="removeSSLBypass('${escHtml(p)}')">Remove</button></td>
   </tr>`).join('');
 }
 
@@ -4331,7 +4344,7 @@ async function loadSecScanStatus() {
     if (fs) fs.textContent = s.threat_feed_last_sync ? 'Last sync: ' + new Date(s.threat_feed_last_sync).toLocaleTimeString() : '';
     const fb = document.getElementById('sec-feed-blocked');
     if (fb) fb.textContent = s.stat_feed_blocked ? s.stat_feed_blocked + ' blocked' : '';
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 async function syncThreatFeeds() {
@@ -4374,7 +4387,7 @@ async function loadTFAllowlist() {
     const d = await api('/api/security-scan/feeds/domain-allowlist');
     tfAllowlistDomains = d.domains || [];
     renderTFAllowlist();
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 function renderTFAllowlist() {
@@ -4420,7 +4433,7 @@ async function fetchRewrite() {
     const d = await api('/api/rewrite');
     rwRules = d.rules || [];
     renderRewrite();
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 function renderRewrite() {
@@ -4439,7 +4452,7 @@ function renderRewrite() {
       <td style="font-family:monospace;font-size:.82rem">${r.host ? escHtml(r.host) : '<span style="color:var(--muted)">*</span>'}</td>
       <td style="font-size:.78rem">${reqOps || '<span style="color:var(--muted)">—</span>'}</td>
       <td style="font-size:.78rem">${respOps || '<span style="color:var(--muted)">—</span>'}</td>
-      <td style="text-align:right"><button class="btn danger sm" onclick="removeRewriteRule(${r.id})">Remove</button></td>
+      <td class="text-right"><button class="btn danger sm" onclick="removeRewriteRule(${r.id})">Remove</button></td>
     </tr>`;
   }).join('');
 }
@@ -4518,7 +4531,7 @@ async function fetchPolicy() {
       uBadge.textContent = 'updated ' + dt.toLocaleString();
     }
     renderPolicy();
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 function actionBadge(action) {
@@ -4658,12 +4671,12 @@ async function loadSettings() {
     const s = await api('/api/settings');
     document.getElementById('s-user').value = s.user || '';
     renderUnauthModeUI(!!s.unauthMode);
-  } catch(e) {}
+  } catch(e) { console.error(e); }
   // Session timeout
   try {
     const t = await api('/api/session-timeout');
     document.getElementById('s-session-hrs').value = t.hours || 8;
-  } catch(e) {}
+  } catch(e) { console.error(e); }
   // Session signing key
   loadSessionSecret();
   // Syslog
@@ -4678,18 +4691,18 @@ async function loadSettings() {
       el.textContent = '✅ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
       el.style.color = 'var(--green)';
     }
-  } catch(e) {}
+  } catch(e) { console.error(e); }
   // Log level
   try {
     const ll = await api('/api/settings/log-level');
     document.getElementById('s-log-level').value = ll.level || 'INFO';
-  } catch(e) {}
+  } catch(e) { console.error(e); }
   // UI allow IPs
   try {
     const ip = await api('/api/ui-allow-ips');
     _uiAllowIPList = ip.ips || [];
     renderUIAllowIPList();
-  } catch(e) {}
+  } catch(e) { console.error(e); }
   // Blocklist feed
   fetchBlocklistFeed();
   // Alert webhooks
@@ -4905,7 +4918,7 @@ async function loadOTLPConfig() {
     } else {
       el.style.display = 'none';
     }
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 async function saveOTLP() {
@@ -4962,7 +4975,7 @@ async function loadWebhooks() {
         <button class="btn danger sm" onclick="deleteWebhook('${h.id}')">Del</button>
       </td>
     </tr>`).join('');
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 function openAddWebhookModal() {
@@ -4988,7 +5001,7 @@ function editWebhook(id) {
     document.getElementById('wh-enabled').checked = !!h.enabled;
     document.querySelectorAll('.wh-event').forEach(cb => { cb.checked = (h.events||[]).includes(cb.value); });
     document.getElementById('webhook-modal').style.display = 'flex';
-  }).catch(()=>{});
+  }).catch(e => { console.error(e); });
 }
 
 function closeWebhookModal() {
@@ -5045,7 +5058,7 @@ async function fetchBlocklistFeed() {
     } else {
       st.textContent = d.url ? 'Not yet synced' : 'No feed configured';
     }
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 async function saveBlocklistFeed() {
@@ -6231,7 +6244,7 @@ async function saveIdP() {
   const url    = id ? `/api/idp/${id}` : '/api/idp';
   const res = await apiFetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   if (!res.ok) {
-    alert('Error: ' + await res.text());
+    toast('Error: ' + await res.text(), 'error');
     return;
   }
   closeIdPModal();
@@ -6241,7 +6254,7 @@ async function saveIdP() {
 async function deleteIdP(id, name) {
   if (!confirm(`Delete provider "${name}"?`)) return;
   const res = await apiFetch(`/api/idp/${id}`, { method: 'DELETE' });
-  if (!res.ok) { alert('Delete failed: ' + await res.text()); return; }
+  if (!res.ok) { toast('Delete failed: ' + await res.text(), 'error'); return; }
   loadIdPList();
 }
 
@@ -6363,7 +6376,7 @@ async function loadPolicyProviderOptions() {
         ).join('');
       if (curAuth) authSel.value = curAuth;
     }
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 async function loadPolicyGroupOptions() {
@@ -6374,7 +6387,7 @@ async function loadPolicyGroupOptions() {
   try {
     const groups = await api('/api/idp/' + pid + '/groups');
     _policyGroupList = groups || [];
-  } catch(e) {}
+  } catch(e) { console.error(e); }
 }
 
 // ── Group picker: search-as-you-type with chip ────────────────────────────
@@ -7676,7 +7689,7 @@ async function updateApply() {
           if (evt.step === 'complete') { toast('Update complete!', 'success'); loadUpdates(); }
           if (evt.step === 'rolled_back') { toast('Update failed — rolled back', 'error'); }
           if (evt.step === 'error') { toast('Update error: ' + evt.detail, 'error'); }
-        } catch(e) {}
+        } catch(e) { console.error(e); }
       }
     }
   } catch(e) {

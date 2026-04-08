@@ -46,7 +46,7 @@ func (f *tlsErrorFilter) Write(p []byte) (int, error) {
 		return len(p), nil // silently discard
 	}
 	// Forward non-TLS errors to the application logger.
-	logger.Printf("http: %s", strings.TrimSpace(string(p)))
+	logger.Printf("HTTP: %s", strings.TrimSpace(string(p)))
 	return len(p), nil
 }
 
@@ -212,7 +212,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	}
 
 	if certFile != "" && keyFile != "" {
-		logger.Printf("UI TLS  → https://localhost:%d (custom cert)", port)
+		logger.Printf("UITLS: https://localhost:%d (custom cert)", port)
 		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
 			logger.Fatalf("UI TLS error: %v", err)
 		}
@@ -226,7 +226,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 			logger.Printf("TLS self-sign failed (%v), falling back to HTTP", err)
 		} else {
 			srv.TLSConfig = tlsCfg
-			logger.Printf("UI TLS  → https://localhost:%d (self-signed)", port)
+			logger.Printf("UITLS: https://localhost:%d (self-signed)", port)
 			if err := srv.ListenAndServeTLS("", ""); err != nil {
 				logger.Fatalf("UI TLS error: %v", err)
 			}
@@ -234,7 +234,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 		}
 	}
 
-	logger.Printf("UI HTTP → http://localhost:%d", port)
+	logger.Printf("UIHTTP: http://localhost:%d", port)
 	if err := srv.ListenAndServe(); err != nil {
 		logger.Fatalf("UI server error: %v", err)
 	}
@@ -736,7 +736,7 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := cfg.SaveUIUsersFile(); err != nil {
-			logger.Printf("UI users → failed to persist: %v", err)
+			logger.Printf("UIUsers: failed to persist: %v", err)
 		}
 		auditEvent(r, "auth.users.set", body.Username, fmt.Sprintf("role=%s", role))
 		jsonOK(w, map[string]any{"ok": true})
@@ -755,7 +755,7 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := cfg.SaveUIUsersFile(); err != nil {
-			logger.Printf("UI users → failed to persist: %v", err)
+			logger.Printf("UIUsers: failed to persist: %v", err)
 		}
 		auditEvent(r, "auth.users.delete", username, "")
 		w.WriteHeader(http.StatusNoContent)
@@ -833,7 +833,7 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := cfg.SaveUIUsersFile(); err != nil {
-		logger.Printf("UI users → failed to persist: %v", err)
+		logger.Printf("UIUsers: failed to persist: %v", err)
 	}
 	// Auto-login after setup so the user lands directly in the dashboard.
 	_ = setUISessionCookie(w, r, body.User, RoleAdmin)
@@ -932,7 +932,7 @@ func validatePolicyRule(rule PolicyRule) error {
 	}
 	if rule.Schedule != nil && rule.Schedule.Timezone != "" {
 		if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
-			return fmt.Errorf("invalid schedule timezone: %s", rule.Schedule.Timezone)
+			return fmt.Errorf("invalid schedule timezone: %s", strings.ReplaceAll(rule.Schedule.Timezone, "\n", ""))
 		}
 	}
 	return nil
@@ -1798,7 +1798,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// Policy rules — validate each before importing.
 	for _, rule := range b.PolicyRules {
 		if err := validatePolicyRule(rule); err != nil {
-			logger.Printf("config import: skipping rule %q: %v", sanitizeLog(rule.Name), err)
+			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
 			continue
 		}
 		policyStore.Add(rule)
@@ -3155,10 +3155,7 @@ func apiSecScanStatus(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(secScanStatusMap()); err != nil {
-		logger.Printf("apiSecScanStatus: encode error: %v", err)
-	}
+	jsonOK(w, secScanStatusMap())
 }
 
 // POST /api/security-scan/feeds/sync — trigger an immediate threat feed sync.
@@ -3172,15 +3169,12 @@ func apiSecFeedsSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !globalThreatFeed.Enabled() {
-		http.Error(w, `{"error":"threat feeds not enabled"}`, http.StatusServiceUnavailable)
+		http.Error(w, "threat feeds not enabled", http.StatusServiceUnavailable)
 		return
 	}
 	// Run the sync synchronously so the response reflects the updated data.
 	globalThreatFeed.Sync()
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(secScanStatusMap()); err != nil {
-		logger.Printf("apiSecFeedsSync: encode error: %v", err)
-	}
+	jsonOK(w, secScanStatusMap())
 }
 
 // GET /api/security-scan/feeds/domain-allowlist — list domains exempt from
@@ -3192,12 +3186,11 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		list := globalThreatFeed.DomainAllowlist()
 		if list == nil {
 			list = []string{}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"domains": list})
+		jsonOK(w, map[string]any{"domains": list})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -3206,13 +3199,12 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 			Domains []string `json:"domains"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
 		globalThreatFeed.SetDomainAllowlist(body.Domains)
-		logger.Printf("threat feed domain allowlist updated (%d entries)", len(body.Domains))
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "count": len(body.Domains)})
+		logger.Printf("ThreatFeed: domain allowlist updated (%d entries)", len(body.Domains))
+		jsonOK(w, map[string]any{"ok": true, "count": len(body.Domains)})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -3233,20 +3225,17 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	globalYARA.mu.RUnlock()
 
 	if dir == "" {
-		http.Error(w, `{"error":"no YARA rules directory configured"}`, http.StatusServiceUnavailable)
+		http.Error(w, "no YARA rules directory configured", http.StatusServiceUnavailable)
 		return
 	}
 	if err := globalYARA.LoadDir(dir); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		http.Error(w, "YARA reload failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+	jsonOK(w, map[string]any{
 		"yara_rules": globalYARA.Count(),
 		"directory":  dir,
-	}); err != nil {
-		logger.Printf("apiSecYARAReload: encode error: %v", err)
-	}
+	})
 }
 
 // GET /api/security-scan/svc — returns scan microservice configuration.

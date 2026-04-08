@@ -255,7 +255,7 @@ func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 	case result := <-ch:
 		return result
 	case <-time.After(scanBodyTimeout):
-		logWarnf("ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout, hash)
+		logWarnf("SecurityScan: ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout, hash)
 		ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"})
 		return &SecurityScanResult{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
 	}
@@ -303,7 +303,7 @@ func (ss *SecurityScanner) scanBodyInner(data []byte, hash string) *SecurityScan
 func safeScanBody(data []byte) (result *SecurityScanResult) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Printf("PANIC in ScanBody recovered: %v", r)
+			logErrorf("SecurityScan: panic in ScanBody recovered: %v", r)
 			result = nil
 		}
 	}()
@@ -318,7 +318,7 @@ func safeScanBody(data []byte) (result *SecurityScanResult) {
 func safeScanBodyWithCT(data []byte, contentType string) (result *SecurityScanResult) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Printf("PANIC in ScanBody recovered: %v", r)
+			logErrorf("SecurityScan: panic in ScanBody recovered: %v", r)
 			result = nil
 		}
 	}()
@@ -333,7 +333,7 @@ func safeScanBodyWithCT(data []byte, contentType string) (result *SecurityScanRe
 func safeDPIScan(data []byte) (pattern string, matched bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Printf("PANIC in DPI Scan recovered: %v", r)
+			logErrorf("SecurityScan: panic in DPI scan recovered: %v", r)
 			pattern = ""
 			matched = false
 		}
@@ -345,7 +345,7 @@ func safeDPIScan(data []byte) (pattern string, matched bool) {
 
 // scanBlock sends a 403 Forbidden response to a plain http.ResponseWriter.
 func scanBlock(w http.ResponseWriter, host, reason, source string) {
-	logger.Printf("SCAN_BLOCKED host=%s source=%s reason=%q", host, source, reason)
+	logger.Printf("SecurityScan: blocked host=%s source=%s reason=%q", host, source, reason)
 	body := fmt.Sprintf("Blocked by %s scan: %s", strings.ToUpper(source), reason)
 	http.Error(w, body, http.StatusForbidden)
 }
@@ -353,7 +353,7 @@ func scanBlock(w http.ResponseWriter, host, reason, source string) {
 // scanBlockConn sends a 403 Forbidden HTTP/1.1 response to a raw connection
 // (used inside SSL-inspect tunnels where http.ResponseWriter is not available).
 func scanBlockConn(dst interface{ Write([]byte) (int, error) }, host, reason, source string) {
-	logger.Printf("SCAN_BLOCKED host=%s source=%s reason=%q", host, source, reason)
+	logger.Printf("SecurityScan: blocked host=%s source=%s reason=%q", host, source, reason)
 	body := fmt.Sprintf("Blocked by %s scan: %s\r\n", strings.ToUpper(source), reason)
 	fmt.Fprintf(dst, //nolint:errcheck
 		"HTTP/1.1 403 Forbidden\r\n"+

@@ -294,7 +294,7 @@ func apiBootstrapScript(w http.ResponseWriter, r *http.Request) {
 		"TokenPath": token,
 	})
 	if err != nil {
-		logger.Printf("bootstrap script template error: %v", err)
+		logger.Printf("Bootstrap: script template error: %v", err)
 	}
 }
 
@@ -340,7 +340,7 @@ func apiBootstrapCompose(w http.ResponseWriter, r *http.Request) {
 		"EnrollURL":    enrollURL,
 	})
 	if err != nil {
-		logger.Printf("bootstrap compose template error: %v", err)
+		logger.Printf("Bootstrap: compose template error: %v", err)
 	}
 }
 

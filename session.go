@@ -47,7 +47,7 @@ func initSessionSecretFromConfig(hexKey string) {
 	}
 	key, err := hex.DecodeString(hexKey)
 	if err != nil || len(key) < 32 {
-		logger.Printf("WARNING: session_secret must be ≥32 bytes hex — ignoring, using random key")
+		logWarnf("Session: session_secret must be ≥32 bytes hex — ignoring, using random key")
 		return
 	}
 	sessionSecret = key
@@ -174,7 +174,7 @@ func (r *revocationList) LoadRevocations() error {
 	}
 	added := r.MergeRevocations(entries)
 	if added > 0 {
-		logger.Printf("Session  → loaded %d revocations from disk", added)
+		logger.Printf("Session: loaded %d revocations from disk", added)
 	}
 	return nil
 }
@@ -196,7 +196,7 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 		if json.Unmarshal(payload, &s) == nil {
 			sessionRevoked.Revoke(b64part, time.Unix(s.Exp, 0))
 			if err := sessionRevoked.SaveRevocations(); err != nil {
-				logger.Printf("Session  → failed to persist revocations: %v", err)
+				logger.Printf("Session: failed to persist revocations: %v", err)
 			}
 		}
 	}

@@ -505,7 +505,7 @@ func (b *Blocklist) AddException(host string) {
 	bare := strings.TrimPrefix(host, "*.")
 	parts := strings.Split(bare, ".")
 	if len(parts) <= 1 || (len(parts) == 2 && strings.HasPrefix(host, "*.")) {
-		logger.Printf("WARN broad blocklist exception added: %q — may exempt many domains", sanitizeLog(host))
+		logWarnf("Blocklist: broad exception added: %q — may exempt many domains", sanitizeLog(host))
 	}
 	b.mu.Lock()
 	b.exceptions[host] = true
@@ -877,7 +877,7 @@ func (c *Config) SetProvider(p AuthProvider) {
 	c.provider = p
 	c.mu.Unlock()
 	if p != nil {
-		logger.Printf("Auth provider → %s", p.Name())
+		logger.Printf("Auth: provider %s", p.Name())
 	}
 }
 
@@ -969,11 +969,11 @@ func (c *Config) SetUnauthMode(enabled bool) {
 	c.unauthMode = enabled
 	c.mu.Unlock()
 	if enabled {
-		logger.Printf("Auth mode → UNAUTH (open proxy, no credentials required)")
+		logger.Printf("Auth: mode UNAUTH (open proxy, no credentials required)")
 	}
 	// Persist so the setting survives restarts.
 	if err := c.SaveUIUsersFile(); err != nil {
-		logger.Printf("warning: failed to persist unauthMode: %v", err)
+		logWarnf("Auth: failed to persist unauthMode: %v", err)
 	}
 }
 

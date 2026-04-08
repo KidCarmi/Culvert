@@ -17,7 +17,7 @@ func startSOCKS5(port int) {
 	if err != nil {
 		logger.Fatalf("SOCKS5 listen error: %v", err)
 	}
-	logger.Printf("SOCKS5  → socks5://localhost:%d", port)
+	logger.Printf("SOCKS5: socks5://localhost:%d", port)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {

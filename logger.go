@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log"
@@ -164,11 +165,16 @@ type jsonLogWriter struct {
 	dst io.Writer
 }
 
-func (j *jsonLogWriter) Write(p []byte) (int, error) {
-	line := strings.TrimRight(string(p), "\n\r")
+// jsonBufPool avoids allocating a new bytes.Buffer for every log line.
+var jsonBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
-	entry := make(map[string]string)
-	entry["time"] = time.Now().UTC().Format(time.RFC3339)
+func (j *jsonLogWriter) Write(p []byte) (int, error) {
+	// Trim trailing newline/CR without allocating a new string.
+	raw := p
+	for len(raw) > 0 && (raw[len(raw)-1] == '\n' || raw[len(raw)-1] == '\r') {
+		raw = raw[:len(raw)-1]
+	}
+	line := string(raw)
 
 	// Extract log level prefix if present (e.g., "DEBUG ...", "WARN ...").
 	level := "INFO"
@@ -179,28 +185,58 @@ func (j *jsonLogWriter) Write(p []byte) (int, error) {
 			break
 		}
 	}
-	entry["level"] = level
+
+	// Build JSON directly into a pooled buffer to avoid map + json.Marshal overhead.
+	buf := jsonBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.WriteString(`{"time":"`)
+	buf.WriteString(time.Now().UTC().Format(time.RFC3339))
+	buf.WriteString(`","level":"`)
+	buf.WriteString(level)
+	buf.WriteString(`","msg":`)
 
 	// Extract structured fields from "{key=val key2=val2}" suffix.
+	var fields string
+	msg := line
 	if idx := strings.LastIndex(line, " {"); idx >= 0 && strings.HasSuffix(line, "}") {
-		fields := line[idx+2 : len(line)-1]
-		msg := line[:idx]
-		entry["msg"] = msg
-		for _, kv := range strings.Fields(fields) {
-			if eqIdx := strings.IndexByte(kv, '='); eqIdx > 0 {
-				entry[kv[:eqIdx]] = kv[eqIdx+1:]
-			}
-		}
-	} else {
-		entry["msg"] = line
+		fields = line[idx+2 : len(line)-1]
+		msg = line[:idx]
 	}
 
-	b, _ := json.Marshal(entry)
-	b = append(b, '\n')
+	// JSON-encode the message value.
+	msgJSON, _ := json.Marshal(msg)
+	buf.Write(msgJSON)
+
+	// Append structured fields as top-level JSON keys.
+	if fields != "" {
+		for fields != "" {
+			// Find next space-separated token.
+			tok := fields
+			if sp := strings.IndexByte(fields, ' '); sp >= 0 {
+				tok = fields[:sp]
+				fields = fields[sp+1:]
+			} else {
+				fields = ""
+			}
+			if eqIdx := strings.IndexByte(tok, '='); eqIdx > 0 {
+				key := tok[:eqIdx]
+				val := tok[eqIdx+1:]
+				buf.WriteString(`,"`)
+				buf.WriteString(key)
+				buf.WriteString(`":`)
+				valJSON, _ := json.Marshal(val)
+				buf.Write(valJSON)
+			}
+		}
+	}
+
+	buf.WriteString("}\n")
 
 	j.mu.Lock()
-	_, err := j.dst.Write(b)
+	_, err := j.dst.Write(buf.Bytes())
 	j.mu.Unlock()
+
+	jsonBufPool.Put(buf)
 	return len(p), err // always return original length so log.Logger doesn't retry
 }
 

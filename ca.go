@@ -563,7 +563,7 @@ func (cm *CertManager) SetKeyProvider(kp KeyProvider) {
 	cm.mu.Lock()
 	cm.keyProvider = kp
 	cm.mu.Unlock()
-	logger.Printf("CA key provider → %s", kp.Name())
+	logger.Printf("CA: key provider %s", kp.Name())
 }
 
 // KeyProviderName returns the name of the active key provider.

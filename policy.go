@@ -445,7 +445,7 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 
 	// Detect policy conflicts after adding the new rule.
 	for _, w := range ps.DetectConflicts() {
-		logger.Printf("WARN policy: %s", sanitizeLog(w))
+		logWarnf("Policy: %s", sanitizeLog(w))
 	}
 	return nr
 }
@@ -646,7 +646,7 @@ func matchSchedule(s *PolicySchedule) bool {
 	loc := time.UTC
 	if s.Timezone != "" {
 		if l, err := time.LoadLocation(s.Timezone); err != nil {
-			logger.Printf("WARN invalid schedule timezone %q, falling back to UTC", sanitizeLog(s.Timezone))
+			logWarnf("Policy: invalid schedule timezone %q, falling back to UTC", sanitizeLog(s.Timezone))
 		} else {
 			loc = l
 		}

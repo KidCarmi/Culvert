@@ -185,7 +185,7 @@ const maxYARAInflight = 50
 // Abandoned goroutines are tracked and capped at maxYARAInflight to prevent leaks.
 func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
 	if yaraInflight.Load() >= maxYARAInflight {
-		logger.Printf("WARN YARA regex skipped: too many in-flight goroutines (%d)", yaraInflight.Load())
+		logWarnf("YARA: regex skipped: too many in-flight goroutines (%d)", yaraInflight.Load())
 		return false
 	}
 	ch := make(chan bool, 1)
@@ -198,7 +198,7 @@ func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration
 	case matched := <-ch:
 		return matched
 	case <-time.After(timeout):
-		logger.Printf("WARN YARA regex timeout after %s on pattern %q (inflight: %d)",
+		logWarnf("YARA: regex timeout after %s on pattern %q (inflight: %d)",
 			timeout, sanitizeLog(re.String()), yaraInflight.Load())
 		return true // S16: fail-closed — treat timeout as suspicious match (Zero Trust)
 	}

@@ -187,7 +187,7 @@
 |---|-------|-----------|----------|
 | P1 | ~~Per-rule Prometheus metrics — unbounded cardinality~~ FALSE POSITIVE — already capped at maxRuleMetrics=200 (metrics.go:17) | metrics.go:15-52 | Medium |
 | P2 | ~~Latency histogram CAS loop contention under high RPS~~ ACCEPTABLE — standard lock-free CAS pattern; hardware CAS is sub-nanosecond; no contention seen in practice | metrics.go:94-101 | Medium |
-| P3 | JSON log writer allocates strings on every Write() — LOW PRIORITY (logger not a bottleneck, ~1μs per call) | logger.go:79-105 | Medium |
+| P3 | ~~JSON log writer allocates strings on every Write()~~ DONE — sync.Pool buffer, direct JSON building eliminates map+marshal overhead | logger.go:167-237 | Medium |
 | P4 | ~~Alert webhook goroutine leak (no worker pool / semaphore)~~ DONE | alerts.go:211 | Medium |
 | P5 | ~~Hash cache O(n) full scan on eviction~~ ACCEPTABLE — 10k max entries; O(n) map scan is ~1ms; min-heap adds complexity without measurable benefit | hashcache.go:111-128 | Medium |
 | P6 | ~~ClamAV semaphore backlog — 96 goroutines blocked at 100 RPS~~ DONE — semaphore now has 5s timeout; returns error instead of blocking indefinitely | clam.go:34-39 | Medium |
@@ -265,11 +265,11 @@
 |---|-------|----------|
 | Q1 | ~~Excessive `//nolint:errcheck` — 11 in update_cluster.go alone~~ DONE — replaced 8 of 11 with proper error handling + logging; remaining 3 are HTTP response encoders (acceptable) | update_cluster.go |
 | Q2 | ~~Deadlock risk: Lock → modify → Unlock → Save pattern~~ DONE (resolved by B14 fix — now uses saveLocked() under held lock) | controlplane.go:684-690 |
-| Q3 | Inconsistent API response format (some `{ok:true}`, some raw data) — LOW PRIORITY (cosmetic, no functional impact) | ui.go (multiple) |
-| Q4 | Inconsistent error handling in JS (empty catch, toast, showErr) — LOW PRIORITY (cosmetic) | static/index.html |
-| Q5 | Inconsistent log prefixes across components — LOW PRIORITY (cosmetic) | logger.go, syslog.go, alerts.go |
+| Q3 | ~~Inconsistent API response format~~ DONE — converted 5 direct json.NewEncoder calls to jsonOK(), removed JSON-in-http.Error anomalies | ui.go (multiple) |
+| Q4 | ~~Inconsistent error handling in JS~~ DONE — replaced 7 alert() with toast(), added console.error to 24 empty catch(e){} blocks | static/index.html |
+| Q5 | ~~Inconsistent log prefixes~~ DONE — converted ~70 arrow separators to colons, PascalCase-ified lowercase prefixes, moved WARN/WARNING to logWarnf() | All Go files |
 | Q6 | ~~Magic numbers without named constants~~ LOW PRIORITY — 1<<20 is idiomatic Go for 1 MiB; events.go:123 has no magic number | ui.go:374, events.go:123 |
-| Q7 | Inline CSS scattered throughout HTML — LOW PRIORITY (cosmetic, SPA convention) | static/index.html (hundreds) |
+| Q7 | ~~Inline CSS scattered throughout HTML~~ DONE — extracted 13 utility classes, replaced ~40 inline style occurrences | static/index.html |
 
 ### 6.2 Missing Tests
 

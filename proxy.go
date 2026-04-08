@@ -744,7 +744,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Printf("WS tunnel established → %q", sanitizeLog(host))
+	logger.Printf("WS: tunnel established %q", sanitizeLog(host))
 
 	// Bridge: drain any buffered bytes from the target first.
 	// B2: Each relay closes its own dst write half after copy completes.
@@ -908,7 +908,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// logged as a warning so it is auditable.
 	var upstreamTLSCfg *tls.Config
 	if tlsSkipVerify {
-		logger.Printf("WARN SSL_INSPECT skipping upstream cert verify for %q (tlsSkipVerify rule)", sanitizeLog(hostOnly))
+		logWarnf("SSLInspect: skipping upstream cert verify for %q (tlsSkipVerify rule)", sanitizeLog(hostOnly))
 		upstreamTLSCfg = &tls.Config{
 			ServerName:         hostOnly,
 			MinVersion:         tls.VersionTLS12,
@@ -918,7 +918,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		systemRoots, err := x509.SystemCertPool()
 		if err != nil {
 			// Fail-closed: empty pool rejects all unknown CAs.
-			logger.Printf("WARN SystemCertPool unavailable, using empty pool (will reject all unknown CAs): %v", err)
+			logWarnf("TLS: SystemCertPool unavailable, using empty pool (will reject all unknown CAs): %v", err)
 			systemRoots = x509.NewCertPool()
 		}
 		upstreamTLSCfg = &tls.Config{
@@ -995,7 +995,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		return
 	}
 
-	logger.Printf("SSL_INSPECT tunnel → %q", sanitizeLog(targetHost))
+	logger.Printf("SSLInspect: tunnel %q", sanitizeLog(targetHost))
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 

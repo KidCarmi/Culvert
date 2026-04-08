@@ -215,7 +215,7 @@ func checkUpdateNow() {
 	globalUpdateInfo.mu.Unlock()
 
 	if result.UpdateAvailable {
-		logger.Printf("update available: %s → %s", version, result.Latest)
+		logger.Printf("Update: available %s -> %s", version, result.Latest)
 	}
 }
 

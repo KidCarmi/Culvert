@@ -69,7 +69,7 @@ func (o *OTLPExporter) Configure(endpoint string, headers map[string]string) {
 	o.cancel = cancel
 	o.mu.Unlock()
 	go o.pushLoop(ctx)
-	logger.Printf("OTLP     → exporting metrics to %s every %s", sanitizeLog(endpoint), o.interval)
+	logger.Printf("OTLP: exporting metrics to %s every %s", sanitizeLog(endpoint), o.interval)
 }
 
 // Stop halts the push loop.
