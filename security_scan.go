@@ -30,10 +30,15 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // maxDecompressBytes limits decompressed data to 64 MB to guard against gzip bombs.
 const maxDecompressBytes = 64 << 20
+
+// scanBodyTimeout caps the total time for all body scanners (ClamAV + YARA).
+// If the combined scan doesn't finish in time, the content is blocked (fail-closed).
+const scanBodyTimeout = 10 * time.Second
 
 // ── Prometheus counters ───────────────────────────────────────────────────────
 
@@ -218,6 +223,7 @@ func decompressForScan(data []byte, contentEncoding string) []byte {
 
 // ScanBody scans a response body with ClamAV and YARA.
 // Results are cached by SHA-256 to avoid redundant work.
+// The entire scan is bounded by scanBodyTimeout (fail-closed: blocks on timeout).
 // Returns nil when the content is clean (or no scanner is enabled).
 func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 	if !ss.BodyScanEnabled() || len(data) == 0 {
@@ -238,6 +244,25 @@ func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 		return nil // cached clean
 	}
 
+	// Run all scanners under a single timeout.
+	// Fail-closed: if the deadline fires, we block the content (Zero Trust).
+	ch := make(chan *SecurityScanResult, 1)
+	go func() {
+		ch <- ss.scanBodyInner(data, hash)
+	}()
+
+	select {
+	case result := <-ch:
+		return result
+	case <-time.After(scanBodyTimeout):
+		logger.Printf("WARN ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout, hash)
+		ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"})
+		return &SecurityScanResult{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
+	}
+}
+
+// scanBodyInner runs ClamAV + YARA sequentially. Called from ScanBody under a timeout.
+func (ss *SecurityScanner) scanBodyInner(data []byte, hash string) *SecurityScanResult {
 	ss.mu.RLock()
 	clam := ss.clam
 	ss.mu.RUnlock()

@@ -52,6 +52,25 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
+// ─── handleReady ──────────────────────────────────────────────────────────────
+
+func TestHandleReady_DefaultOK(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/ready", http.NoBody)
+	handleReady(w, r)
+	// With no ClamAV configured, readiness should pass.
+	if w.Code != http.StatusOK {
+		t.Errorf("handleReady status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"status":"ready"`) {
+		t.Errorf("handleReady body missing status:ready, got %q", body)
+	}
+	if !strings.Contains(body, `"checks"`) {
+		t.Errorf("handleReady body missing checks, got %q", body)
+	}
+}
+
 // ─── matchCountry ─────────────────────────────────────────────────────────────
 
 func TestMatchCountry(t *testing.T) {

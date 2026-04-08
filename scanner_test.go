@@ -258,6 +258,15 @@ func TestIsTextContentType(t *testing.T) {
 	}
 }
 
+// ── ScanBody timeout (F2/F3 fix) ──────────────────────────────────────────────
+
+func TestScanBodyTimeout_FailClosed(t *testing.T) {
+	// Verify the constant exists and is reasonable.
+	if scanBodyTimeout <= 0 || scanBodyTimeout > 30*time.Second {
+		t.Errorf("scanBodyTimeout = %s, want 0 < x <= 30s", scanBodyTimeout)
+	}
+}
+
 // Q8: Test that DPI regex timeout returns true (fail-closed).
 func TestMatchDPIRegexWithTimeout_Normal(t *testing.T) {
 	re := regexp.MustCompile(`evil`)
