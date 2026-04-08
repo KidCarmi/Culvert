@@ -162,12 +162,12 @@ func TestNodeGroupStore_Persistence(t *testing.T) {
 
 	// Create store and add groups.
 	s1 := NewNodeGroupStore(path)
-	s1.Add(NodeGroup{
+	_, _ = s1.Add(NodeGroup{
 		Name:          "persistent-group",
 		LabelSelector: map[string]string{"region": "us-east"},
 		Priority:      5,
 	})
-	s1.Add(NodeGroup{
+	_, _ = s1.Add(NodeGroup{
 		Name:          "another-group",
 		LabelSelector: map[string]string{"tier": "prod"},
 	})

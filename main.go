@@ -52,7 +52,7 @@ var clusterDBPathGlobal string // persisted cluster state path, set at startup
 // dataDir is the base directory for persisted runtime state (node groups, bandwidth policies, etc.).
 var dataDir = "/data"
 
-func main() { //nolint:gocognit,cyclop // main wires everything; refactoring deferred
+func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactoring deferred
 	// ── CLI flags ────────────────────────────────────────────────────────────
 	configPath := flag.String("config", "", "Path to config.yaml (optional)")
 	proxyPort := flag.Int("port", 0, "Proxy port (overrides config)")
