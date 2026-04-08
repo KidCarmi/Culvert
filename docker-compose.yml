@@ -1,4 +1,4 @@
-version: "3.4"
+version: "2.4"
 
 # Culvert — full stack with ClamAV antivirus sidecar
 #
@@ -65,11 +65,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
+    mem_limit: 512m
+    cpus: 0.5
     pids_limit: 64
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
