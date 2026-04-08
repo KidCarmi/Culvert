@@ -94,13 +94,13 @@ func saveConfigVersion(actor, action string) {
 
 	data, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
-		logger.Printf("config versioning: marshal error: %v", err)
+		logger.Printf("ConfigVersion: marshal error: %v", err)
 		return
 	}
 
 	path := filepath.Join(configVersionsDir, fmt.Sprintf("v%d.json", seq))
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		logger.Printf("config versioning: write error: %v", err)
+		logger.Printf("ConfigVersion: write error: %v", err)
 		return
 	}
 

@@ -90,7 +90,7 @@ func (ss *ScanService) Start() error {
 		WriteTimeout: 60 * time.Second,
 	}
 
-	logger.Printf("ScanSvc  → listening on %s", ss.listener.Addr())
+	logger.Printf("ScanSvc: listening on %s", ss.listener.Addr())
 
 	if err := ss.server.Serve(ss.listener); err != nil && err != http.ErrServerClosed {
 		return err

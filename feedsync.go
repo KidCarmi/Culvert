@@ -114,24 +114,24 @@ func (fs *FeedSyncer) Start(ctx context.Context) {
 // bulk write into CommunityDB. The previous DB contents remain readable during
 // the import; BadgerDB's WriteBatch overwrites keys as they arrive.
 func (fs *FeedSyncer) Sync() {
-	logger.Printf("FeedSync → starting UT1 sync from %s", fs.feedURL)
+	logger.Printf("FeedSync: starting UT1 sync from %s", fs.feedURL)
 	start := time.Now()
 
 	entries, err := downloadAndParse(fs.feedURL)
 	if err != nil {
-		logger.Printf("FeedSync → download/parse failed: %v", err)
+		logger.Printf("FeedSync: download/parse failed: %v", err)
 		return
 	}
-	logger.Printf("FeedSync → parsed %d domain entries, writing to BadgerDB…", len(entries))
+	logger.Printf("FeedSync: parsed %d domain entries, writing to BadgerDB…", len(entries))
 
 	if err := fs.db.BulkWrite(entries); err != nil {
-		logger.Printf("FeedSync → bulk write failed: %v", err)
+		logger.Printf("FeedSync: bulk write failed: %v", err)
 		return
 	}
 
 	fs.lastSync.Store(time.Now())
 	fs.totalDomains.Store(int64(len(entries)))
-	logger.Printf("FeedSync → sync complete: %d domains in %s", len(entries), time.Since(start).Round(time.Second))
+	logger.Printf("FeedSync: sync complete: %d domains in %s", len(entries), time.Since(start).Round(time.Second))
 }
 
 // Stats returns (totalDomains, lastSyncTime, syncInterval) for the metrics endpoint.
@@ -198,7 +198,7 @@ func parseTarball(r io.Reader) (map[string]string, error) {
 		if err := parseDomainFile(tr, mappedCat, entries); err != nil {
 			// Log but continue — a single corrupt category file should not
 			// abort the entire import.
-			logger.Printf("FeedSync → skipping %s: %v", hdr.Name, err)
+			logger.Printf("FeedSync: skipping %s: %v", hdr.Name, err)
 		}
 	}
 	return entries, nil

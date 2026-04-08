@@ -174,7 +174,7 @@ func matchDPIRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Durat
 	case matched := <-ch:
 		return matched
 	case <-time.After(timeout):
-		logger.Printf("WARN DPI regex timeout after %s on pattern %q", timeout, sanitizeLog(re.String()))
+		logWarnf("DPI: regex timeout after %s on pattern %q", timeout, sanitizeLog(re.String()))
 		return true // S17: fail-closed — treat timeout as suspicious match (Zero Trust)
 	}
 }

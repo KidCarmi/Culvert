@@ -173,6 +173,6 @@ func InitSyslog(addr, syslogFmt string) error {
 		return err
 	}
 	globalSyslog = sw
-	logger.Printf("Syslog   → forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.format))
+	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.format))
 	return nil
 }

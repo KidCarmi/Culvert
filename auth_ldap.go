@@ -85,7 +85,7 @@ func NewLDAPAuth(cfg LDAPConfig) (*LDAPAuth, error) {
 	}
 	// Warn about plaintext LDAP connections.
 	if strings.HasPrefix(strings.ToLower(cfg.URL), "ldap://") && !cfg.StartTLS {
-		logger.Printf("WARN LDAP: using plaintext ldap:// without StartTLS — credentials will be transmitted unencrypted. Use ldaps:// or set start_tls: true")
+		logWarnf("LDAP: using plaintext ldap:// without StartTLS — credentials will be transmitted unencrypted. Use ldaps:// or set start_tls: true")
 	}
 	return &LDAPAuth{cfg: cfg, ttl: ttl, cache: map[string]*ldapCacheEntry{}}, nil
 }
@@ -147,7 +147,7 @@ func (a *LDAPAuth) verify(username, password string) bool {
 			return false
 		}
 	} else if a.cfg.RequiredGroup != "" {
-		logger.Printf("WARN LDAP anonymous bind with RequiredGroup=%q — group resolution may fail", sanitizeLog(a.cfg.RequiredGroup))
+		logWarnf("LDAP: anonymous bind with RequiredGroup=%q — group resolution may fail", sanitizeLog(a.cfg.RequiredGroup))
 	}
 
 	filter := fmt.Sprintf(a.cfg.UserFilter, ldap.EscapeFilter(username))

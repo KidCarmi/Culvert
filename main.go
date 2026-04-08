@@ -168,9 +168,9 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if *uiUsersFile != "" {
 		cfg.SetUIUsersFile(*uiUsersFile)
 		if err := cfg.LoadUIUsersFile(); err != nil {
-			logger.Printf("UI users → failed to load %s: %v", *uiUsersFile, err)
+			logger.Printf("UIUsers: failed to load %s: %v", *uiUsersFile, err)
 		} else if cfg.AuthEnabled() {
-			logger.Printf("UI users → loaded from %s", *uiUsersFile)
+			logger.Printf("UIUsers: loaded from %s", *uiUsersFile)
 		}
 	}
 
@@ -182,7 +182,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if *revocationsFile != "" {
 		revocationFilePath = *revocationsFile
 		if err := sessionRevoked.LoadRevocations(); err != nil {
-			logger.Printf("Session  → failed to load revocations: %v", err)
+			logger.Printf("Session: failed to load revocations: %v", err)
 		}
 	}
 
@@ -190,7 +190,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	hrs := firstNonZero(*sessionHrs, fc.SessionTimeoutHours)
 	if hrs > 0 {
 		SetSessionTTL(time.Duration(hrs) * time.Hour)
-		logger.Printf("Session  → timeout %dh", hrs)
+		logger.Printf("Session: timeout %dh", hrs)
 	}
 
 	// ── Syslog / SIEM forwarding ──────────────────────────────────────────────
@@ -198,7 +198,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	syslogFmtVal := firstStr(*syslogFormat, fc.SyslogFormat)
 	if syslogVal != "" {
 		if err := InitSyslog(syslogVal, syslogFmtVal); err != nil {
-			logger.Printf("Syslog   → connect failed (%v) — continuing without syslog", err)
+			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
 		} else {
 			syslogConfigured = syslogVal
 		}
@@ -214,9 +214,9 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	auditLogVal := firstStr(*auditLog, fc.AuditLogFile)
 	if auditLogVal != "" {
 		if err := InitAuditLog(auditLogVal); err != nil {
-			logger.Printf("Audit    → log file error (%v) — falling back to in-memory", err)
+			logger.Printf("Audit: log file error (%v) — falling back to in-memory", err)
 		} else {
-			logger.Printf("Audit    → persisting to %s", auditLogVal)
+			logger.Printf("Audit: persisting to %s", auditLogVal)
 		}
 	}
 
@@ -224,12 +224,12 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	geoDBVal := firstStr(*geoIPDB, fc.Proxy.GeoIPDB)
 	if geoDBVal != "" {
 		if err := InitGeoDB(geoDBVal); err != nil {
-			logger.Printf("GeoIP    → failed to open %s (%v) — GeoIP disabled", geoDBVal, err)
+			logger.Printf("GeoIP: failed to open %s (%v) — GeoIP disabled", geoDBVal, err)
 		} else {
-			logger.Printf("GeoIP    → loaded %s", geoDBVal)
+			logger.Printf("GeoIP: loaded %s", geoDBVal)
 		}
 	} else {
-		logger.Printf("GeoIP    → disabled (no -geoip-db set; destCountry rules will be skipped)")
+		logger.Printf("GeoIP: disabled (no -geoip-db set; destCountry rules will be skipped)")
 	}
 
 	// ── Admin UI IP allowlist ─────────────────────────────────────────────────
@@ -242,16 +242,16 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 	if len(uiAllowList) > 0 {
 		if err := SetUIAllowedCIDRs(uiAllowList); err != nil {
-			logger.Printf("UI guard → invalid IP/CIDR (%v) — allowing all IPs", err)
+			logger.Printf("UIGuard: invalid IP/CIDR (%v) — allowing all IPs", err)
 		} else {
-			logger.Printf("UI guard → admin panel restricted to %v", uiAllowList)
+			logger.Printf("UIGuard: admin panel restricted to %v", uiAllowList)
 		}
 	}
 
 	// ── External base URL (for OIDC/SAML callbacks) ──────────────────────────
 	if fc.Proxy.BaseURL != "" {
 		SetProxyBaseURL(fc.Proxy.BaseURL)
-		logger.Printf("BaseURL  → %s", fc.Proxy.BaseURL)
+		logger.Printf("BaseURL: %s", fc.Proxy.BaseURL)
 	}
 
 	// ── Generic IdP Registry ─────────────────────────────────────────────────
@@ -259,7 +259,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		if err := idpRegistry.Load(fc.Proxy.IdPProfilesFile); err != nil {
 			log.Fatalf("IdP profiles load error: %v", err)
 		}
-		logger.Printf("IdP      → loaded from %s (%d profiles)", fc.Proxy.IdPProfilesFile, len(idpRegistry.All()))
+		logger.Printf("IdP: loaded from %s (%d profiles)", fc.Proxy.IdPProfilesFile, len(idpRegistry.All()))
 	}
 
 	// ── PAC file configuration ────────────────────────────────────────────────
@@ -281,7 +281,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			log.Fatalf("LDAP config error: %v", err)
 		}
 		cfg.SetProvider(ldapProvider)
-		logger.Printf("Auth     → LDAP (%s, base=%s)", fc.LDAP.URL, fc.LDAP.BaseDN)
+		logger.Printf("Auth: LDAP (%s, base=%s)", fc.LDAP.URL, fc.LDAP.BaseDN)
 	} else if fc.OIDC.IntrospectionURL != "" {
 		oidcProvider, err := NewOIDCAuth(fc.OIDC)
 		if err != nil {
@@ -290,19 +290,19 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		cfg.SetProvider(oidcProvider)
 		if fc.OIDC.LoginURL != "" {
 			SetOIDCLoginURL(fc.OIDC.LoginURL)
-			logger.Printf("Auth     → OIDC login redirect: %s", fc.OIDC.LoginURL)
+			logger.Printf("Auth: OIDC login redirect: %s", fc.OIDC.LoginURL)
 		}
-		logger.Printf("Auth     → OIDC introspection (%s)", fc.OIDC.IntrospectionURL)
+		logger.Printf("Auth: OIDC introspection (%s)", fc.OIDC.IntrospectionURL)
 	} else if authU != "" {
-		logger.Printf("Auth     → local bcrypt (user=%s)", authU)
+		logger.Printf("Auth: local bcrypt (user=%s)", authU)
 	}
 
 	// ── Metrics token ────────────────────────────────────────────────────────
 	metricsToken = firstStr(*metricsTok, fc.Proxy.MetricsToken)
 	if metricsToken != "" {
-		logger.Printf("Metrics  → /metrics protected by Bearer token")
+		logger.Printf("Metrics: /metrics protected by Bearer token")
 	} else {
-		logger.Printf("Metrics  → /metrics open (set -metrics-token to restrict)")
+		logger.Printf("Metrics: /metrics open (set -metrics-token to restrict)")
 	}
 
 	// ── Control Plane / Data Plane gRPC ──────────────────────────────────────
@@ -314,11 +314,11 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	clusterDBPath := firstStr(*clusterDB, fc.Cluster.StateDB, "cluster.json")
 	clusterDBPathGlobal = clusterDBPath
 	if err := globalClusterStore.Load(clusterDBPath); err != nil {
-		logger.Printf("ClusterDB → load error: %v — starting fresh", err)
+		logger.Printf("ClusterDB: load error: %v — starting fresh", err)
 	} else {
 		nodes := globalClusterStore.ListNodes()
 		if len(nodes) > 0 {
-			logger.Printf("ClusterDB → loaded %d enrolled node(s) from %s", len(nodes), clusterDBPath)
+			logger.Printf("ClusterDB: loaded %d enrolled node(s) from %s", len(nodes), clusterDBPath)
 		}
 	}
 
@@ -379,7 +379,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	// ── Security: Connection limit per IP ────────────────────────────────────
 	if fc.Security.MaxConnsPerIP > 0 {
 		connLimiter.Enable(fc.Security.MaxConnsPerIP)
-		logger.Printf("ConnLimit → max %d connections per IP", fc.Security.MaxConnsPerIP)
+		logger.Printf("ConnLimit: max %d connections per IP", fc.Security.MaxConnsPerIP)
 	}
 
 	// ── Security: IP filter ──────────────────────────────────────────────────
@@ -390,14 +390,14 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 				logger.Printf("IP filter: invalid entry %q: %v", entry, err)
 			}
 		}
-		logger.Printf("IP filter → mode=%s entries=%d", ipModeVal, len(fc.Security.IPList))
+		logger.Printf("IPFilter: mode=%s entries=%d", ipModeVal, len(fc.Security.IPList))
 	}
 
 	// ── Security: Rate limiter ───────────────────────────────────────────────
 	var rlCleanupCancel context.CancelFunc
 	if rlRPM > 0 {
 		rl.Configure(rlRPM, time.Minute)
-		logger.Printf("Rate limit → %d req/min per IP", rlRPM)
+		logger.Printf("RateLimit: %d req/min per IP", rlRPM)
 		var rlCtx context.Context
 		rlCtx, rlCleanupCancel = context.WithCancel(appLifecycleCtx)
 		go func() {
@@ -439,7 +439,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		}
 		blFeedSyncer = newBlocklistSyncer(bl, blFeedURL, blFeedInterval)
 		blFeedSyncer.Start(appLifecycleCtx)
-		logger.Printf("BlocklistFeed → syncing from %s every %s", blFeedURL, blFeedInterval)
+		logger.Printf("BlocklistFeed: syncing from %s every %s", blFeedURL, blFeedInterval)
 	} else {
 		blFeedSyncer = newBlocklistSyncer(bl, "", blFeedDefaultInterval)
 	}
@@ -453,13 +453,13 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		if err := certMgr.LoadOrInitCA(caPathVal, caPassphrase); err != nil {
 			logger.Printf("Warning: Root CA load/init failed (%v) — SSL inspection disabled", err)
 		} else {
-			logger.Printf("SSL CA   → Root CA ready (persisted at %s, encrypted=%v)", caPathVal, caPassphrase != "")
+			logger.Printf("SSLCA: Root CA ready (persisted at %s, encrypted=%v)", caPathVal, caPassphrase != "")
 		}
 	} else {
 		if err := certMgr.InitCA(); err != nil {
 			logger.Printf("Warning: Root CA init failed (%v) — SSL inspection disabled", err)
 		} else {
-			logger.Printf("SSL CA   → Root CA ready in-memory (set -ca-path + %s for persistence)", caPassphraseEnv)
+			logger.Printf("SSLCA: Root CA ready in-memory (set -ca-path + %s for persistence)", caPassphraseEnv)
 		}
 	}
 	// Store CA runtime config for API-driven rotation.
@@ -476,11 +476,11 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		if err := policyStore.Load(polPath); err != nil {
 			logger.Fatalf("Cannot load policy file: %v", err)
 		}
-		logger.Printf("Policy   → %d rule(s) loaded from %s", len(policyStore.List()), polPath)
+		logger.Printf("Policy: %d rule(s) loaded from %s", len(policyStore.List()), polPath)
 	} else {
 		// Use an in-memory store (no persistence until a path is set).
 		policyStore.path = ""
-		logger.Printf("Policy   → in-memory only (set -policy <file> for persistence)")
+		logger.Printf("Policy: in-memory only (set -policy <file> for persistence)")
 	}
 
 	// ── URL Categories ────────────────────────────────────────────────────────
@@ -491,14 +491,14 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if err := catStore.Load(catPath); err != nil {
 		logger.Fatalf("Cannot load URL categories: %v", err)
 	}
-	logger.Printf("URLCat   → %d categories loaded from %s", len(catStore.All()), catPath)
+	logger.Printf("URLCat: %d categories loaded from %s", len(catStore.All()), catPath)
 
 	// ── Community URL category feed (BadgerDB) ────────────────────────────────
 	// When --cat-feed-db is set, open BadgerDB and start the UT1 FeedSyncer.
 	// Layer 1 (catStore) remains the priority; BadgerDB is the fallback.
 	var feedSyncer *FeedSyncer
 	if *catFeedDB == "" { //nolint:nestif // straightforward init block; nesting is necessary
-		logger.Printf("CatFeedDB → disabled (set --cat-feed-db for community feed)")
+		logger.Printf("CatFeedDB: disabled (set --cat-feed-db for community feed)")
 	} else {
 		var dbErr error
 		communityDB, dbErr = openCommunityDB(*catFeedDB)
@@ -513,7 +513,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		}
 		feedSyncer = newFeedSyncer(communityDB, *catFeedURL, syncD)
 		feedSyncer.Start(appLifecycleCtx)
-		logger.Printf("CatFeedDB → BadgerDB at %s, sync every %s", *catFeedDB, syncD)
+		logger.Printf("CatFeedDB: BadgerDB at %s, sync every %s", *catFeedDB, syncD)
 	}
 
 	// ── File block profile ───────────────────────────────────────────────────
@@ -526,7 +526,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			fileBlocker.Add(ext)
 		}
 	}
-	logger.Printf("FileBlock → %d extension(s) in profile", fileBlocker.Count())
+	logger.Printf("FileBlock: %d extension(s) in profile", fileBlocker.Count())
 
 	// ── File extension profiles (for per-rule policy blocking) ────────────────
 	fpPath := firstStr(*fileProfilesFile, fc.Proxy.FileProfilesFile)
@@ -534,9 +534,9 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		fpPath = "fileprofiles.json"
 	}
 	if err := globalProfileStore.Load(fpPath); err != nil {
-		logger.Printf("FileProfiles → load error (%v) — using in-memory defaults", err)
+		logger.Printf("FileProfiles: load error (%v) — using in-memory defaults", err)
 	} else {
-		logger.Printf("FileProfiles → %d profile(s) loaded from %s", len(globalProfileStore.List()), fpPath)
+		logger.Printf("FileProfiles: %d profile(s) loaded from %s", len(globalProfileStore.List()), fpPath)
 	}
 
 	// ── SSL Bypass patterns ───────────────────────────────────────────────────
@@ -553,12 +553,12 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			}
 			sslBypass.Save() // persist seed patterns on first run
 		}
-		logger.Printf("SSL Bypass → %d pattern(s) (file: %s)", len(sslBypass.List()), bypassFilePath)
+		logger.Printf("SSLBypass: %d pattern(s) (file: %s)", len(sslBypass.List()), bypassFilePath)
 	} else if len(fc.Proxy.SSLBypassPatterns) > 0 {
 		if err := sslBypass.Set(fc.Proxy.SSLBypassPatterns); err != nil {
 			logger.Fatalf("SSL bypass pattern error: %v", err)
 		}
-		logger.Printf("SSL Bypass → %d pattern(s) (in-memory; set ssl_bypass_file for dynamic management)", len(sslBypass.List()))
+		logger.Printf("SSLBypass: %d pattern(s) (in-memory; set ssl_bypass_file for dynamic management)", len(sslBypass.List()))
 	}
 
 	// ── DPI Content Scanner ──────────────────────────────────────────────────
@@ -576,18 +576,18 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			}
 			dpiScanner.Save()
 		}
-		logger.Printf("DPI Scan → %d pattern(s) (file: %s)", len(dpiScanner.List()), scanFilePath)
+		logger.Printf("DPIScan: %d pattern(s) (file: %s)", len(dpiScanner.List()), scanFilePath)
 	} else if len(fc.Proxy.ContentScanPatterns) > 0 {
 		if err := dpiScanner.Set(fc.Proxy.ContentScanPatterns); err != nil {
 			logger.Fatalf("Content scan pattern error: %v", err)
 		}
-		logger.Printf("DPI Scan → %d pattern(s) (in-memory; set content_scan_file for persistence)", len(dpiScanner.List()))
+		logger.Printf("DPIScan: %d pattern(s) (in-memory; set content_scan_file for persistence)", len(dpiScanner.List()))
 	}
 
 	// ── Rewrite rules ────────────────────────────────────────────────────────
 	if len(fc.Rewrite) > 0 {
 		rewriter.SetRules(fc.Rewrite)
-		logger.Printf("Rewrite  → %d rule(s) loaded", len(fc.Rewrite))
+		logger.Printf("Rewrite: %d rule(s) loaded", len(fc.Rewrite))
 	}
 
 	// ── Default policy action ────────────────────────────────────────────────
@@ -597,13 +597,13 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if defaultAction == "" {
 		if len(policyStore.List()) == 0 {
 			defaultAction = "allow"
-			logger.Printf("Policy   → no rules configured; defaulting to Allow (passthrough). Add rules and set default_action: deny for Zero Trust.")
+			logger.Printf("Policy: no rules configured; defaulting to Allow (passthrough). Add rules and set default_action: deny for Zero Trust.")
 		} else {
 			defaultAction = "deny"
 		}
 	}
 	setDefaultPolicyAction(defaultAction)
-	logger.Printf("Policy   → default action: %s", defaultAction)
+	logger.Printf("Policy: default action: %s", defaultAction)
 
 	// ── Security scanning: ClamAV + YARA + Threat Feeds ─────────────────────
 	secCfg := fc.SecurityScan
@@ -615,7 +615,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	remoteScanURL := firstStr(*scanSvcURL, secCfg.ScanSvcURL)
 	if remoteScanURL != "" {
 		globalRemoteScanner.Init(remoteScanURL)
-		logger.Printf("ScanSvc  → remote mode, delegating to %s", remoteScanURL)
+		logger.Printf("ScanSvc: remote mode, delegating to %s", remoteScanURL)
 		// Threat feeds still run locally (URL/domain checks are cheap).
 		if feedDB != "" || secCfg.Enabled {
 			syncInterval := 6 * time.Hour
@@ -626,7 +626,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			}
 			globalThreatFeed.Init(feedDB, syncInterval)
 			globalThreatFeed.Start(appLifecycleCtx)
-			logger.Printf("ThreatFeed → sync every %s, db=%q", syncInterval, feedDB)
+			logger.Printf("ThreatFeed: sync every %s, db=%q", syncInterval, feedDB)
 		}
 	} else if secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "" {
 		// Scan result cache TTL.
@@ -659,19 +659,19 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		// YARA rules.
 		if yaraDir != "" {
 			if err := globalYARA.LoadDir(yaraDir); err != nil {
-				logger.Printf("YARA     → load error: %v", err)
+				logger.Printf("YARA: load error: %v", err)
 			} else {
-				logger.Printf("YARA     → %d rule(s) from %s", globalYARA.Count(), yaraDir)
+				logger.Printf("YARA: %d rule(s) from %s", globalYARA.Count(), yaraDir)
 			}
 		} else {
-			logger.Printf("YARA     → disabled (set -yara-rules-dir to enable)")
+			logger.Printf("YARA: disabled (set -yara-rules-dir to enable)")
 		}
 
 		// Threat feeds.
 		if feedDB != "" || secCfg.Enabled {
 			globalThreatFeed.Init(feedDB, syncInterval)
 			globalThreatFeed.Start(appLifecycleCtx)
-			logger.Printf("ThreatFeed → sync every %s, db=%q", syncInterval, feedDB)
+			logger.Printf("ThreatFeed: sync every %s, db=%q", syncInterval, feedDB)
 		}
 	}
 
@@ -681,11 +681,11 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if svcListenAddr != "" {
 		scanSvc = NewScanService(svcListenAddr)
 		if err := scanSvc.Listen(); err != nil {
-			logger.Printf("ScanSvc  → listen error: %v", err)
+			logger.Printf("ScanSvc: listen error: %v", err)
 		} else {
 			go func() {
 				if err := scanSvc.Start(); err != nil {
-					logger.Printf("ScanSvc  → error: %v", err)
+					logger.Printf("ScanSvc: error: %v", err)
 				}
 			}()
 		}
@@ -700,13 +700,13 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if fc.Proxy.ClientCertFile != "" && fc.Proxy.ClientKeyFile != "" {
 		clientCert, err := tls.LoadX509KeyPair(fc.Proxy.ClientCertFile, fc.Proxy.ClientKeyFile)
 		if err != nil {
-			logger.Printf("mTLS     → failed to load client cert: %v", err)
+			logger.Printf("mTLS: failed to load client cert: %v", err)
 		} else {
 			if upstreamTransport.TLSClientConfig == nil {
 				upstreamTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 			}
 			upstreamTransport.TLSClientConfig.Certificates = []tls.Certificate{clientCert}
-			logger.Printf("mTLS     → client cert loaded (%s)", fc.Proxy.ClientCertFile)
+			logger.Printf("mTLS: client cert loaded (%s)", fc.Proxy.ClientCertFile)
 		}
 	}
 
@@ -714,7 +714,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if fc.Proxy.OCSPCheck {
 		globalOCSP.Enable()
 		ConfigureTransportOCSP(upstreamTransport)
-		logger.Printf("OCSP     → upstream certificate revocation checking enabled")
+		logger.Printf("OCSP: upstream certificate revocation checking enabled")
 	}
 
 	// ── SSE live dashboard broadcaster ───────────────────────────────────────
@@ -726,7 +726,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	// ── Docker self-update system ────────────────────────────────────────────
 	if u := firstStr(*updaterURLFlag, fc.Update.UpdaterURL); u != "" {
 		if err := validateUpdaterURL(u); err != nil {
-			logger.Printf("WARNING: invalid updater URL %q: %v — using default", u, err)
+			logWarnf("Update: invalid updater URL %q: %v — using default", u, err)
 		} else {
 			updaterURL = u
 		}
@@ -786,9 +786,9 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		WriteTimeout: 30 * time.Second,
 	}
 
-	logger.Printf("Proxy   → http://localhost:%d", pPort)
+	logger.Printf("Proxy: http://localhost:%d", pPort)
 	if authU != "" {
-		logger.Printf("Auth    → enabled (user: %s)", authU)
+		logger.Printf("Auth: enabled (user: %s)", authU)
 	}
 
 	// ── Graceful shutdown ────────────────────────────────────────────────────
@@ -876,7 +876,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 	if communityDB != nil {
 		if err := communityDB.Close(); err != nil {
-			logger.Printf("CatFeedDB → close error: %v", err)
+			logger.Printf("CatFeedDB: close error: %v", err)
 		}
 	}
 	if logCloser != nil {
@@ -1029,7 +1029,7 @@ func initUpstreamPool(fc *FileConfig) {
 	}
 	upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
 	applyUpstreamProxy()
-	logger.Printf("Upstream → %s", formatUpstreamSummary(fc.Upstream.Proxies))
+	logger.Printf("Upstream: %s", formatUpstreamSummary(fc.Upstream.Proxies))
 
 	// Start health check loop.
 	hi := fc.Upstream.HealthInterval
@@ -1293,7 +1293,7 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 
 	if certFile != "" {
 		if err := checkDPCertExpiry(certFile); err != nil {
-			logger.Printf("WARNING: %v", err)
+			logWarnf("ControlPlane: %v", err)
 		}
 	}
 	dpClient, err := NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile)
@@ -1448,7 +1448,7 @@ func applyHotReload(fc *FileConfig) {
 		if err := bl.Load(fc.Proxy.Blocklist); err != nil {
 			logger.Printf("Reload: blocklist error: %v", err)
 		} else {
-			logger.Printf("Reload: blocklist → %d entries", bl.Count())
+			logger.Printf("Reload: blocklist %d entries", bl.Count())
 		}
 	}
 
@@ -1457,32 +1457,32 @@ func applyHotReload(fc *FileConfig) {
 		if err := policyStore.Load(fc.Proxy.PolicyFile); err != nil {
 			logger.Printf("Reload: policy error: %v", err)
 		} else {
-			logger.Printf("Reload: policy → %d rules", len(policyStore.List()))
+			logger.Printf("Reload: policy %d rules", len(policyStore.List()))
 		}
 	}
 
 	// Default action
 	if fc.DefaultAction != "" {
 		setDefaultPolicyAction(fc.DefaultAction)
-		logger.Printf("Reload: default action → %s", fc.DefaultAction)
+		logger.Printf("Reload: default action %s", fc.DefaultAction)
 	}
 
 	// Rate limit
 	if fc.Security.RateLimit > 0 {
 		rl.Configure(fc.Security.RateLimit, time.Minute)
-		logger.Printf("Reload: rate limit → %d req/min", fc.Security.RateLimit)
+		logger.Printf("Reload: rate limit %d req/min", fc.Security.RateLimit)
 	}
 
 	// IP filter
 	if fc.Security.IPFilterMode != "" {
 		ipf.SetMode(fc.Security.IPFilterMode)
-		logger.Printf("Reload: IP filter mode → %s", fc.Security.IPFilterMode)
+		logger.Printf("Reload: IP filter mode %s", fc.Security.IPFilterMode)
 	}
 
 	// Rewrite rules
 	if len(fc.Rewrite) > 0 {
 		rewriter.SetRules(fc.Rewrite)
-		logger.Printf("Reload: rewrite → %d rules", len(fc.Rewrite))
+		logger.Printf("Reload: rewrite %d rules", len(fc.Rewrite))
 	}
 
 	// Upstream proxy pool
@@ -1495,6 +1495,6 @@ func applyHotReload(fc *FileConfig) {
 		}
 		upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
 		applyUpstreamProxy()
-		logger.Printf("Reload: upstream → %s", formatUpstreamSummary(fc.Upstream.Proxies))
+		logger.Printf("Reload: upstream %s", formatUpstreamSummary(fc.Upstream.Proxies))
 	}
 }

@@ -136,14 +136,14 @@ func (tf *ThreatFeed) Sync() {
 	if err != nil {
 		logger.Printf("ThreatFeed: URLhaus sync failed: %v", err)
 	} else {
-		logger.Printf("ThreatFeed: URLhaus → %d entries", n)
+		logger.Printf("ThreatFeed: URLhaus %d entries", n)
 	}
 
 	n, err = fetchTextFeed(openPhishFeed, "openphish", newURLs, newDomains)
 	if err != nil {
 		logger.Printf("ThreatFeed: OpenPhish sync failed: %v", err)
 	} else {
-		logger.Printf("ThreatFeed: OpenPhish → %d entries", n)
+		logger.Printf("ThreatFeed: OpenPhish %d entries", n)
 	}
 
 	tf.mu.Lock()

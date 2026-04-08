@@ -46,7 +46,7 @@ func (rs *RemoteScanner) Init(baseURL string) {
 		},
 	}
 	rs.enabled = true
-	logger.Printf("ScanSvc  → remote scanner at %s", baseURL)
+	logger.Printf("ScanSvc: remote scanner at %s", baseURL)
 }
 
 // Enabled reports whether remote scanning is configured.

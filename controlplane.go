@@ -839,10 +839,10 @@ func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, 
 		if err != nil {
 			return nil, fmt.Errorf("gRPC TLS: %w", err)
 		}
-		logger.Printf("ControlPlane gRPC → %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
+		logger.Printf("ControlPlane: gRPC %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
 		return grpc.Creds(creds), nil
 	case clusterInsecure:
-		logger.Printf("WARNING: ControlPlane gRPC → %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
+		logWarnf("ControlPlane: gRPC %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
 		return grpc.EmptyServerOption{}, nil
 	default:
 		return nil, fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
@@ -1285,7 +1285,7 @@ func updateDPAddresses(addrs []string) {
 	}
 	old := c.addrs
 	c.addrs = addrs
-	logger.Printf("DataPlane: CP address list updated: %v → %v", old, addrs)
+	logger.Printf("DataPlane: CP address list updated: %v -> %v", old, addrs)
 }
 
 func slicesEqual(a, b []string) bool {

@@ -98,7 +98,7 @@ func NewBandwidthManager(path string) *BandwidthManager {
 	data, err := os.ReadFile(path)
 	if err == nil {
 		if jerr := json.Unmarshal(data, &m.policies); jerr != nil {
-			logger.Printf("bandwidth: failed to parse %s: %v", path, jerr)
+			logger.Printf("Bandwidth: failed to parse %s: %v", path, jerr)
 			m.policies = nil
 		}
 	}
@@ -114,7 +114,7 @@ func NewBandwidthManager(path string) *BandwidthManager {
 		}
 	}
 
-	logger.Printf("bandwidth: loaded %d policies from %s", len(m.policies), path)
+	logger.Printf("Bandwidth: loaded %d policies from %s", len(m.policies), path)
 	return m
 }
 
@@ -194,11 +194,11 @@ func (m *BandwidthManager) Save() {
 func (m *BandwidthManager) saveLocked() {
 	data, err := json.MarshalIndent(m.policies, "", "  ")
 	if err != nil {
-		logger.Printf("bandwidth: marshal error: %v", err)
+		logger.Printf("Bandwidth: marshal error: %v", err)
 		return
 	}
 	if err := os.WriteFile(m.path, data, 0o600); err != nil {
-		logger.Printf("bandwidth: failed to write %s: %v", m.path, err)
+		logger.Printf("Bandwidth: failed to write %s: %v", m.path, err)
 	}
 }
 
@@ -283,7 +283,7 @@ func (m *BandwidthManager) ReplaceAll(policies []BandwidthPolicy) {
 		}
 	}
 	m.saveLocked()
-	logger.Printf("bandwidth: replaced all policies (%d total)", len(m.policies))
+	logger.Printf("Bandwidth: replaced all policies (%d total)", len(m.policies))
 }
 
 // ─── Human-readable rate ────────────────────────────────────────────────────
