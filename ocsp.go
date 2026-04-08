@@ -216,7 +216,7 @@ func (oc *OCSPChecker) queryOCSP(leaf, issuer *x509.Certificate, responderURL st
 // to ensure resumed sessions also undergo revocation checks (gosec G123).
 func ConfigureTransportOCSP(t *http.Transport) {
 	if t.TLSClientConfig == nil {
-		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12} // #nosec G402
+		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
 	}
 	t.TLSClientConfig.VerifyPeerCertificate = globalOCSP.VerifyPeerCertificate // #nosec G123 -- VerifyConnection is set immediately below
 	t.TLSClientConfig.VerifyConnection = func(cs tls.ConnectionState) error {

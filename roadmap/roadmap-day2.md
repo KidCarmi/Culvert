@@ -159,7 +159,7 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| S10 | OCSP transport uses TLS 1.2 minimum (should be 1.3) | ocsp.go:207 | Medium |
+| S10 | ~~OCSP transport uses TLS 1.2 minimum (should be 1.3)~~ DONE | ocsp.go:207 | Medium |
 | S11 | ~~Leaf cert NotBefore backdate too small (1 min, should be 5 min)~~ DONE | ca.go:680 | Low |
 | S12 | No OCSP staple validation (always queries responder) | ocsp.go:109-141 | Low |
 
@@ -189,7 +189,7 @@
 | P1 | Per-rule Prometheus metrics — unbounded cardinality | metrics.go:15-52 | Medium |
 | P2 | Latency histogram CAS loop contention under high RPS | metrics.go:94-101 | Medium |
 | P3 | JSON log writer allocates strings on every Write() | logger.go:79-105 | Medium |
-| P4 | Alert webhook goroutine leak (no worker pool / semaphore) | alerts.go:211 | Medium |
+| P4 | ~~Alert webhook goroutine leak (no worker pool / semaphore)~~ DONE | alerts.go:211 | Medium |
 | P5 | Hash cache O(n) full scan on eviction | hashcache.go:111-128 | Medium |
 | P6 | ClamAV semaphore backlog — 96 goroutines blocked at 100 RPS | clam.go:34-39 | Medium |
 | P7 | Threat feed sync uses 100+ MiB during full download | threatfeed.go:135-156 | Low |
@@ -289,7 +289,7 @@
 |---|-------|----------|
 | Q14 | ~~Deprecated `ValidateToken()` still defined~~ DONE | enrollment.go:270-274 |
 | Q15 | CA import partial failure leaves inconsistent state | enrollment.go:1001-1006 |
-| Q16 | Missing input validation on NodeGroup label keys/values | nodegroup.go:231-244 |
+| Q16 | ~~Missing input validation on NodeGroup label keys/values~~ DONE | nodegroup.go:231-244 |
 | Q17 | Alert webhook no deduplication window | alerts.go:211,254-259 |
 | Q18 | JSON decoder doesn't explicitly close body | ui.go:929-932 |
 

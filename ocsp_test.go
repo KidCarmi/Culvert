@@ -219,8 +219,8 @@ func TestConfigureTransportOCSP(t *testing.T) {
 	if transport.TLSClientConfig.VerifyConnection == nil {
 		t.Fatal("VerifyConnection should be set")
 	}
-	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
-		t.Fatal("MinVersion should be TLS 1.2")
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Fatal("MinVersion should be TLS 1.3")
 	}
 }
 

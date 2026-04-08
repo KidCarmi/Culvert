@@ -32,6 +32,10 @@ import (
 	"time"
 )
 
+// webhookSem bounds concurrent webhook delivery goroutines to prevent
+// unbounded goroutine accumulation under heavy alert load (P4).
+var webhookSem = make(chan struct{}, 10)
+
 // validateWebhookURL checks that a webhook URL is well-formed (http/https with
 // a non-empty host). Unlike validateExternalURL, it does not perform DNS
 // resolution at config time — the SSRF check is deferred to delivery time via
@@ -208,7 +212,16 @@ func fireAlert(event string, payload AlertPayload) {
 		if !matched {
 			continue
 		}
-		go deliverWebhook(h, payload)
+		// Use semaphore to bound concurrent deliveries (P4).
+		select {
+		case webhookSem <- struct{}{}:
+			go func() {
+				defer func() { <-webhookSem }()
+				deliverWebhook(h, payload)
+			}()
+		default:
+			logger.Printf("Alert webhook %q: delivery queue full, skipping", sanitizeLog(h.Name))
+		}
 	}
 }
 

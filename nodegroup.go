@@ -72,6 +72,15 @@ func (s *NodeGroupStore) Add(g NodeGroup) (NodeGroup, error) {
 	if len(g.LabelSelector) == 0 {
 		return NodeGroup{}, fmt.Errorf("label_selector must not be empty")
 	}
+	// Validate label keys/values: DNS-like alphanumeric + dots/dashes/colons/underscores.
+	for k, v := range g.LabelSelector {
+		if k == "" {
+			return NodeGroup{}, fmt.Errorf("label key must not be empty")
+		}
+		if len(k) > 253 || len(v) > 253 {
+			return NodeGroup{}, fmt.Errorf("label key/value must be <= 253 characters")
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, existing := range s.groups {
