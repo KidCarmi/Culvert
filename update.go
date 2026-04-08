@@ -114,8 +114,8 @@ func ensureUpdaterToken() {
 		return
 	}
 	token := hex.EncodeToString(b)
-	// Write with 0644 so the updater sidecar can read it regardless of UID.
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o644); err != nil {
+	// #nosec G306 -- 0640 allows the updater sidecar (same group) to read the shared token
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o640); err != nil {
 		logger.Printf("Update: token write failed: %v", err)
 		return
 	}
