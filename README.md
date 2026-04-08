@@ -81,7 +81,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 ### Admin Web UI
 
-18-panel single-page application with real-time updates:
+21-panel single-page application with real-time updates:
 
 | Panel | Description |
 |-------|-------------|
@@ -98,6 +98,9 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 | SSL / TLS | Root CA viewer, custom TLS upload, SSL bypass patterns |
 | CA Management | CA lifecycle, PEM download, cache stats, OCSP toggle, force rotation |
 | Cluster Nodes | Multi-node role display, DP node metrics, enrollment command generator |
+| Node Groups | Label-based node grouping with geo-aware auto-labeling |
+| Bandwidth / QoS | Per-group bandwidth policies with token bucket rate limiting |
+| Config Versions | Auto-snapshot history, side-by-side diff, one-click rollback |
 | PAC | PAC file generator with custom exclusions |
 | Audit Log | Tamper-evident JSONL trail of all admin actions |
 | Users | User management with RBAC role assignment |
@@ -130,6 +133,11 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 - **Control Plane / Data Plane** — gRPC config sync with mTLS, per-node metrics aggregation
 - **Cluster dashboard** — connected node list, health, request counts, enrollment wizard
+- **Node groups** — label-based selectors with auto GeoIP labeling on enrollment
+- **Bandwidth / QoS** — per-group token bucket rate limiting with admin UI
+- **Config versioning** — automatic snapshots on every mutation, side-by-side diff, one-click rollback (50 versions)
+- **Rolling upgrades** — orchestrated cluster updates with drain, canary, HA sync
+- **PAC / threat feed / secrets sync** — full config snapshot pushed to data plane nodes
 - **Exponential backoff** on connection failures (2s–60s)
 - **Client mTLS** for upstream proxy authentication
 - See **[Deployment Guide](docs/deployment-guide.md)** for single-node, multi-node, and upstream chaining setup
