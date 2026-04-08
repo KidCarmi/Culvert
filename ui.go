@@ -487,6 +487,12 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		// Check session cookie (browser login via login overlay).
 		sess, err := readUISessionCookie(r)
 		if err == nil && sess != nil {
+			// Reject sessions for deleted users (Finding 5.2).
+			if sess.Provider == "local" && !cfg.UIUserExists(sess.Sub) {
+				clearUISessionCookie(w, r)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
 			role := UIRole(sess.Role)
 			if !role.HasRole(RoleViewer) {
 				role = RoleAdmin // backwards compat: sessions without role = admin

@@ -1142,6 +1142,14 @@ func (c *Config) SaveUIUsersFile() error {
 // VerifyUIUser checks credentials against the admin user roster and returns
 // the user's role.  Falls back to the legacy single-user when the roster is
 // empty, assigning RoleAdmin for backwards compatibility.
+// UIUserExists returns true if the named user exists in the roster.
+// Used to reject session cookies for deleted users.
+func (c *Config) UIUserExists(username string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsers[username] != nil
+}
+
 func (c *Config) VerifyUIUser(username, password string) (UIRole, bool) {
 	c.mu.RLock()
 	uiU := c.uiUsers[username]
