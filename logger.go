@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -242,7 +241,4 @@ func setupLogger(logPath string, maxMB int, format string) (*log.Logger, io.Clos
 	return l, closer, nil
 }
 
-// fmtLogLevel returns the formatted log line prefix for display in UI/API.
-func fmtLogLevel() string {
-	return fmt.Sprintf("%s", GetLogLevel())
-}
+

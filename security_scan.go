@@ -90,7 +90,7 @@ func (ss *SecurityScanner) Init(clamAddr string, maxBytes int64) {
 		if err := ss.clam.Ping(); err != nil {
 			logger.Printf("SecurityScan: ClamAV unreachable at %q (%v) — retrying per request", clamAddr, err)
 		} else {
-			logger.Printf("SecurityScan: ClamAV connected at %q", clamAddr)
+			logInfof("SecurityScan: ClamAV connected at %q", clamAddr)
 		}
 	}
 	ss.enabled = true
@@ -255,7 +255,7 @@ func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 	case result := <-ch:
 		return result
 	case <-time.After(scanBodyTimeout):
-		logger.Printf("WARN ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout, hash)
+		logWarnf("ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout, hash)
 		ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"})
 		return &SecurityScanResult{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
 	}
@@ -271,7 +271,7 @@ func (ss *SecurityScanner) scanBodyInner(data []byte, hash string) *SecurityScan
 	if clam != nil {
 		name, found, err := clam.Scan(data)
 		if err != nil {
-			logger.Printf("SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
+			logErrorf("SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
 		} else if found {
 			atomic.AddInt64(&statClamBlocked, 1)
 			ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: name, Source: "clamav"})
