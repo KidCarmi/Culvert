@@ -235,7 +235,7 @@ func apiUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(globalUpdateInfo.snapshot()) //nolint:errcheck
 }
 
-// apiUpdateCheck triggers an immediate version check.
+// apiUpdateCheck triggers an immediate version check and waits for the result (U20).
 // POST /api/update/check
 func apiUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -245,9 +245,22 @@ func apiUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, "admin") {
 		return
 	}
-	go checkUpdateNow()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "checking"}) //nolint:errcheck
+	done := make(chan struct{})
+	go func() {
+		checkUpdateNow()
+		close(done)
+	}()
+	// Wait up to 35s for the check to complete (checkUpdateNow has 30s timeout).
+	select {
+	case <-done:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(globalUpdateInfo.snapshot()) //nolint:errcheck
+	case <-time.After(35 * time.Second):
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "timeout"}) //nolint:errcheck
+	case <-r.Context().Done():
+		// Client disconnected.
+	}
 }
 
 // apiUpdateApply proxies the update request to the updater sidecar, streaming SSE.

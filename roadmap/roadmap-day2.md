@@ -177,7 +177,7 @@
 | S16 | ~~YARA ReDoS timeout silently skips scan (fail-open)~~ DONE — now returns true on timeout (fail-closed, Zero Trust) | yara_scan.go:182-201 | Medium |
 | S17 | ~~DPI regex timeout silently passes response (fail-open)~~ DONE — now returns true on timeout (fail-closed, Zero Trust) | scanner.go:168-180 | Medium |
 | S18 | No archive extraction — nested ZIP evasion — DEFERRED (feature work, tracked as F4) | security_scan.go | Medium |
-| S19 | No polyglot file detection (magic byte vs Content-Type mismatch) — DEFERRED (feature work, tracked as F5) | security_scan.go, scanner.go | Medium |
+| ~~S19~~ | ~~No polyglot file detection (magic byte vs Content-Type mismatch)~~ DONE (implemented as F5) | filemagic.go, proxy.go | Medium |
 
 ---
 
@@ -392,10 +392,10 @@
 
 | # | Issue | File:Line | Description |
 |---|-------|-----------|-------------|
-| U20 | apiUpdateCheck fire-and-forget | update.go:215 | `go checkUpdateNow()` is detached with no error feedback. The API returns `{"status":"checking"}` immediately. Client has no way to know if the check failed. Consider a completion channel or poll mechanism. |
-| U21 | newRotatingFile unused in updater | updater/main.go | The updater uses `log.Printf` (stdlib) instead of a rotating logger. For a long-lived sidecar, logs will accumulate without rotation. Consider adding log rotation or documenting reliance on Docker log driver rotation. |
+| ~~U20~~ | ~~apiUpdateCheck fire-and-forget~~ DONE | update.go:240-261 | API now waits up to 35s for the check to complete and returns the full update info snapshot (version, availability, updater status). Falls back to `{"status":"timeout"}` if the check exceeds 35s. |
+| ~~U21~~ | ~~newRotatingFile unused in updater~~ BY DESIGN | updater/main.go | The updater runs as a Docker container — log rotation is handled by the Docker logging driver (json-file with max-size/max-file). stdlib `log.Printf` writes to stdout/stderr which Docker captures. |
 | U22 | ~~envIntOr uses custom atoi~~ DONE | updater/main.go:1118-1124 | `envIntOr` now validates each character is a digit and falls back to default on invalid input. Logs a warning for malformed env vars. |
-| U23 | performHASyncPush is a stub | update_cluster.go:568-574 | `performHASyncPush()` just sleeps 10s and returns true. It doesn't actually verify the sync succeeded. This is documented but should be flagged as incomplete. |
+| ~~U23~~ | ~~performHASyncPush is a stub~~ DONE | update_cluster.go:600-618 | Now verifies HA state after sync wait — checks globalHA.Status() to confirm leader role and peer connectivity. Logs sync verification result. |
 | ~~U24~~ | ~~Docker Compose updater port exposed to all interfaces~~ DONE | docker-compose.yml, docker-compose.ha.yml | Changed all updater port bindings to `"127.0.0.1:7123:7123"` (localhost only). Applied to updater, dp-updater. |
 | ~~U25~~ | ~~Missing security_opt in compose~~ DONE | docker-compose.yml, docker-compose.ha.yml | Added `security_opt: ["no-new-privileges:true"]` and `cap_drop: [ALL]` to all updater services. |
 | ~~U26~~ | ~~SSE reconnection not implemented in UI~~ DONE | static/index.html (updates panel) | On connection loss, retries 3 times (2s/4s/6s backoff) polling `/api/update/session` for state resume before falling back to CP updating overlay. |

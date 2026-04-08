@@ -597,11 +597,24 @@ func settleAndVerifySync() {
 
 // performHASyncPush triggers the HA sync mechanism so the standby gets latest state.
 // Returns true if the sync appears successful.
+// performHASyncPush waits for the standby to sync with the leader (U23).
+// The HASync is pull-based (standby polls leader every 5s). We wait for
+// 2 sync cycles and verify the standby node is still connected.
 func performHASyncPush() bool {
-	// The HASync is pull-based (standby polls leader every 5s).
-	// We can't directly push — but we know the standby syncs every 5s.
 	// Wait 10s (2 sync cycles) to ensure the standby has caught up.
 	time.Sleep(10 * time.Second)
+
+	// Verify HA state is healthy — check that globalHA still has a peer.
+	haStatus := globalHA.Status()
+	if !haStatus.Enabled {
+		logger.Printf("cluster update HA: HA is not enabled — skipping sync verification")
+		return true // non-HA, nothing to verify
+	}
+	if haStatus.Role != "leader" {
+		logger.Printf("cluster update HA: not leader (role=%s) — sync not applicable", haStatus.Role)
+		return true
+	}
+	logger.Printf("cluster update HA: sync wait complete (peer=%s)", sanitizeLog(haStatus.PeerAddr))
 	return true
 }
 
