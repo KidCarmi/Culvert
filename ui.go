@@ -932,7 +932,7 @@ func validatePolicyRule(rule PolicyRule) error {
 	}
 	if rule.Schedule != nil && rule.Schedule.Timezone != "" {
 		if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
-			return fmt.Errorf("invalid schedule timezone: %s", rule.Schedule.Timezone)
+			return fmt.Errorf("invalid schedule timezone: %s", strings.ReplaceAll(rule.Schedule.Timezone, "\n", ""))
 		}
 	}
 	return nil
@@ -1798,7 +1798,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// Policy rules — validate each before importing.
 	for _, rule := range b.PolicyRules {
 		if err := validatePolicyRule(rule); err != nil {
-			logger.Printf("ConfigImport: skipping rule %q: %v", sanitizeLog(rule.Name), err)
+			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
 			continue
 		}
 		policyStore.Add(rule)
