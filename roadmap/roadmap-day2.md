@@ -100,18 +100,18 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| B9 | Cache TTL doesn't verify leaf cert hasn't actually expired | ca.go:609 | Medium |
-| B10 | LRU eviction can leave stale entries in cacheOrder list | ca.go:623-638 | Medium |
-| B11 | Secondary CA TOCTOU — checked under RLock, used after unlock | ca.go:666,698 | Medium |
+| B9 | ~~Cache TTL doesn't verify leaf cert hasn't actually expired~~ DONE | ca.go:609 | Medium |
+| B10 | ~~LRU eviction can leave stale entries in cacheOrder list~~ DONE | ca.go:623-638 | Medium |
+| B11 | ~~Secondary CA TOCTOU — checked under RLock, used after unlock~~ DONE | ca.go:666,698 | Medium |
 | B12 | ~~OCSP issuer parse error silently ignored~~ DONE | ocsp.go:72 | Low |
-| B13 | OCSP cache eviction iterates+deletes from map (undefined behavior) | ocsp.go:92-101 | Medium |
+| B13 | ~~OCSP cache eviction iterates+deletes from map (undefined behavior)~~ DONE | ocsp.go:92-101 | Medium |
 
 ### 2.4 Cluster & Control Plane
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
 | B14 | Certificate renewal race — direct map mutation without UpdateNode() | controlplane.go:684-691 | High |
-| B15 | Token consumption race — unlock before saveLocked() | enrollment.go:225-267 | Medium |
+| B15 | ~~Token consumption race — unlock before saveLocked()~~ DONE | enrollment.go:225-267 | Medium |
 | B16 | HeartbeatMonitor status transition not atomic with config sync | enrollment.go:600-607 | Medium |
 | B17 | Config rollback TOCTOU — no lock during applyConfigBackup() | configversion.go:194-241 | Medium |
 | B18 | gcExpiredTokens() deletes from live map without full lock | enrollment.go:570-610 | Medium |
@@ -128,7 +128,7 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| B22 | Hash cache race — TTL check outside read lock | hashcache.go:73-84 | Low |
+| B22 | ~~Hash cache race — TTL check outside read lock~~ DONE | hashcache.go:73-84 | Low |
 | B23 | ClamAV response parser captures only first virus name | clam.go:143-162 | Low |
 | B24 | Content-Length mismatch bypass via chunked encoding | proxy.go, security_scan.go | Medium |
 
@@ -160,7 +160,7 @@
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
 | S10 | OCSP transport uses TLS 1.2 minimum (should be 1.3) | ocsp.go:207 | Medium |
-| S11 | Leaf cert NotBefore backdate too small (1 min, should be 5 min) | ca.go:680 | Low |
+| S11 | ~~Leaf cert NotBefore backdate too small (1 min, should be 5 min)~~ DONE | ca.go:680 | Low |
 | S12 | No OCSP staple validation (always queries responder) | ocsp.go:109-141 | Low |
 
 ### 3.4 Cluster
@@ -193,7 +193,7 @@
 | P5 | Hash cache O(n) full scan on eviction | hashcache.go:111-128 | Medium |
 | P6 | ClamAV semaphore backlog — 96 goroutines blocked at 100 RPS | clam.go:34-39 | Medium |
 | P7 | Threat feed sync uses 100+ MiB during full download | threatfeed.go:135-156 | Low |
-| P8 | YARA inflight counter never reset on rule reload | yara_scan.go:449-476 | Low |
+| P8 | ~~YARA inflight counter never reset on rule reload~~ DONE | yara_scan.go:449-476 | Low |
 | P9 | Syslog synchronous DNS on every reconnection | syslog.go:61 | Low |
 | P10 | Config validation runs redundantly on every reload | config.go:205-276 | Low |
 

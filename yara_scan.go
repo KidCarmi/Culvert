@@ -92,6 +92,10 @@ func (y *YARARuleSet) LoadDir(dir string) error {
 	y.rules = loaded
 	y.mu.Unlock()
 
+	// Reset in-flight counter so stale timeouts from previous rules don't
+	// suppress matching after a reload (P8).
+	yaraInflight.Store(0)
+
 	logger.Printf("YARA: %d rule(s) loaded from %d file(s) in %s", len(loaded), len(files), dir)
 	return nil
 }

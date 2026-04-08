@@ -606,7 +606,8 @@ func (cm *CertManager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, er
 
 	now := time.Now()
 	cm.mu.RLock()
-	if entry, ok := cm.cache[host]; ok && now.Sub(entry.createdAt) < certCacheTTL {
+	if entry, ok := cm.cache[host]; ok && now.Sub(entry.createdAt) < certCacheTTL &&
+		(entry.cert.Leaf == nil || now.Before(entry.cert.Leaf.NotAfter)) {
 		cm.mu.RUnlock()
 		return entry.cert, nil
 	}
@@ -625,12 +626,14 @@ func (cm *CertManager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, er
 		evicted := 0
 		newOrder := cm.cacheOrder[:0:0]
 		for _, h := range cm.cacheOrder {
+			// Skip entries no longer in cache (already evicted or cleared externally).
+			if _, exists := cm.cache[h]; !exists {
+				continue
+			}
 			if evicted < evictCount {
-				if _, exists := cm.cache[h]; exists {
-					delete(cm.cache, h)
-					evicted++
-					continue
-				}
+				delete(cm.cache, h)
+				evicted++
+				continue
 			}
 			newOrder = append(newOrder, h)
 		}
@@ -664,6 +667,10 @@ func (cm *CertManager) signLeaf(host string) (*tls.Certificate, error) {
 	caKey := cm.caKey
 	secondaryCert := cm.secondaryCACert
 	secondaryActive := secondaryCert != nil && time.Now().Before(cm.secondaryExpiry)
+	var secondaryCertRaw []byte
+	if secondaryActive {
+		secondaryCertRaw = secondaryCert.Raw
+	}
 	cm.mu.RUnlock()
 
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -677,7 +684,7 @@ func (cm *CertManager) signLeaf(host string) (*tls.Certificate, error) {
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
-		NotBefore:    time.Now().Add(-time.Minute),
+		NotBefore:    time.Now().Add(-5 * time.Minute),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		DNSNames:     []string{host},
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -695,8 +702,8 @@ func (cm *CertManager) signLeaf(host string) (*tls.Certificate, error) {
 	// Build PEM chain: leaf cert + primary CA + (optional) secondary CA.
 	var chainPEM []byte
 	chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})...)
-	if secondaryActive {
-		chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secondaryCert.Raw})...)
+	if len(secondaryCertRaw) > 0 {
+		chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secondaryCertRaw})...)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 

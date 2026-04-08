@@ -253,17 +253,17 @@ func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP stri
 		}
 	}
 
-	// Mark consumed and capture metadata before releasing lock.
+	// Mark consumed and capture metadata; persist while lock is held to prevent
+	// race between consumption and crash (B15).
 	tok.Used = true
 	tok.UsedByNode = nodeID
 	tok.UsedAt = time.Now()
 	info := TokenInfo{CreatedBy: tok.CreatedBy}
-	cs.mu.Unlock()
-
-	// Persist consumed state so it survives crashes.
-	if err := cs.Save(); err != nil {
+	if err := cs.saveLocked(); err != nil {
+		cs.mu.Unlock()
 		return TokenInfo{}, fmt.Errorf("persist token state: %w", err)
 	}
+	cs.mu.Unlock()
 	return info, nil
 }
 

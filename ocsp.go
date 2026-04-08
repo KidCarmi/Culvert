@@ -93,12 +93,21 @@ func (oc *OCSPChecker) checkCached(serialHex string) (bool, bool) {
 func (oc *OCSPChecker) cacheResult(serialHex string, revoked bool) {
 	oc.mu.Lock()
 	if len(oc.cache) >= ocspCacheMaxSize {
-		count := 0
-		for k := range oc.cache {
-			delete(oc.cache, k)
-			count++
-			if count >= ocspCacheMaxSize/10 {
-				break
+		// Evict expired entries first, then oldest 10% if still over capacity.
+		now := time.Now()
+		for k, e := range oc.cache {
+			if now.After(e.expiresAt) {
+				delete(oc.cache, k)
+			}
+		}
+		if len(oc.cache) >= ocspCacheMaxSize {
+			count := 0
+			for k := range oc.cache {
+				delete(oc.cache, k)
+				count++
+				if count >= ocspCacheMaxSize/10 {
+					break
+				}
 			}
 		}
 	}
