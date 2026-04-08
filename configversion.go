@@ -256,11 +256,11 @@ func applyConfigBackup(b *configBackup) {
 
 	// Policy rules: bulk replace.
 	var validRules []PolicyRule
-	for _, rule := range b.PolicyRules {
-		if err := validatePolicyRule(rule); err != nil {
+	for i := range b.PolicyRules {
+		if err := validatePolicyRule(b.PolicyRules[i]); err != nil {
 			continue
 		}
-		validRules = append(validRules, rule)
+		validRules = append(validRules, b.PolicyRules[i])
 	}
 	policyStore.ReplaceAll(validRules)
 	policyStore.Save()

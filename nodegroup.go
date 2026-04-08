@@ -158,9 +158,9 @@ func (s *NodeGroupStore) NodesInGroup(name string, nodes []EnrolledNode) []Enrol
 		return nil
 	}
 	var out []EnrolledNode
-	for _, n := range nodes {
-		if labelsMatch(sel, n.Labels) {
-			out = append(out, n)
+	for i := range nodes {
+		if labelsMatch(sel, nodes[i].Labels) {
+			out = append(out, nodes[i])
 		}
 	}
 	return out
@@ -210,9 +210,9 @@ func listNodeGroupsAPI(w http.ResponseWriter) {
 	infos := make([]NodeGroupInfo, len(groups))
 	for i, g := range groups {
 		var ids []string
-		for _, n := range nodes {
-			if labelsMatch(g.LabelSelector, n.Labels) {
-				ids = append(ids, n.NodeID)
+		for j := range nodes {
+			if labelsMatch(g.LabelSelector, nodes[j].Labels) {
+				ids = append(ids, nodes[j].NodeID)
 			}
 		}
 		if ids == nil {
