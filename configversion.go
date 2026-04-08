@@ -240,8 +240,14 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// configRollbackMu serializes config rollback operations (B17) so concurrent
+// rollback requests cannot interleave store mutations and leave partial state.
+var configRollbackMu sync.Mutex
+
 // applyConfigBackup restores all config stores from a backup snapshot.
 func applyConfigBackup(b *configBackup) {
+	configRollbackMu.Lock()
+	defer configRollbackMu.Unlock()
 	// Blocklist: remove all, then add snapshot entries.
 	for _, h := range bl.List() {
 		bl.Remove(h)

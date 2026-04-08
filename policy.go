@@ -404,6 +404,7 @@ func (ps *PolicyStore) List() []PolicyRule {
 	out := make([]PolicyRule, len(ps.rules))
 	for i, r := range ps.rules {
 		out[i] = *r
+		out[i].HitCount = atomic.LoadInt64(&r.HitCount) // B7: atomic read of concurrently-written counter
 	}
 	return out
 }
@@ -455,7 +456,7 @@ func (ps *PolicyStore) Update(priority int, r PolicyRule) bool {
 	defer ps.mu.Unlock()
 	for i, rule := range ps.rules {
 		if rule.Priority == priority {
-			r.HitCount = rule.HitCount // preserve live hit count
+			r.HitCount = atomic.LoadInt64(&rule.HitCount) // B7: atomic read of concurrently-written counter
 			ps.rules[i] = &r
 			ps.sortLocked()
 			ps.bumpVersion()

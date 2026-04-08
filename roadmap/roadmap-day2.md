@@ -86,14 +86,14 @@
 | B2 | Goroutine cleanup race — first relay completes, write halves still open | proxy.go:822-838 | Medium |
 | B3 | ~~Missing TLS conn close on handshake error (only raw TCP closed)~~ DONE | proxy.go:893-895 | Medium |
 | B4 | X-Forwarded-For parser silently discards non-IP values | proxy.go:127-138 | Low |
-| B5 | SOCKS5 credentials never cleared from memory after auth | socks5.go:76-90 | Low |
+| B5 | ~~SOCKS5 credentials never cleared from memory after auth~~ DONE | socks5.go:76-90 | Low |
 
 ### 2.2 Policy & Content Filtering
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
 | B6 | ~~Duplicate exception check in isExcepted() (dead code)~~ DONE | store.go:467-480 | Low |
-| B7 | PolicyRule.HitCount race — atomic ops on struct field copied by value | policy.go:582 | Medium |
+| B7 | ~~PolicyRule.HitCount race — atomic ops on struct field copied by value~~ DONE | policy.go:582 | Medium |
 | B8 | ~~Missing Priority validation — Priority=0 silently becomes first rule~~ DONE | policy.go:420-430 | Medium |
 
 ### 2.3 TLS & Certificate Management
@@ -113,7 +113,7 @@
 | B14 | ~~Certificate renewal race — direct map mutation without UpdateNode()~~ DONE | controlplane.go:684-691 | High |
 | B15 | ~~Token consumption race — unlock before saveLocked()~~ DONE | enrollment.go:225-267 | Medium |
 | B16 | HeartbeatMonitor status transition not atomic with config sync | enrollment.go:600-607 | Medium |
-| B17 | Config rollback TOCTOU — no lock during applyConfigBackup() | configversion.go:194-241 | Medium |
+| B17 | ~~Config rollback TOCTOU — no lock during applyConfigBackup()~~ DONE | configversion.go:194-241 | Medium |
 | B18 | ~~gcExpiredTokens() deletes from live map without full lock~~ FALSE POSITIVE — already called under held lock (enrollment.go:574-580) | enrollment.go:570-610 | Medium |
 
 ### 2.5 Observability & Ops
@@ -142,8 +142,8 @@
 |---|-------|-----------|----------|
 | S1 | ~~TOTP timing attack — string `==` instead of constant-time compare~~ DONE | totp.go:41-46 | Medium |
 | S2 | LDAP group DN comparison is case-insensitive (incorrect per RFC 4514) | auth_ldap.go:191-197 | Medium |
-| S3 | Logout doesn't invalidate session server-side (replay risk) | ui.go:676-695 | Medium |
-| S4 | No rate limiting on /api/setup/complete (brute-force first-run) | ui.go:781-829 | Medium |
+| S3 | ~~Logout doesn't invalidate session server-side (replay risk)~~ FALSE POSITIVE — revokeSessionCookie() already called at ui.go:687, persists to revocation list | ui.go:676-695 | Medium |
+| S4 | ~~No rate limiting on /api/setup/complete (brute-force first-run)~~ DONE | ui.go:781-829 | Medium |
 
 ### 3.2 Admin UI & API
 
@@ -167,7 +167,7 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| S13 | Bootstrap token plaintext returned (potential log leakage) | enrollment.go:177-212 | Medium |
+| S13 | ~~Bootstrap token plaintext returned (potential log leakage)~~ FALSE POSITIVE — plaintext is returned in API response (required), never logged; audit event at ui.go:3685 only logs prefix+CIDR | enrollment.go:177-212 | Medium |
 | S14 | Missing SSRF check in extractStandbyHost() (no private IP blocklist) | update_cluster.go:446-463 | Medium |
 | S15 | Credential mask circumvention in registry settings | update.go:521-529 | Medium |
 
@@ -290,7 +290,7 @@
 | Q14 | ~~Deprecated `ValidateToken()` still defined~~ DONE | enrollment.go:270-274 |
 | Q15 | CA import partial failure leaves inconsistent state | enrollment.go:1001-1006 |
 | Q16 | ~~Missing input validation on NodeGroup label keys/values~~ DONE | nodegroup.go:231-244 |
-| Q17 | Alert webhook no deduplication window | alerts.go:211,254-259 |
+| Q17 | ~~Alert webhook no deduplication window~~ DONE | alerts.go:211,254-259 |
 | Q18 | JSON decoder doesn't explicitly close body | ui.go:929-932 |
 
 ---

@@ -88,7 +88,11 @@ func handleSOCKS5(conn net.Conn) {
 		if _, err := io.ReadFull(conn, passwd); err != nil {
 			return
 		}
-		if !cfg.VerifyAuth(string(uname), string(passwd)) {
+		authOK := cfg.VerifyAuth(string(uname), string(passwd))
+		// B5: Zero credentials from memory immediately after auth check.
+		clear(uname)
+		clear(passwd)
+		if !authOK {
 			conn.Write([]byte{0x01, 0x01}) //nolint:errcheck
 			atomic.AddInt64(&statAuthFail, 1)
 			recordRequest(clientIP, "SOCKS5", "", "AUTH_FAIL", "", "", "")

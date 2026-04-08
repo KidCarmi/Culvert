@@ -783,6 +783,16 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// S4: Rate-limit setup endpoint to prevent brute-force race during initial setup window.
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	setupKey := "setup:" + ip
+	if locked, secs := loginLimiter.Check(setupKey); locked {
+		http.Error(w, fmt.Sprintf("too many attempts, locked for %ds", secs), http.StatusTooManyRequests)
+		return
+	}
 	if cfg.AuthEnabled() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
@@ -807,10 +817,12 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 
 	body.User = strings.TrimSpace(body.User)
 	if len(body.User) < 1 || len(body.User) > 64 {
+		loginLimiter.RecordFailure(setupKey)
 		http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
 		return
 	}
 	if len(body.Pass) < 8 {
+		loginLimiter.RecordFailure(setupKey)
 		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
 		return
 	}
