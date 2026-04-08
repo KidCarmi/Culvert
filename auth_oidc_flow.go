@@ -348,6 +348,9 @@ func (p *OIDCFlowProvider) ResolveIdentity(username, token string) (*Identity, b
 	// Try JWT validation first (browser flow — token is an ID token).
 	// No nonce check here: non-browser clients submit access tokens, not ID tokens.
 	if id, err := p.validateIDToken(token, ""); err == nil {
+		if id.Sub == "" {
+			return nil, false // reject empty subject
+		}
 		return id, true
 	}
 

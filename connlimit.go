@@ -90,11 +90,17 @@ func (cl *ConnLimiter) Acquire(ip string) bool {
 		ctr = &v
 		cl.conns[ip] = ctr
 	}
+	// Hold lock through the increment to prevent TOCTOU race with Release().
+	n := atomic.AddInt64(ctr, 1)
 	cl.mu.Unlock()
 
-	n := atomic.AddInt64(ctr, 1)
 	if n > int64(cl.maxPerIP) {
-		atomic.AddInt64(ctr, -1)
+		cl.mu.Lock()
+		// Re-check that the counter still exists in the map before decrementing.
+		if cur, exists := cl.conns[ip]; exists && cur == ctr {
+			atomic.AddInt64(ctr, -1)
+		}
+		cl.mu.Unlock()
 		return false
 	}
 	return true

@@ -3630,7 +3630,7 @@ async function fetchTopHosts() {
     const max = hosts[0].count;
     tbody.innerHTML = hosts.map((h, i) => `<tr>
       <td style="color:var(--muted);font-size:.75rem">${i+1}</td>
-      <td style="font-family:monospace;font-size:.82rem">${h.host}</td>
+      <td style="font-family:monospace;font-size:.82rem">${escHtml(h.host)}</td>
       <td style="text-align:right">
         <span style="font-weight:600;margin-right:8px">${fmt(h.count)}</span>
         <span style="display:inline-block;height:6px;width:${Math.round(h.count/max*100)}px;max-width:120px;background:var(--accent);border-radius:3px;vertical-align:middle"></span>
@@ -3684,11 +3684,11 @@ function rowHTML(e) {
     ? `<td style="font-size:.75rem;color:var(--accent);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.identity)}">${escHtml(e.identity)}</td>`
     : `<td style="color:var(--muted);font-size:.75rem">—</td>`;
   return `<tr>
-    <td style="color:var(--muted)">${e.time}</td>
-    <td style="font-family:monospace">${e.ip}</td>
+    <td style="color:var(--muted)">${escHtml(e.time)}</td>
+    <td style="font-family:monospace">${escHtml(e.ip)}</td>
     ${identityCell}
-    <td><code style="font-size:.78rem">${e.method}</code></td>
-    <td style="font-family:monospace;font-size:.8rem">${e.host}</td>
+    <td><code style="font-size:.78rem">${escHtml(e.method)}</code></td>
+    <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}</td>
     <td>${badgeHTML(e.status)}</td>
     <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}">${escHtml(e.ruleMatched||'')}</td>
     <td>${levelBadge(e.level)}</td>
@@ -4263,7 +4263,7 @@ function renderRewrite() {
     const respOps = summariseOps(r.resp_set, r.resp_add, r.resp_remove, 'resp');
     return `<tr>
       <td style="color:var(--muted);font-size:.75rem">#${r.id}</td>
-      <td style="font-family:monospace;font-size:.82rem">${r.host || '<span style="color:var(--muted)">*</span>'}</td>
+      <td style="font-family:monospace;font-size:.82rem">${r.host ? escHtml(r.host) : '<span style="color:var(--muted)">*</span>'}</td>
       <td style="font-size:.78rem">${reqOps || '<span style="color:var(--muted)">—</span>'}</td>
       <td style="font-size:.78rem">${respOps || '<span style="color:var(--muted)">—</span>'}</td>
       <td style="text-align:right"><button class="btn danger sm" onclick="removeRewriteRule(${r.id})">Remove</button></td>
@@ -4273,9 +4273,9 @@ function renderRewrite() {
 
 function summariseOps(set, add, remove, label) {
   const parts = [];
-  if (set)    Object.entries(set).forEach(([k,v]) => parts.push(`set <b>${k}</b>: ${v}`));
-  if (add)    Object.entries(add).forEach(([k,v]) => parts.push(`add <b>${k}</b>: ${v}`));
-  if (remove) remove.forEach(k => parts.push(`del <b>${k}</b>`));
+  if (set)    Object.entries(set).forEach(([k,v]) => parts.push(`set <b>${escHtml(k)}</b>: ${escHtml(v)}`));
+  if (add)    Object.entries(add).forEach(([k,v]) => parts.push(`add <b>${escHtml(k)}</b>: ${escHtml(v)}`));
+  if (remove) remove.forEach(k => parts.push(`del <b>${escHtml(k)}</b>`));
   return parts.join('<br>');
 }
 
@@ -5227,7 +5227,7 @@ async function fetchTopRules() {
       const badge = act === 'allow'
         ? '<span style="color:#22c55e;font-weight:600">allow</span>'
         : `<span style="color:var(--red);font-weight:600">${act || 'deny'}</span>`;
-      return `<tr><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.name}">${r.name}</td><td>${badge}</td><td style="font-family:monospace;font-weight:700;text-align:right">${fmt(r.hits)}</td></tr>`;
+      return `<tr><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.name)}">${escHtml(r.name)}</td><td>${badge}</td><td style="font-family:monospace;font-weight:700;text-align:right">${fmt(r.hits)}</td></tr>`;
     }).join('');
   } catch(_) {}
 }
@@ -5425,19 +5425,19 @@ function renderPolicy() {
   }
   tbody.innerHTML = polRules.map((r, idx) => {
     const schedBadge = r.schedule ? ` <span title="Schedule active" style="font-size:.8em">⏰</span>` : '';
-    const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`, r.authSource && `via:${r.authSource}`].filter(Boolean).join(' / ') || '<span style="color:var(--muted)">Any</span>';
-    const destParts = [r.destFQDN, r.destCategory].filter(Boolean);
+    const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`, r.authSource && `via:${r.authSource}`].filter(Boolean).map(escHtml).join(' / ') || '<span style="color:var(--muted)">Any</span>';
+    const destParts = [r.destFQDN, r.destCategory].filter(Boolean).map(escHtml);
     const dest = destParts.join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const countryCell = r.destCountry && r.destCountry.length
-      ? r.destCountry.map(c => `<span style="font-family:monospace;font-size:.72rem;background:rgba(20,184,166,.15);padding:1px 5px;border-radius:4px">${countryFlag(c)}${c}</span>`).join(' ')
+      ? r.destCountry.map(c => `<span style="font-family:monospace;font-size:.72rem;background:rgba(20,184,166,.15);padding:1px 5px;border-radius:4px">${countryFlag(c)}${escHtml(c)}</span>`).join(' ')
       : '<span style="color:var(--muted)">Any</span>';
     const fileProfileCell = r.fileProfile
-      ? `<span style="font-size:.72rem;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 6px;border-radius:4px">${r.fileProfile}</span>`
+      ? `<span style="font-size:.72rem;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 6px;border-radius:4px">${escHtml(r.fileProfile)}</span>`
       : '<span style="color:var(--muted)">—</span>';
     return `<tr draggable="true" data-priority="${r.priority}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
       <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
-      <td style="font-weight:600">${r.name}${schedBadge}</td>
+      <td style="font-weight:600">${escHtml(r.name)}${schedBadge}</td>
       <td style="font-size:.78rem;font-family:monospace">${src}</td>
       <td style="font-size:.78rem;font-family:monospace">${dest}</td>
       <td style="font-size:.78rem">${countryCell}</td>

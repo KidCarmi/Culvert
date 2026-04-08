@@ -39,7 +39,8 @@ func verifyTOTP(secret, code string) bool {
 	counter := now / totpPeriod
 
 	for i := -int64(totpSkew); i <= int64(totpSkew); i++ {
-		if hotp(key, counter+i) == code {
+		expected := hotp(key, counter+i)
+		if hmac.Equal([]byte(expected), []byte(code)) {
 			return true
 		}
 	}

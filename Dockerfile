@@ -2,11 +2,21 @@
 FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
+RUN apk add --no-cache git
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o culvert .
+# Version is embedded via ldflags. Priority:
+#   1. Explicit VERSION build-arg (set by CI: --build-arg VERSION=x.y.z)
+#   2. Git tag (auto-detected from .git — works for local docker compose builds)
+#   3. Falls back to "dev"
+ARG VERSION=
+RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
+      VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev"); \
+    fi && \
+    : "${VERSION:=dev}" && \
+    go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o culvert .
 
 # ── GeoIP stage ───────────────────────────────────────────────────────────────
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build

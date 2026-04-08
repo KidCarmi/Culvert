@@ -92,6 +92,10 @@ func (y *YARARuleSet) LoadDir(dir string) error {
 	y.rules = loaded
 	y.mu.Unlock()
 
+	// Reset in-flight counter so stale timeouts from previous rules don't
+	// suppress matching after a reload (P8).
+	yaraInflight.Store(0)
+
 	logger.Printf("YARA: %d rule(s) loaded from %d file(s) in %s", len(loaded), len(files), dir)
 	return nil
 }
@@ -196,7 +200,7 @@ func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration
 	case <-time.After(timeout):
 		logger.Printf("WARN YARA regex timeout after %s on pattern %q (inflight: %d)",
 			timeout, sanitizeLog(re.String()), yaraInflight.Load())
-		return false
+		return true // S16: fail-closed — treat timeout as suspicious match (Zero Trust)
 	}
 }
 

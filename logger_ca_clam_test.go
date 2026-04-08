@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ─── logger.go ────────────────────────────────────────────────────────────────
@@ -204,6 +205,34 @@ func TestParseClamResponse_Unexpected(t *testing.T) {
 	_, _, err := parseClamResponse("unexpected response")
 	if err == nil {
 		t.Error("parseClamResponse unexpected: expected error")
+	}
+}
+
+// Q10: Test ClamAV connection failure.
+func TestClamAV_ScanConnectionRefused(t *testing.T) {
+	c := NewClamAV("tcp:127.0.0.1:19999") // port that's not listening
+	c.timeout = 500 * time.Millisecond
+	_, _, err := c.Scan([]byte("test"))
+	if err == nil {
+		t.Fatal("expected connection error for unreachable daemon")
+	}
+	if !strings.Contains(err.Error(), "connect") {
+		t.Errorf("expected connect error, got: %v", err)
+	}
+}
+
+// Q10: Test parseClamResponse with FOUND but no "stream: " prefix (malformed).
+func TestParseClamResponse_MalformedFound(t *testing.T) {
+	// Has " FOUND" suffix but no ": " separator → returns "Unknown".
+	name, found, err := parseClamResponse("virus FOUND")
+	if err != nil {
+		t.Errorf("malformed FOUND should not error, got: %v", err)
+	}
+	if !found {
+		t.Error("should still detect FOUND suffix")
+	}
+	if name != "Unknown" {
+		t.Errorf("malformed FOUND should return 'Unknown', got %q", name)
 	}
 }
 

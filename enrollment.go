@@ -253,25 +253,20 @@ func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP stri
 		}
 	}
 
-	// Mark consumed and capture metadata before releasing lock.
+	// Mark consumed and capture metadata; persist while lock is held to prevent
+	// race between consumption and crash (B15).
 	tok.Used = true
 	tok.UsedByNode = nodeID
 	tok.UsedAt = time.Now()
 	info := TokenInfo{CreatedBy: tok.CreatedBy}
-	cs.mu.Unlock()
-
-	// Persist consumed state so it survives crashes.
-	if err := cs.Save(); err != nil {
+	if err := cs.saveLocked(); err != nil {
+		cs.mu.Unlock()
 		return TokenInfo{}, fmt.Errorf("persist token state: %w", err)
 	}
+	cs.mu.Unlock()
 	return info, nil
 }
 
-// Deprecated: Use ValidateAndConsumeToken instead, which also persists and returns metadata.
-func (cs *ClusterStore) ValidateToken(plaintext, nodeID, sourceIP string) error {
-	_, err := cs.ValidateAndConsumeToken(plaintext, nodeID, sourceIP)
-	return err
-}
 
 // ListTokens returns all tokens (active and consumed).
 func (cs *ClusterStore) ListTokens() []EnrollToken {
@@ -582,11 +577,12 @@ func (cs *ClusterStore) checkHeartbeats() {
 	if cs.gcOldRevocations(now) {
 		changed = true
 	}
-	cs.mu.Unlock()
-
+	// B16: Persist under held lock to prevent concurrent mutations from
+	// overwriting heartbeat status transitions between unlock and save.
 	if changed {
-		_ = cs.Save() //nolint:errcheck // best-effort periodic persistence
+		_ = cs.saveLocked() //nolint:errcheck // best-effort periodic persistence
 	}
+	cs.mu.Unlock()
 }
 
 // checkNodeLiveness marks unreachable nodes as disconnected. Caller holds mu.
@@ -997,12 +993,26 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 			ca.cert.NotAfter.Format("2006-01-02"))
 	}
 
-	// ── Persist new CA to disk ──
-	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+	// ── Persist new CA to disk (Q15: write both to temp files first,
+	// then rename, so partial failure doesn't leave inconsistent state) ──
+	certTmp := certFile + ".tmp"
+	keyTmp := keyFile + ".tmp"
+	if err := os.WriteFile(certTmp, certPEM, 0o600); err != nil {
 		return fmt.Errorf("write cluster CA cert: %w", err)
 	}
-	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+	if err := os.WriteFile(keyTmp, keyPEM, 0o600); err != nil {
+		os.Remove(certTmp) //nolint:errcheck
 		return fmt.Errorf("write cluster CA key: %w", err)
+	}
+	if err := os.Rename(certTmp, certFile); err != nil {
+		os.Remove(certTmp) //nolint:errcheck
+		os.Remove(keyTmp)  //nolint:errcheck
+		return fmt.Errorf("rename cluster CA cert: %w", err)
+	}
+	if err := os.Rename(keyTmp, keyFile); err != nil {
+		// cert already renamed; best-effort cleanup — leave cert in place
+		os.Remove(keyTmp) //nolint:errcheck
+		return fmt.Errorf("rename cluster CA key: %w", err)
 	}
 
 	ca.cert = cert

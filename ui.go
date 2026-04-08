@@ -783,6 +783,16 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// S4: Rate-limit setup endpoint to prevent brute-force race during initial setup window.
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	setupKey := "setup:" + ip
+	if locked, secs := loginLimiter.Check(setupKey); locked {
+		http.Error(w, fmt.Sprintf("too many attempts, locked for %ds", secs), http.StatusTooManyRequests)
+		return
+	}
 	if cfg.AuthEnabled() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
@@ -807,10 +817,12 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 
 	body.User = strings.TrimSpace(body.User)
 	if len(body.User) < 1 || len(body.User) > 64 {
+		loginLimiter.RecordFailure(setupKey)
 		http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
 		return
 	}
 	if len(body.Pass) < 8 {
+		loginLimiter.RecordFailure(setupKey)
 		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
 		return
 	}
@@ -1082,6 +1094,9 @@ func apiTopHosts(w http.ResponseWriter, r *http.Request) {
 func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
 		entries := bl.ListWithSource()
 		// Sort by host for stable output.
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Host < entries[j].Host })
@@ -2376,6 +2391,9 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // enforce 1 MB limit before parsing
 	if err := r.ParseMultipartForm(1 << 20); err != nil { // #nosec G120 -- body already bounded by MaxBytesReader(1 MiB) on the line above
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
@@ -2394,7 +2412,8 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if target == "mitm" {
 		if err := certMgr.LoadCustomCA(certPEM, keyPEM); err != nil {
-			http.Error(w, "invalid CA cert/key: "+err.Error(), http.StatusBadRequest)
+			logger.Printf("certs upload MITM: %v", err)
+			http.Error(w, "invalid CA cert/key pair", http.StatusBadRequest)
 			return
 		}
 		auditEvent(r, "certs.upload_mitm", "custom MITM CA", "")
@@ -2403,7 +2422,8 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	// UI cert — validate only; actual rotation requires restart.
 	if _, err := certMgr.ParseTLSPair(certPEM, keyPEM); err != nil {
-		http.Error(w, "invalid cert/key pair: "+err.Error(), http.StatusBadRequest)
+		logger.Printf("certs upload UI: %v", err)
+		http.Error(w, "invalid cert/key pair", http.StatusBadRequest)
 		return
 	}
 	auditEvent(r, "certs.upload_ui", "custom UI cert (requires restart)", "")

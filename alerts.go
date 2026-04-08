@@ -32,6 +32,18 @@ import (
 	"time"
 )
 
+// webhookSem bounds concurrent webhook delivery goroutines to prevent
+// unbounded goroutine accumulation under heavy alert load (P4).
+var webhookSem = make(chan struct{}, 10)
+
+// alertDedup prevents duplicate webhook deliveries for the same event+detail
+// within a short window (Q17). Key = "event:detail", value = last fire time.
+var (
+	alertDedupMu   sync.Mutex
+	alertDedupMap  = map[string]time.Time{}
+	alertDedupTTL  = 30 * time.Second
+)
+
 // validateWebhookURL checks that a webhook URL is well-formed (http/https with
 // a non-empty host). Unlike validateExternalURL, it does not perform DNS
 // resolution at config time — the SSRF check is deferred to delivery time via
@@ -184,11 +196,29 @@ func (as *AlertStore) GetByID(id string) (AlertWebhook, bool) {
 
 // fireAlert dispatches payload to all enabled webhooks matching event.
 // Always non-blocking: delivery happens in background goroutines.
+// Q17: Duplicate events with the same event+detail are suppressed within alertDedupTTL.
 func fireAlert(event string, payload AlertPayload) {
 	payload.Event = event
 	if payload.Timestamp == "" {
 		payload.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
+
+	// Q17: Dedup — skip if same event+detail fired recently.
+	dedupKey := event + ":" + payload.Detail
+	alertDedupMu.Lock()
+	if last, ok := alertDedupMap[dedupKey]; ok && time.Since(last) < alertDedupTTL {
+		alertDedupMu.Unlock()
+		return
+	}
+	alertDedupMap[dedupKey] = time.Now()
+	// Prune stale entries (cap map growth).
+	for k, t := range alertDedupMap {
+		if time.Since(t) > alertDedupTTL {
+			delete(alertDedupMap, k)
+		}
+	}
+	alertDedupMu.Unlock()
+
 	globalAlertStore.mu.RLock()
 	hooks := make([]AlertWebhook, len(globalAlertStore.hooks))
 	copy(hooks, globalAlertStore.hooks)
@@ -208,7 +238,16 @@ func fireAlert(event string, payload AlertPayload) {
 		if !matched {
 			continue
 		}
-		go deliverWebhook(h, payload)
+		// Use semaphore to bound concurrent deliveries (P4).
+		select {
+		case webhookSem <- struct{}{}:
+			go func() {
+				defer func() { <-webhookSem }()
+				deliverWebhook(h, payload)
+			}()
+		default:
+			logger.Printf("Alert webhook %q: delivery queue full, skipping", sanitizeLog(h.Name))
+		}
 	}
 }
 

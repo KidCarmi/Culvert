@@ -73,9 +73,10 @@ func SHA256Hex(data []byte) string {
 func (c *HashCache) Get(hash string) (ScanCacheResult, bool) {
 	c.mu.RLock()
 	e, ok := c.entries[hash]
+	expired := ok && time.Now().After(e.expiresAt)
 	c.mu.RUnlock()
 
-	if !ok || time.Now().After(e.expiresAt) {
+	if !ok || expired {
 		c.misses.Add(1)
 		return ScanCacheResult{}, false
 	}

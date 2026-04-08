@@ -143,6 +143,27 @@ func TestHashCache_Stats(t *testing.T) {
 	}
 }
 
+// Q9: Concurrent hash cache get/set/eviction to verify race safety.
+func TestHashCache_ConcurrentEviction(t *testing.T) {
+	c := newHashCache(16, 50*time.Millisecond)
+	done := make(chan struct{})
+	// Writer: continuously set entries to trigger eviction.
+	go func() {
+		for i := 0; i < 200; i++ {
+			h := SHA256Hex([]byte(string(rune('A' + i%26))))
+			c.Set(h, ScanCacheResult{Clean: i%2 == 0})
+		}
+		close(done)
+	}()
+	// Reader: continuously get entries concurrently.
+	for i := 0; i < 200; i++ {
+		h := SHA256Hex([]byte(string(rune('A' + i%26))))
+		c.Get(h)
+	}
+	<-done
+	// If we reach here without -race detector flagging, the locks are correct.
+}
+
 func TestSHA256Hex(t *testing.T) {
 	h1 := SHA256Hex([]byte("hello"))
 	h2 := SHA256Hex([]byte("hello"))

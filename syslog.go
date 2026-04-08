@@ -25,14 +25,15 @@ import (
 //	-syslog tcp://logs.corp.com:601 (TCP, reliable delivery)
 //	-syslog-format rfc5424          (default: rfc3164)
 type syslogWriter struct {
-	mu      sync.Mutex
-	network string
-	addr    string
-	conn    net.Conn
-	host    string
-	tag     string
-	format  string // "rfc3164" (default) or "rfc5424"
-	pid     string // cached PID string for RFC 5424 PROCID
+	mu            sync.Mutex
+	network       string
+	addr          string
+	conn          net.Conn
+	host          string
+	tag           string
+	format        string // "rfc3164" (default) or "rfc5424"
+	pid           string // cached PID string for RFC 5424 PROCID
+	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
 }
 
 func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
@@ -101,15 +102,27 @@ func (s *syslogWriter) writeMsg(pri int, msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn == nil {
+		// Backoff: don't retry more often than every 5 seconds.
+		if time.Since(s.lastReconnErr) < 5*time.Second {
+			return
+		}
 		if err := s.connect(); err != nil {
+			s.lastReconnErr = time.Now()
 			return // syslog down — swallow, never block the proxy
 		}
+		s.lastReconnErr = time.Time{} // reset on success
 	}
 	if _, err := fmt.Fprint(s.conn, line); err != nil {
 		s.conn.Close()
 		s.conn = nil
+		if time.Since(s.lastReconnErr) < 5*time.Second {
+			return
+		}
 		if err2 := s.connect(); err2 == nil {
 			fmt.Fprint(s.conn, line) //nolint:errcheck
+			s.lastReconnErr = time.Time{}
+		} else {
+			s.lastReconnErr = time.Now()
 		}
 	}
 }
