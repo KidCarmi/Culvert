@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -781,11 +782,24 @@ func apiClusterUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"target_tag required"}`, http.StatusBadRequest)
 		return
 	}
+	// U6: Validate tag format (OCI tag spec).
+	tagRe := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+	if !tagRe.MatchString(req.TargetTag) {
+		http.Error(w, `{"error":"invalid target_tag format"}`, http.StatusBadRequest)
+		return
+	}
 	if req.MaxConsecutive <= 0 {
 		req.MaxConsecutive = 3
 	}
+	// U10: Enforce upper bounds on error budget to prevent unsafe rollouts.
+	if req.MaxConsecutive > 10 {
+		req.MaxConsecutive = 10
+	}
 	if req.MaxPercent <= 0 {
 		req.MaxPercent = 20
+	}
+	if req.MaxPercent > 50 {
+		req.MaxPercent = 50
 	}
 
 	actor, _, _ := net.SplitHostPort(r.RemoteAddr)

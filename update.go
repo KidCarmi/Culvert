@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -240,6 +241,12 @@ func apiUpdateApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"target_tag required"}`, http.StatusBadRequest)
 		return
 	}
+	// U6: Validate tag format (OCI tag spec).
+	tagRe := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+	if !tagRe.MatchString(req.TargetTag) {
+		http.Error(w, `{"error":"invalid target_tag format"}`, http.StatusBadRequest)
+		return
+	}
 	if req.Container == "" {
 		req.Container = "culvert"
 	}
@@ -324,7 +331,7 @@ func apiUpdatePreview(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body) //nolint:errcheck
+	io.Copy(w, io.LimitReader(resp.Body, 10<<20)) //nolint:errcheck // U7: limit proxy responses to 10MB
 }
 
 // apiUpdateReports lists or downloads update reports.
@@ -434,7 +441,7 @@ func apiUpdateRollbackStatus(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	w.Header().Set("Content-Type", "application/json")
-	io.Copy(w, resp.Body) //nolint:errcheck
+	io.Copy(w, io.LimitReader(resp.Body, 10<<20)) //nolint:errcheck // U7: limit proxy responses to 10MB
 }
 
 // apiUpdateRollback proxies rollback request to updater.
@@ -464,7 +471,7 @@ func apiUpdateRollback(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body) //nolint:errcheck
+	io.Copy(w, io.LimitReader(resp.Body, 10<<20)) //nolint:errcheck // U7: limit proxy responses to 10MB
 }
 
 // ── Registry settings ──────────────────────────────────────────────────────
@@ -539,7 +546,13 @@ func apiRegistrySettings(w http.ResponseWriter, r *http.Request) {
 			"credential":   regVal,
 		}
 		out, _ := json.MarshalIndent(save, "", "  ")
-		if err := os.WriteFile(registrySettingsFile, out, 0o600); err != nil {
+		// U19: Atomic write via temp+rename to prevent corruption on crash.
+		tmp := registrySettingsFile + ".tmp"
+		if err := os.WriteFile(tmp, out, 0o600); err != nil {
+			http.Error(w, "write failed", http.StatusInternalServerError)
+			return
+		}
+		if err := os.Rename(tmp, registrySettingsFile); err != nil {
 			http.Error(w, "write failed", http.StatusInternalServerError)
 			return
 		}

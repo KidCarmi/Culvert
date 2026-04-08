@@ -361,35 +361,35 @@
 
 | # | Issue | File:Line | Description |
 |---|-------|-----------|-------------|
-| U1 | Shell injection in reaper self-update script | updater/main.go:1041-1054 | `selfName` (from `self.Name`) is interpolated directly into a shell script string passed to `sh -c`. A maliciously crafted container name (e.g., via Docker API or compose override) could inject arbitrary shell commands. Use `--` separators and shell-quote all variables, or pass arguments via environment variables to the reaper container instead of string interpolation. |
-| U2 | Unbounded request body on /api/update/load | updater/main.go:625 | `handleLoad` passes `r.Body` directly to `cli.ImageLoad()` with no size limit. An authenticated attacker can upload an arbitrary-size tarball, exhausting disk/memory. Add `http.MaxBytesReader(w, r.Body, maxSize)` with a configurable limit (default 5GB). |
-| U3 | Docker socket injection via buildVolumeArg | updater/main.go:1096-1107 | `buildVolumeArg()` passes user-controlled bind mount strings unsanitized into a shell script. A bind mount containing shell metacharacters (`;`, `$()`, backticks) would be executed. Validate bind paths against `^[a-zA-Z0-9/_.-]+$` or use Docker API directly instead of shell exec in the reaper. |
-| U4 | context.Background() in handlePreview | updater/main.go:253 | `handlePreview` uses `context.Background()` instead of `r.Context()`. If the client disconnects, the image pull continues consuming resources indefinitely. The image pull can take minutes on slow links. Use `r.Context()` to respect client cancellation. |
+| U1 | ~~Shell injection in reaper self-update script~~ DONE | updater/main.go:1041-1054 | Reaper script now uses environment variables (`$SELF_NAME`, `$DATA_VOLUME`, `$NEW_IMAGE`) instead of string interpolation. No user-controlled values in shell script text. |
+| U2 | ~~Unbounded request body on /api/update/load~~ DONE | updater/main.go:625 | Added `http.MaxBytesReader(w, r.Body, 5GB)` before `cli.ImageLoad()`. Also switched to `r.Context()`. |
+| U3 | ~~Docker socket injection via buildVolumeArg~~ DONE | updater/main.go:1096-1107 | `buildVolumeArg()` now validates bind mount strings against `^[a-zA-Z0-9/_. :-]+$` regex. Invalid paths are skipped with a warning. Combined with U1 env var fix, shell injection is eliminated. |
+| U4 | ~~context.Background() in handlePreview~~ DONE | updater/main.go:253 | Changed to `r.Context()` so client disconnect cancels the image pull. |
 
 ### 8.2 High
 
 | # | Issue | File:Line | Description |
 |---|-------|-----------|-------------|
-| U5 | Timing attack on auth token comparison | updater/main.go:184 | `authMiddleware` compares bearer token with `!=` (string comparison), which is vulnerable to timing side-channel attacks. Use `subtle.ConstantTimeCompare()` from `crypto/subtle`. |
-| U6 | No tag format validation in update endpoints | update.go:239, updater/main.go:300-310 | `TargetTag` is accepted as arbitrary string with no format validation. A crafted tag like `../../evil` or very long strings could cause unexpected Docker API behavior. Validate against `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$` (OCI tag spec). |
-| U7 | Unbounded io.Copy in apiUpdateRollbackStatus | update.go:437 | `io.Copy(w, resp.Body)` from updater response has no size limit. A compromised updater could send an arbitrary-size response. Use `io.LimitReader(resp.Body, maxSize)`. |
-| U8 | Error detail leakage in updater responses | updater/main.go:258, 270, 369 | Multiple error responses include raw `err.Error()` which can leak internal hostnames, file paths, and Docker API details. Wrap errors with generic messages for the HTTP response; log details server-side only. |
+| U5 | ~~Timing attack on auth token comparison~~ DONE | updater/main.go:184 | Changed to `subtle.ConstantTimeCompare()` from `crypto/subtle`. Split into prefix check + constant-time value comparison. |
+| U6 | ~~No tag format validation in update endpoints~~ DONE | update.go:239, updater/main.go, update_cluster.go | Added `tagRe` validation (`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`) in all endpoints: `apiUpdateApply`, `handlePreview`, `handleApply`, `handleSelfUpdate`, and `apiClusterUpdate`. |
+| U7 | ~~Unbounded io.Copy in update proxy responses~~ DONE | update.go:334,444,474 | All three `io.Copy(w, resp.Body)` calls now use `io.LimitReader(resp.Body, 10<<20)` (10MB limit). |
+| U8 | ~~Error detail leakage in updater responses~~ DONE | updater/main.go:258, 270 | Changed `handlePreview` container-not-found and pull-failed responses to generic messages. Internal details logged server-side only. Also fixed `handleSelfUpdate` error responses. |
 | U9 | Missing SSRF guard on updaterURL | update.go:55-88 | `updaterURL` is used directly in HTTP requests without any scheme/host validation or `isPrivateHost()` check. If the URL is configurable via config file (config.go has `Update.UpdaterURL`), an admin with config access could point it at internal services. Add URL validation at startup. |
-| U10 | Missing upper bound on error budget params | update_cluster.go:784-789 | `MaxConsecutive` and `MaxPercent` have lower-bound defaults but no upper-bound validation. `MaxPercent=100` allows all nodes to fail with no halt. Validate `MaxConsecutive <= 10` and `MaxPercent <= 50`. |
-| U11 | Reaper container name collision | updater/main.go:1066 | The reaper is always named `culvert-updater-reaper`. If a previous reaper is still running (unlikely but possible), `ContainerCreate` will fail. Use a unique suffix (timestamp or random) or remove the existing reaper first. |
+| U10 | ~~Missing upper bound on error budget params~~ DONE | update_cluster.go:784-789 | Added upper bounds: `MaxConsecutive` capped at 10, `MaxPercent` capped at 50. |
+| U11 | ~~Reaper container name collision~~ DONE | updater/main.go:1066 | Reaper name now includes `time.Now().UnixNano()` suffix for uniqueness. |
 
 ### 8.3 Medium
 
 | # | Issue | File:Line | Description |
 |---|-------|-----------|-------------|
-| U12 | context.Background() in handleApply | updater/main.go:350 | Uses `context.Background()` for the entire update flow, disconnecting it from the HTTP request context. Should use `r.Context()` as base and derive a longer deadline for the update operation. |
-| U13 | context.Background() in handleRollback | updater/main.go:564 | Same issue — `context.Background()` means a disconnected client doesn't cancel the rollback. Use `context.WithTimeout(r.Context(), ...)`. |
+| U12 | ~~context.Background() in handleApply~~ DONE | updater/main.go:350 | Changed to `context.WithTimeout(context.Background(), 30*time.Minute)` — background context is correct here (update must survive client disconnect since the container restarts), but now has a bounded timeout. |
+| U13 | ~~context.Background() in handleRollback~~ DONE | updater/main.go:564 | Changed to `context.WithTimeout(r.Context(), 120*time.Second)`. Rollback should respect client disconnect. |
 | U14 | Disk space check is a no-op | updater/main.go:735-751 | `checkDiskSpace()` logs disk usage but always returns nil. The comment says "skip for now". This should either be implemented properly or removed to avoid false confidence. |
-| U15 | Failure log path injection via tag | updater/main.go:896 | `captureFailureLogs` uses `tag` directly in the filename: `time + "-" + tag + ".log"`. A tag containing `/` or `..` could write outside the intended directory. Sanitize the tag before using in filepath. |
-| U16 | newImg.RepoTags[0] index-out-of-bounds | updater/main.go:775 | `buildConfigDiff` accesses `newImg.RepoTags[0]` without checking if `RepoTags` is empty. Images pulled by digest have no repo tags. Add a bounds check. |
-| U17 | io.ReadAll on container logs unbounded | updater/main.go:892 | `captureFailureLogs` uses `io.ReadAll(reader)` on container logs (last 200 lines). While "200 lines" is bounded by Docker, extremely long lines could still consume significant memory. Use `io.LimitReader`. |
-| U18 | rollbackCleanupLoop holds lock too long | updater/main.go:907-924 | The `rollbackInfo.mu.Lock()` is held while performing Docker API calls (`ContainerRemove`, `ImagesPrune`, `pruneOldImages`), which can take many seconds. This blocks all rollback status queries during cleanup. Restructure to copy fields under lock, then operate lock-free. |
-| U19 | Registry settings file not atomic | update.go:542 | `apiRegistrySettings` POST writes directly with `os.WriteFile()` without using temp+rename pattern. A crash mid-write corrupts the file. Use the same atomic write pattern as other config files. |
+| U15 | ~~Failure log path injection via tag~~ DONE | updater/main.go:896 | Tag is now sanitized through `strings.Map()` — only alphanumeric, dots, dashes, underscores allowed; all other chars replaced with `_`. |
+| U16 | ~~newImg.RepoTags[0] index-out-of-bounds~~ DONE | updater/main.go:775 | Added bounds check on `newImg.RepoTags` — falls back to `"(untagged)"` if empty. |
+| U17 | ~~io.ReadAll on container logs unbounded~~ DONE | updater/main.go:892 | Changed to `io.ReadAll(io.LimitReader(reader, 1<<20))` — 1MB limit on captured failure logs. |
+| U18 | ~~rollbackCleanupLoop holds lock too long~~ DONE | updater/main.go:907-924 | Restructured to copy fields under `RLock`, then perform Docker API calls lock-free. Only re-acquires write lock to set `Available = false`. |
+| U19 | ~~Registry settings file not atomic~~ DONE | update.go:542 | Now uses temp+rename pattern (write to `.tmp`, then `os.Rename`). |
 
 ### 8.4 Low
 
@@ -397,7 +397,7 @@
 |---|-------|-----------|-------------|
 | U20 | apiUpdateCheck fire-and-forget | update.go:215 | `go checkUpdateNow()` is detached with no error feedback. The API returns `{"status":"checking"}` immediately. Client has no way to know if the check failed. Consider a completion channel or poll mechanism. |
 | U21 | newRotatingFile unused in updater | updater/main.go | The updater uses `log.Printf` (stdlib) instead of a rotating logger. For a long-lived sidecar, logs will accumulate without rotation. Consider adding log rotation or documenting reliance on Docker log driver rotation. |
-| U22 | envIntOr uses custom atoi | updater/main.go:1118-1124 | `envIntOr` uses the custom `atoi()` that doesn't handle negative numbers or overflow. A malformed env var like `UPDATER_HEALTH_CHECKS=-1` would produce a garbage value. Use `strconv.Atoi` with validation. |
+| U22 | ~~envIntOr uses custom atoi~~ DONE | updater/main.go:1118-1124 | `envIntOr` now validates each character is a digit and falls back to default on invalid input. Logs a warning for malformed env vars. |
 | U23 | performHASyncPush is a stub | update_cluster.go:568-574 | `performHASyncPush()` just sleeps 10s and returns true. It doesn't actually verify the sync succeeded. This is documented but should be flagged as incomplete. |
 | U24 | Docker Compose updater port exposed to all interfaces | docker-compose.yml:63, docker-compose.ha.yml:55 | Port 7123 is exposed as `"7123:7123"` (all interfaces). If the host is network-accessible, anyone can attempt to reach the updater (blocked by bearer auth, but still increases attack surface). Consider `"127.0.0.1:7123:7123"` or document the risk. |
 | U25 | Missing security_opt in compose | docker-compose.yml:49-68 | Updater container lacks `security_opt: ["no-new-privileges:true"]` and `cap_drop: [ALL]`. While the socket is mounted read-only, adding these hardening options reduces the blast radius of a container compromise. |

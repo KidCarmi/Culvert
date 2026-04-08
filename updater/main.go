@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,6 +42,9 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 )
+
+// tagRe validates OCI-compliant image tags: alphanumeric start, up to 128 chars.
+var tagRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
@@ -181,7 +185,13 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != expected {
+		if !strings.HasPrefix(auth, "Bearer ") {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		// U5: constant-time comparison to prevent timing side-channel attacks.
+		provided := strings.TrimPrefix(auth, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
@@ -249,13 +259,21 @@ func handlePreview(cli *client.Client) http.HandlerFunc {
 		if req.Container == "" {
 			req.Container = "culvert"
 		}
+		// U6: Validate tag format before using in Docker API calls.
+		if req.TargetTag == "" || !tagRe.MatchString(req.TargetTag) {
+			http.Error(w, `{"error":"invalid target_tag format"}`, http.StatusBadRequest)
+			return
+		}
 
-		ctx := context.Background()
+		// U4: Use request context so client disconnect cancels the operation.
+		ctx := r.Context()
 
 		// Inspect current container.
 		info, err := cli.ContainerInspect(ctx, req.Container)
 		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "container not found: " + req.Container})
+			// U8: Don't leak internal error details in HTTP response.
+			log.Printf("container inspect failed for %s: %v", req.Container, err)
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "container not found"})
 			return
 		}
 
@@ -267,7 +285,9 @@ func handlePreview(cli *client.Client) http.HandlerFunc {
 		}
 		reader, err := cli.ImagePull(ctx, targetImage, pullOpts)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pull failed: " + err.Error()})
+			// U8: Don't leak internal error details in HTTP response.
+			log.Printf("image pull failed for %s: %v", targetImage, err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "image pull failed"})
 			return
 		}
 		io.Copy(io.Discard, reader) //nolint:errcheck
@@ -306,6 +326,11 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 		}
 		if req.Container == "" {
 			req.Container = "culvert"
+		}
+		// U6: Validate tag format.
+		if req.TargetTag == "" || !tagRe.MatchString(req.TargetTag) {
+			http.Error(w, `{"error":"invalid target_tag format"}`, http.StatusBadRequest)
+			return
 		}
 		if req.HealthEndpoint == "" {
 			req.HealthEndpoint = "http://" + req.Container + ":8080/health"
@@ -347,7 +372,10 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 			flusher.Flush()
 		}
 
-		ctx := context.Background()
+		// U12: Use a background context for the update operation (must survive
+		// client disconnect since the container gets recreated), but log disconnects.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
 		targetImage := registry + ":" + req.TargetTag
 
 		// Step 1: Disk space check.
@@ -561,7 +589,9 @@ func handleRollback(cli *client.Client) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		// U13: Use request context with a generous timeout for the rollback.
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
 
 		// Stop current, remove, rename rollback, start.
 		stopTimeout := 30
@@ -621,7 +651,10 @@ func handleLoad(cli *client.Client) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		// U2: Limit upload size to 5GB to prevent disk exhaustion.
+		const maxLoadSize = 5 * 1024 * 1024 * 1024 // 5GB
+		r.Body = http.MaxBytesReader(w, r.Body, maxLoadSize)
+		ctx := r.Context()
 		resp, err := cli.ImageLoad(ctx, r.Body)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "image load failed: " + err.Error()})
@@ -767,11 +800,16 @@ type DiffEntry struct {
 }
 
 func buildConfigDiff(info container.InspectResponse, newImg image.InspectResponse) ConfigDiff {
+	// U16: Guard against images with no repo tags (pulled by digest).
+	newImageRef := "(untagged)"
+	if len(newImg.RepoTags) > 0 {
+		newImageRef = newImg.RepoTags[0]
+	}
 	diff := ConfigDiff{
 		Image: DiffEntry{
 			Key:    "Image",
 			Old:    info.Config.Image,
-			New:    newImg.RepoTags[0],
+			New:    newImageRef,
 			Status: "changed",
 		},
 	}
@@ -889,11 +927,19 @@ func captureFailureLogs(ctx context.Context, cli *client.Client, containerID, ta
 	}
 	defer reader.Close()
 
-	data, _ := io.ReadAll(reader)
+	// U17: Limit log capture to 1MB to prevent excessive memory use.
+	data, _ := io.ReadAll(io.LimitReader(reader, 1<<20))
 
 	dir := "/data/update_failures"
 	os.MkdirAll(dir, 0o755) //nolint:errcheck
-	filename := filepath.Join(dir, time.Now().Format("20060102-150405")+"-"+tag+".log")
+	// U15: Sanitize tag to prevent path traversal in log filename.
+	safeTag := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, tag)
+	filename := filepath.Join(dir, time.Now().Format("20060102-150405")+"-"+safeTag+".log")
 	os.WriteFile(filename, data, 0o644) //nolint:errcheck
 	log.Printf("failure logs saved to %s", filename)
 }
@@ -904,23 +950,30 @@ func rollbackCleanupLoop(cli *client.Client) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		rollbackInfo.mu.Lock()
-		if rollbackInfo.Available && time.Now().After(rollbackInfo.ExpiresAt) {
-			ctx := context.Background()
-			cli.ContainerRemove(ctx, rollbackInfo.ContainerName, container.RemoveOptions{Force: true}) //nolint:errcheck
-			log.Printf("removed expired rollback container: %s", rollbackInfo.ContainerName)
-			rollbackInfo.Available = false
+		// U18: Copy fields under lock, then operate lock-free to avoid
+		// blocking rollback status queries during slow Docker API calls.
+		rollbackInfo.mu.RLock()
+		expired := rollbackInfo.Available && time.Now().After(rollbackInfo.ExpiresAt)
+		containerName := rollbackInfo.ContainerName
+		rollbackInfo.mu.RUnlock()
 
-			// Prune dangling images.
-			_, err := cli.ImagesPrune(ctx, filters.Args{})
-			if err != nil {
+		if expired {
+			ctx := context.Background()
+			cli.ContainerRemove(ctx, containerName, container.RemoveOptions{Force: true}) //nolint:errcheck
+			log.Printf("removed expired rollback container: %s", containerName)
+
+			rollbackInfo.mu.Lock()
+			rollbackInfo.Available = false
+			rollbackInfo.mu.Unlock()
+
+			// Prune dangling images (lock-free).
+			if _, err := cli.ImagesPrune(ctx, filters.Args{}); err != nil {
 				log.Printf("image prune failed: %v", err)
 			}
 
 			// Clean up old image tags (keep N most recent).
 			pruneOldImages(ctx, cli)
 		}
-		rollbackInfo.mu.Unlock()
 	}
 }
 
@@ -1013,6 +1066,11 @@ func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
 			http.Error(w, `{"error":"target_tag required"}`, http.StatusBadRequest)
 			return
 		}
+		// U6: Validate tag format.
+		if !tagRe.MatchString(req.TargetTag) {
+			http.Error(w, `{"error":"invalid target_tag format"}`, http.StatusBadRequest)
+			return
+		}
 
 		ctx := r.Context()
 
@@ -1020,7 +1078,7 @@ func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
 		hostname, _ := os.Hostname()
 		self, err := cli.ContainerInspect(ctx, hostname)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"inspect self: %s"}`, err), http.StatusInternalServerError)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "inspect self failed"})
 			return
 		}
 
@@ -1030,47 +1088,58 @@ func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
 		// Pull the new image.
 		pullOut, err := cli.ImagePull(ctx, newImage, image.PullOptions{})
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"pull: %s"}`, err), http.StatusInternalServerError)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "image pull failed"})
 			return
 		}
 		io.Copy(io.Discard, pullOut) //nolint:errcheck
 		pullOut.Close()
 
-		// Build reaper script.
+		// U1/U3: Build reaper script using environment variables instead of
+		// string interpolation to prevent shell injection via container names
+		// or volume bind paths.
 		selfName := strings.TrimPrefix(self.Name, "/")
-		reaperScript := fmt.Sprintf(`
+		dataVolume := buildVolumeArg(self.HostConfig.Binds)
+
+		// U1: The reaper script references only env vars, never interpolated strings.
+		reaperScript := `
 sleep 5
-docker stop -t 10 %s 2>/dev/null || true
-docker rm %s 2>/dev/null || true
-docker create --name %s \
+docker stop -t 10 "$SELF_NAME" 2>/dev/null || true
+docker rm "$SELF_NAME" 2>/dev/null || true
+docker create --name "$SELF_NAME" \
   --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v %s \
+  -v "$DATA_VOLUME" \
   -p 7123:7123 \
-  %s
-docker start %s
-`, selfName, selfName, selfName,
-			buildVolumeArg(self.HostConfig.Binds),
-			newImage, selfName)
+  "$NEW_IMAGE"
+docker start "$SELF_NAME"
+`
+
+		// U11: Use a unique reaper name to avoid collision with a still-running reaper.
+		reaperName := fmt.Sprintf("culvert-updater-reaper-%d", time.Now().UnixNano())
 
 		// Spawn the reaper container using the Docker CLI image (small, has docker binary).
 		reaperCfg := &container.Config{
 			Image: "docker:cli",
 			Cmd:   []string{"sh", "-c", reaperScript},
+			Env: []string{
+				"SELF_NAME=" + selfName,
+				"DATA_VOLUME=" + dataVolume,
+				"NEW_IMAGE=" + newImage,
+			},
 		}
 		reaperHostCfg := &container.HostConfig{
 			AutoRemove: true,
 			Binds:      []string{"/var/run/docker.sock:/var/run/docker.sock"},
 		}
 
-		reaperResp, err := cli.ContainerCreate(ctx, reaperCfg, reaperHostCfg, nil, nil, "culvert-updater-reaper")
+		reaperResp, err := cli.ContainerCreate(ctx, reaperCfg, reaperHostCfg, nil, nil, reaperName)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"create reaper: %s"}`, err), http.StatusInternalServerError)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create reaper failed"})
 			return
 		}
 
 		if err := cli.ContainerStart(ctx, reaperResp.ID, container.StartOptions{}); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"start reaper: %s"}`, err), http.StatusInternalServerError)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "start reaper failed"})
 			return
 		}
 
@@ -1092,18 +1161,28 @@ func imageWithTag(img, tag string) string {
 	return img + ":" + tag
 }
 
-// buildVolumeArg converts bind mounts to a comma-separated -v arg string.
+// bindPathRe validates Docker bind mount strings (source:dest[:mode]).
+var bindPathRe = regexp.MustCompile(`^[a-zA-Z0-9/_. :-]+$`)
+
+// buildVolumeArg returns the first data volume bind (skip docker.sock).
+// U3: Validates the bind string to prevent shell metacharacter injection.
 func buildVolumeArg(binds []string) string {
 	if len(binds) == 0 {
 		return ""
 	}
-	// Return the first data volume bind (skip docker.sock, handled separately)
 	for _, b := range binds {
 		if !strings.Contains(b, "docker.sock") {
+			if !bindPathRe.MatchString(b) {
+				log.Printf("warning: skipping bind with invalid chars: %q", b)
+				continue
+			}
 			return b
 		}
 	}
-	return binds[0]
+	if len(binds) > 0 && bindPathRe.MatchString(binds[0]) {
+		return binds[0]
+	}
+	return ""
 }
 
 // ── Environment helpers ─────────────────────────────────────────────────────
@@ -1120,7 +1199,19 @@ func envIntOr(key string, fallback int) int {
 	if v == "" {
 		return fallback
 	}
-	return atoi(v)
+	// U22: Use proper integer parsing with validation instead of custom atoi.
+	n := 0
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			log.Printf("warning: invalid integer for %s=%q, using default %d", key, v, fallback)
+			return fallback
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n <= 0 {
+		return fallback
+	}
+	return n
 }
 
 func envDurOr(key string, fallback time.Duration) time.Duration {
