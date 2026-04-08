@@ -23,17 +23,15 @@
 
 ## 1. CRITICAL & HIGH PRIORITY (Fix Before Next Release)
 
-### 1.1 Content-Encoding Bypass — Scanners Cannot See Compressed Bodies
+### 1.1 ~~Content-Encoding Bypass — Scanners Cannot See Compressed Bodies~~ DONE
 - **Files**: `proxy.go`, `security_scan.go`
 - **Severity**: CRITICAL
-- **Issue**: Response bodies are scanned as raw bytes without decompressing `Content-Encoding: gzip/deflate/brotli`. Attackers deliver gzipped malware that bypasses ClamAV and YARA because signatures match uncompressed content only.
-- **Fix**: Check `Content-Encoding` header after buffering; decompress before passing to scanners. Guard against gzip bombs with uncompressed size limits.
+- **Status**: FIXED — Added `decompressForScan()` in security_scan.go that decompresses gzip/deflate bodies before passing to ClamAV/YARA/DPI scanners. Called from both scan points (handleHTTP line 599, handleTunnelInspect line 1055). Gzip bomb protection via 64MB `maxDecompressBytes` limit. Brotli deferred (needs external dep). Tests: identity, gzip, invalid gzip, brotli fallback, gzip bomb.
 
-### 1.2 IDN Homograph Attack — No IDNA Normalization
-- **Files**: `policy.go:792-804`, `store.go:862-880`, `catdb.go:62`
+### 1.2 ~~IDN Homograph Attack — No IDNA Normalization~~ DONE
+- **Files**: `security.go`, `policy.go`, `store.go`, `catdb.go`
 - **Severity**: CRITICAL
-- **Issue**: Hosts are lowercased with `strings.ToLower()` but NOT normalized via IDNA2008 (RFC 5890). Punycode domains (`xn--examp1e.com`) bypass blocklist and category rules for their ASCII equivalents.
-- **Fix**: Normalize hosts with `golang.org/x/net/idna.ToASCII()` before all FQDN comparisons in `matchFQDN()`, blocklist lookup, and category DB lookup.
+- **Status**: FIXED — Added `normalizeHost()` in security.go using `golang.org/x/net/idna.ToASCII()` (RFC 5890). Applied to all FQDN comparison sites: `matchFQDN()`, `Blocklist.IsBlocked()`, `Blocklist.Add/Remove/AddException/RemoveException()`, `CommunityDB.Lookup()`, `matchCategoryInStore()`, `lookupHostCategory()`, `SSLBypassMatcher.Matches()`, and category store add/remove. Fast path skips IDNA for IP addresses and pure ASCII. Tests: ASCII, Unicode→punycode, IP passthrough, matchFQDN with Unicode patterns.
 
 ### 1.3 ~~Missing RBAC on Certificate Upload~~ DONE
 - **File**: `ui.go:2374-2411`

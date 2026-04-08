@@ -362,6 +362,36 @@ func TestConfig_SetUIUser_RoleUpdate(t *testing.T) {
 	}
 }
 
+// ── normalizeHost tests (1.2 fix) ────────────────────────────────────────────
+
+func TestNormalizeHost(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		// Basic ASCII — unchanged.
+		{"example.com", "example.com"},
+		{"EXAMPLE.COM", "example.com"},
+		// Trailing dot removed.
+		{"example.com.", "example.com"},
+		// IP addresses — passed through unchanged.
+		{"192.168.1.1", "192.168.1.1"},
+		{"::1", "::1"},
+		// Empty string.
+		{"", ""},
+		// Already punycode — normalized to lowercase.
+		{"xn--mnchen-3ya.de", "xn--mnchen-3ya.de"},
+		// Unicode IDN — converted to punycode (IDNA2008).
+		{"münchen.de", "xn--mnchen-3ya.de"},
+	}
+	for _, c := range cases {
+		got := normalizeHost(c.input)
+		if got != c.want {
+			t.Errorf("normalizeHost(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
+
 func TestInitAuditLog_EmptyPath(t *testing.T) {
 	// Empty path should be a no-op
 	if err := InitAuditLog(""); err != nil {

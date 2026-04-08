@@ -59,7 +59,7 @@ func (c *CommunityDB) Close() error {
 // stopping when no further parent exists above the TLD.
 // Returns ("", false) when no entry is found.
 func (c *CommunityDB) Lookup(host string) (string, bool) {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host = normalizeHost(host)
 	for {
 		cat, found := c.getExact(host)
 		if found {

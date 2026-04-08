@@ -596,7 +596,10 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if scanActive && (resp.ContentLength < 0 || resp.ContentLength <= globalSecScanner.MaxBytes()) {
 		buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
 		if readErr == nil {
-			scanResult := safeScanBodyWithCT(buffered, resp.Header.Get("Content-Type"))
+			// 1.1 fix: decompress gzip/deflate bodies before scanning so
+			// ClamAV/YARA signatures match the actual content.
+			scanData := decompressForScan(buffered, resp.Header.Get("Content-Encoding"))
+			scanResult := safeScanBodyWithCT(scanData, resp.Header.Get("Content-Type"))
 			if scanResult != nil {
 				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)
 				atomic.AddInt64(&statBlocked, 1)
@@ -1049,10 +1052,15 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 				break
 			}
 			if readErr == nil {
+				// 1.1 fix: decompress gzip/deflate bodies before scanning so
+				// ClamAV/YARA signatures match the actual content.
+				ce := resp.Header.Get("Content-Encoding")
+				scanBody := decompressForScan(body, ce)
+
 				// When remote scan service is active, delegate all scanning
 				// (ClamAV + YARA + DPI) in a single remote call.
 				if globalRemoteScanner.Enabled() {
-					if scanResult := safeScanBodyWithCT(body, ct); scanResult != nil {
+					if scanResult := safeScanBodyWithCT(scanBody, ct); scanResult != nil {
 						origBody.Close()
 						atomic.AddInt64(&statBlocked, 1)
 						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "")
@@ -1062,7 +1070,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 				} else {
 					// DPI regex scan (text content only).
 					if dpiScanner.Enabled() && isTextContentType(ct) {
-						if pattern, matched := safeDPIScan(body); matched {
+						if pattern, matched := safeDPIScan(scanBody); matched {
 							origBody.Close()
 							recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern, "")
 							dpiBlock(clientTLS, hostOnly, pattern)
@@ -1070,7 +1078,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 						}
 					}
 					// ClamAV + YARA body scan (all content types).
-					if scanResult := safeScanBody(body); scanResult != nil {
+					if scanResult := safeScanBody(scanBody); scanResult != nil {
 						origBody.Close()
 						atomic.AddInt64(&statBlocked, 1)
 						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "")
