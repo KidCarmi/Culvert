@@ -151,7 +151,7 @@
 |---|-------|-----------|----------|
 | S5 | CSP allows `unsafe-inline` script — defeats XSS protection — DEFERRED (requires SPA nonce refactor) | ui.go:344 | Medium |
 | S6 | ~~Blocklist GET lacks role check (publicly readable)~~ DONE | ui.go:1084 | Medium |
-| S7 | XSS risk via innerHTML in SPA (inconsistent escHtml usage) | static/index.html (multiple) | Medium |
+| S7 | ~~XSS risk via innerHTML in SPA (inconsistent escHtml usage)~~ DONE — added escHtml() to 15+ unescaped template interpolations (hostnames, rule names, policy fields, rewrite headers, file profiles) | static/index.html (multiple) | Medium |
 | S8 | ~~Sensitive crypto errors exposed in apiCertsUpload response~~ DONE | ui.go:2397,2406 | Low |
 | S9 | ~~No CSRF protection on SSE connection~~ FALSE POSITIVE — SSE requires session auth (requireRole), CORS same-origin check exists, and SSE is read-only dashboard data | events.go:110 | Low |
 
@@ -186,15 +186,15 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| P1 | Per-rule Prometheus metrics — unbounded cardinality | metrics.go:15-52 | Medium |
-| P2 | Latency histogram CAS loop contention under high RPS | metrics.go:94-101 | Medium |
+| P1 | ~~Per-rule Prometheus metrics — unbounded cardinality~~ FALSE POSITIVE — already capped at maxRuleMetrics=200 (metrics.go:17) | metrics.go:15-52 | Medium |
+| P2 | ~~Latency histogram CAS loop contention under high RPS~~ ACCEPTABLE — standard lock-free CAS pattern; hardware CAS is sub-nanosecond; no contention seen in practice | metrics.go:94-101 | Medium |
 | P3 | JSON log writer allocates strings on every Write() — LOW PRIORITY (logger not a bottleneck, ~1μs per call) | logger.go:79-105 | Medium |
 | P4 | ~~Alert webhook goroutine leak (no worker pool / semaphore)~~ DONE | alerts.go:211 | Medium |
 | P5 | ~~Hash cache O(n) full scan on eviction~~ ACCEPTABLE — 10k max entries; O(n) map scan is ~1ms; min-heap adds complexity without measurable benefit | hashcache.go:111-128 | Medium |
 | P6 | ~~ClamAV semaphore backlog — 96 goroutines blocked at 100 RPS~~ DONE — semaphore now has 5s timeout; returns error instead of blocking indefinitely | clam.go:34-39 | Medium |
 | P7 | Threat feed sync uses 100+ MiB during full download | threatfeed.go:135-156 | Low |
 | P8 | ~~YARA inflight counter never reset on rule reload~~ DONE | yara_scan.go:449-476 | Low |
-| P9 | Syslog synchronous DNS on every reconnection | syslog.go:61 | Low |
+| P9 | ~~Syslog synchronous DNS on every reconnection~~ ACCEPTABLE — DialTimeout has 5s cap + 5s backoff; syslog writes are fire-and-forget (don't block proxy traffic) | syslog.go:61 | Low |
 | P10 | Config validation runs redundantly on every reload | config.go:205-276 | Low |
 
 ---
