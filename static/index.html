@@ -4569,41 +4569,60 @@ async function deletePolicy(priority) {
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
-// ── Drag-and-drop reordering ──────────────────────────────────────────────
+// ── Drag-and-drop reordering (event delegation — no per-row listeners) ──
+// Uses a single set of listeners on the tbody so they don't accumulate
+// when renderPolicy() rebuilds rows every tick cycle.
+let _polDragInitialised = false;
 function initPolicyDragDrop() {
-  const rows = document.querySelectorAll('#pol-table tbody tr[data-priority]');
-  rows.forEach(row => {
-    row.addEventListener('dragstart', e => {
-      e.dataTransfer.setData('text/plain', row.dataset.priority);
-      row.classList.add('dragging');
-    });
-    row.addEventListener('dragend', () => row.classList.remove('dragging'));
-    row.addEventListener('dragover', e => { e.preventDefault(); row.classList.add('drag-over'); });
-    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
-    row.addEventListener('drop', async e => {
-      e.preventDefault();
-      row.classList.remove('drag-over');
-      const fromPri = parseInt(e.dataTransfer.getData('text/plain'));
-      const toPri   = parseInt(row.dataset.priority);
-      if (fromPri === toPri) return;
+  if (_polDragInitialised) return; // listeners already attached
+  const tbody = document.querySelector('#pol-table tbody');
+  if (!tbody) return;
+  _polDragInitialised = true;
 
-      // Build new ordered priority list
-      const allRows = [...document.querySelectorAll('#pol-table tbody tr[data-priority]')];
-      const priorities = allRows.map(r => parseInt(r.dataset.priority));
-      const fromIdx = priorities.indexOf(fromPri);
-      const toIdx   = priorities.indexOf(toPri);
-      priorities.splice(fromIdx, 1);
-      priorities.splice(toIdx, 0, fromPri);
+  tbody.addEventListener('dragstart', e => {
+    const row = e.target.closest('tr[data-priority]');
+    if (!row) return;
+    e.dataTransfer.setData('text/plain', row.dataset.priority);
+    row.classList.add('dragging');
+  });
+  tbody.addEventListener('dragend', e => {
+    const row = e.target.closest('tr[data-priority]');
+    if (row) row.classList.remove('dragging');
+  });
+  tbody.addEventListener('dragover', e => {
+    const row = e.target.closest('tr[data-priority]');
+    if (!row) return;
+    e.preventDefault();
+    row.classList.add('drag-over');
+  });
+  tbody.addEventListener('dragleave', e => {
+    const row = e.target.closest('tr[data-priority]');
+    if (row) row.classList.remove('drag-over');
+  });
+  tbody.addEventListener('drop', async e => {
+    const row = e.target.closest('tr[data-priority]');
+    if (!row) return;
+    e.preventDefault();
+    row.classList.remove('drag-over');
+    const fromPri = parseInt(e.dataTransfer.getData('text/plain'));
+    const toPri   = parseInt(row.dataset.priority);
+    if (fromPri === toPri) return;
 
-      try {
-        await api('/api/policy/reorder', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ priorities }),
-        });
-        fetchPolicy();
-      } catch(e) { toast('Reorder failed: ' + e.message, 'error'); }
-    });
+    const allRows = [...document.querySelectorAll('#pol-table tbody tr[data-priority]')];
+    const priorities = allRows.map(r => parseInt(r.dataset.priority));
+    const fromIdx = priorities.indexOf(fromPri);
+    const toIdx   = priorities.indexOf(toPri);
+    priorities.splice(fromIdx, 1);
+    priorities.splice(toIdx, 0, fromPri);
+
+    try {
+      await api('/api/policy/reorder', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ priorities }),
+      });
+      fetchPolicy();
+    } catch(e) { toast('Reorder failed: ' + e.message, 'error'); }
   });
 }
 
@@ -5454,12 +5473,33 @@ async function fetchTopRules() {
 // SSE Live Dashboard
 // ═══════════════════════════════════════════════════════════════════════════
 let sseConnected = false;
+let _sseInstance = null;
+let _sseRetries = 0;
+const SSE_MAX_RETRIES = 30;       // stop after 30 failures (~5 min with backoff)
+const SSE_BASE_DELAY = 2000;      // 2s initial
+const SSE_MAX_DELAY  = 30000;     // cap at 30s
+
 function connectSSE() {
   if (typeof EventSource === 'undefined') return;
+
+  // Close any previous connection to prevent orphaned EventSources.
+  if (_sseInstance) {
+    _sseInstance.close();
+    _sseInstance = null;
+  }
+
+  if (_sseRetries >= SSE_MAX_RETRIES) {
+    console.warn('SSE: max reconnect attempts reached, stopping. Reload page to resume.');
+    return;
+  }
+
   const es = new EventSource('/api/events');
-  es.addEventListener('connected', () => { sseConnected = true; });
+  _sseInstance = es;
+
+  es.addEventListener('connected', () => { sseConnected = true; _sseRetries = 0; startTick(); });
   es.onmessage = e => {
     try {
+      _sseRetries = 0; // successful message resets retry counter
       const d = JSON.parse(e.data);
       document.getElementById('d-active').textContent = d.activeConns || 0;
       document.getElementById('d-total').textContent = fmt(d.totalRequests || 0);
@@ -5480,7 +5520,14 @@ function connectSSE() {
       }
     } catch(_) {}
   };
-  es.onerror = () => { sseConnected = false; setTimeout(connectSSE, 5000); };
+  es.onerror = () => {
+    sseConnected = false;
+    es.close();          // explicitly close the failed connection
+    _sseInstance = null;
+    _sseRetries++;
+    const delay = Math.min(SSE_BASE_DELAY * Math.pow(1.5, _sseRetries), SSE_MAX_DELAY);
+    setTimeout(connectSSE, delay);
+  };
 }
 
 const FLAG_BASE = 'https://flagcdn.com/16x12/';
@@ -5805,10 +5852,26 @@ async function uploadCustomCert() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Poll loop
+// Poll loop — pauses when server is unreachable to prevent memory buildup
 // ═══════════════════════════════════════════════════════════════════════════
+let _tickErrors = 0;
+let _tickInterval = null;
+const TICK_MAX_ERRORS = 20;  // pause after 20 consecutive failures (~1 min)
+const TICK_NORMAL_MS  = 3000;
+
 async function tick() {
-  await Promise.all([fetchStats(), fetchTimeseries(), fetchLogs()]);
+  try {
+    await Promise.all([fetchStats(), fetchTimeseries(), fetchLogs()]);
+    _tickErrors = 0; // success resets counter
+  } catch(e) {
+    _tickErrors++;
+    if (_tickErrors >= TICK_MAX_ERRORS && _tickInterval) {
+      clearInterval(_tickInterval);
+      _tickInterval = null;
+      console.warn('Tick: server unreachable, pausing poll. Will resume when SSE reconnects.');
+    }
+    return; // skip view-specific fetches when server is down
+  }
   if (currentView === 'dashboard') {
     fetchTopHosts();
     fetchDashboardHealth();
@@ -5820,6 +5883,12 @@ async function tick() {
   if (currentView === 'rewrite')   fetchRewrite();
   if (currentView === 'policy')    fetchPolicy();
   if (currentView === 'cluster')   loadCluster();
+}
+
+function startTick() {
+  if (_tickInterval) return;
+  _tickErrors = 0;
+  _tickInterval = setInterval(tick, TICK_NORMAL_MS);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5839,7 +5908,7 @@ fetchDashboardThreats();
 fetchTopRules();
 connectSSE();
 tick();
-setInterval(tick, 3000);
+startTick();
 // Reload panels when switching views
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
