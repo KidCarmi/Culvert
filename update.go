@@ -159,6 +159,36 @@ func startUpdateChecker(ctx context.Context) {
 
 	checkUpdateNow()
 
+	// If the updater is not yet ready (token_pending/unavailable), retry
+	// every 15s for up to 3 minutes before falling back to the 6h cycle.
+	globalUpdateInfo.mu.RLock()
+	status := globalUpdateInfo.updaterStatus
+	globalUpdateInfo.mu.RUnlock()
+	if status == "token_pending" || status == "unavailable" {
+		retryTicker := time.NewTicker(15 * time.Second)
+		retryDeadline := time.After(3 * time.Minute)
+	retryLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				retryTicker.Stop()
+				return
+			case <-retryDeadline:
+				retryTicker.Stop()
+				break retryLoop
+			case <-retryTicker.C:
+				checkUpdateNow()
+				globalUpdateInfo.mu.RLock()
+				s := globalUpdateInfo.updaterStatus
+				globalUpdateInfo.mu.RUnlock()
+				if s == "connected" {
+					retryTicker.Stop()
+					break retryLoop
+				}
+			}
+		}
+	}
+
 	// Then check every 6 hours.
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
