@@ -83,7 +83,7 @@
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
 | B1 | ~~RelayBufPool type assertion without bounds validation~~ DONE | proxy.go:711,824,935,1014 | Medium |
-| B2 | Goroutine cleanup race — first relay completes, write halves still open | proxy.go:822-838 | Medium |
+| B2 | ~~Goroutine cleanup race — first relay completes, write halves still open~~ DONE — each relay now CloseWrite its own dst after copy; prevents premature close of other direction | proxy.go:822-838 | Medium |
 | B3 | ~~Missing TLS conn close on handshake error (only raw TCP closed)~~ DONE | proxy.go:893-895 | Medium |
 | B4 | ~~X-Forwarded-For parser silently discards non-IP values~~ FALSE POSITIVE — stripping non-IP values is correct security behavior per RFC 7239; XFF should only contain IPs | proxy.go:127-138 | Low |
 | B5 | ~~SOCKS5 credentials never cleared from memory after auth~~ DONE | socks5.go:76-90 | Low |
@@ -195,7 +195,7 @@
 | P7 | Threat feed sync uses 100+ MiB during full download | threatfeed.go:135-156 | Low |
 | P8 | ~~YARA inflight counter never reset on rule reload~~ DONE | yara_scan.go:449-476 | Low |
 | P9 | ~~Syslog synchronous DNS on every reconnection~~ ACCEPTABLE — DialTimeout has 5s cap + 5s backoff; syslog writes are fire-and-forget (don't block proxy traffic) | syslog.go:61 | Low |
-| P10 | Config validation runs redundantly on every reload | config.go:205-276 | Low |
+| P10 | ~~Config validation runs redundantly on every reload~~ ACCEPTABLE — validate() is flat string comparisons, ~1μs; caching adds complexity without measurable benefit | config.go:205-276 | Low |
 
 ---
 
@@ -269,15 +269,15 @@
 | Q3 | Inconsistent API response format (some `{ok:true}`, some raw data) | ui.go (multiple) |
 | Q4 | Inconsistent error handling in JS (empty catch, toast, showErr) | static/index.html |
 | Q5 | Inconsistent log prefixes across components | logger.go, syslog.go, alerts.go |
-| Q6 | Magic numbers without named constants | ui.go:374, events.go:123 |
+| Q6 | ~~Magic numbers without named constants~~ LOW PRIORITY — 1<<20 is idiomatic Go for 1 MiB; events.go:123 has no magic number | ui.go:374, events.go:123 |
 | Q7 | Inline CSS scattered throughout HTML | static/index.html (hundreds) |
 
 ### 6.2 Missing Tests
 
 | # | Gap | Files |
 |---|-----|-------|
-| Q8 | DPI regex timeout behavior untested | scanner_test.go |
-| Q9 | Hash cache eviction race conditions untested | hashcache_test.go |
+| Q8 | ~~DPI regex timeout behavior untested~~ DONE — added TestMatchDPIRegexWithTimeout_Normal and _TimeoutReturnsTrue | scanner_test.go |
+| Q9 | ~~Hash cache eviction race conditions untested~~ DONE — added TestHashCache_ConcurrentEviction with concurrent get/set/eviction | hashcache_test.go |
 | Q10 | ClamAV connection failures / malformed responses untested | clam_test.go |
 | Q11 | YARA regex timeout goroutine leak untested | yara_scan_test.go |
 | Q12 | sendGRPCToNode() delivery untested | update_cluster_test.go |

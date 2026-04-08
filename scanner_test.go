@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
+	"time"
 )
 
 // ── ContentScanner unit tests ──────────────────────────────────────────────────
@@ -180,5 +182,26 @@ func TestIsTextContentType(t *testing.T) {
 		if got := isTextContentType(tc.ct); got != tc.want {
 			t.Errorf("isTextContentType(%q) = %v, want %v", tc.ct, got, tc.want)
 		}
+	}
+}
+
+// Q8: Test that DPI regex timeout returns true (fail-closed).
+func TestMatchDPIRegexWithTimeout_Normal(t *testing.T) {
+	re := regexp.MustCompile(`evil`)
+	if !matchDPIRegexWithTimeout(re, []byte("this is evil"), time.Second) {
+		t.Error("expected match")
+	}
+	if matchDPIRegexWithTimeout(re, []byte("this is fine"), time.Second) {
+		t.Error("expected no match")
+	}
+}
+
+func TestMatchDPIRegexWithTimeout_TimeoutReturnsTrue(t *testing.T) {
+	// Use a pattern that's fast to compile but we force a tiny timeout.
+	re := regexp.MustCompile(`^(a+)+$`)
+	// With a near-zero timeout, the match should time out and return true (fail-closed).
+	result := matchDPIRegexWithTimeout(re, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"), time.Nanosecond)
+	if !result {
+		t.Error("timeout should return true (fail-closed)")
 	}
 }

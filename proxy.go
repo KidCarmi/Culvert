@@ -719,23 +719,20 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	logger.Printf("WS tunnel established → %q", sanitizeLog(host))
 
 	// Bridge: drain any buffered bytes from the target first.
+	// B2: Each relay closes its own dst write half after copy completes.
 	done := make(chan struct{}, 2)
-	relay := func(dst net.Conn, src io.Reader) {
+	relayWS := func(dst net.Conn, src io.Reader) {
 		bp := getRelayBuf()
 		io.CopyBuffer(dst, src, *bp) //nolint:errcheck
 		relayBufPool.Put(bp)
+		if tc, ok := dst.(interface{ CloseWrite() error }); ok {
+			tc.CloseWrite() //nolint:errcheck
+		}
 		done <- struct{}{}
 	}
-	go relay(clientConn, br)       // target → client (br may have buffered bytes)
-	go relay(destConn, clientConn) // client → target
+	go relayWS(clientConn, br)       // target → client (br may have buffered bytes)
+	go relayWS(destConn, clientConn) // client → target
 	<-done
-	// Unblock the peer goroutine by closing write halves so io.Copy returns.
-	if tc, ok := clientConn.(interface{ CloseWrite() error }); ok {
-		tc.CloseWrite() //nolint:errcheck
-	}
-	if tc, ok := destConn.(interface{ CloseWrite() error }); ok {
-		tc.CloseWrite() //nolint:errcheck
-	}
 	<-done
 }
 
@@ -832,22 +829,22 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 	defer recordActiveConn(-1)
 
 	done := make(chan struct{}, 2)
+	// B2: Each relay closes its own dst write half after copy completes,
+	// signaling EOF to the remote peer without interfering with the other
+	// relay's writes. This prevents the race where CloseWrite on one
+	// connection kills an in-flight write from the other direction.
 	relay := func(dst, src net.Conn) {
 		bp := getRelayBuf()
 		io.CopyBuffer(dst, src, *bp) //nolint:errcheck
 		relayBufPool.Put(bp)
+		if tc, ok := dst.(interface{ CloseWrite() error }); ok {
+			tc.CloseWrite() //nolint:errcheck
+		}
 		done <- struct{}{}
 	}
 	go relay(destConn, clientConn)
 	go relay(clientConn, destConn)
 	<-done
-	// Unblock the peer goroutine by closing write halves so io.Copy returns.
-	if tc, ok := destConn.(interface{ CloseWrite() error }); ok {
-		tc.CloseWrite() //nolint:errcheck
-	}
-	if tc, ok := clientConn.(interface{ CloseWrite() error }); ok {
-		tc.CloseWrite() //nolint:errcheck
-	}
 	<-done
 }
 
