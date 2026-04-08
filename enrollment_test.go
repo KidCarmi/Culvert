@@ -115,13 +115,13 @@ func TestTokenGenerate_And_Validate(t *testing.T) {
 	}
 
 	// Validate with matching node ID.
-	err = cs.ValidateToken(plaintext, "dp-east-1", "")
+	_, err = cs.ValidateAndConsumeToken(plaintext, "dp-east-1", "")
 	if err != nil {
-		t.Fatalf("ValidateToken: %v", err)
+		t.Fatalf("ValidateAndConsumeToken: %v", err)
 	}
 
 	// Token should now be consumed — second use fails.
-	err = cs.ValidateToken(plaintext, "dp-east-2", "")
+	_, err = cs.ValidateAndConsumeToken(plaintext, "dp-east-2", "")
 	if err == nil {
 		t.Fatal("expected error: token already consumed")
 	}
@@ -133,7 +133,7 @@ func TestTokenValidate_Expired(t *testing.T) {
 	plaintext, _ := cs.GenerateToken("", "", "admin", 1*time.Millisecond)
 	time.Sleep(5 * time.Millisecond)
 
-	err := cs.ValidateToken(plaintext, "node-1", "")
+	_, err := cs.ValidateAndConsumeToken(plaintext, "node-1", "")
 	if err == nil {
 		t.Fatal("expected error: token expired")
 	}
@@ -147,7 +147,7 @@ func TestTokenValidate_WrongPrefix(t *testing.T) {
 
 	plaintext, _ := cs.GenerateToken("dp-east-", "", "admin", 1*time.Hour)
 
-	err := cs.ValidateToken(plaintext, "dp-west-1", "")
+	_, err := cs.ValidateAndConsumeToken(plaintext, "dp-west-1", "")
 	if err == nil {
 		t.Fatal("expected error: prefix mismatch")
 	}
@@ -162,7 +162,7 @@ func TestTokenValidate_CIDRRestriction(t *testing.T) {
 	plaintext, _ := cs.GenerateToken("", "10.0.0.0/8", "admin", 1*time.Hour)
 
 	// Allowed IP.
-	err := cs.ValidateToken(plaintext, "node-1", "10.1.2.3")
+	_, err := cs.ValidateAndConsumeToken(plaintext, "node-1", "10.1.2.3")
 	if err != nil {
 		t.Fatalf("should allow 10.1.2.3: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestTokenValidate_CIDRRestriction_Denied(t *testing.T) {
 
 	plaintext, _ := cs.GenerateToken("", "10.0.0.0/8", "admin", 1*time.Hour)
 
-	err := cs.ValidateToken(plaintext, "node-1", "192.168.1.1")
+	_, err := cs.ValidateAndConsumeToken(plaintext, "node-1", "192.168.1.1")
 	if err == nil {
 		t.Fatal("expected error: CIDR mismatch")
 	}
@@ -182,7 +182,7 @@ func TestTokenValidate_CIDRRestriction_Denied(t *testing.T) {
 func TestTokenValidate_InvalidToken(t *testing.T) {
 	cs := newTestClusterStore(t)
 
-	err := cs.ValidateToken("nonexistent-token", "node-1", "")
+	_, err := cs.ValidateAndConsumeToken("nonexistent-token", "node-1", "")
 	if err == nil {
 		t.Fatal("expected error: invalid token")
 	}
@@ -651,9 +651,9 @@ func TestEnrollmentFlow_TokenToCSRToNode(t *testing.T) {
 	}
 
 	// Step 2: Validate the token (simulating what the Enroll RPC does).
-	err = cs.ValidateToken(plaintext, "dp-new-node", "10.0.0.1")
+	_, err = cs.ValidateAndConsumeToken(plaintext, "dp-new-node", "10.0.0.1")
 	if err != nil {
-		t.Fatalf("ValidateToken: %v", err)
+		t.Fatalf("ValidateAndConsumeToken: %v", err)
 	}
 
 	// Step 3: Generate a CSR (simulating what the DP node does).
@@ -713,7 +713,7 @@ func TestEnrollmentFlow_TokenToCSRToNode(t *testing.T) {
 	}
 
 	// Step 7: Token should be consumed — can't reuse.
-	err = cs.ValidateToken(plaintext, "dp-another", "")
+	_, err = cs.ValidateAndConsumeToken(plaintext, "dp-another", "")
 	if err == nil {
 		t.Fatal("expected error: token already consumed")
 	}
@@ -737,7 +737,7 @@ func TestClusterStore_PersistenceRoundTrip(t *testing.T) {
 
 	// Generate token.
 	plaintext, _ := cs1.GenerateToken("dp-", "10.0.0.0/8", "admin", 24*time.Hour)
-	_ = cs1.ValidateToken(plaintext, "dp-1", "10.0.0.1")
+	_, _ = cs1.ValidateAndConsumeToken(plaintext, "dp-1", "10.0.0.1")
 
 	// Register and revoke a node.
 	cs1.RegisterNode(&EnrolledNode{

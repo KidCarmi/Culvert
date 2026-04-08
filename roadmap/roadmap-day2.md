@@ -94,7 +94,7 @@
 |---|-------|-----------|----------|
 | B6 | ~~Duplicate exception check in isExcepted() (dead code)~~ DONE | store.go:467-480 | Low |
 | B7 | PolicyRule.HitCount race — atomic ops on struct field copied by value | policy.go:582 | Medium |
-| B8 | Missing Priority validation — Priority=0 silently becomes first rule | policy.go:420-430 | Medium |
+| B8 | ~~Missing Priority validation — Priority=0 silently becomes first rule~~ DONE | policy.go:420-430 | Medium |
 
 ### 2.3 TLS & Certificate Management
 
@@ -121,7 +121,7 @@
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
 | B19 | Log rotation TOCTOU — size check races with write | logger.go:43-55 | Medium |
-| B20 | Syslog reconnect has no backoff (CPU waste on failure) | syslog.go:104-106 | Medium |
+| B20 | ~~Syslog reconnect has no backoff (CPU waste on failure)~~ DONE | syslog.go:104-106 | Medium |
 | B21 | SSE hub drops messages for slow clients silently | events.go:33-42 | Low |
 
 ### 2.6 Threat Detection & Scanning
@@ -152,7 +152,7 @@
 | S5 | CSP allows `unsafe-inline` script — defeats XSS protection | ui.go:344 | Medium |
 | S6 | ~~Blocklist GET lacks role check (publicly readable)~~ DONE | ui.go:1084 | Medium |
 | S7 | XSS risk via innerHTML in SPA (inconsistent escHtml usage) | static/index.html (multiple) | Medium |
-| S8 | Sensitive crypto errors exposed in apiCertsUpload response | ui.go:2397,2406 | Low |
+| S8 | ~~Sensitive crypto errors exposed in apiCertsUpload response~~ DONE | ui.go:2397,2406 | Low |
 | S9 | No CSRF protection on SSE connection | events.go:110 | Low |
 
 ### 3.3 TLS & Certificates
@@ -287,7 +287,7 @@
 
 | # | Issue | Location |
 |---|-------|----------|
-| Q14 | Deprecated `ValidateToken()` still defined | enrollment.go:270-274 |
+| Q14 | ~~Deprecated `ValidateToken()` still defined~~ DONE | enrollment.go:270-274 |
 | Q15 | CA import partial failure leaves inconsistent state | enrollment.go:1001-1006 |
 | Q16 | Missing input validation on NodeGroup label keys/values | nodegroup.go:231-244 |
 | Q17 | Alert webhook no deduplication window | alerts.go:211,254-259 |

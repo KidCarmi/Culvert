@@ -267,11 +267,6 @@ func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP stri
 	return info, nil
 }
 
-// Deprecated: Use ValidateAndConsumeToken instead, which also persists and returns metadata.
-func (cs *ClusterStore) ValidateToken(plaintext, nodeID, sourceIP string) error {
-	_, err := cs.ValidateAndConsumeToken(plaintext, nodeID, sourceIP)
-	return err
-}
 
 // ListTokens returns all tokens (active and consumed).
 func (cs *ClusterStore) ListTokens() []EnrollToken {

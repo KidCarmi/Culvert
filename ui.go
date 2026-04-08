@@ -2400,7 +2400,8 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if target == "mitm" {
 		if err := certMgr.LoadCustomCA(certPEM, keyPEM); err != nil {
-			http.Error(w, "invalid CA cert/key: "+err.Error(), http.StatusBadRequest)
+			logger.Printf("certs upload MITM: %v", err)
+			http.Error(w, "invalid CA cert/key pair", http.StatusBadRequest)
 			return
 		}
 		auditEvent(r, "certs.upload_mitm", "custom MITM CA", "")
@@ -2409,7 +2410,8 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	// UI cert — validate only; actual rotation requires restart.
 	if _, err := certMgr.ParseTLSPair(certPEM, keyPEM); err != nil {
-		http.Error(w, "invalid cert/key pair: "+err.Error(), http.StatusBadRequest)
+		logger.Printf("certs upload UI: %v", err)
+		http.Error(w, "invalid cert/key pair", http.StatusBadRequest)
 		return
 	}
 	auditEvent(r, "certs.upload_ui", "custom UI cert (requires restart)", "")
