@@ -68,7 +68,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 512M
           cpus: "0.5"
           pids: 64
     healthcheck:
