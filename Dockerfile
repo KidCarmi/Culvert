@@ -16,6 +16,7 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
       VERSION=$(git describe --tags --always 2>/dev/null || echo "dev"); \
     fi && \
     : "${VERSION:=dev}" && \
+    echo "$VERSION" > /app/VERSION && \
     go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o culvert .
 
 # ── GeoIP stage ───────────────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
 USER proxy
 WORKDIR /app
 COPY --from=builder --chown=proxy:proxy /app/culvert .
+COPY --from=builder --chown=proxy:proxy /app/VERSION ./VERSION
 COPY --from=geoip   --chown=proxy:proxy /GeoLite2-Country.mmdb ./GeoLite2-Country.mmdb
 
 # Default config (mount your own at /app/config.yaml)

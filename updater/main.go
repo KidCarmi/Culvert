@@ -680,6 +680,15 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func getCurrentTag(cli *client.Client) string {
+	// Prefer the version file written by the proxy on startup — this works
+	// even for local docker-compose builds where the image tag is "latest".
+	if data, err := os.ReadFile("/data/version.txt"); err == nil {
+		if v := strings.TrimSpace(string(data)); v != "" && v != "dev" {
+			return v
+		}
+	}
+
+	// Fall back to Docker image tag inspection.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	info, err := cli.ContainerInspect(ctx, "culvert")
@@ -688,7 +697,17 @@ func getCurrentTag(cli *client.Client) string {
 	}
 	img := info.Config.Image
 	if idx := strings.LastIndex(img, ":"); idx >= 0 {
-		return img[idx+1:]
+		tag := img[idx+1:]
+		if tag != "latest" && tag != "" {
+			return tag
+		}
+	}
+
+	// Last resort: check container labels (set by docker/metadata-action in CI).
+	for _, key := range []string{"org.opencontainers.image.version"} {
+		if v, ok := info.Config.Labels[key]; ok && v != "" {
+			return v
+		}
 	}
 	return "latest"
 }
