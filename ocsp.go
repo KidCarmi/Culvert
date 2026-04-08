@@ -69,7 +69,10 @@ func resolveIssuer(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) *x50
 		return verifiedChains[0][1]
 	}
 	if len(rawCerts) > 1 {
-		issuer, _ := x509.ParseCertificate(rawCerts[1])
+		issuer, err := x509.ParseCertificate(rawCerts[1])
+		if err != nil {
+			logger.Printf("OCSP: failed to parse issuer cert: %v", err)
+		}
 		return issuer
 	}
 	return nil

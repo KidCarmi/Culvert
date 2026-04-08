@@ -891,7 +891,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	}
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
 	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
-		rawUpstream.Close()
+		upstreamTLS.Close() // closes both TLS and underlying TCP conn
 		logger.Printf("upstream TLS handshake error %q: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return

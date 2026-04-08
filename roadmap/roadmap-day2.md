@@ -33,23 +33,20 @@
 - **Issue**: Hosts are lowercased with `strings.ToLower()` but NOT normalized via IDNA2008 (RFC 5890). Punycode domains (`xn--examp1e.com`) bypass blocklist and category rules for their ASCII equivalents.
 - **Fix**: Normalize hosts with `golang.org/x/net/idna.ToASCII()` before all FQDN comparisons in `matchFQDN()`, blocklist lookup, and category DB lookup.
 
-### 1.3 Missing RBAC on Certificate Upload
+### 1.3 ~~Missing RBAC on Certificate Upload~~ DONE
 - **File**: `ui.go:2374-2411`
 - **Severity**: CRITICAL
-- **Issue**: `/api/certs/upload` has NO `requireRole()` check. Any authenticated user (including viewer) can upload certificates to MITM CA or UI TLS.
-- **Fix**: Add `if !requireRole(w, r, RoleAdmin) { return }` at start of handler.
+- **Status**: FIXED — Added `requireRole(w, r, RoleAdmin)` check.
 
-### 1.4 Missing Sub Validation in OIDC ResolveIdentity
+### 1.4 ~~Missing Sub Validation in OIDC ResolveIdentity~~ DONE
 - **File**: `auth_oidc_flow.go:343-359`
 - **Severity**: HIGH
-- **Issue**: `ResolveIdentity()` does not validate `Sub != ""` after `validateIDToken()`. Can create sessions with empty subject, causing auth bypass. `ExchangeCode()` correctly validates this.
-- **Fix**: Add `if id.Sub == "" { return nil, false }` after validateIDToken in ResolveIdentity.
+- **Status**: FIXED — Added `id.Sub == ""` rejection after validateIDToken in ResolveIdentity.
 
-### 1.5 ConnLimiter TOCTOU Race Condition
+### 1.5 ~~ConnLimiter TOCTOU Race Condition~~ DONE
 - **File**: `connlimit.go:86-100`
 - **Severity**: HIGH
-- **Issue**: Lock is released before `atomic.AddInt64(ctr, 1)`. A concurrent `Release()` can delete the map entry, leaving a dangling pointer. The atomic increment operates on freed memory.
-- **Fix**: Hold lock through the atomic increment, or validate ctr still exists in map after rejection.
+- **Status**: FIXED — Lock held through increment; rejection path re-validates map entry.
 
 ### 1.6 HA Sync Exposes Unencrypted Cluster CA Private Key
 - **File**: `controlplane.go:707-748`
@@ -57,29 +54,25 @@
 - **Issue**: `HASync()` RPC returns `CAKeyPEM` as plaintext string. If HA token is compromised, attacker gets the CA private key and can sign arbitrary node certificates.
 - **Fix**: Never transmit CA private key over RPC. Use HA token to derive symmetric key for state replication; restrict CA key to disk-only access.
 
-### 1.7 Bootstrap Token Not Consumed — Unlimited Reuse
+### 1.7 ~~Bootstrap Token Not Consumed — Unlimited Reuse~~ FALSE POSITIVE
 - **Files**: `bootstrap.go:274-283, 318-327`
-- **Severity**: HIGH
-- **Issue**: `apiBootstrapScript()` and `apiBootstrapCompose()` call `TokenExists()` but never consume it. Token can bootstrap unlimited nodes until expiry (24h).
-- **Fix**: Make bootstrap endpoint single-use by consuming token on first valid request.
+- **Severity**: ~~HIGH~~ N/A
+- **Status**: BY DESIGN — Bootstrap endpoints serve config files (script + compose). Both must be downloaded before enrollment. The actual enrollment RPC in `ValidateAndConsumeToken()` consumes the token. This is intentional.
 
-### 1.8 Enrollment Token CIDR Bypass
+### 1.8 ~~Enrollment Token CIDR Bypass~~ FALSE POSITIVE
 - **File**: `enrollment.go:179-192, 225-267`
-- **Severity**: HIGH
-- **Issue**: `GenerateToken()` accepts `allowCIDR` and validates it, but `ValidateAndConsumeToken()` never checks the CIDR against the source IP.
-- **Fix**: Parse `tok.AllowCIDR` in ValidateAndConsumeToken and verify source IP is within range.
+- **Severity**: ~~HIGH~~ N/A
+- **Status**: ALREADY IMPLEMENTED — `ValidateAndConsumeToken()` lines 247-253 check `tok.AllowCIDR` against `sourceIP` using `net.ParseCIDR` + `cidr.Contains(ip)`. Agent missed this code.
 
-### 1.9 Events SSE Missing Authentication
+### 1.9 ~~Events SSE Missing Authentication~~ DONE
 - **File**: `events.go:109-140`
 - **Severity**: HIGH
-- **Issue**: `/api/events` (live dashboard stream) has no authentication check. Broadcasts real-time stats to any connection.
-- **Fix**: Add `requireRole(w, r, RoleViewer)` check before opening SSE stream.
+- **Status**: FIXED — Added `requireRole(w, r, RoleViewer)` to apiEvents and apiCountryTraffic.
 
-### 1.10 Self-Signed Admin UI Cert Marked as CA
+### 1.10 ~~Self-Signed Admin UI Cert Marked as CA~~ DONE
 - **File**: `tls.go:30`
 - **Severity**: HIGH
-- **Issue**: Admin UI self-signed cert has `IsCA: true`. If imported into a trust store, it can sign arbitrary certs.
-- **Fix**: Set `IsCA: false, BasicConstraintsValid: true`.
+- **Status**: FIXED — Set `IsCA: false`, `BasicConstraintsValid: true`, removed `KeyUsageCertSign`.
 
 ---
 
@@ -91,7 +84,7 @@
 |---|-------|-----------|----------|
 | B1 | RelayBufPool type assertion without bounds validation | proxy.go:711,824,935,1014 | Medium |
 | B2 | Goroutine cleanup race — first relay completes, write halves still open | proxy.go:822-838 | Medium |
-| B3 | Missing TLS conn close on handshake error (only raw TCP closed) | proxy.go:893-895 | Medium |
+| B3 | ~~Missing TLS conn close on handshake error (only raw TCP closed)~~ DONE | proxy.go:893-895 | Medium |
 | B4 | X-Forwarded-For parser silently discards non-IP values | proxy.go:127-138 | Low |
 | B5 | SOCKS5 credentials never cleared from memory after auth | socks5.go:76-90 | Low |
 
@@ -99,7 +92,7 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| B6 | Duplicate exception check in isExcepted() (dead code) | store.go:467-480 | Low |
+| B6 | ~~Duplicate exception check in isExcepted() (dead code)~~ DONE | store.go:467-480 | Low |
 | B7 | PolicyRule.HitCount race — atomic ops on struct field copied by value | policy.go:582 | Medium |
 | B8 | Missing Priority validation — Priority=0 silently becomes first rule | policy.go:420-430 | Medium |
 
@@ -110,7 +103,7 @@
 | B9 | Cache TTL doesn't verify leaf cert hasn't actually expired | ca.go:609 | Medium |
 | B10 | LRU eviction can leave stale entries in cacheOrder list | ca.go:623-638 | Medium |
 | B11 | Secondary CA TOCTOU — checked under RLock, used after unlock | ca.go:666,698 | Medium |
-| B12 | OCSP issuer parse error silently ignored | ocsp.go:72 | Low |
+| B12 | ~~OCSP issuer parse error silently ignored~~ DONE | ocsp.go:72 | Low |
 | B13 | OCSP cache eviction iterates+deletes from map (undefined behavior) | ocsp.go:92-101 | Medium |
 
 ### 2.4 Cluster & Control Plane
@@ -147,7 +140,7 @@
 
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
-| S1 | TOTP timing attack — string `==` instead of constant-time compare | totp.go:41-46 | Medium |
+| S1 | ~~TOTP timing attack — string `==` instead of constant-time compare~~ DONE | totp.go:41-46 | Medium |
 | S2 | LDAP group DN comparison is case-insensitive (incorrect per RFC 4514) | auth_ldap.go:191-197 | Medium |
 | S3 | Logout doesn't invalidate session server-side (replay risk) | ui.go:676-695 | Medium |
 | S4 | No rate limiting on /api/setup/complete (brute-force first-run) | ui.go:781-829 | Medium |
@@ -157,7 +150,7 @@
 | # | Issue | File:Line | Severity |
 |---|-------|-----------|----------|
 | S5 | CSP allows `unsafe-inline` script — defeats XSS protection | ui.go:344 | Medium |
-| S6 | Blocklist GET lacks role check (publicly readable) | ui.go:1084 | Medium |
+| S6 | ~~Blocklist GET lacks role check (publicly readable)~~ DONE | ui.go:1084 | Medium |
 | S7 | XSS risk via innerHTML in SPA (inconsistent escHtml usage) | static/index.html (multiple) | Medium |
 | S8 | Sensitive crypto errors exposed in apiCertsUpload response | ui.go:2397,2406 | Low |
 | S9 | No CSRF protection on SSE connection | events.go:110 | Low |

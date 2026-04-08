@@ -108,6 +108,9 @@ func startSSEBroadcaster() {
 
 // apiEvents is the SSE endpoint. Clients connect and receive live dashboard data.
 func apiEvents(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -141,6 +144,9 @@ func apiEvents(w http.ResponseWriter, r *http.Request) {
 
 // apiCountryTraffic returns the top destination countries for the dashboard.
 func apiCountryTraffic(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(countryTraffic.Top(20))
 }

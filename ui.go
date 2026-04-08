@@ -1082,6 +1082,9 @@ func apiTopHosts(w http.ResponseWriter, r *http.Request) {
 func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
 		entries := bl.ListWithSource()
 		// Sort by host for stable output.
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Host < entries[j].Host })
@@ -2374,6 +2377,9 @@ func apiCACert(w http.ResponseWriter, r *http.Request) {
 func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // enforce 1 MB limit before parsing
