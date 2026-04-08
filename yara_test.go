@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
+	"time"
 )
 
 // Helper: build YARA source with { on its own line (required by parser).
@@ -425,5 +427,38 @@ func TestParseYARALiteralString_Unterminated(t *testing.T) {
 	_, _, err := parseYARALiteralString(`"unterminated`)
 	if err == nil {
 		t.Error("unterminated string should return an error")
+	}
+}
+
+// Q11: Test YARA regex timeout behavior (fail-closed).
+func TestMatchRegexWithTimeout_Normal(t *testing.T) {
+	re := regexp.MustCompile(`evil`)
+	if !matchRegexWithTimeout(re, []byte("this is evil"), time.Second) {
+		t.Error("expected match")
+	}
+	if matchRegexWithTimeout(re, []byte("this is fine"), time.Second) {
+		t.Error("expected no match")
+	}
+}
+
+func TestMatchRegexWithTimeout_TimeoutFailsClosed(t *testing.T) {
+	re := regexp.MustCompile(`^(a+)+$`)
+	// Near-zero timeout should cause timeout → fail-closed (returns true).
+	result := matchRegexWithTimeout(re, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"), time.Nanosecond)
+	if !result {
+		t.Error("timeout should return true (fail-closed)")
+	}
+}
+
+func TestMatchRegexWithTimeout_InflightCap(t *testing.T) {
+	// Verify the inflight cap prevents unbounded goroutine accumulation.
+	old := yaraInflight.Load()
+	defer yaraInflight.Store(old)
+
+	yaraInflight.Store(int64(maxYARAInflight))
+	re := regexp.MustCompile(`test`)
+	// Should return false immediately because inflight cap is reached.
+	if matchRegexWithTimeout(re, []byte("test data"), time.Second) {
+		t.Error("should return false when inflight cap reached")
 	}
 }

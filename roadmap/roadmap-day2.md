@@ -130,7 +130,7 @@
 |---|-------|-----------|----------|
 | B22 | ~~Hash cache race — TTL check outside read lock~~ DONE | hashcache.go:73-84 | Low |
 | B23 | ~~ClamAV response parser captures only first virus name~~ FALSE POSITIVE — ClamAV INSTREAM returns one verdict per scan by protocol design; multi-signature detection reports first match | clam.go:143-162 | Low |
-| B24 | Content-Length mismatch bypass via chunked encoding | proxy.go, security_scan.go | Medium |
+| B24 | Content-Length mismatch bypass via chunked encoding — DEFERRED (requires proxy layer chunked-to-length conversion) | proxy.go, security_scan.go | Medium |
 
 ---
 
@@ -161,7 +161,7 @@
 |---|-------|-----------|----------|
 | S10 | ~~OCSP transport uses TLS 1.2 minimum (should be 1.3)~~ DONE | ocsp.go:207 | Medium |
 | S11 | ~~Leaf cert NotBefore backdate too small (1 min, should be 5 min)~~ DONE | ca.go:680 | Low |
-| S12 | No OCSP staple validation (always queries responder) | ocsp.go:109-141 | Low |
+| S12 | No OCSP staple validation (always queries responder) — LOW PRIORITY (responder query is correct fallback; staple is optimization) | ocsp.go:109-141 | Low |
 
 ### 3.4 Cluster
 
@@ -177,8 +177,8 @@
 |---|-------|-----------|----------|
 | S16 | ~~YARA ReDoS timeout silently skips scan (fail-open)~~ DONE — now returns true on timeout (fail-closed, Zero Trust) | yara_scan.go:182-201 | Medium |
 | S17 | ~~DPI regex timeout silently passes response (fail-open)~~ DONE — now returns true on timeout (fail-closed, Zero Trust) | scanner.go:168-180 | Medium |
-| S18 | No archive extraction — nested ZIP evasion | security_scan.go | Medium |
-| S19 | No polyglot file detection (magic byte vs Content-Type mismatch) | security_scan.go, scanner.go | Medium |
+| S18 | No archive extraction — nested ZIP evasion — DEFERRED (feature work, tracked as F4) | security_scan.go | Medium |
+| S19 | No polyglot file detection (magic byte vs Content-Type mismatch) — DEFERRED (feature work, tracked as F5) | security_scan.go, scanner.go | Medium |
 
 ---
 
@@ -192,7 +192,7 @@
 | P4 | ~~Alert webhook goroutine leak (no worker pool / semaphore)~~ DONE | alerts.go:211 | Medium |
 | P5 | ~~Hash cache O(n) full scan on eviction~~ ACCEPTABLE — 10k max entries; O(n) map scan is ~1ms; min-heap adds complexity without measurable benefit | hashcache.go:111-128 | Medium |
 | P6 | ~~ClamAV semaphore backlog — 96 goroutines blocked at 100 RPS~~ DONE — semaphore now has 5s timeout; returns error instead of blocking indefinitely | clam.go:34-39 | Medium |
-| P7 | Threat feed sync uses 100+ MiB during full download | threatfeed.go:135-156 | Low |
+| P7 | Threat feed sync uses 100+ MiB during full download — DEFERRED (requires streaming download redesign) | threatfeed.go:135-156 | Low |
 | P8 | ~~YARA inflight counter never reset on rule reload~~ DONE | yara_scan.go:449-476 | Low |
 | P9 | ~~Syslog synchronous DNS on every reconnection~~ ACCEPTABLE — DialTimeout has 5s cap + 5s backoff; syslog writes are fire-and-forget (don't block proxy traffic) | syslog.go:61 | Low |
 | P10 | ~~Config validation runs redundantly on every reload~~ ACCEPTABLE — validate() is flat string comparisons, ~1μs; caching adds complexity without measurable benefit | config.go:205-276 | Low |
@@ -266,11 +266,11 @@
 |---|-------|----------|
 | Q1 | ~~Excessive `//nolint:errcheck` — 11 in update_cluster.go alone~~ DONE — replaced 8 of 11 with proper error handling + logging; remaining 3 are HTTP response encoders (acceptable) | update_cluster.go |
 | Q2 | ~~Deadlock risk: Lock → modify → Unlock → Save pattern~~ DONE (resolved by B14 fix — now uses saveLocked() under held lock) | controlplane.go:684-690 |
-| Q3 | Inconsistent API response format (some `{ok:true}`, some raw data) | ui.go (multiple) |
-| Q4 | Inconsistent error handling in JS (empty catch, toast, showErr) | static/index.html |
-| Q5 | Inconsistent log prefixes across components | logger.go, syslog.go, alerts.go |
+| Q3 | Inconsistent API response format (some `{ok:true}`, some raw data) — LOW PRIORITY (cosmetic, no functional impact) | ui.go (multiple) |
+| Q4 | Inconsistent error handling in JS (empty catch, toast, showErr) — LOW PRIORITY (cosmetic) | static/index.html |
+| Q5 | Inconsistent log prefixes across components — LOW PRIORITY (cosmetic) | logger.go, syslog.go, alerts.go |
 | Q6 | ~~Magic numbers without named constants~~ LOW PRIORITY — 1<<20 is idiomatic Go for 1 MiB; events.go:123 has no magic number | ui.go:374, events.go:123 |
-| Q7 | Inline CSS scattered throughout HTML | static/index.html (hundreds) |
+| Q7 | Inline CSS scattered throughout HTML — LOW PRIORITY (cosmetic, SPA convention) | static/index.html (hundreds) |
 
 ### 6.2 Missing Tests
 
@@ -278,10 +278,10 @@
 |---|-----|-------|
 | Q8 | ~~DPI regex timeout behavior untested~~ DONE — added TestMatchDPIRegexWithTimeout_Normal and _TimeoutReturnsTrue | scanner_test.go |
 | Q9 | ~~Hash cache eviction race conditions untested~~ DONE — added TestHashCache_ConcurrentEviction with concurrent get/set/eviction | hashcache_test.go |
-| Q10 | ClamAV connection failures / malformed responses untested | clam_test.go |
-| Q11 | YARA regex timeout goroutine leak untested | yara_scan_test.go |
-| Q12 | sendGRPCToNode() delivery untested | update_cluster_test.go |
-| Q13 | Archive/polyglot file handling untested | security_scan_test.go |
+| Q10 | ~~ClamAV connection failures / malformed responses untested~~ DONE — added TestClamAV_ScanConnectionRefused + TestParseClamResponse_MalformedFound | clam_test.go |
+| Q11 | ~~YARA regex timeout goroutine leak untested~~ DONE — added TestMatchRegexWithTimeout_Normal, _TimeoutFailsClosed, _InflightCap | yara_scan_test.go |
+| Q12 | sendGRPCToNode() delivery untested — DEFERRED (requires mock gRPC infrastructure) | update_cluster_test.go |
+| Q13 | Archive/polyglot file handling untested — DEFERRED (feature F4/F5 not yet implemented) | security_scan_test.go |
 
 ### 6.3 Cleanup
 
