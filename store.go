@@ -1323,6 +1323,12 @@ var oidcLoginURL string
 // Used to build OIDC/SAML callback redirect_uris.
 var proxyExternalBaseURL string
 
+// trustForwardedHeaders controls whether X-Forwarded-Host / X-Forwarded-Proto
+// are trusted for deriving the external base URL from requests.  Default false;
+// set via --trust-forwarded-headers or proxy.trust_forwarded_headers in config.
+// Must be explicitly enabled when running behind a reverse proxy.
+var trustForwardedHeaders bool
+
 // SetProxyBaseURL sets the external base URL used for OIDC/SAML callbacks.
 func SetProxyBaseURL(u string) { proxyExternalBaseURL = strings.TrimRight(u, "/") }
 

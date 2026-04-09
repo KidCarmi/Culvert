@@ -476,7 +476,7 @@ func resolveCaptivePortalURL(r *http.Request) string {
 		if at := strings.LastIndex(emailHint, "@"); at >= 0 {
 			domain := emailHint[at+1:]
 			if prov := idpRegistry.RouteByDomain(domain); prov != nil {
-				return prov.CaptiveLoginURL(relayURL)
+				return prov.CaptiveLoginURL(relayURL, r)
 			}
 		}
 	}
@@ -484,7 +484,7 @@ func resolveCaptivePortalURL(r *http.Request) string {
 	// Single provider — redirect directly without selection screen.
 	providers := idpRegistry.EnabledProviders()
 	if len(providers) == 1 {
-		return providers[0].CaptiveLoginURL(relayURL)
+		return providers[0].CaptiveLoginURL(relayURL, r)
 	}
 	// Multiple providers — send to selection page.
 	if len(providers) > 1 {

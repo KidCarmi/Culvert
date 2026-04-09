@@ -244,17 +244,45 @@ func TestProxyBaseURL(t *testing.T) {
 	old := proxyExternalBaseURL
 	defer func() { proxyExternalBaseURL = old }()
 
-	// No base URL configured — should return default
+	// No base URL configured, nil request — should return default
 	proxyExternalBaseURL = ""
-	url := proxyBaseURL()
-	if url == "" {
+	u := proxyBaseURL(nil)
+	if u == "" {
 		t.Error("proxyBaseURL should return non-empty default")
 	}
+	if u != "https://localhost:9090" {
+		t.Errorf("proxyBaseURL(nil) = %q, want 'https://localhost:9090'", u)
+	}
 
-	// With base URL configured
+	// With base URL configured — takes precedence over request
 	SetProxyBaseURL("https://proxy.corp.com")
-	url = proxyBaseURL()
-	if url != "https://proxy.corp.com" {
-		t.Errorf("proxyBaseURL() = %q, want 'https://proxy.corp.com'", url)
+	u = proxyBaseURL(nil)
+	if u != "https://proxy.corp.com" {
+		t.Errorf("proxyBaseURL(nil) = %q, want 'https://proxy.corp.com'", u)
+	}
+
+	// With request — derives from Host when base_url not set
+	proxyExternalBaseURL = ""
+	req := httptest.NewRequest("GET", "https://10.0.0.5:9090/foo", nil)
+	u = proxyBaseURL(req)
+	if u != "https://10.0.0.5:9090" {
+		t.Errorf("proxyBaseURL(req) = %q, want 'https://10.0.0.5:9090'", u)
+	}
+
+	// X-Forwarded-Host ignored by default (trust_forwarded_headers=false)
+	oldTrust := trustForwardedHeaders
+	defer func() { trustForwardedHeaders = oldTrust }()
+	trustForwardedHeaders = false
+	req.Header.Set("X-Forwarded-Host", "evil.com")
+	u = proxyBaseURL(req)
+	if u != "https://10.0.0.5:9090" {
+		t.Errorf("proxyBaseURL should ignore X-Forwarded-Host when untrusted, got %q", u)
+	}
+
+	// X-Forwarded-Host trusted when enabled
+	trustForwardedHeaders = true
+	u = proxyBaseURL(req)
+	if u != "https://evil.com" {
+		t.Errorf("proxyBaseURL should use X-Forwarded-Host when trusted, got %q", u)
 	}
 }

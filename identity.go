@@ -1,5 +1,7 @@
 package main
 
+import "net/http"
+
 // Identity is the normalised representation of an authenticated user produced
 // by any IdP backend (OIDC, SAML, LDAP).  It is attached to every proxied
 // request after successful authentication and is the only identity object
@@ -36,5 +38,5 @@ type IdentityProvider interface {
 	// CaptiveLoginURL returns the browser-redirect URL for the captive portal
 	// for a given email domain hint (may be empty).  Returns "" if this
 	// provider does not support browser-based SSO.
-	CaptiveLoginURL(emailDomain string) string
+	CaptiveLoginURL(emailDomain string, r *http.Request) string
 }

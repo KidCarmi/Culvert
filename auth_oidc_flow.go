@@ -363,7 +363,7 @@ func (p *OIDCFlowProvider) ResolveIdentity(username, token string) (*Identity, b
 
 // CaptiveLoginURL builds an OIDC authorization URL with PKCE + state + nonce,
 // stores the verifier in globalPKCEStore, and returns the URL to redirect to.
-func (p *OIDCFlowProvider) CaptiveLoginURL(relayURL string) string {
+func (p *OIDCFlowProvider) CaptiveLoginURL(relayURL string, r *http.Request) string {
 	if p.disc.AuthorizationEndpoint == "" {
 		return ""
 	}
@@ -393,7 +393,7 @@ func (p *OIDCFlowProvider) CaptiveLoginURL(relayURL string) string {
 	q := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {p.cfg.ClientID},
-		"redirect_uri":          {proxyBaseURL() + "/auth/oidc/callback"},
+		"redirect_uri":          {proxyBaseURL(r) + "/auth/oidc/callback"},
 		"scope":                 {strings.Join(scopes, " ")},
 		"state":                 {state},
 		"nonce":                 {nonce},
@@ -409,7 +409,7 @@ func (p *OIDCFlowProvider) CaptiveLoginURL(relayURL string) string {
 
 // ExchangeCode handles the authorization code callback: exchanges the code for
 // tokens, validates the ID token, fetches userinfo, and returns the Identity.
-func (p *OIDCFlowProvider) ExchangeCode(code, state string) (*Identity, error) {
+func (p *OIDCFlowProvider) ExchangeCode(r *http.Request, code, state string) (*Identity, error) {
 	entry, ok := globalPKCEStore.pop(state)
 	if !ok {
 		return nil, fmt.Errorf("oidc callback: invalid or expired state")
@@ -422,7 +422,7 @@ func (p *OIDCFlowProvider) ExchangeCode(code, state string) (*Identity, error) {
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
-		"redirect_uri":  {proxyBaseURL() + "/auth/oidc/callback"},
+		"redirect_uri":  {proxyBaseURL(r) + "/auth/oidc/callback"},
 		"client_id":     {p.cfg.ClientID},
 		"client_secret": {p.cfg.ClientSecret},
 		"code_verifier": {entry.verifier},
@@ -694,9 +694,31 @@ func extractStringSliceClaim(claims map[string]interface{}, key string) []string
 
 // proxyBaseURL returns the external-facing base URL of the proxy UI.
 // Used to construct the OIDC/SAML callback redirect_uri.
-func proxyBaseURL() string {
+//
+// Priority: (1) explicit base_url config, (2) derive from request Host header,
+// (3) fall back to https://localhost:9090.
+//
+// X-Forwarded-* headers are only trusted when trust_forwarded_headers is enabled
+// (prevents host header injection when directly exposed to the internet).
+func proxyBaseURL(r *http.Request) string {
 	if u := cfg.ProxyBaseURL(); u != "" {
 		return u
+	}
+	if r != nil {
+		scheme := "https"
+		if r.TLS == nil {
+			scheme = "http"
+		}
+		host := r.Host
+		if trustForwardedHeaders {
+			if fp := r.Header.Get("X-Forwarded-Proto"); fp == "http" || fp == "https" {
+				scheme = fp
+			}
+			if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
+				host = fh
+			}
+		}
+		return scheme + "://" + host
 	}
 	return "https://localhost:9090"
 }

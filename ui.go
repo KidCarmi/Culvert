@@ -90,6 +90,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/config/import", apiConfigImport)      // POST — restore from backup JSON
 	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode) // PUT — toggle proxy auth requirement
 	mux.HandleFunc("/api/settings/log-level", apiLogLevel)     // GET/PUT runtime log level
+	mux.HandleFunc("/api/settings/network", apiNetworkSettings) // GET/POST network & TLS settings
 	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)  // GET/POST session TTL (hours)
 	mux.HandleFunc("/api/session-secret", apiSessionSecret)    // GET/POST shared signing key
 	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)         // GET/POST UI access IP allowlist
@@ -2187,6 +2188,45 @@ func apiLogLevel(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET/POST /api/settings/network — network & TLS settings (base_url, ui_sans, trust_forwarded_headers).
+func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"base_url":                  proxyExternalBaseURL,
+			"ui_sans":                   uiExtraSANs,
+			"trust_forwarded_headers":   trustForwardedHeaders,
+		})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			BaseURL              string   `json:"base_url"`
+			UISANs               []string `json:"ui_sans"`
+			TrustForwardedHeaders bool    `json:"trust_forwarded_headers"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		SetProxyBaseURL(body.BaseURL)
+		uiExtraSANs = body.UISANs
+		trustForwardedHeaders = body.TrustForwardedHeaders
+		logger.Printf("UI: network settings updated (base_url=%q, ui_sans=%v, trust_fwd=%v)",
+			sanitizeLog(body.BaseURL), body.UISANs, body.TrustForwardedHeaders)
+		auditEvent(r, "settings.network", "updated", fmt.Sprintf("base_url=%s trust_fwd=%v sans=%v",
+			body.BaseURL, body.TrustForwardedHeaders, body.UISANs))
+		saveConfigVersion(sessionAdmin(r), "settings.network")
+		jsonOK(w, map[string]string{"status": "ok"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // GET/POST/DELETE /api/rewrite — manage header rewrite rules
 func apiRewrite(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -3083,7 +3123,7 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provider is not OIDC", http.StatusInternalServerError)
 		return
 	}
-	id, err := oidcProv.ExchangeCode(code, state)
+	id, err := oidcProv.ExchangeCode(r, code, state)
 	if err != nil {
 		logger.Printf("OIDC callback error: %v", err)
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
@@ -3147,7 +3187,7 @@ h1{font-size:1.4rem}a.btn{display:block;padding:12px 16px;margin:8px 0;border-ra
 background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover{background:#1d4ed8}
 </style></head><body><h1>Sign in to Culvert</h1>`)
 	for _, p := range providers {
-		loginURL := p.CaptiveLoginURL(relay)
+		loginURL := p.CaptiveLoginURL(relay, r)
 		if loginURL == "" {
 			continue
 		}
