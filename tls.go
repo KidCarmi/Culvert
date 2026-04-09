@@ -79,7 +79,12 @@ func selfSignedTLS() (*tls.Config, error) {
 
 	// Log SANs so admins can verify what the cert covers.
 	if logger != nil {
-		logger.Printf("UITLS: self-signed cert SANs: IPs=%v DNS=%v", ips, dns)
+		// Sanitize DNS names (may contain user-provided SANs via --ui-san).
+		safeDNS := make([]string, len(dns))
+		for i, d := range dns {
+			safeDNS[i] = strings.ReplaceAll(strings.ReplaceAll(d, "\n", ""), "\r", "")
+		}
+		logger.Printf("UITLS: self-signed cert SANs: IPs=%v DNS=%v", ips, safeDNS)
 	}
 
 	tmpl := &x509.Certificate{

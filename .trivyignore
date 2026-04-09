@@ -1,4 +1,4 @@
-# Moby Docker SDK CVEs — both affect Docker plugin installation/AuthZ,
+# Moby Docker SDK CVEs -- both affect Docker plugin installation/AuthZ,
 # which the culvert-updater sidecar never uses (it only calls container
 # lifecycle APIs: inspect, pull, create, start, stop, remove, logs).
 # Will upgrade when a patched SDK version is released.

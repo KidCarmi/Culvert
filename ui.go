@@ -2216,10 +2216,14 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		SetProxyBaseURL(body.BaseURL)
 		uiExtraSANs = body.UISANs
 		trustForwardedHeaders = body.TrustForwardedHeaders
+		safeSANs := make([]string, len(body.UISANs))
+		for i, s := range body.UISANs {
+			safeSANs[i] = strings.ReplaceAll(strings.ReplaceAll(s, "\n", ""), "\r", "")
+		}
 		logger.Printf("UI: network settings updated (base_url=%q, ui_sans=%v, trust_fwd=%v)",
-			sanitizeLog(body.BaseURL), body.UISANs, body.TrustForwardedHeaders)
+			sanitizeLog(body.BaseURL), safeSANs, body.TrustForwardedHeaders)
 		auditEvent(r, "settings.network", "updated", fmt.Sprintf("base_url=%s trust_fwd=%v sans=%v",
-			body.BaseURL, body.TrustForwardedHeaders, body.UISANs))
+			strings.ReplaceAll(body.BaseURL, "\n", ""), body.TrustForwardedHeaders, safeSANs))
 		saveConfigVersion(sessionAdmin(r), "settings.network")
 		jsonOK(w, map[string]string{"status": "ok"})
 	default:
