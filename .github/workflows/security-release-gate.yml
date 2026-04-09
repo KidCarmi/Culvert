@@ -105,7 +105,17 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Scan source & dependencies with Trivy
+      - name: Scan source (table — human-readable log output)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "table"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"      # don't fail here — the SARIF step below is the gate
+          ignore-unfixed: true
+
+      - name: Scan source (SARIF — code scanning upload)
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           scan-type: "fs"
@@ -137,7 +147,16 @@ jobs:
       - name: Build image for scanning (no push)
         run: docker build -t culvert:scan .
 
-      - name: Scan image with Trivy
+      - name: Scan image (table — human-readable log output)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: "culvert:scan"
+          format: "table"
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: Scan image (SARIF — code scanning upload)
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: "culvert:scan"
