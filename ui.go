@@ -2220,10 +2220,11 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		for i, s := range body.UISANs {
 			safeSANs[i] = strings.ReplaceAll(strings.ReplaceAll(s, "\n", ""), "\r", "")
 		}
-		logger.Printf("UI: network settings updated (base_url=%q, ui_sans=%v, trust_fwd=%v)",
-			sanitizeLog(body.BaseURL), safeSANs, body.TrustForwardedHeaders)
-		auditEvent(r, "settings.network", "updated", fmt.Sprintf("base_url=%s trust_fwd=%v sans=%v",
-			strings.ReplaceAll(body.BaseURL, "\n", ""), body.TrustForwardedHeaders, safeSANs))
+		safeTrustFwd := strings.ReplaceAll(fmt.Sprintf("%v", body.TrustForwardedHeaders), "\n", "")
+		logger.Printf("UI: network settings updated (base_url=%q, ui_sans=%v, trust_fwd=%s)",
+			sanitizeLog(body.BaseURL), safeSANs, safeTrustFwd)
+		auditEvent(r, "settings.network", "updated", fmt.Sprintf("base_url=%s trust_fwd=%s sans=%v",
+			strings.ReplaceAll(body.BaseURL, "\n", ""), safeTrustFwd, safeSANs))
 		saveConfigVersion(sessionAdmin(r), "settings.network")
 		jsonOK(w, map[string]string{"status": "ok"})
 	default:
