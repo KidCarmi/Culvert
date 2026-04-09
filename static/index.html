@@ -7909,7 +7909,7 @@ function showCPUpdatingOverlay() {
     attempts++;
     bar.style.width = Math.min(90, (attempts / maxAttempts) * 100) + '%';
     try {
-      const resp = await fetch(BASE + '/api/dashboard/health', { credentials: 'include', signal: AbortSignal.timeout(3000) });
+      const resp = await fetch(BASE + '/healthz', { signal: AbortSignal.timeout(3000) });
       if (resp.ok) {
         clearInterval(poll);
         status.textContent = 'Update complete! Reloading...';
