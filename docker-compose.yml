@@ -96,6 +96,9 @@ services:
       # - ./config.yaml:/app/config.yaml:ro
     environment:
       - TZ=UTC
+      # Optional: manually set the server's public IP/domain for TLS cert SANs.
+      # Usually not needed — auto-detected in Docker containers.
+      # - CULVERT_PUBLIC_IP=203.0.113.50
     command: [
       "-port",           "8080",
       "-ui-port",        "9090",

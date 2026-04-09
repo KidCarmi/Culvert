@@ -55,8 +55,28 @@ func selfSignedTLS() (*tls.Config, error) {
 		dns = append(dns, h)
 	}
 
+	// CULVERT_PUBLIC_IP env var — primary way to inject public IP in Docker containers
+	// where the IMDS endpoint (169.254.169.254) is unreachable via bridge networking.
+	if envIP := os.Getenv("CULVERT_PUBLIC_IP"); envIP != "" {
+		for _, s := range strings.Split(envIP, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			if ip := net.ParseIP(s); ip != nil {
+				ips = append(ips, ip)
+				if logger != nil {
+					logger.Printf("UITLS: added public IP from CULVERT_PUBLIC_IP: %s", ip)
+				}
+			} else {
+				dns = append(dns, s)
+			}
+		}
+	}
+
 	// Auto-detect cloud public IP via instance metadata (AWS, GCP, Azure).
-	// On non-cloud hosts, these time out in ~500ms and are silently ignored.
+	// On non-cloud hosts or inside Docker bridge networking, these time out
+	// in ~2s and are silently ignored. Use CULVERT_PUBLIC_IP env var instead.
 	if cloudIPs := detectCloudPublicIPs(); len(cloudIPs) > 0 {
 		ips = append(ips, cloudIPs...)
 	}
@@ -204,7 +224,55 @@ func detectCloudPublicIPs() []net.IP {
 			return []net.IP{ip}
 		}
 	}
+
+	// Fallback: IMDS unreachable (e.g. Docker bridge networking where
+	// 169.254.169.254 is not routable). Use public IP reflection services.
+	// These are trusted, plain-text endpoints from major providers.
+	if ip := detectPublicIPFallback(client); ip != nil {
+		return []net.IP{ip}
+	}
+
 	return nil
+}
+
+// publicIPEndpoints are public IP reflection services used as a fallback when
+// cloud IMDS is unreachable (e.g. inside Docker bridge-networked containers).
+// Each returns the caller's public IP as plain text.
+var publicIPEndpoints = []cloudMetadataEndpoint{
+	{name: "AWS-checkip", url: "https://checkip.amazonaws.com"},
+	{name: "Cloudflare", url: "https://ipv4.icanhazip.com"},
+}
+
+// detectPublicIPFallback queries public IP reflection services to discover
+// the machine's external IP. Used when IMDS is unreachable (Docker bridge).
+func detectPublicIPFallback(client *http.Client) net.IP {
+	// Only try if we appear to be running in a container — avoids adding
+	// a NAT gateway IP on developer laptops.
+	if !isRunningInContainer() {
+		return nil
+	}
+
+	for _, ep := range publicIPEndpoints {
+		ip := queryMetadataEndpoint(client, ep)
+		if ip != nil {
+			if logger != nil {
+				logger.Printf("UITLS: detected public IP via %s (IMDS unreachable, container fallback): %s", ep.name, ip)
+			}
+			return ip
+		}
+	}
+	return nil
+}
+
+// isRunningInContainer returns true if the process appears to be inside a Docker/OCI container.
+func isRunningInContainer() bool {
+	// Docker creates /.dockerenv; podman and others use /run/.containerenv.
+	for _, f := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(f); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // queryAWSMetadata tries IMDSv2 (token-based) first, then falls back to IMDSv1.
