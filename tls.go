@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -8,16 +9,82 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
-// selfSignedTLS generates a self-signed TLS certificate for localhost.
+// uiExtraSANs holds additional SANs for the self-signed UI TLS cert,
+// set from --ui-san flag / proxy.ui_sans config before startUI() is called.
+var uiExtraSANs []string
+
+// selfSignedTLS generates a self-signed TLS certificate that includes all
+// local network interface IPs (so remote access via private/Docker IPs works)
+// plus any extra SANs from uiExtraSANs (--ui-san / config).
 func selfSignedTLS() (*tls.Config, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
+	}
+
+	// Baseline SANs — always present.
+	ips := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
+	dns := []string{"localhost"}
+
+	// Auto-detect all local interface IPs (private, Docker bridge, etc.).
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			cidr, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := cidr.IP
+			if ip.IsLoopback() {
+				continue // already in baseline
+			}
+			ips = append(ips, ip)
+		}
+	}
+
+	// Add hostname.
+	if h, err := os.Hostname(); err == nil && h != "" && h != "localhost" {
+		dns = append(dns, h)
+	}
+
+	// Auto-detect cloud public IP via instance metadata (AWS, GCP, Azure).
+	// On non-cloud hosts, these time out in ~500ms and are silently ignored.
+	if cloudIPs := detectCloudPublicIPs(); len(cloudIPs) > 0 {
+		ips = append(ips, cloudIPs...)
+	}
+
+	// Parse extra SANs: IPs go to IPAddresses, everything else to DNSNames.
+	for _, san := range uiExtraSANs {
+		if san == "" {
+			continue
+		}
+		if ip := net.ParseIP(san); ip != nil {
+			ips = append(ips, ip)
+		} else {
+			dns = append(dns, san)
+		}
+	}
+
+	// Deduplicate.
+	ips = deduplicateIPs(ips)
+	dns = deduplicateStrings(dns)
+
+	// Log SANs so admins can verify what the cert covers.
+	if logger != nil {
+		// Sanitize DNS names (may contain user-provided SANs via --ui-san).
+		safeDNS := make([]string, len(dns))
+		for i, d := range dns {
+			safeDNS[i] = strings.ReplaceAll(strings.ReplaceAll(d, "\n", ""), "\r", "")
+		}
+		logger.Printf("UITLS: self-signed cert SANs: IPs=%v DNS=%v", ips, safeDNS)
 	}
 
 	tmpl := &x509.Certificate{
@@ -29,8 +96,8 @@ func selfSignedTLS() (*tls.Config, error) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		IsCA:                  false,
 		BasicConstraintsValid: true,
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
-		DNSNames:     []string{"localhost"},
+		IPAddresses:           ips,
+		DNSNames:              dns,
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
@@ -52,3 +119,126 @@ func selfSignedTLS() (*tls.Config, error) {
 
 	return &tls.Config{Certificates: []tls.Certificate{cert}}, nil
 }
+
+// deduplicateIPs returns a deduplicated copy of the IP slice.
+func deduplicateIPs(in []net.IP) []net.IP {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]net.IP, 0, len(in))
+	for _, ip := range in {
+		key := ip.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ip)
+	}
+	return out
+}
+
+// deduplicateStrings returns a deduplicated copy of the string slice.
+func deduplicateStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// cloudMetadataEndpoint describes a cloud provider's instance metadata URL
+// for discovering the public IP address of this machine.
+type cloudMetadataEndpoint struct {
+	name    string
+	url     string
+	headers map[string]string // required headers (e.g. GCP's Metadata-Flavor)
+}
+
+// cloudMetadataEndpoints lists the metadata URLs for major cloud providers.
+// All use the 169.254.169.254 link-local address (except GCP DNS alias).
+// On non-cloud hosts, connections to these addresses time out harmlessly.
+var cloudMetadataEndpoints = []cloudMetadataEndpoint{
+	{
+		name: "AWS",
+		url:  "http://169.254.169.254/latest/meta-data/public-ipv4",
+	},
+	{
+		name:    "GCP",
+		url:     "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip",
+		headers: map[string]string{"Metadata-Flavor": "Google"},
+	},
+	{
+		name:    "Azure",
+		url:     "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text",
+		headers: map[string]string{"Metadata": "true"},
+	},
+}
+
+// detectCloudPublicIPs queries cloud instance metadata APIs to discover
+// the machine's public IP address. Returns nil on non-cloud hosts or if
+// no public IP is assigned. Each provider is tried sequentially; the first
+// successful response wins (a host is only on one cloud provider).
+func detectCloudPublicIPs() []net.IP {
+	// Short timeout — metadata is local (< 50ms on cloud, times out on bare metal).
+	client := &http.Client{
+		Timeout: 800 * time.Millisecond,
+		// Don't follow redirects — metadata endpoints return direct responses.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	for _, ep := range cloudMetadataEndpoints {
+		ip := queryMetadataEndpoint(client, ep)
+		if ip != nil {
+			return []net.IP{ip}
+		}
+	}
+	return nil
+}
+
+// queryMetadataEndpoint makes a single HTTP GET to a cloud metadata URL and
+// returns the parsed IP, or nil if the request fails or returns a non-IP.
+func queryMetadataEndpoint(client *http.Client, ep cloudMetadataEndpoint) net.IP {
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep.url, nil)
+	if err != nil {
+		return nil
+	}
+	for k, v := range ep.headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil // timeout or not on this cloud — expected
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	// Read at most 64 bytes — a public IP is at most ~45 chars (IPv6).
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return nil
+	}
+
+	raw := strings.TrimSpace(string(body))
+	if raw == "" {
+		return nil
+	}
+
+	ip := net.ParseIP(raw)
+	if ip != nil && logger != nil {
+		logger.Printf("UITLS: detected %s public IP: %s", ep.name, ip)
+	}
+	return ip
+}
+

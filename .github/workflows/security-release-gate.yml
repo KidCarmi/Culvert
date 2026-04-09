@@ -105,16 +105,38 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Scan source & dependencies with Trivy
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.0
         with:
-          scan-type: "fs"
-          scan-ref: "."
-          format: "sarif"
-          output: "trivy-fs.sarif"
-          severity: "CRITICAL,HIGH"
-          exit-code: "1"      # fail the gate on CRITICAL/HIGH findings
-          ignore-unfixed: true
+          version: v0.69.3
+          cache: true
+
+      - name: Update Trivy DB
+        run: trivy fs --download-db-only --db-repository mirror.gcr.io/aquasec/trivy-db:2
+
+      - name: Scan source (table — THE GATE — output visible in CI log)
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --ignorefile .trivyignore \
+            --exit-code 1 \
+            --format table \
+            .
+
+      - name: Generate SARIF report (optional — for GitHub Security tab)
+        if: always()
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --ignorefile .trivyignore \
+            --exit-code 0 \
+            --format sarif \
+            --output trivy-fs.sarif \
+            .
 
       - name: Upload Trivy SARIF
         if: always()
@@ -134,18 +156,41 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.0
+        with:
+          version: v0.69.3
+          cache: true
+
+      - name: Update Trivy DB
+        run: trivy image --download-db-only --db-repository mirror.gcr.io/aquasec/trivy-db:2
+
       - name: Build image for scanning (no push)
         run: docker build -t culvert:scan .
 
-      - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
-        with:
-          image-ref: "culvert:scan"
-          format: "sarif"
-          output: "trivy-image.sarif"
-          severity: "CRITICAL,HIGH"
-          exit-code: "1"
-          ignore-unfixed: true
+      - name: Scan image (table — THE GATE — output visible in CI log)
+        run: |
+          trivy image \
+            --scanners vuln \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --ignorefile .trivyignore \
+            --exit-code 1 \
+            --format table \
+            culvert:scan
+
+      - name: Generate SARIF report (optional — for GitHub Security tab)
+        if: always()
+        run: |
+          trivy image \
+            --scanners vuln \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --ignorefile .trivyignore \
+            --exit-code 0 \
+            --format sarif \
+            --output trivy-image.sarif \
+            culvert:scan
 
       - name: Upload Trivy image SARIF
         if: always()

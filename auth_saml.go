@@ -57,7 +57,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		return nil, fmt.Errorf("saml[%s] sp key: %w", p.ID, err)
 	}
 
-	rootURL, err := url.Parse(proxyBaseURL())
+	rootURL, err := url.Parse(proxyBaseURL(nil)) // nil: called at startup, no request context
 	if err != nil {
 		return nil, fmt.Errorf("saml[%s] base url: %w", p.ID, err)
 	}
@@ -92,7 +92,7 @@ func (p *SAMLProvider) ResolveIdentity(_, _ string) (*Identity, bool) { return n
 
 // CaptiveLoginURL generates a SAML AuthnRequest and returns the redirect URL.
 // relayURL is encoded as the SAMLRequest RelayState and returned after callback.
-func (p *SAMLProvider) CaptiveLoginURL(relayURL string) string {
+func (p *SAMLProvider) CaptiveLoginURL(relayURL string, _ *http.Request) string {
 	authReq, err := p.sp.MakeAuthenticationRequest(
 		p.sp.GetSSOBindingLocation(saml.HTTPRedirectBinding),
 		saml.HTTPRedirectBinding,

@@ -90,6 +90,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/config/import", apiConfigImport)      // POST — restore from backup JSON
 	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode) // PUT — toggle proxy auth requirement
 	mux.HandleFunc("/api/settings/log-level", apiLogLevel)     // GET/PUT runtime log level
+	mux.HandleFunc("/api/settings/network", apiNetworkSettings) // GET/POST network & TLS settings
 	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)  // GET/POST session TTL (hours)
 	mux.HandleFunc("/api/session-secret", apiSessionSecret)    // GET/POST shared signing key
 	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)         // GET/POST UI access IP allowlist
@@ -894,7 +895,11 @@ func auditEventDiff(r *http.Request, action, object, detail string, before, afte
 	auditAdd(entry)
 }
 
-// GET /api/audit — return recent configuration-change audit entries (newest first).
+// GET /api/audit — return configuration-change audit entries (newest first).
+// Supports pagination via ?offset=N&limit=M (default: offset=0, limit=500).
+// Supports date filtering via ?from=UNIX_MS&to=UNIX_MS.
+// When a persistent audit log file is configured, reads from the full file
+// instead of the 500-entry in-memory ring buffer (Finding 6.2).
 func apiAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -903,8 +908,19 @@ func apiAudit(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	entries := auditGet()
-	jsonOK(w, map[string]any{"entries": entries, "count": len(entries)})
+	q := r.URL.Query()
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	fromTS, _ := strconv.ParseInt(q.Get("from"), 10, 64)
+	toTS, _ := strconv.ParseInt(q.Get("to"), 10, 64)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 10000 {
+		limit = 500
+	}
+	entries, total := auditGetPersistent(offset, limit, fromTS, toTS)
+	jsonOK(w, map[string]any{"entries": entries, "count": len(entries), "total": total, "offset": offset, "limit": limit})
 }
 
 func jsonOK(w http.ResponseWriter, v any) {
@@ -2172,6 +2188,50 @@ func apiLogLevel(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET/POST /api/settings/network — network & TLS settings (base_url, ui_sans, trust_forwarded_headers).
+func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"base_url":                  proxyExternalBaseURL,
+			"ui_sans":                   uiExtraSANs,
+			"trust_forwarded_headers":   trustForwardedHeaders,
+		})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			BaseURL              string   `json:"base_url"`
+			UISANs               []string `json:"ui_sans"`
+			TrustForwardedHeaders bool    `json:"trust_forwarded_headers"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		SetProxyBaseURL(body.BaseURL)
+		uiExtraSANs = body.UISANs
+		trustForwardedHeaders = body.TrustForwardedHeaders
+		safeSANs := make([]string, len(body.UISANs))
+		for i, s := range body.UISANs {
+			safeSANs[i] = strings.ReplaceAll(strings.ReplaceAll(s, "\n", ""), "\r", "")
+		}
+		safeTrustFwd := strings.ReplaceAll(fmt.Sprintf("%v", body.TrustForwardedHeaders), "\n", "")
+		logger.Printf("UI: network settings updated (base_url=%q, ui_sans=%v, trust_fwd=%s)",
+			sanitizeLog(body.BaseURL), safeSANs, safeTrustFwd)
+		auditEvent(r, "settings.network", "updated", fmt.Sprintf("base_url=%s trust_fwd=%s sans=%v",
+			strings.ReplaceAll(body.BaseURL, "\n", ""), safeTrustFwd, safeSANs))
+		saveConfigVersion(sessionAdmin(r), "settings.network")
+		jsonOK(w, map[string]string{"status": "ok"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // GET/POST/DELETE /api/rewrite — manage header rewrite rules
 func apiRewrite(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -2590,12 +2650,14 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-%s.csv"`, ts))
 		cw := csv.NewWriter(w)
-		cw.Write([]string{"timestamp", "time", "ip", "method", "host", "status"}) //nolint:errcheck // CSV write
+		cw.Write([]string{"timestamp", "time", "ip", "identity", "method", "host", "status", "level", "rule_matched", "action_taken", "bytes_sent", "bytes_recv"}) //nolint:errcheck // CSV write
 		for i := range entries {
 			e := &entries[i]
 			cw.Write([]string{ //nolint:errcheck // CSV write
 				fmt.Sprintf("%d", e.TS),
-				e.Time, e.IP, e.Method, e.Host, e.Status,
+				e.Time, e.IP, e.Identity, e.Method, e.Host, e.Status, e.Level,
+				e.RuleMatched, e.ActionTaken,
+				fmt.Sprintf("%d", e.BytesSent), fmt.Sprintf("%d", e.BytesRecv),
 			})
 		}
 		cw.Flush()
@@ -3066,7 +3128,7 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provider is not OIDC", http.StatusInternalServerError)
 		return
 	}
-	id, err := oidcProv.ExchangeCode(code, state)
+	id, err := oidcProv.ExchangeCode(r, code, state)
 	if err != nil {
 		logger.Printf("OIDC callback error: %v", err)
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
@@ -3130,7 +3192,7 @@ h1{font-size:1.4rem}a.btn{display:block;padding:12px 16px;margin:8px 0;border-ra
 background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover{background:#1d4ed8}
 </style></head><body><h1>Sign in to Culvert</h1>`)
 	for _, p := range providers {
-		loginURL := p.CaptiveLoginURL(relay)
+		loginURL := p.CaptiveLoginURL(relay, r)
 		if loginURL == "" {
 			continue
 		}

@@ -34,6 +34,10 @@ func TestCPBaseURL(t *testing.T) {
 }
 
 func TestCPBaseURL_XForwarded(t *testing.T) {
+	old := trustForwardedHeaders
+	trustForwardedHeaders = true
+	defer func() { trustForwardedHeaders = old }()
+
 	req := httptest.NewRequest(http.MethodGet, "http://cp.internal/test", nil)
 	req.Host = "cp.example.com"
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -44,13 +48,69 @@ func TestCPBaseURL_XForwarded(t *testing.T) {
 	}
 }
 
+func TestCPBaseURL_XForwardedIgnoredByDefault(t *testing.T) {
+	old := trustForwardedHeaders
+	trustForwardedHeaders = false
+	defer func() { trustForwardedHeaders = old }()
+
+	req := httptest.NewRequest(http.MethodGet, "http://cp.internal/test", nil)
+	req.Host = "cp.example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "proxy.example.com")
+	got := cpBaseURL(req)
+	// Should use r.Host, not X-Forwarded-Host
+	if got != "http://cp.example.com" {
+		t.Errorf("cpBaseURL = %q, want http://cp.example.com (forwarded headers untrusted)", got)
+	}
+}
+
 func TestCPBaseURL_PlainHTTP(t *testing.T) {
+	old := trustForwardedHeaders
+	trustForwardedHeaders = true
+	defer func() { trustForwardedHeaders = old }()
+
 	req := httptest.NewRequest(http.MethodGet, "http://cp.internal/test", nil)
 	req.Host = "cp.internal:9090"
 	req.Header.Set("X-Forwarded-Proto", "http")
 	got := cpBaseURL(req)
 	if got != "http://cp.internal:9090" {
 		t.Errorf("cpBaseURL = %q, want http://cp.internal:9090", got)
+	}
+}
+
+func TestEnrollmentCPAddr(t *testing.T) {
+	tests := []struct {
+		name      string
+		host      string
+		grpcAddr  string
+		fwdHost   string
+		trustFwd  bool
+		want      string
+	}{
+		{"IPv4 host", "10.0.0.5:9090", ":50051", "", false, "10.0.0.5:50051"},
+		{"hostname", "cp.example.com:9090", ":50051", "", false, "cp.example.com:50051"},
+		{"IPv6 host", "[::1]:9090", ":50051", "", false, "[::1]:50051"},
+		{"grpc has routable host", "10.0.0.5:9090", "192.168.1.1:50051", "", false, "192.168.1.1:50051"},
+		{"grpc wildcard", "10.0.0.5:9090", "0.0.0.0:50051", "", false, "10.0.0.5:50051"},
+		{"forwarded trusted", "10.0.0.5:9090", ":50051", "proxy.example.com", true, "proxy.example.com:50051"},
+		{"forwarded untrusted", "10.0.0.5:9090", ":50051", "evil.com", false, "10.0.0.5:50051"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			old := trustForwardedHeaders
+			trustForwardedHeaders = tt.trustFwd
+			defer func() { trustForwardedHeaders = old }()
+
+			req := httptest.NewRequest(http.MethodGet, "https://"+tt.host+"/bootstrap", nil)
+			req.Host = tt.host
+			if tt.fwdHost != "" {
+				req.Header.Set("X-Forwarded-Host", tt.fwdHost)
+			}
+			got := enrollmentCPAddr(req, tt.grpcAddr)
+			if got != tt.want {
+				t.Errorf("enrollmentCPAddr() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

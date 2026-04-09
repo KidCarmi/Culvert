@@ -17,8 +17,9 @@ type FileConfig struct {
 		Blocklist string `yaml:"blocklist"`
 		LogFile   string `yaml:"log_file"`
 		LogMaxMB  int    `yaml:"log_max_mb"`
-		TLSCert    string `yaml:"tls_cert"`    // path to TLS cert for UI
-		TLSKey     string `yaml:"tls_key"`     // path to TLS key for UI
+		TLSCert    string   `yaml:"tls_cert"`    // path to TLS cert for UI
+		TLSKey     string   `yaml:"tls_key"`     // path to TLS key for UI
+		UISANs     []string `yaml:"ui_sans"`     // additional SANs for self-signed cert (IPs or hostnames)
 		SOCKS5Port   int    `yaml:"socks5_port"`   // 0 = disabled
 		MetricsToken string `yaml:"metrics_token"` // Bearer token for /metrics; empty=open
 		PolicyFile   string `yaml:"policy_file"`   // JSON file for PBAC policy rules
@@ -30,7 +31,8 @@ type FileConfig struct {
 		GeoIPDB             string   `yaml:"geoip_db"`              // Path to GeoLite2-Country.mmdb; empty = GeoIP disabled
 		IdPProfilesFile     string   `yaml:"idp_profiles_file"`     // JSON file for generic IdP profiles
 		URLCategoriesFile   string   `yaml:"url_categories_file"`   // JSON file for dynamic URL categories (host lists per category)
-		BaseURL             string   `yaml:"base_url"`              // External base URL for OIDC/SAML callbacks (e.g. "https://proxy.corp.com:9090")
+		BaseURL                string   `yaml:"base_url"`                  // External base URL for OIDC/SAML callbacks (e.g. "https://proxy.corp.com:9090")
+		TrustForwardedHeaders  bool     `yaml:"trust_forwarded_headers"`   // Trust X-Forwarded-* headers (enable when behind reverse proxy)
 		BlocklistFeedURL      string   `yaml:"blocklist_feed_url"`      // URL to auto-sync blocklist from (one domain per line)
 		BlocklistFeedInterval string   `yaml:"blocklist_feed_interval"` // sync interval (e.g. "24h"); default 24h
 		FileProfilesFile      string   `yaml:"fileprofiles_file"`       // JSON file for dynamic file extension profiles

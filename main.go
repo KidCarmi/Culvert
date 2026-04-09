@@ -104,7 +104,35 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	scanSvcListen := flag.String("scan-svc-listen", "", "Run as scan microservice sidecar on this address (e.g. :8484)")
 	scanSvcURL := flag.String("scan-svc-url", "", "Remote scan service URL (e.g. http://scan-svc:8484) — disables local ClamAV/YARA")
 	updaterURLFlag := flag.String("updater-url", "", "Updater sidecar URL (default http://culvert-updater:7123)")
+	uiSANsFlag := flag.String("ui-san", "", "Additional TLS SANs for self-signed cert (comma-separated IPs/hostnames)")
+	trustFwdHeaders := flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
+	resetPwUser := flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
 	flag.Parse()
+
+	// ── One-shot: password reset (Finding 5.1) ─────────────────────────────
+	if *resetPwUser != "" {
+		parts := strings.SplitN(*resetPwUser, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || len(parts[1]) < 8 {
+			fmt.Fprintln(os.Stderr, "Usage: --reset-password username:newpassword (min 8 chars)")
+			os.Exit(1)
+		}
+		usersPath := *uiUsersFile
+		if usersPath == "" {
+			usersPath = "/data/ui_users.json"
+		}
+		cfg.SetUIUsersFile(usersPath)
+		_ = cfg.LoadUIUsersFile() // may not exist yet, that's fine
+		if err := cfg.SetUIUser(parts[0], parts[1], RoleAdmin); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := cfg.SaveUIUsersFile(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Password reset for %q (role=admin). You can now start the proxy.\n", parts[0])
+		os.Exit(0)
+	}
 
 	clusterInsecure = *clusterInsecureFlag
 
@@ -141,6 +169,22 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	key := firstStr(*tlsKey, fc.Proxy.TLSKey)
 	rlRPM := firstNonZero(*rateLimitRPM, fc.Security.RateLimit)
 	ipModeVal := firstStr(*ipMode, fc.Security.IPFilterMode)
+
+	// ── Extra TLS SANs for self-signed cert ──────────────────────────────────
+	// Merge CLI --ui-san (comma-separated) with config file ui_sans list.
+	var sansList []string
+	if *uiSANsFlag != "" {
+		for _, s := range strings.Split(*uiSANsFlag, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				sansList = append(sansList, s)
+			}
+		}
+	}
+	sansList = append(sansList, fc.Proxy.UISANs...)
+	uiExtraSANs = sansList // package-level var read by selfSignedTLS()
+
+	// ── Trust forwarded headers ──────────────────────────────────────────────
+	trustForwardedHeaders = *trustFwdHeaders || fc.Proxy.TrustForwardedHeaders
 
 	// ── Logger ───────────────────────────────────────────────────────────────
 	var err error
@@ -252,6 +296,14 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if fc.Proxy.BaseURL != "" {
 		SetProxyBaseURL(fc.Proxy.BaseURL)
 		logger.Printf("BaseURL: %s", fc.Proxy.BaseURL)
+	} else {
+		// Warn if OIDC/SAML is configured but base_url is empty — callback URLs
+		// will be derived from the request Host header, which may not match the
+		// redirect_uri registered with the IdP.
+		hasOIDC := fc.OIDC.IntrospectionURL != "" || fc.Proxy.IdPProfilesFile != ""
+		if hasOIDC {
+			logger.Printf("WARNING: base_url not set — OIDC/SAML callbacks will use request Host header. Set proxy.base_url in config for reliable IdP redirects.")
+		}
 	}
 
 	// ── Generic IdP Registry ─────────────────────────────────────────────────

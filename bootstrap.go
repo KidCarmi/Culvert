@@ -16,6 +16,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -327,8 +328,9 @@ func apiBootstrapCompose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build enrollment URL.
-	cpAddr := clusterRole.grpcAddr
+	// Build enrollment URL — derive CP host from the HTTP request so the
+	// generated docker-compose.yml works from remote machines (not just localhost).
+	cpAddr := enrollmentCPAddr(r, clusterRole.grpcAddr)
 	caFP := globalClusterCA.CACertFingerprint()
 	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, token, caFP)
 
@@ -367,15 +369,55 @@ func extractBootstrapToken(path, prefix string) string {
 func cpBaseURL(r *http.Request) string {
 	scheme := "https"
 	if r.TLS == nil {
-		// Check X-Forwarded-Proto for reverse proxy setups
-		if fp := r.Header.Get("X-Forwarded-Proto"); fp == "http" {
-			scheme = "http"
-		}
+		scheme = "http"
 	}
 	host := r.Host
-	if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
-		host = fh
+	if trustForwardedHeaders {
+		if fp := r.Header.Get("X-Forwarded-Proto"); fp == "http" || fp == "https" {
+			scheme = fp
+		}
+		if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
+			host = fh
+		}
 	}
 	return scheme + "://" + host
+}
+
+// enrollmentCPAddr derives the gRPC Control Plane address for the enrollment URL.
+// Uses the HTTP request's host (the IP/hostname the admin used to access the UI)
+// combined with the gRPC port from the configured listen address.
+// IPv6-safe: strips brackets before net.JoinHostPort to prevent double-bracketing.
+func enrollmentCPAddr(r *http.Request, grpcListenAddr string) string {
+	// If grpcAddr already contains a routable host (not just :port), use it as-is.
+	if grpcListenAddr != "" {
+		gHost, _, err := net.SplitHostPort(grpcListenAddr)
+		if err == nil && gHost != "" && gHost != "0.0.0.0" && gHost != "::" {
+			return grpcListenAddr
+		}
+	}
+
+	// Derive host from the HTTP request.
+	cpHost := r.Host
+	if trustForwardedHeaders {
+		if fh := r.Header.Get("X-Forwarded-Host"); fh != "" {
+			cpHost = fh
+		}
+	}
+
+	// Extract host — IPv6-safe (r.Host for IPv6 is [::1]:port).
+	host, _, err := net.SplitHostPort(cpHost)
+	if err != nil {
+		// No port or bare host — strip brackets to prevent [[::1]]:port
+		host = strings.Trim(cpHost, "[]")
+	}
+
+	// Extract gRPC port from the listen address.
+	_, grpcPort, err := net.SplitHostPort(grpcListenAddr)
+	if err != nil || grpcPort == "" {
+		grpcPort = "50051"
+	}
+
+	// net.JoinHostPort adds brackets for IPv6 automatically.
+	return net.JoinHostPort(host, grpcPort)
 }
 
