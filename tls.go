@@ -183,15 +183,22 @@ var cloudMetadataEndpoints = []cloudMetadataEndpoint{
 // successful response wins (a host is only on one cloud provider).
 func detectCloudPublicIPs() []net.IP {
 	// Short timeout — metadata is local (< 50ms on cloud, times out on bare metal).
+	// 2s total allows for IMDSv2 two-step (PUT token + GET IP) on busy instances.
 	client := &http.Client{
-		Timeout: 800 * time.Millisecond,
+		Timeout: 2 * time.Second,
 		// Don't follow redirects — metadata endpoints return direct responses.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
 
-	for _, ep := range cloudMetadataEndpoints {
+	// Try AWS first with IMDSv2 (token-based), fall back to IMDSv1.
+	if ip := queryAWSMetadata(client); ip != nil {
+		return []net.IP{ip}
+	}
+
+	// Try GCP and Azure.
+	for _, ep := range cloudMetadataEndpoints[1:] { // skip AWS (index 0), handled above
 		ip := queryMetadataEndpoint(client, ep)
 		if ip != nil {
 			return []net.IP{ip}
@@ -200,10 +207,53 @@ func detectCloudPublicIPs() []net.IP {
 	return nil
 }
 
+// queryAWSMetadata tries IMDSv2 (token-based) first, then falls back to IMDSv1.
+// IMDSv2 is required on newer EC2 instances where IMDSv1 is disabled.
+func queryAWSMetadata(client *http.Client) net.IP {
+	const metadataURL = "http://169.254.169.254/latest/meta-data/public-ipv4"
+	const tokenURL = "http://169.254.169.254/latest/api/token"
+
+	// Step 1: Try IMDSv2 — get a session token via PUT.
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodPut, tokenURL, nil)
+	if err != nil {
+		return nil
+	}
+	tokenReq.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+
+	tokenResp, err := client.Do(tokenReq)
+	if err == nil {
+		defer tokenResp.Body.Close()
+		if tokenResp.StatusCode == http.StatusOK {
+			tokenBody, err := io.ReadAll(io.LimitReader(tokenResp.Body, 256))
+			if err == nil && len(tokenBody) > 0 {
+				token := strings.TrimSpace(string(tokenBody))
+				// Step 2: Use token to query public IP.
+				ip := queryMetadataEndpoint(client, cloudMetadataEndpoint{
+					name:    "AWS",
+					url:     metadataURL,
+					headers: map[string]string{"X-aws-ec2-metadata-token": token},
+				})
+				if ip != nil {
+					return ip
+				}
+			}
+		}
+	}
+
+	// Fallback: IMDSv1 (plain GET, no token).
+	return queryMetadataEndpoint(client, cloudMetadataEndpoint{
+		name: "AWS",
+		url:  metadataURL,
+	})
+}
+
 // queryMetadataEndpoint makes a single HTTP GET to a cloud metadata URL and
 // returns the parsed IP, or nil if the request fails or returns a non-IP.
 func queryMetadataEndpoint(client *http.Client, ep cloudMetadataEndpoint) net.IP {
-	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep.url, nil)
