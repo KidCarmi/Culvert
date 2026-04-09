@@ -211,30 +211,30 @@ func detectCloudPublicIPs() []net.IP {
 // IMDSv2 is required on newer EC2 instances where IMDSv1 is disabled.
 func queryAWSMetadata(client *http.Client) net.IP {
 	const metadataURL = "http://169.254.169.254/latest/meta-data/public-ipv4"
-	const tokenURL = "http://169.254.169.254/latest/api/token"
+	const imdsv2SessionURL = "http://169.254.169.254/latest/api/token" // #nosec G101 -- not a credential; IMDS session endpoint URL
 
-	// Step 1: Try IMDSv2 — get a session token via PUT.
+	// Step 1: Try IMDSv2 — get a session credential via PUT.
 	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
 
-	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodPut, tokenURL, nil)
+	imdsReq, err := http.NewRequestWithContext(ctx, http.MethodPut, imdsv2SessionURL, nil)
 	if err != nil {
 		return nil
 	}
-	tokenReq.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+	imdsReq.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "21600")
 
-	tokenResp, err := client.Do(tokenReq)
+	imdsResp, err := client.Do(imdsReq)
 	if err == nil {
-		defer tokenResp.Body.Close()
-		if tokenResp.StatusCode == http.StatusOK {
-			tokenBody, err := io.ReadAll(io.LimitReader(tokenResp.Body, 256))
-			if err == nil && len(tokenBody) > 0 {
-				token := strings.TrimSpace(string(tokenBody))
-				// Step 2: Use token to query public IP.
+		defer imdsResp.Body.Close()
+		if imdsResp.StatusCode == http.StatusOK {
+			sessBody, err := io.ReadAll(io.LimitReader(imdsResp.Body, 256))
+			if err == nil && len(sessBody) > 0 {
+				sess := strings.TrimSpace(string(sessBody))
+				// Step 2: Use session value to query public IP.
 				ip := queryMetadataEndpoint(client, cloudMetadataEndpoint{
 					name:    "AWS",
 					url:     metadataURL,
-					headers: map[string]string{"X-aws-ec2-metadata-token": token},
+					headers: map[string]string{"X-aws-ec2-metadata-token": sess}, // #nosec G101 -- AWS IMDS header name, not a credential
 				})
 				if ip != nil {
 					return ip
