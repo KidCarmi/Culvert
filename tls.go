@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -8,9 +9,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -49,6 +53,12 @@ func selfSignedTLS() (*tls.Config, error) {
 	// Add hostname.
 	if h, err := os.Hostname(); err == nil && h != "" && h != "localhost" {
 		dns = append(dns, h)
+	}
+
+	// Auto-detect cloud public IP via instance metadata (AWS, GCP, Azure).
+	// On non-cloud hosts, these time out in ~500ms and are silently ignored.
+	if cloudIPs := detectCloudPublicIPs(); len(cloudIPs) > 0 {
+		ips = append(ips, cloudIPs...)
 	}
 
 	// Parse extra SANs: IPs go to IPAddresses, everything else to DNSNames.
@@ -132,5 +142,98 @@ func deduplicateStrings(in []string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// cloudMetadataEndpoint describes a cloud provider's instance metadata URL
+// for discovering the public IP address of this machine.
+type cloudMetadataEndpoint struct {
+	name    string
+	url     string
+	headers map[string]string // required headers (e.g. GCP's Metadata-Flavor)
+}
+
+// cloudMetadataEndpoints lists the metadata URLs for major cloud providers.
+// All use the 169.254.169.254 link-local address (except GCP DNS alias).
+// On non-cloud hosts, connections to these addresses time out harmlessly.
+var cloudMetadataEndpoints = []cloudMetadataEndpoint{
+	{
+		name: "AWS",
+		url:  "http://169.254.169.254/latest/meta-data/public-ipv4",
+	},
+	{
+		name:    "GCP",
+		url:     "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip",
+		headers: map[string]string{"Metadata-Flavor": "Google"},
+	},
+	{
+		name:    "Azure",
+		url:     "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text",
+		headers: map[string]string{"Metadata": "true"},
+	},
+}
+
+// detectCloudPublicIPs queries cloud instance metadata APIs to discover
+// the machine's public IP address. Returns nil on non-cloud hosts or if
+// no public IP is assigned. Each provider is tried sequentially; the first
+// successful response wins (a host is only on one cloud provider).
+func detectCloudPublicIPs() []net.IP {
+	// Short timeout — metadata is local (< 50ms on cloud, times out on bare metal).
+	client := &http.Client{
+		Timeout: 800 * time.Millisecond,
+		// Don't follow redirects — metadata endpoints return direct responses.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	for _, ep := range cloudMetadataEndpoints {
+		ip := queryMetadataEndpoint(client, ep)
+		if ip != nil {
+			return []net.IP{ip}
+		}
+	}
+	return nil
+}
+
+// queryMetadataEndpoint makes a single HTTP GET to a cloud metadata URL and
+// returns the parsed IP, or nil if the request fails or returns a non-IP.
+func queryMetadataEndpoint(client *http.Client, ep cloudMetadataEndpoint) net.IP {
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep.url, nil)
+	if err != nil {
+		return nil
+	}
+	for k, v := range ep.headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil // timeout or not on this cloud — expected
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	// Read at most 64 bytes — a public IP is at most ~45 chars (IPv6).
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return nil
+	}
+
+	raw := strings.TrimSpace(string(body))
+	if raw == "" {
+		return nil
+	}
+
+	ip := net.ParseIP(raw)
+	if ip != nil && logger != nil {
+		logger.Printf("UITLS: detected %s public IP: %s", ep.name, ip)
+	}
+	return ip
 }
 
