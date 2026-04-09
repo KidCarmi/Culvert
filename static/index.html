@@ -1977,6 +1977,9 @@ Firefox (all platforms):
             </div>
             <div style="display:flex;flex-direction:column;justify-content:flex-end;gap:10px">
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem">
+                <input type="checkbox" id="pol-enabled" checked> Rule Enabled
+              </label>
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem">
                 <input type="checkbox" id="pol-file-filter"> Enable File Filtering
               </label>
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Skip upstream TLS certificate verification for this rule. Use only for internal sites with self-signed certs.">
@@ -5635,6 +5638,7 @@ function editPolicy(priority) {
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
   loadPolicyCategoryOptions(r.destCategory || '');
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
+  document.getElementById('pol-enabled').checked     = r.enabled !== false;
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
@@ -5666,6 +5670,7 @@ function clearPolicyForm() {
   document.getElementById('pol-action').value        = 'Allow';
   document.getElementById('pol-dest-cat').value      = '';
   document.getElementById('pol-ssl').value           = 'Bypass';
+  document.getElementById('pol-enabled').checked     = true;
   document.getElementById('pol-file-filter').checked = false;
   document.getElementById('pol-file-profile').value  = '';
   document.getElementById('pol-tls-skip').checked    = false;
@@ -5709,6 +5714,7 @@ async function submitPolicyRule() {
     destCategory:   document.getElementById('pol-dest-cat').value || '',
     destCountry,
     sslAction:      document.getElementById('pol-ssl').value,
+    enabled:        document.getElementById('pol-enabled').checked,
     fileFiltering:  document.getElementById('pol-file-filter').checked,
     fileProfile:    document.getElementById('pol-file-profile').value || '',
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
