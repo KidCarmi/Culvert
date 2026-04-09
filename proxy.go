@@ -593,6 +593,10 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Skip buffering if Content-Length signals the response exceeds the
 	// scan limit — avoids wasting memory and I/O on oversized bodies.
 	scanActive := globalRemoteScanner.Enabled() || globalSecScanner.BodyScanEnabled()
+	if scanActive && resp.ContentLength > globalSecScanner.MaxBytes() {
+		logWarnf("SecurityScan: skipped %s (Content-Length %d exceeds scan limit %d)",
+			sanitizeLog(r.Host+r.URL.Path), resp.ContentLength, globalSecScanner.MaxBytes())
+	}
 	if scanActive && (resp.ContentLength < 0 || resp.ContentLength <= globalSecScanner.MaxBytes()) {
 		buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
 		if readErr == nil {

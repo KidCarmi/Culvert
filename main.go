@@ -104,7 +104,33 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	scanSvcListen := flag.String("scan-svc-listen", "", "Run as scan microservice sidecar on this address (e.g. :8484)")
 	scanSvcURL := flag.String("scan-svc-url", "", "Remote scan service URL (e.g. http://scan-svc:8484) — disables local ClamAV/YARA")
 	updaterURLFlag := flag.String("updater-url", "", "Updater sidecar URL (default http://culvert-updater:7123)")
+	resetPwUser := flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
 	flag.Parse()
+
+	// ── One-shot: password reset (Finding 5.1) ─────────────────────────────
+	if *resetPwUser != "" {
+		parts := strings.SplitN(*resetPwUser, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || len(parts[1]) < 8 {
+			fmt.Fprintln(os.Stderr, "Usage: --reset-password username:newpassword (min 8 chars)")
+			os.Exit(1)
+		}
+		usersPath := *uiUsersFile
+		if usersPath == "" {
+			usersPath = "/data/ui_users.json"
+		}
+		cfg.SetUIUsersFile(usersPath)
+		_ = cfg.LoadUIUsersFile() // may not exist yet, that's fine
+		if err := cfg.SetUIUser(parts[0], parts[1], RoleAdmin); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := cfg.SaveUIUsersFile(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Password reset for %q (role=admin). You can now start the proxy.\n", parts[0])
+		os.Exit(0)
+	}
 
 	clusterInsecure = *clusterInsecureFlag
 

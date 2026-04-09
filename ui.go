@@ -894,7 +894,11 @@ func auditEventDiff(r *http.Request, action, object, detail string, before, afte
 	auditAdd(entry)
 }
 
-// GET /api/audit — return recent configuration-change audit entries (newest first).
+// GET /api/audit — return configuration-change audit entries (newest first).
+// Supports pagination via ?offset=N&limit=M (default: offset=0, limit=500).
+// Supports date filtering via ?from=UNIX_MS&to=UNIX_MS.
+// When a persistent audit log file is configured, reads from the full file
+// instead of the 500-entry in-memory ring buffer (Finding 6.2).
 func apiAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -903,8 +907,19 @@ func apiAudit(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	entries := auditGet()
-	jsonOK(w, map[string]any{"entries": entries, "count": len(entries)})
+	q := r.URL.Query()
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	fromTS, _ := strconv.ParseInt(q.Get("from"), 10, 64)
+	toTS, _ := strconv.ParseInt(q.Get("to"), 10, 64)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 10000 {
+		limit = 500
+	}
+	entries, total := auditGetPersistent(offset, limit, fromTS, toTS)
+	jsonOK(w, map[string]any{"entries": entries, "count": len(entries), "total": total, "offset": offset, "limit": limit})
 }
 
 func jsonOK(w http.ResponseWriter, v any) {
@@ -2590,12 +2605,14 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-%s.csv"`, ts))
 		cw := csv.NewWriter(w)
-		cw.Write([]string{"timestamp", "time", "ip", "method", "host", "status"}) //nolint:errcheck // CSV write
+		cw.Write([]string{"timestamp", "time", "ip", "identity", "method", "host", "status", "level", "rule_matched", "action_taken", "bytes_sent", "bytes_recv"}) //nolint:errcheck // CSV write
 		for i := range entries {
 			e := &entries[i]
 			cw.Write([]string{ //nolint:errcheck // CSV write
 				fmt.Sprintf("%d", e.TS),
-				e.Time, e.IP, e.Method, e.Host, e.Status,
+				e.Time, e.IP, e.Identity, e.Method, e.Host, e.Status, e.Level,
+				e.RuleMatched, e.ActionTaken,
+				fmt.Sprintf("%d", e.BytesSent), fmt.Sprintf("%d", e.BytesRecv),
 			})
 		}
 		cw.Flush()

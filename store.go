@@ -181,10 +181,11 @@ type AuditEntry struct {
 const maxAuditLogs = 500
 
 var (
-	auditMu      sync.Mutex
-	auditLog     []AuditEntry
-	auditLogFile io.Writer // persistent JSONL file; nil = in-memory only
-	auditCloser  io.Closer // close on shutdown
+	auditMu          sync.Mutex
+	auditLog         []AuditEntry
+	auditLogFile     io.Writer // persistent JSONL file; nil = in-memory only
+	auditCloser      io.Closer // close on shutdown
+	auditLogFilePath string    // path to JSONL file for paginated reads
 )
 
 // clusterRoleIsDP is set to true when this node is a Data Plane in a cluster.
@@ -220,7 +221,76 @@ func InitAuditLog(path string) error {
 	}
 	auditLogFile = rf
 	auditCloser = rf
+	auditLogFilePath = path
 	return nil
+}
+
+// auditGetPersistent reads the JSONL audit log file with pagination.
+// Returns entries newest-first. If from/to are non-zero, filters by timestamp.
+// Falls back to in-memory buffer if no file is configured.
+func auditGetPersistent(offset, limit int, fromTS, toTS int64) ([]AuditEntry, int) {
+	if auditLogFilePath == "" {
+		all := auditGet()
+		// Apply timestamp filters.
+		if fromTS > 0 || toTS > 0 {
+			filtered := make([]AuditEntry, 0, len(all))
+			for i := range all {
+				if fromTS > 0 && all[i].TS < fromTS {
+					continue
+				}
+				if toTS > 0 && all[i].TS > toTS {
+					continue
+				}
+				filtered = append(filtered, all[i])
+			}
+			all = filtered
+		}
+		total := len(all)
+		if offset >= total {
+			return nil, total
+		}
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		return all[offset:end], total
+	}
+
+	data, err := os.ReadFile(auditLogFilePath)
+	if err != nil {
+		return auditGet(), 0
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	// Parse all entries.
+	entries := make([]AuditEntry, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var e AuditEntry
+		if json.Unmarshal([]byte(line), &e) == nil {
+			if fromTS > 0 && e.TS < fromTS {
+				continue
+			}
+			if toTS > 0 && e.TS > toTS {
+				continue
+			}
+			entries = append(entries, e)
+		}
+	}
+	// Reverse to newest-first.
+	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+		entries[i], entries[j] = entries[j], entries[i]
+	}
+	total := len(entries)
+	if offset >= total {
+		return nil, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return entries[offset:end], total
 }
 
 // auditAdd appends an entry to the in-memory ring buffer and, when configured,
