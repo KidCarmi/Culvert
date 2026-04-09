@@ -5784,10 +5784,12 @@ function renderPolicy() {
     const fileProfileCell = r.fileProfile
       ? `<span style="font-size:.72rem;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 6px;border-radius:4px">${escHtml(r.fileProfile)}</span>`
       : '<span style="color:var(--muted)">—</span>';
-    return `<tr draggable="true" data-priority="${r.priority}">
+    const disabledStyle = r.enabled === false ? 'opacity:.45' : '';
+    const disabledBadge = r.enabled === false ? ' <span style="font-size:.68rem;color:var(--danger);font-weight:700">(disabled)</span>' : '';
+    return `<tr draggable="true" data-priority="${r.priority}" style="${disabledStyle}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
       <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
-      <td style="font-weight:600">${escHtml(r.name)}${schedBadge}</td>
+      <td style="font-weight:600">${escHtml(r.name)}${schedBadge}${disabledBadge}</td>
       <td style="font-size:.78rem;font-family:monospace">${src}</td>
       <td style="font-size:.78rem;font-family:monospace">${dest}</td>
       <td style="font-size:.78rem">${countryCell}</td>
@@ -6837,10 +6839,22 @@ async function clearCACache() {
 }
 
 async function forceRotateCA() {
-  if (!await confirmAction('Rotate Root CA', 'Force-rotate the Root CA now? All clients will need the new CA certificate.', 'Rotate')) return;
-  const r = await api('/api/ca/rotate', {method:'POST'});
-  if (r && !r.error) { toast('Root CA rotated successfully','success'); loadCAMgmt(); }
-  else toast('Rotation failed: '+(r?.error||'unknown'),'error');
+  try {
+    // Step 1: request confirmation token from server.
+    const pending = await api('/api/ca/rotate', {method:'POST', body:{confirm:false}});
+    if (!pending || !pending.confirmation_token) {
+      toast('Failed to initiate CA rotation','error');
+      return;
+    }
+    // Step 2: show warning and ask for confirmation.
+    if (!await confirmAction('Rotate Root CA', pending.warning, 'Rotate')) return;
+    // Step 3: confirm rotation with token.
+    const r = await api('/api/ca/rotate', {method:'POST', body:{confirm:true, confirmation_token:pending.confirmation_token}});
+    if (r && !r.error) { toast('Root CA rotated successfully','success'); loadCAMgmt(); }
+    else toast('Rotation failed: '+(r?.error||'unknown'),'error');
+  } catch(e) {
+    toast('Rotation failed: '+e.message,'error');
+  }
 }
 
 async function toggleOCSP(enabled) {

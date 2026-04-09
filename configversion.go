@@ -283,7 +283,7 @@ func validateConfigBackup(b *configBackup) []string {
 	// Validate each policy rule.
 	var invalidRules int
 	for i := range b.PolicyRules {
-		if err := validatePolicyRule(b.PolicyRules[i]); err != nil {
+		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err != nil {
 			invalidRules++
 		}
 	}
@@ -327,7 +327,7 @@ func applyConfigBackup(b *configBackup) {
 	// Policy rules: bulk replace.
 	var validRules []PolicyRule
 	for i := range b.PolicyRules {
-		if err := validatePolicyRule(b.PolicyRules[i]); err != nil {
+		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err != nil {
 			continue
 		}
 		validRules = append(validRules, b.PolicyRules[i])
