@@ -313,7 +313,15 @@ type PolicyRule struct {
 	TLSSkipVerify  bool            `json:"tlsSkipVerify"`  // skip upstream cert verification (use with caution)
 	Action         PolicyAction    `json:"action"`
 	RedirectURL    string          `json:"redirectURL"` // used when Action == Redirect
+	Enabled        *bool           `json:"enabled,omitempty"` // nil or true = active; false = skipped during evaluation
 	HitCount       int64           `json:"hitCount"`    // runtime counter, not persisted
+}
+
+// ruleIsEnabled returns whether a rule is active. A nil Enabled pointer
+// (the zero value for existing rules loaded from JSON without the field)
+// is treated as true so that all pre-existing rules remain active.
+func ruleIsEnabled(r *PolicyRule) bool {
+	return r.Enabled == nil || *r.Enabled
 }
 
 // PolicySchedule restricts a rule to specific days/times.
@@ -428,6 +436,10 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	ps.mu.Lock()
 	nr := r
 	nr.HitCount = 0
+	if nr.Enabled == nil {
+		t := true
+		nr.Enabled = &t
+	}
 	if nr.Priority <= 0 {
 		// Auto-assign priority: one higher than the current max.
 		maxPri := 0
@@ -580,7 +592,11 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	rules := ps.rules
 	ps.mu.RUnlock()
 
-	for _, rule := range rules {
+	for i := range rules {
+		rule := rules[i]
+		if !ruleIsEnabled(rule) {
+			continue
+		}
 		if !matchSource(rule, clientIP, identity, authSource, groups) {
 			continue
 		}

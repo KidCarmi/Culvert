@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/rand"
 	"embed"
 	"encoding/csv"
 	"encoding/hex"
@@ -35,6 +36,14 @@ var (
 	uiCfgLogMaxMB  int
 	uiCfgLogFormat string
 )
+
+// pendingCARotation holds a confirmation token for the two-step CA rotation flow.
+// An admin must first request rotation (receives a token), then confirm with that token.
+var pendingCARotation struct {
+	sync.Mutex
+	token   string
+	expires time.Time
+}
 
 // tlsErrorFilter is an io.Writer that suppresses noisy TLS handshake errors
 // from Go's http.Server.ErrorLog. These are expected when clients connect to
@@ -112,7 +121,8 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/auth/login", apiAuthLogin)
 	mux.HandleFunc("/api/auth/status", apiAuthStatus)
 	mux.HandleFunc("/api/auth/logout", apiAuthLogout)
-	mux.HandleFunc("/api/auth/users", apiAuthUsers) // RBAC user management (admin only)
+	mux.HandleFunc("/api/auth/users", apiAuthUsers)             // RBAC user management (admin only)
+	mux.HandleFunc("/api/auth/change-password", apiAuthChangePassword) // self-service password change (any role)
 
 	// ── Generic IdP Framework ─────────────────────────────────────────────
 	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
@@ -772,6 +782,67 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// POST /api/auth/change-password — self-service password change for any authenticated user.
+// Body: {"current_password": "...", "new_password": "..."}
+// Verifies the current password before accepting the change.
+func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	username := sessionAdmin(r)
+	if username == "" || username == "unknown" {
+		http.Error(w, "Unauthorized: no valid session", http.StatusUnauthorized)
+		return
+	}
+	var body struct {
+		CurrentPass string `json:"current_password"`
+		NewPass     string `json:"new_password"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.CurrentPass == "" || body.NewPass == "" {
+		http.Error(w, "current_password and new_password are required", http.StatusBadRequest)
+		return
+	}
+	// Verify current password.
+	if _, ok := cfg.VerifyUIUser(username, body.CurrentPass); !ok {
+		http.Error(w, "current password is incorrect", http.StatusForbidden)
+		return
+	}
+	if len(body.NewPass) < 8 {
+		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+	// Preserve existing role when changing password.
+	users := cfg.ListUIUsers()
+	var role UIRole
+	for _, u := range users {
+		if u.Username == username {
+			role = u.Role
+			break
+		}
+	}
+	if role == "" {
+		role = RoleAdmin // legacy single-user fallback
+	}
+	if err := cfg.SetUIUser(username, body.NewPass, role); err != nil {
+		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := cfg.SaveUIUsersFile(); err != nil {
+		logger.Printf("UIUsers: failed to persist after password change: %v", err)
+	}
+	auditEvent(r, "auth.password_change", username, "self-service password change")
+	saveConfigVersion(sessionAdmin(r), "auth.password_change")
+	jsonOK(w, map[string]any{"ok": true})
+}
+
 // GET /api/setup/status — reports whether first-time setup is still needed.
 // Always public so the browser can decide whether to show the setup wizard.
 func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
@@ -898,8 +969,8 @@ func auditEventDiff(r *http.Request, action, object, detail string, before, afte
 // GET /api/audit — return configuration-change audit entries (newest first).
 // Supports pagination via ?offset=N&limit=M (default: offset=0, limit=500).
 // Supports date filtering via ?from=UNIX_MS&to=UNIX_MS.
-// When a persistent audit log file is configured, reads from the full file
-// instead of the 500-entry in-memory ring buffer (Finding 6.2).
+// Use ?source=file to read from the persistent JSONL audit log file instead of
+// the in-memory ring buffer (default: memory for backwards compat) (Finding 6.2).
 func apiAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -931,11 +1002,39 @@ func jsonOK(w http.ResponseWriter, v any) {
 	}
 }
 
+// isValidBlocklistWildcard checks that a wildcard blocklist entry uses only the
+// allowed *.example.com format. Rejects **.example.com, *.*.example.com,
+// *example.com (no dot after star), and any other non-standard wildcard usage.
+func isValidBlocklistWildcard(h string) bool {
+	// Only a single leading "*." prefix is allowed.
+	if !strings.HasPrefix(h, "*.") {
+		return false // e.g. *example.com (no dot after star)
+	}
+	rest := h[2:] // everything after "*."
+	if rest == "" {
+		return false // "*." alone is not a valid domain
+	}
+	// No additional wildcards anywhere in the remainder.
+	if strings.Contains(rest, "*") {
+		return false // e.g. *.*.example.com or **.example.com
+	}
+	return true
+}
+
 // validatePolicyRule checks that a rule has a valid action, a non-empty name,
-// a safe redirect URL when required, and a parseable timezone.
-func validatePolicyRule(rule PolicyRule) error {
+// a safe redirect URL when required, a parseable timezone, and name uniqueness.
+// existingRules is the current rule set; editPriority is the priority of the rule
+// being edited (use -1 when adding a new rule) so its own name is not flagged as
+// a duplicate.
+func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriority int) error {
 	if rule.Name == "" {
 		return fmt.Errorf("name is required")
+	}
+	// Duplicate name check (Finding 2.2).
+	for i := range existingRules {
+		if strings.EqualFold(existingRules[i].Name, rule.Name) && existingRules[i].Priority != editPriority {
+			return fmt.Errorf("rule name already exists")
+		}
 	}
 	validActions := map[PolicyAction]bool{
 		ActionAllow: true, ActionDrop: true,
@@ -1062,7 +1161,8 @@ func apiTimeseries(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"data": total, "allowed": allowed, "blocked": blocked})
 }
 
-// GET /api/logs?filter=...&status=...&level=...&method=...
+// GET /api/logs?filter=...&status=...&level=...&method=...&from=...&to=...
+// from/to accept Unix timestamps (seconds) or ISO 8601 (RFC 3339) strings.
 func apiLogs(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
@@ -1074,8 +1174,26 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 	filterMethod := strings.ToUpper(r.URL.Query().Get("method"))
 	filterIdentity := strings.ToLower(r.URL.Query().Get("identity"))
 
+	// Date range filtering (Finding 6.3).
+	fromTS, fromErr := parseTimestampParam(r.URL.Query().Get("from"))
+	toTS, toErr := parseTimestampParam(r.URL.Query().Get("to"))
+	if fromErr != nil {
+		http.Error(w, "invalid 'from' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
+		return
+	}
+	if toErr != nil {
+		http.Error(w, "invalid 'to' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
+		return
+	}
+
 	filtered := all[:0:0]
 	for _, e := range all {
+		if fromTS != 0 && e.TS < fromTS {
+			continue
+		}
+		if toTS != 0 && e.TS > toTS {
+			continue
+		}
 		if filterHost != "" && !strings.Contains(strings.ToLower(e.Host), filterHost) &&
 			!strings.Contains(strings.ToLower(e.IP), filterHost) {
 			continue
@@ -1095,6 +1213,36 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		filtered = append(filtered, e)
 	}
 	jsonOK(w, map[string]any{"logs": filtered, "total": len(filtered)})
+}
+
+// parseTimestampParam parses a timestamp string that is either a Unix timestamp
+// (integer seconds) or an ISO 8601 / RFC 3339 datetime string.
+// Returns (0, nil) for empty input, (unix, nil) on success, or (0, err) on failure.
+func parseTimestampParam(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	// Try Unix timestamp (integer seconds) first.
+	if ts, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return ts, nil
+	}
+	// Try ISO 8601 / RFC 3339.
+	t, err := time.Parse(time.RFC3339, s)
+	if err == nil {
+		return t.Unix(), nil
+	}
+	// Try RFC 3339 without timezone (assume UTC).
+	t, err = time.Parse("2006-01-02T15:04:05", s)
+	if err == nil {
+		return t.UTC().Unix(), nil
+	}
+	// Try date-only format.
+	t, err = time.Parse("2006-01-02", s)
+	if err == nil {
+		return t.UTC().Unix(), nil
+	}
+	return 0, fmt.Errorf("unrecognized timestamp format: %s", s)
 }
 
 // GET /api/top-hosts?n=20
@@ -1198,6 +1346,13 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 			if len(h) > 253 {
 				logger.Printf("UI: blocklist entry too long, skipped: %q…", sanitizeLog(h[:50]))
 				continue
+			}
+			// Validate wildcard patterns (Finding 1.3).
+			if strings.Contains(h, "*") {
+				if !isValidBlocklistWildcard(h) {
+					http.Error(w, fmt.Sprintf("invalid wildcard pattern %q: only *.example.com format is allowed", sanitizeLog(h)), http.StatusBadRequest)
+					return
+				}
 			}
 			bl.AddManual(h)
 			logger.Printf("UI: blocked %q", sanitizeLog(h))
@@ -1819,7 +1974,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 
 	// Policy rules — validate each before importing.
 	for _, rule := range b.PolicyRules {
-		if err := validatePolicyRule(rule); err != nil {
+		if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
 			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
 			continue
 		}
@@ -2306,7 +2461,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
-		if err := validatePolicyRule(rule); err != nil {
+		if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -2345,7 +2500,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if err := validatePolicyRule(rule); err != nil {
+		if err := validatePolicyRule(rule, policyStore.List(), priority); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -3400,6 +3555,57 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
+
+	// Parse request body for two-step confirmation flow.
+	var req struct {
+		Confirm bool   `json:"confirm"`
+		Token   string `json:"confirmation_token"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck // empty body is valid (step 1)
+	}
+
+	if !req.Confirm {
+		// Step 1: generate confirmation token and return warning.
+		var tokenBytes [16]byte
+		if _, err := rand.Read(tokenBytes[:]); err != nil {
+			http.Error(w, "failed to generate confirmation token", http.StatusInternalServerError)
+			return
+		}
+		token := hex.EncodeToString(tokenBytes[:])
+
+		pendingCARotation.Lock()
+		pendingCARotation.token = token
+		pendingCARotation.expires = time.Now().Add(60 * time.Second)
+		pendingCARotation.Unlock()
+
+		auditEvent(r, "ca.rotate_requested", "root_ca", "rotation confirmation token issued")
+		jsonOK(w, map[string]any{
+			"status":             "pending_confirmation",
+			"confirmation_token": token,
+			"expires_in_seconds": 60,
+			"warning":            "Rotating the Root CA will invalidate all existing leaf certificates and the current CA trust chain. All client workstations and devices will need to trust the new CA certificate. This action cannot be undone.",
+		})
+		return
+	}
+
+	// Step 2: verify confirmation token and perform rotation.
+	pendingCARotation.Lock()
+	storedToken := pendingCARotation.token
+	expires := pendingCARotation.expires
+	pendingCARotation.token = ""
+	pendingCARotation.expires = time.Time{}
+	pendingCARotation.Unlock()
+
+	if storedToken == "" || time.Now().After(expires) {
+		http.Error(w, "confirmation token expired or not found — please request rotation again", http.StatusBadRequest)
+		return
+	}
+	if req.Token != storedToken {
+		http.Error(w, "invalid confirmation token", http.StatusForbidden)
+		return
+	}
+
 	if err := certMgr.InitCA(); err != nil {
 		http.Error(w, "rotation failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -3409,7 +3615,7 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 			logger.Printf("CA force-rotate: save failed: %v", err)
 		}
 	}
-	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API")
+	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API (confirmed)")
 	jsonOK(w, certMgr.CACertInfo())
 }
 

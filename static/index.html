@@ -1977,6 +1977,9 @@ Firefox (all platforms):
             </div>
             <div style="display:flex;flex-direction:column;justify-content:flex-end;gap:10px">
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem">
+                <input type="checkbox" id="pol-enabled" checked> Rule Enabled
+              </label>
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem">
                 <input type="checkbox" id="pol-file-filter"> Enable File Filtering
               </label>
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Skip upstream TLS certificate verification for this rule. Use only for internal sites with self-signed certs.">
@@ -5635,6 +5638,7 @@ function editPolicy(priority) {
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
   loadPolicyCategoryOptions(r.destCategory || '');
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
+  document.getElementById('pol-enabled').checked     = r.enabled !== false;
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
@@ -5666,6 +5670,7 @@ function clearPolicyForm() {
   document.getElementById('pol-action').value        = 'Allow';
   document.getElementById('pol-dest-cat').value      = '';
   document.getElementById('pol-ssl').value           = 'Bypass';
+  document.getElementById('pol-enabled').checked     = true;
   document.getElementById('pol-file-filter').checked = false;
   document.getElementById('pol-file-profile').value  = '';
   document.getElementById('pol-tls-skip').checked    = false;
@@ -5709,6 +5714,7 @@ async function submitPolicyRule() {
     destCategory:   document.getElementById('pol-dest-cat').value || '',
     destCountry,
     sslAction:      document.getElementById('pol-ssl').value,
+    enabled:        document.getElementById('pol-enabled').checked,
     fileFiltering:  document.getElementById('pol-file-filter').checked,
     fileProfile:    document.getElementById('pol-file-profile').value || '',
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
@@ -5784,10 +5790,12 @@ function renderPolicy() {
     const fileProfileCell = r.fileProfile
       ? `<span style="font-size:.72rem;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 6px;border-radius:4px">${escHtml(r.fileProfile)}</span>`
       : '<span style="color:var(--muted)">—</span>';
-    return `<tr draggable="true" data-priority="${r.priority}">
+    const disabledStyle = r.enabled === false ? 'opacity:.45' : '';
+    const disabledBadge = r.enabled === false ? ' <span style="font-size:.68rem;color:var(--danger);font-weight:700">(disabled)</span>' : '';
+    return `<tr draggable="true" data-priority="${r.priority}" style="${disabledStyle}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
       <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
-      <td style="font-weight:600">${escHtml(r.name)}${schedBadge}</td>
+      <td style="font-weight:600">${escHtml(r.name)}${schedBadge}${disabledBadge}</td>
       <td style="font-size:.78rem;font-family:monospace">${src}</td>
       <td style="font-size:.78rem;font-family:monospace">${dest}</td>
       <td style="font-size:.78rem">${countryCell}</td>
@@ -6837,10 +6845,22 @@ async function clearCACache() {
 }
 
 async function forceRotateCA() {
-  if (!await confirmAction('Rotate Root CA', 'Force-rotate the Root CA now? All clients will need the new CA certificate.', 'Rotate')) return;
-  const r = await api('/api/ca/rotate', {method:'POST'});
-  if (r && !r.error) { toast('Root CA rotated successfully','success'); loadCAMgmt(); }
-  else toast('Rotation failed: '+(r?.error||'unknown'),'error');
+  try {
+    // Step 1: request confirmation token from server.
+    const pending = await api('/api/ca/rotate', {method:'POST', body:{confirm:false}});
+    if (!pending || !pending.confirmation_token) {
+      toast('Failed to initiate CA rotation','error');
+      return;
+    }
+    // Step 2: show warning and ask for confirmation.
+    if (!await confirmAction('Rotate Root CA', pending.warning, 'Rotate')) return;
+    // Step 3: confirm rotation with token.
+    const r = await api('/api/ca/rotate', {method:'POST', body:{confirm:true, confirmation_token:pending.confirmation_token}});
+    if (r && !r.error) { toast('Root CA rotated successfully','success'); loadCAMgmt(); }
+    else toast('Rotation failed: '+(r?.error||'unknown'),'error');
+  } catch(e) {
+    toast('Rotation failed: '+e.message,'error');
+  }
 }
 
 async function toggleOCSP(enabled) {
