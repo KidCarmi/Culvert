@@ -1676,6 +1676,16 @@ Firefox (all platforms):
               <tbody id="webhook-tbody"></tbody>
             </table>
           </div>
+          <!-- Delivery History (Finding 8.1) -->
+          <details style="margin-top:12px">
+            <summary style="cursor:pointer;font-size:.85rem;font-weight:600;color:var(--accent)">Delivery History</summary>
+            <div class="tbl-wrap" style="margin-top:8px">
+              <table id="delivery-hist-table" style="font-size:.78rem">
+                <thead><tr><th>Time</th><th>Webhook</th><th>Event</th><th>Status</th><th>Attempt</th><th>Error</th></tr></thead>
+                <tbody id="delivery-hist-tbody"></tbody>
+              </table>
+            </div>
+          </details>
         </div>
       </div>
 
@@ -5037,6 +5047,7 @@ async function loadWebhooks() {
         <button class="btn danger sm" onclick="deleteWebhook('${h.id}')">Del</button>
       </td>
     </tr>`).join('');
+    loadDeliveryHistory();
   } catch(e) { console.error(e); }
 }
 
@@ -5103,9 +5114,31 @@ async function deleteWebhook(id) {
 
 async function testWebhook(id) {
   try {
-    await api('/api/alerts/webhooks/test?id=' + id, {method:'POST'});
-    toast('Test payload sent', 'success');
+    const d = await api('/api/alerts/webhooks/test?id=' + id, {method:'POST'});
+    if (d.delivered) {
+      toast('Test delivered successfully', 'success');
+    } else {
+      toast('Test delivery failed — check delivery history', 'error');
+    }
+    loadDeliveryHistory();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function loadDeliveryHistory() {
+  try {
+    const d = await api('/api/alerts/webhooks/history');
+    const tbody = document.getElementById('delivery-hist-tbody');
+    const items = d.deliveries || [];
+    if (!items.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No deliveries yet</td></tr>'; return; }
+    tbody.innerHTML = items.slice(0, 50).map(h => `<tr>
+      <td>${escHtml(h.timestamp||'')}</td>
+      <td>${escHtml(h.webhookName||'')}</td>
+      <td>${escHtml(h.event||'')}</td>
+      <td><span style="color:${h.success?'var(--green)':'var(--red)'}">${h.success?'OK':'FAIL'}${h.statusCode?' ('+h.statusCode+')':''}</span></td>
+      <td>${h.attempt||1}</td>
+      <td style="font-size:.72rem;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(h.error||'')}">${escHtml(h.error||'—')}</td>
+    </tr>`).join('');
+  } catch(e) { console.error(e); }
 }
 
 async function fetchBlocklistFeed() {
@@ -7781,7 +7814,7 @@ async function updateCheckNow() {
 }
 
 async function updatePreview() {
-  const tag = updatesData?.latest_version;
+  const tag = updatesData?.pull_tag || updatesData?.latest_version;
   if (!tag) { toast('No target version', 'error'); return; }
   const r = await api('/api/update/preview', {
     method: 'POST',
@@ -7800,7 +7833,7 @@ async function updatePreview() {
 }
 
 async function updateApply() {
-  const tag = updatesData?.latest_version;
+  const tag = updatesData?.pull_tag || updatesData?.latest_version;
   if (!tag) return;
   if (!confirm('Apply update to ' + tag + '? The container will be restarted.')) return;
   document.getElementById('upd-progress').style.display = '';

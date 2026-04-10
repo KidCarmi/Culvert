@@ -11,6 +11,87 @@ import (
 	"time"
 )
 
+// ── parseSemver / semverGreater tests ───────────────────────────────────────
+
+func TestParseSemver(t *testing.T) {
+	tests := []struct {
+		input       string
+		maj, min, p int
+		ok          bool
+	}{
+		{"v1.2.3", 1, 2, 3, true},
+		{"0.0.15", 0, 0, 15, true},
+		{"v0.0.19", 0, 0, 19, true},
+		{"v10.20.30", 10, 20, 30, true},
+		{"latest", 0, 0, 0, false},
+		{"", 0, 0, 0, false},
+		{"abc", 0, 0, 0, false},
+		{"v1.2", 0, 0, 0, false},
+	}
+	for _, tt := range tests {
+		maj, min, p, ok := parseSemver(tt.input)
+		if ok != tt.ok || maj != tt.maj || min != tt.min || p != tt.p {
+			t.Errorf("parseSemver(%q) = %d,%d,%d,%v; want %d,%d,%d,%v",
+				tt.input, maj, min, p, ok, tt.maj, tt.min, tt.p, tt.ok)
+		}
+	}
+}
+
+func TestSemverGreater(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"v0.0.19", "v0.0.15", true},
+		{"v0.0.15", "v0.0.19", false},
+		{"v1.0.0", "v0.99.99", true},
+		{"v0.1.0", "v0.0.99", true},
+		{"v1.0.0", "v1.0.0", false},
+		{"latest", "v1.0.0", false},
+		{"v1.0.0", "latest", false},
+	}
+	for _, tt := range tests {
+		got := semverGreater(tt.a, tt.b)
+		if got != tt.want {
+			t.Errorf("semverGreater(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+func TestUpdateInfoSnapshot_PullTag(t *testing.T) {
+	var ui updateInfo
+	ui.mu.Lock()
+	ui.currentVersion = "v0.0.15"
+	ui.latestVersion = "v0.0.19"
+	ui.pullTag = "latest"
+	ui.updateAvailable = true
+	ui.lastChecked = time.Now()
+	ui.updaterStatus = "connected"
+	ui.mu.Unlock()
+
+	snap := ui.snapshot()
+	if snap["pull_tag"] != "latest" {
+		t.Errorf("pull_tag = %v, want latest", snap["pull_tag"])
+	}
+	if snap["latest_version"] != "v0.0.19" {
+		t.Errorf("latest_version = %v, want v0.0.19", snap["latest_version"])
+	}
+}
+
+func TestUpdateInfoSnapshot_PullTagFallback(t *testing.T) {
+	var ui updateInfo
+	ui.mu.Lock()
+	ui.currentVersion = "v1.0.0"
+	ui.latestVersion = "v1.1.0"
+	ui.pullTag = "" // empty pull tag should fall back to latestVersion
+	ui.mu.Unlock()
+
+	snap := ui.snapshot()
+	if snap["pull_tag"] != "v1.1.0" {
+		t.Errorf("pull_tag = %v, want v1.1.0 (fallback)", snap["pull_tag"])
+	}
+}
+
 func TestUpdateInfoSnapshot(t *testing.T) {
 	var ui updateInfo
 	ui.mu.Lock()

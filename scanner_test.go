@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"testing"
 	"time"
+
+	"github.com/andybalholm/brotli"
 )
 
 // ── decompressForScan tests (1.1 fix) ────────────────────────────────────────
@@ -55,11 +57,17 @@ func TestDecompressForScan_InvalidGzip(t *testing.T) {
 }
 
 func TestDecompressForScan_Brotli(t *testing.T) {
-	data := []byte("brotli content")
-	got := decompressForScan(data, "br")
-	// Brotli not yet supported — should return raw data.
-	if !bytes.Equal(got, data) {
-		t.Error("brotli should return raw data (not yet supported)")
+	original := []byte("test brotli content for security scanning")
+	var buf bytes.Buffer
+	w := brotli.NewWriter(&buf)
+	if _, err := w.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	got := decompressForScan(buf.Bytes(), "br")
+	if !bytes.Equal(got, original) {
+		t.Errorf("brotli decompression failed: got %q, want %q", got, original)
 	}
 }
 

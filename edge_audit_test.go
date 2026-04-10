@@ -355,3 +355,132 @@ func TestRevokeUserSessions(t *testing.T) {
 		t.Errorf("other user's session should still be valid: %v", err)
 	}
 }
+
+// ─── Finding 8.1: AlertStore.DeliveryHistory ─────────────────────────────────
+
+func TestDeliveryHistory(t *testing.T) {
+	as := &AlertStore{}
+	as.Init("")
+
+	// Record some deliveries.
+	as.RecordDelivery(AlertDelivery{Timestamp: "2026-01-01T00:00:01Z", WebhookID: "a", Success: true})
+	as.RecordDelivery(AlertDelivery{Timestamp: "2026-01-01T00:00:02Z", WebhookID: "b", Success: false})
+	as.RecordDelivery(AlertDelivery{Timestamp: "2026-01-01T00:00:03Z", WebhookID: "c", Success: true})
+
+	hist := as.DeliveryHistory()
+	if len(hist) != 3 {
+		t.Fatalf("len(history) = %d, want 3", len(hist))
+	}
+	// Newest first.
+	if hist[0].WebhookID != "c" {
+		t.Errorf("history[0].WebhookID = %q, want c (newest)", hist[0].WebhookID)
+	}
+	if hist[2].WebhookID != "a" {
+		t.Errorf("history[2].WebhookID = %q, want a (oldest)", hist[2].WebhookID)
+	}
+}
+
+func TestDeliveryHistory_Empty(t *testing.T) {
+	as := &AlertStore{}
+	as.Init("")
+	hist := as.DeliveryHistory()
+	if len(hist) != 0 {
+		t.Errorf("expected empty history, got %d entries", len(hist))
+	}
+}
+
+// ─── Finding auth_idp: effectivePriority ─────────────────────────────────────
+
+func TestEffectivePriority(t *testing.T) {
+	// nil profile.
+	var nilP *IdPProfile
+	if got := nilP.effectivePriority(); got != 1<<31-1 {
+		t.Errorf("nil.effectivePriority() = %d, want max int", got)
+	}
+	// Zero priority → max int.
+	p := &IdPProfile{Priority: 0}
+	if got := p.effectivePriority(); got != 1<<31-1 {
+		t.Errorf("zero.effectivePriority() = %d, want max int", got)
+	}
+	// Normal priority.
+	p2 := &IdPProfile{Priority: 5}
+	if got := p2.effectivePriority(); got != 5 {
+		t.Errorf("effectivePriority() = %d, want 5", got)
+	}
+}
+
+// ─── blockpage: setBlockPageHTML / getBlockPageHTML ───────────────────────────
+
+func TestSetBlockPageHTML(t *testing.T) {
+	orig := getBlockPageHTML()
+	defer setBlockPageHTML(orig) //nolint:errcheck // restore original
+
+	custom := "<html><body>{{.Host}} blocked</body></html>"
+	if err := setBlockPageHTML(custom); err != nil {
+		t.Fatalf("setBlockPageHTML: %v", err)
+	}
+	if got := getBlockPageHTML(); got != custom {
+		t.Errorf("getBlockPageHTML = %q, want %q", got, custom)
+	}
+}
+
+func TestSetBlockPageHTML_InvalidTemplate(t *testing.T) {
+	err := setBlockPageHTML("{{.Unclosed}")
+	if err == nil {
+		t.Error("expected error for invalid template, got nil")
+	}
+}
+
+// ─── connlimit: Disable / MaxPerIP / ActiveIPs ──────────────────────────────
+
+func TestConnLimiterDisable(t *testing.T) {
+	cl := &ConnLimiter{}
+	cl.Enable(100)
+	if !cl.enabled.Load() {
+		t.Fatal("expected enabled after Enable()")
+	}
+	cl.Disable()
+	if cl.enabled.Load() {
+		t.Error("expected disabled after Disable()")
+	}
+}
+
+func TestConnLimiterMaxPerIP(t *testing.T) {
+	cl := &ConnLimiter{}
+	cl.Enable(50)
+	if got := cl.MaxPerIP(); got != 50 {
+		t.Errorf("MaxPerIP() = %d, want 50", got)
+	}
+}
+
+// ─── ocsp: Disable / CacheLen ────────────────────────────────────────────────
+
+func TestOCSPDisable(t *testing.T) {
+	oc := &OCSPChecker{cache: map[string]*ocspCacheEntry{}}
+	oc.Enable()
+	if !oc.Enabled() {
+		t.Fatal("expected enabled")
+	}
+	oc.Disable()
+	if oc.Enabled() {
+		t.Error("expected disabled after Disable()")
+	}
+}
+
+func TestOCSPCacheLen(t *testing.T) {
+	oc := &OCSPChecker{cache: map[string]*ocspCacheEntry{
+		"a": {}, "b": {},
+	}}
+	if got := oc.CacheLen(); got != 2 {
+		t.Errorf("CacheLen() = %d, want 2", got)
+	}
+}
+
+// ─── logScanLimitExceeded (Finding 4.2) ──────────────────────────────────────
+
+func TestLogScanLimitExceeded(t *testing.T) {
+	// Just ensure it doesn't panic. No need to swap globalAlertStore since
+	// logScanLimitExceeded fires the alert via go fireAlert() which captures
+	// the store pointer internally.
+	logScanLimitExceeded("example.com", "10.0.0.1", 5<<20)
+}

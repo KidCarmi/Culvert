@@ -12,7 +12,7 @@ Here is the comprehensive audit report.
 
 ### 1. BLOCKLIST MANAGEMENT
 
-**Finding 1.1: Config import merges blocklist entries instead of replacing them**
+**Finding 1.1: Config import merges blocklist entries instead of replacing them** ✅ DONE
 - Use case: Restore a known-good blocklist from a backup after a misconfiguration.
 - Current behavior: `apiConfigImport` (ui.go:1789-1793) iterates `b.Blocklist` and calls `bl.Add(h)` for each entry, then `bl.Save()`. This appends entries to whatever already exists. There is no `bl.Clear()` call before importing.
 - Expected behavior: Config import should offer a "replace" mode so an operator can restore an exact snapshot without accumulating stale entries from the current state.
@@ -65,7 +65,7 @@ Here is the comprehensive audit report.
 - Severity: **Low**
 - Category: **Workflow Gap**
 
-**Finding 2.4: No policy rule enable/disable toggle**
+**Finding 2.4: No policy rule enable/disable toggle** ✅ DONE
 - Use case: Operator wants to temporarily disable a rule during an incident without deleting it.
 - Current behavior: Policy rules have no `Enabled` field. The only way to disable a rule is to delete it and re-add it later.
 - Expected behavior: An `enabled` boolean field on each rule, with disabled rules skipped during evaluation.
@@ -76,14 +76,14 @@ Here is the comprehensive audit report.
 
 ### 3. SSL / TLS INSPECTION
 
-**Finding 3.1: No visibility into which requests are being SSL-inspected vs bypassed**
+**Finding 3.1: No visibility into which requests are being SSL-inspected vs bypassed** ✅ DONE
 - Use case: Operator wants to audit how many connections are being inspected versus bypassed, per domain.
 - Current behavior: The `LogEntry` struct (store.go:105-118) records status, host, method, rule matched, and action taken but does not record the SSL action (inspect/bypass). The log line in `handleRequest` at proxy.go:438 prints `SSL_BYPASS_PATTERN` to the system log but this is not captured in the structured request log visible in the UI.
 - Expected behavior: Include `sslAction` in the `LogEntry` struct so the Live Feed and exports reflect inspection status per request.
 - Severity: **High**
 - Category: **Missing Feature**
 
-**Finding 3.2: CA rotation force-regenerates without confirmation**
+**Finding 3.2: CA rotation force-regenerates without confirmation** ✅ DONE
 - Use case: Operator accidentally clicks "Rotate CA" in the UI, invalidating all deployed CA trust across 500 workstations.
 - Current behavior: `apiCARotate` (ui.go:3327-3346) calls `certMgr.InitCA()` immediately on POST. There is no confirmation step, dry-run, or cooling-off period.
 - Expected behavior: A dangerous operation affecting all endpoints should require explicit confirmation (e.g., two-step with a confirmation token) or at least a mandatory dry-run preview showing impact.
@@ -101,14 +101,14 @@ Here is the comprehensive audit report.
 
 ### 4. SECURITY SCANNING (ClamAV / YARA / Threat Feeds)
 
-**Finding 4.1: Brotli-compressed responses are not decompressed for scanning**
+**Finding 4.1: Brotli-compressed responses are not decompressed for scanning** ✅ DONE
 - Use case: A malware payload is delivered via brotli-compressed HTTP response (increasingly common with CDNs).
 - Current behavior: `decompressForScan` (security_scan.go:182-220) handles gzip and deflate but returns raw bytes for brotli (`ce == "br"` at line 198), meaning ClamAV and YARA signatures will not match the decompressed content.
 - Expected behavior: Decompress brotli content before scanning. The code has a TODO comment acknowledging this gap.
 - Severity: **High**
 - Category: **Bug**
 
-**Finding 4.2: Large responses bypass scanning silently**
+**Finding 4.2: Large responses bypass scanning silently** ✅ DONE
 - Use case: A 10 MB malware executable is downloaded through the proxy.
 - Current behavior: `SecurityScanner.maxBytes` defaults to 5 MiB (security_scan.go:74). Responses exceeding this are forwarded unscanned. There is no log entry or alert when this happens.
 - Expected behavior: Log a warning when a response exceeds the scan buffer limit, and optionally block oversized responses in strict mode. The operator should be able to see how often this occurs.
@@ -140,7 +140,7 @@ Here is the comprehensive audit report.
 - Severity: **High**
 - Category: **Workflow Gap**
 
-**Finding 5.2: Deleting a user does not revoke their active sessions**
+**Finding 5.2: Deleting a user does not revoke their active sessions** ✅ DONE
 - Use case: An operator account is deleted by an admin; the deleted user still has an active browser session.
 - Current behavior: `apiAuthUsers` DELETE (ui.go:744-761) calls `cfg.DeleteUIUser(username)` and `cfg.SaveUIUsersFile()`. There is no call to revoke sessions for that username. The HMAC-signed session cookie will remain valid until it naturally expires (default 8 hours).
 - Expected behavior: Deleting a user should immediately revoke all their active sessions.
@@ -186,7 +186,7 @@ Here is the comprehensive audit report.
 - Severity: **High**
 - Category: **Missing Feature**
 
-**Finding 6.4: CSV export missing fields**
+**Finding 6.4: CSV export missing fields** ✅ DONE
 - Use case: Exporting request logs for SIEM ingestion.
 - Current behavior: `apiExport` CSV (ui.go:2587-2595) exports only: timestamp, time, ip, method, host, status. The `identity`, `ruleMatched`, `actionTaken`, `bytesSent`, `bytesRecv`, and `level` fields present in `LogEntry` are omitted from the CSV.
 - Expected behavior: Export all fields in the LogEntry struct.
@@ -215,21 +215,21 @@ Here is the comprehensive audit report.
 
 ### 8. ALERTING / WEBHOOKS
 
-**Finding 8.1: No alert delivery history visible in UI**
+**Finding 8.1: No alert delivery history visible in UI** ✅ DONE
 - Use case: Operator wants to verify that the alert for a threat detection was delivered to Slack.
 - Current behavior: `apiAlertsWebhooks` (ui.go:1412-1488) supports CRUD and test-fire. The retry queue is persisted to `/data/alert_retry_queue.json`. But there is no API endpoint to list delivery history, failed deliveries, or retry status.
 - Expected behavior: Expose alert delivery history (last N deliveries with status, timestamp, retry count) via API and UI.
 - Severity: **Medium**
 - Category: **Missing Feature**
 
-**Finding 8.2: Webhook test fires asynchronously with no result feedback**
+**Finding 8.2: Webhook test fires asynchronously with no result feedback** ✅ DONE
 - Use case: Operator tests a new Slack webhook to verify it works.
 - Current behavior: `apiAlertsWebhookTest` (ui.go:1491-1518) calls `go deliverWebhook(...)` and immediately returns `{"ok": true}` regardless of whether delivery succeeds.
 - Expected behavior: Either deliver synchronously with a timeout or report the delivery result back to the UI.
 - Severity: **Medium**
 - Category: **UX Gap**
 
-**Finding 8.3: No alert for scan timeout events**
+**Finding 8.3: No alert for scan timeout events** ✅ DONE
 - Use case: ClamAV is overloaded and body scans are timing out, causing fail-closed blocks.
 - Current behavior: `ScanBody` (security_scan.go:258-260) logs a warning and caches the timeout result but does not fire an alert. The alert event types in `alerts.go` are: `threat_detected`, `policy_block`, `auth_lockout`, `cert_expiry`, `cluster_updated`, `cluster_update_halted`. There is no `scan_timeout` or `scan_error` event.
 - Expected behavior: Fire an alert when scan timeouts exceed a threshold, indicating infrastructure issues.
@@ -247,7 +247,7 @@ Here is the comprehensive audit report.
 - Severity: **Medium**
 - Category: **Edge Case**
 
-**Finding 9.2: No notification when background version check finds an update**
+**Finding 9.2: No notification when background version check finds an update** ✅ DONE
 - Use case: A critical security update is available and the operator should be proactively notified.
 - Current behavior: The background version check runs every 6 hours (update.go) and stores the result. The UI dashboard shows the status when the operator visits. But there is no alert/webhook fired when a new version is detected.
 - Expected behavior: Fire an alert (new event type `update_available`) when the background check finds a newer version.
@@ -272,7 +272,7 @@ Here is the comprehensive audit report.
 - Severity: **Low**
 - Category: **Workflow Gap**
 
-**Finding 10.3: Config export does not include URL categories, IdP profiles, or alert webhooks**
+**Finding 10.3: Config export does not include URL categories, IdP profiles, or alert webhooks** ✅ DONE
 - Use case: Migrating from a standalone instance to a new cluster setup.
 - Current behavior: `configBackup` struct (used by apiConfigExport/apiConfigImport) contains: blocklist, blocklist mode, policy rules, default action, rewrite rules, SSL bypass, content scan patterns, file block extensions, IP filter mode/list, rate limit RPM. Notably missing: URL categories, IdP profiles, PAC configuration, alert webhooks, syslog config, GeoIP settings, connection limits, block page template, upstream proxy config.
 - Expected behavior: The backup/restore should cover all configurable subsystems for complete disaster recovery.

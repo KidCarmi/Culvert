@@ -10,6 +10,8 @@ package main
 //   "cluster_updated"       — cluster rolling update completed successfully
 //   "cluster_update_halted" — cluster rolling update halted due to error budget
 //   "update_available"      — background version check detected a new release
+//   "scan_timeout"          — ClamAV / YARA scan timeout (infrastructure issue)
+//   "scan_skipped"          — response body exceeds scan size limit, forwarded unscanned
 //
 // Each webhook is stored in an in-memory list backed by a JSON file.
 // Delivery is async, never blocks the request path.
@@ -89,15 +91,57 @@ type AlertPayload struct {
 	Source    string `json:"source"` // "clamav","yara","threatfeed","policy","auth"
 }
 
+// ── Delivery History (Finding 8.1) ────────────────────────────────────────────
+
+// AlertDelivery records a single webhook delivery attempt.
+type AlertDelivery struct {
+	Timestamp   string `json:"timestamp"`
+	WebhookID   string `json:"webhookId"`
+	WebhookName string `json:"webhookName"`
+	Event       string `json:"event"`
+	StatusCode  int    `json:"statusCode,omitempty"` // 0 if delivery failed before HTTP
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
+	Attempt     int    `json:"attempt"` // 1-based
+}
+
+const maxDeliveryHistory = 200
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 type AlertStore struct {
 	mu       sync.RWMutex
 	hooks    []AlertWebhook
 	filePath string
+
+	histMu  sync.Mutex
+	history []AlertDelivery // ring buffer, newest last
 }
 
 var globalAlertStore = &AlertStore{}
+
+// RecordDelivery appends a delivery record to the in-memory history ring.
+func (as *AlertStore) RecordDelivery(d AlertDelivery) {
+	as.histMu.Lock()
+	as.history = append(as.history, d)
+	if len(as.history) > maxDeliveryHistory {
+		as.history = as.history[len(as.history)-maxDeliveryHistory:]
+	}
+	as.histMu.Unlock()
+}
+
+// DeliveryHistory returns the most recent delivery records (newest first).
+func (as *AlertStore) DeliveryHistory() []AlertDelivery {
+	as.histMu.Lock()
+	cp := make([]AlertDelivery, len(as.history))
+	copy(cp, as.history)
+	as.histMu.Unlock()
+	// Reverse so newest is first.
+	for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
+		cp[i], cp[j] = cp[j], cp[i]
+	}
+	return cp
+}
 
 func (as *AlertStore) Init(path string) {
 	as.filePath = path
@@ -221,10 +265,14 @@ func fireAlert(event string, payload AlertPayload) {
 	}
 	alertDedupMu.Unlock()
 
-	globalAlertStore.mu.RLock()
-	hooks := make([]AlertWebhook, len(globalAlertStore.hooks))
-	copy(hooks, globalAlertStore.hooks)
-	globalAlertStore.mu.RUnlock()
+	// Capture the store pointer once under the lock. The goroutines below
+	// use this pointer instead of the global, avoiding a data race if the
+	// global is reassigned (e.g. in tests) before delivery completes.
+	store := globalAlertStore
+	store.mu.RLock()
+	hooks := make([]AlertWebhook, len(store.hooks))
+	copy(hooks, store.hooks)
+	store.mu.RUnlock()
 
 	for _, h := range hooks {
 		if !h.Enabled {
@@ -247,7 +295,7 @@ func fireAlert(event string, payload AlertPayload) {
 		case webhookSem <- struct{}{}:
 			go func() {
 				defer func() { <-webhookSem }()
-				if ok := deliverWebhook(hookCopy, pCopy); !ok {
+				if ok := deliverWebhook(store, hookCopy, pCopy); !ok {
 					enqueueRetry(hookCopy.ID, pCopy, 1) // F16: retry on failure
 				}
 			}()
@@ -263,15 +311,34 @@ func fireAlert(event string, payload AlertPayload) {
 // as a sanitiser in both branches).
 var validWebhookURL = regexp.MustCompile(`^https?://[^/]`)
 
-func deliverWebhook(h AlertWebhook, payload AlertPayload) bool {
+func deliverWebhook(store *AlertStore, h AlertWebhook, payload AlertPayload) bool {
+	return deliverWebhookAttempt(store, h, payload, 1)
+}
+
+// deliverWebhookAttempt performs the actual HTTP POST and records the result.
+// The store parameter is the AlertStore captured at dispatch time (avoids a
+// data race if the global is reassigned between goroutine launch and delivery).
+func deliverWebhookAttempt(store *AlertStore, h AlertWebhook, payload AlertPayload, attempt int) bool {
+	record := AlertDelivery{
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		WebhookID:   h.ID,
+		WebhookName: h.Name,
+		Event:       payload.Event,
+		Attempt:     attempt,
+	}
+
 	body, err := json.Marshal(payload)
 	if err != nil {
+		record.Error = "json marshal: " + err.Error()
+		store.RecordDelivery(record)
 		return false
 	}
 	// Regexp barrier: CodeQL recognises Regexp.MatchString as an SSRF
 	// sanitiser, breaking the taint chain on h.URL.
 	if !validWebhookURL.MatchString(h.URL) {
 		logger.Printf("Alert webhook %q: invalid URL, skipping delivery", sanitizeLog(h.Name))
+		record.Error = "invalid URL"
+		store.RecordDelivery(record)
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -279,6 +346,8 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
 		logger.Printf("Alert webhook %q: build request error: %v", sanitizeLog(h.Name), err)
+		record.Error = err.Error()
+		store.RecordDelivery(record)
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -297,13 +366,20 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) bool {
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.Printf("Alert webhook %q: delivery error: %v", h.Name, err)
+		record.Error = err.Error()
+		store.RecordDelivery(record)
 		return false
 	}
 	resp.Body.Close()
+	record.StatusCode = resp.StatusCode
 	if resp.StatusCode >= 400 {
 		logger.Printf("Alert webhook %q: non-2xx response %d", h.Name, resp.StatusCode)
+		record.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		store.RecordDelivery(record)
 		return false
 	}
+	record.Success = true
+	store.RecordDelivery(record)
 	return true
 }
 
@@ -409,7 +485,7 @@ func processRetryQueue() {
 		if hook == nil || !hook.Enabled {
 			continue
 		}
-		if ok := deliverWebhook(*hook, e.Payload); !ok {
+		if ok := deliverWebhook(globalAlertStore, *hook, e.Payload); !ok {
 			enqueueRetry(e.WebhookID, e.Payload, e.Attempt+1)
 		}
 	}

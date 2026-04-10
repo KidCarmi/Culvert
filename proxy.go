@@ -594,7 +594,8 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// scan limit — avoids wasting memory and I/O on oversized bodies.
 	scanActive := globalRemoteScanner.Enabled() || globalSecScanner.BodyScanEnabled()
 	if scanActive && resp.ContentLength > globalSecScanner.MaxBytes() {
-		logScanLimitExceeded(r.Host, globalSecScanner.MaxBytes())
+		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		logScanLimitExceeded(r.Host, cip, globalSecScanner.MaxBytes())
 	}
 	if scanActive && (resp.ContentLength < 0 || resp.ContentLength <= globalSecScanner.MaxBytes()) {
 		buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
@@ -631,6 +632,15 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 			if scanResult != nil {
 				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)
 				atomic.AddInt64(&statBlocked, 1)
+				// Fire scan_timeout alert for infrastructure monitoring (Finding 8.3).
+				if scanResult.Source == "timeout" {
+					go fireAlert("scan_timeout", AlertPayload{
+						Actor:  cip2,
+						Host:   r.Host,
+						Detail: scanResult.Reason,
+						Source: "scan_timeout",
+					})
+				}
 				recordRequest(cip2, r.Method, r.Host, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, r.Header.Get("X-User-Identity"), "inspect")
 				logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip2, sanitizeLog(r.Host), sanitizeLog(scanResult.Source), sanitizeLog(scanResult.Reason))
 				scanBlock(w, r.Host, scanResult.Reason, scanResult.Source)
@@ -1089,6 +1099,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 				// (ClamAV + YARA + DPI) in a single remote call.
 				if globalRemoteScanner.Enabled() {
 					if scanResult := safeScanBodyWithCT(scanBody, ct); scanResult != nil {
+						if scanResult.Source == "timeout" {
+							go fireAlert("scan_timeout", AlertPayload{Actor: clientIP, Host: hostOnly, Detail: scanResult.Reason, Source: "scan_timeout"})
+						}
 						origBody.Close()
 						atomic.AddInt64(&statBlocked, 1)
 						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "", "inspect")
@@ -1107,6 +1120,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					}
 					// ClamAV + YARA body scan (all content types).
 					if scanResult := safeScanBody(scanBody); scanResult != nil {
+						if scanResult.Source == "timeout" {
+							go fireAlert("scan_timeout", AlertPayload{Actor: clientIP, Host: hostOnly, Detail: scanResult.Reason, Source: "scan_timeout"})
+						}
 						origBody.Close()
 						atomic.AddInt64(&statBlocked, 1)
 						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "", "inspect")

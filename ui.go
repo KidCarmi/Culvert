@@ -131,8 +131,9 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/idp/", apiIdPRouter)           // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
 
 	// ── Alert webhooks ───────────────────────────────────────────────────
-	mux.HandleFunc("/api/alerts/webhooks", apiAlertsWebhooks)         // GET list / POST create
-	mux.HandleFunc("/api/alerts/webhooks/test", apiAlertsWebhookTest) // POST — test-fire
+	mux.HandleFunc("/api/alerts/webhooks", apiAlertsWebhooks)             // GET list / POST create
+	mux.HandleFunc("/api/alerts/webhooks/test", apiAlertsWebhookTest)     // POST — test-fire
+	mux.HandleFunc("/api/alerts/webhooks/history", apiAlertsDeliveryHist) // GET — delivery history (Finding 8.1)
 
 	// ── Updates ──────────────────────────────────────────────────────────
 	mux.HandleFunc("/api/update/status", apiUpdateStatus)                   // GET — version info
@@ -1692,15 +1693,29 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	go deliverWebhook(h, AlertPayload{
+	// Finding 8.2: deliver synchronously so the UI gets actual result feedback.
+	payload := AlertPayload{
 		Event:     "test",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Actor:     "culvert",
 		Host:      "test",
 		Detail:    "This is a test alert from Culvert",
 		Source:    "test",
-	})
-	jsonOK(w, map[string]any{"ok": true})
+	}
+	ok2 := deliverWebhook(globalAlertStore, h, payload)
+	jsonOK(w, map[string]any{"ok": ok2, "delivered": ok2})
+}
+
+// GET /api/alerts/webhooks/history — delivery history (Finding 8.1).
+func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	jsonOK(w, map[string]any{"deliveries": globalAlertStore.DeliveryHistory()})
 }
 
 // ── URL Categories ─────────────────────────────────────────────────────────
@@ -1892,6 +1907,11 @@ type configBackup struct {
 	PACProxyHost        string        `json:"pacProxyHost,omitempty"`
 	PACProxyPort        int           `json:"pacProxyPort,omitempty"`
 	PACExclusions       []string      `json:"pacExclusions,omitempty"`
+	AlertWebhooks       []AlertWebhook  `json:"alertWebhooks,omitempty"`       // Finding 10.3
+	BlockPageHTML       string          `json:"blockPageHTML,omitempty"`        // Finding 10.3
+	UpstreamProxies     []UpstreamEntry `json:"upstreamProxies,omitempty"`     // Finding 10.3
+	ConnLimitEnabled    bool            `json:"connLimitEnabled,omitempty"`    // Finding 10.3
+	ConnLimitMaxPerIP   int             `json:"connLimitMaxPerIP,omitempty"`   // Finding 10.3
 }
 
 // GET /api/config/export — download a full configuration backup as JSON.
@@ -1942,6 +1962,21 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACProxyPort = pc.ProxyPort
 		b.PACExclusions = pc.Exclusions
 		filename = "culvert-pac"
+	case "alerts":
+		b.AlertWebhooks = globalAlertStore.List()
+		filename = "culvert-alerts"
+	case "blockpage":
+		b.BlockPageHTML = getBlockPageHTML()
+		filename = "culvert-blockpage"
+	case "upstream":
+		for _, us := range upstreamPool.List() {
+			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.URL})
+		}
+		filename = "culvert-upstream"
+	case "connlimit":
+		b.ConnLimitEnabled = connLimiter.enabled.Load()
+		b.ConnLimitMaxPerIP = connLimiter.MaxPerIP()
+		filename = "culvert-connlimit"
 	default: // "all" or empty — full export
 		b.BlocklistMode = bl.Mode()
 		b.Blocklist = bl.List()
@@ -1959,6 +1994,19 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACProxyHost = pc.ProxyHost
 		b.PACProxyPort = pc.ProxyPort
 		b.PACExclusions = pc.Exclusions
+		// Alert webhooks (secrets excluded by List()).
+		b.AlertWebhooks = globalAlertStore.List()
+		// Block page template.
+		if html := getBlockPageHTML(); html != "" {
+			b.BlockPageHTML = html
+		}
+		// Upstream proxies.
+		for _, us := range upstreamPool.List() {
+			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.URL})
+		}
+		// Connection limits.
+		b.ConnLimitEnabled = connLimiter.enabled.Load()
+		b.ConnLimitMaxPerIP = connLimiter.MaxPerIP()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2094,6 +2142,40 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		_ = pacStore.Set(pc)
+	}
+
+	// Alert webhooks (Finding 10.3).
+	if len(b.AlertWebhooks) > 0 {
+		if replaceMode {
+			// Clear existing webhooks before importing.
+			for _, wh := range globalAlertStore.List() {
+				globalAlertStore.Delete(wh.ID)
+			}
+		}
+		for _, wh := range b.AlertWebhooks {
+			globalAlertStore.Add(wh)
+		}
+	}
+
+	// Block page template (Finding 10.3).
+	if b.BlockPageHTML != "" {
+		if err := setBlockPageHTML(b.BlockPageHTML); err != nil {
+			logger.Printf("ConfigImport: block page template error: %s", strings.ReplaceAll(err.Error(), "\n", ""))
+		}
+	}
+
+	// Upstream proxies (Finding 10.3).
+	if len(b.UpstreamProxies) > 0 {
+		upstreamPool.Configure(b.UpstreamProxies, 5, 60*time.Second)
+	}
+
+	// Connection limits (Finding 10.3).
+	if b.ConnLimitMaxPerIP > 0 {
+		if b.ConnLimitEnabled {
+			connLimiter.Enable(b.ConnLimitMaxPerIP)
+		} else {
+			connLimiter.Disable()
+		}
 	}
 
 	importMode := "merge"
