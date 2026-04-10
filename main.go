@@ -786,9 +786,11 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	ensureUpdaterToken()
 	// Write current version to shared volume so the updater sidecar can read
 	// it without inspecting Docker image tags (which show "latest" for local builds).
-	if version != "" && version != "dev" {
+	// cleanSemver strips git-describe suffixes (e.g. "v0.0.19-4-g8ac6d14" → "v0.0.19")
+	// so the updater always sees a clean semver for comparison.
+	if cv := cleanSemver(version); cv != "" && cv != "dev" {
 		// #nosec G306 -- 0644 required: updater sidecar runs with cap_drop:ALL (no DAC_OVERRIDE)
-		_ = os.WriteFile("/data/version.txt", []byte(version+"\n"), 0o644)
+		_ = os.WriteFile("/data/version.txt", []byte(cv+"\n"), 0o644)
 	}
 	go startUpdateChecker(appLifecycleCtx)
 	recoverClusterUpdate()

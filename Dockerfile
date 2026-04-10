@@ -13,7 +13,7 @@ COPY . .
 #   3. Falls back to "dev"
 ARG VERSION=
 RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
-      VERSION=$(git describe --tags --always 2>/dev/null || echo "dev"); \
+      VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev"); \
     fi && \
     : "${VERSION:=dev}" && \
     echo "$VERSION" > /app/VERSION && \

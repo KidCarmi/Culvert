@@ -152,7 +152,7 @@ func updaterRequest(ctx context.Context, method, path string, body io.Reader) (*
 
 func startUpdateChecker(ctx context.Context) {
 	globalUpdateInfo.mu.Lock()
-	globalUpdateInfo.currentVersion = version
+	globalUpdateInfo.currentVersion = cleanSemver(version)
 	globalUpdateInfo.updaterStatus = "checking"
 	globalUpdateInfo.mu.Unlock()
 
@@ -224,6 +224,17 @@ const (
 
 // semverParts extracts major, minor, patch from a semver string like "v1.2.3".
 var semverExtract = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)`)
+
+// cleanSemver strips pre-release / git-describe suffixes from a version
+// string.  e.g. "v0.0.19-4-g8ac6d14" → "v0.0.19", "v1.2.3-rc1" → "v1.2.3".
+// Returns the input unchanged if no hyphen is found.
+func cleanSemver(s string) string {
+	m := semverExtract.FindString(s)
+	if m != "" {
+		return m
+	}
+	return s
+}
 
 func parseSemver(s string) (int, int, int, bool) {
 	m := semverExtract.FindStringSubmatch(s)
@@ -353,14 +364,15 @@ func checkUpdateNow() {
 	// semver tags but git tags exist (a known CI issue for v0.0.16-v0.0.19).
 	// When this fallback activates, we tell the updater to pull ":latest"
 	// (which IS always updated on ghcr.io) instead of the specific semver tag.
+	cleanVer := cleanSemver(version)
 	ghFallback := false
-	if !result.UpdateAvailable && version != "dev" {
-		if ghLatest := checkGitHubLatestTag(); ghLatest != "" && semverGreater(ghLatest, version) {
+	if !result.UpdateAvailable && cleanVer != "dev" {
+		if ghLatest := checkGitHubLatestTag(); ghLatest != "" && semverGreater(ghLatest, cleanVer) {
 			result.Latest = ghLatest
 			result.UpdateAvailable = true
 			ghFallback = true
 			logger.Printf("Update: Docker registry had no newer semver tag, but GitHub has %s (current: %s)",
-				ghLatest, version)
+				ghLatest, cleanVer)
 		}
 	}
 

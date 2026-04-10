@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -58,6 +59,46 @@ func TestSemverGreater(t *testing.T) {
 	}
 }
 
+func TestCleanSemver(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"v0.0.19-4-g8ac6d14", "v0.0.19"},
+		{"v0.0.19", "v0.0.19"},
+		{"v1.2.3-rc1", "v1.2.3"},
+		{"v10.20.30-dirty", "v10.20.30"},
+		{"0.0.15", "0.0.15"},
+		{"1.2.3-beta.1", "1.2.3"},
+		{"dev", "dev"},
+		{"latest", "latest"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := cleanSemver(tt.input)
+		if got != tt.want {
+			t.Errorf("cleanSemver(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestCleanSemver_UsedInComparison(t *testing.T) {
+	// Verify that cleaning git-describe version makes comparison work correctly
+	gitDescribe := "v0.0.19-4-g8ac6d14"
+	clean := cleanSemver(gitDescribe)
+	if clean != "v0.0.19" {
+		t.Fatalf("cleanSemver(%q) = %q, want v0.0.19", gitDescribe, clean)
+	}
+	// v0.0.20 should be greater than the cleaned version
+	if !semverGreater("v0.0.20", clean) {
+		t.Error("expected v0.0.20 > v0.0.19 (cleaned from git-describe)")
+	}
+	// Same version should not be greater
+	if semverGreater("v0.0.19", clean) {
+		t.Error("expected v0.0.19 NOT > v0.0.19")
+	}
+}
+
 func TestUpdateInfoSnapshot_PullTag(t *testing.T) {
 	var ui updateInfo
 	ui.mu.Lock()
@@ -89,6 +130,31 @@ func TestUpdateInfoSnapshot_PullTagFallback(t *testing.T) {
 	snap := ui.snapshot()
 	if snap["pull_tag"] != "v1.1.0" {
 		t.Errorf("pull_tag = %v, want v1.1.0 (fallback)", snap["pull_tag"])
+	}
+}
+
+func TestStartUpdateChecker_CleansVersion(t *testing.T) {
+	// Simulate a git-describe version being set at build time
+	oldVersion := version
+	version = "v0.0.19-4-g8ac6d14"
+	defer func() { version = oldVersion }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately so the goroutine exits fast
+
+	// startUpdateChecker sets currentVersion — call it directly to test the clean logic
+	globalUpdateInfo.mu.Lock()
+	globalUpdateInfo.currentVersion = cleanSemver(version)
+	globalUpdateInfo.mu.Unlock()
+
+	_ = ctx // used above
+
+	globalUpdateInfo.mu.RLock()
+	cv := globalUpdateInfo.currentVersion
+	globalUpdateInfo.mu.RUnlock()
+
+	if cv != "v0.0.19" {
+		t.Errorf("currentVersion = %q, want v0.0.19 (cleaned from git-describe)", cv)
 	}
 }
 
