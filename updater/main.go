@@ -579,6 +579,21 @@ func handleRollback(cli *client.Client) http.HandlerFunc {
 			req.Container = "culvert"
 		}
 
+		// Guard against concurrent operations (update or rollback already running).
+		activeSession.mu.Lock()
+		if activeSession.Active {
+			activeSession.mu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "operation already in progress"})
+			return
+		}
+		activeSession.Active = true
+		activeSession.mu.Unlock()
+		defer func() {
+			activeSession.mu.Lock()
+			activeSession.Active = false
+			activeSession.mu.Unlock()
+		}()
+
 		rollbackInfo.mu.RLock()
 		available := rollbackInfo.Available && time.Now().Before(rollbackInfo.ExpiresAt)
 		rbName := rollbackInfo.ContainerName
@@ -1209,6 +1224,21 @@ func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
 			http.Error(w, `{"error":"invalid target_tag format"}`, http.StatusBadRequest)
 			return
 		}
+
+		// Guard against concurrent operations.
+		activeSession.mu.Lock()
+		if activeSession.Active {
+			activeSession.mu.Unlock()
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "operation already in progress"})
+			return
+		}
+		activeSession.Active = true
+		activeSession.mu.Unlock()
+		defer func() {
+			activeSession.mu.Lock()
+			activeSession.Active = false
+			activeSession.mu.Unlock()
+		}()
 
 		ctx := r.Context()
 
