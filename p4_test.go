@@ -277,7 +277,7 @@ func TestCountingReader(t *testing.T) {
 func TestRecordRequestBytes(t *testing.T) {
 	// Reset counters.
 	origTotal := atomic.LoadInt64(&statTotal)
-	recordRequestBytes("127.0.0.1", "GET", "example.com", "OK", "", "", "", 100, 200)
+	recordRequestBytes("127.0.0.1", "GET", "example.com", "OK", "", "", "", 100, 200, "")
 	newTotal := atomic.LoadInt64(&statTotal)
 	if newTotal != origTotal+1 {
 		t.Fatal("recordRequestBytes should increment statTotal")

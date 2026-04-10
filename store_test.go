@@ -191,7 +191,7 @@ func TestAuditLog_NeverContainsCredentials(t *testing.T) {
 
 func TestRecordRequest_IncrementsTotal(t *testing.T) {
 	before := statTotal
-	recordRequest("1.1.1.1", "GET", "example.com", "OK", "", "", "")
+	recordRequest("1.1.1.1", "GET", "example.com", "OK", "", "", "", "")
 	if statTotal != before+1 {
 		t.Errorf("statTotal should have incremented by 1")
 	}

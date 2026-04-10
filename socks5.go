@@ -36,13 +36,13 @@ func handleSOCKS5(conn net.Conn) {
 
 	// ── IP filter ────────────────────────────────────────────────────────────
 	if !ipf.Allowed(clientIP) {
-		recordRequest(clientIP, "SOCKS5", "", "IP_BLOCKED", "", "", "")
+		recordRequest(clientIP, "SOCKS5", "", "IP_BLOCKED", "", "", "", "")
 		return
 	}
 
 	// ── Rate limit ───────────────────────────────────────────────────────────
 	if !rl.AllowAuto(clientIP) {
-		recordRequest(clientIP, "SOCKS5", "", "RATE_LIMITED", "", "", "")
+		recordRequest(clientIP, "SOCKS5", "", "RATE_LIMITED", "", "", "", "")
 		return
 	}
 
@@ -95,7 +95,7 @@ func handleSOCKS5(conn net.Conn) {
 		if !authOK {
 			conn.Write([]byte{0x01, 0x01}) //nolint:errcheck
 			atomic.AddInt64(&statAuthFail, 1)
-			recordRequest(clientIP, "SOCKS5", "", "AUTH_FAIL", "", "", "")
+			recordRequest(clientIP, "SOCKS5", "", "AUTH_FAIL", "", "", "", "")
 			logger.Printf("SOCKS5 AUTH_FAIL %s", clientIP)
 			return
 		}
@@ -156,7 +156,7 @@ func handleSOCKS5(conn net.Conn) {
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
 		socks5Reply(conn, 0x02)
-		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "")
+		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "", "")
 		logger.Printf("SOCKS5 BLOCKED %s -> %s", clientIP, host)
 		return
 	}
@@ -165,7 +165,7 @@ func handleSOCKS5(conn net.Conn) {
 	if pluginDecision(clientIP, "SOCKS5", host) == DecisionBlock {
 		atomic.AddInt64(&statBlocked, 1)
 		socks5Reply(conn, 0x02)
-		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "")
+		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "", "")
 		return
 	}
 
@@ -173,7 +173,7 @@ func handleSOCKS5(conn net.Conn) {
 	if err := isPrivateHost(target); err != nil {
 		socks5Reply(conn, 0x02) // Connection not allowed by ruleset
 		logger.Printf("SOCKS5 SSRF block %s -> %s: %v", clientIP, target, err)
-		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "")
+		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "", "")
 		return
 	}
 
@@ -190,7 +190,7 @@ func handleSOCKS5(conn net.Conn) {
 	conn.SetDeadline(time.Time{}) //nolint:errcheck // remove deadline for streaming
 
 	atomic.AddInt64(&statTotal, 1)
-	recordRequest(clientIP, "SOCKS5", host, "OK", "", "", "")
+	recordRequest(clientIP, "SOCKS5", host, "OK", "", "", "", "")
 	logger.Printf("SOCKS5 OK %s -> %s", clientIP, target)
 
 	done := make(chan struct{}, 2)

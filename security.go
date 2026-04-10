@@ -172,6 +172,14 @@ func (f *IPFilter) Remove(entry string) {
 	f.nets = filtered
 }
 
+// ClearAll removes all IP filter entries. Used by config import "replace" mode.
+func (f *IPFilter) ClearAll() {
+	f.mu.Lock()
+	f.nets = nil
+	f.single = map[string]bool{}
+	f.mu.Unlock()
+}
+
 func (f *IPFilter) List() []string {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -235,6 +243,11 @@ type RateLimiter struct {
 	limit   atomic.Int64
 	window  atomic.Int64 // nanoseconds
 	enabled atomic.Bool
+
+	// Whitelist — exempt IPs/CIDRs that bypass rate limiting (e.g. monitoring).
+	exemptMu   sync.RWMutex
+	exemptNets []*net.IPNet
+	exemptIPs  map[string]bool
 }
 
 type clientBucket struct {
@@ -245,11 +258,73 @@ type clientBucket struct {
 var rl = newRateLimiter()
 
 func newRateLimiter() *RateLimiter {
-	r := &RateLimiter{}
+	r := &RateLimiter{exemptIPs: map[string]bool{}}
 	for i := range r.shards {
 		r.shards[i].clients = make(map[string]*clientBucket)
 	}
 	return r
+}
+
+// IsExempt returns true if the IP is in the rate-limit whitelist.
+func (r *RateLimiter) IsExempt(ip string) bool {
+	r.exemptMu.RLock()
+	defer r.exemptMu.RUnlock()
+	if r.exemptIPs[ip] {
+		return true
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, n := range r.exemptNets {
+		if n.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+// AddExemption adds an IP or CIDR to the rate-limit whitelist.
+func (r *RateLimiter) AddExemption(entry string) error {
+	r.exemptMu.Lock()
+	defer r.exemptMu.Unlock()
+	if _, cidr, err := net.ParseCIDR(entry); err == nil {
+		r.exemptNets = append(r.exemptNets, cidr)
+		return nil
+	}
+	if ip := net.ParseIP(entry); ip != nil {
+		r.exemptIPs[ip.String()] = true
+		return nil
+	}
+	return &net.AddrError{Err: "invalid IP or CIDR", Addr: entry}
+}
+
+// RemoveExemption removes an IP or CIDR from the rate-limit whitelist.
+func (r *RateLimiter) RemoveExemption(entry string) {
+	r.exemptMu.Lock()
+	defer r.exemptMu.Unlock()
+	delete(r.exemptIPs, entry)
+	filtered := r.exemptNets[:0]
+	for _, n := range r.exemptNets {
+		if n.String() != entry {
+			filtered = append(filtered, n)
+		}
+	}
+	r.exemptNets = filtered
+}
+
+// ListExemptions returns all rate-limit whitelist entries.
+func (r *RateLimiter) ListExemptions() []string {
+	r.exemptMu.RLock()
+	defer r.exemptMu.RUnlock()
+	out := make([]string, 0, len(r.exemptIPs)+len(r.exemptNets))
+	for ip := range r.exemptIPs {
+		out = append(out, ip)
+	}
+	for _, n := range r.exemptNets {
+		out = append(out, n.String())
+	}
+	return out
 }
 
 func (r *RateLimiter) shard(ip string) *rlShard {
@@ -272,9 +347,12 @@ func (r *RateLimiter) Enabled() bool {
 	return r.enabled.Load()
 }
 
-// Allow returns true if the IP is within its rate limit.
+// Allow returns true if the IP is within its rate limit or is exempt.
 func (r *RateLimiter) Allow(ip string) bool {
 	if !r.enabled.Load() {
+		return true
+	}
+	if r.IsExempt(ip) {
 		return true
 	}
 	limit := int(r.limit.Load())
@@ -454,6 +532,9 @@ func (r *RateLimiter) AllowAuto(ip string) bool {
 // Used when the node is operating as a Data Plane in a cluster.
 func (r *RateLimiter) AllowClusterAware(ip string) bool {
 	if !r.enabled.Load() {
+		return true
+	}
+	if r.IsExempt(ip) {
 		return true
 	}
 	limit := int(r.limit.Load())
