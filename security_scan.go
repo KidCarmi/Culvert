@@ -377,13 +377,19 @@ func maxScanBufferBytes() int64 {
 	return dpi
 }
 
-// logScanLimitExceeded logs a warning when a response body exceeds the scan
-// buffer limit and is therefore forwarded without ClamAV/YARA/DPI inspection
-// (Finding 4.2).
-func logScanLimitExceeded(host string, maxBytes int64) {
+// logScanLimitExceeded logs a warning and fires a "scan_skipped" alert when a
+// response body exceeds the scan buffer limit and is therefore forwarded
+// without ClamAV/YARA/DPI inspection (Finding 4.2).
+func logScanLimitExceeded(host, clientIP string, maxBytes int64) {
 	if logger != nil {
 		logger.Printf("SCAN: response from %s exceeds scan limit (%d bytes), forwarded unscanned", sanitizeLog(host), maxBytes)
 	}
+	go fireAlert("scan_skipped", AlertPayload{
+		Actor:  clientIP,
+		Host:   host,
+		Detail: fmt.Sprintf("response exceeds scan limit (%d bytes)", maxBytes),
+		Source: "size_limit",
+	})
 }
 
 // bodyNeedsBuffering reports whether a response body must be fully buffered
