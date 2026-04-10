@@ -70,7 +70,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 ### Content Security
 
-- **ClamAV** antivirus (INSTREAM protocol, connection pooling, auto-detection)
+- **ClamAV** antivirus (INSTREAM protocol, concurrency-limited scanning, auto-detection)
 - **YARA rules** — pure-Go engine (no libyara), runtime reload, ReDoS-safe (5s timeout)
 - **Threat feeds** — URLhaus + OpenPhish with hourly sync, dynamic domain allowlist for hosting platforms (GitHub, Google Drive, etc.)
 - **DPI** — regex content scanning on decrypted HTTPS responses
@@ -78,10 +78,12 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 - **Domain blocklist** with wildcard matching and allow-list mode
 - **URL category database** (UT1) with background sync
 - **SHA-256 scan cache** with configurable size + TTL
+- **Remote scan sidecar** — process-isolated ClamAV/YARA scanning via remote microservice
+- **Blocklist feed syncer** — auto-sync domain blocklists from remote URLs
 
 ### Admin Web UI
 
-21-panel single-page application with real-time updates:
+19-panel single-page application with real-time updates:
 
 | Panel | Description |
 |-------|-------------|
@@ -112,10 +114,19 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 - **Real-time SSE** dashboard feed
 - **Structured logging** — text or JSON with `req_id`, `identity`, `rule`, `action` fields
 - **Rotating log files** with configurable size threshold
-- **Syslog forwarding** (UDP/TCP, RFC 3164) for Splunk, Elastic, QRadar
+- **Syslog forwarding** (UDP/TCP, RFC 3164 + RFC 5424) for Splunk, Elastic, QRadar
 - **JSONL audit trail** with actor identity enrichment
 - **Webhook alerts** — HMAC-SHA256 signed notifications for threats, blocks, lockouts
 - **Request tracing** — auto-generated X-Request-ID for end-to-end correlation
+
+### Self-Update System
+
+- **Docker update sidecar** — lightweight Go service with Docker socket access, triggered from the GUI
+- **One-click update** — pull, recreate, health check, automatic rollback on failure (SSE progress stream)
+- **Rollback** — previous container preserved for 1 hour (configurable); one-click restore
+- **Self-update** — updater can update itself via reaper container pattern
+- **Air-gapped mode** — load images from tarball when no registry access
+- **Concurrent operation guard** — prevents double-click races on update/rollback
 
 ### Resilience & Operations
 
@@ -128,6 +139,8 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 - **Admin API rate limiting** — 60 req/min per IP on mutating endpoints
 - **Atomic file writes** for CA bundle and config persistence
 - **PBKDF2 600k iterations** (NIST SP 800-132 2024) for CA key encryption
+- **Password complexity** — enforces 8+ characters, mixed case, digit requirement
+- **Log levels** — runtime DEBUG/INFO/WARN/ERROR with admin API control
 
 ### Distributed Architecture
 
@@ -138,6 +151,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 - **Config versioning** — automatic snapshots on every mutation, side-by-side diff, one-click rollback (50 versions)
 - **Rolling upgrades** — orchestrated cluster updates with drain, canary, HA sync
 - **PAC / threat feed / secrets sync** — full config snapshot pushed to data plane nodes
+- **Bootstrap generator** — one-line curl|bash enrollment scripts and docker-compose templates for DP nodes
 - **Exponential backoff** on connection failures (2s–60s)
 - **Client mTLS** for upstream proxy authentication
 - See **[Deployment Guide](docs/deployment-guide.md)** for single-node, multi-node, and upstream chaining setup
@@ -151,12 +165,24 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 ## Quick Start
 
-### Docker (recommended)
+### One-Line Install (recommended)
+
+Works on Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Amazon Linux, and Arch.
+Runs anywhere Linux runs: AWS EC2, Azure VM, GCP Compute, DigitalOcean, Hetzner, bare metal.
+Installs Docker, clones the repo, builds and starts everything:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/scripts/install.sh | bash
+```
+
+The script handles all Docker installation quirks (snap removal, compose v2, distro packages) so you don't have to.
+
+### Docker (manual)
 
 ```bash
 git clone https://github.com/KidCarmi/Culvert
 cd Culvert
-docker-compose up -d
+docker compose up -d --build
 ```
 
 No configuration required — the setup wizard creates your admin account on first visit.
@@ -181,13 +207,13 @@ curl -x http://localhost:8080 https://example.com
 ```bash
 cp config.example.yaml config.yaml   # edit as needed
 # Uncomment the config.yaml volume mount in docker-compose.yml, then:
-docker-compose up -d
+docker compose up -d
 ```
 
 #### With monitoring stack (Prometheus + Grafana)
 
 ```bash
-docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 # Grafana → http://localhost:3000  (admin / culvert)
 ```
 
@@ -485,7 +511,7 @@ lockout.go         — Brute-force + API rate limiting
 connlimit.go       — Per-IP connection limiter, X-Request-ID
 metrics.go         — Prometheus metrics (per-rule, latency, bytes)
 logger.go          — Structured text/JSON logging with rotation
-syslog.go          — RFC 3164 syslog forwarding
+syslog.go          — RFC 3164/5424 syslog forwarding
 alerts.go          — HMAC-SHA256 signed webhook alerts
 events.go          — SSE live dashboard stream
 config.go          — YAML config loading + validation (goccy/go-yaml)
@@ -497,7 +523,14 @@ hashcache.go       — SHA-256 scan cache with TTL
 controlplane.go    — gRPC Control Plane / Data Plane
 plugin.go          — Middleware plugin chain
 catdb.go           — URL category database
+update.go          — Self-update system (binary + Docker)
+update_cluster.go  — Rolling cluster update orchestrator (canary, drain, HA sync)
+scan_remote.go     — Remote scan sidecar client for process-isolated scanning
+blocklist_feed.go  — Domain blocklist URL feed syncer
+bootstrap.go       — Bootstrap script/compose generators for node enrollment
 static/            — Embedded SPA (vanilla JS, Chart.js)
+updater/           — Docker update sidecar (Go service with rollback)
+scripts/           — Install script (multi-distro), CI runner setup
 deploy/            — Prometheus + Grafana stack
 yara/              — Starter YARA detection rules
 ```
