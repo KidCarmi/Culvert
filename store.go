@@ -116,6 +116,7 @@ type LogEntry struct {
 	ActionTaken string `json:"actionTaken"` // policy action taken, if any
 	BytesSent   int64  `json:"bytesSent,omitempty"`   // bytes sent to upstream (request body)
 	BytesRecv   int64  `json:"bytesRecv,omitempty"`   // bytes received from upstream (response body)
+	SSLAction   string `json:"sslAction,omitempty"`   // "inspect", "bypass", or empty (non-CONNECT)
 }
 
 func levelForStatus(status string) string {
@@ -375,6 +376,34 @@ func auditGet() []AuditEntry {
 		cp[i], cp[j] = cp[j], cp[i]
 	}
 	return cp
+}
+
+// auditGetMemory returns paginated, optionally time-filtered entries from the
+// in-memory ring buffer (newest-first).
+func auditGetMemory(offset, limit int, fromTS, toTS int64) ([]AuditEntry, int) {
+	all := auditGet()
+	if fromTS > 0 || toTS > 0 {
+		filtered := make([]AuditEntry, 0, len(all))
+		for i := range all {
+			if fromTS > 0 && all[i].TS < fromTS {
+				continue
+			}
+			if toTS > 0 && all[i].TS > toTS {
+				continue
+			}
+			filtered = append(filtered, all[i])
+		}
+		all = filtered
+	}
+	total := len(all)
+	if offset >= total {
+		return nil, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return all[offset:end], total
 }
 
 // ─── Blocklist ────────────────────────────────────────────────────────────────
@@ -748,6 +777,16 @@ func (b *Blocklist) Count() int {
 
 // MergeFromLines adds all valid host entries from lines to the blocklist and
 // saves it. Existing entries are NOT removed — safe to call on a live blocklist.
+// ClearAll removes all blocklist entries (exact, wildcard, manual) but preserves
+// exceptions and mode. Used by config import "replace" mode.
+func (b *Blocklist) ClearAll() {
+	b.mu.Lock()
+	b.exact = map[string]bool{}
+	b.wildcards = map[string]bool{}
+	b.manual = map[string]bool{}
+	b.mu.Unlock()
+}
+
 // Lines starting with '#' or empty are skipped.
 // Returns the number of newly-added entries.
 func (b *Blocklist) MergeFromLines(lines []string) int {
@@ -1353,11 +1392,11 @@ func uptime() string {
 	return fmt.Sprintf("%dm %ds", m, s)
 }
 
-func recordRequest(ip, method, host, status, ruleMatched, actionTaken, identity string) {
-	recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0)
+func recordRequest(ip, method, host, status, ruleMatched, actionTaken, identity, sslAction string) {
+	recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, sslAction)
 }
 
-func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64) {
+func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction string) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
 	tsRecordResult(isAllowed)
@@ -1388,6 +1427,7 @@ func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, iden
 		ActionTaken: actionTaken,
 		BytesSent:   bytesSent,
 		BytesRecv:   bytesRecv,
+		SSLAction:   sslAction,
 	})
 }
 

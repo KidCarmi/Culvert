@@ -54,6 +54,7 @@ func initConfigVersioning() {
 // Called after any mutating config operation.
 // captureConfigBackup takes a point-in-time snapshot of all config stores.
 func captureConfigBackup() *configBackup {
+	pc := pacStore.Get()
 	return &configBackup{
 		Version:             1,
 		ExportedAt:          time.Now().UTC().Format(time.RFC3339),
@@ -68,6 +69,9 @@ func captureConfigBackup() *configBackup {
 		IPFilterMode:        ipf.Mode(),
 		IPList:              ipf.List(),
 		RateLimitRPM:        rl.Limit(),
+		PACProxyHost:        pc.ProxyHost,
+		PACProxyPort:        pc.ProxyPort,
+		PACExclusions:       pc.Exclusions,
 	}
 }
 
@@ -365,6 +369,13 @@ func applyConfigBackup(b *configBackup) {
 	if b.RateLimitRPM > 0 {
 		rl.Configure(b.RateLimitRPM, time.Minute)
 	}
+
+	// PAC configuration: replace entirely from snapshot.
+	_ = pacStore.Set(PACConfig{
+		ProxyHost:  b.PACProxyHost,
+		ProxyPort:  b.PACProxyPort,
+		Exclusions: b.PACExclusions,
+	})
 }
 
 // configChange is a single field-level difference between two config versions.
@@ -409,6 +420,12 @@ func diffConfigs(a, b *configBackup) []configChange {
 	if a.RateLimitRPM != b.RateLimitRPM {
 		cmp("rate_limit_rpm", a.RateLimitRPM, b.RateLimitRPM)
 	}
+	if a.PACProxyHost != b.PACProxyHost {
+		cmp("pac_proxy_host", a.PACProxyHost, b.PACProxyHost)
+	}
+	if a.PACProxyPort != b.PACProxyPort {
+		cmp("pac_proxy_port", a.PACProxyPort, b.PACProxyPort)
+	}
 
 	// Element-level diffs for list fields.
 	diffStringList("blocklist", a.Blocklist, b.Blocklist, &changes)
@@ -416,6 +433,7 @@ func diffConfigs(a, b *configBackup) []configChange {
 	diffStringList("content_scan_patterns", a.ContentScanPatterns, b.ContentScanPatterns, &changes)
 	diffStringList("file_block_extensions", a.FileBlockExtensions, b.FileBlockExtensions, &changes)
 	diffStringList("ip_list", a.IPList, b.IPList, &changes)
+	diffStringList("pac_exclusions", a.PACExclusions, b.PACExclusions, &changes)
 
 	// Policy rules: diff by priority key.
 	diffPolicyRules(a.PolicyRules, b.PolicyRules, &changes)

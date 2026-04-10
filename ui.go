@@ -111,6 +111,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/security-scan/feeds/domain-allowlist", apiDomainAllowlist) // GET/PUT — threat feed domain allowlist
 	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)            // POST — reload YARA rules from dir
 	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                   // GET — scan service mode info
+	mux.HandleFunc("/api/security-scan/cache", apiScanCache)                    // GET/DELETE — scan hash cache stats & purge
 
 	// ── URL Categories (dynamic host-list management) ─────────────────────
 	mux.HandleFunc("/api/urlcat", apiURLCat)            // GET/POST/PUT/DELETE categories
@@ -774,6 +775,8 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 		if err := cfg.SaveUIUsersFile(); err != nil {
 			logger.Printf("UIUsers: failed to persist: %v", err)
 		}
+		// Revoke all active sessions for the deleted user (Finding 5.2).
+		sessionRevoked.RevokeUser(username)
 		auditEvent(r, "auth.users.delete", username, "")
 		w.WriteHeader(http.StatusNoContent)
 
@@ -990,7 +993,13 @@ func apiAudit(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 10000 {
 		limit = 500
 	}
-	entries, total := auditGetPersistent(offset, limit, fromTS, toTS)
+	var entries []AuditEntry
+	var total int
+	if q.Get("source") == "file" {
+		entries, total = auditGetPersistent(offset, limit, fromTS, toTS)
+	} else {
+		entries, total = auditGetMemory(offset, limit, fromTS, toTS)
+	}
 	jsonOK(w, map[string]any{"entries": entries, "count": len(entries), "total": total, "offset": offset, "limit": limit})
 }
 
@@ -1879,6 +1888,10 @@ type configBackup struct {
 	IPFilterMode        string        `json:"ipFilterMode"`
 	IPList              []string      `json:"ipList"`
 	RateLimitRPM        int           `json:"rateLimitRPM"`
+	RateLimitExempt     []string      `json:"rateLimitExempt,omitempty"`
+	PACProxyHost        string        `json:"pacProxyHost,omitempty"`
+	PACProxyPort        int           `json:"pacProxyPort,omitempty"`
+	PACExclusions       []string      `json:"pacExclusions,omitempty"`
 }
 
 // GET /api/config/export — download a full configuration backup as JSON.
@@ -1923,6 +1936,12 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.IPFilterMode = ipf.Mode()
 		b.IPList = ipf.List()
 		filename = "culvert-ipfilter"
+	case "pac":
+		pc := pacStore.Get()
+		b.PACProxyHost = pc.ProxyHost
+		b.PACProxyPort = pc.ProxyPort
+		b.PACExclusions = pc.Exclusions
+		filename = "culvert-pac"
 	default: // "all" or empty — full export
 		b.BlocklistMode = bl.Mode()
 		b.Blocklist = bl.List()
@@ -1935,6 +1954,11 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.IPFilterMode = ipf.Mode()
 		b.IPList = ipf.List()
 		b.RateLimitRPM = rl.Limit()
+		b.RateLimitExempt = rl.ListExemptions()
+		pc := pacStore.Get()
+		b.PACProxyHost = pc.ProxyHost
+		b.PACProxyPort = pc.ProxyPort
+		b.PACExclusions = pc.Exclusions
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1963,7 +1987,14 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Import mode: "replace" clears existing state before importing;
+	// "merge" (default) appends to existing state.
+	replaceMode := r.URL.Query().Get("mode") == "replace"
+
 	// Blocklist.
+	if replaceMode && len(b.Blocklist) > 0 {
+		bl.ClearAll()
+	}
 	for _, h := range b.Blocklist {
 		bl.Add(h)
 	}
@@ -1973,12 +2004,16 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Policy rules — validate each before importing.
-	for _, rule := range b.PolicyRules {
-		if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
-			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
-			continue
+	if replaceMode && len(b.PolicyRules) > 0 {
+		policyStore.ReplaceAll(b.PolicyRules)
+	} else {
+		for _, rule := range b.PolicyRules {
+			if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
+				logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
+				continue
+			}
+			policyStore.Add(rule)
 		}
-		policyStore.Add(rule)
 	}
 	policyStore.Save()
 	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
@@ -1986,23 +2021,38 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rewrite rules.
-	for _, rule := range b.RewriteRules {
-		rewriter.Add(rule)
+	if replaceMode && len(b.RewriteRules) > 0 {
+		rewriter.SetRules(b.RewriteRules)
+	} else {
+		for _, rule := range b.RewriteRules {
+			rewriter.Add(rule)
+		}
 	}
 
 	// SSL bypass.
-	for _, p := range b.SSLBypass {
-		_ = sslBypass.Add(p)
+	if replaceMode && len(b.SSLBypass) > 0 {
+		_ = sslBypass.Set(b.SSLBypass)
+	} else {
+		for _, p := range b.SSLBypass {
+			_ = sslBypass.Add(p)
+		}
 	}
 	sslBypass.Save()
 
 	// Content scan patterns.
-	for _, p := range b.ContentScanPatterns {
-		_ = dpiScanner.Add(p)
+	if replaceMode && len(b.ContentScanPatterns) > 0 {
+		_ = dpiScanner.Set(b.ContentScanPatterns)
+	} else {
+		for _, p := range b.ContentScanPatterns {
+			_ = dpiScanner.Add(p)
+		}
 	}
 	dpiScanner.Save()
 
 	// File block extensions.
+	if replaceMode && len(b.FileBlockExtensions) > 0 {
+		fileBlocker.ClearAll()
+	}
 	for _, ext := range b.FileBlockExtensions {
 		fileBlocker.Add(ext)
 	}
@@ -2011,16 +2061,48 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if b.IPFilterMode != "" {
 		ipf.SetMode(b.IPFilterMode)
 	}
+	if replaceMode && len(b.IPList) > 0 {
+		ipf.ClearAll()
+	}
 	for _, ip := range b.IPList {
 		_ = ipf.Add(ip)
 	}
 	if b.RateLimitRPM > 0 {
 		rl.Configure(b.RateLimitRPM, time.Minute)
 	}
+	for _, ex := range b.RateLimitExempt {
+		_ = rl.AddExemption(ex)
+	}
 
-	auditEvent(r, "config.import", "restore", fmt.Sprintf("from backup exported %s", b.ExportedAt))
+	// PAC configuration.
+	if b.PACProxyHost != "" || b.PACProxyPort != 0 || len(b.PACExclusions) > 0 {
+		pc := pacStore.Get()
+		if replaceMode {
+			pc = PACConfig{}
+		}
+		if b.PACProxyHost != "" {
+			pc.ProxyHost = b.PACProxyHost
+		}
+		if b.PACProxyPort != 0 {
+			pc.ProxyPort = b.PACProxyPort
+		}
+		if len(b.PACExclusions) > 0 {
+			if replaceMode {
+				pc.Exclusions = b.PACExclusions
+			} else {
+				pc.Exclusions = append(pc.Exclusions, b.PACExclusions...)
+			}
+		}
+		_ = pacStore.Set(pc)
+	}
+
+	importMode := "merge"
+	if replaceMode {
+		importMode = "replace"
+	}
+	auditEvent(r, "config.import", importMode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
 	saveConfigVersion(sessionAdmin(r), "config.import")
-	jsonOK(w, map[string]any{"ok": true, "exportedAt": b.ExportedAt})
+	jsonOK(w, map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt})
 }
 
 // GET/POST /api/session-secret — shared session signing key management.
@@ -2193,10 +2275,11 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"ipFilterMode": ipf.Mode(),
-			"ipList":       ipf.List(),
-			"rateLimitRPM": rl.Limit(),
-			"rateLimitOn":  rl.Enabled(),
+			"ipFilterMode":       ipf.Mode(),
+			"ipList":             ipf.List(),
+			"rateLimitRPM":       rl.Limit(),
+			"rateLimitOn":        rl.Enabled(),
+			"rateLimitExempt":    rl.ListExemptions(),
 		})
 
 	case http.MethodPost:
@@ -2204,11 +2287,13 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			IPFilterMode string   `json:"ipFilterMode"` // "allow"|"block"|""
-			IPAdd        string   `json:"ipAdd"`
-			IPRemove     string   `json:"ipRemove"`
-			RateLimitRPM int      `json:"rateLimitRPM"` // 0 = disable
-			IPList       []string `json:"ipList"`       // full replace
+			IPFilterMode       string   `json:"ipFilterMode"` // "allow"|"block"|""
+			IPAdd              string   `json:"ipAdd"`
+			IPRemove           string   `json:"ipRemove"`
+			RateLimitRPM       int      `json:"rateLimitRPM"`       // 0 = disable
+			IPList             []string `json:"ipList"`             // full replace
+			RateLimitExemptAdd string   `json:"rateLimitExemptAdd"` // IP or CIDR to exempt
+			RateLimitExemptDel string   `json:"rateLimitExemptDel"` // IP or CIDR to un-exempt
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -2232,6 +2317,15 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.RateLimitRPM >= 0 {
 			rl.Configure(body.RateLimitRPM, time.Minute)
+		}
+		if body.RateLimitExemptAdd != "" {
+			if err := rl.AddExemption(body.RateLimitExemptAdd); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		if body.RateLimitExemptDel != "" {
+			rl.RemoveExemption(body.RateLimitExemptDel)
 		}
 		logMode := strings.ReplaceAll(strings.ReplaceAll(ipf.Mode(), "\n", "_"), "\r", "_")
 		logRPM := strings.ReplaceAll(fmt.Sprintf("%d", rl.Limit()), "\n", "_")
@@ -2805,7 +2899,7 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-%s.csv"`, ts))
 		cw := csv.NewWriter(w)
-		cw.Write([]string{"timestamp", "time", "ip", "identity", "method", "host", "status", "level", "rule_matched", "action_taken", "bytes_sent", "bytes_recv"}) //nolint:errcheck // CSV write
+		cw.Write([]string{"timestamp", "time", "ip", "identity", "method", "host", "status", "level", "rule_matched", "action_taken", "bytes_sent", "bytes_recv", "ssl_action"}) //nolint:errcheck // CSV write
 		for i := range entries {
 			e := &entries[i]
 			cw.Write([]string{ //nolint:errcheck // CSV write
@@ -2813,6 +2907,7 @@ func apiExport(w http.ResponseWriter, r *http.Request) {
 				e.Time, e.IP, e.Identity, e.Method, e.Host, e.Status, e.Level,
 				e.RuleMatched, e.ActionTaken,
 				fmt.Sprintf("%d", e.BytesSent), fmt.Sprintf("%d", e.BytesRecv),
+				e.SSLAction,
 			})
 		}
 		cw.Flush()
@@ -3482,6 +3577,51 @@ func apiScanSvcConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOK(w, resp)
+}
+
+// GET    /api/security-scan/cache          — return cache stats (hits, misses, size).
+// DELETE /api/security-scan/cache          — clear entire scan hash cache.
+// DELETE /api/security-scan/cache?hash=xxx — evict a single hash from the cache.
+func apiScanCache(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		if globalSecScanner == nil || globalSecScanner.cache == nil {
+			jsonOK(w, map[string]any{"enabled": false})
+			return
+		}
+		hits, misses, size := globalSecScanner.cache.Stats()
+		jsonOK(w, map[string]any{
+			"enabled":      true,
+			"cache_hits":   hits,
+			"cache_misses": misses,
+			"cache_size":   size,
+		})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		if globalSecScanner == nil || globalSecScanner.cache == nil {
+			http.Error(w, "scan cache not enabled", http.StatusServiceUnavailable)
+			return
+		}
+		hash := r.URL.Query().Get("hash")
+		if hash != "" {
+			found := globalSecScanner.cache.Evict(hash)
+			auditEvent(r, "scan_cache.evict", sanitizeLog(hash), "")
+			jsonOK(w, map[string]any{"evicted": found, "hash": hash})
+		} else {
+			globalSecScanner.cache.Clear()
+			auditEvent(r, "scan_cache.clear", "all", "")
+			jsonOK(w, map[string]any{"cleared": true})
+		}
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

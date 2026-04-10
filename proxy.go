@@ -192,7 +192,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	if !ipf.Allowed(clientIP) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED", "", "", "")
+		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED", "", "", "", "")
 		logger.Printf("IP_BLOCKED %s {req_id=%s action=block}", clientIP, reqID)
 		return
 	}
@@ -200,7 +200,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	// Rate limit check.
 	if !rl.AllowAuto(clientIP) {
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "", "")
+		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "", "", "")
 		logger.Printf("RATE_LIMITED %s {req_id=%s action=block}", clientIP, reqID)
 		return
 	}
@@ -257,7 +257,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 						atomic.AddInt64(&statAuthFail, 1)
 						w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
 						http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
-						recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "")
+						recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
 						logger.Printf("AUTH_FAIL %s {req_id=%s action=block}", clientIP, reqID)
 						return
 					}
@@ -281,7 +281,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					w.Header().Set("Link", `<`+u+`>; rel="authorization_endpoint"`)
 				}
 				http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
-				recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "")
+				recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
 				logger.Printf("AUTH_FAIL (no-credentials) %s {req_id=%s action=block}", clientIP, reqID)
 				return
 			}
@@ -303,7 +303,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity)
+		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity, "")
 		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
 		return
 	}
@@ -314,7 +314,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		// Domain-level check (applies to CONNECT and plain HTTP).
 		if result := globalSecScanner.CheckDomain(host); result != nil {
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity)
+			recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, "")
 			logger.Printf("THREAT_BLOCKED domain %s -> %q (%q)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
 			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
 			return
@@ -323,7 +323,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
 			if result := globalSecScanner.CheckURL(r.URL.String()); result != nil {
 				atomic.AddInt64(&statBlocked, 1)
-				recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity)
+				recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, "")
 				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
 				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
 				return
@@ -335,7 +335,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	if pluginDecision(clientIP, r.Method, host) == DecisionBlock {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by plugin", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity)
+		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity, "")
 		return
 	}
 
@@ -346,7 +346,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		if ext := fileBlocker.CheckPath(r.URL.Path); ext != "" {
 			atomic.AddInt64(&statFileBlocked, 1)
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity)
+			recordRequest(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, "")
 			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 			return
@@ -365,7 +365,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		switch match.Action {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity)
+			recordRequest(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "")
 			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
@@ -376,14 +376,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity)
+			recordRequest(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "")
 			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return
 
 		case ActionRedirect:
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity)
+			recordRequest(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity, "")
 			if !isSafeRedirectURL(match.Rule.RedirectURL) {
 				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
 				http.Error(w, "Forbidden", http.StatusForbidden)
@@ -394,7 +394,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			return
 
 		case ActionAllow:
-			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity)
+			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, "")
 			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Fall through to normal handling below.
 		}
@@ -402,12 +402,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		// No rule matched — apply the configured default action.
 		if defaultPolicyAction() == "allow" {
 			// Passthrough mode: allow all unmatched traffic (initial setup).
-			recordRequest(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow", authenticatedIdentity)
+			recordRequest(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow", authenticatedIdentity, "")
 		} else {
 			// Zero Trust: deny by default. Serve the custom HTML block page so
 			// end-users see a clear, branded explanation.
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity)
+			recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, "")
 			logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
 			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
 			return
@@ -583,7 +583,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"))
+		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"), "inspect")
 		logger.Printf("FILE_BLOCKED (resp cd) %s -> %q%q (ext=%q)", cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 		serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 		return
@@ -609,7 +609,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 				cip3, _, _ := net.SplitHostPort(r.RemoteAddr)
 				atomic.AddInt64(&statFileBlocked, 1)
 				atomic.AddInt64(&statBlocked, 1)
-				recordRequest(cip3, r.Method, r.Host, "FILE_BLOCKED", "magic:"+archType, "", r.Header.Get("X-User-Identity"))
+				recordRequest(cip3, r.Method, r.Host, "FILE_BLOCKED", "magic:"+archType, "", r.Header.Get("X-User-Identity"), "inspect")
 				logger.Printf("FILE_BLOCKED (magic) %s -> %q (type=%s)", cip3, sanitizeLog(r.Host), archType)
 				serveBlockPage(w, r.Host+r.URL.Path, "File Block", "magic:"+archType)
 				return
@@ -621,7 +621,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 				cip3, _, _ := net.SplitHostPort(r.RemoteAddr)
 				atomic.AddInt64(&statFileBlocked, 1)
 				atomic.AddInt64(&statBlocked, 1)
-				recordRequest(cip3, r.Method, r.Host, "POLYGLOT_BLOCKED", reason, "", r.Header.Get("X-User-Identity"))
+				recordRequest(cip3, r.Method, r.Host, "POLYGLOT_BLOCKED", reason, "", r.Header.Get("X-User-Identity"), "inspect")
 				logger.Printf("POLYGLOT_BLOCKED %s -> %q (%s)", cip3, sanitizeLog(r.Host), sanitizeLog(reason))
 				serveBlockPage(w, r.Host+r.URL.Path, "Polyglot Detection", reason)
 				return
@@ -631,7 +631,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 			if scanResult != nil {
 				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)
 				atomic.AddInt64(&statBlocked, 1)
-				recordRequest(cip2, r.Method, r.Host, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, r.Header.Get("X-User-Identity"))
+				recordRequest(cip2, r.Method, r.Host, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, r.Header.Get("X-User-Identity"), "inspect")
 				logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip2, sanitizeLog(r.Host), sanitizeLog(scanResult.Source), sanitizeLog(scanResult.Reason))
 				scanBlock(w, r.Host, scanResult.Reason, scanResult.Source)
 				return
@@ -1091,7 +1091,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					if scanResult := safeScanBodyWithCT(scanBody, ct); scanResult != nil {
 						origBody.Close()
 						atomic.AddInt64(&statBlocked, 1)
-						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "")
+						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "", "inspect")
 						scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
 						break
 					}
@@ -1100,7 +1100,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					if dpiScanner.Enabled() && isTextContentType(ct) {
 						if pattern, matched := safeDPIScan(scanBody); matched {
 							origBody.Close()
-							recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern, "")
+							recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern, "", "inspect")
 							dpiBlock(clientTLS, hostOnly, pattern)
 							break
 						}
@@ -1109,7 +1109,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					if scanResult := safeScanBody(scanBody); scanResult != nil {
 						origBody.Close()
 						atomic.AddInt64(&statBlocked, 1)
-						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "")
+						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "", "inspect")
 						scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
 						break
 					}

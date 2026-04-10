@@ -3,6 +3,7 @@ module proxy
 go 1.25.9
 
 require (
+	github.com/andybalholm/brotli v1.2.1
 	github.com/crewjam/saml v0.5.1
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/go-ldap/ldap/v3 v3.4.13

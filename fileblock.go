@@ -59,6 +59,13 @@ func (fb *FileBlocker) List() []string {
 	return out
 }
 
+// ClearAll removes all blocked extensions. Used by config import "replace" mode.
+func (fb *FileBlocker) ClearAll() {
+	fb.mu.Lock()
+	fb.extensions = map[string]bool{}
+	fb.mu.Unlock()
+}
+
 func (fb *FileBlocker) Count() int {
 	fb.mu.RLock()
 	defer fb.mu.RUnlock()

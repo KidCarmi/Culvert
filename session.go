@@ -62,9 +62,13 @@ func initSessionSecretFromConfig(hexKey string) {
 type revocationList struct {
 	mu     sync.Mutex
 	tokens map[string]time.Time // b64 payload → session expiry
+	users  map[string]time.Time // username → revocation expiry (all sessions for this user)
 }
 
-var sessionRevoked = &revocationList{tokens: map[string]time.Time{}}
+var sessionRevoked = &revocationList{
+	tokens: map[string]time.Time{},
+	users:  map[string]time.Time{},
+}
 
 func (r *revocationList) Revoke(token string, exp time.Time) {
 	r.mu.Lock()
@@ -81,6 +85,30 @@ func (r *revocationList) IsRevoked(token string) bool {
 	}
 	if time.Now().After(exp) {
 		delete(r.tokens, token) // lazy eviction
+		return false
+	}
+	return true
+}
+
+// RevokeUser invalidates all sessions for a username. Active session cookies
+// for this user are rejected until the revocation expiry (max session TTL).
+// Called when a user account is deleted (Finding 5.2).
+func (r *revocationList) RevokeUser(username string) {
+	r.mu.Lock()
+	r.users[username] = time.Now().Add(getSessionTTL())
+	r.mu.Unlock()
+}
+
+// IsUserRevoked returns true if all sessions for the given username are revoked.
+func (r *revocationList) IsUserRevoked(username string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	exp, ok := r.users[username]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(r.users, username) // lazy eviction
 		return false
 	}
 	return true
@@ -306,6 +334,10 @@ func decodeSession(raw string) (*Session, error) {
 	}
 	if time.Now().Unix() > s.Exp {
 		return nil, fmt.Errorf("session: expired")
+	}
+	// User-level revocation (account deleted while session was active).
+	if s.Sub != "" && sessionRevoked.IsUserRevoked(s.Sub) {
+		return nil, fmt.Errorf("session: user revoked")
 	}
 	return &s, nil
 }

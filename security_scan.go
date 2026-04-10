@@ -31,6 +31,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/andybalholm/brotli"
 )
 
 // maxDecompressBytes limits decompressed data to 64 MB to guard against gzip bombs.
@@ -194,10 +196,7 @@ func decompressForScan(data []byte, contentEncoding string) []byte {
 	case "deflate":
 		reader = flate.NewReader(bytes.NewReader(data))
 	case "br":
-		// Brotli requires an external dependency (andybalholm/brotli).
-		// For now, return raw bytes — YARA/ClamAV will scan compressed form.
-		// TODO: add brotli support when dependency is acceptable.
-		return data
+		reader = io.NopCloser(brotli.NewReader(bytes.NewReader(data)))
 	default:
 		// Unknown encoding — scan raw bytes.
 		return data

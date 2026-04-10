@@ -106,6 +106,25 @@ func (c *HashCache) Stats() (int64, int64, int) {
 	return c.hits.Load(), c.misses.Load(), size
 }
 
+// Evict removes a specific hash from the cache.
+// Returns true if the entry existed (regardless of expiry).
+func (c *HashCache) Evict(hash string) bool {
+	c.mu.Lock()
+	_, ok := c.entries[hash]
+	if ok {
+		delete(c.entries, hash)
+	}
+	c.mu.Unlock()
+	return ok
+}
+
+// Clear removes all entries from the cache.
+func (c *HashCache) Clear() {
+	c.mu.Lock()
+	c.entries = make(map[string]*hashCacheEntry, c.maxSize)
+	c.mu.Unlock()
+}
+
 // evictLocked removes all expired entries.  If the map is still at capacity
 // afterward, it drops approximately 25 % of the remaining entries.
 // Must be called with c.mu held for writing.

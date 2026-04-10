@@ -212,6 +212,10 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		actor := sessionAdmin(r)
+		auditEvent(r, "pac.update", "pac-config", fmt.Sprintf("host=%s port=%d exclusions=%d",
+			sanitizeLog(c.ProxyHost), c.ProxyPort, len(c.Exclusions)))
+		saveConfigVersion(actor, "pac.update")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(c) //nolint:errcheck
 	default:

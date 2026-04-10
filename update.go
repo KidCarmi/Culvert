@@ -251,13 +251,18 @@ func checkUpdateNow() {
 	}
 
 	globalUpdateInfo.mu.Lock()
+	prevLatest := globalUpdateInfo.latestVersion
 	globalUpdateInfo.latestVersion = result.Latest
 	globalUpdateInfo.updateAvailable = result.UpdateAvailable
 	globalUpdateInfo.lastChecked = time.Now()
 	globalUpdateInfo.updaterStatus = "connected"
 	globalUpdateInfo.mu.Unlock()
 
-	if result.UpdateAvailable {
+	if result.UpdateAvailable && result.Latest != prevLatest {
+		go fireAlert("update_available", AlertPayload{
+			Detail: fmt.Sprintf("New version available: %s (current: %s)", result.Latest, version),
+			Source: "update_checker",
+		})
 		logger.Printf("Update: available %s -> %s", version, result.Latest)
 	}
 }

@@ -9,6 +9,7 @@ package main
 //   "cert_expiry"           — CA certificate nearing expiry (fired on startup if ≤30 days)
 //   "cluster_updated"       — cluster rolling update completed successfully
 //   "cluster_update_halted" — cluster rolling update halted due to error budget
+//   "update_available"      — background version check detected a new release
 //
 // Each webhook is stored in an in-memory list backed by a JSON file.
 // Delivery is async, never blocks the request path.

@@ -23,10 +23,17 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build
 # time so no runtime network access or manual download is required.
 # Attribution: https://db-ip.com
+#
+# If the download fails (db-ip.com blocks some cloud/CI IPs), the build
+# continues without GeoIP — country-based policy rules will be silently
+# skipped until a valid .mmdb is mounted at runtime.
 FROM alpine:3.22 AS geoip
 RUN apk add --no-cache wget && \
-    wget -qO- "https://download.db-ip.com/free/dbip-country-lite-$(date +%Y-%m).mmdb.gz" \
-      | gzip -d > /GeoLite2-Country.mmdb
+    (wget -qO- "https://download.db-ip.com/free/dbip-country-lite-$(date +%Y-%m).mmdb.gz" \
+      | gzip -d > /GeoLite2-Country.mmdb 2>/dev/null && \
+      test -s /GeoLite2-Country.mmdb) || \
+    (echo "WARN: GeoIP download failed — building without GeoIP database" >&2 && \
+     rm -f /GeoLite2-Country.mmdb && touch /GeoLite2-Country.mmdb)
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 # Security hardening (shift-left):
@@ -39,7 +46,8 @@ RUN apk add --no-cache wget && \
 #   • No new privileges: --security-opt no-new-privileges
 FROM alpine:3.22
 
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tzdata && \
     addgroup -S proxy && adduser -S proxy -G proxy && \
     mkdir -p /data && chown proxy:proxy /data
 
