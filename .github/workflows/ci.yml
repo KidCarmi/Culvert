@@ -152,6 +152,26 @@ jobs:
           provenance: true
           sbom: true
 
+      # ── Build & push updater sidecar image ────────────────────────────────
+      - name: Build and push updater image
+        id: build-updater
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.updater
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository }}-updater:latest
+            ghcr.io/${{ github.repository }}-updater:${{ steps.next-ver.outputs.version || 'dev' }}
+          labels: |
+            org.opencontainers.image.title=Culvert Updater
+            org.opencontainers.image.description=Update sidecar for Culvert proxy
+            org.opencontainers.image.vendor=KidCarmi
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=updater
+          cache-to: type=gha,mode=max,scope=updater
+
       # ── Apply semver tags explicitly ──────────────────────────────────────
       # The metadata-action raw tags with enable= can silently fail to apply.
       # This step guarantees the computed semver tag (e.g. v0.0.18) is applied
@@ -168,13 +188,25 @@ jobs:
             --tag "${IMAGE}:${VER_BARE}" \
             "${IMAGE}@${{ steps.build.outputs.digest }}"
 
+      - name: Apply version tag (updater)
+        if: steps.next-ver.outputs.version != '' && github.event_name != 'pull_request'
+        run: |
+          VER="${{ steps.next-ver.outputs.version }}"
+          VER_BARE="${{ steps.next-ver.outputs.version_bare }}"
+          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-updater"
+          echo "Tagging updater image with ${VER} and ${VER_BARE}"
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VER}" \
+            --tag "${IMAGE}:${VER_BARE}" \
+            "${IMAGE}@${{ steps.build-updater.outputs.digest }}"
+
       # ── Sign the published image with cosign (keyless) ────────────────────
       # Only runs when the image was actually pushed (not PRs).
       - name: Install cosign
         if: ${{ github.event_name != 'pull_request' }}
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
-      - name: Sign image (keyless via Sigstore)
+      - name: Sign proxy image (keyless via Sigstore)
         if: ${{ github.event_name != 'pull_request' }}
         env:
           COSIGN_EXPERIMENTAL: "1"
@@ -185,6 +217,18 @@ jobs:
             cosign sign --yes \
               --rekor-url=https://rekor.sigstore.dev \
               "${tag}@${{ steps.build.outputs.digest }}"
+          done
+
+      - name: Sign updater image (keyless via Sigstore)
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-updater"
+          for tag in "latest" "${{ steps.next-ver.outputs.version || 'dev' }}"; do
+            cosign sign --yes \
+              --rekor-url=https://rekor.sigstore.dev \
+              "${IMAGE}:${tag}@${{ steps.build-updater.outputs.digest }}"
           done
 
   # ─── Auto-tag ───────────────────────────────────────────────────────────

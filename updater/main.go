@@ -1321,7 +1321,11 @@ func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
 			activeSession.mu.Unlock()
 		}()
 
-		ctx := r.Context()
+		// Use background context — self-update must complete even if the
+		// HTTP client disconnects (the proxy's fire-and-forget POST returns
+		// immediately, which would cancel r.Context()).
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
 
 		// Get our own container info.
 		hostname, _ := os.Hostname()
@@ -1333,6 +1337,12 @@ func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
 
 		currentImage := self.Config.Image
 		newImage := imageWithTag(currentImage, req.TargetTag)
+
+		// If the updater was built locally (no registry prefix), derive the
+		// registry image name from the proxy registry config.
+		if !strings.Contains(currentImage, "/") {
+			newImage = registry + "-updater:" + req.TargetTag
+		}
 
 		// Pull the new image.
 		pullOut, err := cli.ImagePull(ctx, newImage, image.PullOptions{})

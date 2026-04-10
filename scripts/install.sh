@@ -297,12 +297,12 @@ fi
 cd "$INSTALL_DIR"
 
 ###############################################################################
-# 6. Build and start
+# 6. Pull and start
 ###############################################################################
-step "Building and starting Culvert"
+step "Starting Culvert"
 
-info "This will take a few minutes on first run (downloading Go, compiling, GeoIP DB)..."
-sudo docker compose up -d --build
+info "Pulling images and starting services (first run may take 1-2 minutes)..."
+sudo docker compose up -d
 
 ###############################################################################
 # 7. Wait for health checks

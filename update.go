@@ -9,6 +9,7 @@ package main
 // See roadmap/docker-system-update.md for full design.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -528,15 +529,49 @@ func apiUpdateApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	buf := make([]byte, 4096)
+	updateSucceeded := false
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			w.Write(buf[:n]) //nolint:errcheck
+			chunk := buf[:n]
+			w.Write(chunk) //nolint:errcheck
 			flusher.Flush()
+			// Detect successful completion in the SSE stream.
+			if bytes.Contains(chunk, []byte(`"step":"complete"`)) {
+				updateSucceeded = true
+			}
 		}
 		if err != nil {
 			break
 		}
+	}
+
+	// After proxy update succeeds, trigger updater self-update (fire-and-forget).
+	if updateSucceeded {
+		go triggerUpdaterSelfUpdate(req.TargetTag)
+	}
+}
+
+// triggerUpdaterSelfUpdate asks the updater sidecar to update itself to the
+// same tag the proxy was just updated to. Fire-and-forget — the updater uses
+// a reaper container to restart itself.
+func triggerUpdaterSelfUpdate(tag string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	body, _ := json.Marshal(map[string]string{"target_tag": tag})
+	resp, err := updaterRequest(ctx, http.MethodPost, "/api/self-update", bytes.NewReader(body))
+	if err != nil {
+		logger.Printf("Update: updater self-update trigger failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		logger.Printf("Update: updater self-update triggered (tag=%s)", sanitizeLog(tag))
+	} else {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		logger.Printf("Update: updater self-update returned HTTP %d: %s", resp.StatusCode, respBody)
 	}
 }
 
