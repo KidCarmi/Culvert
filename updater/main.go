@@ -57,6 +57,7 @@ var (
 	healthInterval = envDurOr("UPDATER_HEALTH_INTERVAL", 5*time.Second)
 	rollbackTTL    = envDurOr("UPDATER_ROLLBACK_TTL", 1*time.Hour)
 	keepImages     = envIntOr("UPDATER_KEEP_IMAGES", 3)
+	soakDuration   = envDurOr("UPDATER_SOAK_DURATION", 60*time.Second)
 )
 
 // ── Active session state ────────────────────────────────────────────────────
@@ -559,7 +560,70 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 
 		sendEvent("complete", "Update to "+req.TargetTag+" successful", 100)
 		log.Printf("update complete: %s → %s", oldImage, targetImage)
+
+		// Post-update soak monitor: watch the container for soakDuration after
+		// health checks pass. If it exits during the soak window, auto-rollback.
+		// This catches containers that start and pass health checks but crash
+		// shortly after (e.g. bad image, missing config, runtime errors).
+		go soakMonitor(cli, req.Container, rollbackName, oldImage, targetImage)
 	}
+}
+
+// soakMonitor watches a container after a successful update. If the container
+// exits within the soak window (default 60s), it automatically rolls back to
+// the previous version. This catches containers that pass health checks but
+// crash shortly after (bad image, missing env vars, runtime panics).
+func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newImage string) {
+	ctx := context.Background()
+	checkInterval := 5 * time.Second
+	deadline := time.Now().Add(soakDuration)
+
+	log.Printf("soak monitor: watching %s for %s", containerName, soakDuration)
+
+	for time.Now().Before(deadline) {
+		time.Sleep(checkInterval)
+
+		info, err := cli.ContainerInspect(ctx, containerName)
+		if err != nil {
+			// Container was removed (manual intervention) — stop monitoring.
+			log.Printf("soak monitor: container %s gone, stopping watch", containerName)
+			return
+		}
+
+		if !info.State.Running {
+			log.Printf("soak monitor: container %s exited (code=%d) during soak — auto-rolling back",
+				containerName, info.State.ExitCode)
+
+			// Auto-rollback: stop failed container, restore rollback.
+			rollbackInfo.mu.RLock()
+			rbAvailable := rollbackInfo.Available
+			rollbackInfo.mu.RUnlock()
+
+			if !rbAvailable {
+				log.Printf("soak monitor: rollback no longer available, cannot auto-rollback")
+				return
+			}
+
+			stopTimeout := 10
+			cli.ContainerStop(ctx, containerName, container.StopOptions{Timeout: &stopTimeout}) //nolint:errcheck
+			cli.ContainerRemove(ctx, containerName, container.RemoveOptions{Force: true})       //nolint:errcheck
+			cli.ContainerRename(ctx, rollbackName, containerName)                               //nolint:errcheck
+
+			if err := cli.ContainerStart(ctx, containerName, container.StartOptions{}); err != nil {
+				log.Printf("soak monitor: auto-rollback start failed: %v", err)
+				return
+			}
+
+			rollbackInfo.mu.Lock()
+			rollbackInfo.Available = false
+			rollbackInfo.mu.Unlock()
+
+			log.Printf("soak monitor: auto-rollback complete — restored %s (%s)", containerName, oldImage)
+			return
+		}
+	}
+
+	log.Printf("soak monitor: %s stable for %s, soak complete", containerName, soakDuration)
 }
 
 // ── POST /api/update/rollback ───────────────────────────────────────────────
