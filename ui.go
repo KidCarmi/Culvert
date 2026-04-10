@@ -775,6 +775,8 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 		if err := cfg.SaveUIUsersFile(); err != nil {
 			logger.Printf("UIUsers: failed to persist: %v", err)
 		}
+		// Revoke all active sessions for the deleted user (Finding 5.2).
+		sessionRevoked.RevokeUser(username)
 		auditEvent(r, "auth.users.delete", username, "")
 		w.WriteHeader(http.StatusNoContent)
 

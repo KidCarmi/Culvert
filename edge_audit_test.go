@@ -217,13 +217,13 @@ func TestAuditGetMemory(t *testing.T) {
 	}
 
 	// Offset past end.
-	entries, total = auditGetMemory(10, 5, 0, 0)
+	entries, _ = auditGetMemory(10, 5, 0, 0)
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries for offset past end, got %d", len(entries))
 	}
 
 	// With time filter.
-	entries, total = auditGetMemory(0, 100, now+1000, now+3000)
+	entries, _ = auditGetMemory(0, 100, now+1000, now+3000)
 	if len(entries) == 0 {
 		t.Error("expected some entries with time filter")
 	}
@@ -315,4 +315,43 @@ func TestConfigImportReplaceMode(t *testing.T) {
 
 	// Clean up.
 	bl.ClearAll()
+}
+
+// ─── Finding 5.2: User deletion revokes sessions ───────────────────────────
+
+func TestRevokeUserSessions(t *testing.T) {
+	// Create a valid session for a user.
+	s := &Session{
+		Sub:  "deleteme",
+		Role: string(RoleOperator),
+		Exp:  time.Now().Add(time.Hour).Unix(),
+	}
+	tok, err := encodeSession(s)
+	if err != nil {
+		t.Fatalf("encodeSession: %v", err)
+	}
+
+	// Session should be valid before revocation.
+	if _, err := decodeSession(tok); err != nil {
+		t.Fatalf("session should be valid before revocation: %v", err)
+	}
+
+	// Revoke all sessions for this user.
+	sessionRevoked.RevokeUser("deleteme")
+
+	// Session should now be rejected.
+	if _, err := decodeSession(tok); err == nil {
+		t.Error("session should be rejected after user revocation")
+	}
+
+	// A different user's session should still work.
+	s2 := &Session{
+		Sub:  "otheruser",
+		Role: string(RoleOperator),
+		Exp:  time.Now().Add(time.Hour).Unix(),
+	}
+	tok2, _ := encodeSession(s2)
+	if _, err := decodeSession(tok2); err != nil {
+		t.Errorf("other user's session should still be valid: %v", err)
+	}
 }
