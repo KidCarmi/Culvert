@@ -151,12 +151,23 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 ## Quick Start
 
-### Docker (recommended)
+### One-Line Install (recommended)
+
+Works on Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Amazon Linux, and Arch.
+Installs Docker, clones the repo, builds and starts everything:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/scripts/install.sh | bash
+```
+
+The script handles all Docker installation quirks (snap removal, compose v2, distro packages) so you don't have to.
+
+### Docker (manual)
 
 ```bash
 git clone https://github.com/KidCarmi/Culvert
 cd Culvert
-docker-compose up -d
+docker compose up -d --build
 ```
 
 No configuration required — the setup wizard creates your admin account on first visit.
@@ -181,13 +192,13 @@ curl -x http://localhost:8080 https://example.com
 ```bash
 cp config.example.yaml config.yaml   # edit as needed
 # Uncomment the config.yaml volume mount in docker-compose.yml, then:
-docker-compose up -d
+docker compose up -d
 ```
 
 #### With monitoring stack (Prometheus + Grafana)
 
 ```bash
-docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 # Grafana → http://localhost:3000  (admin / culvert)
 ```
 
