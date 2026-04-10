@@ -453,7 +453,7 @@ func TestSaveAndLoadUIUsersFile(t *testing.T) {
 
 	cfg2 := &Config{}
 	cfg2.SetUIUsersFile(f.Name())
-	_ = cfg2.SetUIUser("testuser", "testpass123", RoleAdmin)
+	_ = cfg2.SetUIUser("testuser", "TestPass1", RoleAdmin)
 
 	if err := cfg2.SaveUIUsersFile(); err != nil {
 		t.Fatalf("SaveUIUsersFile: %v", err)
@@ -465,7 +465,7 @@ func TestSaveAndLoadUIUsersFile(t *testing.T) {
 		t.Fatalf("LoadUIUsersFile: %v", err)
 	}
 
-	role, valid := cfg3.VerifyUIUser("testuser", "testpass123")
+	role, valid := cfg3.VerifyUIUser("testuser", "TestPass1")
 	if !valid {
 		t.Error("LoadUIUsersFile should load saved user")
 	}

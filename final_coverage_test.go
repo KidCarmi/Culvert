@@ -619,8 +619,8 @@ func TestCertManager_SaveCA_WithPassphrase(t *testing.T) {
 
 func TestAPIAuthUsers_Delete_QueryParam(t *testing.T) {
 	// Create a second admin so deletion is allowed
-	_ = cfg.SetUIUser("deletetest1", "password123", RoleAdmin)
-	_ = cfg.SetUIUser("deletetest2", "password123", RoleAdmin)
+	_ = cfg.SetUIUser("deletetest1", "Password1", RoleAdmin)
+	_ = cfg.SetUIUser("deletetest2", "Password1", RoleAdmin)
 	defer cfg.DeleteUIUser("deletetest1") //nolint:errcheck // test teardown; reset errors are non-actionable
 	defer cfg.DeleteUIUser("deletetest2") //nolint:errcheck // test teardown; reset errors are non-actionable
 
@@ -1101,7 +1101,7 @@ func TestConfig_VerifyAuth_CacheHit(t *testing.T) {
 
 func TestConfig_SetUIUser_UpdateRoleOnly(t *testing.T) {
 	// Create a user first
-	_ = cfg.SetUIUser("roletest", "password123", RoleAdmin)
+	_ = cfg.SetUIUser("roletest", "Password1", RoleAdmin)
 	defer cfg.DeleteUIUser("roletest") //nolint:errcheck // test teardown; cleanup errors are non-actionable
 
 	// Update role without changing password

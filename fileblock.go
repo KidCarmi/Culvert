@@ -103,6 +103,47 @@ func (fb *FileBlocker) CheckExt(ext string) string {
 	return ""
 }
 
+// blockedMIMETypes maps dangerous Content-Type MIME types to their canonical
+// file extension. Used by CheckContentType to detect renamed executables
+// (e.g. malware.exe renamed to malware.txt still served as application/x-msdownload).
+var blockedMIMETypes = map[string]string{
+	"application/x-msdownload":                      ".exe",
+	"application/x-msdos-program":                   ".exe",
+	"application/x-dosexec":                          ".exe",
+	"application/x-executable":                       ".exe",
+	"application/vnd.microsoft.portable-executable":  ".exe",
+	"application/x-msi":                              ".msi",
+	"application/x-ms-installer":                     ".msi",
+	"application/x-bat":                              ".bat",
+	"application/x-powershell":                       ".ps1",
+	"application/x-vbs":                              ".vbs",
+}
+
+// CheckContentType returns the blocked extension if the response Content-Type
+// header matches a dangerous MIME type whose associated extension is in the
+// block list. This prevents bypass by renaming files (e.g. malware.exe → malware.txt).
+// The contentType parameter should be the raw Content-Type header value
+// (e.g. "application/x-msdownload; charset=utf-8").
+func (fb *FileBlocker) CheckContentType(contentType string) string {
+	if contentType == "" {
+		return ""
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return ""
+	}
+	ext, ok := blockedMIMETypes[mediaType]
+	if !ok {
+		return ""
+	}
+	fb.mu.RLock()
+	defer fb.mu.RUnlock()
+	if fb.extensions[ext] {
+		return ext
+	}
+	return ""
+}
+
 // CheckContentDisposition returns the blocked extension if the
 // Content-Disposition response header carries a filename with a blocked
 // extension (catches downloads that use a generic URL but declare the real

@@ -258,7 +258,7 @@ func TestConfig_TOTPOperations(t *testing.T) {
 	c := newTestConfig()
 
 	// Setup: create a test user.
-	if err := c.SetUIUser("totp_user", "password", RoleAdmin); err != nil {
+	if err := c.SetUIUser("totp_user", "Passw0rd", RoleAdmin); err != nil {
 		t.Fatalf("SetUIUser: %v", err)
 	}
 
@@ -310,7 +310,7 @@ func TestConfig_TOTPOperations(t *testing.T) {
 
 func TestConfig_ConsumeBackupCode(t *testing.T) {
 	c := newTestConfig()
-	if err := c.SetUIUser("backup_user", "pass", RoleAdmin); err != nil {
+	if err := c.SetUIUser("backup_user", "Passw0rd", RoleAdmin); err != nil {
 		t.Fatalf("SetUIUser: %v", err)
 	}
 

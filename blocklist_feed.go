@@ -7,6 +7,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -44,7 +45,7 @@ func newBlocklistSyncer(bl *Blocklist, feedURL string, interval time.Duration) *
 // startup, then repeats every configured interval.
 func (bs *BlocklistSyncer) Start(ctx context.Context) {
 	go func() {
-		bs.Sync()
+		_, _ = bs.Sync()
 		for {
 			d := bs.interval.Load().(time.Duration)
 			if d <= 0 {
@@ -60,23 +61,24 @@ func (bs *BlocklistSyncer) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-time.After(d):
-				bs.Sync()
+				_, _ = bs.Sync()
 			}
 		}
 	}()
 }
 
 // Sync fetches the feed URL and merges new domains into the blocklist.
-func (bs *BlocklistSyncer) Sync() {
+// Returns the number of new domains added and any error encountered.
+func (bs *BlocklistSyncer) Sync() (int, error) {
 	url := bs.feedURL.Load().(string)
 	if url == "" {
-		return
+		return 0, nil
 	}
 	client := &http.Client{Timeout: blFeedHTTPTimeout}
 	resp, err := client.Get(url) // #nosec G107 -- URL is operator-configured
 	if err != nil {
 		logger.Printf("BlocklistFeed: fetch %s failed: %v", url, err)
-		return
+		return 0, fmt.Errorf("fetch %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
@@ -90,13 +92,14 @@ func (bs *BlocklistSyncer) Sync() {
 	}
 	if err := scanner.Err(); err != nil {
 		logger.Printf("BlocklistFeed: read error from %s: %v", url, err)
-		return
+		return 0, fmt.Errorf("read %s: %w", url, err)
 	}
 
 	added := bs.bl.MergeFromLines(lines)
 	bs.importedCount.Add(int64(added))
 	bs.lastSync.Store(time.Now())
 	logger.Printf("BlocklistFeed: synced %s — added %d new entries", url, added)
+	return added, nil
 }
 
 // SetFeed updates the feed URL and sync interval at runtime.

@@ -76,6 +76,52 @@ func TestFileBlocker_CheckContentDisposition(t *testing.T) {
 	}
 }
 
+func TestFileBlocker_CheckContentType(t *testing.T) {
+	fb := freshFB()
+	fb.Add(".exe")
+	fb.Add(".msi")
+
+	cases := []struct {
+		ct      string
+		blocked bool
+		ext     string
+	}{
+		// Exact dangerous MIME — should block
+		{"application/x-msdownload", true, ".exe"},
+		{"application/x-dosexec", true, ".exe"},
+		{"application/vnd.microsoft.portable-executable", true, ".exe"},
+		{"application/x-msi", true, ".msi"},
+
+		// MIME with parameters — should still block
+		{"application/x-msdownload; charset=utf-8", true, ".exe"},
+		{"application/x-msi; name=setup.msi", true, ".msi"},
+
+		// Dangerous MIME but extension not in block list
+		{"application/x-powershell", false, ""},
+		{"application/x-bat", false, ""},
+
+		// Safe MIME types — should not block
+		{"text/html", false, ""},
+		{"application/json", false, ""},
+		{"image/png", false, ""},
+		{"application/pdf", false, ""},
+
+		// Empty / invalid
+		{"", false, ""},
+		{";;;invalid", false, ""},
+	}
+	for _, c := range cases {
+		got := fb.CheckContentType(c.ct)
+		if c.blocked && got == "" {
+			t.Errorf("CheckContentType(%q) expected block (ext=%s), got allowed", c.ct, c.ext)
+		} else if !c.blocked && got != "" {
+			t.Errorf("CheckContentType(%q) expected allowed, got blocked (ext=%s)", c.ct, got)
+		} else if c.blocked && got != c.ext {
+			t.Errorf("CheckContentType(%q) expected ext=%s, got %s", c.ct, c.ext, got)
+		}
+	}
+}
+
 func TestFileBlocker_List(t *testing.T) {
 	fb := freshFB()
 	fb.Add(".exe")

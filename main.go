@@ -82,6 +82,8 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	policyFile := flag.String("policy", "", "Policy rules JSON file path")
 	caPath := flag.String("ca-path", "", "Path to persist encrypted Root CA bundle (optional)")
 	auditLog := flag.String("audit-log", "", "Persistent audit log file path (JSONL, appended)")
+	requestLogPath := flag.String("request-log", "", "Persistent request log file path (JSONL, rotated)")
+	requestLogMaxMB := flag.Int("request-log-max-mb", 100, "Request log rotation size in MB")
 	syslogAddr := flag.String("syslog", "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
 	syslogFormat := flag.String("syslog-format", "", "Syslog message format: rfc3164 (default) or rfc5424")
 	otlpEndpoint := flag.String("otlp-endpoint", "", "OTLP/HTTP endpoint for metrics export (e.g. http://otel-collector:4318)")
@@ -261,6 +263,17 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			logger.Printf("Audit: log file error (%v) — falling back to in-memory", err)
 		} else {
 			logger.Printf("Audit: persisting to %s", auditLogVal)
+		}
+	}
+
+	// ── Persistent request log (Finding 6.1) ────────────────────────────────
+	reqLogVal := firstStr(*requestLogPath, fc.RequestLogFile)
+	reqLogMB := firstNonZero(*requestLogMaxMB, fc.RequestLogMaxMB, 100)
+	if reqLogVal != "" {
+		if err := initRequestLog(reqLogVal, reqLogMB); err != nil {
+			logger.Printf("RequestLog: file error (%v) — falling back to in-memory only", err)
+		} else {
+			logger.Printf("RequestLog: persisting to %s (max %d MB)", reqLogVal, reqLogMB)
 		}
 	}
 
@@ -810,6 +823,9 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	// ── Bandwidth / QoS ─────────────────────────────────────────────────
 	globalBandwidth = NewBandwidthManager(filepath.Join(dataDir, "bandwidth.json"))
 
+	// ── Hit counter persistence (Finding 2.3) ───────────────────────────
+	startHitCounterPersistence(appLifecycleCtx, filepath.Join(dataDir, "hit_counters.json"))
+
 	// ── Web UI ────────────────────────────────────────────────────────────
 	uiCfgGeoIPDB = geoDBVal
 	uiCfgLogFile = lPath
@@ -938,6 +954,9 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		if err := communityDB.Close(); err != nil {
 			logger.Printf("CatFeedDB: close error: %v", err)
 		}
+	}
+	if requestLogCloser != nil {
+		requestLogCloser.Close() //nolint:errcheck // best-effort flush on shutdown
 	}
 	if logCloser != nil {
 		logCloser.Close()

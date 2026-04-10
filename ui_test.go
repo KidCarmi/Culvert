@@ -335,7 +335,7 @@ func TestAPIAuthUsers_Create(t *testing.T) {
 	w := httptest.NewRecorder()
 	apiAuthUsers(w, jsonReq(http.MethodPost, "/api/auth/users", map[string]string{
 		"username": "testoperator",
-		"password": "operatorpass123",
+		"password": "Operator1pass",
 		"role":     "operator",
 	}))
 	assertStatus(t, w, http.StatusOK)
@@ -346,7 +346,7 @@ func TestAPIAuthUsers_Create(t *testing.T) {
 func TestAPIAuthUsers_Create_BadRole(t *testing.T) {
 	w := httptest.NewRecorder()
 	apiAuthUsers(w, jsonReq(http.MethodPost, "/api/auth/users", map[string]string{
-		"username": "u", "password": "longpass123", "role": "superuser",
+		"username": "u", "password": "LongPass1", "role": "superuser",
 	}))
 	assertStatus(t, w, http.StatusBadRequest)
 }

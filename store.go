@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"unicode"
+
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -132,19 +134,53 @@ func levelForStatus(status string) string {
 	}
 }
 
-const maxLogs = 1000
+const maxLogs = 5000
 
 var (
 	logsMu sync.Mutex
 	logs   []LogEntry
 )
 
+// ─── Persistent JSONL request log ────────────────────────────────────────────
+
+var (
+	requestLogWriter io.Writer // *rotatingFile; nil = file persistence disabled
+	requestLogCloser io.Closer
+)
+
+// initRequestLog opens a rotating JSONL file for persistent request logging.
+// Each LogEntry is appended as a single JSON line. The file rotates at maxMB.
+// If path is empty this is a no-op (backwards-compatible).
+func initRequestLog(path string, maxMB int) error {
+	if path == "" {
+		return nil
+	}
+	if maxMB <= 0 {
+		maxMB = 100
+	}
+	rf, err := newRotatingFile(path, maxMB)
+	if err != nil {
+		return fmt.Errorf("request log open %s: %w", path, err)
+	}
+	requestLogWriter = rf
+	requestLogCloser = rf
+	return nil
+}
+
 func logAdd(e LogEntry) {
 	logsMu.Lock()
-	defer logsMu.Unlock()
 	logs = append(logs, e)
 	if len(logs) > maxLogs {
 		logs = logs[len(logs)-maxLogs:]
+	}
+	logsMu.Unlock()
+
+	// Persist to JSONL file (outside the lock to avoid blocking callers).
+	if w := requestLogWriter; w != nil {
+		if b, err := json.Marshal(e); err == nil {
+			b = append(b, '\n')
+			w.Write(b) //nolint:errcheck -- best-effort file write
+		}
 	}
 }
 
@@ -1088,6 +1124,29 @@ func (c *Config) SetUnauthMode(enabled bool) {
 
 // ─── UI multi-user admin management ──────────────────────────────────────────
 
+// validatePasswordComplexity enforces minimum password strength:
+// at least 8 characters, one uppercase letter, one lowercase letter, one digit.
+func validatePasswordComplexity(password string) error {
+	if len(password) < 8 {
+		return fmt.Errorf("password must be at least 8 characters")
+	}
+	var hasUpper, hasLower, hasDigit bool
+	for _, ch := range password {
+		switch {
+		case unicode.IsUpper(ch):
+			hasUpper = true
+		case unicode.IsLower(ch):
+			hasLower = true
+		case unicode.IsDigit(ch):
+			hasDigit = true
+		}
+	}
+	if !hasUpper || !hasLower || !hasDigit {
+		return fmt.Errorf("password must contain at least one uppercase letter, one lowercase letter, and one digit")
+	}
+	return nil
+}
+
 // SetUIUser creates or updates an admin UI user with the given role.
 // Call with empty password to update only the role (password unchanged).
 func (c *Config) SetUIUser(username, password string, role UIRole) error {
@@ -1098,6 +1157,9 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 	}
 	existing := c.uiUsers[username]
 	if password != "" {
+		if err := validatePasswordComplexity(password); err != nil {
+			return err
+		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 		if err != nil {
 			return err
@@ -1414,7 +1476,7 @@ func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, iden
 	if status == "OK" || status == "POLICY_ALLOW" {
 		topHosts.Record(host)
 	}
-	logAdd(LogEntry{
+	entry := LogEntry{
 		TS:          time.Now().UnixMilli(),
 		Time:        time.Now().Format("15:04:05"),
 		IP:          ip,
@@ -1428,7 +1490,12 @@ func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, iden
 		BytesSent:   bytesSent,
 		BytesRecv:   bytesRecv,
 		SSLAction:   sslAction,
-	})
+	}
+	logAdd(entry)
+	// Forward request log entry to syslog/SIEM if configured (Finding 17.2).
+	if globalSyslog != nil {
+		globalSyslog.WriteRequest(entry)
+	}
 }
 
 // ─── Top hosts ────────────────────────────────────────────────────────────────

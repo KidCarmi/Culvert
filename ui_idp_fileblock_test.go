@@ -20,17 +20,17 @@ func TestAPIAuthStatus_Get_AuthDisabled(t *testing.T) {
 
 func TestAPIAuthStatus_BasicAuth_Valid(t *testing.T) {
 	// Set up a UI user for basic-auth test
-	_ = cfg.SetUIUser("teststatuser", "testpass999", RoleAdmin)
+	_ = cfg.SetUIUser("teststatuser", "TestPass9", RoleAdmin)
 	defer cfg.DeleteUIUser("teststatuser") //nolint:errcheck // test teardown; cleanup errors are non-actionable
 
 	// Enable auth so the basic-auth branch is reached
-	_ = cfg.SetAuth("teststatuser", "testpass999")
+	_ = cfg.SetAuth("teststatuser", "TestPass9")
 	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
-	r.SetBasicAuth("teststatuser", "testpass999")
+	r.SetBasicAuth("teststatuser", "TestPass9")
 	apiAuthStatus(w, r)
 	assertStatus(t, w, http.StatusOK)
 }
