@@ -605,9 +605,14 @@ func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newI
 			}
 
 			stopTimeout := 10
-			cli.ContainerStop(ctx, containerName, container.StopOptions{Timeout: &stopTimeout}) //nolint:errcheck
-			cli.ContainerRemove(ctx, containerName, container.RemoveOptions{Force: true})       //nolint:errcheck
-			cli.ContainerRename(ctx, rollbackName, containerName)                               //nolint:errcheck
+			cli.ContainerStop(ctx, containerName, container.StopOptions{Timeout: &stopTimeout}) //nolint:errcheck — may already be stopped
+			if err := cli.ContainerRemove(ctx, containerName, container.RemoveOptions{Force: true}); err != nil {
+				log.Printf("soak monitor: remove %s failed: %v", containerName, err)
+			}
+			if err := cli.ContainerRename(ctx, rollbackName, containerName); err != nil {
+				log.Printf("soak monitor: rename %s → %s failed: %v — cannot auto-rollback", rollbackName, containerName, err)
+				return
+			}
 
 			if err := cli.ContainerStart(ctx, containerName, container.StartOptions{}); err != nil {
 				log.Printf("soak monitor: auto-rollback start failed: %v", err)
@@ -668,15 +673,27 @@ func handleRollback(cli *client.Client) http.HandlerFunc {
 			return
 		}
 
-		// U13: Use request context with a generous timeout for the rollback.
-		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		// Use background context — rollback must complete even if the HTTP
+		// client disconnects (browser tab close, SSE drop, etc.).
+		// Previously used r.Context() which cancelled Docker ops on disconnect.
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 
 		// Stop current, remove, rename rollback, start.
+		// Each step is checked — partial failure leaves the system in an
+		// inconsistent state (container name mismatch), so bail early.
 		stopTimeout := 30
-		cli.ContainerStop(ctx, req.Container, container.StopOptions{Timeout: &stopTimeout}) //nolint:errcheck
-		cli.ContainerRemove(ctx, req.Container, container.RemoveOptions{Force: true})       //nolint:errcheck
-		cli.ContainerRename(ctx, rbName, req.Container)                                     //nolint:errcheck
+		cli.ContainerStop(ctx, req.Container, container.StopOptions{Timeout: &stopTimeout}) //nolint:errcheck — may already be stopped
+		if err := cli.ContainerRemove(ctx, req.Container, container.RemoveOptions{Force: true}); err != nil {
+			log.Printf("rollback: remove %s failed: %v (trying rename anyway)", req.Container, err)
+		}
+		if err := cli.ContainerRename(ctx, rbName, req.Container); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": fmt.Sprintf("rollback rename failed: %v — manual recovery: docker rename %s %s && docker start %s",
+					err, rbName, req.Container, req.Container),
+			})
+			return
+		}
 
 		if err := cli.ContainerStart(ctx, req.Container, container.StartOptions{}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "rollback start failed: " + err.Error()})
