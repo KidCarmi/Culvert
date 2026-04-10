@@ -154,6 +154,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 ### One-Line Install (recommended)
 
 Works on Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Amazon Linux, and Arch.
+Runs anywhere Linux runs: AWS EC2, Azure VM, GCP Compute, DigitalOcean, Hetzner, bare metal.
 Installs Docker, clones the repo, builds and starts everything:
 
 ```bash

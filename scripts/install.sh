@@ -19,6 +19,10 @@
 #   Ubuntu 20.04+, Debian 11+, RHEL/CentOS/Rocky/Alma 8+, Fedora 38+,
 #   Amazon Linux 2023+, Arch Linux
 #
+# Cloud platforms (all use standard distros, fully supported):
+#   AWS EC2, Azure VM, GCP Compute Engine, Oracle Cloud, DigitalOcean,
+#   Linode/Akamai, Hetzner, Vultr, OVH
+#
 # Requirements: sudo access, internet connection
 
 set -euo pipefail
@@ -124,6 +128,13 @@ if command -v snap &>/dev/null && snap list docker 2>/dev/null | grep -q docker;
   info "Removing snap Docker (known to cause permission issues)..."
   sudo snap remove docker 2>/dev/null || true
   hash -r
+fi
+
+# Cloud VM pre-installed Docker cleanup
+# Azure, GCP, and some AWS AMIs ship with outdated Docker or Moby packages.
+if dpkg -l moby-engine 2>/dev/null | grep -q "^ii"; then
+  info "Removing Azure-provided Moby engine (replacing with Docker CE)..."
+  sudo apt-get remove -y moby-engine moby-cli moby-containerd moby-runc moby-compose 2>/dev/null || true
 fi
 
 case "$DISTRO_FAMILY" in
