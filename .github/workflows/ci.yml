@@ -161,7 +161,7 @@ jobs:
         run: |
           VER="${{ steps.next-ver.outputs.version }}"
           VER_BARE="${{ steps.next-ver.outputs.version_bare }}"
-          IMAGE="ghcr.io/${{ github.repository }}"
+          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           echo "Tagging image with ${VER} and ${VER_BARE}"
           docker buildx imagetools create \
             --tag "${IMAGE}:${VER}" \
