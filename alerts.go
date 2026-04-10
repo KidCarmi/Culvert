@@ -89,15 +89,57 @@ type AlertPayload struct {
 	Source    string `json:"source"` // "clamav","yara","threatfeed","policy","auth"
 }
 
+// ── Delivery History (Finding 8.1) ────────────────────────────────────────────
+
+// AlertDelivery records a single webhook delivery attempt.
+type AlertDelivery struct {
+	Timestamp   string `json:"timestamp"`
+	WebhookID   string `json:"webhookId"`
+	WebhookName string `json:"webhookName"`
+	Event       string `json:"event"`
+	StatusCode  int    `json:"statusCode,omitempty"` // 0 if delivery failed before HTTP
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
+	Attempt     int    `json:"attempt"` // 1-based
+}
+
+const maxDeliveryHistory = 200
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 type AlertStore struct {
 	mu       sync.RWMutex
 	hooks    []AlertWebhook
 	filePath string
+
+	histMu  sync.Mutex
+	history []AlertDelivery // ring buffer, newest last
 }
 
 var globalAlertStore = &AlertStore{}
+
+// RecordDelivery appends a delivery record to the in-memory history ring.
+func (as *AlertStore) RecordDelivery(d AlertDelivery) {
+	as.histMu.Lock()
+	as.history = append(as.history, d)
+	if len(as.history) > maxDeliveryHistory {
+		as.history = as.history[len(as.history)-maxDeliveryHistory:]
+	}
+	as.histMu.Unlock()
+}
+
+// DeliveryHistory returns the most recent delivery records (newest first).
+func (as *AlertStore) DeliveryHistory() []AlertDelivery {
+	as.histMu.Lock()
+	cp := make([]AlertDelivery, len(as.history))
+	copy(cp, as.history)
+	as.histMu.Unlock()
+	// Reverse so newest is first.
+	for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
+		cp[i], cp[j] = cp[j], cp[i]
+	}
+	return cp
+}
 
 func (as *AlertStore) Init(path string) {
 	as.filePath = path
@@ -264,14 +306,31 @@ func fireAlert(event string, payload AlertPayload) {
 var validWebhookURL = regexp.MustCompile(`^https?://[^/]`)
 
 func deliverWebhook(h AlertWebhook, payload AlertPayload) bool {
+	return deliverWebhookAttempt(h, payload, 1)
+}
+
+// deliverWebhookAttempt performs the actual HTTP POST and records the result.
+func deliverWebhookAttempt(h AlertWebhook, payload AlertPayload, attempt int) bool {
+	record := AlertDelivery{
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		WebhookID:   h.ID,
+		WebhookName: h.Name,
+		Event:       payload.Event,
+		Attempt:     attempt,
+	}
+
 	body, err := json.Marshal(payload)
 	if err != nil {
+		record.Error = "json marshal: " + err.Error()
+		globalAlertStore.RecordDelivery(record)
 		return false
 	}
 	// Regexp barrier: CodeQL recognises Regexp.MatchString as an SSRF
 	// sanitiser, breaking the taint chain on h.URL.
 	if !validWebhookURL.MatchString(h.URL) {
 		logger.Printf("Alert webhook %q: invalid URL, skipping delivery", sanitizeLog(h.Name))
+		record.Error = "invalid URL"
+		globalAlertStore.RecordDelivery(record)
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -279,6 +338,8 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
 		logger.Printf("Alert webhook %q: build request error: %v", sanitizeLog(h.Name), err)
+		record.Error = err.Error()
+		globalAlertStore.RecordDelivery(record)
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -297,13 +358,20 @@ func deliverWebhook(h AlertWebhook, payload AlertPayload) bool {
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.Printf("Alert webhook %q: delivery error: %v", h.Name, err)
+		record.Error = err.Error()
+		globalAlertStore.RecordDelivery(record)
 		return false
 	}
 	resp.Body.Close()
+	record.StatusCode = resp.StatusCode
 	if resp.StatusCode >= 400 {
 		logger.Printf("Alert webhook %q: non-2xx response %d", h.Name, resp.StatusCode)
+		record.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		globalAlertStore.RecordDelivery(record)
 		return false
 	}
+	record.Success = true
+	globalAlertStore.RecordDelivery(record)
 	return true
 }
 
