@@ -152,6 +152,22 @@ jobs:
           provenance: true
           sbom: true
 
+      # ── Apply semver tags explicitly ──────────────────────────────────────
+      # The metadata-action raw tags with enable= can silently fail to apply.
+      # This step guarantees the computed semver tag (e.g. v0.0.18) is applied
+      # to the image that was just pushed.
+      - name: Apply version tag
+        if: steps.next-ver.outputs.version != '' && github.event_name != 'pull_request'
+        run: |
+          VER="${{ steps.next-ver.outputs.version }}"
+          VER_BARE="${{ steps.next-ver.outputs.version_bare }}"
+          IMAGE="ghcr.io/${{ github.repository }}"
+          echo "Tagging image with ${VER} and ${VER_BARE}"
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VER}" \
+            --tag "${IMAGE}:${VER_BARE}" \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
+
       # ── Sign the published image with cosign (keyless) ────────────────────
       # Only runs when the image was actually pushed (not PRs).
       - name: Install cosign
