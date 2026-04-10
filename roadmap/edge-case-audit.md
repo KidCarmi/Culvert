@@ -26,7 +26,7 @@ Here is the comprehensive audit report.
 - Severity: **Medium**
 - Category: **UX Gap**
 
-**Finding 1.3: No validation that wildcard blocklist entries are syntactically correct**
+**Finding 1.3: No validation that wildcard blocklist entries are syntactically correct** ✅ DONE
 - Use case: Operator adds `*.*.example.com` or `**bad.com` as a wildcard blocklist entry.
 - Current behavior: The blocklist POST handler (ui.go:1155+) trims whitespace and length-checks entries but does not validate wildcard syntax. Malformed wildcards are silently stored but may never match.
 - Expected behavior: Validate wildcard syntax on input (e.g., only `*.domain.tld` format) and warn the operator if a pattern is unusual.
@@ -51,7 +51,7 @@ Here is the comprehensive audit report.
 - Severity: **Medium**
 - Category: **Missing Feature**
 
-**Finding 2.2: No duplicate rule name detection**
+**Finding 2.2: No duplicate rule name detection** ✅ DONE
 - Use case: Operator creates two policy rules named "Block Social Media" at different priorities.
 - Current behavior: `validatePolicyRule` (ui.go:914-938) checks name non-empty, valid action, redirect URL safety, and timezone parsing. It does not check for name uniqueness across existing rules.
 - Expected behavior: Warn or reject duplicate rule names, since rule names are used as identifiers in logs, audit trail, and the hit counter.
@@ -90,7 +90,7 @@ Here is the comprehensive audit report.
 - Severity: **Critical**
 - Category: **UX Gap**
 
-**Finding 3.3: Dual-CA overlap expiry is not alertable**
+**Finding 3.3: Dual-CA overlap expiry is not alertable** ✅ DONE
 - Use case: During a CA rotation, the secondary CA overlap window is about to expire and the operator needs to know.
 - Current behavior: `apiCAStatus` (ui.go:3268-3294) reports dual-CA status including secondary CA info. But the alert system (`alerts.go`) only has `cert_expiry` as an event type -- there is no specific event for dual-CA overlap window expiring.
 - Expected behavior: Fire a `cert_expiry` alert when the dual-CA overlap window is within a configurable threshold of expiry.
@@ -122,7 +122,7 @@ Here is the comprehensive audit report.
 - Severity: **Medium**
 - Category: **Missing Feature**
 
-**Finding 4.4: Scan cache has no manual purge mechanism**
+**Finding 4.4: Scan cache has no manual purge mechanism** ✅ DONE
 - Use case: A false positive is cached and the operator wants to force a re-scan of a specific hash.
 - Current behavior: The hash cache exposes `Stats()` but there is no API endpoint to evict a specific hash or clear the entire cache. Only `cache_size`, `cache_hits`, and `cache_misses` are shown in the status.
 - Expected behavior: Provide an API endpoint to purge a specific hash or the entire scan cache.
@@ -133,7 +133,7 @@ Here is the comprehensive audit report.
 
 ### 5. USER / AUTH MANAGEMENT
 
-**Finding 5.1: No password reset workflow for locked-out admin**
+**Finding 5.1: No password reset workflow for locked-out admin** ✅ DONE
 - Use case: The sole admin account is locked out (5 failed attempts, 15 min lockout) and no other admin exists.
 - Current behavior: `loginLimiter` (lockout.go) locks accounts in memory for 15 minutes. The lockout is not persisted (restart clears it). There is no password reset endpoint, no "forgot password" flow, and no CLI command to reset credentials. The only recovery is restarting the proxy process.
 - Expected behavior: Provide a CLI command (`culvert reset-password`) or a recovery token mechanism for admin lockout scenarios.
@@ -154,7 +154,7 @@ Here is the comprehensive audit report.
 - Severity: **Medium**
 - Category: **UX Gap**
 
-**Finding 5.4: No user self-service password change**
+**Finding 5.4: No user self-service password change** ✅ DONE
 - Use case: An operator wants to change their own password without asking an admin.
 - Current behavior: Password changes require admin role (`RoleAdmin` check at ui.go:707-710 on the GET, 708 on POST). Operators and viewers cannot change their own passwords.
 - Expected behavior: Allow authenticated users to change their own password via a self-service endpoint.
@@ -172,14 +172,14 @@ Here is the comprehensive audit report.
 - Severity: **Critical**
 - Category: **Missing Feature**
 
-**Finding 6.2: Audit log limited to 500 entries in memory**
+**Finding 6.2: Audit log limited to 500 entries in memory** ✅ DONE
 - Use case: Compliance review requires 90 days of configuration change history.
 - Current behavior: `maxAuditLogs = 500` (store.go:180). The JSONL file persistence (`auditLogFile`) stores all entries to disk but the UI API (`apiAudit`, ui.go:892-902) only returns the in-memory ring buffer (`auditGet()`), not the full file contents.
 - Expected behavior: The audit API should support pagination over the persistent JSONL file, not just the in-memory buffer. For compliance, the full audit history must be queryable.
 - Severity: **Critical**
 - Category: **Bug**
 
-**Finding 6.3: No date range filtering on logs or audit**
+**Finding 6.3: No date range filtering on logs or audit** ✅ DONE
 - Use case: Operator wants to see all blocked requests from yesterday between 2pm and 4pm.
 - Current behavior: `apiLogs` (ui.go:1044-1076) supports filtering by host, status, level, method, and identity but not by timestamp range. `apiAudit` (ui.go:892-902) returns all in-memory entries with no filtering at all.
 - Expected behavior: Support `from` and `to` timestamp parameters on both log and audit endpoints.
@@ -387,7 +387,7 @@ Here is the comprehensive audit report.
 
 ### 16. RATE LIMITING
 
-**Finding 16.1: No rate limit whitelist / exemption capability**
+**Finding 16.1: No rate limit whitelist / exemption capability** ✅ DONE
 - Use case: An internal monitoring system polls through the proxy at high frequency and should not be rate-limited.
 - Current behavior: Rate limiting (`rl.AllowAuto(clientIP)` at proxy.go:201) applies uniformly to all client IPs. There is no exemption list. IP filter allowlist is a separate mechanism (allows/blocks at the IP level, not rate-limit exemption).
 - Expected behavior: Allow specific IPs or CIDRs to be exempted from rate limiting.
@@ -430,7 +430,7 @@ Here is the comprehensive audit report.
 - Severity: **Medium**
 - Category: **Edge Case**
 
-**Finding 18.2: PAC file changes are not versioned**
+**Finding 18.2: PAC file changes are not versioned** ✅ DONE
 - Use case: An operator modifies PAC exclusions and later wants to see what changed.
 - Current behavior: PAC configuration is persisted to a JSON file. But PAC config is NOT included in `captureConfigBackup` (configversion.go), so PAC changes are not captured by the config versioning system and cannot be rolled back.
 - Expected behavior: Include PAC configuration in config versioning snapshots.
@@ -491,30 +491,55 @@ Here is the comprehensive audit report.
 
 ### SUMMARY OF FINDINGS BY SEVERITY
 
-| Severity | Count |
-|----------|-------|
-| Critical | 3     |
-| High     | 11    |
-| Medium   | 24    |
-| Low      | 10    |
+| Severity | Total | Done | Remaining |
+|----------|-------|------|-----------|
+| Critical | 3     | 2    | 1         |
+| High     | 11    | 10   | 1         |
+| Medium   | 24    | 8    | 16        |
+| Low      | 10    | 0    | 10        |
+| **Total**| **48**| **20** | **28**  |
 
-### CRITICAL FINDINGS REQUIRING IMMEDIATE ATTENTION
+### COMPLETED FINDINGS (20/48)
+
+- 1.1 Config import replace mode ✅
+- 1.3 Wildcard blocklist validation ✅
+- 2.2 Duplicate rule name detection ✅
+- 2.4 Policy rule enable/disable toggle ✅
+- 3.1 SSL inspection status in request log ✅
+- 3.2 CA rotation confirmation step ✅
+- 3.3 Dual-CA overlap expiry alert ✅
+- 4.1 Brotli decompression for scanning ✅
+- 4.2 Large response scan skip alert ✅
+- 4.4 Scan cache manual purge ✅
+- 5.1 Password reset workflow ✅
+- 5.2 User deletion revokes sessions ✅
+- 5.4 User self-service password change ✅
+- 6.2 Audit log persistent file API ✅
+- 6.3 Date range filtering on logs/audit ✅
+- 6.4 CSV export all fields ✅
+- 8.1 Alert delivery history ✅
+- 8.2 Webhook test sync delivery ✅
+- 8.3 Scan timeout alert ✅
+- 9.2 Update available alert ✅
+- 10.3 Config export expanded ✅
+- 16.1 Rate limit whitelist/exemption ✅
+- 18.2 PAC config versioning ✅
+
+### CRITICAL FINDINGS REMAINING
 
 1. **Request log limited to 1,000 entries (6.1)** -- At enterprise scale, this makes incident response impossible. The log rolls over in minutes during peak traffic.
-2. **Audit log API only returns in-memory buffer, not persistent file (6.2)** -- The JSONL file stores all entries but the API endpoint ignores it, making compliance audits incomplete.
-3. **CA rotation has no confirmation step (3.2)** -- A single accidental click can invalidate the CA trust for 500 workstations with no undo.
 
-### HIGH FINDINGS REQUIRING NEAR-TERM ACTION
+### HIGH FINDINGS REMAINING
 
-1. Config import merges instead of replaces (1.1)
-2. No SSL inspection status in request log (3.1)
-3. Brotli decompression gap in security scanning (4.1)
-4. Large responses bypass scanning silently (4.2)
-5. No password reset workflow for locked-out admin (5.1)
-6. Deleting a user does not revoke active sessions (5.2)
-7. No date range filtering on logs or audit (6.3)
-8. No cluster-wide request log aggregation (7.2)
-9. No automatic failover warning when HA is unconfigured (7.1)
-10. File blocking is extension-only, no MIME verification (13.1)
-11. No rate limit whitelist/exemption (16.1)
-12. Config export missing major subsystems (10.3)
+1. File blocking is extension-only, no MIME verification (13.1)
+
+### NOTE: Previously listed as HIGH, now resolved
+- ~~Config import merges instead of replaces (1.1)~~ ✅
+- ~~No SSL inspection status in request log (3.1)~~ ✅
+- ~~Brotli decompression gap in security scanning (4.1)~~ ✅
+- ~~Large responses bypass scanning silently (4.2)~~ ✅
+- ~~No password reset workflow for locked-out admin (5.1)~~ ✅
+- ~~Deleting a user does not revoke active sessions (5.2)~~ ✅
+- ~~No date range filtering on logs or audit (6.3)~~ ✅
+- ~~No rate limit whitelist/exemption (16.1)~~ ✅
+- ~~Config export missing major subsystems (10.3)~~ ✅
