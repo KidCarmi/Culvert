@@ -376,6 +376,16 @@ func checkUpdateNow() {
 		}
 	}
 
+	// Correct stale registry display: if the Docker registry's highest semver
+	// tag is older than what we're currently running (e.g. registry has v0.0.15
+	// but we're on v0.0.19 built from source/latest), show current version as
+	// latest so the UI doesn't misleadingly display an ancient version.
+	if !result.UpdateAvailable && cleanVer != "dev" && result.Latest != "" {
+		if semverGreater(cleanVer, cleanSemver(result.Latest)) {
+			result.Latest = cleanVer
+		}
+	}
+
 	globalUpdateInfo.mu.Lock()
 	prevLatest := globalUpdateInfo.latestVersion
 	globalUpdateInfo.latestVersion = result.Latest

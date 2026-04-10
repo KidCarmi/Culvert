@@ -370,6 +370,52 @@ func TestAPIUpdateRollbackStatus_NoUpdater(t *testing.T) {
 	}
 }
 
+func TestStaleRegistryCorrection(t *testing.T) {
+	// Unit-test the stale registry correction logic directly, without network.
+	// Scenario: Docker registry returns v0.0.15, we're running v0.0.19,
+	// and GitHub fallback didn't find anything newer.
+	// The displayed "latest" should be v0.0.19 (current), not v0.0.15.
+	cleanVer := "v0.0.19"
+	registryLatest := "v0.0.15"
+	updateAvailable := false
+
+	// Simulate the correction logic from checkUpdateNow:
+	// "if registry latest < current, show current as latest"
+	if !updateAvailable && cleanVer != "dev" && registryLatest != "" {
+		if semverGreater(cleanVer, cleanSemver(registryLatest)) {
+			registryLatest = cleanVer
+		}
+	}
+
+	if registryLatest != "v0.0.19" {
+		t.Errorf("latest = %q, want v0.0.19 (current version should replace stale registry)", registryLatest)
+	}
+
+	// When registry is current (not stale), it should stay unchanged.
+	registryLatest2 := "v0.0.19"
+	cleanVer2 := "v0.0.19"
+	if !false && cleanVer2 != "dev" && registryLatest2 != "" {
+		if semverGreater(cleanVer2, cleanSemver(registryLatest2)) {
+			registryLatest2 = cleanVer2
+		}
+	}
+	if registryLatest2 != "v0.0.19" {
+		t.Errorf("latest = %q, want v0.0.19 (should stay unchanged when not stale)", registryLatest2)
+	}
+
+	// When registry has a newer version, it should stay unchanged.
+	registryLatest3 := "v0.0.20"
+	cleanVer3 := "v0.0.19"
+	if !false && cleanVer3 != "dev" && registryLatest3 != "" {
+		if semverGreater(cleanVer3, cleanSemver(registryLatest3)) {
+			registryLatest3 = cleanVer3
+		}
+	}
+	if registryLatest3 != "v0.0.20" {
+		t.Errorf("latest = %q, want v0.0.20 (registry newer should stay)", registryLatest3)
+	}
+}
+
 func TestAPIUpdateReports_GETList(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/update/reports", nil)
 	w := httptest.NewRecorder()
