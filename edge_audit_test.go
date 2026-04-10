@@ -1,0 +1,318 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+// ─── Finding 1.1: Blocklist.ClearAll ────────────────────────────────────────
+
+func TestBlocklistClearAll(t *testing.T) {
+	b := &Blocklist{
+		exact:      map[string]bool{"example.com": true, "test.org": true},
+		wildcards:  map[string]bool{".evil.com": true},
+		manual:     map[string]bool{"manual.net": true},
+		exceptions: map[string]bool{"safe.com": true},
+		mode:       "block",
+	}
+	b.ClearAll()
+	if len(b.exact) != 0 {
+		t.Error("exact should be empty after ClearAll")
+	}
+	if len(b.wildcards) != 0 {
+		t.Error("wildcards should be empty after ClearAll")
+	}
+	if len(b.manual) != 0 {
+		t.Error("manual should be empty after ClearAll")
+	}
+	// Exceptions and mode should be preserved.
+	if len(b.exceptions) != 1 {
+		t.Error("exceptions should be preserved after ClearAll")
+	}
+	if b.mode != "block" {
+		t.Error("mode should be preserved after ClearAll")
+	}
+}
+
+// ─── Finding 1.1: FileBlocker.ClearAll ──────────────────────────────────────
+
+func TestFileBlockerClearAll(t *testing.T) {
+	fb := &FileBlocker{extensions: map[string]bool{".exe": true, ".dll": true}}
+	fb.ClearAll()
+	if fb.Count() != 0 {
+		t.Errorf("expected 0 after ClearAll, got %d", fb.Count())
+	}
+}
+
+// ─── Finding 1.1: IPFilter.ClearAll ─────────────────────────────────────────
+
+func TestIPFilterClearAll(t *testing.T) {
+	f := &IPFilter{single: map[string]bool{}}
+	_ = f.Add("10.0.0.1")
+	_ = f.Add("192.168.0.0/16")
+	if len(f.List()) == 0 {
+		t.Fatal("expected entries before ClearAll")
+	}
+	f.ClearAll()
+	if len(f.List()) != 0 {
+		t.Error("expected empty list after ClearAll")
+	}
+}
+
+// ─── Finding 4.4: HashCache.Evict + Clear ───────────────────────────────────
+
+func TestHashCacheEvictAndClear(t *testing.T) {
+	c := newHashCache(100, 5*time.Minute)
+
+	c.Set("abc123", ScanCacheResult{Clean: true})
+	c.Set("def456", ScanCacheResult{Clean: false, Source: "test"})
+
+	// Evict existing.
+	if !c.Evict("abc123") {
+		t.Error("Evict should return true for existing entry")
+	}
+	// Evict non-existing.
+	if c.Evict("nonexistent") {
+		t.Error("Evict should return false for non-existing entry")
+	}
+	// Verify abc123 is gone.
+	if _, ok := c.Get("abc123"); ok {
+		t.Error("abc123 should be evicted")
+	}
+	// def456 should still exist.
+	if _, ok := c.Get("def456"); !ok {
+		t.Error("def456 should still exist")
+	}
+
+	// Clear all.
+	c.Clear()
+	if _, ok := c.Get("def456"); ok {
+		t.Error("def456 should be gone after Clear")
+	}
+	_, _, size := c.Stats()
+	if size != 0 {
+		t.Errorf("cache_size should be 0 after Clear, got %d", size)
+	}
+}
+
+// ─── Finding 16.1: RateLimiter exemption ────────────────────────────────────
+
+func TestRateLimiterExemption(t *testing.T) {
+	r := newRateLimiter()
+	r.Configure(1, time.Minute) // 1 req/min
+
+	// Add exemptions.
+	if err := r.AddExemption("10.0.0.5"); err != nil {
+		t.Fatalf("AddExemption IP: %v", err)
+	}
+	if err := r.AddExemption("192.168.0.0/16"); err != nil {
+		t.Fatalf("AddExemption CIDR: %v", err)
+	}
+
+	// Invalid entry.
+	if err := r.AddExemption("not-an-ip"); err == nil {
+		t.Error("expected error for invalid IP")
+	}
+
+	// Check exemption.
+	if !r.IsExempt("10.0.0.5") {
+		t.Error("10.0.0.5 should be exempt")
+	}
+	if !r.IsExempt("192.168.1.100") {
+		t.Error("192.168.1.100 should be exempt (CIDR match)")
+	}
+	if r.IsExempt("8.8.8.8") {
+		t.Error("8.8.8.8 should not be exempt")
+	}
+	if r.IsExempt("not-an-ip") {
+		t.Error("invalid IP should not be exempt")
+	}
+
+	// Exempt IP should always be allowed even when rate limited.
+	if !r.Allow("10.0.0.5") {
+		t.Error("exempt IP should always be allowed")
+	}
+	if !r.Allow("10.0.0.5") {
+		t.Error("exempt IP should always be allowed (2nd request)")
+	}
+
+	// List exemptions.
+	list := r.ListExemptions()
+	if len(list) != 2 {
+		t.Errorf("expected 2 exemptions, got %d", len(list))
+	}
+
+	// Remove exemption.
+	r.RemoveExemption("10.0.0.5")
+	if r.IsExempt("10.0.0.5") {
+		t.Error("10.0.0.5 should no longer be exempt")
+	}
+	r.RemoveExemption("192.168.0.0/16")
+	if r.IsExempt("192.168.1.100") {
+		t.Error("192.168.1.100 should no longer be exempt")
+	}
+}
+
+// ─── Finding 3.1: SSLAction in LogEntry ─────────────────────────────────────
+
+func TestRecordRequestSSLAction(t *testing.T) {
+	// Clear logs.
+	logsMu.Lock()
+	logs = nil
+	logsMu.Unlock()
+
+	recordRequest("1.2.3.4", "CONNECT", "example.com:443", "OK", "rule1", "allow", "user@test", "inspect")
+
+	entries := logGet()
+	if len(entries) == 0 {
+		t.Fatal("expected at least one log entry")
+	}
+	last := entries[len(entries)-1]
+	if last.SSLAction != "inspect" {
+		t.Errorf("expected SSLAction='inspect', got %q", last.SSLAction)
+	}
+}
+
+// ─── Finding 6.2: auditGetMemory ────────────────────────────────────────────
+
+func TestAuditGetMemory(t *testing.T) {
+	// Seed some audit entries.
+	auditMu.Lock()
+	auditLog = nil
+	auditMu.Unlock()
+
+	now := time.Now().UnixMilli()
+	for i := 0; i < 5; i++ {
+		auditMu.Lock()
+		auditLog = append(auditLog, AuditEntry{
+			TS:     now + int64(i*1000),
+			Time:   time.Now().Format("15:04:05"),
+			Actor:  "admin",
+			Action: "test",
+		})
+		auditMu.Unlock()
+	}
+
+	// No filter.
+	entries, total := auditGetMemory(0, 100, 0, 0)
+	if total != 5 {
+		t.Errorf("expected total=5, got %d", total)
+	}
+	if len(entries) != 5 {
+		t.Errorf("expected 5 entries, got %d", len(entries))
+	}
+
+	// With pagination.
+	entries, total = auditGetMemory(2, 2, 0, 0)
+	if total != 5 {
+		t.Errorf("expected total=5, got %d", total)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected 2 entries, got %d", len(entries))
+	}
+
+	// Offset past end.
+	entries, total = auditGetMemory(10, 5, 0, 0)
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries for offset past end, got %d", len(entries))
+	}
+
+	// With time filter.
+	entries, total = auditGetMemory(0, 100, now+1000, now+3000)
+	if len(entries) == 0 {
+		t.Error("expected some entries with time filter")
+	}
+	for _, e := range entries {
+		if e.TS < now+1000 || e.TS > now+3000 {
+			t.Errorf("entry TS %d outside filter range [%d, %d]", e.TS, now+1000, now+3000)
+		}
+	}
+}
+
+// ─── Finding 4.4: apiScanCache handler ──────────────────────────────────────
+
+func TestAPIScanCache(t *testing.T) {
+	// GET — should return stats or disabled.
+	req := httptest.NewRequest(http.MethodGet, "/api/security-scan/cache", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	rr := httptest.NewRecorder()
+	apiScanCache(rr, req)
+	if rr.Code != 200 {
+		t.Errorf("GET expected 200, got %d", rr.Code)
+	}
+
+	// DELETE without hash — clear all (or return error if scanner not initialized).
+	req = httptest.NewRequest(http.MethodDelete, "/api/security-scan/cache", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	rr = httptest.NewRecorder()
+	apiScanCache(rr, req)
+	// Either 200 (cleared) or 503 (scanner not enabled) is acceptable.
+	if rr.Code != 200 && rr.Code != 503 {
+		t.Errorf("DELETE expected 200 or 503, got %d", rr.Code)
+	}
+
+	// Method not allowed.
+	req = httptest.NewRequest(http.MethodPut, "/api/security-scan/cache", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	rr = httptest.NewRecorder()
+	apiScanCache(rr, req)
+	if rr.Code != 405 {
+		t.Errorf("PUT expected 405, got %d", rr.Code)
+	}
+}
+
+// ─── Finding 1.1: Config import replace mode ────────────────────────────────
+
+func TestConfigImportReplaceMode(t *testing.T) {
+	// Seed some blocklist entries.
+	bl.Add("old-entry.com")
+
+	backup := configBackup{
+		Version:   1,
+		Blocklist: []string{"new-entry.com"},
+	}
+	body, _ := json.Marshal(backup)
+
+	// Import with replace mode.
+	req := httptest.NewRequest(http.MethodPost, "/api/config/import?mode=replace", strings.NewReader(string(body)))
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	rr := httptest.NewRecorder()
+	apiConfigImport(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp["mode"] != "replace" {
+		t.Errorf("expected mode=replace in response, got %v", resp["mode"])
+	}
+
+	// In replace mode, old-entry.com should be gone.
+	entries := bl.List()
+	found := false
+	for _, e := range entries {
+		if e == "old-entry.com" {
+			t.Error("old-entry.com should have been cleared in replace mode")
+		}
+		if e == "new-entry.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("new-entry.com should have been imported")
+	}
+
+	// Clean up.
+	bl.ClearAll()
+}
