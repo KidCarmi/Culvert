@@ -248,7 +248,7 @@ func TestAPIAuthUsers_Post_Create(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/auth/users", map[string]any{
 		"username": "newuser-test",
-		"password": "strongpassword123",
+		"password": "StrongPass1",
 		"role":     "viewer",
 	})
 	r = adminCtx(r)

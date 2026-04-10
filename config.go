@@ -87,6 +87,14 @@ type FileConfig struct {
 	// When empty audit events are kept in-memory only (lost on restart).
 	AuditLogFile string `yaml:"audit_log_file"`
 
+	// RequestLogFile is the path for persistent JSONL request log (Finding 6.1).
+	// When empty, request logs are kept in-memory only (lost on restart).
+	RequestLogFile string `yaml:"request_log_file"`
+
+	// RequestLogMaxMB is the rotation size in MB for the request log file.
+	// Default: 100 MB.
+	RequestLogMaxMB int `yaml:"request_log_max_mb"`
+
 	// SyslogAddr enables forwarding of all log lines and audit events to a
 	// remote syslog server. Format: "udp://host:514" or "tcp://host:601".
 	SyslogAddr string `yaml:"syslog_addr"`

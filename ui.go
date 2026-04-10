@@ -104,6 +104,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/session-secret", apiSessionSecret)    // GET/POST shared signing key
 	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)         // GET/POST UI access IP allowlist
 	mux.HandleFunc("/api/syslog", apiSyslogConfig)             // GET/POST syslog forwarding
+	mux.HandleFunc("/api/syslog/test", apiSyslogTest)          // POST syslog test message
 
 	// ── Security scanning (ClamAV / YARA / Threat Feeds) ─────────────────
 	mux.HandleFunc("/api/security-scan/status", apiSecScanStatus)      // GET
@@ -741,9 +742,11 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
 			return
 		}
-		if body.Password != "" && len(body.Password) < 8 {
-			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
-			return
+		if body.Password != "" {
+			if err := validatePasswordComplexity(body.Password); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		role := UIRole(body.Role)
 		if !role.HasRole(RoleViewer) {
@@ -751,7 +754,7 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := cfg.SetUIUser(body.Username, body.Password, role); err != nil {
-			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if err := cfg.SaveUIUsersFile(); err != nil {
@@ -819,8 +822,8 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "current password is incorrect", http.StatusForbidden)
 		return
 	}
-	if len(body.NewPass) < 8 {
-		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+	if err := validatePasswordComplexity(body.NewPass); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// Preserve existing role when changing password.
@@ -836,7 +839,7 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 		role = RoleAdmin // legacy single-user fallback
 	}
 	if err := cfg.SetUIUser(username, body.NewPass, role); err != nil {
-		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := cfg.SaveUIUsersFile(); err != nil {
@@ -905,9 +908,9 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
 		return
 	}
-	if len(body.Pass) < 8 {
+	if err := validatePasswordComplexity(body.Pass); err != nil {
 		loginLimiter.RecordFailure(setupKey)
-		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := cfg.SetAuth(body.User, body.Pass); err != nil {
@@ -1196,6 +1199,20 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pagination parameters (Finding 6.1).
+	limitVal := 1000
+	if lq := r.URL.Query().Get("limit"); lq != "" {
+		if v, err := strconv.Atoi(lq); err == nil && v > 0 {
+			limitVal = v
+		}
+	}
+	offsetVal := 0
+	if oq := r.URL.Query().Get("offset"); oq != "" {
+		if v, err := strconv.Atoi(oq); err == nil && v >= 0 {
+			offsetVal = v
+		}
+	}
+
 	filtered := all[:0:0]
 	for _, e := range all {
 		if fromTS != 0 && e.TS < fromTS {
@@ -1222,7 +1239,18 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered = append(filtered, e)
 	}
-	jsonOK(w, map[string]any{"logs": filtered, "total": len(filtered)})
+	total := len(filtered)
+	// Apply offset/limit pagination.
+	if offsetVal >= total {
+		filtered = nil
+	} else {
+		end := offsetVal + limitVal
+		if end > total {
+			end = total
+		}
+		filtered = filtered[offsetVal:end]
+	}
+	jsonOK(w, map[string]any{"logs": filtered, "total": total})
 }
 
 // parseTimestampParam parses a timestamp string that is either a Unix timestamp
@@ -1513,7 +1541,7 @@ func apiBlocklistFeed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// POST /api/blocklist/feed/sync → trigger immediate sync
+// POST /api/blocklist/feed/sync → trigger immediate sync (synchronous with result)
 func apiBlocklistFeedSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1522,9 +1550,13 @@ func apiBlocklistFeedSync(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
 		return
 	}
-	go blFeedSyncer.Sync()
+	count, err := blFeedSyncer.Sync()
 	auditEvent(r, "blocklist.feed.sync", "", "")
-	jsonOK(w, map[string]any{"ok": true})
+	if err != nil {
+		http.Error(w, "sync failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true, "domains_synced": count})
 }
 
 // GET /api/blocklist/exceptions        → list all exception hosts
@@ -2349,6 +2381,23 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// POST /api/syslog/test — send a test message to the configured syslog target.
+func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	if globalSyslog == nil {
+		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
+		return
+	}
+	globalSyslog.writeMsg(14, "Culvert syslog test message — connectivity verified")
+	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
+}
+
 // GET/POST /api/security — IP filter + rate limiter config
 func apiSecurity(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -2445,6 +2494,12 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
+		}
+		if body.Pass != "" {
+			if err := validatePasswordComplexity(body.Pass); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		if err := cfg.SetAuth(body.User, body.Pass); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)

@@ -354,8 +354,8 @@ func TestConfig_LoadUIUsersFile_EmptyPath(t *testing.T) {
 
 func TestConfig_DeleteUIUser(t *testing.T) {
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
-	_ = c.SetUIUser("admin1", "pass1", RoleAdmin)
-	_ = c.SetUIUser("admin2", "pass2", RoleAdmin)
+	_ = c.SetUIUser("admin1", "Password1", RoleAdmin)
+	_ = c.SetUIUser("admin2", "Password2", RoleAdmin)
 
 	// Deleting one admin should succeed
 	if err := c.DeleteUIUser("admin2"); err != nil {
@@ -370,7 +370,7 @@ func TestConfig_DeleteUIUser(t *testing.T) {
 
 func TestConfig_SetUIUser_RoleUpdate(t *testing.T) {
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
-	_ = c.SetUIUser("op1", "pass", RoleOperator)
+	_ = c.SetUIUser("op1", "Passw0rd", RoleOperator)
 	// Update role without changing password (empty password string)
 	_ = c.SetUIUser("op1", "", RoleViewer)
 	users := c.ListUIUsers()

@@ -67,7 +67,7 @@ func TestAPISettings_Post(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/settings", map[string]string{
 		"user": "admin",
-		"pass": "strongpassword123",
+		"pass": "StrongPass1",
 	})
 	r = adminCtx(r)
 	apiSettings(w, r)
@@ -169,8 +169,8 @@ func TestAPIPolicy_Add_MissingAction(t *testing.T) {
 
 func TestAPIAuthUsers_Delete_Success(t *testing.T) {
 	// Add two admins so we can delete one
-	_ = cfg.SetUIUser("admin-to-delete", "password123", RoleAdmin)
-	_ = cfg.SetUIUser("admin-keeper", "password456", RoleAdmin)
+	_ = cfg.SetUIUser("admin-to-delete", "Password1", RoleAdmin)
+	_ = cfg.SetUIUser("admin-keeper", "Password2", RoleAdmin)
 	defer func() {
 		cfg.DeleteUIUser("admin-to-delete") //nolint:errcheck // test teardown; cleanup errors are non-actionable
 		cfg.DeleteUIUser("admin-keeper")    //nolint:errcheck // test teardown; cleanup errors are non-actionable

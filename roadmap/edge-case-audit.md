@@ -33,7 +33,7 @@ Here is the comprehensive audit report.
 - Severity: **Low**
 - Category: **Edge Case**
 
-**Finding 1.4: Feed sync result not visible after manual trigger**
+**Finding 1.4: Feed sync result not visible after manual trigger** ✅ DONE
 - Use case: Operator clicks "Sync Now" for the blocklist feed and wants to know if it succeeded.
 - Current behavior: `apiBlocklistFeedSync` (ui.go:1330-1341) fires `go blFeedSyncer.Sync()` asynchronously and immediately returns `{"ok": true}`. There is no mechanism to report sync errors, count of new entries imported, or sync duration back to the UI.
 - Expected behavior: Return sync results (entries imported, errors encountered) either synchronously or via an SSE notification.
@@ -58,7 +58,7 @@ Here is the comprehensive audit report.
 - Severity: **Medium**
 - Category: **Edge Case**
 
-**Finding 2.3: Policy hit counters are not persisted across restarts**
+**Finding 2.3: Policy hit counters are not persisted across restarts** ✅ DONE
 - Use case: Operator reviews policy usage after a proxy restart to identify unused rules for cleanup.
 - Current behavior: `PolicyRule.HitCount` is an in-memory counter incremented by `ruleMet.RecordHit()`. It resets to zero on restart.
 - Expected behavior: Hit counters should be periodically persisted so operators can make data-driven decisions about rule lifecycle.
@@ -147,7 +147,7 @@ Here is the comprehensive audit report.
 - Severity: **High**
 - Category: **Bug**
 
-**Finding 5.3: No password complexity requirements beyond minimum length**
+**Finding 5.3: No password complexity requirements beyond minimum length** ✅ DONE
 - Use case: An admin sets a user's password to "12345678" (8 chars, meeting the minimum).
 - Current behavior: `apiAuthUsers` POST (ui.go:725-726) checks `len(body.Password) < 8` only. No uppercase, lowercase, digit, or special character requirements.
 - Expected behavior: Enforce configurable password complexity (at a minimum: mixed case + digit) or integrate with a well-known strength estimator.
@@ -165,7 +165,7 @@ Here is the comprehensive audit report.
 
 ### 6. LOGS AND AUDIT
 
-**Finding 6.1: Request log limited to 1,000 entries in memory with no persistent search**
+**Finding 6.1: Request log limited to 1,000 entries in memory with no persistent search** ✅ DONE
 - Use case: Investigating a security incident that happened 3 hours ago on a busy proxy serving 500 users.
 - Current behavior: `maxLogs = 1000` (store.go:133). At high traffic (e.g., 100 req/min), the log buffer rolls over in ~10 minutes. There is no persistent request log storage or external search integration. The `/api/export` endpoint exports only what is currently in the ring buffer.
 - Expected behavior: For a 500-user deployment, provide persistent request log storage with configurable retention and searchable history (e.g., SQLite or log file with indexing). Alternatively, ensure syslog integration captures request-level detail.
@@ -290,7 +290,7 @@ Here is the comprehensive audit report.
 - Severity: **Medium**
 - Category: **Edge Case**
 
-**Finding 11.2: DNS resolution failures are fail-closed with no operator notification**
+**Finding 11.2: DNS resolution failures are fail-closed with no operator notification** ✅ DONE
 - Use case: Internal DNS is flaky, causing legitimate requests to be blocked by SSRF check.
 - Current behavior: `isPrivateHost` (proxy.go:111-117) returns an error when DNS resolution fails ("DNS resolution failed"), which causes the request to be rejected. DNS errors are not cached (correctly), but there is no metric or alert for DNS failure rates.
 - Expected behavior: Track DNS resolution failure rate and alert when it exceeds a threshold, as this could indicate infrastructure issues rather than actual SSRF.
@@ -333,7 +333,7 @@ Here is the comprehensive audit report.
 
 ### 13. FILE BLOCKING
 
-**Finding 13.1: File blocking is extension-based only, no MIME type verification**
+**Finding 13.1: File blocking is extension-based only, no MIME type verification** ✅ DONE
 - Use case: An attacker renames `malware.exe` to `malware.txt` to bypass extension-based blocking.
 - Current behavior: `fileBlocker.CheckPath` (fileblock.go) checks the file extension in the URL path. `fileBlocker.CheckContentDisposition` checks the Content-Disposition header filename. Neither inspects the actual response body MIME type or magic bytes.
 - Expected behavior: For defense-in-depth, optionally verify the response Content-Type header against the extension, or use magic byte detection for high-risk MIME types.
@@ -405,14 +405,14 @@ Here is the comprehensive audit report.
 
 ### 17. SYSLOG / SIEM INTEGRATION
 
-**Finding 17.1: Syslog configuration changes take effect immediately with no test option**
+**Finding 17.1: Syslog configuration changes take effect immediately with no test option** ✅ DONE
 - Use case: Operator enters a syslog address and wants to verify connectivity before committing.
 - Current behavior: `apiSyslogConfig` POST (ui.go:1970-2008) calls `InitSyslog(body.Addr, body.Format)` which immediately attempts connection. If it fails, an error is returned. But there is no "test" button that verifies connectivity without replacing the current config.
 - Expected behavior: Add a test endpoint that validates connectivity without changing the active syslog configuration.
 - Severity: **Low**
 - Category: **UX Gap**
 
-**Finding 17.2: Request-level log entries are not forwarded to syslog**
+**Finding 17.2: Request-level log entries are not forwarded to syslog** ✅ DONE
 - Use case: SIEM team wants all proxy request logs (not just audit events) forwarded via syslog for correlation.
 - Current behavior: The syslog integration (syslog.go) forwards audit events at severity=5 as JSON. System log lines are forwarded via the logger. But individual `LogEntry` records (the structured request log with IP, identity, host, status) are not explicitly forwarded as syslog messages.
 - Expected behavior: Optionally forward request log entries (especially blocked/threat events) as individual syslog messages in a structured format.

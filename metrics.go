@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,6 +53,84 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 	v := int64(1)
 	rm.hits[ruleName] = &v
 	rm.order = append(rm.order, ruleName)
+}
+
+// saveHitCounters marshals the current hit counters to JSON and writes them
+// to path using a temp-file-then-rename pattern for crash safety.
+func saveHitCounters(path string) {
+	ruleMet.mu.RLock()
+	data := make(map[string]int64, len(ruleMet.hits))
+	for name, ptr := range ruleMet.hits {
+		data[name] = atomic.LoadInt64(ptr)
+	}
+	ruleMet.mu.RUnlock()
+
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		logger.Printf("HitCounters: marshal error: %v", err)
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		logger.Printf("HitCounters: write error: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		logger.Printf("HitCounters: rename error: %v", err)
+	}
+}
+
+// loadHitCounters reads a JSON file of persisted hit counters and restores
+// them into the in-memory ruleMetrics map.
+func loadHitCounters(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // file may not exist on first run; silently skip
+	}
+	var counts map[string]int64
+	if json.Unmarshal(data, &counts) != nil {
+		logger.Printf("HitCounters: unmarshal error from %s — starting fresh", path)
+		return
+	}
+
+	ruleMet.mu.Lock()
+	for name, count := range counts {
+		if _, ok := ruleMet.hits[name]; !ok && len(ruleMet.hits) < maxRuleMetrics {
+			v := count
+			ruleMet.hits[name] = &v
+			ruleMet.order = append(ruleMet.order, name)
+		} else if ptr, ok := ruleMet.hits[name]; ok {
+			atomic.StoreInt64(ptr, count)
+		}
+	}
+	ruleMet.mu.Unlock()
+	logger.Printf("HitCounters: restored %d counter(s) from %s", len(counts), path)
+}
+
+// startHitCounterPersistence loads persisted counters from path, then starts
+// a background goroutine that saves them every 5 minutes. It also performs
+// a final save when the context is cancelled (graceful shutdown).
+func startHitCounterPersistence(ctx context.Context, path string) {
+	// Ensure the directory exists.
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		os.MkdirAll(dir, 0o750) //nolint:errcheck // best-effort
+	}
+
+	loadHitCounters(path)
+
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				saveHitCounters(path)
+				return
+			case <-t.C:
+				saveHitCounters(path)
+			}
+		}
+	}()
 }
 
 // WritePrometheus writes per-rule metrics lines to the given builder.

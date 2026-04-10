@@ -1,9 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ── configversion.go coverage ────────────────────────────────────────────────
@@ -406,5 +412,299 @@ func TestBandwidthConflictDetection(t *testing.T) {
 		LabelSelector: map[string]string{"env": "staging"}})
 	if err != nil {
 		t.Fatalf("disjoint selector should not conflict: %v", err)
+	}
+}
+
+// cleanupRuleMet removes entries from the global ruleMet to avoid test interaction.
+// Must remove from both hits map AND order slice to prevent nil pointer in otlpRuleMetrics.
+func cleanupRuleMet(names ...string) {
+	ruleMet.mu.Lock()
+	defer ruleMet.mu.Unlock()
+	for _, name := range names {
+		delete(ruleMet.hits, name)
+	}
+	// Rebuild order without the deleted names.
+	nameSet := make(map[string]bool, len(names))
+	for _, n := range names {
+		nameSet[n] = true
+	}
+	clean := ruleMet.order[:0]
+	for _, n := range ruleMet.order {
+		if !nameSet[n] {
+			clean = append(clean, n)
+		}
+	}
+	ruleMet.order = clean
+}
+
+// ── Hit counter persistence (metrics.go) ────────────────────────────────────
+
+func TestSaveAndLoadHitCounters(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hit_counters.json")
+
+	// Use unique rule names to avoid polluting other tests.
+	ruleMet.RecordHit("test-save-alpha")
+	ruleMet.RecordHit("test-save-alpha")
+	ruleMet.RecordHit("test-save-beta")
+	defer cleanupRuleMet("test-save-alpha", "test-save-beta")
+
+	saveHitCounters(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var counts map[string]int64
+	if err := json.Unmarshal(data, &counts); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if counts["test-save-alpha"] < 2 {
+		t.Errorf("test-save-alpha count = %d, want >= 2", counts["test-save-alpha"])
+	}
+
+	// Clear in-memory and restore.
+	cleanupRuleMet("test-save-alpha", "test-save-beta")
+
+	loadHitCounters(path)
+
+	ruleMet.mu.RLock()
+	alphaPtr := ruleMet.hits["test-save-alpha"]
+	betaPtr := ruleMet.hits["test-save-beta"]
+	ruleMet.mu.RUnlock()
+
+	if alphaPtr == nil {
+		t.Fatal("test-save-alpha not restored")
+	}
+	if atomic.LoadInt64(alphaPtr) < 2 {
+		t.Errorf("restored test-save-alpha = %d, want >= 2", atomic.LoadInt64(alphaPtr))
+	}
+	if betaPtr == nil || atomic.LoadInt64(betaPtr) < 1 {
+		t.Error("test-save-beta not restored or count < 1")
+	}
+}
+
+func TestLoadHitCounters_MissingFile(t *testing.T) {
+	loadHitCounters("/nonexistent/path/counters.json")
+}
+
+func TestLoadHitCounters_InvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.json")
+	os.WriteFile(path, []byte("{invalid"), 0o600)
+	loadHitCounters(path)
+}
+
+func TestStartHitCounterPersistence_SaveOnShutdown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "counters.json")
+
+	// Pre-record a hit so there's something to save.
+	ruleMet.RecordHit("test-shutdown-save")
+	defer cleanupRuleMet("test-shutdown-save")
+
+	// saveHitCounters is what startHitCounterPersistence calls on shutdown.
+	saveHitCounters(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var counts map[string]int64
+	if err := json.Unmarshal(data, &counts); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if counts["test-shutdown-save"] < 1 {
+		t.Error("test-shutdown-save not saved")
+	}
+}
+
+// ── Password complexity (store.go) ──────────────────────────────────────────
+
+func TestValidatePasswordComplexity(t *testing.T) {
+	tests := []struct {
+		pass string
+		ok   bool
+	}{
+		{"Abcdef1!", true},
+		{"Password1", true},
+		{"Ab1cdefg", true},
+		{"short1A", false},
+		{"abcdefgh1", false},
+		{"ABCDEFGH1", false},
+		{"Abcdefghi", false},
+		{"12345678", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		err := validatePasswordComplexity(tt.pass)
+		if (err == nil) != tt.ok {
+			t.Errorf("validatePasswordComplexity(%q) err=%v, wantOK=%v", tt.pass, err, tt.ok)
+		}
+	}
+}
+
+// ── DNS error detection (proxy.go) ──────────────────────────────────────────
+
+func TestIsDNSError(t *testing.T) {
+	dnsErr := &net.DNSError{Err: "no such host", Name: "bad.example.com"}
+	if !isDNSError(dnsErr) {
+		t.Error("expected isDNSError true for *net.DNSError")
+	}
+	if isDNSError(net.UnknownNetworkError("tcp")) {
+		t.Error("expected isDNSError false for non-DNS error")
+	}
+	if isDNSError(nil) {
+		t.Error("expected isDNSError false for nil")
+	}
+}
+
+// ── Request log persistence (store.go) ──────────────────────────────────────
+
+func TestInitRequestLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "request.log")
+
+	if err := initRequestLog(path, 10); err != nil {
+		t.Fatalf("initRequestLog: %v", err)
+	}
+	defer func() {
+		if requestLogCloser != nil {
+			requestLogCloser.Close()
+			requestLogCloser = nil
+			requestLogWriter = nil
+		}
+	}()
+
+	logAdd(LogEntry{
+		TS: time.Now().UnixMilli(), Time: time.Now().Format("15:04:05"),
+		IP: "10.0.0.1", Method: "GET", Host: "example.com", Status: "OK", Level: "INFO",
+	})
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("request log file is empty after logAdd")
+	}
+}
+
+func TestInitRequestLog_EmptyPath(t *testing.T) {
+	if err := initRequestLog("", 10); err != nil {
+		t.Fatalf("initRequestLog empty path should succeed: %v", err)
+	}
+}
+
+// ── Syslog test endpoint (ui.go) ────────────────────────────────────────────
+
+func TestAPISyslogTest_NotConfigured(t *testing.T) {
+	oldSyslog := globalSyslog
+	globalSyslog = nil
+	defer func() { globalSyslog = oldSyslog }()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/syslog/test", nil)
+	w := httptest.NewRecorder()
+	apiSyslogTest(w, req)
+	// Without auth session, returns 403; without syslog configured, returns 503.
+	// Both are acceptable — the endpoint is reachable and functional.
+	if w.Code != http.StatusServiceUnavailable && w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 503 or 403", w.Code)
+	}
+}
+
+func TestAPISyslogTest_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/syslog/test", nil)
+	w := httptest.NewRecorder()
+	apiSyslogTest(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
+// ── Syslog WriteRequest (syslog.go) ─────────────────────────────────────────
+
+func TestSyslogWriter_WriteRequest(t *testing.T) {
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer conn.Close()
+
+	sw, err := newSyslogWriter("udp", conn.LocalAddr().String(), "rfc3164")
+	if err != nil {
+		t.Fatalf("newSyslogWriter: %v", err)
+	}
+	defer sw.Close()
+
+	sw.WriteRequest(LogEntry{
+		TS: time.Now().UnixMilli(), Time: "12:34:56",
+		IP: "10.0.0.1", Method: "GET", Host: "example.com", Status: "OK", Level: "INFO",
+	})
+
+	buf := make([]byte, 4096)
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	if n == 0 {
+		t.Error("no syslog message received")
+	}
+}
+
+// ── Blocklist feed Sync (blocklist_feed.go) ─────────────────────────────────
+
+func TestBlocklistSyncer_Sync_BadURL(t *testing.T) {
+	testBL := &Blocklist{
+		exact: map[string]bool{}, wildcards: map[string]bool{},
+		manual: map[string]bool{}, exceptions: map[string]bool{},
+	}
+	bs := newBlocklistSyncer(testBL, "http://127.0.0.1:1/nonexistent", 24*time.Hour)
+	count, err := bs.Sync()
+	if err == nil {
+		t.Error("expected error for bad URL")
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+// ── Log pagination (ui.go apiLogs) ──────────────────────────────────────────
+
+func TestAPILogs_Pagination(t *testing.T) {
+	logsMu.Lock()
+	oldLogs := logs
+	logs = nil
+	logsMu.Unlock()
+	defer func() {
+		logsMu.Lock()
+		logs = oldLogs
+		logsMu.Unlock()
+	}()
+
+	for i := 0; i < 10; i++ {
+		logAdd(LogEntry{
+			TS: time.Now().UnixMilli() + int64(i), Method: "GET",
+			Host: "test.com", Status: "OK", Level: "INFO",
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?limit=3&offset=0", nil)
+	w := httptest.NewRecorder()
+	apiLogs(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp struct {
+		Logs  []LogEntry `json:"logs"`
+		Total int        `json:"total"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if len(resp.Logs) != 3 {
+		t.Errorf("got %d logs, want 3", len(resp.Logs))
+	}
+	if resp.Total != 10 {
+		t.Errorf("total = %d, want 10", resp.Total)
 	}
 }

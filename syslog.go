@@ -83,6 +83,16 @@ func (s *syslogWriter) WriteAudit(e AuditEntry) {
 	s.writeMsg(13, string(b)) // PRI=13: facility=1 severity=5 (notice)
 }
 
+// WriteRequest sends a LogEntry (request log) as a structured JSON syslog
+// message at PRI=14 (facility=1 user-level, severity=6 informational).
+func (s *syslogWriter) WriteRequest(e LogEntry) {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return
+	}
+	s.writeMsg(14, string(b)) // PRI=14: facility=1 severity=6 (informational)
+}
+
 // formatMsg builds a syslog line in the configured format.
 func (s *syslogWriter) formatMsg(pri int, msg string) string {
 	switch s.format {

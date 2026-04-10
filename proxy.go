@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -567,6 +568,9 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := client.Do(r)
 	if err != nil {
 		logger.Printf("upstream request error: %v", err)
+		if isDNSError(err) {
+			go fireAlert("dns_failure", AlertPayload{Host: r.Host, Detail: err.Error(), Source: "proxy"})
+		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -585,6 +589,19 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&statBlocked, 1)
 		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"), "inspect")
 		logger.Printf("FILE_BLOCKED (resp cd) %s -> %q%q (ext=%q)", cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
+		serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
+		return
+	}
+
+	// File block — check Content-Type MIME for dangerous types.
+	// Catches renamed executables (e.g. malware.exe → malware.txt) where the
+	// server still reports the true MIME type in the Content-Type header.
+	if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
+		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		atomic.AddInt64(&statFileBlocked, 1)
+		atomic.AddInt64(&statBlocked, 1)
+		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"), "inspect")
+		logger.Printf("FILE_BLOCKED (resp ct) %s -> %q%q (ext=%q)", cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 		serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 		return
 	}
@@ -690,6 +707,12 @@ func isSafeRedirectURL(raw string) bool {
 	return isPrivateHost(u.Host) == nil
 }
 
+// isDNSError returns true when err wraps a *net.DNSError.
+func isDNSError(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr)
+}
+
 // isWebSocketUpgrade returns true when the request is an HTTP→WebSocket upgrade.
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
@@ -713,6 +736,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", host)
 	if err != nil {
 		logger.Printf("WS dial error %q: %v", sanitizeLog(host), err)
+		if isDNSError(err) {
+			go fireAlert("dns_failure", AlertPayload{Host: host, Detail: err.Error(), Source: "proxy"})
+		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -848,6 +874,9 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", r.Host)
 	if err != nil {
 		logger.Printf("tunnel dial error %q: %v", sanitizeLog(r.Host), err)
+		if isDNSError(err) {
+			go fireAlert("dns_failure", AlertPayload{Host: r.Host, Detail: err.Error(), Source: "proxy"})
+		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
@@ -910,6 +939,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	rawUpstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", targetHost)
 	if err != nil {
 		logger.Printf("inspect dial error %q: %v", sanitizeLog(targetHost), err)
+		if isDNSError(err) {
+			go fireAlert("dns_failure", AlertPayload{Host: targetHost, Detail: err.Error(), Source: "proxy"})
+		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
