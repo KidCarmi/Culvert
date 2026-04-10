@@ -340,7 +340,7 @@ Here is the comprehensive audit report.
 - Severity: **High**
 - Category: **Missing Feature**
 
-**Finding 13.2: File blocking check happens before upstream request for URL path, but Content-Disposition check timing is unclear**
+**Finding 13.2: File blocking check happens before upstream request for URL path, but Content-Disposition check timing is unclear** ✅ DONE
 - Use case: A file download URL like `/download?id=123` has no extension in the path but serves `Content-Disposition: attachment; filename="payload.exe"`.
 - Current behavior: The URL path check happens in `handleRequest` (proxy.go:345-354) before the upstream request. The Content-Disposition check must happen after the response is received. Both paths exist but the response-phase check depends on body scanning being enabled (`bodyNeedsBuffering`).
 - Expected behavior: Clearly document that Content-Disposition checking requires body scanning to be active, and warn in the UI if file blocking is enabled but body scanning is disabled.
@@ -423,7 +423,7 @@ Here is the comprehensive audit report.
 
 ### 18. PAC FILE
 
-**Finding 18.1: PAC file auto-detect relies on request Host header**
+**Finding 18.1: PAC file auto-detect relies on request Host header** ✅ DONE
 - Use case: Proxy is behind a load balancer and the Host header does not reflect the correct proxy address.
 - Current behavior: PAC file generation auto-detects the proxy host from the request. When behind a load balancer or NAT, the detected address may be incorrect (e.g., internal hostname instead of external).
 - Expected behavior: Allow explicit configuration of the proxy address used in PAC file generation, not just auto-detection. The `base_url` config option exists but it is not clear if it feeds into PAC generation.
@@ -480,7 +480,7 @@ Here is the comprehensive audit report.
 - Severity: **Low**
 - Category: **Edge Case**
 
-**Finding 20.4: No dark/light theme preference persistence across sessions**
+**Finding 20.4: No dark/light theme preference persistence across sessions** ✅ DONE
 - Use case: Operator prefers dark theme but it resets on every login.
 - Current behavior: The theme toggle exists in the UI (index.html) but uses `localStorage` which persists per-browser. This is actually fine for single-browser use but there is no server-side preference stored with the user profile.
 - Expected behavior: For environments where operators use multiple workstations, store theme preference server-side in the user profile.
@@ -495,11 +495,11 @@ Here is the comprehensive audit report.
 |----------|-------|------|-----------|
 | Critical | 3     | 2    | 1         |
 | High     | 11    | 10   | 1         |
-| Medium   | 24    | 8    | 16        |
-| Low      | 10    | 0    | 10        |
-| **Total**| **48**| **20** | **28**  |
+| Medium   | 24    | 11   | 13        |
+| Low      | 10    | 3    | 7         |
+| **Total**| **48**| **26** | **22**  |
 
-### COMPLETED FINDINGS (20/48)
+### COMPLETED FINDINGS (26/48)
 
 - 1.1 Config import replace mode ✅
 - 1.3 Wildcard blocklist validation ✅
@@ -522,8 +522,11 @@ Here is the comprehensive audit report.
 - 8.3 Scan timeout alert ✅
 - 9.2 Update available alert ✅
 - 10.3 Config export expanded ✅
+- 13.2 Content-Disposition check timing ✅
 - 16.1 Rate limit whitelist/exemption ✅
+- 18.1 PAC file explicit proxy address ✅
 - 18.2 PAC config versioning ✅
+- 20.4 Theme preference persistence ✅
 
 ### CRITICAL FINDINGS REMAINING
 
