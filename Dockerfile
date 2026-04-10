@@ -46,7 +46,8 @@ RUN apk add --no-cache wget && \
 #   • No new privileges: --security-opt no-new-privileges
 FROM alpine:3.22
 
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tzdata && \
     addgroup -S proxy && adduser -S proxy -G proxy && \
     mkdir -p /data && chown proxy:proxy /data
 
