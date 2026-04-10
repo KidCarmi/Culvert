@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,7 @@ type updateInfo struct {
 	mu              sync.RWMutex
 	currentVersion  string
 	latestVersion   string
+	pullTag         string // Docker tag to pull (may differ from latestVersion if semver tag missing)
 	updateAvailable bool
 	lastChecked     time.Time
 	updaterStatus   string // "connected", "unavailable", "token_pending"
@@ -45,9 +48,14 @@ var globalUpdateInfo updateInfo
 func (u *updateInfo) snapshot() map[string]any {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
+	pt := u.pullTag
+	if pt == "" {
+		pt = u.latestVersion
+	}
 	return map[string]any{
 		"current_version":  u.currentVersion,
 		"latest_version":   u.latestVersion,
+		"pull_tag":         pt,
 		"update_available": u.updateAvailable,
 		"last_checked":     u.lastChecked.Format(time.RFC3339),
 		"updater_status":   u.updaterStatus,
@@ -203,6 +211,96 @@ func startUpdateChecker(ctx context.Context) {
 	}
 }
 
+// ── GitHub tag fallback ─────────────────────────────────────────────────────
+// When the Docker registry lacks semver tags (a known CI issue for v0.0.16+),
+// query the GitHub API for git tags as a fallback. Git tags are always created
+// by the auto-tag CI job even when Docker tagging fails.
+
+// ghRepoOwner and ghRepoName identify the GitHub repo for tag queries.
+const (
+	ghRepoOwner = "KidCarmi"
+	ghRepoName  = "Culvert"
+)
+
+// semverParts extracts major, minor, patch from a semver string like "v1.2.3".
+var semverExtract = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)`)
+
+func parseSemver(s string) (int, int, int, bool) {
+	m := semverExtract.FindStringSubmatch(s)
+	if len(m) < 4 {
+		return 0, 0, 0, false
+	}
+	maj, _ := strconv.Atoi(m[1])
+	min, _ := strconv.Atoi(m[2])
+	pat, _ := strconv.Atoi(m[3])
+	return maj, min, pat, true
+}
+
+func semverGreater(a, b string) bool {
+	a1, a2, a3, aOK := parseSemver(a)
+	b1, b2, b3, bOK := parseSemver(b)
+	if !aOK || !bOK {
+		return false
+	}
+	if a1 != b1 {
+		return a1 > b1
+	}
+	if a2 != b2 {
+		return a2 > b2
+	}
+	return a3 > b3
+}
+
+// checkGitHubLatestTag queries the GitHub API for the latest semver tag.
+// Returns the tag name (e.g. "v0.0.19") or "" on any error.
+func checkGitHubLatestTag() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// GitHub API: list tags sorted by creation date (newest first).
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/tags?per_page=20",
+		ghRepoOwner, ghRepoName)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "Culvert-Update-Checker/1.0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		logger.Printf("Update: GitHub tag check failed: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+
+	var tags []struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return ""
+	}
+
+	// Find highest semver tag.
+	var semverTags []string
+	for _, t := range tags {
+		if semverExtract.MatchString(t.Name) {
+			semverTags = append(semverTags, t.Name)
+		}
+	}
+	if len(semverTags) == 0 {
+		return ""
+	}
+	sort.Slice(semverTags, func(i, j int) bool {
+		return semverGreater(semverTags[i], semverTags[j])
+	})
+	return semverTags[0]
+}
+
 func checkUpdateNow() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -250,10 +348,31 @@ func checkUpdateNow() {
 		return
 	}
 
+	// GitHub tag fallback: if the Docker registry reports no newer version,
+	// check GitHub git tags. This handles the case where Docker images lack
+	// semver tags but git tags exist (a known CI issue for v0.0.16-v0.0.19).
+	// When this fallback activates, we tell the updater to pull ":latest"
+	// (which IS always updated on ghcr.io) instead of the specific semver tag.
+	ghFallback := false
+	if !result.UpdateAvailable && version != "dev" {
+		if ghLatest := checkGitHubLatestTag(); ghLatest != "" && semverGreater(ghLatest, version) {
+			result.Latest = ghLatest
+			result.UpdateAvailable = true
+			ghFallback = true
+			logger.Printf("Update: Docker registry had no newer semver tag, but GitHub has %s (current: %s)",
+				ghLatest, version)
+		}
+	}
+
 	globalUpdateInfo.mu.Lock()
 	prevLatest := globalUpdateInfo.latestVersion
 	globalUpdateInfo.latestVersion = result.Latest
 	globalUpdateInfo.updateAvailable = result.UpdateAvailable
+	if ghFallback {
+		globalUpdateInfo.pullTag = "latest"
+	} else if result.Latest != "" {
+		globalUpdateInfo.pullTag = result.Latest
+	}
 	globalUpdateInfo.lastChecked = time.Now()
 	globalUpdateInfo.updaterStatus = "connected"
 	globalUpdateInfo.mu.Unlock()

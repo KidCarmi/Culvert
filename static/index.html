@@ -7814,7 +7814,7 @@ async function updateCheckNow() {
 }
 
 async function updatePreview() {
-  const tag = updatesData?.latest_version;
+  const tag = updatesData?.pull_tag || updatesData?.latest_version;
   if (!tag) { toast('No target version', 'error'); return; }
   const r = await api('/api/update/preview', {
     method: 'POST',
@@ -7833,7 +7833,7 @@ async function updatePreview() {
 }
 
 async function updateApply() {
-  const tag = updatesData?.latest_version;
+  const tag = updatesData?.pull_tag || updatesData?.latest_version;
   if (!tag) return;
   if (!confirm('Apply update to ' + tag + '? The container will be restarted.')) return;
   document.getElementById('upd-progress').style.display = '';
