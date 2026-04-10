@@ -61,8 +61,6 @@ services:
       - proxy-data:/data:ro   # read shared updater token
     ports:
       - "127.0.0.1:7123:7123" # localhost only; exposed for GUI resilience during CP update (auth required)
-    security_opt:
-      - no-new-privileges:true
     cap_drop:
       - ALL
     mem_limit: 512m
