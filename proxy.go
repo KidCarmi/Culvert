@@ -610,6 +610,11 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Skip buffering if Content-Length signals the response exceeds the
 	// scan limit — avoids wasting memory and I/O on oversized bodies.
 	scanActive := globalRemoteScanner.Enabled() || globalSecScanner.BodyScanEnabled()
+	// Tier 3.3: admin-managed host allowlist short-circuits the whole pipeline
+	// so known-good hosts (e.g. internal content mirrors) aren't buffered.
+	if scanActive && globalScanExclusions.IsHostExcluded(r.Host) {
+		scanActive = false
+	}
 	if scanActive && resp.ContentLength > globalSecScanner.MaxBytes() {
 		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
 		logScanLimitExceeded(r.Host, cip, globalSecScanner.MaxBytes())
@@ -1113,7 +1118,10 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		// We buffer up to maxScanBufferBytes() before forwarding so any match
 		// blocks the response entirely (true prevention, not merely logging).
 		ct := resp.Header.Get("Content-Type")
-		if bodyNeedsBuffering(ct) {
+		// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
+		hostExcluded := globalScanExclusions.IsHostExcluded(hostOnly)
+		dpiBypassed := dpiScanner.IsBypassHost(hostOnly)
+		if !hostExcluded && bodyNeedsBuffering(ct) {
 			origBody := resp.Body
 			body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
 			if readErr != nil {
@@ -1142,7 +1150,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					}
 				} else {
 					// DPI regex scan (text content only).
-					if dpiScanner.Enabled() && isTextContentType(ct) {
+					// Tier 3.4: respect per-host DPI bypass list.
+					if !dpiBypassed && dpiScanner.Enabled() && isTextContentType(ct) {
 						if pattern, matched := safeDPIScan(scanBody); matched {
 							origBody.Close()
 							recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern, "", "inspect")

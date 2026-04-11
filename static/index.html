@@ -930,11 +930,91 @@ tr.dragging  { opacity: .4; }
               <div id="sec-feed-blocked" style="font-size:.75rem;color:var(--muted);margin-top:2px"></div>
             </div>
           </div>
+
+          <!-- Runtime health metrics (Tier 1.2 / 1.3 / 2.2) -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px">
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">Scan timeouts</div>
+              <div id="sec-scan-timeout" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">Skipped (oversize)</div>
+              <div id="sec-scan-skipped" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">YARA inflight</div>
+              <div id="sec-yara-inflight" style="font-weight:600;font-size:.85rem">0 / 50</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">Sidecar fails</div>
+              <div id="sec-remote-fail" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+          </div>
+          <div id="sec-yara-warnings" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:14px;font-size:.78rem;color:var(--yellow)"></div>
+
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             <button class="btn ghost sm" onclick="syncThreatFeeds()">↻ Sync Feeds Now</button>
             <button class="btn ghost sm" onclick="reloadYARA()">↻ Reload YARA Rules</button>
           </div>
           <div id="sec-scan-action-status" style="display:none;margin-top:10px;font-size:.8rem"></div>
+
+          <!-- YARA rule editor (Tier 3.1 + 3.2) -->
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <div>
+                <div style="font-weight:600;font-size:.88rem">YARA Rule Files</div>
+                <div style="font-size:.72rem;color:var(--muted);margin-top:2px">Create, edit, and delete rule files on disk. Rules are validated before saving and the hash cache is cleared automatically.</div>
+              </div>
+              <div id="sec-yara-dir" style="font-size:.7rem;color:var(--muted);font-family:ui-monospace,monospace"></div>
+            </div>
+            <div style="display:grid;grid-template-columns:200px 1fr;gap:10px">
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <div id="sec-yara-rule-list" style="max-height:260px;overflow-y:auto;background:var(--surface2);border-radius:6px;padding:4px;font-size:.78rem"></div>
+                <button class="btn ghost sm" onclick="newYARARule()">+ New rule</button>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <input id="sec-yara-edit-name" placeholder="rule_file_name" style="padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.82rem;font-family:ui-monospace,monospace">
+                <textarea id="sec-yara-edit-src" rows="10" placeholder="rule example { strings: $a = &quot;sample&quot; condition: $a }" style="padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;font-family:ui-monospace,monospace;resize:vertical"></textarea>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <button class="btn ghost sm" onclick="validateYARARule()">✓ Validate</button>
+                  <button class="btn ghost sm" onclick="saveYARARule()">💾 Save</button>
+                  <button class="btn ghost sm" onclick="deleteYARARule()">🗑 Delete</button>
+                </div>
+                <div id="sec-yara-edit-status" style="display:none;font-size:.78rem"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Scan exclusions (Tier 3.3) -->
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">Scan Exclusions</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Known-good SHA-256 hashes and hostnames bypass all body scanning (ClamAV + YARA). Useful for internal content mirrors and false-positive remediation.</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div>
+                <div style="font-size:.78rem;font-weight:600;margin-bottom:4px">Excluded hosts</div>
+                <textarea id="sec-excl-hosts" rows="6" placeholder="one host per line" style="width:100%;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;font-family:ui-monospace,monospace"></textarea>
+              </div>
+              <div>
+                <div style="font-size:.78rem;font-weight:600;margin-bottom:4px">Excluded SHA-256 hashes</div>
+                <textarea id="sec-excl-hashes" rows="6" placeholder="one hex hash per line" style="width:100%;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;font-family:ui-monospace,monospace"></textarea>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button class="btn ghost sm" onclick="saveScanExclusions()">💾 Save exclusions</button>
+              <div id="sec-excl-status" style="font-size:.78rem;align-self:center"></div>
+            </div>
+          </div>
+
+          <!-- DPI bypass hosts (Tier 3.4) -->
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">DPI Bypass Hosts</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Hosts listed here skip DPI regex scanning entirely but still flow through ClamAV + YARA + policy engine.</div>
+            <textarea id="sec-dpi-bypass" rows="4" placeholder="one host per line" style="width:100%;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;font-family:ui-monospace,monospace"></textarea>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button class="btn ghost sm" onclick="saveDPIBypass()">💾 Save bypass list</button>
+              <div id="sec-dpi-status" style="font-size:.78rem;align-self:center"></div>
+            </div>
+          </div>
 
           <!-- Domain allowlist for threat feeds -->
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
@@ -4201,6 +4281,9 @@ async function loadSecurity() {
   loadSSLBypass();
   loadSecScanStatus();
   loadTFAllowlist();
+  loadYARARules();
+  loadScanExclusions();
+  loadDPIBypass();
 }
 
 function renderSecIPList() {
@@ -4391,6 +4474,27 @@ async function loadSecScanStatus() {
     if (fs) fs.textContent = s.threat_feed_last_sync ? 'Last sync: ' + new Date(s.threat_feed_last_sync).toLocaleTimeString() : '';
     const fb = document.getElementById('sec-feed-blocked');
     if (fb) fb.textContent = s.stat_feed_blocked ? s.stat_feed_blocked + ' blocked' : '';
+
+    // Tier 1.2 / 1.3 / 2.2: runtime health metrics
+    const setMetric = (id, val, warnAt, critAt) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const n = Number(val || 0);
+      el.textContent = (id === 'sec-yara-inflight')
+        ? (n + ' / ' + (s.yara_inflight_max || 50))
+        : String(n);
+      if (critAt != null && n >= critAt) {
+        el.style.color = 'var(--red)';
+      } else if (warnAt != null && n >= warnAt) {
+        el.style.color = 'var(--yellow)';
+      } else {
+        el.style.color = 'var(--text)';
+      }
+    };
+    setMetric('sec-scan-timeout', s.stat_scan_timeout, 1, 10);
+    setMetric('sec-scan-skipped', s.stat_scan_skipped, 1, null);
+    setMetric('sec-yara-inflight', s.yara_inflight, (s.yara_inflight_max||50)*0.8, s.yara_inflight_max||50);
+    setMetric('sec-remote-fail', s.stat_remote_scan_fail, 1, 10);
   } catch(e) { console.error(e); }
 }
 
@@ -4420,9 +4524,168 @@ async function reloadYARA() {
     statusEl.style.color = 'var(--green)';
     statusEl.textContent = 'Loaded ' + (d.yara_rules || 0) + ' rules from ' + (d.directory || '—');
     loadSecScanStatus();
+    loadYARARules();
   } catch(e) {
     statusEl.style.color = 'var(--red)';
     statusEl.textContent = 'Reload failed: ' + e.message;
+  }
+}
+
+// ── YARA rule CRUD (Tier 3.1 / 3.2) ─────────────────────────────────────
+let yaraRuleList = [];
+let yaraWarningList = [];
+let yaraRuleDir = '';
+let yaraSelectedName = '';
+
+async function loadYARARules() {
+  try {
+    const d = await api('/api/security-scan/yara/rules');
+    yaraRuleList = d.rules || [];
+    yaraWarningList = d.warnings || [];
+    yaraRuleDir = d.directory || '';
+    const dirEl = document.getElementById('sec-yara-dir');
+    if (dirEl) dirEl.textContent = yaraRuleDir;
+    const warnEl = document.getElementById('sec-yara-warnings');
+    if (warnEl) {
+      if (yaraWarningList.length) {
+        warnEl.style.display = 'block';
+        warnEl.innerHTML = '<b>YARA parse warnings:</b><br>' +
+          yaraWarningList.map(w => '• ' + escHtml(w)).join('<br>');
+      } else {
+        warnEl.style.display = 'none';
+      }
+    }
+    renderYARARuleList();
+  } catch(e) { console.error(e); }
+}
+
+function renderYARARuleList() {
+  const el = document.getElementById('sec-yara-rule-list');
+  if (!el) return;
+  if (!yaraRuleList.length) {
+    el.innerHTML = '<div style="color:var(--muted);padding:8px">No rules loaded.</div>';
+    return;
+  }
+  el.innerHTML = yaraRuleList.map(n => {
+    const active = n === yaraSelectedName ? 'background:var(--accent);color:#fff' : '';
+    return '<div onclick="selectYARARule(' + JSON.stringify(n).replace(/"/g, '&quot;') + ')" style="padding:6px 10px;border-radius:4px;cursor:pointer;font-family:ui-monospace,monospace;' + active + '">' + escHtml(n) + '</div>';
+  }).join('');
+}
+
+async function selectYARARule(name) {
+  yaraSelectedName = name;
+  renderYARARuleList();
+  document.getElementById('sec-yara-edit-name').value = name;
+  try {
+    const d = await api('/api/security-scan/yara/rules/' + encodeURIComponent(name));
+    document.getElementById('sec-yara-edit-src').value = d.source || '';
+  } catch(e) {
+    // Rule name from /api/.../rules may not correspond to a file name
+    // (it's the rule identifier, not the filename). Leave the editor empty
+    // and let the admin type the source manually.
+    document.getElementById('sec-yara-edit-src').value = '';
+    setYARAEditStatus('warn', 'Could not load source for ' + name + ' — rule name may not match file name.');
+  }
+}
+
+function newYARARule() {
+  yaraSelectedName = '';
+  renderYARARuleList();
+  document.getElementById('sec-yara-edit-name').value = '';
+  document.getElementById('sec-yara-edit-src').value = 'rule example {\n  strings:\n    $a = "sample"\n  condition:\n    $a\n}\n';
+  setYARAEditStatus('info', 'New rule — fill in the name and source, then Save.');
+}
+
+function setYARAEditStatus(kind, msg) {
+  const el = document.getElementById('sec-yara-edit-status');
+  if (!el) return;
+  el.style.display = 'block';
+  el.style.color = kind === 'err' ? 'var(--red)' : kind === 'warn' ? 'var(--yellow)' : kind === 'ok' ? 'var(--green)' : 'var(--muted)';
+  el.textContent = msg;
+}
+
+async function validateYARARule() {
+  const src = document.getElementById('sec-yara-edit-src').value;
+  try {
+    const d = await api('/api/security-scan/yara/validate', { method: 'POST', body: { source: src }});
+    if (d.valid) {
+      setYARAEditStatus('ok', '✓ Valid — rules: ' + (d.rule_names || []).join(', ') + (d.warnings && d.warnings.length ? ' (' + d.warnings.length + ' warning(s))' : ''));
+    } else {
+      setYARAEditStatus('err', '✗ ' + (d.error || 'invalid rule'));
+    }
+  } catch(e) {
+    setYARAEditStatus('err', 'Validate failed: ' + e.message);
+  }
+}
+
+async function saveYARARule() {
+  const name = document.getElementById('sec-yara-edit-name').value.trim();
+  const source = document.getElementById('sec-yara-edit-src').value;
+  if (!name) { setYARAEditStatus('err', 'Name is required'); return; }
+  try {
+    const d = await api('/api/security-scan/yara/rules', { method: 'POST', body: { name, source }});
+    setYARAEditStatus('ok', '✓ Saved. ' + (d.yara_rules || 0) + ' rule(s) active' + (d.warnings && d.warnings.length ? ' (' + d.warnings.length + ' parse warning(s))' : '.'));
+    loadYARARules();
+    loadSecScanStatus();
+  } catch(e) {
+    setYARAEditStatus('err', 'Save failed: ' + e.message);
+  }
+}
+
+async function deleteYARARule() {
+  const name = document.getElementById('sec-yara-edit-name').value.trim();
+  if (!name) { setYARAEditStatus('err', 'Name is required'); return; }
+  if (!confirm('Delete YARA rule file "' + name + '"?')) return;
+  try {
+    await api('/api/security-scan/yara/rules/' + encodeURIComponent(name), { method: 'DELETE' });
+    setYARAEditStatus('ok', '✓ Deleted ' + name);
+    document.getElementById('sec-yara-edit-name').value = '';
+    document.getElementById('sec-yara-edit-src').value = '';
+    yaraSelectedName = '';
+    loadYARARules();
+    loadSecScanStatus();
+  } catch(e) {
+    setYARAEditStatus('err', 'Delete failed: ' + e.message);
+  }
+}
+
+// ── Scan exclusions (Tier 3.3) ───────────────────────────────────────────
+async function loadScanExclusions() {
+  try {
+    const d = await api('/api/security-scan/exclusions');
+    document.getElementById('sec-excl-hosts').value = (d.hosts || []).join('\n');
+    document.getElementById('sec-excl-hashes').value = (d.hashes || []).join('\n');
+  } catch(e) { console.error(e); }
+}
+
+async function saveScanExclusions() {
+  const hosts = document.getElementById('sec-excl-hosts').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const hashes = document.getElementById('sec-excl-hashes').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const statusEl = document.getElementById('sec-excl-status');
+  try {
+    await api('/api/security-scan/exclusions', { method: 'PUT', body: { hosts, hashes }});
+    if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Saved ' + hosts.length + ' host(s), ' + hashes.length + ' hash(es)'; }
+  } catch(e) {
+    if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = 'Save failed: ' + e.message; }
+  }
+}
+
+// ── DPI bypass (Tier 3.4) ─────────────────────────────────────────────────
+async function loadDPIBypass() {
+  try {
+    const d = await api('/api/content-scan/bypass');
+    document.getElementById('sec-dpi-bypass').value = (d.hosts || []).join('\n');
+  } catch(e) { console.error(e); }
+}
+
+async function saveDPIBypass() {
+  const hosts = document.getElementById('sec-dpi-bypass').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const statusEl = document.getElementById('sec-dpi-status');
+  try {
+    await api('/api/content-scan/bypass', { method: 'PUT', body: { hosts }});
+    if (statusEl) { statusEl.style.color = 'var(--green)'; statusEl.textContent = '✓ Saved ' + hosts.length + ' host(s)'; }
+  } catch(e) {
+    if (statusEl) { statusEl.style.color = 'var(--red)'; statusEl.textContent = 'Save failed: ' + e.message; }
   }
 }
 

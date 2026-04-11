@@ -38,6 +38,19 @@ type ContentScanner struct {
 	compiled []*regexp.Regexp // pre-compiled for fast matching
 	path     string           // optional JSON file path for persistence
 	maxBytes int64            // max bytes buffered per response (default 1 MiB)
+
+	// Tier 3.4: per-host DPI bypass list. Hosts in this map skip DPI regex
+	// scanning entirely even when the scanner has patterns loaded. Used for
+	// internal content mirrors, CI artifact servers, etc. where DPI false
+	// positives would otherwise block legitimate traffic.
+	bypassHosts map[string]bool
+}
+
+// dpiContentFile is the on-disk JSON envelope supporting both legacy
+// (array-of-patterns) and new ({patterns, bypass_hosts}) formats.
+type dpiContentFile struct {
+	Patterns    []string `json:"patterns"`
+	BypassHosts []string `json:"bypass_hosts,omitempty"`
 }
 
 // dpiScanner is the global DPI pattern engine, shared across all inspected tunnels.
@@ -68,8 +81,9 @@ func (s *ContentScanner) Set(patterns []string) error {
 	return nil
 }
 
-// Load reads a JSON array of regex strings from path.  If the file does not
-// exist, Load succeeds (empty scanner — no patterns active).
+// Load reads a JSON array of regex strings (legacy format) or a dpiContentFile
+// envelope ({patterns, bypass_hosts}) from path. If the file does not exist,
+// Load succeeds (empty scanner — no patterns active).
 func (s *ContentScanner) Load(path string) error {
 	s.mu.Lock()
 	s.path = path
@@ -82,6 +96,19 @@ func (s *ContentScanner) Load(path string) error {
 	if err != nil {
 		return fmt.Errorf("content-scan file read error: %w", err)
 	}
+	// Detect envelope vs legacy array.
+	trimmed := strings.TrimLeft(string(data), " \t\r\n")
+	if strings.HasPrefix(trimmed, "{") {
+		var env dpiContentFile
+		if err := json.Unmarshal(data, &env); err != nil {
+			return fmt.Errorf("content-scan JSON parse error: %w", err)
+		}
+		if err := s.Set(env.Patterns); err != nil {
+			return err
+		}
+		s.SetBypassHosts(env.BypassHosts)
+		return nil
+	}
 	var patterns []string
 	if err := json.Unmarshal(data, &patterns); err != nil {
 		return fmt.Errorf("content-scan JSON parse error: %w", err)
@@ -89,13 +116,28 @@ func (s *ContentScanner) Load(path string) error {
 	return s.Set(patterns)
 }
 
-// Save persists the current pattern list to the configured file path.
-// Uses an atomic write (tmp + rename) so a crash never leaves a partial file.
-// No-op if no path is configured.
+// Save persists the current pattern list and bypass host list to the
+// configured file path. Uses an atomic write (tmp + rename) so a crash never
+// leaves a partial file. No-op if no path is configured. Writes the envelope
+// format when bypass hosts are present, otherwise the legacy array format so
+// existing tooling keeps working. Tier 3.4.
 func (s *ContentScanner) Save() {
 	s.mu.RLock()
 	path := s.path
-	data, _ := json.MarshalIndent(s.raw, "", "  ")
+	bypass := make([]string, 0, len(s.bypassHosts))
+	for h := range s.bypassHosts {
+		bypass = append(bypass, h)
+	}
+	var data []byte
+	if len(bypass) > 0 {
+		env := dpiContentFile{
+			Patterns:    append([]string(nil), s.raw...),
+			BypassHosts: bypass,
+		}
+		data, _ = json.MarshalIndent(env, "", "  ")
+	} else {
+		data, _ = json.MarshalIndent(s.raw, "", "  ")
+	}
 	s.mu.RUnlock()
 
 	if path == "" || data == nil {
@@ -106,6 +148,53 @@ func (s *ContentScanner) Save() {
 		return
 	}
 	os.Rename(tmp, path) //nolint:errcheck
+}
+
+// SetBypassHosts atomically replaces the DPI bypass host list. Hosts are
+// lower-cased and trimmed. Tier 3.4.
+func (s *ContentScanner) SetBypassHosts(hosts []string) {
+	m := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		h = strings.TrimSpace(strings.ToLower(h))
+		if h != "" {
+			m[h] = true
+		}
+	}
+	s.mu.Lock()
+	s.bypassHosts = m
+	s.mu.Unlock()
+}
+
+// BypassHosts returns a sorted copy of the current DPI bypass host list.
+// Tier 3.4.
+func (s *ContentScanner) BypassHosts() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.bypassHosts))
+	for h := range s.bypassHosts {
+		out = append(out, h)
+	}
+	// tiny insertion sort — list is short
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
+}
+
+// IsBypassHost reports whether the given host is on the DPI bypass list.
+// Hot path: called once per inspected tunnel response. Tier 3.4.
+func (s *ContentScanner) IsBypassHost(host string) bool {
+	if s == nil || host == "" {
+		return false
+	}
+	if idx := strings.LastIndex(host, ":"); idx > 0 && !strings.Contains(host[idx:], "]") {
+		host = host[:idx]
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.bypassHosts[strings.ToLower(host)]
 }
 
 // Add compiles and appends a single pattern.

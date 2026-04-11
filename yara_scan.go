@@ -154,6 +154,122 @@ func (y *YARARuleSet) Count() int {
 	return len(y.rules)
 }
 
+// yaraFileNameRe constrains admin-supplied rule file names. Tier 3.2.
+// Rejects path traversal, slashes, dots, and anything other than
+// [A-Za-z0-9_-]. The ".yar" suffix is always appended by the caller.
+var yaraFileNameRe = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9_-]{0,63}$`)
+
+// sanitizeYARAName validates a rule filename (without extension) supplied
+// over the admin API and returns an error for any invalid / unsafe input.
+// Tier 3.2: defense against path traversal during WriteRule / DeleteRule.
+func sanitizeYARAName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("rule name is empty")
+	}
+	if strings.HasSuffix(name, ".yar") {
+		name = strings.TrimSuffix(name, ".yar")
+	} else if strings.HasSuffix(name, ".yara") {
+		name = strings.TrimSuffix(name, ".yara")
+	}
+	if !yaraFileNameRe.MatchString(name) {
+		return "", fmt.Errorf("rule name must match [A-Za-z0-9_-]{1,64}")
+	}
+	return name, nil
+}
+
+// ReadRule returns the raw source of the named rule file. Tier 3.2.
+func (y *YARARuleSet) ReadRule(name string) (string, error) {
+	clean, err := sanitizeYARAName(name)
+	if err != nil {
+		return "", err
+	}
+	y.mu.RLock()
+	dir := y.dir
+	y.mu.RUnlock()
+	if dir == "" {
+		return "", fmt.Errorf("no YARA rules directory configured")
+	}
+	path := filepath.Join(dir, clean+".yar")
+	data, err := os.ReadFile(path) // #nosec G304 -- dir is admin-configured, name is sanitized
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// WriteRule validates and persists a YARA rule file, then reloads the rule
+// set atomically. Tier 3.2. Uses tmp+rename for crash-safety. Returns the
+// parser warnings (if any) so the admin can see what was skipped inside the
+// rule file even on success.
+func (y *YARARuleSet) WriteRule(name, src string) ([]string, error) {
+	clean, err := sanitizeYARAName(name)
+	if err != nil {
+		return nil, err
+	}
+	names, warnings, err := ValidateYARASource(src)
+	if err != nil {
+		return warnings, err
+	}
+	if len(names) == 0 {
+		return warnings, fmt.Errorf("rule source parsed without errors but defines no rules")
+	}
+
+	y.mu.RLock()
+	dir := y.dir
+	y.mu.RUnlock()
+	if dir == "" {
+		return warnings, fmt.Errorf("no YARA rules directory configured")
+	}
+	// Ensure the directory exists (first-time write in /data/yara).
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return warnings, fmt.Errorf("create rules dir: %w", err)
+	}
+	path := filepath.Join(dir, clean+".yar")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(src), 0o600); err != nil { // #nosec G306
+		return warnings, fmt.Errorf("write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return warnings, fmt.Errorf("rename: %w", err)
+	}
+
+	// Reload the whole directory so the new rule takes effect immediately.
+	if err := y.LoadDir(dir); err != nil {
+		return warnings, fmt.Errorf("reload: %w", err)
+	}
+	return warnings, nil
+}
+
+// DeleteRule removes the named rule file from disk and reloads. Tier 3.2.
+func (y *YARARuleSet) DeleteRule(name string) error {
+	clean, err := sanitizeYARAName(name)
+	if err != nil {
+		return err
+	}
+	y.mu.RLock()
+	dir := y.dir
+	y.mu.RUnlock()
+	if dir == "" {
+		return fmt.Errorf("no YARA rules directory configured")
+	}
+	path := filepath.Join(dir, clean+".yar")
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return y.LoadDir(dir)
+}
+
+// SetDir updates the rules directory without loading. Used on first-time
+// startup when /data/yara/ does not yet exist and the admin wants to create
+// rules via the API. Tier 3.2.
+func (y *YARARuleSet) SetDir(dir string) {
+	y.mu.Lock()
+	y.dir = dir
+	y.mu.Unlock()
+}
+
 // Match returns the names of every rule that matches data.
 func (y *YARARuleSet) Match(data []byte) []string {
 	y.mu.RLock()
@@ -376,6 +492,17 @@ func loadYARAFile(path string) ([]yaraCompiledRule, error) {
 }
 
 func parseYARASrc(src string) ([]yaraCompiledRule, error) {
+	rules, warnings, err := parseYARASrcWithWarnings(src)
+	for _, w := range warnings {
+		logger.Printf("YARA: %s", w)
+	}
+	return rules, err
+}
+
+// parseYARASrcWithWarnings is the internal parser used by both parseYARASrc
+// (which forwards warnings to the logger) and ValidateYARASource (which
+// returns them to the caller so the admin UI can display them).
+func parseYARASrcWithWarnings(src string) ([]yaraCompiledRule, []string, error) {
 	var lines []string
 	sc := bufio.NewScanner(strings.NewReader(src))
 	for sc.Scan() {
@@ -383,13 +510,14 @@ func parseYARASrc(src string) ([]yaraCompiledRule, error) {
 	}
 
 	var rules []yaraCompiledRule
+	var warnings []string
 	i := 0
 	for i < len(lines) {
 		line := strings.TrimSpace(stripYARAComment(lines[i]))
 		if strings.HasPrefix(line, "rule ") {
 			rule, end, err := parseYARARule(lines, i)
 			if err != nil {
-				logger.Printf("YARA: parse error near line %d: %v (skipping rule)", i+1, err)
+				warnings = append(warnings, fmt.Sprintf("parse error near line %d: %v (skipping rule)", i+1, err))
 				// Skip to the closing brace of this broken rule.
 				i++
 				for i < len(lines) && strings.TrimSpace(lines[i]) != "}" {
@@ -404,7 +532,33 @@ func parseYARASrc(src string) ([]yaraCompiledRule, error) {
 		}
 		i++
 	}
-	return rules, nil
+	return rules, warnings, nil
+}
+
+// ValidateYARASource parses a YARA rule source string without loading it into
+// the global rule set. Used by the admin UI's "validate" feature so operators
+// can check a rule before persisting it. Tier 3.1.
+//
+// Returns the list of rule names successfully parsed and any parser warnings.
+// Returns an error only when the source contains no valid rules at all; a
+// non-empty warnings slice with a non-empty names slice indicates a source
+// that loaded some rules but skipped others.
+func ValidateYARASource(src string) (names []string, warnings []string, err error) {
+	rules, warnings, perr := parseYARASrcWithWarnings(src)
+	if perr != nil {
+		return nil, warnings, perr
+	}
+	names = make([]string, len(rules))
+	for i := range rules {
+		names[i] = rules[i].name
+	}
+	if len(rules) == 0 {
+		if len(warnings) > 0 {
+			return nil, warnings, fmt.Errorf("no valid rules parsed (%d warning(s))", len(warnings))
+		}
+		return nil, warnings, fmt.Errorf("no rules defined in source")
+	}
+	return names, warnings, nil
 }
 
 // stripYARAComment removes a trailing // comment from a line.

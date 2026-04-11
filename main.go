@@ -732,6 +732,14 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			logger.Printf("YARA: disabled (set -yara-rules-dir to enable)")
 		}
 
+		// Tier 3.3: admin-managed scan exclusion lists (hash + host allowlists).
+		// Persisted under the same data directory as the rest of the state.
+		if dataDir != "" {
+			if err := globalScanExclusions.Load(filepath.Join(dataDir, "scan_exclusions.json")); err != nil {
+				logger.Printf("ScanExclusions: load error: %v", err)
+			}
+		}
+
 		// Threat feeds.
 		if feedDB != "" || secCfg.Enabled {
 			globalThreatFeed.Init(feedDB, syncInterval)

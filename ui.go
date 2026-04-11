@@ -111,9 +111,13 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)             // POST — force immediate sync
 	mux.HandleFunc("/api/security-scan/feeds/domain-allowlist", apiDomainAllowlist) // GET/PUT — threat feed domain allowlist
 	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)            // POST — reload YARA rules from dir
-	mux.HandleFunc("/api/security-scan/yara/rules", apiSecYARARules)              // GET — list loaded rules and parse warnings
+	mux.HandleFunc("/api/security-scan/yara/rules", apiSecYARARules)              // GET/POST/PUT/DELETE — list / CRUD YARA rule files
+	mux.HandleFunc("/api/security-scan/yara/rules/", apiSecYARARules)             // PUT/DELETE /api/security-scan/yara/rules/{name}
+	mux.HandleFunc("/api/security-scan/yara/validate", apiSecYARAValidate)        // POST — dry-run validate a YARA rule source
+	mux.HandleFunc("/api/security-scan/exclusions", apiSecScanExclusions)         // GET/PUT — scan exclusion hashes/hosts
 	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                   // GET — scan service mode info
 	mux.HandleFunc("/api/security-scan/cache", apiScanCache)                    // GET/DELETE — scan hash cache stats & purge
+	mux.HandleFunc("/api/content-scan/bypass", apiContentScanBypass)             // GET/PUT — DPI bypass host list
 
 	// ── URL Categories (dynamic host-list management) ─────────────────────
 	mux.HandleFunc("/api/urlcat", apiURLCat)            // GET/POST/PUT/DELETE categories
@@ -3702,22 +3706,231 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /api/security-scan/yara/rules — list loaded YARA rule names and any
-// parse warnings captured during the last LoadDir. Tier 2.1.
+// apiSecYARARules handles list + CRUD for YARA rule files:
+//
+//   GET    /api/security-scan/yara/rules           — list loaded rule names
+//   GET    /api/security-scan/yara/rules/{name}    — read one rule source
+//   POST   /api/security-scan/yara/rules           — create rule (JSON body)
+//   PUT    /api/security-scan/yara/rules/{name}    — update rule (JSON body)
+//   DELETE /api/security-scan/yara/rules/{name}    — remove rule
+//
+// Writes go to globalYARA.Dir() (persistent /data/yara/ in Docker). Each
+// mutation validates the rule source with ValidateYARASource BEFORE touching
+// disk and atomically replaces the full rule set via LoadDir. Tier 2.1 + 3.2.
 func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	// Extract {name} from the URL path if present.
+	const prefix = "/api/security-scan/yara/rules"
+	name := ""
+	if len(r.URL.Path) > len(prefix) && r.URL.Path[len(prefix)] == '/' {
+		name = strings.TrimPrefix(r.URL.Path, prefix+"/")
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		if name == "" {
+			jsonOK(w, map[string]any{
+				"directory": globalYARA.Dir(),
+				"rules":     globalYARA.Names(),
+				"warnings":  globalYARA.Warnings(),
+				"count":     globalYARA.Count(),
+			})
+			return
+		}
+		src, err := globalYARA.ReadRule(name)
+		if err != nil {
+			http.Error(w, "read rule: "+err.Error(), http.StatusNotFound)
+			return
+		}
+		jsonOK(w, map[string]any{
+			"name":   name,
+			"source": src,
+		})
+
+	case http.MethodPost, http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var req struct {
+			Name   string `json:"name"`
+			Source string `json:"source"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024)).Decode(&req); err != nil {
+			http.Error(w, "bad JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		// URL {name} overrides body name for PUT so the admin can't rename a
+		// rule via the body payload unexpectedly.
+		if name != "" {
+			req.Name = name
+		}
+		if req.Name == "" {
+			http.Error(w, "missing rule name", http.StatusBadRequest)
+			return
+		}
+		warnings, err := globalYARA.WriteRule(req.Name, req.Source)
+		if err != nil {
+			http.Error(w, "write rule: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Hash cache must be cleared on any rule change (Tier 1.1 applies to CRUD).
+		globalSecScanner.cache.Clear()
+		auditEvent(r, "security.yara-write", req.Name, fmt.Sprintf("%d warning(s)", len(warnings)))
+		jsonOK(w, map[string]any{
+			"name":          req.Name,
+			"warnings":      warnings,
+			"yara_rules":    globalYARA.Count(),
+			"cache_cleared": true,
+		})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		if name == "" {
+			// Also accept ?name= for clients that can't DELETE with a path.
+			name = r.URL.Query().Get("name")
+		}
+		if name == "" {
+			http.Error(w, "missing rule name", http.StatusBadRequest)
+			return
+		}
+		if err := globalYARA.DeleteRule(name); err != nil {
+			http.Error(w, "delete rule: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalSecScanner.cache.Clear()
+		auditEvent(r, "security.yara-delete", name, "rule removed and cache cleared")
+		jsonOK(w, map[string]any{
+			"deleted":       name,
+			"yara_rules":    globalYARA.Count(),
+			"cache_cleared": true,
+		})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiSecYARAValidate dry-runs ValidateYARASource against a rule body so admins
+// can check a new rule in the UI before persisting it. Tier 3.1.
+func apiSecYARAValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireRole(w, r, RoleViewer) {
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	var req struct {
+		Source string `json:"source"`
+		Rule   string `json:"rule"` // alias accepted for convenience
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024)).Decode(&req); err != nil {
+		http.Error(w, "bad JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	src := req.Source
+	if src == "" {
+		src = req.Rule
+	}
+	if strings.TrimSpace(src) == "" {
+		http.Error(w, "missing source", http.StatusBadRequest)
+		return
+	}
+	names, warnings, err := ValidateYARASource(src)
+	if err != nil {
+		jsonOK(w, map[string]any{
+			"valid":    false,
+			"error":    err.Error(),
+			"warnings": warnings,
+		})
 		return
 	}
 	jsonOK(w, map[string]any{
-		"directory": globalYARA.Dir(),
-		"rules":     globalYARA.Names(),
-		"warnings":  globalYARA.Warnings(),
-		"count":     globalYARA.Count(),
+		"valid":      true,
+		"rule_names": names,
+		"warnings":   warnings,
 	})
+}
+
+// apiSecScanExclusions exposes the admin-managed ScanExclusionStore.
+//
+//   GET /api/security-scan/exclusions        — return current lists
+//   PUT /api/security-scan/exclusions        — replace lists ({hashes, hosts})
+//
+// Tier 3.3.
+func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		hashes, hosts := globalScanExclusions.Lists()
+		jsonOK(w, map[string]any{
+			"hashes": hashes,
+			"hosts":  hosts,
+		})
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var req struct {
+			Hashes []string `json:"hashes"`
+			Hosts  []string `json:"hosts"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+			http.Error(w, "bad JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalScanExclusions.Replace(req.Hashes, req.Hosts)
+		if err := globalScanExclusions.Save(); err != nil {
+			logger.Printf("ScanExclusions: save error: %v", err)
+		}
+		auditEvent(r, "security.scan-exclusions", "update", fmt.Sprintf("%d hash(es), %d host(s)", len(req.Hashes), len(req.Hosts)))
+		hashes, hosts := globalScanExclusions.Lists()
+		jsonOK(w, map[string]any{
+			"hashes": hashes,
+			"hosts":  hosts,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiContentScanBypass exposes the DPI per-host bypass list.
+//
+//   GET /api/content-scan/bypass             — return current bypass hosts
+//   PUT /api/content-scan/bypass             — replace bypass hosts ({hosts})
+//
+// Tier 3.4.
+func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts()})
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var req struct {
+			Hosts []string `json:"hosts"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024)).Decode(&req); err != nil {
+			http.Error(w, "bad JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		dpiScanner.SetBypassHosts(req.Hosts)
+		dpiScanner.Save()
+		auditEvent(r, "security.dpi-bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
+		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // GET /api/security-scan/svc — returns scan microservice configuration.
