@@ -89,6 +89,17 @@ jobs:
           echo "version_bare=${NEXT#v}" >> $GITHUB_OUTPUT
           echo "Next version: $NEXT"
 
+      # ── Lowercase repo name ───────────────────────────────────────────────
+      # Container registries require lowercase image names, but
+      # ${{ github.repository }} preserves the original case (e.g.
+      # "KidCarmi/Culvert"). docker/metadata-action lowercases automatically;
+      # the updater build step uses raw `tags:` so we have to do it ourselves.
+      - name: Compute lowercase image base
+        id: img-lc
+        run: |
+          LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=$LC" >> $GITHUB_OUTPUT
+
       # ── Registry login ────────────────────────────────────────────────────
       # ghcr.io: always available, uses GITHUB_TOKEN — no secrets needed.
       - name: Log in to GitHub Container Registry
@@ -162,8 +173,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            ghcr.io/${{ github.repository }}-updater:latest
-            ghcr.io/${{ github.repository }}-updater:${{ steps.next-ver.outputs.version || 'dev' }}
+            ghcr.io/${{ steps.img-lc.outputs.repo }}-updater:latest
+            ghcr.io/${{ steps.img-lc.outputs.repo }}-updater:${{ steps.next-ver.outputs.version || 'dev' }}
           labels: |
             org.opencontainers.image.title=Culvert Updater
             org.opencontainers.image.description=Update sidecar for Culvert proxy
