@@ -119,6 +119,79 @@ func (y *YARARuleSet) Names() []string {
 	return out
 }
 
+// Files returns the basenames (without extension) of every *.yar / *.yara file
+// in the configured rules directory. Tier 3.2: the GUI rule editor lists
+// *files*, not the rule names inside them — otherwise ReadRule fails whenever
+// a single file bundles multiple rules (the common case for starter kits). The
+// returned list is sorted and de-duplicated across the two extensions.
+func (y *YARARuleSet) Files() []string {
+	y.mu.RLock()
+	dir := y.dir
+	y.mu.RUnlock()
+	if dir == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, pat := range []string{"*.yar", "*.yara"} {
+		m, _ := filepath.Glob(filepath.Join(dir, pat))
+		for _, f := range m {
+			base := filepath.Base(f)
+			stem := strings.TrimSuffix(base, filepath.Ext(base))
+			if stem != "" {
+				seen[stem] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	// tiny insertion sort — directory listings are short
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
+}
+
+// FileRules returns a map from file stem to the list of rule names defined in
+// that file. Tier 3.2: lets the GUI show "sample_rules.yar → [EICAR_Test_File,
+// WebShell_…]" without a second round trip. File stems with no parsable rules
+// (parse failures, empty files) map to an empty slice.
+func (y *YARARuleSet) FileRules() map[string][]string {
+	y.mu.RLock()
+	dir := y.dir
+	y.mu.RUnlock()
+	if dir == "" {
+		return nil
+	}
+	out := map[string][]string{}
+	for _, pat := range []string{"*.yar", "*.yara"} {
+		m, _ := filepath.Glob(filepath.Join(dir, pat))
+		for _, f := range m {
+			base := filepath.Base(f)
+			stem := strings.TrimSuffix(base, filepath.Ext(base))
+			if stem == "" {
+				continue
+			}
+			rules, err := loadYARAFile(f)
+			if err != nil {
+				if _, ok := out[stem]; !ok {
+					out[stem] = []string{}
+				}
+				continue
+			}
+			names := make([]string, len(rules))
+			for i := range rules {
+				names[i] = rules[i].name
+			}
+			out[stem] = names
+		}
+	}
+	return out
+}
+
 // Warnings returns a copy of any parse/load warnings from the most recent
 // LoadDir call. Empty when all rule files loaded cleanly.
 // Tier 2.1: lets admins surface silently-skipped rules in the UI.
@@ -184,6 +257,10 @@ func sanitizeYARAName(name string) (string, error) {
 // taint analyser (gosec G703) and any future auditor can see a defence-in-
 // depth path traversal guard, even though sanitizeYARAName already rejects
 // anything outside [A-Za-z0-9_-]{1,64}. Tier 3.2.
+//
+// New files are always created with the .yar extension. If an existing
+// .yara file matches the name, that path is returned instead so Read/Delete
+// find the existing file.
 func (y *YARARuleSet) resolveRulePath(name string) (path, dir string, err error) {
 	clean, err := sanitizeYARAName(name)
 	if err != nil {
@@ -202,6 +279,17 @@ func (y *YARARuleSet) resolveRulePath(name string) (path, dir string, err error)
 	// sanitisation legible to static analysers and is cheap to run.
 	if filepath.Dir(path) != dir {
 		return "", "", fmt.Errorf("resolved path escapes rules directory")
+	}
+	// If the .yar variant does not exist but a .yara variant does, prefer
+	// the existing file so Read/Delete operate on the real file on disk.
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		altPath := filepath.Clean(filepath.Join(dir, clean+".yara"))
+		if filepath.Dir(altPath) != dir {
+			return "", "", fmt.Errorf("resolved alt path escapes rules directory")
+		}
+		if _, altErr := os.Stat(altPath); altErr == nil {
+			path = altPath
+		}
 	}
 	return path, dir, nil
 }

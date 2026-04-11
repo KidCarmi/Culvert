@@ -4532,7 +4532,11 @@ async function reloadYARA() {
 }
 
 // ── YARA rule CRUD (Tier 3.1 / 3.2) ─────────────────────────────────────
-let yaraRuleList = [];
+// The left column lists *files* (the unit of CRUD). Each file may contain
+// multiple YARA rules; the contained rule names are shown as a subtitle so
+// admins can still recognise "which file has EICAR" at a glance.
+let yaraFileList = [];
+let yaraFileRules = {}; // stem → [rule names inside]
 let yaraWarningList = [];
 let yaraRuleDir = '';
 let yaraSelectedName = '';
@@ -4540,7 +4544,8 @@ let yaraSelectedName = '';
 async function loadYARARules() {
   try {
     const d = await api('/api/security-scan/yara/rules');
-    yaraRuleList = d.rules || [];
+    yaraFileList = d.files || [];
+    yaraFileRules = d.file_rules || {};
     yaraWarningList = d.warnings || [];
     yaraRuleDir = d.directory || '';
     const dirEl = document.getElementById('sec-yara-dir');
@@ -4562,13 +4567,19 @@ async function loadYARARules() {
 function renderYARARuleList() {
   const el = document.getElementById('sec-yara-rule-list');
   if (!el) return;
-  if (!yaraRuleList.length) {
-    el.innerHTML = '<div style="color:var(--muted);padding:8px">No rules loaded.</div>';
+  if (!yaraFileList.length) {
+    el.innerHTML = '<div style="color:var(--muted);padding:8px">No rule files. Click "+ New rule" to create one.</div>';
     return;
   }
-  el.innerHTML = yaraRuleList.map(n => {
-    const active = n === yaraSelectedName ? 'background:var(--accent);color:#fff' : '';
-    return '<div onclick="selectYARARule(' + JSON.stringify(n).replace(/"/g, '&quot;') + ')" style="padding:6px 10px;border-radius:4px;cursor:pointer;font-family:ui-monospace,monospace;' + active + '">' + escHtml(n) + '</div>';
+  el.innerHTML = yaraFileList.map(stem => {
+    const rules = yaraFileRules[stem] || [];
+    const active = stem === yaraSelectedName ? 'background:var(--accent);color:#fff' : '';
+    const subtitle = rules.length
+      ? '<div style="font-size:11px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(rules.join(', ')) + '</div>'
+      : '<div style="font-size:11px;color:var(--yellow);margin-top:2px">(no parsable rules)</div>';
+    return '<div onclick="selectYARARule(' + JSON.stringify(stem).replace(/"/g, '&quot;') + ')" style="padding:6px 10px;border-radius:4px;cursor:pointer;font-family:ui-monospace,monospace;' + active + '">' +
+      '<div>' + escHtml(stem) + '</div>' + subtitle +
+      '</div>';
   }).join('');
 }
 
@@ -4579,12 +4590,15 @@ async function selectYARARule(name) {
   try {
     const d = await api('/api/security-scan/yara/rules/' + encodeURIComponent(name));
     document.getElementById('sec-yara-edit-src').value = d.source || '';
+    const rules = yaraFileRules[name] || [];
+    if (rules.length) {
+      setYARAEditStatus('info', 'Loaded ' + name + ' — ' + rules.length + ' rule(s): ' + rules.join(', '));
+    } else {
+      setYARAEditStatus('info', 'Loaded ' + name);
+    }
   } catch(e) {
-    // Rule name from /api/.../rules may not correspond to a file name
-    // (it's the rule identifier, not the filename). Leave the editor empty
-    // and let the admin type the source manually.
     document.getElementById('sec-yara-edit-src').value = '';
-    setYARAEditStatus('warn', 'Could not load source for ' + name + ' — rule name may not match file name.');
+    setYARAEditStatus('err', 'Could not load source for ' + name + ': ' + e.message);
   }
 }
 
