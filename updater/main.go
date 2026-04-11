@@ -42,6 +42,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 )
 
 // tagRe validates OCI-compliant image tags: alphanumeric start, up to 128 chars.
@@ -481,9 +482,10 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 			http.Error(w, `{"error":"invalid target_tag format"}`, http.StatusBadRequest)
 			return
 		}
-		if req.HealthEndpoint == "" {
-			req.HealthEndpoint = "http://" + req.Container + ":8080/health"
-		}
+		// Default health endpoint is filled in AFTER the container is
+		// inspected (see below) so we can pick up a non-8080 port from
+		// the container's ExposedPorts instead of hardcoding :8080.
+		userProvidedEndpoint := req.HealthEndpoint != ""
 
 		// Check if update already in progress.
 		activeSession.mu.Lock()
@@ -572,6 +574,22 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 		}
 		oldImage := info.Config.Image
 
+		// Pick the health port from the container's exposed ports if the
+		// caller didn't pass an explicit endpoint. Fallback to 8080 for
+		// backwards compatibility with older CLI callers.
+		if !userProvidedEndpoint {
+			port := 8080
+			if info.Config != nil {
+				for exposed := range info.Config.ExposedPorts {
+					if exposed.Proto() == "tcp" {
+						port = exposed.Int()
+						break
+					}
+				}
+			}
+			req.HealthEndpoint = fmt.Sprintf("http://%s:%d/health", req.Container, port)
+		}
+
 		// Capture all networks.
 		containerNetworks := info.NetworkSettings.Networks
 
@@ -631,13 +649,18 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 			return
 		}
 
-		// Attach additional networks.
+		// Attach additional networks. Failures here don't abort the update
+		// (the container will still run on the primary network), but the
+		// operator needs to see them — a silent drop means a sidecar suddenly
+		// can't reach the proxy after an update. Surface via SSE so the
+		// "warning" shows up next to the progress log in the GUI.
 		for netName, netCfg := range additionalNets {
 			err := cli.NetworkConnect(ctx, netCfg.NetworkID, created.ID, &network.EndpointSettings{
 				Aliases: netCfg.Aliases,
 			})
 			if err != nil {
 				log.Printf("warning: failed to attach network %s: %v", netName, err)
+				sendEvent("warning", fmt.Sprintf("failed to attach network %s: %v", netName, err), 60)
 			}
 		}
 
@@ -771,7 +794,11 @@ func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newI
 			}
 
 			stopTimeout := 10
-			cli.ContainerStop(ctx, containerName, container.StopOptions{Timeout: &stopTimeout}) //nolint:errcheck — may already be stopped
+			if err := cli.ContainerStop(ctx, containerName, container.StopOptions{Timeout: &stopTimeout}); err != nil {
+				if !errdefs.IsNotModified(err) && !errdefs.IsNotFound(err) {
+					log.Printf("soak monitor: stop %s failed: %v (continuing)", containerName, err)
+				}
+			}
 			if err := cli.ContainerRemove(ctx, containerName, container.RemoveOptions{Force: true}); err != nil {
 				log.Printf("soak monitor: remove %s failed: %v", containerName, err)
 			}
@@ -869,7 +896,15 @@ func handleRollback(cli *client.Client) http.HandlerFunc {
 		// Each step is checked — partial failure leaves the system in an
 		// inconsistent state (container name mismatch), so bail early.
 		stopTimeout := 30
-		cli.ContainerStop(ctx, req.Container, container.StopOptions{Timeout: &stopTimeout}) //nolint:errcheck — may already be stopped
+		if err := cli.ContainerStop(ctx, req.Container, container.StopOptions{Timeout: &stopTimeout}); err != nil {
+			// NotModified means the container was already stopped, which is
+			// the expected case during rollback. Real errors (daemon down,
+			// permission denied, etc.) get logged so operators can diagnose
+			// stuck rollbacks instead of staring at a silent failure.
+			if !errdefs.IsNotModified(err) && !errdefs.IsNotFound(err) {
+				log.Printf("rollback: stop %s failed: %v (continuing)", req.Container, err)
+			}
+		}
 		if err := cli.ContainerRemove(ctx, req.Container, container.RemoveOptions{Force: true}); err != nil {
 			log.Printf("rollback: remove %s failed: %v (trying rename anyway)", req.Container, err)
 		}
