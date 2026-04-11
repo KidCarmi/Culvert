@@ -36,6 +36,28 @@ warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[x]${NC} $*" >&2; exit 1; }
 step()  { echo -e "\n${CYAN}━━━ $* ━━━${NC}"; }
 
+# wait_for_apt_lock — block until any other apt/dpkg process releases its lock.
+# Cloud VMs (Ubuntu especially) often run unattended-upgrades on first boot,
+# which holds /var/lib/dpkg/lock-frontend and causes apt-get to fail with
+# "Could not get lock /var/lib/dpkg/lock-frontend" if we run too soon.
+wait_for_apt_lock() {
+  local waited=0
+  local max=300  # 5 minutes
+  while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
+     || sudo fuser /var/lib/dpkg/lock          >/dev/null 2>&1 \
+     || sudo fuser /var/lib/apt/lists/lock     >/dev/null 2>&1; do
+    if (( waited == 0 )); then
+      warn "Another apt/dpkg process is running (likely unattended-upgrades). Waiting..."
+    fi
+    sleep 3
+    waited=$((waited + 3))
+    if (( waited >= max )); then
+      warn "Still waiting for apt lock after ${max}s. Giving up and trying anyway."
+      break
+    fi
+  done
+}
+
 # apt_install_with_repair — run apt-get install with auto-repair on dpkg failure.
 # Usage: apt_install_with_repair pkg1 pkg2 ...
 # On failure: dumps the last 30 lines of output, runs `dpkg --configure -a`
@@ -45,6 +67,8 @@ step()  { echo -e "\n${CYAN}━━━ $* ━━━${NC}"; }
 apt_install_with_repair() {
   local log
   log=$(mktemp 2>/dev/null || echo "/tmp/culvert-apt-$$.log")
+
+  wait_for_apt_lock
 
   if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >"$log" 2>&1; then
     rm -f "$log"
@@ -56,11 +80,14 @@ apt_install_with_repair() {
   rm -f "$log"
 
   warn "Attempting to repair dpkg state (dpkg --configure -a)..."
+  wait_for_apt_lock
   sudo dpkg --configure -a 2>&1 | tail -n 20 >&2 || true
   warn "Attempting to fix broken dependencies (apt-get install -f -y)..."
+  wait_for_apt_lock
   sudo apt-get install -f -y 2>&1 | tail -n 20 >&2 || true
 
   info "Retrying installation of: $*"
+  wait_for_apt_lock
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
 }
 
@@ -217,10 +244,15 @@ case "$DISTRO_FAMILY" in
       info "Removing old docker-compose v1..."
       sudo apt-get remove -y docker-compose 2>/dev/null || true
     fi
-    # Remove distro-packaged Docker
-    for pkg in docker.io containerd runc podman-docker; do
+    # Remove distro-packaged Docker.
+    # Note: we deliberately do NOT remove `runc` here. Modern containerd.io
+    # declares `Conflicts: runc` and apt resolves the swap automatically.
+    # Pre-removing `runc` can break unrelated dependents (kubeadm, crun-based
+    # tools) and was the trigger for an earlier dpkg-failure report.
+    for pkg in docker.io containerd podman-docker; do
       if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
         info "Removing $pkg..."
+        wait_for_apt_lock
         sudo apt-get remove -y "$pkg" 2>/dev/null || true
       fi
     done
@@ -435,21 +467,62 @@ cd "$INSTALL_DIR"
 ###############################################################################
 step "Starting Culvert"
 
+# dump_compose_diagnostics — print container state and recent logs on failure.
+dump_compose_diagnostics() {
+  echo "" >&2
+  warn "── docker compose ps -a ──"
+  sudo docker compose ps -a 2>&1 | sed 's/^/    /' >&2 || true
+  echo "" >&2
+  warn "── docker compose logs (last 100 lines per service) ──"
+  sudo docker compose logs --tail=100 --no-color 2>&1 | sed 's/^/    /' >&2 || true
+  echo "" >&2
+}
+
 info "Pulling images and starting services (first run may take 1-2 minutes)..."
-sudo docker compose up -d
 
-###############################################################################
-# 7. Wait for health checks
-###############################################################################
-step "Waiting for services to start"
-
-info "Waiting for proxy to become healthy..."
-for i in $(seq 1 30); do
-  if sudo docker compose ps --format json 2>/dev/null | grep -q '"healthy"'; then
-    break
+# `docker compose up -d --wait` (Compose v2.17+) blocks until containers are
+# either healthy or exited, and returns non-zero on failure. Much more
+# reliable than the old "sleep + grep healthy" loop, which silently passed
+# even when services crash-looped.
+COMPOSE_UP_OK=0
+if sudo docker compose up -d --wait --wait-timeout 180; then
+  COMPOSE_UP_OK=1
+else
+  # Fallback for older Compose versions that don't support --wait.
+  warn "'docker compose up --wait' failed or is unsupported. Falling back to manual health check."
+  if sudo docker compose up -d; then
+    info "Waiting up to 90s for services to become healthy..."
+    for i in $(seq 1 45); do
+      # Treat any exited container as a hard failure
+      if sudo docker compose ps -a --format '{{.State}}' 2>/dev/null | grep -qw exited; then
+        break
+      fi
+      if sudo docker compose ps --format '{{.Health}}' 2>/dev/null | grep -qw healthy; then
+        COMPOSE_UP_OK=1
+        break
+      fi
+      sleep 2
+    done
   fi
-  sleep 2
-done
+fi
+
+if [[ "$COMPOSE_UP_OK" != "1" ]]; then
+  warn "Culvert services did not reach a healthy state."
+  dump_compose_diagnostics
+  error "Culvert failed to start. See diagnostics above.
+
+  Common causes:
+    1. Port conflict — another process is using 8080 or 9090
+       Check: sudo ss -tlnp | grep -E ':(8080|9090)'
+    2. Image pull failed — corporate proxy or Docker Hub rate limit
+    3. Insufficient memory — ClamAV needs ~600 MB on its own
+    4. Build failure — check the logs above for compile errors
+
+  Manual diagnostics:
+    cd $INSTALL_DIR
+    sudo docker compose ps -a
+    sudo docker compose logs"
+fi
 
 echo ""
 echo -e "${GREEN}============================================================${NC}"
