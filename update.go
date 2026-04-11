@@ -9,6 +9,8 @@ package main
 // See roadmap/docker-system-update.md for full design.
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -527,16 +529,58 @@ func apiUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	buf := make([]byte, 4096)
+	// Line-based scan: SSE events are framed by `\n\n`, but every payload line
+	// itself ends with `\n`. Reading line-by-line guarantees we never split a
+	// JSON token across reads — fixing the 4096-byte buffer-boundary bug where
+	// `"step":"complete"` could land half in one chunk and half in the next.
+	br := bufio.NewReaderSize(resp.Body, 8192)
+	updateSucceeded := false
 	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			w.Write(buf[:n]) //nolint:errcheck
+		line, err := br.ReadString('\n')
+		if len(line) > 0 {
+			io.WriteString(w, line) //nolint:errcheck
 			flusher.Flush()
+			if !updateSucceeded && strings.Contains(line, `"step":"complete"`) {
+				updateSucceeded = true
+			}
 		}
 		if err != nil {
 			break
 		}
+	}
+
+	// After proxy update succeeds, trigger updater self-update (fire-and-forget).
+	// Intentionally NOT propagating r.Context(): the SSE stream is about to
+	// close, which would cancel the request context immediately and kill the
+	// updater self-update mid-pull. triggerUpdaterSelfUpdate creates its own
+	// 5-minute background context — same pattern as the rollback handler fix
+	// in 2d5f6d1.
+	if updateSucceeded {
+		// #nosec G118 -- detached lifetime is required; see comment above.
+		go triggerUpdaterSelfUpdate(req.TargetTag)
+	}
+}
+
+// triggerUpdaterSelfUpdate asks the updater sidecar to update itself to the
+// same tag the proxy was just updated to. Fire-and-forget — the updater uses
+// a reaper container to restart itself.
+func triggerUpdaterSelfUpdate(tag string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	body, _ := json.Marshal(map[string]string{"target_tag": tag})
+	resp, err := updaterRequest(ctx, http.MethodPost, "/api/self-update", bytes.NewReader(body))
+	if err != nil {
+		logger.Printf("Update: updater self-update trigger failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		logger.Printf("Update: updater self-update triggered (tag=%s)", sanitizeLog(tag))
+	} else {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		logger.Printf("Update: updater self-update returned HTTP %d: %s", resp.StatusCode, respBody)
 	}
 }
 

@@ -49,14 +49,17 @@ services:
   # Handles container pull/recreate/rollback when triggered from the GUI.
   # Idle 99.99% of the time — only wakes for update operations.
   updater:
-    build:
-      context: .
-      dockerfile: Dockerfile.updater
+    image: ghcr.io/kidcarmi/culvert-updater:latest
+    # Uncomment to build locally instead of pulling from registry:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.updater
     container_name: culvert-updater
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - proxy-data:/data:ro   # read shared updater token
+      - proxy-data:/data:ro       # read shared updater token (read-only)
+      - updater-state:/state      # writable rollback metadata; survives self-update
     ports:
       - "127.0.0.1:7123:7123" # localhost only; exposed for GUI resilience during CP update (auth required)
     cap_drop:
@@ -72,7 +75,9 @@ services:
 
   # ── Culvert proxy + admin UI ────────────────────────────────────────────
   proxy:
-    build: .
+    image: ghcr.io/kidcarmi/culvert:latest
+    # Uncomment to build locally:
+    # build: .
     container_name: culvert
     restart: unless-stopped
     # Wait for ClamAV to pass its health check before starting the proxy.
@@ -123,4 +128,5 @@ services:
 
 volumes:
   proxy-data:
-  clamav-db:    # ClamAV signature database — persisted to skip re-download on restart
+  clamav-db:      # ClamAV signature database — persisted to skip re-download on restart
+  updater-state:  # writable rollback state for the updater sidecar (survives self-update)
