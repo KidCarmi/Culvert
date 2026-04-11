@@ -217,6 +217,8 @@ docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 # Grafana → http://localhost:3000  (admin / culvert)
 ```
 
+The **Culvert Overview** dashboard (12 panels: traffic, latency, security blocks, top policy rules) is auto-provisioned from `deploy/grafana/dashboards/culvert-overview.json` — no manual import needed.
+
 ### Binary
 
 ```bash

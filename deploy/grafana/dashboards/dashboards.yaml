@@ -1,0 +1,20 @@
+# Grafana dashboard provisioning provider config.
+# Tells Grafana to load every .json file in this directory as a dashboard.
+# Mounted into the Grafana container at /etc/grafana/provisioning/dashboards
+# by docker-compose.monitoring.yml. Dashboards appear automatically on
+# startup; no manual import required.
+
+apiVersion: 1
+
+providers:
+  - name: Culvert
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false
