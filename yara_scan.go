@@ -178,20 +178,44 @@ func sanitizeYARAName(name string) (string, error) {
 	return name, nil
 }
 
+// resolveRulePath builds a cleaned, absolute path for the given rule name and
+// verifies the result is still inside the configured rules directory. It is
+// the single choke-point for every file operation on YARA rule files so the
+// taint analyser (gosec G703) and any future auditor can see a defence-in-
+// depth path traversal guard, even though sanitizeYARAName already rejects
+// anything outside [A-Za-z0-9_-]{1,64}. Tier 3.2.
+func (y *YARARuleSet) resolveRulePath(name string) (path, dir string, err error) {
+	clean, err := sanitizeYARAName(name)
+	if err != nil {
+		return "", "", err
+	}
+	y.mu.RLock()
+	rawDir := y.dir
+	y.mu.RUnlock()
+	if rawDir == "" {
+		return "", "", fmt.Errorf("no YARA rules directory configured")
+	}
+	dir = filepath.Clean(rawDir)
+	path = filepath.Clean(filepath.Join(dir, clean+".yar"))
+	// Reject any path that does not live directly inside dir. This cannot
+	// happen given sanitizeYARAName, but the explicit check makes the
+	// sanitisation legible to static analysers and is cheap to run.
+	if filepath.Dir(path) != dir {
+		return "", "", fmt.Errorf("resolved path escapes rules directory")
+	}
+	return path, dir, nil
+}
+
 // ReadRule returns the raw source of the named rule file. Tier 3.2.
 func (y *YARARuleSet) ReadRule(name string) (string, error) {
-	clean, err := sanitizeYARAName(name)
+	path, _, err := y.resolveRulePath(name)
 	if err != nil {
 		return "", err
 	}
-	y.mu.RLock()
-	dir := y.dir
-	y.mu.RUnlock()
-	if dir == "" {
-		return "", fmt.Errorf("no YARA rules directory configured")
-	}
-	path := filepath.Join(dir, clean+".yar")
-	data, err := os.ReadFile(path) // #nosec G304 -- dir is admin-configured, name is sanitized
+	// #nosec G304,G703 -- name is regex-validated by sanitizeYARAName and
+	// the resolved path is verified to live inside the admin-configured
+	// rules directory by resolveRulePath.
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
@@ -203,10 +227,6 @@ func (y *YARARuleSet) ReadRule(name string) (string, error) {
 // parser warnings (if any) so the admin can see what was skipped inside the
 // rule file even on success.
 func (y *YARARuleSet) WriteRule(name, src string) ([]string, error) {
-	clean, err := sanitizeYARAName(name)
-	if err != nil {
-		return nil, err
-	}
 	names, warnings, err := ValidateYARASource(src)
 	if err != nil {
 		return warnings, err
@@ -214,24 +234,25 @@ func (y *YARARuleSet) WriteRule(name, src string) ([]string, error) {
 	if len(names) == 0 {
 		return warnings, fmt.Errorf("rule source parsed without errors but defines no rules")
 	}
-
-	y.mu.RLock()
-	dir := y.dir
-	y.mu.RUnlock()
-	if dir == "" {
-		return warnings, fmt.Errorf("no YARA rules directory configured")
+	path, dir, err := y.resolveRulePath(name)
+	if err != nil {
+		return warnings, err
 	}
 	// Ensure the directory exists (first-time write in /data/yara).
+	// #nosec G703 -- dir is the cleaned, admin-configured rules directory
+	// returned by resolveRulePath; no user-controlled component.
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return warnings, fmt.Errorf("create rules dir: %w", err)
 	}
-	path := filepath.Join(dir, clean+".yar")
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(src), 0o600); err != nil { // #nosec G306
+	// #nosec G304,G306,G703 -- tmp is derived from a path validated by
+	// resolveRulePath; 0600 is already used, G306 lint is a false positive.
+	if err := os.WriteFile(tmp, []byte(src), 0o600); err != nil {
 		return warnings, fmt.Errorf("write tmp: %w", err)
 	}
+	// #nosec G304,G703 -- both arguments flow from resolveRulePath.
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp) //nolint:errcheck
+		_ = os.Remove(tmp) // #nosec G104,G304,G703 -- cleanup of our own tmp file
 		return warnings, fmt.Errorf("rename: %w", err)
 	}
 
@@ -244,17 +265,11 @@ func (y *YARARuleSet) WriteRule(name, src string) ([]string, error) {
 
 // DeleteRule removes the named rule file from disk and reloads. Tier 3.2.
 func (y *YARARuleSet) DeleteRule(name string) error {
-	clean, err := sanitizeYARAName(name)
+	path, dir, err := y.resolveRulePath(name)
 	if err != nil {
 		return err
 	}
-	y.mu.RLock()
-	dir := y.dir
-	y.mu.RUnlock()
-	if dir == "" {
-		return fmt.Errorf("no YARA rules directory configured")
-	}
-	path := filepath.Join(dir, clean+".yar")
+	// #nosec G304,G703 -- path validated by resolveRulePath.
 	if err := os.Remove(path); err != nil {
 		return err
 	}
@@ -484,7 +499,10 @@ func parseYARAAtom(ts *yaraTokenStream, hit map[string]bool) bool {
 // ── YARA file / source parser ─────────────────────────────────────────────────
 
 func loadYARAFile(path string) ([]yaraCompiledRule, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- admin-configured rules directory
+	// #nosec G304,G703 -- path comes from filepath.Glob over the admin-
+	// configured rules directory (see LoadDir) or from resolveRulePath which
+	// validates containment; no user-controlled component reaches this call.
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
