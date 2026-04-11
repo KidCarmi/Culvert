@@ -111,6 +111,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)             // POST — force immediate sync
 	mux.HandleFunc("/api/security-scan/feeds/domain-allowlist", apiDomainAllowlist) // GET/PUT — threat feed domain allowlist
 	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)            // POST — reload YARA rules from dir
+	mux.HandleFunc("/api/security-scan/yara/rules", apiSecYARARules)              // GET — list loaded rules and parse warnings
 	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                   // GET — scan service mode info
 	mux.HandleFunc("/api/security-scan/cache", apiScanCache)                    // GET/DELETE — scan hash cache stats & purge
 
@@ -3688,9 +3689,34 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "YARA reload failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Tier 1.1: Clear hash cache so content scanned as clean under old rules
+	// is re-scanned under the new rule set. Without this, new rules don't
+	// apply to previously-cached content until the 1-hour TTL expires.
+	globalSecScanner.cache.Clear()
+	auditEvent(r, "security.yara-reload", dir, "YARA rules reloaded and hash cache cleared")
 	jsonOK(w, map[string]any{
-		"yara_rules": globalYARA.Count(),
-		"directory":  dir,
+		"yara_rules":    globalYARA.Count(),
+		"directory":     dir,
+		"cache_cleared": true,
+		"warnings":      globalYARA.Warnings(),
+	})
+}
+
+// GET /api/security-scan/yara/rules — list loaded YARA rule names and any
+// parse warnings captured during the last LoadDir. Tier 2.1.
+func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	jsonOK(w, map[string]any{
+		"directory": globalYARA.Dir(),
+		"rules":     globalYARA.Names(),
+		"warnings":  globalYARA.Warnings(),
+		"count":     globalYARA.Count(),
 	})
 }
 

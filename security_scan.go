@@ -48,6 +48,9 @@ var (
 	statClamBlocked       int64 // requests blocked by ClamAV
 	statYARABlocked       int64 // requests blocked by YARA rules
 	statThreatFeedBlocked int64 // requests blocked by threat intel feeds
+	statScanTimeout       int64 // body scans that hit scanBodyTimeout (fail-closed)
+	statScanSkipped       int64 // responses forwarded unscanned (size > maxBytes)
+	statRemoteScanFail    int64 // remote scan sidecar failures (fail-open)
 )
 
 // ── SecurityScanner ───────────────────────────────────────────────────────────
@@ -68,7 +71,15 @@ type SecurityScanner struct {
 	cache    *HashCache
 	maxBytes int64 // max bytes to buffer per response for body scanning
 	enabled  bool
+
+	// Tier 2.3: ClamAV ping cache. Protects the admin dashboard from
+	// opening a fresh TCP connection to ClamAV on every status poll.
+	clamStatusVal    string
+	clamStatusExpiry time.Time
 }
+
+// clamStatusTTL is how long a successful ClamAV ping result is considered fresh.
+const clamStatusTTL = 30 * time.Second
 
 // globalSecScanner is the process-wide scanner, initialised in main.go.
 var globalSecScanner = &SecurityScanner{
@@ -96,6 +107,10 @@ func (ss *SecurityScanner) Init(clamAddr string, maxBytes int64) {
 		}
 	}
 	ss.enabled = true
+	// Tier 2.3: Invalidate any cached clam status so the first admin poll
+	// after reconfiguration runs a real ping.
+	ss.clamStatusVal = ""
+	ss.clamStatusExpiry = time.Time{}
 }
 
 // Enabled reports whether the scanner has been initialised.
@@ -120,17 +135,35 @@ func (ss *SecurityScanner) MaxBytes() int64 {
 }
 
 // ClamAVStatus returns a human-readable daemon connectivity string.
+// Tier 2.3: Result is cached for clamStatusTTL to avoid hammering the ClamAV
+// daemon on every admin dashboard poll. Cache is invalidated on Init().
 func (ss *SecurityScanner) ClamAVStatus() string {
 	ss.mu.RLock()
 	clam := ss.clam
-	ss.mu.RUnlock()
 	if clam == nil {
+		ss.mu.RUnlock()
 		return "disabled"
 	}
-	if err := clam.Ping(); err != nil {
-		return fmt.Sprintf("unreachable: %v", err)
+	// Cache hit: return stored status without pinging.
+	if ss.clamStatusVal != "" && time.Now().Before(ss.clamStatusExpiry) {
+		v := ss.clamStatusVal
+		ss.mu.RUnlock()
+		return v
 	}
-	return "connected"
+	ss.mu.RUnlock()
+
+	// Cache miss or expired — ping outside any lock, then cache result.
+	var val string
+	if err := clam.Ping(); err != nil {
+		val = fmt.Sprintf("unreachable: %v", err)
+	} else {
+		val = "connected"
+	}
+	ss.mu.Lock()
+	ss.clamStatusVal = val
+	ss.clamStatusExpiry = time.Now().Add(clamStatusTTL)
+	ss.mu.Unlock()
+	return val
 }
 
 // ── URL / domain checks ───────────────────────────────────────────────────────
@@ -254,6 +287,7 @@ func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 	case result := <-ch:
 		return result
 	case <-time.After(scanBodyTimeout):
+		atomic.AddInt64(&statScanTimeout, 1)
 		logWarnf("SecurityScan: ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout, hash)
 		ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"})
 		return &SecurityScanResult{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
@@ -380,7 +414,10 @@ func maxScanBufferBytes() int64 {
 // logScanLimitExceeded logs a warning and fires a "scan_skipped" alert when a
 // response body exceeds the scan buffer limit and is therefore forwarded
 // without ClamAV/YARA/DPI inspection (Finding 4.2).
+// Tier 1.2: also increments the statScanSkipped counter so the status API
+// exposes size-skipped events without grepping logs.
 func logScanLimitExceeded(host, clientIP string, maxBytes int64) {
+	atomic.AddInt64(&statScanSkipped, 1)
 	if logger != nil {
 		logger.Printf("SCAN: response from %s exceeds scan limit (%d bytes), forwarded unscanned", sanitizeLog(host), maxBytes)
 	}
@@ -416,7 +453,7 @@ func secScanStatusMap() map[string]interface{} {
 	// When remote scanner is active, fetch status from the sidecar.
 	if globalRemoteScanner.Enabled() {
 		m := map[string]interface{}{
-			"enabled":      true,
+			"enabled":       true,
 			"scan_svc_mode": "remote",
 			"scan_svc_url":  globalRemoteScanner.URL(),
 		}
@@ -424,8 +461,10 @@ func secScanStatusMap() map[string]interface{} {
 			for k, v := range status {
 				m[k] = v
 			}
+			m["scan_svc_degraded"] = false
 		} else {
 			m["scan_svc_status"] = fmt.Sprintf("unreachable: %v", err)
+			m["scan_svc_degraded"] = true
 		}
 		// Always include local threat feed stats (feeds run locally even with remote scanning).
 		feedTotal, feedLastSync, feedInterval := globalThreatFeed.Stats()
@@ -433,6 +472,8 @@ func secScanStatusMap() map[string]interface{} {
 		m["threat_feed_last_sync"] = feedLastSync
 		m["threat_feed_interval"] = feedInterval.String()
 		m["stat_feed_blocked"] = atomic.LoadInt64(&statThreatFeedBlocked)
+		// Tier 2.2: surface remote sidecar failure counter even when scan_svc_mode=remote.
+		m["stat_remote_scan_fail"] = atomic.LoadInt64(&statRemoteScanFail)
 		return m
 	}
 
@@ -443,6 +484,9 @@ func secScanStatusMap() map[string]interface{} {
 		"scan_svc_mode":         "local",
 		"clamav_status":         globalSecScanner.ClamAVStatus(),
 		"yara_rules":            globalYARA.Count(),
+		"yara_warnings":         len(globalYARA.Warnings()),       // Tier 2.1
+		"yara_inflight":         yaraInflight.Load(),              // Tier 1.3
+		"yara_inflight_max":     int64(maxYARAInflight),           // Tier 1.3
 		"threat_feed_entries":   feedTotal,
 		"threat_feed_last_sync": feedLastSync,
 		"threat_feed_interval":  feedInterval.String(),
@@ -452,5 +496,8 @@ func secScanStatusMap() map[string]interface{} {
 		"stat_clam_blocked":     atomic.LoadInt64(&statClamBlocked),
 		"stat_yara_blocked":     atomic.LoadInt64(&statYARABlocked),
 		"stat_feed_blocked":     atomic.LoadInt64(&statThreatFeedBlocked),
+		"stat_scan_timeout":     atomic.LoadInt64(&statScanTimeout),     // Tier 1.2
+		"stat_scan_skipped":     atomic.LoadInt64(&statScanSkipped),     // Tier 1.2
+		"stat_remote_scan_fail": atomic.LoadInt64(&statRemoteScanFail),  // Tier 2.2
 	}
 }

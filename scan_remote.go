@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -63,6 +64,17 @@ func (rs *RemoteScanner) URL() string {
 	return rs.baseURL
 }
 
+// remoteScanFailAlert increments the fail counter and fires a debounced
+// webhook alert so admins see when the sidecar starts dropping scans.
+// Tier 2.2: every fail-open return path routes through this helper.
+func remoteScanFailAlert(reason string) {
+	atomic.AddInt64(&statRemoteScanFail, 1)
+	go fireAlert("scan_svc_down", AlertPayload{
+		Source: "remote_scan",
+		Detail: reason,
+	})
+}
+
 // ScanBody sends data to the remote scan service and returns the result.
 // Returns nil when the content is clean or the service is unreachable (fail-open
 // on network errors to avoid blocking all traffic when the sidecar is down).
@@ -82,6 +94,7 @@ func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *SecurityScan
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/scan", bytes.NewReader(data))
 	if err != nil {
 		logger.Printf("ScanSvc: request error: %v", err)
+		remoteScanFailAlert("request build error: " + err.Error())
 		return nil // fail-open
 	}
 	if contentType != "" {
@@ -92,24 +105,28 @@ func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *SecurityScan
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.Printf("ScanSvc: remote scan error: %v", err)
+		remoteScanFailAlert("transport error: " + err.Error())
 		return nil // fail-open
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Printf("ScanSvc: remote scan HTTP %d", resp.StatusCode)
+		remoteScanFailAlert(fmt.Sprintf("sidecar returned HTTP %d", resp.StatusCode))
 		return nil // fail-open
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
 		logger.Printf("ScanSvc: read response error: %v", err)
+		remoteScanFailAlert("response read error: " + err.Error())
 		return nil
 	}
 
 	var sr ScanResponse
 	if err := json.Unmarshal(body, &sr); err != nil {
 		logger.Printf("ScanSvc: parse response error: %v", err)
+		remoteScanFailAlert("response parse error: " + err.Error())
 		return nil
 	}
 
