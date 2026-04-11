@@ -672,6 +672,10 @@ tr.dragging  { opacity: .4; }
           <option value="DELETE">DELETE</option>
         </select>
         <button class="btn ghost sm" onclick="clearFilter()">Clear</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer"
+               title="Query the persistent JSONL request log on disk (newest 20 000 entries) instead of the in-memory ring buffer.">
+          <input type="checkbox" id="log-source-file" onchange="applyLogFilter()"> Persistent log
+        </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer;margin-left:auto">
           <input type="checkbox" id="auto-scroll" checked> Auto-scroll
         </label>
@@ -3992,6 +3996,8 @@ async function fetchLogs() {
     if (logStatusFilter)   params.push('status='   + logStatusFilter);
     if (logLevelFilter)    params.push('level='    + logLevelFilter);
     if (logMethodFilter)   params.push('method='   + logMethodFilter);
+    const srcEl = document.getElementById('log-source-file');
+    if (srcEl && srcEl.checked) params.push('source=file');
     if (params.length) url += '?' + params.join('&');
     const d = await api(url);
     logEntries = d.logs || [];

@@ -1180,13 +1180,36 @@ func apiTimeseries(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"data": total, "allowed": allowed, "blocked": blocked})
 }
 
-// GET /api/logs?filter=...&status=...&level=...&method=...&from=...&to=...
+// apiLogsSource returns the log entries the caller wants to filter over:
+// either the in-memory ring buffer (default) or the persistent JSONL file
+// when source=file is set. On file read error it writes an HTTP 500 and
+// returns ok=false; on success it returns the entries newest-first.
+func apiLogsSource(w http.ResponseWriter, r *http.Request) (entries []LogEntry, ok bool) {
+	if r.URL.Query().Get("source") != "file" {
+		return logGet(), true
+	}
+	fileEntries, err := requestLogReadPersistent()
+	if err != nil {
+		logger.Printf("WARN apiLogs: persistent log read: %v", err)
+		http.Error(w, "persistent log read error", http.StatusInternalServerError)
+		return nil, false
+	}
+	return fileEntries, true
+}
+
+// GET /api/logs?filter=...&status=...&level=...&method=...&from=...&to=...&source=file
 // from/to accept Unix timestamps (seconds) or ISO 8601 (RFC 3339) strings.
+// source=file reads from the persistent JSONL request log file (newest-first,
+// capped at requestLogMaxPersistentReturn entries); any other value reads from
+// the in-memory ring buffer.
 func apiLogs(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	all := logGet()
+	all, ok := apiLogsSource(w, r)
+	if !ok {
+		return
+	}
 	filterHost := strings.ToLower(r.URL.Query().Get("filter"))
 	filterStatus := strings.ToUpper(r.URL.Query().Get("status"))
 	filterLevel := strings.ToUpper(r.URL.Query().Get("level"))
