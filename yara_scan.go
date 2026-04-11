@@ -59,17 +59,19 @@ type yaraCompiledRule struct {
 // YARARuleSet holds compiled YARA rules loaded from a directory.
 // All methods are safe for concurrent use.
 type YARARuleSet struct {
-	mu    sync.RWMutex
-	rules []yaraCompiledRule
-	dir   string
+	mu       sync.RWMutex
+	rules    []yaraCompiledRule
+	dir      string
+	warnings []string // parse/load warnings from the most recent LoadDir call
 }
 
 // globalYARA is the process-wide YARA rule set.
 var globalYARA = &YARARuleSet{}
 
 // LoadDir loads all *.yar and *.yara files from dir, replacing current rules
-// atomically. Errors in individual rule files are logged and skipped; the
-// remaining rules are still loaded.
+// atomically. Errors in individual rule files are logged and captured in
+// y.warnings so admins can see which files failed to parse; the remaining
+// rules are still loaded.
 func (y *YARARuleSet) LoadDir(dir string) error {
 	var files []string
 	for _, pat := range []string{"*.yar", "*.yara"} {
@@ -78,10 +80,13 @@ func (y *YARARuleSet) LoadDir(dir string) error {
 	}
 
 	var loaded []yaraCompiledRule
+	var warnings []string
 	for _, f := range files {
 		rules, err := loadYARAFile(f)
 		if err != nil {
-			logger.Printf("YARA: skipping %s: %v", f, err)
+			msg := fmt.Sprintf("%s: %v", filepath.Base(f), err)
+			logger.Printf("YARA: skipping %s", msg)
+			warnings = append(warnings, msg)
 			continue
 		}
 		loaded = append(loaded, rules...)
@@ -90,14 +95,49 @@ func (y *YARARuleSet) LoadDir(dir string) error {
 	y.mu.Lock()
 	y.dir = dir
 	y.rules = loaded
+	y.warnings = warnings
 	y.mu.Unlock()
 
 	// Reset in-flight counter so stale timeouts from previous rules don't
 	// suppress matching after a reload (P8).
 	yaraInflight.Store(0)
 
-	logger.Printf("YARA: %d rule(s) loaded from %d file(s) in %s", len(loaded), len(files), dir)
+	logger.Printf("YARA: %d rule(s) loaded from %d file(s) in %s (%d warnings)",
+		len(loaded), len(files), dir, len(warnings))
 	return nil
+}
+
+// Names returns the names of all currently loaded rules.
+// Tier 2.1: exposes the rule set so admins can verify which rules are active.
+func (y *YARARuleSet) Names() []string {
+	y.mu.RLock()
+	defer y.mu.RUnlock()
+	out := make([]string, len(y.rules))
+	for i := range y.rules {
+		out[i] = y.rules[i].name
+	}
+	return out
+}
+
+// Warnings returns a copy of any parse/load warnings from the most recent
+// LoadDir call. Empty when all rule files loaded cleanly.
+// Tier 2.1: lets admins surface silently-skipped rules in the UI.
+func (y *YARARuleSet) Warnings() []string {
+	y.mu.RLock()
+	defer y.mu.RUnlock()
+	if len(y.warnings) == 0 {
+		return nil
+	}
+	out := make([]string, len(y.warnings))
+	copy(out, y.warnings)
+	return out
+}
+
+// Dir returns the directory the rule set was loaded from.
+func (y *YARARuleSet) Dir() string {
+	y.mu.RLock()
+	defer y.mu.RUnlock()
+	return y.dir
 }
 
 // Enabled reports whether any rules are currently loaded.
@@ -180,13 +220,34 @@ var yaraInflight atomic.Int64
 // Beyond this limit, new regex matches are skipped entirely.
 const maxYARAInflight = 50
 
+// yaraDegradedThreshold is the inflight goroutine count that triggers the
+// yara_degraded alert. At 80% of the hard cap we warn admins that the rule
+// engine is approaching the point where new scans will be skipped.
+// Tier 1.3: visibility into silent degradation.
+const yaraDegradedThreshold = (maxYARAInflight * 80) / 100
+
 // matchRegexWithTimeout runs re.Match(data) in a goroutine and returns false
 // if the match does not complete within the given timeout (ReDoS prevention).
 // Abandoned goroutines are tracked and capped at maxYARAInflight to prevent leaks.
 func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
-	if yaraInflight.Load() >= maxYARAInflight {
-		logWarnf("YARA: regex skipped: too many in-flight goroutines (%d)", yaraInflight.Load())
+	inflight := yaraInflight.Load()
+	if inflight >= maxYARAInflight {
+		logWarnf("YARA: regex skipped: too many in-flight goroutines (%d)", inflight)
+		// Tier 1.3: Fire degraded alert when we're actively skipping regex matches.
+		// fireAlert has a 30s dedup window so storms are naturally throttled.
+		go fireAlert("yara_degraded", AlertPayload{
+			Source: "yara",
+			Detail: fmt.Sprintf("regex skipped: inflight=%d max=%d — YARA engine saturated", inflight, maxYARAInflight),
+		})
 		return false
+	}
+	// Tier 1.3: Warn once we're approaching the cap so admins have a chance
+	// to react before matches start being silently dropped.
+	if inflight >= yaraDegradedThreshold {
+		go fireAlert("yara_degraded", AlertPayload{
+			Source: "yara",
+			Detail: fmt.Sprintf("inflight=%d/%d — approaching YARA saturation", inflight, maxYARAInflight),
+		})
 	}
 	ch := make(chan bool, 1)
 	yaraInflight.Add(1)
