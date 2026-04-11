@@ -109,6 +109,67 @@ type RollbackInfo struct {
 
 var rollbackInfo RollbackInfo
 
+// rollbackInfoFile persists rollback metadata across updater restarts.
+// This allows the proxy's rollback window to survive an updater self-update.
+const rollbackInfoFile = "/data/updater_rollback.json"
+
+// saveRollbackInfo writes current rollback state to disk.
+func saveRollbackInfo() {
+	rollbackInfo.mu.RLock()
+	data, err := json.Marshal(map[string]any{
+		"available":      rollbackInfo.Available,
+		"container_name": rollbackInfo.ContainerName,
+		"rollback_tag":   rollbackInfo.RollbackTag,
+		"expires_at":     rollbackInfo.ExpiresAt,
+	})
+	rollbackInfo.mu.RUnlock()
+	if err != nil {
+		return
+	}
+	tmp := rollbackInfoFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil { //nolint:gosec // not secret data
+		log.Printf("save rollback info: %v", err)
+		return
+	}
+	os.Rename(tmp, rollbackInfoFile) //nolint:errcheck
+}
+
+// loadRollbackInfo restores rollback state from disk on startup.
+func loadRollbackInfo() {
+	data, err := os.ReadFile(rollbackInfoFile)
+	if err != nil {
+		return // no file = no prior rollback state
+	}
+	var info struct {
+		Available     bool      `json:"available"`
+		ContainerName string    `json:"container_name"`
+		RollbackTag   string    `json:"rollback_tag"`
+		ExpiresAt     time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		log.Printf("load rollback info: %v", err)
+		return
+	}
+	// Only restore if not expired.
+	if info.Available && time.Now().Before(info.ExpiresAt) {
+		rollbackInfo.mu.Lock()
+		rollbackInfo.Available = info.Available
+		rollbackInfo.ContainerName = info.ContainerName
+		rollbackInfo.RollbackTag = info.RollbackTag
+		rollbackInfo.ExpiresAt = info.ExpiresAt
+		rollbackInfo.mu.Unlock()
+		log.Printf("restored rollback info: %s (expires %s)", info.ContainerName, info.ExpiresAt.Format(time.RFC3339))
+	} else {
+		// Expired — clean up the file.
+		os.Remove(rollbackInfoFile) //nolint:errcheck
+	}
+}
+
+// clearRollbackInfo removes the persisted rollback state.
+func clearRollbackInfo() {
+	os.Remove(rollbackInfoFile) //nolint:errcheck
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -130,6 +191,9 @@ func main() {
 		log.Fatalf("docker ping: %v", err)
 	}
 	log.Printf("connected to Docker engine")
+
+	// Restore rollback info from disk (survives updater self-update restart).
+	loadRollbackInfo()
 
 	// Start rollback cleanup goroutine.
 	go rollbackCleanupLoop(cli)
@@ -557,6 +621,7 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 		rollbackInfo.RollbackTag = oldImage
 		rollbackInfo.ExpiresAt = time.Now().Add(rollbackTTL)
 		rollbackInfo.mu.Unlock()
+		saveRollbackInfo()
 
 		sendEvent("complete", "Update to "+req.TargetTag+" successful", 100)
 		log.Printf("update complete: %s → %s", oldImage, targetImage)
@@ -622,6 +687,7 @@ func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newI
 			rollbackInfo.mu.Lock()
 			rollbackInfo.Available = false
 			rollbackInfo.mu.Unlock()
+			clearRollbackInfo()
 
 			log.Printf("soak monitor: auto-rollback complete — restored %s (%s)", containerName, oldImage)
 			return
@@ -703,6 +769,7 @@ func handleRollback(cli *client.Client) http.HandlerFunc {
 		rollbackInfo.mu.Lock()
 		rollbackInfo.Available = false
 		rollbackInfo.mu.Unlock()
+		clearRollbackInfo()
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "rolled_back"})
 		log.Printf("manual rollback completed: restored %s", rbName)
@@ -1199,6 +1266,7 @@ func rollbackCleanupLoop(cli *client.Client) {
 			rollbackInfo.mu.Lock()
 			rollbackInfo.Available = false
 			rollbackInfo.mu.Unlock()
+			clearRollbackInfo()
 
 			// Prune dangling images (lock-free).
 			if _, err := cli.ImagesPrune(ctx, filters.Args{}); err != nil {
@@ -1360,16 +1428,42 @@ func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
 		dataVolume := buildVolumeArg(self.HostConfig.Binds)
 
 		// U1: The reaper script references only env vars, never interpolated strings.
+		// Reaper renames the old container (preserving it for rollback), creates the
+		// new one, health-checks it, and rolls back if the new updater fails to start.
 		reaperScript := `
 sleep 5
+ROLLBACK_NAME="${SELF_NAME}-rollback-$(date +%Y%m%d-%H%M%S)"
 docker stop -t 10 "$SELF_NAME" 2>/dev/null || true
-docker rm "$SELF_NAME" 2>/dev/null || true
+docker rename "$SELF_NAME" "$ROLLBACK_NAME" 2>/dev/null || true
 docker create --name "$SELF_NAME" \
   --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v "$DATA_VOLUME" \
   -p 7123:7123 \
   "$NEW_IMAGE"
+docker start "$SELF_NAME"
+
+# Health check: 6 attempts, 5s apart (30s total).
+HEALTHY=0
+for i in 1 2 3 4 5 6; do
+  sleep 5
+  if wget -qO- http://localhost:7123/healthz >/dev/null 2>&1; then
+    HEALTHY=$((HEALTHY+1))
+    if [ "$HEALTHY" -ge 3 ]; then
+      echo "updater healthy after $i checks — removing rollback"
+      docker rm "$ROLLBACK_NAME" 2>/dev/null || true
+      exit 0
+    fi
+  else
+    HEALTHY=0
+  fi
+done
+
+# Health check failed — rollback.
+echo "updater health check failed — rolling back"
+docker stop -t 10 "$SELF_NAME" 2>/dev/null || true
+docker rm "$SELF_NAME" 2>/dev/null || true
+docker rename "$ROLLBACK_NAME" "$SELF_NAME" 2>/dev/null || true
 docker start "$SELF_NAME"
 `
 
