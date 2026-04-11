@@ -2957,7 +2957,8 @@ Firefox (all platforms):
     <div style="width:100%;height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:24px">
       <div id="cp-upd-bar" style="width:0%;height:100%;background:var(--accent);transition:width .3s"></div>
     </div>
-    <p style="font-size:.78rem;color:var(--muted)">If this takes more than 2 minutes, check Docker logs.</p>
+    <button id="cp-upd-reload" class="btn primary" onclick="location.reload()" style="margin-bottom:12px">Reload Now</button>
+    <p style="font-size:.78rem;color:var(--muted)">If the update already completed, click "Reload Now". Otherwise check <code>docker logs culvert-updater</code>.</p>
   </div>
 </div>
 
@@ -8006,6 +8007,14 @@ async function saveRegistrySettings() {
 }
 
 // ── CP Updating Overlay ─────────────────────────────────────────────────
+// Polls multiple endpoints to detect when the new container is back:
+//   1. /healthz           — 200 from admin UI (standalone / HA leader)
+//   2. /api/update/session — status=complete from updater (definitive)
+//   3. /healthz 503        — HA standby node; container is up, reload anyway
+//
+// Any successful reach reloads the page. The 2-minute cap is a soft hint;
+// after that we keep polling in the background so the user isn't stuck on
+// a "timeout" screen if the new container just took a little longer.
 let cpUpdOverlayActive = false;
 function showCPUpdatingOverlay() {
   if (cpUpdOverlayActive) return;
@@ -8015,31 +8024,50 @@ function showCPUpdatingOverlay() {
   const status = document.getElementById('cp-upd-status');
   const bar = document.getElementById('cp-upd-bar');
   let attempts = 0;
-  const maxAttempts = 60; // 2 minutes at 2s interval
-  const poll = setInterval(async () => {
-    attempts++;
-    bar.style.width = Math.min(90, (attempts / maxAttempts) * 100) + '%';
+  const softCap = 60; // 2 minutes — after this we still keep polling
+  let done = false;
+  const finish = (msg) => {
+    if (done) return;
+    done = true;
+    clearInterval(poll);
+    status.textContent = msg;
+    status.style.color = 'var(--ok)';
+    bar.style.width = '100%';
+    setTimeout(() => location.reload(), 1200);
+  };
+  const tryReach = async () => {
+    // 1. Any HTTP response from /healthz means the admin UI is up. 200
+    //    (standalone or leader) and 503 (HA standby) both count.
     try {
       const resp = await fetch(BASE + '/healthz', { signal: AbortSignal.timeout(3000) });
-      if (resp.ok) {
-        clearInterval(poll);
-        status.textContent = 'Update complete! Reloading...';
-        status.style.color = 'var(--ok)';
-        bar.style.width = '100%';
-        setTimeout(() => location.reload(), 1500);
-        return;
+      if (resp.status === 200 || resp.status === 503) {
+        finish('Container back online — reloading...');
+        return true;
       }
-    } catch(e) { /* still down */ }
+    } catch(_) { /* still down */ }
+    // 2. /api/update/session — definitive "update complete" signal even if
+    //    /healthz is briefly unavailable.
+    try {
+      const r = await fetch(BASE + '/api/update/session', { credentials: 'include', signal: AbortSignal.timeout(3000) });
+      if (r.ok) {
+        const s = await r.json();
+        if (s && (s.status === 'complete' || s.status === 'rolled_back' || s.status === 'error')) {
+          finish(s.status === 'complete' ? 'Update complete — reloading...' : 'Update finished (' + s.status + ') — reloading...');
+          return true;
+        }
+      }
+    } catch(_) { /* still down */ }
+    return false;
+  };
+  const poll = setInterval(async () => {
+    attempts++;
+    bar.style.width = Math.min(90, (attempts / softCap) * 100) + '%';
+    if (await tryReach()) return;
     if (attempts <= 5) status.textContent = 'Container stopping...';
     else if (attempts <= 15) status.textContent = 'Starting new container...';
     else if (attempts <= 40) status.textContent = 'Verifying health...';
-    else status.textContent = 'Still waiting... check Docker logs if this persists.';
-    if (attempts >= maxAttempts) {
-      clearInterval(poll);
-      status.textContent = 'Timeout — the container may have rolled back. Try refreshing.';
-      status.style.color = 'var(--blocked)';
-      cpUpdOverlayActive = false;
-    }
+    else if (attempts <= softCap) status.textContent = 'Still waiting on the container...';
+    else status.textContent = 'Taking longer than expected — click "Reload Now" if the update finished. Attempt ' + attempts + '.';
   }, 2000);
 }
 

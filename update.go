@@ -784,6 +784,43 @@ func findReportFile(dir, id string) string {
 	return ""
 }
 
+// apiUpdateSession proxies the updater's active-session snapshot to the GUI.
+// The GUI reconnect logic (U26) polls this after SSE drops to detect whether
+// an update is still in progress, has completed, or has rolled back — without
+// it, the "Control Plane Updating" overlay always falls through to a blind
+// /healthz poll that can time out before the new container's admin UI
+// finishes booting.
+// GET /api/update/session
+func apiUpdateSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, "viewer") {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	resp, err := updaterRequest(ctx, http.MethodGet, "/api/update/session", nil)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		// Return 200 with status=unavailable so the GUI's reconnect loop can
+		// continue polling without treating this as a hard error.
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"status": "unavailable",
+			"error":  "updater unavailable",
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, io.LimitReader(resp.Body, 1<<20)) //nolint:errcheck // 1MB cap
+}
+
 // apiUpdateRollbackStatus proxies rollback status from updater.
 // GET /api/update/rollback/status
 func apiUpdateRollbackStatus(w http.ResponseWriter, r *http.Request) {
