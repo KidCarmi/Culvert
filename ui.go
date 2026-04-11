@@ -144,6 +144,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/update/reports", apiUpdateReports)                 // GET — list/download reports
 	mux.HandleFunc("/api/update/rollback", apiUpdateRollback)               // POST — rollback
 	mux.HandleFunc("/api/update/rollback/status", apiUpdateRollbackStatus)  // GET — rollback availability
+	mux.HandleFunc("/api/update/session", apiUpdateSession)                 // GET — active update session (SSE re-attach)
 	mux.HandleFunc("/api/update/cluster", apiClusterUpdate)                 // POST — start rolling update
 	mux.HandleFunc("/api/update/cluster/status", apiClusterUpdateStatus)    // GET — rolling update progress
 	mux.HandleFunc("/api/update/registry", apiRegistrySettings)             // GET/POST — registry settings
