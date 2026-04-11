@@ -169,7 +169,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 Works on Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Amazon Linux, and Arch.
 Runs anywhere Linux runs: AWS EC2, Azure VM, GCP Compute, DigitalOcean, Hetzner, bare metal.
-Installs Docker, clones the repo, builds and starts everything:
+Installs Docker, clones the repo, pulls the pre-built images and starts everything:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/scripts/install.sh | bash
@@ -182,7 +182,7 @@ The script handles all Docker installation quirks (snap removal, compose v2, dis
 ```bash
 git clone https://github.com/KidCarmi/Culvert
 cd Culvert
-docker compose up -d --build
+docker compose up -d
 ```
 
 No configuration required — the setup wizard creates your admin account on first visit.

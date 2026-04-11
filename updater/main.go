@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -179,6 +180,76 @@ func clearRollbackInfo() {
 	os.Remove(rollbackInfoFile) //nolint:errcheck
 }
 
+// ── Soak monitor persistence ────────────────────────────────────────────────
+//
+// The post-update soak monitor runs as a goroutine that watches the proxy
+// container for soakDuration (default 60s) after health checks pass. If the
+// proxy exits during the soak window it auto-rolls back.
+//
+// Without persistence, the goroutine dies when the updater self-updates — a
+// crash 30–60s after the proxy update would go unnoticed because the new
+// updater has no idea a soak was in flight.
+//
+// Fix: write the active soak state to /state/soak.json at start, clear it on
+// success or rollback, and re-spawn the monitor on startup if a file exists
+// whose deadline hasn't passed. The deadline is the ORIGINAL deadline — a
+// resumed monitor only watches the remaining window.
+
+type SoakInfo struct {
+	Active        bool      `json:"active"`
+	ContainerName string    `json:"container_name"`
+	RollbackName  string    `json:"rollback_name"`
+	OldImage      string    `json:"old_image"`
+	NewImage      string    `json:"new_image"`
+	Deadline      time.Time `json:"deadline"`
+}
+
+const soakInfoFile = "/state/soak.json"
+
+// saveSoakInfo writes the current soak monitor state to disk so it can be
+// resumed after an updater self-update restart.
+func saveSoakInfo(info SoakInfo) {
+	data, err := json.Marshal(info)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(soakInfoFile), 0755); err != nil {
+		log.Printf("save soak info: mkdir: %v", err)
+		return
+	}
+	tmp := soakInfoFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil { //nolint:gosec // not secret data
+		log.Printf("save soak info: %v", err)
+		return
+	}
+	os.Rename(tmp, soakInfoFile) //nolint:errcheck
+}
+
+// loadSoakInfo returns the persisted soak state if it exists and is still
+// within its deadline. Expired or unreadable files are cleaned up.
+func loadSoakInfo() (SoakInfo, bool) {
+	var info SoakInfo
+	data, err := os.ReadFile(soakInfoFile)
+	if err != nil {
+		return info, false
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		log.Printf("load soak info: %v", err)
+		os.Remove(soakInfoFile) //nolint:errcheck
+		return info, false
+	}
+	if !info.Active || time.Now().After(info.Deadline) {
+		os.Remove(soakInfoFile) //nolint:errcheck
+		return info, false
+	}
+	return info, true
+}
+
+// clearSoakInfo removes the persisted soak state.
+func clearSoakInfo() {
+	os.Remove(soakInfoFile) //nolint:errcheck
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -203,6 +274,10 @@ func main() {
 
 	// Restore rollback info from disk (survives updater self-update restart).
 	loadRollbackInfo()
+
+	// Resume any in-flight soak monitor that was interrupted by a restart
+	// (e.g. updater self-update during the post-update soak window).
+	resumeSoakMonitor(cli)
 
 	// Start rollback cleanup goroutine.
 	go rollbackCleanupLoop(cli)
@@ -639,20 +714,35 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 		// health checks pass. If it exits during the soak window, auto-rollback.
 		// This catches containers that start and pass health checks but crash
 		// shortly after (e.g. bad image, missing config, runtime errors).
-		go soakMonitor(cli, req.Container, rollbackName, oldImage, targetImage)
+		//
+		// The deadline is persisted to /state/soak.json so the monitor survives
+		// an updater self-update restart — the proxy typically triggers updater
+		// self-update immediately after its own update, which would otherwise
+		// kill this goroutine mid-watch.
+		soakDeadline := time.Now().Add(soakDuration)
+		saveSoakInfo(SoakInfo{
+			Active:        true,
+			ContainerName: req.Container,
+			RollbackName:  rollbackName,
+			OldImage:      oldImage,
+			NewImage:      targetImage,
+			Deadline:      soakDeadline,
+		})
+		go soakMonitor(cli, req.Container, rollbackName, oldImage, targetImage, soakDeadline)
 	}
 }
 
 // soakMonitor watches a container after a successful update. If the container
-// exits within the soak window (default 60s), it automatically rolls back to
-// the previous version. This catches containers that pass health checks but
-// crash shortly after (bad image, missing env vars, runtime panics).
-func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newImage string) {
+// exits within the soak window, it automatically rolls back to the previous
+// version. The deadline is passed in explicitly so a monitor resumed from
+// persisted state only watches the remaining window.
+func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newImage string, deadline time.Time) {
 	ctx := context.Background()
 	checkInterval := 5 * time.Second
-	deadline := time.Now().Add(soakDuration)
 
-	log.Printf("soak monitor: watching %s for %s", containerName, soakDuration)
+	remaining := time.Until(deadline)
+	log.Printf("soak monitor: watching %s (deadline %s, %s remaining)",
+		containerName, deadline.Format(time.RFC3339), remaining.Round(time.Second))
 
 	for time.Now().Before(deadline) {
 		time.Sleep(checkInterval)
@@ -661,6 +751,7 @@ func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newI
 		if err != nil {
 			// Container was removed (manual intervention) — stop monitoring.
 			log.Printf("soak monitor: container %s gone, stopping watch", containerName)
+			clearSoakInfo()
 			return
 		}
 
@@ -675,6 +766,7 @@ func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newI
 
 			if !rbAvailable {
 				log.Printf("soak monitor: rollback no longer available, cannot auto-rollback")
+				clearSoakInfo()
 				return
 			}
 
@@ -685,11 +777,13 @@ func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newI
 			}
 			if err := cli.ContainerRename(ctx, rollbackName, containerName); err != nil {
 				log.Printf("soak monitor: rename %s → %s failed: %v — cannot auto-rollback", rollbackName, containerName, err)
+				clearSoakInfo()
 				return
 			}
 
 			if err := cli.ContainerStart(ctx, containerName, container.StartOptions{}); err != nil {
 				log.Printf("soak monitor: auto-rollback start failed: %v", err)
+				clearSoakInfo()
 				return
 			}
 
@@ -697,13 +791,30 @@ func soakMonitor(cli *client.Client, containerName, rollbackName, oldImage, newI
 			rollbackInfo.Available = false
 			rollbackInfo.mu.Unlock()
 			clearRollbackInfo()
+			clearSoakInfo()
 
 			log.Printf("soak monitor: auto-rollback complete — restored %s (%s)", containerName, oldImage)
 			return
 		}
 	}
 
-	log.Printf("soak monitor: %s stable for %s, soak complete", containerName, soakDuration)
+	log.Printf("soak monitor: %s stable through deadline, soak complete", containerName)
+	clearSoakInfo()
+}
+
+// resumeSoakMonitor re-spawns a soak monitor if a persisted soak state exists
+// whose deadline hasn't passed. Called on updater startup — handles the case
+// where the updater self-updated (or crashed) mid-soak. If the container has
+// exited in the meantime, the resumed monitor will trigger an auto-rollback
+// on its first inspect iteration.
+func resumeSoakMonitor(cli *client.Client) {
+	info, ok := loadSoakInfo()
+	if !ok {
+		return
+	}
+	log.Printf("resuming soak monitor: %s until %s",
+		info.ContainerName, info.Deadline.Format(time.RFC3339))
+	go soakMonitor(cli, info.ContainerName, info.RollbackName, info.OldImage, info.NewImage, info.Deadline)
 }
 
 // ── POST /api/update/rollback ───────────────────────────────────────────────
@@ -779,6 +890,10 @@ func handleRollback(cli *client.Client) http.HandlerFunc {
 		rollbackInfo.Available = false
 		rollbackInfo.mu.Unlock()
 		clearRollbackInfo()
+		// Clear any in-flight soak state — the user has taken over. An
+		// orphaned soak file would otherwise cause the next updater restart
+		// to resume a pointless monitor on the already-rolled-back container.
+		clearSoakInfo()
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "rolled_back"})
 		log.Printf("manual rollback completed: restored %s", rbName)
@@ -1456,6 +1571,21 @@ func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
 			networkName = ""
 		}
 
+		// Preserve security + resource hardening from the running updater.
+		// Without this, the reaper would recreate the updater with docker
+		// defaults (no cap_drop, unlimited memory/cpus/pids) — a silent
+		// privilege escalation after the first self-update.
+		hard := extractHardening(self.HostConfig)
+		capDropsEnv := strings.Join(hard.CapDrops, "\n")
+		memEnv := ""
+		if hard.MemoryBytes > 0 {
+			memEnv = strconv.FormatInt(hard.MemoryBytes, 10)
+		}
+		pidsEnv := ""
+		if hard.PidsLimit > 0 {
+			pidsEnv = strconv.FormatInt(hard.PidsLimit, 10)
+		}
+
 		// U1: The reaper script references only env vars, never interpolated strings.
 		// Reaper renames the old container (preserving it for rollback), creates the
 		// new one on the same compose network, health-checks via `docker exec` (the
@@ -1488,10 +1618,44 @@ if [ -n "${DATA_VOLUMES:-}" ]; then
   IFS="$OLDIFS"
 fi
 
+# Build --cap-drop args from newline-separated CAP_DROPS (pre-validated by
+# capDropRe on the Go side — safe to expand unquoted).
+CAP_ARGS=""
+if [ -n "${CAP_DROPS:-}" ]; then
+  OLDIFS="$IFS"
+  IFS='
+'
+  for c in $CAP_DROPS; do
+    [ -z "$c" ] && continue
+    CAP_ARGS="$CAP_ARGS --cap-drop=$c"
+  done
+  IFS="$OLDIFS"
+fi
+
+# Optional resource limits. Each value is either empty (Go side zero-filters)
+# or a strictly numeric/float string validated on the Go side.
+MEM_ARG=""
+if [ -n "${MEM_BYTES:-}" ]; then
+  MEM_ARG="--memory=${MEM_BYTES}"
+fi
+CPUS_ARG=""
+if [ -n "${CPUS:-}" ]; then
+  CPUS_ARG="--cpus=${CPUS}"
+fi
+PIDS_ARG=""
+if [ -n "${PIDS_LIMIT:-}" ]; then
+  PIDS_ARG="--pids-limit=${PIDS_LIMIT}"
+fi
+RESTART_ARG="--restart=${RESTART_POLICY:-unless-stopped}"
+
 # shellcheck disable=SC2086
 docker create --name "$SELF_NAME" \
-  --restart unless-stopped \
+  $RESTART_ARG \
   $NETWORK_ARG \
+  $CAP_ARGS \
+  $MEM_ARG \
+  $CPUS_ARG \
+  $PIDS_ARG \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   $VOL_ARGS \
   -p 127.0.0.1:7123:7123 \
@@ -1537,6 +1701,11 @@ exit 1
 				"DATA_VOLUMES=" + dataVolumeArgs,
 				"NEW_IMAGE=" + newImage,
 				"NETWORK_NAME=" + networkName,
+				"CAP_DROPS=" + capDropsEnv,
+				"MEM_BYTES=" + memEnv,
+				"CPUS=" + hard.CPUs,
+				"PIDS_LIMIT=" + pidsEnv,
+				"RESTART_POLICY=" + hard.RestartPolicy,
 			},
 		}
 		reaperHostCfg := &container.HostConfig{
@@ -1620,6 +1789,75 @@ func pickComposeNetwork(nets map[string]*network.EndpointSettings) string {
 		return name
 	}
 	return ""
+}
+
+// capDropRe matches valid Linux capability names (uppercase letters + underscore).
+// CAP_* prefix is optional in docker — both `ALL` and `NET_RAW` are accepted.
+var capDropRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+
+// restartPolicyRe matches the four docker restart policy names.
+var restartPolicyRe = regexp.MustCompile(`^(no|always|unless-stopped|on-failure)$`)
+
+// hardeningFlags holds the security/resource limits extracted from the
+// running updater's HostConfig. The reaper must pass every field below on
+// `docker create` — otherwise the new container silently loses its
+// cap_drop / mem_limit / cpus / pids_limit hardening after the first
+// self-update. Each field is validated before being passed through the
+// shell env so the reaper script can expand them unquoted without injection.
+type hardeningFlags struct {
+	CapDrops      []string // validated capability names (e.g. ["ALL"])
+	MemoryBytes   int64    // 0 = no limit
+	CPUs          string   // float formatted as "0.5" (derived from NanoCPUs)
+	PidsLimit     int64    // 0 = no limit
+	RestartPolicy string   // "unless-stopped" etc. (empty = omit flag)
+}
+
+// extractHardening pulls security + resource limits from a container's
+// HostConfig and validates each value so it is safe to expand unquoted
+// inside the reaper shell script. Invalid entries are dropped with a
+// warning rather than failing the whole self-update — losing an unknown
+// restart-policy string is safer than aborting the update entirely.
+func extractHardening(hc *container.HostConfig) hardeningFlags {
+	var out hardeningFlags
+	if hc == nil {
+		return out
+	}
+
+	for _, cap := range hc.CapDrop {
+		if !capDropRe.MatchString(cap) {
+			log.Printf("warning: skipping cap_drop entry with invalid chars: %q", cap)
+			continue
+		}
+		out.CapDrops = append(out.CapDrops, cap)
+	}
+
+	if hc.Memory > 0 {
+		out.MemoryBytes = hc.Memory
+	}
+
+	if hc.NanoCPUs > 0 {
+		// NanoCPUs is int64 in units of 1e-9 CPUs. 500000000 → "0.5".
+		cpus := float64(hc.NanoCPUs) / 1e9
+		out.CPUs = strconv.FormatFloat(cpus, 'f', -1, 64)
+	}
+
+	if hc.PidsLimit != nil && *hc.PidsLimit > 0 {
+		out.PidsLimit = *hc.PidsLimit
+	}
+
+	name := string(hc.RestartPolicy.Name)
+	if name != "" {
+		if restartPolicyRe.MatchString(name) {
+			out.RestartPolicy = name
+		} else {
+			log.Printf("warning: unrecognized restart policy %q, defaulting to unless-stopped", name)
+		}
+	}
+	if out.RestartPolicy == "" {
+		out.RestartPolicy = "unless-stopped"
+	}
+
+	return out
 }
 
 // ── Environment helpers ─────────────────────────────────────────────────────
