@@ -640,7 +640,12 @@ func parseYARARule(lines []string, start int) (yaraCompiledRule, int, error) {
 				if sd, err := parseYARAStringDef(raw); err == nil {
 					rule.strings = append(rule.strings, sd)
 				} else {
-					logger.Printf("YARA: rule %s: string parse error: %v", name, err)
+					// CWE-117: rule name and error text may contain admin-
+					// supplied content via WriteRule; strip CR/LF/TAB and
+					// quote with %q so CodeQL sees the sanitiser inline.
+					safeName := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(name, "\n", "_"), "\r", "_"), "\t", "_")
+					safeErr := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(err.Error(), "\n", "_"), "\r", "_"), "\t", "_")
+					logger.Printf("YARA: rule %q: string parse error: %q", safeName, safeErr)
 				}
 			case "condition":
 				condParts = append(condParts, raw)
