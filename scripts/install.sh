@@ -116,6 +116,25 @@ else
   error "No internet connection. Cannot reach download.docker.com"
 fi
 
+# Memory check — Culvert + ClamAV need ~1.5 GB to run comfortably.
+# ClamAV alone keeps ~600 MB of virus signatures resident in RAM.
+if command -v free &>/dev/null; then
+  TOTAL_MEM_MB=$(free -m | awk '/^Mem:/{print $2}')
+  if [[ -n "$TOTAL_MEM_MB" && "$TOTAL_MEM_MB" -lt 1500 ]]; then
+    warn "Detected ${TOTAL_MEM_MB} MB RAM. Culvert + ClamAV want ~1.5 GB to run comfortably."
+    warn "Consider adding swap or disabling the clamav service in docker-compose.yml."
+  fi
+fi
+
+# Corporate proxy detection — Docker daemon does NOT inherit shell env vars.
+# If the user is behind an HTTP proxy, image pulls will hang or fail unless
+# /etc/systemd/system/docker.service.d/http-proxy.conf is configured.
+if [[ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]]; then
+  warn "HTTP/HTTPS proxy environment variables detected."
+  warn "Docker daemon does NOT inherit these — image pulls may fail."
+  warn "Configure: https://docs.docker.com/engine/daemon/proxy/"
+fi
+
 detect_distro
 
 ###############################################################################
