@@ -144,9 +144,15 @@ var (
 // ─── Persistent JSONL request log ────────────────────────────────────────────
 
 var (
-	requestLogWriter io.Writer // *rotatingFile; nil = file persistence disabled
-	requestLogCloser io.Closer
+	requestLogWriter   io.Writer // *rotatingFile; nil = file persistence disabled
+	requestLogCloser   io.Closer
+	requestLogFilePath string // path to JSONL file for paginated reads; "" = disabled
 )
+
+// requestLogMaxPersistentReturn caps the newest-N entries returned from the
+// persistent JSONL request log so admin queries remain bounded regardless of
+// the on-disk rotation size. Roughly one day of traffic at ~100 req/s.
+const requestLogMaxPersistentReturn = 20000
 
 // initRequestLog opens a rotating JSONL file for persistent request logging.
 // Each LogEntry is appended as a single JSON line. The file rotates at maxMB.
@@ -164,7 +170,69 @@ func initRequestLog(path string, maxMB int) error {
 	}
 	requestLogWriter = rf
 	requestLogCloser = rf
+	requestLogFilePath = path
 	return nil
+}
+
+// requestLogReadPersistent streams the persistent JSONL request log file and
+// returns the newest-first slice of parsed entries, capped at
+// requestLogMaxPersistentReturn so memory stays bounded regardless of file
+// size. Callers should apply their own filter + pagination loop on top — the
+// same loop they use on the in-memory ring buffer — so there is a single
+// filter code path to maintain.
+//
+// Returns (nil, nil) when persistence is disabled (no file configured) or
+// when the file has not yet been created. Only the active (non-rotated) log
+// file is consulted; the rotated ".1" archive is intentionally skipped to
+// keep each query bounded to one rotation window.
+func requestLogReadPersistent() ([]LogEntry, error) {
+	if requestLogFilePath == "" {
+		return nil, nil
+	}
+	f, err := os.Open(requestLogFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("request log open: %w", err)
+	}
+	defer f.Close() //nolint:errcheck -- read-only close
+
+	sc := bufio.NewScanner(f)
+	// SSL-inspected entries with long identity/rule strings occasionally
+	// exceed the 64 KB default scanner buffer; lift the ceiling to 1 MB.
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	// Amortized O(N) truncate-to-cap: grow up to 2× cap, then drop the oldest
+	// half. Peak memory is ~2× cap parsed structs (~8 MB at cap=20k).
+	const cap_ = requestLogMaxPersistentReturn
+	buf := make([]LogEntry, 0, 2*cap_)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var e LogEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			continue
+		}
+		buf = append(buf, e)
+		if len(buf) >= 2*cap_ {
+			copy(buf, buf[len(buf)-cap_:])
+			buf = buf[:cap_]
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("request log scan: %w", err)
+	}
+	if len(buf) > cap_ {
+		buf = buf[len(buf)-cap_:]
+	}
+	// Reverse in place to newest-first.
+	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return buf, nil
 }
 
 func logAdd(e LogEntry) {

@@ -573,6 +573,7 @@ func TestInitRequestLog(t *testing.T) {
 			requestLogCloser.Close()
 			requestLogCloser = nil
 			requestLogWriter = nil
+			requestLogFilePath = ""
 		}
 	}()
 
@@ -593,6 +594,212 @@ func TestInitRequestLog(t *testing.T) {
 func TestInitRequestLog_EmptyPath(t *testing.T) {
 	if err := initRequestLog("", 10); err != nil {
 		t.Fatalf("initRequestLog empty path should succeed: %v", err)
+	}
+}
+
+// ── Persistent request log query (H1) ───────────────────────────────────────
+
+// resetRequestLogState unwires the persistent request log package state so
+// tests can safely re-init without leaking file handles or paths across
+// tests. Safe to call whether or not persistence was initialised.
+func resetRequestLogState() {
+	if requestLogCloser != nil {
+		requestLogCloser.Close()
+	}
+	requestLogCloser = nil
+	requestLogWriter = nil
+	requestLogFilePath = ""
+}
+
+func TestRequestLogReadPersistent_NewestFirst(t *testing.T) {
+	t.Cleanup(resetRequestLogState)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "request.jsonl")
+	if err := initRequestLog(path, 10); err != nil {
+		t.Fatalf("initRequestLog: %v", err)
+	}
+
+	base := time.Now().UnixMilli()
+	for i := 0; i < 50; i++ {
+		e := LogEntry{
+			TS:       base + int64(i),
+			Time:     "12:00:00",
+			IP:       "10.0.0.1",
+			Identity: "alice",
+			Method:   "GET",
+			Host:     "example.com",
+			Status:   "OK",
+			Level:    "INFO",
+		}
+		if i%2 == 0 {
+			e.Host = "blocked.example.com"
+			e.Status = "BLOCKED"
+			e.Level = "WARN"
+		}
+		logAdd(e)
+	}
+
+	entries, err := requestLogReadPersistent()
+	if err != nil {
+		t.Fatalf("requestLogReadPersistent: %v", err)
+	}
+	if len(entries) != 50 {
+		t.Fatalf("expected 50 entries, got %d", len(entries))
+	}
+	// Newest-first: first entry should have the highest TS (= base+49).
+	if entries[0].TS != base+49 {
+		t.Errorf("newest entry TS = %d, want %d", entries[0].TS, base+49)
+	}
+	if entries[len(entries)-1].TS != base {
+		t.Errorf("oldest entry TS = %d, want %d", entries[len(entries)-1].TS, base)
+	}
+	// Ordering strictly monotonically descending.
+	for i := 1; i < len(entries); i++ {
+		if entries[i-1].TS < entries[i].TS {
+			t.Errorf("entries not newest-first at idx %d: %d < %d", i, entries[i-1].TS, entries[i].TS)
+			break
+		}
+	}
+}
+
+func TestRequestLogReadPersistent_EmptyPath(t *testing.T) {
+	prev := requestLogFilePath
+	requestLogFilePath = ""
+	t.Cleanup(func() { requestLogFilePath = prev })
+
+	entries, err := requestLogReadPersistent()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if entries != nil {
+		t.Errorf("expected nil when no path, got %d entries", len(entries))
+	}
+}
+
+func TestRequestLogReadPersistent_MissingFile(t *testing.T) {
+	prev := requestLogFilePath
+	requestLogFilePath = filepath.Join(t.TempDir(), "does-not-exist.jsonl")
+	t.Cleanup(func() { requestLogFilePath = prev })
+
+	entries, err := requestLogReadPersistent()
+	if err != nil {
+		t.Fatalf("missing file should not error: %v", err)
+	}
+	if entries != nil {
+		t.Errorf("expected nil for missing file, got %d entries", len(entries))
+	}
+}
+
+func TestRequestLogReadPersistent_CapEnforced(t *testing.T) {
+	t.Cleanup(resetRequestLogState)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "request.jsonl")
+	// Use a large rotation cap so the single file holds all entries.
+	if err := initRequestLog(path, 200); err != nil {
+		t.Fatalf("initRequestLog: %v", err)
+	}
+
+	total := requestLogMaxPersistentReturn + 500
+	for i := 0; i < total; i++ {
+		logAdd(LogEntry{
+			TS: int64(i), Method: "GET", Host: "h.example.com", Status: "OK", Level: "INFO",
+		})
+	}
+
+	entries, err := requestLogReadPersistent()
+	if err != nil {
+		t.Fatalf("requestLogReadPersistent: %v", err)
+	}
+	if len(entries) != requestLogMaxPersistentReturn {
+		t.Fatalf("expected cap=%d entries, got %d", requestLogMaxPersistentReturn, len(entries))
+	}
+	// Newest-first: first entry TS should be total-1, last should be total-cap.
+	if entries[0].TS != int64(total-1) {
+		t.Errorf("newest TS = %d, want %d", entries[0].TS, total-1)
+	}
+	if entries[len(entries)-1].TS != int64(total-requestLogMaxPersistentReturn) {
+		t.Errorf("oldest TS = %d, want %d", entries[len(entries)-1].TS, total-requestLogMaxPersistentReturn)
+	}
+}
+
+// TestApiLogs_SourceFile exercises the new ?source=file branch end-to-end:
+// entries on disk should be returned via the API in newest-first order,
+// filtered by host, and paginated — exactly like the in-memory path.
+func TestApiLogs_SourceFile(t *testing.T) {
+	t.Cleanup(resetRequestLogState)
+
+	// Isolate global in-memory log state so logAdd side-effects here don't
+	// leak into other tests that inspect the ring buffer.
+	logsMu.Lock()
+	oldLogs := logs
+	logs = nil
+	logsMu.Unlock()
+	t.Cleanup(func() {
+		logsMu.Lock()
+		logs = oldLogs
+		logsMu.Unlock()
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "request.jsonl")
+	if err := initRequestLog(path, 10); err != nil {
+		t.Fatalf("initRequestLog: %v", err)
+	}
+
+	base := time.Now().UnixMilli()
+	for i := 0; i < 30; i++ {
+		host := "good.example.com"
+		status := "OK"
+		if i%3 == 0 {
+			host = "bad.example.com"
+			status = "BLOCKED"
+		}
+		logAdd(LogEntry{
+			TS:     base + int64(i),
+			Time:   "12:00:00",
+			IP:     "10.0.0.1",
+			Method: "GET",
+			Host:   host,
+			Status: status,
+			Level:  "INFO",
+		})
+	}
+
+	// Issue an HTTP request against apiLogs with ?source=file&filter=bad.
+	// uiRole() defaults to RoleViewer when no session is on the context, so
+	// requireRole(RoleViewer) passes without any auth setup — matches the
+	// existing TestAPILogs_Pagination pattern a few tests below.
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?source=file&filter=bad.example.com", nil)
+	rec := httptest.NewRecorder()
+	apiLogs(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apiLogs status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Logs  []LogEntry `json:"logs"`
+		Total int        `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, rec.Body.String())
+	}
+	// 30 entries, 1 in 3 is bad → 10 matches.
+	if resp.Total != 10 {
+		t.Errorf("filtered total = %d, want 10", resp.Total)
+	}
+	for _, e := range resp.Logs {
+		if e.Host != "bad.example.com" {
+			t.Errorf("unexpected host in filtered result: %q", e.Host)
+		}
+	}
+	// Newest-first.
+	for i := 1; i < len(resp.Logs); i++ {
+		if resp.Logs[i-1].TS < resp.Logs[i].TS {
+			t.Errorf("apiLogs file result not newest-first at idx %d", i)
+			break
+		}
 	}
 }
 
