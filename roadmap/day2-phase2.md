@@ -1,13 +1,19 @@
 # Day-2 Phase 2 — Gap Analysis & Architectural Evolution
 
-**Audit date:** 2026-04-11
-**Baseline commit:** `c1c3eff` (claude/continue-roadmap-3aRAb)
+**Audit date:** 2026-04-11 (refresh)
+**Baseline commit:** `6a246a5` (branch `claude/go-proxy-evolution-zSgRJ`)
+**Previous revision:** `0454329` — this refresh supersedes several stale
+claims in that revision (see §"Corrections to prior revision").
 **Scope:** Cross-reference of every roadmap file under `/roadmap/` against the
 actual codebase and outstanding `TODO`/`FIXME` markers in `*.go`.
 
 > **Status:** This file covers **Phase 1 only** (gap analysis). Phase 2
 > (architectural evolution proposals) will be appended once the gap list is
 > agreed.
+
+Each open item carries a **Workstream** tag so that multiple engineers can
+pick them up in parallel without treading on one another. Items sharing a tag
+touch overlapping files; items with distinct tags are fully independent.
 
 ---
 
@@ -16,11 +22,13 @@ actual codebase and outstanding `TODO`/`FIXME` markers in `*.go`.
 - **Roadmap items audited:** 136+ across 8 domains (day2, PHASES, edge-cases,
   security-features, ROADMAP, CLUSTER-GAPS, FEATURE-COVERAGE, docker-system-update)
 - **Marked incomplete in roadmap:** 23 items
-- **Actually incomplete in code:** 7 items
-- **False positives (claimed open, actually shipped):** 16 items
+- **Actually incomplete in code (this refresh):** **6 items**
+- **False positives (claimed open, actually shipped):** 17 items — up 1 from
+  the previous revision after re-verification
 - **Shipping blockers:** **0**
-- **Outstanding `TODO`/`FIXME`/`XXX`/`HACK` in `*.go`:** **0** (one false
-  positive — "xxx" placeholder in an API doc comment, not a work marker)
+- **Outstanding `TODO`/`FIXME`/`XXX`/`HACK` in `*.go`:** **0** (verified
+  across all `.go` files — 0 total occurrences)
+- **Parallel workstreams open:** **4** (Observability, UI-CSP, Tracing, Docs)
 
 The Culvert core proxy is security-complete for a v1 release. The remaining
 gaps are operational/observability concerns that do not block shipping.
@@ -32,79 +40,146 @@ gaps are operational/observability concerns that do not block shipping.
 Gaps that affect production correctness, incident response, or data integrity
 in a multi-user enterprise deployment.
 
-- **Persistent request log** — source: `edge-case-audit.md:172`, `roadmap-day2.md` §6.1
-  — evidence: `store.go maxLogs = 1000`, ring buffer in memory only; syslog sink
-  is fire-and-forget and the UI can only surface in-memory history — status:
-  **UNFINISHED** — impact: in a 500-user deployment an operator investigating
-  an incident can only see the last ~60 seconds of traffic before the ring
-  overwrites. Syslog alone is insufficient because operators need an in-proxy
-  searchable view — recommended action: add a pluggable persistent sink
-  (SQLite or append-only JSONL under `/data/request_log/`) with retention
-  policy, rotation, and an indexed query path for the existing `/api/logs`
-  handler. #1 remaining operator friction.
-
-- **CSP `'unsafe-inline'` on admin SPA** — source: `roadmap-day2.md:266` (S5,
-  deferred) — evidence: `ui.go` serves CSP header with `script-src 'self'
-  'unsafe-inline'`; the admin SPA embeds event handlers directly in HTML via
-  `onclick="…"` attributes throughout `static/index.html` — status:
-  **UNFINISHED, deferred** — impact: low because the SPA consumes only
-  authenticated JSON from its own origin and never renders untrusted HTML, but
-  this still fails a common SOC-2 CSP audit check — recommended action: document
-  as GA limitation; schedule a nonce-based refactor of inline handlers
-  post-GA. Requires replacing ~80 inline `onclick` attributes with
-  `addEventListener`.
+**None.** The previous revision listed "Persistent request log" as the #1
+Critical item; that was a **false positive** against the current tree — see
+§"Corrections to prior revision" below. No remaining gap meets the Critical
+bar at `6a246a5`.
 
 ---
 
 ## High
 
 Gaps that meaningfully reduce operator ergonomics or observability but do not
-break security or correctness.
+break security or correctness. All four are **independent workstreams** —
+they touch disjoint files and can be developed in parallel.
 
-- **OpenTelemetry request-span tracing** — source: `roadmap-day2.md:352-353`
-  (F14) — evidence: `metrics.go` exports counters/gauges via OTLP, `apiOTelConfig`
-  lets admins configure the collector, but there are no per-request spans and
-  no W3C traceparent propagation on upstream-dialled requests — status:
-  **PARTIAL** — impact: a cluster operator cannot correlate a slow user
-  request to the upstream hop that caused it without additional tooling —
-  recommended action: Phase 3. Today's OTLP metrics export is sufficient for
-  SRE dashboards; distributed tracing is a performance-investigation
-  upgrade.
+### H1. `/api/logs` query path ignores the persistent JSONL sink
+**Workstream:** `observability-logs` (independent)
+**Source:** `edge-case-audit.md` Finding 6.1
+**Evidence:**
+- JSONL persistence **does** exist: `store.go:144` (`initRequestLog`),
+  `store.go:170-184` (`logAdd` writes to `requestLogWriter`),
+  `config.go:90-96` (`RequestLogFile`, `RequestLogMaxMB`),
+  `main.go:270-273` (wires the CLI flag/config into `initRequestLog`),
+  `bootstrap.go:216` (bootstrap script emits `-audit-log /data/audit.jsonl`).
+- `/api/audit` already supports `?source=file` for reading the persistent
+  JSONL audit log (`ui.go:1008-1012`, `store.go:268 auditGetPersistent`).
+- **Gap:** `apiLogs` (`ui.go:1185-1260`) still calls only `logGet()` — the
+  in-memory ring buffer sized at `maxLogs = 5000` (`store.go:137`). It has
+  no equivalent of `?source=file` and no paginated reader for the request-log
+  JSONL.
 
-- **Grafana dashboard templates** — source: `roadmap-day2.md:353` (F15) —
-  evidence: no `.json` dashboard files in repo — status: **UNFINISHED** —
-  impact: operators must hand-author dashboards from the Prometheus-compatible
-  `/metrics` surface — recommended action: ship a starter dashboard JSON under
-  `observability/` referencing the documented `culvert_*` metric namespace.
-  Documentation task, not a code change.
+**Impact:** an operator investigating an incident older than the last ~5000
+entries must `grep` the JSONL on disk by hand. The file is written and
+rotated correctly, but the admin UI cannot see past the ring-buffer window.
+
+**Status:** **PARTIAL** (persistence: done; query surface: missing).
+
+**Recommended action:** add a `requestLogGetPersistent(offset, limit, from, to, filters)`
+helper in `store.go` mirroring `auditGetPersistent`, wire a `?source=file`
+branch into `apiLogs`, and surface a "query persistent log" toggle in the
+existing Logs panel. Estimated ~1 day; isolated to `store.go`, `ui.go`, and
+`static/index.html` Logs view.
+
+### H2. OTLP trace spans (not just metrics)
+**Workstream:** `tracing-otlp` (independent)
+**Source:** `roadmap-day2.md` F14
+**Evidence:**
+- `generateTraceparent` (`connlimit.go:24-33`) creates W3C Trace Context
+  values and `proxy.go:180-183` propagates or generates a `Traceparent`
+  header on every incoming request — so the previous revision's claim of
+  "no W3C traceparent propagation" is also stale (see §Corrections).
+- `otlp.go` exports *metrics* only. No span exporter is wired up and there
+  is no OTLP `/v1/traces` endpoint configuration.
+- `apiOTLPConfig` (`ui.go:4908-4948`) only toggles the metrics exporter.
+
+**Impact:** traceparent values reach upstreams for correlation, but Culvert
+itself does not emit spans, so a cluster operator cannot visualise which
+upstream hop slowed a given user request in Jaeger/Tempo.
+
+**Status:** **PARTIAL** — header propagation done; span pipeline missing.
+
+**Recommended action:** Phase 3. Today's OTLP metrics export + traceparent
+forwarding is sufficient for SRE dashboards; span export is a
+performance-investigation upgrade.
+
+### H3. Grafana dashboard templates not shipped
+**Workstream:** `docs-observability` (independent)
+**Source:** `roadmap-day2.md` F15
+**Evidence:** `Glob **/*.json` returns zero files under `observability/`
+or anywhere else in the repo. Prometheus-compatible metrics surface is
+documented via the `culvert_*` namespace (`metrics.go`) but operators have
+no starter dashboard.
+
+**Impact:** operators must hand-author dashboards. Entirely cosmetic, but
+the first thing every new deployment asks for.
+
+**Status:** **UNFINISHED** — documentation task, not a code change.
+
+**Recommended action:** ship a starter dashboard JSON under `observability/`
+referencing the documented `culvert_*` metric namespace. Pure documentation;
+no Go code touched.
+
+### H4. Admin SPA CSP still permits `'unsafe-inline'` script-src
+**Workstream:** `ui-csp` (large scope; independent)
+**Source:** `roadmap-day2.md` S5 (deferred)
+**Evidence:**
+- `ui.go:366-367` sets
+  `script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'`.
+- `Grep -c 'onclick='` over `static/index.html` returns **185** inline
+  handlers (the previous revision under-counted at ~80).
+
+**Impact:** low — the SPA consumes only authenticated JSON from its own
+origin and never renders untrusted HTML — but still fails a common
+SOC-2 / OWASP ASVS CSP audit check.
+
+**Status:** **UNFINISHED, deferred**.
+
+**Recommended action:** document as a GA limitation; schedule a nonce-based
+refactor of inline handlers post-GA. Requires replacing ~185 inline
+`onclick` attributes with `addEventListener`, plus a nonce plumbing change
+in `ui.go` that stamps each page load. Track as an epic, not a single commit.
 
 ---
 
 ## Low
 
-Nice-to-have enhancements deferred to later phases.
+Nice-to-have enhancements deferred to later phases. None block shipping,
+none block any of the High items above.
 
 - **PagerDuty / Slack native integrations** — source: `roadmap-day2.md:392`
   (F24) — evidence: `alerts.go` provides a generic signed webhook — status:
-  **BY DESIGN** — recommended action: document the webhook payload format and
-  the HMAC-SHA256 signing scheme; no code change.
-
+  **BY DESIGN**. Recommended action: document the payload format and the
+  HMAC-SHA256 signing scheme; no code change.
 - **Metrics persistence across restarts** — source: `roadmap-day2.md:393`
   (F25) — evidence: `metrics.go` keeps a 60-minute rolling in-memory
-  time-series — status: **LOW PRIORITY** — recommended action: document
-  Prometheus scraper as the persistence path. Dashboard metrics are ephemeral
-  by design.
-
+  time-series — status: **LOW PRIORITY**. Recommended action: document
+  Prometheus scraper as the persistence path.
 - **Threat-feed reputation scoring + IOC extraction** — source:
-  `roadmap-day2.md:394` (F26) — evidence: `threatfeed.go` treats each feed as
-  a flat list; no scoring — status: **NOT STARTED** — recommended action:
-  Phase 3. Current binary allow/deny is sufficient for v1.
-
+  `roadmap-day2.md:394` (F26) — evidence: `threatfeed.go` treats each feed
+  as a flat list; `Grep -i 'reputation|etag|If-None-Match'` finds nothing —
+  status: **NOT STARTED**. Recommended action: Phase 3.
 - **Incremental threat-feed delta sync** — source: `roadmap-day2.md:395`
   (F27) — evidence: `feedsync.go` + `blocklist_feed.go` download the full
-  feed on every sync tick — status: **NOT STARTED** — recommended action:
-  Phase 3. The ~100 MiB full pull is acceptable at hourly-or-longer cadence;
-  bandwidth is not an issue at current subscriber volumes.
+  feed on every sync tick; no ETag / If-None-Match plumbing — status:
+  **NOT STARTED**. Recommended action: Phase 3.
+
+---
+
+## Parallel workstream map
+
+Four independent workstreams; any subset can be tackled at once.
+
+| Workstream | Item | Scope | Shared files w/ other streams? |
+|---|---|---|---|
+| `observability-logs` | H1 JSONL query surface | `store.go`, `ui.go` apiLogs, Logs panel JS | none |
+| `tracing-otlp` | H2 span export | new `otlp_traces.go`, `ui.go` apiOTLPConfig extension | none |
+| `docs-observability` | H3 Grafana JSON | `observability/*.json` | none |
+| `ui-csp` | H4 inline-handler refactor | `static/index.html`, `ui.go` CSP header | none |
+
+All four touch disjoint files. `observability-logs` and `ui-csp` both modify
+`ui.go` in *different* handlers (`apiLogs` vs the header middleware), so
+merge conflicts are limited to import blocks.
 
 ---
 
@@ -112,19 +187,47 @@ Nice-to-have enhancements deferred to later phases.
 
 `Grep -i 'TODO|FIXME|XXX|HACK'` across `*.go` → **0 outstanding work markers.**
 
-One false positive in `ui.go` API doc comment uses the string "xxx" as a hash
-placeholder ("`.../feeds/xxx`"), not a code marker.
+One false positive in a `ui.go` API doc comment uses the string "xxx" as a
+hash placeholder ("`.../feeds/xxx`"), not a code marker.
 
-This is unusually clean — the team has been disciplined about landing TODOs
-rather than leaving them in the tree.
+This remains unusually clean — the team has been disciplined about landing
+TODOs rather than leaving them in the tree.
+
+---
+
+## Corrections to prior revision (`0454329`)
+
+The previous `day2-phase2.md` revision made four claims that do not hold
+against `6a246a5`. Flagging them here so the next auditor has a clean slate.
+
+1. **"Persistent request log — UNFINISHED" (was #1 Critical).** False against
+   the current tree. JSONL persistence + rotation is already implemented
+   in `store.go:144-185` (`initRequestLog` + `logAdd` JSONL persistence),
+   wired through `config.go:90-96` (`RequestLogFile`, `RequestLogMaxMB`) and
+   `main.go:270-273`. The narrower remaining gap is the **query surface**:
+   `apiLogs` reads only from the in-memory ring buffer. Reclassified as
+   **H1 (High)**, not Critical.
+
+2. **"store.go maxLogs = 1000".** Stale. `store.go:137` is
+   `const maxLogs = 5000`.
+
+3. **"~80 inline onclick attributes in static/index.html".** Stale.
+   `Grep -c 'onclick='` returns **185**. CSP refactor (H4) scope is more
+   than 2× what was scoped previously.
+
+4. **"No W3C traceparent propagation on upstream-dialled requests".** Stale.
+   `proxy.go:180-183` injects `Traceparent` via `generateTraceparent`
+   (`connlimit.go:24-33`) on every incoming request, so upstream hops do
+   receive the header. The remaining gap is span *export* (H2), not header
+   propagation.
 
 ---
 
 ## Notes on roadmap hygiene
 
-Sixteen items that were flagged as unfinished in prior audits have actually
-shipped and should be marked complete in the source roadmap files. Listing
-them here so the next auditor does not re-file the same gaps.
+Seventeen items flagged as unfinished in prior audits have actually shipped
+and should be marked complete in the source roadmap files. Listing them
+here so the next auditor does not re-file the same gaps.
 
 ### Tier 1 correctness fixes (all shipped)
 
@@ -153,18 +256,26 @@ them here so the next auditor does not re-file the same gaps.
 
 - **3.1 YARA validate endpoint** — `apiSecYARAValidate`.
 - **3.2 YARA CRUD via GUI** — `ReadRule`/`WriteRule`/`DeleteRule` +
-  `apiSecYARARules`. (Follow-up `c1c3eff` fixed the file-vs-rule-name bug
-  and added `.yara` extension fallback.)
+  `apiSecYARARules`.
 - **3.3 Global scan exclusion list** — `ScanExclusionStore` with host +
   SHA-256 exclusion, persisted to `/data/scan_exclusions.json`.
 - **3.4 DPI bypass per host** — `ContentScanner.bypassHosts` with envelope
   JSON persistence and port/IPv6-aware lookup.
 
+### Observability shipped that previous revision missed
+
+- **Persistent JSONL request log** — `store.go:144-185`, see §Corrections.
+- **Persistent JSONL audit log** — `store.go:232-263` (`InitAuditLog`),
+  with paginated reader at `store.go:268` and `?source=file` query path
+  at `ui.go:1008`.
+- **W3C Trace Context header propagation** — `proxy.go:180-183`,
+  `connlimit.go:24-33`.
+
 ### False positives from prior audits
 
 - **B4** — X-Forwarded-For discards non-IP values: **by design** (anti-spoof).
 - **B18** — enrolment token consumption race: already under mutex
-  (`enrollment.go` `ValidateAndConsumeToken`).
+  (`enrollment.go ValidateAndConsumeToken`).
 - **B19** — log rotation TOCTOU: already under `r.mu.Lock` (`logger.go`).
 - **B23** — ClamAV parser captures first verdict: **by protocol**
   (INSTREAM returns one verdict per stream).
@@ -193,31 +304,36 @@ them here so the next auditor does not re-file the same gaps.
 **Shipping blockers: none.**
 
 All security-critical and correctness items from the day-2 audit are
-complete. The remaining seven gaps are:
+complete. The remaining six gaps are:
 
-- one operational (persistent request log — the single biggest operator
-  complaint),
-- one SOC-2 hygiene (CSP `unsafe-inline`),
-- two observability (OTEL tracing, Grafana templates),
-- three deferred-by-design (reputation scoring, delta sync, metrics
-  persistence).
+- two narrowly-scoped observability items (JSONL query surface, Grafana
+  templates),
+- one deferred UI-security epic (CSP nonce refactor),
+- one deferred performance-investigation upgrade (OTLP span export),
+- two deferred-by-design Phase-3 items (reputation scoring, delta sync).
 
-Recommended v1 release note: "Persistent request log is in-memory;
-long-term retention via syslog or OTLP export. Slate for v1.1."
+Recommended v1 release note: "Persistent request & audit logs are JSONL on
+disk with rotation; admin UI currently surfaces the last 5000 in-memory
+entries. File-backed query surface for request logs is slated for v1.1."
 
 ---
 
 ## Recommended next actions (in order)
 
-1. **Ship persistent request log sink** (Critical). Append-only JSONL under
-   `/data/request_log/` with daily rotation and a bounded total-size cap.
-   Surface a date-range query in the existing `/api/logs` panel.
-2. **Document operator observability story** (High). Ship a starter Grafana
-   dashboard JSON and a "Prometheus + OTLP in production" operator guide.
-3. **Plan CSP nonce refactor** (Critical, post-GA). Track as an epic — not
-   a one-commit fix.
-4. **Mark the 16 resolved items in roadmap-day2.md** (hygiene). Prevents the
-   next audit from re-opening closed work.
+Ordered so the four parallel workstreams can start immediately without
+waiting on one another.
+
+1. **Wire `?source=file` into `apiLogs`** (H1, `observability-logs`). Mirror
+   the existing `auditGetPersistent` pattern. ~1 day.
+2. **Ship Grafana starter dashboard JSON** (H3, `docs-observability`). Pure
+   docs; no Go changes. ~half a day.
+3. **Plan the CSP nonce refactor epic** (H4, `ui-csp`). 185 inline handlers
+   to convert; stamp a nonce per page-load in `ui.go`. Track as a multi-PR
+   epic, not a single commit. Post-GA.
+4. **Plan the OTLP span exporter** (H2, `tracing-otlp`). Phase 3; decide
+   between direct OTLP/HTTP client and `go.opentelemetry.io/otel` SDK.
+5. **Mark the 17 resolved items in `roadmap-day2.md`** (hygiene). Prevents
+   the next audit from re-opening closed work.
 
 ---
 
