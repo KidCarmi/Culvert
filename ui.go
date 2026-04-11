@@ -3708,11 +3708,15 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 
 // apiSecYARARules handles list + CRUD for YARA rule files:
 //
-//   GET    /api/security-scan/yara/rules           — list loaded rule names
-//   GET    /api/security-scan/yara/rules/{name}    — read one rule source
-//   POST   /api/security-scan/yara/rules           — create rule (JSON body)
-//   PUT    /api/security-scan/yara/rules/{name}    — update rule (JSON body)
-//   DELETE /api/security-scan/yara/rules/{name}    — remove rule
+//   GET    /api/security-scan/yara/rules           — list rule files + contained rule names
+//   GET    /api/security-scan/yara/rules/{name}    — read one rule file source (name = file stem)
+//   POST   /api/security-scan/yara/rules           — create rule file (JSON body)
+//   PUT    /api/security-scan/yara/rules/{name}    — update rule file (JSON body)
+//   DELETE /api/security-scan/yara/rules/{name}    — remove rule file
+//
+// "name" in the path / body always refers to the *file stem* (no extension).
+// Rule files may bundle many YARA rules; the `file_rules` field in the GET
+// response maps each file to its contained rule identifiers for display.
 //
 // Writes go to globalYARA.Dir() (persistent /data/yara/ in Docker). Each
 // mutation validates the rule source with ValidateYARASource BEFORE touching
@@ -3732,10 +3736,12 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 		}
 		if name == "" {
 			jsonOK(w, map[string]any{
-				"directory": globalYARA.Dir(),
-				"rules":     globalYARA.Names(),
-				"warnings":  globalYARA.Warnings(),
-				"count":     globalYARA.Count(),
+				"directory":  globalYARA.Dir(),
+				"files":      globalYARA.Files(),     // file stems — use for CRUD
+				"file_rules": globalYARA.FileRules(), // filename → rule names inside
+				"rules":      globalYARA.Names(),     // compiled rule names (display only)
+				"warnings":   globalYARA.Warnings(),
+				"count":      globalYARA.Count(),
 			})
 			return
 		}

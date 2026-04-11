@@ -176,6 +176,81 @@ func TestYARARuleSet_DeleteRule_NotFound(t *testing.T) {
 
 // ─── Names / Warnings / Dir ───────────────────────────────────────────────────
 
+// ─── Files / FileRules (Tier 3.2) ─────────────────────────────────────────────
+
+func TestYARARuleSet_Files_And_FileRules(t *testing.T) {
+	dir := t.TempDir()
+	// Write a .yar file containing two rules.
+	src1 := yaraRule("RuleOne", `        $a = "x"`, "any of them") +
+		yaraRule("RuleTwo", `        $a = "y"`, "any of them")
+	if err := os.WriteFile(filepath.Join(dir, "bundle.yar"), []byte(src1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Write a .yara file with a single rule.
+	src2 := yaraRule("LegacyRule", `        $a = "z"`, "any of them")
+	if err := os.WriteFile(filepath.Join(dir, "legacy.yara"), []byte(src2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	y := &YARARuleSet{}
+	if err := y.LoadDir(dir); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+
+	files := y.Files()
+	if len(files) != 2 || files[0] != "bundle" || files[1] != "legacy" {
+		t.Errorf("Files() = %v, want [bundle legacy]", files)
+	}
+
+	fr := y.FileRules()
+	bundleRules := fr["bundle"]
+	if len(bundleRules) != 2 {
+		t.Errorf("bundle should contain 2 rules, got %v", bundleRules)
+	}
+	legacyRules := fr["legacy"]
+	if len(legacyRules) != 1 || legacyRules[0] != "LegacyRule" {
+		t.Errorf("legacy should contain [LegacyRule], got %v", legacyRules)
+	}
+}
+
+func TestYARARuleSet_Files_Empty(t *testing.T) {
+	y := &YARARuleSet{}
+	if f := y.Files(); f != nil {
+		t.Errorf("Files() on empty set = %v, want nil", f)
+	}
+	if fr := y.FileRules(); fr != nil {
+		t.Errorf("FileRules() on empty set = %v, want nil", fr)
+	}
+}
+
+// ─── .yara extension fallback (Tier 3.2) ──────────────────────────────────────
+
+func TestYARARuleSet_ReadRule_YaraExtension(t *testing.T) {
+	dir := t.TempDir()
+	src := yaraRule("LegacyRule", `        $a = "legacy"`, "any of them")
+	if err := os.WriteFile(filepath.Join(dir, "legacy.yara"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	y := &YARARuleSet{}
+	y.SetDir(dir)
+
+	got, err := y.ReadRule("legacy")
+	if err != nil {
+		t.Fatalf("ReadRule should find .yara file: %v", err)
+	}
+	if got != src {
+		t.Errorf("unexpected content: %q", got)
+	}
+
+	// Delete should also find the .yara file.
+	if err := y.DeleteRule("legacy"); err != nil {
+		t.Fatalf("DeleteRule: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "legacy.yara")); !os.IsNotExist(err) {
+		t.Errorf(".yara file not removed: %v", err)
+	}
+}
+
 func TestYARARuleSet_Names_Warnings_Dir_Empty(t *testing.T) {
 	y := &YARARuleSet{}
 	if names := y.Names(); len(names) != 0 {
