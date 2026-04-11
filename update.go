@@ -550,7 +550,13 @@ func apiUpdateApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// After proxy update succeeds, trigger updater self-update (fire-and-forget).
+	// Intentionally NOT propagating r.Context(): the SSE stream is about to
+	// close, which would cancel the request context immediately and kill the
+	// updater self-update mid-pull. triggerUpdaterSelfUpdate creates its own
+	// 5-minute background context — same pattern as the rollback handler fix
+	// in 2d5f6d1.
 	if updateSucceeded {
+		// #nosec G118 -- detached lifetime is required; see comment above.
 		go triggerUpdaterSelfUpdate(req.TargetTag)
 	}
 }
