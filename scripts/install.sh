@@ -36,6 +36,50 @@ warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[x]${NC} $*" >&2; exit 1; }
 step()  { echo -e "\n${CYAN}━━━ $* ━━━${NC}"; }
 
+# apt_install_with_repair — run apt-get install with auto-repair on dpkg failure.
+# Usage: apt_install_with_repair pkg1 pkg2 ...
+# On failure: dumps the last 30 lines of output, runs `dpkg --configure -a`
+# and `apt-get install -f -y` to fix half-configured packages, then retries once.
+# This is the #1 cause of "E: Sub-process /usr/bin/dpkg returned an error code (1)"
+# being unrecoverable from the user's perspective.
+apt_install_with_repair() {
+  local log
+  log=$(mktemp 2>/dev/null || echo "/tmp/culvert-apt-$$.log")
+
+  if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >"$log" 2>&1; then
+    rm -f "$log"
+    return 0
+  fi
+
+  warn "apt-get install failed. Last 30 lines of output:"
+  tail -n 30 "$log" >&2 || true
+  rm -f "$log"
+
+  warn "Attempting to repair dpkg state (dpkg --configure -a)..."
+  sudo dpkg --configure -a 2>&1 | tail -n 20 >&2 || true
+  warn "Attempting to fix broken dependencies (apt-get install -f -y)..."
+  sudo apt-get install -f -y 2>&1 | tail -n 20 >&2 || true
+
+  info "Retrying installation of: $*"
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+}
+
+# dump_docker_diagnostics — print docker.service status and recent journal lines.
+# Called when docker.service fails to start so the user sees the actual error
+# without having to manually run systemctl status / journalctl.
+dump_docker_diagnostics() {
+  echo "" >&2
+  warn "── docker.service status ──"
+  sudo systemctl status docker.service --no-pager -l 2>&1 | sed 's/^/    /' >&2 || true
+  echo "" >&2
+  warn "── docker.service journal (last 30 lines) ──"
+  sudo journalctl -xeu docker.service --no-pager -n 30 2>&1 | sed 's/^/    /' >&2 || true
+  echo "" >&2
+  warn "── containerd.service journal (last 20 lines) ──"
+  sudo journalctl -xeu containerd.service --no-pager -n 20 2>&1 | sed 's/^/    /' >&2 || true
+  echo "" >&2
+}
+
 REPO_URL="https://github.com/KidCarmi/Culvert.git"
 INSTALL_DIR="${CULVERT_DIR:-$HOME/Culvert}"
 
@@ -126,6 +170,16 @@ if command -v free &>/dev/null; then
   fi
 fi
 
+# Disk space check — Docker engine + Culvert images need ~3 GB free in /var.
+# Low disk space is a frequent cause of dpkg postinst failures during install.
+if command -v df &>/dev/null; then
+  DISK_AVAIL_MB=$(df -m /var 2>/dev/null | awk 'NR==2 {print $4}')
+  if [[ -n "$DISK_AVAIL_MB" && "$DISK_AVAIL_MB" =~ ^[0-9]+$ && "$DISK_AVAIL_MB" -lt 3000 ]]; then
+    warn "Only ${DISK_AVAIL_MB} MB free in /var. Docker engine + Culvert images need ~3 GB."
+    warn "Low disk space is a common cause of dpkg install failures."
+  fi
+fi
+
 # Corporate proxy detection — Docker daemon does NOT inherit shell env vars.
 # If the user is behind an HTTP proxy, image pulls will hang or fail unless
 # /etc/systemd/system/docker.service.d/http-proxy.conf is configured.
@@ -200,12 +254,15 @@ step "Installing Docker Engine"
 
 if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
   info "Docker with Compose v2 already installed: $(docker --version)"
+  if ! sudo systemctl is-active --quiet docker 2>/dev/null; then
+    warn "Docker daemon is not currently running — will repair it in the next step."
+  fi
 else
   case "$DISTRO_FAMILY" in
     debian)
       info "Installing from Docker's official apt repository..."
       sudo apt-get update -qq
-      sudo apt-get install -y -qq ca-certificates curl gnupg >/dev/null
+      apt_install_with_repair ca-certificates curl gnupg
 
       sudo install -m 0755 -d /etc/apt/keyrings
       if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
@@ -217,7 +274,7 @@ else
         sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
       sudo apt-get update -qq
-      sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null
+      apt_install_with_repair docker-ce docker-ce-cli containerd.io docker-compose-plugin
       ;;
 
     rhel)
@@ -265,8 +322,65 @@ fi
 ###############################################################################
 step "Configuring Docker"
 
-sudo systemctl enable docker >/dev/null 2>&1
-sudo systemctl start docker
+# Reload systemd in case the install added or changed unit files mid-run.
+sudo systemctl daemon-reload >/dev/null 2>&1 || true
+
+# Start containerd FIRST — docker.service depends on it. If containerd is
+# wedged, docker will refuse to start with a generic "control process exited
+# with error code" message, which is exactly the failure the user reported.
+sudo systemctl enable containerd >/dev/null 2>&1 || true
+if ! sudo systemctl start containerd 2>/dev/null; then
+  warn "containerd failed to start on first attempt — retrying..."
+  sleep 2
+  sudo systemctl restart containerd 2>/dev/null || true
+fi
+
+sudo systemctl enable docker >/dev/null 2>&1 || true
+
+# Start docker — with auto-recovery on failure.
+if ! sudo systemctl start docker 2>/dev/null; then
+  warn "docker.service failed to start on first attempt."
+  dump_docker_diagnostics
+
+  warn "Recovery attempt 1: reloading systemd and restarting containerd..."
+  sudo systemctl daemon-reload || true
+  sudo systemctl restart containerd 2>/dev/null || true
+  sleep 2
+
+  if ! sudo systemctl start docker 2>/dev/null; then
+    case "$DISTRO_FAMILY" in
+      debian)
+        warn "Recovery attempt 2: reinstalling docker-ce + containerd.io..."
+        sudo apt-get install --reinstall -y docker-ce docker-ce-cli containerd.io 2>&1 | tail -n 20 >&2 || true
+        ;;
+      rhel|fedora)
+        warn "Recovery attempt 2: reinstalling docker-ce + containerd.io..."
+        sudo dnf reinstall -y docker-ce docker-ce-cli containerd.io 2>&1 | tail -n 20 >&2 || \
+          sudo yum reinstall -y docker-ce docker-ce-cli containerd.io 2>&1 | tail -n 20 >&2 || true
+        ;;
+    esac
+    sudo systemctl daemon-reload || true
+    sudo systemctl restart containerd 2>/dev/null || true
+    sleep 2
+
+    if ! sudo systemctl start docker 2>/dev/null; then
+      dump_docker_diagnostics
+      error "Docker daemon could not be started after recovery attempts.
+
+  Common causes and fixes:
+    1. Reboot — kernel module / cgroup state may need refresh after install
+    2. Invalid /etc/docker/daemon.json — check JSON syntax
+    3. Disk full — check: df -h /var/lib/docker
+    4. Conflicting iptables backend — try: sudo update-alternatives --config iptables
+    5. cgroup v1/v2 mismatch — check: stat -fc %T /sys/fs/cgroup
+
+  Manual diagnostic commands:
+    sudo systemctl status docker.service
+    sudo journalctl -xeu docker.service
+    sudo journalctl -xeu containerd.service"
+    fi
+  fi
+fi
 
 CURRENT_USER="$(id -un)"
 if [[ "$CURRENT_USER" != "root" ]]; then
@@ -280,7 +394,8 @@ fi
 if sudo docker info &>/dev/null; then
   info "Docker engine is running"
 else
-  error "Docker engine failed to start. Check: sudo systemctl status docker"
+  dump_docker_diagnostics
+  error "Docker engine started but is not responding. See diagnostics above."
 fi
 
 ###############################################################################
@@ -289,7 +404,7 @@ fi
 if ! command -v git &>/dev/null; then
   step "Installing git"
   case "$DISTRO_FAMILY" in
-    debian) sudo apt-get install -y -qq git >/dev/null ;;
+    debian) apt_install_with_repair git ;;
     rhel|fedora) sudo dnf install -y git 2>/dev/null || sudo yum install -y git ;;
     amzn) sudo yum install -y git ;;
     arch) sudo pacman -Sy --noconfirm git ;;
