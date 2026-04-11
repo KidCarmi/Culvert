@@ -58,7 +58,8 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - proxy-data:/data:ro   # read shared updater token
+      - proxy-data:/data:ro       # read shared updater token (read-only)
+      - updater-state:/state      # writable rollback metadata; survives self-update
     ports:
       - "127.0.0.1:7123:7123" # localhost only; exposed for GUI resilience during CP update (auth required)
     cap_drop:
@@ -127,4 +128,5 @@ services:
 
 volumes:
   proxy-data:
-  clamav-db:    # ClamAV signature database — persisted to skip re-download on restart
+  clamav-db:      # ClamAV signature database — persisted to skip re-download on restart
+  updater-state:  # writable rollback state for the updater sidecar (survives self-update)

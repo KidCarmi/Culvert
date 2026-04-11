@@ -9,6 +9,7 @@ package main
 // See roadmap/docker-system-update.md for full design.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -528,16 +529,18 @@ func apiUpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	buf := make([]byte, 4096)
+	// Line-based scan: SSE events are framed by `\n\n`, but every payload line
+	// itself ends with `\n`. Reading line-by-line guarantees we never split a
+	// JSON token across reads — fixing the 4096-byte buffer-boundary bug where
+	// `"step":"complete"` could land half in one chunk and half in the next.
+	br := bufio.NewReaderSize(resp.Body, 8192)
 	updateSucceeded := false
 	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			chunk := buf[:n]
-			w.Write(chunk) //nolint:errcheck
+		line, err := br.ReadString('\n')
+		if len(line) > 0 {
+			io.WriteString(w, line) //nolint:errcheck
 			flusher.Flush()
-			// Detect successful completion in the SSE stream.
-			if bytes.Contains(chunk, []byte(`"step":"complete"`)) {
+			if !updateSucceeded && strings.Contains(line, `"step":"complete"`) {
 				updateSucceeded = true
 			}
 		}

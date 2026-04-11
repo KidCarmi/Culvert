@@ -111,7 +111,10 @@ var rollbackInfo RollbackInfo
 
 // rollbackInfoFile persists rollback metadata across updater restarts.
 // This allows the proxy's rollback window to survive an updater self-update.
-const rollbackInfoFile = "/data/updater_rollback.json"
+//
+// Lives in /state (writable volume) — /data is mounted read-only because
+// only the proxy is the source of truth for shared updater token + audit data.
+const rollbackInfoFile = "/state/rollback.json"
 
 // saveRollbackInfo writes current rollback state to disk.
 func saveRollbackInfo() {
@@ -124,6 +127,12 @@ func saveRollbackInfo() {
 	})
 	rollbackInfo.mu.RUnlock()
 	if err != nil {
+		return
+	}
+	// Ensure parent directory exists (state volume should provide it, but be
+	// defensive for fresh installs that haven't mounted /state yet).
+	if err := os.MkdirAll(filepath.Dir(rollbackInfoFile), 0755); err != nil {
+		log.Printf("save rollback info: mkdir: %v", err)
 		return
 	}
 	tmp := rollbackInfoFile + ".tmp"
@@ -1423,31 +1432,79 @@ func handleSelfUpdate(cli *client.Client) http.HandlerFunc {
 
 		// U1/U3: Build reaper script using environment variables instead of
 		// string interpolation to prevent shell injection via container names
-		// or volume bind paths.
+		// or volume bind paths. The reaper script *quotes* "$SELF_NAME" and
+		// "$NEW_IMAGE", but $NETWORK_NAME is expanded unquoted to avoid passing
+		// "" to `--network`, so we additionally validate it server-side.
 		selfName := strings.TrimPrefix(self.Name, "/")
-		dataVolume := buildVolumeArg(self.HostConfig.Binds)
+		if !dockerIdentRe.MatchString(selfName) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "self container name failed validation"})
+			return
+		}
+
+		// Preserve ALL non-docker.sock binds (data, state, etc.) — joined with
+		// newlines so the reaper can iterate them. Empty bind list means no
+		// extra volumes (still safe — the new container just has the socket).
+		volBinds := collectValidBinds(self.HostConfig.Binds)
+		dataVolumeArgs := strings.Join(volBinds, "\n")
+
+		// Determine the compose network to attach the new container to.
+		// Without this, the new container lands on the default bridge and the
+		// proxy can't reach it via service-name DNS (http://culvert-updater:7123).
+		networkName := pickComposeNetwork(self.NetworkSettings.Networks)
+		if networkName != "" && !dockerIdentRe.MatchString(networkName) {
+			log.Printf("warning: discarding network name %q (failed validation)", networkName)
+			networkName = ""
+		}
 
 		// U1: The reaper script references only env vars, never interpolated strings.
 		// Reaper renames the old container (preserving it for rollback), creates the
-		// new one, health-checks it, and rolls back if the new updater fails to start.
+		// new one on the same compose network, health-checks via `docker exec` (the
+		// reaper itself is on a different network — localhost from inside the reaper
+		// is NOT the new updater), and rolls back if the new updater fails to start.
 		reaperScript := `
+set -u
 sleep 5
-ROLLBACK_NAME="${SELF_NAME}-rollback-$(date +%Y%m%d-%H%M%S)"
+ROLLBACK_NAME="${SELF_NAME}-rollback-$(date +%s%N)"
 docker stop -t 10 "$SELF_NAME" 2>/dev/null || true
 docker rename "$SELF_NAME" "$ROLLBACK_NAME" 2>/dev/null || true
+
+# Build optional --network flag.
+NETWORK_ARG=""
+if [ -n "${NETWORK_NAME:-}" ]; then
+  NETWORK_ARG="--network ${NETWORK_NAME}"
+fi
+
+# Build -v args from newline-separated DATA_VOLUMES (each bind is pre-validated
+# by the Go side via bindPathRe — safe to expand unquoted here).
+VOL_ARGS=""
+if [ -n "${DATA_VOLUMES:-}" ]; then
+  OLDIFS="$IFS"
+  IFS='
+'
+  for b in $DATA_VOLUMES; do
+    [ -z "$b" ] && continue
+    VOL_ARGS="$VOL_ARGS -v $b"
+  done
+  IFS="$OLDIFS"
+fi
+
+# shellcheck disable=SC2086
 docker create --name "$SELF_NAME" \
   --restart unless-stopped \
+  $NETWORK_ARG \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v "$DATA_VOLUME" \
-  -p 7123:7123 \
+  $VOL_ARGS \
+  -p 127.0.0.1:7123:7123 \
   "$NEW_IMAGE"
 docker start "$SELF_NAME"
 
-# Health check: 6 attempts, 5s apart (30s total).
+# Health check: probe the new updater from INSIDE its own container via
+# docker exec. The reaper sits on a different network namespace, so a
+# direct wget from the reaper to "localhost:7123" would hit the reaper itself.
 HEALTHY=0
 for i in 1 2 3 4 5 6; do
   sleep 5
-  if wget -qO- http://localhost:7123/healthz >/dev/null 2>&1; then
+  if docker exec "$SELF_NAME" wget -qO- http://127.0.0.1:7123/healthz >/dev/null 2>&1; then
     HEALTHY=$((HEALTHY+1))
     if [ "$HEALTHY" -ge 3 ]; then
       echo "updater healthy after $i checks — removing rollback"
@@ -1465,6 +1522,7 @@ docker stop -t 10 "$SELF_NAME" 2>/dev/null || true
 docker rm "$SELF_NAME" 2>/dev/null || true
 docker rename "$ROLLBACK_NAME" "$SELF_NAME" 2>/dev/null || true
 docker start "$SELF_NAME"
+exit 1
 `
 
 		// U11: Use a unique reaper name to avoid collision with a still-running reaper.
@@ -1476,8 +1534,9 @@ docker start "$SELF_NAME"
 			Cmd:   []string{"sh", "-c", reaperScript},
 			Env: []string{
 				"SELF_NAME=" + selfName,
-				"DATA_VOLUME=" + dataVolume,
+				"DATA_VOLUMES=" + dataVolumeArgs,
 				"NEW_IMAGE=" + newImage,
+				"NETWORK_NAME=" + networkName,
 			},
 		}
 		reaperHostCfg := &container.HostConfig{
@@ -1515,25 +1574,50 @@ func imageWithTag(img, tag string) string {
 }
 
 // bindPathRe validates Docker bind mount strings (source:dest[:mode]).
-var bindPathRe = regexp.MustCompile(`^[a-zA-Z0-9/_. :-]+$`)
+// Disallows whitespace, quotes, $, &, |, ; and other shell metacharacters so
+// the value is safe to expand unquoted inside the reaper shell script.
+var bindPathRe = regexp.MustCompile(`^[a-zA-Z0-9/_.:-]+$`)
 
-// buildVolumeArg returns the first data volume bind (skip docker.sock).
-// U3: Validates the bind string to prevent shell metacharacter injection.
-func buildVolumeArg(binds []string) string {
-	if len(binds) == 0 {
+// dockerIdentRe matches the character set Docker permits in container and
+// network names: [a-zA-Z0-9][a-zA-Z0-9_.-]*. We use it to defensively reject
+// anything weird that could break the reaper shell script.
+var dockerIdentRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// collectValidBinds returns all non-docker.sock binds that pass the safety
+// regex, preserving order. The reaper script will iterate over this list and
+// emit one `-v` arg per entry — so we MUST NOT silently drop volumes.
+// U3: Validates each bind string to prevent shell metacharacter injection.
+func collectValidBinds(binds []string) []string {
+	out := make([]string, 0, len(binds))
+	for _, b := range binds {
+		if strings.Contains(b, "docker.sock") {
+			continue
+		}
+		if !bindPathRe.MatchString(b) {
+			log.Printf("warning: skipping bind with invalid chars: %q", b)
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// pickComposeNetwork returns the first non-default network name from a
+// container's network settings. The default `bridge` network is skipped
+// because docker-compose service DNS only resolves on user-defined networks.
+// Returns "" if only the default bridge is attached (caller will then create
+// the new container without --network, which is the safest fallback).
+func pickComposeNetwork(nets map[string]*network.EndpointSettings) string {
+	if len(nets) == 0 {
 		return ""
 	}
-	for _, b := range binds {
-		if !strings.Contains(b, "docker.sock") {
-			if !bindPathRe.MatchString(b) {
-				log.Printf("warning: skipping bind with invalid chars: %q", b)
-				continue
-			}
-			return b
+	// Prefer the first non-bridge network. Compose creates one user-defined
+	// network per project, so this is normally the only entry anyway.
+	for name := range nets {
+		if name == "bridge" || name == "host" || name == "none" {
+			continue
 		}
-	}
-	if len(binds) > 0 && bindPathRe.MatchString(binds[0]) {
-		return binds[0]
+		return name
 	}
 	return ""
 }
