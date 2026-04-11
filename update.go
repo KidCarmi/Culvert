@@ -489,10 +489,18 @@ func apiUpdateApply(w http.ResponseWriter, r *http.Request) {
 
 	auditEvent(r, "update.apply", "system", fmt.Sprintf("update to %s initiated", sanitizeLog(req.TargetTag)))
 
-	// Build request body for updater.
+	// Build request body for updater. Pass the proxy's actual listen port so
+	// the updater's post-recreate health check hits the right endpoint — the
+	// updater would otherwise hardcode :8080, which breaks for users who run
+	// Culvert on a custom port.
+	healthPort := cfg.ProxyPort
+	if healthPort == 0 {
+		healthPort = 8080
+	}
 	body, _ := json.Marshal(map[string]string{
-		"container":  req.Container,
-		"target_tag": req.TargetTag,
+		"container":       req.Container,
+		"target_tag":      req.TargetTag,
+		"health_endpoint": fmt.Sprintf("http://%s:%d/health", req.Container, healthPort),
 	})
 
 	// Proxy SSE from updater to client.
@@ -563,7 +571,9 @@ func apiUpdateApply(w http.ResponseWriter, r *http.Request) {
 
 // triggerUpdaterSelfUpdate asks the updater sidecar to update itself to the
 // same tag the proxy was just updated to. Fire-and-forget — the updater uses
-// a reaper container to restart itself.
+// a reaper container to restart itself. After triggering, this function polls
+// the updater's /healthz endpoint for up to 90s to confirm the self-update
+// actually succeeded, then writes an audit event with the outcome.
 func triggerUpdaterSelfUpdate(tag string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -572,16 +582,94 @@ func triggerUpdaterSelfUpdate(tag string) {
 	resp, err := updaterRequest(ctx, http.MethodPost, "/api/self-update", bytes.NewReader(body))
 	if err != nil {
 		logger.Printf("Update: updater self-update trigger failed: %v", err)
+		recordUpdaterSelfUpdateAudit(tag, "failed", "trigger request failed: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusOK {
-		logger.Printf("Update: updater self-update triggered (tag=%s)", sanitizeLog(tag))
-	} else {
+	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		logger.Printf("Update: updater self-update returned HTTP %d: %s", resp.StatusCode, respBody)
+		recordUpdaterSelfUpdateAudit(tag, "failed",
+			fmt.Sprintf("trigger returned HTTP %d", resp.StatusCode))
+		return
 	}
+	logger.Printf("Update: updater self-update triggered (tag=%s)", sanitizeLog(tag))
+
+	// Poll /healthz to confirm the new updater comes back. The reaper sleeps
+	// 5s, stops the old updater, creates + starts the new one, then health
+	// checks it from inside its own container for up to ~30s. End to end
+	// ~50s happy path, so we wait up to 90s with 5s poll intervals — long
+	// enough for a slow image pull, short enough to alert promptly.
+	//
+	// During the gap where the old updater is stopped and the new one isn't
+	// listening yet, our polls will fail — that's expected. We only declare
+	// "failed" if we never see a 200 within the window.
+	pollCtx, pollCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer pollCancel()
+
+	// Initial wait: the old updater is still running for ~5s after trigger
+	// (reaper sleeps before acting). Polling now would succeed against the
+	// OLD updater and give a false positive. Wait for the reaper to actually
+	// cut over before counting healthz successes.
+	select {
+	case <-pollCtx.Done():
+		recordUpdaterSelfUpdateAudit(tag, "unknown", "cancelled before first poll")
+		return
+	case <-time.After(15 * time.Second):
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	attempts := 0
+	for {
+		attempts++
+		if checkUpdaterHealth(pollCtx) {
+			logger.Printf("Update: updater self-update confirmed healthy (tag=%s, attempts=%d)",
+				sanitizeLog(tag), attempts)
+			recordUpdaterSelfUpdateAudit(tag, "succeeded",
+				fmt.Sprintf("healthy after %d poll(s)", attempts))
+			return
+		}
+		select {
+		case <-pollCtx.Done():
+			logger.Printf("Update: updater self-update health check timeout (tag=%s, attempts=%d)",
+				sanitizeLog(tag), attempts)
+			recordUpdaterSelfUpdateAudit(tag, "failed",
+				fmt.Sprintf("health check timeout after %d attempts", attempts))
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// checkUpdaterHealth returns true if the updater's /healthz endpoint responds
+// 200 within 3s. Used by the post-self-update polling loop.
+func checkUpdaterHealth(ctx context.Context) bool {
+	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	resp, err := updaterRequest(reqCtx, http.MethodGet, "/healthz", nil)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// recordUpdaterSelfUpdateAudit writes a system-actor audit entry describing
+// the outcome of a post-proxy-update updater self-update cycle. There is no
+// HTTP request in this context (the SSE stream has already closed), so we
+// call auditAdd directly instead of auditEvent.
+func recordUpdaterSelfUpdateAudit(tag, outcome, detail string) {
+	entry := AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  "system@updater",
+		Action: "update.updater_self_update",
+		Object: sanitizeLog(tag),
+		Detail: strings.ReplaceAll(outcome+": "+detail, "\n", " "),
+	}
+	auditAdd(entry)
 }
 
 // apiUpdatePreview proxies preview request to updater.
