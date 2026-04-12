@@ -395,6 +395,21 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			return
 
 		case ActionAllow:
+			// Per-rule file profile: even when the policy allows the request,
+			// the attached file-extension profile can still block specific
+			// download types (e.g. "Allow github.com but block Executables").
+			// CONNECT tunnels are handled inside handleTunnelInspect where
+			// the inner URL is visible; here we only check plain HTTP.
+			if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
+				if match.Rule != nil && match.Rule.FileProfileBlocked(r.URL.Path) {
+					atomic.AddInt64(&statFileBlocked, 1)
+					atomic.AddInt64(&statBlocked, 1)
+					recordRequest(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "")
+					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
+					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
+					return
+				}
+			}
 			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, "")
 			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Fall through to normal handling below.
@@ -442,7 +457,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 
 	switch {
 	case r.Method == http.MethodConnect:
-		handleTunnel(w, r, sslAction, tlsSkipVerify)
+		handleTunnel(w, r, sslAction, tlsSkipVerify, match)
 	case isWebSocketUpgrade(r):
 		handleWebSocket(w, r)
 	default:
@@ -838,9 +853,12 @@ func detectProtocolName(b byte) string {
 }
 
 // handleTunnel dispatches to SSL-bypass or SSL-inspect based on policy.
-func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, tlsSkipVerify bool) {
+// match is the policy evaluation result (may be nil when no rule matched and
+// default action is "allow"); it is forwarded to the inspect path so per-rule
+// file-blocking profiles can be enforced on inner HTTP requests.
+func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, tlsSkipVerify bool, match *PolicyMatch) {
 	if sslAction == SSLInspect && certMgr.Ready() {
-		handleTunnelInspect(w, r, tlsSkipVerify)
+		handleTunnelInspect(w, r, tlsSkipVerify, match)
 	} else {
 		handleTunnelBypass(w, r)
 	}
@@ -928,7 +946,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 // internal Root CA, allowing the proxy to inspect decrypted HTTP/1.x traffic.
 // tlsSkipVerify disables upstream certificate validation for specific policy
 // rules (e.g. internal sites with self-signed certs); use with caution.
-func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool) {
+func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool, match *PolicyMatch) {
 	targetHost := r.Host
 	if _, _, err := net.SplitHostPort(targetHost); err != nil {
 		targetHost += ":443"
@@ -1091,6 +1109,51 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			break
 		}
 
+		// ── File blocking (tunnel inner request) ────────────────────────────
+		// These checks mirror the file-blocking logic in handleHTTP and the
+		// pre-policy global check in handleRequest. They run before any data
+		// is written to the client, so a clean 403 is safe to inject.
+
+		// 1. Global file extension blocklist — check the inner request URL.
+		if ext := fileBlocker.CheckPath(req.URL.Path); ext != "" {
+			atomic.AddInt64(&statFileBlocked, 1)
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", ext, "", "", "inspect")
+			resp.Body.Close()
+			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "global ext")
+			break
+		}
+		// 2. Per-rule file profile — check the inner request URL against the
+		//    file-extension profile attached to the matched policy rule.
+		if match != nil && match.Rule != nil && match.Rule.FileProfileBlocked(req.URL.Path) {
+			atomic.AddInt64(&statFileBlocked, 1)
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, "", "inspect")
+			resp.Body.Close()
+			fileBlockConn(clientTLS, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
+			break
+		}
+		// 3. Content-Disposition header — catches downloads that use a generic
+		//    URL but declare the real filename in the response header.
+		if ext := fileBlocker.CheckContentDisposition(resp.Header.Get("Content-Disposition")); ext != "" {
+			atomic.AddInt64(&statFileBlocked, 1)
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", ext, "", "", "inspect")
+			resp.Body.Close()
+			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
+			break
+		}
+		// 4. Content-Type MIME — catches renamed executables where the server
+		//    still reports the true MIME type.
+		if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
+			atomic.AddInt64(&statFileBlocked, 1)
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", ext, "", "", "inspect")
+			resp.Body.Close()
+			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-type")
+			break
+		}
+
 		// WebSocket upgrade: the protocol switches after the 101 handshake.
 		// Write the 101 response to the client and fall back to raw relay.
 		if resp.StatusCode == http.StatusSwitchingProtocols {
@@ -1134,6 +1197,27 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 				// ClamAV/YARA signatures match the actual content.
 				ce := resp.Header.Get("Content-Encoding")
 				scanBody := decompressForScan(body, ce)
+
+				// File blocking: magic byte detection — block archives even
+				// if the URL/Content-Disposition doesn't reveal the format.
+				if archType := IsBlockedArchive(scanBody); archType != "" {
+					origBody.Close()
+					atomic.AddInt64(&statFileBlocked, 1)
+					atomic.AddInt64(&statBlocked, 1)
+					recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", "magic:"+archType, "", "", "inspect")
+					fileBlockConn(clientTLS, hostOnly, req.URL.Path, "magic:"+archType, "magic bytes")
+					break
+				}
+				// File blocking: polyglot detection — block files whose
+				// Content-Type doesn't match their actual magic bytes.
+				if reason := CheckMagicVsContentType(scanBody, ct); reason != "" {
+					origBody.Close()
+					atomic.AddInt64(&statFileBlocked, 1)
+					atomic.AddInt64(&statBlocked, 1)
+					recordRequest(clientIP, "CONNECT", hostOnly, "POLYGLOT_BLOCKED", reason, "", "", "inspect")
+					fileBlockConn(clientTLS, hostOnly, req.URL.Path, reason, "polyglot")
+					break
+				}
 
 				// When remote scan service is active, delegate all scanning
 				// (ClamAV + YARA + DPI) in a single remote call.
