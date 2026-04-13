@@ -93,79 +93,65 @@ func DetectMagic(data []byte) *fileMagicSig {
 // header against the actual file content's magic bytes.
 // Returns a non-empty reason string if a mismatch is detected that indicates
 // a potentially disguised file (e.g., a PE executable served as image/png).
+// expectedCTForMagic maps magic signature types to Content-Type substrings
+// that are considered legitimate (not a polyglot disguise). Extracted from
+// CheckMagicVsContentType to reduce cyclomatic complexity.
+var expectedCTForMagic = map[string][]string{
+	"PE":        {"application/x-dosexec", "application/x-msdownload", "application/octet-stream"},
+	"ELF":       {"application/x-executable", "application/x-elf", "application/octet-stream"},
+	"ZIP":       {"application/zip", "application/x-zip", "application/java-archive", "application/vnd.openxmlformats", "application/octet-stream"},
+	"ZIP-empty": {"application/zip", "application/x-zip", "application/java-archive", "application/vnd.openxmlformats", "application/octet-stream"},
+	"RAR":       {"application/x-rar", "application/vnd.rar", "application/octet-stream"},
+	"7Z":        {"application/x-7z", "application/octet-stream"},
+	"Script":    {"text/", "application/x-sh", "application/octet-stream"},
+	"MachO32":   {"application/octet-stream"},
+	"MachO64":   {"application/octet-stream"},
+	"MachO64r":  {"application/octet-stream"},
+	"XZ":        {"application/x-xz", "application/octet-stream"},
+	"Z-LZW":     {"application/x-compress", "application/octet-stream"},
+	"ISO9660":   {"application/x-iso9660-image", "application/octet-stream"},
+}
+
+// compressionMagicTypes are signature types that double as HTTP Content-Encoding
+// formats. When the body hasn't been decompressed, their magic bytes are expected
+// and should not trigger polyglot detection for web content types.
+var compressionMagicTypes = map[string][]string{
+	"GZIP":  {"application/gzip", "application/x-gzip", "application/octet-stream"},
+	"ZSTD":  {"application/zstd", "application/octet-stream"},
+	"BZIP2": {"application/x-bzip2", "application/octet-stream"},
+}
+
 func CheckMagicVsContentType(data []byte, contentType string) string {
 	sig := DetectMagic(data)
 	if sig == nil {
-		return "" // unknown format — no mismatch to report
+		return ""
 	}
 
 	ct := strings.ToLower(contentType)
 
-	// If the declared Content-Type matches expected types for this magic, no issue.
-	switch sig.Type {
-	case "PE":
-		if strings.Contains(ct, "application/x-dosexec") ||
-			strings.Contains(ct, "application/x-msdownload") ||
-			strings.Contains(ct, "application/octet-stream") {
-			return ""
+	// Check compression types (also exempt web content for HTTP Content-Encoding).
+	if accepted, ok := compressionMagicTypes[sig.Type]; ok {
+		for _, a := range accepted {
+			if strings.Contains(ct, a) {
+				return ""
+			}
 		}
-	case "ELF":
-		if strings.Contains(ct, "application/x-executable") ||
-			strings.Contains(ct, "application/x-elf") ||
-			strings.Contains(ct, "application/octet-stream") {
-			return ""
-		}
-	case "ZIP", "ZIP-empty":
-		if strings.Contains(ct, "application/zip") ||
-			strings.Contains(ct, "application/x-zip") ||
-			strings.Contains(ct, "application/java-archive") ||
-			strings.Contains(ct, "application/vnd.openxmlformats") ||
-			strings.Contains(ct, "application/octet-stream") {
-			return ""
-		}
-	case "GZIP":
-		if strings.Contains(ct, "application/gzip") ||
-			strings.Contains(ct, "application/x-gzip") ||
-			strings.Contains(ct, "application/octet-stream") ||
-			isHTTPCompressedWebContent(ct) {
-			return ""
-		}
-	case "ZSTD":
-		if strings.Contains(ct, "application/zstd") ||
-			strings.Contains(ct, "application/octet-stream") ||
-			isHTTPCompressedWebContent(ct) {
-			return ""
-		}
-	case "BZIP2":
-		if strings.Contains(ct, "application/x-bzip2") ||
-			strings.Contains(ct, "application/octet-stream") ||
-			isHTTPCompressedWebContent(ct) {
-			return ""
-		}
-	case "RAR":
-		if strings.Contains(ct, "application/x-rar") ||
-			strings.Contains(ct, "application/vnd.rar") ||
-			strings.Contains(ct, "application/octet-stream") {
-			return ""
-		}
-	case "7Z":
-		if strings.Contains(ct, "application/x-7z") ||
-			strings.Contains(ct, "application/octet-stream") {
-			return ""
-		}
-	case "Script":
-		if strings.Contains(ct, "text/") ||
-			strings.Contains(ct, "application/x-sh") ||
-			strings.Contains(ct, "application/octet-stream") {
-			return ""
-		}
-	default:
-		if strings.Contains(ct, "application/octet-stream") {
+		if isHTTPCompressedWebContent(ct) {
 			return ""
 		}
 	}
 
-	// Mismatch: actual content doesn't match declared Content-Type.
+	// Check known magic-to-CT mappings.
+	if accepted, ok := expectedCTForMagic[sig.Type]; ok {
+		for _, a := range accepted {
+			if strings.Contains(ct, a) {
+				return ""
+			}
+		}
+	} else if strings.Contains(ct, "application/octet-stream") {
+		return "" // unknown type + octet-stream = legitimate
+	}
+
 	return "magic:" + sig.Type + " disguised as " + ct
 }
 
