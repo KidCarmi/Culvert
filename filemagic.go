@@ -12,6 +12,23 @@ import (
 	"strings"
 )
 
+// isHTTPCompressedWebContent returns true if the Content-Type is a normal web
+// content type that is commonly served with HTTP Content-Encoding compression
+// (gzip, br, zstd). When the response body hasn't been decompressed, the raw
+// bytes will start with the compression format's magic signature — that's
+// expected behavior, NOT a polyglot disguise. Without this check, any
+// zstd/gzip/brotli-compressed HTML, CSS, or JS page would be false-positive
+// flagged as "archive disguised as text/html".
+func isHTTPCompressedWebContent(ct string) bool {
+	return strings.Contains(ct, "text/") ||
+		strings.Contains(ct, "application/javascript") ||
+		strings.Contains(ct, "application/json") ||
+		strings.Contains(ct, "application/xml") ||
+		strings.Contains(ct, "application/xhtml") ||
+		strings.Contains(ct, "application/wasm") ||
+		strings.Contains(ct, "image/svg")
+}
+
 // fileMagicSig describes a file type signature (magic bytes).
 type fileMagicSig struct {
 	Offset  int    // byte offset where the magic starts
@@ -109,7 +126,20 @@ func CheckMagicVsContentType(data []byte, contentType string) string {
 	case "GZIP":
 		if strings.Contains(ct, "application/gzip") ||
 			strings.Contains(ct, "application/x-gzip") ||
-			strings.Contains(ct, "application/octet-stream") {
+			strings.Contains(ct, "application/octet-stream") ||
+			isHTTPCompressedWebContent(ct) {
+			return ""
+		}
+	case "ZSTD":
+		if strings.Contains(ct, "application/zstd") ||
+			strings.Contains(ct, "application/octet-stream") ||
+			isHTTPCompressedWebContent(ct) {
+			return ""
+		}
+	case "BZIP2":
+		if strings.Contains(ct, "application/x-bzip2") ||
+			strings.Contains(ct, "application/octet-stream") ||
+			isHTTPCompressedWebContent(ct) {
 			return ""
 		}
 	case "RAR":

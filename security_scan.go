@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
 // maxDecompressBytes limits decompressed data to 64 MB to guard against gzip bombs.
@@ -395,6 +396,17 @@ func decompressForScan(data []byte, contentEncoding string) []byte {
 		reader = flate.NewReader(bytes.NewReader(data))
 	case "br":
 		reader = io.NopCloser(brotli.NewReader(bytes.NewReader(data)))
+	case "zstd":
+		zr, zErr := zstd.NewReader(bytes.NewReader(data))
+		if zErr != nil {
+			return data
+		}
+		defer zr.Close()
+		decompressed, zReadErr := io.ReadAll(io.LimitReader(zr, maxDecompressBytes))
+		if zReadErr != nil || len(decompressed) == 0 {
+			return data
+		}
+		return decompressed
 	default:
 		// Unknown encoding — scan raw bytes.
 		return data
