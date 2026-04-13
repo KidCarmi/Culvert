@@ -1140,7 +1140,7 @@ func seedYARARules(targetDir string) {
 		if filepath.Dir(dst) != filepath.Clean(targetDir) {
 			continue
 		}
-		if err := os.WriteFile(dst, data, 0o600); err == nil { // #nosec G306 -- 0600 is intentional
+		if err := os.WriteFile(dst, data, 0o600); err == nil { // #nosec G703,G306 -- dst is validated by filepath.Dir containment check above
 			copied++
 		}
 	}
