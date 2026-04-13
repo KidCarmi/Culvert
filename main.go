@@ -250,10 +250,11 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		}
 	}
 
-	// ── OTLP metrics export ─────────────────────────────────────────────────
+	// ── OTLP export (metrics + traces) ──────────────────────────────────────
 	otlpVal := firstStr(*otlpEndpoint, fc.OTLPEndpoint)
 	if otlpVal != "" {
 		globalOTLP.Configure(otlpVal, nil)
+		globalOTLPTraces.Configure(otlpVal, nil)
 	}
 
 	// ── Persistent audit log ──────────────────────────────────────────────────

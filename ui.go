@@ -4953,6 +4953,7 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 		body.Endpoint = strings.TrimSpace(body.Endpoint)
 		if body.Endpoint == "" {
 			globalOTLP.Stop()
+			globalOTLPTraces.Stop()
 			auditEvent(r, "settings.otlp", "disabled", "")
 			jsonOK(w, map[string]any{"ok": true, "enabled": false})
 			return
@@ -4968,7 +4969,8 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalOTLP.Configure(body.Endpoint, nil)
-		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled")
+		globalOTLPTraces.Configure(body.Endpoint, nil)
+		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled (metrics + traces)")
 		jsonOK(w, map[string]any{"ok": true, "enabled": true, "endpoint": body.Endpoint})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

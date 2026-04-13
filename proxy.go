@@ -466,6 +466,36 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 
 	// Record request latency for Prometheus histogram.
 	latencyHist.Observe(time.Since(start).Seconds())
+
+	// OTLP span export: record one span per proxied request for Jaeger/Tempo.
+	// Only fires when the OTLP endpoint is configured; the Enabled() check
+	// avoids constructing the SpanRecord struct on the common no-OTLP path.
+	if globalOTLPTraces.Enabled() {
+		traceID, spanID := parseTraceparent(r.Header.Get("Traceparent"))
+		sslStr := ""
+		if sslAction == SSLInspect {
+			sslStr = "inspect"
+		} else if r.Method == http.MethodConnect {
+			sslStr = "bypass"
+		}
+		ruleName := ""
+		if match != nil && match.Rule != nil {
+			ruleName = match.Rule.Name
+		}
+		globalOTLPTraces.RecordSpan(SpanRecord{
+			TraceID:   traceID,
+			SpanID:    spanID,
+			Name:      "proxy_request",
+			Method:    r.Method,
+			Host:      host,
+			Status:    "OK",
+			Rule:      ruleName,
+			ClientIP:  clientIP,
+			SSLAction: sslStr,
+			StartNano: start.UnixNano(),
+			EndNano:   time.Now().UnixNano(),
+		})
+	}
 }
 
 const maxUsernameLen = 256
