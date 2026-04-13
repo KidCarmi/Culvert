@@ -564,6 +564,12 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		logger.Printf("CategoryGroups: load error: %v", err)
 	}
 
+	// ── SaaS category feed (dynamic updates from GitHub) ────────────────────
+	// Auto-syncs curated SaaS categories (AI, Marketing, Messaging, etc.)
+	// from the Culvert repo. Additive merge: new domains added, admin
+	// removals preserved. Disabled by default; enable via admin GUI.
+	globalSaaSFeed.Configure(defaultSaaSFeedURL, 24*time.Hour)
+
 	// ── Community URL category feed (BadgerDB) ────────────────────────────────
 	// When --cat-feed-db is set, open BadgerDB and start the UT1 FeedSyncer.
 	// Layer 1 (catStore) remains the priority; BadgerDB is the fallback.
