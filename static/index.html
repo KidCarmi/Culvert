@@ -1854,16 +1854,29 @@ Firefox (all platforms):
 
       <!-- OTLP Metrics + Traces Export -->
       <div class="panel" style="margin-top:18px">
-        <div class="panel-header"><span class="panel-title">OpenTelemetry (OTLP) — Metrics + Traces</span></div>
+        <div class="panel-header"><span class="panel-title">OpenTelemetry (OTLP) - Metrics + Traces</span></div>
         <div class="panel-body">
           <p class="hint">
             Push all Culvert metrics and request-level traces to an OpenTelemetry Collector via OTLP/HTTP JSON (every 15s). Traces appear in Jaeger / Tempo.<br>
-            Compatible with Grafana, Datadog, New Relic, Jaeger, and any OTLP-compatible backend.
+            Compatible with Grafana Cloud, Datadog, New Relic, Jaeger, and any OTLP-compatible backend.
           </p>
-          <div style="display:flex;gap:10px;align-items:center">
-            <input type="text" class="input wide" id="s-otlp-endpoint" placeholder="http://otel-collector:4318">
-            <button class="btn" data-click="saveOTLP">Enable</button>
-            <button class="btn ghost sm" data-click="disableOTLP">Disable</button>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div>
+              <label style="font-size:.78rem;color:var(--muted)">OTLP Endpoint</label>
+              <input type="text" class="input wide" id="s-otlp-endpoint" placeholder="https://otlp-gateway-prod-us-east-0.grafana.net/otlp" style="margin-top:4px">
+            </div>
+            <div>
+              <label style="font-size:.78rem;color:var(--muted)">Authorization Header <span style="font-size:.7rem;opacity:.6">(optional - required for Grafana Cloud)</span></label>
+              <input type="password" class="input wide" id="s-otlp-auth" placeholder="Basic <base64(instanceID:apiToken)>" style="margin-top:4px" autocomplete="off">
+            </div>
+            <p class="hint" style="margin:0;font-size:.72rem">
+              <strong>Grafana Cloud:</strong> Go to My Account → Stack → OpenTelemetry → Generate Token. Paste: <code>Basic &lt;base64(instanceID:token)&gt;</code><br>
+              <strong>Tip:</strong> In a terminal run: <code>echo -n "INSTANCE_ID:API_TOKEN" | base64</code> to get the base64 value.
+            </p>
+            <div style="display:flex;gap:10px;align-items:center">
+              <button class="btn" data-click="saveOTLP">Enable</button>
+              <button class="btn ghost sm" data-click="disableOTLP">Disable</button>
+            </div>
           </div>
           <div id="s-otlp-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
         </div>
@@ -5716,10 +5729,14 @@ async function loadOTLPConfig() {
   try {
     const r = await api('/api/otlp');
     document.getElementById('s-otlp-endpoint').value = r.endpoint || '';
+    // Don't populate auth field — it's a secret, show placeholder if configured
+    const authInput = document.getElementById('s-otlp-auth');
+    authInput.value = '';
+    authInput.placeholder = r.hasAuth ? '••••••••  (configured - leave blank to keep)' : 'Basic <base64(instanceID:apiToken)>';
     const el = document.getElementById('s-otlp-status');
     if (r.enabled) {
       el.style.display = '';
-      el.textContent = '✅ Exporting metrics + traces to ' + r.endpoint;
+      el.textContent = '✅ Exporting metrics + traces to ' + r.endpoint + (r.hasAuth ? ' (authenticated)' : '');
       el.style.color = 'var(--green)';
     } else {
       el.style.display = 'none';
@@ -5730,16 +5747,20 @@ async function loadOTLPConfig() {
 async function saveOTLP() {
   const endpoint = document.getElementById('s-otlp-endpoint').value.trim();
   if (!endpoint) { toast('Enter an OTLP endpoint', 'error'); return; }
+  const auth = document.getElementById('s-otlp-auth').value.trim();
+  const payload = {endpoint};
+  if (auth) payload.authHeader = auth;
   try {
     await api('/api/otlp', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({endpoint})
+      body: JSON.stringify(payload)
     });
     const el = document.getElementById('s-otlp-status');
     el.style.display = '';
-    el.textContent = '✅ Exporting metrics + traces to ' + endpoint;
+    el.textContent = '✅ Exporting metrics + traces to ' + endpoint + (auth ? ' (authenticated)' : '');
     el.style.color = 'var(--green)';
-    toast('OTLP export enabled', 'success');
+    toast('OTLP export enabled' + (auth ? ' with authentication' : ''), 'success');
+    loadOTLPConfig();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 

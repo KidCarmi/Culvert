@@ -5087,23 +5087,29 @@ func apiClusterMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET/POST /api/otlp — configure OpenTelemetry OTLP/HTTP metrics export.
+// GET/POST /api/otlp - configure OpenTelemetry OTLP/HTTP export (metrics + traces).
 func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
+		// Check if auth headers are configured (don't expose the actual value).
+		globalOTLP.mu.RLock()
+		hasAuth := len(globalOTLP.headers) > 0
+		globalOTLP.mu.RUnlock()
 		jsonOK(w, map[string]any{
 			"enabled":  globalOTLP.Enabled(),
 			"endpoint": globalOTLP.Endpoint(),
+			"hasAuth":  hasAuth,
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		var body struct {
-			Endpoint string `json:"endpoint"`
+			Endpoint   string `json:"endpoint"`
+			AuthHeader string `json:"authHeader"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -5127,8 +5133,21 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "endpoint must not resolve to a private network", http.StatusBadRequest)
 			return
 		}
-		globalOTLP.Configure(body.Endpoint, nil)
-		globalOTLPTraces.Configure(body.Endpoint, nil)
+		// Build headers map from the auth field.
+		var headers map[string]string
+		authVal := strings.TrimSpace(body.AuthHeader)
+		if authVal != "" {
+			headers = map[string]string{"Authorization": authVal}
+		} else {
+			// Preserve existing headers if auth field was left blank (keep current).
+			globalOTLP.mu.RLock()
+			if len(globalOTLP.headers) > 0 {
+				headers = globalOTLP.headers
+			}
+			globalOTLP.mu.RUnlock()
+		}
+		globalOTLP.Configure(body.Endpoint, headers)
+		globalOTLPTraces.Configure(body.Endpoint, headers)
 		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled (metrics + traces)")
 		jsonOK(w, map[string]any{"ok": true, "enabled": true, "endpoint": body.Endpoint})
 	default:
