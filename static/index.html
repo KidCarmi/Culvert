@@ -9,6 +9,12 @@
 <style>
 /* ─── Reset & Variables ──────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+/* Custom scrollbar — slim, themed, adapts to dark/light mode */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-hi); }
+* { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 :root {
   --bg:        #0b0f1a;
   --surface:   #111827;
@@ -717,7 +723,7 @@ tr.dragging  { opacity: .4; }
         <div class="panel-body">
           <!-- Mode bar -->
           <div id="blocklist-mode-bar" class="mode-block">
-            <span id="blocklist-mode-label">🚫 <strong>Block mode</strong> — listed hosts are blocked</span>
+            <span id="blocklist-mode-label">🚫 <strong>Block mode</strong> - listed hosts are blocked</span>
             <button class="btn ghost sm" style="margin-left:auto" id="blocklist-mode-btn" data-click="toggleBlocklistMode">Switch to Allowlist mode</button>
           </div>
           <div class="add-row">
@@ -755,7 +761,7 @@ tr.dragging  { opacity: .4; }
       <!-- Exceptions card -->
       <div class="panel" style="margin-top:18px">
         <div class="panel-header">
-          <span class="panel-title">Exceptions — Never Blocked</span>
+          <span class="panel-title">Exceptions - Never Blocked</span>
           <span id="bl-exc-count" style="font-size:.75rem;color:var(--muted)"></span>
         </div>
         <div class="panel-body">
@@ -784,7 +790,7 @@ tr.dragging  { opacity: .4; }
         <div class="panel-body">
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:8px;line-height:1.65">
             Automatically import <strong>blocked domains</strong> from a remote text feed (one domain per line, <code style="background:var(--surface2);padding:1px 4px;border-radius:3px;font-size:.75rem"># comments</code> allowed).
-            New entries are merged — manually-added entries are never removed.
+            New entries are merged - manually-added entries are never removed.
             This is <strong>separate</strong> from URL Categories: domains imported here are fully blocked regardless of policy rules.
           </p>
           <p style="font-size:.75rem;color:var(--muted);margin-bottom:14px">
@@ -822,7 +828,7 @@ tr.dragging  { opacity: .4; }
           Policy Rules (priority order) <span style="color:var(--accent)">&rarr;</span>
           Default Action
         </span>
-        <br>Blocklist entries are checked first and hard-block regardless of policy. Threat feeds (URLhaus, OpenPhish) are checked during scanning. Policy rules are evaluated in priority order — first match wins.
+        <br>Blocklist entries are checked first and hard-block regardless of policy. Threat feeds (URLhaus, OpenPhish) are checked during scanning. Policy rules are evaluated in priority order - first match wins.
       </div>
     </div>
 
@@ -1163,7 +1169,7 @@ tr.dragging  { opacity: .4; }
           <div class="idp-proto-section" style="margin-top:18px">
             <div class="idp-proto-label">
               <span class="idp-proto-badge oidc">OIDC</span>
-              OpenID Connect — OAuth 2.0 based login
+              OpenID Connect - OAuth 2.0 based login
             </div>
             <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
               <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="okta-oidc" data-tpl="okta-oidc">
@@ -1259,7 +1265,7 @@ tr.dragging  { opacity: .4; }
               <input id="idp-meta-url" class="input" placeholder="https://your-idp.com/metadata.xml" style="width:100%">
             </div>
             <div class="form-group">
-              <label class="form-label">— or Upload / Paste Metadata XML —</label>
+              <label class="form-label">Or upload / paste Metadata XML</label>
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
                 <label style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0;transition:border-color .15s" data-hover="border-accent">
                   Upload XML
@@ -1368,7 +1374,7 @@ tr.dragging  { opacity: .4; }
             <p style="font-size:.8rem;color:var(--muted);margin-bottom:18px;line-height:1.6">
               A <strong>PAC file</strong> lets Windows/macOS/Linux clients automatically route traffic through this proxy.
               Point client machines to <code style="background:var(--surface2);padding:2px 6px;border-radius:4px;font-size:.78rem" id="pac-url-display">/proxy.pac</code>
-              in their proxy settings — no per-app configuration needed.
+              in their proxy settings - no per-app configuration needed.
               Exclusions are evaluated first and bypassed entirely (DIRECT), without touching this proxy.
             </p>
 
@@ -1567,8 +1573,8 @@ Firefox (all platforms):
               </div>
             </div>
             <p style="font-size:.72rem;color:var(--muted);margin-top:6px;line-height:1.5">
-              <strong>DEBUG</strong> — Verbose, includes request details. <strong>INFO</strong> — Normal operations (default).
-              <strong>WARN</strong> — Warnings &amp; degraded state. <strong>ERROR</strong> — Errors only.
+              <strong>DEBUG</strong> - Verbose, includes request details. <strong>INFO</strong> - Normal operations (default).
+              <strong>WARN</strong> - Warnings &amp; degraded state. <strong>ERROR</strong> - Errors only.
             </p>
           </div>
         </div>
@@ -1713,7 +1719,7 @@ Firefox (all platforms):
             </div>
           </div>
           <p class="hint">
-            <strong>Credentials Required</strong> — Proxy port demands authentication (407). Use when all clients authenticate via local/LDAP/OIDC credentials.<br>
+            <strong>Credentials Required</strong> - Proxy port demands authentication (407). Use when all clients authenticate via local/LDAP/OIDC credentials.<br>
             <strong>Open / Policy-Only</strong> — Proxy accepts all clients without credentials. Identity is set to <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> for unauthenticated traffic. <strong>Policy rules</strong> control access — create a rule with Auth Source = <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> to allow or block unauthenticated users. Recommended when using a PAC file with PBAC.
           </p>
           <div style="display:flex;gap:10px;align-items:center">
@@ -1876,9 +1882,9 @@ Firefox (all platforms):
         <div class="panel-body">
           <p class="hint">
             Manage who can access this dashboard and what they can do.
-            <strong>admin</strong> — full access &nbsp;·&nbsp;
-            <strong>operator</strong> — manage policy/blocklist/filters &nbsp;·&nbsp;
-            <strong>viewer</strong> — read-only
+            <strong>admin</strong> - full access &nbsp;·&nbsp;
+            <strong>operator</strong> - manage policy/blocklist/filters &nbsp;·&nbsp;
+            <strong>viewer</strong> - read-only
           </p>
           <table>
             <thead><tr>
@@ -1906,9 +1912,9 @@ Firefox (all platforms):
                 <input type="text" class="input" style="width:100%" id="rw-host" placeholder="api.example.com or *.corp.com">
               </div>
               <div class="form-group">
-                <label class="form-label">Request header — action</label>
+                <label class="form-label">Request header action</label>
                 <select class="select" id="rw-req-action" style="width:100%;margin-bottom:6px">
-                  <option value="">— none —</option>
+                  <option value="">None</option>
                   <option value="set">Set (overwrite)</option>
                   <option value="add">Add (append)</option>
                   <option value="remove">Remove</option>
@@ -1924,9 +1930,9 @@ Firefox (all platforms):
                 <label class="form-label">&nbsp;</label>
               </div>
               <div class="form-group">
-                <label class="form-label">Response header — action</label>
+                <label class="form-label">Response header action</label>
                 <select class="select" id="rw-resp-action" style="width:100%;margin-bottom:6px">
-                  <option value="">— none —</option>
+                  <option value="">None</option>
                   <option value="set">Set (overwrite)</option>
                   <option value="add">Add (append)</option>
                   <option value="remove">Remove</option>
@@ -1997,7 +2003,7 @@ Firefox (all platforms):
             <div>
               <label class="form-label">Auth Provider <span style="color:var(--muted);font-weight:400">(for group filter)</span></label>
               <select class="select" style="width:100%" id="pol-src-provider" data-change="loadPolicyGroupOptions">
-                <option value="">— any provider —</option>
+                <option value="">Any provider</option>
               </select>
             </div>
             <div>
@@ -2018,9 +2024,9 @@ Firefox (all platforms):
             <div>
               <label class="form-label">Auth Source <span style="color:var(--muted);font-weight:400">(IdP or unauth)</span></label>
               <select class="select" style="width:100%" id="pol-src-auth">
-                <option value="">— any source —</option>
-                <option value="unauth">unauth — unauthenticated</option>
-                <option value="local">local — local credentials</option>
+                <option value="">Any source</option>
+                <option value="unauth">unauth - unauthenticated</option>
+                <option value="local">local - local credentials</option>
               </select>
             </div>
           </div>
@@ -2039,7 +2045,7 @@ Firefox (all platforms):
             <div>
               <label class="form-label">URL Category</label>
               <select class="select" style="width:100%" id="pol-dest-cat">
-                <option value="">— any —</option>
+                <option value="">Any</option>
                 <option value="Any">Any</option>
               </select>
             </div>
@@ -2068,7 +2074,7 @@ Firefox (all platforms):
             <div>
               <label class="form-label">File Extension Profile</label>
               <select class="select" style="width:100%" id="pol-file-profile">
-                <option value="">— none —</option>
+                <option value="">None</option>
               </select>
             </div>
             <div style="display:flex;flex-direction:column;justify-content:flex-end;gap:10px">
@@ -2130,7 +2136,7 @@ Firefox (all platforms):
           Policy Rules (below) <span style="color:var(--accent)">&rarr;</span>
           Default Action
         </span>
-        — First matching policy rule wins. Blocklist and threat feed blocks happen before policy evaluation.
+        First matching policy rule wins. Blocklist and threat feed blocks happen before policy evaluation.
       </div>
 
       <!-- Rule Table -->
@@ -2452,7 +2458,7 @@ Firefox (all platforms):
         <div class="panel-body" style="font-size:.85rem">
           <p style="color:var(--muted);margin-bottom:12px">
             During CA rotation, both old and new Root CAs are served in the leaf cert chain.
-            Clients trusting either CA can validate connections — zero-downtime rotation.
+            Clients trusting either CA can validate connections - zero-downtime rotation.
           </p>
           <div id="dual-ca-status" style="display:flex;gap:24px">
             <div class="stat-card"><div class="stat-val" id="dca-status">—</div><div class="stat-label">Status</div></div>
@@ -2533,11 +2539,14 @@ Firefox (all platforms):
         <div style="padding:20px">
           <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">
             Switch this node to Control Plane mode to manage Data Plane nodes, distribute configuration,
-            and handle enrollment — all from this GUI. No CLI flags needed.
+            and handle enrollment - all from this GUI. No CLI flags needed.
           </p>
           <div style="display:grid;gap:12px;max-width:480px">
-            <label style="font-size:.8rem;color:var(--muted)">gRPC Listen Address <span style="color:#ef4444">*</span>
-              <input id="cp-grpc-addr" class="input" placeholder=":50051" value=":50051" style="margin-top:4px">
+            <label style="font-size:.8rem;color:var(--muted)">gRPC Listen Port <span style="color:#ef4444">*</span>
+              <div style="display:flex;align-items:center;gap:0;margin-top:4px">
+                <span style="background:var(--surface);border:1px solid var(--border);border-right:none;border-radius:var(--radius) 0 0 var(--radius);padding:7px 10px;color:var(--muted);font-family:monospace;font-size:.9rem">:</span>
+                <input id="cp-grpc-addr" class="input" placeholder="50051" value="50051" style="border-radius:0 var(--radius) var(--radius) 0;flex:1" type="number" min="1" max="65535">
+              </div>
             </label>
             <label style="font-size:.8rem;color:var(--muted)">TLS Certificate <span style="opacity:.5">(optional — leave blank for insecure dev mode)</span>
               <input id="cp-cert-file" class="input" placeholder="/path/to/cert.pem" style="margin-top:4px">
@@ -3966,7 +3975,7 @@ async function loadPolicyCategoryOptions(selectedValue) {
     const cats = await api('/api/urlcat');
     // Preserve any value that was already set
     const current = selectedValue !== undefined ? selectedValue : sel.value;
-    sel.innerHTML = '<option value="">— any —</option><option value="Any">Any</option>' +
+    sel.innerHTML = '<option value="">Any</option><option value="Any">Any</option>' +
       (cats || []).map(c => `<option value="${escHtml(c.name)}">${escHtml(c.name)}${c.builtIn ? '' : ' ★'}</option>`).join('');
     sel.value = current;
   } catch (_) { /* fall through — keep static options */ }
@@ -3993,7 +4002,7 @@ function applyBlocklistMode(mode) {
     lbl.innerHTML = '✅ <strong>Allowlist mode</strong> — only listed hosts are allowed, everything else is blocked';
     btn.textContent = 'Switch to Block mode';
   } else {
-    lbl.innerHTML = '🚫 <strong>Block mode</strong> — listed hosts are blocked, everything else is allowed';
+    lbl.innerHTML = '🚫 <strong>Block mode</strong> - listed hosts are blocked, everything else is allowed';
     btn.textContent = 'Switch to Allowlist mode';
   }
 }
@@ -4202,11 +4211,11 @@ async function fetchStats() {
     document.getElementById('d-auth').textContent    = fmt(s.authFail);
     document.getElementById('uptime').textContent    = s.uptime;
     document.getElementById('server-time').textContent = s.serverTime;
-    document.getElementById('proxy-port').textContent  = ':' + s.proxyPort;
-    document.getElementById('ui-port').textContent     = ':' + s.uiPort;
+    document.getElementById('proxy-port').textContent  = s.proxyPort;
+    document.getElementById('ui-port').textContent     = s.uiPort;
     // settings view
-    document.getElementById('s-proxy-port').textContent = ':' + s.proxyPort;
-    document.getElementById('s-ui-port').textContent    = ':' + s.uiPort;
+    document.getElementById('s-proxy-port').textContent = s.proxyPort;
+    document.getElementById('s-ui-port').textContent    = s.uiPort;
     document.getElementById('s-uptime').textContent     = s.uptime;
     document.getElementById('s-bl-sz').textContent      = s.blocklistSz + ' hosts';
     document.getElementById('s-auth').textContent       = s.authEnabled ? 'Enabled' : 'Disabled';
@@ -4724,7 +4733,7 @@ function renderSSLBypass() {
   if (!tbody) return;
   count.textContent = _sslBypassList.length + ' pattern' + (_sslBypassList.length !== 1 ? 's' : '');
   if (!_sslBypassList.length) {
-    tbody.innerHTML = '<tr><td colspan="2"><div class="empty-state"><div class="empty-icon">🔒</div>No bypass patterns — all HTTPS traffic is inspected</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="2"><div class="empty-state"><div class="empty-icon">🔒</div>No bypass patterns - all HTTPS traffic is inspected</div></td></tr>';
     return;
   }
   tbody.innerHTML = _sslBypassList.map(p => `<tr>
@@ -4929,7 +4938,7 @@ async function selectYARARule(name) {
     document.getElementById('sec-yara-edit-src').value = d.source || '';
     const rules = yaraFileRules[name] || [];
     if (rules.length) {
-      setYARAEditStatus('info', 'Loaded ' + name + ' — ' + rules.length + ' rule(s): ' + rules.join(', '));
+      setYARAEditStatus('info', 'Loaded ' + name + ' - ' + rules.length + ' rule(s): ' + rules.join(', '));
     } else {
       setYARAEditStatus('info', 'Loaded ' + name);
     }
@@ -4944,7 +4953,7 @@ function newYARARule() {
   renderYARARuleList();
   document.getElementById('sec-yara-edit-name').value = '';
   document.getElementById('sec-yara-edit-src').value = 'rule example {\n  strings:\n    $a = "sample"\n  condition:\n    $a\n}\n';
-  setYARAEditStatus('info', 'New rule — fill in the name and source, then Save.');
+  setYARAEditStatus('info', 'New rule - fill in the name and source, then Save.');
 }
 
 function setYARAEditStatus(kind, msg) {
@@ -5697,7 +5706,7 @@ async function clearMetricsToken() {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({token: ''})
     });
-    toast('Metrics token cleared — endpoint is now public', 'success');
+    toast('Metrics token cleared - endpoint is now public', 'success');
     loadMetricsConfig();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
@@ -5843,7 +5852,7 @@ async function testWebhook(id) {
     if (d.delivered) {
       toast('Test delivered successfully', 'success');
     } else {
-      toast('Test delivery failed — check delivery history', 'error');
+      toast('Test delivery failed - check delivery history', 'error');
     }
     loadDeliveryHistory();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
@@ -6206,7 +6215,7 @@ async function loadFileProfileDropdown() {
     const sel = document.getElementById('pol-file-profile');
     if (!sel) return;
     const current = sel.value;
-    sel.innerHTML = '<option value="">— none —</option>' +
+    sel.innerHTML = '<option value="">None</option>' +
       (profiles || []).map(p => `<option value="${escHtml(p.name)}">${escHtml(p.name)} (${p.extensions.length} ext)</option>`).join('');
     if (current) sel.value = current;
   } catch(e) { /* dropdown stays with current options */ }
@@ -6521,7 +6530,7 @@ function renderPolicy() {
   updateDefaultActionBadge();
   if (!total) {
     document.getElementById('pol-count').textContent = '0 rules';
-    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">📋</div>No policy rules yet — default action applies to all traffic</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">📋</div>No policy rules yet - default action applies to all traffic</div></td></tr>';
     return;
   }
 
@@ -6570,7 +6579,7 @@ function renderPolicy() {
       <td style="text-align:right;white-space:nowrap;position:relative">
         <button class="btn ghost sm" data-click="editPolicy" data-arg="${r.priority}" style="margin-right:4px">Edit</button>
         <button class="btn ghost sm" data-click="togglePolActions" data-arg="${r.priority}" title="Actions">⋮</button>
-        <div class="pol-actions-menu" id="pol-actions-${r.priority}" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:9999;min-width:200px;padding:6px 0;font-size:.82rem">
+        <div class="pol-actions-menu" id="pol-actions-${r.priority}" style="display:none;background:var(--surface2, #1a2235);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:9999;min-width:200px;padding:6px 0;font-size:.82rem">
           <div class="pol-act-item" data-click="movePolicy" data-arg="${r.priority}" data-arg2="first">Move to first</div>
           <div class="pol-act-item" data-click="movePolicy" data-arg="${r.priority}" data-arg2="last">Move to last</div>
           <div class="pol-act-item" data-click="showMoveTarget" data-arg="${r.priority}" data-arg2="before">Move before…</div>
@@ -6887,7 +6896,7 @@ const IDP_TEMPLATES = {
     type: 'saml', name: 'Google Workspace', icon: '🔴',
     metaUrlHint: '',
     groupsAttr: 'groups', emailAttr: 'email',
-    banner: '🔴 <b>Google Workspace SAML</b>: In Google Admin → Apps → Web and mobile apps → Add custom SAML app. Download the IdP metadata XML and upload it here. Map <em>email</em> and any custom group attribute under <em>Attribute mapping</em> in the Google app. Note: Google does not natively pass group memberships — you need a custom attribute or use LDAP.',
+    banner: '🔴 <b>Google Workspace SAML</b>: In Google Admin → Apps → Web and mobile apps → Add custom SAML app. Download the IdP metadata XML and upload it here. Map <em>email</em> and any custom group attribute under <em>Attribute mapping</em> in the Google app. Note: Google does not natively pass group memberships - you need a custom attribute or use LDAP.',
     spInfo: true,
   },
   'adfs': {
@@ -7240,7 +7249,7 @@ function copyPACURL() {
   const url = pacHTTPURL();
   navigator.clipboard.writeText(url).then(
     () => toast('PAC URL copied to clipboard', 'success'),
-    () => toast('Copy failed — URL: ' + url, 'error')
+    () => toast('Copy failed - URL: ' + url, 'error')
   );
 }
 
@@ -7268,7 +7277,7 @@ async function loadPolicyProviderOptions() {
     // Provider dropdown
     const provSel = document.getElementById('pol-src-provider');
     const curProv = provSel.value;
-    provSel.innerHTML = '<option value="">— any provider —</option>' +
+    provSel.innerHTML = '<option value="">Any provider</option>' +
       _policyIdPList.filter(p => p.enabled).map(p =>
         `<option value="${p.id}">${escHtml(p.name)} (${p.type.toUpperCase()})</option>`
       ).join('');
@@ -7277,9 +7286,9 @@ async function loadPolicyProviderOptions() {
     const authSel = document.getElementById('pol-src-auth');
     if (authSel) {
       const curAuth = authSel.value;
-      authSel.innerHTML = '<option value="">— any source —</option>' +
-        '<option value="unauth">unauth — unauthenticated</option>' +
-        '<option value="local">local — local credentials</option>' +
+      authSel.innerHTML = '<option value="">Any source</option>' +
+        '<option value="unauth">unauth - unauthenticated</option>' +
+        '<option value="local">local - local credentials</option>' +
         _policyIdPList.filter(p => p.enabled).map(p =>
           `<option value="${escHtml(p.name)}">${escHtml(p.name)} (${p.type.toUpperCase()})</option>`
         ).join('');
@@ -8178,10 +8187,11 @@ async function loadClusterAudit(show) {
 }
 
 async function enableControlPlane() {
-  const addr = document.getElementById('cp-grpc-addr').value.trim();
-  if (!addr) { toast('gRPC listen address is required', 'error'); return; }
-  // Validate host:port format
-  if (!addr.includes(':')) { toast('gRPC address must be in host:port format (e.g. :50051)', 'error'); return; }
+  const port = document.getElementById('cp-grpc-addr').value.trim();
+  if (!port) { toast('gRPC listen port is required', 'error'); return; }
+  const portNum = parseInt(port, 10);
+  if (isNaN(portNum) || portNum < 1 || portNum > 65535) { toast('Port must be between 1 and 65535', 'error'); return; }
+  const addr = ':' + portNum;
   const certFile = document.getElementById('cp-cert-file').value.trim();
   const keyFile = document.getElementById('cp-key-file').value.trim();
   const caFile = document.getElementById('cp-ca-file').value.trim();
@@ -8216,7 +8226,7 @@ async function enableHA() {
       body: JSON.stringify({ leader_addr: leaderAddr })
     });
     if (!r) return;
-    toast('HA enabled — this node is now the leader', 'success');
+    toast('HA enabled - this node is now the leader', 'success');
     loadCluster();
   } catch(e) {
     toast('Failed to enable HA: ' + e.message, 'error');
@@ -8498,7 +8508,7 @@ async function saveBlockPage() {
 function resetBlockPage() {
   if (!blockPageDefault) return;
   document.getElementById('blockpage-html').value = blockPageDefault;
-  toast('Reset to default — click Save to apply','success');
+  toast('Reset to default - click Save to apply','success');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -8781,7 +8791,7 @@ function showCPUpdatingOverlay() {
     try {
       const resp = await fetch(BASE + '/healthz', { signal: AbortSignal.timeout(3000) });
       if (resp.status === 200 || resp.status === 503) {
-        finish('Container back online — reloading...');
+        finish('Container back online - reloading...');
         return true;
       }
     } catch(_) { /* still down */ }
@@ -8792,7 +8802,7 @@ function showCPUpdatingOverlay() {
       if (r.ok) {
         const s = await r.json();
         if (s && (s.status === 'complete' || s.status === 'rolled_back' || s.status === 'error')) {
-          finish(s.status === 'complete' ? 'Update complete — reloading...' : 'Update finished (' + s.status + ') — reloading...');
+          finish(s.status === 'complete' ? 'Update complete - reloading...' : 'Update finished (' + s.status + ') - reloading...');
           return true;
         }
       }
@@ -8921,7 +8931,7 @@ function showCPUpdatingOverlay() {
   </div>
 </div>
 
-<div id="user-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
+<div id="user-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
   <div class="setup-card" style="width:360px;max-width:94vw">
     <h2 id="user-modal-title" style="font-size:1.15rem;margin-bottom:4px">Add User</h2>
     <p id="user-modal-sub" style="font-size:.82rem;color:var(--muted);margin-bottom:18px">New admin dashboard user</p>
@@ -8940,9 +8950,9 @@ function showCPUpdatingOverlay() {
     <div class="form-group">
       <label class="form-label">Role</label>
       <select id="um-role" class="input" style="width:100%">
-        <option value="admin">admin — full access</option>
-        <option value="operator" selected>operator — manage content</option>
-        <option value="viewer">viewer — read only</option>
+        <option value="admin">admin - full access</option>
+        <option value="operator" selected>operator - manage content</option>
+        <option value="viewer">viewer - read only</option>
       </select>
     </div>
     <div class="setup-err" id="um-err" style="margin-bottom:10px"></div>

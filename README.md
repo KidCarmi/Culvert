@@ -23,7 +23,7 @@
 
 ## Why Culvert?
 
-Most forward proxies force you to choose: commercial appliance with vendor lock-in, or a minimal open-source tool you have to build around. Culvert is neither. It ships as a **single Go binary** with everything built in — SSL inspection, identity-aware policy, antivirus scanning, threat feeds, a full admin UI, and enterprise auth (OIDC, SAML, LDAP) — all without plugins, agents, or runtime dependencies.
+Most forward proxies force you to choose: commercial appliance with vendor lock-in, or a minimal open-source tool you have to build around. Culvert is neither. It ships as a **single Go binary** with everything built in - SSL inspection, identity-aware policy, antivirus scanning, threat feeds, a full admin UI, and enterprise auth (OIDC, SAML, LDAP) - all without plugins, agents, or runtime dependencies.
 
 Deploy it with `docker-compose up -d` and you get a production-ready proxy with zero-trust default-deny, real-time dashboards, Prometheus metrics, and a 10-check CI security pipeline. Scale it out with the built-in gRPC Control Plane for multi-node deployments. Extend it with the plugin API when you need custom logic.
 
@@ -34,17 +34,17 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 ### Proxy & Protocols
 
 - **HTTP / HTTPS** forward proxy with full CONNECT tunnel support
-- **SSL/TLS inspection** — on-the-fly MITM certs (ECDSA P-256), per-host bypass, LRU cert cache (10k entries, 1h TTL)
+- **SSL/TLS inspection** - on-the-fly MITM certs (ECDSA P-256), per-host bypass, LRU cert cache (10k entries, 1h TTL)
 - **SOCKS5** proxy (RFC 1928/1929) with username/password auth
 - **WebSocket** tunneling through CONNECT
 - **PAC file** auto-generation for browser auto-configuration
 - **Upstream proxy chaining** with round-robin, health checks, and automatic failover
-- **Circuit breaker** — stops forwarding to hung upstream proxies after consecutive failures
+- **Circuit breaker** - stops forwarding to hung upstream proxies after consecutive failures
 
 ### Policy Engine (Zero Trust)
 
-- **Default deny** — unmatched traffic is blocked
-- **Priority-based rules** — first match wins across 8 condition types:
+- **Default deny** - unmatched traffic is blocked
+- **Priority-based rules** - first match wins across 8 condition types:
   - Source IP / CIDR
   - Authenticated identity
   - IdP group membership
@@ -55,7 +55,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
   - Time schedule (day of week + time window + timezone)
 - **Actions**: Allow, Drop, Block Page, Redirect
 - **Per-rule SSL action**: Inspect (full MITM) or Bypass (transparent tunnel)
-- **Policy conflict detection** — warns on overlapping rules at same priority
+- **Policy conflict detection** - warns on overlapping rules at same priority
 - **Per-rule Prometheus metrics** with cardinality cap
 
 ### Authentication & Identity
@@ -64,22 +64,22 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 - **OIDC** Authorization Code + PKCE (Okta, Azure AD, Google, Auth0, Keycloak)
 - **SAML 2.0** SP-initiated SSO (Okta, Azure AD, ADFS)
 - **LDAP** bind + search with group resolution (Active Directory, OpenLDAP, FreeIPA)
-- **Multi-IdP** — simultaneous providers with email-domain routing
+- **Multi-IdP** - simultaneous providers with email-domain routing
 - **TOTP 2FA** (RFC 6238, inline stdlib implementation) with backup codes for admin accounts
-- **RBAC** — admin / operator / viewer roles
+- **RBAC** - admin / operator / viewer roles
 
 ### Content Security
 
 - **ClamAV** antivirus (INSTREAM protocol, concurrency-limited scanning, auto-detection)
-- **YARA rules** — pure-Go engine (no libyara), runtime reload, ReDoS-safe (5s timeout)
-- **Threat feeds** — URLhaus + OpenPhish with hourly sync, dynamic domain allowlist for hosting platforms (GitHub, Google Drive, etc.)
-- **DPI** — regex content scanning on decrypted HTTPS responses
-- **File-type blocking** — 5 named profiles (Executables, Archives, Documents, Media, Strict)
+- **YARA rules** - pure-Go engine (no libyara), runtime reload, ReDoS-safe (5s timeout)
+- **Threat feeds** - URLhaus + OpenPhish with hourly sync, dynamic domain allowlist for hosting platforms (GitHub, Google Drive, etc.)
+- **DPI** - regex content scanning on decrypted HTTPS responses
+- **File-type blocking** - 5 named profiles (Executables, Archives, Documents, Media, Strict)
 - **Domain blocklist** with wildcard matching and allow-list mode
 - **URL category database** (UT1) with background sync
 - **SHA-256 scan cache** with configurable size + TTL
-- **Remote scan sidecar** — process-isolated ClamAV/YARA scanning via remote microservice
-- **Blocklist feed syncer** — auto-sync domain blocklists from remote URLs
+- **Remote scan sidecar** - process-isolated ClamAV/YARA scanning via remote microservice
+- **Blocklist feed syncer** - auto-sync domain blocklists from remote URLs
 
 ### Admin Web UI
 
@@ -110,56 +110,56 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 ### Observability & SIEM
 
-- **Prometheus metrics** — requests, blocks, auth failures, AV scans, YARA matches, bytes transferred, latency histogram, per-rule counters
+- **Prometheus metrics** - requests, blocks, auth failures, AV scans, YARA matches, bytes transferred, latency histogram, per-rule counters
 - **Real-time SSE** dashboard feed
-- **Structured logging** — text or JSON with `req_id`, `identity`, `rule`, `action` fields
+- **Structured logging** - text or JSON with `req_id`, `identity`, `rule`, `action` fields
 - **Rotating log files** with configurable size threshold
 - **Syslog forwarding** (UDP/TCP, RFC 3164 + RFC 5424) for Splunk, Elastic, QRadar
 - **JSONL audit trail** with actor identity enrichment
-- **Webhook alerts** — HMAC-SHA256 signed notifications for threats, blocks, lockouts
-- **Request tracing** — auto-generated X-Request-ID for end-to-end correlation
+- **Webhook alerts** - HMAC-SHA256 signed notifications for threats, blocks, lockouts
+- **Request tracing** - auto-generated X-Request-ID for end-to-end correlation
 
 ### Self-Update System
 
-- **Docker update sidecar** — lightweight Go service with Docker socket access, triggered from the GUI
-- **One-click update** — pull, recreate, health check, automatic rollback on failure (SSE progress stream)
-- **Rollback** — previous container preserved for 1 hour (configurable); one-click restore
-- **Self-update** — updater can update itself via reaper container pattern
-- **Air-gapped mode** — load images from tarball when no registry access
-- **Concurrent operation guard** — prevents double-click races on update/rollback
+- **Docker update sidecar** - lightweight Go service with Docker socket access, triggered from the GUI
+- **One-click update** - pull, recreate, health check, automatic rollback on failure (SSE progress stream)
+- **Rollback** - previous container preserved for 1 hour (configurable); one-click restore
+- **Self-update** - updater can update itself via reaper container pattern
+- **Air-gapped mode** - load images from tarball when no registry access
+- **Concurrent operation guard** - prevents double-click races on update/rollback
 
 ### Resilience & Operations
 
-- **Hot config reload** — `SIGHUP` reloads blocklist, policy, rewrite, rate limit, upstream pool
-- **Graceful shutdown** — lifecycle context + 15s drain window for active tunnels
-- **CA auto-rotation** — daily expiry check, auto-rotates 30 days before expiry
+- **Hot config reload** - `SIGHUP` reloads blocklist, policy, rewrite, rate limit, upstream pool
+- **Graceful shutdown** - lifecycle context + 15s drain window for active tunnels
+- **CA auto-rotation** - daily expiry check, auto-rotates 30 days before expiry
 - **OCSP/CRL checking** on upstream TLS certificates (fail-closed)
 - **Per-IP connection limiting** (configurable, default 1024) with runtime admin API
-- **Brute-force lockout** — 5 failures triggers 15-min IP + user lock
-- **Admin API rate limiting** — 60 req/min per IP on mutating endpoints
+- **Brute-force lockout** - 5 failures triggers 15-min IP + user lock
+- **Admin API rate limiting** - 60 req/min per IP on mutating endpoints
 - **Atomic file writes** for CA bundle and config persistence
 - **PBKDF2 600k iterations** (NIST SP 800-132 2024) for CA key encryption
-- **Password complexity** — enforces 8+ characters, mixed case, digit requirement
-- **Log levels** — runtime DEBUG/INFO/WARN/ERROR with admin API control
+- **Password complexity** - enforces 8+ characters, mixed case, digit requirement
+- **Log levels** - runtime DEBUG/INFO/WARN/ERROR with admin API control
 
 ### Distributed Architecture
 
-- **Control Plane / Data Plane** — gRPC config sync with mTLS, per-node metrics aggregation
-- **Cluster dashboard** — connected node list, health, request counts, enrollment wizard
-- **Node groups** — label-based selectors with auto GeoIP labeling on enrollment
-- **Bandwidth / QoS** — per-group token bucket rate limiting with admin UI
-- **Config versioning** — automatic snapshots on every mutation, side-by-side diff, one-click rollback (50 versions)
-- **Rolling upgrades** — orchestrated cluster updates with drain, canary, HA sync
-- **PAC / threat feed / secrets sync** — full config snapshot pushed to data plane nodes
-- **Bootstrap generator** — one-line curl|bash enrollment scripts and docker-compose templates for DP nodes
+- **Control Plane / Data Plane** - gRPC config sync with mTLS, per-node metrics aggregation
+- **Cluster dashboard** - connected node list, health, request counts, enrollment wizard
+- **Node groups** - label-based selectors with auto GeoIP labeling on enrollment
+- **Bandwidth / QoS** - per-group token bucket rate limiting with admin UI
+- **Config versioning** - automatic snapshots on every mutation, side-by-side diff, one-click rollback (50 versions)
+- **Rolling upgrades** - orchestrated cluster updates with drain, canary, HA sync
+- **PAC / threat feed / secrets sync** - full config snapshot pushed to data plane nodes
+- **Bootstrap generator** - one-line curl|bash enrollment scripts and docker-compose templates for DP nodes
 - **Exponential backoff** on connection failures (2s–60s)
 - **Client mTLS** for upstream proxy authentication
 - See **[Deployment Guide](docs/deployment-guide.md)** for single-node, multi-node, and upstream chaining setup
 
 ### Extensibility
 
-- **Plugin API** — `Middleware` interface for custom request/response inspection
-- **HSM/KMS integration** — `KeyProvider` interface (AWS KMS, Azure Key Vault, PKCS#11)
+- **Plugin API** - `Middleware` interface for custom request/response inspection
+- **HSM/KMS integration** - `KeyProvider` interface (AWS KMS, Azure Key Vault, PKCS#11)
 
 ---
 
@@ -185,7 +185,7 @@ cd Culvert
 docker compose up -d
 ```
 
-No configuration required — the setup wizard creates your admin account on first visit.
+No configuration required - the setup wizard creates your admin account on first visit.
 
 | Endpoint | URL | Notes |
 |----------|-----|-------|
@@ -217,7 +217,7 @@ docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 # Grafana → http://localhost:3000  (admin / culvert)
 ```
 
-The **Culvert Overview** dashboard (12 panels: traffic, latency, security blocks, top policy rules) is auto-provisioned from `deploy/grafana/dashboards/culvert-overview.json` — no manual import needed.
+The **Culvert Overview** dashboard (12 panels: traffic, latency, security blocks, top policy rules) is auto-provisioned from `deploy/grafana/dashboards/culvert-overview.json` - no manual import needed.
 
 ### Binary
 
@@ -350,7 +350,7 @@ Rules & Filtering:
   -geoip-db string       MaxMind GeoLite2-Country.mmdb path
 
 Security Scanning:
-  -clamav-addr string    ClamAV address — tcp:host:port or unix:/path/to/clamd.sock
+  -clamav-addr string    ClamAV address - tcp:host:port or unix:/path/to/clamd.sock
   -yara-rules-dir string Directory containing .yar / .yara rule files
   -threat-feed-db string Threat feed local database path
 
@@ -358,7 +358,7 @@ Logging:
   -logfile string        Request log file (rotated at -log-max-mb)
   -log-max-mb int        Log rotation threshold in MB (default 50)
   -audit-log string      Persistent JSONL audit log path
-  -syslog string         Remote syslog — udp://host:514 or tcp://host:601
+  -syslog string         Remote syslog - udp://host:514 or tcp://host:601
 
 Metrics:
   -metrics-token string  Bearer token protecting /metrics (empty = open)
@@ -459,7 +459,7 @@ Culvert follows a defence-in-depth approach:
 | **Session security** | HMAC-SHA256 signed cookies; dynamic `Secure` flag; fixation prevention |
 | **CA key protection** | AES-256-GCM + PBKDF2-SHA256 (600k iterations) at rest |
 | **OCSP/CRL** | Upstream certificate revocation checking (fail-closed) |
-| **Hop-by-hop** | RFC 7230 compliant — parses `Connection` header for dynamic names |
+| **Hop-by-hop** | RFC 7230 compliant - parses `Connection` header for dynamic names |
 | **GeoIP** | Fail-closed on cache miss (unknown country = no match) |
 | **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, removes `X-User-Identity` |
 
@@ -467,16 +467,16 @@ Culvert follows a defence-in-depth approach:
 
 Every push runs a **10-check security gate**:
 
-1. **gosec** — Go security linter
-2. **govulncheck** — reachable CVE detection
-3. **trivy** — filesystem + Docker image vulnerability scan
-4. **gitleaks** — secret scanning on PR diffs
-5. **staticcheck** — advanced static analysis
-6. **hadolint** — Dockerfile best practices
-7. **Race tests** — `-race` flag on full test suite
-8. **Coverage gate** — minimum 55% statement coverage
-9. **License compliance** — no GPL/AGPL/LGPL/CPAL dependencies
-10. **SBOM generation** — CycloneDX JSON via Syft
+1. **gosec** - Go security linter
+2. **govulncheck** - reachable CVE detection
+3. **trivy** - filesystem + Docker image vulnerability scan
+4. **gitleaks** - secret scanning on PR diffs
+5. **staticcheck** - advanced static analysis
+6. **hadolint** - Dockerfile best practices
+7. **Race tests** - `-race` flag on full test suite
+8. **Coverage gate** - minimum 55% statement coverage
+9. **License compliance** - no GPL/AGPL/LGPL/CPAL dependencies
+10. **SBOM generation** - CycloneDX JSON via Syft
 
 Plus: **CodeQL** semantic SAST, **Dependency Obituary** dependency health scoring, **Cosign** keyless signing, and **SLSA Level 3** provenance on all releases.
 
@@ -485,56 +485,56 @@ Plus: **CodeQL** semantic SAST, **Dependency Obituary** dependency health scorin
 ## Architecture
 
 ```
-main.go            — Entrypoint, CLI flags, graceful shutdown, hot reload (SIGHUP)
-proxy.go           — HTTP/HTTPS/WebSocket handler, SSL inspection, structured logging
-socks5.go          — SOCKS5 server (RFC 1928/1929)
-policy.go          — PBAC engine: rule evaluation, conflict detection, GeoIP fail-closed
-session.go         — HMAC-SHA256 signed cookies, revocation, dynamic Secure flag
-ui.go              — Admin Web UI (47 REST endpoints, RBAC, audit enrichment)
-store.go           — Config, blocklist, request log, time-series, audit log
-security.go        — IP filter, rate limiter, SSRF guard, DNS cache
-security_scan.go   — ClamAV + YARA + threat feed scan coordinator
-clam.go            — ClamAV INSTREAM client with connection pooling
-yara_scan.go       — Pure-Go YARA engine with ReDoS timeout
-threatfeed.go      — URLhaus + OpenPhish sync, domain allowlist
-feedsync.go        — UT1 URL category syncer
-geoip.go           — MaxMind GeoLite2 with background cache
-upstream.go        — Proxy chaining, failover, circuit breaker, health checks
-ocsp.go            — OCSP/CRL revocation checking
-ca.go              — Root CA, MITM certs, AES-GCM encryption, LRU cache, auto-rotation
-auth.go            — Auth provider interface
-auth_ldap.go       — LDAP bind + search + group resolution
-auth_oidc_flow.go  — OIDC Authorization Code + PKCE
-auth_saml.go       — SAML 2.0 SP-initiated SSO
-auth_idp.go        — Multi-IdP registry with domain routing
-identity.go        — Identity model (Sub, Groups, Source, Provider)
-totp.go            — TOTP 2FA (RFC 6238, stdlib HMAC-SHA1)
-lockout.go         — Brute-force + API rate limiting
-connlimit.go       — Per-IP connection limiter, X-Request-ID
-metrics.go         — Prometheus metrics (per-rule, latency, bytes)
-logger.go          — Structured text/JSON logging with rotation
-syslog.go          — RFC 3164/5424 syslog forwarding
-alerts.go          — HMAC-SHA256 signed webhook alerts
-events.go          — SSE live dashboard stream
-config.go          — YAML config loading + validation (goccy/go-yaml)
-rewrite.go         — Per-host header rewrite engine
-fileblock.go       — File extension/MIME blocking
-pac.go             — PAC file generation
-blockpage.go       — Block page HTML template
-hashcache.go       — SHA-256 scan cache with TTL
-controlplane.go    — gRPC Control Plane / Data Plane
-plugin.go          — Middleware plugin chain
-catdb.go           — URL category database
-update.go          — Self-update system (binary + Docker)
-update_cluster.go  — Rolling cluster update orchestrator (canary, drain, HA sync)
-scan_remote.go     — Remote scan sidecar client for process-isolated scanning
-blocklist_feed.go  — Domain blocklist URL feed syncer
-bootstrap.go       — Bootstrap script/compose generators for node enrollment
-static/            — Embedded SPA (vanilla JS, Chart.js)
-updater/           — Docker update sidecar (Go service with rollback)
-scripts/           — Install script (multi-distro), CI runner setup
-deploy/            — Prometheus + Grafana stack
-yara/              — Starter YARA detection rules
+main.go            - Entrypoint, CLI flags, graceful shutdown, hot reload (SIGHUP)
+proxy.go           - HTTP/HTTPS/WebSocket handler, SSL inspection, structured logging
+socks5.go          - SOCKS5 server (RFC 1928/1929)
+policy.go          - PBAC engine: rule evaluation, conflict detection, GeoIP fail-closed
+session.go         - HMAC-SHA256 signed cookies, revocation, dynamic Secure flag
+ui.go              - Admin Web UI (47 REST endpoints, RBAC, audit enrichment)
+store.go           - Config, blocklist, request log, time-series, audit log
+security.go        - IP filter, rate limiter, SSRF guard, DNS cache
+security_scan.go   - ClamAV + YARA + threat feed scan coordinator
+clam.go            - ClamAV INSTREAM client with connection pooling
+yara_scan.go       - Pure-Go YARA engine with ReDoS timeout
+threatfeed.go      - URLhaus + OpenPhish sync, domain allowlist
+feedsync.go        - UT1 URL category syncer
+geoip.go           - MaxMind GeoLite2 with background cache
+upstream.go        - Proxy chaining, failover, circuit breaker, health checks
+ocsp.go            - OCSP/CRL revocation checking
+ca.go              - Root CA, MITM certs, AES-GCM encryption, LRU cache, auto-rotation
+auth.go            - Auth provider interface
+auth_ldap.go       - LDAP bind + search + group resolution
+auth_oidc_flow.go  - OIDC Authorization Code + PKCE
+auth_saml.go       - SAML 2.0 SP-initiated SSO
+auth_idp.go        - Multi-IdP registry with domain routing
+identity.go        - Identity model (Sub, Groups, Source, Provider)
+totp.go            - TOTP 2FA (RFC 6238, stdlib HMAC-SHA1)
+lockout.go         - Brute-force + API rate limiting
+connlimit.go       - Per-IP connection limiter, X-Request-ID
+metrics.go         - Prometheus metrics (per-rule, latency, bytes)
+logger.go          - Structured text/JSON logging with rotation
+syslog.go          - RFC 3164/5424 syslog forwarding
+alerts.go          - HMAC-SHA256 signed webhook alerts
+events.go          - SSE live dashboard stream
+config.go          - YAML config loading + validation (goccy/go-yaml)
+rewrite.go         - Per-host header rewrite engine
+fileblock.go       - File extension/MIME blocking
+pac.go             - PAC file generation
+blockpage.go       - Block page HTML template
+hashcache.go       - SHA-256 scan cache with TTL
+controlplane.go    - gRPC Control Plane / Data Plane
+plugin.go          - Middleware plugin chain
+catdb.go           - URL category database
+update.go          - Self-update system (binary + Docker)
+update_cluster.go  - Rolling cluster update orchestrator (canary, drain, HA sync)
+scan_remote.go     - Remote scan sidecar client for process-isolated scanning
+blocklist_feed.go  - Domain blocklist URL feed syncer
+bootstrap.go       - Bootstrap script/compose generators for node enrollment
+static/            - Embedded SPA (vanilla JS, Chart.js)
+updater/           - Docker update sidecar (Go service with rollback)
+scripts/           - Install script (multi-distro), CI runner setup
+deploy/            - Prometheus + Grafana stack
+yara/              - Starter YARA detection rules
 ```
 
 ---
