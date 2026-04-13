@@ -288,6 +288,8 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 .drag-handle:active { cursor: grabbing; }
 tr.drag-over { background: rgba(20,184,166,.08) !important; outline: 1px dashed var(--accent); }
 tr.dragging  { opacity: .4; }
+.pol-act-item { padding: 6px 14px; cursor: pointer; white-space: nowrap; }
+.pol-act-item:hover { background: rgba(20,184,166,.12); }
 /* ─── Policy pickers (group / country) ──────────────────────────────────── */
 .picker-dropdown {
   position: absolute; top: 100%; left: 0; right: 0; z-index: 500;
@@ -4905,7 +4907,7 @@ async function deletePolicy(priority) {
 let _polDragInitialised = false;
 function initPolicyDragDrop() {
   if (_polDragInitialised) return; // listeners already attached
-  const tbody = document.querySelector('#pol-table tbody');
+  const tbody = document.getElementById('pol-table');
   if (!tbody) return;
   _polDragInitialised = true;
 
@@ -4938,7 +4940,7 @@ function initPolicyDragDrop() {
     const toPri   = parseInt(row.dataset.priority);
     if (fromPri === toPri) return;
 
-    const allRows = [...document.querySelectorAll('#pol-table tbody tr[data-priority]')];
+    const allRows = [...document.querySelectorAll('#pol-table tr[data-priority]')];
     const priorities = allRows.map(r => parseInt(r.dataset.priority));
     const fromIdx = priorities.indexOf(fromPri);
     const toIdx   = priorities.indexOf(toPri);
@@ -4954,6 +4956,102 @@ function initPolicyDragDrop() {
       fetchPolicy();
     } catch(e) { toast('Reorder failed: ' + e.message, 'error'); }
   });
+}
+
+// ── Policy actions dropdown ─────────────────────────────────────────────
+
+function togglePolActions(e, pri) {
+  e.stopPropagation();
+  // Close any open menus first.
+  document.querySelectorAll('.pol-actions-menu').forEach(m => { if (m.id !== 'pol-actions-' + pri) m.style.display = 'none'; });
+  const menu = document.getElementById('pol-actions-' + pri);
+  if (!menu) return;
+  menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+}
+
+// Close menus on outside click.
+document.addEventListener('click', () => {
+  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+});
+
+async function movePolicy(pri, position, targetName) {
+  const body = { priority: pri, position };
+  if (targetName) body.targetName = targetName;
+  try {
+    await api('/api/policy/move', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    toast('Rule moved to ' + position, 'success');
+    fetchPolicy();
+  } catch(e) { toast('Move failed: ' + e.message, 'error'); }
+}
+
+function showMoveTarget(pri, direction) {
+  // Close the actions menu.
+  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+  // Build a list of other rule names.
+  const currentRule = polRules.find(r => r.priority === pri);
+  const otherRules = polRules.filter(r => r.priority !== pri);
+  if (!otherRules.length) { toast('No other rules to move relative to', 'error'); return; }
+  const options = otherRules.map(r => `<option value="${escHtml(r.name)}">${escHtml(r.name)}</option>`).join('');
+  const label = direction === 'before' ? 'Move BEFORE rule:' : 'Move AFTER rule:';
+  // Simple modal overlay.
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML = `<div style="background:var(--card);border-radius:12px;padding:24px;min-width:340px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+    <div style="font-weight:600;margin-bottom:12px">${label}</div>
+    <select id="move-target-select" class="select" style="width:100%;margin-bottom:16px">${options}</select>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" id="move-target-cancel">Cancel</button>
+      <button class="btn" id="move-target-confirm">Move</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#move-target-cancel').onclick = () => overlay.remove();
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('#move-target-confirm').onclick = () => {
+    const target = document.getElementById('move-target-select').value;
+    overlay.remove();
+    if (target) movePolicy(pri, direction, target);
+  };
+}
+
+function clonePolicy(pri) {
+  // Close the actions menu.
+  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+  const r = polRules.find(x => x.priority === pri);
+  if (!r) return;
+  // Switch to "Add" mode (not edit) — cloned rule is not live until Save.
+  polEditPriority = null;
+  document.getElementById('pol-priority').value  = '';
+  document.getElementById('pol-name').value       = r.name + ' (copy)';
+  document.getElementById('pol-action').value     = r.action;
+  document.getElementById('pol-src-ip').value     = r.sourceIP || '';
+  document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
+  document.getElementById('pol-redirect').value   = r.redirectURL || '';
+  document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
+  loadPolicyCategoryOptions(r.destCategory || '');
+  document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
+  document.getElementById('pol-enabled').checked     = r.enabled !== false;
+  document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
+  document.getElementById('pol-file-profile').value   = r.fileProfile || '';
+  document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
+  clearGroupSelection();
+  if (r.sourceGroup) selectGroup(r.sourceGroup);
+  loadPolicyProviderOptions().then(() => {
+    document.getElementById('pol-src-auth').value = r.authSource || '';
+  });
+  _selectedCountries = [...(r.destCountry || [])];
+  _syncCountryHidden();
+  renderCountryChips();
+  setScheduleToForm(r.schedule || null);
+  document.getElementById('policy-form-title').textContent = 'Clone Rule: ' + r.name;
+  document.getElementById('policy-submit-btn').textContent = '💾 Create Clone';
+  document.getElementById('policy-cancel-btn').style.display = '';
+  document.getElementById('policy-form-panel').scrollIntoView({behavior:'smooth'});
+  toast('Edit the cloned rule and click Save to create it', 'success');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -6120,9 +6218,19 @@ function renderPolicy() {
       <td>${sslBadge(r.sslAction, r.tlsSkipVerify)}</td>
       <td>${actionBadge(r.action)}</td>
       <td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${r.hitCount || 0}</td>
-      <td style="text-align:right;white-space:nowrap">
+      <td style="text-align:right;white-space:nowrap;position:relative">
         <button class="btn ghost sm" onclick="editPolicy(${r.priority})" style="margin-right:4px">Edit</button>
-        <button class="btn danger sm" onclick="deletePolicy(${r.priority})">Del</button>
+        <button class="btn ghost sm" onclick="togglePolActions(event,${r.priority})" title="Actions">⋮</button>
+        <div class="pol-actions-menu" id="pol-actions-${r.priority}" style="display:none;position:absolute;right:0;top:100%;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);z-index:100;min-width:190px;padding:4px 0;font-size:.8rem">
+          <div class="pol-act-item" onclick="movePolicy(${r.priority},'first')">Move to first</div>
+          <div class="pol-act-item" onclick="movePolicy(${r.priority},'last')">Move to last</div>
+          <div class="pol-act-item" onclick="showMoveTarget(${r.priority},'before')">Move before…</div>
+          <div class="pol-act-item" onclick="showMoveTarget(${r.priority},'after')">Move after…</div>
+          <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+          <div class="pol-act-item" onclick="clonePolicy(${r.priority})">Clone rule</div>
+          <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+          <div class="pol-act-item" style="color:var(--danger)" onclick="deletePolicy(${r.priority})">Delete</div>
+        </div>
       </td>
     </tr>`;
   }).join('');

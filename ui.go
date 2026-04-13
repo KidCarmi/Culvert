@@ -82,6 +82,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/rewrite", apiRewrite)
 	mux.HandleFunc("/api/policy", apiPolicy)
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
+	mux.HandleFunc("/api/policy/move", apiPolicyMove)
 	mux.HandleFunc("/api/policy/test", apiPolicyTest)
 	mux.HandleFunc("/api/ca-cert", apiCACert)
 	mux.HandleFunc("/api/certs/upload", apiCertsUpload)
@@ -2863,6 +2864,119 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": true})
 }
 
+// POST /api/policy/move — move a rule to first/last/before/after a target rule.
+// Builds a new ordered priority list and delegates to policyStore.Reorder().
+// Body: {"priority": 5, "position": "first|last|before|after", "targetName": "rule-name"}
+// findRuleIdxByName returns the index within priorities that corresponds to the
+// rule named targetName. Returns -1 if not found. Extracted to keep
+// buildMovedPriorities under the cyclop complexity threshold.
+func findRuleIdxByName(rules []PolicyRule, priorities []int, targetName string) int {
+	for i, pri := range priorities {
+		for j := range rules {
+			if rules[j].Priority == pri && strings.EqualFold(rules[j].Name, targetName) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// buildMovedPriorities computes a new priority ordering after moving a rule
+// identified by movePriority to the given position (first/last/before/after).
+// Returns the reordered priority slice or an error for unknown rule/target.
+func buildMovedPriorities(rules []PolicyRule, movePriority int, position, targetName string) ([]int, error) {
+	moveIdx := -1
+	for i := range rules {
+		if rules[i].Priority == movePriority {
+			moveIdx = i
+			break
+		}
+	}
+	if moveIdx < 0 {
+		return nil, fmt.Errorf("rule not found")
+	}
+
+	// Build priority list without the moved rule.
+	priorities := make([]int, 0, len(rules))
+	for i := range rules {
+		if i != moveIdx {
+			priorities = append(priorities, rules[i].Priority)
+		}
+	}
+	movePri := rules[moveIdx].Priority
+
+	switch position {
+	case "first":
+		return append([]int{movePri}, priorities...), nil
+	case "last":
+		return append(priorities, movePri), nil
+	case "before", "after":
+		targetIdx := findRuleIdxByName(rules, priorities, targetName)
+		if targetIdx < 0 {
+			return nil, fmt.Errorf("target rule not found: %s", strings.ReplaceAll(targetName, "\n", ""))
+		}
+		insertAt := targetIdx
+		if position == "after" {
+			insertAt++
+		}
+		newPri := make([]int, 0, len(rules))
+		newPri = append(newPri, priorities[:insertAt]...)
+		newPri = append(newPri, movePri)
+		newPri = append(newPri, priorities[insertAt:]...)
+		return newPri, nil
+	}
+	return nil, fmt.Errorf("invalid position")
+}
+
+func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	var body struct {
+		Priority   int    `json:"priority"`
+		Position   string `json:"position"`
+		TargetName string `json:"targetName"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.Position != "first" && body.Position != "last" &&
+		body.Position != "before" && body.Position != "after" {
+		http.Error(w, "position must be first, last, before, or after", http.StatusBadRequest)
+		return
+	}
+	if (body.Position == "before" || body.Position == "after") && body.TargetName == "" {
+		http.Error(w, "targetName is required for before/after", http.StatusBadRequest)
+		return
+	}
+	rules := policyStore.List()
+	if len(rules) == 0 {
+		http.Error(w, "no rules to reorder", http.StatusBadRequest)
+		return
+	}
+	priorities, err := buildMovedPriorities(rules, body.Priority, body.Position, body.TargetName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !policyStore.Reorder(priorities) {
+		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
+		return
+	}
+	policyStore.Save()
+	safePri := strings.ReplaceAll(fmt.Sprintf("%d", body.Priority), "\n", "")
+	safePos := sanitizeLog(body.Position)
+	logger.Printf("UI: policy rule pri=%s moved to %s", safePri, safePos)
+	auditEvent(r, "policy.move", fmt.Sprintf("pri=%s to %s", safePri, safePos), "")
+	saveConfigVersion(sessionAdmin(r), "policy.move")
+	jsonOK(w, map[string]any{"ok": true})
+}
+
 // POST /api/policy/test — evaluate policy rules against hypothetical inputs.
 // Useful for debugging: returns the first matching rule (or no-match) without
 // side-effects (hit counts are NOT incremented).
@@ -4953,6 +5067,7 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 		body.Endpoint = strings.TrimSpace(body.Endpoint)
 		if body.Endpoint == "" {
 			globalOTLP.Stop()
+			globalOTLPTraces.Stop()
 			auditEvent(r, "settings.otlp", "disabled", "")
 			jsonOK(w, map[string]any{"ok": true, "enabled": false})
 			return
@@ -4968,7 +5083,8 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalOTLP.Configure(body.Endpoint, nil)
-		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled")
+		globalOTLPTraces.Configure(body.Endpoint, nil)
+		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled (metrics + traces)")
 		jsonOK(w, map[string]any{"ok": true, "enabled": true, "endpoint": body.Endpoint})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
