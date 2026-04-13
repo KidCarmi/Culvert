@@ -2542,8 +2542,11 @@ Firefox (all platforms):
             and handle enrollment — all from this GUI. No CLI flags needed.
           </p>
           <div style="display:grid;gap:12px;max-width:480px">
-            <label style="font-size:.8rem;color:var(--muted)">gRPC Listen Address <span style="color:#ef4444">*</span>
-              <input id="cp-grpc-addr" class="input" placeholder=":50051" value=":50051" style="margin-top:4px">
+            <label style="font-size:.8rem;color:var(--muted)">gRPC Listen Port <span style="color:#ef4444">*</span>
+              <div style="display:flex;align-items:center;gap:0;margin-top:4px">
+                <span style="background:var(--surface);border:1px solid var(--border);border-right:none;border-radius:var(--radius) 0 0 var(--radius);padding:7px 10px;color:var(--muted);font-family:monospace;font-size:.9rem">:</span>
+                <input id="cp-grpc-addr" class="input" placeholder="50051" value="50051" style="border-radius:0 var(--radius) var(--radius) 0;flex:1" type="number" min="1" max="65535">
+              </div>
             </label>
             <label style="font-size:.8rem;color:var(--muted)">TLS Certificate <span style="opacity:.5">(optional — leave blank for insecure dev mode)</span>
               <input id="cp-cert-file" class="input" placeholder="/path/to/cert.pem" style="margin-top:4px">
@@ -8184,10 +8187,11 @@ async function loadClusterAudit(show) {
 }
 
 async function enableControlPlane() {
-  const addr = document.getElementById('cp-grpc-addr').value.trim();
-  if (!addr) { toast('gRPC listen address is required', 'error'); return; }
-  // Validate host:port format
-  if (!addr.includes(':')) { toast('gRPC address must be in host:port format (e.g. :50051)', 'error'); return; }
+  const port = document.getElementById('cp-grpc-addr').value.trim();
+  if (!port) { toast('gRPC listen port is required', 'error'); return; }
+  const portNum = parseInt(port, 10);
+  if (isNaN(portNum) || portNum < 1 || portNum > 65535) { toast('Port must be between 1 and 65535', 'error'); return; }
+  const addr = ':' + portNum;
   const certFile = document.getElementById('cp-cert-file').value.trim();
   const keyFile = document.getElementById('cp-key-file').value.trim();
   const caFile = document.getElementById('cp-ca-file').value.trim();
