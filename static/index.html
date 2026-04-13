@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Culvert</title>
 <link rel="icon" type="image/png" href="logo.png">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script nonce="__CSP_NONCE__" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 /* ─── Reset & Variables ──────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -419,7 +419,7 @@ tr.dragging  { opacity: .4; }
     </div>
     <div style="margin-top:8px;display:flex;align-items:center;justify-content:space-between">
       <span style="color:var(--muted); font-size:.68rem;">Up <span id="uptime">0s</span></span>
-      <button onclick="toggleTheme()" id="theme-toggle-btn" title="Toggle light/dark mode"
+      <button data-click="toggleTheme" id="theme-toggle-btn" title="Toggle light/dark mode"
         style="background:none;border:1px solid var(--border);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:.78rem;color:var(--muted)">🌙</button>
     </div>
   </div>
@@ -429,7 +429,7 @@ tr.dragging  { opacity: .4; }
 <div id="main">
   <div class="topbar">
     <div style="display:flex;align-items:center;gap:12px">
-      <button id="sidebar-toggle" onclick="document.getElementById('sidebar').classList.toggle('open')" aria-label="Toggle menu">&#9776;</button>
+      <button id="sidebar-toggle" data-click="toggleSidebar" aria-label="Toggle menu">&#9776;</button>
       <div>
         <div class="topbar-title" id="topbar-title">Dashboard</div>
         <div class="topbar-meta" id="topbar-meta">Real-time proxy overview</div>
@@ -442,7 +442,7 @@ tr.dragging  { opacity: .4; }
         <span id="topbar-username" style="color:var(--muted)"></span>
         <span id="topbar-role-badge" style="padding:2px 8px;border-radius:99px;font-size:.7rem;font-weight:700;text-transform:uppercase"></span>
       </span>
-      <button class="btn ghost sm" id="logout-btn" onclick="doLogout()" style="display:none">Sign Out</button>
+      <button class="btn ghost sm" id="logout-btn" data-click="doLogout" style="display:none">Sign Out</button>
     </div>
   </div>
 
@@ -462,12 +462,12 @@ tr.dragging  { opacity: .4; }
               Your proxy is running. Complete these steps to start filtering traffic:
             </p>
             <div style="display:flex;flex-direction:column;gap:8px;font-size:.82rem">
-              <div><span style="color:var(--accent);font-weight:600">1.</span> <a href="#" onclick="event.preventDefault();switchView('pac')" style="color:var(--accent)">Configure a PAC file</a> or set your browser proxy to <code style="background:var(--surface2);padding:1px 6px;border-radius:3px">http://localhost:8080</code></div>
-              <div><span style="color:var(--accent);font-weight:600">2.</span> <a href="#" onclick="event.preventDefault();switchView('certificates')" style="color:var(--accent)">Install the Root CA</a> if using SSL inspection</div>
-              <div><span style="color:var(--accent);font-weight:600">3.</span> <a href="#" onclick="event.preventDefault();switchView('policy')" style="color:var(--accent)">Create your first policy rule</a> to control access</div>
+              <div><span style="color:var(--accent);font-weight:600">1.</span> <a href="#" data-click="switchView" data-arg="pac" style="color:var(--accent)">Configure a PAC file</a> or set your browser proxy to <code style="background:var(--surface2);padding:1px 6px;border-radius:3px">http://localhost:8080</code></div>
+              <div><span style="color:var(--accent);font-weight:600">2.</span> <a href="#" data-click="switchView" data-arg="certificates" style="color:var(--accent)">Install the Root CA</a> if using SSL inspection</div>
+              <div><span style="color:var(--accent);font-weight:600">3.</span> <a href="#" data-click="switchView" data-arg="policy" style="color:var(--accent)">Create your first policy rule</a> to control access</div>
             </div>
           </div>
-          <button class="btn ghost sm" onclick="this.parentElement.parentElement.style.display='none'" title="Dismiss" style="flex-shrink:0">&times;</button>
+          <button class="btn ghost sm" data-click="dismissParent" title="Dismiss" style="flex-shrink:0">&times;</button>
         </div>
       </div>
 
@@ -645,9 +645,9 @@ tr.dragging  { opacity: .4; }
     <!-- ── LIVE FEED ──────────────────────────────────────────────────────── -->
     <div class="view" id="view-livefeed">
       <div class="filter-bar">
-        <input type="text" class="input wide" id="log-filter" placeholder="Filter by host or IP…" oninput="applyLogFilter()">
-        <input type="text" class="input" style="width:160px" id="log-identity" placeholder="Filter by user…" oninput="applyLogFilter()">
-        <select class="select" id="log-status" onchange="applyLogFilter()">
+        <input type="text" class="input wide" id="log-filter" placeholder="Filter by host or IP…" data-input="applyLogFilter">
+        <input type="text" class="input" style="width:160px" id="log-identity" placeholder="Filter by user…" data-input="applyLogFilter">
+        <select class="select" id="log-status" data-change="applyLogFilter">
           <option value="">All statuses</option>
           <option value="OK">OK</option>
           <option value="BLOCKED">Blocked</option>
@@ -659,13 +659,13 @@ tr.dragging  { opacity: .4; }
           <option value="POLICY_DEFAULT_DENY">Policy Deny</option>
           <option value="AUTH_FAIL">Auth Fail</option>
         </select>
-        <select class="select" id="log-level" onchange="applyLogFilter()">
+        <select class="select" id="log-level" data-change="applyLogFilter">
           <option value="">All levels</option>
           <option value="INFO">INFO</option>
           <option value="WARN">WARN</option>
           <option value="ERROR">ERROR</option>
         </select>
-        <select class="select" id="log-method" onchange="applyLogFilter()">
+        <select class="select" id="log-method" data-change="applyLogFilter">
           <option value="">All methods</option>
           <option value="GET">GET</option>
           <option value="POST">POST</option>
@@ -673,10 +673,10 @@ tr.dragging  { opacity: .4; }
           <option value="PUT">PUT</option>
           <option value="DELETE">DELETE</option>
         </select>
-        <button class="btn ghost sm" onclick="clearFilter()">Clear</button>
+        <button class="btn ghost sm" data-click="clearFilter">Clear</button>
         <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer"
                title="Query the persistent JSONL request log on disk (newest 20 000 entries) instead of the in-memory ring buffer.">
-          <input type="checkbox" id="log-source-file" onchange="applyLogFilter()"> Persistent log
+          <input type="checkbox" id="log-source-file" data-change="applyLogFilter"> Persistent log
         </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer;margin-left:auto">
           <input type="checkbox" id="auto-scroll" checked> Auto-scroll
@@ -687,8 +687,8 @@ tr.dragging  { opacity: .4; }
           <span class="panel-title">Live Request Log</span>
           <div style="display:flex;align-items:center;gap:8px">
             <span class="topbar-meta" id="log-count">0 entries</span>
-            <button class="btn ghost sm" onclick="exportLogs('csv')">⬇ CSV</button>
-            <button class="btn ghost sm" onclick="exportLogs('json')">⬇ JSON</button>
+            <button class="btn ghost sm" data-click="exportLogs" data-arg="csv">⬇ CSV</button>
+            <button class="btn ghost sm" data-click="exportLogs" data-arg="json">⬇ JSON</button>
           </div>
         </div>
         <div class="tbl-wrap" style="max-height:60vh;overflow-y:auto" id="log-scroll">
@@ -708,9 +708,9 @@ tr.dragging  { opacity: .4; }
         <div class="panel-header">
           <span class="panel-title">Manage Blocklist</span>
           <div style="display:flex;gap:8px">
-            <button class="btn ghost sm" onclick="exportBlocklist()">⬇ Export</button>
+            <button class="btn ghost sm" data-click="exportBlocklist">⬇ Export</button>
             <label class="btn ghost sm" style="cursor:pointer">
-              ⬆ Import <input type="file" accept=".txt,.json" style="display:none" onchange="importBlocklist(this)">
+              ⬆ Import <input type="file" accept=".txt,.json" style="display:none" data-change="importBlocklist">
             </label>
           </div>
         </div>
@@ -718,36 +718,36 @@ tr.dragging  { opacity: .4; }
           <!-- Mode bar -->
           <div id="blocklist-mode-bar" class="mode-block">
             <span id="blocklist-mode-label">🚫 <strong>Block mode</strong> — listed hosts are blocked</span>
-            <button class="btn ghost sm" style="margin-left:auto" id="blocklist-mode-btn" onclick="toggleBlocklistMode()">Switch to Allowlist mode</button>
+            <button class="btn ghost sm" style="margin-left:auto" id="blocklist-mode-btn" data-click="toggleBlocklistMode">Switch to Allowlist mode</button>
           </div>
           <div class="add-row">
             <input type="text" class="input wide" id="new-host"
               placeholder="example.com or *.example.com (wildcards supported)">
-            <button class="btn" onclick="addHost()">+ Add Host</button>
+            <button class="btn" data-click="addHost">+ Add Host</button>
           </div>
           <div class="filter-bar" style="gap:8px;flex-wrap:wrap">
             <input type="text" class="input" style="width:240px" id="bl-filter"
-              placeholder="Search hosts…" oninput="renderBlocklist()">
+              placeholder="Search hosts…" data-input="renderBlocklist">
             <div style="display:flex;gap:4px" id="bl-source-tabs">
-              <button class="btn sm active" id="bl-src-all"   onclick="setBlSource('')"      >All</button>
-              <button class="btn sm ghost" id="bl-src-manual" onclick="setBlSource('manual')" >Admin only</button>
-              <button class="btn sm ghost" id="bl-src-feed"   onclick="setBlSource('feed')"   >Feed only</button>
+              <button class="btn sm active" id="bl-src-all"   data-click="setBlSource" data-arg=""      >All</button>
+              <button class="btn sm ghost" id="bl-src-manual" data-click="setBlSource" data-arg="manual" >Admin only</button>
+              <button class="btn sm ghost" id="bl-src-feed"   data-click="setBlSource" data-arg="feed"   >Feed only</button>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:10px;margin:8px 0 10px">
             <span id="bl-count" style="font-size:.75rem;color:var(--muted)"></span>
-            <button class="btn danger sm" id="bl-bulk-del" style="display:none" onclick="bulkDeleteBL()">Delete Selected</button>
+            <button class="btn danger sm" id="bl-bulk-del" style="display:none" data-click="bulkDeleteBL">Delete Selected</button>
           </div>
           <div class="tbl-wrap">
             <table>
               <thead>
-                <tr><th style="width:28px"><input type="checkbox" id="bl-check-all" onchange="blToggleAll(this.checked)"></th><th>Host / Pattern</th><th>Type</th><th>Added by</th><th></th></tr>
+                <tr><th style="width:28px"><input type="checkbox" id="bl-check-all" data-change="blToggleAll"></th><th>Host / Pattern</th><th>Type</th><th>Added by</th><th></th></tr>
               </thead>
               <tbody id="bl-table"></tbody>
             </table>
           </div>
           <div id="bl-load-more" style="display:none;margin-top:10px;text-align:center">
-            <button class="btn ghost sm" onclick="blLoadMore()">Load more…</button>
+            <button class="btn ghost sm" data-click="blLoadMore">Load more…</button>
           </div>
         </div>
       </div>
@@ -766,7 +766,7 @@ tr.dragging  { opacity: .4; }
           <div class="add-row" style="margin-bottom:14px">
             <input type="text" class="input wide" id="bl-exc-new"
               placeholder="example.com or *.example.com">
-            <button class="btn" onclick="addException()">+ Add Exception</button>
+            <button class="btn" data-click="addException">+ Add Exception</button>
           </div>
           <div class="tbl-wrap">
             <table>
@@ -805,8 +805,8 @@ tr.dragging  { opacity: .4; }
               </select>
             </div>
             <div style="display:flex;gap:6px">
-              <button class="btn" onclick="saveBlocklistFeed()">Save</button>
-              <button class="btn ghost" onclick="syncBlocklistFeed()">Sync Now</button>
+              <button class="btn" data-click="saveBlocklistFeed">Save</button>
+              <button class="btn ghost" data-click="syncBlocklistFeed">Sync Now</button>
             </div>
           </div>
           <div id="s-bl-feed-status" style="font-size:.8rem;color:var(--muted)"></div>
@@ -852,7 +852,7 @@ tr.dragging  { opacity: .4; }
               <label class="form-label">Add IP / CIDR</label>
               <div class="add-row" style="margin-bottom:0">
                 <input type="text" class="input wide" id="sec-ip-input" placeholder="192.168.1.1 or 10.0.0.0/8">
-                <button class="btn" onclick="secAddIP()">Add</button>
+                <button class="btn" data-click="secAddIP">Add</button>
               </div>
             </div>
             <div id="sec-ip-count" style="font-size:.75rem;color:var(--muted);margin-bottom:8px;"></div>
@@ -862,7 +862,7 @@ tr.dragging  { opacity: .4; }
                 <tbody id="sec-ip-table"></tbody>
               </table>
             </div>
-            <button class="btn" style="margin-top:14px;width:100%" onclick="saveSecurity()">Apply Changes</button>
+            <button class="btn" style="margin-top:14px;width:100%" data-click="saveSecurity">Apply Changes</button>
           </div>
         </div>
 
@@ -875,8 +875,8 @@ tr.dragging  { opacity: .4; }
                 <label class="form-label">Max requests / minute per IP</label>
                 <div class="form-row">
                   <input type="number" class="input" style="width:110px" id="sec-rpm" min="0" placeholder="0 = off">
-                  <button class="btn" onclick="saveRateLimit()">Apply</button>
-                  <button class="btn danger" onclick="disableRateLimit()">Disable</button>
+                  <button class="btn" data-click="saveRateLimit">Apply</button>
+                  <button class="btn danger" data-click="disableRateLimit">Disable</button>
                 </div>
                 <p style="font-size:.72rem;color:var(--muted);margin-top:8px;">
                   Current: <strong id="sec-rpm-cur">—</strong> &nbsp;|&nbsp; Status: <strong id="sec-rl-status">—</strong>
@@ -892,8 +892,8 @@ tr.dragging  { opacity: .4; }
                 Download all recorded requests (up to last 1 000 entries).
               </p>
               <div style="display:flex;gap:10px;flex-wrap:wrap">
-                <button class="btn" onclick="exportLogs('csv')" style="flex:1">⬇ Export CSV</button>
-                <button class="btn ghost" onclick="exportLogs('json')" style="flex:1">⬇ Export JSON</button>
+                <button class="btn" data-click="exportLogs" data-arg="csv" style="flex:1">⬇ Export CSV</button>
+                <button class="btn ghost" data-click="exportLogs" data-arg="json" style="flex:1">⬇ Export JSON</button>
               </div>
             </div>
           </div>
@@ -959,8 +959,8 @@ tr.dragging  { opacity: .4; }
           <div id="sec-yara-warnings" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:14px;font-size:.78rem;color:var(--yellow)"></div>
 
           <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="btn ghost sm" onclick="syncThreatFeeds()">↻ Sync Feeds Now</button>
-            <button class="btn ghost sm" onclick="reloadYARA()">↻ Reload YARA Rules</button>
+            <button class="btn ghost sm" data-click="syncThreatFeeds">↻ Sync Feeds Now</button>
+            <button class="btn ghost sm" data-click="reloadYARA">↻ Reload YARA Rules</button>
           </div>
           <div id="sec-scan-action-status" style="display:none;margin-top:10px;font-size:.8rem"></div>
 
@@ -976,15 +976,15 @@ tr.dragging  { opacity: .4; }
             <div style="display:grid;grid-template-columns:200px 1fr;gap:10px">
               <div style="display:flex;flex-direction:column;gap:6px">
                 <div id="sec-yara-rule-list" style="max-height:260px;overflow-y:auto;background:var(--surface2);border-radius:6px;padding:4px;font-size:.78rem"></div>
-                <button class="btn ghost sm" onclick="newYARARule()">+ New rule</button>
+                <button class="btn ghost sm" data-click="newYARARule">+ New rule</button>
               </div>
               <div style="display:flex;flex-direction:column;gap:6px">
                 <input id="sec-yara-edit-name" placeholder="rule_file_name" style="padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.82rem;font-family:ui-monospace,monospace">
                 <textarea id="sec-yara-edit-src" rows="10" placeholder="rule example { strings: $a = &quot;sample&quot; condition: $a }" style="padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;font-family:ui-monospace,monospace;resize:vertical"></textarea>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
-                  <button class="btn ghost sm" onclick="validateYARARule()">✓ Validate</button>
-                  <button class="btn ghost sm" onclick="saveYARARule()">💾 Save</button>
-                  <button class="btn ghost sm" onclick="deleteYARARule()">🗑 Delete</button>
+                  <button class="btn ghost sm" data-click="validateYARARule">✓ Validate</button>
+                  <button class="btn ghost sm" data-click="saveYARARule">💾 Save</button>
+                  <button class="btn ghost sm" data-click="deleteYARARule">🗑 Delete</button>
                 </div>
                 <div id="sec-yara-edit-status" style="display:none;font-size:.78rem"></div>
               </div>
@@ -1006,7 +1006,7 @@ tr.dragging  { opacity: .4; }
               </div>
             </div>
             <div style="display:flex;gap:8px;margin-top:8px">
-              <button class="btn ghost sm" onclick="saveScanExclusions()">💾 Save exclusions</button>
+              <button class="btn ghost sm" data-click="saveScanExclusions">💾 Save exclusions</button>
               <div id="sec-excl-status" style="font-size:.78rem;align-self:center"></div>
             </div>
           </div>
@@ -1017,7 +1017,7 @@ tr.dragging  { opacity: .4; }
             <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Hosts listed here skip DPI regex scanning entirely but still flow through ClamAV + YARA + policy engine.</div>
             <textarea id="sec-dpi-bypass" rows="4" placeholder="one host per line" style="width:100%;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;font-family:ui-monospace,monospace"></textarea>
             <div style="display:flex;gap:8px;margin-top:8px">
-              <button class="btn ghost sm" onclick="saveDPIBypass()">💾 Save bypass list</button>
+              <button class="btn ghost sm" data-click="saveDPIBypass">💾 Save bypass list</button>
               <div id="sec-dpi-status" style="font-size:.78rem;align-self:center"></div>
             </div>
           </div>
@@ -1032,13 +1032,13 @@ tr.dragging  { opacity: .4; }
             </div>
             <div style="display:flex;gap:8px;margin-bottom:10px">
               <input id="tf-allowlist-input" type="text" placeholder="e.g. github.com" style="flex:1;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.82rem">
-              <button class="btn ghost sm" onclick="addTFAllowlistDomain()">+ Add</button>
+              <button class="btn ghost sm" data-click="addTFAllowlistDomain">+ Add</button>
             </div>
             <div id="tf-allowlist-list" style="display:flex;flex-wrap:wrap;gap:6px"></div>
           </div>
 
           <div style="margin-top:12px;font-size:.75rem;color:var(--muted)">
-            Looking for the blocklist domain feed? <a href="#" onclick="event.preventDefault();switchView('blocklist')" style="color:var(--accent)">Manage in Blocklist →</a>
+            Looking for the blocklist domain feed? <a href="#" data-click="switchView" data-arg="blocklist" style="color:var(--accent)">Manage in Blocklist →</a>
           </div>
         </div>
       </div>
@@ -1056,7 +1056,7 @@ tr.dragging  { opacity: .4; }
               <input type="number" class="input" id="connlimit-max" value="1024" style="width:100px" min="1">
             </div>
             <span style="font-size:.8rem;color:var(--muted)">Active IPs: <strong id="connlimit-active">—</strong></span>
-            <button class="btn sm" onclick="saveConnLimit()">Save</button>
+            <button class="btn sm" data-click="saveConnLimit">Save</button>
           </div>
         </div>
       </div>
@@ -1067,8 +1067,8 @@ tr.dragging  { opacity: .4; }
         <div class="panel-body">
           <textarea id="blockpage-html" class="input" style="width:100%;height:200px;font-family:monospace;font-size:.78rem;resize:vertical" placeholder="Loading..."></textarea>
           <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
-            <button class="btn sm" onclick="saveBlockPage()">Save Template</button>
-            <button class="btn sm ghost" onclick="resetBlockPage()">Reset to Default</button>
+            <button class="btn sm" data-click="saveBlockPage">Save Template</button>
+            <button class="btn sm ghost" data-click="resetBlockPage">Reset to Default</button>
             <span style="font-size:.75rem;color:var(--muted)">Variables: {{.URL}} {{.Category}} {{.RuleName}} {{.Timestamp}}</span>
           </div>
         </div>
@@ -1083,7 +1083,7 @@ tr.dragging  { opacity: .4; }
           <h2 style="margin:0">Identity Providers</h2>
           <span id="idp-count-badge" style="font-size:.72rem;background:var(--surface2);color:var(--muted);padding:2px 8px;border-radius:10px;display:none"></span>
         </div>
-        <button class="btn" onclick="openIdPModal()">+ Add Provider</button>
+        <button class="btn" data-click="openIdPModal">+ Add Provider</button>
       </div>
       <p style="color:var(--muted);font-size:.82rem;margin:0 0 20px;line-height:1.6">
         Connect OIDC or SAML 2.0 providers for single sign-on. Group memberships from the IdP are available as conditions in policy rules.
@@ -1112,7 +1112,7 @@ tr.dragging  { opacity: .4; }
               </span>
             </div>
           </div>
-          <button onclick="closeIdPModal()" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.5rem;line-height:1;padding:4px;border-radius:6px;transition:color .15s;flex-shrink:0;margin-left:12px" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">&times;</button>
+          <button data-click="closeIdPModal" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.5rem;line-height:1;padding:4px;border-radius:6px;transition:color .15s;flex-shrink:0;margin-left:12px" data-hover="true">&times;</button>
         </div>
         <input type="hidden" id="idp-edit-id">
 
@@ -1126,32 +1126,32 @@ tr.dragging  { opacity: .4; }
               Federated login via SAML assertions
             </div>
             <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
-              <button class="idp-provider-card" onclick="selectIdPTemplate('okta-saml')" data-tpl="okta-saml">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="okta-saml" data-tpl="okta-saml">
                 <span class="idp-card-icon" style="background:#009de015;color:#009de0">Ok</span>
                 <span class="idp-card-name">Okta</span>
                 <span class="idp-card-proto">SAML 2.0</span>
               </button>
-              <button class="idp-provider-card" onclick="selectIdPTemplate('azure-saml')" data-tpl="azure-saml">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="azure-saml" data-tpl="azure-saml">
                 <span class="idp-card-icon" style="background:#0078d415;color:#0078d4">Az</span>
                 <span class="idp-card-name">Azure AD / Entra</span>
                 <span class="idp-card-proto">SAML 2.0</span>
               </button>
-              <button class="idp-provider-card" onclick="selectIdPTemplate('google-saml')" data-tpl="google-saml">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="google-saml" data-tpl="google-saml">
                 <span class="idp-card-icon" style="background:#4285f415;color:#4285f4">G</span>
                 <span class="idp-card-name">Google Workspace</span>
                 <span class="idp-card-proto">SAML 2.0</span>
               </button>
-              <button class="idp-provider-card" onclick="selectIdPTemplate('adfs')" data-tpl="adfs">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="adfs" data-tpl="adfs">
                 <span class="idp-card-icon" style="background:#0078d415;color:#0078d4">AD</span>
                 <span class="idp-card-name">ADFS</span>
                 <span class="idp-card-proto">SAML 2.0</span>
               </button>
-              <button class="idp-provider-card" onclick="selectIdPTemplate('keycloak')" data-tpl="keycloak">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="keycloak" data-tpl="keycloak">
                 <span class="idp-card-icon" style="background:#e0521b15;color:#e0521b">KC</span>
                 <span class="idp-card-name">Keycloak</span>
                 <span class="idp-card-proto">SAML / OIDC</span>
               </button>
-              <button class="idp-provider-card" onclick="selectIdPTemplate('generic-saml')" data-tpl="generic-saml">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="generic-saml" data-tpl="generic-saml">
                 <span class="idp-card-icon" style="background:#6366f115;color:#818cf8">SP</span>
                 <span class="idp-card-name">Generic SAML</span>
                 <span class="idp-card-proto">Any SAML 2.0</span>
@@ -1166,17 +1166,17 @@ tr.dragging  { opacity: .4; }
               OpenID Connect — OAuth 2.0 based login
             </div>
             <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
-              <button class="idp-provider-card" onclick="selectIdPTemplate('okta-oidc')" data-tpl="okta-oidc">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="okta-oidc" data-tpl="okta-oidc">
                 <span class="idp-card-icon" style="background:#009de015;color:#009de0">Ok</span>
                 <span class="idp-card-name">Okta</span>
                 <span class="idp-card-proto">OIDC</span>
               </button>
-              <button class="idp-provider-card" onclick="selectIdPTemplate('azure-oidc')" data-tpl="azure-oidc">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="azure-oidc" data-tpl="azure-oidc">
                 <span class="idp-card-icon" style="background:#0078d415;color:#0078d4">Az</span>
                 <span class="idp-card-name">Azure AD / Entra</span>
                 <span class="idp-card-proto">OIDC</span>
               </button>
-              <button class="idp-provider-card" onclick="selectIdPTemplate('auth0')" data-tpl="auth0">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="auth0" data-tpl="auth0">
                 <span class="idp-card-icon" style="background:#eb542415;color:#eb5424">A0</span>
                 <span class="idp-card-name">Auth0 / Okta CIC</span>
                 <span class="idp-card-proto">OIDC</span>
@@ -1223,7 +1223,7 @@ tr.dragging  { opacity: .4; }
                 <input id="idp-issuer" class="input" placeholder="https://your-domain.okta.com" style="width:100%">
               </div>
               <div style="display:flex;align-items:flex-end">
-                <button class="btn ghost sm" onclick="discoverOIDC()" title="Auto-discover OIDC endpoints" style="white-space:nowrap">Discover</button>
+                <button class="btn ghost sm" data-click="discoverOIDC" title="Auto-discover OIDC endpoints" style="white-space:nowrap">Discover</button>
               </div>
             </div>
             <div id="idp-discover-result" style="display:none;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:.78rem;margin-bottom:12px;word-break:break-all;line-height:1.7"></div>
@@ -1261,9 +1261,9 @@ tr.dragging  { opacity: .4; }
             <div class="form-group">
               <label class="form-label">— or Upload / Paste Metadata XML —</label>
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-                <label style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0;transition:border-color .15s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+                <label style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0;transition:border-color .15s" data-hover="border-accent">
                   Upload XML
-                  <input type="file" id="idp-meta-xml-file" accept=".xml,text/xml,application/xml" style="display:none" onchange="loadXMLFile(event)">
+                  <input type="file" id="idp-meta-xml-file" accept=".xml,text/xml,application/xml" style="display:none" data-change="loadXMLFile">
                 </label>
                 <span style="font-size:.75rem;color:var(--muted)" id="idp-xml-filename">No file chosen</span>
               </div>
@@ -1298,10 +1298,10 @@ tr.dragging  { opacity: .4; }
 
           <!-- Footer actions -->
           <div style="display:flex;gap:8px;justify-content:space-between;align-items:center;padding-top:4px;border-top:1px solid var(--border)">
-            <button class="btn ghost sm" id="idp-back-btn" onclick="idpGoBack()" style="display:none">← Back</button>
+            <button class="btn ghost sm" id="idp-back-btn" data-click="idpGoBack" style="display:none">← Back</button>
             <div style="display:flex;gap:8px;margin-left:auto">
-              <button class="btn ghost" onclick="closeIdPModal()">Cancel</button>
-              <button class="btn" onclick="saveIdP()">Save Provider</button>
+              <button class="btn ghost" data-click="closeIdPModal">Cancel</button>
+              <button class="btn" data-click="saveIdP">Save Provider</button>
             </div>
           </div>
         </div>
@@ -1383,9 +1383,9 @@ tr.dragging  { opacity: .4; }
               placeholder="*.corp.local&#10;internal.mycompany.com&#10;192.168.0.0/16&#10;10.0.0.0/8"></textarea>
 
             <div style="display:flex;gap:8px;margin-top:14px">
-              <button class="btn" onclick="savePACConfig()">💾 Save Configuration</button>
-              <button class="btn ghost" onclick="downloadPAC()">⬇ Download PAC</button>
-              <button class="btn ghost" onclick="copyPACURL()">📋 Copy URL</button>
+              <button class="btn" data-click="savePACConfig">💾 Save Configuration</button>
+              <button class="btn ghost" data-click="downloadPAC">⬇ Download PAC</button>
+              <button class="btn ghost" data-click="copyPACURL">📋 Copy URL</button>
             </div>
           </div>
         </div>
@@ -1394,7 +1394,7 @@ tr.dragging  { opacity: .4; }
         <div class="panel">
           <div class="panel-header">
             <span class="panel-title">Live PAC Preview</span>
-            <button class="btn ghost sm" onclick="refreshPACPreview()">Refresh</button>
+            <button class="btn ghost sm" data-click="refreshPACPreview">Refresh</button>
           </div>
           <div class="panel-body" style="padding:0">
             <pre id="pac-preview" style="margin:0;padding:16px;overflow-x:auto;font-size:.78rem;line-height:1.6;background:var(--bg);border-radius:0 0 10px 10px;min-height:200px;color:var(--text)">Loading…</pre>
@@ -1412,7 +1412,7 @@ tr.dragging  { opacity: .4; }
         <div class="panel">
           <div class="panel-header">
             <span class="panel-title">🏛️ Root CA Certificate</span>
-            <button class="btn ghost sm" onclick="loadCACertInfo()">↻ Refresh</button>
+            <button class="btn ghost sm" data-click="loadCACertInfo">↻ Refresh</button>
           </div>
           <div class="panel-body">
             <div id="ca-info" style="font-size:.85rem;line-height:1.8;margin-bottom:14px">
@@ -1424,7 +1424,7 @@ tr.dragging  { opacity: .4; }
             </p>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <a id="ca-download-btn" href="/api/ca-cert" class="btn" download="culvert-ca.pem">⬇ Download Root CA (.pem)</a>
-              <button class="btn ghost sm" onclick="copyCAInstallInstructions()">📋 Install Instructions</button>
+              <button class="btn ghost sm" data-click="copyCAInstallInstructions">📋 Install Instructions</button>
             </div>
           </div>
         </div>
@@ -1450,7 +1450,7 @@ tr.dragging  { opacity: .4; }
               <label class="form-label">Private Key (PEM) <span style="color:#ef4444;font-weight:400">— stored in memory only, never logged</span></label>
               <textarea class="input" id="cert-key" rows="5" style="width:100%;font-family:monospace;font-size:.75rem;resize:vertical" placeholder="-----BEGIN EC PRIVATE KEY-----&#10;...&#10;-----END EC PRIVATE KEY-----"></textarea>
             </div>
-            <button class="btn" onclick="uploadCustomCert()">⬆ Upload & Activate</button>
+            <button class="btn" data-click="uploadCustomCert">⬆ Upload & Activate</button>
           </div>
         </div>
 
@@ -1468,7 +1468,7 @@ tr.dragging  { opacity: .4; }
           </p>
           <div class="add-row" style="margin-bottom:12px">
             <input type="text" class="input wide" id="ssl-bypass-input" placeholder="*.example.com or ~.*\.internal$">
-            <button class="btn" onclick="addSSLBypass()">+ Add</button>
+            <button class="btn" data-click="addSSLBypass">+ Add</button>
           </div>
           <div id="ssl-bypass-count" style="font-size:.75rem;color:var(--muted);margin-bottom:8px"></div>
           <div class="tbl-wrap">
@@ -1498,7 +1498,7 @@ Linux (Ubuntu/Debian):
 
 Firefox (all platforms):
   Settings → Privacy → View Certificates → Authorities → Import</pre>
-          <button class="btn" style="margin-top:14px" onclick="document.getElementById('ca-instructions-modal').style.display='none'">Close</button>
+          <button class="btn" style="margin-top:14px" data-click="closeCAInstructions">Close</button>
         </div>
       </div>
     </div>
@@ -1544,7 +1544,7 @@ Firefox (all platforms):
               <label class="form-label">Password</label>
               <input type="password" class="input" style="width:100%" id="s-pass" placeholder="Password">
             </div>
-            <button class="btn" onclick="saveSettings()">Save Credentials</button>
+            <button class="btn" data-click="saveSettings">Save Credentials</button>
             <p style="font-size:.72rem;color:var(--muted);margin-top:10px;">
               Changes apply immediately without restart.
             </p>
@@ -1557,7 +1557,7 @@ Firefox (all platforms):
             <div class="form-group">
               <label class="form-label">Log Level</label>
               <div style="display:flex;gap:8px;align-items:center">
-                <select class="input" style="width:160px" id="s-log-level" onchange="setLogLevel(this.value)">
+                <select class="input" style="width:160px" id="s-log-level" data-change="setLogLevel">
                   <option value="DEBUG">DEBUG</option>
                   <option value="INFO">INFO</option>
                   <option value="WARN">WARN</option>
@@ -1582,22 +1582,22 @@ Firefox (all platforms):
             <strong style="color:var(--red)">Note:</strong> Admin credentials are not exported for security reasons.
           </p>
           <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-            <button class="btn" onclick="exportConfig()">⬇ Export Configuration</button>
+            <button class="btn" data-click="exportConfig">⬇ Export Configuration</button>
             <label class="btn ghost" style="cursor:pointer">
               ⬆ Import Configuration
-              <input type="file" accept=".json" style="display:none" onchange="importConfig(this)">
+              <input type="file" accept=".json" style="display:none" data-change="importConfig">
             </label>
           </div>
           <div id="backup-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
           <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">
             <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;font-weight:600">Export Individual Sections</p>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
-              <button class="btn ghost sm" onclick="exportSection('blocklist')">Blocklist</button>
-              <button class="btn ghost sm" onclick="exportSection('policy')">Policy</button>
-              <button class="btn ghost sm" onclick="exportSection('rewrite')">Rewrite</button>
-              <button class="btn ghost sm" onclick="exportSection('sslbypass')">SSL Bypass</button>
-              <button class="btn ghost sm" onclick="exportSection('fileblock')">File Block</button>
-              <button class="btn ghost sm" onclick="exportSection('ipfilter')">IP Filter</button>
+              <button class="btn ghost sm" data-click="exportSection" data-arg="blocklist">Blocklist</button>
+              <button class="btn ghost sm" data-click="exportSection" data-arg="policy">Policy</button>
+              <button class="btn ghost sm" data-click="exportSection" data-arg="rewrite">Rewrite</button>
+              <button class="btn ghost sm" data-click="exportSection" data-arg="sslbypass">SSL Bypass</button>
+              <button class="btn ghost sm" data-click="exportSection" data-arg="fileblock">File Block</button>
+              <button class="btn ghost sm" data-click="exportSection" data-arg="ipfilter">IP Filter</button>
             </div>
           </div>
         </div>
@@ -1627,7 +1627,7 @@ Firefox (all platforms):
           <div style="display:flex;gap:10px;align-items:center">
             <input type="number" class="input" id="s-session-hrs" min="1" max="168" style="width:90px" placeholder="8">
             <span style="font-size:.85rem;color:var(--muted)">hours (1–168)</span>
-            <button class="btn" onclick="saveSessionTimeout()">Save</button>
+            <button class="btn" data-click="saveSessionTimeout">Save</button>
           </div>
           <div id="s-session-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
         </div>
@@ -1644,8 +1644,8 @@ Firefox (all platforms):
           <div id="s-session-key-status" style="margin-bottom:10px;font-size:.8rem"></div>
           <div style="display:flex;gap:10px;align-items:center">
             <input type="text" class="input" id="s-session-key" style="flex:1;font-family:monospace;font-size:.8rem" placeholder="64+ hex characters (e.g. openssl rand -hex 32)">
-            <button class="btn" onclick="saveSessionSecret()">Apply</button>
-            <button class="btn ghost sm" onclick="generateSessionSecret()">Generate</button>
+            <button class="btn" data-click="saveSessionSecret">Apply</button>
+            <button class="btn ghost sm" data-click="generateSessionSecret">Generate</button>
           </div>
         </div>
       </div>
@@ -1660,10 +1660,10 @@ Firefox (all platforms):
           </p>
           <div class="add-row" style="margin-bottom:10px">
             <input type="text" class="input wide" id="s-uiip-new" placeholder="10.0.0.0/8 or 192.168.1.5">
-            <button class="btn" onclick="addUIAllowIP()">+ Add</button>
+            <button class="btn" data-click="addUIAllowIP">+ Add</button>
           </div>
           <div id="s-uiip-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>
-          <button class="btn ghost sm" onclick="saveUIAllowIPs()">Apply Changes</button>
+          <button class="btn ghost sm" data-click="saveUIAllowIPs">Apply Changes</button>
           <span id="s-uiip-status" style="font-size:.8rem;color:var(--muted);margin-left:10px"></span>
         </div>
       </div>
@@ -1696,7 +1696,7 @@ Firefox (all platforms):
               Enable only when running behind a trusted reverse proxy. When disabled, X-Forwarded-Host/Proto headers are ignored.
             </p>
           </div>
-          <button class="btn" style="margin-top:10px" onclick="saveNetworkTLS()">Save Network Settings</button>
+          <button class="btn" style="margin-top:10px" data-click="saveNetworkTLS">Save Network Settings</button>
           <span id="s-network-status" style="font-size:.8rem;color:var(--muted);margin-left:10px"></span>
         </div>
       </div>
@@ -1717,7 +1717,7 @@ Firefox (all platforms):
             <strong>Open / Policy-Only</strong> — Proxy accepts all clients without credentials. Identity is set to <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> for unauthenticated traffic. <strong>Policy rules</strong> control access — create a rule with Auth Source = <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> to allow or block unauthenticated users. Recommended when using a PAC file with PBAC.
           </p>
           <div style="display:flex;gap:10px;align-items:center">
-            <button class="btn" id="s-unauth-toggle-btn" onclick="toggleUnauthMode()">Enable Open / Policy-Only</button>
+            <button class="btn" id="s-unauth-toggle-btn" data-click="toggleUnauthMode">Enable Open / Policy-Only</button>
             <span id="s-unauth-save-status" style="font-size:.8rem;color:var(--muted)"></span>
           </div>
         </div>
@@ -1737,8 +1737,8 @@ Firefox (all platforms):
               <option value="rfc3164">RFC 3164 (BSD)</option>
               <option value="rfc5424">RFC 5424 (IETF)</option>
             </select>
-            <button class="btn" onclick="saveSyslog()">Save</button>
-            <button class="btn ghost sm" onclick="disableSyslog()">Disable</button>
+            <button class="btn" data-click="saveSyslog">Save</button>
+            <button class="btn ghost sm" data-click="disableSyslog">Disable</button>
           </div>
           <div id="s-syslog-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
         </div>
@@ -1748,7 +1748,7 @@ Firefox (all platforms):
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Alert Webhooks</span>
-          <button class="btn sm" onclick="openAddWebhookModal()">+ Add Webhook</button>
+          <button class="btn sm" data-click="openAddWebhookModal">+ Add Webhook</button>
         </div>
         <div class="panel-body">
           <p class="hint">
@@ -1840,8 +1840,8 @@ Firefox (all platforms):
           </div>
           <div style="display:flex;gap:10px;align-items:center">
             <input type="text" class="input" id="metrics-token-input" style="flex:1;font-family:monospace;font-size:.8rem" placeholder="Bearer token (empty = public access)">
-            <button class="btn" onclick="saveMetricsToken()">Apply</button>
-            <button class="btn ghost sm" onclick="clearMetricsToken()">Clear</button>
+            <button class="btn" data-click="saveMetricsToken">Apply</button>
+            <button class="btn ghost sm" data-click="clearMetricsToken">Clear</button>
           </div>
         </div>
       </div>
@@ -1856,8 +1856,8 @@ Firefox (all platforms):
           </p>
           <div style="display:flex;gap:10px;align-items:center">
             <input type="text" class="input wide" id="s-otlp-endpoint" placeholder="http://otel-collector:4318">
-            <button class="btn" onclick="saveOTLP()">Enable</button>
-            <button class="btn ghost sm" onclick="disableOTLP()">Disable</button>
+            <button class="btn" data-click="saveOTLP">Enable</button>
+            <button class="btn ghost sm" data-click="disableOTLP">Disable</button>
           </div>
           <div id="s-otlp-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
         </div>
@@ -1871,7 +1871,7 @@ Firefox (all platforms):
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Admin Users</span>
-          <button class="btn" onclick="openUserModal()">+ Add User</button>
+          <button class="btn" data-click="openUserModal">+ Add User</button>
         </div>
         <div class="panel-body">
           <p class="hint">
@@ -1938,7 +1938,7 @@ Firefox (all platforms):
               </div>
             </div>
           </div>
-          <button class="btn" onclick="addRewriteRule()">+ Add Rule</button>
+          <button class="btn" data-click="addRewriteRule">+ Add Rule</button>
         </div>
       </div>
 
@@ -1965,7 +1965,7 @@ Firefox (all platforms):
       <div class="panel" id="policy-form-panel">
         <div class="panel-header">
           <span class="panel-title" id="policy-form-title">Add Policy Rule</span>
-          <button class="btn ghost sm" id="policy-cancel-btn" onclick="cancelPolicyEdit()" style="display:none">✕ Cancel</button>
+          <button class="btn ghost sm" id="policy-cancel-btn" data-click="cancelPolicyEdit" style="display:none">✕ Cancel</button>
         </div>
         <div class="panel-body">
           <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:14px">
@@ -1996,7 +1996,7 @@ Firefox (all platforms):
             </div>
             <div>
               <label class="form-label">Auth Provider <span style="color:var(--muted);font-weight:400">(for group filter)</span></label>
-              <select class="select" style="width:100%" id="pol-src-provider" onchange="loadPolicyGroupOptions()">
+              <select class="select" style="width:100%" id="pol-src-provider" data-change="loadPolicyGroupOptions">
                 <option value="">— any provider —</option>
               </select>
             </div>
@@ -2006,11 +2006,11 @@ Firefox (all platforms):
                 <input type="hidden" id="pol-src-group">
                 <div class="group-chip-row" id="pol-src-group-chip" style="display:none">
                   <span style="color:var(--accent2);font-weight:600;font-size:.82rem" id="pol-src-group-chip-text"></span>
-                  <button type="button" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1;padding:0 0 0 4px;margin-left:auto" onclick="clearGroupSelection()" title="Clear">×</button>
+                  <button type="button" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1;padding:0 0 0 4px;margin-left:auto" data-click="clearGroupSelection" title="Clear">×</button>
                 </div>
                 <input type="text" class="input" style="width:100%" id="pol-src-group-search"
                   placeholder="Search groups…" autocomplete="off"
-                  onfocus="onGroupFocus()" oninput="onGroupSearchInput(this.value)"
+                  data-focus="onGroupFocus" data-input="onGroupSearchInput"
                   onblur="setTimeout(()=>closeGroupDropdown(),200)">
                 <div id="pol-src-group-dropdown" class="picker-dropdown" style="display:none"></div>
               </div>
@@ -2051,7 +2051,7 @@ Firefox (all platforms):
                 <input type="text" class="input" style="width:100%" id="pol-dest-country-input"
                   placeholder="Type ISO code + Enter (e.g. US, DE, JP…)"
                   autocomplete="off" maxlength="2"
-                  onkeydown="onCountryKeydown(event)">
+                  data-keydown="onCountryKeydown">
                 <div style="font-size:.68rem;color:var(--muted);margin-top:3px">2-letter ISO code · Enter or comma to add · Backspace to remove last</div>
               </div>
             </div>
@@ -2117,7 +2117,7 @@ Firefox (all platforms):
             </div>
           </details>
 
-          <button class="btn" id="policy-submit-btn" onclick="submitPolicyRule()">+ Add Rule</button>
+          <button class="btn" id="policy-submit-btn" data-click="submitPolicyRule">+ Add Rule</button>
         </div>
       </div>
 
@@ -2146,11 +2146,11 @@ Firefox (all platforms):
         </div>
         <div style="padding:8px 16px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input type="text" class="input" style="width:260px" id="pol-filter"
-            placeholder="Search rules…" oninput="renderPolicy()">
+            placeholder="Search rules…" data-input="renderPolicy">
           <div style="display:flex;gap:4px" id="pol-action-tabs">
-            <button class="btn sm active" id="pol-act-all" onclick="setPolActionFilter('')">All</button>
-            <button class="btn sm ghost" id="pol-act-allow" onclick="setPolActionFilter('allow')">Allow</button>
-            <button class="btn sm ghost" id="pol-act-block" onclick="setPolActionFilter('block')">Block</button>
+            <button class="btn sm active" id="pol-act-all" data-click="setPolActionFilter" data-arg="">All</button>
+            <button class="btn sm ghost" id="pol-act-allow" data-click="setPolActionFilter" data-arg="allow">Allow</button>
+            <button class="btn sm ghost" id="pol-act-block" data-click="setPolActionFilter" data-arg="block">Block</button>
           </div>
         </div>
         <div class="tbl-wrap">
@@ -2180,7 +2180,7 @@ Firefox (all platforms):
                   <span id="default-action-badge"></span>
                 </td>
                 <td style="padding:8px 12px;text-align:right">
-                  <button class="btn ghost sm" onclick="toggleDefaultAction()" id="default-action-btn" title="Toggle default action for unmatched traffic">Toggle</button>
+                  <button class="btn ghost sm" data-click="toggleDefaultAction" id="default-action-btn" title="Toggle default action for unmatched traffic">Toggle</button>
                 </td>
               </tr>
             </tfoot>
@@ -2194,7 +2194,7 @@ Firefox (all platforms):
     <div class="view" id="view-urlcat">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
         <h2 style="margin:0">URL Categories</h2>
-        <button class="btn" onclick="openNewCategoryModal()">+ New Category</button>
+        <button class="btn" data-click="openNewCategoryModal">+ New Category</button>
       </div>
       <p style="color:var(--text-muted);margin-bottom:20px;font-size:13px">
         Manage host lists for each URL category. Built-in categories are seeded automatically.
@@ -2209,8 +2209,8 @@ Firefox (all platforms):
         <div class="panel-body">
           <div style="display:flex;gap:8px;align-items:center">
             <input type="text" class="input" id="urlcat-lookup-host" placeholder="e.g. casino.com, youtube.com, malware-site.ru"
-              style="flex:1" onkeydown="if(event.key==='Enter')runURLLookup()">
-            <button class="btn" onclick="runURLLookup()">Look Up</button>
+              style="flex:1" data-enter="runURLLookup">
+            <button class="btn" data-click="runURLLookup">Look Up</button>
           </div>
           <div style="font-size:.72rem;color:var(--muted);margin-top:6px">
             Checks admin-managed lists first, then the community feed. Suffix matching — <code style="background:var(--surface2);padding:1px 4px;border-radius:3px">example.com</code> also matches <code style="background:var(--surface2);padding:1px 4px;border-radius:3px">www.example.com</code>.
@@ -2230,7 +2230,7 @@ Firefox (all platforms):
               id="bl-cat-count">loading…</span>
             <span class="badge" style="font-size:11px;background:var(--surface2);color:var(--muted)">read-only · managed in Blocklist</span>
           </div>
-          <a href="#" onclick="event.preventDefault();switchView('blocklist')"
+          <a href="#" data-click="switchView" data-arg="blocklist"
             style="font-size:.75rem;color:var(--accent)">Manage in Blocklist →</a>
         </div>
         <p style="font-size:.78rem;color:var(--muted);margin:0 0 12px;line-height:1.55">
@@ -2241,12 +2241,12 @@ Firefox (all platforms):
           <input type="text" class="input" id="bl-cat-search"
             placeholder="Search blocklisted domains…"
             style="flex:1;font-family:monospace;font-size:.82rem"
-            oninput="blCatSearch()">
+            data-input="blCatSearch">
           <span id="bl-cat-match-count" style="font-size:.75rem;color:var(--muted);white-space:nowrap"></span>
         </div>
         <div id="bl-cat-results" style="display:flex;flex-direction:column;gap:2px;max-height:320px;overflow-y:auto;font-family:monospace;font-size:.82rem"></div>
         <div id="bl-cat-load-more" style="display:none;margin-top:8px">
-          <button class="btn ghost sm" onclick="blCatLoadMore()">Load more…</button>
+          <button class="btn ghost sm" data-click="blCatLoadMore">Load more…</button>
         </div>
       </div>
     </div><!-- /view-urlcat -->
@@ -2267,7 +2267,7 @@ Firefox (all platforms):
         <div class="panel">
           <div class="panel-header">
             <span class="panel-title">Extension Profiles</span>
-            <button class="btn sm" onclick="openNewProfilePanel()">+ New</button>
+            <button class="btn sm" data-click="openNewProfilePanel">+ New</button>
           </div>
           <div class="panel-body" style="padding:0">
             <div id="fp-profile-list" style="display:flex;flex-direction:column"></div>
@@ -2279,8 +2279,8 @@ Firefox (all platforms):
           <div class="panel-header">
             <span class="panel-title" id="fp-editor-title">Select a profile to edit</span>
             <div style="display:flex;gap:6px" id="fp-editor-actions" style="display:none">
-              <button class="btn sm" onclick="saveProfile()">Save</button>
-              <button class="btn danger sm" id="fp-delete-btn" onclick="deleteProfile()">Delete</button>
+              <button class="btn sm" data-click="saveProfile">Save</button>
+              <button class="btn danger sm" id="fp-delete-btn" data-click="deleteProfile">Delete</button>
             </div>
           </div>
           <div class="panel-body" id="fp-editor-body">
@@ -2302,7 +2302,7 @@ Firefox (all platforms):
             <div style="font-size:.68rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Custom Extension</div>
             <input type="text" class="input wide" id="fb-ext-input"
               placeholder=".exe or exe" style="margin-bottom:6px">
-            <button class="btn" style="width:100%" onclick="addFileExt()">+ Add Extension</button>
+            <button class="btn" style="width:100%" data-click="addFileExt">+ Add Extension</button>
           </div>
         </div>
 
@@ -2311,7 +2311,7 @@ Firefox (all platforms):
             <span class="panel-title">Active Global Extensions</span>
             <div style="display:flex;align-items:center;gap:10px">
               <span id="fb-count-badge" style="font-size:.75rem;color:var(--muted)">0 extensions</span>
-              <button class="btn danger sm" onclick="clearAllExts()">Clear All</button>
+              <button class="btn danger sm" data-click="clearAllExts">Clear All</button>
             </div>
           </div>
           <div class="panel-body">
@@ -2349,7 +2349,7 @@ Firefox (all platforms):
               <label class="label">Destination Host</label>
               <input type="text" class="input" id="pt-host" placeholder="example.com" style="width:100%">
             </div>
-            <button class="btn" style="width:100%" onclick="runPolicyTest()">🧪 Run Test</button>
+            <button class="btn" style="width:100%" data-click="runPolicyTest">🧪 Run Test</button>
           </div>
         </div>
 
@@ -2383,8 +2383,8 @@ Firefox (all platforms):
         <div class="panel-header">
           <span class="panel-title">Audit Log</span>
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="text" class="input" style="width:200px" id="audit-filter" placeholder="Filter…" oninput="renderAuditLog()">
-            <button class="btn ghost sm" onclick="loadAuditLog()">↺ Refresh</button>
+            <input type="text" class="input" style="width:200px" id="audit-filter" placeholder="Filter…" data-input="renderAuditLog">
+            <button class="btn ghost sm" data-click="loadAuditLog">↺ Refresh</button>
           </div>
         </div>
         <div class="tbl-wrap">
@@ -2410,7 +2410,7 @@ Firefox (all platforms):
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">CA Management</span>
-          <button class="btn ghost sm" onclick="loadCAMgmt()">↺ Refresh</button>
+          <button class="btn ghost sm" data-click="loadCAMgmt">↺ Refresh</button>
         </div>
         <div class="cards" id="ca-cards" style="grid-template-columns:repeat(3,1fr)">
           <div class="card"><div class="card-label">Status</div><div class="card-value" id="ca-status">—</div></div>
@@ -2423,8 +2423,8 @@ Firefox (all platforms):
         <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
           <div style="display:grid;grid-template-columns:120px 1fr;gap:8px;font-size:.85rem" id="ca-details"></div>
           <div style="display:flex;gap:8px;margin-top:8px">
-            <button class="btn sm" onclick="downloadCA()">Download CA Cert (PEM)</button>
-            <button class="btn sm danger" onclick="forceRotateCA()">Force Rotate Now</button>
+            <button class="btn sm" data-click="downloadCA">Download CA Cert (PEM)</button>
+            <button class="btn sm danger" data-click="forceRotateCA">Force Rotate Now</button>
           </div>
         </div>
       </div>
@@ -2434,14 +2434,14 @@ Firefox (all platforms):
           <span>Cached: <strong id="ca-cache-size">—</strong> / <span id="ca-cache-max">—</span></span>
           <span>TTL: <span id="ca-cache-ttl">—</span></span>
           <span>Leaf validity: <span id="ca-leaf-validity">—</span></span>
-          <button class="btn sm ghost" onclick="clearCACache()">Clear Cache</button>
+          <button class="btn sm ghost" data-click="clearCACache">Clear Cache</button>
         </div>
       </div>
       <div class="panel" style="margin-top:16px">
         <div class="panel-header"><span class="panel-title">OCSP / CRL Revocation</span></div>
         <div style="padding:16px;display:flex;align-items:center;gap:16px;font-size:.85rem">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-            <input type="checkbox" id="ocsp-toggle" onchange="toggleOCSP(this.checked)"> Enable OCSP checking
+            <input type="checkbox" id="ocsp-toggle" data-change="toggleOCSP"> Enable OCSP checking
           </label>
           <span>Cache entries: <strong id="ocsp-cache-len">—</strong></span>
         </div>
@@ -2488,8 +2488,8 @@ Firefox (all platforms):
         <div class="panel-header">
           <span class="panel-title">Upstream Proxies</span>
           <div style="display:flex;gap:8px">
-            <button class="btn sm ghost" onclick="upstreamHealthCheck()">Health Check</button>
-            <button class="btn sm" onclick="showUpstreamAdd()">+ Add Proxy</button>
+            <button class="btn sm ghost" data-click="upstreamHealthCheck">Health Check</button>
+            <button class="btn sm" data-click="showUpstreamAdd">+ Add Proxy</button>
           </div>
         </div>
         <div id="upstream-empty" style="padding:32px;text-align:center;color:var(--muted);font-size:.85rem">
@@ -2504,8 +2504,8 @@ Firefox (all platforms):
         <div id="upstream-add-form" style="display:none;padding:16px;border-top:1px solid var(--border)">
           <div style="display:flex;gap:8px;align-items:center">
             <input type="text" class="input" id="upstream-url-input" placeholder="http://parent-proxy:3128" style="flex:1">
-            <button class="btn sm" onclick="addUpstreamProxy()">Add</button>
-            <button class="btn sm ghost" onclick="document.getElementById('upstream-add-form').style.display='none'">Cancel</button>
+            <button class="btn sm" data-click="addUpstreamProxy">Add</button>
+            <button class="btn sm ghost" data-click="hideUpstreamAdd">Cancel</button>
           </div>
         </div>
       </div>
@@ -2516,7 +2516,7 @@ Firefox (all platforms):
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Cluster Overview</span>
-          <button class="btn ghost sm" onclick="loadCluster()">↺ Refresh</button>
+          <button class="btn ghost sm" data-click="loadCluster">↺ Refresh</button>
         </div>
         <div class="cards" id="cluster-cards" style="grid-template-columns:repeat(5,1fr)">
           <div class="card"><div class="card-label">Role</div><div class="card-value" id="cluster-role">—</div></div>
@@ -2549,7 +2549,7 @@ Firefox (all platforms):
               <input id="cp-ca-file" class="input" placeholder="/path/to/ca.pem" style="margin-top:4px">
             </label>
             <div style="margin-top:4px">
-              <button class="btn" onclick="enableControlPlane()">Enable Control Plane</button>
+              <button class="btn" data-click="enableControlPlane">Enable Control Plane</button>
             </div>
           </div>
         </div>
@@ -2571,7 +2571,7 @@ Firefox (all platforms):
                 <span style="font-size:.7rem;color:var(--muted);margin-top:2px;display:block">The hostname/IP that the standby server can reach this CP on</span>
               </label>
               <div style="margin-top:4px">
-                <button class="btn" id="ha-enable-btn" onclick="enableHA()">Enable HA</button>
+                <button class="btn" id="ha-enable-btn" data-click="enableHA">Enable HA</button>
               </div>
             </div>
           </div>
@@ -2587,7 +2587,7 @@ Firefox (all platforms):
               <p style="color:var(--muted);font-size:.8rem;margin:8px 0">
                 Run this command on the standby server. It must have access to the same shared storage directory.
               </p>
-              <pre id="ha-deploy-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="copyHADeployCmd()" title="Click to copy"></pre>
+              <pre id="ha-deploy-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" data-click="copyHADeployCmd" title="Click to copy"></pre>
             </details>
           </div>
         </div>
@@ -2597,7 +2597,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:16px" id="cluster-ca-panel">
         <div class="panel-header">
           <span class="panel-title">Cluster CA</span>
-          <button class="btn ghost sm" onclick="loadClusterCA()">↺ Refresh</button>
+          <button class="btn ghost sm" data-click="loadClusterCA">↺ Refresh</button>
         </div>
         <div style="padding:20px">
           <div id="cluster-ca-info" style="margin-bottom:16px">
@@ -2622,7 +2622,7 @@ Firefox (all platforms):
               <label style="font-size:.8rem;color:var(--muted)">CA Private Key (PEM, ECDSA P-256)
                 <textarea id="cca-key-pem" class="input" rows="5" placeholder="-----BEGIN EC PRIVATE KEY-----&#10;..." style="margin-top:4px;font-family:monospace;font-size:.75rem"></textarea>
               </label>
-              <div><button class="btn" id="cca-import-btn" onclick="importClusterCA()">Import Cluster CA</button></div>
+              <div><button class="btn" id="cca-import-btn" data-click="importClusterCA">Import Cluster CA</button></div>
               <div style="font-size:.75rem;color:#f59e0b;margin-top:4px">&#9888; Rotating the CA invalidates all existing enrollment tokens and node certificates. Nodes must re-enroll after rotation.</div>
             </div>
           </details>
@@ -2664,7 +2664,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:16px" id="cluster-nodes-panel">
         <div class="panel-header">
           <span class="panel-title">Enrolled Nodes</span>
-          <button class="btn sm" id="cluster-enroll-btn" onclick="showEnrollModal()" style="display:none">+ Enroll Node</button>
+          <button class="btn sm" id="cluster-enroll-btn" data-click="showEnrollModal" style="display:none">+ Enroll Node</button>
         </div>
         <div id="cluster-no-nodes" style="padding:24px;text-align:center;color:var(--muted);font-size:.85rem">
           No nodes enrolled. This node is running in standalone mode.
@@ -2679,7 +2679,7 @@ Firefox (all platforms):
 
       <!-- Active Tokens -->
       <div class="panel" style="margin-top:16px;display:none" id="cluster-tokens-panel">
-        <div class="panel-header"><span class="panel-title">Enrollment Tokens</span><button class="btn ghost sm" id="cluster-bulk-delete-btn" style="display:none;font-size:.7rem;color:#ef4444" onclick="bulkDeleteExpiredTokens()">Delete Expired</button></div>
+        <div class="panel-header"><span class="panel-title">Enrollment Tokens</span><button class="btn ghost sm" id="cluster-bulk-delete-btn" style="display:none;font-size:.7rem;color:#ef4444" data-click="bulkDeleteExpiredTokens">Delete Expired</button></div>
         <div id="cluster-no-tokens" style="padding:24px;text-align:center;color:var(--muted);font-size:.85rem">
           No enrollment tokens.
         </div>
@@ -2712,7 +2712,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:16px;display:none" id="cluster-groups-panel">
         <div class="panel-header">
           <span class="panel-title">Node Groups</span>
-          <button class="btn sm" onclick="showAddGroupModal()">+ Add Group</button>
+          <button class="btn sm" data-click="showAddGroupModal">+ Add Group</button>
         </div>
         <div class="panel-body">
           <p class="hint">
@@ -2746,8 +2746,8 @@ Firefox (all platforms):
             <input class="input" id="ng-priority" type="number" value="0" min="0" style="width:100px">
           </div>
           <div style="display:flex;gap:10px;justify-content:flex-end">
-            <button class="btn ghost" onclick="hideAddGroupModal()">Cancel</button>
-            <button class="btn" onclick="createNodeGroup()">Create</button>
+            <button class="btn ghost" data-click="hideAddGroupModal">Cancel</button>
+            <button class="btn" data-click="createNodeGroup">Create</button>
           </div>
         </div>
       </div>
@@ -2756,7 +2756,7 @@ Firefox (all platforms):
       <div class="panel" style="margin-top:16px;display:none" id="cluster-bandwidth-panel">
         <div class="panel-header">
           <span class="panel-title">Bandwidth / QoS</span>
-          <button class="btn sm" onclick="showAddBandwidthModal()">+ Add Policy</button>
+          <button class="btn sm" data-click="showAddBandwidthModal">+ Add Policy</button>
         </div>
         <div class="panel-body">
           <p class="hint">
@@ -2797,8 +2797,8 @@ Firefox (all platforms):
             <input class="input" id="bw-priority" type="number" value="0" min="0" style="width:100px">
           </div>
           <div style="display:flex;gap:10px;justify-content:flex-end">
-            <button class="btn ghost" onclick="hideAddBandwidthModal()">Cancel</button>
-            <button class="btn" onclick="createBandwidthPolicy()">Create</button>
+            <button class="btn ghost" data-click="hideAddBandwidthModal">Cancel</button>
+            <button class="btn" data-click="createBandwidthPolicy">Create</button>
           </div>
         </div>
       </div>
@@ -2874,20 +2874,20 @@ Firefox (all platforms):
           <!-- Token result (shown after generation) -->
           <div id="enroll-result" style="display:none;margin-top:18px">
             <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">One-Click Bootstrap <span style="opacity:.5">(installs Docker + starts DP node automatically)</span></div>
-            <pre id="enroll-result-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="copyEnrollCmd()" title="Click to copy"></pre>
+            <pre id="enroll-result-cmd" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:.75rem;overflow-x:auto;color:var(--accent2);white-space:pre-wrap;word-break:break-all;cursor:pointer" data-click="copyEnrollCmd" title="Click to copy"></pre>
             <div style="font-size:.7rem;color:var(--muted);margin-top:4px;opacity:.7">Click to copy. Paste and run on any Linux server — Docker will be installed if needed.</div>
             <details style="margin-top:12px">
               <summary style="font-size:.78rem;color:var(--muted);cursor:pointer">Advanced: manual binary enrollment</summary>
               <div style="margin-top:8px;font-size:.75rem;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                 <code id="enroll-result-manual" style="color:var(--accent);font-size:.72rem"></code>
-                <button class="btn ghost sm" style="font-size:.65rem;padding:2px 6px" onclick="copyEnrollManual()" title="Copy URL">Copy</button>
+                <button class="btn ghost sm" style="font-size:.65rem;padding:2px 6px" data-click="copyEnrollManual" title="Copy URL">Copy</button>
               </div>
             </details>
           </div>
 
           <div style="display:flex;gap:10px;margin-top:20px;justify-content:flex-end">
-            <button class="btn ghost sm" onclick="hideEnrollModal()">Close</button>
-            <button class="btn sm" id="enroll-generate-btn" onclick="generateEnrollToken()">Generate Token</button>
+            <button class="btn ghost sm" data-click="hideEnrollModal">Close</button>
+            <button class="btn sm" id="enroll-generate-btn" data-click="generateEnrollToken">Generate Token</button>
           </div>
         </div>
       </div>
@@ -2899,7 +2899,7 @@ Firefox (all platforms):
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Version Status</span>
-          <button class="btn sm ghost" onclick="updateCheckNow()">Check Now</button>
+          <button class="btn sm ghost" data-click="updateCheckNow">Check Now</button>
         </div>
         <div class="card-grid" id="update-status-cards">
           <div class="card"><div class="card-label">Current Version</div><div class="card-value" id="upd-current">—</div></div>
@@ -2919,8 +2919,8 @@ Firefox (all platforms):
           <div id="upd-available" style="display:none">
             <p style="margin:0 0 12px 0;font-size:.9rem">A new version is available. Review changes before applying.</p>
             <div style="display:flex;gap:8px">
-              <button class="btn sm" onclick="updatePreview()">Preview Changes</button>
-              <button class="btn sm" id="upd-apply-btn" style="display:none" onclick="updateApply()">Apply Update</button>
+              <button class="btn sm" data-click="updatePreview">Preview Changes</button>
+              <button class="btn sm" id="upd-apply-btn" style="display:none" data-click="updateApply">Apply Update</button>
             </div>
           </div>
           <!-- Preview diff -->
@@ -2949,7 +2949,7 @@ Firefox (all platforms):
         </div>
         <div style="padding:16px">
           <p style="margin:0 0 8px 0;font-size:.85rem" id="upd-rollback-info">—</p>
-          <button class="btn sm danger" onclick="updateRollback()">Rollback Now</button>
+          <button class="btn sm danger" data-click="updateRollback">Rollback Now</button>
         </div>
       </div>
 
@@ -2957,7 +2957,7 @@ Firefox (all platforms):
       <div class="panel" id="upd-cluster-panel" style="display:none">
         <div class="panel-header">
           <span class="panel-title">Cluster Rolling Update</span>
-          <button class="btn sm ghost" onclick="loadClusterUpdateStatus()">Refresh</button>
+          <button class="btn sm ghost" data-click="loadClusterUpdateStatus">Refresh</button>
         </div>
         <div style="padding:16px">
           <div id="upd-cluster-idle">
@@ -2968,7 +2968,7 @@ Firefox (all platforms):
                 <option value="normal" selected>Normal (3/20%)</option>
                 <option value="aggressive">Aggressive (5/50%)</option>
               </select>
-              <button class="btn sm" onclick="clusterUpdateStart()">Update Cluster</button>
+              <button class="btn sm" data-click="clusterUpdateStart">Update Cluster</button>
             </div>
           </div>
           <div id="upd-cluster-active" style="display:none">
@@ -2990,7 +2990,7 @@ Firefox (all platforms):
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Update Reports</span>
-          <button class="btn sm ghost" onclick="loadUpdateReports()">Refresh</button>
+          <button class="btn sm ghost" data-click="loadUpdateReports">Refresh</button>
         </div>
         <div id="upd-reports-empty" style="padding:16px;color:var(--muted);font-size:.85rem">No update reports yet.</div>
         <div class="tbl-wrap">
@@ -3022,7 +3022,7 @@ Firefox (all platforms):
               <input id="upd-reg-pass" type="password" placeholder="(optional)" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
             </div>
           </div>
-          <button class="btn accent" onclick="saveRegistrySettings()">Save Registry Settings</button>
+          <button class="btn accent" data-click="saveRegistrySettings">Save Registry Settings</button>
         </div>
       </div>
     </div><!-- /view-updates -->
@@ -3043,7 +3043,7 @@ Firefox (all platforms):
     <div style="width:100%;height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:24px">
       <div id="cp-upd-bar" style="width:0%;height:100%;background:var(--accent);transition:width .3s"></div>
     </div>
-    <button id="cp-upd-reload" class="btn primary" onclick="location.reload()" style="margin-bottom:12px">Reload Now</button>
+    <button id="cp-upd-reload" class="btn primary" data-click="reloadPage" style="margin-bottom:12px">Reload Now</button>
     <p style="font-size:.78rem;color:var(--muted)">If the update already completed, click "Reload Now". Otherwise check <code>docker logs culvert-updater</code>.</p>
   </div>
 </div>
@@ -3054,19 +3054,332 @@ Firefox (all platforms):
     <h3 id="confirm-dialog-title" style="margin:0 0 8px;font-size:1.05rem;font-weight:700;color:var(--danger)">Confirm</h3>
     <p id="confirm-dialog-msg" style="margin:0 0 20px;font-size:.88rem;color:var(--muted);line-height:1.6"></p>
     <div style="display:flex;gap:10px;justify-content:flex-end">
-      <button class="btn ghost" onclick="confirmDialogResolve(false)">Cancel</button>
-      <button class="btn danger" id="confirm-dialog-ok" onclick="confirmDialogResolve(true)">Delete</button>
+      <button class="btn ghost" data-click="confirmDialogResolve" data-arg="false">Cancel</button>
+      <button class="btn danger" id="confirm-dialog-ok" data-click="confirmDialogResolve" data-arg="true">Delete</button>
     </div>
   </div>
 </div>
 
 <div id="toasts"></div>
 
-<script>
+<script nonce="__CSP_NONCE__">
 // ═══════════════════════════════════════════════════════════════════════════
 // State
 // ═══════════════════════════════════════════════════════════════════════════
 const BASE = '';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CSP Event Delegation — replaces all inline event handlers (onclick, etc.)
+// with data-* attributes dispatched by these centralized listeners.
+// This allows the CSP to use a strict nonce instead of 'unsafe-inline'.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── data-click: replaces onclick="fn()" / onclick="fn(arg)" ─────────────
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-click]');
+  if (!el) return;
+  const fn = el.dataset.click;
+  const arg = el.dataset.arg;
+  const arg2 = el.dataset.arg2;
+
+  // Dispatch table — every valid click action must be listed here.
+  // No eval, no Function(), fully CSP-compliant.
+  switch (fn) {
+    // ── Global / nav ──
+    case 'toggleTheme':       toggleTheme(); break;
+    case 'toggleSidebar':     document.getElementById('sidebar').classList.toggle('open'); break;
+    case 'doLogout':          doLogout(); break;
+    case 'switchView':        e.preventDefault(); switchView(arg); break;
+    case 'dismissParent':     el.parentElement.parentElement.style.display='none'; break;
+    case 'reloadPage':        location.reload(); break;
+
+    // ── Confirm dialog ──
+    case 'confirmDialogResolve': confirmDialogResolve(arg === 'true'); break;
+
+    // ── Live Feed / Logs ──
+    case 'clearFilter':       clearFilter(); break;
+    case 'exportLogs':        exportLogs(arg); break;
+    case 'applyLogFilter':    applyLogFilter(); break;
+
+    // ── Blocklist ──
+    case 'exportBlocklist':   exportBlocklist(); break;
+    case 'toggleBlocklistMode': toggleBlocklistMode(); break;
+    case 'addHost':           addHost(); break;
+    case 'setBlSource':       setBlSource(arg); break;
+    case 'bulkDeleteBL':      bulkDeleteBL(); break;
+    case 'blLoadMore':        blLoadMore(); break;
+    case 'addException':      addException(); break;
+    case 'removeHost':        removeHost(+arg); break;
+    case 'removeException':   removeException(+arg); break;
+    case 'saveBlocklistFeed': saveBlocklistFeed(); break;
+    case 'syncBlocklistFeed': syncBlocklistFeed(); break;
+    case 'blToggleAll':       blToggleAll(el.checked); break;
+
+    // ── Security / IP filter ──
+    case 'secAddIP':          secAddIP(); break;
+    case 'saveSecurity':      saveSecurity(); break;
+    case 'saveRateLimit':     saveRateLimit(); break;
+    case 'disableRateLimit':  disableRateLimit(); break;
+    case 'secRemoveIP':       secRemoveIP(arg); break;
+
+    // ── Threat feeds / YARA / scanning ──
+    case 'syncThreatFeeds':   syncThreatFeeds(); break;
+    case 'reloadYARA':        reloadYARA(); break;
+    case 'newYARARule':       newYARARule(); break;
+    case 'validateYARARule':  validateYARARule(); break;
+    case 'saveYARARule':      saveYARARule(); break;
+    case 'deleteYARARule':    deleteYARARule(); break;
+    case 'selectYARARule':    selectYARARule(arg); break;
+    case 'saveScanExclusions': saveScanExclusions(); break;
+    case 'saveDPIBypass':     saveDPIBypass(); break;
+    case 'addTFAllowlistDomain': addTFAllowlistDomain(); break;
+    case 'removeTFAllowlistDomain': removeTFAllowlistDomain(arg); break;
+
+    // ── Connection limit / block page ──
+    case 'saveConnLimit':     saveConnLimit(); break;
+    case 'saveBlockPage':     saveBlockPage(); break;
+    case 'resetBlockPage':    resetBlockPage(); break;
+
+    // ── IdP / auth ──
+    case 'openIdPModal':      openIdPModal(); break;
+    case 'closeIdPModal':     closeIdPModal(); break;
+    case 'selectIdPTemplate': selectIdPTemplate(arg); break;
+    case 'discoverOIDC':      discoverOIDC(); break;
+    case 'idpGoBack':         idpGoBack(); break;
+    case 'saveIdP':           saveIdP(); break;
+    case 'editIdP':           editIdP(JSON.parse(arg)); break;
+    case 'deleteIdP':         deleteIdP(arg, arg2); break;
+    case 'idpCopyText':       idpCopyText(arg, el); break;
+
+    // ── PAC ──
+    case 'savePACConfig':     savePACConfig(); break;
+    case 'downloadPAC':       downloadPAC(); break;
+    case 'copyPACURL':        copyPACURL(); break;
+    case 'refreshPACPreview': refreshPACPreview(); break;
+
+    // ── Certificates ──
+    case 'loadCACertInfo':    loadCACertInfo(); break;
+    case 'copyCAInstallInstructions': copyCAInstallInstructions(); break;
+    case 'uploadCustomCert':  uploadCustomCert(); break;
+    case 'addSSLBypass':      addSSLBypass(); break;
+    case 'removeSSLBypass':   removeSSLBypass(arg); break;
+    case 'closeCAInstructions': document.getElementById('ca-instructions-modal').style.display='none'; break;
+
+    // ── Settings ──
+    case 'saveSettings':      saveSettings(); break;
+    case 'exportConfig':      exportConfig(); break;
+    case 'exportSection':     exportSection(arg); break;
+    case 'saveSessionTimeout': saveSessionTimeout(); break;
+    case 'saveSessionSecret': saveSessionSecret(); break;
+    case 'generateSessionSecret': generateSessionSecret(); break;
+    case 'addUIAllowIP':      addUIAllowIP(); break;
+    case 'saveUIAllowIPs':    saveUIAllowIPs(); break;
+    case 'removeUIAllowIP':   removeUIAllowIP(+arg); break;
+    case 'saveNetworkTLS':    saveNetworkTLS(); break;
+    case 'toggleUnauthMode':  toggleUnauthMode(); break;
+    case 'saveSyslog':        saveSyslog(); break;
+    case 'disableSyslog':     disableSyslog(); break;
+    case 'saveMetricsToken':  saveMetricsToken(); break;
+    case 'clearMetricsToken': clearMetricsToken(); break;
+    case 'saveOTLP':          saveOTLP(); break;
+    case 'disableOTLP':       disableOTLP(); break;
+    case 'setLogLevel':       { const sel = el.closest('select') || el; setLogLevel(sel.value); break; }
+
+    // ── Webhooks ──
+    case 'openAddWebhookModal': openAddWebhookModal(); break;
+    case 'testWebhook':       testWebhook(arg); break;
+    case 'editWebhook':       editWebhook(arg); break;
+    case 'deleteWebhook':     deleteWebhook(arg); break;
+    case 'closeWebhookModal': closeWebhookModal(); break;
+    case 'saveWebhook':       saveWebhook(); break;
+
+    // ── Users ──
+    case 'openUserModal':     openUserModal(arg, arg2); break;
+    case 'deleteUser':        deleteUser(arg); break;
+    case 'saveUser':          saveUser(); break;
+    case 'closeUserModal':    closeUserModal(); break;
+
+    // ── Rewrite rules ──
+    case 'addRewriteRule':    addRewriteRule(); break;
+    case 'removeRewriteRule': removeRewriteRule(+arg); break;
+
+    // ── Policy ──
+    case 'submitPolicyRule':  submitPolicyRule(); break;
+    case 'cancelPolicyEdit':  cancelPolicyEdit(); break;
+    case 'editPolicy':        editPolicy(+arg); break;
+    case 'deletePolicy':      deletePolicy(+arg); break;
+    case 'togglePolActions':  e.stopPropagation(); togglePolActions(e, +arg); break;
+    case 'movePolicy':        movePolicy(+arg, arg2); break;
+    case 'showMoveTarget':    showMoveTarget(+arg, arg2); break;
+    case 'clonePolicy':       clonePolicy(+arg); break;
+    case 'setPolActionFilter': setPolActionFilter(arg); break;
+    case 'toggleDefaultAction': toggleDefaultAction(); break;
+    case 'runPolicyTest':     runPolicyTest(); break;
+    case 'clearGroupSelection': clearGroupSelection(); break;
+
+    // ── URL categories ──
+    case 'openNewCategoryModal': openNewCategoryModal(); break;
+    case 'runURLLookup':      runURLLookup(); break;
+    case 'blCatLoadMore':     blCatLoadMore(); break;
+    case 'deleteURLCategory': deleteURLCategory(arg); break;
+    case 'addURLCatHost':     addURLCatHost(arg); break;
+    case 'removeURLCatHost':  removeURLCatHost(arg, arg2); break;
+
+    // ── File profiles ──
+    case 'openNewProfilePanel': openNewProfilePanel(); break;
+    case 'saveProfile':       saveProfile(); break;
+    case 'deleteProfile':     deleteProfile(); break;
+    case 'addFileExt':        addFileExt(); break;
+    case 'clearAllExts':      clearAllExts(); break;
+    case 'selectProfile':     selectProfile(arg); break;
+    case 'fpRemoveExt':       fpRemoveExt(el, arg); break;
+    case 'fpAddExt':          fpAddExt(); break;
+    case 'removeFileExt':     removeFileExt(arg); break;
+
+    // ── Audit / CA management ──
+    case 'loadAuditLog':      loadAuditLog(); break;
+    case 'toggleAuditDiff':   toggleAuditDiff(+arg); break;
+    case 'loadCAMgmt':        loadCAMgmt(); break;
+    case 'downloadCA':        downloadCA(); break;
+    case 'forceRotateCA':     forceRotateCA(); break;
+    case 'clearCACache':      clearCACache(); break;
+    case 'diffConfigVersions': diffConfigVersions(+arg, +arg2); break;
+    case 'rollbackConfigVersion': rollbackConfigVersion(+arg); break;
+
+    // ── Upstream ──
+    case 'upstreamHealthCheck': upstreamHealthCheck(); break;
+    case 'showUpstreamAdd':   showUpstreamAdd(); break;
+    case 'addUpstreamProxy':  addUpstreamProxy(); break;
+    case 'hideUpstreamAdd':   document.getElementById('upstream-add-form').style.display='none'; break;
+    case 'removeUpstreamProxy': removeUpstreamProxy(+arg); break;
+
+    // ── Cluster ──
+    case 'loadCluster':       loadCluster(); break;
+    case 'enableControlPlane': enableControlPlane(); break;
+    case 'enableHA':          enableHA(); break;
+    case 'copyHADeployCmd':   copyHADeployCmd(); break;
+    case 'loadClusterCA':     loadClusterCA(); break;
+    case 'importClusterCA':   importClusterCA(); break;
+    case 'showEnrollModal':   showEnrollModal(); break;
+    case 'hideEnrollModal':   hideEnrollModal(); break;
+    case 'generateEnrollToken': generateEnrollToken(); break;
+    case 'copyEnrollCmd':     copyEnrollCmd(); break;
+    case 'copyEnrollManual':  copyEnrollManual(); break;
+    case 'bulkDeleteExpiredTokens': bulkDeleteExpiredTokens(); break;
+    case 'deleteToken':       deleteToken(arg); break;
+    case 'revokeNode':        revokeNode(arg); break;
+    case 'toggleDrain':       toggleDrain(arg, arg2 === 'true'); break;
+    case 'editLabels':        editLabels(arg); break;
+
+    // ── Node groups / bandwidth ──
+    case 'showAddGroupModal': showAddGroupModal(); break;
+    case 'hideAddGroupModal': hideAddGroupModal(); break;
+    case 'createNodeGroup':   createNodeGroup(); break;
+    case 'deleteNodeGroup':   deleteNodeGroup(arg); break;
+    case 'showAddBandwidthModal': showAddBandwidthModal(); break;
+    case 'hideAddBandwidthModal': hideAddBandwidthModal(); break;
+    case 'createBandwidthPolicy': createBandwidthPolicy(); break;
+    case 'deleteBandwidthPolicy': deleteBandwidthPolicy(arg); break;
+
+    // ── Update system ──
+    case 'updateCheckNow':    updateCheckNow(); break;
+    case 'updatePreview':     updatePreview(); break;
+    case 'updateApply':       updateApply(); break;
+    case 'updateRollback':    updateRollback(); break;
+    case 'loadClusterUpdateStatus': loadClusterUpdateStatus(); break;
+    case 'clusterUpdateStart': clusterUpdateStart(); break;
+    case 'loadUpdateReports': loadUpdateReports(); break;
+    case 'saveRegistrySettings': saveRegistrySettings(); break;
+
+    default:
+      console.warn('CSP delegation: unknown click action:', fn);
+  }
+});
+
+// ── data-change: replaces onchange="fn()" ───────────────────────────────
+document.addEventListener('change', e => {
+  const el = e.target.closest('[data-change]');
+  if (!el) return;
+  switch (el.dataset.change) {
+    case 'applyLogFilter':    applyLogFilter(); break;
+    case 'importBlocklist':   importBlocklist(el); break;
+    case 'loadXMLFile':       loadXMLFile(e); break;
+    case 'setLogLevel':       setLogLevel(el.value); break;
+    case 'importConfig':      importConfig(el); break;
+    case 'toggleOCSP':        toggleOCSP(el.checked); break;
+    case 'blToggleAll':       blToggleAll(el.checked); break;
+    default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
+  }
+});
+
+// ── data-input: replaces oninput="fn()" ─────────────────────────────────
+document.addEventListener('input', e => {
+  const el = e.target.closest('[data-input]');
+  if (!el) return;
+  switch (el.dataset.input) {
+    case 'applyLogFilter':       applyLogFilter(); break;
+    case 'onGroupSearchInput':   onGroupSearchInput(el.value); break;
+    case 'fpSyncTitle':          document.getElementById('fp-editor-title').textContent = el.value || 'Profile'; break;
+    case 'fpSyncNewTitle':       document.getElementById('fp-editor-title').textContent = el.value || 'New Profile'; break;
+    default: console.warn('CSP delegation: unknown input action:', el.dataset.input);
+  }
+});
+
+// ── data-enter: replaces onkeydown="if(event.key==='Enter') fn()" ──────
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const el = e.target.closest('[data-enter]');
+  if (!el) return;
+  e.preventDefault();
+  const arg = el.dataset.enterArg;
+  switch (el.dataset.enter) {
+    case 'fpAddExt':     fpAddExt(); break;
+    case 'addURLCatHost': addURLCatHost(arg); break;
+    default: console.warn('CSP delegation: unknown enter action:', el.dataset.enter);
+  }
+});
+
+// ── data-keydown: replaces onkeydown="fn(event)" ───────────────────────
+document.addEventListener('keydown', e => {
+  const el = e.target.closest('[data-keydown]');
+  if (!el) return;
+  switch (el.dataset.keydown) {
+    case 'onCountryKeydown': onCountryKeydown(e); break;
+    default: console.warn('CSP delegation: unknown keydown action:', el.dataset.keydown);
+  }
+});
+
+// ── data-focus: replaces onfocus="fn()" ─────────────────────────────────
+document.addEventListener('focusin', e => {
+  const el = e.target.closest('[data-focus]');
+  if (!el) return;
+  switch (el.dataset.focus) {
+    case 'onGroupFocus': onGroupFocus(); break;
+  }
+});
+
+// ── data-hover: replaces onmouseover/onmouseout ─────────────────────────
+document.addEventListener('mouseover', e => {
+  const el = e.target.closest('[data-hover]');
+  if (!el) return;
+  if (el.dataset.hover === 'border-accent') el.style.borderColor = 'var(--accent)';
+  if (el.dataset.hover === 'bg-surface2') el.style.background = 'var(--surface2)';
+  if (el.dataset.hover === 'true') { el.style.color = 'var(--text)'; }
+});
+document.addEventListener('mouseout', e => {
+  const el = e.target.closest('[data-hover]');
+  if (!el) return;
+  if (el.dataset.hover === 'border-accent') el.style.borderColor = 'var(--border)';
+  if (el.dataset.hover === 'bg-surface2') el.style.background = 'transparent';
+  if (el.dataset.hover === 'true') { el.style.color = 'var(--muted)'; }
+});
+
+// Close policy actions menu on outside click.
+document.addEventListener('click', e => {
+  if (!e.target.closest('.pol-actions-menu') && !e.target.closest('[data-click="togglePolActions"]')) {
+    document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+  }
+});
 
 // ── F28: Theme toggle (dark/light mode) ──────────────────────────────────
 function initTheme() {
@@ -3358,8 +3671,8 @@ function renderUsersTable(users) {
       <td><strong>${escHtml(u.username)}</strong></td>
       <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span></td>
       <td>
-        <button class="btn ghost sm" onclick="openUserModal(${JSON.stringify(u.username).replace(/"/g,'&quot;')}, ${JSON.stringify(u.role).replace(/"/g,'&quot;')})">Edit</button>
-        ${u.username !== uiUsername ? `<button class="btn ghost sm" style="color:var(--red)" onclick="deleteUser(${JSON.stringify(u.username).replace(/"/g,'&quot;')})">Delete</button>` : '<span style="color:var(--muted);font-size:.75rem">  (you)</span>'}
+        <button class="btn ghost sm" data-click="openUserModal" data-arg="${escHtml(u.username)}" data-arg2="${escHtml(u.role)}">Edit</button>
+        ${u.username !== uiUsername ? `<button class="btn ghost sm" style="color:var(--red)" data-click="deleteUser" data-arg="${JSON.stringify(u.username).replace(/"/g,'&quot;')}">Delete</button>` : '<span style="color:var(--muted);font-size:.75rem">  (you)</span>'}
       </td>
     </tr>`).join('');
 }
@@ -3559,7 +3872,7 @@ function renderURLCatList(cats) {
           <strong style="font-size:15px">${qn}</strong>
           ${cat.builtIn ? '<span class="badge" style="font-size:11px;background:var(--surface2);color:var(--text-muted)">built-in</span>' : ''}
         </div>
-        <button class="btn sm danger" onclick="deleteURLCategory(${jn})"
+        <button class="btn sm danger" data-click="deleteURLCategory" data-arg="${jn}"
           title="Delete category">Delete</button>
       </div>
       <div id="uc-chips-${qn}" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
@@ -3567,7 +3880,7 @@ function renderURLCatList(cats) {
           const jh = JSON.stringify(h).replace(/"/g, '&quot;');
           return `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px">
             ${escHtml(h)}
-            <button onclick="removeURLCatHost(${jn}, ${jh})" title="Remove host"
+            <button data-click="removeURLCatHost" data-arg="${jn}" data-arg2="${jh}" title="Remove host"
               style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px;padding:0;line-height:1">&times;</button>
           </span>`;
         }).join('')}
@@ -3576,8 +3889,8 @@ function renderURLCatList(cats) {
       <div style="display:flex;gap:6px">
         <input class="form-input" id="uc-new-host-${qn}" type="text"
           placeholder="add host (e.g. example.com)" style="flex:1;max-width:300px"
-          onkeydown="if(event.key===&quot;Enter&quot;)addURLCatHost(${jn})">
-        <button class="btn sm" onclick="addURLCatHost(${jn})">Add Host</button>
+          data-enter="addURLCatHost" data-enter-arg="${jn}">
+        <button class="btn sm" data-click="addURLCatHost" data-arg="${jn}">Add Host</button>
       </div>
     </div>`;
   }).join('');
@@ -3755,8 +4068,8 @@ async function loadConfigVersions() {
     versions.forEach((v, i) => {
       const date = new Date(v.created_at).toLocaleString();
       const prev = i < versions.length - 1 ? versions[i + 1].version : null;
-      const diffBtn = prev ? `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px" onclick="diffConfigVersions(${prev},${v.version})">Diff</button>` : '';
-      const rollbackBtn = `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px;color:var(--yellow)" onclick="rollbackConfigVersion(${v.version})">Rollback</button>`;
+      const diffBtn = prev ? `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px" data-click="diffConfigVersions" data-arg="${prev}" data-arg2="${v.version}">Diff</button>` : '';
+      const rollbackBtn = `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px;color:var(--yellow)" data-click="rollbackConfigVersion" data-arg="${v.version}">Rollback</button>`;
       html += `<tr><td>v${v.version}</td><td>${date}</td><td>${esc(v.action)}</td><td>${esc(v.actor)}</td><td class="text-right">${diffBtn} ${rollbackBtn}</td></tr>`;
     });
     html += '</tbody></table>';
@@ -4094,12 +4407,12 @@ function _blRenderPage(append) {
       ? '<span class="badge" style="background:rgba(20,184,166,.12);color:#2dd4bf;border:1px solid rgba(20,184,166,.25);font-size:10px">Admin</span>'
       : '<span class="badge" style="background:var(--surface2);color:var(--muted);font-size:10px">Feed</span>';
     return `<tr>
-      <td><input type="checkbox" class="bl-check" value="${jh}" onchange="blUpdateBulk()"></td>
+      <td><input type="checkbox" class="bl-check" value="${jh}" data-change="blUpdateBulk"></td>
       <td class="host-td">${h}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
       <td style="color:var(--muted);font-size:.75rem">${wild ? 'Wildcard' : 'Exact'}</td>
       <td>${srcBadge}</td>
       <td class="text-right">
-        <button class="btn danger sm" onclick="removeHost(${jh})">Remove</button>
+        <button class="btn danger sm" data-click="removeHost" data-arg="${jh}">Remove</button>
       </td>
     </tr>`;
   }).join('');
@@ -4232,7 +4545,7 @@ function renderExceptions(hosts) {
     return `<tr>
       <td class="host-td">${escHtml(h)}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
       <td class="text-right">
-        <button class="btn danger sm" onclick="removeException(${jh})">Remove</button>
+        <button class="btn danger sm" data-click="removeException" data-arg="${jh}">Remove</button>
       </td>
     </tr>`;
   }).join('');
@@ -4305,7 +4618,7 @@ function renderSecIPList() {
   tbody.innerHTML = secIPList.map(ip => `<tr>
     <td style="font-family:monospace;font-size:.82rem">${ip}</td>
     <td class="text-right">
-      <button class="btn danger sm" onclick="secRemoveIP('${ip}')">Remove</button>
+      <button class="btn danger sm" data-click="secRemoveIP" data-arg="${ip}">Remove</button>
     </td>
   </tr>`).join('');
 }
@@ -4400,7 +4713,7 @@ function renderSSLBypass() {
   }
   tbody.innerHTML = _sslBypassList.map(p => `<tr>
     <td style="font-family:monospace;font-size:.82rem">${escHtml(p)}</td>
-    <td class="text-right"><button class="btn danger sm" onclick="removeSSLBypass('${escHtml(p)}')">Remove</button></td>
+    <td class="text-right"><button class="btn danger sm" data-click="removeSSLBypass" data-arg="${escHtml(p)}">Remove</button></td>
   </tr>`).join('');
 }
 
@@ -4585,7 +4898,7 @@ function renderYARARuleList() {
     const subtitle = rules.length
       ? '<div style="font-size:11px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(rules.join(', ')) + '</div>'
       : '<div style="font-size:11px;color:var(--yellow);margin-top:2px">(no parsable rules)</div>';
-    return '<div onclick="selectYARARule(' + JSON.stringify(stem).replace(/"/g, '&quot;') + ')" style="padding:6px 10px;border-radius:4px;cursor:pointer;font-family:ui-monospace,monospace;' + active + '">' +
+    return '<div data-click="selectYARARule" data-arg="' + escHtml(stem) + '" style="padding:6px 10px;border-radius:4px;cursor:pointer;font-family:ui-monospace,monospace;' + active + '">' +
       '<div>' + escHtml(stem) + '</div>' + subtitle +
       '</div>';
   }).join('');
@@ -4728,7 +5041,7 @@ function renderTFAllowlist() {
   el.innerHTML = tfAllowlistDomains.map(d =>
     `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);padding:3px 10px;border-radius:14px;font-size:.78rem">
       ${escHtml(d)}
-      <span onclick="removeTFAllowlistDomain('${escHtml(d)}')" style="cursor:pointer;color:var(--muted);font-weight:700;margin-left:2px" title="Remove">&times;</span>
+      <span data-click="removeTFAllowlistDomain" data-arg="${escHtml(d)}" style="cursor:pointer;color:var(--muted);font-weight:700;margin-left:2px" title="Remove">&times;</span>
     </span>`
   ).join('');
 }
@@ -4784,7 +5097,7 @@ function renderRewrite() {
       <td style="font-family:monospace;font-size:.82rem">${r.host ? escHtml(r.host) : '<span style="color:var(--muted)">*</span>'}</td>
       <td style="font-size:.78rem">${reqOps || '<span style="color:var(--muted)">—</span>'}</td>
       <td style="font-size:.78rem">${respOps || '<span style="color:var(--muted)">—</span>'}</td>
-      <td class="text-right"><button class="btn danger sm" onclick="removeRewriteRule(${r.id})">Remove</button></td>
+      <td class="text-right"><button class="btn danger sm" data-click="removeRewriteRule" data-arg="${r.id}">Remove</button></td>
     </tr>`;
   }).join('');
 }
@@ -4969,10 +5282,6 @@ function togglePolActions(e, pri) {
   menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
 }
 
-// Close menus on outside click.
-document.addEventListener('click', () => {
-  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
-});
 
 async function movePolicy(pri, position, targetName) {
   const body = { priority: pri, position };
@@ -5233,7 +5542,7 @@ function renderUIAllowIPList() {
   el.innerHTML = _uiAllowIPList.map((ip, i) =>
     `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);padding:3px 8px;border-radius:8px;font-size:.78rem">
       ${escHtml(ip)}
-      <button style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:.9rem;line-height:1" onclick="removeUIAllowIP(${i})">×</button>
+      <button style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:.9rem;line-height:1" data-click="removeUIAllowIP" data-arg="${i}">×</button>
     </span>`
   ).join('');
 }
@@ -5424,9 +5733,9 @@ async function loadWebhooks() {
       <td style="font-size:.78rem">${(h.events||[]).join(', ')}</td>
       <td><span style="font-size:.75rem;padding:2px 8px;border-radius:10px;background:${h.enabled?'rgba(34,197,94,.15)':'rgba(100,116,139,.15)'};color:${h.enabled?'var(--green)':'var(--muted)'}">${h.enabled?'Active':'Disabled'}</span></td>
       <td style="display:flex;gap:6px">
-        <button class="btn ghost sm" onclick="testWebhook('${h.id}')">Test</button>
-        <button class="btn ghost sm" onclick="editWebhook('${h.id}')">Edit</button>
-        <button class="btn danger sm" onclick="deleteWebhook('${h.id}')">Del</button>
+        <button class="btn ghost sm" data-click="testWebhook" data-arg="${h.id}">Test</button>
+        <button class="btn ghost sm" data-click="editWebhook" data-arg="${h.id}">Edit</button>
+        <button class="btn danger sm" data-click="deleteWebhook" data-arg="${h.id}">Del</button>
       </td>
     </tr>`).join('');
     loadDeliveryHistory();
@@ -5632,7 +5941,7 @@ function renderFileBlock() {
   box.innerHTML = fbExts.map(ext => {
     return `<div style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:.82rem">
       <span style="font-weight:700;font-family:monospace">${escHtml(ext)}</span>
-      <button onclick="removeFileExt('${escHtml(ext)}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1;padding:0;margin-left:2px" title="Remove ${escHtml(ext)}">&times;</button>
+      <button data-click="removeFileExt" data-arg="${escHtml(ext)}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1;padding:0;margin-left:2px" title="Remove ${escHtml(ext)}">&times;</button>
     </div>`;
   }).join('');
 }
@@ -5697,12 +6006,12 @@ function renderProfileList() {
   el.innerHTML = fpProfiles.map(p => {
     const active = p.id === fpCurrentId;
     const col = fpColor(p.name);
-    return `<button onclick="selectProfile('${escHtml(p.id)}')"
+    return `<button data-click="selectProfile" data-arg="${escHtml(p.id)}"
       style="display:flex;align-items:center;gap:10px;padding:10px 14px;border:none;background:${active ? 'rgba(99,102,241,.12)' : 'transparent'};
       border-left:3px solid ${active ? col : 'transparent'};cursor:pointer;text-align:left;width:100%;
       color:var(--text);transition:background .15s;border-right:none;border-top:none;border-bottom:1px solid var(--border)"
-      onmouseover="if('${p.id}'!=='${fpCurrentId||''}')this.style.background='var(--surface2)'"
-      onmouseout="if('${p.id}'!=='${fpCurrentId||''}')this.style.background='transparent'">
+      
+      data-hover="bg-surface2">
       <div style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0"></div>
       <div style="flex:1;min-width:0">
         <div style="font-weight:600;font-size:.83rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(p.name)}</div>
@@ -5729,20 +6038,20 @@ function renderProfileEditor(p) {
     <div style="margin-bottom:14px">
       <label class="form-label">Profile Name</label>
       <input id="fp-edit-name" class="input" value="${escHtml(p.name)}" style="width:100%" placeholder="e.g. My Corp Profile"
-        oninput="document.getElementById('fp-editor-title').textContent=this.value||'Profile'">
+        data-input="fpSyncTitle">
     </div>
     <label class="form-label">Extensions</label>
     <div id="fp-edit-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;min-height:40px">
       ${p.extensions.map(ext => `
         <span style="display:inline-flex;align-items:center;gap:5px;background:${col}18;border:1px solid ${col}40;border-radius:5px;padding:3px 9px;font-size:.8rem;font-family:monospace">
           ${escHtml(ext)}
-          <button onclick="fpRemoveExt(this,'${escHtml(ext)}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1rem;line-height:1;padding:0">&times;</button>
+          <button data-click="fpRemoveExt" data-arg="${escHtml(ext)}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1rem;line-height:1;padding:0">&times;</button>
         </span>`).join('')}
     </div>
     <div style="display:flex;gap:6px">
       <input id="fp-add-ext-input" class="input" placeholder=".exe or exe" style="flex:1"
-        onkeydown="if(event.key==='Enter'){event.preventDefault();fpAddExt()}">
-      <button class="btn ghost sm" onclick="fpAddExt()">+ Add</button>
+        data-enter="fpAddExt">
+      <button class="btn ghost sm" data-click="fpAddExt">+ Add</button>
     </div>`;
 }
 
@@ -5763,7 +6072,7 @@ function fpAddExt() {
   const col = p ? fpColor(p.name) : '#6366f1';
   const span = document.createElement('span');
   span.style.cssText = `display:inline-flex;align-items:center;gap:5px;background:${col}18;border:1px solid ${col}40;border-radius:5px;padding:3px 9px;font-size:.8rem;font-family:monospace`;
-  span.innerHTML = `${escHtml(ext)}<button onclick="fpRemoveExt(this,'${escHtml(ext)}')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1rem;line-height:1;padding:0">&times;</button>`;
+  span.innerHTML = `${escHtml(ext)}<button data-click="fpRemoveExt" data-arg="${escHtml(ext)}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1rem;line-height:1;padding:0">&times;</button>`;
   chips.appendChild(span);
   input.value = '';
 }
@@ -5824,14 +6133,14 @@ function openNewProfilePanel() {
     <div style="margin-bottom:14px">
       <label class="form-label">Profile Name</label>
       <input id="fp-edit-name" class="input" style="width:100%" placeholder="e.g. My Corp Profile"
-        oninput="document.getElementById('fp-editor-title').textContent=this.value||'New Profile'">
+        data-input="fpSyncNewTitle">
     </div>
     <label class="form-label">Extensions</label>
     <div id="fp-edit-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;min-height:40px"></div>
     <div style="display:flex;gap:6px">
       <input id="fp-add-ext-input" class="input" placeholder=".exe or exe" style="flex:1"
-        onkeydown="if(event.key==='Enter'){event.preventDefault();fpAddExt()}">
-      <button class="btn ghost sm" onclick="fpAddExt()">+ Add</button>
+        data-enter="fpAddExt">
+      <button class="btn ghost sm" data-click="fpAddExt">+ Add</button>
     </div>`;
   // Override saveProfile for create path
   document.getElementById('fp-editor-actions').querySelector('.btn.sm').onclick = async function() {
@@ -6219,17 +6528,17 @@ function renderPolicy() {
       <td>${actionBadge(r.action)}</td>
       <td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${r.hitCount || 0}</td>
       <td style="text-align:right;white-space:nowrap;position:relative">
-        <button class="btn ghost sm" onclick="editPolicy(${r.priority})" style="margin-right:4px">Edit</button>
-        <button class="btn ghost sm" onclick="togglePolActions(event,${r.priority})" title="Actions">⋮</button>
+        <button class="btn ghost sm" data-click="editPolicy" data-arg="${r.priority}" style="margin-right:4px">Edit</button>
+        <button class="btn ghost sm" data-click="togglePolActions" data-arg="${r.priority}" title="Actions">⋮</button>
         <div class="pol-actions-menu" id="pol-actions-${r.priority}" style="display:none;position:absolute;right:0;top:100%;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);z-index:100;min-width:190px;padding:4px 0;font-size:.8rem">
-          <div class="pol-act-item" onclick="movePolicy(${r.priority},'first')">Move to first</div>
-          <div class="pol-act-item" onclick="movePolicy(${r.priority},'last')">Move to last</div>
-          <div class="pol-act-item" onclick="showMoveTarget(${r.priority},'before')">Move before…</div>
-          <div class="pol-act-item" onclick="showMoveTarget(${r.priority},'after')">Move after…</div>
+          <div class="pol-act-item" data-click="movePolicy" data-arg="${r.priority}" data-arg2="first">Move to first</div>
+          <div class="pol-act-item" data-click="movePolicy" data-arg="${r.priority}" data-arg2="last">Move to last</div>
+          <div class="pol-act-item" data-click="showMoveTarget" data-arg="${r.priority}" data-arg2="before">Move before…</div>
+          <div class="pol-act-item" data-click="showMoveTarget" data-arg="${r.priority}" data-arg2="after">Move after…</div>
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
-          <div class="pol-act-item" onclick="clonePolicy(${r.priority})">Clone rule</div>
+          <div class="pol-act-item" data-click="clonePolicy" data-arg="${r.priority}">Clone rule</div>
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
-          <div class="pol-act-item" style="color:var(--danger)" onclick="deletePolicy(${r.priority})">Delete</div>
+          <div class="pol-act-item" style="color:var(--danger)" data-click="deletePolicy" data-arg="${r.priority}">Delete</div>
         </div>
       </td>
     </tr>`;
@@ -6489,7 +6798,7 @@ async function loadIdPList() {
       : '';
     return `
     <div style="background:var(--surface1);border-radius:10px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;gap:16px;border:1px solid var(--border);transition:border-color .15s"
-      onmouseover="this.style.borderColor='var(--accent)30'" onmouseout="this.style.borderColor='var(--border)'">
+      data-hover="border-accent">
       <div style="display:flex;align-items:center;gap:14px;flex:1;min-width:0">
         <!-- Icon: use first letter of vendor name in a coloured circle -->
         <div style="width:42px;height:42px;border-radius:10px;background:${meta.color}20;border:1.5px solid ${meta.color}40;
@@ -6509,8 +6818,8 @@ async function loadIdPList() {
         </div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0">
-        <button class="btn ghost sm" onclick="editIdP(${JSON.stringify(JSON.stringify(p))})">Edit</button>
-        <button class="btn danger sm" onclick="deleteIdP('${p.id}', '${escHtml(p.name)}')">Delete</button>
+        <button class="btn ghost sm" data-click="editIdP" data-arg="${JSON.stringify(JSON.stringify(p))}">Edit</button>
+        <button class="btn danger sm" data-click="deleteIdP" data-arg="${escHtml(p.id)}" data-arg2="${escHtml(p.name)}">Delete</button>
       </div>
     </div>`;
   }).join('');
@@ -6594,7 +6903,7 @@ function _idpCopyRow(label, value) {
     <div style="font-size:.72rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">${label}</div>
     <div style="display:flex;align-items:center;gap:6px">
       <code style="background:var(--bg);border:1px solid var(--border);padding:4px 8px;border-radius:5px;font-size:.8rem;word-break:break-all;flex:1;color:var(--text)">${safeVal}</code>
-      <button class="idp-copy-btn" onclick="idpCopyText('${safeVal.replace(/'/g,"\\'")}', this)">Copy</button>
+      <button class="idp-copy-btn" data-click="idpCopyText" data-arg="${safeVal}">Copy</button>
     </div>
   </div>`;
 }
@@ -7169,7 +7478,7 @@ function renderAuditLog() {
   tb.innerHTML = entries.map((e, idx) => {
     const hasDiff = e.before || e.after;
     const diffBtn = hasDiff
-      ? `<button class="audit-diff-btn" onclick="toggleAuditDiff(${idx})">± diff</button>`
+      ? `<button class="audit-diff-btn" data-click="toggleAuditDiff" data-arg="${idx}">± diff</button>`
       : '—';
     return `<tr id="audit-row-${idx}">
       <td style="white-space:nowrap;font-size:.75rem">${escHtml(e.time||'')}</td>
@@ -7320,7 +7629,7 @@ function renderUpstream() {
     <td style="font-family:monospace;font-size:.82rem">${escHtml(p.url)}</td>
     <td><span class="badge ${p.healthy?'ok':'blocked'}">${p.healthy?'Healthy':'Down'}</span></td>
     <td><span class="badge ${p.circuit==='closed'?'ok':p.circuit==='open'?'blocked':'auth'}">${escHtml(p.circuit)}</span></td>
-    <td><button class="btn sm danger" onclick="removeUpstreamProxy(${i})">Remove</button></td>
+    <td><button class="btn sm danger" data-click="removeUpstreamProxy" data-arg="${i}">Remove</button></td>
   </tr>`).join('');
 }
 
@@ -7421,13 +7730,13 @@ async function loadCluster() {
           : '<em style="color:var(--muted);font-size:.7rem">none</em>';
         let actions = '';
         if (canRevoke) {
-          actions += `<button class="btn ghost sm" style="color:#ef4444;font-size:.7rem" onclick="revokeNode('${escHtml(n.node_id)}')">Revoke</button>`;
+          actions += `<button class="btn ghost sm" style="color:#ef4444;font-size:.7rem" data-click="revokeNode" data-arg="${escHtml(n.node_id)}">Revoke</button>`;
           if (isDraining) {
-            actions += ` <button class="btn ghost sm" style="font-size:.7rem;color:#22c55e" onclick="toggleDrain('${escHtml(n.node_id)}',false)">Undrain</button>`;
+            actions += ` <button class="btn ghost sm" style="font-size:.7rem;color:#22c55e" data-click="toggleDrain" data-arg="${escHtml(n.node_id)}" data-arg2="false">Undrain</button>`;
           } else {
-            actions += ` <button class="btn ghost sm" style="font-size:.7rem;color:#a855f7" onclick="toggleDrain('${escHtml(n.node_id)}',true)">Drain</button>`;
+            actions += ` <button class="btn ghost sm" style="font-size:.7rem;color:#a855f7" data-click="toggleDrain" data-arg="${escHtml(n.node_id)}" data-arg2="true">Drain</button>`;
           }
-          actions += ` <button class="btn ghost sm" style="font-size:.7rem" onclick="editLabels('${escHtml(n.node_id)}')">Labels</button>`;
+          actions += ` <button class="btn ghost sm" style="font-size:.7rem" data-click="editLabels" data-arg="${escHtml(n.node_id)}">Labels</button>`;
         } else {
           actions = '<span style="color:var(--muted);font-size:.75rem">Revoked</span>';
         }
@@ -7573,7 +7882,7 @@ async function loadClusterTokens() {
           <td style="font-size:.75rem">${createdAt}</td>
           <td style="font-size:.75rem" title="${expiresAt.toLocaleString()}">${expiryText}</td>
           <td style="color:${statusColor}">${status}</td>
-          <td>${canDelete ? `<button class="btn ghost sm" style="font-size:.75rem" onclick="deleteToken('${escHtml(t.token_hash)}')">Delete</button>` : '—'}</td>
+          <td>${canDelete ? `<button class="btn ghost sm" style="font-size:.75rem" data-click="deleteToken" data-arg="${escHtml(t.token_hash)}">Delete</button>` : '—'}</td>
         </tr>`;
       }).join('');
     } else {
@@ -7622,7 +7931,7 @@ async function loadNodeGroups(show) {
         <td><code style="font-size:.75rem">${labels || '—'}</code></td>
         <td>${g.priority || 0}</td>
         <td title="${nodeIds}">${g.node_count || 0}</td>
-        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" onclick="deleteNodeGroup('${esc(g.name)}')">Delete</button></td>
+        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" data-click="deleteNodeGroup" data-arg="${esc(g.name)}">Delete</button></td>
       </tr>`;
     });
     html += '</tbody></table>';
@@ -7693,7 +8002,7 @@ async function loadBandwidthPolicies(show) {
         <td><code style="font-size:.75rem">${labels || '—'}</code></td>
         <td>${esc(p.human_rate || 'unlimited')}</td>
         <td>${p.priority || 0}</td>
-        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" onclick="deleteBandwidthPolicy('${esc(p.name)}')">Delete</button></td>
+        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" data-click="deleteBandwidthPolicy" data-arg="${esc(p.name)}">Delete</button></td>
       </tr>`;
     });
     html += '</tbody></table>';
@@ -8566,8 +8875,8 @@ function showCPUpdatingOverlay() {
       </label>
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
-      <button class="btn ghost" onclick="closeWebhookModal()">Cancel</button>
-      <button class="btn" onclick="saveWebhook()">Save</button>
+      <button class="btn ghost" data-click="closeWebhookModal">Cancel</button>
+      <button class="btn" data-click="saveWebhook">Save</button>
     </div>
   </div>
 </div>
@@ -8598,8 +8907,8 @@ function showCPUpdatingOverlay() {
     </div>
     <div class="setup-err" id="um-err" style="margin-bottom:10px"></div>
     <div style="display:flex;gap:10px;margin-top:6px">
-      <button class="btn" id="um-save-btn" onclick="saveUser()">Save</button>
-      <button class="btn ghost" onclick="closeUserModal()">Cancel</button>
+      <button class="btn" id="um-save-btn" data-click="saveUser">Save</button>
+      <button class="btn ghost" data-click="closeUserModal">Cancel</button>
     </div>
   </div>
 </div>
@@ -8663,7 +8972,7 @@ pre.diff-block { margin:0;white-space:pre-wrap;word-break:break-all;font-size:.7
   </div>
 </div>
 
-<script>
+<script nonce="__CSP_NONCE__">
 // ── Login overlay form handler ──────────────────────────────────────────
 document.getElementById('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
