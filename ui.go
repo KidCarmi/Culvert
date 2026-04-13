@@ -59,11 +59,48 @@ func (f *tlsErrorFilter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// cspNonce generates a cryptographically random 16-byte base64 nonce for CSP.
+func cspNonce() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "fallback-nonce-000"
+	}
+	return hex.EncodeToString(b)
+}
+
+// cspNonceKey is the context key for passing the per-request CSP nonce from
+// the index.html handler to securityMiddleware.
+type cspNonceKey struct{}
+
+// cachedIndexHTML holds the embedded index.html template with __CSP_NONCE__
+// placeholders. Read once at startup to avoid re-reading the embed on every
+// page load.
+var cachedIndexHTML []byte
+
 func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen // route registration; each line is one endpoint
 	sub, _ := fs.Sub(staticFiles, "static")
 
+	// Pre-read index.html from embed for nonce injection.
+	if data, err := fs.ReadFile(sub, "index.html"); err == nil {
+		cachedIndexHTML = data
+	}
+
+	staticServer := http.FileServer(http.FS(sub))
+
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	// Serve index.html with per-request CSP nonce injection; all other
+	// static assets (logo.png, etc.) are served directly from the embed.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+			staticServer.ServeHTTP(w, r)
+			return
+		}
+		// Read nonce from context (set by securityMiddleware).
+		nonce, _ := r.Context().Value(cspNonceKey{}).(string)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		body := strings.ReplaceAll(string(cachedIndexHTML), "__CSP_NONCE__", html.EscapeString(nonce))
+		w.Write([]byte(body)) //nolint:errcheck
+	})
 	mux.HandleFunc("/api/setup/status", apiSetupStatus)
 	mux.HandleFunc("/api/setup/complete", apiSetupComplete)
 	mux.HandleFunc("/api/stats", apiStats)
@@ -364,8 +401,12 @@ func securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		// CSP: generate a per-request nonce and pass it to handlers via context.
+		// The index.html handler reads this to inject into <script> tags.
+		nonce := cspNonce()
+		r = r.WithContext(context.WithValue(r.Context(), cspNonceKey{}, nonce))
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://flagcdn.com; connect-src 'self'")
+			fmt.Sprintf("default-src 'self'; frame-ancestors 'none'; script-src 'self' 'nonce-%s' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://flagcdn.com; connect-src 'self'", nonce))
 
 		// ── CORS: allow same-origin requests (reflect the origin back) ───────
 		origin := r.Header.Get("Origin")
