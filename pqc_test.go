@@ -78,7 +78,7 @@ func TestPQC_MLKEM768_KeyExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close() //nolint:errcheck -- test cleanup
+	defer func() { _ = ln.Close() }()
 
 	// Accept one connection in background.
 	serverDone := make(chan error, 1)
@@ -99,7 +99,7 @@ func TestPQC_MLKEM768_KeyExchange(t *testing.T) {
 			"This means Go's crypto/tls did not negotiate ML-KEM-768.\n"+
 			"Culvert's post-quantum claims in the README are invalid for this Go version.", err)
 	}
-	defer rawConn.Close() //nolint:errcheck -- test cleanup
+	defer func() { _ = rawConn.Close() }()
 	conn := rawConn.(*tls.Conn)
 
 	// Verify server side also succeeded.
@@ -146,7 +146,7 @@ func TestPQC_ClassicalFallback_Rejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close() //nolint:errcheck -- test cleanup
+	defer func() { _ = ln.Close() }()
 
 	go func() {
 		conn, err := ln.Accept()

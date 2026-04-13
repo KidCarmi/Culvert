@@ -97,20 +97,20 @@ func applyAdminSecurity(s *AdminSettings) {
 	if s.IPFilterMode != "" {
 		ipf.SetMode(s.IPFilterMode)
 		for _, ip := range s.IPFilterList {
-			ipf.Add(ip) //nolint:errcheck -- best-effort on startup
+			_ = ipf.Add(ip)
 		}
 	}
 	if s.RateLimitRPM > 0 {
 		rl.Configure(s.RateLimitRPM, time.Minute)
 		for _, ex := range s.RateLimitExemptions {
-			rl.AddExemption(ex) //nolint:errcheck -- best-effort on startup
+			_ = rl.AddExemption(ex)
 		}
 	}
 	if s.ConnLimitEnabled && s.ConnLimitMaxPerIP > 0 {
 		connLimiter.Enable(s.ConnLimitMaxPerIP)
 	}
 	if s.BlockPageHTML != "" {
-		setBlockPageHTML(s.BlockPageHTML)
+		_ = setBlockPageHTML(s.BlockPageHTML)
 	}
 	if len(s.RewriteRules) > 0 {
 		rewriter.SetRules(s.RewriteRules)
@@ -149,7 +149,7 @@ func applyAdminServices(s *AdminSettings) {
 // applyAdminNetwork applies UI access, TLS, and network settings.
 func applyAdminNetwork(s *AdminSettings) {
 	if len(s.UIAllowIPs) > 0 {
-		SetUIAllowedCIDRs(s.UIAllowIPs)
+		_ = SetUIAllowedCIDRs(s.UIAllowIPs)
 	}
 	if s.BaseURL != "" {
 		SetProxyBaseURL(s.BaseURL)
