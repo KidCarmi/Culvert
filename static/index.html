@@ -1846,12 +1846,12 @@ Firefox (all platforms):
         </div>
       </div>
 
-      <!-- OTLP Metrics Export -->
+      <!-- OTLP Metrics + Traces Export -->
       <div class="panel" style="margin-top:18px">
-        <div class="panel-header"><span class="panel-title">OpenTelemetry (OTLP) Export</span></div>
+        <div class="panel-header"><span class="panel-title">OpenTelemetry (OTLP) — Metrics + Traces</span></div>
         <div class="panel-body">
           <p class="hint">
-            Push all Culvert metrics to an OpenTelemetry Collector via OTLP/HTTP JSON (every 15s).<br>
+            Push all Culvert metrics and request-level traces to an OpenTelemetry Collector via OTLP/HTTP JSON (every 15s). Traces appear in Jaeger / Tempo.<br>
             Compatible with Grafana, Datadog, New Relic, Jaeger, and any OTLP-compatible backend.
           </p>
           <div style="display:flex;gap:10px;align-items:center">
@@ -2011,7 +2011,7 @@ Firefox (all platforms):
                 <input type="text" class="input" style="width:100%" id="pol-src-group-search"
                   placeholder="Search groups…" autocomplete="off"
                   data-focus="onGroupFocus" data-input="onGroupSearchInput"
-                  onblur="setTimeout(()=>closeGroupDropdown(),200)">
+                  data-blur="closeGroupDropdown">
                 <div id="pol-src-group-dropdown" class="picker-dropdown" style="display:none"></div>
               </div>
             </div>
@@ -3109,8 +3109,8 @@ document.addEventListener('click', e => {
     case 'bulkDeleteBL':      bulkDeleteBL(); break;
     case 'blLoadMore':        blLoadMore(); break;
     case 'addException':      addException(); break;
-    case 'removeHost':        removeHost(+arg); break;
-    case 'removeException':   removeException(+arg); break;
+    case 'removeHost':        removeHost(arg); break;
+    case 'removeException':   removeException(arg); break;
     case 'saveBlocklistFeed': saveBlocklistFeed(); break;
     case 'syncBlocklistFeed': syncBlocklistFeed(); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
@@ -3357,6 +3357,22 @@ document.addEventListener('focusin', e => {
     case 'onGroupFocus': onGroupFocus(); break;
   }
 });
+
+// ── data-blur: replaces onblur ───────────────────────────────────────────
+document.addEventListener('focusout', e => {
+  const el = e.target.closest('[data-blur]');
+  if (!el) return;
+  if (el.dataset.blur === 'closeGroupDropdown') {
+    setTimeout(() => closeGroupDropdown(), 200);
+  }
+});
+
+// ── Flag image onerror (programmatic — CSP allows JS-set handlers) ──────
+document.addEventListener('error', e => {
+  if (e.target.tagName === 'IMG' && e.target.src && e.target.src.includes('flagcdn.com')) {
+    e.target.style.display = 'none';
+  }
+}, true); // capture phase to catch img errors
 
 // ── data-hover: replaces onmouseover/onmouseout ─────────────────────────
 document.addEventListener('mouseover', e => {
@@ -5694,7 +5710,7 @@ async function loadOTLPConfig() {
     const el = document.getElementById('s-otlp-status');
     if (r.enabled) {
       el.style.display = '';
-      el.textContent = '✅ Exporting to ' + r.endpoint;
+      el.textContent = '✅ Exporting metrics + traces to ' + r.endpoint;
       el.style.color = 'var(--green)';
     } else {
       el.style.display = 'none';
@@ -5712,7 +5728,7 @@ async function saveOTLP() {
     });
     const el = document.getElementById('s-otlp-status');
     el.style.display = '';
-    el.textContent = '✅ Exporting to ' + endpoint;
+    el.textContent = '✅ Exporting metrics + traces to ' + endpoint;
     el.style.color = 'var(--green)';
     toast('OTLP export enabled', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
@@ -6336,7 +6352,7 @@ function connectSSE() {
 const FLAG_BASE = 'https://flagcdn.com/16x12/';
 function countryFlag(code) {
   if (!code) return '';
-  return `<img src="${FLAG_BASE}${code.toLowerCase()}.png" width="16" height="12" style="vertical-align:middle;margin-right:4px;border-radius:2px" onerror="this.style.display='none'">`;
+  return `<img src="${FLAG_BASE}${code.toLowerCase()}.png" width="16" height="12" style="vertical-align:middle;margin-right:4px;border-radius:2px">`;
 }
 
 function renderCountryChart(countries) {

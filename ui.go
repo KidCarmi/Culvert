@@ -63,7 +63,11 @@ func (f *tlsErrorFilter) Write(p []byte) (int, error) {
 func cspNonce() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		return "fallback-nonce-000"
+		// crypto/rand failure means the system entropy source is broken.
+		// Fail closed: return an empty nonce so the CSP blocks all scripts
+		// rather than allowing a predictable nonce to bypass the policy.
+		logger.Printf("ERROR: crypto/rand failed for CSP nonce: %v", err)
+		return ""
 	}
 	return hex.EncodeToString(b)
 }

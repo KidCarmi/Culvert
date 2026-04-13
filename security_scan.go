@@ -41,6 +41,15 @@ import (
 // maxDecompressBytes limits decompressed data to 64 MB to guard against gzip bombs.
 const maxDecompressBytes = 64 << 20
 
+// zstdDecoderPool reuses zstd decoders to avoid allocating ~1-8 MB of internal
+// buffers per response. Decoders are reset with Reset() before reuse.
+var zstdDecoderPool = sync.Pool{
+	New: func() any {
+		d, _ := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1)) //nolint:errcheck // nil reader is valid for pool initialization
+		return d
+	},
+}
+
 // scanBodyTimeout caps the total time for all body scanners (ClamAV + YARA).
 // If the combined scan doesn't finish in time, the content is blocked (fail-closed).
 const scanBodyTimeout = 10 * time.Second
@@ -397,12 +406,13 @@ func decompressForScan(data []byte, contentEncoding string) []byte {
 	case "br":
 		reader = io.NopCloser(brotli.NewReader(bytes.NewReader(data)))
 	case "zstd":
-		zr, zErr := zstd.NewReader(bytes.NewReader(data))
-		if zErr != nil {
+		zr := zstdDecoderPool.Get().(*zstd.Decoder)
+		if err := zr.Reset(bytes.NewReader(data)); err != nil {
+			zstdDecoderPool.Put(zr)
 			return data
 		}
-		defer zr.Close()
 		decompressed, zReadErr := io.ReadAll(io.LimitReader(zr, maxDecompressBytes))
+		zstdDecoderPool.Put(zr)
 		if zReadErr != nil || len(decompressed) == 0 {
 			return data
 		}
