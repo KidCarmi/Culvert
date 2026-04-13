@@ -3942,7 +3942,7 @@ function renderURLCatList(cats) {
 }
 
 async function deleteURLCategory(name) {
-  if (!confirm(`Delete category "${name}"? Policy rules referencing it will no longer match.`)) return;
+  if (!await confirmAction('Delete Category', `Delete category "${name}"? Policy rules referencing it will no longer match.`)) return;
   try {
     await api('/api/urlcat?name=' + encodeURIComponent(name), {method: 'DELETE'});
     showToast(`Category "${name}" deleted`, 'success');
@@ -4032,7 +4032,7 @@ async function toggleBlocklistMode() {
   const warn = newMode === 'allow'
     ? 'Switch to ALLOWLIST mode?\n\nOnly the hosts in your list will be reachable. Everything else will be blocked. Make sure your list is correct before confirming.'
     : 'Switch back to BLOCK mode?\n\nOnly the hosts in your list will be blocked. Everything else will be allowed.';
-  if (!confirm(warn)) return;
+  if (!await confirmAction('Change Default Action', warn, next === 'allow' ? 'Switch to Allow' : 'Switch to Deny')) return;
   try {
     const d = await api('/api/blocklist/mode', {
       method: 'POST',
@@ -4779,7 +4779,7 @@ async function addSSLBypass() {
 }
 
 async function removeSSLBypass(pattern) {
-  if (!confirm('Remove SSL bypass for "' + pattern + '"? Traffic to this host will be inspected.')) return;
+  if (!await confirmAction('Remove SSL Bypass', 'Remove SSL bypass for "' + pattern + '"? Traffic to this host will be inspected.')) return;
   try {
     await api('/api/ssl-bypass?pattern=' + encodeURIComponent(pattern), { method: 'DELETE' });
     toast('Pattern removed', 'success');
@@ -5015,7 +5015,7 @@ async function saveYARARule() {
 async function deleteYARARule() {
   const name = document.getElementById('sec-yara-edit-name').value.trim();
   if (!name) { setYARAEditStatus('err', 'Name is required'); return; }
-  if (!confirm('Delete YARA rule file "' + name + '"?')) return;
+  if (!await confirmAction('Delete YARA Rule', 'Delete YARA rule file "' + name + '"? This cannot be undone.')) return;
   try {
     await api('/api/security-scan/yara/rules/' + encodeURIComponent(name), { method: 'DELETE' });
     setYARAEditStatus('ok', '✓ Deleted ' + name);
@@ -5871,7 +5871,7 @@ async function saveWebhook() {
 }
 
 async function deleteWebhook(id) {
-  if (!confirm('Delete this webhook?')) return;
+  if (!await confirmAction('Delete Webhook', 'Delete this webhook? This cannot be undone.')) return;
   try {
     await api('/api/alerts/webhooks?id=' + id, {method:'DELETE'});
     toast('Webhook deleted', 'success');
@@ -6188,7 +6188,7 @@ async function deleteProfile() {
   if (!fpCurrentId) return;
   const p = fpProfiles.find(x => x.id === fpCurrentId);
   if (!p) return;
-  if (!confirm(`Delete profile "${p.name}"? Policy rules referencing it will no longer filter files.`)) return;
+  if (!await confirmAction('Delete Profile', `Delete profile "${p.name}"? Policy rules referencing it will no longer filter files.`)) return;
   try {
     await api('/api/fileblock/profiles?id=' + encodeURIComponent(fpCurrentId), {method:'DELETE'});
     fpCurrentId = null;
@@ -7203,7 +7203,7 @@ async function saveIdP() {
 }
 
 async function deleteIdP(id, name) {
-  if (!confirm(`Delete provider "${name}"?`)) return;
+  if (!await confirmAction('Delete Provider', `Delete provider "${name}"? Users authenticating through this provider will be affected.`)) return;
   const res = await apiFetch(`/api/idp/${id}`, { method: 'DELETE' });
   if (!res.ok) { toast('Delete failed: ' + await res.text(), 'error'); return; }
   loadIdPList();
@@ -7654,7 +7654,7 @@ async function downloadCA() {
 }
 
 async function clearCACache() {
-  if (!confirm('Clear all cached leaf certificates?')) return;
+  if (!await confirmAction('Clear Certificate Cache', 'Clear all cached leaf certificates? New certs will be generated on next request.', 'Clear')) return;
   await api('/api/ca/cache-clear', {method:'POST'});
   toast('Leaf certificate cache cleared','success');
   loadCAMgmt();
@@ -8056,7 +8056,7 @@ async function createNodeGroup() {
 }
 
 async function deleteNodeGroup(name) {
-  if (!confirm(`Delete node group "${name}"?`)) return;
+  if (!await confirmAction('Delete Node Group', `Delete node group "${name}"? Nodes will become ungrouped.`)) return;
   try {
     await api('/api/cluster/node-groups?name=' + encodeURIComponent(name), { method: 'DELETE' });
     loadNodeGroups(true);
@@ -8131,7 +8131,7 @@ async function createBandwidthPolicy() {
 }
 
 async function deleteBandwidthPolicy(name) {
-  if (!confirm(`Delete bandwidth policy "${name}"?`)) return;
+  if (!await confirmAction('Delete Bandwidth Policy', `Delete bandwidth policy "${name}"? Rate limits will no longer apply.`)) return;
   try {
     await api('/api/cluster/bandwidth?name=' + encodeURIComponent(name), { method: 'DELETE' });
     loadBandwidthPolicies(true);
@@ -8388,7 +8388,7 @@ async function revokeNode(nodeId) {
 }
 
 async function deleteToken(hash) {
-  if (!confirm('Delete this enrollment token? This cannot be undone.')) return;
+  if (!await confirmAction('Delete Token', 'Delete this enrollment token? This cannot be undone.')) return;
   try {
     const r = await api('/api/cluster/tokens?hash=' + encodeURIComponent(hash), { method: 'DELETE' });
     if (r && r.ok) {
@@ -8401,7 +8401,7 @@ async function deleteToken(hash) {
 }
 
 async function bulkDeleteExpiredTokens() {
-  if (!confirm('Delete all expired and used tokens? This cannot be undone.')) return;
+  if (!await confirmAction('Delete Expired Tokens', 'Delete all expired and used tokens? This cannot be undone.', 'Delete All')) return;
   try {
     const r = await api('/api/cluster/tokens');
     if (!r) return;
@@ -8441,7 +8441,7 @@ function timeUntil(date) {
 
 async function toggleDrain(nodeId, draining) {
   const action = draining ? 'drain (maintenance mode)' : 'return to active service';
-  if (!confirm(`${draining ? 'Drain' : 'Undrain'} node "${nodeId}"? This will ${action}.`)) return;
+  if (!await confirmAction(draining ? 'Drain Node' : 'Undrain Node', `${draining ? 'Drain' : 'Undrain'} node "${nodeId}"? This will ${action}.`, draining ? 'Drain' : 'Undrain')) return;
   try {
     const r = await api('/api/cluster/drain', {
       method: 'POST',
@@ -8619,7 +8619,7 @@ async function updatePreview() {
 async function updateApply() {
   const tag = updatesData?.pull_tag || updatesData?.latest_version;
   if (!tag) return;
-  if (!confirm('Apply update to ' + tag + '? The container will be restarted.')) return;
+  if (!await confirmAction('Apply Update', 'Apply update to ' + tag + '? The container will be restarted.', 'Apply')) return;
   document.getElementById('upd-progress').style.display = '';
   document.getElementById('upd-apply-btn').style.display = 'none';
   const progressBar = document.getElementById('upd-progress-bar');
@@ -8701,7 +8701,7 @@ async function loadRollbackStatus() {
 }
 
 async function updateRollback() {
-  if (!confirm('Rollback to the previous version?')) return;
+  if (!await confirmAction('Rollback', 'Rollback to the previous version? The container will be restarted.', 'Rollback')) return;
   const r = await api('/api/update/rollback', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -8742,7 +8742,7 @@ async function clusterUpdateStart() {
   let mc = 3, mp = 20;
   if (budgetSel === 'conservative') { mc = 2; mp = 10; }
   else if (budgetSel === 'aggressive') { mc = 5; mp = 50; }
-  if (!confirm('Start cluster rolling update to ' + tag + '?')) return;
+  if (!await confirmAction('Cluster Update', 'Start cluster rolling update to ' + tag + '? Nodes will be updated one by one.', 'Start Update')) return;
   const r = await api('/api/update/cluster', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

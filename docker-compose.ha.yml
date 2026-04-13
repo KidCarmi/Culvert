@@ -105,7 +105,7 @@ services:
           -audit-log /data/audit.jsonl
           -geoip-db /app/GeoLite2-Country.mmdb
           -clamav-addr tcp:clamav:3310
-          -yara-rules-dir /app/yara
+          -yara-rules-dir /data/yara
           -threat-feed-db /data/threatfeeds.json
           -ui-users-file /data/ui_users.json
           -fileprofiles-file /data/fileprofiles.json
@@ -182,7 +182,7 @@ services:
           -audit-log /data/audit.jsonl
           -geoip-db /app/GeoLite2-Country.mmdb
           -clamav-addr tcp:clamav:3310
-          -yara-rules-dir /app/yara
+          -yara-rules-dir /data/yara
           -threat-feed-db /data/threatfeeds.json
           -fileprofiles-file /data/fileprofiles.json"
 

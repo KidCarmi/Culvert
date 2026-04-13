@@ -730,6 +730,11 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 
 		// YARA rules.
 		if yaraDir != "" {
+			// Seed the rules directory from the bundled /app/yara on first boot
+			// so starter rules are available even when yaraDir points to a
+			// persistent volume (e.g. /data/yara). Only copies if the target
+			// directory is empty or doesn't exist.
+			seedYARARules(yaraDir)
 			if err := globalYARA.LoadDir(yaraDir); err != nil {
 				logger.Printf("YARA: load error: %v", err)
 			} else {
@@ -1098,6 +1103,51 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+// seedYARARules copies bundled starter rules from /app/yara to the target
+// directory on first boot. Only copies if the target is empty or doesn't exist.
+// This ensures starter rules are available when yaraDir points to a persistent
+// volume (e.g. /data/yara) that starts empty on first deployment.
+func seedYARARules(targetDir string) {
+	const bundledDir = "/app/yara"
+	if targetDir == bundledDir {
+		return // same directory, no seeding needed
+	}
+	// Check if target already has rules.
+	entries, _ := filepath.Glob(filepath.Join(targetDir, "*.yar"))
+	yaraEntries, _ := filepath.Glob(filepath.Join(targetDir, "*.yara"))
+	if len(entries)+len(yaraEntries) > 0 {
+		return // already has rules, don't overwrite
+	}
+	// Check if bundled dir exists.
+	bundled, _ := filepath.Glob(filepath.Join(bundledDir, "*.yar"))
+	bundledYara, _ := filepath.Glob(filepath.Join(bundledDir, "*.yara"))
+	bundled = append(bundled, bundledYara...)
+	if len(bundled) == 0 {
+		return // no bundled rules to seed
+	}
+	_ = os.MkdirAll(targetDir, 0o750)
+	copied := 0
+	for _, src := range bundled {
+		data, err := os.ReadFile(src) // #nosec G304 -- src is from filepath.Glob on admin-configured bundledDir
+		if err != nil {
+			continue
+		}
+		// filepath.Base strips any directory component; filepath.Clean prevents traversal.
+		safeName := filepath.Base(filepath.Clean(src))
+		dst := filepath.Join(targetDir, safeName)
+		// Verify the resolved path stays inside targetDir (defense-in-depth).
+		if filepath.Dir(dst) != filepath.Clean(targetDir) {
+			continue
+		}
+		if err := os.WriteFile(dst, data, 0o600); err == nil { // #nosec G703,G306 -- dst is validated by filepath.Dir containment check above
+			copied++
+		}
+	}
+	if copied > 0 {
+		logger.Printf("YARA: seeded %d starter rule(s) from %s to %s", copied, bundledDir, targetDir)
+	}
+}
 
 func firstNonZero(vals ...int) int {
 	for _, v := range vals {
