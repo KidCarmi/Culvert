@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"mime"
 	"path"
 	"strings"
@@ -170,4 +171,20 @@ func (fb *FileBlocker) CheckContentDisposition(cd string) string {
 		return ext
 	}
 	return ""
+}
+
+// fileBlockConn writes a synthetic HTTP/1.1 403 response to a raw connection
+// (typically the client side of an SSL-inspected tunnel) when a file-blocking
+// check fires inside handleTunnelInspect. Mirrors the scanBlockConn pattern.
+func fileBlockConn(dst interface{ Write([]byte) (int, error) }, host, urlPath, ext, source string) {
+	logger.Printf("FILE_BLOCKED (tunnel %s) -> %q%q (ext=%q)", source, sanitizeLog(host), sanitizeLog(urlPath), sanitizeLog(ext))
+	body := fmt.Sprintf("Blocked: file type %s is not allowed (%s)\r\n", ext, source)
+	fmt.Fprintf(dst, //nolint:errcheck
+		"HTTP/1.1 403 Forbidden\r\n"+
+			"Content-Type: text/plain; charset=utf-8\r\n"+
+			"Content-Length: %d\r\n"+
+			"Connection: close\r\n"+
+			"\r\n%s",
+		len(body), body,
+	)
 }

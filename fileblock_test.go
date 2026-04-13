@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -148,5 +149,119 @@ func TestProxy_FileBlockURL(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", rec.Code)
+	}
+}
+
+// ── fileBlockConn helper ────────────────────────────────────────────────────
+
+func TestFileBlockConn(t *testing.T) {
+	var buf bytes.Buffer
+	fileBlockConn(&buf, "example.com", "/download/script.ps1", ".ps1", "global ext")
+
+	resp := buf.String()
+	if !bytes.Contains(buf.Bytes(), []byte("HTTP/1.1 403")) {
+		t.Errorf("expected HTTP/1.1 403 in response, got:\n%s", resp)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte(".ps1")) {
+		t.Errorf("expected .ps1 in body, got:\n%s", resp)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("Connection: close")) {
+		t.Errorf("expected Connection: close header, got:\n%s", resp)
+	}
+}
+
+// ── Fix 1: ActionAllow + file profile blocks plain HTTP ──────────────────────
+
+func TestProxy_FileBlockPolicyProfile(t *testing.T) {
+	setupProxyTest(t)
+
+	// Ensure the built-in "Executables" profile is available (includes .ps1).
+	globalProfileStore.mu.Lock()
+	found := false
+	for _, p := range globalProfileStore.profiles {
+		if p.Name == "Executables" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		globalProfileStore.profiles = append(globalProfileStore.profiles, &FileExtProfile{
+			ID: "test-exec", Name: "Executables", Extensions: []string{".ps1", ".exe", ".bat"},
+		})
+	}
+	globalProfileStore.mu.Unlock()
+
+	// Add a policy rule that allows example.com with the Executables profile.
+	policyStore.mu.Lock()
+	oldRules := policyStore.rules
+	policyStore.rules = []*PolicyRule{{
+		Name:          "allow-with-profile",
+		Priority:      1,
+		Action:        ActionAllow,
+		DestFQDN:      "example.com",
+		FileFiltering: true,
+		FileProfile:   "Executables",
+	}}
+	policyStore.mu.Unlock()
+	t.Cleanup(func() {
+		policyStore.mu.Lock()
+		policyStore.rules = oldRules
+		policyStore.mu.Unlock()
+	})
+
+	req := makeRequest("GET", "http://example.com/tools/script.ps1", nil)
+	rec := httptest.NewRecorder()
+	handleRequest(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for .ps1 via policy profile, got %d", rec.Code)
+	}
+}
+
+// Verify that the same rule allows a non-blocked extension.
+func TestProxy_FileBlockPolicyProfile_AllowsClean(t *testing.T) {
+	setupProxyTest(t)
+
+	// Ensure the built-in "Executables" profile is available.
+	globalProfileStore.mu.Lock()
+	found := false
+	for _, p := range globalProfileStore.profiles {
+		if p.Name == "Executables" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		globalProfileStore.profiles = append(globalProfileStore.profiles, &FileExtProfile{
+			ID: "test-exec", Name: "Executables", Extensions: []string{".ps1", ".exe"},
+		})
+	}
+	globalProfileStore.mu.Unlock()
+
+	policyStore.mu.Lock()
+	oldRules := policyStore.rules
+	policyStore.rules = []*PolicyRule{{
+		Name:          "allow-with-profile",
+		Priority:      1,
+		Action:        ActionAllow,
+		DestFQDN:      "example.com",
+		FileFiltering: true,
+		FileProfile:   "Executables",
+	}}
+	policyStore.mu.Unlock()
+	t.Cleanup(func() {
+		policyStore.mu.Lock()
+		policyStore.rules = oldRules
+		policyStore.mu.Unlock()
+	})
+
+	// A .txt download should pass through the profile check.
+	req := makeRequest("GET", "http://example.com/readme.txt", nil)
+	rec := httptest.NewRecorder()
+	handleRequest(rec, req)
+
+	// Not forbidden — should be 200 or 502 (no real upstream), but NOT 403.
+	if rec.Code == http.StatusForbidden {
+		t.Errorf("expected non-403 for .txt, got %d", rec.Code)
 	}
 }

@@ -2,3 +2,5 @@
 github.com/mattermost/xml-roundtrip-validator
 # Mature hash library, transitive of badger/ristretto — no updates needed
 github.com/cespare/xxhash/v2
+# ASN.1 BER codec, transitive of go-ldap/ldap — active pseudoversion, low score is heuristic noise
+github.com/go-asn1-ber/asn1-ber
