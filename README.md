@@ -169,13 +169,18 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 Culvert is lightweight by design - a single Go binary with no runtime dependencies. Resource requirements scale with traffic volume, SSL inspection depth, and whether antivirus scanning is enabled.
 
+All benchmarks below are based on **x86_64 (AMD64)** processors. ARM64 (AWS Graviton, Apple Silicon) typically achieves 10-20% better throughput per vCPU due to Go's efficient ARM code generation. If deploying on ARM, you can conservatively use the same numbers or reduce vCPU count by one tier.
+
 ### Deployment Profiles
 
-| Profile | Users | Requests/sec | SSL Inspection | ClamAV | YARA |
-|---|---|---|---|---|---|
-| **Home Lab** | 1-5 | < 50 | Optional | Off | Off |
-| **Small Office** | 10-50 | 50-500 | Recommended | Optional | Optional |
-| **Enterprise** | 100-1000+ | 500-5000+ | Yes | Yes | Yes |
+| Profile | Users | Requests/sec | Max throughput | Concurrent conns | SSL Inspection | ClamAV | YARA |
+|---|---|---|---|---|---|---|---|
+| **Home Lab** | 1-5 | < 50 | ~100 Mbps | < 100 | Optional | Off | Off |
+| **Small Office** | 10-50 | 50-500 | ~500 Mbps | 100-1000 | Recommended | Optional | Optional |
+| **Enterprise (single node)** | 100-500 | 500-2000 | ~1 Gbps | 1000-5000 | Yes | Yes | Yes |
+| **Enterprise (cluster)** | 500-5000+ | 2000-10000+ | ~10 Gbps (multi-DP) | 5000+ | Yes | Yes | Yes |
+
+> **When to cluster:** A single node with SSL inspection + ClamAV handles ~500 concurrent users comfortably. Beyond 500 users or 1 Gbps sustained throughput, deploy a Control Plane + Data Plane cluster and add DP nodes horizontally.
 
 ### Resource Requirements
 
@@ -184,17 +189,33 @@ Culvert is lightweight by design - a single Go binary with no runtime dependenci
 | **CPU** | 1 vCPU | 2 vCPU | 4+ vCPU |
 | **RAM (proxy only)** | 128 MB | 256 MB | 512 MB - 1 GB |
 | **RAM (with ClamAV)** | 512 MB | 1 GB | 2 GB |
+| **RAM per connection** | ~10 KB idle / ~138 KB active | same | same |
 | **Storage (base)** | 50 MB (binary + config) | 50 MB | 50 MB |
 | **Storage (ClamAV DB)** | - | 300 MB | 300 MB |
 | **Storage (GeoIP DB)** | 5 MB | 5 MB | 5 MB |
 | **Storage (logs)** | 100 MB - 1 GB | 1 - 5 GB | 5 - 50 GB |
 | **Storage (admin settings)** | < 10 KB | < 10 KB | < 10 KB |
+| **Disk type** | Any (HDD OK) | SSD recommended | SSD required |
+
+### Connection Memory Breakdown
+
+Each proxied connection consumes memory proportional to its state:
+
+| State | RAM per connection | Notes |
+|---|---|---|
+| Idle (keepalive) | ~10 KB | Go net/http conn + buffers |
+| Active HTTP forward | ~70 KB | Request/response buffers (32 KB each) |
+| SSL-inspected tunnel | ~138 KB | 2x 32 KB relay buffers (pooled) + TLS state |
+| Body scanning (ClamAV/YARA) | +64 KB - 4 MB | Buffered body up to scan limit, then freed |
+| WebSocket relay | ~138 KB | Same as tunnel (bidirectional relay) |
+
+At 5000 concurrent SSL-inspected connections: ~670 MB for connection buffers alone. Plan RAM accordingly for high-concurrency environments.
 
 ### Notes
 
-- **ClamAV** is the largest resource consumer. It downloads ~300 MB of virus signatures on first boot and keeps them in memory. If you don't need antivirus scanning, disable it to save ~500 MB RAM.
-- **SSL inspection** adds ~1 KB RAM per cached leaf certificate (LRU cache, 10K max = ~10 MB). CPU impact is ~0.5ms per new TLS handshake (ECDSA P-256 signing).
-- **Log rotation** is automatic. Request logs rotate at 100 MB (configurable via `-request-log-max-mb`), audit logs at 50 MB, system logs at 50 MB.
+- **ClamAV** is the largest resource consumer. It downloads ~300 MB of virus signatures on first boot and keeps them in memory (~500 MB RSS). If you don't need antivirus scanning, disable it to save ~500 MB RAM. ClamAV signature reloads (freshclam updates, typically every 4 hours) cause a brief CPU spike (~2-5 seconds) but do **not** block proxy traffic - the reload happens in the ClamAV sidecar process, not in Culvert itself. No over-provisioning needed.
+- **SSL inspection** adds ~1 KB RAM per cached leaf certificate (LRU cache, 10K max = ~10 MB). CPU impact is ~0.5ms per **new** TLS handshake using **ECDSA P-256 signing** (Culvert's default). RSA 2048 would be ~5x slower per signing operation, but Culvert exclusively uses ECDSA P-256 for its internal CA - no RSA path exists. Cached certificates (cache hit) have zero signing overhead.
+- **Log rotation** is automatic. Request logs rotate at 100 MB (configurable via `-request-log-max-mb`), audit logs at 50 MB, system logs at 50 MB. **Storage I/O:** log writes are append-only and sequential - HDD is adequate for Home Lab. For Small Office+ with SSL inspection (high request volume), SSD is recommended to avoid I/O wait impacting proxy latency.
 - **Threat feeds** (URLhaus + OpenPhish) add ~5-20 MB RAM depending on feed size.
 - **Prometheus metrics** are stateless - scraped externally, no local storage.
 - **Post-quantum (ML-KEM-768)** adds ~1 KB to initial TLS handshakes. No ongoing RAM/CPU impact.
@@ -205,13 +226,13 @@ Culvert is lightweight by design - a single Go binary with no runtime dependenci
 For a functional deployment with all features enabled:
 
 ```
-2 vCPU | 1 GB RAM | 2 GB disk
+2 vCPU | 1 GB RAM | 2 GB disk (SSD recommended)
 ```
 
 For proxy-only (no AV, no SSL inspection):
 
 ```
-1 vCPU | 128 MB RAM | 100 MB disk
+1 vCPU | 128 MB RAM | 100 MB disk (any)
 ```
 
 ### Cluster Deployments (Control Plane / Data Plane)
@@ -225,16 +246,17 @@ For proxy-only (no AV, no SSL inspection):
 
 **Scale reference:**
 
-| Setup | Nodes | Total resources | Handles |
-|---|---|---|---|
-| **Small cluster** | 1 CP + 2 DP | 6 vCPU, 2.5 GB RAM | ~1000 concurrent users |
-| **Medium cluster** | 1 CP (HA) + 5 DP | 12 vCPU, 6 GB RAM | ~5000 concurrent users |
-| **Large cluster** | 1 CP (HA) + 10 DP | 22 vCPU, 11 GB RAM | ~10000+ concurrent users |
+| Setup | Nodes | Total resources | Throughput | Handles |
+|---|---|---|---|---|
+| **Small cluster** | 1 CP + 2 DP | 6 vCPU, 2.5 GB RAM | ~2 Gbps | ~1000 concurrent users |
+| **Medium cluster** | 1 CP (HA) + 5 DP | 12 vCPU, 6 GB RAM | ~5 Gbps | ~5000 concurrent users |
+| **Large cluster** | 1 CP (HA) + 10 DP | 22 vCPU, 11 GB RAM | ~10 Gbps | ~10000+ concurrent users |
 
 - **CP is lightweight** - it only serves gRPC config sync, node enrollment, and the admin dashboard. No proxy traffic flows through it.
 - **DP nodes are stateless** - they receive their entire config from the CP on connect. Lose a DP, spin up a new one, it auto-enrolls and gets the full config in seconds.
 - **Bandwidth/QoS** policies are enforced per-DP, so rate limits scale linearly with node count.
 - **Network:** CP to DP communication uses gRPC over mTLS. Typical bandwidth: < 1 KB/s per node (config sync + heartbeat every 30s).
+- **Horizontal scaling:** each DP node adds ~1 Gbps throughput capacity (with SSL inspection). Scale is linear - no shared state between DP nodes.
 
 ---
 
