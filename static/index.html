@@ -4211,11 +4211,11 @@ async function fetchStats() {
     document.getElementById('d-auth').textContent    = fmt(s.authFail);
     document.getElementById('uptime').textContent    = s.uptime;
     document.getElementById('server-time').textContent = s.serverTime;
-    document.getElementById('proxy-port').textContent  = ':' + s.proxyPort;
-    document.getElementById('ui-port').textContent     = ':' + s.uiPort;
+    document.getElementById('proxy-port').textContent  = s.proxyPort;
+    document.getElementById('ui-port').textContent     = s.uiPort;
     // settings view
-    document.getElementById('s-proxy-port').textContent = ':' + s.proxyPort;
-    document.getElementById('s-ui-port').textContent    = ':' + s.uiPort;
+    document.getElementById('s-proxy-port').textContent = s.proxyPort;
+    document.getElementById('s-ui-port').textContent    = s.uiPort;
     document.getElementById('s-uptime').textContent     = s.uptime;
     document.getElementById('s-bl-sz').textContent      = s.blocklistSz + ' hosts';
     document.getElementById('s-auth').textContent       = s.authEnabled ? 'Enabled' : 'Disabled';
