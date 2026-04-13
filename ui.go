@@ -162,6 +162,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/content-scan/bypass", apiContentScanBypass)             // GET/PUT — DPI bypass host list
 
 	// ── URL Categories (dynamic host-list management) ─────────────────────
+	mux.HandleFunc("/api/category-groups", apiCategoryGroups) // GET/POST/PUT/DELETE category groups
 	mux.HandleFunc("/api/urlcat", apiURLCat)            // GET/POST/PUT/DELETE categories
 	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)   // POST/DELETE individual hosts
 	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup) // GET — resolve a domain to its category
@@ -1829,6 +1830,91 @@ func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 // ── URL Categories ─────────────────────────────────────────────────────────
 
 // GET/POST/PUT/DELETE /api/urlcat
+// GET/POST/PUT/DELETE /api/category-groups - manage named category groups.
+func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"groups": globalCategoryGroups.List(),
+			"names":  globalCategoryGroups.Names(),
+		})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Name       string   `json:"name"`
+			Categories []string `json:"categories"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		g, err := globalCategoryGroups.Add(body.Name, body.Categories)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalCategoryGroups.Save()
+		auditEvent(r, "category-group.add", g.Name, fmt.Sprintf("%d categories", len(g.Categories)))
+		saveConfigVersion(sessionAdmin(r), "category-group.add")
+		jsonOK(w, map[string]any{"ok": true, "group": g})
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Name       string   `json:"name"`
+			Categories []string `json:"categories"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := globalCategoryGroups.Update(body.Name, body.Categories); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalCategoryGroups.Save()
+		auditEvent(r, "category-group.update", body.Name, fmt.Sprintf("%d categories", len(body.Categories)))
+		saveConfigVersion(sessionAdmin(r), "category-group.update")
+		jsonOK(w, map[string]any{"ok": true})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		// Referential integrity: block deletion if referenced by a policy rule.
+		for _, rule := range policyStore.List() {
+			if strings.EqualFold(rule.DestCategoryGroup, name) {
+				http.Error(w, fmt.Sprintf("cannot delete: group is referenced by policy rule %q", rule.Name), http.StatusConflict)
+				return
+			}
+		}
+		if err := globalCategoryGroups.Delete(name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalCategoryGroups.Save()
+		auditEvent(r, "category-group.delete", name, "")
+		saveConfigVersion(sessionAdmin(r), "category-group.delete")
+		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen // CRUD handler: one branch per HTTP method is intentional
 	switch r.Method {
 	case http.MethodGet:
@@ -1904,6 +1990,11 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 		name := r.URL.Query().Get("name")
 		if name == "" {
 			http.Error(w, "name query param required", http.StatusBadRequest)
+			return
+		}
+		// Referential integrity: block deletion if the category is in a group.
+		if groupName, inGroup := globalCategoryGroups.ContainsCategory(name); inGroup {
+			http.Error(w, fmt.Sprintf("cannot delete: category is used by group %q", groupName), http.StatusConflict)
 			return
 		}
 		if err := catStore.Delete(name); err != nil {

@@ -303,9 +303,10 @@ type PolicyRule struct {
 	SourceIdentity string          `json:"sourceIdentity"` // authenticated username; empty = any
 	SourceGroup    string          `json:"sourceGroup"`    // IdP group/role membership; empty = any
 	AuthSource     string          `json:"authSource"`     // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
-	DestFQDN       string          `json:"destFQDN"`       // exact or wildcard FQDN; empty = any
-	DestCategory   URLCategory     `json:"destCategory"`   // URL category; empty = any
-	DestCountry    []string        `json:"destCountry"`    // ISO 3166-1 alpha-2 country codes; empty = any
+	DestFQDN          string          `json:"destFQDN"`          // exact or wildcard FQDN; empty = any
+	DestCategory      URLCategory     `json:"destCategory"`      // URL category; empty = any
+	DestCategoryGroup string          `json:"destCategoryGroup"` // category group name; empty = any
+	DestCountry       []string        `json:"destCountry"`       // ISO 3166-1 alpha-2 country codes; empty = any
 	Schedule       *PolicySchedule `json:"schedule,omitempty"` // nil = always active
 	SSLAction      SSLAction       `json:"sslAction"`      // Inspect | Bypass
 	FileFiltering  bool            `json:"fileFiltering"`  // enable file-type scanning
@@ -693,6 +694,9 @@ func buildMatchedConditions(rule *PolicyRule) string {
 	if rule.DestCategory != "" && rule.DestCategory != CategoryAny {
 		parts = append(parts, "destCat="+string(rule.DestCategory))
 	}
+	if rule.DestCategoryGroup != "" {
+		parts = append(parts, "destCatGroup="+rule.DestCategoryGroup)
+	}
 	if len(rule.DestCountry) > 0 {
 		parts = append(parts, "destCountry="+strings.Join(rule.DestCountry, ","))
 	}
@@ -792,14 +796,20 @@ func matchDest(rule *PolicyRule, host string) bool {
 	// Empty fields mean "match any" — all configured fields must satisfy.
 	fqdnSet := rule.DestFQDN != ""
 	catSet := rule.DestCategory != "" && rule.DestCategory != CategoryAny
+	catGroupSet := rule.DestCategoryGroup != ""
 	countrySet := len(rule.DestCountry) > 0
 
 	// FQDN check.
 	if fqdnSet && !matchFQDN(rule.DestFQDN, host) {
 		return false
 	}
-	// URL category check.
+	// URL category check (single category).
 	if catSet && !matchCategory(rule.DestCategory, host) {
+		return false
+	}
+	// Category group check — host must be in ANY category within the group.
+	// O(1): lookupHostCategory(host) → group.catSet[result].
+	if catGroupSet && !globalCategoryGroups.MatchesHost(rule.DestCategoryGroup, host) {
 		return false
 	}
 	// Geo-IP country check — cache-only to avoid blocking the request goroutine.

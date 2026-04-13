@@ -559,6 +559,11 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 	logger.Printf("URLCat: %d categories loaded from %s", len(catStore.All()), catPath)
 
+	// ── Category Groups ──────────────────────────────────────────────────────
+	if err := globalCategoryGroups.Load(filepath.Join(dataDir, "category_groups.json")); err != nil {
+		logger.Printf("CategoryGroups: load error: %v", err)
+	}
+
 	// ── Community URL category feed (BadgerDB) ────────────────────────────────
 	// When --cat-feed-db is set, open BadgerDB and start the UT1 FeedSyncer.
 	// Layer 1 (catStore) remains the priority; BadgerDB is the fallback.
