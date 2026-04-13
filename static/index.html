@@ -2045,7 +2045,7 @@ Firefox (all platforms):
             <div>
               <label class="form-label">URL Category</label>
               <select class="select" style="width:100%" id="pol-dest-cat">
-                <option value="">— any —</option>
+                <option value="">Any</option>
                 <option value="Any">Any</option>
               </select>
             </div>
@@ -3975,7 +3975,7 @@ async function loadPolicyCategoryOptions(selectedValue) {
     const cats = await api('/api/urlcat');
     // Preserve any value that was already set
     const current = selectedValue !== undefined ? selectedValue : sel.value;
-    sel.innerHTML = '<option value="">— any —</option><option value="Any">Any</option>' +
+    sel.innerHTML = '<option value="">Any</option><option value="Any">Any</option>' +
       (cats || []).map(c => `<option value="${escHtml(c.name)}">${escHtml(c.name)}${c.builtIn ? '' : ' ★'}</option>`).join('');
     sel.value = current;
   } catch (_) { /* fall through — keep static options */ }
