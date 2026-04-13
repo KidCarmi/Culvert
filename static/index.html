@@ -5275,11 +5275,29 @@ function initPolicyDragDrop() {
 
 function togglePolActions(e, pri) {
   e.stopPropagation();
-  // Close any open menus first.
+  // Close any other open menus.
   document.querySelectorAll('.pol-actions-menu').forEach(m => { if (m.id !== 'pol-actions-' + pri) m.style.display = 'none'; });
   const menu = document.getElementById('pol-actions-' + pri);
   if (!menu) return;
-  menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+  const isOpen = menu.style.display === 'block';
+  if (isOpen) { menu.style.display = 'none'; return; }
+
+  // Use fixed positioning so the dropdown isn't clipped by the table's
+  // overflow-x:auto wrapper. Position relative to the ⋮ button.
+  const btn = e.target.closest('[data-click="togglePolActions"]') || e.target;
+  const rect = btn.getBoundingClientRect();
+  menu.style.position = 'fixed';
+  menu.style.right = (window.innerWidth - rect.right) + 'px';
+  menu.style.left = 'auto';
+  // Open upward if near the bottom of the viewport, downward otherwise.
+  if (rect.bottom + 280 > window.innerHeight) {
+    menu.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+    menu.style.top = 'auto';
+  } else {
+    menu.style.top = (rect.bottom + 4) + 'px';
+    menu.style.bottom = 'auto';
+  }
+  menu.style.display = 'block';
 }
 
 
@@ -6476,6 +6494,12 @@ function setPolActionFilter(f) {
 }
 
 function renderPolicy() {
+  // Skip re-render while a policy actions dropdown is open — the tick
+  // interval destroys the DOM and the user can't click menu items.
+  if (document.querySelector('.pol-actions-menu[style*="display: block"]') ||
+      document.querySelector('.pol-actions-menu[style*="display:block"]')) {
+    return;
+  }
   const tbody = document.getElementById('pol-table');
   const total = polRules.length;
   updateDefaultActionBadge();
@@ -6530,7 +6554,7 @@ function renderPolicy() {
       <td style="text-align:right;white-space:nowrap;position:relative">
         <button class="btn ghost sm" data-click="editPolicy" data-arg="${r.priority}" style="margin-right:4px">Edit</button>
         <button class="btn ghost sm" data-click="togglePolActions" data-arg="${r.priority}" title="Actions">⋮</button>
-        <div class="pol-actions-menu" id="pol-actions-${r.priority}" style="display:none;position:absolute;right:0;top:100%;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);z-index:100;min-width:190px;padding:4px 0;font-size:.8rem">
+        <div class="pol-actions-menu" id="pol-actions-${r.priority}" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:9999;min-width:200px;padding:6px 0;font-size:.82rem">
           <div class="pol-act-item" data-click="movePolicy" data-arg="${r.priority}" data-arg2="first">Move to first</div>
           <div class="pol-act-item" data-click="movePolicy" data-arg="${r.priority}" data-arg2="last">Move to last</div>
           <div class="pol-act-item" data-click="showMoveTarget" data-arg="${r.priority}" data-arg2="before">Move before…</div>
