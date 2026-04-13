@@ -98,7 +98,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 		// Read nonce from context (set by securityMiddleware).
 		nonce, _ := r.Context().Value(cspNonceKey{}).(string)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		body := strings.ReplaceAll(string(cachedIndexHTML), "__CSP_NONCE__", nonce)
+		body := strings.ReplaceAll(string(cachedIndexHTML), "__CSP_NONCE__", html.EscapeString(nonce))
 		w.Write([]byte(body)) //nolint:errcheck
 	})
 	mux.HandleFunc("/api/setup/status", apiSetupStatus)
