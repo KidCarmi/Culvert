@@ -1,0 +1,324 @@
+[
+  {
+    "name": "AI",
+    "hosts": [
+      "openai.com", "chat.openai.com", "platform.openai.com",
+      "anthropic.com", "claude.ai",
+      "gemini.google.com", "bard.google.com", "ai.google.dev",
+      "copilot.microsoft.com", "bing.com/chat",
+      "midjourney.com",
+      "stability.ai",
+      "huggingface.co",
+      "replicate.com",
+      "perplexity.ai",
+      "cohere.com",
+      "mistral.ai",
+      "groq.com",
+      "together.ai",
+      "deepmind.google",
+      "runwayml.com",
+      "elevenlabs.io",
+      "jasper.ai",
+      "writesonic.com",
+      "copy.ai",
+      "notion.ai"
+    ]
+  },
+  {
+    "name": "Messaging",
+    "hosts": [
+      "slack.com",
+      "teams.microsoft.com",
+      "discord.com", "discord.gg",
+      "telegram.org", "web.telegram.org",
+      "signal.org",
+      "whatsapp.com", "web.whatsapp.com",
+      "messenger.com",
+      "element.io",
+      "matrix.org",
+      "rocket.chat",
+      "mattermost.com",
+      "wire.com",
+      "zulip.com",
+      "twist.com",
+      "flock.com",
+      "pumble.com"
+    ]
+  },
+  {
+    "name": "Video Conferencing",
+    "hosts": [
+      "zoom.us", "zoom.com",
+      "teams.microsoft.com", "teams.live.com",
+      "meet.google.com",
+      "webex.com",
+      "gotomeeting.com",
+      "whereby.com",
+      "around.co",
+      "gather.town",
+      "jitsi.org", "meet.jit.si",
+      "loom.com",
+      "riverside.fm",
+      "streamyard.com"
+    ]
+  },
+  {
+    "name": "Dev Tools",
+    "hosts": [
+      "github.com",
+      "gitlab.com",
+      "bitbucket.org",
+      "stackoverflow.com",
+      "npmjs.com", "registry.npmjs.org",
+      "pypi.org",
+      "crates.io",
+      "pkg.go.dev", "go.dev",
+      "hub.docker.com",
+      "vercel.com",
+      "netlify.com",
+      "render.com",
+      "railway.app",
+      "fly.io",
+      "heroku.com",
+      "codepen.io",
+      "codesandbox.io",
+      "replit.com",
+      "jsfiddle.net",
+      "postman.com"
+    ]
+  },
+  {
+    "name": "Cloud Storage",
+    "hosts": [
+      "drive.google.com", "docs.google.com",
+      "dropbox.com",
+      "onedrive.live.com", "sharepoint.com",
+      "box.com",
+      "icloud.com",
+      "mega.nz",
+      "wetransfer.com",
+      "pcloud.com",
+      "sync.com",
+      "tresorit.com",
+      "nextcloud.com"
+    ]
+  },
+  {
+    "name": "Cloud Infrastructure",
+    "hosts": [
+      "aws.amazon.com", "console.aws.amazon.com",
+      "portal.azure.com", "azure.microsoft.com",
+      "console.cloud.google.com", "cloud.google.com",
+      "digitalocean.com",
+      "linode.com",
+      "vultr.com",
+      "hetzner.com",
+      "oracle.com/cloud",
+      "cloudflare.com", "dash.cloudflare.com",
+      "fastly.com",
+      "akamai.com"
+    ]
+  },
+  {
+    "name": "Marketing",
+    "hosts": [
+      "mailchimp.com",
+      "hubspot.com",
+      "salesforce.com",
+      "marketo.com",
+      "constantcontact.com",
+      "sendgrid.com",
+      "mailgun.com",
+      "activecampaign.com",
+      "klaviyo.com",
+      "drip.com",
+      "convertkit.com",
+      "buffer.com",
+      "hootsuite.com",
+      "sproutsocial.com",
+      "semrush.com",
+      "ahrefs.com",
+      "moz.com"
+    ]
+  },
+  {
+    "name": "CRM",
+    "hosts": [
+      "salesforce.com",
+      "hubspot.com",
+      "zoho.com",
+      "pipedrive.com",
+      "freshworks.com",
+      "monday.com",
+      "close.com",
+      "copper.com",
+      "insightly.com",
+      "zendesk.com"
+    ]
+  },
+  {
+    "name": "Project Management",
+    "hosts": [
+      "asana.com",
+      "trello.com",
+      "jira.atlassian.com", "atlassian.com",
+      "monday.com",
+      "notion.so",
+      "clickup.com",
+      "basecamp.com",
+      "linear.app",
+      "height.app",
+      "shortcut.com",
+      "wrike.com",
+      "smartsheet.com",
+      "airtable.com"
+    ]
+  },
+  {
+    "name": "HR & Recruiting",
+    "hosts": [
+      "workday.com",
+      "bamboohr.com",
+      "greenhouse.io",
+      "lever.co",
+      "gusto.com",
+      "rippling.com",
+      "deel.com",
+      "remote.com",
+      "hibob.com",
+      "personio.com",
+      "linkedin.com"
+    ]
+  },
+  {
+    "name": "Design",
+    "hosts": [
+      "figma.com",
+      "canva.com",
+      "adobe.com", "creativecloud.adobe.com",
+      "sketch.com",
+      "invisionapp.com",
+      "miro.com",
+      "whimsical.com",
+      "lucidchart.com",
+      "dribbble.com",
+      "behance.net",
+      "unsplash.com",
+      "pexels.com"
+    ]
+  },
+  {
+    "name": "Security Tools",
+    "hosts": [
+      "virustotal.com",
+      "shodan.io",
+      "censys.io",
+      "urlscan.io",
+      "hybrid-analysis.com",
+      "any.run",
+      "malwarebytes.com",
+      "crowdstrike.com",
+      "sentinelone.com",
+      "snyk.io",
+      "sonarqube.org",
+      "burpsuite.net",
+      "nessus.org",
+      "qualys.com",
+      "rapid7.com",
+      "tenable.com"
+    ]
+  },
+  {
+    "name": "E-Commerce",
+    "hosts": [
+      "amazon.com",
+      "ebay.com",
+      "aliexpress.com",
+      "shopify.com",
+      "etsy.com",
+      "walmart.com",
+      "target.com",
+      "bestbuy.com",
+      "newegg.com"
+    ]
+  },
+  {
+    "name": "Productivity",
+    "hosts": [
+      "docs.google.com", "sheets.google.com", "slides.google.com",
+      "office.com", "office365.com",
+      "notion.so",
+      "evernote.com",
+      "todoist.com",
+      "obsidian.md",
+      "roamresearch.com",
+      "grammarly.com",
+      "calendly.com",
+      "doodle.com",
+      "1password.com",
+      "bitwarden.com",
+      "lastpass.com"
+    ]
+  },
+  {
+    "name": "Analytics",
+    "hosts": [
+      "analytics.google.com",
+      "mixpanel.com",
+      "amplitude.com",
+      "segment.com",
+      "hotjar.com",
+      "fullstory.com",
+      "heap.io",
+      "posthog.com",
+      "matomo.org",
+      "plausible.io",
+      "datadog.com",
+      "grafana.com",
+      "newrelic.com",
+      "splunk.com",
+      "elastic.co"
+    ]
+  },
+  {
+    "name": "Travel",
+    "hosts": [
+      "booking.com",
+      "expedia.com",
+      "airbnb.com",
+      "tripadvisor.com",
+      "kayak.com",
+      "skyscanner.net",
+      "google.com/travel",
+      "hotels.com",
+      "trivago.com"
+    ]
+  },
+  {
+    "name": "Health",
+    "hosts": [
+      "webmd.com",
+      "healthline.com",
+      "mayoclinic.org",
+      "nih.gov",
+      "who.int",
+      "medlineplus.gov",
+      "drugs.com",
+      "zocdoc.com",
+      "teladoc.com"
+    ]
+  },
+  {
+    "name": "Legal & Compliance",
+    "hosts": [
+      "westlaw.com",
+      "lexisnexis.com",
+      "casetext.com",
+      "courtlistener.com",
+      "docusign.com",
+      "pandadoc.com",
+      "contractpodai.com",
+      "ironclad.com"
+    ]
+  }
+]

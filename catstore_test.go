@@ -44,11 +44,11 @@ func TestCategoryStore_Set_Create(t *testing.T) {
 func TestCategoryStore_Set_Update(t *testing.T) {
 	cs := newTestCatStore()
 	// Social is a built-in category; overwrite its hosts.
-	if err := cs.Set("Social", []string{"only.example.com"}, true); err != nil {
+	if err := cs.Set("Social Media", []string{"only.example.com"}, true); err != nil {
 		t.Fatalf("Set update: %v", err)
 	}
 	for _, e := range cs.All() {
-		if e.Name == "Social" {
+		if e.Name == "Social Media" {
 			if len(e.Hosts) != 1 || e.Hosts[0] != "only.example.com" {
 				t.Errorf("Social hosts not updated: %v", e.Hosts)
 			}

@@ -48,18 +48,60 @@ const (
 // ut1CategoryMap maps UT1 directory names to our URLCategory values.
 // Only directories listed here are ingested; all others are ignored.
 var ut1CategoryMap = map[string]string{
+	// Security threats
 	"adult":           "Adult",
-	"agressif":        "Malicious", // French for "aggressive" — contains attack infrastructure
+	"agressif":        "Malicious",
+	"malware":         "Malicious",
+	"phishing":        "Malicious",
+	"redirector":      "Malicious",
+	"warez":           "Malicious",
+	"hacking":         "Hacking",
+	"cryptojacking":   "Malicious",
+
+	// Content categories
 	"dating":          "Dating",
 	"gambling":        "Gambling",
 	"games":           "Gaming",
-	"malware":         "Malicious",
-	"phishing":        "Malicious",
-	"redirector":      "Malicious", // URL shorteners abused for phishing
-	"social_networks": "Social",
+	"social_networks": "Social Media",
 	"streamingmedia":  "Streaming",
 	"news":            "News",
-	"warez":           "Malicious", // piracy/malware distribution sites
+	"blog":            "Blogs",
+	"forums":          "Forums",
+	"chat":            "Chat",
+	"press":           "News",
+	"radio":           "Media",
+	"audio-video":     "Media",
+
+	// Commerce & finance
+	"shopping":        "Shopping",
+	"bank":            "Finance",
+	"bitcoin":         "Cryptocurrency",
+	"financial":       "Finance",
+
+	// Education & government
+	"education":       "Education",
+	"government":      "Government",
+	"associations":    "Non-Profit",
+	"religious":       "Religion",
+	"science":         "Education",
+
+	// Technology
+	"filehosting":     "File Hosting",
+	"download":        "Downloads",
+	"ddos":            "Malicious",
+	"vpn":             "VPN/Proxy",
+	"remote-control":  "Remote Access",
+
+	// Ads & tracking
+	"ads":             "Advertising",
+	"tracker":         "Tracking",
+	"marketingware":   "Tracking",
+
+	// Misc
+	"jobsearch":       "Job Search",
+	"reaffected":      "Parked Domains",
+	"mixed_adult":     "Adult",
+	"lingerie":        "Adult",
 }
 
 // FeedSyncer manages periodic synchronisation of UT1 data into CommunityDB.

@@ -34,7 +34,7 @@ func TestCommunityDB_BulkWrite_And_Lookup(t *testing.T) {
 	defer db.Close() //nolint:errcheck // test cleanup
 
 	entries := map[string]string{
-		"facebook.com":  "Social",
+		"facebook.com":  "Social Media",
 		"malware.io":    "Malicious",
 		"example.co.uk": "News",
 	}
@@ -47,7 +47,7 @@ func TestCommunityDB_BulkWrite_And_Lookup(t *testing.T) {
 		wantCat string
 		wantHit bool
 	}{
-		{"facebook.com", "Social", true},
+		{"facebook.com", "Social Media", true},
 		{"malware.io", "Malicious", true},
 		{"example.co.uk", "News", true},
 		{"unknown.example.com", "", false},
@@ -70,14 +70,14 @@ func TestCommunityDB_Lookup_DomainWalking(t *testing.T) {
 	defer db.Close() //nolint:errcheck // test cleanup
 
 	if err := db.BulkWrite(map[string]string{
-		"facebook.com": "Social",
+		"facebook.com": "Social Media",
 	}); err != nil {
 		t.Fatalf("BulkWrite: %v", err)
 	}
 
 	// Subdomain should resolve to parent via domain walking.
 	cat, ok := db.Lookup("sub.facebook.com")
-	if !ok || cat != "Social" {
+	if !ok || cat != "Social Media" {
 		t.Errorf("Lookup subdomain: got (%q, %v), want (Social, true)", cat, ok)
 	}
 }
@@ -169,7 +169,7 @@ func TestClassifyTarEntry(t *testing.T) {
 		{"blacklists/adult/domains", "Adult", true},
 		{"blacklists/malware/domains", "Malicious", true},
 		{"blacklists/gambling/domains", "Gambling", true},
-		{"blacklists/social_networks/domains", "Social", true},
+		{"blacklists/social_networks/domains", "Social Media", true},
 		{"blacklists/streamingmedia/domains", "Streaming", true},
 		{"blacklists/news/domains", "News", true},
 		{"blacklists/games/domains", "Gaming", true},
@@ -202,13 +202,13 @@ func TestClassifyTarEntry(t *testing.T) {
 func TestParseDomainFile_Basic(t *testing.T) {
 	input := "facebook.com\ngoogle.com\n# comment\n\nbad_no_dot\nexample.org\n"
 	out := make(map[string]string)
-	if err := parseDomainFile(strings.NewReader(input), "Social", out); err != nil {
+	if err := parseDomainFile(strings.NewReader(input), "Social Media", out); err != nil {
 		t.Fatalf("parseDomainFile: %v", err)
 	}
 	expected := map[string]string{
-		"facebook.com": "Social",
-		"google.com":   "Social",
-		"example.org":  "Social",
+		"facebook.com": "Social Media",
+		"google.com":   "Social Media",
+		"example.org":  "Social Media",
 	}
 	for k, v := range expected {
 		if out[k] != v {
@@ -247,10 +247,10 @@ func TestParseDomainFile_CRLFLineEndings(t *testing.T) {
 func TestParseDomainFile_CaseNormalization(t *testing.T) {
 	input := "FACEBOOK.COM\nGOOGLE.COM\n"
 	out := make(map[string]string)
-	if err := parseDomainFile(strings.NewReader(input), "Social", out); err != nil {
+	if err := parseDomainFile(strings.NewReader(input), "Social Media", out); err != nil {
 		t.Fatalf("parseDomainFile: %v", err)
 	}
-	if out["facebook.com"] != "Social" {
+	if out["facebook.com"] != "Social Media" {
 		t.Errorf("domain should be lowercased: %v", out)
 	}
 }
@@ -298,7 +298,7 @@ func TestParseTarball_Basic(t *testing.T) {
 	if entries["playboy.com"] != "Adult" {
 		t.Errorf("playboy.com not Adult: %q", entries["playboy.com"])
 	}
-	if entries["facebook.com"] != "Social" {
+	if entries["facebook.com"] != "Social Media" {
 		t.Errorf("facebook.com not Social: %q", entries["facebook.com"])
 	}
 	if _, ok := entries["skip.me"]; ok {

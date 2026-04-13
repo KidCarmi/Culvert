@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -35,7 +36,7 @@ const (
 type URLCategory string
 
 const (
-	CategorySocial    URLCategory = "Social"
+	CategorySocial    URLCategory = "Social Media"
 	CategoryMalicious URLCategory = "Malicious"
 	CategoryNews      URLCategory = "News"
 	CategoryStreaming  URLCategory = "Streaming"
@@ -85,9 +86,13 @@ func (cs *CategoryStore) rebuildIndex() {
 }
 
 // defaultCategoryEntries returns the built-in category seed list.
+//go:embed default_categories.json
+var defaultCategoriesJSON []byte
+
 func defaultCategoryEntries() []*CategoryEntry {
-	return []*CategoryEntry{
-		{Name: "Social", BuiltIn: true, Hosts: []string{
+	// Start with the built-in hardcoded categories.
+	entries := []*CategoryEntry{
+		{Name: "Social Media", BuiltIn: true, Hosts: []string{
 			"facebook.com", "twitter.com", "x.com", "instagram.com",
 			"tiktok.com", "linkedin.com", "reddit.com", "snapchat.com", "pinterest.com",
 		}},
@@ -107,6 +112,17 @@ func defaultCategoryEntries() []*CategoryEntry {
 		}},
 		{Name: "Adult", BuiltIn: true, Hosts: []string{}},
 	}
+
+	// Merge embedded SaaS categories (AI, Marketing, Messaging, etc.).
+	var saas []CategoryEntry
+	if json.Unmarshal(defaultCategoriesJSON, &saas) == nil {
+		for i := range saas {
+			e := &saas[i]
+			e.BuiltIn = true
+			entries = append(entries, e)
+		}
+	}
+	return entries
 }
 
 // Load reads categories from a JSON file. If the file does not exist the
