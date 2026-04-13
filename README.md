@@ -214,6 +214,28 @@ For proxy-only (no AV, no SSL inspection):
 1 vCPU | 128 MB RAM | 100 MB disk
 ```
 
+### Cluster Deployments (Control Plane / Data Plane)
+
+| Component | CPU | RAM | Storage | Notes |
+|---|---|---|---|---|
+| **Control Plane** | 2 vCPU | 512 MB | 500 MB | No proxy traffic - config sync, enrollment, dashboard only |
+| **Control Plane (HA pair)** | 2 vCPU each | 512 MB each | 500 MB each | Leader + standby with automatic failover |
+| **Data Plane node** | 2 vCPU | 1 GB | 1 GB | Handles proxy traffic, receives config from CP |
+| **Data Plane + ClamAV** | 2 vCPU | 2 GB | 1.5 GB | Add ~1 GB RAM + 300 MB disk for AV |
+
+**Scale reference:**
+
+| Setup | Nodes | Total resources | Handles |
+|---|---|---|---|
+| **Small cluster** | 1 CP + 2 DP | 6 vCPU, 2.5 GB RAM | ~1000 concurrent users |
+| **Medium cluster** | 1 CP (HA) + 5 DP | 12 vCPU, 6 GB RAM | ~5000 concurrent users |
+| **Large cluster** | 1 CP (HA) + 10 DP | 22 vCPU, 11 GB RAM | ~10000+ concurrent users |
+
+- **CP is lightweight** - it only serves gRPC config sync, node enrollment, and the admin dashboard. No proxy traffic flows through it.
+- **DP nodes are stateless** - they receive their entire config from the CP on connect. Lose a DP, spin up a new one, it auto-enrolls and gets the full config in seconds.
+- **Bandwidth/QoS** policies are enforced per-DP, so rate limits scale linearly with node count.
+- **Network:** CP to DP communication uses gRPC over mTLS. Typical bandwidth: < 1 KB/s per node (config sync + heartbeat every 30s).
+
 ---
 
 ## Quick Start
