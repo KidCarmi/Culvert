@@ -5097,19 +5097,26 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 		// Check if auth headers are configured (don't expose the actual value).
 		globalOTLP.mu.RLock()
 		hasAuth := len(globalOTLP.headers) > 0
+		authName := ""
+		for k := range globalOTLP.headers {
+			authName = k // return the header NAME (not value) so UI can show it
+			break
+		}
 		globalOTLP.mu.RUnlock()
 		jsonOK(w, map[string]any{
-			"enabled":  globalOTLP.Enabled(),
-			"endpoint": globalOTLP.Endpoint(),
-			"hasAuth":  hasAuth,
+			"enabled":        globalOTLP.Enabled(),
+			"endpoint":       globalOTLP.Endpoint(),
+			"hasAuth":        hasAuth,
+			"authHeaderName": authName,
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		var body struct {
-			Endpoint   string `json:"endpoint"`
-			AuthHeader string `json:"authHeader"`
+			Endpoint        string `json:"endpoint"`
+			AuthHeaderName  string `json:"authHeaderName"`
+			AuthHeaderValue string `json:"authHeaderValue"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -5133,11 +5140,12 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "endpoint must not resolve to a private network", http.StatusBadRequest)
 			return
 		}
-		// Build headers map from the auth field.
+		// Build headers map from the name+value fields.
 		var headers map[string]string
-		authVal := strings.TrimSpace(body.AuthHeader)
-		if authVal != "" {
-			headers = map[string]string{"Authorization": authVal}
+		hdrName := strings.TrimSpace(body.AuthHeaderName)
+		hdrVal := strings.TrimSpace(body.AuthHeaderValue)
+		if hdrName != "" && hdrVal != "" {
+			headers = map[string]string{hdrName: hdrVal}
 		} else {
 			// Preserve existing headers if auth field was left blank (keep current).
 			globalOTLP.mu.RLock()

@@ -1865,13 +1865,20 @@ Firefox (all platforms):
               <label style="font-size:.78rem;color:var(--muted)">OTLP Endpoint</label>
               <input type="text" class="input wide" id="s-otlp-endpoint" placeholder="https://otlp-gateway-prod-us-east-0.grafana.net/otlp" style="margin-top:4px">
             </div>
-            <div>
-              <label style="font-size:.78rem;color:var(--muted)">Authorization Header <span style="font-size:.7rem;opacity:.6">(optional - required for Grafana Cloud)</span></label>
-              <input type="password" class="input wide" id="s-otlp-auth" placeholder="Basic <base64(instanceID:apiToken)>" style="margin-top:4px" autocomplete="off">
+            <div style="display:flex;gap:10px">
+              <div style="flex:0 0 180px">
+                <label style="font-size:.78rem;color:var(--muted)">Header Name <span style="font-size:.7rem;opacity:.6">(optional)</span></label>
+                <input type="text" class="input" id="s-otlp-header-name" placeholder="Authorization" value="Authorization" style="margin-top:4px">
+              </div>
+              <div style="flex:1">
+                <label style="font-size:.78rem;color:var(--muted)">Header Value</label>
+                <input type="password" class="input wide" id="s-otlp-auth" placeholder="Basic <base64(instanceID:apiToken)>" style="margin-top:4px" autocomplete="off">
+              </div>
             </div>
             <p class="hint" style="margin:0;font-size:.72rem">
-              <strong>Grafana Cloud:</strong> Go to My Account → Stack → OpenTelemetry → Generate Token. Paste: <code>Basic &lt;base64(instanceID:token)&gt;</code><br>
-              <strong>Tip:</strong> In a terminal run: <code>echo -n "INSTANCE_ID:API_TOKEN" | base64</code> to get the base64 value.
+              <strong>Grafana Cloud:</strong> Header: <code>Authorization</code> / Value: <code>Basic &lt;base64(instanceID:token)&gt;</code><br>
+              <strong>Datadog:</strong> Header: <code>DD-API-KEY</code> / Value: your API key<br>
+              <strong>Self-hosted:</strong> Leave both blank - no auth header sent.
             </p>
             <div style="display:flex;gap:10px;align-items:center">
               <button class="btn" data-click="saveOTLP">Enable</button>
@@ -5729,10 +5736,11 @@ async function loadOTLPConfig() {
   try {
     const r = await api('/api/otlp');
     document.getElementById('s-otlp-endpoint').value = r.endpoint || '';
-    // Don't populate auth field — it's a secret, show placeholder if configured
+    // Restore header name if configured; don't expose the value (secret).
+    document.getElementById('s-otlp-header-name').value = r.authHeaderName || 'Authorization';
     const authInput = document.getElementById('s-otlp-auth');
     authInput.value = '';
-    authInput.placeholder = r.hasAuth ? '••••••••  (configured - leave blank to keep)' : 'Basic <base64(instanceID:apiToken)>';
+    authInput.placeholder = r.hasAuth ? '••••••••  (configured - leave blank to keep)' : 'e.g. Basic <base64>';
     const el = document.getElementById('s-otlp-status');
     if (r.enabled) {
       el.style.display = '';
@@ -5747,9 +5755,13 @@ async function loadOTLPConfig() {
 async function saveOTLP() {
   const endpoint = document.getElementById('s-otlp-endpoint').value.trim();
   if (!endpoint) { toast('Enter an OTLP endpoint', 'error'); return; }
-  const auth = document.getElementById('s-otlp-auth').value.trim();
+  const headerName = document.getElementById('s-otlp-header-name').value.trim();
+  const headerValue = document.getElementById('s-otlp-auth').value.trim();
   const payload = {endpoint};
-  if (auth) payload.authHeader = auth;
+  if (headerName && headerValue) {
+    payload.authHeaderName = headerName;
+    payload.authHeaderValue = headerValue;
+  }
   try {
     await api('/api/otlp', {
       method: 'POST', headers: {'Content-Type':'application/json'},
