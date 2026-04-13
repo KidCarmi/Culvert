@@ -133,6 +133,21 @@ func startHitCounterPersistence(ctx context.Context, path string) {
 	}()
 }
 
+// RestoreHitCounts copies persisted hit counter values from ruleMet back into
+// the matching PolicyRule.HitCount fields. Called once at startup after both
+// policyStore.Load() and loadHitCounters() have run.
+func RestoreHitCounts() {
+	ruleMet.mu.RLock()
+	defer ruleMet.mu.RUnlock()
+	policyStore.mu.Lock()
+	defer policyStore.mu.Unlock()
+	for _, rule := range policyStore.rules {
+		if ctr, ok := ruleMet.hits[rule.Name]; ok {
+			atomic.StoreInt64(&rule.HitCount, atomic.LoadInt64(ctr))
+		}
+	}
+}
+
 // WritePrometheus writes per-rule metrics lines to the given builder.
 func (rm *ruleMetrics) WritePrometheus(w *strings.Builder) {
 	rm.mu.RLock()
