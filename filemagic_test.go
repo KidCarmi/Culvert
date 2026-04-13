@@ -88,6 +88,35 @@ func TestCheckMagicVsContentType_UnknownContent(t *testing.T) {
 	}
 }
 
+// Regression test: ZSTD-compressed HTML (Content-Encoding: zstd) must NOT
+// be flagged as polyglot. SourceForge and other CDNs serve text/html with
+// zstd compression; the raw bytes start with the ZSTD magic signature.
+func TestCheckMagicVsContentType_ZSTDCompressedHTML(t *testing.T) {
+	// ZSTD magic bytes followed by compressed content
+	data := append([]byte{0x28, 0xb5, 0x2f, 0xfd}, make([]byte, 64)...)
+	reason := CheckMagicVsContentType(data, "text/html; charset=utf-8")
+	if reason != "" {
+		t.Errorf("ZSTD + text/html should NOT be polyglot, got %q", reason)
+	}
+}
+
+func TestCheckMagicVsContentType_GZIPCompressedJS(t *testing.T) {
+	data := append([]byte{0x1f, 0x8b}, make([]byte, 64)...)
+	reason := CheckMagicVsContentType(data, "application/javascript")
+	if reason != "" {
+		t.Errorf("GZIP + application/javascript should NOT be polyglot, got %q", reason)
+	}
+}
+
+func TestCheckMagicVsContentType_ZSTDAsImage_StillPolyglot(t *testing.T) {
+	// ZSTD magic served as image/jpeg — this IS suspicious (not a web content type)
+	data := append([]byte{0x28, 0xb5, 0x2f, 0xfd}, make([]byte, 64)...)
+	reason := CheckMagicVsContentType(data, "image/jpeg")
+	if reason == "" {
+		t.Error("ZSTD + image/jpeg SHOULD be flagged as polyglot")
+	}
+}
+
 func TestCheckMagicVsContentType_Script(t *testing.T) {
 	data := []byte("#!/bin/bash\necho hello")
 	// Script served as text/plain — expected match, no polyglot.
