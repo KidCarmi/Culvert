@@ -6570,7 +6570,7 @@ function renderPolicy() {
       <td style="text-align:right;white-space:nowrap;position:relative">
         <button class="btn ghost sm" data-click="editPolicy" data-arg="${r.priority}" style="margin-right:4px">Edit</button>
         <button class="btn ghost sm" data-click="togglePolActions" data-arg="${r.priority}" title="Actions">⋮</button>
-        <div class="pol-actions-menu" id="pol-actions-${r.priority}" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:9999;min-width:200px;padding:6px 0;font-size:.82rem">
+        <div class="pol-actions-menu" id="pol-actions-${r.priority}" style="display:none;background:var(--surface2, #1a2235);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:9999;min-width:200px;padding:6px 0;font-size:.82rem">
           <div class="pol-act-item" data-click="movePolicy" data-arg="${r.priority}" data-arg2="first">Move to first</div>
           <div class="pol-act-item" data-click="movePolicy" data-arg="${r.priority}" data-arg2="last">Move to last</div>
           <div class="pol-act-item" data-click="showMoveTarget" data-arg="${r.priority}" data-arg2="before">Move before…</div>
