@@ -464,6 +464,10 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	for i := range rules {
 		r := rules[i]
 		r.HitCount = 0
+		// Auto-enable FileFiltering when a profile is selected.
+		if r.FileProfile != "" && r.FileProfile != FileProfileNone {
+			r.FileFiltering = true
+		}
 		ps.rules[i] = &r
 	}
 	ps.sortLocked()
@@ -476,6 +480,10 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	ps.mu.Lock()
 	nr := r
 	nr.HitCount = 0
+	// Auto-enable FileFiltering when a profile is selected (defense-in-depth).
+	if nr.FileProfile != "" && nr.FileProfile != FileProfileNone {
+		nr.FileFiltering = true
+	}
 	if nr.Enabled == nil {
 		t := true
 		nr.Enabled = &t
@@ -504,6 +512,10 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 
 // Update replaces the rule with the given priority. Returns false if not found.
 func (ps *PolicyStore) Update(priority int, r PolicyRule) bool {
+	// Auto-enable FileFiltering when a profile is selected (defense-in-depth).
+	if r.FileProfile != "" && r.FileProfile != FileProfileNone {
+		r.FileFiltering = true
+	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	for i, rule := range ps.rules {

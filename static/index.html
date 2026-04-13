@@ -2093,7 +2093,7 @@ Firefox (all platforms):
             </div>
             <div>
               <label class="form-label">File Extension Profile</label>
-              <select class="select" style="width:100%" id="pol-file-profile">
+              <select class="select" style="width:100%" id="pol-file-profile" data-change="syncFileFilter">
                 <option value="">None</option>
               </select>
             </div>
@@ -3336,6 +3336,7 @@ document.addEventListener('change', e => {
     case 'setLogLevel':       setLogLevel(el.value); break;
     case 'importConfig':      importConfig(el); break;
     case 'toggleOCSP':        toggleOCSP(el.checked); break;
+    case 'syncFileFilter':    document.getElementById('pol-file-filter').checked = (el.value !== ''); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
@@ -6515,7 +6516,7 @@ async function submitPolicyRule() {
     destCountry,
     sslAction:      document.getElementById('pol-ssl').value,
     enabled:        document.getElementById('pol-enabled').checked,
-    fileFiltering:  document.getElementById('pol-file-filter').checked,
+    fileFiltering:  document.getElementById('pol-file-filter').checked || (document.getElementById('pol-file-profile').value !== ''),
     fileProfile:    document.getElementById('pol-file-profile').value || '',
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
     schedule:       getScheduleFromForm(),
