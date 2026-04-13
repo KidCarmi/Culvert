@@ -559,6 +559,28 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 	logger.Printf("URLCat: %d categories loaded from %s", len(catStore.All()), catPath)
 
+	// Seed empty catStore entries for all UT1 mapped category names so they
+	// appear in the Category Groups dropdown. The names must exist in catStore
+	// (Layer 1) for the GUI to list them, even though domains are in BadgerDB
+	// (Layer 2). lookupHostCategory checks both layers for matching.
+	ut1Seeded := 0
+	seen := map[string]bool{}
+	for _, mappedCat := range ut1CategoryMap {
+		lc := strings.ToLower(mappedCat)
+		if seen[lc] {
+			continue
+		}
+		seen[lc] = true
+		if catStore.GetByName(mappedCat) == nil {
+			_ = catStore.Set(mappedCat, []string{}, true) // empty, built-in
+			ut1Seeded++
+		}
+	}
+	if ut1Seeded > 0 {
+		catStore.Save()
+		logger.Printf("URLCat: seeded %d UT1 category name(s) into catStore for GUI visibility", ut1Seeded)
+	}
+
 	// ── Category Groups ──────────────────────────────────────────────────────
 	if err := globalCategoryGroups.Load(filepath.Join(dataDir, "category_groups.json")); err != nil {
 		logger.Printf("CategoryGroups: load error: %v", err)
