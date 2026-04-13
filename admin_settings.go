@@ -81,20 +81,29 @@ func LoadAdminSettings(path string) {
 		return
 	}
 
-	// Apply each field to its component (skip empty = use config default).
+	applyAdminSecurity(&s)
+	applyAdminServices(&s)
+	applyAdminNetwork(&s)
+
+	logger.Printf("AdminSettings: loaded from %s", path)
+}
+
+// applyAdminSecurity applies policy, IP filter, rate limiter, and connection
+// limit settings. Extracted to keep LoadAdminSettings under the cyclop cap.
+func applyAdminSecurity(s *AdminSettings) {
 	if s.DefaultAction != "" {
 		setDefaultPolicyAction(s.DefaultAction)
 	}
 	if s.IPFilterMode != "" {
 		ipf.SetMode(s.IPFilterMode)
 		for _, ip := range s.IPFilterList {
-			ipf.Add(ip) //nolint:errcheck
+			ipf.Add(ip) //nolint:errcheck -- best-effort on startup
 		}
 	}
 	if s.RateLimitRPM > 0 {
 		rl.Configure(s.RateLimitRPM, time.Minute)
 		for _, ex := range s.RateLimitExemptions {
-			rl.AddExemption(ex)
+			rl.AddExemption(ex) //nolint:errcheck -- best-effort on startup
 		}
 	}
 	if s.ConnLimitEnabled && s.ConnLimitMaxPerIP > 0 {
@@ -103,6 +112,13 @@ func LoadAdminSettings(path string) {
 	if s.BlockPageHTML != "" {
 		setBlockPageHTML(s.BlockPageHTML)
 	}
+	if len(s.RewriteRules) > 0 {
+		rewriter.SetRules(s.RewriteRules)
+	}
+}
+
+// applyAdminServices applies logging, monitoring, and session settings.
+func applyAdminServices(s *AdminSettings) {
 	if s.SyslogAddr != "" {
 		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err == nil {
 			syslogConfigured = s.SyslogAddr
@@ -121,6 +137,17 @@ func LoadAdminSettings(path string) {
 	if s.SessionTimeoutHours > 0 {
 		SetSessionTTL(time.Duration(s.SessionTimeoutHours) * time.Hour)
 	}
+	if s.BlocklistFeedURL != "" {
+		interval := 24 * time.Hour
+		if d, err := time.ParseDuration(s.BlocklistFeedInterval); err == nil && d > 0 {
+			interval = d
+		}
+		blFeedSyncer.SetFeed(s.BlocklistFeedURL, interval)
+	}
+}
+
+// applyAdminNetwork applies UI access, TLS, and network settings.
+func applyAdminNetwork(s *AdminSettings) {
 	if len(s.UIAllowIPs) > 0 {
 		SetUIAllowedCIDRs(s.UIAllowIPs)
 	}
@@ -133,18 +160,6 @@ func LoadAdminSettings(path string) {
 	if s.TrustForwardedHeaders {
 		trustForwardedHeaders = true
 	}
-	if len(s.RewriteRules) > 0 {
-		rewriter.SetRules(s.RewriteRules)
-	}
-	if s.BlocklistFeedURL != "" {
-		interval := 24 * time.Hour
-		if d, err := time.ParseDuration(s.BlocklistFeedInterval); err == nil && d > 0 {
-			interval = d
-		}
-		blFeedSyncer.SetFeed(s.BlocklistFeedURL, interval)
-	}
-
-	logger.Printf("AdminSettings: loaded from %s", path)
 }
 
 // SaveAdminSettings snapshots all current runtime values and writes them

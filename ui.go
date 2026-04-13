@@ -5104,6 +5104,23 @@ func apiClusterMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// resolveOTLPHeaders builds the OTLP auth headers map from the name+value
+// fields. If both are empty, preserves the existing headers (admin changed
+// endpoint but didn't re-enter the auth token).
+func resolveOTLPHeaders(name, value string) map[string]string {
+	n := strings.TrimSpace(name)
+	v := strings.TrimSpace(value)
+	if n != "" && v != "" {
+		return map[string]string{n: v}
+	}
+	globalOTLP.mu.RLock()
+	defer globalOTLP.mu.RUnlock()
+	if len(globalOTLP.headers) > 0 {
+		return globalOTLP.headers
+	}
+	return nil
+}
+
 // GET/POST /api/otlp - configure OpenTelemetry OTLP/HTTP export (metrics + traces).
 func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -5158,20 +5175,7 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "endpoint must not resolve to a private network", http.StatusBadRequest)
 			return
 		}
-		// Build headers map from the name+value fields.
-		var headers map[string]string
-		hdrName := strings.TrimSpace(body.AuthHeaderName)
-		hdrVal := strings.TrimSpace(body.AuthHeaderValue)
-		if hdrName != "" && hdrVal != "" {
-			headers = map[string]string{hdrName: hdrVal}
-		} else {
-			// Preserve existing headers if auth field was left blank (keep current).
-			globalOTLP.mu.RLock()
-			if len(globalOTLP.headers) > 0 {
-				headers = globalOTLP.headers
-			}
-			globalOTLP.mu.RUnlock()
-		}
+		headers := resolveOTLPHeaders(body.AuthHeaderName, body.AuthHeaderValue)
 		globalOTLP.Configure(body.Endpoint, headers)
 		globalOTLPTraces.Configure(body.Endpoint, headers)
 		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled (metrics + traces)")

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -189,7 +190,7 @@ func TestCspNonce_Unique(t *testing.T) {
 func TestCspNonce_HexOnly(t *testing.T) {
 	nonce := cspNonce()
 	for _, c := range nonce {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Errorf("nonce contains non-hex char %q: %s", c, nonce)
 			break
 		}
@@ -242,7 +243,7 @@ func TestDecompressForScan_ZstdFallback(t *testing.T) {
 	// Invalid zstd data should return raw bytes (graceful fallback).
 	data := []byte("not valid zstd data at all")
 	result := decompressForScan(data, "zstd")
-	if string(result) != string(data) {
+	if !bytes.Equal(result, data) {
 		t.Errorf("invalid zstd should return raw data, got %q", string(result))
 	}
 }

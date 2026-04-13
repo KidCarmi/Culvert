@@ -78,7 +78,7 @@ func TestPQC_MLKEM768_KeyExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck -- test cleanup
 
 	// Accept one connection in background.
 	serverDone := make(chan error, 1)
@@ -88,18 +88,19 @@ func TestPQC_MLKEM768_KeyExchange(t *testing.T) {
 			serverDone <- err
 			return
 		}
-		defer conn.Close()
+		defer conn.Close() //nolint:errcheck -- test cleanup
 		serverDone <- conn.(*tls.Conn).HandshakeContext(t.Context())
 	}()
 
 	// Connect as client with PQC-only config.
-	conn, err := tls.Dial("tcp", ln.Addr().String(), clientCfg)
+	rawConn, err := (&tls.Dialer{Config: clientCfg}).DialContext(t.Context(), "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("PQC TLS handshake FAILED: %v\n"+
 			"This means Go's crypto/tls did not negotiate ML-KEM-768.\n"+
 			"Culvert's post-quantum claims in the README are invalid for this Go version.", err)
 	}
-	defer conn.Close()
+	defer rawConn.Close() //nolint:errcheck -- test cleanup
+	conn := rawConn.(*tls.Conn)
 
 	// Verify server side also succeeded.
 	if err := <-serverDone; err != nil {
@@ -145,7 +146,7 @@ func TestPQC_ClassicalFallback_Rejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck -- test cleanup
 
 	go func() {
 		conn, err := ln.Accept()
@@ -157,7 +158,7 @@ func TestPQC_ClassicalFallback_Rejected(t *testing.T) {
 	}()
 
 	// This should FAIL — PQC server rejects classical-only client.
-	conn, err := tls.Dial("tcp", ln.Addr().String(), clientCfg)
+	conn, err := (&tls.Dialer{Config: clientCfg}).DialContext(t.Context(), "tcp", ln.Addr().String())
 	if err == nil {
 		conn.Close()
 		t.Fatal("Expected handshake to FAIL when PQC server meets classical-only client, but it succeeded.\n" +
