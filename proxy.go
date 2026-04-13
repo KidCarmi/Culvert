@@ -1135,7 +1135,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		if hasProfile {
 			profileName = string(match.Rule.FileProfile)
 		}
-		logger.Printf("SSL_INNER %s %s %s%s (profile=%q filtering=%v)", clientIP, strings.ReplaceAll(req.Method, "\n", ""), sanitizeLog(hostOnly), sanitizeLog(req.URL.Path), sanitizeLog(profileName), hasProfile)
+		logger.Printf("SSL_INNER %s %s %s%s (profile=%q filtering=%v)", clientIP, sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(req.URL.Path), sanitizeLog(profileName), hasProfile)
 		// Strip hop-by-hop headers before forwarding upstream.
 		removeHopHeaders(req.Header)
 
