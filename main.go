@@ -583,6 +583,8 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 
 	// ── File block profile ───────────────────────────────────────────────────
+	// Load defaults or config-specified extensions first, then override with
+	// the persistent file (UI changes survive restart/update).
 	if len(fc.FileBlock.Extensions) > 0 {
 		for _, ext := range fc.FileBlock.Extensions {
 			fileBlocker.Add(ext)
@@ -592,6 +594,10 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			fileBlocker.Add(ext)
 		}
 	}
+	// SetPath loads from the persistent JSON file (if it exists), overriding
+	// the config/defaults above. This ensures UI-added extensions survive
+	// container restarts and system updates.
+	fileBlocker.SetPath(filepath.Join(dataDir, "fileblock.json"))
 	logger.Printf("FileBlock: %d extension(s) in profile", fileBlocker.Count())
 
 	// ── File extension profiles (for per-rule policy blocking) ────────────────

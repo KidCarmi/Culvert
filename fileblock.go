@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"mime"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -10,13 +12,55 @@ import (
 
 // FileBlocker holds the set of file extensions to block.
 // Extensions are normalised to lowercase with a leading dot (e.g. ".exe").
-// All operations are safe for concurrent use.
+// All operations are safe for concurrent use. Persists to a JSON file when
+// a path is configured via SetPath().
 type FileBlocker struct {
 	mu         sync.RWMutex
 	extensions map[string]bool
+	path       string // persistence file (e.g. /data/fileblock.json); "" = no persistence
 }
 
 var fileBlocker = &FileBlocker{extensions: map[string]bool{}}
+
+// SetPath configures the persistence file and loads any previously saved
+// extensions from it. If the file doesn't exist, the current in-memory
+// state is kept (caller should load defaults before calling SetPath).
+func (fb *FileBlocker) SetPath(p string) {
+	fb.mu.Lock()
+	fb.path = p
+	fb.mu.Unlock()
+	if p == "" {
+		return
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return // file doesn't exist yet — keep current state
+	}
+	var exts []string
+	if json.Unmarshal(data, &exts) != nil {
+		return
+	}
+	fb.mu.Lock()
+	fb.extensions = map[string]bool{}
+	for _, ext := range exts {
+		fb.extensions[fb.norm(ext)] = true
+	}
+	fb.mu.Unlock()
+}
+
+// save persists the current extension list to the configured file.
+// Called internally after Add/Remove/ClearAll — no-op if no path is set.
+func (fb *FileBlocker) save() {
+	if fb.path == "" {
+		return
+	}
+	exts := make([]string, 0, len(fb.extensions))
+	for ext := range fb.extensions {
+		exts = append(exts, ext)
+	}
+	data, _ := json.Marshal(exts)
+	os.WriteFile(fb.path, data, 0o600) //nolint:errcheck -- best-effort
+}
 
 // defaultBlockedExts is loaded at startup when no config override is provided.
 // Covers common Windows malware/script delivery formats.
@@ -40,13 +84,15 @@ func (fb *FileBlocker) Add(ext string) {
 	}
 	fb.mu.Lock()
 	fb.extensions[ext] = true
+	fb.save()
 	fb.mu.Unlock()
 }
 
-func (fb *FileBlocker) Remove(ext string) {
+func (fb *FileBlocker) Remove(ext string) { //nolint:unused // called from UI API
 	ext = fb.norm(ext)
 	fb.mu.Lock()
 	delete(fb.extensions, ext)
+	fb.save()
 	fb.mu.Unlock()
 }
 
@@ -64,6 +110,7 @@ func (fb *FileBlocker) List() []string {
 func (fb *FileBlocker) ClearAll() {
 	fb.mu.Lock()
 	fb.extensions = map[string]bool{}
+	fb.save()
 	fb.mu.Unlock()
 }
 
@@ -190,8 +237,14 @@ func (fb *FileBlocker) CheckContentDisposition(cd string) string {
 
 // fileBlockConn writes a synthetic HTTP/1.1 403 response to a raw connection
 // (typically the client side of an SSL-inspected tunnel) when a file-blocking
-// check fires inside handleTunnelInspect. Mirrors the scanBlockConn pattern.
-func fileBlockConn(dst interface{ Write([]byte) (int, error) }, host, urlPath, ext, source string) {
+// check fires inside handleTunnelInspect. After writing the response, the
+// connection is explicitly closed to prevent HTTP/1.1 connection reuse — a
+// browser with a pipelined second request in the same TLS session could
+// otherwise bypass the block on retry.
+func fileBlockConn(dst interface {
+	Write([]byte) (int, error)
+	Close() error
+}, host, urlPath, ext, source string) {
 	logger.Printf("FILE_BLOCKED (tunnel %s) -> %q%q (ext=%q)", source, sanitizeLog(host), sanitizeLog(urlPath), sanitizeLog(ext))
 	body := fmt.Sprintf("Blocked: file type %s is not allowed (%s)\r\n", ext, source)
 	fmt.Fprintf(dst, //nolint:errcheck
@@ -202,4 +255,5 @@ func fileBlockConn(dst interface{ Write([]byte) (int, error) }, host, urlPath, e
 			"\r\n%s",
 		len(body), body,
 	)
+	dst.Close() //nolint:errcheck -- force-close prevents pipelined request bypass
 }
