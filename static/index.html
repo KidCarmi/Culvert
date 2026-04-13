@@ -1265,7 +1265,7 @@ tr.dragging  { opacity: .4; }
               <input id="idp-meta-url" class="input" placeholder="https://your-idp.com/metadata.xml" style="width:100%">
             </div>
             <div class="form-group">
-              <label class="form-label">— or Upload / Paste Metadata XML —</label>
+              <label class="form-label">Or upload / paste Metadata XML</label>
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
                 <label style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0;transition:border-color .15s" data-hover="border-accent">
                   Upload XML
@@ -1914,7 +1914,7 @@ Firefox (all platforms):
               <div class="form-group">
                 <label class="form-label">Request header — action</label>
                 <select class="select" id="rw-req-action" style="width:100%;margin-bottom:6px">
-                  <option value="">— none —</option>
+                  <option value="">None</option>
                   <option value="set">Set (overwrite)</option>
                   <option value="add">Add (append)</option>
                   <option value="remove">Remove</option>
@@ -1932,7 +1932,7 @@ Firefox (all platforms):
               <div class="form-group">
                 <label class="form-label">Response header — action</label>
                 <select class="select" id="rw-resp-action" style="width:100%;margin-bottom:6px">
-                  <option value="">— none —</option>
+                  <option value="">None</option>
                   <option value="set">Set (overwrite)</option>
                   <option value="add">Add (append)</option>
                   <option value="remove">Remove</option>
@@ -2003,7 +2003,7 @@ Firefox (all platforms):
             <div>
               <label class="form-label">Auth Provider <span style="color:var(--muted);font-weight:400">(for group filter)</span></label>
               <select class="select" style="width:100%" id="pol-src-provider" data-change="loadPolicyGroupOptions">
-                <option value="">— any provider —</option>
+                <option value="">Any provider</option>
               </select>
             </div>
             <div>
@@ -2024,7 +2024,7 @@ Firefox (all platforms):
             <div>
               <label class="form-label">Auth Source <span style="color:var(--muted);font-weight:400">(IdP or unauth)</span></label>
               <select class="select" style="width:100%" id="pol-src-auth">
-                <option value="">— any source —</option>
+                <option value="">Any source</option>
                 <option value="unauth">unauth — unauthenticated</option>
                 <option value="local">local — local credentials</option>
               </select>
@@ -2074,7 +2074,7 @@ Firefox (all platforms):
             <div>
               <label class="form-label">File Extension Profile</label>
               <select class="select" style="width:100%" id="pol-file-profile">
-                <option value="">— none —</option>
+                <option value="">None</option>
               </select>
             </div>
             <div style="display:flex;flex-direction:column;justify-content:flex-end;gap:10px">
@@ -6215,7 +6215,7 @@ async function loadFileProfileDropdown() {
     const sel = document.getElementById('pol-file-profile');
     if (!sel) return;
     const current = sel.value;
-    sel.innerHTML = '<option value="">— none —</option>' +
+    sel.innerHTML = '<option value="">None</option>' +
       (profiles || []).map(p => `<option value="${escHtml(p.name)}">${escHtml(p.name)} (${p.extensions.length} ext)</option>`).join('');
     if (current) sel.value = current;
   } catch(e) { /* dropdown stays with current options */ }
@@ -7277,7 +7277,7 @@ async function loadPolicyProviderOptions() {
     // Provider dropdown
     const provSel = document.getElementById('pol-src-provider');
     const curProv = provSel.value;
-    provSel.innerHTML = '<option value="">— any provider —</option>' +
+    provSel.innerHTML = '<option value="">Any provider</option>' +
       _policyIdPList.filter(p => p.enabled).map(p =>
         `<option value="${p.id}">${escHtml(p.name)} (${p.type.toUpperCase()})</option>`
       ).join('');
@@ -7286,7 +7286,7 @@ async function loadPolicyProviderOptions() {
     const authSel = document.getElementById('pol-src-auth');
     if (authSel) {
       const curAuth = authSel.value;
-      authSel.innerHTML = '<option value="">— any source —</option>' +
+      authSel.innerHTML = '<option value="">Any source</option>' +
         '<option value="unauth">unauth — unauthenticated</option>' +
         '<option value="local">local — local credentials</option>' +
         _policyIdPList.filter(p => p.enabled).map(p =>
