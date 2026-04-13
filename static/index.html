@@ -362,6 +362,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="urlcat" data-min-role="operator">
       <span class="icon">🏷️</span> URL Categories
     </div>
+    <div class="nav-item" data-view="catgroups" data-min-role="operator">
+      <span class="icon">📦</span> Category Groups
+    </div>
     <div class="nav-item" data-view="fileblock" data-min-role="operator">
       <span class="icon">🛡️</span> File Block
     </div>
@@ -2070,6 +2073,12 @@ Firefox (all platforms):
               </select>
             </div>
             <div>
+              <label class="form-label">Category Group</label>
+              <select class="select" style="width:100%" id="pol-dest-catgroup">
+                <option value="">None</option>
+              </select>
+            </div>
+            <div>
               <label class="form-label">Destination Countries <span style="color:var(--muted);font-weight:400">(Geo-IP)</span></label>
               <div id="pol-dest-country-wrap">
                 <input type="hidden" id="pol-dest-country">
@@ -2276,6 +2285,40 @@ Firefox (all platforms):
         </div>
       </div>
     </div><!-- /view-urlcat -->
+
+    <!-- ── CATEGORY GROUPS ───────────────────────────────────────────── -->
+    <div class="view" id="view-catgroups">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Category Groups</span>
+          <button class="btn sm" data-click="showAddCatGroupForm">+ New Group</button>
+        </div>
+        <div class="panel-body">
+          <p class="hint">
+            Bundle multiple URL categories into a named group, then reference the group in policy rules.
+            Example: "Prod Allowed" = AI + Marketing + Messaging + Dev Tools.
+          </p>
+          <div id="catgroup-form" style="display:none;margin-bottom:16px;padding:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)">
+            <div style="display:flex;gap:10px;margin-bottom:10px">
+              <div style="flex:1">
+                <label class="form-label">Group Name</label>
+                <input type="text" class="input wide" id="cg-name" placeholder="e.g. Prod Auth Users Allowed">
+              </div>
+            </div>
+            <label class="form-label">Categories in this group</label>
+            <div id="cg-cat-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;min-height:32px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px"></div>
+            <select class="select" style="width:100%;margin-bottom:10px" id="cg-cat-select" data-change="addCgCat">
+              <option value="">Add a category...</option>
+            </select>
+            <div style="display:flex;gap:8px">
+              <button class="btn" data-click="saveCatGroup">Save Group</button>
+              <button class="btn ghost" data-click="cancelCatGroup">Cancel</button>
+            </div>
+          </div>
+          <div id="catgroup-list"></div>
+        </div>
+      </div>
+    </div>
 
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
     <div class="view" id="view-fileblock">
@@ -3248,6 +3291,14 @@ document.addEventListener('click', e => {
 
     // ── URL categories ──
     case 'openNewCategoryModal': openNewCategoryModal(); break;
+
+    // -- Category groups --
+    case 'showAddCatGroupForm': showAddCatGroupForm(); break;
+    case 'saveCatGroup':      saveCatGroup(); break;
+    case 'cancelCatGroup':    cancelCatGroup(); break;
+    case 'editCatGroup':      editCatGroup(arg); break;
+    case 'deleteCatGroup':    deleteCatGroup(arg); break;
+    case 'removeCgCat':       removeCgCat(arg); break;
     case 'runURLLookup':      runURLLookup(); break;
     case 'blCatLoadMore':     blCatLoadMore(); break;
     case 'deleteURLCategory': deleteURLCategory(arg); break;
@@ -3337,6 +3388,7 @@ document.addEventListener('change', e => {
     case 'importConfig':      importConfig(el); break;
     case 'toggleOCSP':        toggleOCSP(el.checked); break;
     case 'syncFileFilter':    document.getElementById('pol-file-filter').checked = (el.value !== ''); break;
+    case 'addCgCat':          addCgCat(); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
@@ -3500,6 +3552,7 @@ const viewMeta = {
   security:     { title: 'Security',      meta: 'IP filter, rate limiting & log export' },
   policy:       { title: 'Policy',        meta: 'Policy-Based Access Control (PBAC) rules' },
   urlcat:       { title: 'URL Categories', meta: 'Manage host lists for each URL category used in policy rules' },
+  catgroups:    { title: 'Category Groups', meta: 'Bundle multiple URL categories into named groups for policy rules' },
   fileblock:    { title: 'File Block',    meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   rewrite:      { title: 'Rewrite',       meta: 'Header injection & removal rules' },
   idproviders:  { title: 'Identity Providers', meta: 'OIDC & SAML 2.0 identity provider profiles' },
@@ -3532,8 +3585,9 @@ function switchView(name) {
   if (name === 'audit')          loadAuditLog();
   if (name === 'blocklist')      fetchBlocklistFeed();
   if (name === 'settings')       loadSettings();
-  if (name === 'policy')         { fetchPolicy(); loadFileProfileDropdown(); }
+  if (name === 'policy')         { fetchPolicy(); loadFileProfileDropdown(); fetchCatGroups(); }
   if (name === 'urlcat')         loadURLCategories();
+  if (name === 'catgroups')      fetchCatGroups();
   if (name === 'fileblock')      fetchFileBlock();
   if (name === 'rewrite')        fetchRewrite();
   if (name === 'pac')            loadPACConfig();
@@ -3792,6 +3846,139 @@ async function deleteUser(username) {
   } catch (err) {
     toast('Delete failed: ' + err.message, 'error');
   }
+}
+
+// ── Category Groups ───────────────────────────────────────────────────────
+
+let _catGroups = [];
+let _editingCatGroup = null;
+
+async function fetchCatGroups() {
+  try {
+    const d = await api('/api/category-groups');
+    _catGroups = d.groups || [];
+    renderCatGroups();
+    loadCatGroupDropdown();
+  } catch(e) { console.error(e); }
+}
+
+function renderCatGroups() {
+  const el = document.getElementById('catgroup-list');
+  if (!el) return;
+  if (!_catGroups.length) {
+    el.innerHTML = '<div class="empty-state"><div class="empty-icon">📦</div>No category groups yet</div>';
+    return;
+  }
+  el.innerHTML = _catGroups.map(g => `<div style="padding:12px;margin-bottom:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <strong style="font-size:.95rem">${escHtml(g.name)}</strong>
+      <div style="display:flex;gap:6px">
+        <span style="font-size:.72rem;color:var(--muted)">${g.categories.length} categories</span>
+        <button class="btn ghost sm" data-click="editCatGroup" data-arg="${escHtml(g.name)}">Edit</button>
+        <button class="btn ghost sm" style="color:var(--red)" data-click="deleteCatGroup" data-arg="${escHtml(g.name)}">Delete</button>
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:4px">${g.categories.map(c => `<span style="font-size:.72rem;background:rgba(20,184,166,.15);color:var(--accent);padding:2px 8px;border-radius:4px">${escHtml(c)}</span>`).join('')}</div>
+  </div>`).join('');
+}
+
+function showAddCatGroupForm() {
+  _editingCatGroup = null;
+  document.getElementById('cg-name').value = '';
+  document.getElementById('cg-name').disabled = false;
+  _cgSelectedCats = [];
+  renderCgChips();
+  loadCgCatOptions();
+  document.getElementById('catgroup-form').style.display = '';
+}
+
+function editCatGroup(name) {
+  const g = _catGroups.find(x => x.name === name);
+  if (!g) return;
+  _editingCatGroup = name;
+  document.getElementById('cg-name').value = g.name;
+  document.getElementById('cg-name').disabled = true;
+  _cgSelectedCats = [...g.categories];
+  renderCgChips();
+  loadCgCatOptions();
+  document.getElementById('catgroup-form').style.display = '';
+}
+
+function cancelCatGroup() {
+  document.getElementById('catgroup-form').style.display = 'none';
+  _editingCatGroup = null;
+}
+
+let _cgSelectedCats = [];
+
+function renderCgChips() {
+  const el = document.getElementById('cg-cat-chips');
+  if (!el) return;
+  if (!_cgSelectedCats.length) {
+    el.innerHTML = '<span style="color:var(--muted);font-size:.78rem">No categories selected</span>';
+    return;
+  }
+  el.innerHTML = _cgSelectedCats.map(c => `<span style="display:inline-flex;align-items:center;gap:4px;font-size:.75rem;background:rgba(20,184,166,.15);color:var(--accent);padding:3px 8px;border-radius:4px">${escHtml(c)}<button data-click="removeCgCat" data-arg="${escHtml(c)}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:.9rem;line-height:1;padding:0">&times;</button></span>`).join('');
+}
+
+function removeCgCat(catName) {
+  _cgSelectedCats = _cgSelectedCats.filter(c => c !== catName);
+  renderCgChips();
+  loadCgCatOptions();
+}
+
+function loadCgCatOptions() {
+  const sel = document.getElementById('cg-cat-select');
+  if (!sel) return;
+  // Get all available categories from catStore
+  api('/api/urlcat').then(cats => {
+    const available = (cats || []).map(c => c.name).filter(n => !_cgSelectedCats.includes(n.toLowerCase()) && !_cgSelectedCats.includes(n));
+    sel.innerHTML = '<option value="">Add a category...</option>' + available.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('');
+  }).catch(() => {});
+}
+
+function addCgCat() {
+  const sel = document.getElementById('cg-cat-select');
+  const val = sel.value;
+  if (!val) return;
+  if (!_cgSelectedCats.includes(val)) {
+    _cgSelectedCats.push(val);
+    renderCgChips();
+    loadCgCatOptions();
+  }
+  sel.value = '';
+}
+
+async function saveCatGroup() {
+  const name = document.getElementById('cg-name').value.trim();
+  if (!name) { toast('Group name is required', 'error'); return; }
+  if (!_cgSelectedCats.length) { toast('Select at least one category', 'error'); return; }
+  const method = _editingCatGroup ? 'PUT' : 'POST';
+  try {
+    await api('/api/category-groups', {
+      method, headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name, categories: _cgSelectedCats })
+    });
+    toast(_editingCatGroup ? 'Group updated' : 'Group created', 'success');
+    cancelCatGroup();
+    fetchCatGroups();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteCatGroup(name) {
+  if (!await confirmAction('Delete Category Group', `Delete group "${name}"? Policy rules referencing it will no longer match.`)) return;
+  try {
+    await api('/api/category-groups?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    toast('Group deleted', 'success');
+    fetchCatGroups();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+function loadCatGroupDropdown() {
+  const sel = document.getElementById('pol-dest-catgroup');
+  if (!sel) return;
+  const names = _catGroups.map(g => g.name);
+  sel.innerHTML = '<option value="">None</option>' + names.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('');
 }
 
 // ── URL Categories ────────────────────────────────────────────────────────
@@ -5406,6 +5593,7 @@ function clonePolicy(pri) {
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
   loadPolicyCategoryOptions(r.destCategory || '');
+  document.getElementById('pol-dest-catgroup').value = r.destCategoryGroup || '';
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
   document.getElementById('pol-enabled').checked     = r.enabled !== false;
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
@@ -6438,6 +6626,7 @@ function editPolicy(priority) {
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
   loadPolicyCategoryOptions(r.destCategory || '');
+  document.getElementById('pol-dest-catgroup').value = r.destCategoryGroup || '';
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
   document.getElementById('pol-enabled').checked     = r.enabled !== false;
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
@@ -6470,6 +6659,7 @@ function clearPolicyForm() {
   if (pSel) pSel.value = '';
   document.getElementById('pol-action').value        = 'Allow';
   document.getElementById('pol-dest-cat').value      = '';
+  document.getElementById('pol-dest-catgroup').value = '';
   document.getElementById('pol-ssl').value           = 'Bypass';
   document.getElementById('pol-enabled').checked     = true;
   document.getElementById('pol-file-filter').checked = false;
@@ -6512,7 +6702,8 @@ async function submitPolicyRule() {
     authSource:     document.getElementById('pol-src-auth').value.trim(),
     redirectURL:    document.getElementById('pol-redirect').value.trim(),
     destFQDN:       document.getElementById('pol-dest-fqdn').value.trim(),
-    destCategory:   document.getElementById('pol-dest-cat').value || '',
+    destCategory:      document.getElementById('pol-dest-cat').value || '',
+    destCategoryGroup: document.getElementById('pol-dest-catgroup').value || '',
     destCountry,
     sslAction:      document.getElementById('pol-ssl').value,
     enabled:        document.getElementById('pol-enabled').checked,

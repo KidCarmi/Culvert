@@ -112,6 +112,9 @@ type ConfigSnapshot struct {
 	// Node group definitions synced from CP to DP.
 	NodeGroups []NodeGroup `json:"node_groups,omitempty"`
 
+	// Category groups for policy rules.
+	CategoryGroups []CategoryGroup `json:"category_groups,omitempty"`
+
 	// Global file-block extension list (day-3 audit CRIT-2).
 	FileBlockExtensions []string `json:"file_block_extensions,omitempty"`
 
@@ -1435,6 +1438,11 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		globalBandwidth.ReplaceAll(snap.BandwidthPolicies)
 	}
 
+	// Category groups.
+	if snap.CategoryGroups != nil {
+		globalCategoryGroups.ReplaceAll(snap.CategoryGroups)
+	}
+
 	// Global file-block extensions (CRIT-2).
 	if snap.FileBlockExtensions != nil {
 		fileBlocker.ClearAll()
@@ -1524,6 +1532,9 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	if globalNodeGroups != nil {
 		snap.NodeGroups = globalNodeGroups.List()
 	}
+
+	// Category groups.
+	snap.CategoryGroups = globalCategoryGroups.List()
 
 	// Global file-block extensions (CRIT-2: DP nodes need the blocklist).
 	snap.FileBlockExtensions = fileBlocker.List()

@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -35,7 +36,7 @@ const (
 type URLCategory string
 
 const (
-	CategorySocial    URLCategory = "Social"
+	CategorySocial    URLCategory = "Social Media"
 	CategoryMalicious URLCategory = "Malicious"
 	CategoryNews      URLCategory = "News"
 	CategoryStreaming  URLCategory = "Streaming"
@@ -85,9 +86,13 @@ func (cs *CategoryStore) rebuildIndex() {
 }
 
 // defaultCategoryEntries returns the built-in category seed list.
+//go:embed default_categories.json
+var defaultCategoriesJSON []byte
+
 func defaultCategoryEntries() []*CategoryEntry {
-	return []*CategoryEntry{
-		{Name: "Social", BuiltIn: true, Hosts: []string{
+	// Start with the built-in hardcoded categories.
+	entries := []*CategoryEntry{
+		{Name: "Social Media", BuiltIn: true, Hosts: []string{
 			"facebook.com", "twitter.com", "x.com", "instagram.com",
 			"tiktok.com", "linkedin.com", "reddit.com", "snapchat.com", "pinterest.com",
 		}},
@@ -107,6 +112,17 @@ func defaultCategoryEntries() []*CategoryEntry {
 		}},
 		{Name: "Adult", BuiltIn: true, Hosts: []string{}},
 	}
+
+	// Merge embedded SaaS categories (AI, Marketing, Messaging, etc.).
+	var saas []CategoryEntry
+	if json.Unmarshal(defaultCategoriesJSON, &saas) == nil {
+		for i := range saas {
+			e := &saas[i]
+			e.BuiltIn = true
+			entries = append(entries, e)
+		}
+	}
+	return entries
 }
 
 // Load reads categories from a JSON file. If the file does not exist the
@@ -303,9 +319,10 @@ type PolicyRule struct {
 	SourceIdentity string          `json:"sourceIdentity"` // authenticated username; empty = any
 	SourceGroup    string          `json:"sourceGroup"`    // IdP group/role membership; empty = any
 	AuthSource     string          `json:"authSource"`     // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
-	DestFQDN       string          `json:"destFQDN"`       // exact or wildcard FQDN; empty = any
-	DestCategory   URLCategory     `json:"destCategory"`   // URL category; empty = any
-	DestCountry    []string        `json:"destCountry"`    // ISO 3166-1 alpha-2 country codes; empty = any
+	DestFQDN          string          `json:"destFQDN"`          // exact or wildcard FQDN; empty = any
+	DestCategory      URLCategory     `json:"destCategory"`      // URL category; empty = any
+	DestCategoryGroup string          `json:"destCategoryGroup"` // category group name; empty = any
+	DestCountry       []string        `json:"destCountry"`       // ISO 3166-1 alpha-2 country codes; empty = any
 	Schedule       *PolicySchedule `json:"schedule,omitempty"` // nil = always active
 	SSLAction      SSLAction       `json:"sslAction"`      // Inspect | Bypass
 	FileFiltering  bool            `json:"fileFiltering"`  // enable file-type scanning
@@ -693,6 +710,9 @@ func buildMatchedConditions(rule *PolicyRule) string {
 	if rule.DestCategory != "" && rule.DestCategory != CategoryAny {
 		parts = append(parts, "destCat="+string(rule.DestCategory))
 	}
+	if rule.DestCategoryGroup != "" {
+		parts = append(parts, "destCatGroup="+rule.DestCategoryGroup)
+	}
 	if len(rule.DestCountry) > 0 {
 		parts = append(parts, "destCountry="+strings.Join(rule.DestCountry, ","))
 	}
@@ -792,14 +812,20 @@ func matchDest(rule *PolicyRule, host string) bool {
 	// Empty fields mean "match any" — all configured fields must satisfy.
 	fqdnSet := rule.DestFQDN != ""
 	catSet := rule.DestCategory != "" && rule.DestCategory != CategoryAny
+	catGroupSet := rule.DestCategoryGroup != ""
 	countrySet := len(rule.DestCountry) > 0
 
 	// FQDN check.
 	if fqdnSet && !matchFQDN(rule.DestFQDN, host) {
 		return false
 	}
-	// URL category check.
+	// URL category check (single category).
 	if catSet && !matchCategory(rule.DestCategory, host) {
+		return false
+	}
+	// Category group check — host must be in ANY category within the group.
+	// O(1): lookupHostCategory(host) → group.catSet[result].
+	if catGroupSet && !globalCategoryGroups.MatchesHost(rule.DestCategoryGroup, host) {
 		return false
 	}
 	// Geo-IP country check — cache-only to avoid blocking the request goroutine.

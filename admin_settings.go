@@ -56,6 +56,9 @@ type AdminSettings struct {
 	// Blocklist feed
 	BlocklistFeedURL      string `json:"blocklist_feed_url,omitempty"`
 	BlocklistFeedInterval string `json:"blocklist_feed_interval,omitempty"` // e.g. "24h"
+
+	// SaaS category feed
+	SaaSFeedURL string `json:"saas_feed_url,omitempty"`
 }
 
 var (
@@ -144,6 +147,9 @@ func applyAdminServices(s *AdminSettings) {
 		}
 		blFeedSyncer.SetFeed(s.BlocklistFeedURL, interval)
 	}
+	if s.SaaSFeedURL != "" {
+		globalSaaSFeed.Configure(s.SaaSFeedURL, 24*time.Hour)
+	}
 }
 
 // applyAdminNetwork applies UI access, TLS, and network settings.
@@ -219,6 +225,11 @@ func SaveAdminSettings() {
 	feedURL, _, _, feedInterval := blFeedSyncer.Stats()
 	if feedURL != "" {
 		s.BlocklistFeedURL = feedURL
+	}
+
+	// SaaS feed
+	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {
+		s.SaaSFeedURL = saasURL
 		s.BlocklistFeedInterval = feedInterval.String()
 	}
 
