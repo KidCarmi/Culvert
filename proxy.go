@@ -1085,6 +1085,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// Wrap rawClient with the peek buffer so the already-peeked byte isn't lost.
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, &tls.Config{
 		GetCertificate: certMgr.GetCert,
+		// Force HTTP/1.1 — the inner request loop uses http.ReadRequest which
+		// is HTTP/1.x only. Without this, browsers negotiate HTTP/2 via ALPN
+		// and the parser can't read H2 frames, causing a silent fallback to
+		// raw relay with zero file-blocking/DPI/scanning checks.
+		NextProtos: []string{"http/1.1"},
 	})
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
 		clientTLS.Close()  //nolint:errcheck // best-effort cleanup on handshake failure
