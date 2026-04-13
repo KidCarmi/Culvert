@@ -842,6 +842,9 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	startHitCounterPersistence(appLifecycleCtx, filepath.Join(dataDir, "hit_counters.json"))
 	RestoreHitCounts() // copy persisted hit counters back into PolicyRule.HitCount
 
+	// ── Admin settings persistence (restore GUI changes across restarts) ──
+	LoadAdminSettings(filepath.Join(dataDir, "admin_settings.json"))
+
 	// ── Web UI ────────────────────────────────────────────────────────────
 	uiCfgGeoIPDB = geoDBVal
 	uiCfgLogFile = lPath
