@@ -145,6 +145,21 @@ func (fb *FileBlocker) CheckContentType(contentType string) string {
 	return ""
 }
 
+// extractCDFilename extracts the filename from a Content-Disposition header.
+// Returns "" if no filename is found. Used by per-rule file profile checking
+// when the download URL doesn't contain the file extension (e.g. SourceForge's
+// /files/latest/download pattern).
+func extractCDFilename(cd string) string {
+	if cd == "" {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(cd)
+	if err != nil {
+		return ""
+	}
+	return params["filename"]
+}
+
 // CheckContentDisposition returns the blocked extension if the
 // Content-Disposition response header carries a filename with a blocked
 // extension (catches downloads that use a generic URL but declare the real

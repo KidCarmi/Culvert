@@ -111,6 +111,12 @@ type ConfigSnapshot struct {
 
 	// Node group definitions synced from CP to DP.
 	NodeGroups []NodeGroup `json:"node_groups,omitempty"`
+
+	// Global file-block extension list (day-3 audit CRIT-2).
+	FileBlockExtensions []string `json:"file_block_extensions,omitempty"`
+
+	// OTLP endpoint for metrics + traces export (day-3 audit CRIT-3).
+	OTLPEndpoint string `json:"otlp_endpoint,omitempty"`
 }
 
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
@@ -1429,6 +1435,25 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		globalBandwidth.ReplaceAll(snap.BandwidthPolicies)
 	}
 
+	// Global file-block extensions (CRIT-2).
+	if snap.FileBlockExtensions != nil {
+		fileBlocker.ClearAll()
+		for _, ext := range snap.FileBlockExtensions {
+			fileBlocker.Add(ext)
+		}
+	}
+
+	// OTLP endpoint (CRIT-3).
+	if snap.OTLPEndpoint != "" {
+		if !globalOTLP.Enabled() || globalOTLP.Endpoint() != snap.OTLPEndpoint {
+			globalOTLP.Configure(snap.OTLPEndpoint, nil)
+			globalOTLPTraces.Configure(snap.OTLPEndpoint, nil)
+		}
+	} else if globalOTLP.Enabled() {
+		globalOTLP.Stop()
+		globalOTLPTraces.Stop()
+	}
+
 	// Node groups.
 	if snap.NodeGroups != nil && globalNodeGroups != nil {
 		globalNodeGroups.ReplaceAll(snap.NodeGroups)
@@ -1499,6 +1524,12 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	if globalNodeGroups != nil {
 		snap.NodeGroups = globalNodeGroups.List()
 	}
+
+	// Global file-block extensions (CRIT-2: DP nodes need the blocklist).
+	snap.FileBlockExtensions = fileBlocker.List()
+
+	// OTLP endpoint (CRIT-3: DP nodes need the endpoint to export spans/metrics).
+	snap.OTLPEndpoint = globalOTLP.Endpoint()
 
 	return snap
 }

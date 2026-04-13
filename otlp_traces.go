@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,6 +50,7 @@ type SpanRecord struct {
 // OTLPSpanExporter collects spans and pushes them to an OTLP/HTTP endpoint.
 type OTLPSpanExporter struct {
 	mu       sync.Mutex
+	active   atomic.Bool // lock-free fast path for Enabled()
 	endpoint string
 	headers  map[string]string
 	interval time.Duration
@@ -83,6 +85,7 @@ func (e *OTLPSpanExporter) Configure(endpoint string, headers map[string]string)
 	}
 	e.endpoint = strings.TrimRight(endpoint, "/")
 	e.headers = headers
+	e.active.Store(endpoint != "")
 	e.mu.Unlock()
 
 	if endpoint == "" {
@@ -104,14 +107,13 @@ func (e *OTLPSpanExporter) Stop() {
 		e.cancel = nil
 	}
 	e.endpoint = ""
+	e.active.Store(false)
 	e.mu.Unlock()
 }
 
-// Enabled returns whether trace export is active.
+// Enabled returns whether trace export is active (lock-free fast path).
 func (e *OTLPSpanExporter) Enabled() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.endpoint != ""
+	return e.active.Load()
 }
 
 // RecordSpan appends a span to the ring buffer. Lock-free fast path: callers
