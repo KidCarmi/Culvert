@@ -1165,13 +1165,29 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		}
 		// 3. Content-Disposition header — catches downloads that use a generic
 		//    URL but declare the real filename in the response header.
-		if ext := fileBlocker.CheckContentDisposition(resp.Header.Get("Content-Disposition")); ext != "" {
-			atomic.AddInt64(&statFileBlocked, 1)
-			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", ext, "", "", "inspect")
-			resp.Body.Close()
-			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
-			break
+		if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+			if ext := fileBlocker.CheckContentDisposition(cd); ext != "" {
+				atomic.AddInt64(&statFileBlocked, 1)
+				atomic.AddInt64(&statBlocked, 1)
+				recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", ext, "", "", "inspect")
+				resp.Body.Close()
+				fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
+				break
+			}
+			// Per-rule profile: check the CD filename against the matched rule's
+			// file profile (catches SourceForge-style /files/latest/download URLs).
+			if match != nil && match.Rule != nil && match.Rule.FileFiltering && match.Rule.FileProfile != "" {
+				if fn := extractCDFilename(cd); fn != "" {
+					if match.Rule.FileProfileBlocked(fn) {
+						atomic.AddInt64(&statFileBlocked, 1)
+						atomic.AddInt64(&statBlocked, 1)
+						recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, "", "inspect")
+						resp.Body.Close()
+						fileBlockConn(clientTLS, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
+						break
+					}
+				}
+			}
 		}
 		// 4. Content-Type MIME — catches renamed executables where the server
 		//    still reports the true MIME type.
