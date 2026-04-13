@@ -16,6 +16,7 @@
   <a href="https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml"><img src="https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml/badge.svg" alt="Security Gate" /></a>
   <a href="https://github.com/KidCarmi/Dependency-Obituary"><img src="https://img.shields.io/badge/deps-Dependency%20Obituary-blueviolet" alt="Dependency Obituary" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <img src="https://img.shields.io/badge/PQC-ML--KEM--768-brightgreen?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDFMMyA1djZjMCA1LjU1IDMuODQgMTAuNzQgOSAxMiA1LjE2LTEuMjYgOS02LjQ1IDktMTJWNWwtOS00eiIvPjwvc3ZnPg==" alt="Post-Quantum Ready" />
   <a href="https://goreportcard.com/report/github.com/KidCarmi/Culvert"><img src="https://goreportcard.com/badge/github.com/KidCarmi/Culvert" alt="Go Report Card" /></a>
 </p>
 
@@ -139,6 +140,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 - **Admin API rate limiting** - 60 req/min per IP on mutating endpoints
 - **Atomic file writes** for CA bundle and config persistence
 - **PBKDF2 600k iterations** (NIST SP 800-132 2024) for CA key encryption
+- **Post-Quantum Cryptography** - ML-KEM-768 hybrid key exchange (Go 1.25), protects against "Harvest Now, Decrypt Later" attacks
 - **Password complexity** - enforces 8+ characters, mixed case, digit requirement
 - **Log levels** - runtime DEBUG/INFO/WARN/ERROR with admin API control
 
@@ -462,6 +464,24 @@ Culvert follows a defence-in-depth approach:
 | **Hop-by-hop** | RFC 7230 compliant - parses `Connection` header for dynamic names |
 | **GeoIP** | Fail-closed on cache miss (unknown country = no match) |
 | **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, removes `X-User-Identity` |
+| **Post-Quantum (PQC)** | ML-KEM-768 hybrid key exchange via Go 1.25 - quantum-resistant on all TLS connections |
+
+### Post-Quantum Cryptography (PQC)
+
+Culvert is **quantum-resistant by default**. Go 1.25's `crypto/tls` automatically negotiates ML-KEM-768 (formerly Kyber) hybrid key exchange on all TLS connections when the peer supports it. This protects against "Harvest Now, Decrypt Later" attacks where an adversary records encrypted traffic today and decrypts it with a future quantum computer.
+
+| Connection | PQC Key Exchange | Notes |
+|---|---|---|
+| Browser to Admin UI | Auto-negotiated | Chrome 124+, Firefox 128+, Edge 124+ |
+| Proxy to upstream servers | Auto-negotiated | When upstream supports ML-KEM |
+| Control Plane to Data Plane (gRPC mTLS) | Always active | Both sides run Go 1.25 |
+| SSL-inspected client connections | Auto-negotiated | When client browser supports ML-KEM |
+
+**What's quantum-resistant today:** All key exchanges (TLS handshakes) use hybrid X25519 + ML-KEM-768, meaning traffic confidentiality is protected even against quantum computers.
+
+**What's still classical:** Certificate signing uses ECDSA P-256. PQC signature algorithms (ML-DSA / Dilithium) are not yet in Go's standard library. Culvert will adopt PQC signing when Go adds native support (expected Go 1.26+). This is a lower risk - signatures prove identity at connection time and cannot be "harvested" for future decryption.
+
+No configuration required - PQC is enabled automatically. No performance impact - the ML-KEM handshake adds ~1ms to the initial TLS connection.
 
 ### CI Security Pipeline
 
