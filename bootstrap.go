@@ -215,7 +215,7 @@ services:
           -logfile /data/proxy.log
           -audit-log /data/audit.jsonl
           -geoip-db /app/GeoLite2-Country.mmdb
-          -yara-rules-dir /app/yara
+          -yara-rules-dir /data/yara
           -threat-feed-db /data/threatfeeds.json
           -fileprofiles-file /data/fileprofiles.json
           -updater-url http://dp-updater:7123"
