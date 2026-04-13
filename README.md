@@ -165,6 +165,57 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 ---
 
+## Sizing Guide
+
+Culvert is lightweight by design - a single Go binary with no runtime dependencies. Resource requirements scale with traffic volume, SSL inspection depth, and whether antivirus scanning is enabled.
+
+### Deployment Profiles
+
+| Profile | Users | Requests/sec | SSL Inspection | ClamAV | YARA |
+|---|---|---|---|---|---|
+| **Home Lab** | 1-5 | < 50 | Optional | Off | Off |
+| **Small Office** | 10-50 | 50-500 | Recommended | Optional | Optional |
+| **Enterprise** | 100-1000+ | 500-5000+ | Yes | Yes | Yes |
+
+### Resource Requirements
+
+| Resource | Home Lab | Small Office | Enterprise |
+|---|---|---|---|
+| **CPU** | 1 vCPU | 2 vCPU | 4+ vCPU |
+| **RAM (proxy only)** | 128 MB | 256 MB | 512 MB - 1 GB |
+| **RAM (with ClamAV)** | 512 MB | 1 GB | 2 GB |
+| **Storage (base)** | 50 MB (binary + config) | 50 MB | 50 MB |
+| **Storage (ClamAV DB)** | - | 300 MB | 300 MB |
+| **Storage (GeoIP DB)** | 5 MB | 5 MB | 5 MB |
+| **Storage (logs)** | 100 MB - 1 GB | 1 - 5 GB | 5 - 50 GB |
+| **Storage (admin settings)** | < 10 KB | < 10 KB | < 10 KB |
+
+### Notes
+
+- **ClamAV** is the largest resource consumer. It downloads ~300 MB of virus signatures on first boot and keeps them in memory. If you don't need antivirus scanning, disable it to save ~500 MB RAM.
+- **SSL inspection** adds ~1 KB RAM per cached leaf certificate (LRU cache, 10K max = ~10 MB). CPU impact is ~0.5ms per new TLS handshake (ECDSA P-256 signing).
+- **Log rotation** is automatic. Request logs rotate at 100 MB (configurable via `-request-log-max-mb`), audit logs at 50 MB, system logs at 50 MB.
+- **Threat feeds** (URLhaus + OpenPhish) add ~5-20 MB RAM depending on feed size.
+- **Prometheus metrics** are stateless - scraped externally, no local storage.
+- **Post-quantum (ML-KEM-768)** adds ~1 KB to initial TLS handshakes. No ongoing RAM/CPU impact.
+- **Docker image size:** ~30 MB (distroless base + static Go binary).
+
+### Minimum Requirements
+
+For a functional deployment with all features enabled:
+
+```
+2 vCPU | 1 GB RAM | 2 GB disk
+```
+
+For proxy-only (no AV, no SSL inspection):
+
+```
+1 vCPU | 128 MB RAM | 100 MB disk
+```
+
+---
+
 ## Quick Start
 
 ### One-Line Install (recommended)
