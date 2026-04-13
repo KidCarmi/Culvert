@@ -82,6 +82,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/rewrite", apiRewrite)
 	mux.HandleFunc("/api/policy", apiPolicy)
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
+	mux.HandleFunc("/api/policy/move", apiPolicyMove)
 	mux.HandleFunc("/api/policy/test", apiPolicyTest)
 	mux.HandleFunc("/api/ca-cert", apiCACert)
 	mux.HandleFunc("/api/certs/upload", apiCertsUpload)
@@ -2860,6 +2861,111 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
 	auditEvent(r, "policy.reorder", fmt.Sprintf("%d rules", len(body.Priorities)), "")
 	saveConfigVersion(sessionAdmin(r), "policy.reorder")
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// POST /api/policy/move — move a rule to first/last/before/after a target rule.
+// Builds a new ordered priority list and delegates to policyStore.Reorder().
+// Body: {"priority": 5, "position": "first|last|before|after", "targetName": "rule-name"}
+func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	var body struct {
+		Priority   int    `json:"priority"`
+		Position   string `json:"position"`
+		TargetName string `json:"targetName"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.Position != "first" && body.Position != "last" &&
+		body.Position != "before" && body.Position != "after" {
+		http.Error(w, "position must be first, last, before, or after", http.StatusBadRequest)
+		return
+	}
+	if (body.Position == "before" || body.Position == "after") && body.TargetName == "" {
+		http.Error(w, "targetName is required for before/after", http.StatusBadRequest)
+		return
+	}
+
+	// Build the new priority order from the current rules.
+	rules := policyStore.List()
+	if len(rules) == 0 {
+		http.Error(w, "no rules to reorder", http.StatusBadRequest)
+		return
+	}
+
+	// Find the rule being moved.
+	moveIdx := -1
+	for i := range rules {
+		if rules[i].Priority == body.Priority {
+			moveIdx = i
+			break
+		}
+	}
+	if moveIdx < 0 {
+		http.Error(w, "rule not found", http.StatusBadRequest)
+		return
+	}
+
+	// Build priority list without the moved rule.
+	priorities := make([]int, 0, len(rules))
+	for i := range rules {
+		if i != moveIdx {
+			priorities = append(priorities, rules[i].Priority)
+		}
+	}
+	movePri := rules[moveIdx].Priority
+
+	switch body.Position {
+	case "first":
+		priorities = append([]int{movePri}, priorities...)
+	case "last":
+		priorities = append(priorities, movePri)
+	case "before", "after":
+		// Find the target rule by name in the remaining list.
+		targetIdx := -1
+		for i, pri := range priorities {
+			for j := range rules {
+				if rules[j].Priority == pri && strings.EqualFold(rules[j].Name, body.TargetName) {
+					targetIdx = i
+					break
+				}
+			}
+			if targetIdx >= 0 {
+				break
+			}
+		}
+		if targetIdx < 0 {
+			http.Error(w, fmt.Sprintf("target rule not found: %s", sanitizeLog(body.TargetName)), http.StatusBadRequest)
+			return
+		}
+		insertAt := targetIdx
+		if body.Position == "after" {
+			insertAt++
+		}
+		// Insert movePri at the target position.
+		newPri := make([]int, 0, len(rules))
+		newPri = append(newPri, priorities[:insertAt]...)
+		newPri = append(newPri, movePri)
+		newPri = append(newPri, priorities[insertAt:]...)
+		priorities = newPri
+	}
+
+	if !policyStore.Reorder(priorities) {
+		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
+		return
+	}
+	policyStore.Save()
+	logger.Printf("UI: policy rule pri=%d moved to %s", body.Priority, sanitizeLog(body.Position))
+	auditEvent(r, "policy.move", fmt.Sprintf("pri=%d to %s", body.Priority, sanitizeLog(body.Position)), "")
+	saveConfigVersion(sessionAdmin(r), "policy.move")
 	jsonOK(w, map[string]any{"ok": true})
 }
 
