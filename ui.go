@@ -2867,6 +2867,20 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 // POST /api/policy/move — move a rule to first/last/before/after a target rule.
 // Builds a new ordered priority list and delegates to policyStore.Reorder().
 // Body: {"priority": 5, "position": "first|last|before|after", "targetName": "rule-name"}
+// findRuleIdxByName returns the index within priorities that corresponds to the
+// rule named targetName. Returns -1 if not found. Extracted to keep
+// buildMovedPriorities under the cyclop complexity threshold.
+func findRuleIdxByName(rules []PolicyRule, priorities []int, targetName string) int {
+	for i, pri := range priorities {
+		for j := range rules {
+			if rules[j].Priority == pri && strings.EqualFold(rules[j].Name, targetName) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 // buildMovedPriorities computes a new priority ordering after moving a rule
 // identified by movePriority to the given position (first/last/before/after).
 // Returns the reordered priority slice or an error for unknown rule/target.
@@ -2897,18 +2911,7 @@ func buildMovedPriorities(rules []PolicyRule, movePriority int, position, target
 	case "last":
 		return append(priorities, movePri), nil
 	case "before", "after":
-		targetIdx := -1
-		for i, pri := range priorities {
-			for j := range rules {
-				if rules[j].Priority == pri && strings.EqualFold(rules[j].Name, targetName) {
-					targetIdx = i
-					break
-				}
-			}
-			if targetIdx >= 0 {
-				break
-			}
-		}
+		targetIdx := findRuleIdxByName(rules, priorities, targetName)
 		if targetIdx < 0 {
 			return nil, fmt.Errorf("target rule not found: %s", strings.ReplaceAll(targetName, "\n", ""))
 		}
