@@ -1128,6 +1128,16 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			break
 		}
 		clientTLS.SetReadDeadline(time.Time{}) //nolint:errcheck // clear deadline for forwarding
+
+		// Debug: log every inner request so admins can trace file-blocking decisions.
+		// All values are sanitized or hardcoded to satisfy CodeQL CWE-117.
+		filterStr := "off"
+		profileStr := ""
+		if match != nil && match.Rule != nil && match.Rule.FileFiltering {
+			filterStr = "on"
+			profileStr = sanitizeLog(string(match.Rule.FileProfile))
+		}
+		logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(req.URL.Path), profileStr, filterStr)
 		// Strip hop-by-hop headers before forwarding upstream.
 		removeHopHeaders(req.Header)
 
