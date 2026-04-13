@@ -834,6 +834,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 
 	// ── Hit counter persistence (Finding 2.3) ───────────────────────────
 	startHitCounterPersistence(appLifecycleCtx, filepath.Join(dataDir, "hit_counters.json"))
+	RestoreHitCounts() // copy persisted hit counters back into PolicyRule.HitCount
 
 	// ── Web UI ────────────────────────────────────────────────────────────
 	uiCfgGeoIPDB = geoDBVal

@@ -375,7 +375,46 @@ func (ps *PolicyStore) Load(path string) error {
 	ps.rules = rules
 	ps.sortLocked()
 	ps.mu.Unlock()
+	// Restore persisted version from sidecar .meta file.
+	ps.loadMeta()
 	return nil
+}
+
+// policyMeta is persisted alongside the policy file so version survives restart.
+type policyMeta struct {
+	Version   int64  `json:"version"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func (ps *PolicyStore) loadMeta() {
+	if ps.path == "" {
+		return
+	}
+	metaPath := ps.path + ".meta"
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return
+	}
+	var m policyMeta
+	if json.Unmarshal(data, &m) == nil {
+		ps.mu.Lock()
+		ps.version = m.Version
+		if m.UpdatedAt != "" {
+			ps.updatedAt = m.UpdatedAt
+		}
+		ps.mu.Unlock()
+	}
+}
+
+func (ps *PolicyStore) saveMeta() {
+	if ps.path == "" {
+		return
+	}
+	ps.mu.RLock()
+	m := policyMeta{Version: ps.version, UpdatedAt: ps.updatedAt}
+	ps.mu.RUnlock()
+	data, _ := json.Marshal(m)
+	os.WriteFile(ps.path+".meta", data, 0o600) //nolint:errcheck
 }
 
 // Save persists the current rules to disk (skips HitCount — runtime only).
@@ -403,6 +442,7 @@ func (ps *PolicyStore) Save() {
 		return
 	}
 	_ = os.Rename(tmp, ps.path)
+	ps.saveMeta()
 }
 
 // List returns a copy of all rules (including live HitCount).
