@@ -1918,7 +1918,25 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen // CRUD handler: one branch per HTTP method is intentional
 	switch r.Method {
 	case http.MethodGet:
-		jsonOK(w, catStore.All())
+		all := catStore.All()
+		// Enrich with feed-backed flag so the GUI shows which categories
+		// have UT1 community feed domains behind them.
+		ut1Set := make(map[string]bool)
+		for _, cat := range ut1CategoryMap {
+			ut1Set[strings.ToLower(cat)] = true
+		}
+		type enrichedCat struct {
+			CategoryEntry
+			FeedBacked bool `json:"feedBacked"`
+		}
+		enriched := make([]enrichedCat, len(all))
+		for i, e := range all {
+			enriched[i] = enrichedCat{
+				CategoryEntry: e,
+				FeedBacked:    ut1Set[strings.ToLower(e.Name)],
+			}
+		}
+		jsonOK(w, enriched)
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {

@@ -4117,7 +4117,8 @@ function renderURLCatList(cats) {
               style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px;padding:0;line-height:1">&times;</button>
           </span>`;
         }).join('')}
-        ${(cat.hosts || []).length === 0 ? '<span style="color:var(--text-muted);font-size:12px">No hosts yet</span>' : ''}
+        ${(cat.hosts || []).length === 0 && !cat.feedBacked ? '<span style="color:var(--text-muted);font-size:12px">No hosts yet</span>' : ''}
+        ${cat.feedBacked ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--accent);background:rgba(20,184,166,.1);padding:3px 8px;border-radius:4px;margin-bottom:4px">UT1 Community Feed - auto-synced hourly</span>' : ''}
       </div>
       <div style="display:flex;gap:6px">
         <input class="form-input" id="uc-new-host-${qn}" type="text"
