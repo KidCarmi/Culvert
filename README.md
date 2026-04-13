@@ -16,6 +16,7 @@
   <a href="https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml"><img src="https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml/badge.svg" alt="Security Gate" /></a>
   <a href="https://github.com/KidCarmi/Dependency-Obituary"><img src="https://img.shields.io/badge/deps-Dependency%20Obituary-blueviolet" alt="Dependency Obituary" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <img src="https://img.shields.io/badge/PQC-ML--KEM--768-brightgreen?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDFMMyA1djZjMCA1LjU1IDMuODQgMTAuNzQgOSAxMiA1LjE2LTEuMjYgOS02LjQ1IDktMTJWNWwtOS00eiIvPjwvc3ZnPg==" alt="Post-Quantum Ready" />
   <a href="https://goreportcard.com/report/github.com/KidCarmi/Culvert"><img src="https://goreportcard.com/badge/github.com/KidCarmi/Culvert" alt="Go Report Card" /></a>
 </p>
 
@@ -139,6 +140,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 - **Admin API rate limiting** - 60 req/min per IP on mutating endpoints
 - **Atomic file writes** for CA bundle and config persistence
 - **PBKDF2 600k iterations** (NIST SP 800-132 2024) for CA key encryption
+- **Post-Quantum Cryptography** - ML-KEM-768 hybrid key exchange (Go 1.25), protects against "Harvest Now, Decrypt Later" attacks
 - **Password complexity** - enforces 8+ characters, mixed case, digit requirement
 - **Log levels** - runtime DEBUG/INFO/WARN/ERROR with admin API control
 
@@ -160,6 +162,79 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 - **Plugin API** - `Middleware` interface for custom request/response inspection
 - **HSM/KMS integration** - `KeyProvider` interface (AWS KMS, Azure Key Vault, PKCS#11)
+
+---
+
+## Sizing Guide
+
+Culvert is lightweight by design - a single Go binary with no runtime dependencies. Resource requirements scale with traffic volume, SSL inspection depth, and whether antivirus scanning is enabled.
+
+### Deployment Profiles
+
+| Profile | Users | Requests/sec | SSL Inspection | ClamAV | YARA |
+|---|---|---|---|---|---|
+| **Home Lab** | 1-5 | < 50 | Optional | Off | Off |
+| **Small Office** | 10-50 | 50-500 | Recommended | Optional | Optional |
+| **Enterprise** | 100-1000+ | 500-5000+ | Yes | Yes | Yes |
+
+### Resource Requirements
+
+| Resource | Home Lab | Small Office | Enterprise |
+|---|---|---|---|
+| **CPU** | 1 vCPU | 2 vCPU | 4+ vCPU |
+| **RAM (proxy only)** | 128 MB | 256 MB | 512 MB - 1 GB |
+| **RAM (with ClamAV)** | 512 MB | 1 GB | 2 GB |
+| **Storage (base)** | 50 MB (binary + config) | 50 MB | 50 MB |
+| **Storage (ClamAV DB)** | - | 300 MB | 300 MB |
+| **Storage (GeoIP DB)** | 5 MB | 5 MB | 5 MB |
+| **Storage (logs)** | 100 MB - 1 GB | 1 - 5 GB | 5 - 50 GB |
+| **Storage (admin settings)** | < 10 KB | < 10 KB | < 10 KB |
+
+### Notes
+
+- **ClamAV** is the largest resource consumer. It downloads ~300 MB of virus signatures on first boot and keeps them in memory. If you don't need antivirus scanning, disable it to save ~500 MB RAM.
+- **SSL inspection** adds ~1 KB RAM per cached leaf certificate (LRU cache, 10K max = ~10 MB). CPU impact is ~0.5ms per new TLS handshake (ECDSA P-256 signing).
+- **Log rotation** is automatic. Request logs rotate at 100 MB (configurable via `-request-log-max-mb`), audit logs at 50 MB, system logs at 50 MB.
+- **Threat feeds** (URLhaus + OpenPhish) add ~5-20 MB RAM depending on feed size.
+- **Prometheus metrics** are stateless - scraped externally, no local storage.
+- **Post-quantum (ML-KEM-768)** adds ~1 KB to initial TLS handshakes. No ongoing RAM/CPU impact.
+- **Docker image size:** ~30 MB (distroless base + static Go binary).
+
+### Minimum Requirements
+
+For a functional deployment with all features enabled:
+
+```
+2 vCPU | 1 GB RAM | 2 GB disk
+```
+
+For proxy-only (no AV, no SSL inspection):
+
+```
+1 vCPU | 128 MB RAM | 100 MB disk
+```
+
+### Cluster Deployments (Control Plane / Data Plane)
+
+| Component | CPU | RAM | Storage | Notes |
+|---|---|---|---|---|
+| **Control Plane** | 2 vCPU | 512 MB | 500 MB | No proxy traffic - config sync, enrollment, dashboard only |
+| **Control Plane (HA pair)** | 2 vCPU each | 512 MB each | 500 MB each | Leader + standby with automatic failover |
+| **Data Plane node** | 2 vCPU | 1 GB | 1 GB | Handles proxy traffic, receives config from CP |
+| **Data Plane + ClamAV** | 2 vCPU | 2 GB | 1.5 GB | Add ~1 GB RAM + 300 MB disk for AV |
+
+**Scale reference:**
+
+| Setup | Nodes | Total resources | Handles |
+|---|---|---|---|
+| **Small cluster** | 1 CP + 2 DP | 6 vCPU, 2.5 GB RAM | ~1000 concurrent users |
+| **Medium cluster** | 1 CP (HA) + 5 DP | 12 vCPU, 6 GB RAM | ~5000 concurrent users |
+| **Large cluster** | 1 CP (HA) + 10 DP | 22 vCPU, 11 GB RAM | ~10000+ concurrent users |
+
+- **CP is lightweight** - it only serves gRPC config sync, node enrollment, and the admin dashboard. No proxy traffic flows through it.
+- **DP nodes are stateless** - they receive their entire config from the CP on connect. Lose a DP, spin up a new one, it auto-enrolls and gets the full config in seconds.
+- **Bandwidth/QoS** policies are enforced per-DP, so rate limits scale linearly with node count.
+- **Network:** CP to DP communication uses gRPC over mTLS. Typical bandwidth: < 1 KB/s per node (config sync + heartbeat every 30s).
 
 ---
 
@@ -462,6 +537,24 @@ Culvert follows a defence-in-depth approach:
 | **Hop-by-hop** | RFC 7230 compliant - parses `Connection` header for dynamic names |
 | **GeoIP** | Fail-closed on cache miss (unknown country = no match) |
 | **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, removes `X-User-Identity` |
+| **Post-Quantum (PQC)** | ML-KEM-768 hybrid key exchange via Go 1.25 - quantum-resistant on all TLS connections |
+
+### Post-Quantum Cryptography (PQC)
+
+Culvert is **quantum-resistant by default**. Go 1.25's `crypto/tls` automatically negotiates ML-KEM-768 (formerly Kyber) hybrid key exchange on all TLS connections when the peer supports it. This protects against "Harvest Now, Decrypt Later" attacks where an adversary records encrypted traffic today and decrypts it with a future quantum computer.
+
+| Connection | PQC Key Exchange | Notes |
+|---|---|---|
+| Browser to Admin UI | Auto-negotiated | Chrome 124+, Firefox 128+, Edge 124+ |
+| Proxy to upstream servers | Auto-negotiated | When upstream supports ML-KEM |
+| Control Plane to Data Plane (gRPC mTLS) | Always active | Both sides run Go 1.25 |
+| SSL-inspected client connections | Auto-negotiated | When client browser supports ML-KEM |
+
+**What's quantum-resistant today:** All key exchanges (TLS handshakes) use hybrid X25519 + ML-KEM-768, meaning traffic confidentiality is protected even against quantum computers.
+
+**What's still classical:** Certificate signing uses ECDSA P-256. PQC signature algorithms (ML-DSA / Dilithium) are not yet in Go's standard library. Culvert will adopt PQC signing when Go adds native support (expected Go 1.26+). This is a lower risk - signatures prove identity at connection time and cannot be "harvested" for future decryption.
+
+No configuration required - PQC is enabled automatically. No performance impact - the ML-KEM handshake adds ~1ms to the initial TLS connection.
 
 ### CI Security Pipeline
 

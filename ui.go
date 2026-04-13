@@ -1609,6 +1609,7 @@ func apiBlocklistFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		blFeedSyncer.SetFeed(body.URL, interval)
 		auditEvent(r, "blocklist.feed.set", body.URL, "")
+  adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "url": body.URL, "interval": interval.String()})
 
 	default:
@@ -2325,6 +2326,7 @@ func apiSessionSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		sessionSecret = key
 		auditEvent(r, "settings.session_secret", "rotated", "shared session key updated via GUI")
+  adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2356,6 +2358,7 @@ func apiSessionTimeout(w http.ResponseWriter, r *http.Request) {
 		}
 		SetSessionTTL(time.Duration(body.Hours) * time.Hour)
 		auditEvent(r, "settings.session_timeout", fmt.Sprintf("%dh", body.Hours), "")
+  adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "hours": body.Hours})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2390,6 +2393,7 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		auditEvent(r, "settings.ui_allow_ips", fmt.Sprintf("%d entries", len(body.IPs)), strings.Join(body.IPs, ", "))
+  adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "ips": ListUIAllowedCIDRs()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2441,6 +2445,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			syslogConfigured = ""
 			auditEvent(r, "settings.syslog", "disabled", "")
+   adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
 			return
 		}
@@ -2450,6 +2455,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		syslogConfigured = body.Addr
 		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
+  adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2538,6 +2544,7 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 		logger.Printf("UI: security config updated (ipMode=%q rateRPM=%s)", logMode, logRPM)
 		auditEvent(r, "security.update", "ip_filter+rate_limit",
 			fmt.Sprintf("mode=%s rpm=%d", ipf.Mode(), rl.Limit()))
+		adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "security.update")
 		jsonOK(w, map[string]any{"ok": true})
 
@@ -2608,9 +2615,11 @@ func apiUnauthMode(w http.ResponseWriter, r *http.Request) {
 	cfg.SetUnauthMode(body.Enabled)
 	if body.Enabled {
 		auditEvent(r, "settings.update", "unauthMode", "enabled — proxy accepts unauthenticated traffic; policy rules govern access")
+  adminSettingsSave()
 		logger.Printf("UI: unauth mode enabled — proxy accepts traffic without credentials")
 	} else {
 		auditEvent(r, "settings.update", "unauthMode", "disabled — proxy requires credentials")
+  adminSettingsSave()
 		logger.Printf("UI: unauth mode disabled — proxy requires credentials")
 	}
 	jsonOK(w, map[string]any{"ok": true, "unauthMode": body.Enabled})
@@ -2643,6 +2652,7 @@ func apiLogLevel(w http.ResponseWriter, r *http.Request) {
 		SetLogLevel(ParseLogLevel(upper))
 		logger.Printf("UI: log level changed to %s", strings.ReplaceAll(upper, "\n", ""))
 		auditEvent(r, "settings.log_level", upper, "")
+  adminSettingsSave()
 		jsonOK(w, map[string]string{"level": upper})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2686,6 +2696,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			sanitizeLog(body.BaseURL), safeSANs, safeTrustFwd)
 		auditEvent(r, "settings.network", "updated", fmt.Sprintf("base_url=%s trust_fwd=%s sans=%v",
 			strings.ReplaceAll(body.BaseURL, "\n", ""), safeTrustFwd, safeSANs))
+		adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "settings.network")
 		jsonOK(w, map[string]string{"status": "ok"})
 	default:
@@ -2712,6 +2723,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		added := rewriter.Add(rule)
 		logger.Printf("UI: rewrite rule added id=%d host=%q", added.ID, sanitizeLog(added.Host))
 		auditEvent(r, "rewrite.add", fmt.Sprintf("id=%d host=%s", added.ID, added.Host), "")
+  adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "rewrite.add")
 		jsonOK(w, added)
 
@@ -2731,6 +2743,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		}
 		logger.Printf("UI: rewrite rule removed id=%d", id)
 		auditEvent(r, "rewrite.remove", fmt.Sprintf("id=%d", id), "")
+  adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "rewrite.remove")
 		w.WriteHeader(http.StatusNoContent)
 
@@ -3202,6 +3215,7 @@ func apiDefaultAction(w http.ResponseWriter, r *http.Request) {
 		}
 		setDefaultPolicyAction(body.Action)
 		auditEvent(r, "policy.default_action", body.Action, "")
+		adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "policy.default_action")
 		logger.Printf("UI: default policy action set to %q", body.Action)
 		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction()})
@@ -4438,6 +4452,7 @@ func apiMetricsConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		metricsToken = body.Token
 		auditEvent(r, "settings.metrics_token", "updated", "")
+  adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -4477,6 +4492,7 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 			connLimiter.Enable(body.MaxPerIP)
 		}
 		auditEvent(r, "connlimit.update", fmt.Sprintf("enabled=%v max=%d", connLimiter.enabled.Load(), connLimiter.MaxPerIP()), "")
+  adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "enabled": connLimiter.enabled.Load(), "maxPerIP": connLimiter.MaxPerIP()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -4514,6 +4530,7 @@ func apiBlockPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		auditEvent(r, "blockpage.update", "block_page_template", "")
+  adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -5087,23 +5104,53 @@ func apiClusterMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET/POST /api/otlp — configure OpenTelemetry OTLP/HTTP metrics export.
+// resolveOTLPHeaders builds the OTLP auth headers map from the name+value
+// fields. If both are empty, preserves the existing headers (admin changed
+// endpoint but didn't re-enter the auth token).
+func resolveOTLPHeaders(name, value string) map[string]string {
+	n := strings.TrimSpace(name)
+	v := strings.TrimSpace(value)
+	if n != "" && v != "" {
+		return map[string]string{n: v}
+	}
+	globalOTLP.mu.RLock()
+	defer globalOTLP.mu.RUnlock()
+	if len(globalOTLP.headers) > 0 {
+		return globalOTLP.headers
+	}
+	return nil
+}
+
+// GET/POST /api/otlp - configure OpenTelemetry OTLP/HTTP export (metrics + traces).
 func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
+		// Check if auth headers are configured (don't expose the actual value).
+		globalOTLP.mu.RLock()
+		hasAuth := len(globalOTLP.headers) > 0
+		authName := ""
+		for k := range globalOTLP.headers {
+			authName = k // return the header NAME (not value) so UI can show it
+			break
+		}
+		globalOTLP.mu.RUnlock()
 		jsonOK(w, map[string]any{
-			"enabled":  globalOTLP.Enabled(),
-			"endpoint": globalOTLP.Endpoint(),
+			"enabled":        globalOTLP.Enabled(),
+			"endpoint":       globalOTLP.Endpoint(),
+			"hasAuth":        hasAuth,
+			"authHeaderName": authName,
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		var body struct {
-			Endpoint string `json:"endpoint"`
+			Endpoint        string `json:"endpoint"`
+			AuthHeaderName  string `json:"authHeaderName"`
+			AuthHeaderValue string `json:"authHeaderValue"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -5114,6 +5161,7 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			globalOTLP.Stop()
 			globalOTLPTraces.Stop()
 			auditEvent(r, "settings.otlp", "disabled", "")
+   adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "enabled": false})
 			return
 		}
@@ -5127,9 +5175,11 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "endpoint must not resolve to a private network", http.StatusBadRequest)
 			return
 		}
-		globalOTLP.Configure(body.Endpoint, nil)
-		globalOTLPTraces.Configure(body.Endpoint, nil)
+		headers := resolveOTLPHeaders(body.AuthHeaderName, body.AuthHeaderValue)
+		globalOTLP.Configure(body.Endpoint, headers)
+		globalOTLPTraces.Configure(body.Endpoint, headers)
 		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled (metrics + traces)")
+  adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "enabled": true, "endpoint": body.Endpoint})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

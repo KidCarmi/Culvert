@@ -154,8 +154,13 @@ func TestProxy_FileBlockURL(t *testing.T) {
 
 // ── fileBlockConn helper ────────────────────────────────────────────────────
 
+// closableBuffer wraps bytes.Buffer with a no-op Close for fileBlockConn.
+type closableBuffer struct{ bytes.Buffer }
+
+func (cb *closableBuffer) Close() error { return nil }
+
 func TestFileBlockConn(t *testing.T) {
-	var buf bytes.Buffer
+	var buf closableBuffer
 	fileBlockConn(&buf, "example.com", "/download/script.ps1", ".ps1", "global ext")
 
 	resp := buf.String()
