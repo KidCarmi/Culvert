@@ -141,67 +141,38 @@ func TestSpanExporter_ConcurrentRecordDrain(t *testing.T) {
 
 // ── OTLP JSON schema validation ─────────────────────────────────────────────
 
-func TestBuildTracePayload_Schema(t *testing.T) {
+// testSpanPayload is a helper that builds, marshals, and round-trips a
+// single-span payload, returning the parsed span map. Keeps sub-tests short.
+func testSpanPayload(t *testing.T) map[string]any {
+	t.Helper()
 	spans := []SpanRecord{{
-		TraceID:   "0af7651916cd43dd8448eb211c80319c",
-		SpanID:    "b7ad6b7169203331",
-		Name:      "proxy_request",
-		Method:    "CONNECT",
-		Host:      "github.com",
-		Status:    "OK",
-		Rule:      "allow-github",
-		ClientIP:  "10.0.0.1",
-		SSLAction: "inspect",
-		StartNano: 1700000000000000000,
-		EndNano:   1700000000050000000,
+		TraceID: "0af7651916cd43dd8448eb211c80319c", SpanID: "b7ad6b7169203331",
+		Name: "proxy_request", Method: "CONNECT", Host: "github.com",
+		Status: "OK", Rule: "allow-github", ClientIP: "10.0.0.1", SSLAction: "inspect",
+		StartNano: 1700000000000000000, EndNano: 1700000000050000000,
 	}}
-
 	payload := buildTracePayload(spans)
 	b, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-
-	// Round-trip: unmarshal into a generic map to verify structure.
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-
-	// Top-level: resourceSpans
-	rs, ok := m["resourceSpans"].([]any)
-	if !ok || len(rs) != 1 {
-		t.Fatalf("expected 1 resourceSpans entry, got %v", m["resourceSpans"])
-	}
+	rs := m["resourceSpans"].([]any)
 	rsMap := rs[0].(map[string]any)
-
-	// resource.attributes should contain service.name
-	res := rsMap["resource"].(map[string]any)
-	attrs := res["attributes"].([]any)
-	foundSvcName := false
-	for _, a := range attrs {
-		attr := a.(map[string]any)
-		if attr["key"] == "service.name" {
-			val := attr["value"].(map[string]any)
-			if val["stringValue"] == "culvert" {
-				foundSvcName = true
-			}
-		}
-	}
-	if !foundSvcName {
-		t.Error("missing service.name=culvert in resource attributes")
-	}
-
-	// scopeSpans[0].spans[0]
 	ss := rsMap["scopeSpans"].([]any)
 	ssMap := ss[0].(map[string]any)
 	spansArr := ssMap["spans"].([]any)
 	if len(spansArr) != 1 {
 		t.Fatalf("expected 1 span, got %d", len(spansArr))
 	}
-	span := spansArr[0].(map[string]any)
+	return spansArr[0].(map[string]any)
+}
 
-	// Verify key fields.
+func TestBuildTracePayload_SpanFields(t *testing.T) {
+	span := testSpanPayload(t)
 	if span["traceId"] != "0af7651916cd43dd8448eb211c80319c" {
 		t.Errorf("traceId = %v", span["traceId"])
 	}
@@ -211,17 +182,21 @@ func TestBuildTracePayload_Schema(t *testing.T) {
 	if span["name"] != "proxy_request" {
 		t.Errorf("name = %v", span["name"])
 	}
-	// Kind 2 = SERVER
+}
+
+func TestBuildTracePayload_KindAndStatus(t *testing.T) {
+	span := testSpanPayload(t)
 	if kind, ok := span["kind"].(float64); !ok || kind != 2 {
-		t.Errorf("kind = %v, want 2", span["kind"])
+		t.Errorf("kind = %v, want 2 (SERVER)", span["kind"])
 	}
-	// Status code 1 = OK
 	st := span["status"].(map[string]any)
 	if code, ok := st["code"].(float64); !ok || code != 1 {
-		t.Errorf("status.code = %v, want 1", st["code"])
+		t.Errorf("status.code = %v, want 1 (OK)", st["code"])
 	}
+}
 
-	// Verify traceId is 32 hex chars, spanId is 16 hex chars.
+func TestBuildTracePayload_IDLengths(t *testing.T) {
+	span := testSpanPayload(t)
 	tid := span["traceId"].(string)
 	sid := span["spanId"].(string)
 	if len(tid) != 32 {
@@ -229,6 +204,31 @@ func TestBuildTracePayload_Schema(t *testing.T) {
 	}
 	if len(sid) != 16 {
 		t.Errorf("spanId length = %d, want 16", len(sid))
+	}
+}
+
+func TestBuildTracePayload_ServiceName(t *testing.T) {
+	spans := []SpanRecord{{TraceID: "a", SpanID: "b", Name: "test"}}
+	payload := buildTracePayload(spans)
+	b, _ := json.Marshal(payload)
+	var m map[string]any
+	json.Unmarshal(b, &m) //nolint:errcheck
+	rs := m["resourceSpans"].([]any)
+	rsMap := rs[0].(map[string]any)
+	res := rsMap["resource"].(map[string]any)
+	attrs := res["attributes"].([]any)
+	found := false
+	for _, a := range attrs {
+		attr := a.(map[string]any)
+		if attr["key"] == "service.name" {
+			val := attr["value"].(map[string]any)
+			if val["stringValue"] == "culvert" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("missing service.name=culvert in resource attributes")
 	}
 }
 
