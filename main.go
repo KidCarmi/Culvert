@@ -1122,19 +1122,25 @@ func seedYARARules(targetDir string) {
 	// Check if bundled dir exists.
 	bundled, _ := filepath.Glob(filepath.Join(bundledDir, "*.yar"))
 	bundledYara, _ := filepath.Glob(filepath.Join(bundledDir, "*.yara"))
-	allBundled := append(bundled, bundledYara...)
-	if len(allBundled) == 0 {
+	bundled = append(bundled, bundledYara...)
+	if len(bundled) == 0 {
 		return // no bundled rules to seed
 	}
 	_ = os.MkdirAll(targetDir, 0o750)
 	copied := 0
-	for _, src := range allBundled {
-		data, err := os.ReadFile(src)
+	for _, src := range bundled {
+		data, err := os.ReadFile(src) // #nosec G304 -- src is from filepath.Glob on admin-configured bundledDir
 		if err != nil {
 			continue
 		}
-		dst := filepath.Join(targetDir, filepath.Base(src))
-		if err := os.WriteFile(dst, data, 0o600); err == nil {
+		// filepath.Base strips any directory component; filepath.Clean prevents traversal.
+		safeName := filepath.Base(filepath.Clean(src))
+		dst := filepath.Join(targetDir, safeName)
+		// Verify the resolved path stays inside targetDir (defense-in-depth).
+		if filepath.Dir(dst) != filepath.Clean(targetDir) {
+			continue
+		}
+		if err := os.WriteFile(dst, data, 0o600); err == nil { // #nosec G306 -- 0600 is intentional
 			copied++
 		}
 	}
