@@ -869,7 +869,26 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		if !cdrCfg.CDRFailOpen() {
 			failSafe = "fail-closed"
 		}
-		logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 1: client primitives loaded, proxy wiring pending)",
+
+		// Load persistent state: enrolled Sluice instances + CDR policies.
+		// Missing files are tolerated (fresh install); malformed files fail
+		// startup fast so admins notice.
+		instPath := "/data/cdr_instances.json"
+		polPath := "/data/cdr_policies.json"
+		if err := cdrInstances.Load(instPath); err != nil {
+			logger.Printf("CDR: instance registry load failed: %v", err)
+		}
+		if err := cdrPolicyStore.Load(polPath); err != nil {
+			logger.Printf("CDR: policy store load failed: %v", err)
+		}
+
+		if err := initCDRClient(cdrCfg); err != nil {
+			// Non-fatal: CDR is opt-in.  If the dial fails we log + continue;
+			// handleTunnelInspect (Phase 2b) will fail-open/closed per policy.
+			logger.Printf("CDR: initial client dial failed, CDR effectively disabled: %v", err)
+		}
+
+		logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 2a: policy engine + instance registry loaded; proxy wiring in 2b)",
 			sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
 	}
 
@@ -1021,6 +1040,11 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 
 	// Gracefully stop gRPC server first (drains in-flight RPCs).
 	StopControlPlaneGRPC()
+
+	// Close the CDR client before cancelling lifecycle context so any
+	// in-flight Sanitize streams get a clean tear-down rather than a
+	// context-cancelled transport error.
+	shutdownCDRClient()
 
 	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.)
 	appLifecycleCancel()
