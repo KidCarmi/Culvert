@@ -1922,8 +1922,11 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 		// Enrich with feed-backed flag so the GUI shows which categories
 		// have UT1 community feed domains behind them.
 		ut1Set := make(map[string]bool)
-		for _, cat := range ut1CategoryMap {
-			ut1Set[strings.ToLower(cat)] = true
+		feedActive := communityDB != nil // only show badge if feed is actually configured
+		if feedActive {
+			for _, cat := range ut1CategoryMap {
+				ut1Set[strings.ToLower(cat)] = true
+			}
 		}
 		type enrichedCat struct {
 			CategoryEntry
