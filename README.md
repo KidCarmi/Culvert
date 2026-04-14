@@ -193,6 +193,7 @@ All benchmarks below are based on **x86_64 (AMD64)** processors. ARM64 (AWS Grav
 | **Storage (base)** | 50 MB (binary + config) | 50 MB | 50 MB |
 | **Storage (ClamAV DB)** | - | 300 MB | 300 MB |
 | **Storage (GeoIP DB)** | 5 MB | 5 MB | 5 MB |
+| **Storage (UT1 category feed)** | 150 MB | 150 MB | 150 MB |
 | **Storage (logs)** | 100 MB - 1 GB | 1 - 5 GB | 5 - 50 GB |
 | **Storage (admin settings)** | < 10 KB | < 10 KB | < 10 KB |
 | **Disk type** | Any (HDD OK) | SSD recommended | SSD required |
@@ -217,6 +218,7 @@ At 5000 concurrent SSL-inspected connections: ~670 MB for connection buffers alo
 - **SSL inspection** adds ~1 KB RAM per cached leaf certificate (LRU cache, 10K max = ~10 MB). CPU impact is ~0.5ms per **new** TLS handshake using **ECDSA P-256 signing** (Culvert's default). RSA 2048 would be ~5x slower per signing operation, but Culvert exclusively uses ECDSA P-256 for its internal CA - no RSA path exists. Cached certificates (cache hit) have zero signing overhead.
 - **Log rotation** is automatic. Request logs rotate at 100 MB (configurable via `-request-log-max-mb`), audit logs at 50 MB, system logs at 50 MB. **Storage I/O:** log writes are append-only and sequential - HDD is adequate for Home Lab. For Small Office+ with SSL inspection (high request volume), SSD is recommended to avoid I/O wait impacting proxy latency.
 - **Threat feeds** (URLhaus + OpenPhish) add ~5-20 MB RAM depending on feed size.
+- **UT1 category feed** (University of Toulouse) downloads a ~50 MB tarball on first sync, stored in BadgerDB at ~150 MB on disk + ~50-100 MB RAM for the index. Provides millions of categorized domains (Adult, Gambling, Malicious, etc.) auto-synced hourly. The SaaS category feed (AI, Marketing, etc.) adds negligible storage (< 100 KB JSON).
 - **Prometheus metrics** are stateless - scraped externally, no local storage.
 - **Post-quantum (ML-KEM-768)** adds ~1 KB to initial TLS handshakes. No ongoing RAM/CPU impact.
 - **Docker image size:** ~30 MB (distroless base + static Go binary).
@@ -226,7 +228,7 @@ At 5000 concurrent SSL-inspected connections: ~670 MB for connection buffers alo
 For a functional deployment with all features enabled:
 
 ```
-2 vCPU | 1 GB RAM | 2 GB disk (SSD recommended)
+2 vCPU | 1.5 GB RAM | 2.5 GB disk (SSD recommended)
 ```
 
 For proxy-only (no AV, no SSL inspection):

@@ -217,6 +217,7 @@ services:
           -geoip-db /app/GeoLite2-Country.mmdb
           -yara-rules-dir /data/yara
           -threat-feed-db /data/threatfeeds.json
+          -cat-feed-db /data/catfeeddb
           -fileprofiles-file /data/fileprofiles.json
           -updater-url http://dp-updater:7123"
 
