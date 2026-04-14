@@ -45,6 +45,13 @@ var (
 	statCDRBytesIn  int64
 	statCDRBytesOut int64
 
+	// Health-poller observations.  statCDRInstanceHealthy is 0 or 1
+	// depending on the most recent Health probe; statCDRQueueDepth is the
+	// Sluice-reported queue depth — a leading indicator that Sluice is
+	// about to push back.
+	statCDRInstanceHealthy int64
+	statCDRQueueDepth      int64
+
 	// Per-threat-type counters — low cardinality, stable vocabulary.
 	threatCountersMu sync.Mutex
 	threatCounters   = make(map[string]int64) // "macro" -> count
@@ -139,6 +146,15 @@ func cdrWritePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cdr_bytes_out_total Sanitized bytes received from Sluice\n")
 	w.WriteString("# TYPE culvert_cdr_bytes_out_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_bytes_out_total %d\n", atomic.LoadInt64(&statCDRBytesOut))
+
+	// Instance health (observed by the background poller).
+	w.WriteString("\n# HELP culvert_cdr_instance_healthy 1 when the most recent Health probe succeeded and Sluice reported healthy, else 0\n")
+	w.WriteString("# TYPE culvert_cdr_instance_healthy gauge\n")
+	fmt.Fprintf(w, "culvert_cdr_instance_healthy %d\n", atomic.LoadInt64(&statCDRInstanceHealthy))
+
+	w.WriteString("\n# HELP culvert_cdr_queue_depth Sluice-reported queue depth at the most recent Health probe\n")
+	w.WriteString("# TYPE culvert_cdr_queue_depth gauge\n")
+	fmt.Fprintf(w, "culvert_cdr_queue_depth %d\n", atomic.LoadInt64(&statCDRQueueDepth))
 
 	// Per-threat-type.
 	threatCountersMu.Lock()

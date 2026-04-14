@@ -323,6 +323,11 @@ func initCDRClient(cfg CDRConfig) error {
 	logger.Printf("CDR: client active — endpoint=%q instance=%q",
 		sanitizeLog(ep),
 		sanitizeLog(certBundle.InstanceName))
+
+	// Fire a non-blocking Health probe so the first real user request
+	// doesn't eat the TLS-handshake latency (and so we detect a broken
+	// cert / fingerprint mismatch at boot, not under load).
+	warmupCDRClient()
 	return nil
 }
 
