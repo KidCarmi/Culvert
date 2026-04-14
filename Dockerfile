@@ -4,11 +4,6 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
-# sluicev1/ is a local stub module referenced by a `replace` directive in
-# go.mod. It must exist before `go mod download` tries to resolve the
-# replacement, otherwise the build fails with "directory does not exist".
-# Removed once upstream Sluice tags v0.1.0 and we drop the replace.
-COPY sluicev1/ ./sluicev1/
 RUN go mod download
 
 COPY . .
