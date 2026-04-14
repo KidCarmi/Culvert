@@ -121,8 +121,9 @@ type CDRClient struct {
 	conn *grpc.ClientConn
 	stub pb.SluiceServiceClient
 
+	// mu guards mutable state.  Intentionally minimal in Phase 1; Phase 2
+	// adds the circuit breaker + health state that earns its keep.
 	mu       sync.RWMutex
-	lastErr  error
 	closedAt time.Time
 }
 
@@ -206,29 +207,26 @@ func newCDRClientFromConn(conn *grpc.ClientConn, cfg CDRClientConfig) *CDRClient
 //   - skips stdlib hostname verification (Sluice may be accessed by IP in
 //     docker-compose); fingerprint pin is the authoritative identity check
 func buildCDRTLSConfig(cfg CDRClientConfig) (*tls.Config, error) {
-	tlsCfg := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-	}
-
 	// Client cert (mTLS).  Optional for the Enroll bootstrap path (chicken-
 	// and-egg) — callers that don't have certs yet pass nil and rely on the
 	// fingerprint pin alone.
+	var clientCerts []tls.Certificate
 	if len(cfg.ClientCertPEM) > 0 && len(cfg.ClientKeyPEM) > 0 {
 		cert, err := tls.X509KeyPair(cfg.ClientCertPEM, cfg.ClientKeyPEM)
 		if err != nil {
 			return nil, fmt.Errorf("client keypair: %w", err)
 		}
-		tlsCfg.Certificates = []tls.Certificate{cert}
+		clientCerts = []tls.Certificate{cert}
 	}
 
 	// CA pool — used only when CACertPEM is supplied.  When fingerprint pin
 	// is set, the pin is authoritative and CA is advisory.
+	var rootPool *x509.CertPool
 	if len(cfg.CACertPEM) > 0 {
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(cfg.CACertPEM) {
+		rootPool = x509.NewCertPool()
+		if !rootPool.AppendCertsFromPEM(cfg.CACertPEM) {
 			return nil, errors.New("ca bundle: invalid PEM")
 		}
-		tlsCfg.RootCAs = pool
 	}
 
 	fp := strings.TrimSpace(cfg.ServerFingerprintHx)
@@ -238,11 +236,15 @@ func buildCDRTLSConfig(cfg CDRClientConfig) (*tls.Config, error) {
 
 	if fp == "" {
 		// No pin — fall back to CA-only validation.  Only safe when
-		// CACertPEM is populated.
-		if len(cfg.CACertPEM) == 0 {
+		// CACertPEM is populated, and stdlib verification is ON.
+		if rootPool == nil {
 			return nil, errors.New("either server_fingerprint or ca_cert is required")
 		}
-		return tlsCfg, nil
+		return &tls.Config{
+			MinVersion:   tls.VersionTLS13,
+			Certificates: clientCerts,
+			RootCAs:      rootPool,
+		}, nil
 	}
 
 	expected, err := hex.DecodeString(fp)
@@ -253,12 +255,62 @@ func buildCDRTLSConfig(cfg CDRClientConfig) (*tls.Config, error) {
 		return nil, fmt.Errorf("server_fingerprint: expected %d bytes, got %d", sha256.Size, len(expected))
 	}
 
-	// Fingerprint pin short-circuits stdlib verification — it's a strict
-	// equality check on the leaf cert's DER bytes. This is the correct
-	// model for TOFU (SSH / Tailscale / kubelet) when the admin pasted
-	// the fingerprint from Sluice's boot log.
-	tlsCfg.InsecureSkipVerify = true // #nosec G402 -- replaced by fingerprint check below
-	tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+	// Build the pin-based tls.Config as a single struct literal.  The
+	// "InsecureSkipVerify: true" is required to bypass the stdlib's hostname
+	// + chain checks (Sluice is typically reached by IP in docker-compose and
+	// presents a self-signed cert until enrollment completes).  It is
+	// replaced by verifyPinnedFingerprint, which performs a constant-time
+	// equality check on the leaf cert's SHA-256.  This is the canonical TOFU
+	// pinning pattern used by SSH, Tailscale, and kubelet.
+	//
+	// SessionTicketsDisabled + explicit ClientSessionCache=nil guard against
+	// gosec G123: on TLS 1.3 or 1.2, a resumed session may skip
+	// VerifyPeerCertificate entirely, so the fingerprint check would not
+	// re-run.  Disabling resumption forces a full handshake each time, which
+	// is fine for our traffic profile (few long-lived connections) and
+	// closes the gap.  VerifyConnection provides a second layer that runs
+	// even if resumption is somehow enabled upstream.
+	verify := verifyPinnedFingerprint(expected)
+	return &tls.Config{
+		MinVersion:             tls.VersionTLS13,
+		Certificates:           clientCerts,
+		RootCAs:                rootPool,
+		InsecureSkipVerify:     true, // #nosec G402 -- pin-verified below (see VerifyPeerCertificate)
+		VerifyPeerCertificate:  verify,
+		VerifyConnection:       verifyConnectionWithFingerprint(expected),
+		SessionTicketsDisabled: true,
+		ClientSessionCache:     nil,
+	}, nil
+}
+
+// verifyConnectionWithFingerprint is a secondary check that runs on EVERY
+// handshake (including resumed sessions), closing the gosec G123 gap where
+// a resumed session could bypass VerifyPeerCertificate.
+func verifyConnectionWithFingerprint(expected []byte) func(cs tls.ConnectionState) error {
+	return func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
+			atomic.AddInt64(&statCDRFingerprintFails, 1)
+			return errors.New("sluice server presented no certificate (resumed session)")
+		}
+		sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
+		var diff byte
+		for i := range sum {
+			diff |= sum[i] ^ expected[i]
+		}
+		if diff != 0 {
+			atomic.AddInt64(&statCDRFingerprintFails, 1)
+			return fmt.Errorf("sluice server fingerprint mismatch on resumption (got sha256:%s)", hex.EncodeToString(sum[:]))
+		}
+		return nil
+	}
+}
+
+// verifyPinnedFingerprint returns a VerifyPeerCertificate callback that
+// enforces a strict SHA-256 equality check on the leaf server certificate.
+// Callers MUST supply a 32-byte expected digest; the function is a no-op
+// for any other length (defensive — upstream validates).
+func verifyPinnedFingerprint(expected []byte) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			atomic.AddInt64(&statCDRFingerprintFails, 1)
 			return errors.New("sluice server presented no certificate")
@@ -279,7 +331,6 @@ func buildCDRTLSConfig(cfg CDRClientConfig) (*tls.Config, error) {
 		}
 		return nil
 	}
-	return tlsCfg, nil
 }
 
 // ─── Sanitize (streaming) ───────────────────────────────────────────────────
