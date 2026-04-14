@@ -109,6 +109,16 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	uiSANsFlag := flag.String("ui-san", "", "Additional TLS SANs for self-signed cert (comma-separated IPs/hostnames)")
 	trustFwdHeaders := flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
 	resetPwUser := flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
+	// CDR / Sluice integration (Phase 1: single-instance client with TOFU pinning).
+	cdrEnabledFlag := flag.Bool("cdr-enabled", false, "Enable Sluice CDR integration (strip macros/JS/OLE from downloads)")
+	cdrEndpointFlag := flag.String("cdr-endpoint", "", "Sluice gRPC endpoint (e.g. sluice:8443)")
+	cdrFailModeFlag := flag.String("cdr-fail-mode", "", "Behaviour when Sluice is unreachable: open (default) | closed")
+	cdrProfileFlag := flag.String("cdr-default-profile", "", "Sanitization profile name sent when no policy matches (default: \"default\")")
+	cdrModeFlag := flag.String("cdr-default-mode", "", "Default Mode: ENFORCE (default) | REPORT_ONLY | BYPASS_WITH_REPORT")
+	cdrTimeoutFlag := flag.Int("cdr-timeout-sec", 0, "Per-file CDR deadline in seconds (>=30, default 35)")
+	cdrMaxSizeFlag := flag.Int("cdr-max-file-size-mb", 0, "Reject CDR payloads larger than this (default 50 MB)")
+	cdrFingerprintFlag := flag.String("cdr-server-fingerprint", "", "TOFU-pinned SHA-256 of Sluice's server cert (hex; 'sha256:' prefix optional)")
+	cdrCertsDirFlag := flag.String("cdr-certs-dir", "", "Directory holding Sluice mTLS client bundle (ca.pem, client.pem, client.key)")
 	flag.Parse()
 
 	// ── One-shot: password reset (Finding 5.1) ─────────────────────────────
@@ -812,6 +822,55 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	// ── Upstream proxy chaining ──────────────────────────────────────────────
 	if len(fc.Upstream.Proxies) > 0 {
 		initUpstreamPool(fc)
+	}
+
+	// ── Sluice CDR integration (Phase 1: config plumbing only) ──────────────
+	// Client wiring into the proxy pipeline (handleTunnelInspect) lands in a
+	// follow-up phase.  For now we merge flags, validate, and log status so
+	// operators can sanity-check their setup before Phase 2 ships.
+	cdrCfg := fc.CDR
+	if *cdrEnabledFlag {
+		cdrCfg.Enabled = true
+	}
+	if ep := firstStr(*cdrEndpointFlag, cdrCfg.Endpoint); ep != "" {
+		cdrCfg.Endpoint = ep
+	}
+	if fm := firstStr(*cdrFailModeFlag, cdrCfg.FailMode); fm != "" {
+		cdrCfg.FailMode = fm
+	}
+	if pn := firstStr(*cdrProfileFlag, cdrCfg.DefaultProfile); pn != "" {
+		cdrCfg.DefaultProfile = pn
+	}
+	if m := firstStr(*cdrModeFlag, cdrCfg.DefaultMode); m != "" {
+		cdrCfg.DefaultMode = m
+	}
+	if t := firstNonZero(*cdrTimeoutFlag, cdrCfg.TimeoutSec); t != 0 {
+		cdrCfg.TimeoutSec = t
+	}
+	if s := firstNonZero(*cdrMaxSizeFlag, cdrCfg.MaxFileSizeMB); s != 0 {
+		cdrCfg.MaxFileSizeMB = s
+	}
+	if fp := firstStr(*cdrFingerprintFlag, cdrCfg.ServerFingerprint); fp != "" {
+		cdrCfg.ServerFingerprint = fp
+	}
+	if d := firstStr(*cdrCertsDirFlag, cdrCfg.CertsDir); d != "" {
+		cdrCfg.CertsDir = d
+	}
+	if cdrCfg.Enabled {
+		mode := cdrCfg.DefaultMode
+		if mode == "" {
+			mode = "ENFORCE"
+		}
+		profile := cdrCfg.DefaultProfile
+		if profile == "" {
+			profile = "default"
+		}
+		failSafe := "fail-open"
+		if !cdrCfg.CDRFailOpen() {
+			failSafe = "fail-closed"
+		}
+		logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 1: client primitives loaded, proxy wiring pending)",
+			sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
 	}
 
 	// ── Client certificate (mTLS) for upstream servers ───────────────────────
