@@ -35,8 +35,10 @@ import (
 )
 
 const (
-	// defaultUT1FeedURL is the public UT1 Capestat distribution endpoint.
-	defaultUT1FeedURL = "https://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/blacklists.tar.gz"
+	// defaultUT1FeedURL is the NethServer daily mirror of the UT1 Capitole
+	// blacklists. The official UT1 FTP/HTTP endpoints are unreliable (403/404),
+	// so we use this actively maintained GitHub mirror instead.
+	defaultUT1FeedURL = "https://raw.githubusercontent.com/NethServer/toulouse-bl-mirror/master/blacklists.tar.gz"
 
 	// feedSyncHTTPTimeout caps the download of the full tarball (can be 50+ MB).
 	feedSyncHTTPTimeout = 5 * time.Minute
