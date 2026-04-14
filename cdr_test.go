@@ -520,7 +520,7 @@ func TestCDRClient_Fingerprint_MatchAccepts(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, err := NewCDRClient(ctx, CDRClientConfig{
+	c, err := NewCDRClient(CDRClientConfig{
 		Endpoint:            lis.Addr().String(),
 		ServerFingerprintHx: fpHex,
 	})
@@ -559,7 +559,7 @@ func TestCDRClient_Fingerprint_MismatchRejects(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, err := NewCDRClient(ctx, CDRClientConfig{
+	c, err := NewCDRClient(CDRClientConfig{
 		Endpoint:            lis.Addr().String(),
 		ServerFingerprintHx: wrong,
 	})

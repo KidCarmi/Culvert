@@ -129,7 +129,12 @@ type CDRClient struct {
 
 // NewCDRClient dials Sluice with mTLS and TOFU fingerprint verification.
 // The returned client owns the underlying gRPC connection — call Close.
-func NewCDRClient(ctx context.Context, cfg CDRClientConfig) (*CDRClient, error) {
+//
+// Note: grpc.NewClient is non-blocking (no dial happens until the first RPC),
+// so no dial-time context is needed.  Callers pass per-RPC contexts when they
+// actually use the client.  Phase 2 will likely add a dial-time Health probe
+// that takes a context; until then we keep the signature minimal.
+func NewCDRClient(cfg CDRClientConfig) (*CDRClient, error) {
 	if cfg.Endpoint == "" {
 		return nil, errors.New("cdr: endpoint required")
 	}
@@ -362,31 +367,46 @@ func (c *CDRClient) Sanitize(ctx context.Context, header *pb.SanitizeHeader, bod
 		return nil, fmt.Errorf("cdr: open stream: %w", err)
 	}
 
-	// 1) Send the header as the first message.
+	if err := sendSanitizeHeader(stream, header); err != nil {
+		return nil, err
+	}
+	if err := sendSanitizeBody(stream, body, c.cfg.ChunkSize); err != nil {
+		return nil, err
+	}
+	return recvSanitizeResponse(stream)
+}
+
+// sendSanitizeHeader sends the opening header frame and records an error
+// counter on failure.  The header MUST be the first client-to-server message.
+func sendSanitizeHeader(stream pb.SluiceService_SanitizeClient, header *pb.SanitizeHeader) error {
 	if err := stream.Send(&pb.SanitizeRequest{
 		Payload: &pb.SanitizeRequest_Header{Header: header},
 	}); err != nil {
 		atomic.AddInt64(&statCDRSanitizeErrors, 1)
-		return nil, fmt.Errorf("cdr: send header: %w", err)
+		return fmt.Errorf("cdr: send header: %w", err)
 	}
+	return nil
+}
 
-	// 2) Stream body chunks.  Use a pooled buffer later (Phase 2).
-	buf := make([]byte, c.cfg.ChunkSize)
+// sendSanitizeBody pumps `body` into the stream as chunks of `chunkSize`
+// bytes.  Enforces cdrMaxFileSize mid-stream in case the caller lied in the
+// header (our body-scanning guard is defence-in-depth here).
+func sendSanitizeBody(stream pb.SluiceService_SanitizeClient, body io.Reader, chunkSize int) error {
+	buf := make([]byte, chunkSize)
 	var sentBytes int64
 	for {
 		n, rerr := io.ReadFull(body, buf)
-		switch {
-		case n > 0:
+		if n > 0 {
 			if sentBytes+int64(n) > cdrMaxFileSize {
 				_ = stream.CloseSend()
 				atomic.AddInt64(&statCDRSanitizeErrors, 1)
-				return nil, fmt.Errorf("file_too_large: body exceeded %d bytes mid-stream", cdrMaxFileSize)
+				return fmt.Errorf("file_too_large: body exceeded %d bytes mid-stream", cdrMaxFileSize)
 			}
 			if err := stream.Send(&pb.SanitizeRequest{
 				Payload: &pb.SanitizeRequest_Chunk{Chunk: append([]byte(nil), buf[:n]...)},
 			}); err != nil {
 				atomic.AddInt64(&statCDRSanitizeErrors, 1)
-				return nil, fmt.Errorf("cdr: send chunk: %w", err)
+				return fmt.Errorf("cdr: send chunk: %w", err)
 			}
 			sentBytes += int64(n)
 			atomic.AddInt64(&statCDRBytesSent, int64(n))
@@ -396,15 +416,20 @@ func (c *CDRClient) Sanitize(ctx context.Context, header *pb.SanitizeHeader, bod
 		}
 		if rerr != nil {
 			atomic.AddInt64(&statCDRSanitizeErrors, 1)
-			return nil, fmt.Errorf("cdr: read body: %w", rerr)
+			return fmt.Errorf("cdr: read body: %w", rerr)
 		}
 	}
 	if err := stream.CloseSend(); err != nil {
 		atomic.AddInt64(&statCDRSanitizeErrors, 1)
-		return nil, fmt.Errorf("cdr: close send: %w", err)
+		return fmt.Errorf("cdr: close send: %w", err)
 	}
+	return nil
+}
 
-	// 3) Recv — FIRST message MUST be a SanitizeResult.
+// recvSanitizeResponse reads the result frame (always first), then drains
+// any following chunk frames, and converts the whole reply into a CDRResult.
+// Callers get a stable shape decoupled from the protobuf generated types.
+func recvSanitizeResponse(stream pb.SluiceService_SanitizeClient) (*CDRResult, error) {
 	first, err := stream.Recv()
 	if err != nil {
 		atomic.AddInt64(&statCDRSanitizeErrors, 1)
@@ -417,31 +442,9 @@ func (c *CDRClient) Sanitize(ctx context.Context, header *pb.SanitizeHeader, bod
 	}
 	raw := resMsg.Result
 
-	// 4) Drain remaining chunks.
-	var sanitized []byte
-	if raw.SanitizedSize > 0 {
-		sanitized = make([]byte, 0, raw.SanitizedSize)
-	}
-	for {
-		msg, rerr := stream.Recv()
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			atomic.AddInt64(&statCDRSanitizeErrors, 1)
-			return nil, fmt.Errorf("cdr: recv chunk: %w", rerr)
-		}
-		chunkMsg, ok := msg.Payload.(*pb.SanitizeResponse_Chunk)
-		if !ok {
-			atomic.AddInt64(&statCDRSanitizeErrors, 1)
-			return nil, errors.New("cdr: unexpected second Result in stream")
-		}
-		sanitized = append(sanitized, chunkMsg.Chunk...)
-		atomic.AddInt64(&statCDRBytesReceived, int64(len(chunkMsg.Chunk)))
-		if int64(len(sanitized)) > cdrMaxFileSize {
-			atomic.AddInt64(&statCDRSanitizeErrors, 1)
-			return nil, fmt.Errorf("cdr: sanitized response exceeded client cap %d", cdrMaxFileSize)
-		}
+	sanitized, err := drainSanitizedChunks(stream, raw.SanitizedSize)
+	if err != nil {
+		return nil, err
 	}
 
 	threats := make([]CDRThreat, 0, len(raw.ThreatsRemoved))
@@ -473,6 +476,37 @@ func (c *CDRClient) Sanitize(ctx context.Context, header *pb.SanitizeHeader, bod
 		out.SanitizedSHA256 = hex.EncodeToString(raw.SanitizedSha256)
 	}
 	return out, nil
+}
+
+// drainSanitizedChunks reads chunk frames until EOF, accumulating bytes.
+// Enforces cdrMaxFileSize so a misbehaving server can't balloon our memory.
+// Any non-chunk frame after the result is a protocol violation.
+func drainSanitizedChunks(stream pb.SluiceService_SanitizeClient, hintSize int64) ([]byte, error) {
+	var out []byte
+	if hintSize > 0 {
+		out = make([]byte, 0, hintSize)
+	}
+	for {
+		msg, rerr := stream.Recv()
+		if rerr == io.EOF {
+			return out, nil
+		}
+		if rerr != nil {
+			atomic.AddInt64(&statCDRSanitizeErrors, 1)
+			return nil, fmt.Errorf("cdr: recv chunk: %w", rerr)
+		}
+		chunkMsg, ok := msg.Payload.(*pb.SanitizeResponse_Chunk)
+		if !ok {
+			atomic.AddInt64(&statCDRSanitizeErrors, 1)
+			return nil, errors.New("cdr: unexpected second Result in stream")
+		}
+		out = append(out, chunkMsg.Chunk...)
+		atomic.AddInt64(&statCDRBytesReceived, int64(len(chunkMsg.Chunk)))
+		if int64(len(out)) > cdrMaxFileSize {
+			atomic.AddInt64(&statCDRSanitizeErrors, 1)
+			return nil, fmt.Errorf("cdr: sanitized response exceeded client cap %d", cdrMaxFileSize)
+		}
+	}
 }
 
 // IsFileTooLarge reports whether err represents Sluice's oversize rejection.
