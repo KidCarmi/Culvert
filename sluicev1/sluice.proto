@@ -1,0 +1,143 @@
+// Sluice v1 CDR service — gRPC contract between Culvert and Sluice.
+//
+// This is a LOCAL STUB of the Sluice proto, copied verbatim from the agreed
+// v0.1 contract. It is used until the upstream Sluice project tags v0.1.0 and
+// publishes the generated stubs at github.com/KidCarmi/Sluice/proto/sluicev1.
+//
+// At that point, go.mod's `replace` directive is dropped and Culvert imports
+// the upstream module directly. The on-wire format is byte-identical because
+// this file is the source of truth both sides agreed on.
+//
+// ⚠️  DO NOT EDIT without coordinating with the Sluice maintainer.  Any change
+// must land in Sluice's proto first, then be mirrored here.
+
+syntax = "proto3";
+
+package sluice.v1;
+
+option go_package = "github.com/KidCarmi/Sluice/proto/sluicev1;sluicev1";
+
+service SluiceService {
+  // Sanitize processes a file via bidirectional streaming.
+  // Client sends one SanitizeHeader, then chunks (64 KiB each).
+  // Server responds with one SanitizeResult, then sanitized chunks.
+  // Result is ALWAYS the first server message, even for CLEAN/BLOCKED/ERROR.
+  rpc Sanitize(stream SanitizeRequest) returns (stream SanitizeResponse);
+
+  // Health returns the service status, supported file types, and available
+  // sanitization profiles (for Culvert's GUI profile picker).
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Enroll exchanges a one-time enrollment token for mTLS client certificates.
+  // Does NOT require a client cert (chicken-and-egg bootstrap).
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+// ─── Sanitize ────────────────────────────────────────────────────────────────
+
+message SanitizeRequest {
+  oneof payload {
+    SanitizeHeader header = 1;
+    bytes          chunk  = 2;
+  }
+}
+
+message SanitizeHeader {
+  string filename       = 1;
+  string content_type   = 2;
+  int64  content_length = 3;
+  string request_id     = 4;
+  string trace_parent   = 5;
+  // profile_name: name of the sanitization profile to apply.
+  // Empty string is equivalent to "default".
+  // Unknown names MUST be rejected with Status=ERROR and
+  // error_message="unknown_profile: <name>".
+  string profile_name   = 6;
+  Mode   mode           = 7;
+  // tags: opaque low-cardinality labels. Sluice echoes them in logs only.
+  // Only whitelisted keys (direction, dest_category) may be emitted as
+  // Prometheus labels. All other keys are log-only.
+  map<string, string> tags = 8;
+  // policy_version: opaque hash of the Culvert policy snapshot in effect.
+  // Log-field only — MUST NOT be used as a Prometheus label (high cardinality).
+  string policy_version = 9;
+}
+
+enum Mode {
+  ENFORCE            = 0;
+  REPORT_ONLY        = 1;
+  BYPASS_WITH_REPORT = 2;
+}
+
+message SanitizeResponse {
+  oneof payload {
+    SanitizeResult result = 1;
+    bytes          chunk  = 2;
+  }
+}
+
+message SanitizeResult {
+  Status status                   = 1;
+  string original_type            = 2;
+  int64  original_size            = 3;
+  int64  sanitized_size           = 4;
+  repeated Threat threats_removed = 5;
+  string error_message            = 6;
+  // sanitized_sha256: raw 32-byte SHA-256 of the bytes on the wire.
+  // In REPORT_ONLY / BYPASS_WITH_REPORT mode this equals SHA-256(original).
+  bytes  sanitized_sha256         = 7;
+  int64  duration_ms              = 8;
+}
+
+enum Status {
+  CLEAN       = 0;
+  SANITIZED   = 1;
+  BLOCKED     = 2;
+  ERROR       = 3;
+  UNSUPPORTED = 4;
+}
+
+message Threat {
+  string type        = 1; // lowercase snake_case, stable-ish: macro, javascript, ole_object, ...
+  string location    = 2;
+  string description = 3;
+  string severity    = 4; // MUST be one of: low | medium | high | critical
+}
+
+// ─── Health ──────────────────────────────────────────────────────────────────
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool   healthy                   = 1;
+  string version                   = 2;
+  repeated string supported_types  = 3;
+  int32  active_workers            = 4;
+  int32  max_workers               = 5;
+  int32  queue_depth               = 6;
+  int64  files_processed           = 7;
+  int64  threats_removed           = 8;
+  // profiles: sanitization profiles this Sluice instance advertises.
+  // Culvert's GUI populates the per-policy profile picker from this list.
+  repeated Profile profiles        = 9;
+}
+
+message Profile {
+  string name                   = 1; // lowercase-hyphenated, "default" is reserved
+  string description            = 2;
+  repeated string capabilities  = 3; // e.g. strip_macros, strip_js, re_encode_images
+  int64  max_file_size_bytes    = 4; // 0 = use server default
+}
+
+// ─── Enroll ──────────────────────────────────────────────────────────────────
+
+message EnrollRequest {
+  string token = 1;
+}
+
+message EnrollResponse {
+  bytes  ca_cert     = 1;
+  bytes  client_cert = 2;
+  bytes  client_key  = 3;
+  string endpoint    = 4;
+}

@@ -194,6 +194,80 @@ type FileConfig struct {
 		// running ClamAV/YARA/DPI in-process. Example: "http://scan-svc:8484".
 		ScanSvcURL string `yaml:"scan_svc_url"`
 	} `yaml:"security_scan"`
+
+	// CDR configures integration with the Sluice Content Disarm &
+	// Reconstruction engine. Sluice runs as a Docker sidecar and strips
+	// active content (macros, JS, OLE) from files passing through the
+	// proxy before they reach the user.
+	//
+	// Phase 1 (this ships): single-instance gRPC client + TOFU pinning
+	// at enrollment. Pool, circuit breaker, and policy engine land later.
+	CDR CDRConfig `yaml:"cdr"`
+}
+
+// CDRConfig holds the YAML-addressable surface for Sluice integration.
+// Paired with `-cdr-*` CLI flags in main.go (full GUI parity comes in a
+// later phase via an Integrations → CDR panel).
+type CDRConfig struct {
+	// Enabled turns the CDR stage on.  Default off — operators must opt in.
+	Enabled bool `yaml:"enabled"`
+
+	// Endpoint of the single Sluice instance Culvert talks to.  Format
+	// "host:port", e.g. "sluice:8443" (docker-compose) or "127.0.0.1:8443".
+	// Multiple endpoints + load balancing are Phase 2.
+	Endpoint string `yaml:"endpoint"`
+
+	// FailMode selects behaviour when Sluice is unreachable / returns ERROR.
+	//   "open"   — pass the original file through + audit event + alert
+	//   "closed" — return 503 + block page + alert
+	// Default "open". Per-policy overrides come with the policy engine.
+	FailMode string `yaml:"fail_mode"`
+
+	// DefaultProfile is the name sent in SanitizeHeader when no policy rule
+	// applies.  Must match a profile advertised by Sluice's Health response.
+	// Use "default" (reserved name) unless you know you've added others.
+	DefaultProfile string `yaml:"default_profile"`
+
+	// DefaultMode is the Mode sent when no policy rule applies.
+	//   "ENFORCE"             — strip threats and return sanitized bytes
+	//   "REPORT_ONLY"         — detect only, deliver original bytes
+	//   "BYPASS_WITH_REPORT"  — VIP carve-out: report threats, deliver original
+	// Default "ENFORCE".
+	DefaultMode string `yaml:"default_mode"`
+
+	// TimeoutSec bounds a single Sanitize call.  Sluice's internal cap is
+	// 30s; we default to 35 so our context expires after and we surface a
+	// meaningful error.  Must be ≥ 30.
+	TimeoutSec int `yaml:"timeout_sec"`
+
+	// MaxFileSizeMB rejects files above this size client-side before any
+	// bytes hit the wire.  Must match Sluice's application-level cap.
+	MaxFileSizeMB int `yaml:"max_file_size_mb"`
+
+	// ChunkSizeKB is the streaming payload per gRPC message.  Lower values
+	// help with backpressure visibility; higher values reduce syscall rate.
+	ChunkSizeKB int `yaml:"chunk_size_kb"`
+
+	// ServerFingerprint is the TOFU-pinned SHA-256 of Sluice's server cert,
+	// printed by `sluice token` on Sluice's first boot and entered during
+	// enrollment.  Format: hex string, optional "sha256:" prefix.  Once an
+	// enrollment has happened, this field keeps the identity pinned so a
+	// stolen client cert still can't be used against a rogue Sluice.
+	ServerFingerprint string `yaml:"server_fingerprint"`
+
+	// Paths populated by the enrollment flow (or pre-provisioned for HA/
+	// DR). When CertsDir is set, Culvert expects files:
+	//   <CertsDir>/ca.pem
+	//   <CertsDir>/client.pem
+	//   <CertsDir>/client.key
+	CertsDir string `yaml:"certs_dir"`
+}
+
+// CDRFailOpen reports whether fail-open is configured.  Any value other
+// than the explicit string "closed" is treated as open — prefer safety-of-
+// availability by default, admins opt into fail-closed.
+func (c CDRConfig) CDRFailOpen() bool {
+	return !strings.EqualFold(strings.TrimSpace(c.FailMode), "closed")
 }
 
 func loadFileConfig(path string) (*FileConfig, error) {
@@ -287,6 +361,40 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 	} {
 		if p.val != "" && strings.Contains(p.val, "..") {
 			errs = append(errs, fmt.Sprintf("%s: must not contain path traversal (..)", p.name))
+		}
+	}
+
+	// CDR validation.
+	if fc.CDR.Enabled {
+		if fc.CDR.Endpoint == "" {
+			errs = append(errs, "cdr.endpoint is required when cdr.enabled is true")
+		}
+		if fm := fc.CDR.FailMode; fm != "" && fm != "open" && fm != "closed" {
+			errs = append(errs, fmt.Sprintf("cdr.fail_mode: must be \"open\" or \"closed\", got %q", fm))
+		}
+		if m := fc.CDR.DefaultMode; m != "" && m != "ENFORCE" && m != "REPORT_ONLY" && m != "BYPASS_WITH_REPORT" {
+			errs = append(errs, fmt.Sprintf("cdr.default_mode: must be ENFORCE | REPORT_ONLY | BYPASS_WITH_REPORT, got %q", m))
+		}
+		if t := fc.CDR.TimeoutSec; t != 0 && t < 30 {
+			errs = append(errs, fmt.Sprintf("cdr.timeout_sec: must be >= 30 (Sluice's own cap), got %d", t))
+		}
+		if s := fc.CDR.MaxFileSizeMB; s < 0 {
+			errs = append(errs, fmt.Sprintf("cdr.max_file_size_mb: must be >= 0, got %d", s))
+		}
+		if s := fc.CDR.ChunkSizeKB; s != 0 && (s < 16 || s > 3072) {
+			// 3072 KB = 3 MiB, a safe ceiling under the 4 MiB gRPC frame cap.
+			errs = append(errs, fmt.Sprintf("cdr.chunk_size_kb: must be 16–3072, got %d", s))
+		}
+		if fp := strings.TrimSpace(fc.CDR.ServerFingerprint); fp != "" {
+			fp = strings.TrimPrefix(fp, "sha256:")
+			fp = strings.TrimPrefix(fp, "SHA256:")
+			fp = strings.ReplaceAll(fp, ":", "")
+			if len(fp) != 64 {
+				errs = append(errs, fmt.Sprintf("cdr.server_fingerprint: expected 64 hex chars (SHA-256), got %d", len(fp)))
+			}
+		}
+		if p := fc.CDR.CertsDir; p != "" && strings.Contains(p, "..") {
+			errs = append(errs, "cdr.certs_dir: must not contain path traversal (..)")
 		}
 	}
 
