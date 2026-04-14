@@ -356,8 +356,9 @@ culvert_bytes_recv_total %d
 		bytesRecv,
 	)
 
-	// Append per-rule hit counters and latency histogram.
+	// Append per-rule hit counters, latency histogram, and CDR metrics.
 	ruleMet.WritePrometheus(&ruleMetBuf)
 	latencyHist.WritePrometheus(&ruleMetBuf)
+	cdrWritePrometheus(&ruleMetBuf)
 	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
 }

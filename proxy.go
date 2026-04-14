@@ -455,9 +455,18 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
 	}
 
+	// Identity context forwarded to SSL-inspect (consumed by CDR today;
+	// future audit enrichment can read this without re-parsing headers).
+	proxyID := ProxyIdentity{
+		ClientIP:   clientIP,
+		Identity:   authenticatedIdentity,
+		AuthSource: authenticatedSource,
+		Groups:     authenticatedGroups,
+	}
+
 	switch {
 	case r.Method == http.MethodConnect:
-		handleTunnel(w, r, sslAction, tlsSkipVerify, match)
+		handleTunnel(w, r, sslAction, tlsSkipVerify, match, proxyID)
 	case isWebSocketUpgrade(r):
 		handleWebSocket(w, r)
 	default:
@@ -886,9 +895,13 @@ func detectProtocolName(b byte) string {
 // match is the policy evaluation result (may be nil when no rule matched and
 // default action is "allow"); it is forwarded to the inspect path so per-rule
 // file-blocking profiles can be enforced on inner HTTP requests.
-func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, tlsSkipVerify bool, match *PolicyMatch) {
+//
+// id is the authenticated context extracted by the top-level handler; it is
+// forwarded to inspect so downstream stages (CDR, future audit enrichment)
+// can branch on identity without re-parsing headers.
+func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
 	if sslAction == SSLInspect && certMgr.Ready() {
-		handleTunnelInspect(w, r, tlsSkipVerify, match)
+		handleTunnelInspect(w, r, tlsSkipVerify, match, id)
 	} else {
 		handleTunnelBypass(w, r)
 	}
@@ -976,7 +989,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 // internal Root CA, allowing the proxy to inspect decrypted HTTP/1.x traffic.
 // tlsSkipVerify disables upstream certificate validation for specific policy
 // rules (e.g. internal sites with self-signed certs); use with caution.
-func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool, match *PolicyMatch) {
+func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
 	targetHost := r.Host
 	if _, _, err := net.SplitHostPort(targetHost); err != nil {
 		targetHost += ":443"
@@ -1278,6 +1291,67 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					recordRequest(clientIP, "CONNECT", hostOnly, "POLYGLOT_BLOCKED", reason, "", "", "inspect")
 					fileBlockConn(clientTLS, hostOnly, req.URL.Path, reason, "polyglot")
 					break
+				}
+
+				// ── CDR (Sluice content disarm & reconstruction) ──
+				// Runs BEFORE ClamAV/YARA so downstream scanners see the
+				// sanitized bytes if CDR stripped active content.  No-op
+				// (single atomic load) when CDR is disabled.
+				if cdrActiveClient() != nil {
+					cdrRes := safeCDRSanitize(r.Context(),
+						cdrRequestContext{
+							Host:        hostOnly,
+							URL:         req.URL.Path,
+							RequestID:   req.Header.Get("X-Request-ID"),
+							TraceParent: req.Header.Get("Traceparent"),
+						},
+						body, ct, id, cdrActiveConfig())
+					recordCDRTerminal(cdrRes.Status)
+					recordThreatDetections(cdrRes.Threats)
+					switch cdrRes.Outcome {
+					case cdrBlock:
+						origBody.Close()
+						atomic.AddInt64(&statBlocked, 1)
+						recordRequest(clientIP, "CONNECT", hostOnly, "CDR_BLOCKED", cdrRes.ProfileName, cdrRes.BlockReason, id.Identity, "inspect")
+						logger.Printf("CDR_BLOCKED %s -> %q reason=%q profile=%q mode=%q threats=%q",
+							clientIP, sanitizeLog(hostOnly),
+							sanitizeLog(cdrRes.BlockReason),
+							sanitizeLog(cdrRes.ProfileName),
+							sanitizeLog(cdrRes.Mode),
+							sanitizeLog(cdrSummariseThreats(cdrRes.Threats)))
+						scanBlockConn(clientTLS, hostOnly, cdrRes.BlockReason, "cdr")
+						// Fall through — the for-loop break happens after the switch
+						// because "break" inside a switch only exits the switch.
+					case cdrSwap:
+						// Replace both buffers so ClamAV/YARA see the sanitized
+						// bytes.  Re-decompress defensively: Sluice typically
+						// returns uncompressed output regardless of input
+						// encoding, so decompressForScan on the sanitized bytes
+						// is a no-op in practice but safe as a fallback.
+						body = cdrRes.Body
+						atomic.AddInt64(&statCDRBytesOut, int64(len(body)))
+						scanBody = decompressForScan(body, ce)
+						recordRequest(clientIP, "CONNECT", hostOnly, "CDR_SANITIZED", cdrRes.ProfileName, cdrSummariseThreats(cdrRes.Threats), id.Identity, "inspect")
+						logger.Printf("CDR_SANITIZED %s -> %q profile=%q mode=%q threats=%q duration_ms=%d",
+							clientIP, sanitizeLog(hostOnly),
+							sanitizeLog(cdrRes.ProfileName),
+							sanitizeLog(cdrRes.Mode),
+							sanitizeLog(cdrSummariseThreats(cdrRes.Threats)),
+							cdrRes.DurationMs)
+					case cdrPass:
+						// Status-aware audit: only log error/skipped at INFO,
+						// clean is too chatty for normal operation.
+						if cdrRes.Status == "ERROR" {
+							recordRequest(clientIP, "CONNECT", hostOnly, "CDR_ERROR", cdrRes.ProfileName, cdrRes.BlockReason, id.Identity, "inspect")
+							logger.Printf("CDR_ERROR %s -> %q (fail-open) reason=%q",
+								clientIP, sanitizeLog(hostOnly), sanitizeLog(cdrRes.BlockReason))
+						}
+					}
+					// cdrBlock path already broke out of the for-loop via
+					// scanBlockConn; guard against accidental fall-through.
+					if cdrRes.Outcome == cdrBlock {
+						break
+					}
 				}
 
 				// When remote scan service is active, delegate all scanning

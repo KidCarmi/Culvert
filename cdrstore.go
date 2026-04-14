@@ -251,6 +251,7 @@ func normaliseFingerprint(fp string) string {
 var (
 	cdrClientMu      sync.RWMutex
 	cdrActiveClientV *CDRClient
+	cdrActiveCfg     CDRConfig
 )
 
 // cdrActiveClient returns the process-wide CDR client, or nil when CDR is
@@ -261,6 +262,15 @@ func cdrActiveClient() *CDRClient {
 	cdrClientMu.RLock()
 	defer cdrClientMu.RUnlock()
 	return cdrActiveClientV
+}
+
+// cdrActiveConfig returns a snapshot of the effective CDR config as wired
+// at the last initCDRClient() call.  Safe to call from hot paths; callers
+// receive a value copy — mutating it does not affect live state.
+func cdrActiveConfig() CDRConfig {
+	cdrClientMu.RLock()
+	defer cdrClientMu.RUnlock()
+	return cdrActiveCfg
 }
 
 // initCDRClient wires up the singleton from CDRConfig + the instance
@@ -304,6 +314,7 @@ func initCDRClient(cfg CDRConfig) error {
 	cdrClientMu.Lock()
 	oldClient := cdrActiveClientV
 	cdrActiveClientV = newClient
+	cdrActiveCfg = cfg
 	cdrClientMu.Unlock()
 
 	if oldClient != nil {
@@ -321,6 +332,7 @@ func shutdownCDRClient() {
 	cdrClientMu.Lock()
 	client := cdrActiveClientV
 	cdrActiveClientV = nil
+	cdrActiveCfg = CDRConfig{}
 	cdrClientMu.Unlock()
 	if client != nil {
 		_ = client.Close()
