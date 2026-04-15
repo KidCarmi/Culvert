@@ -595,7 +595,7 @@ func apiCDRTest(w http.ResponseWriter, r *http.Request) {
 // readCDRTestUpload accepts multipart/form-data (field: "file") OR a raw
 // body with Content-Type carrying the MIME.  Returns the body bytes, a
 // filename hint, and the effective content-type.
-func readCDRTestUpload(r *http.Request) ([]byte, string, string, error) {
+func readCDRTestUpload(r *http.Request) (body []byte, filename, contentType string, err error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		// Cap the total multipart body BEFORE parsing so a huge boundary
@@ -619,9 +619,10 @@ func readCDRTestUpload(r *http.Request) ([]byte, string, string, error) {
 		return body, hdr.Filename, firstStr(hdr.Header.Get("Content-Type"), "application/octet-stream"), nil
 	}
 	// Raw body fallback.
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
-	if err != nil {
-		return nil, "", "", fmt.Errorf("read body: %w", err)
+	var rerr error
+	body, rerr = io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if rerr != nil {
+		return nil, "", "", fmt.Errorf("read body: %w", rerr)
 	}
 	fn := firstStr(r.URL.Query().Get("filename"), "upload.bin")
 	return body, fn, firstStr(ct, "application/octet-stream"), nil

@@ -989,6 +989,12 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 // internal Root CA, allowing the proxy to inspect decrypted HTTP/1.x traffic.
 // tlsSkipVerify disables upstream certificate validation for specific policy
 // rules (e.g. internal sites with self-signed certs); use with caution.
+//
+//nolint:gocognit,gocyclo,funlen // handleTunnelInspect is the SSL-inspection orchestrator —
+// pre-existing complexity predating the CDR integration (was gocognit 128 before CDR;
+// dropped to 112 after Phase 2b extracted runCDRStage out of here).  Further splitting
+// would change the keep-alive loop semantics and is out of scope for CDR work —
+// tracked as a day-2 refactor item in roadmap/roadmap-day2.md.
 func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
 	targetHost := r.Host
 	if _, _, err := net.SplitHostPort(targetHost); err != nil {
