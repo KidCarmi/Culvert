@@ -2414,6 +2414,8 @@ Firefox (all platforms):
         <div class="panel">
           <div class="panel-header"><span class="panel-title">Runtime Status</span>
             <span id="cdr-status-badge" class="badge">—</span>
+            <button class="btn sm" id="cdr-toggle-btn" data-min-role="admin"
+                    data-click="cdrToggleEnabled" style="margin-left:8px;display:none">—</button>
           </div>
           <div class="panel-body">
             <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">
@@ -2448,6 +2450,15 @@ Firefox (all platforms):
         <div class="panel" data-min-role="admin">
           <div class="panel-header"><span class="panel-title">Enroll new Sluice instance</span></div>
           <div class="panel-body">
+            <div id="cdr-enroll-autoenable-banner"
+                 style="display:none;background:var(--surface2);border-left:3px solid var(--accent);
+                        padding:10px 14px;border-radius:6px;margin-bottom:12px">
+              <div style="font-weight:600;margin-bottom:2px">CDR is currently disabled.</div>
+              <div class="muted" style="font-size:.82rem">
+                Enrolling your first Sluice instance will also turn CDR on automatically — you don't need to touch the config file
+                or restart the proxy.  The choice persists across restarts (stored at <code>/data/cdr_enabled</code>).
+              </div>
+            </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
               <label>Name<input class="input" id="cdr-enroll-name" placeholder="e.g. sluice-01"></label>
               <label>Endpoint<input class="input" id="cdr-enroll-endpoint" placeholder="sluice:8443"></label>
@@ -3569,6 +3580,7 @@ document.addEventListener('click', e => {
 
     // ── CDR (Sluice) ──
     case 'cdrSwitchTab':       cdrSwitchTab(arg); break;
+    case 'cdrToggleEnabled':   cdrToggleEnabled(); break;
     case 'cdrRefreshHealth':   cdrRefreshHealth(); break;
     case 'cdrRefreshInstances': cdrRefreshInstances(); break;
     case 'cdrEnrollInstance':  cdrEnrollInstance(); break;
@@ -6443,6 +6455,22 @@ function cdrRenderOverview() {
     else { badge.textContent = 'not connected'; badge.className = 'badge drop'; }
   }
 
+  // Runtime toggle button — admin flips cdr.enabled without a restart.
+  // Copy flips with current state: disabled → "Enable CDR" (primary),
+  // enabled → "Disable CDR" (ghost).  Hidden for non-admins (the
+  // data-min-role attribute handles that via applySession).
+  const tbtn = document.getElementById('cdr-toggle-btn');
+  if (tbtn && typeof uiRole !== 'undefined' && uiRole === 'admin') {
+    tbtn.style.display = '';
+    if (cfg.enabled) {
+      tbtn.textContent = 'Disable CDR';
+      tbtn.className = 'btn sm ghost';
+    } else {
+      tbtn.textContent = 'Enable CDR';
+      tbtn.className = 'btn sm';
+    }
+  }
+
   const tbody = document.getElementById('cdr-pool-tbody');
   if (!tbody) return;
   const instances = cdrState.instances || [];
@@ -6466,6 +6494,26 @@ function cdrRenderOverview() {
   }).join('');
 }
 
+// cdrToggleEnabled flips cdr.enabled at runtime via PUT /api/cdr/config.
+// Persisted to /data/cdr_enabled on the server so the choice survives
+// restart.  Disabling does NOT delete enrolled instances — their certs
+// stay on disk and re-enabling brings them back.
+async function cdrToggleEnabled() {
+  const cfg = cdrState.config || {};
+  const target = !cfg.enabled;
+  const verb = target ? 'Enable' : 'Disable';
+  if (!await confirmAction(verb + ' CDR?',
+    target
+      ? 'Turns the CDR engine on and dials every enrolled Sluice instance in the pool.  Takes effect immediately and survives restarts.'
+      : 'Shuts down the CDR client pool.  Enrolled instances stay registered — certs remain on disk — but no files flow through sanitisation until CDR is re-enabled.  Takes effect immediately.',
+    verb)) return;
+  try {
+    await api('/api/cdr/config', { method: 'PUT', body: { enabled: target } });
+    toast('CDR ' + (target ? 'enabled' : 'disabled'), 'success');
+    cdrLoadOverview();
+  } catch (e) { toast('Toggle failed: ' + e.message, 'error'); }
+}
+
 async function cdrRefreshHealth() {
   try {
     cdrState.health = await api('/api/cdr/health');
@@ -6478,9 +6526,19 @@ async function cdrRefreshHealth() {
 
 async function cdrLoadInstances() {
   try {
-    const d = await api('/api/cdr/instances');
-    cdrState.instances = d.instances || [];
+    // Fetch config alongside so the banner can toggle without the
+    // Overview tab needing to be opened first.
+    const [inst, cfg] = await Promise.all([
+      api('/api/cdr/instances'),
+      api('/api/cdr/config').catch(() => null),
+    ]);
+    cdrState.instances = inst.instances || [];
+    if (cfg) cdrState.config = cfg;
     cdrRenderInstances();
+    const banner = document.getElementById('cdr-enroll-autoenable-banner');
+    if (banner) {
+      banner.style.display = (cdrState.config && !cdrState.config.enabled) ? '' : 'none';
+    }
   } catch (e) { toast('CDR instances failed: ' + e.message, 'error'); }
 }
 

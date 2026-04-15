@@ -243,13 +243,23 @@ func TestProxy_FileBlockPolicyProfile_AllowsClean(t *testing.T) {
 	}
 	globalProfileStore.mu.Unlock()
 
+	// Spin up a local upstream that always returns 200 so handleHTTP has
+	// somewhere reachable to dial.  Without this, client.Do(r) tries to
+	// resolve/dial example.com and can receive environment-dependent
+	// responses (CI sandboxes return a 403 "Host not in allowlist" which
+	// the proxy then echoes, causing a false-positive test failure).
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
 	policyStore.mu.Lock()
 	oldRules := policyStore.rules
 	policyStore.rules = []*PolicyRule{{
 		Name:          "allow-with-profile",
 		Priority:      1,
 		Action:        ActionAllow,
-		DestFQDN:      "example.com",
+		DestFQDN:      "127.0.0.1",
 		FileFiltering: true,
 		FileProfile:   "Executables",
 	}}
@@ -260,13 +270,15 @@ func TestProxy_FileBlockPolicyProfile_AllowsClean(t *testing.T) {
 		policyStore.mu.Unlock()
 	})
 
-	// A .txt download should pass through the profile check.
-	req := makeRequest("GET", "http://example.com/readme.txt", nil)
+	// Request routes to the local upstream; the policy rule matches on
+	// 127.0.0.1 (the Host header carries host+port but matchFQDN strips
+	// the port before comparing).  A .txt path must NOT trip the
+	// Executables profile (.ps1 / .exe only).
+	req := makeRequest("GET", upstream.URL+"/readme.txt", nil)
 	rec := httptest.NewRecorder()
 	handleRequest(rec, req)
 
-	// Not forbidden — should be 200 or 502 (no real upstream), but NOT 403.
 	if rec.Code == http.StatusForbidden {
-		t.Errorf("expected non-403 for .txt, got %d", rec.Code)
+		t.Errorf("expected non-403 for .txt, got %d (body=%q)", rec.Code, rec.Body.String())
 	}
 }
