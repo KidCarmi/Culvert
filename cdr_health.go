@@ -86,82 +86,105 @@ func startCDRHealthPoller(ctx context.Context) {
 func probeCDRHealth(ctx context.Context) {
 	members := cdrPool.List()
 	if len(members) == 0 {
-		// No pool — clear aggregate snapshot so /api/cdr/health shows
-		// "no data" rather than stale reassurance.
 		clearCDRHealth()
 		return
 	}
+	agg := probeAllMembers(ctx, members)
+	if agg.failed == len(members) {
+		handleAllMembersFailed(len(members))
+		return
+	}
+	applyAggregateHealth(agg)
+	updateRegistryMetadataFromPool(members)
+}
 
-	var (
-		anyHealthy      bool
-		minQueue        int32 = -1
-		bestResp        *pb.HealthResponse
-		aggregateFailed int
-	)
-
+// probeAllMembers fires one Health RPC per pool member and collects the
+// aggregate view.  Extracted from probeCDRHealth to bound cyclomatic.
+func probeAllMembers(ctx context.Context, members []*cdrPooledClient) probeAggregate {
+	var agg probeAggregate
+	agg.minQueue = -1
 	for _, pc := range members {
 		probeCtx, cancel := context.WithTimeout(ctx, cdrHealthProbeDeadline)
 		resp, err := pc.Client.Health(probeCtx)
 		cancel()
 		if err != nil {
-			aggregateFailed++
+			agg.failed++
 			pc.clearHealth()
 			continue
 		}
 		pc.setHealth(resp)
-		if resp.Healthy {
-			anyHealthy = true
-			if minQueue < 0 || resp.QueueDepth < minQueue {
-				minQueue = resp.QueueDepth
-			}
-			// Prefer any healthy response for the aggregate "last"
-			// snapshot; first healthy wins deterministically (pool
-			// order mirrors registry order).
-			if bestResp == nil {
-				bestResp = resp
-			}
+		if !resp.Healthy {
+			continue
+		}
+		agg.anyHealthy = true
+		if agg.minQueue < 0 || resp.QueueDepth < agg.minQueue {
+			agg.minQueue = resp.QueueDepth
+		}
+		if agg.bestResp == nil {
+			agg.bestResp = resp
 		}
 	}
+	return agg
+}
 
-	// Aggregate failure accounting — mirrors Phase 2c semantics.
-	if aggregateFailed == len(members) {
-		failCount := atomic.AddInt64(&cdrHealthFailures, 1)
-		atomic.StoreInt64(&statCDRInstanceHealthy, 0)
-		if failCount <= cdrHealthFailStaleAfter {
-			logger.Printf("CDR: all %d instance health probes failed (%d/%d)",
-				len(members), failCount, cdrHealthFailStaleAfter)
-		}
-		if failCount >= cdrHealthFailStaleAfter {
-			clearCDRHealth()
-		}
-		return
+// probeAggregate holds the combined view of one polling tick.
+type probeAggregate struct {
+	anyHealthy bool
+	minQueue   int32
+	bestResp   *pb.HealthResponse
+	failed     int
+}
+
+// handleAllMembersFailed applies the Phase 2c "everyone failed" policy:
+// bump counter, log sparingly, clear the snapshot once we've been
+// failing for long enough that the UI shouldn't trust stale data.
+func handleAllMembersFailed(memberCount int) {
+	failCount := atomic.AddInt64(&cdrHealthFailures, 1)
+	atomic.StoreInt64(&statCDRInstanceHealthy, 0)
+	if failCount <= cdrHealthFailStaleAfter {
+		logger.Printf("CDR: all %d instance health probes failed (%d/%d)",
+			memberCount, failCount, cdrHealthFailStaleAfter)
 	}
+	if failCount >= cdrHealthFailStaleAfter {
+		clearCDRHealth()
+	}
+}
+
+// applyAggregateHealth updates the aggregate gauges + snapshot from the
+// probe result.
+func applyAggregateHealth(agg probeAggregate) {
 	atomic.StoreInt64(&cdrHealthFailures, 0)
-	if anyHealthy {
+	if agg.anyHealthy {
 		atomic.StoreInt64(&statCDRInstanceHealthy, 1)
 	} else {
 		atomic.StoreInt64(&statCDRInstanceHealthy, 0)
 	}
-	if minQueue >= 0 {
-		atomic.StoreInt64(&statCDRQueueDepth, int64(minQueue))
+	if agg.minQueue >= 0 {
+		atomic.StoreInt64(&statCDRQueueDepth, int64(agg.minQueue))
 	}
-
-	if bestResp != nil {
+	if agg.bestResp != nil {
 		cdrHealthMu.Lock()
-		cdrHealthLast = bestResp
+		cdrHealthLast = agg.bestResp
 		cdrHealthLastSeen = time.Now()
 		cdrHealthMu.Unlock()
 	}
+}
 
-	// Update registry metadata (version, last-seen) for every instance
-	// that responded.  Runtime telemetry only — no persistence.
+// updateRegistryMetadataFromPool copies runtime telemetry (version,
+// last-health) from each pool member back onto its registry entry.
+// Not persisted — purely for the admin GUI.
+func updateRegistryMetadataFromPool(members []*cdrPooledClient) {
 	for _, pc := range members {
-		if h, _ := pc.HealthSnapshot(); h != nil {
-			if inst := cdrInstances.Get(pc.Name); inst != nil {
-				inst.Version = h.Version
-				inst.LastHealth = time.Now().UTC()
-			}
+		h, _ := pc.HealthSnapshot()
+		if h == nil {
+			continue
 		}
+		inst := cdrInstances.Get(pc.Name)
+		if inst == nil {
+			continue
+		}
+		inst.Version = h.Version
+		inst.LastHealth = time.Now().UTC()
 	}
 }
 

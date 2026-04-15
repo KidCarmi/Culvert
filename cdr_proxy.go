@@ -28,6 +28,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"path"
 	"strings"
@@ -172,7 +174,7 @@ func (c *cdrHashCache) evictSomeLocked() {
 }
 
 // Stats returns (hits, misses, size).  Used by metrics exposition.
-func (c *cdrHashCache) Stats() (int64, int64, int) {
+func (c *cdrHashCache) Stats() (hits, misses int64, size int) {
 	c.mu.Lock()
 	n := len(c.entries)
 	c.mu.Unlock()
@@ -195,9 +197,9 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	}()
 
 	// Gate + pool pick.  Pool picker returns nil when every instance's
-	// circuit breaker is open OR no clients are enrolled.  Either way we
-	// skip CDR for this request — the caller's fail_mode then decides
-	// whether to still deliver the file.
+	// circuit breaker is open OR no clients are enrolled.  Either way
+	// we skip CDR for this request — the caller's fail_mode then
+	// decides whether to still deliver the file.
 	if !cfg.Enabled {
 		return cdrPassSkipped("SKIPPED")
 	}
@@ -206,132 +208,219 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 		return cdrPassSkipped("SKIPPED")
 	}
 
-	// Oversize skip: fail-open on truncation-detected or size-over-cap.
-	// The scan pipeline buffers up to maxScanBufferBytes().  If CDR needs
-	// more headroom than the scanner was given, we skip CDR for THIS
-	// response (log + metric) rather than sanitize a truncated buffer.
-	maxFile := cfg.maxFileSizeBytes()
-	if int64(len(body)) > maxFile {
-		atomic.AddInt64(&statCDROversizeSkipped, 1)
-		logger.Printf("CDR: skip oversize %d > %d (host=%q)", len(body), maxFile, sanitizeLog(req.Host))
-		return cdrPassSkipped("SKIPPED_OVERSIZE")
+	// Oversize skip before any Sluice contact.
+	if skipped := cdrGateOversize(body, cfg, req.Host); skipped != nil {
+		return skipped
 	}
 
-	// Policy decision — decides profile + mode for this specific request.
+	// Policy decision + cache lookup.  Cache hit short-circuits the RPC.
 	decision := cdrPolicyStore.Evaluate(id.ClientIP, id.Identity, id.AuthSource, req.Host, id.Groups, cfg)
 	profile := decision.ProfileName
 	modeStr := decision.Mode.String()
-
-	// Hash-cache lookup.  Keyed on SHA-256 of the buffered body.  The
-	// epoch check inside Get() handles policy-version invalidation.
 	sum := sha256.Sum256(body)
 	hashHex := hex.EncodeToString(sum[:])
 	epoch := cdrPolicyStore.Epoch()
-	if e, ok := cdrCache.Get(hashHex, epoch); ok {
-		atomic.AddInt64(&statCDRCacheHits, 1)
-		switch e.status {
-		case "CLEAN":
-			return cdrPassClean(e.profile, e.mode, e.threats, 0, true)
-		case "UNSUPPORTED":
-			return cdrPassUnsupported(e.profile, e.mode, 0, true)
-		case "BLOCKED":
-			return cdrBlockResult(e.blockReason, e.threats, e.profile, e.mode, 0, true)
-		}
+	if hit := cdrCacheLookup(hashHex, epoch); hit != nil {
+		return hit
 	}
-	atomic.AddInt64(&statCDRCacheMisses, 1)
 
-	// Build the header.  Culvert's X-Request-ID propagates for correlation;
-	// tags are whitelisted low-cardinality only (direction=download).
-	header := &pb.SanitizeHeader{
+	// One RPC call + outcome classification.
+	header := cdrBuildHeader(req, ct, body, profile, decision.Mode)
+	callCtx, cancel := cdrCallContext(ctx, cfg)
+	if cancel != nil {
+		defer cancel()
+	}
+	t0 := time.Now()
+	res, err := client.Sanitize(callCtx, header, cdrBodyReader(body))
+	ms := time.Since(t0).Milliseconds()
+	if err != nil {
+		if !IsFileTooLarge(err) {
+			cdrMarkOutcome(instanceName, true)
+		}
+		return cdrHandleCallError(err, profile, modeStr, ms, cfg)
+	}
+	return cdrClassifyResult(res, instanceName, profile, modeStr, ms, hashHex, epoch, cfg)
+}
+
+// cdrGateOversize returns SKIPPED_OVERSIZE when body is over the per-
+// file cap.  Nil when the request can proceed.  Extracted for cyclop.
+func cdrGateOversize(body []byte, cfg CDRConfig, host string) *cdrRunResult {
+	maxFile := cfg.maxFileSizeBytes()
+	if int64(len(body)) <= maxFile {
+		return nil
+	}
+	atomic.AddInt64(&statCDROversizeSkipped, 1)
+	logger.Printf("CDR: skip oversize %d > %d (host=%q)", len(body), maxFile, sanitizeLog(host))
+	return cdrPassSkipped("SKIPPED_OVERSIZE")
+}
+
+// cdrCacheLookup translates a hash-cache hit into a cdrRunResult, or
+// returns nil on miss (and increments the miss counter).
+func cdrCacheLookup(hashHex string, epoch int64) *cdrRunResult {
+	e, ok := cdrCache.Get(hashHex, epoch)
+	if !ok {
+		atomic.AddInt64(&statCDRCacheMisses, 1)
+		return nil
+	}
+	atomic.AddInt64(&statCDRCacheHits, 1)
+	switch e.status {
+	case "CLEAN":
+		return cdrPassClean(e.profile, e.mode, e.threats, 0, true)
+	case "UNSUPPORTED":
+		return cdrPassUnsupported(e.profile, e.mode, 0, true)
+	case "BLOCKED":
+		return cdrBlockResult(e.blockReason, e.threats, e.profile, e.mode, 0, true)
+	}
+	// Unknown cached status (shouldn't happen — only the three above are
+	// ever inserted).  Treat as miss.
+	return nil
+}
+
+// cdrBuildHeader constructs the SanitizeHeader with Culvert's tags +
+// policy-version propagation rules.
+func cdrBuildHeader(req cdrRequestContext, ct string, body []byte, profile string, mode pb.Mode) *pb.SanitizeHeader {
+	return &pb.SanitizeHeader{
 		Filename:      cdrFilenameFromURL(req.URL),
 		ContentType:   ct,
 		ContentLength: int64(len(body)),
 		RequestId:     req.RequestID,
 		TraceParent:   req.TraceParent,
 		ProfileName:   profile,
-		Mode:          decision.Mode,
+		Mode:          mode,
 		Tags:          map[string]string{"direction": "download"},
 		PolicyVersion: cdrPolicyVersionString(),
 	}
+}
 
-	// Per-call timeout: caller context wins if tighter; else we apply our
-	// cfg.TimeoutSec (default 35s — matches Sluice's 30s internal cap + 5s).
-	callCtx := ctx
-	var cancel context.CancelFunc
-	if _, ok := ctx.Deadline(); !ok {
-		timeout := 35 * time.Second
-		if cfg.TimeoutSec > 0 {
-			timeout = time.Duration(cfg.TimeoutSec) * time.Second
-		}
-		callCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
+// cdrCallContext derives the per-call deadline.  Returns the derived
+// context and an optional cancel fn the caller must defer.
+func cdrCallContext(ctx context.Context, cfg CDRConfig) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, nil
 	}
-
-	t0 := time.Now()
-	res, err := client.Sanitize(callCtx, header, cdrBodyReader(body))
-	ms := time.Since(t0).Milliseconds()
-
-	if err != nil {
-		// file_too_large is an application-layer rejection — not a
-		// transport failure, so it does NOT trip the CB.  Everything
-		// else (Unavailable, DeadlineExceeded, stream EOF, …) does.
-		if !IsFileTooLarge(err) {
-			cdrMarkOutcome(instanceName, true)
-		}
-		return cdrHandleCallError(err, profile, modeStr, ms, cfg)
+	timeout := 35 * time.Second
+	if cfg.TimeoutSec > 0 {
+		timeout = time.Duration(cfg.TimeoutSec) * time.Second
 	}
+	return context.WithTimeout(ctx, timeout)
+}
 
-	// Status-based branching.  Mode semantics are enforced server-side
-	// (REPORT_ONLY / BYPASS_WITH_REPORT already return original bytes);
-	// we trust Sluice's contract and treat the bytes on the wire as
-	// authoritative.
+// cdrClassifyResult turns a successful Sluice response into the
+// appropriate cdrRunResult, marks the CB, and caches the decision
+// where safe.  Split out of safeCDRSanitize to keep that function's
+// cyclomatic under the linter threshold.
+func cdrClassifyResult(res *cdrRunSanitizeResult, instance, profile, mode string, ms int64, hashHex string, epoch int64, cfg CDRConfig) *cdrRunResult {
 	switch res.Status {
 	case pb.Status_CLEAN:
-		cdrMarkOutcome(instanceName, false)
+		cdrMarkOutcome(instance, false)
 		cdrCache.Put(hashHex, &cdrCacheEntry{
-			status: "CLEAN", threats: nil, profile: profile, mode: modeStr,
+			status: "CLEAN", profile: profile, mode: mode,
 			expiresAt: time.Now().Add(cdrCache.ttl), epoch: epoch,
 		})
-		return cdrPassClean(profile, modeStr, nil, ms, false)
-
+		return cdrPassClean(profile, mode, nil, ms, false)
 	case pb.Status_SANITIZED:
-		cdrMarkOutcome(instanceName, false)
-		// Never cache SANITIZED bytes (too large).  Always call Sluice.
-		return cdrSwapResult(res.SanitizedData, res.Threats, profile, modeStr, ms)
-
+		cdrMarkOutcome(instance, false)
+		return cdrSwapResult(res.SanitizedData, res.Threats, profile, mode, ms)
 	case pb.Status_BLOCKED:
-		cdrMarkOutcome(instanceName, false)
-		reason := "cdr_blocked"
-		if res.ErrorMessage != "" {
-			reason = res.ErrorMessage
+		cdrMarkOutcome(instance, false)
+		reason := res.ErrorMessage
+		if reason == "" {
+			reason = "cdr_blocked"
 		}
 		cdrCache.Put(hashHex, &cdrCacheEntry{
 			status: "BLOCKED", blockReason: reason, threats: res.Threats,
-			profile: profile, mode: modeStr,
+			profile: profile, mode: mode,
 			expiresAt: time.Now().Add(cdrCache.ttl), epoch: epoch,
 		})
-		return cdrBlockResult(reason, res.Threats, profile, modeStr, ms, false)
-
+		return cdrBlockResult(reason, res.Threats, profile, mode, ms, false)
 	case pb.Status_UNSUPPORTED:
-		cdrMarkOutcome(instanceName, false)
+		cdrMarkOutcome(instance, false)
 		cdrCache.Put(hashHex, &cdrCacheEntry{
-			status: "UNSUPPORTED", profile: profile, mode: modeStr,
+			status: "UNSUPPORTED", profile: profile, mode: mode,
 			expiresAt: time.Now().Add(cdrCache.ttl), epoch: epoch,
 		})
-		return cdrPassUnsupported(profile, modeStr, ms, false)
-
+		return cdrPassUnsupported(profile, mode, ms, false)
 	case pb.Status_ERROR:
-		// Sluice reported a well-formed error (e.g. unknown_profile).
-		// We don't cache this — the policy may be fixed minutes later.
-		// Trips the breaker: a Sluice that keeps returning ERROR is
-		// effectively unavailable from our POV.
-		cdrMarkOutcome(instanceName, true)
-		return cdrErrorOutcome(res.ErrorMessage, profile, modeStr, ms, cfg)
+		cdrMarkOutcome(instance, true)
+		return cdrErrorOutcome(res.ErrorMessage, profile, mode, ms, cfg)
 	}
-
 	// Unknown status — defensive.  Treat like ERROR.
-	cdrMarkOutcome(instanceName, true)
-	return cdrErrorOutcome(fmt.Sprintf("unknown_status_%d", res.Status), profile, modeStr, ms, cfg)
+	cdrMarkOutcome(instance, true)
+	return cdrErrorOutcome(fmt.Sprintf("unknown_status_%d", res.Status), profile, mode, ms, cfg)
+}
+
+// cdrRunSanitizeResult is a type alias so cdrClassifyResult can take the
+// Sluice result without importing the generated proto directly at every
+// call site.  The underlying type is CDRResult from cdr.go.
+type cdrRunSanitizeResult = CDRResult
+
+// cdrStageDecision is the narrow interface handleTunnelInspect sees.
+// Pulled out of cdr_proxy.go into a compact struct so the proxy hot
+// path reads as "call runCDRStage → either break or update body".
+type cdrStageDecision struct {
+	blocked  bool
+	body     []byte // original or sanitized bytes for downstream scanners
+	scanBody []byte // decompressed-for-scan view
+}
+
+// runCDRStage is the proxy-side orchestration of one CDR decision.
+// Keeps handleTunnelInspect slim (stays under the existing gocognit
+// budget) while still driving:
+//   - the safeCDRSanitize call
+//   - metric counters
+//   - audit record
+//   - block-page write on BLOCKED
+//   - body/scanBody swap on SANITIZED
+//
+// Callers treat `blocked=true` as "break out of the keep-alive loop".
+// The underlying connection is closed by the caller, not by us, so
+// we DON'T write the block page here except through scanBlockConn —
+// same contract as ClamAV/YARA's scanBlockConn integration.
+//
+//nolint:gocognit // orchestration splits poorly; already extracted from handleTunnelInspect
+func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, ce string,
+	clientTLS net.Conn, hostOnly, clientIP string, id ProxyIdentity) cdrStageDecision {
+	if cdrActiveClient() == nil {
+		return cdrStageDecision{body: body, scanBody: scanBody}
+	}
+	res := safeCDRSanitize(r.Context(), cdrRequestContext{
+		Host:        hostOnly,
+		URL:         req.URL.Path,
+		RequestID:   req.Header.Get("X-Request-ID"),
+		TraceParent: req.Header.Get("Traceparent"),
+	}, body, ct, id, cdrActiveConfig())
+	recordCDRTerminal(res.Status)
+	recordThreatDetections(res.Threats)
+
+	switch res.Outcome {
+	case cdrBlock:
+		atomic.AddInt64(&statBlocked, 1)
+		recordRequest(clientIP, "CONNECT", hostOnly, "CDR_BLOCKED", res.ProfileName, res.BlockReason, id.Identity, "inspect")
+		logger.Printf("CDR_BLOCKED %s -> %q reason=%q profile=%q mode=%q threats=%q",
+			clientIP, sanitizeLog(hostOnly),
+			sanitizeLog(res.BlockReason), sanitizeLog(res.ProfileName),
+			sanitizeLog(res.Mode), sanitizeLog(cdrSummariseThreats(res.Threats)))
+		scanBlockConn(clientTLS, hostOnly, res.BlockReason, "cdr")
+		return cdrStageDecision{blocked: true}
+	case cdrSwap:
+		atomic.AddInt64(&statCDRBytesOut, int64(len(res.Body)))
+		newBody := res.Body
+		newScan := decompressForScan(newBody, ce)
+		recordRequest(clientIP, "CONNECT", hostOnly, "CDR_SANITIZED", res.ProfileName, cdrSummariseThreats(res.Threats), id.Identity, "inspect")
+		logger.Printf("CDR_SANITIZED %s -> %q profile=%q mode=%q threats=%q duration_ms=%d",
+			clientIP, sanitizeLog(hostOnly), sanitizeLog(res.ProfileName),
+			sanitizeLog(res.Mode), sanitizeLog(cdrSummariseThreats(res.Threats)),
+			res.DurationMs)
+		return cdrStageDecision{body: newBody, scanBody: newScan}
+	case cdrPass:
+		if res.Status == "ERROR" {
+			recordRequest(clientIP, "CONNECT", hostOnly, "CDR_ERROR", res.ProfileName, res.BlockReason, id.Identity, "inspect")
+			logger.Printf("CDR_ERROR %s -> %q (fail-open) reason=%q",
+				clientIP, sanitizeLog(hostOnly), sanitizeLog(res.BlockReason))
+		}
+		return cdrStageDecision{body: body, scanBody: scanBody}
+	}
+	return cdrStageDecision{body: body, scanBody: scanBody}
 }
 
 // cdrHandleCallError maps a Sanitize() transport error to an outcome.
@@ -446,11 +535,11 @@ func cdrSummariseThreats(threats []CDRThreat) string {
 	if len(threats) == 0 {
 		return ""
 	}
-	const cap = 8
+	const maxListed = 8
 	parts := make([]string, 0, len(threats))
 	for i, t := range threats {
-		if i >= cap {
-			parts = append(parts, fmt.Sprintf("+%d_more", len(threats)-cap))
+		if i >= maxListed {
+			parts = append(parts, fmt.Sprintf("+%d_more", len(threats)-maxListed))
 			break
 		}
 		parts = append(parts, t.Type)

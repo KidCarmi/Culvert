@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -138,12 +139,24 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 // Errors are logged but not returned — the registry entry is already gone
 // and we don't want to block the operator on disk cleanup races.
 func shredCDRCerts(inst *CDREnrolledInstance) {
+	// Defence-in-depth: refuse to delete anything outside cdrCertsRoot.
+	// Even though the paths were written by persistCDREnrollment through
+	// the sanitised dir, a compromised instances file could point
+	// anywhere — we decline to act on a path whose cleaned form
+	// escapes the root.  CodeQL sees the check as an explicit
+	// sanitiser for the os.Remove sink.
+	rootWithSep := cdrCertsRoot + string(filepath.Separator)
 	for _, p := range []string{inst.CACertPath, inst.ClientCertPath, inst.ClientKeyPath} {
 		if p == "" {
 			continue
 		}
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			logger.Printf("CDR: shred %q failed: %v", sanitizeLog(p), err)
+		cleaned := filepath.Clean(p)
+		if !strings.HasPrefix(cleaned, rootWithSep) {
+			logger.Printf("CDR: shred refused — path %q escapes root", sanitizeLog(cleaned))
+			continue
+		}
+		if err := os.Remove(cleaned); err != nil && !os.IsNotExist(err) {
+			logger.Printf("CDR: shred %q failed: %v", sanitizeLog(cleaned), err)
 		}
 	}
 }
@@ -206,54 +219,26 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Persist certs — atomic dir write with cleanup on failure.
-	dir := filepath.Join("/data/integrations/sluice", req.Name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		http.Error(w, fmt.Sprintf("create certs dir: %v", err), http.StatusInternalServerError)
-		return
-	}
-	paths := writtenPaths{}
-	if err := writeCertFile(filepath.Join(dir, "ca.pem"), resp.CaCert, &paths); err != nil {
-		paths.cleanup()
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := writeCertFile(filepath.Join(dir, "client.pem"), resp.ClientCert, &paths); err != nil {
-		paths.cleanup()
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := writeCertFile(filepath.Join(dir, "client.key"), resp.ClientKey, &paths); err != nil {
-		paths.cleanup()
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// 3. Register the instance.  If this fails, shred the certs we just wrote.
-	inst := CDREnrolledInstance{
-		Name:              req.Name,
-		Endpoint:          req.Endpoint,
-		ServerFingerprint: req.ServerFingerprint,
-		CACertPath:        filepath.Join(dir, "ca.pem"),
-		ClientCertPath:    filepath.Join(dir, "client.pem"),
-		ClientKeyPath:     filepath.Join(dir, "client.key"),
-		EnrolledAt:        time.Now().UTC(),
-	}
-	stored, err := cdrInstances.Add(inst)
+	// 2. Persist certs under the sanitised per-instance directory.
+	//    cdrInstanceCertsDir re-validates the name AND the resolved path
+	//    so CodeQL sees a clear taint-sanitisation boundary.
+	stored, err := persistCDREnrollment(req, resp)
 	if err != nil {
-		paths.cleanup()
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 4. Re-init client if CDR is enabled so the new certs take effect
+	// 3. Re-init client if CDR is enabled so the new certs take effect
 	//    without requiring a restart.  Failure here is non-fatal: we've
 	//    still persisted the instance, so a later boot / manual
-	//    reinit will pick it up.
+	//    reinit will pick it up.  We sanitizeLog the error because it
+	//    may include user-controlled names coming back up the stack
+	//    (CWE-117 mitigation).
 	cfg := cdrActiveConfig()
 	if cfg.Enabled {
-		if err := initCDRClient(cfg); err != nil {
-			logger.Printf("CDR: enroll succeeded but client re-init failed: %v", err)
+		if rerr := initCDRClient(cfg); rerr != nil {
+			logger.Printf("CDR: enroll succeeded but client re-init failed: %q",
+				sanitizeLog(rerr.Error()))
 		}
 	}
 
@@ -262,6 +247,52 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 		nil, stored)
 	saveConfigVersion(sessionAdmin(r), "cdr.instance.enroll")
 	jsonOK(w, stored)
+}
+
+// persistCDREnrollment writes the PEM bundle to the validated per-
+// instance directory and registers the instance.  On any failure
+// rolls back written files so the operator can retry cleanly.
+// Extracted from apiCDREnroll to keep that function under the funlen
+// threshold and to give CodeQL a single sanitisation seam.
+func persistCDREnrollment(req cdrEnrollRequest, resp *pb.EnrollResponse) (CDREnrolledInstance, error) {
+	dir, err := cdrInstanceCertsDir(req.Name)
+	if err != nil {
+		return CDREnrolledInstance{}, fmt.Errorf("invalid instance name: %w", err)
+	}
+	if mkerr := os.MkdirAll(dir, 0o700); mkerr != nil {
+		return CDREnrolledInstance{}, fmt.Errorf("create certs dir: %w", mkerr)
+	}
+	caPath := filepath.Join(dir, "ca.pem")
+	certPath := filepath.Join(dir, "client.pem")
+	keyPath := filepath.Join(dir, "client.key")
+	paths := writtenPaths{}
+	if werr := writeCertFile(caPath, resp.CaCert, &paths); werr != nil {
+		paths.cleanup()
+		return CDREnrolledInstance{}, werr
+	}
+	if werr := writeCertFile(certPath, resp.ClientCert, &paths); werr != nil {
+		paths.cleanup()
+		return CDREnrolledInstance{}, werr
+	}
+	if werr := writeCertFile(keyPath, resp.ClientKey, &paths); werr != nil {
+		paths.cleanup()
+		return CDREnrolledInstance{}, werr
+	}
+	inst := CDREnrolledInstance{
+		Name:              req.Name,
+		Endpoint:          req.Endpoint,
+		ServerFingerprint: req.ServerFingerprint,
+		CACertPath:        caPath,
+		ClientCertPath:    certPath,
+		ClientKeyPath:     keyPath,
+		EnrolledAt:        time.Now().UTC(),
+	}
+	stored, aerr := cdrInstances.Add(inst)
+	if aerr != nil {
+		paths.cleanup()
+		return CDREnrolledInstance{}, aerr
+	}
+	return stored, nil
 }
 
 // writtenPaths tracks PEM files written during an enrollment flow so we
@@ -290,6 +321,14 @@ func writeCertFile(path string, pem []byte, seen *writtenPaths) error {
 	return nil
 }
 
+// cdrInstanceNameRE is a strict allowlist for names used as directory
+// components on disk.  First character must be alphanum; the remainder
+// alphanum plus dash / dot / underscore; length 1–64.  Deliberately
+// narrower than POSIX filenames so CodeQL's taint analyser can see the
+// validation and so operators can't accidentally hit edge cases with
+// unicode, control characters, or shell metacharacters.
+var cdrInstanceNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
 // validateEnrollRequest rejects invalid inputs early so we don't bother
 // Sluice with obviously-bad tokens.
 func validateEnrollRequest(req cdrEnrollRequest) error {
@@ -297,9 +336,8 @@ func validateEnrollRequest(req cdrEnrollRequest) error {
 	if name == "" {
 		return errors.New("name is required")
 	}
-	// Name is used as a directory component — reject path traversal.
-	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
-		return errors.New("name must not contain path separators or '..'")
+	if !cdrInstanceNameRE.MatchString(name) {
+		return errors.New("name must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63} (no slashes, no '..', no unicode, no control chars)")
 	}
 	if strings.TrimSpace(req.Endpoint) == "" {
 		return errors.New("endpoint is required")
@@ -311,6 +349,31 @@ func validateEnrollRequest(req cdrEnrollRequest) error {
 		return errors.New("serverFingerprint is required (TOFU pin)")
 	}
 	return nil
+}
+
+// cdrCertsRoot is the parent directory under which every enrolled
+// instance's mTLS bundle lives.  Constant — never constructed from
+// user input.
+const cdrCertsRoot = "/data/integrations/sluice"
+
+// cdrInstanceCertsDir returns the per-instance cert directory after
+// verifying that the resolved path is STILL inside cdrCertsRoot even if
+// `name` somehow evaded the allowlist.  Returns an error when the name
+// or the resolved path fails any check — gives CodeQL's taint analyser
+// a clear sanitiser boundary to stop flagging the downstream os.*
+// callers.
+func cdrInstanceCertsDir(name string) (string, error) {
+	if !cdrInstanceNameRE.MatchString(name) {
+		return "", fmt.Errorf("invalid instance name")
+	}
+	dir := filepath.Join(cdrCertsRoot, name)
+	cleaned := filepath.Clean(dir)
+	// Must still be strictly inside the root.
+	rootWithSep := cdrCertsRoot + string(filepath.Separator)
+	if !strings.HasPrefix(cleaned, rootWithSep) || cleaned == cdrCertsRoot {
+		return "", fmt.Errorf("certs dir escaped root")
+	}
+	return cleaned, nil
 }
 
 // shortFingerprint returns an 8-hex-char prefix for audit logs.  Never
@@ -548,7 +611,7 @@ func readCDRTestUpload(r *http.Request) ([]byte, string, string, error) {
 		if err != nil {
 			return nil, "", "", fmt.Errorf("form file 'file': %w", err)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		body, err := io.ReadAll(io.LimitReader(file, 64<<20))
 		if err != nil {
 			return nil, "", "", fmt.Errorf("read upload: %w", err)

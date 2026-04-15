@@ -93,76 +93,77 @@ func recordCDRTerminal(status string) {
 
 // cdrWritePrometheus appends culvert_cdr_* metric lines to the builder.
 // Called from handleMetrics in metrics.go alongside the per-rule and
-// latency-histogram writers.
+// latency-histogram writers.  Delegates each family to a focused helper
+// so this function stays under funlen.
 func cdrWritePrometheus(w *strings.Builder) {
-	// Terminal decisions.
+	cdrWriteTerminalMetrics(w)
+	cdrWriteOperationalMetrics(w)
+	cdrWriteCacheMetrics(w)
+	cdrWriteByteMetrics(w)
+	cdrWriteHealthMetrics(w)
+	cdrPoolWritePrometheus(w)
+	cdrWriteThreatMetrics(w)
+}
+
+func cdrWriteTerminalMetrics(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cdr_files_processed_total Files processed by the CDR engine, keyed on terminal status\n")
 	w.WriteString("# TYPE culvert_cdr_files_processed_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_files_processed_total{status=\"clean\"} %d\n", atomic.LoadInt64(&statCDRClean))
 	fmt.Fprintf(w, "culvert_cdr_files_processed_total{status=\"sanitized\"} %d\n", atomic.LoadInt64(&statCDRSanitized))
 	fmt.Fprintf(w, "culvert_cdr_files_processed_total{status=\"blocked\"} %d\n", atomic.LoadInt64(&statCDRBlocked))
 	fmt.Fprintf(w, "culvert_cdr_files_processed_total{status=\"unsupported\"} %d\n", atomic.LoadInt64(&statCDRUnsupported))
+}
 
-	// Operational.
+func cdrWriteOperationalMetrics(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cdr_oversize_skipped_total Requests where CDR was skipped because the body exceeded the per-file cap\n")
 	w.WriteString("# TYPE culvert_cdr_oversize_skipped_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_oversize_skipped_total %d\n", atomic.LoadInt64(&statCDROversizeSkipped))
-
 	w.WriteString("\n# HELP culvert_cdr_errors_total Transport or Sluice-reported errors\n")
 	w.WriteString("# TYPE culvert_cdr_errors_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_errors_total %d\n", atomic.LoadInt64(&statCDRErrors))
-
 	w.WriteString("\n# HELP culvert_cdr_fail_open_total Errors that passed the original file through per fail_mode=open\n")
 	w.WriteString("# TYPE culvert_cdr_fail_open_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_fail_open_total %d\n", atomic.LoadInt64(&statCDRFailOpen))
-
 	w.WriteString("\n# HELP culvert_cdr_fail_closed_total Errors that blocked the response per fail_mode=closed\n")
 	w.WriteString("# TYPE culvert_cdr_fail_closed_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_fail_closed_total %d\n", atomic.LoadInt64(&statCDRFailClosed))
-
 	w.WriteString("\n# HELP culvert_cdr_panics_total Panics caught by the CDR defer-recover (always fail-closed regardless of fail_mode)\n")
 	w.WriteString("# TYPE culvert_cdr_panics_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_panics_total %d\n", atomic.LoadInt64(&statCDRPanics))
+}
 
-	// Cache.
+func cdrWriteCacheMetrics(w *strings.Builder) {
 	hits, misses, size := cdrCache.Stats()
 	w.WriteString("\n# HELP culvert_cdr_cache_hits_total Hash cache hits (decision reused without calling Sluice)\n")
 	w.WriteString("# TYPE culvert_cdr_cache_hits_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_cache_hits_total %d\n", hits)
-
 	w.WriteString("\n# HELP culvert_cdr_cache_misses_total Hash cache misses — required a Sluice call\n")
 	w.WriteString("# TYPE culvert_cdr_cache_misses_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_cache_misses_total %d\n", misses)
-
 	w.WriteString("\n# HELP culvert_cdr_cache_size Current number of entries in the CDR hash cache\n")
 	w.WriteString("# TYPE culvert_cdr_cache_size gauge\n")
 	fmt.Fprintf(w, "culvert_cdr_cache_size %d\n", size)
+}
 
-	// Bytes.
+func cdrWriteByteMetrics(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cdr_bytes_in_total Bytes sent to Sluice for sanitisation (original file sizes)\n")
 	w.WriteString("# TYPE culvert_cdr_bytes_in_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_bytes_in_total %d\n", atomic.LoadInt64(&statCDRBytesIn))
-
 	w.WriteString("\n# HELP culvert_cdr_bytes_out_total Sanitized bytes received from Sluice\n")
 	w.WriteString("# TYPE culvert_cdr_bytes_out_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_bytes_out_total %d\n", atomic.LoadInt64(&statCDRBytesOut))
+}
 
-	// Instance health (aggregate, observed by the background poller).
+func cdrWriteHealthMetrics(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cdr_instance_healthy 1 when at least one pool member's most recent Health probe succeeded; else 0\n")
 	w.WriteString("# TYPE culvert_cdr_instance_healthy gauge\n")
 	fmt.Fprintf(w, "culvert_cdr_instance_healthy %d\n", atomic.LoadInt64(&statCDRInstanceHealthy))
-
 	w.WriteString("\n# HELP culvert_cdr_queue_depth Minimum Sluice-reported queue depth across healthy pool members at the most recent Health probe\n")
 	w.WriteString("# TYPE culvert_cdr_queue_depth gauge\n")
 	fmt.Fprintf(w, "culvert_cdr_queue_depth %d\n", atomic.LoadInt64(&statCDRQueueDepth))
+}
 
-	// Per-instance pool state — bounded cardinality by the enrolled
-	// instance count (typically ≤ 10 in production).  Labelled with
-	// the admin-chosen instance name; names are sanitised against
-	// backslash / double-quote / newline injection.
-	cdrPoolWritePrometheus(w)
-
-	// Per-threat-type.
+func cdrWriteThreatMetrics(w *strings.Builder) {
 	threatCountersMu.Lock()
 	if len(threatCounters) > 0 {
 		w.WriteString("\n# HELP culvert_cdr_threats_detected_total Threats detected by type (capped at 64 distinct types)\n")

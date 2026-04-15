@@ -271,84 +271,89 @@ func cdrMarkOutcome(instanceName string, isFailure bool) {
 // ─── Construction from the registry ────────────────────────────────────────
 
 // buildCDRPoolFromRegistry enumerates enrolled instances and dials one
-// client per enabled entry.  Returns the new pool contents (caller calls
-// pool.replace()) and the first error encountered, if any.
-//
-// A partial pool is returned when some instances fail: CDR should keep
-// working for the instances that dialled successfully, while the admin
-// investigates the broken ones through /api/cdr/instances.
-func buildCDRPoolFromRegistry(cfg CDRConfig, oldPool []*cdrPooledClient) ([]*cdrPooledClient, error) {
+// client per enabled entry.  Returns (pool, firstErr) so a partial pool
+// still works while admins investigate broken instances through
+// /api/cdr/instances.
+func buildCDRPoolFromRegistry(cfg CDRConfig, oldPool []*cdrPooledClient) (pool []*cdrPooledClient, firstErr error) {
 	instances := cdrInstances.List()
 	if len(instances) == 0 {
-		// Fallback: pre-enrollment / test mode — if cfg has an endpoint
-		// + fingerprint, dial a single anonymous client like Phase 2c.
-		if cfg.Endpoint != "" && cfg.ServerFingerprint != "" {
-			pc, err := dialSingleFromConfig(cfg)
-			if err != nil {
-				return nil, err
-			}
-			return []*cdrPooledClient{pc}, nil
-		}
-		return nil, errors.New("cdr: no enrolled instances and no cdr.endpoint configured")
+		return bootstrapPoolFromConfig(cfg)
 	}
-
-	var out []*cdrPooledClient
-	var firstErr error
 	for _, inst := range instances {
 		if !inst.IsEnabled() {
 			continue
 		}
-		// Carry over the breaker state if this instance was in the old pool.
-		var carriedBreaker *cdrCircuitBreaker
-		for _, oc := range oldPool {
-			if oc.Name == inst.Name {
-				carriedBreaker = oc.Breaker
-				break
-			}
-		}
-
-		ca, cert, key, perr := loadCDRCertBundle(inst.CACertPath, inst.ClientCertPath, inst.ClientKeyPath)
-		if perr != nil {
-			logger.Printf("CDR: pool: skipping %q (cert load failed): %v", sanitizeLog(inst.Name), perr)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("instance %q: %w", inst.Name, perr)
-			}
-			continue
-		}
-		clientCfg := CDRClientConfig{
-			Endpoint:            inst.Endpoint,
-			ServerFingerprintHx: inst.ServerFingerprint,
-			CACertPEM:           ca,
-			ClientCertPEM:       cert,
-			ClientKeyPEM:        key,
-		}
-		if cfg.TimeoutSec > 0 {
-			clientCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
-		}
-		if cfg.ChunkSizeKB > 0 {
-			clientCfg.ChunkSize = cfg.ChunkSizeKB * 1024
-		}
-		client, err := NewCDRClient(clientCfg)
+		pc, err := dialEnrolledInstance(inst, cfg, oldPool)
 		if err != nil {
-			logger.Printf("CDR: pool: skipping %q (dial failed): %v", sanitizeLog(inst.Name), err)
+			logger.Printf("CDR: pool: skipping %q: %v", sanitizeLog(inst.Name), err)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("instance %q: %w", inst.Name, err)
 			}
 			continue
 		}
-		if carriedBreaker == nil {
-			carriedBreaker = newCDRCircuitBreaker(cdrBreakerConfig{})
-		}
-		out = append(out, &cdrPooledClient{
-			Name:    inst.Name,
-			Client:  client,
-			Breaker: carriedBreaker,
-		})
+		pool = append(pool, pc)
 	}
-	if len(out) == 0 && firstErr != nil {
+	if len(pool) == 0 && firstErr != nil {
 		return nil, firstErr
 	}
-	return out, nil
+	return pool, firstErr
+}
+
+// bootstrapPoolFromConfig dials a single anonymous client from
+// CDRConfig when no instances are enrolled yet.  Used for the
+// pre-enrollment / test path.  Kept separate from the registry loop
+// so the main function stays under gocognit.
+func bootstrapPoolFromConfig(cfg CDRConfig) ([]*cdrPooledClient, error) {
+	if cfg.Endpoint == "" || cfg.ServerFingerprint == "" {
+		return nil, errors.New("cdr: no enrolled instances and no cdr.endpoint configured")
+	}
+	pc, err := dialSingleFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return []*cdrPooledClient{pc}, nil
+}
+
+// dialEnrolledInstance builds one pooled client from a registry entry,
+// carrying the circuit-breaker state forward if the instance was
+// already in the old pool.
+func dialEnrolledInstance(inst *CDREnrolledInstance, cfg CDRConfig, oldPool []*cdrPooledClient) (*cdrPooledClient, error) {
+	var carriedBreaker *cdrCircuitBreaker
+	for _, oc := range oldPool {
+		if oc.Name == inst.Name {
+			carriedBreaker = oc.Breaker
+			break
+		}
+	}
+	ca, cert, key, err := loadCDRCertBundle(inst.CACertPath, inst.ClientCertPath, inst.ClientKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("cert load: %w", err)
+	}
+	clientCfg := CDRClientConfig{
+		Endpoint:            inst.Endpoint,
+		ServerFingerprintHx: inst.ServerFingerprint,
+		CACertPEM:           ca,
+		ClientCertPEM:       cert,
+		ClientKeyPEM:        key,
+	}
+	if cfg.TimeoutSec > 0 {
+		clientCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
+	}
+	if cfg.ChunkSizeKB > 0 {
+		clientCfg.ChunkSize = cfg.ChunkSizeKB * 1024
+	}
+	client, derr := NewCDRClient(clientCfg)
+	if derr != nil {
+		return nil, fmt.Errorf("dial: %w", derr)
+	}
+	if carriedBreaker == nil {
+		carriedBreaker = newCDRCircuitBreaker(cdrBreakerConfig{})
+	}
+	return &cdrPooledClient{
+		Name:    inst.Name,
+		Client:  client,
+		Breaker: carriedBreaker,
+	}, nil
 }
 
 // dialSingleFromConfig builds a single pooled client from CDRConfig

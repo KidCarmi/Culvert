@@ -1297,62 +1297,13 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 				// Runs BEFORE ClamAV/YARA so downstream scanners see the
 				// sanitized bytes if CDR stripped active content.  No-op
 				// (single atomic load) when CDR is disabled.
-				if cdrActiveClient() != nil {
-					cdrRes := safeCDRSanitize(r.Context(),
-						cdrRequestContext{
-							Host:        hostOnly,
-							URL:         req.URL.Path,
-							RequestID:   req.Header.Get("X-Request-ID"),
-							TraceParent: req.Header.Get("Traceparent"),
-						},
-						body, ct, id, cdrActiveConfig())
-					recordCDRTerminal(cdrRes.Status)
-					recordThreatDetections(cdrRes.Threats)
-					switch cdrRes.Outcome {
-					case cdrBlock:
-						origBody.Close()
-						atomic.AddInt64(&statBlocked, 1)
-						recordRequest(clientIP, "CONNECT", hostOnly, "CDR_BLOCKED", cdrRes.ProfileName, cdrRes.BlockReason, id.Identity, "inspect")
-						logger.Printf("CDR_BLOCKED %s -> %q reason=%q profile=%q mode=%q threats=%q",
-							clientIP, sanitizeLog(hostOnly),
-							sanitizeLog(cdrRes.BlockReason),
-							sanitizeLog(cdrRes.ProfileName),
-							sanitizeLog(cdrRes.Mode),
-							sanitizeLog(cdrSummariseThreats(cdrRes.Threats)))
-						scanBlockConn(clientTLS, hostOnly, cdrRes.BlockReason, "cdr")
-						// Fall through — the for-loop break happens after the switch
-						// because "break" inside a switch only exits the switch.
-					case cdrSwap:
-						// Replace both buffers so ClamAV/YARA see the sanitized
-						// bytes.  Re-decompress defensively: Sluice typically
-						// returns uncompressed output regardless of input
-						// encoding, so decompressForScan on the sanitized bytes
-						// is a no-op in practice but safe as a fallback.
-						body = cdrRes.Body
-						atomic.AddInt64(&statCDRBytesOut, int64(len(body)))
-						scanBody = decompressForScan(body, ce)
-						recordRequest(clientIP, "CONNECT", hostOnly, "CDR_SANITIZED", cdrRes.ProfileName, cdrSummariseThreats(cdrRes.Threats), id.Identity, "inspect")
-						logger.Printf("CDR_SANITIZED %s -> %q profile=%q mode=%q threats=%q duration_ms=%d",
-							clientIP, sanitizeLog(hostOnly),
-							sanitizeLog(cdrRes.ProfileName),
-							sanitizeLog(cdrRes.Mode),
-							sanitizeLog(cdrSummariseThreats(cdrRes.Threats)),
-							cdrRes.DurationMs)
-					case cdrPass:
-						// Status-aware audit: only log error/skipped at INFO,
-						// clean is too chatty for normal operation.
-						if cdrRes.Status == "ERROR" {
-							recordRequest(clientIP, "CONNECT", hostOnly, "CDR_ERROR", cdrRes.ProfileName, cdrRes.BlockReason, id.Identity, "inspect")
-							logger.Printf("CDR_ERROR %s -> %q (fail-open) reason=%q",
-								clientIP, sanitizeLog(hostOnly), sanitizeLog(cdrRes.BlockReason))
-						}
-					}
-					// cdrBlock path already broke out of the for-loop via
-					// scanBlockConn; guard against accidental fall-through.
-					if cdrRes.Outcome == cdrBlock {
-						break
-					}
+				cdrDecision := runCDRStage(r, req, body, scanBody, ct, ce, clientTLS, hostOnly, clientIP, id)
+				if cdrDecision.blocked {
+					origBody.Close()
+					break
 				}
+				body = cdrDecision.body
+				scanBody = cdrDecision.scanBody
 
 				// When remote scan service is active, delegate all scanning
 				// (ClamAV + YARA + DPI) in a single remote call.

@@ -22,22 +22,28 @@ import (
 
 // newAdminRequest builds an *http.Request with RoleAdmin injected into the
 // context — matches what uiAuthMiddleware does for an authenticated admin.
+// Uses NewRequestWithContext per noctx lint (propagates cancellation).
 func newAdminRequest(method, target string, body []byte) *http.Request {
-	var r *http.Request
+	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin)
+	var bodyReader *bytes.Reader
 	if body != nil {
-		r = httptest.NewRequest(method, target, bytes.NewReader(body))
+		bodyReader = bytes.NewReader(body)
+	}
+	var r *http.Request
+	if bodyReader != nil {
+		r = httptest.NewRequestWithContext(ctx, method, target, bodyReader)
 		r.Header.Set("Content-Type", "application/json")
 	} else {
-		r = httptest.NewRequest(method, target, nil)
+		r = httptest.NewRequestWithContext(ctx, method, target, nil)
 	}
-	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
 	return r
 }
 
-func newViewerRequest(method, target string) *http.Request {
-	r := httptest.NewRequest(method, target, nil)
-	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleViewer))
-	return r
+// newViewerRequest mirrors newAdminRequest for RoleViewer.  Only used
+// with GET today; parameterised on method for future read-style ops.
+func newViewerRequest(target string) *http.Request {
+	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleViewer)
+	return httptest.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 }
 
 // resetCDRState wipes process-wide CDR singletons between tests.
@@ -69,7 +75,7 @@ func TestApiCDRConfig_ReturnsRuntimeState(t *testing.T) {
 	cdrClientMu.Unlock()
 
 	w := httptest.NewRecorder()
-	apiCDRConfig(w, newViewerRequest(http.MethodGet, "/api/cdr/config"))
+	apiCDRConfig(w, newViewerRequest("/api/cdr/config"))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
@@ -102,7 +108,7 @@ func TestApiCDRInstances_List(t *testing.T) {
 	_, _ = cdrInstances.Add(CDREnrolledInstance{Name: "b", Endpoint: "sluice-2:8443"})
 
 	w := httptest.NewRecorder()
-	apiCDRInstances(w, newViewerRequest(http.MethodGet, "/api/cdr/instances"))
+	apiCDRInstances(w, newViewerRequest("/api/cdr/instances"))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
@@ -196,7 +202,7 @@ func TestApiCDREnroll_RejectsWrongMethod(t *testing.T) {
 func TestApiCDRPolicies_ListEmpty(t *testing.T) {
 	resetCDRState(t)
 	w := httptest.NewRecorder()
-	apiCDRPolicies(w, newViewerRequest(http.MethodGet, "/api/cdr/policies"))
+	apiCDRPolicies(w, newViewerRequest("/api/cdr/policies"))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d", w.Code)
 	}
@@ -217,7 +223,7 @@ func TestApiCDRPolicies_AddThenList(t *testing.T) {
 	}
 
 	w = httptest.NewRecorder()
-	apiCDRPolicies(w, newViewerRequest(http.MethodGet, "/api/cdr/policies"))
+	apiCDRPolicies(w, newViewerRequest("/api/cdr/policies"))
 	var got map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
 	if got["count"].(float64) != 1 {
@@ -276,7 +282,7 @@ func TestApiCDRHealth_NoClientReturns503(t *testing.T) {
 	cdrHealthMu.Unlock()
 
 	w := httptest.NewRecorder()
-	apiCDRHealth(w, newViewerRequest(http.MethodGet, "/api/cdr/health"))
+	apiCDRHealth(w, newViewerRequest("/api/cdr/health"))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
 	}
@@ -293,7 +299,7 @@ func TestApiCDRHealth_CachedSnapshotReturned(t *testing.T) {
 	t.Cleanup(clearCDRHealth)
 
 	w := httptest.NewRecorder()
-	apiCDRHealth(w, newViewerRequest(http.MethodGet, "/api/cdr/health"))
+	apiCDRHealth(w, newViewerRequest("/api/cdr/health"))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
 	}
