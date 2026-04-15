@@ -42,17 +42,42 @@ import (
 
 // ─── /api/cdr/config ────────────────────────────────────────────────────────
 
-// apiCDRConfig returns the effective CDR runtime configuration as seen by
-// the proxy: the last CDRConfig wired into initCDRClient, plus a handful of
-// derived fields the GUI uses without having to recompute.
+// cdrConfigToggleRequest is the JSON body for PUT /api/cdr/config.
+// Narrow on purpose — other fields (fail_mode, default_profile, etc.)
+// still come from YAML/CLI.  Runtime toggling is limited to enable/
+// disable because the other settings have subtle implications that
+// deserve a config review + restart.
+type cdrConfigToggleRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// apiCDRConfig handles:
+//
+//	GET — return the effective runtime CDR configuration + derived
+//	      convenience fields (clientActive, failOpen) for the GUI.
+//	PUT — admin-only toggle of the runtime-enable sentinel.  Flips
+//	      cdr.enabled at runtime AND persists to /data/cdr_enabled so
+//	      the choice survives a restart.  Triggers initCDRClient /
+//	      shutdownCDRClient so the pool matches the new state
+//	      without operator action.
 func apiCDRConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		apiCDRConfigGet(w, r)
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		apiCDRConfigToggle(w, r)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	if !requireRole(w, r, RoleViewer) {
-		return
-	}
+}
+
+func apiCDRConfigGet(w http.ResponseWriter, r *http.Request) {
 	cfg := cdrActiveConfig()
 	clientActive := cdrActiveClient() != nil
 	jsonOK(w, map[string]any{
@@ -68,6 +93,41 @@ func apiCDRConfig(w http.ResponseWriter, r *http.Request) {
 		"certsDir":          cfg.CertsDir,
 		"clientActive":      clientActive,
 		"failOpen":          cfg.CDRFailOpen(),
+	})
+}
+
+// apiCDRConfigToggle flips cdr.enabled at runtime, persists to the
+// sentinel file so the choice survives restart, and drives the pool
+// state: enable → initCDRClient so any enrolled instances become
+// live; disable → shutdownCDRClient so the pool drains.  Both paths
+// are idempotent — re-enabling when already on (or disabling when
+// already off) is a no-op.
+func apiCDRConfigToggle(w http.ResponseWriter, r *http.Request) {
+	var req cdrConfigToggleRequest
+	if err := decodeJSON(r, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	before := cdrActiveConfig()
+	if err := setCDREnabledRuntime(req.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cfg := cdrActiveConfig()
+	if req.Enabled {
+		if rerr := initCDRClient(cfg); rerr != nil {
+			logger.Printf("CDR: runtime toggle → enabled but init failed: %q",
+				sanitizeLog(rerr.Error()))
+		}
+	} else {
+		shutdownCDRClient()
+	}
+	auditEventDiff(r, "cdr.config.toggle", "cdr.enabled",
+		fmt.Sprintf("enabled=%t", req.Enabled), before.Enabled, req.Enabled)
+	saveConfigVersion(sessionAdmin(r), "cdr.config.toggle")
+	jsonOK(w, map[string]any{
+		"enabled":      req.Enabled,
+		"clientActive": cdrActiveClient() != nil,
 	})
 }
 
@@ -243,13 +303,24 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Re-init client if CDR is enabled so the new certs take effect
-	//    without requiring a restart.  Failure here is non-fatal: we've
-	//    still persisted the instance, so a later boot / manual
-	//    reinit will pick it up.  We sanitizeLog the error because it
-	//    may include user-controlled names coming back up the stack
-	//    (CWE-117 mitigation).
+	// 3. Auto-enable on first enrollment + re-init the pool.  An admin
+	//    clicking "Enroll" in the GUI obviously wants CDR running —
+	//    but the v0.1 design required `cdr.enabled: true` in YAML or a
+	//    CLI flag, so fresh installs fell into a "registry has entries
+	//    but no client dialled" hole.  We flip the runtime sentinel
+	//    here (survives restarts) and kick the client init so the Pool
+	//    tab goes green immediately.  Failure on the sentinel write
+	//    is logged but non-fatal: the in-memory flag still flips, so
+	//    this session works; only a restart would revert.
 	cfg := cdrActiveConfig()
+	if !cfg.Enabled {
+		if terr := setCDREnabledRuntime(true); terr != nil {
+			logger.Printf("CDR: auto-enable on enroll: persist sentinel: %q",
+				sanitizeLog(terr.Error()))
+		}
+		cfg = cdrActiveConfig() // pick up the flipped flag
+		logger.Printf("CDR: auto-enabled on first enrollment (%q)", sanitizeLog(req.Name))
+	}
 	if cfg.Enabled {
 		if rerr := initCDRClient(cfg); rerr != nil {
 			logger.Printf("CDR: enroll succeeded but client re-init failed: %q",

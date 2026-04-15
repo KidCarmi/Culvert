@@ -856,6 +856,14 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if d := firstStr(*cdrCertsDirFlag, cdrCfg.CertsDir); d != "" {
 		cdrCfg.CertsDir = d
 	}
+	// Runtime sentinel takes priority: if /data/cdr_enabled exists
+	// (written by the admin GUI toggle or by the first enrollment
+	// auto-enable path), CDR is on regardless of YAML/CLI.  This lets
+	// operators enable CDR via the admin UI without editing config
+	// files or restarting the proxy.
+	if cdrRuntimeEnabled() {
+		cdrCfg.Enabled = true
+	}
 	if cdrCfg.Enabled {
 		mode := cdrCfg.DefaultMode
 		if mode == "" {

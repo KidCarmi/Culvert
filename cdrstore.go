@@ -262,6 +262,59 @@ var (
 	cdrActiveCfg CDRConfig
 )
 
+// cdrRuntimeEnabledPath is the sentinel file whose existence indicates
+// CDR is enabled at runtime — written by the admin toggle / first
+// enrollment, read at boot.  Separate from YAML/CLI so admins can flip
+// CDR on without restarting Culvert (and so the first enrollment via
+// the GUI works without ops pre-setting the flag).
+const cdrRuntimeEnabledPath = "/data/cdr_enabled"
+
+// cdrRuntimeEnabled reports whether the runtime-enable sentinel exists.
+// Called at startup (config merge time) and whenever the toggle
+// handler needs to check current state.
+func cdrRuntimeEnabled() bool {
+	info, err := os.Stat(cdrRuntimeEnabledPath)
+	return err == nil && !info.IsDir()
+}
+
+// setCDRRuntimeEnabled creates or removes the runtime-enable sentinel.
+// Called by the admin toggle handler and the auto-enable-on-enroll
+// path.  Errors are returned for the caller to surface in audit logs —
+// a failed write means the next boot will see the previous state.
+func setCDRRuntimeEnabled(on bool) error {
+	if !on {
+		if err := os.Remove(cdrRuntimeEnabledPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("cdr toggle: remove sentinel: %w", err)
+		}
+		return nil
+	}
+	// Ensure parent dir exists (matches the 0700 perms we use for
+	// other CDR state).  Empty file — presence is the signal.
+	if dir := filepath.Dir(cdrRuntimeEnabledPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return fmt.Errorf("cdr toggle: mkdir: %w", err)
+		}
+	}
+	if err := os.WriteFile(cdrRuntimeEnabledPath, nil, 0o600); err != nil {
+		return fmt.Errorf("cdr toggle: write sentinel: %w", err)
+	}
+	return nil
+}
+
+// setCDREnabledRuntime flips the in-memory cfg.Enabled AND the
+// on-disk sentinel.  Used by the enroll auto-enable path and the
+// admin toggle.  Does NOT call initCDRClient — callers decide
+// whether/when to dial.
+func setCDREnabledRuntime(on bool) error {
+	if err := setCDRRuntimeEnabled(on); err != nil {
+		return err
+	}
+	cdrClientMu.Lock()
+	cdrActiveCfg.Enabled = on
+	cdrClientMu.Unlock()
+	return nil
+}
+
 // cdrActiveClient returns any live CDR client from the pool, or nil when
 // CDR is disabled / no instance is available.
 //
