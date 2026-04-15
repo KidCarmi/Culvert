@@ -368,6 +368,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="fileblock" data-min-role="operator">
       <span class="icon">🛡️</span> File Block
     </div>
+    <div class="nav-item" data-view="cdr" data-min-role="operator">
+      <span class="icon">🧬</span> CDR
+    </div>
     <div class="nav-section" data-min-role="operator">Network</div>
     <div class="nav-item" data-view="rewrite" data-min-role="operator">
       <span class="icon">✏️</span> Rewrite
@@ -2390,6 +2393,183 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-fileblock -->
 
+    <!-- ── CDR (Content Disarm & Reconstruction via Sluice) ──────────────── -->
+    <div class="view" id="view-cdr">
+      <!-- Tab bar -->
+      <div class="panel" style="margin-bottom:12px">
+        <div class="panel-header">
+          <span class="panel-title">CDR Engine</span>
+          <div style="display:flex;gap:4px" id="cdr-tabs">
+            <button class="btn sm active" data-click="cdrSwitchTab" data-arg="overview">Overview</button>
+            <button class="btn sm ghost" data-click="cdrSwitchTab" data-arg="instances">Instances</button>
+            <button class="btn sm ghost" data-click="cdrSwitchTab" data-arg="policies">Policies</button>
+            <button class="btn sm ghost" data-click="cdrSwitchTab" data-arg="test">Test</button>
+            <button class="btn sm ghost" data-click="cdrSwitchTab" data-arg="audit">Audit</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Overview tab -->
+      <div id="cdr-tab-overview" class="cdr-tab-content">
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Runtime Status</span>
+            <span id="cdr-status-badge" class="badge">—</span>
+          </div>
+          <div class="panel-body">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">
+              <div class="card"><div class="card-label">Endpoint</div><div id="cdr-ov-endpoint" class="card-value">—</div></div>
+              <div class="card"><div class="card-label">Default profile</div><div id="cdr-ov-profile" class="card-value">—</div></div>
+              <div class="card"><div class="card-label">Default mode</div><div id="cdr-ov-mode" class="card-value">—</div></div>
+              <div class="card"><div class="card-label">Fail mode</div><div id="cdr-ov-failmode" class="card-value">—</div></div>
+              <div class="card"><div class="card-label">Max file size</div><div id="cdr-ov-maxsize" class="card-value">—</div></div>
+              <div class="card"><div class="card-label">Client active</div><div id="cdr-ov-active" class="card-value">—</div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Instance pool</span>
+            <button class="btn sm ghost" data-click="cdrRefreshHealth">Refresh</button>
+          </div>
+          <div class="panel-body">
+            <table class="table" id="cdr-pool-table">
+              <thead><tr>
+                <th>Instance</th><th>Endpoint</th><th>Healthy</th>
+                <th>CB state</th><th>Version</th><th>Queue</th><th>Files</th><th>Last health</th>
+              </tr></thead>
+              <tbody id="cdr-pool-tbody"><tr><td colspan="8" class="muted">No instances enrolled</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Instances tab -->
+      <div id="cdr-tab-instances" class="cdr-tab-content" hidden>
+        <div class="panel" data-min-role="admin">
+          <div class="panel-header"><span class="panel-title">Enroll new Sluice instance</span></div>
+          <div class="panel-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <label>Name<input class="input" id="cdr-enroll-name" placeholder="e.g. sluice-01"></label>
+              <label>Endpoint<input class="input" id="cdr-enroll-endpoint" placeholder="sluice:8443"></label>
+              <label style="grid-column:1/-1">Enrollment token<input class="input" id="cdr-enroll-token" placeholder="Paste the one-time token from Sluice"></label>
+              <label style="grid-column:1/-1">Server fingerprint
+                <input class="input" id="cdr-enroll-fingerprint" placeholder="sha256:aabb…  (from 'sluice fingerprint')">
+              </label>
+            </div>
+            <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+              <button class="btn" data-click="cdrEnrollInstance">Enroll</button>
+            </div>
+            <p class="muted" style="margin-top:8px;font-size:.82rem">
+              The token + fingerprint pair come from the Sluice admin.  Fingerprint is TOFU-pinned — a
+              mismatch rejects the handshake even with a valid token.  On success Culvert stores the
+              mTLS bundle at <code>/data/integrations/sluice/&lt;name&gt;/</code> (0600).
+            </p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Enrolled instances</span>
+            <button class="btn sm ghost" data-click="cdrRefreshInstances">Refresh</button>
+          </div>
+          <div class="panel-body">
+            <table class="table" id="cdr-instances-table">
+              <thead><tr>
+                <th>Name</th><th>Endpoint</th><th>Fingerprint</th><th>Enrolled</th><th>Version</th>
+                <th data-min-role="admin">Actions</th>
+              </tr></thead>
+              <tbody id="cdr-instances-tbody"><tr><td colspan="6" class="muted">No instances enrolled</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Policies tab -->
+      <div id="cdr-tab-policies" class="cdr-tab-content" hidden>
+        <div class="panel" data-min-role="admin">
+          <div class="panel-header"><span class="panel-title">Add CDR policy rule</span></div>
+          <div class="panel-body">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px">
+              <label>Name<input class="input" id="cdr-pol-name" placeholder="e.g. vip-monitor"></label>
+              <label>Priority<input class="input" id="cdr-pol-priority" type="number" value="50"></label>
+              <label>Profile<input class="input" id="cdr-pol-profile" value="default"></label>
+              <label>Mode
+                <select class="select" id="cdr-pol-mode">
+                  <option value="ENFORCE">ENFORCE — strip threats</option>
+                  <option value="REPORT_ONLY">REPORT_ONLY — detect only</option>
+                  <option value="BYPASS_WITH_REPORT">BYPASS_WITH_REPORT — VIP passthrough</option>
+                </select>
+              </label>
+              <label>Source group<input class="input" id="cdr-pol-group" placeholder="optional"></label>
+              <label>Source IP / CIDR<input class="input" id="cdr-pol-srcip" placeholder="optional"></label>
+              <label>Source identity<input class="input" id="cdr-pol-identity" placeholder="optional"></label>
+              <label>Dest FQDN<input class="input" id="cdr-pol-destfqdn" placeholder="optional (supports *)"></label>
+            </div>
+            <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+              <button class="btn" data-click="cdrSubmitPolicy">Add rule</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Active rules</span>
+            <span id="cdr-pol-count" class="muted" style="font-size:.82rem"></span>
+          </div>
+          <div class="panel-body">
+            <table class="table" id="cdr-policies-table">
+              <thead><tr>
+                <th>Priority</th><th>Name</th><th>Match</th><th>Profile</th><th>Mode</th>
+                <th>Hits</th><th data-min-role="admin">Actions</th>
+              </tr></thead>
+              <tbody id="cdr-policies-tbody"><tr><td colspan="7" class="muted">No rules — default profile/mode applies to every file</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Test tab -->
+      <div id="cdr-tab-test" class="cdr-tab-content" hidden>
+        <div class="panel" data-min-role="admin">
+          <div class="panel-header"><span class="panel-title">Test sanitise a file</span></div>
+          <div class="panel-body">
+            <div id="cdr-test-dropzone"
+                 style="border:2px dashed var(--border);border-radius:10px;padding:40px;
+                        text-align:center;cursor:pointer;transition:background .15s"
+                 data-click="cdrTestPickFile">
+              <div style="font-size:2rem">📄</div>
+              <div style="font-weight:600;margin-top:6px">Drop a file here, or click to choose</div>
+              <div class="muted" style="font-size:.82rem;margin-top:4px">
+                Runs with mode=REPORT_ONLY — your file is never modified by this test.
+              </div>
+              <input type="file" id="cdr-test-file" style="display:none">
+            </div>
+            <div id="cdr-test-result" style="margin-top:14px;display:none"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Audit tab -->
+      <div id="cdr-tab-audit" class="cdr-tab-content" hidden>
+        <div class="panel">
+          <div class="panel-header"><span class="panel-title">Recent CDR events</span>
+            <div style="display:flex;gap:4px">
+              <button class="btn sm active" data-click="cdrAuditFilter" data-arg="all">All</button>
+              <button class="btn sm ghost" data-click="cdrAuditFilter" data-arg="CDR_SANITIZED">Sanitized</button>
+              <button class="btn sm ghost" data-click="cdrAuditFilter" data-arg="CDR_BLOCKED">Blocked</button>
+              <button class="btn sm ghost" data-click="cdrAuditFilter" data-arg="CDR_ERROR">Errors</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <table class="table" id="cdr-audit-table">
+              <thead><tr>
+                <th>Time</th><th>Client</th><th>Host</th><th>Status</th><th>Profile</th><th>Detail</th>
+              </tr></thead>
+              <tbody id="cdr-audit-tbody"><tr><td colspan="6" class="muted">No events yet</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-cdr -->
+
     <!-- ── POLICY TESTER ────────────────────────────────────────────────── -->
     <div class="view" id="view-policy-tester">
       <div style="display:grid;grid-template-columns:380px 1fr;gap:18px;align-items:start">
@@ -3554,6 +3734,7 @@ const viewMeta = {
   urlcat:       { title: 'URL Categories', meta: 'Manage host lists for each URL category used in policy rules' },
   catgroups:    { title: 'Category Groups', meta: 'Bundle multiple URL categories into named groups for policy rules' },
   fileblock:    { title: 'File Block',    meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
+  cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice — enrolled engines, policies, per-file testing' },
   rewrite:      { title: 'Rewrite',       meta: 'Header injection & removal rules' },
   idproviders:  { title: 'Identity Providers', meta: 'OIDC & SAML 2.0 identity provider profiles' },
   pac:          { title: 'PAC File',      meta: 'Proxy Auto-Configuration — serve /proxy.pac to Windows/macOS clients' },
@@ -3596,6 +3777,7 @@ function switchView(name) {
   if (name === 'upstream')       loadUpstream();
   if (name === 'cluster')        loadCluster();
   if (name === 'updates')        loadUpdates();
+  if (name === 'cdr')            loadCDRData();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -6175,6 +6357,339 @@ async function setLogLevel(level) {
     toast('Log level set to ' + level, 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CDR — Content Disarm & Reconstruction via Sluice
+// ═══════════════════════════════════════════════════════════════════════════
+let cdrState = { tab: 'overview', auditFilter: 'all', instances: [], policies: [], health: null, config: null };
+
+function cdrSwitchTab(name) {
+  cdrState.tab = name;
+  document.querySelectorAll('#cdr-tabs button').forEach(b => {
+    const active = b.dataset.arg === name;
+    b.className = active ? 'btn sm active' : 'btn sm ghost';
+  });
+  document.querySelectorAll('.cdr-tab-content').forEach(el => {
+    el.hidden = el.id !== 'cdr-tab-' + name;
+  });
+  // Per-tab lazy load so opening the panel doesn't burst every endpoint.
+  if (name === 'overview')  cdrLoadOverview();
+  if (name === 'instances') cdrLoadInstances();
+  if (name === 'policies')  cdrLoadPolicies();
+  if (name === 'audit')     cdrLoadAudit();
+}
+
+async function loadCDRData() {
+  // Entry from switchView — warm up the overview first.
+  cdrSwitchTab(cdrState.tab || 'overview');
+}
+
+async function cdrLoadOverview() {
+  try {
+    const [cfg, health, instances] = await Promise.all([
+      api('/api/cdr/config'),
+      api('/api/cdr/health').catch(() => null),
+      api('/api/cdr/instances').catch(() => ({ instances: [] })),
+    ]);
+    cdrState.config = cfg;
+    cdrState.health = health;
+    cdrState.instances = instances.instances || [];
+    cdrRenderOverview();
+  } catch (e) { toast('CDR overview failed: ' + e.message, 'error'); }
+}
+
+function cdrRenderOverview() {
+  const cfg = cdrState.config || {};
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v ?? '—'; };
+  set('cdr-ov-endpoint', cfg.endpoint || '(none)');
+  set('cdr-ov-profile',  cfg.defaultProfile || 'default');
+  set('cdr-ov-mode',     cfg.defaultMode || 'ENFORCE');
+  set('cdr-ov-failmode', cfg.failOpen ? 'open (pass through on error)' : 'closed (block on error)');
+  set('cdr-ov-maxsize',  cfg.maxFileSizeMB ? cfg.maxFileSizeMB + ' MB' : '50 MB (default)');
+  set('cdr-ov-active',   cfg.clientActive ? 'yes' : 'no');
+
+  const badge = document.getElementById('cdr-status-badge');
+  if (badge) {
+    if (!cfg.enabled) { badge.textContent = 'disabled'; badge.className = 'badge'; }
+    else if (cfg.clientActive) { badge.textContent = 'active'; badge.className = 'badge allow'; }
+    else { badge.textContent = 'not connected'; badge.className = 'badge drop'; }
+  }
+
+  const tbody = document.getElementById('cdr-pool-tbody');
+  if (!tbody) return;
+  const instances = cdrState.instances || [];
+  if (instances.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted">No instances enrolled — go to the Instances tab to add one.</td></tr>';
+    return;
+  }
+  const health = cdrState.health || {};
+  tbody.innerHTML = instances.map(i => {
+    const healthy = (cfg.clientActive && health.healthy) ? '<span class="badge allow">healthy</span>' : '<span class="badge drop">—</span>';
+    return `<tr>
+      <td>${escHtml(i.name)}</td>
+      <td><code>${escHtml(i.endpoint)}</code></td>
+      <td>${healthy}</td>
+      <td>—</td>
+      <td>${escHtml(i.version || health.version || '')}</td>
+      <td>${(health.queueDepth ?? '')}</td>
+      <td>${(health.filesProcessed ?? '')}</td>
+      <td>${i.lastHealth ? escHtml(i.lastHealth) : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function cdrRefreshHealth() {
+  try {
+    cdrState.health = await api('/api/cdr/health');
+    cdrRenderOverview();
+    toast('Health refreshed', 'success');
+  } catch (e) { toast('Refresh failed: ' + e.message, 'error'); }
+}
+
+// ── Instances tab ────────────────────────────────────────────────────────
+
+async function cdrLoadInstances() {
+  try {
+    const d = await api('/api/cdr/instances');
+    cdrState.instances = d.instances || [];
+    cdrRenderInstances();
+  } catch (e) { toast('CDR instances failed: ' + e.message, 'error'); }
+}
+
+function cdrRenderInstances() {
+  const tbody = document.getElementById('cdr-instances-tbody');
+  if (!tbody) return;
+  const list = cdrState.instances || [];
+  if (list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">No instances enrolled</td></tr>';
+    return;
+  }
+  const isAdmin = (typeof uiRole !== 'undefined' && uiRole === 'admin');
+  tbody.innerHTML = list.map(i => {
+    const fp = (i.serverFingerprint || '').slice(0, 12);
+    const enrolled = i.enrolledAt ? new Date(i.enrolledAt).toLocaleString() : '—';
+    const actions = isAdmin
+      ? `<button class="btn sm danger" data-click="cdrRevokeInstance" data-arg="${escHtml(i.name)}">Revoke</button>`
+      : '';
+    return `<tr>
+      <td><strong>${escHtml(i.name)}</strong></td>
+      <td><code>${escHtml(i.endpoint)}</code></td>
+      <td><code title="${escHtml(i.serverFingerprint || '')}">${escHtml(fp)}${fp ? '…' : ''}</code></td>
+      <td>${escHtml(enrolled)}</td>
+      <td>${escHtml(i.version || '—')}</td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function cdrRefreshInstances() {
+  cdrLoadInstances();
+}
+
+async function cdrEnrollInstance() {
+  const name = document.getElementById('cdr-enroll-name').value.trim();
+  const endpoint = document.getElementById('cdr-enroll-endpoint').value.trim();
+  const token = document.getElementById('cdr-enroll-token').value.trim();
+  const fp = document.getElementById('cdr-enroll-fingerprint').value.trim();
+  if (!name || !endpoint || !token || !fp) {
+    toast('All four fields are required', 'error');
+    return;
+  }
+  try {
+    await api('/api/cdr/instances/enroll', {
+      method: 'POST',
+      body: { name, endpoint, token, serverFingerprint: fp },
+    });
+    toast('Enrolled ' + name, 'success');
+    document.getElementById('cdr-enroll-name').value = '';
+    document.getElementById('cdr-enroll-endpoint').value = '';
+    document.getElementById('cdr-enroll-token').value = '';
+    document.getElementById('cdr-enroll-fingerprint').value = '';
+    cdrLoadInstances();
+  } catch (e) { toast('Enrollment failed: ' + e.message, 'error'); }
+}
+
+async function cdrRevokeInstance(name) {
+  if (!await confirmAction('Revoke Sluice instance?',
+    `Remove "${name}" from the pool and shred its mTLS bundle.  Re-enrollment will require a fresh token + fingerprint.`,
+    'Revoke')) return;
+  try {
+    await api('/api/cdr/instances?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    toast('Revoked ' + name, 'success');
+    cdrLoadInstances();
+  } catch (e) { toast('Revoke failed: ' + e.message, 'error'); }
+}
+
+// ── Policies tab ─────────────────────────────────────────────────────────
+
+async function cdrLoadPolicies() {
+  try {
+    const d = await api('/api/cdr/policies');
+    cdrState.policies = d.rules || [];
+    cdrRenderPolicies(d.count);
+  } catch (e) { toast('CDR policies failed: ' + e.message, 'error'); }
+}
+
+function cdrRenderPolicies(count) {
+  const tbody = document.getElementById('cdr-policies-tbody');
+  if (!tbody) return;
+  const rules = cdrState.policies || [];
+  const badge = document.getElementById('cdr-pol-count');
+  if (badge) badge.textContent = (count ?? rules.length) + ' rule(s)';
+  if (rules.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="muted">No rules — default profile/mode applies to every file</td></tr>';
+    return;
+  }
+  const isAdmin = (typeof uiRole !== 'undefined' && uiRole === 'admin');
+  tbody.innerHTML = rules.map(r => {
+    const match = [r.sourceGroup && 'group=' + r.sourceGroup,
+                   r.sourceIdentity && 'id=' + r.sourceIdentity,
+                   r.sourceIP && 'ip=' + r.sourceIP,
+                   r.destFQDN && 'dst=' + r.destFQDN].filter(Boolean).join(', ') || '(any)';
+    const modeBadgeCls = r.mode === 'ENFORCE' ? 'badge allow'
+                        : r.mode === 'BYPASS_WITH_REPORT' ? 'badge inspect' : 'badge';
+    const actions = isAdmin
+      ? `<button class="btn sm danger" data-click="cdrDeletePolicy" data-arg="${escHtml(r.name)}">Delete</button>`
+      : '';
+    return `<tr>
+      <td>${r.priority}</td>
+      <td><strong>${escHtml(r.name)}</strong></td>
+      <td><span class="muted" style="font-size:.8rem">${escHtml(match)}</span></td>
+      <td>${escHtml(r.profileName || 'default')}</td>
+      <td><span class="${modeBadgeCls}">${escHtml(r.mode || 'ENFORCE')}</span></td>
+      <td>${r.hitCount || 0}</td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function cdrSubmitPolicy() {
+  const rule = {
+    name:           document.getElementById('cdr-pol-name').value.trim(),
+    priority:       parseInt(document.getElementById('cdr-pol-priority').value, 10) || 50,
+    profileName:    document.getElementById('cdr-pol-profile').value.trim() || 'default',
+    mode:           document.getElementById('cdr-pol-mode').value,
+    sourceGroup:    document.getElementById('cdr-pol-group').value.trim(),
+    sourceIP:       document.getElementById('cdr-pol-srcip').value.trim(),
+    sourceIdentity: document.getElementById('cdr-pol-identity').value.trim(),
+    destFQDN:       document.getElementById('cdr-pol-destfqdn').value.trim(),
+  };
+  if (!rule.name) { toast('Name is required', 'error'); return; }
+  try {
+    await api('/api/cdr/policies', { method: 'POST', body: rule });
+    toast('Rule added', 'success');
+    document.getElementById('cdr-pol-name').value = '';
+    cdrLoadPolicies();
+  } catch (e) { toast('Add failed: ' + e.message, 'error'); }
+}
+
+async function cdrDeletePolicy(name) {
+  if (!await confirmAction('Delete rule?', `Remove CDR policy rule "${name}".  This cannot be undone from the UI (restore via Config Versions).`, 'Delete')) return;
+  try {
+    await api('/api/cdr/policies?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    toast('Rule deleted', 'success');
+    cdrLoadPolicies();
+  } catch (e) { toast('Delete failed: ' + e.message, 'error'); }
+}
+
+// ── Test tab ─────────────────────────────────────────────────────────────
+
+function cdrTestPickFile() { document.getElementById('cdr-test-file').click(); }
+
+function cdrInitTestDropzone() {
+  const dz = document.getElementById('cdr-test-dropzone');
+  if (!dz || dz.dataset.wired) return;
+  dz.dataset.wired = '1';
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.style.background = 'var(--surface2)'; });
+  dz.addEventListener('dragleave', () => { dz.style.background = ''; });
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.style.background = '';
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) cdrRunTest(f);
+  });
+  const inp = document.getElementById('cdr-test-file');
+  if (inp) inp.addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    if (f) cdrRunTest(f);
+  });
+}
+
+async function cdrRunTest(file) {
+  const result = document.getElementById('cdr-test-result');
+  result.style.display = 'block';
+  result.innerHTML = '<div class="muted">Sanitising (REPORT_ONLY)…</div>';
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const resp = await fetch('/api/cdr/test', { method: 'POST', body: fd, credentials: 'same-origin' });
+    if (!resp.ok) throw new Error(await resp.text() || resp.statusText);
+    const r = await resp.json();
+    const threatsHtml = (r.threats || []).map(t =>
+      `<li><span class="badge drop">${escHtml(t.severity || '?')}</span> <code>${escHtml(t.type || '')}</code> — ${escHtml(t.description || t.location || '')}</li>`
+    ).join('') || '<li class="muted">No threats detected.</li>';
+    result.innerHTML = `
+      <div class="card"><div class="card-label">Status</div><div class="card-value">${escHtml(r.status || '')}</div></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-top:10px">
+        <div class="card"><div class="card-label">Original size</div><div class="card-value">${(r.originalSize ?? 0)} B</div></div>
+        <div class="card"><div class="card-label">Sanitized size</div><div class="card-value">${(r.sanitizedSize ?? 0)} B</div></div>
+        <div class="card"><div class="card-label">Duration</div><div class="card-value">${(r.durationMs ?? 0)} ms</div></div>
+        <div class="card"><div class="card-label">SHA-256 (sanitized)</div><div class="card-value" style="font-family:monospace;font-size:.72rem;word-break:break-all">${escHtml((r.sanitizedSha256 || '').slice(0, 32))}…</div></div>
+      </div>
+      <div style="margin-top:12px"><strong>Threats:</strong><ul style="margin:6px 0 0 18px">${threatsHtml}</ul></div>
+      ${r.errorMessage ? `<div class="muted" style="margin-top:8px;color:var(--red)">Error: ${escHtml(r.errorMessage)}</div>` : ''}
+    `;
+  } catch (e) {
+    result.innerHTML = `<div class="muted" style="color:var(--red)">Test failed: ${escHtml(e.message || String(e))}</div>`;
+  }
+}
+
+// ── Audit tab ────────────────────────────────────────────────────────────
+
+async function cdrLoadAudit() {
+  try {
+    const d = await api('/api/requests?limit=200').catch(() => ({ entries: [] }));
+    const all = (d.entries || []).filter(e => (e.status || '').startsWith('CDR_'));
+    cdrRenderAudit(all);
+  } catch (e) { toast('Audit load failed: ' + e.message, 'error'); }
+}
+
+function cdrAuditFilter(which) {
+  cdrState.auditFilter = which;
+  document.querySelectorAll('#cdr-tab-audit button').forEach(b => {
+    const active = b.dataset.arg === which;
+    if (b.classList.contains('sm')) {
+      b.className = active ? 'btn sm active' : 'btn sm ghost';
+    }
+  });
+  cdrLoadAudit();
+}
+
+function cdrRenderAudit(entries) {
+  const tbody = document.getElementById('cdr-audit-tbody');
+  if (!tbody) return;
+  const want = cdrState.auditFilter || 'all';
+  const rows = entries.filter(e => want === 'all' || e.status === want);
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">No events match the filter yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.slice(0, 200).map(e => {
+    const statusCls = e.status === 'CDR_BLOCKED' ? 'badge drop'
+                     : e.status === 'CDR_SANITIZED' ? 'badge allow'
+                     : 'badge';
+    return `<tr>
+      <td style="font-family:monospace;font-size:.78rem">${escHtml(e.time || e.ts || '')}</td>
+      <td>${escHtml(e.ip || '')}</td>
+      <td>${escHtml(e.host || '')}</td>
+      <td><span class="${statusCls}">${escHtml(e.status)}</span></td>
+      <td>${escHtml(e.ruleMatched || '')}</td>
+      <td><span class="muted" style="font-size:.82rem">${escHtml(e.actionTaken || e.reason || '')}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+// Wire drop-zone the first time the panel is rendered.
+document.addEventListener('DOMContentLoaded', cdrInitTestDropzone);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // File Block — Global Extension List
