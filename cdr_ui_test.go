@@ -44,10 +44,12 @@ func newViewerRequest(method, target string) *http.Request {
 func resetCDRState(t *testing.T) {
 	t.Helper()
 	shutdownCDRClient()
+	cdrPool.shutdown()
 	cdrInstances = &CDRInstanceRegistry{}
 	cdrPolicyStore = &CDRPolicyStore{}
 	t.Cleanup(func() {
 		shutdownCDRClient()
+		cdrPool.shutdown()
 		cdrInstances = &CDRInstanceRegistry{}
 		cdrPolicyStore = &CDRPolicyStore{}
 	})
@@ -331,9 +333,10 @@ func TestApiCDRTest_WithFakeSluiceReturnsReportOnly(t *testing.T) {
 	c, stop := startFakeSluice(t, srv)
 	defer stop()
 	cdrClientMu.Lock()
-	cdrActiveClientV = c
 	cdrActiveCfg = CDRConfig{Enabled: true, DefaultProfile: "default"}
 	cdrClientMu.Unlock()
+	cdrPoolInstallSingleForTest(c)
+	defer cdrPool.shutdown()
 
 	r := newAdminRequest(http.MethodPost, "/api/cdr/test?filename=sample.docx", []byte("data"))
 	r.Header.Set("Content-Type", "application/octet-stream")
@@ -363,9 +366,10 @@ func TestApiCDRTest_RejectsOversize(t *testing.T) {
 	c, stop := startFakeSluice(t, srv)
 	defer stop()
 	cdrClientMu.Lock()
-	cdrActiveClientV = c
 	cdrActiveCfg = CDRConfig{Enabled: true, MaxFileSizeMB: 1}
 	cdrClientMu.Unlock()
+	cdrPoolInstallSingleForTest(c)
+	defer cdrPool.shutdown()
 
 	big := make([]byte, 2<<20)
 	w := httptest.NewRecorder()

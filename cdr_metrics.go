@@ -147,14 +147,20 @@ func cdrWritePrometheus(w *strings.Builder) {
 	w.WriteString("# TYPE culvert_cdr_bytes_out_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_bytes_out_total %d\n", atomic.LoadInt64(&statCDRBytesOut))
 
-	// Instance health (observed by the background poller).
-	w.WriteString("\n# HELP culvert_cdr_instance_healthy 1 when the most recent Health probe succeeded and Sluice reported healthy, else 0\n")
+	// Instance health (aggregate, observed by the background poller).
+	w.WriteString("\n# HELP culvert_cdr_instance_healthy 1 when at least one pool member's most recent Health probe succeeded; else 0\n")
 	w.WriteString("# TYPE culvert_cdr_instance_healthy gauge\n")
 	fmt.Fprintf(w, "culvert_cdr_instance_healthy %d\n", atomic.LoadInt64(&statCDRInstanceHealthy))
 
-	w.WriteString("\n# HELP culvert_cdr_queue_depth Sluice-reported queue depth at the most recent Health probe\n")
+	w.WriteString("\n# HELP culvert_cdr_queue_depth Minimum Sluice-reported queue depth across healthy pool members at the most recent Health probe\n")
 	w.WriteString("# TYPE culvert_cdr_queue_depth gauge\n")
 	fmt.Fprintf(w, "culvert_cdr_queue_depth %d\n", atomic.LoadInt64(&statCDRQueueDepth))
+
+	// Per-instance pool state — bounded cardinality by the enrolled
+	// instance count (typically ≤ 10 in production).  Labelled with
+	// the admin-chosen instance name; names are sanitised against
+	// backslash / double-quote / newline injection.
+	cdrPoolWritePrometheus(w)
 
 	// Per-threat-type.
 	threatCountersMu.Lock()

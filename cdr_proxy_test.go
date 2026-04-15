@@ -19,21 +19,21 @@ import (
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
 
-// withActiveCDRClient plugs `c` into the process-wide singleton for the
+// withActiveCDRClient plugs `c` into the process-wide pool for the
 // duration of a test.  Restores the previous state on cleanup.
 func withActiveCDRClient(t *testing.T, c *CDRClient, cfg CDRConfig) {
 	t.Helper()
+	prev := cdrPool.List()
 	cdrClientMu.Lock()
-	prevClient := cdrActiveClientV
 	prevCfg := cdrActiveCfg
-	cdrActiveClientV = c
 	cdrActiveCfg = cfg
 	cdrClientMu.Unlock()
+	cdrPoolInstallSingleForTest(c)
 	t.Cleanup(func() {
 		cdrClientMu.Lock()
-		cdrActiveClientV = prevClient
 		cdrActiveCfg = prevCfg
 		cdrClientMu.Unlock()
+		cdrPool.replace(prev)
 	})
 }
 

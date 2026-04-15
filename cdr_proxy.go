@@ -194,9 +194,15 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 		}
 	}()
 
-	// Gate check — cheap, pre-everything.
-	client := cdrActiveClient()
-	if client == nil || !cfg.Enabled {
+	// Gate + pool pick.  Pool picker returns nil when every instance's
+	// circuit breaker is open OR no clients are enrolled.  Either way we
+	// skip CDR for this request — the caller's fail_mode then decides
+	// whether to still deliver the file.
+	if !cfg.Enabled {
+		return cdrPassSkipped("SKIPPED")
+	}
+	client, instanceName := cdrPickClient()
+	if client == nil {
 		return cdrPassSkipped("SKIPPED")
 	}
 
@@ -266,6 +272,12 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	ms := time.Since(t0).Milliseconds()
 
 	if err != nil {
+		// file_too_large is an application-layer rejection — not a
+		// transport failure, so it does NOT trip the CB.  Everything
+		// else (Unavailable, DeadlineExceeded, stream EOF, …) does.
+		if !IsFileTooLarge(err) {
+			cdrMarkOutcome(instanceName, true)
+		}
 		return cdrHandleCallError(err, profile, modeStr, ms, cfg)
 	}
 
@@ -275,6 +287,7 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	// authoritative.
 	switch res.Status {
 	case pb.Status_CLEAN:
+		cdrMarkOutcome(instanceName, false)
 		cdrCache.Put(hashHex, &cdrCacheEntry{
 			status: "CLEAN", threats: nil, profile: profile, mode: modeStr,
 			expiresAt: time.Now().Add(cdrCache.ttl), epoch: epoch,
@@ -282,10 +295,12 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 		return cdrPassClean(profile, modeStr, nil, ms, false)
 
 	case pb.Status_SANITIZED:
+		cdrMarkOutcome(instanceName, false)
 		// Never cache SANITIZED bytes (too large).  Always call Sluice.
 		return cdrSwapResult(res.SanitizedData, res.Threats, profile, modeStr, ms)
 
 	case pb.Status_BLOCKED:
+		cdrMarkOutcome(instanceName, false)
 		reason := "cdr_blocked"
 		if res.ErrorMessage != "" {
 			reason = res.ErrorMessage
@@ -298,6 +313,7 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 		return cdrBlockResult(reason, res.Threats, profile, modeStr, ms, false)
 
 	case pb.Status_UNSUPPORTED:
+		cdrMarkOutcome(instanceName, false)
 		cdrCache.Put(hashHex, &cdrCacheEntry{
 			status: "UNSUPPORTED", profile: profile, mode: modeStr,
 			expiresAt: time.Now().Add(cdrCache.ttl), epoch: epoch,
@@ -307,10 +323,14 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	case pb.Status_ERROR:
 		// Sluice reported a well-formed error (e.g. unknown_profile).
 		// We don't cache this — the policy may be fixed minutes later.
+		// Trips the breaker: a Sluice that keeps returning ERROR is
+		// effectively unavailable from our POV.
+		cdrMarkOutcome(instanceName, true)
 		return cdrErrorOutcome(res.ErrorMessage, profile, modeStr, ms, cfg)
 	}
 
 	// Unknown status — defensive.  Treat like ERROR.
+	cdrMarkOutcome(instanceName, true)
 	return cdrErrorOutcome(fmt.Sprintf("unknown_status_%d", res.Status), profile, modeStr, ms, cfg)
 }
 
