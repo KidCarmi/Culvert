@@ -3551,6 +3551,17 @@ document.addEventListener('click', e => {
     case 'loadUpdateReports': loadUpdateReports(); break;
     case 'saveRegistrySettings': saveRegistrySettings(); break;
 
+    // ── CDR (Sluice) ──
+    case 'cdrSwitchTab':       cdrSwitchTab(arg); break;
+    case 'cdrRefreshHealth':   cdrRefreshHealth(); break;
+    case 'cdrRefreshInstances': cdrRefreshInstances(); break;
+    case 'cdrEnrollInstance':  cdrEnrollInstance(); break;
+    case 'cdrRevokeInstance':  cdrRevokeInstance(arg); break;
+    case 'cdrSubmitPolicy':    cdrSubmitPolicy(); break;
+    case 'cdrDeletePolicy':    cdrDeletePolicy(arg); break;
+    case 'cdrTestPickFile':    cdrTestPickFile(); break;
+    case 'cdrAuditFilter':     cdrAuditFilter(arg); break;
+
     default:
       console.warn('CSP delegation: unknown click action:', fn);
   }
