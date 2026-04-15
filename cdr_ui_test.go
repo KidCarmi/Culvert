@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -101,19 +102,21 @@ func TestApiCDRConfig_RejectsWrongMethod(t *testing.T) {
 	}
 }
 
+// redirectSentinelToTempDir points cdrRuntimeEnabledPath at a
+// test-owned tmp file so the suite doesn't require root or /data to
+// exist.  Restores the original path on cleanup.
+func redirectSentinelToTempDir(t *testing.T) {
+	t.Helper()
+	orig := cdrRuntimeEnabledPath
+	cdrRuntimeEnabledPath = filepath.Join(t.TempDir(), "cdr_enabled")
+	t.Cleanup(func() { cdrRuntimeEnabledPath = orig })
+}
+
 // TestApiCDRConfigToggle_OnThenOff — PUT flips the runtime-enable
 // sentinel, persists to disk, and surfaces in GET.
 func TestApiCDRConfigToggle_OnThenOff(t *testing.T) {
 	resetCDRState(t)
-	// Redirect sentinel to a temp dir for the test.
-	tmp := t.TempDir()
-	origPath := cdrRuntimeEnabledPath
-	// Can't monkey-patch a const — use an indirect override via
-	// env-var-ish helpers isn't available.  Instead verify behaviour
-	// through the helpers directly on the real path (best-effort:
-	// skip sentinel verification, just assert in-memory flag flips).
-	_ = origPath
-	_ = tmp
+	redirectSentinelToTempDir(t)
 
 	// GET baseline — should be disabled.
 	w := httptest.NewRecorder()
@@ -133,8 +136,6 @@ func TestApiCDRConfigToggle_OnThenOff(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT enable status %d; body=%s", w.Code, w.Body.String())
 	}
-
-	// In-memory flag must reflect the change.
 	if !cdrActiveConfig().Enabled {
 		t.Fatal("runtime flag did not flip to enabled")
 	}
@@ -148,9 +149,6 @@ func TestApiCDRConfigToggle_OnThenOff(t *testing.T) {
 	if cdrActiveConfig().Enabled {
 		t.Fatal("runtime flag did not flip back to disabled")
 	}
-
-	// Clean up sentinel if the test wrote one.
-	_ = setCDRRuntimeEnabled(false)
 }
 
 func TestApiCDRConfigToggle_RequiresAdmin(t *testing.T) {
@@ -182,10 +180,10 @@ func TestApiCDRConfigToggle_InvalidJSON(t *testing.T) {
 
 // TestCDRRuntimeEnabled_SentinelLifecycle — setCDRRuntimeEnabled
 // write/remove is idempotent and observable via cdrRuntimeEnabled.
-// Skipped when we can't write /data (CI builds without root).
 func TestCDRRuntimeEnabled_SentinelLifecycle(t *testing.T) {
+	redirectSentinelToTempDir(t)
 	if err := setCDRRuntimeEnabled(true); err != nil {
-		t.Skipf("cannot write %s (test env doesn't allow): %v", cdrRuntimeEnabledPath, err)
+		t.Fatalf("cannot write %s: %v", cdrRuntimeEnabledPath, err)
 	}
 	t.Cleanup(func() { _ = setCDRRuntimeEnabled(false) })
 

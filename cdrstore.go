@@ -267,7 +267,11 @@ var (
 // enrollment, read at boot.  Separate from YAML/CLI so admins can flip
 // CDR on without restarting Culvert (and so the first enrollment via
 // the GUI works without ops pre-setting the flag).
-const cdrRuntimeEnabledPath = "/data/cdr_enabled"
+//
+// A var (not const) so tests can redirect the path to a tmp dir — real
+// Culvert always uses /data/cdr_enabled (baked into the Docker image's
+// persistent volume layout).  Production code never mutates this.
+var cdrRuntimeEnabledPath = "/data/cdr_enabled"
 
 // cdrRuntimeEnabled reports whether the runtime-enable sentinel exists.
 // Called at startup (config merge time) and whenever the toggle
