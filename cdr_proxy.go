@@ -203,13 +203,17 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	if !cfg.Enabled {
 		return cdrPassSkipped("SKIPPED")
 	}
-	client, instanceName := cdrPickClient()
-	if client == nil {
+	pooled := cdrPickPooled()
+	if pooled == nil {
 		return cdrPassSkipped("SKIPPED")
 	}
+	client := pooled.Client
+	instanceName := pooled.Name
 
-	// Oversize skip before any Sluice contact.
-	if skipped := cdrGateOversize(body, cfg, req.Host); skipped != nil {
+	// Oversize skip before any Sluice contact.  Uses min(cfg cap,
+	// profile cap) so Culvert enforces the tighter of the two —
+	// defence-in-depth against a file Sluice would reject anyway.
+	if skipped := cdrGateOversize(body, cfg, pooled.ProfileCap(), req.Host); skipped != nil {
 		return skipped
 	}
 
@@ -242,15 +246,22 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	return cdrClassifyResult(res, instanceName, profile, modeStr, ms, hashHex, epoch, cfg)
 }
 
-// cdrGateOversize returns SKIPPED_OVERSIZE when body is over the per-
-// file cap.  Nil when the request can proceed.  Extracted for cyclop.
-func cdrGateOversize(body []byte, cfg CDRConfig, host string) *cdrRunResult {
-	maxFile := cfg.maxFileSizeBytes()
-	if int64(len(body)) <= maxFile {
+// cdrGateOversize returns SKIPPED_OVERSIZE when body is over the
+// effective per-file cap.  The effective cap is
+// `min(cfg.maxFileSizeBytes(), profileCap)` when profileCap > 0, else
+// just the config cap.  This protects against sending a file that
+// Sluice would reject anyway — saves the round-trip.  Nil when the
+// request can proceed.
+func cdrGateOversize(body []byte, cfg CDRConfig, profileCap int64, host string) *cdrRunResult {
+	effective := cfg.maxFileSizeBytes()
+	if profileCap > 0 && profileCap < effective {
+		effective = profileCap
+	}
+	if int64(len(body)) <= effective {
 		return nil
 	}
 	atomic.AddInt64(&statCDROversizeSkipped, 1)
-	logger.Printf("CDR: skip oversize %d > %d (host=%q)", len(body), maxFile, sanitizeLog(host))
+	logger.Printf("CDR: skip oversize %d > %d (host=%q)", len(body), effective, sanitizeLog(host))
 	return cdrPassSkipped("SKIPPED_OVERSIZE")
 }
 

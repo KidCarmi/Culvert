@@ -25,7 +25,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -82,9 +84,23 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 		}
 		list := cdrInstances.List()
 		ver, updatedAt := cdrInstances.Version()
+		// Enrich each entry with cert-expiry metadata so the GUI can
+		// render a countdown + banner without having to parse PEMs
+		// itself.  Errors are non-fatal — we just omit the expiry
+		// fields for instances whose cert we can't read (admin will
+		// see "—" in the GUI and we log server-side).
+		enriched := make([]map[string]any, 0, len(list))
+		for _, inst := range list {
+			entry := cdrInstanceToMap(inst)
+			if expiry, err := loadCertExpiry(inst.ClientCertPath); err == nil {
+				entry["clientCertNotAfter"] = expiry.UTC().Format(time.RFC3339)
+				entry["clientCertDaysRemaining"] = daysUntil(expiry)
+			}
+			enriched = append(enriched, entry)
+		}
 		jsonOK(w, map[string]any{
-			"instances": list,
-			"count":     len(list),
+			"instances": enriched,
+			"count":     len(enriched),
 			"version":   ver,
 			"updatedAt": updatedAt,
 		})
@@ -633,6 +649,71 @@ func readCDRTestUpload(r *http.Request) (body []byte, filename, contentType stri
 // Placeholder so this file compiles without the health-poller dependency.
 // Overridden by cdr_health.go's real implementation.
 var cdrHealthSnapshot = func() *pb.HealthResponse { return nil }
+
+// cdrInstanceToMap flattens a CDREnrolledInstance to a JSON-safe map.
+// Kept separate from the struct tags so we can add computed fields
+// (e.g. cert expiry) without polluting the persisted shape.
+func cdrInstanceToMap(inst *CDREnrolledInstance) map[string]any {
+	return map[string]any{
+		"name":              inst.Name,
+		"endpoint":          inst.Endpoint,
+		"serverFingerprint": inst.ServerFingerprint,
+		"caCertPath":        inst.CACertPath,
+		"clientCertPath":    inst.ClientCertPath,
+		"clientKeyPath":     inst.ClientKeyPath,
+		"enrolledAt":        inst.EnrolledAt.UTC().Format(time.RFC3339),
+		"version":           inst.Version,
+		"lastHealth":        formatOptionalTime(inst.LastHealth),
+		"enabled":           inst.IsEnabled(),
+	}
+}
+
+// formatOptionalTime returns "" when t is zero, else RFC3339.
+func formatOptionalTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// loadCertExpiry reads a PEM-encoded cert and returns its NotAfter
+// time.  Returns an error when the file is missing or unparsable —
+// callers should treat "can't read" as "expiry unknown" rather than
+// a hard failure.
+func loadCertExpiry(path string) (time.Time, error) {
+	if path == "" {
+		return time.Time{}, errors.New("empty path")
+	}
+	cleaned := filepath.Clean(path)
+	// Defence-in-depth: only read paths under cdrCertsRoot so a
+	// tampered registry can't coerce us into reading arbitrary
+	// files (CodeQL CWE-22 guard mirroring shredCDRCerts).
+	rootWithSep := cdrCertsRoot + string(filepath.Separator)
+	if !strings.HasPrefix(cleaned, rootWithSep) {
+		return time.Time{}, fmt.Errorf("path outside cdr certs root")
+	}
+	data, err := os.ReadFile(cleaned)
+	if err != nil {
+		return time.Time{}, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return time.Time{}, errors.New("no PEM block")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return cert.NotAfter, nil
+}
+
+// daysUntil returns integer days between now and t.  Negative when t
+// is in the past.  Uses 24h days (not wall-clock calendar days) since
+// the semantic we want is "how much cert life is left", which is
+// interval-based, not human-calendar-based.
+func daysUntil(t time.Time) int {
+	return int(time.Until(t).Hours() / 24)
+}
 
 // jsonOK / decodeJSON / auditEventDiff / saveConfigVersion / sessionAdmin
 // live in ui.go and configversion.go respectively.  No redefinition here.

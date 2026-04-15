@@ -9,7 +9,7 @@ package main
 //   - A per-instance circuit breaker
 //   - Last-known health response + timestamp
 //
-// safeCDRSanitize (cdr_proxy.go) calls cdrPickClient() to get the best
+// safeCDRSanitize (cdr_proxy.go) calls cdrPickPooled() to get the best
 // available instance.  The picker ignores clients whose breaker is open
 // and round-robins across the rest.  All-open → nil → safeCDRSanitize
 // applies fail-mode.
@@ -41,6 +41,18 @@ type cdrPooledClient struct {
 	lastHealth   *pb.HealthResponse
 	lastHealthAt time.Time
 	healthy      atomic.Int32 // 0 or 1
+
+	// profileCap is the effective per-file cap (bytes) reported by Sluice
+	// on the selected profile.  Zero means "not yet probed / no cap".
+	// Client-side enforcement uses min(cfg cap, profileCap) as a
+	// defence-in-depth check so oversize files never hit the wire.
+	profileCap atomic.Int64
+}
+
+// ProfileCap returns the cached per-profile size cap in bytes.  Zero when
+// no Health probe has succeeded yet.
+func (p *cdrPooledClient) ProfileCap() int64 {
+	return p.profileCap.Load()
 }
 
 // Healthy reports the poller's latest view.  Lock-free.
@@ -49,6 +61,8 @@ func (p *cdrPooledClient) Healthy() bool {
 }
 
 // setHealth updates the snapshot atomically.  Used by the poller.
+// Also refreshes the cached per-profile size cap from the first profile
+// in the response (Sluice v0.1 always surfaces "default" first).
 func (p *cdrPooledClient) setHealth(h *pb.HealthResponse) {
 	p.healthMu.Lock()
 	p.lastHealth = h
@@ -58,6 +72,11 @@ func (p *cdrPooledClient) setHealth(h *pb.HealthResponse) {
 		p.healthy.Store(1)
 	} else {
 		p.healthy.Store(0)
+	}
+	// Profile cap: take the cap from the server's default profile.
+	// A zero value means "no cap from server" — we keep our own default.
+	if h != nil && len(h.Profiles) > 0 && h.Profiles[0] != nil && h.Profiles[0].MaxFileSizeBytes > 0 {
+		p.profileCap.Store(h.Profiles[0].MaxFileSizeBytes)
 	}
 }
 
@@ -191,14 +210,12 @@ func (p *cdrClientPool) shutdown() {
 
 // ─── Package-level conveniences ────────────────────────────────────────────
 
-// cdrPickClient is the pool-aware selector used by the proxy hot path.
-// Returns (nil, "") when no instance is available.
-func cdrPickClient() (*CDRClient, string) {
-	pc := cdrPool.Pick()
-	if pc == nil {
-		return nil, ""
-	}
-	return pc.Client, pc.Name
+// cdrPickPooled returns the pool-aware selected client with full
+// per-instance state (profileCap, breaker, health).  Returns nil when
+// no instance is available — callers treat nil as "skip CDR" and apply
+// fail_mode.  This is the proxy hot path's selector.
+func cdrPickPooled() *cdrPooledClient {
+	return cdrPool.Pick()
 }
 
 // cdrPoolInstallSingleForTest registers `c` as the sole pool member

@@ -2463,7 +2463,22 @@ Firefox (all platforms):
               The token + fingerprint pair come from the Sluice admin.  Fingerprint is TOFU-pinned — a
               mismatch rejects the handshake even with a valid token.  On success Culvert stores the
               mTLS bundle at <code>/data/integrations/sluice/&lt;name&gt;/</code> (0600).
+              <strong>Get the fingerprint over a trusted channel</strong> (the same SSH session that ran
+              <code>docker exec ... sluice token</code>, not a paste from chat) — an attacker who can
+              substitute the fingerprint alongside a valid token gets a rogue enrollment.
             </p>
+            <div class="card" style="margin-top:12px;border-left:3px solid var(--accent);padding:10px 14px">
+              <div style="font-weight:600;margin-bottom:4px">Cert lifecycle (Sluice v0.1)</div>
+              <div class="muted" style="font-size:.82rem">
+                Client certs are valid for <strong>1 year</strong>.  When they expire, Sluice v0.1 has no
+                renewal RPC — operators must <strong>Revoke</strong> this instance and re-enroll with a
+                fresh token + fingerprint.  Sluice v0.2 will add <code>RenewCert</code> for zero-touch
+                renewal.  <br>
+                If the <strong>server</strong> cert on Sluice is regenerated, the TOFU pin breaks and
+                re-enrollment is required — plan server-side rotations during a maintenance window or
+                wait for Sluice v0.2's dual-pin grace window.
+              </div>
+            </div>
           </div>
         </div>
 
@@ -2474,10 +2489,11 @@ Firefox (all platforms):
           <div class="panel-body">
             <table class="table" id="cdr-instances-table">
               <thead><tr>
-                <th>Name</th><th>Endpoint</th><th>Fingerprint</th><th>Enrolled</th><th>Version</th>
+                <th>Name</th><th>Endpoint</th><th>Fingerprint</th><th>Enrolled</th>
+                <th>Cert expires</th><th>Version</th>
                 <th data-min-role="admin">Actions</th>
               </tr></thead>
-              <tbody id="cdr-instances-tbody"><tr><td colspan="6" class="muted">No instances enrolled</td></tr></tbody>
+              <tbody id="cdr-instances-tbody"><tr><td colspan="7" class="muted">No instances enrolled</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -3550,6 +3566,17 @@ document.addEventListener('click', e => {
     case 'clusterUpdateStart': clusterUpdateStart(); break;
     case 'loadUpdateReports': loadUpdateReports(); break;
     case 'saveRegistrySettings': saveRegistrySettings(); break;
+
+    // ── CDR (Sluice) ──
+    case 'cdrSwitchTab':       cdrSwitchTab(arg); break;
+    case 'cdrRefreshHealth':   cdrRefreshHealth(); break;
+    case 'cdrRefreshInstances': cdrRefreshInstances(); break;
+    case 'cdrEnrollInstance':  cdrEnrollInstance(); break;
+    case 'cdrRevokeInstance':  cdrRevokeInstance(arg); break;
+    case 'cdrSubmitPolicy':    cdrSubmitPolicy(); break;
+    case 'cdrDeletePolicy':    cdrDeletePolicy(arg); break;
+    case 'cdrTestPickFile':    cdrTestPickFile(); break;
+    case 'cdrAuditFilter':     cdrAuditFilter(arg); break;
 
     default:
       console.warn('CSP delegation: unknown click action:', fn);
@@ -6461,7 +6488,7 @@ function cdrRenderInstances() {
   if (!tbody) return;
   const list = cdrState.instances || [];
   if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="muted">No instances enrolled</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="muted">No instances enrolled</td></tr>';
     return;
   }
   const isAdmin = (typeof uiRole !== 'undefined' && uiRole === 'admin');
@@ -6476,10 +6503,24 @@ function cdrRenderInstances() {
       <td><code>${escHtml(i.endpoint)}</code></td>
       <td><code title="${escHtml(i.serverFingerprint || '')}">${escHtml(fp)}${fp ? '…' : ''}</code></td>
       <td>${escHtml(enrolled)}</td>
+      <td>${cdrCertExpiryBadge(i)}</td>
       <td>${escHtml(i.version || '—')}</td>
       <td>${actions}</td>
     </tr>`;
   }).join('');
+}
+
+// cdrCertExpiryBadge returns an HTML fragment for the instance's cert
+// expiry: green when > 60 days, yellow when ≤ 60 days, red when ≤ 14
+// days, grey when we have no data.  Hard-coded thresholds match the
+// roadmap — config knobs land with v0.2 when auto-renewal is wired.
+function cdrCertExpiryBadge(inst) {
+  const d = (typeof inst.clientCertDaysRemaining === 'number') ? inst.clientCertDaysRemaining : null;
+  if (d === null) return '<span class="muted">—</span>';
+  if (d < 0)   return `<span class="badge drop" title="${escHtml(inst.clientCertNotAfter || '')}">expired ${Math.abs(d)}d ago</span>`;
+  if (d <= 14) return `<span class="badge drop" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left — renew now</span>`;
+  if (d <= 60) return `<span class="badge inspect" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left</span>`;
+  return `<span class="badge allow" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left</span>`;
 }
 
 async function cdrRefreshInstances() {

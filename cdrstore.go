@@ -257,7 +257,7 @@ var (
 // CDR is disabled / no instance is available.
 //
 // Backwards-compat: callers that just want "is CDR live?" treat nil as
-// "no" and keep working.  The proxy hot path should call cdrPickClient()
+// "no" and keep working.  The proxy hot path should call cdrPickPooled()
 // instead to pick a healthy instance with circuit-breaker awareness.
 func cdrActiveClient() *CDRClient {
 	if pc := cdrPool.Pick(); pc != nil {
