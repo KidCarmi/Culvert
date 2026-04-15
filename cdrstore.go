@@ -246,140 +246,87 @@ func normaliseFingerprint(fp string) string {
 
 // ─── Process-wide client lifecycle ──────────────────────────────────────────
 
-// cdrClientState wraps the singleton so tests can reset it without data
-// races.  Only one enrolled Sluice is dialled in Phase 2a.
+// cdrClientState wraps the config snapshot so tests can reset it without
+// data races.  The pool itself (cdr_pool.go) owns the actual clients.
 var (
-	cdrClientMu      sync.RWMutex
-	cdrActiveClientV *CDRClient
+	cdrClientMu  sync.RWMutex
+	cdrActiveCfg CDRConfig
 )
 
-// cdrActiveClient returns the process-wide CDR client, or nil when CDR is
-// disabled / no instance is enrolled.  Phase 2b's handleTunnelInspect will
-// call this on each request; constant-time because it's a read-locked
-// pointer fetch.
+// cdrActiveClient returns any live CDR client from the pool, or nil when
+// CDR is disabled / no instance is available.
+//
+// Backwards-compat: callers that just want "is CDR live?" treat nil as
+// "no" and keep working.  The proxy hot path should call cdrPickClient()
+// instead to pick a healthy instance with circuit-breaker awareness.
 func cdrActiveClient() *CDRClient {
-	cdrClientMu.RLock()
-	defer cdrClientMu.RUnlock()
-	return cdrActiveClientV
+	if pc := cdrPool.Pick(); pc != nil {
+		return pc.Client
+	}
+	return nil
 }
 
-// initCDRClient wires up the singleton from CDRConfig + the instance
-// registry.  Safe to call when disabled (no-op).  Idempotent: callers may
-// reinvoke after hot-config-reload; the old connection is closed first.
+// cdrActiveConfig returns a snapshot of the effective CDR config as wired
+// at the last initCDRClient() call.  Safe to call from hot paths; callers
+// receive a value copy — mutating it does not affect live state.
+func cdrActiveConfig() CDRConfig {
+	cdrClientMu.RLock()
+	defer cdrClientMu.RUnlock()
+	return cdrActiveCfg
+}
+
+// initCDRClient wires up the client pool from CDRConfig + the instance
+// registry.  Safe to call when disabled (no-op).  Idempotent: callers
+// may reinvoke after hot-config-reload; the old pool is replaced
+// atomically and old connections are closed after the swap.
 //
-// Phase 2a picks the first enabled instance from the registry.  If none
-// are registered but CDRConfig.Endpoint is set (test / pre-enrollment
-// manual config), we fall back to dialling it with the configured
-// fingerprint + certs from CertsDir.
+// Phase 2d: each enabled instance gets its own pooled client with its
+// own circuit breaker.  Phase 2c's single-client behaviour is preserved
+// when the registry has exactly one enabled instance.
 func initCDRClient(cfg CDRConfig) error {
 	if !cfg.Enabled {
 		shutdownCDRClient()
 		return nil
 	}
 
-	ep, fp, certBundle, err := resolveCDRConnection(cfg)
-	if err != nil {
-		return err
+	oldPool := cdrPool.List()
+	newPool, err := buildCDRPoolFromRegistry(cfg, oldPool)
+	if err != nil && len(newPool) == 0 {
+		// Complete failure — every instance failed to dial.
+		return fmt.Errorf("cdr: init pool: %w", err)
 	}
-
-	clientCfg := CDRClientConfig{
-		Endpoint:            ep,
-		ServerFingerprintHx: fp,
-		CACertPEM:           certBundle.CA,
-		ClientCertPEM:       certBundle.Cert,
-		ClientKeyPEM:        certBundle.Key,
-	}
-	if cfg.TimeoutSec > 0 {
-		clientCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
-	}
-	if cfg.ChunkSizeKB > 0 {
-		clientCfg.ChunkSize = cfg.ChunkSizeKB * 1024
-	}
-
-	newClient, err := NewCDRClient(clientCfg)
-	if err != nil {
-		return fmt.Errorf("cdr: init client: %w", err)
-	}
+	cdrPool.replace(newPool)
 
 	cdrClientMu.Lock()
-	oldClient := cdrActiveClientV
-	cdrActiveClientV = newClient
+	cdrActiveCfg = cfg
 	cdrClientMu.Unlock()
 
-	if oldClient != nil {
-		_ = oldClient.Close()
+	names := make([]string, 0, len(newPool))
+	for _, pc := range newPool {
+		names = append(names, pc.Name)
 	}
-	logger.Printf("CDR: client active — endpoint=%q instance=%q",
-		sanitizeLog(ep),
-		sanitizeLog(certBundle.InstanceName))
+	logger.Printf("CDR: pool active — %d instance(s): %s",
+		len(newPool), sanitizeLog(strings.Join(names, ",")))
+
+	// Fire non-blocking Health probes against every pool member so the
+	// first real user request doesn't eat the TLS-handshake latency
+	// (and so we detect broken certs / fingerprint mismatches at boot,
+	// not under load).
+	warmupCDRClient()
 	return nil
 }
 
-// shutdownCDRClient closes the singleton.  Safe to call when no client
-// was ever initialised.  Invoked from main.go's graceful shutdown.
+// shutdownCDRClient closes every pooled client and clears the active
+// config.  Safe to call when no pool was ever built.  Invoked from
+// main.go's graceful shutdown.
 func shutdownCDRClient() {
 	cdrClientMu.Lock()
-	client := cdrActiveClientV
-	cdrActiveClientV = nil
+	cdrActiveCfg = CDRConfig{}
 	cdrClientMu.Unlock()
-	if client != nil {
-		_ = client.Close()
-	}
+	cdrPool.shutdown()
 }
 
 // cdrCertBundle is the set of PEM blobs + naming context loaded from a
-// registered instance (or from CDRConfig.CertsDir in pre-enrollment mode).
-type cdrCertBundle struct {
-	CA           []byte
-	Cert         []byte
-	Key          []byte
-	InstanceName string // empty when bootstrapped from CDRConfig only
-}
-
-// resolveCDRConnection selects an endpoint + fingerprint + cert bundle
-// from the registry, falling back to CDRConfig for manual/test setups.
-func resolveCDRConnection(cfg CDRConfig) (endpoint, fingerprint string, bundle cdrCertBundle, err error) {
-	inst := cdrInstances.firstEnabled()
-	if inst != nil {
-		ca, cert, key, perr := loadCDRCertBundle(inst.CACertPath, inst.ClientCertPath, inst.ClientKeyPath)
-		if perr != nil {
-			return "", "", cdrCertBundle{}, perr
-		}
-		return inst.Endpoint, inst.ServerFingerprint, cdrCertBundle{
-			CA:           ca,
-			Cert:         cert,
-			Key:          key,
-			InstanceName: inst.Name,
-		}, nil
-	}
-
-	// Fallback: pre-enrollment / test mode — CDRConfig supplies the
-	// endpoint, fingerprint and a flat certs dir containing ca.pem,
-	// client.pem, client.key.
-	if strings.TrimSpace(cfg.Endpoint) == "" {
-		return "", "", cdrCertBundle{}, fmt.Errorf("cdr: no enrolled instances and no cdr.endpoint configured")
-	}
-	if strings.TrimSpace(cfg.CertsDir) == "" {
-		// Endpoint + fingerprint with no certs is valid during enrollment
-		// (mTLS isn't available until Enroll completes) but we can't dial
-		// Sanitize yet.  Return so the caller can decide whether to proceed.
-		return cfg.Endpoint, cfg.ServerFingerprint, cdrCertBundle{}, nil
-	}
-	ca, cert, key, perr := loadCDRCertBundle(
-		filepath.Join(cfg.CertsDir, "ca.pem"),
-		filepath.Join(cfg.CertsDir, "client.pem"),
-		filepath.Join(cfg.CertsDir, "client.key"),
-	)
-	if perr != nil {
-		return "", "", cdrCertBundle{}, perr
-	}
-	return cfg.Endpoint, cfg.ServerFingerprint, cdrCertBundle{
-		CA:   ca,
-		Cert: cert,
-		Key:  key,
-	}, nil
-}
-
 // loadCDRCertBundle reads the three PEM files from disk, validating that
 // none contain path traversal and all exist.
 func loadCDRCertBundle(caPath, certPath, keyPath string) (ca, cert, key []byte, err error) {

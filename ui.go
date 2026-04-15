@@ -125,6 +125,14 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
 	mux.HandleFunc("/api/policy/move", apiPolicyMove)
 	mux.HandleFunc("/api/policy/test", apiPolicyTest)
+
+	// CDR (Sluice) integration — Phase 2c admin API.
+	mux.HandleFunc("/api/cdr/config", apiCDRConfig)
+	mux.HandleFunc("/api/cdr/instances", apiCDRInstances)
+	mux.HandleFunc("/api/cdr/instances/enroll", apiCDREnroll)
+	mux.HandleFunc("/api/cdr/policies", apiCDRPolicies)
+	mux.HandleFunc("/api/cdr/health", apiCDRHealth)
+	mux.HandleFunc("/api/cdr/test", apiCDRTest)
 	mux.HandleFunc("/api/ca-cert", apiCACert)
 	mux.HandleFunc("/api/certs/upload", apiCertsUpload)
 	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)

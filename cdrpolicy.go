@@ -115,12 +115,19 @@ func validateMode(s string) bool {
 
 // CDRPolicyStore is the ordered, thread-safe list of CDRPolicyRule entries.
 // Persisted as JSON at `path`; missing file = empty ruleset.
+//
+// The store exposes a monotonic `epoch` counter bumped on every mutation.
+// Downstream caches (cdrHashCache in cdr_proxy.go) tag entries with the
+// epoch-at-write so cached decisions under an old policy are invalidated
+// automatically without a mass Clear() — addresses the "stale cached
+// verdict after policy change" class of bug.
 type CDRPolicyStore struct {
 	mu        sync.RWMutex
 	rules     []*CDRPolicyRule
 	path      string
 	version   int64  // monotonic, bumped on every mutation
 	updatedAt string // RFC3339
+	epoch     int64  // monotonic, bumped on every mutation (lock-free read via atomic)
 }
 
 // cdrPolicyStore is the process-wide store, loaded from disk at init.
@@ -137,6 +144,16 @@ func (s *CDRPolicyStore) Version() (int64, string) {
 func (s *CDRPolicyStore) bumpVersion() {
 	s.version++
 	s.updatedAt = time.Now().UTC().Format(time.RFC3339)
+	// Advance the lock-free epoch atomic so cache readers see the change
+	// without acquiring our RWMutex.
+	atomic.AddInt64(&s.epoch, 1)
+}
+
+// Epoch returns the current lock-free monotonic epoch.  Safe to call from
+// hot paths (cache lookups) without holding s.mu.  Guaranteed to advance
+// strictly monotonically across mutations.
+func (s *CDRPolicyStore) Epoch() int64 {
+	return atomic.LoadInt64(&s.epoch)
 }
 
 // Load reads rules from a JSON file.  A missing file is treated as an

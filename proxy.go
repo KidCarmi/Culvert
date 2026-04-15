@@ -455,9 +455,18 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
 	}
 
+	// Identity context forwarded to SSL-inspect (consumed by CDR today;
+	// future audit enrichment can read this without re-parsing headers).
+	proxyID := ProxyIdentity{
+		ClientIP:   clientIP,
+		Identity:   authenticatedIdentity,
+		AuthSource: authenticatedSource,
+		Groups:     authenticatedGroups,
+	}
+
 	switch {
 	case r.Method == http.MethodConnect:
-		handleTunnel(w, r, sslAction, tlsSkipVerify, match)
+		handleTunnel(w, r, sslAction, tlsSkipVerify, match, proxyID)
 	case isWebSocketUpgrade(r):
 		handleWebSocket(w, r)
 	default:
@@ -886,9 +895,13 @@ func detectProtocolName(b byte) string {
 // match is the policy evaluation result (may be nil when no rule matched and
 // default action is "allow"); it is forwarded to the inspect path so per-rule
 // file-blocking profiles can be enforced on inner HTTP requests.
-func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, tlsSkipVerify bool, match *PolicyMatch) {
+//
+// id is the authenticated context extracted by the top-level handler; it is
+// forwarded to inspect so downstream stages (CDR, future audit enrichment)
+// can branch on identity without re-parsing headers.
+func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
 	if sslAction == SSLInspect && certMgr.Ready() {
-		handleTunnelInspect(w, r, tlsSkipVerify, match)
+		handleTunnelInspect(w, r, tlsSkipVerify, match, id)
 	} else {
 		handleTunnelBypass(w, r)
 	}
@@ -976,7 +989,13 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 // internal Root CA, allowing the proxy to inspect decrypted HTTP/1.x traffic.
 // tlsSkipVerify disables upstream certificate validation for specific policy
 // rules (e.g. internal sites with self-signed certs); use with caution.
-func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool, match *PolicyMatch) {
+//
+//nolint:gocognit,gocyclo,cyclop,funlen // handleTunnelInspect is the SSL-inspection orchestrator —
+// pre-existing complexity predating the CDR integration (was gocognit 128 before CDR;
+// dropped to 112 after Phase 2b extracted runCDRStage out of here).  Further splitting
+// would change the keep-alive loop semantics and is out of scope for CDR work —
+// tracked as a day-2 refactor item in roadmap/roadmap-day2.md.
+func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
 	targetHost := r.Host
 	if _, _, err := net.SplitHostPort(targetHost); err != nil {
 		targetHost += ":443"
@@ -1279,6 +1298,18 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					fileBlockConn(clientTLS, hostOnly, req.URL.Path, reason, "polyglot")
 					break
 				}
+
+				// ── CDR (Sluice content disarm & reconstruction) ──
+				// Runs BEFORE ClamAV/YARA so downstream scanners see the
+				// sanitized bytes if CDR stripped active content.  No-op
+				// (single atomic load) when CDR is disabled.
+				cdrDecision := runCDRStage(r, req, body, scanBody, ct, ce, clientTLS, hostOnly, clientIP, id)
+				if cdrDecision.blocked {
+					origBody.Close()
+					break
+				}
+				body = cdrDecision.body
+				scanBody = cdrDecision.scanBody
 
 				// When remote scan service is active, delegate all scanning
 				// (ClamAV + YARA + DPI) in a single remote call.

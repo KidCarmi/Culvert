@@ -888,7 +888,12 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			logger.Printf("CDR: initial client dial failed, CDR effectively disabled: %v", err)
 		}
 
-		logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 2a: policy engine + instance registry loaded; proxy wiring in 2b)",
+		// Phase 2c: background Health poller — updates cached snapshot
+		// every 15s so /api/cdr/health is cheap and the GUI sees instance
+		// liveness without polling Sluice on every view.
+		startCDRHealthPoller(appLifecycleCtx)
+
+		logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 2c: client + policy engine + proxy wiring + admin API live)",
 			sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
 	}
 
