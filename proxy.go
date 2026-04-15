@@ -990,7 +990,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 // tlsSkipVerify disables upstream certificate validation for specific policy
 // rules (e.g. internal sites with self-signed certs); use with caution.
 //
-//nolint:gocognit,gocyclo,funlen // handleTunnelInspect is the SSL-inspection orchestrator —
+//nolint:gocognit,gocyclo,cyclop,funlen // handleTunnelInspect is the SSL-inspection orchestrator —
 // pre-existing complexity predating the CDR integration (was gocognit 128 before CDR;
 // dropped to 112 after Phase 2b extracted runCDRStage out of here).  Further splitting
 // would change the keep-alive loop semantics and is out of scope for CDR work —
