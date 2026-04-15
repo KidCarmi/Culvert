@@ -864,6 +864,25 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if cdrRuntimeEnabled() {
 		cdrCfg.Enabled = true
 	}
+
+	// Load persistent state unconditionally — the registry and policy
+	// store must know their on-disk paths even when CDR is currently
+	// disabled, otherwise Save() silently no-ops (see
+	// CDRInstanceRegistry.Save: path=="" returns nil) and any enroll /
+	// toggle done via the GUI lives only in RAM until the next restart
+	// wipes it.  Missing files are tolerated (fresh install); malformed
+	// files fail loudly so admins notice.
+	const (
+		cdrInstPath   = "/data/cdr_instances.json"
+		cdrPolicyPath = "/data/cdr_policies.json"
+	)
+	if err := cdrInstances.Load(cdrInstPath); err != nil {
+		logger.Printf("CDR: instance registry load failed: %v", err)
+	}
+	if err := cdrPolicyStore.Load(cdrPolicyPath); err != nil {
+		logger.Printf("CDR: policy store load failed: %v", err)
+	}
+
 	if cdrCfg.Enabled {
 		mode := cdrCfg.DefaultMode
 		if mode == "" {
@@ -876,18 +895,6 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		failSafe := "fail-open"
 		if !cdrCfg.CDRFailOpen() {
 			failSafe = "fail-closed"
-		}
-
-		// Load persistent state: enrolled Sluice instances + CDR policies.
-		// Missing files are tolerated (fresh install); malformed files fail
-		// startup fast so admins notice.
-		instPath := "/data/cdr_instances.json"
-		polPath := "/data/cdr_policies.json"
-		if err := cdrInstances.Load(instPath); err != nil {
-			logger.Printf("CDR: instance registry load failed: %v", err)
-		}
-		if err := cdrPolicyStore.Load(polPath); err != nil {
-			logger.Printf("CDR: policy store load failed: %v", err)
 		}
 
 		if err := initCDRClient(cdrCfg); err != nil {
