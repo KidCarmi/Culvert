@@ -158,7 +158,8 @@ func propagateServerRotation(members []*cdrPooledClient) {
 	}
 	if needReinit {
 		if err := initCDRClient(cdrActiveConfig()); err != nil {
-			logger.Printf("CDR: rotation re-init failed (existing pool still serving): %v", err)
+			logger.Printf("CDR: rotation re-init failed (existing pool still serving): %q",
+				sanitizeLog(err.Error()))
 		}
 	}
 }
@@ -243,8 +244,8 @@ func runRenewFor(pc *cdrPooledClient, inst *CDREnrolledInstance) {
 	// the old cert keeps working until its NotAfter, so traffic
 	// continues — next poll retries the reinit.
 	if err := initCDRClient(cdrActiveConfig()); err != nil {
-		logger.Printf("CDR: RenewCert %q: reinit failed (old cert still valid): %v",
-			sanitizeLog(pc.Name), err)
+		logger.Printf("CDR: RenewCert %q: reinit failed (old cert still valid): %q",
+			sanitizeLog(pc.Name), sanitizeLog(err.Error()))
 	}
 }
 
