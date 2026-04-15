@@ -130,6 +130,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cdr/config", apiCDRConfig)
 	mux.HandleFunc("/api/cdr/instances", apiCDRInstances)
 	mux.HandleFunc("/api/cdr/instances/enroll", apiCDREnroll)
+	mux.HandleFunc("/api/cdr/instances/revoke", apiCDRRevokeRPC)
 	mux.HandleFunc("/api/cdr/policies", apiCDRPolicies)
 	mux.HandleFunc("/api/cdr/health", apiCDRHealth)
 	mux.HandleFunc("/api/cdr/test", apiCDRTest)

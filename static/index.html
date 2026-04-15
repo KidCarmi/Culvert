@@ -3573,6 +3573,7 @@ document.addEventListener('click', e => {
     case 'cdrRefreshInstances': cdrRefreshInstances(); break;
     case 'cdrEnrollInstance':  cdrEnrollInstance(); break;
     case 'cdrRevokeInstance':  cdrRevokeInstance(arg); break;
+    case 'cdrRevokeInstanceRPC': cdrRevokeInstanceRPC(arg); break;
     case 'cdrSubmitPolicy':    cdrSubmitPolicy(); break;
     case 'cdrDeletePolicy':    cdrDeletePolicy(arg); break;
     case 'cdrTestPickFile':    cdrTestPickFile(); break;
@@ -6495,9 +6496,12 @@ function cdrRenderInstances() {
   tbody.innerHTML = list.map(i => {
     const fp = (i.serverFingerprint || '').slice(0, 12);
     const enrolled = i.enrolledAt ? new Date(i.enrolledAt).toLocaleString() : '—';
-    const actions = isAdmin
-      ? `<button class="btn sm danger" data-click="cdrRevokeInstance" data-arg="${escHtml(i.name)}">Revoke</button>`
-      : '';
+    const actions = isAdmin ? `
+        <button class="btn sm ghost" data-click="cdrRevokeInstance" data-arg="${escHtml(i.name)}"
+                title="Remove local registry entry only (Sluice cert stays valid until NotAfter)">Revoke (local)</button>
+        <button class="btn sm danger" data-click="cdrRevokeInstanceRPC" data-arg="${escHtml(i.name)}"
+                title="Calls Sluice.RevokeClient — cert is dead server-side immediately">Revoke on Sluice</button>
+      ` : '';
     return `<tr>
       <td><strong>${escHtml(i.name)}</strong></td>
       <td><code>${escHtml(i.endpoint)}</code></td>
@@ -6552,13 +6556,33 @@ async function cdrEnrollInstance() {
 
 async function cdrRevokeInstance(name) {
   if (!await confirmAction('Revoke Sluice instance?',
-    `Remove "${name}" from the pool and shred its mTLS bundle.  Re-enrollment will require a fresh token + fingerprint.`,
+    `Remove "${name}" from the pool and shred its mTLS bundle.  Re-enrollment will require a fresh token + fingerprint.  ` +
+    `NOTE: This does NOT tell Sluice to invalidate the cert — use "Revoke on Sluice" for that.`,
     'Revoke')) return;
   try {
     await api('/api/cdr/instances?name=' + encodeURIComponent(name), { method: 'DELETE' });
-    toast('Revoked ' + name, 'success');
+    toast('Revoked ' + name + ' (local only)', 'success');
     cdrLoadInstances();
   } catch (e) { toast('Revoke failed: ' + e.message, 'error'); }
+}
+
+// cdrRevokeInstanceRPC calls /api/cdr/instances/revoke which in turn
+// calls Sluice.RevokeClient — the client cert is dead server-side
+// immediately.  Requires at least one OTHER active Sluice instance
+// (Sluice refuses self-revocation).
+async function cdrRevokeInstanceRPC(name) {
+  if (!await confirmAction('Revoke on Sluice?',
+    `This tells Sluice to mark "${name}"'s client cert as revoked.  All future RPCs from that cert fail with PermissionDenied.  ` +
+    `Requires at least one OTHER enrolled Sluice instance to issue the call — Sluice refuses self-revocation.`,
+    'Revoke on Sluice')) return;
+  try {
+    await api('/api/cdr/instances/revoke', {
+      method: 'POST',
+      body: { name: name, reason: 'revoked via admin GUI' },
+    });
+    toast('Revoked ' + name + ' on Sluice', 'success');
+    cdrLoadInstances();
+  } catch (e) { toast('RPC revoke failed: ' + e.message, 'error'); }
 }
 
 // ── Policies tab ─────────────────────────────────────────────────────────

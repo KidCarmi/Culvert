@@ -59,6 +59,15 @@ type CDREnrolledInstance struct {
 	// instances are skipped by the client picker but kept in the registry
 	// so re-enabling doesn't require re-enrollment.
 	Enabled *bool `json:"enabled,omitempty"` // nil or true = active
+
+	// RotatedFingerprint + RotatedFingerprintUntilUnix track an active
+	// Sluice server-cert rotation.  Populated by the health poller from
+	// HealthResponse.rotated_fingerprint* fields.  Empty / 0 when no
+	// rotation is active.  When the window passes, the poller promotes
+	// RotatedFingerprint to ServerFingerprint and clears these two
+	// fields — the new cert is now the canonical pin.
+	RotatedFingerprint          string `json:"rotatedFingerprint,omitempty"`
+	RotatedFingerprintUntilUnix int64  `json:"rotatedFingerprintUntilUnix,omitempty"`
 }
 
 // IsEnabled mirrors policy.go's ruleIsEnabled — nil pointer = active.

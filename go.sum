@@ -1,7 +1,7 @@
 github.com/Azure/go-ntlmssp v0.1.0 h1:DjFo6YtWzNqNvQdrwEyr/e4nhU3vRiwenz5QX7sFz+A=
 github.com/Azure/go-ntlmssp v0.1.0/go.mod h1:NYqdhxd/8aAct/s4qSYZEerdPuH1liG2/X9DiVTbhpk=
-github.com/KidCarmi/Sluice v0.1.0 h1:HdQnst4FSriz+pb3o90ar8Q3LPmzFj8OUEAa/olVdHo=
-github.com/KidCarmi/Sluice v0.1.0/go.mod h1:j5EoYLp4wZUanBPOgzhxzwyIYD24Hb+KoNvBUSCuPlQ=
+github.com/KidCarmi/Sluice v0.2.0 h1:Wtcp/E+KTY5UTVjJ8Nx4FXhr9Z8QsOODoc9GwOaZDfM=
+github.com/KidCarmi/Sluice v0.2.0/go.mod h1:j5EoYLp4wZUanBPOgzhxzwyIYD24Hb+KoNvBUSCuPlQ=
 github.com/alexbrainman/sspi v0.0.0-20250919150558-7d374ff0d59e h1:4dAU9FXIyQktpoUAgOJK3OTFc/xug0PCXYCqU0FgDKI=
 github.com/alexbrainman/sspi v0.0.0-20250919150558-7d374ff0d59e/go.mod h1:cEWa1LVoE5KvSD9ONXsZrj0z6KqySlCCNKHlLzbqAt4=
 github.com/andybalholm/brotli v1.2.1 h1:R+f5xP285VArJDRgowrfb9DqL18yVK0gKAW/F+eTWro=

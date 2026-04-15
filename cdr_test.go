@@ -597,6 +597,128 @@ func TestBuildCDRTLSConfig_InvalidFingerprint(t *testing.T) {
 	}
 }
 
+// TestFingerprintMatches — constant-time comparator behaves correctly
+// for matching, mismatching, and zero-length inputs.
+func TestFingerprintMatches(t *testing.T) {
+	a := sha256.Sum256([]byte("hello"))
+	b := sha256.Sum256([]byte("world"))
+	if !fingerprintMatches(a[:], a[:]) {
+		t.Fatal("same digest must match")
+	}
+	if fingerprintMatches(a[:], b[:]) {
+		t.Fatal("different digests must not match")
+	}
+	if fingerprintMatches(a[:], nil) {
+		t.Fatal("nil secondary must not match")
+	}
+	if fingerprintMatches(nil, a[:]) {
+		t.Fatal("nil got must not match")
+	}
+}
+
+// TestDualPin_VerifyAcceptsEither — verify callback accepts either the
+// primary or secondary fingerprint, rejects all others.
+func TestDualPin_VerifyAcceptsEither(t *testing.T) {
+	primary := sha256.Sum256([]byte("primary"))
+	secondary := sha256.Sum256([]byte("secondary"))
+	other := sha256.Sum256([]byte("other"))
+
+	verify := verifyPinnedFingerprint(primary[:], secondary[:])
+
+	// Primary cert bytes: fake raw bytes whose sha256 happens to be
+	// `primary` — we can't construct arbitrary preimages, so test via
+	// the raw bytes directly: the verify fn hashes rawCerts[0], so
+	// a cert whose raw == "primary" should produce digest == primary.
+	if err := verify([][]byte{[]byte("primary")}, nil); err != nil {
+		t.Fatalf("primary must verify: %v", err)
+	}
+	if err := verify([][]byte{[]byte("secondary")}, nil); err != nil {
+		t.Fatalf("secondary must verify: %v", err)
+	}
+	if err := verify([][]byte{[]byte("other")}, nil); err == nil {
+		t.Fatal("unrelated cert must NOT verify")
+	}
+	_ = other // keep linter happy
+}
+
+// TestDualPin_EmptySecondaryIsSinglePin — when no secondary is provided,
+// behaviour is identical to single-pin: only primary accepted.
+func TestDualPin_EmptySecondaryIsSinglePin(t *testing.T) {
+	primary := sha256.Sum256([]byte("primary"))
+	verify := verifyPinnedFingerprint(primary[:], nil)
+
+	if err := verify([][]byte{[]byte("primary")}, nil); err != nil {
+		t.Fatalf("primary must verify: %v", err)
+	}
+	if err := verify([][]byte{[]byte("other")}, nil); err == nil {
+		t.Fatal("without secondary, only primary should verify")
+	}
+}
+
+// TestBuildCDRTLSConfig_SecondaryWithinWindow — when secondary is set
+// AND within the validity window, the resulting tls.Config's verify
+// callback accepts both digests.  We can't introspect the callback's
+// closure, so test behaviour indirectly by checking the config was
+// built without error.
+func TestBuildCDRTLSConfig_SecondaryWithinWindow(t *testing.T) {
+	primary := sha256.Sum256([]byte("a"))
+	secondary := sha256.Sum256([]byte("b"))
+	cfg, err := buildCDRTLSConfig(CDRClientConfig{
+		ServerFingerprintHx:    hex.EncodeToString(primary[:]),
+		SecondaryFingerprintHx: hex.EncodeToString(secondary[:]),
+		SecondaryValidUntil:    time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if cfg.VerifyPeerCertificate == nil {
+		t.Fatal("verify callback missing")
+	}
+	if err := cfg.VerifyPeerCertificate([][]byte{[]byte("a")}, nil); err != nil {
+		t.Fatalf("primary must verify: %v", err)
+	}
+	if err := cfg.VerifyPeerCertificate([][]byte{[]byte("b")}, nil); err != nil {
+		t.Fatalf("secondary must verify within window: %v", err)
+	}
+}
+
+// TestBuildCDRTLSConfig_SecondaryExpiredIgnored — expired secondary is
+// silently dropped; only primary accepted.
+func TestBuildCDRTLSConfig_SecondaryExpiredIgnored(t *testing.T) {
+	primary := sha256.Sum256([]byte("a"))
+	secondary := sha256.Sum256([]byte("b"))
+	cfg, err := buildCDRTLSConfig(CDRClientConfig{
+		ServerFingerprintHx:    hex.EncodeToString(primary[:]),
+		SecondaryFingerprintHx: hex.EncodeToString(secondary[:]),
+		SecondaryValidUntil:    time.Now().Add(-time.Minute), // expired
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if err := cfg.VerifyPeerCertificate([][]byte{[]byte("a")}, nil); err != nil {
+		t.Fatalf("primary must verify: %v", err)
+	}
+	if err := cfg.VerifyPeerCertificate([][]byte{[]byte("b")}, nil); err == nil {
+		t.Fatal("secondary past window must NOT verify")
+	}
+}
+
+// TestNormalisePinHex — covers colon stripping, prefix stripping, case.
+func TestNormalisePinHex(t *testing.T) {
+	cases := map[string]string{
+		"":                           "",
+		"  aB:cD  ":                  "abcd",
+		"sha256:aB:cD":               "abcd",
+		"SHA256:ABCD":                "abcd",
+		"abcd":                       "abcd",
+	}
+	for in, want := range cases {
+		if got := normalisePinHex(in); got != want {
+			t.Errorf("normalisePinHex(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // ─── Tests: Enroll ──────────────────────────────────────────────────────────
 
 func TestEnroll_ReturnsCertBundle(t *testing.T) {

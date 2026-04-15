@@ -47,6 +47,12 @@ type cdrPooledClient struct {
 	// Client-side enforcement uses min(cfg cap, profileCap) as a
 	// defence-in-depth check so oversize files never hit the wire.
 	profileCap atomic.Int64
+
+	// renewInFlight is a single-flight flag for the RenewCert poller.
+	// 0 = idle, 1 = renewal running — prevents a flapping poller from
+	// double-renewing in a tight window.  Cleared in the defer of the
+	// renewal goroutine.
+	renewInFlight atomic.Int32
 }
 
 // ProfileCap returns the cached per-profile size cap in bytes.  Zero when
@@ -352,6 +358,14 @@ func dialEnrolledInstance(inst *CDREnrolledInstance, cfg CDRConfig, oldPool []*c
 		CACertPEM:           ca,
 		ClientCertPEM:       cert,
 		ClientKeyPEM:        key,
+	}
+	// Carry forward an active dual-pin window so the dialled client
+	// accepts EITHER fingerprint until the grace window expires.
+	// Buildtlsconfig ignores a zero time / empty fingerprint, so
+	// unconditionally passing both fields is safe.
+	clientCfg.SecondaryFingerprintHx = inst.RotatedFingerprint
+	if inst.RotatedFingerprintUntilUnix > 0 {
+		clientCfg.SecondaryValidUntil = time.Unix(inst.RotatedFingerprintUntilUnix, 0)
 	}
 	if cfg.TimeoutSec > 0 {
 		clientCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second

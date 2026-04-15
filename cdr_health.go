@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,6 +97,156 @@ func probeCDRHealth(ctx context.Context) {
 	}
 	applyAggregateHealth(agg)
 	updateRegistryMetadataFromPool(members)
+	propagateServerRotation(members)
+
+	// Opportunistic auto-renewal: any instance whose client cert is
+	// within the renewal window gets a RenewCert call fired off in a
+	// background goroutine.  Single-flight prevents double-renewal
+	// when successive polls see the same expiry value.
+	maybeRenewExpiringClients(members)
+}
+
+// propagateServerRotation reads Health.rotated_fingerprint{,_until_unix}
+// for each pool member and mirrors it onto the registry entry so
+// subsequent dials accept EITHER pin.  Once the grace window has
+// passed, promotes RotatedFingerprint to ServerFingerprint and clears
+// the rotation fields, then triggers a reinit so the dialled client
+// drops the old pin.
+func propagateServerRotation(members []*cdrPooledClient) {
+	var needReinit bool
+	for _, pc := range members {
+		h, _ := pc.HealthSnapshot()
+		if h == nil {
+			continue
+		}
+		inst := cdrInstances.Get(pc.Name)
+		if inst == nil {
+			continue
+		}
+		newRotated := normalisePinHex(h.RotatedFingerprint)
+		// Case 1: grace window expired — promote + clear.
+		if inst.RotatedFingerprint != "" &&
+			inst.RotatedFingerprintUntilUnix > 0 &&
+			time.Now().Unix() >= inst.RotatedFingerprintUntilUnix {
+			// The fingerprint advertised as "primary" in Health is the
+			// new one.  Adopt it.
+			if newPrimary := normalisePinHex(h.ServerFingerprint); newPrimary != "" {
+				inst.ServerFingerprint = newPrimary
+			}
+			inst.RotatedFingerprint = ""
+			inst.RotatedFingerprintUntilUnix = 0
+			needReinit = true
+			if err := cdrInstances.Save(); err != nil {
+				logger.Printf("CDR: rotation promote: save registry: %v", err)
+			}
+			logger.Printf("CDR: server-cert rotation complete for %q — promoted new fingerprint", sanitizeLog(pc.Name))
+			continue
+		}
+		// Case 2: new rotation signalled.
+		if newRotated != "" &&
+			h.RotatedFingerprintUntilUnix > 0 &&
+			inst.RotatedFingerprint != newRotated {
+			inst.RotatedFingerprint = newRotated
+			inst.RotatedFingerprintUntilUnix = h.RotatedFingerprintUntilUnix
+			needReinit = true
+			if err := cdrInstances.Save(); err != nil {
+				logger.Printf("CDR: rotation stage: save registry: %v", err)
+			}
+			logger.Printf("CDR: server-cert rotation signalled by %q — dual-pin active until %s",
+				sanitizeLog(pc.Name), time.Unix(h.RotatedFingerprintUntilUnix, 0).UTC().Format(time.RFC3339))
+		}
+	}
+	if needReinit {
+		if err := initCDRClient(cdrActiveConfig()); err != nil {
+			logger.Printf("CDR: rotation re-init failed (existing pool still serving): %q",
+				sanitizeLog(err.Error()))
+		}
+	}
+}
+
+// cdrRenewWindow is the days-remaining threshold that triggers
+// auto-renewal.  30 days matches Sluice's recommendation — gives
+// plenty of headroom if a Sluice instance is briefly unreachable.
+const cdrRenewWindow = 30
+
+// maybeRenewExpiringClients scans pool members and kicks off a
+// RenewCert call for any whose client cert is within the renewal
+// window.  Each renewal runs in its own goroutine so a slow Sluice
+// doesn't stall the poller.
+func maybeRenewExpiringClients(members []*cdrPooledClient) {
+	for _, pc := range members {
+		inst := cdrInstances.Get(pc.Name)
+		if inst == nil || inst.ClientCertPath == "" {
+			continue
+		}
+		exp, err := loadCertExpiry(inst.ClientCertPath)
+		if err != nil {
+			continue // no data → no action; next poll retries
+		}
+		if daysUntil(exp) > cdrRenewWindow {
+			continue
+		}
+		if !pc.renewInFlight.CompareAndSwap(0, 1) {
+			continue // already renewing — skip silently
+		}
+		go runRenewFor(pc, inst)
+	}
+}
+
+// runRenewFor performs a single RenewCert RPC, persists the new
+// cert/key atomically, and re-initialises the pool so the fresh
+// credentials take effect for subsequent RPCs.  Errors are logged
+// but non-fatal — the old cert still works until its own NotAfter,
+// giving us up to cdrRenewWindow days of retries.
+func runRenewFor(pc *cdrPooledClient, inst *CDREnrolledInstance) {
+	defer pc.renewInFlight.Store(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := pc.Client.RenewCert(ctx, &pb.RenewCertRequest{})
+	if err != nil {
+		logger.Printf("CDR: RenewCert failed for %q (will retry next poll): %v",
+			sanitizeLog(pc.Name), err)
+		return
+	}
+	if len(resp.ClientCert) == 0 || len(resp.ClientKey) == 0 {
+		logger.Printf("CDR: RenewCert for %q returned empty material; skipping", sanitizeLog(pc.Name))
+		return
+	}
+
+	// Write the new bundle to disk atomically via tmp + rename, so a
+	// crash mid-rename leaves either the old or the new cert intact —
+	// never a half-written one.  Same 0600 perms as enrollment.
+	if werr := os.WriteFile(inst.ClientCertPath+".tmp", resp.ClientCert, 0o600); werr != nil {
+		logger.Printf("CDR: RenewCert %q: write cert tmp: %v", sanitizeLog(pc.Name), werr)
+		return
+	}
+	if werr := os.WriteFile(inst.ClientKeyPath+".tmp", resp.ClientKey, 0o600); werr != nil {
+		_ = os.Remove(inst.ClientCertPath + ".tmp")
+		logger.Printf("CDR: RenewCert %q: write key tmp: %v", sanitizeLog(pc.Name), werr)
+		return
+	}
+	if werr := os.Rename(inst.ClientCertPath+".tmp", inst.ClientCertPath); werr != nil {
+		logger.Printf("CDR: RenewCert %q: swap cert: %v", sanitizeLog(pc.Name), werr)
+		return
+	}
+	if werr := os.Rename(inst.ClientKeyPath+".tmp", inst.ClientKeyPath); werr != nil {
+		logger.Printf("CDR: RenewCert %q: swap key: %v", sanitizeLog(pc.Name), werr)
+		return
+	}
+
+	logger.Printf("CDR: RenewCert %q succeeded — days_until_expiry=%d",
+		sanitizeLog(pc.Name), resp.DaysUntilExpiry)
+
+	// Re-init the client so the next RPC uses the new cert.  The old
+	// *CDRClient (and its grpc.ClientConn) gets closed inside
+	// initCDRClient's pool.replace() path.  Failure here is non-fatal:
+	// the old cert keeps working until its NotAfter, so traffic
+	// continues — next poll retries the reinit.
+	if err := initCDRClient(cdrActiveConfig()); err != nil {
+		logger.Printf("CDR: RenewCert %q: reinit failed (old cert still valid): %q",
+			sanitizeLog(pc.Name), sanitizeLog(err.Error()))
+	}
 }
 
 // probeAllMembers fires one Health RPC per pool member and collects the
