@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
@@ -400,5 +401,60 @@ func TestShortFingerprint(t *testing.T) {
 	}
 	if got := shortFingerprint("ab"); got != "ab" {
 		t.Fatalf("short input should pass through, got %q", got)
+	}
+}
+
+// TestLoadCertExpiry_RejectsPathOutsideRoot is a CodeQL-grade check
+// — we only read certs under cdrCertsRoot, even if the registry is
+// tampered with to point elsewhere.
+func TestLoadCertExpiry_RejectsPathOutsideRoot(t *testing.T) {
+	_, err := loadCertExpiry("/etc/passwd")
+	if err == nil {
+		t.Fatal("expected path-outside-root rejection")
+	}
+	if !strings.Contains(err.Error(), "outside cdr certs root") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	_, err = loadCertExpiry("")
+	if err == nil {
+		t.Fatal("empty path should error")
+	}
+}
+
+func TestDaysUntil(t *testing.T) {
+	// Future timestamp — positive days.
+	if d := daysUntil(time.Now().Add(5 * 24 * time.Hour)); d < 4 || d > 5 {
+		t.Fatalf("days = %d, want ~5", d)
+	}
+	// Past timestamp — negative days.
+	if d := daysUntil(time.Now().Add(-5 * 24 * time.Hour)); d > -4 || d < -5 {
+		t.Fatalf("days = %d, want ~-5", d)
+	}
+}
+
+// TestCDRInstanceToMap verifies the JSON-flattening preserves the
+// fields the GUI reads.
+func TestCDRInstanceToMap(t *testing.T) {
+	enabled := true
+	inst := &CDREnrolledInstance{
+		Name:              "prod-01",
+		Endpoint:          "sluice:8443",
+		ServerFingerprint: "aabbccdd",
+		EnrolledAt:        time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		Version:           "v0.1.0",
+		Enabled:           &enabled,
+	}
+	got := cdrInstanceToMap(inst)
+	if got["name"] != "prod-01" {
+		t.Fatalf("name = %v", got["name"])
+	}
+	if got["enabled"] != true {
+		t.Fatalf("enabled = %v", got["enabled"])
+	}
+	if got["enrolledAt"] != "2025-01-01T00:00:00Z" {
+		t.Fatalf("enrolledAt = %v", got["enrolledAt"])
+	}
+	if _, ok := got["clientCertNotAfter"]; ok {
+		t.Fatal("cert-expiry fields must be added by the caller, not by the flattener")
 	}
 }

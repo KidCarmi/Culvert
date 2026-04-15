@@ -116,6 +116,53 @@ func TestSafeCDRSanitize_OversizeBodyIsSkipped(t *testing.T) {
 	}
 }
 
+// TestSafeCDRSanitize_ProfileCapTightensGate — when the Sluice profile
+// advertises a smaller cap than our config, we honour the smaller.
+// This is v0.2 Q5 defence-in-depth — stops files Sluice would reject
+// from hitting the wire.
+func TestSafeCDRSanitize_ProfileCapTightensGate(t *testing.T) {
+	resetCDRCountersAndCache(t)
+	freshPolicyStore(t)
+	c, stop := startFakeSluice(t, &fakeSluice{})
+	defer stop()
+	withActiveCDRClient(t, c, CDRConfig{Enabled: true, MaxFileSizeMB: 50})
+
+	// Seed a tight profile cap (1 MiB) on the pool member via the
+	// same setter the Health poller uses.
+	for _, pc := range cdrPool.List() {
+		pc.profileCap.Store(1 << 20)
+	}
+
+	body := make([]byte, 2<<20) // 2 MiB > 1 MiB profile cap
+	out := safeCDRSanitize(context.Background(), sampleReq("example.com"),
+		body, "application/pdf", sampleID, cdrActiveConfig())
+	if out.Status != "SKIPPED_OVERSIZE" {
+		t.Fatalf("expected SKIPPED_OVERSIZE when body > profile cap, got %+v", out)
+	}
+}
+
+// TestSafeCDRSanitize_ProfileCapLooserThanConfigDoesNotRelax — if the
+// profile cap is LARGER than our config, we stay at the config limit.
+// (i.e. we never silently widen the gate.)
+func TestSafeCDRSanitize_ProfileCapLooserThanConfigDoesNotRelax(t *testing.T) {
+	resetCDRCountersAndCache(t)
+	freshPolicyStore(t)
+	c, stop := startFakeSluice(t, &fakeSluice{})
+	defer stop()
+	withActiveCDRClient(t, c, CDRConfig{Enabled: true, MaxFileSizeMB: 1})
+
+	for _, pc := range cdrPool.List() {
+		pc.profileCap.Store(50 << 20) // profile allows 50 MiB
+	}
+
+	body := make([]byte, 2<<20) // 2 MiB > 1 MiB config cap
+	out := safeCDRSanitize(context.Background(), sampleReq("example.com"),
+		body, "application/pdf", sampleID, cdrActiveConfig())
+	if out.Status != "SKIPPED_OVERSIZE" {
+		t.Fatalf("config cap must still be enforced even with looser profile cap; got %+v", out)
+	}
+}
+
 // ─── Happy paths: CLEAN / SANITIZED / BLOCKED / UNSUPPORTED ────────────────
 
 func TestSafeCDRSanitize_CleanPath(t *testing.T) {
