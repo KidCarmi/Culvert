@@ -25,9 +25,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KidCarmi/Sluice/pkg/sluiceauth"
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
 
@@ -472,6 +471,132 @@ func apiCDRPolicies(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ─── /api/cdr/instances/revoke ─────────────────────────────────────────────
+
+// cdrRevokeRequest is the JSON body for POST /api/cdr/instances/revoke.
+// Distinct from the DELETE path on /api/cdr/instances which only prunes
+// our local registry — this one actually tells Sluice to refuse future
+// RPCs from the named instance's client cert.
+type cdrRevokeRequest struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// apiCDRRevokeRPC calls Sluice.RevokeClient for the instance with the
+// given name, targeting its CURRENT client cert's SHA-256 fingerprint.
+// Sluice v0.2 refuses self-revocation (InvalidArgument) — Culvert must
+// always call this from a DIFFERENT instance than the one being
+// revoked.  Phase 2d-1's pool + circuit breaker means we use ANY
+// other pooled client to make the call.
+//
+// On success the local registry entry is pruned so the GUI doesn't
+// show a dead reference — if the operator wants to re-enroll under
+// the same name later, they can.
+func apiCDRRevokeRPC(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var req cdrRevokeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	target := cdrInstances.Get(name)
+	if target == nil {
+		http.Error(w, "instance not found", http.StatusNotFound)
+		return
+	}
+
+	// Derive the target's fingerprint from its client cert on disk.
+	fp, err := loadCertFingerprint(target.ClientCertPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("load target cert: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Pick ANY other active pool member to make the call — Sluice
+	// refuses self-revocation, and even if it didn't, revoking from
+	// the same client we're about to invalidate mid-RPC is nonsense.
+	caller := cdrPickOtherClient(name)
+	if caller == nil {
+		http.Error(w, "no other active Sluice instance to issue revoke; enroll a second instance first",
+			http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if _, err := caller.RevokeClient(ctx, &pb.RevokeClientRequest{
+		Fingerprint: fp,
+		Reason:      strings.TrimSpace(req.Reason),
+	}); err != nil {
+		http.Error(w, fmt.Sprintf("RevokeClient: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	// Prune the local registry entry now that its cert is dead on
+	// the Sluice side.  shredCDRCerts removes the PEMs from disk.
+	_, _ = cdrInstances.RemoveByName(name)
+	shredCDRCerts(target)
+	if cdrActiveClient() != nil {
+		// Drop the pool entry by re-init so we stop trying to dial
+		// the revoked instance.
+		if rerr := initCDRClient(cdrActiveConfig()); rerr != nil {
+			logger.Printf("CDR: revoke %q succeeded but reinit failed: %q",
+				sanitizeLog(name), sanitizeLog(rerr.Error()))
+		}
+	}
+
+	auditEventDiff(r, "cdr.instance.revoke_rpc", name,
+		fmt.Sprintf("fingerprint=%s reason=%q", shortFingerprint(fp), sanitizeLog(req.Reason)),
+		target, nil)
+	saveConfigVersion(sessionAdmin(r), "cdr.instance.revoke_rpc")
+	jsonOK(w, map[string]any{"revoked": name, "fingerprint": fp})
+}
+
+// loadCertFingerprint reads a PEM cert and returns its SHA-256
+// hex fingerprint via the sluiceauth canonical helper.
+func loadCertFingerprint(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("empty path")
+	}
+	cleaned := filepath.Clean(path)
+	rootWithSep := cdrCertsRoot + string(filepath.Separator)
+	if !strings.HasPrefix(cleaned, rootWithSep) {
+		return "", fmt.Errorf("path outside cdr certs root")
+	}
+	data, err := os.ReadFile(cleaned)
+	if err != nil {
+		return "", err
+	}
+	return sluiceauth.Fingerprint(data)
+}
+
+// cdrPickOtherClient returns any active pooled client whose instance
+// name is NOT `exclude`.  Used by RevokeClient to find a caller that
+// isn't the target.  Returns nil when no such client exists.
+func cdrPickOtherClient(exclude string) *CDRClient {
+	for _, pc := range cdrPool.List() {
+		if pc.Name == exclude {
+			continue
+		}
+		if pc.Breaker.Allow() {
+			return pc.Client
+		}
+	}
+	return nil
+}
+
 // ─── /api/cdr/health ────────────────────────────────────────────────────────
 
 // apiCDRHealth is a live proxy to Sluice.Health.  Returns the most recent
@@ -676,10 +801,11 @@ func formatOptionalTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// loadCertExpiry reads a PEM-encoded cert and returns its NotAfter
-// time.  Returns an error when the file is missing or unparsable —
-// callers should treat "can't read" as "expiry unknown" rather than
-// a hard failure.
+// loadCertExpiry reads a PEM-encoded cert file and returns its NotAfter
+// timestamp via the sluiceauth canonical parser (v0.2).  Returns an
+// error when the path escapes cdrCertsRoot, the file is missing, or
+// the PEM doesn't parse.  Callers treat "can't read" as "expiry
+// unknown" rather than a hard failure.
 func loadCertExpiry(path string) (time.Time, error) {
 	if path == "" {
 		return time.Time{}, errors.New("empty path")
@@ -696,15 +822,7 @@ func loadCertExpiry(path string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return time.Time{}, errors.New("no PEM block")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return cert.NotAfter, nil
+	return sluiceauth.NotAfter(data)
 }
 
 // daysUntil returns integer days between now and t.  Negative when t

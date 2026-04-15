@@ -113,6 +113,14 @@ type CDRClientConfig struct {
 	ClientCertPEM       []byte        // from Enroll()
 	ClientKeyPEM        []byte        // from Enroll()
 	CACertPEM           []byte        // from Enroll()
+
+	// SecondaryFingerprintHx is the previous server-cert fingerprint
+	// accepted during a rotation grace window.  Populated from
+	// HealthResponse.rotated_fingerprint by the health poller and
+	// reused across reconnects until SecondaryValidUntil passes.
+	// Empty string = no active rotation (single-pin mode).
+	SecondaryFingerprintHx string
+	SecondaryValidUntil    time.Time
 }
 
 // CDRClient is a pooled mTLS gRPC client to a single Sluice instance.
@@ -260,6 +268,17 @@ func buildCDRTLSConfig(cfg CDRClientConfig) (*tls.Config, error) {
 		return nil, fmt.Errorf("server_fingerprint: expected %d bytes, got %d", sha256.Size, len(expected))
 	}
 
+	// Optional secondary fingerprint for Sluice server-cert rotation
+	// (Sluice v0.2 dual-pin grace window).  When populated and within
+	// the validity window, the verify callbacks accept EITHER digest
+	// so Culvert keeps talking during the operator's rotation window.
+	var secondary []byte
+	if sfp := normalisePinHex(cfg.SecondaryFingerprintHx); sfp != "" && time.Now().Before(cfg.SecondaryValidUntil) {
+		if raw, err := hex.DecodeString(sfp); err == nil && len(raw) == sha256.Size {
+			secondary = raw
+		}
+	}
+
 	// Build the pin-based tls.Config as a single struct literal.  The
 	// "InsecureSkipVerify: true" is required to bypass the stdlib's hostname
 	// + chain checks (Sluice is typically reached by IP in docker-compose and
@@ -275,67 +294,80 @@ func buildCDRTLSConfig(cfg CDRClientConfig) (*tls.Config, error) {
 	// is fine for our traffic profile (few long-lived connections) and
 	// closes the gap.  VerifyConnection provides a second layer that runs
 	// even if resumption is somehow enabled upstream.
-	verify := verifyPinnedFingerprint(expected)
 	return &tls.Config{
 		MinVersion:             tls.VersionTLS13,
 		Certificates:           clientCerts,
 		RootCAs:                rootPool,
 		InsecureSkipVerify:     true, // #nosec G402 -- pin-verified below (see VerifyPeerCertificate)
-		VerifyPeerCertificate:  verify,
-		VerifyConnection:       verifyConnectionWithFingerprint(expected),
+		VerifyPeerCertificate:  verifyPinnedFingerprint(expected, secondary),
+		VerifyConnection:       verifyConnectionWithFingerprint(expected, secondary),
 		SessionTicketsDisabled: true,
 		ClientSessionCache:     nil,
 	}, nil
 }
 
-// verifyConnectionWithFingerprint is a secondary check that runs on EVERY
-// handshake (including resumed sessions), closing the gosec G123 gap where
-// a resumed session could bypass VerifyPeerCertificate.
-func verifyConnectionWithFingerprint(expected []byte) func(cs tls.ConnectionState) error {
+// normalisePinHex strips common prefixes + colons + whitespace and
+// lowercases hex.  Empty string in → empty string out.
+func normalisePinHex(fp string) string {
+	s := strings.TrimSpace(fp)
+	s = strings.TrimPrefix(s, "sha256:")
+	s = strings.TrimPrefix(s, "SHA256:")
+	s = strings.ReplaceAll(s, ":", "")
+	return strings.ToLower(s)
+}
+
+// verifyConnectionWithFingerprint is the VerifyConnection hook — runs
+// on EVERY handshake (including resumed sessions), closing the gosec
+// G123 gap where a resumed session could bypass VerifyPeerCertificate.
+// Accepts EITHER the primary OR secondary fingerprint; secondary is
+// populated during a Sluice dual-pin rotation grace window.
+func verifyConnectionWithFingerprint(primary, secondary []byte) func(cs tls.ConnectionState) error {
 	return func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) == 0 {
 			atomic.AddInt64(&statCDRFingerprintFails, 1)
 			return errors.New("sluice server presented no certificate (resumed session)")
 		}
 		sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
-		var diff byte
-		for i := range sum {
-			diff |= sum[i] ^ expected[i]
+		if fingerprintMatches(sum[:], primary) || fingerprintMatches(sum[:], secondary) {
+			return nil
 		}
-		if diff != 0 {
-			atomic.AddInt64(&statCDRFingerprintFails, 1)
-			return fmt.Errorf("sluice server fingerprint mismatch on resumption (got sha256:%s)", hex.EncodeToString(sum[:]))
-		}
-		return nil
+		atomic.AddInt64(&statCDRFingerprintFails, 1)
+		return fmt.Errorf("sluice server fingerprint mismatch on resumption (got sha256:%s)", hex.EncodeToString(sum[:]))
 	}
 }
 
 // verifyPinnedFingerprint returns a VerifyPeerCertificate callback that
-// enforces a strict SHA-256 equality check on the leaf server certificate.
-// Callers MUST supply a 32-byte expected digest; the function is a no-op
-// for any other length (defensive — upstream validates).
-func verifyPinnedFingerprint(expected []byte) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+// enforces a strict SHA-256 equality check on the leaf server cert.
+// Accepts EITHER the primary OR secondary fingerprint; secondary is
+// non-empty only during a Sluice dual-pin rotation grace window.
+func verifyPinnedFingerprint(primary, secondary []byte) func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			atomic.AddInt64(&statCDRFingerprintFails, 1)
 			return errors.New("sluice server presented no certificate")
 		}
 		sum := sha256.Sum256(rawCerts[0])
-		if len(sum) != len(expected) {
-			atomic.AddInt64(&statCDRFingerprintFails, 1)
-			return errors.New("fingerprint length mismatch")
+		if fingerprintMatches(sum[:], primary) || fingerprintMatches(sum[:], secondary) {
+			return nil
 		}
-		// Constant-time compare to avoid timing side channels.
-		var diff byte
-		for i := range sum {
-			diff |= sum[i] ^ expected[i]
-		}
-		if diff != 0 {
-			atomic.AddInt64(&statCDRFingerprintFails, 1)
-			return fmt.Errorf("sluice server fingerprint mismatch (got sha256:%s)", hex.EncodeToString(sum[:]))
-		}
-		return nil
+		atomic.AddInt64(&statCDRFingerprintFails, 1)
+		return fmt.Errorf("sluice server fingerprint mismatch (got sha256:%s)", hex.EncodeToString(sum[:]))
 	}
+}
+
+// fingerprintMatches does a constant-time equality check between two
+// SHA-256 digests.  Returns false for any length mismatch (including
+// a nil `expected` slice — used by verify callbacks as "no secondary
+// pin configured").
+func fingerprintMatches(got, expected []byte) bool {
+	if len(expected) != sha256.Size || len(got) != sha256.Size {
+		return false
+	}
+	var diff byte
+	for i := range got {
+		diff |= got[i] ^ expected[i]
+	}
+	return diff == 0
 }
 
 // ─── Sanitize (streaming) ───────────────────────────────────────────────────
@@ -537,6 +569,37 @@ func (c *CDRClient) Health(ctx context.Context) (*pb.HealthResponse, error) {
 		defer cancel()
 	}
 	return c.stub.Health(ctx, &pb.HealthRequest{})
+}
+
+// RenewCert mints a fresh client cert over the existing mTLS channel.
+// The Sluice server reads the caller's current cert from peer auth info,
+// validates it against the CA + revocation set, then returns a new cert
+// with the same CN.  The old cert keeps working until its NotAfter —
+// Sluice does NOT revoke on renewal (would break in-flight streams).
+//
+// Culvert's health poller calls this when daysUntilExpiry < 30.  See
+// cdr_health.go:runRenewFor for the atomic persist path.
+func (c *CDRClient) RenewCert(ctx context.Context, req *pb.RenewCertRequest) (*pb.RenewCertResponse, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+	}
+	return c.stub.RenewCert(ctx, req)
+}
+
+// RevokeClient synchronously revokes a Sluice-side client cert by
+// SHA-256 fingerprint.  After it returns, the revoked client's next
+// RPC will fail with PermissionDenied.  Self-revocation is refused
+// by Sluice (InvalidArgument) — the caller must always target
+// ANOTHER client's fingerprint.
+func (c *CDRClient) RevokeClient(ctx context.Context, req *pb.RevokeClientRequest) (*pb.RevokeClientResponse, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+	}
+	return c.stub.RevokeClient(ctx, req)
 }
 
 // ─── Enroll ─────────────────────────────────────────────────────────────────

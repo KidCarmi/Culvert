@@ -3,7 +3,7 @@ module proxy
 go 1.25.9
 
 require (
-	github.com/KidCarmi/Sluice v0.1.0
+	github.com/KidCarmi/Sluice v0.2.0
 	github.com/andybalholm/brotli v1.2.1
 	github.com/crewjam/saml v0.5.1
 	github.com/dgraph-io/badger/v4 v4.9.1
