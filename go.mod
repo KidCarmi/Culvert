@@ -11,7 +11,7 @@ require (
 	github.com/goccy/go-yaml v1.19.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/klauspost/compress v1.18.0
+	github.com/klauspost/compress v1.18.5
 	github.com/oschwald/geoip2-golang v1.13.0
 	golang.org/x/crypto v0.50.0
 	golang.org/x/net v0.53.0
