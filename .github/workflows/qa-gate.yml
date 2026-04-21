@@ -220,7 +220,18 @@ jobs:
         # service. The production compose wires in clamav + an updater sidecar;
         # both are slow and their failure modes would mask application logic
         # issues. The proxy service is exercised here IN ISOLATION.
+        #
+        # The session secret is generated in the shell (OUTSIDE the heredoc)
+        # so the value is a real 64-hex-char string, not the literal text
+        # "$(openssl rand -hex 32)". A literal dollar-paren string would fail
+        # the hex decode in initSessionSecret() and panic on startup.
+        env:
+          # Exported here so docker compose's ${VAR} substitution picks it up.
+          CULVERT_SESSION_SECRET_VALUE: ""
         run: |
+          SESSION_SECRET=$(openssl rand -hex 32)
+          export CULVERT_SESSION_SECRET_VALUE="$SESSION_SECRET"
+
           cat > compose.qa.yml <<'YAML'
           services:
             proxy:
@@ -230,7 +241,7 @@ jobs:
                 - "19090:9090"
               environment:
                 - TZ=UTC
-                - CULVERT_SESSION_SECRET=$(openssl rand -hex 32)
+                - CULVERT_SESSION_SECRET=${CULVERT_SESSION_SECRET_VALUE}
               command: ["-port","8080","-ui-port","9090"]
               healthcheck:
                 test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
@@ -238,25 +249,41 @@ jobs:
                 timeout: 3s
                 retries: 12
           YAML
+
           docker compose -f compose.qa.yml up -d
-          # Wait for the healthcheck to flip to healthy. Fail fast if it does not
-          # become healthy within the retry budget — this is the boundary between
-          # "app issue" (would have failed in qa-logic) and "infra issue".
-          for i in $(seq 1 30); do
-            status=$(docker inspect --format '{{.State.Health.Status}}' $(docker compose -f compose.qa.yml ps -q proxy) 2>/dev/null || echo "starting")
-            echo "proxy health: $status"
-            if [ "$status" = "healthy" ]; then break; fi
+          # Wait for the healthcheck to flip to healthy. Fail fast if it does
+          # not become healthy within the retry budget — this is the boundary
+          # between "app issue" (would have failed in qa-logic) and "infra
+          # issue".
+          healthy=0
+          for i in $(seq 1 45); do
+            cid=$(docker compose -f compose.qa.yml ps -q proxy || true)
+            if [ -z "$cid" ]; then
+              echo "proxy container not yet created (attempt $i)"
+              sleep 2
+              continue
+            fi
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "starting")
+            echo "proxy health: $status (attempt $i)"
+            if [ "$status" = "healthy" ]; then healthy=1; break; fi
             if [ "$status" = "unhealthy" ]; then
-              echo "::error::proxy container unhealthy — infrastructure failure"
+              echo "::error::proxy container reported unhealthy — infrastructure failure"
               docker compose -f compose.qa.yml logs proxy
               exit 1
             fi
             sleep 2
           done
+          if [ "$healthy" -ne 1 ]; then
+            echo "::error::proxy container never became healthy within budget"
+            docker compose -f compose.qa.yml logs proxy
+            exit 1
+          fi
           # Smoke test the public endpoints to confirm they are reachable from
           # the runner (not just inside the container).
           curl -fsS http://127.0.0.1:18080/health || { echo "::error::HTTP health endpoint unreachable"; exit 1; }
-          curl -fsS -k https://127.0.0.1:19090/api/auth/status || echo "admin UI reachable (status code printed above)"
+          # Admin UI is HTTPS with a self-signed cert; treat non-2xx as OK as
+          # long as TLS handshakes and the connection completes.
+          curl -sS -k -o /dev/null -w "admin UI HTTP status: %{http_code}\n" https://127.0.0.1:19090/api/auth/status || true
 
       - name: Dump compose logs on failure
         if: failure()
@@ -339,9 +366,12 @@ jobs:
       - name: Build
         run: go build -o culvert .
 
-      - name: Example config must parse
-        run: ./culvert -validate-config -config config.example.yaml || \
-             echo "::notice::(-validate-config not yet implemented; contract check deferred)"
+      - name: Binary exists and is executable
+        # Sanity: guarantees the "Persisted users file schema" step below
+        # has a binary to exercise.  -validate-config is intentionally NOT
+        # invoked here because the CLI does not implement it yet; the test
+        # below covers the same contract at the unit level.
+        run: test -x ./culvert
 
       - name: Persisted users file schema is stable
         # We assert the published JSON schema — the tests in

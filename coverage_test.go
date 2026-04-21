@@ -140,7 +140,22 @@ func TestMaxScanBufferBytes(t *testing.T) {
 }
 
 func TestBodyNeedsBuffering_Disabled(t *testing.T) {
-	// Both scanners disabled — should return false
+	// bodyNeedsBuffering reads three package-global scanners. Under -count>1
+	// or -shuffle=on, ANY other test that enables a scanner leaks state
+	// into this one. Snapshot the globals, force the "disabled" state, then
+	// restore so order of execution doesn't matter.
+	origDPI := dpiScanner
+	origRemote := globalRemoteScanner
+	origSec := globalSecScanner
+	t.Cleanup(func() {
+		dpiScanner = origDPI
+		globalRemoteScanner = origRemote
+		globalSecScanner = origSec
+	})
+	dpiScanner = &ContentScanner{}                        // no patterns → Enabled() == false
+	globalRemoteScanner = &RemoteScanner{}                // zero value → Enabled() == false
+	globalSecScanner = &SecurityScanner{}
+
 	if bodyNeedsBuffering("text/html") {
 		t.Error("bodyNeedsBuffering should be false when scanners are disabled")
 	}
