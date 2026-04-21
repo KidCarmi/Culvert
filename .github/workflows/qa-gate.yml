@@ -132,7 +132,14 @@ jobs:
           # -shuffle=on picks a random order per package each run; -count=2
           # makes every test run twice in that order. Any test that leaks
           # state between invocations or depends on ordering will fail.
-          go test -race -count=2 -shuffle=on -timeout=20m ./...
+          #
+          # Note: we INTENTIONALLY do NOT add -race here. The race detector
+          # is covered by qa-logic. Combining -race with -shuffle=on on a
+          # shared CI runner roughly doubles wall time and surfaces timing
+          # sensitivity that is orthogonal to order-dependency — exactly
+          # the failure-isolation principle this gate enforces (one job,
+          # one layer, one failure class).
+          go test -count=2 -shuffle=on -timeout=20m ./...
 
   # ─── C. Gate-critical coverage floor ───────────────────────────────────────
   # Coverage floor is enforced on the SECURITY-SENSITIVE surface specifically.
