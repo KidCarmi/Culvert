@@ -1,0 +1,1209 @@
+package main
+
+import (
+	"encoding/csv"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+
+func apiBlocklist(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		entries := bl.ListWithSource()
+		// Sort by host for stable output.
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Host < entries[j].Host })
+
+		// Optional filters: ?q=keyword&source=manual|feed&limit=N&offset=N
+		q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+		sourceFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+		limitStr := r.URL.Query().Get("limit")
+		offsetStr := r.URL.Query().Get("offset")
+
+		// Apply filters.
+		filtered := entries
+		if q != "" || sourceFilter != "" {
+			filtered = make([]BlocklistEntry, 0, 64)
+			for _, e := range entries {
+				if q != "" && !strings.Contains(e.Host, q) {
+					continue
+				}
+				if sourceFilter != "" && e.Source != sourceFilter {
+					continue
+				}
+				filtered = append(filtered, e)
+			}
+		}
+		total := len(filtered)
+
+		// Apply offset.
+		offset := 0
+		if offsetStr != "" {
+			if v, err := strconv.Atoi(offsetStr); err == nil && v > 0 {
+				offset = v
+			}
+		}
+		if offset > total {
+			offset = total
+		}
+		filtered = filtered[offset:]
+
+		// Apply limit (default: all, for backward-compat with export/import).
+		limit := total
+		if limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v < limit {
+				limit = v
+			}
+		}
+
+		jsonOK(w, map[string]any{
+			"entries": filtered[:limit],
+			"count":   total,
+			"offset":  offset,
+			"limit":   limit,
+		})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Hosts []string `json:"hosts"` // support bulk add
+			Host  string   `json:"host"`  // single add
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		added := 0
+		if body.Host != "" {
+			body.Hosts = append(body.Hosts, body.Host)
+		}
+		for _, h := range body.Hosts {
+			h = strings.TrimSpace(h)
+			if h == "" {
+				continue
+			}
+			if len(h) > 253 {
+				logger.Printf("UI: blocklist entry too long, skipped: %q…", sanitizeLog(h[:50]))
+				continue
+			}
+			// Validate wildcard patterns (Finding 1.3).
+			if strings.Contains(h, "*") {
+				if !isValidBlocklistWildcard(h) {
+					http.Error(w, fmt.Sprintf("invalid wildcard pattern %q: only *.example.com format is allowed", sanitizeLog(h)), http.StatusBadRequest)
+					return
+				}
+			}
+			bl.AddManual(h)
+			logger.Printf("UI: blocked %q", sanitizeLog(h))
+			added++
+		}
+		bl.Save()
+		auditEvent(r, "blocklist.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
+		saveConfigVersion(sessionAdmin(r), "blocklist.add")
+		jsonOK(w, map[string]any{"added": added})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		host := strings.TrimSpace(r.URL.Query().Get("host"))
+		// F19: support bulk delete via JSON body with hosts array.
+		if host == "" {
+			var body struct {
+				Hosts []string `json:"hosts"`
+			}
+			if err := decodeJSON(r, &body); err == nil && len(body.Hosts) > 0 {
+				removed := 0
+				for _, h := range body.Hosts {
+					h = strings.TrimSpace(h)
+					if h == "" {
+						continue
+					}
+					bl.Remove(h)
+					removed++
+				}
+				bl.Save()
+				logger.Printf("UI: bulk unblocked %d host(s)", removed)
+				auditEvent(r, "blocklist.bulk_remove", fmt.Sprintf("%d host(s)", removed), "")
+				saveConfigVersion(sessionAdmin(r), "blocklist.bulk_remove")
+				jsonOK(w, map[string]any{"removed": removed})
+				return
+			}
+			http.Error(w, "missing host param or hosts body", http.StatusBadRequest)
+			return
+		}
+		bl.Remove(host)
+		bl.Save()
+		logger.Printf("UI: unblocked %q", sanitizeLog(host))
+		auditEvent(r, "blocklist.remove", host, "")
+		saveConfigVersion(sessionAdmin(r), "blocklist.remove")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET/POST /api/blocklist/mode — switch between "block" and "allow" modes.
+func apiBlocklistMode(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, map[string]string{"mode": bl.Mode()})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Mode string `json:"mode"` // "block" or "allow"
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Mode != "block" && body.Mode != "allow" {
+			http.Error(w, `mode must be "block" or "allow"`, http.StatusBadRequest)
+			return
+		}
+		bl.SetMode(body.Mode)
+		auditEvent(r, "blocklist.mode", body.Mode, "")
+		jsonOK(w, map[string]string{"mode": bl.Mode()})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ── Blocklist Feed ─────────────────────────────────────────────────────────
+
+// GET  /api/blocklist/feed  → current feed config + status
+// POST /api/blocklist/feed  → update feed URL and interval
+func apiBlocklistFeed(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		url, lastSync, count, interval := blFeedSyncer.Stats()
+		lastSyncStr := ""
+		if !lastSync.IsZero() {
+			lastSyncStr = lastSync.UTC().Format(time.RFC3339)
+		}
+		jsonOK(w, map[string]any{
+			"url":            url,
+			"interval":       interval.String(),
+			"last_sync":      lastSyncStr,
+			"imported_count": count,
+		})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			URL      string `json:"url"`
+			Interval string `json:"interval"` // e.g. "24h"
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.URL != "" && !strings.HasPrefix(body.URL, "http://") && !strings.HasPrefix(body.URL, "https://") {
+			http.Error(w, "feed URL must use http:// or https://", http.StatusBadRequest)
+			return
+		}
+		// SSRF guard: reject URLs pointing at private/loopback addresses.
+		if body.URL != "" {
+			u, err := url.Parse(body.URL)
+			if err != nil {
+				http.Error(w, "invalid feed URL", http.StatusBadRequest)
+				return
+			}
+			host := u.Hostname()
+			if err := isPrivateHost(host); err != nil {
+				http.Error(w, "feed URL must not point to private/loopback addresses", http.StatusBadRequest)
+				return
+			}
+		}
+		var interval time.Duration
+		if body.Interval == "" || body.Interval == "off" {
+			interval = 0 // disabled
+		} else if d, err := time.ParseDuration(body.Interval); err == nil && d > 0 {
+			interval = d
+		} else {
+			interval = blFeedDefaultInterval
+		}
+		blFeedSyncer.SetFeed(body.URL, interval)
+		auditEvent(r, "blocklist.feed.set", body.URL, "")
+  adminSettingsSave()
+		jsonOK(w, map[string]any{"ok": true, "url": body.URL, "interval": interval.String()})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST /api/blocklist/feed/sync → trigger immediate sync (synchronous with result)
+func apiBlocklistFeedSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	count, err := blFeedSyncer.Sync()
+	auditEvent(r, "blocklist.feed.sync", "", "")
+	if err != nil {
+		http.Error(w, "sync failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true, "domains_synced": count})
+}
+
+// GET /api/blocklist/exceptions        → list all exception hosts
+// POST /api/blocklist/exceptions       → add exception(s)  body: {host} or {hosts:[]}
+// DELETE /api/blocklist/exceptions?host=X → remove one exception
+func apiBlocklistExceptions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		hosts := bl.ListExceptions()
+		jsonOK(w, map[string]any{"hosts": hosts, "count": len(hosts)})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Host  string   `json:"host"`
+			Hosts []string `json:"hosts"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Host != "" {
+			body.Hosts = append(body.Hosts, body.Host)
+		}
+		added := 0
+		for _, h := range body.Hosts {
+			h = strings.TrimSpace(h)
+			if h == "" {
+				continue
+			}
+			if len(h) > 253 {
+				logger.Printf("UI: exception entry too long, skipped: %q…", sanitizeLog(h[:50]))
+				continue
+			}
+			bl.AddException(h)
+			logger.Printf("UI: blocklist exception added %q", sanitizeLog(h))
+			added++
+		}
+		auditEvent(r, "blocklist.exception.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
+		jsonOK(w, map[string]any{"ok": true, "added": added})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		host := strings.TrimSpace(r.URL.Query().Get("host"))
+		if host == "" {
+			http.Error(w, "host required", http.StatusBadRequest)
+			return
+		}
+		bl.RemoveException(host)
+		logger.Printf("UI: blocklist exception removed %q", sanitizeLog(host))
+		auditEvent(r, "blocklist.exception.remove", host, "")
+		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ── URL Categories ─────────────────────────────────────────────────────────
+
+// GET/POST/PUT/DELETE /api/urlcat
+// GET/POST/PUT/DELETE /api/category-groups - manage named category groups.
+func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"groups": globalCategoryGroups.List(),
+			"names":  globalCategoryGroups.Names(),
+		})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Name       string   `json:"name"`
+			Categories []string `json:"categories"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		g, err := globalCategoryGroups.Add(body.Name, body.Categories)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalCategoryGroups.Save()
+		auditEvent(r, "category-group.add", g.Name, fmt.Sprintf("%d categories", len(g.Categories)))
+		saveConfigVersion(sessionAdmin(r), "category-group.add")
+		jsonOK(w, map[string]any{"ok": true, "group": g})
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Name       string   `json:"name"`
+			Categories []string `json:"categories"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := globalCategoryGroups.Update(body.Name, body.Categories); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalCategoryGroups.Save()
+		auditEvent(r, "category-group.update", body.Name, fmt.Sprintf("%d categories", len(body.Categories)))
+		saveConfigVersion(sessionAdmin(r), "category-group.update")
+		jsonOK(w, map[string]any{"ok": true})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		// Referential integrity: block deletion if referenced by a policy rule.
+		for _, rule := range policyStore.List() {
+			if strings.EqualFold(rule.DestCategoryGroup, name) {
+				http.Error(w, fmt.Sprintf("cannot delete: group is referenced by policy rule %q", rule.Name), http.StatusConflict)
+				return
+			}
+		}
+		if err := globalCategoryGroups.Delete(name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalCategoryGroups.Save()
+		auditEvent(r, "category-group.delete", name, "")
+		saveConfigVersion(sessionAdmin(r), "category-group.delete")
+		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen // CRUD handler: one branch per HTTP method is intentional
+	switch r.Method {
+	case http.MethodGet:
+		all := catStore.All()
+		// Enrich with feed-backed flag so the GUI shows which categories
+		// have UT1 community feed domains behind them.
+		ut1Set := make(map[string]bool)
+		feedActive := communityDB != nil // only show badge if feed is actually configured
+		if feedActive {
+			for _, cat := range ut1CategoryMap {
+				ut1Set[strings.ToLower(cat)] = true
+			}
+		}
+		type enrichedCat struct {
+			CategoryEntry
+			FeedBacked bool `json:"feedBacked"`
+		}
+		enriched := make([]enrichedCat, len(all))
+		for i, e := range all {
+			enriched[i] = enrichedCat{
+				CategoryEntry: e,
+				FeedBacked:    ut1Set[strings.ToLower(e.Name)],
+			}
+		}
+		jsonOK(w, enriched)
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Name  string   `json:"name"`
+			Hosts []string `json:"hosts"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if len(body.Name) > 256 {
+			http.Error(w, "name must be 256 characters or fewer", http.StatusBadRequest)
+			return
+		}
+		if len(body.Hosts) > 10000 {
+			http.Error(w, "category cannot contain more than 10000 hosts", http.StatusBadRequest)
+			return
+		}
+		if err := catStore.Set(body.Name, body.Hosts, false); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEvent(r, "urlcat.create", body.Name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
+		jsonOK(w, map[string]string{"name": body.Name})
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name query param required", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Hosts []string `json:"hosts"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		// Preserve builtIn flag when updating.
+		all := catStore.All()
+		builtIn := false
+		for _, e := range all {
+			if strings.EqualFold(e.Name, name) {
+				builtIn = e.BuiltIn
+				break
+			}
+		}
+		if err := catStore.Set(name, body.Hosts, builtIn); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		auditEvent(r, "urlcat.update", name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
+		jsonOK(w, map[string]string{"name": name})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "name query param required", http.StatusBadRequest)
+			return
+		}
+		// Referential integrity: block deletion if the category is in a group.
+		if groupName, inGroup := globalCategoryGroups.ContainsCategory(name); inGroup {
+			http.Error(w, fmt.Sprintf("cannot delete: category is used by group %q", groupName), http.StatusConflict)
+			return
+		}
+		if err := catStore.Delete(name); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "urlcat.delete", name, "")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST/DELETE /api/urlcat/host — add or remove a single host from a category.
+func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Category string `json:"category"`
+			Host     string `json:"host"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Category == "" || body.Host == "" {
+			http.Error(w, "category and host are required", http.StatusBadRequest)
+			return
+		}
+		if err := catStore.AddHost(body.Category, body.Host); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "urlcat.host.add", body.Category, body.Host)
+		jsonOK(w, map[string]string{"category": body.Category, "host": body.Host})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		category := r.URL.Query().Get("category")
+		host := r.URL.Query().Get("host")
+		if category == "" || host == "" {
+			http.Error(w, "category and host query params required", http.StatusBadRequest)
+			return
+		}
+		if err := catStore.RemoveHost(category, host); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		auditEvent(r, "urlcat.host.remove", category, host)
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET /api/urlcat/lookup?host=example.com
+// Resolves a hostname to its URL category AND checks the blocklist.
+// Response: {"host":"…","category":"…","tier":"admin"|"community"|"none","matchedBy":"…","blocked":true|false,"blockSource":"manual"|"feed"|""}
+func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	host := r.URL.Query().Get("host")
+	if host == "" {
+		http.Error(w, "host query param required", http.StatusBadRequest)
+		return
+	}
+	category, tier, matchedBy := lookupHostCategory(host)
+	// Also check the blocklist so the lookup tool gives a complete picture.
+	blocked := bl.IsBlocked(host)
+	blockSource := ""
+	if blocked {
+		blockSource = "blocklist"
+	}
+	jsonOK(w, map[string]any{
+		"host":        host,
+		"category":    category,
+		"tier":        tier,
+		"matchedBy":   matchedBy,
+		"blocked":     blocked,
+		"blockSource": blockSource,
+	})
+}
+
+// configBackup is the portable JSON snapshot of all non-secret configuration.
+type configBackup struct {
+	Version             int           `json:"version"`
+	ExportedAt          string        `json:"exportedAt"`
+	BlocklistMode       string        `json:"blocklistMode"`
+	Blocklist           []string      `json:"blocklist"`
+	PolicyRules         []PolicyRule  `json:"policyRules"`
+	DefaultAction       string        `json:"defaultAction"`
+	RewriteRules        []RewriteRule `json:"rewriteRules"`
+	SSLBypass           []string      `json:"sslBypass"`
+	ContentScanPatterns []string      `json:"contentScanPatterns"`
+	FileBlockExtensions []string      `json:"fileBlockExtensions"`
+	IPFilterMode        string        `json:"ipFilterMode"`
+	IPList              []string      `json:"ipList"`
+	RateLimitRPM        int           `json:"rateLimitRPM"`
+	RateLimitExempt     []string      `json:"rateLimitExempt,omitempty"`
+	PACProxyHost        string        `json:"pacProxyHost,omitempty"`
+	PACProxyPort        int           `json:"pacProxyPort,omitempty"`
+	PACExclusions       []string      `json:"pacExclusions,omitempty"`
+	AlertWebhooks       []AlertWebhook  `json:"alertWebhooks,omitempty"`       // Finding 10.3
+	BlockPageHTML       string          `json:"blockPageHTML,omitempty"`        // Finding 10.3
+	UpstreamProxies     []UpstreamEntry `json:"upstreamProxies,omitempty"`     // Finding 10.3
+	ConnLimitEnabled    bool            `json:"connLimitEnabled,omitempty"`    // Finding 10.3
+	ConnLimitMaxPerIP   int             `json:"connLimitMaxPerIP,omitempty"`   // Finding 10.3
+}
+
+// GET /api/config/export — download a full configuration backup as JSON.
+func apiRewrite(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rules := rewriter.List()
+		jsonOK(w, map[string]any{"rules": rules, "count": len(rules)})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var rule RewriteRule
+		if err := decodeJSON(r, &rule); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		added := rewriter.Add(rule)
+		logger.Printf("UI: rewrite rule added id=%d host=%q", added.ID, sanitizeLog(added.Host))
+		auditEvent(r, "rewrite.add", fmt.Sprintf("id=%d host=%s", added.ID, added.Host), "")
+  adminSettingsSave()
+		saveConfigVersion(sessionAdmin(r), "rewrite.add")
+		jsonOK(w, added)
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		idStr := strings.TrimSpace(r.URL.Query().Get("id"))
+		var id int
+		if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+			http.Error(w, "missing or invalid id param", http.StatusBadRequest)
+			return
+		}
+		if !rewriter.RemoveByID(id) {
+			http.Error(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		logger.Printf("UI: rewrite rule removed id=%d", id)
+		auditEvent(r, "rewrite.remove", fmt.Sprintf("id=%d", id), "")
+  adminSettingsSave()
+		saveConfigVersion(sessionAdmin(r), "rewrite.remove")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ─── Policy API ───────────────────────────────────────────────────────────────
+
+// GET/POST/PUT/DELETE /api/policy — manage PBAC policy rules
+func apiPolicy(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rules := policyStore.List()
+		ver, updatedAt := policyStore.policyVersion()
+		jsonOK(w, map[string]any{
+			"rules":     rules,
+			"count":     len(rules),
+			"version":   ver,
+			"updatedAt": updatedAt,
+		})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var rule PolicyRule
+		if err := decodeJSON(r, &rule); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if rule.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		added := policyStore.Add(rule)
+		policyStore.Save()
+		logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
+		logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
+		logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
+		logger.Printf("UI: policy rule added priority=%s name=%q action=%q", logPriority, logName, logAction)
+		auditEventDiff(r, "policy.add", added.Name,
+			fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
+		saveConfigVersion(sessionAdmin(r), "policy.add")
+		jsonOK(w, added)
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
+		var priority int
+		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
+			http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
+			return
+		}
+		// Snapshot before state for diff.
+		var beforeRule *PolicyRule
+		for _, existing := range policyStore.List() {
+			if existing.Priority == priority {
+				r2 := existing
+				beforeRule = &r2
+				break
+			}
+		}
+		var rule PolicyRule
+		if err := decodeJSON(r, &rule); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := validatePolicyRule(rule, policyStore.List(), priority); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !policyStore.Update(priority, rule) {
+			http.Error(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		policyStore.Save()
+		logger.Printf("UI: policy rule updated priority=%d name=%q", priority, sanitizeLog(rule.Name))
+		auditEventDiff(r, "policy.update", rule.Name,
+			fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
+		saveConfigVersion(sessionAdmin(r), "policy.update")
+		jsonOK(w, map[string]any{"ok": true})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
+		// F19: support bulk delete via JSON body with priorities array.
+		if priorityStr == "" {
+			var body struct {
+				Priorities []int `json:"priorities"`
+			}
+			if err := decodeJSON(r, &body); err == nil && len(body.Priorities) > 0 {
+				deleted := 0
+				for _, p := range body.Priorities {
+					if policyStore.Delete(p) {
+						deleted++
+					}
+				}
+				policyStore.Save()
+				logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
+				auditEvent(r, "policy.bulk_delete", fmt.Sprintf("%d rule(s)", deleted), "")
+				saveConfigVersion(sessionAdmin(r), "policy.bulk_delete")
+				jsonOK(w, map[string]any{"deleted": deleted})
+				return
+			}
+			http.Error(w, "missing priority param or priorities body", http.StatusBadRequest)
+			return
+		}
+		var priority int
+		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
+			http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
+			return
+		}
+		// Snapshot before deletion.
+		var beforeRule *PolicyRule
+		for _, existing := range policyStore.List() {
+			if existing.Priority == priority {
+				r2 := existing
+				beforeRule = &r2
+				break
+			}
+		}
+		if !policyStore.Delete(priority) {
+			http.Error(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		policyStore.Save()
+		name := fmt.Sprintf("priority=%d", priority)
+		if beforeRule != nil {
+			name = beforeRule.Name
+		}
+		logger.Printf("UI: policy rule deleted priority=%d", priority)
+		auditEventDiff(r, "policy.delete", name, "", beforeRule, nil)
+		saveConfigVersion(sessionAdmin(r), "policy.delete")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// POST /api/policy/reorder — drag-and-drop priority reordering
+// Body: {"priorities": [3,1,2]} — ordered list of old priorities (new order)
+func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	var body struct {
+		Priorities []int `json:"priorities"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if !policyStore.Reorder(body.Priorities) {
+		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
+		return
+	}
+	policyStore.Save()
+	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
+	auditEvent(r, "policy.reorder", fmt.Sprintf("%d rules", len(body.Priorities)), "")
+	saveConfigVersion(sessionAdmin(r), "policy.reorder")
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// POST /api/policy/move — move a rule to first/last/before/after a target rule.
+// Builds a new ordered priority list and delegates to policyStore.Reorder().
+// Body: {"priority": 5, "position": "first|last|before|after", "targetName": "rule-name"}
+// findRuleIdxByName returns the index within priorities that corresponds to the
+// rule named targetName. Returns -1 if not found. Extracted to keep
+// buildMovedPriorities under the cyclop complexity threshold.
+func findRuleIdxByName(rules []PolicyRule, priorities []int, targetName string) int {
+	for i, pri := range priorities {
+		for j := range rules {
+			if rules[j].Priority == pri && strings.EqualFold(rules[j].Name, targetName) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// buildMovedPriorities computes a new priority ordering after moving a rule
+// identified by movePriority to the given position (first/last/before/after).
+// Returns the reordered priority slice or an error for unknown rule/target.
+func buildMovedPriorities(rules []PolicyRule, movePriority int, position, targetName string) ([]int, error) {
+	moveIdx := -1
+	for i := range rules {
+		if rules[i].Priority == movePriority {
+			moveIdx = i
+			break
+		}
+	}
+	if moveIdx < 0 {
+		return nil, fmt.Errorf("rule not found")
+	}
+
+	// Build priority list without the moved rule.
+	priorities := make([]int, 0, len(rules))
+	for i := range rules {
+		if i != moveIdx {
+			priorities = append(priorities, rules[i].Priority)
+		}
+	}
+	movePri := rules[moveIdx].Priority
+
+	switch position {
+	case "first":
+		return append([]int{movePri}, priorities...), nil
+	case "last":
+		return append(priorities, movePri), nil
+	case "before", "after":
+		targetIdx := findRuleIdxByName(rules, priorities, targetName)
+		if targetIdx < 0 {
+			return nil, fmt.Errorf("target rule not found: %s", strings.ReplaceAll(targetName, "\n", ""))
+		}
+		insertAt := targetIdx
+		if position == "after" {
+			insertAt++
+		}
+		newPri := make([]int, 0, len(rules))
+		newPri = append(newPri, priorities[:insertAt]...)
+		newPri = append(newPri, movePri)
+		newPri = append(newPri, priorities[insertAt:]...)
+		return newPri, nil
+	}
+	return nil, fmt.Errorf("invalid position")
+}
+
+func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	var body struct {
+		Priority   int    `json:"priority"`
+		Position   string `json:"position"`
+		TargetName string `json:"targetName"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.Position != "first" && body.Position != "last" &&
+		body.Position != "before" && body.Position != "after" {
+		http.Error(w, "position must be first, last, before, or after", http.StatusBadRequest)
+		return
+	}
+	if (body.Position == "before" || body.Position == "after") && body.TargetName == "" {
+		http.Error(w, "targetName is required for before/after", http.StatusBadRequest)
+		return
+	}
+	rules := policyStore.List()
+	if len(rules) == 0 {
+		http.Error(w, "no rules to reorder", http.StatusBadRequest)
+		return
+	}
+	priorities, err := buildMovedPriorities(rules, body.Priority, body.Position, body.TargetName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !policyStore.Reorder(priorities) {
+		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
+		return
+	}
+	policyStore.Save()
+	safePri := strings.ReplaceAll(fmt.Sprintf("%d", body.Priority), "\n", "")
+	safePos := sanitizeLog(body.Position)
+	logger.Printf("UI: policy rule pri=%s moved to %s", safePri, safePos)
+	auditEvent(r, "policy.move", fmt.Sprintf("pri=%s to %s", safePri, safePos), "")
+	saveConfigVersion(sessionAdmin(r), "policy.move")
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// POST /api/policy/test — evaluate policy rules against hypothetical inputs.
+// Useful for debugging: returns the first matching rule (or no-match) without
+// side-effects (hit counts are NOT incremented).
+// Body: {"sourceIP":"…","identity":"…","authSource":"…","groups":["…"],"host":"…"}
+func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	var body struct {
+		SourceIP   string   `json:"sourceIP"`
+		Identity   string   `json:"identity"`
+		AuthSource string   `json:"authSource"`
+		Groups     []string `json:"groups"`
+		Host       string   `json:"host"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.Host == "" {
+		http.Error(w, "host is required", http.StatusBadRequest)
+		return
+	}
+	if body.AuthSource == "" {
+		body.AuthSource = "unauth"
+	}
+
+	// Walk rules manually without incrementing hit counts.
+	rules := policyStore.List()
+	type ruleTrace struct {
+		Priority   int    `json:"priority"`
+		Name       string `json:"name"`
+		SkipReason string `json:"skipReason,omitempty"` // why this rule was skipped
+	}
+	var trace []ruleTrace
+	var matched *PolicyRule
+
+	for _, rule := range rules {
+		r2 := rule // copy
+		skip := ""
+		if !matchSource(&r2, body.SourceIP, body.Identity, body.AuthSource, body.Groups) {
+			skip = "source mismatch"
+		} else if !matchSchedule(r2.Schedule) {
+			skip = "schedule inactive"
+		} else if !matchDest(&r2, body.Host) {
+			skip = "destination mismatch"
+		}
+		trace = append(trace, ruleTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})
+		if skip == "" {
+			matched = &r2
+			break
+		}
+	}
+
+	// Enrich with category lookup so the admin can see how the host was categorised.
+	catName, catTier, catMatchedBy := lookupHostCategory(body.Host)
+	hostCategory := map[string]string{
+		"category":  catName,
+		"tier":      catTier,
+		"matchedBy": catMatchedBy,
+	}
+
+	if matched == nil {
+		defAction := defaultPolicyAction()
+		jsonOK(w, map[string]any{
+			"matched":       false,
+			"defaultAction": defAction,
+			"trace":         trace,
+			"hostCategory":  hostCategory,
+		})
+		return
+	}
+	jsonOK(w, map[string]any{
+		"matched":      true,
+		"rule":         matched,
+		"action":       matched.Action,
+		"trace":        trace,
+		"hostCategory": hostCategory,
+	})
+}
+
+// GET /api/ca-cert — download the Root CA certificate (PEM) for browser/OS import.
+// Also returns metadata: subject, expiry, SHA256 fingerprint.
+func apiDefaultAction(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction()})
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Action string `json:"action"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Action != "allow" && body.Action != "deny" {
+			http.Error(w, `action must be "allow" or "deny"`, http.StatusBadRequest)
+			return
+		}
+		setDefaultPolicyAction(body.Action)
+		auditEvent(r, "policy.default_action", body.Action, "")
+		adminSettingsSave()
+		saveConfigVersion(sessionAdmin(r), "policy.default_action")
+		logger.Printf("UI: default policy action set to %q", body.Action)
+		jsonOK(w, map[string]string{"defaultAction": defaultPolicyAction()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET /api/export?format=json|csv — download all logs
+func apiExport(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	entries := logGet()
+	format := r.URL.Query().Get("format")
+	ts := time.Now().Format("20060102-150405")
+
+	switch format {
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-%s.csv"`, ts))
+		cw := csv.NewWriter(w)
+		cw.Write([]string{"timestamp", "time", "ip", "identity", "method", "host", "status", "level", "rule_matched", "action_taken", "bytes_sent", "bytes_recv", "ssl_action"}) //nolint:errcheck // CSV write
+		for i := range entries {
+			e := &entries[i]
+			cw.Write([]string{ //nolint:errcheck // CSV write
+				fmt.Sprintf("%d", e.TS),
+				e.Time, e.IP, e.Identity, e.Method, e.Host, e.Status, e.Level,
+				e.RuleMatched, e.ActionTaken,
+				fmt.Sprintf("%d", e.BytesSent), fmt.Sprintf("%d", e.BytesRecv),
+				e.SSLAction,
+			})
+		}
+		cw.Flush()
+
+	default: // json
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="culvert-%s.json"`, ts))
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // HTTP response write
+			"exported": ts,
+			"count":    len(entries),
+			"logs":     entries,
+		})
+	}
+}
+
+// GET/POST/DELETE /api/ssl-bypass — manage the dynamic SSL bypass pattern list.
+//
+// Patterns are persisted to the file configured via ssl_bypass_file in
+// config.yaml (or -ssl-bypass-file flag). Changes take effect immediately
+// without a proxy restart.
+//
+//	GET    → {"patterns": [...], "count": N}
+//	POST   → {"pattern": "*.co.il"} or {"patterns": ["*.co.il","~^.*\.gov\.il$"]}
+//	DELETE → ?pattern=*.co.il
+func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		patterns := sslBypass.List()
+		jsonOK(w, map[string]any{"patterns": patterns, "count": len(patterns)})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var body struct {
+			Pattern  string   `json:"pattern"`
+			Patterns []string `json:"patterns"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.Pattern != "" {
+			body.Patterns = append(body.Patterns, body.Pattern)
+		}
+		added := 0
+		for _, p := range body.Patterns {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if err := sslBypass.Add(p); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			logger.Printf("UI: ssl bypass added %q", p)
+			added++
+		}
+		sslBypass.Save()
+		auditEvent(r, "ssl_bypass.add", fmt.Sprintf("%d pattern(s)", added),
+			strings.Join(body.Patterns, ", "))
+		saveConfigVersion(sessionAdmin(r), "ssl_bypass.add")
+		jsonOK(w, map[string]any{"added": added})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		pattern := strings.TrimSpace(r.URL.Query().Get("pattern"))
+		if pattern == "" {
+			http.Error(w, "missing pattern param", http.StatusBadRequest)
+			return
+		}
+		sslBypass.Remove(pattern)
+		sslBypass.Save()
+		logger.Printf("UI: ssl bypass removed %q", pattern)
+		auditEvent(r, "ssl_bypass.remove", pattern, "")
+		saveConfigVersion(sessionAdmin(r), "ssl_bypass.remove")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET/POST/DELETE /api/content-scan — manage DPI signature patterns
+//
+// These regex patterns are matched against decrypted HTTP response bodies
+// flowing through SSL Inspect tunnels.  Only text/* and application/json
+// responses are scanned; binary content is passed through unscanned.
+//
+//	GET    → {"patterns": [...], "count": N, "blocked_total": N}
+//	POST   → {"pattern": "evil-keyword"} or {"patterns": ["p1","p2"]}
+//	DELETE → ?pattern=evil-keyword
