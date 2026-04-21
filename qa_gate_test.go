@@ -437,6 +437,34 @@ func TestRateLimiter_ExemptAlwaysAllowed(t *testing.T) {
 	}
 }
 
+// ─── 9a. applyConfigSnapshot must leave all Blocklist maps usable ──────────
+
+// TestApplyConfigSnapshot_BlocklistMapsInitialised is a regression guard for
+// the production defect caught by qa-determinism: applyConfigSnapshot used
+// to construct &Blocklist{exact, wildcards} without the manual/exceptions
+// maps, so the next AddManual or AddException call on a Data Plane node
+// panicked with "assignment to entry in nil map".
+func TestApplyConfigSnapshot_BlocklistMapsInitialised(t *testing.T) {
+	origBL := bl
+	t.Cleanup(func() { bl = origBL })
+
+	applyConfigSnapshot(ConfigSnapshot{
+		Version:      1,
+		BlockedHosts: []string{"snapshot-regression.test"},
+	})
+
+	// These two calls would panic before the fix.
+	bl.AddManual("manual-regression.test")
+	bl.AddException("except-regression.test")
+
+	if !bl.IsBlocked("snapshot-regression.test") {
+		t.Fatal("snapshot host should be blocked after applyConfigSnapshot")
+	}
+	if !bl.IsBlocked("manual-regression.test") {
+		t.Fatal("manual host should be blocked after AddManual")
+	}
+}
+
 // ─── 10a. TOTP lockout — handler-level integration test ────────────────────
 
 // TestAPIAuthLogin_TOTPFailureRecordsLockout proves the high-severity defect
