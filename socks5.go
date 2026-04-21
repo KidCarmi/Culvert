@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -178,7 +179,9 @@ func handleSOCKS5(conn net.Conn) {
 	}
 
 	// ── Dial target ───────────────────────────────────────────────────────────
-	destConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	// Use Dialer.Control so the final connect() is rejected when DNS rebinding
+	// flipped the target to a private IP between isPrivateHost and here.
+	destConn, err := (&net.Dialer{Timeout: 10 * time.Second, Control: ssrfControl}).DialContext(context.Background(), "tcp", target)
 	if err != nil {
 		socks5Reply(conn, 0x05)
 		logger.Printf("SOCKS5 dial error %s: %v", target, err)

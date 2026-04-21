@@ -52,11 +52,31 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			secret := cfg.GetTOTPSecret(body.User)
-			if !verifyTOTP(secret, body.TOTP) {
+			lastCounter := cfg.GetTOTPLastCounter(body.User)
+			totpOK, matchedCounter := verifyTOTPReturnCounter(secret, body.TOTP, time.Now().Unix(), lastCounter)
+			if totpOK {
+				// Persist the matched counter to close the replay window for
+				// this step and all earlier steps within the skew tolerance.
+				cfg.SetTOTPLastCounter(body.User, matchedCounter)
+				cfg.SaveUIUsersFile() //nolint:errcheck — best-effort persist
+			} else {
 				// Try backup codes.
 				if !cfg.ConsumeBackupCode(body.User, body.TOTP) {
+					// TOTP failures MUST feed the lockout counter — otherwise
+					// an attacker who has (or guesses) a valid password can
+					// brute-force the 6-digit OTP (1M possibilities) with
+					// only the 300 ms delay as a barrier.
+					nowLocked := loginLimiter.RecordFailure(body.User)
 					cfg.SaveUIUsersFile() //nolint:errcheck — best-effort persist
+					auditEvent(r, "auth.totp.fail", body.User,
+						fmt.Sprintf("invalid TOTP, locked=%v, attempts_left=%d",
+							nowLocked, loginLimiter.AttemptsLeft(body.User)))
 					time.Sleep(300 * time.Millisecond)
+					if nowLocked {
+						_, secs := loginLimiter.Check(body.User)
+						http.Error(w, LockoutMsg(secs), http.StatusTooManyRequests)
+						return
+					}
 					http.Error(w, "Invalid TOTP code", http.StatusUnauthorized)
 					return
 				}

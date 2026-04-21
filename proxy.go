@@ -60,19 +60,39 @@ func defaultPolicyAction() string {
 	return "deny"
 }
 
-// privateCIDRs lists RFC 1918, loopback, link-local, and ULA ranges whose
-// addresses must never be forwarded to upstream servers in headers such as
-// X-Forwarded-For, preventing internal network topology leakage.
+// privateCIDRs lists every non-routable / internal-infrastructure range that
+// must never be exposed to an untrusted client (SSRF guard) and must never be
+// forwarded to upstream servers in headers such as X-Forwarded-For.
+//
+// Coverage goes beyond RFC 1918 on purpose: CGN (100.64/10) can reach a
+// carrier's management plane, 0.0.0.0/8 is treated as "this host" by many
+// stacks, and the IPv4-mapped IPv6 form ::ffff:0:0/96 is a known SSRF bypass
+// if only IPv4 ranges are listed. Multicast (224/4, ff00::/8) and reserved
+// (240/4) ranges are included because they have no legitimate proxy target.
 var privateCIDRs = func() []*net.IPNet {
 	ranges := []string{
+		"0.0.0.0/8",      // "this network" / local host on most stacks
 		"10.0.0.0/8",     // RFC 1918
+		"100.64.0.0/10",  // RFC 6598 — carrier-grade NAT
+		"127.0.0.0/8",    // loopback (IPv4)
+		"169.254.0.0/16", // link-local (IPv4) — AWS/GCP/Azure metadata lives here
 		"172.16.0.0/12",  // RFC 1918
 		"192.168.0.0/16", // RFC 1918
-		"127.0.0.0/8",    // loopback (IPv4)
-		"169.254.0.0/16", // link-local (IPv4)
+		"198.18.0.0/15",  // benchmark network
+		"224.0.0.0/4",    // multicast
+		"240.0.0.0/4",    // reserved / broadcast (includes 255.255.255.255)
+		"::/128",         // unspecified (IPv6)
 		"::1/128",        // loopback (IPv6)
+		"64:ff9b::/96",   // NAT64
+		"100::/64",       // discard prefix
 		"fc00::/7",       // ULA (IPv6)
 		"fe80::/10",      // link-local (IPv6)
+		"ff00::/8",       // multicast (IPv6)
+		// IPv4-mapped IPv6 (::ffff:0:0/96) is intentionally NOT listed here:
+		// net.IPNet.Contains calls To4() on the input, so a mapped address like
+		// ::ffff:127.0.0.1 is still caught by 127.0.0.0/8 above. Listing
+		// ::ffff:0:0/96 directly would match ALL IPv4 addresses (since Go
+		// stores IPv4 in 16-byte form by default) and block every destination.
 	}
 	nets := make([]*net.IPNet, 0, len(ranges))
 	for _, r := range ranges {
@@ -739,14 +759,42 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt64(&statBytesRecv, respBytes)
 }
 
-// sanitizeLog strips newlines, carriage returns, and tabs from s to prevent
-// log forging (CWE-117). Uses strings.ReplaceAll so that CodeQL recognises
-// the sanitisation (go/log-injection).
+// sanitizeLog strips newlines, carriage returns, tabs, and all other C0
+// control characters (plus DEL) from s to prevent log forging (CWE-117) and
+// terminal-escape-sequence injection (CWE-150) via ESC (0x1B) into log
+// viewers. Uses strings.ReplaceAll for the common newline/CR/tab cases so
+// CodeQL (go/log-injection) recognises the sanitiser; a single final pass
+// over remaining control bytes catches the rest with one allocation.
 func sanitizeLog(s string) string {
 	s = strings.ReplaceAll(s, "\n", "_")
 	s = strings.ReplaceAll(s, "\r", "_")
 	s = strings.ReplaceAll(s, "\t", "_")
-	return s
+	// Fast path: nothing else to scrub.
+	if !containsControl(s) {
+		return s
+	}
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		// C0 controls (0x00-0x1F) and DEL (0x7F). \n, \r, \t already replaced above.
+		if c < 0x20 || c == 0x7F {
+			b[i] = '_'
+			continue
+		}
+		b[i] = c
+	}
+	return string(b)
+}
+
+// containsControl reports whether s has any byte < 0x20 or == 0x7F.
+func containsControl(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7F {
+			return true
+		}
+	}
+	return false
 }
 
 // isSafeRedirectURL returns true only for absolute http/https URLs whose host
@@ -792,7 +840,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", host)
+	destConn, err := (&net.Dialer{Timeout: 10 * time.Second, Control: ssrfControl}).DialContext(r.Context(), "tcp", host)
 	if err != nil {
 		logger.Printf("WS dial error %q: %v", sanitizeLog(host), err)
 		if isDNSError(err) {
@@ -937,7 +985,9 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", r.Host)
+	// Use ssrfControl so the final connect() call is rejected if DNS rebinding
+	// flipped the target to a private IP between isPrivateHost and here.
+	destConn, err := (&net.Dialer{Timeout: 10 * time.Second, Control: ssrfControl}).DialContext(r.Context(), "tcp", r.Host)
 	if err != nil {
 		logger.Printf("tunnel dial error %q: %v", sanitizeLog(r.Host), err)
 		if isDNSError(err) {
@@ -1008,7 +1058,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	rawUpstream, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", targetHost)
+	// Use ssrfControl so the final connect() call is rejected if DNS rebinding
+	// flipped the target to a private IP between isPrivateHost and here.
+	rawUpstream, err := (&net.Dialer{Timeout: 10 * time.Second, Control: ssrfControl}).DialContext(r.Context(), "tcp", targetHost)
 	if err != nil {
 		logger.Printf("inspect dial error %q: %v", sanitizeLog(targetHost), err)
 		if isDNSError(err) {

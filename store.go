@@ -1039,10 +1039,11 @@ func (r UIRole) HasRole(min UIRole) bool {
 
 // uiAdminUser holds credentials and role for a single UI admin user.
 type uiAdminUser struct {
-	passHash    []byte
-	role        UIRole
-	totpSecret  string   // base32 TOTP secret; empty = TOTP not enrolled
-	backupCodes []string // bcrypt-hashed backup codes
+	passHash        []byte
+	role            UIRole
+	totpSecret      string   // base32 TOTP secret; empty = TOTP not enrolled
+	backupCodes     []string // bcrypt-hashed backup codes
+	totpLastCounter int64    // last successfully-used TOTP time-step; prevents replay
 }
 
 // UIUserInfo is the public (no hash) view of a UI admin user.
@@ -1281,11 +1282,12 @@ func (c *Config) SetUIUsersFile(path string) {
 
 // uiUserRecord is the on-disk representation of a UI admin user.
 type uiUserRecord struct {
-	Username    string   `json:"username"`
-	PassHash    string   `json:"pass_hash"`               // hex-encoded bcrypt hash
-	Role        UIRole   `json:"role"`
-	TOTPSecret  string   `json:"totp_secret,omitempty"`   // base32 TOTP secret
-	BackupCodes []string `json:"backup_codes,omitempty"`  // bcrypt-hashed one-time codes
+	Username        string   `json:"username"`
+	PassHash        string   `json:"pass_hash"`                    // hex-encoded bcrypt hash
+	Role            UIRole   `json:"role"`
+	TOTPSecret      string   `json:"totp_secret,omitempty"`        // base32 TOTP secret
+	BackupCodes     []string `json:"backup_codes,omitempty"`       // bcrypt-hashed one-time codes
+	TOTPLastCounter int64    `json:"totp_last_counter,omitempty"`  // last successfully-used TOTP step (replay protection)
 }
 
 // uiUsersFileEnvelope is the on-disk JSON structure that wraps the user
@@ -1331,10 +1333,11 @@ func (c *Config) LoadUIUsersFile() error {
 			continue
 		}
 		c.uiUsers[rec.Username] = &uiAdminUser{
-			passHash:    hash,
-			role:        rec.Role,
-			totpSecret:  rec.TOTPSecret,
-			backupCodes: rec.BackupCodes,
+			passHash:        hash,
+			role:            rec.Role,
+			totpSecret:      rec.TOTPSecret,
+			backupCodes:     rec.BackupCodes,
+			totpLastCounter: rec.TOTPLastCounter,
 		}
 		// Keep legacy single-user in sync with the first admin found.
 		if rec.Role == RoleAdmin && c.user == "" {
@@ -1356,11 +1359,12 @@ func (c *Config) SaveUIUsersFile() error {
 	}
 	for name, u := range c.uiUsers {
 		env.Users = append(env.Users, uiUserRecord{
-			Username:    name,
-			PassHash:    hex.EncodeToString(u.passHash),
-			Role:        u.role,
-			TOTPSecret:  u.totpSecret,
-			BackupCodes: u.backupCodes,
+			Username:        name,
+			PassHash:        hex.EncodeToString(u.passHash),
+			Role:            u.role,
+			TOTPSecret:      u.totpSecret,
+			BackupCodes:     u.backupCodes,
+			TOTPLastCounter: u.totpLastCounter,
 		})
 	}
 	c.mu.RUnlock()
@@ -1456,6 +1460,34 @@ func (c *Config) ClearTOTP(username string) bool {
 	}
 	u.totpSecret = ""
 	u.backupCodes = nil
+	return true
+}
+
+// GetTOTPLastCounter returns the last successfully-used TOTP time-step for a
+// user (0 if none). Callers use this to detect replay of an OTP within the
+// ±skew window (RFC 6238 §5.2).
+func (c *Config) GetTOTPLastCounter(username string) int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if u, ok := c.uiUsers[username]; ok {
+		return u.totpLastCounter
+	}
+	return 0
+}
+
+// SetTOTPLastCounter records the TOTP time-step just consumed by a successful
+// validation. Subsequent codes whose matched counter is <= this value are
+// rejected as replays. Returns false if the user does not exist.
+func (c *Config) SetTOTPLastCounter(username string, counter int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	u, ok := c.uiUsers[username]
+	if !ok {
+		return false
+	}
+	if counter > u.totpLastCounter {
+		u.totpLastCounter = counter
+	}
 	return true
 }
 
