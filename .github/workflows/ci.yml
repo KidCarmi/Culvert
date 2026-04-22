@@ -56,10 +56,72 @@ jobs:
         with:
           threshold: "60"
 
+  smoke:
+    name: Compose Smoke Test
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Build proxy image from branch source
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml build proxy
+
+      - name: Start proxy (no deps — skips ClamAV and updater)
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-deps proxy
+
+      - name: Wait for healthy (fail fast on container exit)
+        timeout-minutes: 2
+        run: |
+          for i in $(seq 1 24); do
+            STATE=$(docker inspect --format='{{.State.Status}}' culvert 2>/dev/null || echo "missing")
+            if [ "$STATE" != "running" ]; then
+              echo "FAIL: container is not running (state=$STATE)"
+              exit 1
+            fi
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' culvert 2>/dev/null || echo "unknown")
+            echo "Attempt $i/24: container=$STATE health=$STATUS"
+            if [ "$STATUS" = "healthy" ]; then
+              echo "Container is healthy."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "FAIL: container did not become healthy within 120s"
+          exit 1
+
+      - name: Health check (/health — liveness)
+        run: |
+          curl -sf http://localhost:8080/health | grep -q '"status":"ok"'
+
+      - name: Readiness check (/ready — subsystems up, 3 attempts)
+        run: |
+          for i in 1 2 3; do
+            if curl -sf http://localhost:8080/ready 2>/dev/null | grep -q '"status":"ready"'; then
+              echo "Ready check passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: not ready yet, waiting 2s..."
+            sleep 2
+          done
+          echo "FAIL: /ready did not return ready after 3 attempts"
+          exit 1
+
+      - name: Diagnostics and teardown
+        if: always()
+        run: |
+          echo "=== docker compose ps ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml ps
+          echo "=== docker compose logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --no-color proxy
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
+
   docker:
     name: Docker Build & Publish
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, smoke]
 
     permissions:
       contents: read
