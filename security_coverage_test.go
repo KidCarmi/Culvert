@@ -3,6 +3,11 @@ package main
 // security_coverage_test.go — unit tests for security-critical paths that
 // were previously at 0% coverage: AlertStore CRUD, webhook delivery,
 // selfSignedTLS, TOTP store operations, and verifyTOTP.
+//
+// Helpers:
+//   resetAlertDedup — clears the package-global alert dedup map so tests
+//   that re-run (under -count>1 or -shuffle=on) aren't suppressed by the
+//   30-second dedup window.
 
 import (
 	"crypto/tls"
@@ -14,6 +19,17 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+// resetAlertDedup wipes the dedup state so two back-to-back invocations of
+// fireAlert with the same (event, detail) both go through. Required for
+// deterministic alert tests.
+func resetAlertDedup() {
+	alertDedupMu.Lock()
+	for k := range alertDedupMap {
+		delete(alertDedupMap, k)
+	}
+	alertDedupMu.Unlock()
+}
 
 // ── AlertStore ────────────────────────────────────────────────────────────────
 
@@ -104,6 +120,13 @@ func TestAlertStore_AddListDelete(t *testing.T) {
 }
 
 func TestFireAlert_EnabledAndDisabled(t *testing.T) {
+	// fireAlert dedupes on event+detail for 30 s via the package-global
+	// alertDedupMap. Under -count>1 or -shuffle=on the second run would be
+	// silently suppressed. Reset the dedup state up front (and on cleanup)
+	// so this test is deterministic regardless of run order.
+	resetAlertDedup()
+	t.Cleanup(resetAlertDedup)
+
 	// Use a test HTTP server as the webhook target.
 	received := make(chan string, 5)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +198,10 @@ func TestFireAlert_EnabledAndDisabled(t *testing.T) {
 }
 
 func TestFireAlert_WildcardEvent(t *testing.T) {
+	// See TestFireAlert_EnabledAndDisabled — same dedup concern.
+	resetAlertDedup()
+	t.Cleanup(resetAlertDedup)
+
 	received := make(chan struct{}, 5)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received <- struct{}{}

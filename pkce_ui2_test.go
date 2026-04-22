@@ -101,6 +101,8 @@ func TestPKCEStore_Set_Eviction(t *testing.T) {
 // ─── apiSetupComplete ─────────────────────────────────────────────────────────
 
 func TestAPISetupComplete_AlreadySetup(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
 	// Set auth so AuthEnabled() = true
 	_ = cfg.SetAuth("setupuser", "setuppass123")
 	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
@@ -115,6 +117,8 @@ func TestAPISetupComplete_AlreadySetup(t *testing.T) {
 }
 
 func TestAPISetupComplete_BadJSON(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
 	// Make sure auth is not enabled
 	_ = cfg.SetAuth("", "")
 
@@ -126,6 +130,8 @@ func TestAPISetupComplete_BadJSON(t *testing.T) {
 }
 
 func TestAPISetupComplete_EmptyUser(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "")
 
 	w := httptest.NewRecorder()

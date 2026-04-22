@@ -320,6 +320,22 @@ func TestConfigImportReplaceMode(t *testing.T) {
 // ─── Finding 5.2: User deletion revokes sessions ───────────────────────────
 
 func TestRevokeUserSessions(t *testing.T) {
+	// sessionRevoked is a package-global; under -count=2 or -shuffle=on this
+	// test's own RevokeUser("deleteme") call leaks into the next run and
+	// causes the "valid before revocation" assertion to fail. Tear down the
+	// revocation entries we create, before AND after, so the test is
+	// deterministic regardless of run order.
+	sessionRevoked.mu.Lock()
+	delete(sessionRevoked.users, "deleteme")
+	delete(sessionRevoked.users, "otheruser")
+	sessionRevoked.mu.Unlock()
+	t.Cleanup(func() {
+		sessionRevoked.mu.Lock()
+		delete(sessionRevoked.users, "deleteme")
+		delete(sessionRevoked.users, "otheruser")
+		sessionRevoked.mu.Unlock()
+	})
+
 	// Create a valid session for a user.
 	s := &Session{
 		Sub:  "deleteme",

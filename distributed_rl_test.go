@@ -501,6 +501,23 @@ func TestOTLPHistogramMetric(t *testing.T) {
 }
 
 func TestOTLPRuleMetrics_Empty(t *testing.T) {
+	// ruleMet is a package global populated by every test that exercises the
+	// policy engine. Under -count>1 or -shuffle=on, a previously-registered
+	// rule bleeds into this test and the "0 rules" assertion fires. Snapshot
+	// and clear ruleMet for the duration of the test, then restore.
+	ruleMet.mu.Lock()
+	savedHits := ruleMet.hits
+	savedOrder := ruleMet.order
+	ruleMet.hits = map[string]*int64{}
+	ruleMet.order = nil
+	ruleMet.mu.Unlock()
+	t.Cleanup(func() {
+		ruleMet.mu.Lock()
+		ruleMet.hits = savedHits
+		ruleMet.order = savedOrder
+		ruleMet.mu.Unlock()
+	})
+
 	now := "1234567890"
 	metrics := otlpRuleMetrics(now)
 	// With no rules registered, should return empty slice.

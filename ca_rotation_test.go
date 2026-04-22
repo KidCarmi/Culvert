@@ -128,6 +128,19 @@ func TestConfigSnapshot_CAFingerprint(t *testing.T) {
 // ── DP CA Rotation Detection ─────────────────────────────────────────────────
 
 func TestApplyConfigSnapshot_CARotationDetection(t *testing.T) {
+	// Save and restore package globals that applyConfigSnapshot mutates so
+	// this test does NOT leak into sibling tests (qa-determinism catches the
+	// cascade: AddManual on the half-initialised Blocklist left behind here
+	// used to panic with "assignment to entry in nil map").
+	origBL, origIPF, origRL := bl, ipf, rl
+	origCert, _ := lastSeenCAFingerprint.Load().(string)
+	t.Cleanup(func() {
+		bl = origBL
+		ipf = origIPF
+		rl = origRL
+		lastSeenCAFingerprint.Store(origCert)
+	})
+
 	// Reset state.
 	lastSeenCAFingerprint.Store("")
 

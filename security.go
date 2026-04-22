@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/idna"
@@ -39,29 +40,47 @@ func normalizeHost(host string) string {
 
 // ─── SSRF-safe dialer ────────────────────────────────────────────────────────
 
-// ssrfSafeDialContext is a net.Dialer.DialContext replacement that resolves
-// DNS and rejects connections to private/internal IP addresses. Use as the
-// DialContext in an http.Transport to prevent SSRF at the network level,
-// independent of URL validation.
+// ssrfControl rejects a connection when the resolved peer address falls into
+// any private/internal range. Installed as net.Dialer.Control, it runs AFTER
+// DNS resolution and IMMEDIATELY BEFORE connect(2), closing the TOCTOU window
+// that a pre-flight LookupHost leaves open (DNS-rebinding: public IP on the
+// pre-check, private IP on the real dial).
+//
+// address is the resolved IP:port that the kernel is about to connect to
+// (never a hostname at this layer), so net.ParseIP always succeeds for a
+// well-formed stack. We still fail-closed on any parse anomaly.
+func ssrfControl(network, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("ssrf control: invalid address %q: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("ssrf control: unexpected non-IP %q in dial", host)
+	}
+	if isPrivateIP(ip) {
+		return fmt.Errorf("ssrf control: refusing %s dial to private address %s", network, ip)
+	}
+	return nil
+}
+
+// ssrfSafeDialer is the canonical SSRF-safe dialer. It resolves DNS once, then
+// Go applies ssrfControl to every resolved address the dialer attempts.
+var ssrfSafeDialer = &net.Dialer{
+	Timeout: 15 * time.Second,
+	Control: ssrfControl,
+}
+
+// ssrfSafeDialContext is a net.Dialer.DialContext replacement that rejects
+// connections to private/internal IPs. Use as the DialContext in an
+// http.Transport to prevent SSRF at the network level, independent of URL
+// validation. Safe against DNS rebinding because the check runs on the
+// post-resolution address that will actually be connected.
 //
 // Declared as a variable so that tests can temporarily replace it with a
 // plain dialer that permits localhost webhook targets.
 var ssrfSafeDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, fmt.Errorf("ssrf dial: invalid address %q: %w", addr, err)
-	}
-	ips, err := net.DefaultResolver.LookupHost(ctx, host)
-	if err != nil {
-		return nil, fmt.Errorf("ssrf dial: DNS resolution failed for %s: %w", host, err)
-	}
-	for _, ipStr := range ips {
-		if ip := net.ParseIP(ipStr); ip != nil && isPrivateIP(ip) {
-			return nil, fmt.Errorf("ssrf dial: %s resolves to private address %s", host, ipStr)
-		}
-	}
-	// All resolved IPs are public — dial the original address.
-	return (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, network, net.JoinHostPort(host, port))
+	return ssrfSafeDialer.DialContext(ctx, network, addr)
 }
 
 // ─── DNS result cache for SSRF checks ────────────────────────────────────────

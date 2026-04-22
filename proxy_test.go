@@ -21,6 +21,15 @@ func setupProxyTest(t *testing.T) {
 	rl = newRateLimiter()
 	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	plugins = nil
+	// Also reset policy state — callers like TestHandleRequest_DefaultDeny_NoRules
+	// rely on "no rules" AND "default deny" being the post-setup state. Earlier
+	// tests (e.g. TestHandleRequest_AllowedByRule, apiDefaultAction handlers)
+	// can leak rules or flip the default action to "allow"; without resetting
+	// here, the flake only shows up under -count>1 / -shuffle=on.
+	policyStore.mu.Lock()
+	policyStore.rules = nil
+	policyStore.mu.Unlock()
+	setDefaultPolicyAction("deny")
 }
 
 // makeRequest builds a request that looks like a browser→proxy HTTP request.
@@ -491,8 +500,18 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 func startTestProxy(t *testing.T) *url.URL {
 	t.Helper()
 	setupProxyTest(t)
+	// Flip to allow for the duration of this test only — restore on cleanup
+	// so a subsequent sibling test (under -count>1 / -shuffle=on) doesn't
+	// inherit the permissive default and regress default-deny assertions.
+	prevAction := defaultPolicyAction()
 	setDefaultPolicyAction("allow")
 	policyStore.rules = nil
+	t.Cleanup(func() {
+		setDefaultPolicyAction(prevAction)
+		policyStore.mu.Lock()
+		policyStore.rules = nil
+		policyStore.mu.Unlock()
+	})
 
 	// Must not use http.ServeMux: it 301-redirects CONNECT requests (empty path).
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

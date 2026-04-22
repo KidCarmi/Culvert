@@ -1319,8 +1319,16 @@ var caRotationNotify = make(chan struct{}, 1)
 
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
 func applyConfigSnapshot(snap ConfigSnapshot) {
-	// Blocklist.
-	newBL := &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+	// Blocklist. All four maps MUST be pre-allocated — AddManual/AddException
+	// on a Data Plane node after a snapshot push would otherwise panic with
+	// "assignment to entry in nil map" (production defect caught by the
+	// qa-determinism gate).
+	newBL := &Blocklist{
+		exact:      map[string]bool{},
+		wildcards:  map[string]bool{},
+		manual:     map[string]bool{},
+		exceptions: map[string]bool{},
+	}
 	for _, h := range snap.BlockedHosts {
 		newBL.Add(h)
 	}

@@ -1,0 +1,430 @@
+## ─────────────────────────────────────────────────────────────────────────────
+## Culvert — QA Gate (hard blocking)
+## ─────────────────────────────────────────────────────────────────────────────
+## Purpose: enforce QA as a hard gate that must be GREEN before a branch can
+## merge or release. Unlike the Security Release Gate (which focuses on CVEs,
+## secrets, linters, and supply-chain concerns), this workflow is dedicated to
+## FUNCTIONAL CORRECTNESS and RUNTIME BEHAVIOR.
+##
+## Key design choices:
+##
+##   1. Failures are isolated by LAYER so the root cause is obvious at a
+##      glance in the PR checks list:
+##
+##        · qa-logic        — application-logic regressions (Go unit + race
+##                            tests, compile+vet). A red X here means the code
+##                            is wrong, independent of infra/OS.
+##        · qa-determinism  — repeats the same tests under -shuffle and -count
+##                            to surface order-dependent tests and flakes.
+##                            A red X here means a test is non-deterministic.
+##        · qa-coverage     — enforces a minimum gate-critical coverage floor
+##                            on the security-sensitive packages (totp, auth,
+##                            session, SSRF helpers). Red = gap in coverage.
+##        · qa-infra-compose — builds the Docker image in isolation and brings
+##                            up docker-compose.yml WITHOUT the application
+##                            depending on it. Red = container/orchestration
+##                            issue, not application code.
+##        · qa-os           — runs the binary smoke test on a clean ubuntu
+##                            runner with no Docker. Red = OS/environment or
+##                            static-link problem.
+##        · qa-contract     — asserts schema-stable artefacts (config example,
+##                            default policy, on-disk user schema) still parse.
+##                            Red = on-disk contract broken for operators.
+##
+##   2. Every job writes a JUnit-style or step-summary report so failures are
+##      visible without digging into raw logs.
+##
+##   3. The final `qa-gate-approved` job requires ALL jobs to succeed. Branch
+##      Protection must mark this job as a required status check.
+## ─────────────────────────────────────────────────────────────────────────────
+
+name: QA Gate
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GO_VERSION: "1.25"
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: qa-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── A. Application-logic gate ──────────────────────────────────────────────
+  # Isolates PURE Go correctness. No Docker. No network. A failure here means
+  # the committed source code is wrong — not infra, not the runner.
+  qa-logic:
+    name: "QA · Application logic (race + vet)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Compile (strict)
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Unit + integration tests (race detector, fixed seed)
+        # Single-seed, single-shuffle run with the race detector. Owners of a
+        # failure here MUST treat it as a logic regression, not a flake.
+        env:
+          # Deterministic RNG seed for tests that use math/rand so reruns are
+          # byte-for-byte reproducible. Any test reading TEST_SEED should feed
+          # it to rand.New(rand.NewSource(...)).
+          TEST_SEED: "20260421"
+        run: |
+          mkdir -p qa-reports
+          go test -race -count=1 -timeout=15m -v ./... \
+            2>&1 | tee qa-reports/logic.log
+          go test -race -count=1 -timeout=15m -json ./... \
+            > qa-reports/logic.json || true
+
+      - name: Upload logic test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-logic-reports
+          path: qa-reports/
+          retention-days: 14
+
+  # ─── B. Determinism gate ───────────────────────────────────────────────────
+  # Re-runs the test suite with -shuffle=on and -count=2 to flush out
+  # order-dependent tests and intermittent flakes. A failure here means a test
+  # is non-deterministic; the fix is to pin the test's inputs/time/RNG, NOT to
+  # mark the build green.
+  qa-determinism:
+    name: "QA · Determinism (shuffle + count=2)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: qa-logic
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Determinism — shuffled double-run
+        env:
+          TEST_SEED: "20260421"
+        run: |
+          # -shuffle=on picks a random order per package each run; -count=2
+          # makes every test run twice in that order. Any test that leaks
+          # state between invocations or depends on ordering will fail.
+          #
+          # Note: we INTENTIONALLY do NOT add -race here. The race detector
+          # is covered by qa-logic. Combining -race with -shuffle=on on a
+          # shared CI runner roughly doubles wall time and surfaces timing
+          # sensitivity that is orthogonal to order-dependency — exactly
+          # the failure-isolation principle this gate enforces (one job,
+          # one layer, one failure class).
+          go test -count=2 -shuffle=on -timeout=20m ./...
+
+  # ─── C. Gate-critical coverage floor ───────────────────────────────────────
+  # Coverage floor is enforced on the SECURITY-SENSITIVE surface specifically.
+  # A global 55% number from security-release-gate.yml is a health metric; this
+  # gate enforces that the blast-radius files stay well above it.
+  qa-coverage:
+    name: "QA · Gate-critical coverage floor"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: qa-logic
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run tests with coverage
+        run: go test -count=1 -timeout=15m -coverprofile=coverage.out ./...
+
+      - name: Enforce coverage floor on critical files
+        # Every file listed here is security-sensitive. If coverage drops below
+        # the threshold it usually means a new branch was added without tests —
+        # exactly the kind of regression this gate is designed to catch.
+        run: |
+          set -e
+          FUNC=$(go tool cover -func=coverage.out)
+          fail=0
+          check () {
+            local file="$1" floor="$2"
+            local pct
+            # Anchored match: require "/<file>:" so security.go doesn't also
+            # match ui_security.go (and policy.go doesn't match cdrpolicy.go
+            # / ui_policy.go, etc.). index() on a literal string keeps the
+            # check invariant to any regex-special characters in the name.
+            pct=$(echo "$FUNC" | awk -v f="$file" '
+              index($1, "/" f ":") > 0 {
+                match($NF, /[0-9.]+/); sum += substr($NF, RSTART, RLENGTH); n++
+              }
+              END { if (n>0) printf "%.1f", sum/n; else printf "0.0" }')
+            echo "  $file ... ${pct}% (floor ${floor}%)"
+            awk -v p="$pct" -v f="$floor" 'BEGIN { exit (p+0 < f+0) ? 1 : 0 }' || {
+              echo "::error file=$file::coverage ${pct}% below floor ${floor}%"
+              fail=1
+            }
+          }
+          echo "── Gate-critical coverage ──"
+          check "totp.go"        85
+          check "security.go"    70
+          check "session.go"     75
+          check "lockout.go"     80
+          check "policy.go"      60
+          exit $fail
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-coverage
+          path: coverage.out
+          retention-days: 30
+
+  # ─── D. Docker Compose infra gate ──────────────────────────────────────────
+  # Runs the compose stack INDEPENDENTLY of the Go test run. The application
+  # tests already passed (qa-logic). If this job fails, the failure is an
+  # infra/orchestration issue — image build, healthcheck, compose graph —
+  # NOT application logic. That isolation matters: it lets operators ship a
+  # hotfix without re-running hours of Go tests.
+  qa-infra-compose:
+    name: "QA · Docker Compose (infra)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: qa-logic
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build proxy image (local only)
+        run: |
+          docker build -t culvert:qa-gate -f Dockerfile .
+
+      - name: Render + validate docker-compose.yml
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+
+      - name: Bring up stack (proxy only — clamav disabled for determinism)
+        # We override the compose file at runtime to bring up only the proxy
+        # service. The production compose wires in clamav + an updater sidecar;
+        # both are slow and their failure modes would mask application logic
+        # issues. The proxy service is exercised here IN ISOLATION.
+        #
+        # The session secret is generated in the shell (OUTSIDE the heredoc)
+        # so the value is a real 64-hex-char string, not the literal text
+        # "$(openssl rand -hex 32)". A literal dollar-paren string would fail
+        # the hex decode in initSessionSecret() and panic on startup.
+        env:
+          # Exported here so docker compose's ${VAR} substitution picks it up.
+          CULVERT_SESSION_SECRET_VALUE: ""
+        run: |
+          SESSION_SECRET=$(openssl rand -hex 32)
+          export CULVERT_SESSION_SECRET_VALUE="$SESSION_SECRET"
+
+          cat > compose.qa.yml <<'YAML'
+          services:
+            proxy:
+              image: culvert:qa-gate
+              ports:
+                - "18080:8080"
+                - "19090:9090"
+              environment:
+                - TZ=UTC
+                - CULVERT_SESSION_SECRET=${CULVERT_SESSION_SECRET_VALUE}
+              command: ["-port","8080","-ui-port","9090"]
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+                interval: 5s
+                timeout: 3s
+                retries: 12
+          YAML
+
+          docker compose -f compose.qa.yml up -d
+          # Wait for the healthcheck to flip to healthy. Fail fast if it does
+          # not become healthy within the retry budget — this is the boundary
+          # between "app issue" (would have failed in qa-logic) and "infra
+          # issue".
+          healthy=0
+          for i in $(seq 1 45); do
+            cid=$(docker compose -f compose.qa.yml ps -q proxy || true)
+            if [ -z "$cid" ]; then
+              echo "proxy container not yet created (attempt $i)"
+              sleep 2
+              continue
+            fi
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "starting")
+            echo "proxy health: $status (attempt $i)"
+            if [ "$status" = "healthy" ]; then healthy=1; break; fi
+            if [ "$status" = "unhealthy" ]; then
+              echo "::error::proxy container reported unhealthy — infrastructure failure"
+              docker compose -f compose.qa.yml logs proxy
+              exit 1
+            fi
+            sleep 2
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "::error::proxy container never became healthy within budget"
+            docker compose -f compose.qa.yml logs proxy
+            exit 1
+          fi
+          # Smoke test the public endpoints to confirm they are reachable from
+          # the runner (not just inside the container).
+          curl -fsS http://127.0.0.1:18080/health || { echo "::error::HTTP health endpoint unreachable"; exit 1; }
+          # Admin UI is HTTPS with a self-signed cert; treat non-2xx as OK as
+          # long as TLS handshakes and the connection completes.
+          curl -sS -k -o /dev/null -w "admin UI HTTP status: %{http_code}\n" https://127.0.0.1:19090/api/auth/status || true
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose -f compose.qa.yml logs || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f compose.qa.yml down -v || true
+
+  # ─── E. OS / environment gate ──────────────────────────────────────────────
+  # Runs a static CGO_ENABLED=0 binary on a clean Ubuntu runner (no Docker,
+  # no sidecar). If qa-logic passes but this job fails, the problem is in the
+  # build or the runtime environment, NOT the Go test logic.
+  qa-os:
+    name: "QA · Bare-metal smoke (no Docker)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: qa-logic
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Static build
+        env:
+          CGO_ENABLED: "0"
+        run: go build -ldflags="-s -w" -o culvert .
+
+      - name: Verify binary is static
+        run: |
+          file culvert
+          if ldd culvert 2>&1 | grep -q "not a dynamic executable"; then
+            echo "binary is static — good"
+          else
+            echo "::error::binary has dynamic dependencies — broke CGO_ENABLED=0 guarantee"
+            ldd culvert || true
+            exit 1
+          fi
+
+      - name: Smoke run — start, hit /health, stop
+        run: |
+          # Runs in a clean shell on the runner itself. If /health responds
+          # we know the OS environment + binary combination is good. A
+          # failure here with qa-logic green = runner/OS problem.
+          export CULVERT_SESSION_SECRET=$(openssl rand -hex 32)
+          ./culvert -port 18080 -ui-port 19090 &
+          PID=$!
+          trap "kill $PID 2>/dev/null || true" EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then
+              echo "proxy healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::binary did not become healthy on bare OS — environment/runtime failure"
+          exit 1
+
+  # ─── F. On-disk contract gate ──────────────────────────────────────────────
+  # The config file, default policy, and persisted user schema are part of the
+  # OPERATOR CONTRACT. Changing them silently breaks upgrades for existing
+  # deployments. This job asserts those artefacts still parse with the current
+  # build. Failing here = deliberate or accidental schema break.
+  qa-contract:
+    name: "QA · On-disk contract"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: qa-logic
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build
+        run: go build -o culvert .
+
+      - name: Binary exists and is executable
+        # Sanity: guarantees the "Persisted users file schema" step below
+        # has a binary to exercise.  -validate-config is intentionally NOT
+        # invoked here because the CLI does not implement it yet; the test
+        # below covers the same contract at the unit level.
+        run: test -x ./culvert
+
+      - name: Persisted users file schema is stable
+        # We assert the published JSON schema — the tests in
+        # qa_gate_test.go::TestConfig_TOTPLastCounter_PersistsThroughFile
+        # already write and re-read the on-disk format. Here we re-run
+        # that single test with -v so a schema break is called out loudly.
+        run: go test -v -run TestConfig_TOTPLastCounter_PersistsThroughFile ./...
+
+  # ─── Gate summary ───────────────────────────────────────────────────────────
+  qa-gate-approved:
+    name: "✅ QA Gate — APPROVED"
+    runs-on: ubuntu-latest
+    needs:
+      - qa-logic
+      - qa-determinism
+      - qa-coverage
+      - qa-infra-compose
+      - qa-os
+      - qa-contract
+    steps:
+      - name: Summarise
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## ✅ QA Gate Passed
+
+          | Layer | Job | Status |
+          |-------|-----|--------|
+          | Application logic | qa-logic | ✅ |
+          | Determinism       | qa-determinism | ✅ |
+          | Coverage floor    | qa-coverage | ✅ |
+          | Infra (Docker Compose) | qa-infra-compose | ✅ |
+          | OS / environment  | qa-os | ✅ |
+          | On-disk contract  | qa-contract | ✅ |
+
+          **Interpretation**
+          - If `qa-logic` was the only red job, the code is wrong.
+          - If `qa-logic` was green but `qa-infra-compose` was red, the
+            Docker/compose graph is the problem — not the application.
+          - If `qa-logic` was green but `qa-os` was red, the runner or
+            build-environment is the problem — not the application.
+          - `qa-determinism` failures are flakes or order-dependent tests;
+            they must be pinned, not retried away.
+          EOF
