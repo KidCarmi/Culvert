@@ -172,9 +172,15 @@ jobs:
           check () {
             local file="$1" floor="$2"
             local pct
-            pct=$(echo "$FUNC" | awk -v f="$file" '$1 ~ f {
-              match($NF, /[0-9.]+/); sum += substr($NF, RSTART, RLENGTH); n++
-            } END { if (n>0) printf "%.1f", sum/n; else printf "0.0" }')
+            # Anchored match: require "/<file>:" so security.go doesn't also
+            # match ui_security.go (and policy.go doesn't match cdrpolicy.go
+            # / ui_policy.go, etc.). index() on a literal string keeps the
+            # check invariant to any regex-special characters in the name.
+            pct=$(echo "$FUNC" | awk -v f="$file" '
+              index($1, "/" f ":") > 0 {
+                match($NF, /[0-9.]+/); sum += substr($NF, RSTART, RLENGTH); n++
+              }
+              END { if (n>0) printf "%.1f", sum/n; else printf "0.0" }')
             echo "  $file ... ${pct}% (floor ${floor}%)"
             awk -v p="$pct" -v f="$floor" 'BEGIN { exit (p+0 < f+0) ? 1 : 0 }' || {
               echo "::error file=$file::coverage ${pct}% below floor ${floor}%"
