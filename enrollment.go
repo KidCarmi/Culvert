@@ -143,6 +143,13 @@ func (cs *ClusterStore) Load(path string) error {
 	if st.Revoked == nil {
 		st.Revoked = []RevokedCert{}
 	}
+	// If a CA rotation was in progress at shutdown and the JSON payload
+	// omits or nils out renewed_nodes, RecordNodeRenewed will panic with
+	// "assignment to entry in nil map" when the first node reports back.
+	// Normalise defensively — same pattern as the top-level maps above.
+	if st.CARotation != nil && st.CARotation.RenewedNodes == nil {
+		st.CARotation.RenewedNodes = make(map[string]string)
+	}
 	cs.st = st
 	return nil
 }
@@ -660,6 +667,12 @@ func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
 	}
 	if st.Tokens == nil {
 		st.Tokens = make(map[string]*EnrollToken)
+	}
+	// Same nil-map defence as Load() — a follower that replays replicated
+	// state while a CA rotation is in progress would otherwise panic on the
+	// first RecordNodeRenewed call if renewed_nodes was null/missing.
+	if st.CARotation != nil && st.CARotation.RenewedNodes == nil {
+		st.CARotation.RenewedNodes = make(map[string]string)
 	}
 	cs.mu.Lock()
 	cs.st = st

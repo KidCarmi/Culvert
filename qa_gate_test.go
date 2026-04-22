@@ -437,6 +437,84 @@ func TestRateLimiter_ExemptAlwaysAllowed(t *testing.T) {
 	}
 }
 
+// ─── 8b. ClusterStore.Load must not leave CARotation.RenewedNodes nil ─────
+
+// TestClusterStoreLoad_CARotationRenewedNodesInitialised guards against a
+// second nil-map class defect: if a persisted cluster-state JSON contains
+// a CARotation object whose renewed_nodes field is absent or null (e.g.
+// from an older writer or a manually-edited file), RecordNodeRenewed would
+// panic with "assignment to entry in nil map" when the first DP node reports
+// back. Load must normalise the map defensively.
+func TestClusterStoreLoad_CARotationRenewedNodesInitialised(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cluster.json")
+
+	// Write a minimal cluster state with an active rotation but NO
+	// renewed_nodes field — simulating an older writer or a hand-edited file.
+	raw := []byte(`{
+		"nodes": {},
+		"tokens": {},
+		"revoked": [],
+		"version": 1,
+		"ca_rotation": {
+			"started_at": "2026-04-21T00:00:00Z",
+			"new_fingerprint": "new-fp",
+			"old_fingerprint": "old-fp",
+			"old_expires":     "2026-04-22T00:00:00Z",
+			"total_nodes":     3
+		}
+	}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("seed cluster.json: %v", err)
+	}
+
+	cs := &ClusterStore{}
+	if err := cs.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// If the defensive init regressed, this would panic with
+	// "assignment to entry in nil map" — fail loudly instead.
+	cs.RecordNodeRenewed("dp-1")
+
+	rot := cs.CARotationStatus()
+	if rot == nil {
+		t.Fatal("expected rotation state after Load")
+	}
+	if _, ok := rot.RenewedNodes["dp-1"]; !ok {
+		t.Fatalf("dp-1 should be in RenewedNodes after RecordNodeRenewed, got %v", rot.RenewedNodes)
+	}
+}
+
+// TestClusterStoreImportFullState_CARotationRenewedNodesInitialised covers
+// the HA-replication twin of the Load path above. A follower that receives
+// a state bundle mid-rotation must also get a non-nil RenewedNodes map.
+func TestClusterStoreImportFullState_CARotationRenewedNodesInitialised(t *testing.T) {
+	raw := []byte(`{
+		"nodes": {},
+		"tokens": {},
+		"revoked": [],
+		"version": 7,
+		"ca_rotation": {
+			"started_at": "2026-04-21T00:00:00Z",
+			"new_fingerprint": "new-fp",
+			"old_fingerprint": "old-fp",
+			"old_expires":     "2026-04-22T00:00:00Z",
+			"total_nodes":     2
+		}
+	}`)
+
+	cs := &ClusterStore{}
+	if err := cs.ImportFullState(raw); err != nil {
+		t.Fatalf("ImportFullState: %v", err)
+	}
+	cs.RecordNodeRenewed("dp-a") // must not panic
+	rot := cs.CARotationStatus()
+	if rot == nil || rot.RenewedNodes == nil || rot.RenewedNodes["dp-a"] == "" {
+		t.Fatalf("RenewedNodes not initialised / node not recorded: %+v", rot)
+	}
+}
+
 // ─── 9a. applyConfigSnapshot must leave all Blocklist maps usable ──────────
 
 // TestApplyConfigSnapshot_BlocklistMapsInitialised is a regression guard for
