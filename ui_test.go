@@ -19,6 +19,17 @@ func adminCtx(r *http.Request) *http.Request {
 	return r.WithContext(ctx)
 }
 
+// resetSetupLockout clears the per-IP lockout state apiSetupComplete uses
+// when validation fails. Without this, the lockout counter LEAKS ACROSS
+// tests (every TestAPISetupComplete_* test that hits a 4xx path triggers
+// loginLimiter.RecordFailure on the same setupKey "setup:127.0.0.1"), so
+// after ~5 attempts in a single suite run the next test gets a 429 instead
+// of the expected 4xx — a flake that surfaces under -count>1 / -shuffle=on.
+// Tests calling apiSetupComplete should defer or invoke this helper.
+func resetSetupLockout() {
+	loginLimiter.RecordSuccess("setup:127.0.0.1")
+}
+
 // jsonReq builds a request with a JSON body.
 func jsonReq(method, path string, body any) *http.Request {
 	var buf io.Reader
@@ -204,12 +215,16 @@ func TestAPISetupStatus_WrongMethod(t *testing.T) {
 }
 
 func TestAPISetupComplete_WrongMethod(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
 	w := httptest.NewRecorder()
 	apiSetupComplete(w, getReq("/api/setup/complete"))
 	assertStatus(t, w, http.StatusMethodNotAllowed)
 }
 
 func TestAPISetupComplete_AlreadyDone(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
 	// Configure auth so "already complete" path is taken.
 	_ = cfg.SetAuth("admin", "testpassword123")
 	defer func() { _ = cfg.SetAuth("", "") }()
@@ -222,6 +237,8 @@ func TestAPISetupComplete_AlreadyDone(t *testing.T) {
 }
 
 func TestAPISetupComplete_ShortPassword(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "") // ensure no auth configured
 	w := httptest.NewRecorder()
 	apiSetupComplete(w, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
@@ -231,6 +248,8 @@ func TestAPISetupComplete_ShortPassword(t *testing.T) {
 }
 
 func TestAPISetupComplete_UnauthMode(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "")
 	defer func() { cfg.SetUnauthMode(false) }()
 
