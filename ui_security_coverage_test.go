@@ -484,3 +484,349 @@ func TestAPISecYARARules_POSTBadJSON(t *testing.T) {
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Round 3 — scan-evasion controls and YARA validator
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The three handlers covered below are all security-sensitive:
+//
+//   apiContentScanBypass   PUT replaces dpiScanner.bypassHosts — disables DPI
+//                          for the listed hosts. Untested = silent scan bypass.
+//   apiSecScanExclusions   PUT replaces globalScanExclusions (hashes + hosts)
+//                          — skips ClamAV/YARA/threat-feed for those targets.
+//   apiSecYARAValidate     Pure parser wrapper. Protects the rule-authoring
+//                          path from upstream YARA-lib drift.
+//
+// The first two share a "snapshot whole store → replace with clean
+// instance → restore on cleanup" pattern. That pattern is extracted into
+// isolateDPIScanner / isolateScanExclusions so the same shape can be
+// lifted into a Round 4 apiFileblockProfiles test by writing a single
+// isolateProfileStore helper with the same surface area.
+
+// isolateDPIScanner swaps the global dpiScanner for a fresh, in-memory
+// ContentScanner for the duration of the test, then restores the original
+// on cleanup. The isolated scanner has an empty persistence path so
+// Save() is a no-op — callers do not need to manage a temp file.
+//
+// Pattern note: see isolateScanExclusions below for the sibling helper.
+// Both expose the same three-line usage: snapshot, replace, defer
+// restore. A future isolateProfileStore helper for apiFileblockProfiles
+// will follow the same shape.
+func isolateDPIScanner(t *testing.T) *ContentScanner {
+	t.Helper()
+	orig := dpiScanner
+	fresh := &ContentScanner{}
+	dpiScanner = fresh
+	t.Cleanup(func() { dpiScanner = orig })
+	return fresh
+}
+
+// isolateScanExclusions swaps globalScanExclusions for a fresh, in-memory
+// ScanExclusionStore for the duration of the test. Same contract as
+// isolateDPIScanner: empty persistence path → Save() is a no-op.
+func isolateScanExclusions(t *testing.T) *ScanExclusionStore {
+	t.Helper()
+	orig := globalScanExclusions
+	fresh := &ScanExclusionStore{
+		hashes: map[string]bool{},
+		hosts:  map[string]bool{},
+	}
+	globalScanExclusions = fresh
+	t.Cleanup(func() { globalScanExclusions = orig })
+	return fresh
+}
+
+// ─── apiContentScanBypass ──────────────────────────────────────────────────
+
+func TestAPIContentScanBypass_WrongMethod(t *testing.T) {
+	isolateDPIScanner(t)
+	w := httptest.NewRecorder()
+	apiContentScanBypass(w, jsonReq(http.MethodPost, "/api/content-scan/bypass", nil))
+	assertStatus(t, w, http.StatusMethodNotAllowed)
+}
+
+// GET on an empty store returns an empty host slice — never nil, never
+// missing the "hosts" key. The UI depends on the key existing.
+func TestAPIContentScanBypass_GETEmpty(t *testing.T) {
+	isolateDPIScanner(t)
+
+	w := httptest.NewRecorder()
+	apiContentScanBypass(w, getReq("/api/content-scan/bypass"))
+	assertStatus(t, w, http.StatusOK)
+
+	m := assertJSON(t, w)
+	raw, ok := m["hosts"]
+	if !ok {
+		t.Fatalf("GET response missing 'hosts' key: %v", m)
+	}
+	hosts, _ := raw.([]any)
+	if len(hosts) != 0 {
+		t.Errorf("expected empty host list on empty store, got %v", hosts)
+	}
+}
+
+// Happy path: PUT a list of hosts, then GET confirms they were stored
+// (lower-cased and trimmed), and the response echoes the same list.
+func TestAPIContentScanBypass_PUTRoundTrip(t *testing.T) {
+	isolateDPIScanner(t)
+
+	w := httptest.NewRecorder()
+	apiContentScanBypass(w, jsonReq(http.MethodPut, "/api/content-scan/bypass",
+		map[string]any{"hosts": []string{"  Internal.Corp  ", "CI.Corp", "", "internal.corp"}}))
+	assertStatus(t, w, http.StatusOK)
+
+	putResp := assertJSON(t, w)
+	// The response echoes the current state — deduplicated, case-folded,
+	// empty entries dropped. Contract we're locking in.
+	hosts, _ := putResp["hosts"].([]any)
+	if len(hosts) != 2 {
+		t.Fatalf("PUT response: expected 2 unique hosts after normalisation, got %v", hosts)
+	}
+	for _, h := range hosts {
+		s, _ := h.(string)
+		if s != strings.ToLower(strings.TrimSpace(s)) {
+			t.Errorf("PUT response returned un-normalised host %q", s)
+		}
+	}
+
+	// GET after PUT returns the same list.
+	w2 := httptest.NewRecorder()
+	apiContentScanBypass(w2, getReq("/api/content-scan/bypass"))
+	assertStatus(t, w2, http.StatusOK)
+	getResp := assertJSON(t, w2)
+	got, _ := getResp["hosts"].([]any)
+	if len(got) != 2 {
+		t.Errorf("GET after PUT: expected 2 hosts, got %v", got)
+	}
+
+	// Direct store inspection — the handler path must reach SetBypassHosts.
+	if !containsString(dpiScanner.BypassHosts(), "internal.corp") {
+		t.Error("internal.corp should be in bypass list")
+	}
+}
+
+// PUT with empty body (no "hosts" field) clears the list.
+func TestAPIContentScanBypass_PUTEmptyClearsList(t *testing.T) {
+	d := isolateDPIScanner(t)
+	d.SetBypassHosts([]string{"host.a", "host.b"})
+
+	w := httptest.NewRecorder()
+	apiContentScanBypass(w, jsonReq(http.MethodPut, "/api/content-scan/bypass",
+		map[string]any{"hosts": []string{}}))
+	assertStatus(t, w, http.StatusOK)
+	if len(d.BypassHosts()) != 0 {
+		t.Errorf("PUT with empty list should clear bypass hosts, got %v", d.BypassHosts())
+	}
+}
+
+// Malformed JSON must 400 without mutating the store.
+func TestAPIContentScanBypass_PUTBadJSON(t *testing.T) {
+	d := isolateDPIScanner(t)
+	d.SetBypassHosts([]string{"preserved.example"})
+
+	r := httptest.NewRequest(http.MethodPut, "/api/content-scan/bypass",
+		bytes.NewReader([]byte("not json")))
+	r.Header.Set("Content-Type", "application/json")
+	r.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiContentScanBypass(w, adminCtx(r))
+	assertStatus(t, w, http.StatusBadRequest)
+
+	// The original list must survive a malformed request.
+	if !containsString(d.BypassHosts(), "preserved.example") {
+		t.Error("pre-existing bypass list was mutated by a failed PUT")
+	}
+}
+
+// ─── apiSecScanExclusions ──────────────────────────────────────────────────
+
+func TestAPISecScanExclusions_WrongMethod(t *testing.T) {
+	isolateScanExclusions(t)
+	w := httptest.NewRecorder()
+	apiSecScanExclusions(w, jsonReq(http.MethodPost, "/api/security-scan/exclusions", nil))
+	assertStatus(t, w, http.StatusMethodNotAllowed)
+}
+
+// GET on an empty store must return both keys and empty slices (UI contract).
+func TestAPISecScanExclusions_GETEmpty(t *testing.T) {
+	isolateScanExclusions(t)
+
+	w := httptest.NewRecorder()
+	apiSecScanExclusions(w, getReq("/api/security-scan/exclusions"))
+	assertStatus(t, w, http.StatusOK)
+
+	m := assertJSON(t, w)
+	for _, k := range []string{"hashes", "hosts"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("GET response missing %q key: %v", k, m)
+		}
+	}
+}
+
+// Happy-path round-trip: PUT replaces both lists; GET confirms persistence.
+// Also verifies case-folding + trim + empty-entry drop behavior.
+func TestAPISecScanExclusions_PUTRoundTrip(t *testing.T) {
+	store := isolateScanExclusions(t)
+
+	body := map[string]any{
+		"hashes": []string{"  DEADBEEF  ", "deadbeef", "", "CAFE"}, // case + dup + empty
+		"hosts":  []string{"Trusted.Corp", " trusted.corp ", "other.corp", ""},
+	}
+	w := httptest.NewRecorder()
+	apiSecScanExclusions(w, jsonReq(http.MethodPut, "/api/security-scan/exclusions", body))
+	assertStatus(t, w, http.StatusOK)
+
+	m := assertJSON(t, w)
+	hashes, _ := m["hashes"].([]any)
+	if len(hashes) != 2 {
+		t.Errorf("PUT response hashes: expected 2 unique, got %v", hashes)
+	}
+	hosts, _ := m["hosts"].([]any)
+	if len(hosts) != 2 {
+		t.Errorf("PUT response hosts: expected 2 unique, got %v", hosts)
+	}
+
+	// Direct store inspection — handler must hit ScanExclusionStore.Replace.
+	gotHashes, gotHosts := store.Lists()
+	if !containsString(gotHashes, "deadbeef") {
+		t.Errorf("expected 'deadbeef' in hashes, got %v", gotHashes)
+	}
+	if !containsString(gotHosts, "trusted.corp") {
+		t.Errorf("expected 'trusted.corp' in hosts, got %v", gotHosts)
+	}
+
+	// GET after PUT returns the same two lists.
+	w2 := httptest.NewRecorder()
+	apiSecScanExclusions(w2, getReq("/api/security-scan/exclusions"))
+	assertStatus(t, w2, http.StatusOK)
+}
+
+// PUT with both lists missing / empty collapses the store to empty.
+func TestAPISecScanExclusions_PUTEmpty(t *testing.T) {
+	store := isolateScanExclusions(t)
+	store.Replace([]string{"old"}, []string{"old.example"})
+
+	w := httptest.NewRecorder()
+	apiSecScanExclusions(w, jsonReq(http.MethodPut, "/api/security-scan/exclusions",
+		map[string]any{"hashes": []string{}, "hosts": []string{}}))
+	assertStatus(t, w, http.StatusOK)
+
+	hashes, hosts := store.Lists()
+	if len(hashes) != 0 || len(hosts) != 0 {
+		t.Errorf("PUT with empty lists should clear store, got hashes=%v hosts=%v", hashes, hosts)
+	}
+}
+
+// Malformed JSON must 400 without mutating the store.
+func TestAPISecScanExclusions_PUTBadJSON(t *testing.T) {
+	store := isolateScanExclusions(t)
+	store.Replace([]string{"keep"}, []string{"keep.example"})
+
+	r := httptest.NewRequest(http.MethodPut, "/api/security-scan/exclusions",
+		bytes.NewReader([]byte("not json")))
+	r.Header.Set("Content-Type", "application/json")
+	r.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiSecScanExclusions(w, adminCtx(r))
+	assertStatus(t, w, http.StatusBadRequest)
+
+	hashes, hosts := store.Lists()
+	if !containsString(hashes, "keep") || !containsString(hosts, "keep.example") {
+		t.Error("pre-existing exclusions were mutated by a failed PUT")
+	}
+}
+
+// ─── apiSecYARAValidate ────────────────────────────────────────────────────
+
+func TestAPISecYARAValidate_WrongMethod(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiSecYARAValidate(w, getReq("/api/security-scan/yara/validate"))
+	assertStatus(t, w, http.StatusMethodNotAllowed)
+}
+
+// Happy path: a syntactically valid rule round-trips with valid=true,
+// rule_names set, and no error.
+func TestAPISecYARAValidate_ValidRule(t *testing.T) {
+	src := yaraRule("ValidRule", `        $a = "HELLO"`, "any of them")
+
+	w := httptest.NewRecorder()
+	apiSecYARAValidate(w, jsonReq(http.MethodPost, "/api/security-scan/yara/validate",
+		map[string]any{"source": src}))
+	assertStatus(t, w, http.StatusOK)
+
+	m := assertJSON(t, w)
+	if m["valid"] != true {
+		t.Fatalf("valid = %v, want true; body: %v", m["valid"], m)
+	}
+	names, _ := m["rule_names"].([]any)
+	if len(names) != 1 || names[0] != "ValidRule" {
+		t.Errorf("rule_names = %v, want [ValidRule]", names)
+	}
+}
+
+// Alias: the handler accepts {rule: ...} as a synonym for {source: ...}.
+func TestAPISecYARAValidate_RuleFieldAlias(t *testing.T) {
+	src := yaraRule("AliasRule", `        $a = "HELLO"`, "any of them")
+
+	w := httptest.NewRecorder()
+	apiSecYARAValidate(w, jsonReq(http.MethodPost, "/api/security-scan/yara/validate",
+		map[string]any{"rule": src})) // note: "rule" not "source"
+	assertStatus(t, w, http.StatusOK)
+
+	m := assertJSON(t, w)
+	if m["valid"] != true {
+		t.Fatalf("alias field not accepted: valid=%v body=%v", m["valid"], m)
+	}
+}
+
+// Bad YARA source returns 200 OK with valid=false + an error string. The
+// 200 is intentional — the endpoint is a dry-run, not a failed operation.
+func TestAPISecYARAValidate_InvalidRule(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiSecYARAValidate(w, jsonReq(http.MethodPost, "/api/security-scan/yara/validate",
+		map[string]any{"source": "this is not a yara rule"}))
+	assertStatus(t, w, http.StatusOK)
+
+	m := assertJSON(t, w)
+	if m["valid"] != false {
+		t.Errorf("invalid rule reported valid=%v, want false", m["valid"])
+	}
+	if errStr, _ := m["error"].(string); errStr == "" {
+		t.Error("invalid rule response missing error string")
+	}
+}
+
+// Empty source (neither field set, or both empty strings) returns 400.
+func TestAPISecYARAValidate_EmptySource(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiSecYARAValidate(w, jsonReq(http.MethodPost, "/api/security-scan/yara/validate",
+		map[string]any{"source": "   "}))
+	assertStatus(t, w, http.StatusBadRequest)
+}
+
+// Malformed JSON body must 400 with the "bad JSON body:" prefix so the UI
+// can surface it verbatim.
+func TestAPISecYARAValidate_BadJSON(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/api/security-scan/yara/validate",
+		bytes.NewReader([]byte("not json")))
+	r.Header.Set("Content-Type", "application/json")
+	r.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiSecYARAValidate(w, adminCtx(r))
+	assertStatus(t, w, http.StatusBadRequest)
+	if !strings.Contains(w.Body.String(), "bad JSON body:") {
+		t.Errorf("response should mention 'bad JSON body:', got %q", w.Body.String())
+	}
+}
+
+// containsString is a tiny helper — kept local so Round 3 tests don't need
+// to reach into a shared helper file.
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
