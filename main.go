@@ -846,50 +846,12 @@ func initFileBlocking(s *startupState) {
 }
 
 // initSSLBypassAndDPI loads SSL bypass patterns and the DPI content scanner patterns.
+// initSSLBypassAndDPI is the PR3 pilot shim: resolve the inspection-rules
+// slice of FileConfig and hand it to the domain loader. Behaviour and fatal
+// semantics are unchanged — the loader returns errors, main fails fast.
 func initSSLBypassAndDPI(s *startupState) {
-	// ── SSL Bypass patterns ───────────────────────────────────────────────────
-	// If ssl_bypass_file is set, load from the JSON file (dynamic — managed via
-	// /api/ssl-bypass without restart). On first run, seed it from ssl_bypass_patterns.
-	bypassFilePath := firstStr(s.fc.Proxy.SSLBypassFile)
-	if bypassFilePath != "" {
-		if err := sslBypass.Load(bypassFilePath); err != nil {
-			logger.Fatalf("SSL bypass file error: %v", err)
-		}
-		if len(sslBypass.List()) == 0 && len(s.fc.Proxy.SSLBypassPatterns) > 0 {
-			if err := sslBypass.Set(s.fc.Proxy.SSLBypassPatterns); err != nil {
-				logger.Fatalf("SSL bypass pattern error: %v", err)
-			}
-			sslBypass.Save() // persist seed patterns on first run
-		}
-		logger.Printf("SSLBypass: %d pattern(s) (file: %s)", len(sslBypass.List()), bypassFilePath)
-	} else if len(s.fc.Proxy.SSLBypassPatterns) > 0 {
-		if err := sslBypass.Set(s.fc.Proxy.SSLBypassPatterns); err != nil {
-			logger.Fatalf("SSL bypass pattern error: %v", err)
-		}
-		logger.Printf("SSLBypass: %d pattern(s) (in-memory; set ssl_bypass_file for dynamic management)", len(sslBypass.List()))
-	}
-
-	// ── DPI Content Scanner ──────────────────────────────────────────────────
-	// If content_scan_file is set, patterns are loaded from JSON and can be
-	// managed at runtime via /api/content-scan without restarting.
-	// On first run, content_scan_patterns from YAML seeds the file.
-	scanFilePath := firstStr(s.fc.Proxy.ContentScanFile)
-	if scanFilePath != "" {
-		if err := dpiScanner.Load(scanFilePath); err != nil {
-			logger.Fatalf("Content scan file error: %v", err)
-		}
-		if len(dpiScanner.List()) == 0 && len(s.fc.Proxy.ContentScanPatterns) > 0 {
-			if err := dpiScanner.Set(s.fc.Proxy.ContentScanPatterns); err != nil {
-				logger.Fatalf("Content scan pattern error: %v", err)
-			}
-			dpiScanner.Save()
-		}
-		logger.Printf("DPIScan: %d pattern(s) (file: %s)", len(dpiScanner.List()), scanFilePath)
-	} else if len(s.fc.Proxy.ContentScanPatterns) > 0 {
-		if err := dpiScanner.Set(s.fc.Proxy.ContentScanPatterns); err != nil {
-			logger.Fatalf("Content scan pattern error: %v", err)
-		}
-		logger.Printf("DPIScan: %d pattern(s) (in-memory; set content_scan_file for persistence)", len(dpiScanner.List()))
+	if err := loadInspectionRules(resolveInspectionRulesConfig(s.fc)); err != nil {
+		logger.Fatalf("inspection rules: %v", err)
 	}
 }
 
