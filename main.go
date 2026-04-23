@@ -52,83 +52,222 @@ var clusterDBPathGlobal string // persisted cluster state path, set at startup
 // dataDir is the base directory for persisted runtime state (node groups, bandwidth policies, etc.).
 var dataDir = "/data"
 
-func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactoring deferred
-	// ── CLI flags ────────────────────────────────────────────────────────────
-	configPath := flag.String("config", "", "Path to config.yaml (optional)")
-	proxyPort := flag.Int("port", 0, "Proxy port (overrides config)")
-	uiPortFlag := flag.Int("ui-port", 0, "Web UI port (overrides config)")
-	user := flag.String("user", "", "Basic auth username")
-	pass := flag.String("pass", "", "Basic auth password")
-	blockFile := flag.String("blocklist", "", "Blocklist file path")
-	logFilePath := flag.String("logfile", "", "Log file path")
-	logMaxMB := flag.Int("log-max-mb", 50, "Log rotation size in MB")
-	tlsCert := flag.String("tls-cert", "", "TLS cert file for UI (optional)")
-	tlsKey := flag.String("tls-key", "", "TLS key file for UI (optional)")
-	rateLimitRPM := flag.Int("rate-limit", 0, "Max requests/min per IP (0=off)")
-	ipMode := flag.String("ip-filter-mode", "", "IP filter mode: allow|block (empty=off)")
-	socks5Port := flag.Int("socks5-port", 0, "SOCKS5 proxy port (0=disabled)")
-	metricsTok := flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
-	cpGRPCAddr := flag.String("cp-grpc-addr", "", "ControlPlane gRPC listen addr e.g. :50051 (empty=off)")
-	cpGRPCCert := flag.String("cp-grpc-cert", "", "ControlPlane gRPC TLS cert (mTLS)")
-	cpGRPCKey := flag.String("cp-grpc-key", "", "ControlPlane gRPC TLS key")
-	cpGRPCCA := flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
-	haJoin := flag.String("ha-join", "", "HA standby: leader CP gRPC address to sync from (e.g. cp1:50051)")
-	haToken := flag.String("ha-token", "", "HA standby: authentication token (from leader's deploy command)")
-	dpCPAddr := flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
-	dpNodeID := flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
-	dpCert := flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
-	dpKey := flag.String("dp-key", "", "DataPlane gRPC client TLS key")
-	dpCA := flag.String("dp-ca", "", "DataPlane gRPC CA cert")
-	policyFile := flag.String("policy", "", "Policy rules JSON file path")
-	caPath := flag.String("ca-path", "", "Path to persist encrypted Root CA bundle (optional)")
-	auditLog := flag.String("audit-log", "", "Persistent audit log file path (JSONL, appended)")
-	requestLogPath := flag.String("request-log", "", "Persistent request log file path (JSONL, rotated)")
-	requestLogMaxMB := flag.Int("request-log-max-mb", 100, "Request log rotation size in MB")
-	syslogAddr := flag.String("syslog", "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
-	syslogFormat := flag.String("syslog-format", "", "Syslog message format: rfc3164 (default) or rfc5424")
-	otlpEndpoint := flag.String("otlp-endpoint", "", "OTLP/HTTP endpoint for metrics export (e.g. http://otel-collector:4318)")
-	uiAllowIP := flag.String("ui-allow-ip", "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
-	sessionHrs := flag.Int("session-timeout", 0, "Admin UI session lifetime in hours (1-168, 0=default 8h)")
-	geoIPDB := flag.String("geoip-db", "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
-	clamavAddr := flag.String("clamav-addr", "", "ClamAV address: unix:/run/clamav/clamd.sock or tcp:host:port")
-	yaraRulesDir := flag.String("yara-rules-dir", "", "Directory containing *.yar/*.yara YARA rule files")
-	threatFeedDB := flag.String("threat-feed-db", "", "Path for persisted threat feed JSON database")
-	uiUsersFile := flag.String("ui-users-file", "", "Path to persist admin UI users across restarts (e.g. /data/ui_users.json)")
-	fileProfilesFile := flag.String("fileprofiles-file", "", "Path to persist file extension profiles (e.g. /data/fileprofiles.json)")
-	uiNoTLS := flag.Bool("ui-no-tls", false, "Disable auto self-signed TLS; serve admin UI over plain HTTP")
-	catFeedDB := flag.String("cat-feed-db", "", "Directory for BadgerDB URL category community feed (empty=disabled)")
-	catFeedURL := flag.String("cat-feed-url", "", "Override URL for the UT1 category tarball (default: UT1 Capestat)")
-	catSyncIntvl := flag.String("cat-sync-interval", "24h", "How often to re-sync the URL category feed (e.g. 12h, 24h)")
-	enrollURL := flag.String("enroll", "", "Enrollment URL from Control Plane (e.g. culvert://enroll/host:50051/TOKEN?ca-fp=sha256:...)")
-	clusterDB := flag.String("cluster-db", "", "Path to persist cluster state (e.g. /data/cluster.json)")
-	clusterInsecureFlag := flag.Bool("cluster-insecure", false, "Allow insecure (non-TLS) gRPC for development — NEVER use in production")
-	revocationsFile := flag.String("revocations-file", "", "Path to persist session revocations across restarts (e.g. /data/revocations.json)")
-	scanSvcListen := flag.String("scan-svc-listen", "", "Run as scan microservice sidecar on this address (e.g. :8484)")
-	scanSvcURL := flag.String("scan-svc-url", "", "Remote scan service URL (e.g. http://scan-svc:8484) — disables local ClamAV/YARA")
-	updaterURLFlag := flag.String("updater-url", "", "Updater sidecar URL (default http://culvert-updater:7123)")
-	uiSANsFlag := flag.String("ui-san", "", "Additional TLS SANs for self-signed cert (comma-separated IPs/hostnames)")
-	trustFwdHeaders := flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
-	resetPwUser := flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
-	// CDR / Sluice integration (Phase 1: single-instance client with TOFU pinning).
-	cdrEnabledFlag := flag.Bool("cdr-enabled", false, "Enable Sluice CDR integration (strip macros/JS/OLE from downloads)")
-	cdrEndpointFlag := flag.String("cdr-endpoint", "", "Sluice gRPC endpoint (e.g. sluice:8443)")
-	cdrFailModeFlag := flag.String("cdr-fail-mode", "", "Behaviour when Sluice is unreachable: open (default) | closed")
-	cdrProfileFlag := flag.String("cdr-default-profile", "", "Sanitization profile name sent when no policy matches (default: \"default\")")
-	cdrModeFlag := flag.String("cdr-default-mode", "", "Default Mode: ENFORCE (default) | REPORT_ONLY | BYPASS_WITH_REPORT")
-	cdrTimeoutFlag := flag.Int("cdr-timeout-sec", 0, "Per-file CDR deadline in seconds (>=30, default 35)")
-	cdrMaxSizeFlag := flag.Int("cdr-max-file-size-mb", 0, "Reject CDR payloads larger than this (default 50 MB)")
-	cdrFingerprintFlag := flag.String("cdr-server-fingerprint", "", "TOFU-pinned SHA-256 of Sluice's server cert (hex; 'sha256:' prefix optional)")
-	cdrCertsDirFlag := flag.String("cdr-certs-dir", "", "Directory holding Sluice mTLS client bundle (ca.pem, client.pem, client.key)")
-	flag.Parse()
+// startupState carries locals across the extracted init functions so each
+// one stays a simple `initX(s *startupState)` call. Private, plain struct,
+// no methods — purely a mechanical scope-crossing device introduced by
+// PR2's main() extraction.
+type startupState struct {
+	// ── CLI flag pointers (all set in parseFlags) ─────────────────────────
+	configPath          *string
+	proxyPort           *int
+	uiPortFlag          *int
+	user                *string
+	pass                *string
+	blockFile           *string
+	logFilePath         *string
+	logMaxMB            *int
+	tlsCert             *string
+	tlsKey              *string
+	rateLimitRPM        *int
+	ipMode              *string
+	socks5Port          *int
+	metricsTok          *string
+	cpGRPCAddr          *string
+	cpGRPCCert          *string
+	cpGRPCKey           *string
+	cpGRPCCA            *string
+	haJoin              *string
+	haToken             *string
+	dpCPAddr            *string
+	dpNodeID            *string
+	dpCert              *string
+	dpKey               *string
+	dpCA                *string
+	policyFile          *string
+	caPath              *string
+	auditLog            *string
+	requestLogPath      *string
+	requestLogMaxMB     *int
+	syslogAddr          *string
+	syslogFormat        *string
+	otlpEndpoint        *string
+	uiAllowIP           *string
+	sessionHrs          *int
+	geoIPDB             *string
+	clamavAddr          *string
+	yaraRulesDir        *string
+	threatFeedDB        *string
+	uiUsersFile         *string
+	fileProfilesFile    *string
+	uiNoTLS             *bool
+	catFeedDB           *string
+	catFeedURL          *string
+	catSyncIntvl        *string
+	enrollURL           *string
+	clusterDB           *string
+	clusterInsecureFlag *bool
+	revocationsFile     *string
+	scanSvcListen       *string
+	scanSvcURL          *string
+	updaterURLFlag      *string
+	uiSANsFlag          *string
+	trustFwdHeaders     *bool
+	resetPwUser         *string
+	cdrEnabledFlag      *bool
+	cdrEndpointFlag     *string
+	cdrFailModeFlag     *string
+	cdrProfileFlag      *string
+	cdrModeFlag         *string
+	cdrTimeoutFlag      *int
+	cdrMaxSizeFlag      *int
+	cdrFingerprintFlag  *string
+	cdrCertsDirFlag     *string
 
+	// ── Derived locals shared across init functions ──────────────────────
+	fc             *FileConfig
+	pPort          int
+	uPort          int
+	lPath          string
+	blPath         string
+	lMaxMB         int
+	authU          string
+	authP          string
+	cert           string
+	key            string
+	rlRPM          int
+	ipModeVal      string
+	enrolledConfig *dpEnrollmentConfig
+	geoDBVal       string
+
+	// ── Shutdown handles (carried to runProxyUntilShutdown) ──────────────
+	logCloser       interface{ Close() error }
+	rlCleanupCancel context.CancelFunc
+	feedSyncer      *FeedSyncer
+	scanSvc         *ScanService
+}
+
+func main() {
+	s := &startupState{}
+	parseFlags(s)
+	handleOneShotCommands(s)
+	setInsecureFlag(s)
+	runEnrollmentMode(s)
+	loadFileConfigAndFlags(s)
+	initUIExtras(s)
+	initLogger(s)
+	initLifecycleContext(s)
+	defer appLifecycleCancel() // kept in main() for panic safety; initLifecycleContext only creates the context.
+
+	initAuth(s)
+	initSession(s)
+	initObservability(s)
+	initGeoIP(s)
+	initUIAccessPolicy(s)
+	initPAC(s)
+	initLegacyAuthProviders(s)
+	initMetricsToken(s)
+	initCluster(s)
+	initConnAndRateLimit(s)
+	initBlocklist(s)
+	initRootCA(s)
+	initPolicy(s)
+	initURLCategories(s)
+	initFileBlocking(s)
+	initSSLBypassAndDPI(s)
+	initRewriteAndDefaultAction(s)
+	initScanning(s)
+	initUpstreamProxy(s)
+	initCDR(s)
+	initMTLSAndOCSP(s)
+	initBackgroundServices(s)
+	initSOCKS5(s)
+	initPersistentAdminState(s)
+	startAdminUI(s)
+
+	proxySrv := buildAndStartProxyServer(s)
+	quit, _ := installSignalHandlers(s)
+	runProxyUntilShutdown(s, proxySrv, quit)
+}
+// parseFlags reads every CLI flag into the shared startup state.
+func parseFlags(s *startupState) {
+	// ── CLI flags ────────────────────────────────────────────────────────────
+	s.configPath = flag.String("config", "", "Path to config.yaml (optional)")
+	s.proxyPort = flag.Int("port", 0, "Proxy port (overrides config)")
+	s.uiPortFlag = flag.Int("ui-port", 0, "Web UI port (overrides config)")
+	s.user = flag.String("user", "", "Basic auth username")
+	s.pass = flag.String("pass", "", "Basic auth password")
+	s.blockFile = flag.String("blocklist", "", "Blocklist file path")
+	s.logFilePath = flag.String("logfile", "", "Log file path")
+	s.logMaxMB = flag.Int("log-max-mb", 50, "Log rotation size in MB")
+	s.tlsCert = flag.String("tls-cert", "", "TLS cert file for UI (optional)")
+	s.tlsKey = flag.String("tls-key", "", "TLS key file for UI (optional)")
+	s.rateLimitRPM = flag.Int("rate-limit", 0, "Max requests/min per IP (0=off)")
+	s.ipMode = flag.String("ip-filter-mode", "", "IP filter mode: allow|block (empty=off)")
+	s.socks5Port = flag.Int("socks5-port", 0, "SOCKS5 proxy port (0=disabled)")
+	s.metricsTok = flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
+	s.cpGRPCAddr = flag.String("cp-grpc-addr", "", "ControlPlane gRPC listen addr e.g. :50051 (empty=off)")
+	s.cpGRPCCert = flag.String("cp-grpc-cert", "", "ControlPlane gRPC TLS cert (mTLS)")
+	s.cpGRPCKey = flag.String("cp-grpc-key", "", "ControlPlane gRPC TLS key")
+	s.cpGRPCCA = flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
+	s.haJoin = flag.String("ha-join", "", "HA standby: leader CP gRPC address to sync from (e.g. cp1:50051)")
+	s.haToken = flag.String("ha-token", "", "HA standby: authentication token (from leader's deploy command)")
+	s.dpCPAddr = flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
+	s.dpNodeID = flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
+	s.dpCert = flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
+	s.dpKey = flag.String("dp-key", "", "DataPlane gRPC client TLS key")
+	s.dpCA = flag.String("dp-ca", "", "DataPlane gRPC CA cert")
+	s.policyFile = flag.String("policy", "", "Policy rules JSON file path")
+	s.caPath = flag.String("ca-path", "", "Path to persist encrypted Root CA bundle (optional)")
+	s.auditLog = flag.String("audit-log", "", "Persistent audit log file path (JSONL, appended)")
+	s.requestLogPath = flag.String("request-log", "", "Persistent request log file path (JSONL, rotated)")
+	s.requestLogMaxMB = flag.Int("request-log-max-mb", 100, "Request log rotation size in MB")
+	s.syslogAddr = flag.String("syslog", "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
+	s.syslogFormat = flag.String("syslog-format", "", "Syslog message format: rfc3164 (default) or rfc5424")
+	s.otlpEndpoint = flag.String("otlp-endpoint", "", "OTLP/HTTP endpoint for metrics export (e.g. http://otel-collector:4318)")
+	s.uiAllowIP = flag.String("ui-allow-ip", "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
+	s.sessionHrs = flag.Int("session-timeout", 0, "Admin UI session lifetime in hours (1-168, 0=default 8h)")
+	s.geoIPDB = flag.String("geoip-db", "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
+	s.clamavAddr = flag.String("clamav-addr", "", "ClamAV address: unix:/run/clamav/clamd.sock or tcp:host:port")
+	s.yaraRulesDir = flag.String("yara-rules-dir", "", "Directory containing *.yar/*.yara YARA rule files")
+	s.threatFeedDB = flag.String("threat-feed-db", "", "Path for persisted threat feed JSON database")
+	s.uiUsersFile = flag.String("ui-users-file", "", "Path to persist admin UI users across restarts (e.g. /data/ui_users.json)")
+	s.fileProfilesFile = flag.String("fileprofiles-file", "", "Path to persist file extension profiles (e.g. /data/fileprofiles.json)")
+	s.uiNoTLS = flag.Bool("ui-no-tls", false, "Disable auto self-signed TLS; serve admin UI over plain HTTP")
+	s.catFeedDB = flag.String("cat-feed-db", "", "Directory for BadgerDB URL category community feed (empty=disabled)")
+	s.catFeedURL = flag.String("cat-feed-url", "", "Override URL for the UT1 category tarball (default: UT1 Capestat)")
+	s.catSyncIntvl = flag.String("cat-sync-interval", "24h", "How often to re-sync the URL category feed (e.g. 12h, 24h)")
+	s.enrollURL = flag.String("enroll", "", "Enrollment URL from Control Plane (e.g. culvert://enroll/host:50051/TOKEN?ca-fp=sha256:...)")
+	s.clusterDB = flag.String("cluster-db", "", "Path to persist cluster state (e.g. /data/cluster.json)")
+	s.clusterInsecureFlag = flag.Bool("cluster-insecure", false, "Allow insecure (non-TLS) gRPC for development — NEVER use in production")
+	s.revocationsFile = flag.String("revocations-file", "", "Path to persist session revocations across restarts (e.g. /data/revocations.json)")
+	s.scanSvcListen = flag.String("scan-svc-listen", "", "Run as scan microservice sidecar on this address (e.g. :8484)")
+	s.scanSvcURL = flag.String("scan-svc-url", "", "Remote scan service URL (e.g. http://scan-svc:8484) — disables local ClamAV/YARA")
+	s.updaterURLFlag = flag.String("updater-url", "", "Updater sidecar URL (default http://culvert-updater:7123)")
+	s.uiSANsFlag = flag.String("ui-san", "", "Additional TLS SANs for self-signed cert (comma-separated IPs/hostnames)")
+	s.trustFwdHeaders = flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
+	s.resetPwUser = flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
+	// CDR / Sluice integration (Phase 1: single-instance client with TOFU pinning).
+	s.cdrEnabledFlag = flag.Bool("cdr-enabled", false, "Enable Sluice CDR integration (strip macros/JS/OLE from downloads)")
+	s.cdrEndpointFlag = flag.String("cdr-endpoint", "", "Sluice gRPC endpoint (e.g. sluice:8443)")
+	s.cdrFailModeFlag = flag.String("cdr-fail-mode", "", "Behaviour when Sluice is unreachable: open (default) | closed")
+	s.cdrProfileFlag = flag.String("cdr-default-profile", "", "Sanitization profile name sent when no policy matches (default: \"default\")")
+	s.cdrModeFlag = flag.String("cdr-default-mode", "", "Default Mode: ENFORCE (default) | REPORT_ONLY | BYPASS_WITH_REPORT")
+	s.cdrTimeoutFlag = flag.Int("cdr-timeout-sec", 0, "Per-file CDR deadline in seconds (>=30, default 35)")
+	s.cdrMaxSizeFlag = flag.Int("cdr-max-file-size-mb", 0, "Reject CDR payloads larger than this (default 50 MB)")
+	s.cdrFingerprintFlag = flag.String("cdr-server-fingerprint", "", "TOFU-pinned SHA-256 of Sluice's server cert (hex; 'sha256:' prefix optional)")
+	s.cdrCertsDirFlag = flag.String("cdr-certs-dir", "", "Directory holding Sluice mTLS client bundle (ca.pem, client.pem, client.key)")
+	flag.Parse()
+}
+// handleOneShotCommands handles one-shot CLI commands that exit before starting the proxy.
+func handleOneShotCommands(s *startupState) {
 	// ── One-shot: password reset (Finding 5.1) ─────────────────────────────
-	if *resetPwUser != "" {
-		parts := strings.SplitN(*resetPwUser, ":", 2)
+	if *s.resetPwUser != "" {
+		parts := strings.SplitN(*s.resetPwUser, ":", 2)
 		if len(parts) != 2 || parts[0] == "" || len(parts[1]) < 8 {
 			fmt.Fprintln(os.Stderr, "Usage: --reset-password username:newpassword (min 8 chars)")
 			os.Exit(1)
 		}
-		usersPath := *uiUsersFile
+		usersPath := *s.uiUsersFile
 		if usersPath == "" {
 			usersPath = "/data/ui_users.json"
 		}
@@ -145,113 +284,135 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		fmt.Printf("Password reset for %q (role=admin). You can now start the proxy.\n", parts[0])
 		os.Exit(0)
 	}
+}
 
-	clusterInsecure = *clusterInsecureFlag
+// setInsecureFlag propagates the --cluster-insecure flag to the package global.
+func setInsecureFlag(s *startupState) {
+	clusterInsecure = *s.clusterInsecureFlag
+}
 
+// runEnrollmentMode enrolls with a Control Plane when --enroll is set.
+func runEnrollmentMode(s *startupState) {
 	// ── Enrollment mode — enroll then continue as DP ────────────────────
-	var enrolledConfig *dpEnrollmentConfig
-	if *enrollURL != "" {
-		ec, err := runEnrollment(*enrollURL)
+	if *s.enrollURL != "" {
+		ec, err := runEnrollment(*s.enrollURL)
 		if err != nil {
 			log.Fatalf("Enrollment failed: %v", err)
 		}
-		enrolledConfig = ec
+		s.enrolledConfig = ec
 	}
+}
 
+// loadFileConfigAndFlags loads the config file and resolves CLI flag overrides.
+func loadFileConfigAndFlags(s *startupState) {
 	// ── Load file config (if provided) ──────────────────────────────────────
-	fc := &FileConfig{}
-	if *configPath != "" {
-		loaded, err := loadFileConfig(*configPath)
+	s.fc = &FileConfig{}
+	if *s.configPath != "" {
+		loaded, err := loadFileConfig(*s.configPath)
 		if err != nil {
 			log.Fatalf("Cannot load config file: %v", err)
 		}
-		fc = loaded
-		fmt.Printf("[Culvert] Loaded config from %s\n", *configPath)
+		s.fc = loaded
+		fmt.Printf("[Culvert] Loaded config from %s\n", *s.configPath)
 	}
 
 	// CLI flags override file config.
-	pPort := firstNonZero(*proxyPort, fc.Proxy.Port, 8080)
-	uPort := firstNonZero(*uiPortFlag, fc.Proxy.UIPort, 9090)
-	lPath := firstStr(*logFilePath, fc.Proxy.LogFile)
-	blPath := firstStr(*blockFile, fc.Proxy.Blocklist)
-	lMaxMB := firstNonZero(*logMaxMB, fc.Proxy.LogMaxMB, 50)
-	authU := firstStr(*user, fc.Auth.User)
-	authP := firstStr(*pass, fc.Auth.Pass)
-	cert := firstStr(*tlsCert, fc.Proxy.TLSCert)
-	key := firstStr(*tlsKey, fc.Proxy.TLSKey)
-	rlRPM := firstNonZero(*rateLimitRPM, fc.Security.RateLimit)
-	ipModeVal := firstStr(*ipMode, fc.Security.IPFilterMode)
-
+	s.pPort = firstNonZero(*s.proxyPort, s.fc.Proxy.Port, 8080)
+	s.uPort = firstNonZero(*s.uiPortFlag, s.fc.Proxy.UIPort, 9090)
+	s.lPath = firstStr(*s.logFilePath, s.fc.Proxy.LogFile)
+	s.blPath = firstStr(*s.blockFile, s.fc.Proxy.Blocklist)
+	s.lMaxMB = firstNonZero(*s.logMaxMB, s.fc.Proxy.LogMaxMB, 50)
+	s.authU = firstStr(*s.user, s.fc.Auth.User)
+	s.authP = firstStr(*s.pass, s.fc.Auth.Pass)
+	s.cert = firstStr(*s.tlsCert, s.fc.Proxy.TLSCert)
+	s.key = firstStr(*s.tlsKey, s.fc.Proxy.TLSKey)
+	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
+	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
+}
+// initUIExtras configures extra TLS SANs and the trust-forwarded-headers flag.
+func initUIExtras(s *startupState) {
 	// ── Extra TLS SANs for self-signed cert ──────────────────────────────────
 	// Merge CLI --ui-san (comma-separated) with config file ui_sans list.
 	var sansList []string
-	if *uiSANsFlag != "" {
-		for _, s := range strings.Split(*uiSANsFlag, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				sansList = append(sansList, s)
+	if *s.uiSANsFlag != "" {
+		for _, san := range strings.Split(*s.uiSANsFlag, ",") {
+			if san = strings.TrimSpace(san); san != "" {
+				sansList = append(sansList, san)
 			}
 		}
 	}
-	sansList = append(sansList, fc.Proxy.UISANs...)
+	sansList = append(sansList, s.fc.Proxy.UISANs...)
 	uiExtraSANs = sansList // package-level var read by selfSignedTLS()
 
 	// ── Trust forwarded headers ──────────────────────────────────────────────
-	trustForwardedHeaders = *trustFwdHeaders || fc.Proxy.TrustForwardedHeaders
+	trustForwardedHeaders = *s.trustFwdHeaders || s.fc.Proxy.TrustForwardedHeaders
+}
 
+// initLogger sets up the rotating logger and stores the closer on startupState.
+func initLogger(s *startupState) {
 	// ── Logger ───────────────────────────────────────────────────────────────
 	var err error
-	var logCloser interface{ Close() error }
-	logger, logCloser, err = setupLogger(lPath, lMaxMB, fc.LogFormat)
+	logger, s.logCloser, err = setupLogger(s.lPath, s.lMaxMB, s.fc.LogFormat)
 	if err != nil {
 		log.Fatalf("Logger setup failed: %v", err)
 	}
-	SetLogLevel(ParseLogLevel(fc.LogLevel))
+	SetLogLevel(ParseLogLevel(s.fc.LogLevel))
+}
 
+// initLifecycleContext creates the app-wide lifecycle context.
+func initLifecycleContext(s *startupState) {
 	// ── Lifecycle context for all background goroutines ─────────────────────
-	appLifecycleCtx, appLifecycleCancel = context.WithCancel(context.Background()) // #nosec G118 -- cancel is deferred on the next line
-	defer appLifecycleCancel()
+	appLifecycleCtx, appLifecycleCancel = context.WithCancel(context.Background()) // #nosec G118 -- cancel is deferred in main()
+}
 
+// initAuth wires basic auth and loads persisted UI users.
+func initAuth(s *startupState) {
 	// ── Config ───────────────────────────────────────────────────────────────
-	cfg.ProxyPort = pPort
-	cfg.UIPort = uPort
-	if err := cfg.SetAuth(authU, authP); err != nil {
+	cfg.ProxyPort = s.pPort
+	cfg.UIPort = s.uPort
+	if err := cfg.SetAuth(s.authU, s.authP); err != nil {
 		log.Fatalf("Failed to set auth: %v", err)
 	}
 
 	// ── UI user persistence ───────────────────────────────────────────────────
 	// Load previously-created admin users from disk so auth survives restarts.
 	// The file is written whenever a user is created/modified/deleted via the UI.
-	if *uiUsersFile != "" {
-		cfg.SetUIUsersFile(*uiUsersFile)
+	if *s.uiUsersFile != "" {
+		cfg.SetUIUsersFile(*s.uiUsersFile)
 		if err := cfg.LoadUIUsersFile(); err != nil {
-			logger.Printf("UIUsers: failed to load %s: %v", *uiUsersFile, err)
+			logger.Printf("UIUsers: failed to load %s: %v", *s.uiUsersFile, err)
 		} else if cfg.AuthEnabled() {
-			logger.Printf("UIUsers: loaded from %s", *uiUsersFile)
+			logger.Printf("UIUsers: loaded from %s", *s.uiUsersFile)
 		}
 	}
-
+}
+// initSession initialises the session HMAC, revocations, and timeout.
+func initSession(s *startupState) {
 	// ── Session secret ───────────────────────────────────────────────────────
 	initSessionSecret()
-	initSessionSecretFromConfig(fc.SessionSecret) // overrides random if config provides one
+	initSessionSecretFromConfig(s.fc.SessionSecret) // overrides random if config provides one
 
 	// ── Session revocation persistence ──────────────────────────────────────
-	if *revocationsFile != "" {
-		revocationFilePath = *revocationsFile
+	if *s.revocationsFile != "" {
+		revocationFilePath = *s.revocationsFile
 		if err := sessionRevoked.LoadRevocations(); err != nil {
 			logger.Printf("Session: failed to load revocations: %v", err)
 		}
 	}
 
 	// ── Session timeout ───────────────────────────────────────────────────────
-	hrs := firstNonZero(*sessionHrs, fc.SessionTimeoutHours)
+	hrs := firstNonZero(*s.sessionHrs, s.fc.SessionTimeoutHours)
 	if hrs > 0 {
 		SetSessionTTL(time.Duration(hrs) * time.Hour)
 		logger.Printf("Session: timeout %dh", hrs)
 	}
+}
 
+// initObservability configures syslog, OTLP export, and persistent audit/request logs.
+func initObservability(s *startupState) {
 	// ── Syslog / SIEM forwarding ──────────────────────────────────────────────
-	syslogVal := firstStr(*syslogAddr, fc.SyslogAddr)
-	syslogFmtVal := firstStr(*syslogFormat, fc.SyslogFormat)
+	syslogVal := firstStr(*s.syslogAddr, s.fc.SyslogAddr)
+	syslogFmtVal := firstStr(*s.syslogFormat, s.fc.SyslogFormat)
 	if syslogVal != "" {
 		if err := InitSyslog(syslogVal, syslogFmtVal); err != nil {
 			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
@@ -261,14 +422,14 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 
 	// ── OTLP export (metrics + traces) ──────────────────────────────────────
-	otlpVal := firstStr(*otlpEndpoint, fc.OTLPEndpoint)
+	otlpVal := firstStr(*s.otlpEndpoint, s.fc.OTLPEndpoint)
 	if otlpVal != "" {
 		globalOTLP.Configure(otlpVal, nil)
 		globalOTLPTraces.Configure(otlpVal, nil)
 	}
 
 	// ── Persistent audit log ──────────────────────────────────────────────────
-	auditLogVal := firstStr(*auditLog, fc.AuditLogFile)
+	auditLogVal := firstStr(*s.auditLog, s.fc.AuditLogFile)
 	if auditLogVal != "" {
 		if err := InitAuditLog(auditLogVal); err != nil {
 			logger.Printf("Audit: log file error (%v) — falling back to in-memory", err)
@@ -278,8 +439,8 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 
 	// ── Persistent request log (Finding 6.1) ────────────────────────────────
-	reqLogVal := firstStr(*requestLogPath, fc.RequestLogFile)
-	reqLogMB := firstNonZero(*requestLogMaxMB, fc.RequestLogMaxMB, 100)
+	reqLogVal := firstStr(*s.requestLogPath, s.fc.RequestLogFile)
+	reqLogMB := firstNonZero(*s.requestLogMaxMB, s.fc.RequestLogMaxMB, 100)
 	if reqLogVal != "" {
 		if err := initRequestLog(reqLogVal, reqLogMB); err != nil {
 			logger.Printf("RequestLog: file error (%v) — falling back to in-memory only", err)
@@ -287,22 +448,27 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			logger.Printf("RequestLog: persisting to %s (max %d MB)", reqLogVal, reqLogMB)
 		}
 	}
-
+}
+// initGeoIP opens the GeoIP database if configured.
+func initGeoIP(s *startupState) {
 	// ── GeoIP database ───────────────────────────────────────────────────────
-	geoDBVal := firstStr(*geoIPDB, fc.Proxy.GeoIPDB)
-	if geoDBVal != "" {
-		if err := InitGeoDB(geoDBVal); err != nil {
-			logger.Printf("GeoIP: failed to open %s (%v) — GeoIP disabled", geoDBVal, err)
+	s.geoDBVal = firstStr(*s.geoIPDB, s.fc.Proxy.GeoIPDB)
+	if s.geoDBVal != "" {
+		if err := InitGeoDB(s.geoDBVal); err != nil {
+			logger.Printf("GeoIP: failed to open %s (%v) — GeoIP disabled", s.geoDBVal, err)
 		} else {
-			logger.Printf("GeoIP: loaded %s", geoDBVal)
+			logger.Printf("GeoIP: loaded %s", s.geoDBVal)
 		}
 	} else {
 		logger.Printf("GeoIP: disabled (no -geoip-db set; destCountry rules will be skipped)")
 	}
+}
 
+// initUIAccessPolicy configures UI IP allowlist, external base URL, and IdP registry.
+func initUIAccessPolicy(s *startupState) {
 	// ── Admin UI IP allowlist ─────────────────────────────────────────────────
-	uiAllowIPVal := firstStr(*uiAllowIP, "")
-	uiAllowList := fc.UIAllowIPs
+	uiAllowIPVal := firstStr(*s.uiAllowIP, "")
+	uiAllowList := s.fc.UIAllowIPs
 	if uiAllowIPVal != "" {
 		for _, cidr := range strings.Split(uiAllowIPVal, ",") {
 			uiAllowList = append(uiAllowList, strings.TrimSpace(cidr))
@@ -317,27 +483,30 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 
 	// ── External base URL (for OIDC/SAML callbacks) ──────────────────────────
-	if fc.Proxy.BaseURL != "" {
-		SetProxyBaseURL(fc.Proxy.BaseURL)
-		logger.Printf("BaseURL: %s", fc.Proxy.BaseURL)
+	if s.fc.Proxy.BaseURL != "" {
+		SetProxyBaseURL(s.fc.Proxy.BaseURL)
+		logger.Printf("BaseURL: %s", s.fc.Proxy.BaseURL)
 	} else {
 		// Warn if OIDC/SAML is configured but base_url is empty — callback URLs
 		// will be derived from the request Host header, which may not match the
 		// redirect_uri registered with the IdP.
-		hasOIDC := fc.OIDC.IntrospectionURL != "" || fc.Proxy.IdPProfilesFile != ""
+		hasOIDC := s.fc.OIDC.IntrospectionURL != "" || s.fc.Proxy.IdPProfilesFile != ""
 		if hasOIDC {
 			logger.Printf("WARNING: base_url not set — OIDC/SAML callbacks will use request Host header. Set proxy.base_url in config for reliable IdP redirects.")
 		}
 	}
 
 	// ── Generic IdP Registry ─────────────────────────────────────────────────
-	if fc.Proxy.IdPProfilesFile != "" {
-		if err := idpRegistry.Load(fc.Proxy.IdPProfilesFile); err != nil {
+	if s.fc.Proxy.IdPProfilesFile != "" {
+		if err := idpRegistry.Load(s.fc.Proxy.IdPProfilesFile); err != nil {
 			log.Fatalf("IdP profiles load error: %v", err)
 		}
-		logger.Printf("IdP: loaded from %s (%d profiles)", fc.Proxy.IdPProfilesFile, len(idpRegistry.All()))
+		logger.Printf("IdP: loaded from %s (%d profiles)", s.fc.Proxy.IdPProfilesFile, len(idpRegistry.All()))
 	}
+}
 
+// initPAC loads the PAC file configuration and wires the default proxy port.
+func initPAC(s *startupState) {
 	// ── PAC file configuration ────────────────────────────────────────────────
 	pacCfgPath := "pac_config.json"
 	if err := pacStore.Load(pacCfgPath); err != nil {
@@ -345,49 +514,56 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 	// Tell the PAC generator the real proxy port so /proxy.pac auto-generates
 	// the correct PROXY directive even when the admin hasn't explicitly set it.
-	pacDefaultProxyPort = pPort
-
+	pacDefaultProxyPort = s.pPort
+}
+// initLegacyAuthProviders wires legacy LDAP/OIDC auth providers when configured.
+func initLegacyAuthProviders(s *startupState) {
 	// ── Legacy external auth provider (LDAP / OIDC introspection) ────────────
 	// LDAP takes precedence when URL is configured.
 	// The generic IdP registry is preferred; the legacy providers remain for
 	// backwards-compatibility.
-	if fc.LDAP.URL != "" {
-		ldapProvider, err := NewLDAPAuth(fc.LDAP)
+	if s.fc.LDAP.URL != "" {
+		ldapProvider, err := NewLDAPAuth(s.fc.LDAP)
 		if err != nil {
 			log.Fatalf("LDAP config error: %v", err)
 		}
 		cfg.SetProvider(ldapProvider)
-		logger.Printf("Auth: LDAP (%s, base=%s)", fc.LDAP.URL, fc.LDAP.BaseDN)
-	} else if fc.OIDC.IntrospectionURL != "" {
-		oidcProvider, err := NewOIDCAuth(fc.OIDC)
+		logger.Printf("Auth: LDAP (%s, base=%s)", s.fc.LDAP.URL, s.fc.LDAP.BaseDN)
+	} else if s.fc.OIDC.IntrospectionURL != "" {
+		oidcProvider, err := NewOIDCAuth(s.fc.OIDC)
 		if err != nil {
 			log.Fatalf("OIDC config error: %v", err)
 		}
 		cfg.SetProvider(oidcProvider)
-		if fc.OIDC.LoginURL != "" {
-			SetOIDCLoginURL(fc.OIDC.LoginURL)
-			logger.Printf("Auth: OIDC login redirect: %s", fc.OIDC.LoginURL)
+		if s.fc.OIDC.LoginURL != "" {
+			SetOIDCLoginURL(s.fc.OIDC.LoginURL)
+			logger.Printf("Auth: OIDC login redirect: %s", s.fc.OIDC.LoginURL)
 		}
-		logger.Printf("Auth: OIDC introspection (%s)", fc.OIDC.IntrospectionURL)
-	} else if authU != "" {
-		logger.Printf("Auth: local bcrypt (user=%s)", authU)
+		logger.Printf("Auth: OIDC introspection (%s)", s.fc.OIDC.IntrospectionURL)
+	} else if s.authU != "" {
+		logger.Printf("Auth: local bcrypt (user=%s)", s.authU)
 	}
+}
 
+// initMetricsToken resolves the Bearer token used to protect /metrics.
+func initMetricsToken(s *startupState) {
 	// ── Metrics token ────────────────────────────────────────────────────────
-	metricsToken = firstStr(*metricsTok, fc.Proxy.MetricsToken)
+	metricsToken = firstStr(*s.metricsTok, s.fc.Proxy.MetricsToken)
 	if metricsToken != "" {
 		logger.Printf("Metrics: /metrics protected by Bearer token")
 	} else {
 		logger.Printf("Metrics: /metrics open (set -metrics-token to restrict)")
 	}
-
+}
+// initCluster starts Control Plane / Data Plane gRPC and HA failover.
+func initCluster(s *startupState) {
 	// ── Control Plane / Data Plane gRPC ──────────────────────────────────────
 	clusterRole.role = "standalone"
 	if h, err2 := os.Hostname(); err2 == nil {
 		clusterRole.nodeID = h
 	}
 	// ── Cluster state persistence ────────────────────────────────────────
-	clusterDBPath := firstStr(*clusterDB, fc.Cluster.StateDB, "cluster.json")
+	clusterDBPath := firstStr(*s.clusterDB, s.fc.Cluster.StateDB, "cluster.json")
 	clusterDBPathGlobal = clusterDBPath
 	if err := globalClusterStore.Load(clusterDBPath); err != nil {
 		logger.Printf("ClusterDB: load error: %v — starting fresh", err)
@@ -399,21 +575,21 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 
 	// Merge CLI flags with YAML cluster config (CLI wins).
-	cpAddr := firstStr(*cpGRPCAddr, fc.Cluster.GRPCAddr)
-	cpCert := firstStr(*cpGRPCCert, fc.Cluster.CertFile)
-	cpKey := firstStr(*cpGRPCKey, fc.Cluster.KeyFile)
-	cpCA := firstStr(*cpGRPCCA, fc.Cluster.CAFile)
+	cpAddr := firstStr(*s.cpGRPCAddr, s.fc.Cluster.GRPCAddr)
+	cpCert := firstStr(*s.cpGRPCCert, s.fc.Cluster.CertFile)
+	cpKey := firstStr(*s.cpGRPCKey, s.fc.Cluster.KeyFile)
+	cpCA := firstStr(*s.cpGRPCCA, s.fc.Cluster.CAFile)
 
-	if *haJoin != "" && *haToken != "" {
+	if *s.haJoin != "" && *s.haToken != "" {
 		// ── HA Standby: sync state from leader, then stand by ────────
 		initClusterCA(clusterDBPath)
-		globalHA.StartAsStandby(appLifecycleCtx, *haJoin, *haToken,
+		globalHA.StartAsStandby(appLifecycleCtx, *s.haJoin, *s.haToken,
 			cpAddr, cpCert, cpKey, cpCA,
 			func() error {
 				return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
 			},
 		)
-	} else if cpAddr != "" || fc.Cluster.Role == "control-plane" {
+	} else if cpAddr != "" || s.fc.Cluster.Role == "control-plane" {
 		// ── Normal CP startup ────────────────────────────────────────
 		if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
 			logger.Fatalf("ControlPlane gRPC: %v", err)
@@ -428,14 +604,14 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		}
 	}
 	// ── Data Plane startup: from flags, enrollment, or saved config ─────────
-	dpAddr, dpNID, dpCertF, dpKeyF, dpCAF := *dpCPAddr, *dpNodeID, *dpCert, *dpKey, *dpCA
+	dpAddr, dpNID, dpCertF, dpKeyF, dpCAF := *s.dpCPAddr, *s.dpNodeID, *s.dpCert, *s.dpKey, *s.dpCA
 	// Priority 1: fresh enrollment from this run.
-	if enrolledConfig != nil && dpAddr == "" {
-		dpAddr = enrolledConfig.CPAddr
-		dpNID = enrolledConfig.NodeID
-		dpCertF = enrolledConfig.CertFile
-		dpKeyF = enrolledConfig.KeyFile
-		dpCAF = enrolledConfig.CAFile
+	if s.enrolledConfig != nil && dpAddr == "" {
+		dpAddr = s.enrolledConfig.CPAddr
+		dpNID = s.enrolledConfig.NodeID
+		dpCertF = s.enrolledConfig.CertFile
+		dpKeyF = s.enrolledConfig.KeyFile
+		dpCAF = s.enrolledConfig.CAFile
 	}
 	// Priority 2: saved enrollment config from a previous run.
 	if dpAddr == "" {
@@ -451,31 +627,32 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if dpAddr != "" {
 		startDataPlane(appLifecycleCtx, dpAddr, dpNID, dpCertF, dpKeyF, dpCAF)
 	}
-
+}
+// initConnAndRateLimit configures per-IP connection limits, IP filter, and rate limiter.
+func initConnAndRateLimit(s *startupState) {
 	// ── Security: Connection limit per IP ────────────────────────────────────
-	if fc.Security.MaxConnsPerIP > 0 {
-		connLimiter.Enable(fc.Security.MaxConnsPerIP)
-		logger.Printf("ConnLimit: max %d connections per IP", fc.Security.MaxConnsPerIP)
+	if s.fc.Security.MaxConnsPerIP > 0 {
+		connLimiter.Enable(s.fc.Security.MaxConnsPerIP)
+		logger.Printf("ConnLimit: max %d connections per IP", s.fc.Security.MaxConnsPerIP)
 	}
 
 	// ── Security: IP filter ──────────────────────────────────────────────────
-	if ipModeVal != "" {
-		ipf.SetMode(ipModeVal)
-		for _, entry := range fc.Security.IPList {
+	if s.ipModeVal != "" {
+		ipf.SetMode(s.ipModeVal)
+		for _, entry := range s.fc.Security.IPList {
 			if err := ipf.Add(entry); err != nil {
 				logger.Printf("IP filter: invalid entry %q: %v", entry, err)
 			}
 		}
-		logger.Printf("IPFilter: mode=%s entries=%d", ipModeVal, len(fc.Security.IPList))
+		logger.Printf("IPFilter: mode=%s entries=%d", s.ipModeVal, len(s.fc.Security.IPList))
 	}
 
 	// ── Security: Rate limiter ───────────────────────────────────────────────
-	var rlCleanupCancel context.CancelFunc
-	if rlRPM > 0 {
-		rl.Configure(rlRPM, time.Minute)
-		logger.Printf("RateLimit: %d req/min per IP", rlRPM)
+	if s.rlRPM > 0 {
+		rl.Configure(s.rlRPM, time.Minute)
+		logger.Printf("RateLimit: %d req/min per IP", s.rlRPM)
 		var rlCtx context.Context
-		rlCtx, rlCleanupCancel = context.WithCancel(appLifecycleCtx)
+		rlCtx, s.rlCleanupCancel = context.WithCancel(appLifecycleCtx)
 		go func() {
 			t := time.NewTicker(5 * time.Minute)
 			defer t.Stop()
@@ -490,26 +667,30 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			}
 		}()
 	}
+}
 
+// initBlocklist loads the blocklist from disk and starts the blocklist feed syncer.
+func initBlocklist(s *startupState) {
 	// ── Blocklist ────────────────────────────────────────────────────────────
-	if blPath != "" {
-		if err := bl.Load(blPath); err != nil {
+	if s.blPath != "" {
+		if err := bl.Load(s.blPath); err != nil {
 			if os.IsNotExist(err) {
-				logger.Printf("Blocklist not found at %s — starting with empty list", blPath)
+				logger.Printf("Blocklist not found at %s — starting with empty list", s.blPath)
 			} else {
 				logger.Fatalf("Cannot load blocklist: %v", err)
 			}
 		} else {
-			logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), blPath)
+			logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), s.blPath)
 		}
 	}
 
 	// ── Blocklist feed sync ───────────────────────────────────────────────────
-	blFeedURL := fc.Proxy.BlocklistFeedURL
+	blFeedURL := s.fc.Proxy.BlocklistFeedURL
 	if blFeedURL != "" {
 		blFeedInterval := blFeedDefaultInterval
-		if s := fc.Proxy.BlocklistFeedInterval; s != "" {
-			if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		// Local name `iv` (not `s`) to avoid shadowing the *startupState parameter.
+		if iv := s.fc.Proxy.BlocklistFeedInterval; iv != "" {
+			if d, err := time.ParseDuration(iv); err == nil && d > 0 {
 				blFeedInterval = d
 			}
 		}
@@ -519,12 +700,14 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	} else {
 		blFeedSyncer = newBlocklistSyncer(bl, "", blFeedDefaultInterval)
 	}
-
+}
+// initRootCA loads or initialises the Root CA used for SSL inspection.
+func initRootCA(s *startupState) {
 	// ── Root CA for SSL inspection ────────────────────────────────────────────
 	// Passphrase is read from env so it never appears in CLI history or
 	// process listings (shift-left secret hygiene).
 	caPassphrase := os.Getenv(caPassphraseEnv)
-	caPathVal := firstStr(*caPath, fc.Proxy.CAPath)
+	caPathVal := firstStr(*s.caPath, s.fc.Proxy.CAPath)
 	if caPathVal != "" {
 		if err := certMgr.LoadOrInitCA(caPathVal, caPassphrase); err != nil {
 			logger.Printf("Warning: Root CA load/init failed (%v) — SSL inspection disabled", err)
@@ -545,9 +728,12 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if certMgr.Ready() {
 		StartCAAutoRotation(appLifecycleCtx, caPathVal, caPassphrase)
 	}
+}
 
+// initPolicy loads the policy rules file into the global policy store.
+func initPolicy(s *startupState) {
 	// ── Policy engine ─────────────────────────────────────────────────────────
-	polPath := firstStr(*policyFile, fc.Proxy.PolicyFile)
+	polPath := firstStr(*s.policyFile, s.fc.Proxy.PolicyFile)
 	if polPath != "" {
 		if err := policyStore.Load(polPath); err != nil {
 			logger.Fatalf("Cannot load policy file: %v", err)
@@ -558,9 +744,12 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		policyStore.path = ""
 		logger.Printf("Policy: in-memory only (set -policy <file> for persistence)")
 	}
+}
 
+// initURLCategories loads URL categories, category groups, SaaS feed, and the community BadgerDB feed.
+func initURLCategories(s *startupState) {
 	// ── URL Categories ────────────────────────────────────────────────────────
-	catPath := fc.Proxy.URLCategoriesFile
+	catPath := s.fc.Proxy.URLCategoriesFile
 	if catPath == "" {
 		catPath = "categories.json"
 	}
@@ -605,31 +794,32 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	// ── Community URL category feed (BadgerDB) ────────────────────────────────
 	// When --cat-feed-db is set, open BadgerDB and start the UT1 FeedSyncer.
 	// Layer 1 (catStore) remains the priority; BadgerDB is the fallback.
-	var feedSyncer *FeedSyncer
-	if *catFeedDB == "" { //nolint:nestif // straightforward init block; nesting is necessary
+	if *s.catFeedDB == "" { //nolint:nestif // straightforward init block; nesting is necessary
 		logger.Printf("CatFeedDB: disabled (set --cat-feed-db for community feed)")
 	} else {
 		var dbErr error
-		communityDB, dbErr = openCommunityDB(*catFeedDB)
+		communityDB, dbErr = openCommunityDB(*s.catFeedDB)
 		if dbErr != nil {
-			logger.Fatalf("CatFeedDB → cannot open BadgerDB at %s: %v", *catFeedDB, dbErr)
+			logger.Fatalf("CatFeedDB → cannot open BadgerDB at %s: %v", *s.catFeedDB, dbErr)
 		}
 		syncD := 24 * time.Hour
-		if *catSyncIntvl != "" {
-			if d, err2 := time.ParseDuration(*catSyncIntvl); err2 == nil {
+		if *s.catSyncIntvl != "" {
+			if d, err2 := time.ParseDuration(*s.catSyncIntvl); err2 == nil {
 				syncD = d
 			}
 		}
-		feedSyncer = newFeedSyncer(communityDB, *catFeedURL, syncD)
-		feedSyncer.Start(appLifecycleCtx)
-		logger.Printf("CatFeedDB: BadgerDB at %s, sync every %s", *catFeedDB, syncD)
+		s.feedSyncer = newFeedSyncer(communityDB, *s.catFeedURL, syncD)
+		s.feedSyncer.Start(appLifecycleCtx)
+		logger.Printf("CatFeedDB: BadgerDB at %s, sync every %s", *s.catFeedDB, syncD)
 	}
-
+}
+// initFileBlocking sets up the file-extension blocker and named file-type profiles.
+func initFileBlocking(s *startupState) {
 	// ── File block profile ───────────────────────────────────────────────────
 	// Load defaults or config-specified extensions first, then override with
 	// the persistent file (UI changes survive restart/update).
-	if len(fc.FileBlock.Extensions) > 0 {
-		for _, ext := range fc.FileBlock.Extensions {
+	if len(s.fc.FileBlock.Extensions) > 0 {
+		for _, ext := range s.fc.FileBlock.Extensions {
 			fileBlocker.Add(ext)
 		}
 	} else {
@@ -644,7 +834,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	logger.Printf("FileBlock: %d extension(s) in profile", fileBlocker.Count())
 
 	// ── File extension profiles (for per-rule policy blocking) ────────────────
-	fpPath := firstStr(*fileProfilesFile, fc.Proxy.FileProfilesFile)
+	fpPath := firstStr(*s.fileProfilesFile, s.fc.Proxy.FileProfilesFile)
 	if fpPath == "" {
 		fpPath = "fileprofiles.json"
 	}
@@ -653,24 +843,27 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	} else {
 		logger.Printf("FileProfiles: %d profile(s) loaded from %s", len(globalProfileStore.List()), fpPath)
 	}
+}
 
+// initSSLBypassAndDPI loads SSL bypass patterns and the DPI content scanner patterns.
+func initSSLBypassAndDPI(s *startupState) {
 	// ── SSL Bypass patterns ───────────────────────────────────────────────────
 	// If ssl_bypass_file is set, load from the JSON file (dynamic — managed via
 	// /api/ssl-bypass without restart). On first run, seed it from ssl_bypass_patterns.
-	bypassFilePath := firstStr(fc.Proxy.SSLBypassFile)
+	bypassFilePath := firstStr(s.fc.Proxy.SSLBypassFile)
 	if bypassFilePath != "" {
 		if err := sslBypass.Load(bypassFilePath); err != nil {
 			logger.Fatalf("SSL bypass file error: %v", err)
 		}
-		if len(sslBypass.List()) == 0 && len(fc.Proxy.SSLBypassPatterns) > 0 {
-			if err := sslBypass.Set(fc.Proxy.SSLBypassPatterns); err != nil {
+		if len(sslBypass.List()) == 0 && len(s.fc.Proxy.SSLBypassPatterns) > 0 {
+			if err := sslBypass.Set(s.fc.Proxy.SSLBypassPatterns); err != nil {
 				logger.Fatalf("SSL bypass pattern error: %v", err)
 			}
 			sslBypass.Save() // persist seed patterns on first run
 		}
 		logger.Printf("SSLBypass: %d pattern(s) (file: %s)", len(sslBypass.List()), bypassFilePath)
-	} else if len(fc.Proxy.SSLBypassPatterns) > 0 {
-		if err := sslBypass.Set(fc.Proxy.SSLBypassPatterns); err != nil {
+	} else if len(s.fc.Proxy.SSLBypassPatterns) > 0 {
+		if err := sslBypass.Set(s.fc.Proxy.SSLBypassPatterns); err != nil {
 			logger.Fatalf("SSL bypass pattern error: %v", err)
 		}
 		logger.Printf("SSLBypass: %d pattern(s) (in-memory; set ssl_bypass_file for dynamic management)", len(sslBypass.List()))
@@ -680,35 +873,38 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	// If content_scan_file is set, patterns are loaded from JSON and can be
 	// managed at runtime via /api/content-scan without restarting.
 	// On first run, content_scan_patterns from YAML seeds the file.
-	scanFilePath := firstStr(fc.Proxy.ContentScanFile)
+	scanFilePath := firstStr(s.fc.Proxy.ContentScanFile)
 	if scanFilePath != "" {
 		if err := dpiScanner.Load(scanFilePath); err != nil {
 			logger.Fatalf("Content scan file error: %v", err)
 		}
-		if len(dpiScanner.List()) == 0 && len(fc.Proxy.ContentScanPatterns) > 0 {
-			if err := dpiScanner.Set(fc.Proxy.ContentScanPatterns); err != nil {
+		if len(dpiScanner.List()) == 0 && len(s.fc.Proxy.ContentScanPatterns) > 0 {
+			if err := dpiScanner.Set(s.fc.Proxy.ContentScanPatterns); err != nil {
 				logger.Fatalf("Content scan pattern error: %v", err)
 			}
 			dpiScanner.Save()
 		}
 		logger.Printf("DPIScan: %d pattern(s) (file: %s)", len(dpiScanner.List()), scanFilePath)
-	} else if len(fc.Proxy.ContentScanPatterns) > 0 {
-		if err := dpiScanner.Set(fc.Proxy.ContentScanPatterns); err != nil {
+	} else if len(s.fc.Proxy.ContentScanPatterns) > 0 {
+		if err := dpiScanner.Set(s.fc.Proxy.ContentScanPatterns); err != nil {
 			logger.Fatalf("Content scan pattern error: %v", err)
 		}
 		logger.Printf("DPIScan: %d pattern(s) (in-memory; set content_scan_file for persistence)", len(dpiScanner.List()))
 	}
+}
 
+// initRewriteAndDefaultAction loads header rewrite rules and sets the default policy action.
+func initRewriteAndDefaultAction(s *startupState) {
 	// ── Rewrite rules ────────────────────────────────────────────────────────
-	if len(fc.Rewrite) > 0 {
-		rewriter.SetRules(fc.Rewrite)
-		logger.Printf("Rewrite: %d rule(s) loaded", len(fc.Rewrite))
+	if len(s.fc.Rewrite) > 0 {
+		rewriter.SetRules(s.fc.Rewrite)
+		logger.Printf("Rewrite: %d rule(s) loaded", len(s.fc.Rewrite))
 	}
 
 	// ── Default policy action ────────────────────────────────────────────────
 	// "allow" = passthrough mode (good for initial setup); "deny" = zero-trust.
 	// Defaults to "deny" when rules are configured, "allow" when no rules exist.
-	defaultAction := firstStr(fc.DefaultAction)
+	defaultAction := firstStr(s.fc.DefaultAction)
 	if defaultAction == "" {
 		if len(policyStore.List()) == 0 {
 			defaultAction = "allow"
@@ -719,15 +915,17 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 	setDefaultPolicyAction(defaultAction)
 	logger.Printf("Policy: default action: %s", defaultAction)
-
+}
+// initScanning wires up ClamAV, YARA, threat feeds, and the optional scan microservice sidecar.
+func initScanning(s *startupState) {
 	// ── Security scanning: ClamAV + YARA + Threat Feeds ─────────────────────
-	secCfg := fc.SecurityScan
-	clamAddr := firstStr(*clamavAddr, secCfg.ClamAVAddr)
-	yaraDir := firstStr(*yaraRulesDir, secCfg.YARARulesDir)
-	feedDB := firstStr(*threatFeedDB, secCfg.ThreatFeedDB)
+	secCfg := s.fc.SecurityScan
+	clamAddr := firstStr(*s.clamavAddr, secCfg.ClamAVAddr)
+	yaraDir := firstStr(*s.yaraRulesDir, secCfg.YARARulesDir)
+	feedDB := firstStr(*s.threatFeedDB, secCfg.ThreatFeedDB)
 
 	// Remote scan service mode: delegate body scanning to a sidecar.
-	remoteScanURL := firstStr(*scanSvcURL, secCfg.ScanSvcURL)
+	remoteScanURL := firstStr(*s.scanSvcURL, secCfg.ScanSvcURL)
 	if remoteScanURL != "" {
 		globalRemoteScanner.Init(remoteScanURL)
 		logger.Printf("ScanSvc: remote mode, delegating to %s", remoteScanURL)
@@ -804,56 +1002,60 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 
 	// Scan microservice sidecar: expose local scanners as an HTTP service.
-	var scanSvc *ScanService
-	svcListenAddr := firstStr(*scanSvcListen, secCfg.ScanSvcListen)
+	svcListenAddr := firstStr(*s.scanSvcListen, secCfg.ScanSvcListen)
 	if svcListenAddr != "" {
-		scanSvc = NewScanService(svcListenAddr)
-		if err := scanSvc.Listen(); err != nil {
+		s.scanSvc = NewScanService(svcListenAddr)
+		if err := s.scanSvc.Listen(); err != nil {
 			logger.Printf("ScanSvc: listen error: %v", err)
 		} else {
 			go func() {
-				if err := scanSvc.Start(); err != nil {
+				if err := s.scanSvc.Start(); err != nil {
 					logger.Printf("ScanSvc: error: %v", err)
 				}
 			}()
 		}
 	}
-
+}
+// initUpstreamProxy configures parent-proxy chaining when configured.
+func initUpstreamProxy(s *startupState) {
 	// ── Upstream proxy chaining ──────────────────────────────────────────────
-	if len(fc.Upstream.Proxies) > 0 {
-		initUpstreamPool(fc)
+	if len(s.fc.Upstream.Proxies) > 0 {
+		initUpstreamPool(s.fc)
 	}
+}
 
+// initCDR wires Sluice CDR configuration, persistent state, client, and health poller.
+func initCDR(s *startupState) {
 	// ── Sluice CDR integration (Phase 1: config plumbing only) ──────────────
 	// Client wiring into the proxy pipeline (handleTunnelInspect) lands in a
 	// follow-up phase.  For now we merge flags, validate, and log status so
 	// operators can sanity-check their setup before Phase 2 ships.
-	cdrCfg := fc.CDR
-	if *cdrEnabledFlag {
+	cdrCfg := s.fc.CDR
+	if *s.cdrEnabledFlag {
 		cdrCfg.Enabled = true
 	}
-	if ep := firstStr(*cdrEndpointFlag, cdrCfg.Endpoint); ep != "" {
+	if ep := firstStr(*s.cdrEndpointFlag, cdrCfg.Endpoint); ep != "" {
 		cdrCfg.Endpoint = ep
 	}
-	if fm := firstStr(*cdrFailModeFlag, cdrCfg.FailMode); fm != "" {
+	if fm := firstStr(*s.cdrFailModeFlag, cdrCfg.FailMode); fm != "" {
 		cdrCfg.FailMode = fm
 	}
-	if pn := firstStr(*cdrProfileFlag, cdrCfg.DefaultProfile); pn != "" {
+	if pn := firstStr(*s.cdrProfileFlag, cdrCfg.DefaultProfile); pn != "" {
 		cdrCfg.DefaultProfile = pn
 	}
-	if m := firstStr(*cdrModeFlag, cdrCfg.DefaultMode); m != "" {
+	if m := firstStr(*s.cdrModeFlag, cdrCfg.DefaultMode); m != "" {
 		cdrCfg.DefaultMode = m
 	}
-	if t := firstNonZero(*cdrTimeoutFlag, cdrCfg.TimeoutSec); t != 0 {
+	if t := firstNonZero(*s.cdrTimeoutFlag, cdrCfg.TimeoutSec); t != 0 {
 		cdrCfg.TimeoutSec = t
 	}
-	if s := firstNonZero(*cdrMaxSizeFlag, cdrCfg.MaxFileSizeMB); s != 0 {
-		cdrCfg.MaxFileSizeMB = s
+	if sz := firstNonZero(*s.cdrMaxSizeFlag, cdrCfg.MaxFileSizeMB); sz != 0 {
+		cdrCfg.MaxFileSizeMB = sz
 	}
-	if fp := firstStr(*cdrFingerprintFlag, cdrCfg.ServerFingerprint); fp != "" {
+	if fp := firstStr(*s.cdrFingerprintFlag, cdrCfg.ServerFingerprint); fp != "" {
 		cdrCfg.ServerFingerprint = fp
 	}
-	if d := firstStr(*cdrCertsDirFlag, cdrCfg.CertsDir); d != "" {
+	if d := firstStr(*s.cdrCertsDirFlag, cdrCfg.CertsDir); d != "" {
 		cdrCfg.CertsDir = d
 	}
 	// Runtime sentinel takes priority: if /data/cdr_enabled exists
@@ -911,10 +1113,12 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 		logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 2c: client + policy engine + proxy wiring + admin API live)",
 			sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
 	}
-
+}
+// initMTLSAndOCSP loads the upstream client cert and enables OCSP/CRL checks.
+func initMTLSAndOCSP(s *startupState) {
 	// ── Client certificate (mTLS) for upstream servers ───────────────────────
-	if fc.Proxy.ClientCertFile != "" && fc.Proxy.ClientKeyFile != "" {
-		clientCert, err := tls.LoadX509KeyPair(fc.Proxy.ClientCertFile, fc.Proxy.ClientKeyFile)
+	if s.fc.Proxy.ClientCertFile != "" && s.fc.Proxy.ClientKeyFile != "" {
+		clientCert, err := tls.LoadX509KeyPair(s.fc.Proxy.ClientCertFile, s.fc.Proxy.ClientKeyFile)
 		if err != nil {
 			logger.Printf("mTLS: failed to load client cert: %v", err)
 		} else {
@@ -922,17 +1126,20 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 				upstreamTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 			}
 			upstreamTransport.TLSClientConfig.Certificates = []tls.Certificate{clientCert}
-			logger.Printf("mTLS: client cert loaded (%s)", fc.Proxy.ClientCertFile)
+			logger.Printf("mTLS: client cert loaded (%s)", s.fc.Proxy.ClientCertFile)
 		}
 	}
 
 	// ── OCSP/CRL revocation checking ─────────────────────────────────────────
-	if fc.Proxy.OCSPCheck {
+	if s.fc.Proxy.OCSPCheck {
 		globalOCSP.Enable()
 		ConfigureTransportOCSP(upstreamTransport)
 		logger.Printf("OCSP: upstream certificate revocation checking enabled")
 	}
+}
 
+// initBackgroundServices starts SSE, alert retry, updater, and cluster recovery.
+func initBackgroundServices(s *startupState) {
 	// ── SSE live dashboard broadcaster ───────────────────────────────────────
 	startSSEBroadcaster()
 
@@ -940,7 +1147,7 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	go startAlertRetryLoop(appLifecycleCtx)
 
 	// ── Docker self-update system ────────────────────────────────────────────
-	if u := firstStr(*updaterURLFlag, fc.Update.UpdaterURL); u != "" {
+	if u := firstStr(*s.updaterURLFlag, s.fc.Update.UpdaterURL); u != "" {
 		if err := validateUpdaterURL(u); err != nil {
 			logWarnf("Update: invalid updater URL %q: %v — using default", u, err)
 		} else {
@@ -958,13 +1165,19 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	}
 	go startUpdateChecker(appLifecycleCtx)
 	recoverClusterUpdate()
+}
 
+// initSOCKS5 starts the optional SOCKS5 listener.
+func initSOCKS5(s *startupState) {
 	// ── SOCKS5 server (optional) ─────────────────────────────────────────────
-	s5Port := firstNonZero(*socks5Port, fc.Proxy.SOCKS5Port)
-	if s5Port > 0 {
-		go startSOCKS5(s5Port)
+	socks5PortVal := firstNonZero(*s.socks5Port, s.fc.Proxy.SOCKS5Port)
+	if socks5PortVal > 0 {
+		go startSOCKS5(socks5PortVal)
 	}
+}
 
+// initPersistentAdminState initializes config versioning, node groups, bandwidth, hit counters, and admin settings.
+func initPersistentAdminState(s *startupState) {
 	// ── Config versioning ────────────────────────────────────────────────
 	initConfigVersioning()
 
@@ -980,14 +1193,19 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 
 	// ── Admin settings persistence (restore GUI changes across restarts) ──
 	LoadAdminSettings(filepath.Join(dataDir, "admin_settings.json"))
+}
 
+// startAdminUI wires UI globals and launches the admin UI goroutine.
+func startAdminUI(s *startupState) {
 	// ── Web UI ────────────────────────────────────────────────────────────
-	uiCfgGeoIPDB = geoDBVal
-	uiCfgLogFile = lPath
-	uiCfgLogMaxMB = lMaxMB
-	uiCfgLogFormat = fc.LogFormat
-	go startUI(uPort, cert, key, *uiNoTLS)
-
+	uiCfgGeoIPDB = s.geoDBVal
+	uiCfgLogFile = s.lPath
+	uiCfgLogMaxMB = s.lMaxMB
+	uiCfgLogFormat = s.fc.LogFormat
+	go startUI(s.uPort, s.cert, s.key, *s.uiNoTLS)
+}
+// buildAndStartProxyServer constructs the proxy HTTP server and logs startup.
+func buildAndStartProxyServer(s *startupState) *http.Server {
 	// ── Proxy server ─────────────────────────────────────────────────────────
 	// NOTE: http.ServeMux cannot be used here because it "cleans" URLs and
 	// issues a 301 redirect when the path is empty — which is always the case
@@ -1011,32 +1229,37 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	})
 
 	proxySrv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", pPort),
+		Addr:         fmt.Sprintf(":%d", s.pPort),
 		Handler:      proxyHandler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
 
-	logger.Printf("Proxy: http://localhost:%d", pPort)
-	if authU != "" {
-		logger.Printf("Auth: enabled (user: %s)", authU)
+	logger.Printf("Proxy: http://localhost:%d", s.pPort)
+	if s.authU != "" {
+		logger.Printf("Auth: enabled (user: %s)", s.authU)
 	}
+	return proxySrv
+}
 
+// installSignalHandlers registers SIGINT/SIGTERM/SIGHUP handlers and spawns the SIGHUP
+// hot-reload goroutine. Returns the quit and sighup channels (caller uses quit to block).
+func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 	// ── Graceful shutdown ────────────────────────────────────────────────────
-	quit := make(chan os.Signal, 1)
+	quit = make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	// ── Hot config reload (SIGHUP) ──────────────────────────────────────────
-	sighup := make(chan os.Signal, 1)
+	sighup = make(chan os.Signal, 1)
 	signal.Notify(sighup, syscall.SIGHUP)
 	go func() {
 		for range sighup {
-			if *configPath == "" {
+			if *s.configPath == "" {
 				logger.Println("SIGHUP received but no -config path set; ignoring")
 				continue
 			}
-			logger.Printf("SIGHUP received — reloading config from %s", *configPath)
-			reloaded, err := loadFileConfig(*configPath)
+			logger.Printf("SIGHUP received — reloading config from %s", *s.configPath)
+			reloaded, err := loadFileConfig(*s.configPath)
 			if err != nil {
 				logger.Printf("Config reload error: %v — keeping current config", err)
 				continue
@@ -1045,7 +1268,11 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 			logger.Println("Config reloaded successfully")
 		}
 	}()
-
+	return quit, sighup
+}
+// runProxyUntilShutdown starts the proxy goroutine, blocks on quit, then runs
+// the graceful shutdown sequence in its exact original order.
+func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.Signal) {
 	go func() {
 		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Fatalf("Proxy error: %v", err)
@@ -1069,16 +1296,16 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.)
 	appLifecycleCancel()
 
-	if rlCleanupCancel != nil {
-		rlCleanupCancel()
+	if s.rlCleanupCancel != nil {
+		s.rlCleanupCancel()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Shut down scan microservice sidecar if running.
-	if scanSvc != nil {
-		scanSvc.Shutdown(ctx) //nolint:errcheck -- best-effort shutdown
+	if s.scanSvc != nil {
+		s.scanSvc.Shutdown(ctx) //nolint:errcheck -- best-effort shutdown
 	}
 
 	if err := proxySrv.Shutdown(ctx); err != nil {
@@ -1118,10 +1345,9 @@ func main() { //nolint:gocognit,cyclop,funlen // main wires everything; refactor
 	if requestLogCloser != nil {
 		requestLogCloser.Close() //nolint:errcheck // best-effort flush on shutdown
 	}
-	if logCloser != nil {
-		logCloser.Close()
+	if s.logCloser != nil {
+		s.logCloser.Close()
 	}
-	_ = feedSyncer // suppress unused warning; it runs as a goroutine
 	logger.Println("Stopped.")
 }
 
