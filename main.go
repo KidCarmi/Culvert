@@ -814,34 +814,13 @@ func initURLCategories(s *startupState) {
 	}
 }
 // initFileBlocking sets up the file-extension blocker and named file-type profiles.
+// initFileBlocking is the PR3 follow-up pilot shim: resolve the
+// file-blocking slice of FileConfig and hand it to the domain loader.
+// Behaviour is unchanged — loader errors are logged (non-fatal) so
+// startup continues with in-memory defaults, matching the original body.
 func initFileBlocking(s *startupState) {
-	// ── File block profile ───────────────────────────────────────────────────
-	// Load defaults or config-specified extensions first, then override with
-	// the persistent file (UI changes survive restart/update).
-	if len(s.fc.FileBlock.Extensions) > 0 {
-		for _, ext := range s.fc.FileBlock.Extensions {
-			fileBlocker.Add(ext)
-		}
-	} else {
-		for _, ext := range defaultBlockedExts {
-			fileBlocker.Add(ext)
-		}
-	}
-	// SetPath loads from the persistent JSON file (if it exists), overriding
-	// the config/defaults above. This ensures UI-added extensions survive
-	// container restarts and system updates.
-	fileBlocker.SetPath(filepath.Join(dataDir, "fileblock.json"))
-	logger.Printf("FileBlock: %d extension(s) in profile", fileBlocker.Count())
-
-	// ── File extension profiles (for per-rule policy blocking) ────────────────
-	fpPath := firstStr(*s.fileProfilesFile, s.fc.Proxy.FileProfilesFile)
-	if fpPath == "" {
-		fpPath = "fileprofiles.json"
-	}
-	if err := globalProfileStore.Load(fpPath); err != nil {
+	if err := loadFileBlocking(resolveFileBlockStartupConfig(s.fc, *s.fileProfilesFile)); err != nil {
 		logger.Printf("FileProfiles: load error (%v) — using in-memory defaults", err)
-	} else {
-		logger.Printf("FileProfiles: %d profile(s) loaded from %s", len(globalProfileStore.List()), fpPath)
 	}
 }
 
