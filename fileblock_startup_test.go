@@ -87,7 +87,7 @@ func TestResolveFileBlockStartupConfig_DefaultPath(t *testing.T) {
 	if got.ProfilesPath != "fileprofiles.json" {
 		t.Errorf("expected default 'fileprofiles.json', got %q", got.ProfilesPath)
 	}
-	if got.Extensions != nil && len(got.Extensions) != 0 {
+	if len(got.Extensions) != 0 {
 		t.Errorf("empty FileConfig should yield empty Extensions, got %v", got.Extensions)
 	}
 }
