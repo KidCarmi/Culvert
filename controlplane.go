@@ -488,20 +488,54 @@ func verifyNodeCert(ctx context.Context, claimedNodeID string) error {
 	return nil
 }
 
-func (s *controlPlaneServer) GetConfig(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
-	// GetConfig is called during initial poll before enrollment completes.
-	// No node identity check required — config is not secret, and unenrolled
-	// nodes need it to bootstrap.
+func (s *controlPlaneServer) GetConfig(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	// GetConfig is called during initial poll before enrollment completes, so
+	// it must remain reachable without a full node-identity check. However,
+	// the snapshot carries secrets (SessionHMAC) that must NOT leak to
+	// unenrolled callers. We redact those fields unless the peer's TLS cert
+	// serial matches an enrolled, non-revoked node. (C1 fix.)
 	snap := globalConfigStore.Get()
 	// Include cluster CA fingerprint so DP nodes detect CA rotation.
 	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
 		snap.CAFingerprint = fp
+	}
+	if !callerIsEnrolledNode(ctx) {
+		snap.SessionHMAC = ""
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
 	return b, nil
+}
+
+// callerIsEnrolledNode returns true when the gRPC peer presented a TLS
+// certificate whose serial matches an enrolled, non-revoked cluster node.
+// Used by GetConfig to decide whether to redact cluster secrets from the
+// response.
+//
+// Unlike verifyNodeCert this is a POSITIVE check (caller must prove
+// enrolment) — a missing peer cert or missing TLS info yields false, so
+// unauthenticated bootstrap callers are correctly treated as unenrolled.
+func callerIsEnrolledNode(ctx context.Context) bool {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.AuthInfo == nil {
+		return false
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
+		return false
+	}
+	serial := tlsInfo.State.PeerCertificates[0].SerialNumber.Text(16)
+	if globalClusterStore.IsRevoked(serial) {
+		return false
+	}
+	for _, n := range globalClusterStore.ListNodes() {
+		if n.CertSerial == serial {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *controlPlaneServer) PushMetrics(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
