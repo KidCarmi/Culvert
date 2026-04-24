@@ -466,14 +466,25 @@ func verifyNode(ctx context.Context, claimedNodeID string) error {
 }
 
 // verifyNodeCert extracts the peer TLS cert serial and matches it to the enrolled node.
+// Fails closed when no TLS peer certificate is present, unless the
+// --cluster-insecure flag has been set explicitly (dev-mode opt-in). The
+// previous implicit "no peer info ⇒ skip cert pinning" fall-through was a
+// footgun: if the CP's gRPC listener was ever started without TLS by
+// mistake, every RPC would auth as any claimed node. (H3 fix.)
 func verifyNodeCert(ctx context.Context, claimedNodeID string) error {
 	p, ok := peer.FromContext(ctx)
 	if !ok || p.AuthInfo == nil {
-		return nil // insecure dev mode — skip cert pinning
+		if clusterInsecure {
+			return nil // explicit dev-mode opt-in via --cluster-insecure
+		}
+		return status.Errorf(codes.Unauthenticated, "mTLS required: no peer info")
 	}
 	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
 	if !ok || len(tlsInfo.State.PeerCertificates) == 0 {
-		return nil
+		if clusterInsecure {
+			return nil
+		}
+		return status.Errorf(codes.Unauthenticated, "mTLS required: no peer certificate")
 	}
 	peerSerial := tlsInfo.State.PeerCertificates[0].SerialNumber.Text(16)
 	node, exists := globalClusterStore.GetNode(claimedNodeID)
