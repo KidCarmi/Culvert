@@ -329,23 +329,10 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
 }
-// initUIExtras configures extra TLS SANs and the trust-forwarded-headers flag.
+// initUIExtras is the PR3 expansion shim: resolve the UI-extras slice
+// (TLS SANs + trust-forwarded-headers) and apply it.
 func initUIExtras(s *startupState) {
-	// ── Extra TLS SANs for self-signed cert ──────────────────────────────────
-	// Merge CLI --ui-san (comma-separated) with config file ui_sans list.
-	var sansList []string
-	if *s.uiSANsFlag != "" {
-		for _, san := range strings.Split(*s.uiSANsFlag, ",") {
-			if san = strings.TrimSpace(san); san != "" {
-				sansList = append(sansList, san)
-			}
-		}
-	}
-	sansList = append(sansList, s.fc.Proxy.UISANs...)
-	uiExtraSANs = sansList // package-level var read by selfSignedTLS()
-
-	// ── Trust forwarded headers ──────────────────────────────────────────────
-	trustForwardedHeaders = *s.trustFwdHeaders || s.fc.Proxy.TrustForwardedHeaders
+	loadUIExtras(resolveUIExtrasStartupConfig(s.fc, *s.uiSANsFlag, *s.trustFwdHeaders))
 }
 
 // initLogger sets up the rotating logger and stores the closer on startupState.
@@ -449,19 +436,12 @@ func initObservability(s *startupState) {
 		}
 	}
 }
-// initGeoIP opens the GeoIP database if configured.
+// initGeoIP is the PR3 expansion shim: resolve the GeoIP DB slice, stash
+// the resolved path on startupState for startAdminUI, and apply it.
 func initGeoIP(s *startupState) {
-	// ── GeoIP database ───────────────────────────────────────────────────────
-	s.geoDBVal = firstStr(*s.geoIPDB, s.fc.Proxy.GeoIPDB)
-	if s.geoDBVal != "" {
-		if err := InitGeoDB(s.geoDBVal); err != nil {
-			logger.Printf("GeoIP: failed to open %s (%v) — GeoIP disabled", s.geoDBVal, err)
-		} else {
-			logger.Printf("GeoIP: loaded %s", s.geoDBVal)
-		}
-	} else {
-		logger.Printf("GeoIP: disabled (no -geoip-db set; destCountry rules will be skipped)")
-	}
+	cfg := resolveGeoIPStartupConfig(s.fc, *s.geoIPDB)
+	s.geoDBVal = cfg.DBPath
+	loadGeoIP(cfg)
 }
 
 // initUIAccessPolicy configures UI IP allowlist, external base URL, and IdP registry.
@@ -545,15 +525,10 @@ func initLegacyAuthProviders(s *startupState) {
 	}
 }
 
-// initMetricsToken resolves the Bearer token used to protect /metrics.
+// initMetricsToken is the PR3 expansion shim: resolve the /metrics Bearer
+// token slice and apply it.
 func initMetricsToken(s *startupState) {
-	// ── Metrics token ────────────────────────────────────────────────────────
-	metricsToken = firstStr(*s.metricsTok, s.fc.Proxy.MetricsToken)
-	if metricsToken != "" {
-		logger.Printf("Metrics: /metrics protected by Bearer token")
-	} else {
-		logger.Printf("Metrics: /metrics open (set -metrics-token to restrict)")
-	}
+	loadMetricsToken(resolveMetricsTokenStartupConfig(s.fc, *s.metricsTok))
 }
 // initCluster starts Control Plane / Data Plane gRPC and HA failover.
 func initCluster(s *startupState) {
