@@ -9,7 +9,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -329,23 +328,10 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
 }
-// initUIExtras configures extra TLS SANs and the trust-forwarded-headers flag.
+// initUIExtras is the PR3 expansion shim: resolve the UI-extras slice
+// (TLS SANs + trust-forwarded-headers) and apply it.
 func initUIExtras(s *startupState) {
-	// ── Extra TLS SANs for self-signed cert ──────────────────────────────────
-	// Merge CLI --ui-san (comma-separated) with config file ui_sans list.
-	var sansList []string
-	if *s.uiSANsFlag != "" {
-		for _, san := range strings.Split(*s.uiSANsFlag, ",") {
-			if san = strings.TrimSpace(san); san != "" {
-				sansList = append(sansList, san)
-			}
-		}
-	}
-	sansList = append(sansList, s.fc.Proxy.UISANs...)
-	uiExtraSANs = sansList // package-level var read by selfSignedTLS()
-
-	// ── Trust forwarded headers ──────────────────────────────────────────────
-	trustForwardedHeaders = *s.trustFwdHeaders || s.fc.Proxy.TrustForwardedHeaders
+	loadUIExtras(resolveUIExtrasStartupConfig(s.fc, *s.uiSANsFlag, *s.trustFwdHeaders))
 }
 
 // initLogger sets up the rotating logger and stores the closer on startupState.
@@ -386,25 +372,12 @@ func initAuth(s *startupState) {
 		}
 	}
 }
-// initSession initialises the session HMAC, revocations, and timeout.
+// initSession is the PR3 expansion shim: resolve the session slice
+// (HMAC secret + revocations file + TTL) and apply it.
 func initSession(s *startupState) {
-	// ── Session secret ───────────────────────────────────────────────────────
-	initSessionSecret()
-	initSessionSecretFromConfig(s.fc.SessionSecret) // overrides random if config provides one
-
-	// ── Session revocation persistence ──────────────────────────────────────
-	if *s.revocationsFile != "" {
-		revocationFilePath = *s.revocationsFile
-		if err := sessionRevoked.LoadRevocations(); err != nil {
-			logger.Printf("Session: failed to load revocations: %v", err)
-		}
-	}
-
-	// ── Session timeout ───────────────────────────────────────────────────────
-	hrs := firstNonZero(*s.sessionHrs, s.fc.SessionTimeoutHours)
-	if hrs > 0 {
-		SetSessionTTL(time.Duration(hrs) * time.Hour)
-		logger.Printf("Session: timeout %dh", hrs)
+	cfg := resolveSessionStartupConfig(s.fc, *s.revocationsFile, *s.sessionHrs)
+	if err := loadSession(cfg); err != nil {
+		logger.Printf("Session: failed to load revocations: %v", err)
 	}
 }
 
@@ -449,111 +422,44 @@ func initObservability(s *startupState) {
 		}
 	}
 }
-// initGeoIP opens the GeoIP database if configured.
+// initGeoIP is the PR3 expansion shim: resolve the GeoIP DB slice, stash
+// the resolved path on startupState for startAdminUI, and apply it.
 func initGeoIP(s *startupState) {
-	// ── GeoIP database ───────────────────────────────────────────────────────
-	s.geoDBVal = firstStr(*s.geoIPDB, s.fc.Proxy.GeoIPDB)
-	if s.geoDBVal != "" {
-		if err := InitGeoDB(s.geoDBVal); err != nil {
-			logger.Printf("GeoIP: failed to open %s (%v) — GeoIP disabled", s.geoDBVal, err)
-		} else {
-			logger.Printf("GeoIP: loaded %s", s.geoDBVal)
-		}
-	} else {
-		logger.Printf("GeoIP: disabled (no -geoip-db set; destCountry rules will be skipped)")
-	}
+	cfg := resolveGeoIPStartupConfig(s.fc, *s.geoIPDB)
+	s.geoDBVal = cfg.DBPath
+	loadGeoIP(cfg)
 }
 
-// initUIAccessPolicy configures UI IP allowlist, external base URL, and IdP registry.
+// initUIAccessPolicy is the PR3 expansion shim: resolve the UI access
+// policy slice (IP allowlist + base URL + IdP registry) and apply it.
 func initUIAccessPolicy(s *startupState) {
-	// ── Admin UI IP allowlist ─────────────────────────────────────────────────
-	uiAllowIPVal := firstStr(*s.uiAllowIP, "")
-	uiAllowList := s.fc.UIAllowIPs
-	if uiAllowIPVal != "" {
-		for _, cidr := range strings.Split(uiAllowIPVal, ",") {
-			uiAllowList = append(uiAllowList, strings.TrimSpace(cidr))
-		}
-	}
-	if len(uiAllowList) > 0 {
-		if err := SetUIAllowedCIDRs(uiAllowList); err != nil {
-			logger.Printf("UIGuard: invalid IP/CIDR (%v) — allowing all IPs", err)
-		} else {
-			logger.Printf("UIGuard: admin panel restricted to %v", uiAllowList)
-		}
-	}
-
-	// ── External base URL (for OIDC/SAML callbacks) ──────────────────────────
-	if s.fc.Proxy.BaseURL != "" {
-		SetProxyBaseURL(s.fc.Proxy.BaseURL)
-		logger.Printf("BaseURL: %s", s.fc.Proxy.BaseURL)
-	} else {
-		// Warn if OIDC/SAML is configured but base_url is empty — callback URLs
-		// will be derived from the request Host header, which may not match the
-		// redirect_uri registered with the IdP.
-		hasOIDC := s.fc.OIDC.IntrospectionURL != "" || s.fc.Proxy.IdPProfilesFile != ""
-		if hasOIDC {
-			logger.Printf("WARNING: base_url not set — OIDC/SAML callbacks will use request Host header. Set proxy.base_url in config for reliable IdP redirects.")
-		}
-	}
-
-	// ── Generic IdP Registry ─────────────────────────────────────────────────
-	if s.fc.Proxy.IdPProfilesFile != "" {
-		if err := idpRegistry.Load(s.fc.Proxy.IdPProfilesFile); err != nil {
-			log.Fatalf("IdP profiles load error: %v", err)
-		}
-		logger.Printf("IdP: loaded from %s (%d profiles)", s.fc.Proxy.IdPProfilesFile, len(idpRegistry.All()))
+	cfg := resolveUIAccessPolicyStartupConfig(s.fc, *s.uiAllowIP)
+	if err := loadUIAccessPolicy(cfg); err != nil {
+		log.Fatalf("%v", err)
 	}
 }
 
-// initPAC loads the PAC file configuration and wires the default proxy port.
+// initPAC is the PR3 expansion shim: resolve the PAC slice (config
+// path + default proxy port) and apply it.
 func initPAC(s *startupState) {
-	// ── PAC file configuration ────────────────────────────────────────────────
-	pacCfgPath := "pac_config.json"
-	if err := pacStore.Load(pacCfgPath); err != nil {
-		log.Fatalf("PAC config load error: %v", err)
+	cfg := resolvePACStartupConfig(s.pPort)
+	if err := loadPAC(cfg); err != nil {
+		log.Fatalf("%v", err)
 	}
-	// Tell the PAC generator the real proxy port so /proxy.pac auto-generates
-	// the correct PROXY directive even when the admin hasn't explicitly set it.
-	pacDefaultProxyPort = s.pPort
 }
-// initLegacyAuthProviders wires legacy LDAP/OIDC auth providers when configured.
+// initLegacyAuthProviders is the PR3 expansion shim: resolve the legacy
+// LDAP / OIDC-introspection provider slice and apply it.
 func initLegacyAuthProviders(s *startupState) {
-	// ── Legacy external auth provider (LDAP / OIDC introspection) ────────────
-	// LDAP takes precedence when URL is configured.
-	// The generic IdP registry is preferred; the legacy providers remain for
-	// backwards-compatibility.
-	if s.fc.LDAP.URL != "" {
-		ldapProvider, err := NewLDAPAuth(s.fc.LDAP)
-		if err != nil {
-			log.Fatalf("LDAP config error: %v", err)
-		}
-		cfg.SetProvider(ldapProvider)
-		logger.Printf("Auth: LDAP (%s, base=%s)", s.fc.LDAP.URL, s.fc.LDAP.BaseDN)
-	} else if s.fc.OIDC.IntrospectionURL != "" {
-		oidcProvider, err := NewOIDCAuth(s.fc.OIDC)
-		if err != nil {
-			log.Fatalf("OIDC config error: %v", err)
-		}
-		cfg.SetProvider(oidcProvider)
-		if s.fc.OIDC.LoginURL != "" {
-			SetOIDCLoginURL(s.fc.OIDC.LoginURL)
-			logger.Printf("Auth: OIDC login redirect: %s", s.fc.OIDC.LoginURL)
-		}
-		logger.Printf("Auth: OIDC introspection (%s)", s.fc.OIDC.IntrospectionURL)
-	} else if s.authU != "" {
-		logger.Printf("Auth: local bcrypt (user=%s)", s.authU)
+	c := resolveLegacyAuthProvidersStartupConfig(s.fc, s.authU)
+	if err := loadLegacyAuthProviders(c); err != nil {
+		log.Fatalf("%v", err)
 	}
 }
 
-// initMetricsToken resolves the Bearer token used to protect /metrics.
+// initMetricsToken is the PR3 expansion shim: resolve the /metrics Bearer
+// token slice and apply it.
 func initMetricsToken(s *startupState) {
-	// ── Metrics token ────────────────────────────────────────────────────────
-	metricsToken = firstStr(*s.metricsTok, s.fc.Proxy.MetricsToken)
-	if metricsToken != "" {
-		logger.Printf("Metrics: /metrics protected by Bearer token")
-	} else {
-		logger.Printf("Metrics: /metrics open (set -metrics-token to restrict)")
-	}
+	loadMetricsToken(resolveMetricsTokenStartupConfig(s.fc, *s.metricsTok))
 }
 // initCluster starts Control Plane / Data Plane gRPC and HA failover.
 func initCluster(s *startupState) {
@@ -814,107 +720,33 @@ func initURLCategories(s *startupState) {
 	}
 }
 // initFileBlocking sets up the file-extension blocker and named file-type profiles.
+// initFileBlocking is the PR3 follow-up pilot shim: resolve the
+// file-blocking slice of FileConfig and hand it to the domain loader.
+// Behaviour is unchanged — loader errors are logged (non-fatal) so
+// startup continues with in-memory defaults, matching the original body.
 func initFileBlocking(s *startupState) {
-	// ── File block profile ───────────────────────────────────────────────────
-	// Load defaults or config-specified extensions first, then override with
-	// the persistent file (UI changes survive restart/update).
-	if len(s.fc.FileBlock.Extensions) > 0 {
-		for _, ext := range s.fc.FileBlock.Extensions {
-			fileBlocker.Add(ext)
-		}
-	} else {
-		for _, ext := range defaultBlockedExts {
-			fileBlocker.Add(ext)
-		}
-	}
-	// SetPath loads from the persistent JSON file (if it exists), overriding
-	// the config/defaults above. This ensures UI-added extensions survive
-	// container restarts and system updates.
-	fileBlocker.SetPath(filepath.Join(dataDir, "fileblock.json"))
-	logger.Printf("FileBlock: %d extension(s) in profile", fileBlocker.Count())
-
-	// ── File extension profiles (for per-rule policy blocking) ────────────────
-	fpPath := firstStr(*s.fileProfilesFile, s.fc.Proxy.FileProfilesFile)
-	if fpPath == "" {
-		fpPath = "fileprofiles.json"
-	}
-	if err := globalProfileStore.Load(fpPath); err != nil {
+	if err := loadFileBlocking(resolveFileBlockStartupConfig(s.fc, *s.fileProfilesFile)); err != nil {
 		logger.Printf("FileProfiles: load error (%v) — using in-memory defaults", err)
-	} else {
-		logger.Printf("FileProfiles: %d profile(s) loaded from %s", len(globalProfileStore.List()), fpPath)
 	}
 }
 
 // initSSLBypassAndDPI loads SSL bypass patterns and the DPI content scanner patterns.
+// initSSLBypassAndDPI is the PR3 pilot shim: resolve the inspection-rules
+// slice of FileConfig and hand it to the domain loader. Behaviour and fatal
+// semantics are unchanged — the loader returns errors, main fails fast.
 func initSSLBypassAndDPI(s *startupState) {
-	// ── SSL Bypass patterns ───────────────────────────────────────────────────
-	// If ssl_bypass_file is set, load from the JSON file (dynamic — managed via
-	// /api/ssl-bypass without restart). On first run, seed it from ssl_bypass_patterns.
-	bypassFilePath := firstStr(s.fc.Proxy.SSLBypassFile)
-	if bypassFilePath != "" {
-		if err := sslBypass.Load(bypassFilePath); err != nil {
-			logger.Fatalf("SSL bypass file error: %v", err)
-		}
-		if len(sslBypass.List()) == 0 && len(s.fc.Proxy.SSLBypassPatterns) > 0 {
-			if err := sslBypass.Set(s.fc.Proxy.SSLBypassPatterns); err != nil {
-				logger.Fatalf("SSL bypass pattern error: %v", err)
-			}
-			sslBypass.Save() // persist seed patterns on first run
-		}
-		logger.Printf("SSLBypass: %d pattern(s) (file: %s)", len(sslBypass.List()), bypassFilePath)
-	} else if len(s.fc.Proxy.SSLBypassPatterns) > 0 {
-		if err := sslBypass.Set(s.fc.Proxy.SSLBypassPatterns); err != nil {
-			logger.Fatalf("SSL bypass pattern error: %v", err)
-		}
-		logger.Printf("SSLBypass: %d pattern(s) (in-memory; set ssl_bypass_file for dynamic management)", len(sslBypass.List()))
-	}
-
-	// ── DPI Content Scanner ──────────────────────────────────────────────────
-	// If content_scan_file is set, patterns are loaded from JSON and can be
-	// managed at runtime via /api/content-scan without restarting.
-	// On first run, content_scan_patterns from YAML seeds the file.
-	scanFilePath := firstStr(s.fc.Proxy.ContentScanFile)
-	if scanFilePath != "" {
-		if err := dpiScanner.Load(scanFilePath); err != nil {
-			logger.Fatalf("Content scan file error: %v", err)
-		}
-		if len(dpiScanner.List()) == 0 && len(s.fc.Proxy.ContentScanPatterns) > 0 {
-			if err := dpiScanner.Set(s.fc.Proxy.ContentScanPatterns); err != nil {
-				logger.Fatalf("Content scan pattern error: %v", err)
-			}
-			dpiScanner.Save()
-		}
-		logger.Printf("DPIScan: %d pattern(s) (file: %s)", len(dpiScanner.List()), scanFilePath)
-	} else if len(s.fc.Proxy.ContentScanPatterns) > 0 {
-		if err := dpiScanner.Set(s.fc.Proxy.ContentScanPatterns); err != nil {
-			logger.Fatalf("Content scan pattern error: %v", err)
-		}
-		logger.Printf("DPIScan: %d pattern(s) (in-memory; set content_scan_file for persistence)", len(dpiScanner.List()))
+	if err := loadInspectionRules(resolveInspectionRulesConfig(s.fc)); err != nil {
+		logger.Fatalf("inspection rules: %v", err)
 	}
 }
 
-// initRewriteAndDefaultAction loads header rewrite rules and sets the default policy action.
+// initRewriteAndDefaultAction is the PR3 expansion shim: resolve the
+// header-rewrite + default-policy-action slice and apply it. Passes
+// the current policy-rule count so the loader can derive the zero-
+// trust-vs-passthrough default when fc.DefaultAction is unset.
 func initRewriteAndDefaultAction(s *startupState) {
-	// ── Rewrite rules ────────────────────────────────────────────────────────
-	if len(s.fc.Rewrite) > 0 {
-		rewriter.SetRules(s.fc.Rewrite)
-		logger.Printf("Rewrite: %d rule(s) loaded", len(s.fc.Rewrite))
-	}
-
-	// ── Default policy action ────────────────────────────────────────────────
-	// "allow" = passthrough mode (good for initial setup); "deny" = zero-trust.
-	// Defaults to "deny" when rules are configured, "allow" when no rules exist.
-	defaultAction := firstStr(s.fc.DefaultAction)
-	if defaultAction == "" {
-		if len(policyStore.List()) == 0 {
-			defaultAction = "allow"
-			logger.Printf("Policy: no rules configured; defaulting to Allow (passthrough). Add rules and set default_action: deny for Zero Trust.")
-		} else {
-			defaultAction = "deny"
-		}
-	}
-	setDefaultPolicyAction(defaultAction)
-	logger.Printf("Policy: default action: %s", defaultAction)
+	cfg := resolveRewriteDefaultActionStartupConfig(s.fc)
+	loadRewriteAndDefaultAction(cfg, len(policyStore.List()))
 }
 // initScanning wires up ClamAV, YARA, threat feeds, and the optional scan microservice sidecar.
 func initScanning(s *startupState) {
@@ -1114,28 +946,10 @@ func initCDR(s *startupState) {
 			sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
 	}
 }
-// initMTLSAndOCSP loads the upstream client cert and enables OCSP/CRL checks.
+// initMTLSAndOCSP is the PR3 expansion shim: resolve the upstream
+// mTLS + OCSP slice and apply it.
 func initMTLSAndOCSP(s *startupState) {
-	// ── Client certificate (mTLS) for upstream servers ───────────────────────
-	if s.fc.Proxy.ClientCertFile != "" && s.fc.Proxy.ClientKeyFile != "" {
-		clientCert, err := tls.LoadX509KeyPair(s.fc.Proxy.ClientCertFile, s.fc.Proxy.ClientKeyFile)
-		if err != nil {
-			logger.Printf("mTLS: failed to load client cert: %v", err)
-		} else {
-			if upstreamTransport.TLSClientConfig == nil {
-				upstreamTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-			}
-			upstreamTransport.TLSClientConfig.Certificates = []tls.Certificate{clientCert}
-			logger.Printf("mTLS: client cert loaded (%s)", s.fc.Proxy.ClientCertFile)
-		}
-	}
-
-	// ── OCSP/CRL revocation checking ─────────────────────────────────────────
-	if s.fc.Proxy.OCSPCheck {
-		globalOCSP.Enable()
-		ConfigureTransportOCSP(upstreamTransport)
-		logger.Printf("OCSP: upstream certificate revocation checking enabled")
-	}
+	loadMTLSAndOCSP(resolveMTLSOCSPStartupConfig(s.fc))
 }
 
 // initBackgroundServices starts SSE, alert retry, updater, and cluster recovery.
