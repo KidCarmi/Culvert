@@ -593,6 +593,34 @@ func parseProxyAuth(r *http.Request) (string, string, bool) {
 // CONNECT tunnels and WebSocket upgrades bypass this limit (they stream raw TCP).
 const maxRequestBody = 64 << 20 // 64 MB
 
+// sslInspectBodyStallTimeout bounds the gap between successive bytes on a
+// decrypted SSL-inspected request body. A peer that pauses longer than this
+// while req.Write is streaming the body upstream trips the deadline and
+// releases the pinned upstream TLS conn. Long legitimate uploads complete
+// as long as bytes keep flowing within the window.
+const sslInspectBodyStallTimeout = 60 * time.Second
+
+// stallDetectReadCloser wraps an io.ReadCloser (an http.Request.Body during
+// inner-request forwarding) and re-arms conn.SetReadDeadline on every Read.
+// The underlying net.Conn's SetReadDeadline is expected to abort blocked
+// Reads with i/o timeout when the deadline elapses. This turns an
+// inactivity pause > timeout into a Read error, which unwinds the caller.
+// Used by the SSL-inspect loop to close the slowloris body-transfer window
+// (H2 fix).
+type stallDetectReadCloser struct {
+	io.ReadCloser
+	conn    net.Conn
+	timeout time.Duration
+}
+
+// Read re-arms the deadline before delegating. Any Read that completes
+// successfully resets the clock for the next Read; any Read that blocks
+// past the deadline returns a timeout error.
+func (s *stallDetectReadCloser) Read(p []byte) (int, error) {
+	_ = s.conn.SetReadDeadline(time.Now().Add(s.timeout))
+	return s.ReadCloser.Read(p)
+}
+
 // countingReader wraps an io.ReadCloser and counts bytes read through it.
 type countingReader struct {
 	r     io.ReadCloser
@@ -1198,7 +1226,19 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		if err != nil {
 			break
 		}
-		clientTLS.SetReadDeadline(time.Time{}) //nolint:errcheck // clear deadline for forwarding
+		// H2: wrap req.Body with a stall-detecting reader. The previous
+		// implementation cleared the read deadline entirely before
+		// req.Write(upstreamTLS), leaving the upstream TLS connection
+		// pinned to a slow body transfer indefinitely. Stall detection
+		// re-arms the client-side read deadline on every Body.Read, so a
+		// pause longer than sslInspectBodyStallTimeout trips the next
+		// Read — long legitimate uploads still complete as long as bytes
+		// keep flowing.
+		req.Body = &stallDetectReadCloser{
+			ReadCloser: req.Body,
+			conn:       clientTLS,
+			timeout:    sslInspectBodyStallTimeout,
+		}
 
 		// Debug: log every inner request so admins can trace file-blocking decisions.
 		// All values are sanitized or hardcoded to satisfy CodeQL CWE-117.
