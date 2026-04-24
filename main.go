@@ -373,25 +373,12 @@ func initAuth(s *startupState) {
 		}
 	}
 }
-// initSession initialises the session HMAC, revocations, and timeout.
+// initSession is the PR3 expansion shim: resolve the session slice
+// (HMAC secret + revocations file + TTL) and apply it.
 func initSession(s *startupState) {
-	// ── Session secret ───────────────────────────────────────────────────────
-	initSessionSecret()
-	initSessionSecretFromConfig(s.fc.SessionSecret) // overrides random if config provides one
-
-	// ── Session revocation persistence ──────────────────────────────────────
-	if *s.revocationsFile != "" {
-		revocationFilePath = *s.revocationsFile
-		if err := sessionRevoked.LoadRevocations(); err != nil {
-			logger.Printf("Session: failed to load revocations: %v", err)
-		}
-	}
-
-	// ── Session timeout ───────────────────────────────────────────────────────
-	hrs := firstNonZero(*s.sessionHrs, s.fc.SessionTimeoutHours)
-	if hrs > 0 {
-		SetSessionTTL(time.Duration(hrs) * time.Hour)
-		logger.Printf("Session: timeout %dh", hrs)
+	cfg := resolveSessionStartupConfig(s.fc, *s.revocationsFile, *s.sessionHrs)
+	if err := loadSession(cfg); err != nil {
+		logger.Printf("Session: failed to load revocations: %v", err)
 	}
 }
 
@@ -444,44 +431,12 @@ func initGeoIP(s *startupState) {
 	loadGeoIP(cfg)
 }
 
-// initUIAccessPolicy configures UI IP allowlist, external base URL, and IdP registry.
+// initUIAccessPolicy is the PR3 expansion shim: resolve the UI access
+// policy slice (IP allowlist + base URL + IdP registry) and apply it.
 func initUIAccessPolicy(s *startupState) {
-	// ── Admin UI IP allowlist ─────────────────────────────────────────────────
-	uiAllowIPVal := firstStr(*s.uiAllowIP, "")
-	uiAllowList := s.fc.UIAllowIPs
-	if uiAllowIPVal != "" {
-		for _, cidr := range strings.Split(uiAllowIPVal, ",") {
-			uiAllowList = append(uiAllowList, strings.TrimSpace(cidr))
-		}
-	}
-	if len(uiAllowList) > 0 {
-		if err := SetUIAllowedCIDRs(uiAllowList); err != nil {
-			logger.Printf("UIGuard: invalid IP/CIDR (%v) — allowing all IPs", err)
-		} else {
-			logger.Printf("UIGuard: admin panel restricted to %v", uiAllowList)
-		}
-	}
-
-	// ── External base URL (for OIDC/SAML callbacks) ──────────────────────────
-	if s.fc.Proxy.BaseURL != "" {
-		SetProxyBaseURL(s.fc.Proxy.BaseURL)
-		logger.Printf("BaseURL: %s", s.fc.Proxy.BaseURL)
-	} else {
-		// Warn if OIDC/SAML is configured but base_url is empty — callback URLs
-		// will be derived from the request Host header, which may not match the
-		// redirect_uri registered with the IdP.
-		hasOIDC := s.fc.OIDC.IntrospectionURL != "" || s.fc.Proxy.IdPProfilesFile != ""
-		if hasOIDC {
-			logger.Printf("WARNING: base_url not set — OIDC/SAML callbacks will use request Host header. Set proxy.base_url in config for reliable IdP redirects.")
-		}
-	}
-
-	// ── Generic IdP Registry ─────────────────────────────────────────────────
-	if s.fc.Proxy.IdPProfilesFile != "" {
-		if err := idpRegistry.Load(s.fc.Proxy.IdPProfilesFile); err != nil {
-			log.Fatalf("IdP profiles load error: %v", err)
-		}
-		logger.Printf("IdP: loaded from %s (%d profiles)", s.fc.Proxy.IdPProfilesFile, len(idpRegistry.All()))
+	cfg := resolveUIAccessPolicyStartupConfig(s.fc, *s.uiAllowIP)
+	if err := loadUIAccessPolicy(cfg); err != nil {
+		log.Fatalf("%v", err)
 	}
 }
 
@@ -496,32 +451,12 @@ func initPAC(s *startupState) {
 	// the correct PROXY directive even when the admin hasn't explicitly set it.
 	pacDefaultProxyPort = s.pPort
 }
-// initLegacyAuthProviders wires legacy LDAP/OIDC auth providers when configured.
+// initLegacyAuthProviders is the PR3 expansion shim: resolve the legacy
+// LDAP / OIDC-introspection provider slice and apply it.
 func initLegacyAuthProviders(s *startupState) {
-	// ── Legacy external auth provider (LDAP / OIDC introspection) ────────────
-	// LDAP takes precedence when URL is configured.
-	// The generic IdP registry is preferred; the legacy providers remain for
-	// backwards-compatibility.
-	if s.fc.LDAP.URL != "" {
-		ldapProvider, err := NewLDAPAuth(s.fc.LDAP)
-		if err != nil {
-			log.Fatalf("LDAP config error: %v", err)
-		}
-		cfg.SetProvider(ldapProvider)
-		logger.Printf("Auth: LDAP (%s, base=%s)", s.fc.LDAP.URL, s.fc.LDAP.BaseDN)
-	} else if s.fc.OIDC.IntrospectionURL != "" {
-		oidcProvider, err := NewOIDCAuth(s.fc.OIDC)
-		if err != nil {
-			log.Fatalf("OIDC config error: %v", err)
-		}
-		cfg.SetProvider(oidcProvider)
-		if s.fc.OIDC.LoginURL != "" {
-			SetOIDCLoginURL(s.fc.OIDC.LoginURL)
-			logger.Printf("Auth: OIDC login redirect: %s", s.fc.OIDC.LoginURL)
-		}
-		logger.Printf("Auth: OIDC introspection (%s)", s.fc.OIDC.IntrospectionURL)
-	} else if s.authU != "" {
-		logger.Printf("Auth: local bcrypt (user=%s)", s.authU)
+	c := resolveLegacyAuthProvidersStartupConfig(s.fc, s.authU)
+	if err := loadLegacyAuthProviders(c); err != nil {
+		log.Fatalf("%v", err)
 	}
 }
 
