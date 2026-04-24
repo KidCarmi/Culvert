@@ -9,7 +9,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -440,16 +439,13 @@ func initUIAccessPolicy(s *startupState) {
 	}
 }
 
-// initPAC loads the PAC file configuration and wires the default proxy port.
+// initPAC is the PR3 expansion shim: resolve the PAC slice (config
+// path + default proxy port) and apply it.
 func initPAC(s *startupState) {
-	// ── PAC file configuration ────────────────────────────────────────────────
-	pacCfgPath := "pac_config.json"
-	if err := pacStore.Load(pacCfgPath); err != nil {
-		log.Fatalf("PAC config load error: %v", err)
+	cfg := resolvePACStartupConfig(s.pPort)
+	if err := loadPAC(cfg); err != nil {
+		log.Fatalf("%v", err)
 	}
-	// Tell the PAC generator the real proxy port so /proxy.pac auto-generates
-	// the correct PROXY directive even when the admin hasn't explicitly set it.
-	pacDefaultProxyPort = s.pPort
 }
 // initLegacyAuthProviders is the PR3 expansion shim: resolve the legacy
 // LDAP / OIDC-introspection provider slice and apply it.
@@ -744,28 +740,13 @@ func initSSLBypassAndDPI(s *startupState) {
 	}
 }
 
-// initRewriteAndDefaultAction loads header rewrite rules and sets the default policy action.
+// initRewriteAndDefaultAction is the PR3 expansion shim: resolve the
+// header-rewrite + default-policy-action slice and apply it. Passes
+// the current policy-rule count so the loader can derive the zero-
+// trust-vs-passthrough default when fc.DefaultAction is unset.
 func initRewriteAndDefaultAction(s *startupState) {
-	// ── Rewrite rules ────────────────────────────────────────────────────────
-	if len(s.fc.Rewrite) > 0 {
-		rewriter.SetRules(s.fc.Rewrite)
-		logger.Printf("Rewrite: %d rule(s) loaded", len(s.fc.Rewrite))
-	}
-
-	// ── Default policy action ────────────────────────────────────────────────
-	// "allow" = passthrough mode (good for initial setup); "deny" = zero-trust.
-	// Defaults to "deny" when rules are configured, "allow" when no rules exist.
-	defaultAction := firstStr(s.fc.DefaultAction)
-	if defaultAction == "" {
-		if len(policyStore.List()) == 0 {
-			defaultAction = "allow"
-			logger.Printf("Policy: no rules configured; defaulting to Allow (passthrough). Add rules and set default_action: deny for Zero Trust.")
-		} else {
-			defaultAction = "deny"
-		}
-	}
-	setDefaultPolicyAction(defaultAction)
-	logger.Printf("Policy: default action: %s", defaultAction)
+	cfg := resolveRewriteDefaultActionStartupConfig(s.fc)
+	loadRewriteAndDefaultAction(cfg, len(policyStore.List()))
 }
 // initScanning wires up ClamAV, YARA, threat feeds, and the optional scan microservice sidecar.
 func initScanning(s *startupState) {
@@ -965,28 +946,10 @@ func initCDR(s *startupState) {
 			sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
 	}
 }
-// initMTLSAndOCSP loads the upstream client cert and enables OCSP/CRL checks.
+// initMTLSAndOCSP is the PR3 expansion shim: resolve the upstream
+// mTLS + OCSP slice and apply it.
 func initMTLSAndOCSP(s *startupState) {
-	// ── Client certificate (mTLS) for upstream servers ───────────────────────
-	if s.fc.Proxy.ClientCertFile != "" && s.fc.Proxy.ClientKeyFile != "" {
-		clientCert, err := tls.LoadX509KeyPair(s.fc.Proxy.ClientCertFile, s.fc.Proxy.ClientKeyFile)
-		if err != nil {
-			logger.Printf("mTLS: failed to load client cert: %v", err)
-		} else {
-			if upstreamTransport.TLSClientConfig == nil {
-				upstreamTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-			}
-			upstreamTransport.TLSClientConfig.Certificates = []tls.Certificate{clientCert}
-			logger.Printf("mTLS: client cert loaded (%s)", s.fc.Proxy.ClientCertFile)
-		}
-	}
-
-	// ── OCSP/CRL revocation checking ─────────────────────────────────────────
-	if s.fc.Proxy.OCSPCheck {
-		globalOCSP.Enable()
-		ConfigureTransportOCSP(upstreamTransport)
-		logger.Printf("OCSP: upstream certificate revocation checking enabled")
-	}
+	loadMTLSAndOCSP(resolveMTLSOCSPStartupConfig(s.fc))
 }
 
 // initBackgroundServices starts SSE, alert retry, updater, and cluster recovery.
