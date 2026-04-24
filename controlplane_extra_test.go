@@ -223,7 +223,12 @@ func TestVerifyNode_ValidNode(t *testing.T) {
 	globalClusterStore = newTestClusterStore(t)
 	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-1", Status: "connected", CertSerial: "s1"})
 
-	// No TLS peer info → insecure mode → should pass.
+	// H3: no TLS peer info now fails closed by default; this test
+	// exercises the explicit dev-mode opt-in.
+	origInsecure := clusterInsecure
+	defer func() { clusterInsecure = origInsecure }()
+	clusterInsecure = true
+
 	err := verifyNode(testBGCtx(), "dp-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
