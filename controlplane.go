@@ -122,6 +122,74 @@ type ConfigSnapshot struct {
 	OTLPEndpoint string `json:"otlp_endpoint,omitempty"`
 }
 
+// ConfigSnapshot per-slice size caps (H5 fix).
+//
+// Each cap is a hard upper bound on the number of entries a single
+// ConfigSnapshot may carry. Sized well above realistic deployments to
+// avoid breaking legitimate clusters; a malicious or compromised
+// Control Plane that pushes a snapshot exceeding ANY one of these
+// causes the entire snapshot to be rejected (no partial application).
+//
+// Without these caps, a CP could pack the gRPC frame (4 MiB by
+// default) full of small entries — ~200 k blocked-host strings, or
+// many policy rules — and force every DP to allocate proportional
+// memory + CPU on every poll cycle.
+const (
+	maxSnapBlockedHosts        = 200_000
+	maxSnapIPList              = 200_000
+	maxSnapPolicyRules         = 10_000
+	maxSnapSSLBypassPatterns   = 10_000
+	maxSnapURLCategories       = 200_000
+	maxSnapFileProfiles        = 1_000
+	maxSnapFileBlockExtensions = 10_000
+	maxSnapRewriteRules        = 5_000
+	maxSnapDPIPatterns         = 5_000
+	maxSnapCPAddresses         = 100
+	maxSnapPACExclusions       = 10_000
+	maxSnapThreatFeedURLs      = 500_000
+	maxSnapThreatFeedDomains   = 500_000
+	maxSnapDomainAllowlist     = 10_000
+	maxSnapBandwidthPolicies   = 1_000
+	maxSnapNodeGroups          = 1_000
+	maxSnapCategoryGroups      = 1_000
+)
+
+// validateConfigSnapshot enforces the per-slice caps above. Returns an
+// error naming the first field that overflows; nil when the snapshot is
+// within bounds. Callers must reject the whole snapshot on error — the
+// goal is to prevent partial application of an attacker-shaped payload.
+func validateConfigSnapshot(snap ConfigSnapshot) error {
+	checks := []struct {
+		name  string
+		size  int
+		limit int
+	}{
+		{"blocked_hosts", len(snap.BlockedHosts), maxSnapBlockedHosts},
+		{"ip_list", len(snap.IPList), maxSnapIPList},
+		{"policy_rules", len(snap.PolicyRules), maxSnapPolicyRules},
+		{"ssl_bypass_patterns", len(snap.SSLBypassPatterns), maxSnapSSLBypassPatterns},
+		{"url_categories", len(snap.URLCategories), maxSnapURLCategories},
+		{"file_profiles", len(snap.FileProfiles), maxSnapFileProfiles},
+		{"file_block_extensions", len(snap.FileBlockExtensions), maxSnapFileBlockExtensions},
+		{"rewrite_rules", len(snap.RewriteRules), maxSnapRewriteRules},
+		{"dpi_patterns", len(snap.DPIPatterns), maxSnapDPIPatterns},
+		{"cp_addresses", len(snap.CPAddresses), maxSnapCPAddresses},
+		{"pac_exclusions", len(snap.PACExclusions), maxSnapPACExclusions},
+		{"threat_feed_urls", len(snap.ThreatFeedURLs), maxSnapThreatFeedURLs},
+		{"threat_feed_domains", len(snap.ThreatFeedDomains), maxSnapThreatFeedDomains},
+		{"threat_domain_allowlist", len(snap.ThreatDomainAllowlist), maxSnapDomainAllowlist},
+		{"bandwidth_policies", len(snap.BandwidthPolicies), maxSnapBandwidthPolicies},
+		{"node_groups", len(snap.NodeGroups), maxSnapNodeGroups},
+		{"category_groups", len(snap.CategoryGroups), maxSnapCategoryGroups},
+	}
+	for _, c := range checks {
+		if c.size > c.limit {
+			return fmt.Errorf("config snapshot %s=%d exceeds cap %d", c.name, c.size, c.limit)
+		}
+	}
+	return nil
+}
+
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
 
 // ConfigStore holds the current ConfigSnapshot and notifies subscribers when
@@ -1165,6 +1233,15 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		logger.Printf("DataPlane: parse config error: %v", err)
 		return
 	}
+	// H5: validate per-slice caps BEFORE advancing lastVersion so that a
+	// rejected (over-cap) snapshot does not poison the version counter —
+	// otherwise the same poisoned version number would suppress every
+	// subsequent legitimate snapshot via the "snap.Version <= lastVersion"
+	// short-circuit below.
+	if err := validateConfigSnapshot(snap); err != nil {
+		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
+		return
+	}
 	if snap.Version <= c.lastVersion {
 		return // nothing changed
 	}
@@ -1364,6 +1441,15 @@ var caRotationNotify = make(chan struct{}, 1)
 
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
 func applyConfigSnapshot(snap ConfigSnapshot) {
+	// H5: reject the entire snapshot if any per-slice cap is exceeded.
+	// Logged at info; the next CP poll cycle will retry with a fresh
+	// snapshot once the operator corrects the CP-side input. No partial
+	// state mutation occurs on rejection.
+	if err := validateConfigSnapshot(snap); err != nil {
+		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
+		return
+	}
+
 	// Blocklist. All four maps MUST be pre-allocated — AddManual/AddException
 	// on a Data Plane node after a snapshot push would otherwise panic with
 	// "assignment to entry in nil map" (production defect caught by the
