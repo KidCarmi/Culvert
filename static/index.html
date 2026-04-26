@@ -405,6 +405,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="updates" data-min-role="admin">
       <span class="icon">&#x2B06;</span> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
     </div>
+    <div class="nav-item" data-view="diagnostics" data-min-role="admin">
+      <span class="icon">🩺</span> Diagnostics
+    </div>
 
     <div class="nav-section">Tools</div>
     <div class="nav-item" data-view="policy-tester">
@@ -3306,6 +3309,23 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-updates -->
 
+    <!-- ═══ DIAGNOSTICS ══════════════════════════════════════════════════ -->
+    <div class="view" id="view-diagnostics">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Operator Contract</span>
+          <button class="btn ghost sm" data-click="loadDiagnostics">↺ Refresh</button>
+        </div>
+        <div style="padding:16px">
+          <div id="diag-summary" style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+            <span id="diag-verdict-badge" style="padding:4px 10px;border-radius:999px;font-size:.75rem;font-weight:700;background:var(--surface2);color:var(--muted)">—</span>
+            <span id="diag-generated-at" style="color:var(--muted);font-size:.75rem"></span>
+          </div>
+          <div id="diag-checks-list" style="display:grid;gap:8px"></div>
+        </div>
+      </div>
+    </div><!-- /view-diagnostics -->
+
     <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
     <!-- (embedded inside Security panel later, but available as standalone) -->
 
@@ -3542,6 +3562,7 @@ document.addEventListener('click', e => {
 
     // ── Cluster ──
     case 'loadCluster':       loadCluster(); break;
+    case 'loadDiagnostics':   loadDiagnostics(); break;
     case 'enableControlPlane': enableControlPlane(); break;
     case 'enableHA':          enableHA(); break;
     case 'copyHADeployCmd':   copyHADeployCmd(); break;
@@ -3784,6 +3805,7 @@ const viewMeta = {
   cluster:      { title: 'Cluster Nodes', meta: 'Multi-node Control Plane / Data Plane management' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
   updates:      { title: 'Updates',       meta: 'Docker-based self-update system' },
+  diagnostics:  { title: 'Diagnostics',   meta: 'Operator contract — readiness, security posture, and risky-mode warnings' },
   users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
@@ -3818,6 +3840,7 @@ function switchView(name) {
   if (name === 'cluster')        loadCluster();
   if (name === 'updates')        loadUpdates();
   if (name === 'cdr')            loadCDRData();
+  if (name === 'diagnostics')    loadDiagnostics();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -8573,6 +8596,47 @@ async function upstreamHealthCheck() {
   await api('/api/upstream/health', {method:'POST'});
   toast('Health check complete','success');
   loadUpstream();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Diagnostics — Operator Contract
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadDiagnostics() {
+  const list = document.getElementById('diag-checks-list');
+  const badge = document.getElementById('diag-verdict-badge');
+  const ts = document.getElementById('diag-generated-at');
+  if (!list || !badge) return;
+  try {
+    const r = await api('/api/diagnostics');
+    if (!r) return;
+    const palette = {
+      ok:   { bg: 'rgba(34,197,94,.15)',  fg: '#22c55e', label: 'OK'   },
+      warn: { bg: 'rgba(245,158,11,.18)', fg: '#f59e0b', label: 'WARN' },
+      fail: { bg: 'rgba(239,68,68,.18)',  fg: '#ef4444', label: 'FAIL' },
+    };
+    const v = palette[r.verdict] || palette.ok;
+    badge.textContent = v.label;
+    badge.style.background = v.bg;
+    badge.style.color = v.fg;
+    ts.textContent = r.generated_at ? `as of ${new Date(r.generated_at).toLocaleString()}` : '';
+    const checks = Array.isArray(r.checks) ? r.checks : [];
+    list.innerHTML = checks.map(c => {
+      const cv = palette[c.status] || palette.ok;
+      const action = c.operator_action
+        ? `<div style="margin-top:6px;font-size:.78rem;color:var(--muted)"><strong style="color:${cv.fg}">Action:</strong> ${escHtml(c.operator_action)}</div>`
+        : '';
+      return `<div style="border:1px solid var(--border);border-left:4px solid ${cv.fg};border-radius:6px;padding:10px 12px;background:var(--surface)">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:700;background:${cv.bg};color:${cv.fg}">${cv.label}</span>
+          <span style="font-family:monospace;font-size:.78rem;color:var(--muted)">${escHtml(c.code)}</span>
+        </div>
+        <div style="margin-top:6px;font-size:.85rem">${escHtml(c.message)}</div>
+        ${action}
+      </div>`;
+    }).join('') || '<div style="color:var(--muted);font-size:.8rem">No checks reported.</div>';
+  } catch (e) {
+    list.innerHTML = `<div style="color:#ef4444;font-size:.85rem">Failed to load diagnostics: ${escHtml(e.message || String(e))}</div>`;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
