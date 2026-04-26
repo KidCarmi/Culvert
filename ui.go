@@ -257,6 +257,9 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/cluster/bootstrap/", apiBootstrapRouter)    // GET bootstrap script/compose (token-authed)
 	mux.HandleFunc("/healthz", apiHealthz)                            // GET unauthenticated health check (LB probe)
 
+	// ── Operator diagnostics ────────────────────────────────────────────
+	mux.HandleFunc("/api/diagnostics", apiDiagnostics) // GET — aggregated operator contract (viewer)
+
 	// ── PAC file ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
 	mux.HandleFunc("/api/pac-config", apiPACConfig)

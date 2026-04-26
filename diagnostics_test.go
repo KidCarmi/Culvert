@@ -1,0 +1,302 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// viewerCtx attaches RoleViewer to the request context — the minimum role
+// /api/diagnostics requires.
+func viewerCtx(r *http.Request) *http.Request {
+	ctx := context.WithValue(r.Context(), uiRoleKey{}, RoleViewer)
+	return r.WithContext(ctx)
+}
+
+// noRoleCtx attaches a role that does NOT satisfy RoleViewer so we can
+// exercise the requireRole(RoleViewer) failure path. UIRole("none") has
+// rolePriority 0, below RoleViewer's 1.
+func noRoleCtx(r *http.Request) *http.Request {
+	ctx := context.WithValue(r.Context(), uiRoleKey{}, UIRole("none"))
+	return r.WithContext(ctx)
+}
+
+// decodeContract parses the response body into an OperatorContract value.
+// Tests use this to assert structure without re-parsing maps each time.
+func decodeContract(t *testing.T, w *httptest.ResponseRecorder) OperatorContract {
+	t.Helper()
+	var c OperatorContract
+	if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
+		t.Fatalf("response is not a valid OperatorContract: %v; body=%s", err, w.Body.String())
+	}
+	return c
+}
+
+func TestApiDiagnostics_DefaultOK(t *testing.T) {
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+
+	apiDiagnostics(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	c := decodeContract(t, w)
+
+	switch c.Verdict {
+	case diagOK, diagWarn, diagFail:
+	default:
+		t.Errorf("verdict = %q, want one of ok/warn/fail", c.Verdict)
+	}
+	if c.GeneratedAt == "" {
+		t.Error("generated_at is empty")
+	}
+	if len(c.Checks) == 0 {
+		t.Fatal("checks slice is empty")
+	}
+
+	// Every check must populate the required fields and use a known status.
+	requiredCodes := map[string]bool{
+		"storage_path":              false,
+		"policy_loaded":             false,
+		"root_ca":                   false,
+		"session_secret":            false,
+		"cdr":                       false,
+		"cluster_posture":           false,
+		"unauth_mode":               false,
+		"updater_url":               false,
+		"config_snapshot_validator": false,
+	}
+	for i := range c.Checks {
+		ck := c.Checks[i]
+		if ck.Code == "" {
+			t.Errorf("check[%d] has empty code", i)
+		}
+		if ck.Message == "" {
+			t.Errorf("check[%d] (%s) has empty message", i, ck.Code)
+		}
+		switch ck.Status {
+		case diagOK:
+		case diagWarn, diagFail:
+			if ck.OperatorAction == "" {
+				t.Errorf("check %s is %s but operator_action is empty", ck.Code, ck.Status)
+			}
+		default:
+			t.Errorf("check %s has invalid status %q", ck.Code, ck.Status)
+		}
+		if _, ok := requiredCodes[ck.Code]; ok {
+			requiredCodes[ck.Code] = true
+		}
+	}
+	for code, seen := range requiredCodes {
+		if !seen {
+			t.Errorf("expected check %q in default report", code)
+		}
+	}
+}
+
+func TestApiDiagnostics_WarnsOnClusterInsecure(t *testing.T) {
+	// Snapshot + restore the globals we mutate so this test is hermetic.
+	prevInsecure := clusterInsecure
+	clusterRoleMu.Lock()
+	prevRole := clusterRole.role
+	clusterRole.role = "control-plane"
+	clusterRoleMu.Unlock()
+	clusterInsecure = true
+	t.Cleanup(func() {
+		clusterRoleMu.Lock()
+		clusterRole.role = prevRole
+		clusterRoleMu.Unlock()
+		clusterInsecure = prevInsecure
+	})
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	c := decodeContract(t, w)
+
+	var found *OperatorContractCheck
+	for i := range c.Checks {
+		if c.Checks[i].Code == "cluster_posture" {
+			found = &c.Checks[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("cluster_posture check missing")
+	}
+	if found.Status != diagWarn {
+		t.Errorf("cluster_posture status = %q, want warn (clusterInsecure must NOT escalate to fail)", found.Status)
+	}
+	if found.OperatorAction == "" {
+		t.Error("cluster_posture warn must include operator_action explaining how to harden")
+	}
+	if c.Verdict == diagFail {
+		t.Error("top-level verdict escalated to fail; clusterInsecure must remain a warn")
+	}
+}
+
+func TestApiDiagnostics_RoleGated(t *testing.T) {
+	// Insufficient role → 403.
+	r := noRoleCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("no-role status = %d, want 403", w.Code)
+	}
+
+	// Viewer role → 200.
+	r2 := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w2 := httptest.NewRecorder()
+	apiDiagnostics(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Errorf("viewer status = %d, want 200; body=%s", w2.Code, w2.Body.String())
+	}
+
+	// Wrong method → 405.
+	r3 := viewerCtx(httptest.NewRequest(http.MethodPost, "/api/diagnostics", http.NoBody))
+	w3 := httptest.NewRecorder()
+	apiDiagnostics(w3, r3)
+	if w3.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST status = %d, want 405", w3.Code)
+	}
+}
+
+func TestApiDiagnostics_NoSideEffects(t *testing.T) {
+	// The handler must not mutate observable state. We sample three
+	// reads of state-version counters across calls and assert none of
+	// them advanced.
+	policyVerBefore, _ := policyStore.policyVersion()
+	cdrEpochBefore := cdrPolicyStore.Epoch()
+
+	for i := 0; i < 3; i++ {
+		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		w := httptest.NewRecorder()
+		apiDiagnostics(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("iter %d: status = %d", i, w.Code)
+		}
+	}
+
+	policyVerAfter, _ := policyStore.policyVersion()
+	cdrEpochAfter := cdrPolicyStore.Epoch()
+
+	if policyVerBefore != policyVerAfter {
+		t.Errorf("policy version mutated by handler: %d → %d", policyVerBefore, policyVerAfter)
+	}
+	if cdrEpochBefore != cdrEpochAfter {
+		t.Errorf("cdr epoch mutated by handler: %d → %d", cdrEpochBefore, cdrEpochAfter)
+	}
+}
+
+// TestApiDiagnostics_DegradedCDRNoPanic exercises the "enabled but no
+// instances" branch of checkCDR to confirm the report renders a
+// well-formed warn/fail entry rather than panicking.
+func TestApiDiagnostics_DegradedCDRNoPanic(t *testing.T) {
+	prev := cdrActiveCfg
+	cdrClientMu.Lock()
+	cdrActiveCfg = CDRConfig{Enabled: true} // no FailMode, no DefaultProfile, empty pool
+	cdrClientMu.Unlock()
+	t.Cleanup(func() {
+		cdrClientMu.Lock()
+		cdrActiveCfg = prev
+		cdrClientMu.Unlock()
+	})
+
+	// Build the contract directly so a panic surfaces as a test failure
+	// rather than being swallowed by the HTTP recorder.
+	c := buildOperatorContract()
+
+	var found *OperatorContractCheck
+	for i := range c.Checks {
+		if c.Checks[i].Code == "cdr" {
+			found = &c.Checks[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("cdr check missing from degraded report")
+	}
+	if found.Status != diagFail && found.Status != diagWarn {
+		t.Errorf("cdr status = %q, want warn or fail in degraded mode", found.Status)
+	}
+	if found.OperatorAction == "" {
+		t.Error("degraded CDR check must include operator_action")
+	}
+}
+
+// TestApiDiagnostics_NoSensitiveValues is a guardrail: the report must
+// never include the session secret, full updater URL, IdP tokens, file
+// paths, or other operator secrets. New checks that need to display
+// sensitive data must redact at the API boundary, not in the SPA.
+func TestApiDiagnostics_NoSensitiveValues(t *testing.T) {
+	// Plant a recognisable sentinel into globals the report inspects so
+	// that, if a future change leaks them, this test fails loudly.
+	prevURL := updaterURL
+	prevAllow := append([]string(nil), updaterURLAllowlist...)
+	updaterURL = "https://leaky.example.invalid/secret-path"
+	updaterURLAllowlist = []string{updaterURL}
+	t.Cleanup(func() {
+		updaterURL = prevURL
+		updaterURLAllowlist = prevAllow
+	})
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	body := w.Body.String()
+	forbidden := []string{
+		"leaky.example.invalid", // raw updater URL
+		"secret-path",           // raw updater URL path
+		"sessionSecret",         // Go symbol leak
+		"CULVERT_SESSION_SECRET",
+		"-----BEGIN",            // PEM material
+		"/data/",                // raw filesystem paths
+	}
+	for _, needle := range forbidden {
+		if strings.Contains(body, needle) {
+			t.Errorf("response leaked sensitive token %q; body=%s", needle, body)
+		}
+	}
+
+	// The session-secret check must remain boolean-only — no hex digest.
+	for _, ck := range decodeContract(t, w).Checks {
+		if ck.Code != "session_secret" {
+			continue
+		}
+		// 32 bytes hex would be 64 chars — easy heuristic to spot a leak.
+		if hasLongHexRun(ck.Message) || hasLongHexRun(ck.OperatorAction) {
+			t.Errorf("session_secret check appears to leak secret material: %+v", ck)
+		}
+	}
+}
+
+// hasLongHexRun returns true when s contains a run of 32+ contiguous hex
+// characters — a cheap heuristic for accidentally-included key material.
+func hasLongHexRun(s string) bool {
+	run := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if isHex {
+			run++
+			if run >= 32 {
+				return true
+			}
+		} else {
+			run = 0
+		}
+	}
+	return false
+}
