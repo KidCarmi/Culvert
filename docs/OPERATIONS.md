@@ -21,15 +21,60 @@ Culvert exposes two endpoints for "is this node healthy". They have
 * Served on the **proxy port** (default `:8080`), unauthenticated.
 * `/health` is a **liveness** probe: the process is up, the request loop is
   scheduling, the CA cert (if loaded) has not expired in place.
-* `/ready` is a **readiness** probe: critical scanning subsystems
-  (ClamAV, GeoIP, YARA — when configured) are reachable. Returns `200`
-  with `{"status":"ready", "checks":{...}}` when ready, `503` when not.
+* `/ready` is a **readiness** probe: load-balancer signal that this node
+  is fit to take traffic. Returns `200` with `{"status":"ready",
+  "checks":{...}}` when ready, `503` with `"status":"not_ready"` when not.
 * These endpoints have a **stable JSON contract**. CI smoke tests
   (`.github/workflows/ci.yml`) and Kubernetes probes depend on them.
 
   → Treat `/ready` as an **external interface**. Do not change response
   shape, status codes, or check names without a major-version migration
   plan.
+
+#### `/ready` checks map
+
+Each row in the `checks` object has the shape `{"status":"ok"|"fail",
+"detail":"..."}`. A row is included only when the relevant subsystem is
+configured (e.g. `clamav` is absent when ClamAV is not configured). Two
+classes of row exist:
+
+* **Gating** — a `fail` here forces the response to `503`.
+* **Informational** — surfaced for operators but does NOT affect the
+  HTTP status. A `fail` row in this class still returns `200`.
+
+| Check                       | Class           | Behaviour                                                                 |
+|-----------------------------|-----------------|---------------------------------------------------------------------------|
+| `ca`                        | informational   | Present and `ok` once the root CA is initialised; absent otherwise (the proxy still works as a plain forward proxy). |
+| `clamav`                    | gating          | When ClamAV is configured, `fail` if the daemon is unreachable.           |
+| `geoip`                     | informational   | Present and `ok` when GeoIP is enabled.                                    |
+| `yara`                      | informational   | Present and `ok` when YARA is enabled.                                     |
+| `policy_loaded`             | informational   | `ok` when at least one policy rule has been recorded; `fail` when the ruleset is empty (default-deny is still in effect — fresh installs are expected to start here). |
+| `session_secret`            | gating          | `ok` when the admin session HMAC key is initialised; `fail` triggers `503` because signed admin cookies cannot be issued without it. |
+| `config_snapshot_validator` | gating          | `ok` when `validateConfigSnapshot` accepts the empty baseline (its identity contract); `fail` triggers `503` because the cluster control-plane apply path is unsafe. |
+
+The new `policy_loaded` / `session_secret` / `config_snapshot_validator`
+rows are additive — existing fields, status semantics, and the rest of
+the `checks` map are unchanged. Existing probes that look only at
+top-level `status` and HTTP code keep working as before.
+
+### Readiness vs Diagnostics — when to look at which
+
+There is occasional confusion between the two surfaces. Quick rule of
+thumb:
+
+* **Use `/ready`** for "should the load balancer / k8s service send
+  traffic to this pod?". It is anonymous, narrow, stable, and gates on
+  hard-fail conditions only. Polled by infrastructure on a tight loop.
+* **Use `/api/diagnostics`** for "is my deployment correctly configured
+  and hardened?". It is admin-gated, broad, includes warnings (e.g.
+  `cluster-insecure`, unauth mode, validation hints), and is intended
+  for human operators or audit dashboards. A `warn` here does NOT make
+  `/ready` go red.
+
+A subsystem may legitimately appear in both with different meanings —
+for example, `policy_loaded` is **informational** in `/ready`
+(default-deny is a valid posture) but appears as a `warn` row in
+`/api/diagnostics` because operators usually want to be reminded.
 
 ### `/api/diagnostics` — operator contract
 

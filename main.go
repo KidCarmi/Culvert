@@ -1230,6 +1230,15 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleReady is a readiness probe — returns 200 only when all configured
 // subsystems are operational. Use for Kubernetes readinessProbe / startup gate.
 // Unlike /health (liveness), this returns 503 when dependencies are degraded.
+// configSnapshotValidatorOK reports whether the config-snapshot
+// validator accepts the empty baseline (its identity contract). Defined
+// as a package-level variable so tests can swap in a stub that simulates
+// a broken validator without mutating the per-slice caps in
+// configversion / controlplane.
+var configSnapshotValidatorOK = func() bool {
+	return validateConfigSnapshot(ConfigSnapshot{}) == nil
+}
+
 func handleReady(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -1269,6 +1278,40 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 	// 4. YARA rules: if configured, verify loaded.
 	if globalYARA.Enabled() {
 		checks["yara"] = &checkResult{Status: "ok"}
+	}
+
+	// 5. Policy loaded (informational). Empty policy is a valid
+	// Zero-Trust posture — default-deny applies — so this row does NOT
+	// gate readiness. Surfaces "no rules yet" as a hint to operators
+	// without flapping load balancers on a fresh install.
+	if ver, _ := policyStore.policyVersion(); ver > 0 {
+		checks["policy_loaded"] = &checkResult{Status: "ok"}
+	} else {
+		checks["policy_loaded"] = &checkResult{Status: "fail", Detail: "no rules"}
+	}
+
+	// 6. Admin session HMAC initialised. Without this, signed cookies
+	// cannot be issued or verified — the admin UI is effectively
+	// unmanageable. Fail readiness so traffic is held off until the
+	// node is restarted with a valid secret.
+	if sessionSecretSet() {
+		checks["session_secret"] = &checkResult{Status: "ok"}
+	} else {
+		checks["session_secret"] = &checkResult{Status: "fail", Detail: "uninitialised"}
+		allOK = false
+	}
+
+	// 7. ConfigSnapshot validator. The pure validateConfigSnapshot
+	// function must accept the empty baseline (its identity contract).
+	// If it ever rejects, the cluster control-plane apply path is
+	// broken and we must shed load. configSnapshotValidatorOK is a
+	// package-level seam so tests can simulate a broken validator
+	// without mutating the per-slice caps.
+	if configSnapshotValidatorOK() {
+		checks["config_snapshot_validator"] = &checkResult{Status: "ok"}
+	} else {
+		checks["config_snapshot_validator"] = &checkResult{Status: "fail", Detail: "validator rejected empty baseline"}
+		allOK = false
 	}
 
 	status := "ready"
