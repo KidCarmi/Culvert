@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -120,15 +121,18 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 
 	// Every check must populate the required fields and use a known status.
 	requiredCodes := map[string]bool{
-		"storage_path":              false,
-		"policy_loaded":             false,
-		"root_ca":                   false,
-		"session_secret":            false,
-		"cdr":                       false,
-		"cluster_posture":           false,
-		"unauth_mode":               false,
-		"updater_url":               false,
-		"config_snapshot_validator": false,
+		"storage_path":               false,
+		"policy_loaded":              false,
+		"root_ca":                    false,
+		"session_secret":             false,
+		"cdr":                        false,
+		"cluster_posture":            false,
+		"unauth_mode":                false,
+		"updater_url":                false,
+		"config_snapshot_validator":  false,
+		"config_versions_present":    false,
+		"config_versions_readable":   false,
+		"config_rollback_validation": false,
 	}
 	for i := range c.Checks {
 		assertCheckShape(t, i, c.Checks[i])
@@ -457,6 +461,259 @@ func TestApiDiagnostics_NoIOOnRepeatedCalls(t *testing.T) {
 		}
 		if found.Status != diagOK {
 			t.Errorf("iter %d: storage_path status = %q, want ok (handler re-probed disk!)", i, found.Status)
+		}
+	}
+}
+
+// ── config-version diagnostics ────────────────────────────────────────────
+
+// writeConfigVersionFile writes a v{N}.json envelope into dir using the
+// same shape saveConfigVersion produces. Used by tests to seed disk
+// state without invoking the writer (which would touch the production
+// /data/config_versions path).
+func writeConfigVersionFile(t *testing.T, dir string, version int, body any) {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	path := filepath.Join(dir, "v"+strconv.Itoa(version)+".json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// validEnvelope builds a {meta, config} envelope that parses cleanly,
+// passes envelope-shape checks, and produces no validateConfigBackup
+// warnings. JSON tag names match the configBackup struct in ui_policy.go.
+func validEnvelope(version int) map[string]any {
+	return map[string]any{
+		"meta": map[string]any{
+			"version":    version,
+			"created_at": "2026-04-26T00:00:00Z",
+			"actor":      "test",
+			"action":     "test.seed",
+		},
+		"config": map[string]any{
+			"version":        1,
+			"exportedAt":     "2026-04-26T00:00:00Z",
+			"blocklistMode":  "block",
+			"defaultAction":  "block",
+			"ipFilterMode":   "block",
+			"rateLimitRPM":   60,
+		},
+	}
+}
+
+func TestConfigVersionsCheck_NoVersions(t *testing.T) {
+	dir := t.TempDir()
+
+	sum := summarizeLatestConfigVersionAt(dir)
+	if sum.Found {
+		t.Fatalf("Found = true on empty dir; sum=%+v", sum)
+	}
+	if !sum.DirAccessible {
+		t.Errorf("DirAccessible = false on existing empty dir")
+	}
+
+	if got := checkConfigVersionsPresent(sum); got.Status != diagWarn {
+		t.Errorf("present status = %q, want warn", got.Status)
+	} else if got.OperatorAction == "" {
+		t.Error("present warn must include operator_action")
+	}
+
+	// The other two checks should NOT cascade — they return ok because
+	// the present-check already surfaced the root cause.
+	if got := checkConfigVersionsReadable(sum); got.Status != diagOK {
+		t.Errorf("readable status = %q, want ok (no version to read)", got.Status)
+	}
+	if got := checkConfigRollbackValidation(sum); got.Status != diagOK {
+		t.Errorf("rollback_validation status = %q, want ok (nothing to validate)", got.Status)
+	}
+}
+
+func TestConfigVersionsCheck_LatestValid(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigVersionFile(t, dir, 1, validEnvelope(1))
+
+	sum := summarizeLatestConfigVersionAt(dir)
+	if !sum.Found || sum.LatestVersion != 1 || sum.Count != 1 {
+		t.Fatalf("summary=%+v, want Found=true LatestVersion=1 Count=1", sum)
+	}
+	if sum.LoadErr != nil || sum.BadShape {
+		t.Fatalf("summary=%+v, want clean parse", sum)
+	}
+	if len(sum.Warnings) != 0 {
+		t.Errorf("Warnings=%v, want empty", sum.Warnings)
+	}
+
+	for _, ck := range []OperatorContractCheck{
+		checkConfigVersionsPresent(sum),
+		checkConfigVersionsReadable(sum),
+		checkConfigRollbackValidation(sum),
+	} {
+		if ck.Status != diagOK {
+			t.Errorf("%s status = %q, want ok", ck.Code, ck.Status)
+		}
+	}
+}
+
+func TestConfigVersionsCheck_LatestCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	// Valid v1, corrupt v2 — the latest should be selected and reported.
+	writeConfigVersionFile(t, dir, 1, validEnvelope(1))
+	if err := os.WriteFile(filepath.Join(dir, "v2.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+
+	sum := summarizeLatestConfigVersionAt(dir)
+	if sum.LatestVersion != 2 {
+		t.Fatalf("LatestVersion = %d, want 2 (corrupt file should still be the latest by number)", sum.LatestVersion)
+	}
+	if sum.LoadErr == nil {
+		t.Fatal("LoadErr nil, want non-nil")
+	}
+
+	if got := checkConfigVersionsReadable(sum); got.Status != diagFail {
+		t.Errorf("readable status = %q, want fail", got.Status)
+	} else if got.OperatorAction == "" {
+		t.Error("readable fail must include operator_action")
+	}
+	if got := checkConfigRollbackValidation(sum); got.Status != diagFail {
+		t.Errorf("rollback_validation status = %q, want fail (parse failure)", got.Status)
+	}
+}
+
+func TestConfigVersionsCheck_LatestBadShape(t *testing.T) {
+	dir := t.TempDir()
+	// Parses as JSON but is missing the meta block — the envelope-shape
+	// guard should catch this and report fail.
+	noMeta := map[string]any{
+		"config": map[string]any{"blocklist_mode": "block"},
+	}
+	writeConfigVersionFile(t, dir, 1, noMeta)
+
+	sum := summarizeLatestConfigVersionAt(dir)
+	if !sum.BadShape {
+		t.Fatalf("BadShape = false; sum=%+v", sum)
+	}
+	if got := checkConfigVersionsReadable(sum); got.Status != diagFail {
+		t.Errorf("readable status = %q, want fail (bad envelope shape)", got.Status)
+	}
+}
+
+func TestConfigVersionsCheck_ValidationWarning(t *testing.T) {
+	dir := t.TempDir()
+	// Parses cleanly, envelope is well-shaped, but blocklist_mode is
+	// invalid — validateConfigBackup should return one warning and the
+	// rollback_validation check should report warn (not fail).
+	env := validEnvelope(1)
+	env["config"].(map[string]any)["blocklistMode"] = "not-a-mode"
+	writeConfigVersionFile(t, dir, 1, env)
+
+	sum := summarizeLatestConfigVersionAt(dir)
+	if sum.LoadErr != nil || sum.BadShape {
+		t.Fatalf("expected clean parse; sum=%+v", sum)
+	}
+	if len(sum.Warnings) == 0 {
+		t.Fatal("validateConfigBackup returned no warnings; expected at least one")
+	}
+
+	if got := checkConfigRollbackValidation(sum); got.Status != diagWarn {
+		t.Errorf("rollback_validation status = %q, want warn", got.Status)
+	} else if got.OperatorAction == "" {
+		t.Error("rollback_validation warn must include operator_action")
+	} else if strings.Contains(got.Message, "not-a-mode") {
+		t.Error("rollback_validation message leaked the raw invalid value")
+	}
+}
+
+func TestConfigVersionsCheck_LatestSelectionByNumber(t *testing.T) {
+	dir := t.TempDir()
+	// Write v3 first, then v10, then v2. Latest must be v10 strictly by
+	// numeric version — never by file creation/mtime order.
+	writeConfigVersionFile(t, dir, 3, validEnvelope(3))
+	writeConfigVersionFile(t, dir, 10, validEnvelope(10))
+	writeConfigVersionFile(t, dir, 2, validEnvelope(2))
+
+	sum := summarizeLatestConfigVersionAt(dir)
+	if sum.LatestVersion != 10 {
+		t.Errorf("LatestVersion = %d, want 10", sum.LatestVersion)
+	}
+	if sum.Count != 3 {
+		t.Errorf("Count = %d, want 3", sum.Count)
+	}
+}
+
+// TestConfigVersionsCheck_NoSideEffects asserts the diagnostics path
+// performs no writes against configVersionsDir: snapshots the seeded
+// directory before and after repeated calls and requires the listing to
+// match exactly (no new probe files, no removed versions).
+func TestConfigVersionsCheck_NoSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigVersionFile(t, dir, 1, validEnvelope(1))
+	writeConfigVersionFile(t, dir, 2, validEnvelope(2))
+
+	snapshot := func() []string {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		return names
+	}
+	before := snapshot()
+
+	for i := 0; i < 5; i++ {
+		sum := summarizeLatestConfigVersionAt(dir)
+		// Exercise all three checks each iteration so any of them
+		// accidentally touching the dir would be caught.
+		_ = checkConfigVersionsPresent(sum)
+		_ = checkConfigVersionsReadable(sum)
+		_ = checkConfigRollbackValidation(sum)
+	}
+
+	after := snapshot()
+	if len(before) != len(after) {
+		t.Errorf("dir entry count changed: before=%v after=%v", before, after)
+	}
+	for i := range before {
+		if i >= len(after) || before[i] != after[i] {
+			t.Errorf("dir contents changed: before=%v after=%v", before, after)
+			return
+		}
+	}
+}
+
+// TestConfigVersionsCheck_NoBackupContentLeak ensures the diagnostics
+// output does not echo raw backup contents (rule names, IP addresses,
+// mode strings) when validateConfigBackup flags warnings.
+func TestConfigVersionsCheck_NoBackupContentLeak(t *testing.T) {
+	dir := t.TempDir()
+	env := validEnvelope(1)
+	cfg := env["config"].(map[string]any)
+	// Plant several recognisable sentinels that, if leaked, will be
+	// trivial to detect in the JSON output.
+	cfg["blocklistMode"] = "leaky-sentinel-mode"
+	cfg["defaultAction"] = "leaky-sentinel-action"
+	writeConfigVersionFile(t, dir, 1, env)
+
+	sum := summarizeLatestConfigVersionAt(dir)
+	checks := []OperatorContractCheck{
+		checkConfigVersionsPresent(sum),
+		checkConfigVersionsReadable(sum),
+		checkConfigRollbackValidation(sum),
+	}
+	body, err := json.Marshal(checks)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, needle := range []string{"leaky-sentinel-mode", "leaky-sentinel-action"} {
+		if strings.Contains(string(body), needle) {
+			t.Errorf("config-version checks leaked backup content %q; body=%s", needle, body)
 		}
 	}
 }

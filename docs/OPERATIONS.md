@@ -175,6 +175,85 @@ After fixing, **restart the proxy**. The probe is one-shot at startup,
 so the diagnostics row will not flip back to `ok` until the next
 process start.
 
+### Config versions vs `/data` backup vs export/import
+
+Culvert has **three** distinct mechanisms that touch persistent
+configuration. They solve different problems and the diagnostics page
+covers each at the right granularity.
+
+| Mechanism                | What it captures                                  | Where it lives                                | Use it when…                              |
+|--------------------------|---------------------------------------------------|-----------------------------------------------|-------------------------------------------|
+| **Config versions**      | Automatic numbered snapshots of mutable config (policy, blocklist, file-block, IP filter, rate limit, PAC, etc.) | `/data/config_versions/v{N}.json` (last 50)   | Undoing a single admin change in the GUI  |
+| **Config export / import** | A point-in-time JSON bundle the operator triggers manually (`/api/config/export`, `/api/config/import`) | Wherever the operator saves it                | Migrating config between environments     |
+| **Full `/data` backup**  | Everything — config versions, CA bundle, audit log, request log, cluster state, ui_users, etc. | Whatever your snapshot/tar tool produces       | Disaster recovery, migrations, machine moves |
+
+A `/data` backup includes the `config_versions` directory, so a full
+restore brings the version history back along with everything else.
+Config export / import does **not** include the version history — only
+the current effective config — so importing into a fresh node leaves
+`config_versions` empty until the next admin change seeds a new v1.
+
+The Diagnostics page surfaces three separate health signals for this
+subsystem:
+
+* **`config_versions_present`** — `ok` once at least one numbered
+  version exists; `warn` on a fresh install or after a config-only
+  restore that did not include the version directory. The remedy is
+  benign: any admin-side config change seeds `v1.json` automatically.
+* **`config_versions_readable`** — `ok` when the **latest** version
+  file (selected strictly by numeric `v{N}`, not by file modified
+  time) reads cleanly and conforms to the `{meta, config}` envelope
+  Culvert writes. `fail` when the file is corrupt JSON or has a
+  malformed envelope.
+* **`config_rollback_validation`** — `ok` when the latest version
+  passes `validateConfigBackup` pre-flight; `warn` when the validator
+  flags issues (e.g. an invalid mode string in the snapshot) — the
+  diagnostics row reports only the warning **count**, not the raw
+  values, to avoid leaking config contents through the viewer-role
+  endpoint; `fail` only when the file failed to parse.
+
+### Recovering from corrupt or missing config versions
+
+1. **Latest version is corrupt (`config_versions_readable = fail`).**
+   The most recent admin action probably wrote a partial file (disk
+   full at the time, or the proxy was killed mid-write). Earlier
+   versions remain intact:
+   * From the admin UI, **Settings → Config Versions** lists every
+     version that parses, descending. Roll back to the highest one
+     that succeeds.
+   * If you prefer to delete the corrupt file by hand, remove the
+     single bad `v{N}.json` from the host filesystem; the next admin
+     change will write a fresh `v{N+1}.json`.
+2. **Latest version has a malformed envelope.** Same remedy as
+   corrupt — the file does not match Culvert's `{meta, config}`
+   shape. Likely cause: the file was edited by hand or copied from
+   an older release.
+3. **Whole directory is missing or empty
+   (`config_versions_present = warn`).** Either Culvert has not yet
+   completed a config mutation since startup (benign — make any
+   change and a `v1` will be created), or the directory was
+   excluded from a `/data` restore. If you have a `/data` backup,
+   restore the `config_versions` subtree alongside the rest of
+   `/data`.
+4. **Validation warnings (`config_rollback_validation = warn`).**
+   The cached file parses, but rolling back to it would silently
+   drop invalid rules or modes. Use the existing dry-run path to
+   inspect specifics:
+
+   ```
+   POST /api/config/versions
+   { "version": <N>, "dry_run": true }
+   ```
+
+   The response includes the verbatim `warnings` array and a `changes`
+   diff so you can choose between rolling back to an earlier version
+   or accepting the warnings.
+
+The diagnostics handler is **read-only** with respect to
+`/data/config_versions` — it never writes, deletes, or rewrites
+version files. Cleaning up bad entries is always an explicit operator
+action.
+
 ---
 
 ## 5. Upgrade checklist
@@ -273,5 +352,6 @@ admin API cannot redirect the updater to an attacker-controlled host.
 | Operator contract (API)      | `GET :9090/api/diagnostics` (viewer role)                      |
 | Backup                       | snapshot `/data`                                              |
 | Config rollback              | Admin UI → Settings → Config Versions                         |
+| Config-version health        | Diagnostics rows `config_versions_present` / `_readable` / `config_rollback_validation` |
 | Cluster rolling update       | Admin UI → Updates → Cluster Rolling Update                   |
 | Audit log                    | Admin UI → Audit Log, or `audit.json` in `/data`              |
