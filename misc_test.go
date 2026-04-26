@@ -143,6 +143,41 @@ func TestHandleReady_BrokenValidator503(t *testing.T) {
 	}
 }
 
+// TestHandleReady_UnaffectedByClusterInsecure — Scenario 6 of the
+// failure-mode validation matrix (PR #159), readiness side. Companion
+// to TestApiDiagnostics_WarnsOnClusterInsecure in diagnostics_test.go,
+// which covers the diagnostics surface. Asserts that flipping
+// clusterInsecure=true (and clusterRole.role=control-plane so the
+// posture check is exercised) does NOT downgrade readiness:
+// risky-but-allowed cluster posture is intentionally a warn on
+// /api/diagnostics, never a 503 on /ready.
+func TestHandleReady_UnaffectedByClusterInsecure(t *testing.T) {
+	prevInsecure := clusterInsecure
+	clusterRoleMu.Lock()
+	prevRole := clusterRole.role
+	clusterRole.role = "control-plane"
+	clusterRoleMu.Unlock()
+	clusterInsecure = true
+	t.Cleanup(func() {
+		clusterRoleMu.Lock()
+		clusterRole.role = prevRole
+		clusterRoleMu.Unlock()
+		clusterInsecure = prevInsecure
+	})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/ready", http.NoBody)
+	handleReady(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (cluster_insecure must NOT gate /ready)", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"status":"ready"`) {
+		t.Errorf("body missing status:ready, got %q", body)
+	}
+}
+
 // ─── matchCountry ─────────────────────────────────────────────────────────────
 
 func TestMatchCountry(t *testing.T) {
