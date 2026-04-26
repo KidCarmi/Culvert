@@ -1005,6 +1005,11 @@ func initSOCKS5(s *startupState) {
 
 // initPersistentAdminState initializes config versioning, node groups, bandwidth, hit counters, and admin settings.
 func initPersistentAdminState(s *startupState) {
+	// ── Storage writability probe (one-shot, startup-only) ──────────────
+	// Result is cached for the diagnostics handler so /api/diagnostics
+	// stays side-effect-free. Never retries; never blocks startup.
+	probeStorageWritability()
+
 	// ── Config versioning ────────────────────────────────────────────────
 	initConfigVersioning()
 

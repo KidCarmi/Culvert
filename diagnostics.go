@@ -2,6 +2,8 @@ package main
 
 import (
 	"net/http"
+	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,6 +39,75 @@ const (
 	diagWarn = "warn"
 	diagFail = "fail"
 )
+
+// storageWritability cached states. The probe runs once at startup
+// (probeStorageWritability) and never re-runs — so the diagnostics
+// handler stays side-effect-free.
+const (
+	storageStateUnknown    = "unknown"
+	storageStateWritable   = "writable"
+	storageStateUnwritable = "unwritable"
+)
+
+// storageWritableState holds the result of the one-shot startup probe.
+// atomic.Value gives us race-free reads from the diagnostics handler
+// without locking; it stores a plain string from the storageState* set.
+var storageWritableState atomic.Value
+
+// probeStorageWritability runs ONCE at startup against the configured
+// dataDir. It creates a temp file, writes a few bytes, closes, and
+// removes it. The outcome is cached in storageWritableState; the
+// diagnostics handler reads the cached value and never re-probes.
+//
+// Contract:
+//   - never retries
+//   - never blocks startup (cleanup failure is logged but does not
+//     downgrade the verdict — the write itself proved writability)
+//   - safe to call multiple times (last write wins) but expected to
+//     run exactly once from initPersistentAdminState
+func probeStorageWritability() {
+	if dataDir == "" {
+		storageWritableState.Store(storageStateUnknown)
+		return
+	}
+	f, err := os.CreateTemp(dataDir, ".culvert-writability-probe-*")
+	if err != nil {
+		storageWritableState.Store(storageStateUnwritable)
+		return
+	}
+	name := f.Name()
+	if _, werr := f.WriteString("ok"); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(name)
+		storageWritableState.Store(storageStateUnwritable)
+		return
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(name)
+		storageWritableState.Store(storageStateUnwritable)
+		return
+	}
+	if rerr := os.Remove(name); rerr != nil {
+		// The write itself succeeded — operator intent (durable write)
+		// is satisfied. Log the cleanup miss but do not downgrade the
+		// verdict; otherwise a transient unlink failure would
+		// permanently mark the node unwritable for the rest of this
+		// process lifetime.
+		logger.Printf("Storage: writability probe cleanup failed: %v", rerr)
+	}
+	storageWritableState.Store(storageStateWritable)
+}
+
+// storageWritability returns the cached probe result, or
+// storageStateUnknown if the probe has not yet run.
+func storageWritability() string {
+	if v := storageWritableState.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return storageStateUnknown
+}
 
 // sessionSecretSet reports whether the admin session HMAC key has been
 // initialised. Boolean only — the secret value is never returned or logged.
@@ -90,23 +161,33 @@ func rollUpVerdict(checks []OperatorContractCheck) string {
 // perform disk I/O, network probes, or any operation that mutates state.
 
 func checkStorage() OperatorContractCheck {
-	// This check reports whether the data directory PATH is configured.
-	// It does NOT verify writability or that the directory exists — the
-	// handler is required to be side-effect-free, so no stat/open is
-	// performed. A follow-up PR can wire a startup-cached writability
-	// signal and report it here without changing this contract.
-	if dataDir == "" {
+	// This check reports the cached result of the one-shot writability
+	// probe that ran at startup (probeStorageWritability). The handler
+	// itself does NO disk I/O — repeated calls are free.
+	switch storageWritability() {
+	case storageStateWritable:
+		return OperatorContractCheck{
+			Code:    "storage_path",
+			Status:  diagOK,
+			Message: "data directory writable (verified once at startup)",
+		}
+	case storageStateUnwritable:
 		return OperatorContractCheck{
 			Code:           "storage_path",
 			Status:         diagFail,
-			Message:        "data directory path not configured (writability not verified)",
-			OperatorAction: "Set --data-dir or the data_dir config field; restart the proxy.",
+			Message:        "data directory not writable at startup — persistence is broken",
+			OperatorAction: "Fix mount/permissions on the data directory (chown to the proxy UID, ensure the volume is mounted read-write), then restart the proxy.",
 		}
-	}
-	return OperatorContractCheck{
-		Code:    "storage_path",
-		Status:  diagOK,
-		Message: "data directory path is configured (writability not verified)",
+	default:
+		// storageStateUnknown — either dataDir is empty or the startup
+		// probe never ran (e.g. unit-test path that bypasses
+		// initPersistentAdminState).
+		return OperatorContractCheck{
+			Code:           "storage_path",
+			Status:         diagWarn,
+			Message:        "data directory writability unknown — startup probe did not run or path not configured",
+			OperatorAction: "Set --data-dir or the data_dir config field and restart the proxy so the startup probe can verify writability.",
+		}
 	}
 }
 

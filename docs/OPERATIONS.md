@@ -44,11 +44,22 @@ Culvert exposes two endpoints for "is this node healthy". They have
   pings ClamAV. It is safe to poll.
 * Visible in the GUI under **Infrastructure → Diagnostics**.
 * **What `storage_path` does and does not check.** The `storage_path`
-  row reports whether the data directory **path is configured** in the
-  proxy. It does **not** verify that the directory exists, is mounted,
-  or is writable — those would require disk I/O at request time, which
-  this endpoint deliberately avoids. Routine `ls` / `df` / write-probe
-  monitoring still belongs in your host-level checks.
+  row reports the result of a **one-shot writability probe** that runs
+  once at startup against the configured data directory. The probe
+  creates a small temp file, writes a few bytes, then deletes it; the
+  outcome is cached for the lifetime of the process. The handler reads
+  only the cache — no disk I/O happens at request time, and the probe
+  is **not** retried. This means:
+  * `ok` — the directory was writable at startup.
+  * `fail` — the directory was not writable at startup; persistence is
+    broken until you fix permissions / mount and restart.
+  * `warn` — no data directory is configured, or the startup probe did
+    not run (e.g. embedded test harness path).
+
+  Because the probe is one-shot, this row will **not** notice a mount
+  that goes away after startup. Continuous filesystem monitoring (`df`,
+  inotify, your platform's volume health signals) still belongs in
+  host-level checks.
 
   → `/ready` answers "should the load balancer send me traffic?".
   `/api/diagnostics` answers "is my deployment correctly configured and
@@ -134,6 +145,35 @@ systemctl start culvert
 The config-version snapshots under `config_versions/` are an in-place
 rollback mechanism — separate from your full backup, but useful for
 quick "undo" of an admin change.
+
+### Recovering from a `storage_path = fail` on Diagnostics
+
+The `storage_path` row goes red when the startup writability probe
+could not create + delete a tiny temp file under the configured data
+directory. Common causes and fixes:
+
+1. **Volume not mounted.** In Docker / Kubernetes, confirm the volume
+   is bound to `/data` (or your `--data-dir`). `docker inspect` or
+   `kubectl describe pod` will show the mount source. Re-create the
+   container with the volume attached.
+2. **Wrong owner or mode.** The proxy process must own (or be able to
+   write to) the data directory. Fix with
+   `chown -R <proxy-uid>:<proxy-gid> /data && chmod 0750 /data`. In
+   containers, the proxy runs as a non-root UID by default; the host
+   directory must permit that UID to write.
+3. **Read-only mount.** Some platforms mount volumes read-only by
+   default (e.g. some serverless filesystems). Re-mount read-write or
+   use a different volume type.
+4. **Disk full / quota exceeded.** Check `df -h` on the host. The
+   probe writes only a couple of bytes, but a full filesystem still
+   refuses the create.
+5. **SELinux / AppArmor denial.** Inspect `auditd` or `dmesg` for
+   denials referencing the proxy binary; relabel the directory or
+   adjust the policy as required.
+
+After fixing, **restart the proxy**. The probe is one-shot at startup,
+so the diagnostics row will not flip back to `ok` until the next
+process start.
 
 ---
 
