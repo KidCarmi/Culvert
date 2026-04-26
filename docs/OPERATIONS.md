@@ -43,6 +43,12 @@ Culvert exposes two endpoints for "is this node healthy". They have
 * **Side-effect-free**: reading it never opens files, dials sockets, or
   pings ClamAV. It is safe to poll.
 * Visible in the GUI under **Infrastructure → Diagnostics**.
+* **What `storage_path` does and does not check.** The `storage_path`
+  row reports whether the data directory **path is configured** in the
+  proxy. It does **not** verify that the directory exists, is mounted,
+  or is writable — those would require disk I/O at request time, which
+  this endpoint deliberately avoids. Routine `ls` / `df` / write-probe
+  monitoring still belongs in your host-level checks.
 
   → `/ready` answers "should the load balancer send me traffic?".
   `/api/diagnostics` answers "is my deployment correctly configured and

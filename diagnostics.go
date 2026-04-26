@@ -90,23 +90,23 @@ func rollUpVerdict(checks []OperatorContractCheck) string {
 // perform disk I/O, network probes, or any operation that mutates state.
 
 func checkStorage() OperatorContractCheck {
-	// We deliberately do not probe dataDir writability at request time
-	// (per the operator-contract scope: cached signals only — no disk
-	// probes in the handler). Reporting the configured path lets the
-	// operator confirm wiring; a follow-up PR can wire a startup-cached
-	// writability signal.
+	// This check reports whether the data directory PATH is configured.
+	// It does NOT verify writability or that the directory exists — the
+	// handler is required to be side-effect-free, so no stat/open is
+	// performed. A follow-up PR can wire a startup-cached writability
+	// signal and report it here without changing this contract.
 	if dataDir == "" {
 		return OperatorContractCheck{
 			Code:           "storage_path",
 			Status:         diagFail,
-			Message:        "data directory not configured",
+			Message:        "data directory path not configured (writability not verified)",
 			OperatorAction: "Set --data-dir or the data_dir config field; restart the proxy.",
 		}
 	}
 	return OperatorContractCheck{
 		Code:    "storage_path",
 		Status:  diagOK,
-		Message: "data directory configured",
+		Message: "data directory path is configured (writability not verified)",
 	}
 }
 
