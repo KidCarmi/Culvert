@@ -301,6 +301,18 @@ curl http://localhost:8080/health
 curl -x http://localhost:8080 https://example.com
 ```
 
+### After it's running
+
+Three things to do once the containers are up:
+
+1. **Setup wizard** — open `https://<host>:9090` in a browser, accept the self-signed cert, and create the first admin account. This step is required before any other API call.
+2. **Verify readiness** — confirm Culvert is fit to take traffic:
+   ```bash
+   curl http://<host>:8080/ready
+   ```
+   Returns `200` with `{"status":"ready", "checks":{...}}` when ready, `503` with `"status":"not_ready"` when a gating check fails. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the full checks-map reference.
+3. **Open Diagnostics** — Admin UI → **Infrastructure → Diagnostics**. The page surfaces the operator contract: storage path, policy load, root CA, session HMAC, CDR, cluster TLS posture, updater URL, config-version health, and any active risky-but-allowed warnings (`cluster-insecure`, unauth mode). Resolve any `fail` rows before exposing the proxy to clients.
+
 #### With custom config
 
 ```bash
