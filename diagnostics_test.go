@@ -72,6 +72,28 @@ func decodeContract(t *testing.T, w *httptest.ResponseRecorder) OperatorContract
 	return c
 }
 
+// assertCheckShape validates one OperatorContractCheck row's required
+// fields and status invariants. Extracted from TestApiDiagnostics_DefaultOK
+// so the test stays under the project's cyclop=15 threshold.
+func assertCheckShape(t *testing.T, idx int, ck OperatorContractCheck) {
+	t.Helper()
+	if ck.Code == "" {
+		t.Errorf("check[%d] has empty code", idx)
+	}
+	if ck.Message == "" {
+		t.Errorf("check[%d] (%s) has empty message", idx, ck.Code)
+	}
+	switch ck.Status {
+	case diagOK:
+	case diagWarn, diagFail:
+		if ck.OperatorAction == "" {
+			t.Errorf("check %s is %s but operator_action is empty", ck.Code, ck.Status)
+		}
+	default:
+		t.Errorf("check %s has invalid status %q", ck.Code, ck.Status)
+	}
+}
+
 func TestApiDiagnostics_DefaultOK(t *testing.T) {
 	primeWritable(t) // baseline expects storage_path=ok
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
@@ -109,24 +131,9 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"config_snapshot_validator": false,
 	}
 	for i := range c.Checks {
-		ck := c.Checks[i]
-		if ck.Code == "" {
-			t.Errorf("check[%d] has empty code", i)
-		}
-		if ck.Message == "" {
-			t.Errorf("check[%d] (%s) has empty message", i, ck.Code)
-		}
-		switch ck.Status {
-		case diagOK:
-		case diagWarn, diagFail:
-			if ck.OperatorAction == "" {
-				t.Errorf("check %s is %s but operator_action is empty", ck.Code, ck.Status)
-			}
-		default:
-			t.Errorf("check %s has invalid status %q", ck.Code, ck.Status)
-		}
-		if _, ok := requiredCodes[ck.Code]; ok {
-			requiredCodes[ck.Code] = true
+		assertCheckShape(t, i, c.Checks[i])
+		if _, ok := requiredCodes[c.Checks[i].Code]; ok {
+			requiredCodes[c.Checks[i].Code] = true
 		}
 	}
 	for code, seen := range requiredCodes {
