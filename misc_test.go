@@ -71,6 +71,78 @@ func TestHandleReady_DefaultOK(t *testing.T) {
 	}
 }
 
+// TestHandleReady_EmptyPolicyStillReady asserts that an empty policy
+// ruleset surfaces as policy_loaded=fail in the checks map but does NOT
+// downgrade overall readiness to 503 — empty policy is a valid
+// Zero-Trust posture (default-deny applies) so the LB should still
+// receive traffic for a fresh install.
+func TestHandleReady_EmptyPolicyStillReady(t *testing.T) {
+	// The default test process has policyStore at version 0 / empty
+	// rules; no setup needed.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/ready", http.NoBody)
+	handleReady(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (empty policy must not gate readiness)", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"status":"ready"`) {
+		t.Errorf("body missing status:ready, got %q", body)
+	}
+	if !strings.Contains(body, `"policy_loaded"`) {
+		t.Errorf("body missing policy_loaded check, got %q", body)
+	}
+}
+
+// TestHandleReady_SessionSecretMissing503 zeros the admin session HMAC
+// and asserts /ready returns 503 with status:not_ready.
+func TestHandleReady_SessionSecretMissing503(t *testing.T) {
+	prev := sessionSecret
+	sessionSecret = nil
+	t.Cleanup(func() { sessionSecret = prev })
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/ready", http.NoBody)
+	handleReady(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"status":"not_ready"`) {
+		t.Errorf("body missing status:not_ready, got %q", body)
+	}
+	if !strings.Contains(body, `"session_secret"`) {
+		t.Errorf("body missing session_secret check, got %q", body)
+	}
+}
+
+// TestHandleReady_BrokenValidator503 simulates a broken
+// validateConfigSnapshot via the readiness-only seam and asserts
+// /ready returns 503. t.Cleanup restores the default so production
+// behaviour is unchanged outside the test.
+func TestHandleReady_BrokenValidator503(t *testing.T) {
+	prev := configSnapshotValidatorOK
+	configSnapshotValidatorOK = func() bool { return false }
+	t.Cleanup(func() { configSnapshotValidatorOK = prev })
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/ready", http.NoBody)
+	handleReady(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"status":"not_ready"`) {
+		t.Errorf("body missing status:not_ready, got %q", body)
+	}
+	if !strings.Contains(body, `"config_snapshot_validator"`) {
+		t.Errorf("body missing config_snapshot_validator check, got %q", body)
+	}
+}
+
 // ─── matchCountry ─────────────────────────────────────────────────────────────
 
 func TestMatchCountry(t *testing.T) {
