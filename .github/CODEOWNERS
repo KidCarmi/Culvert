@@ -29,7 +29,7 @@ store.go                    @KidCarmi
 # ── CI / Release pipeline — changes here affect all deployments ─────────────
 .github/                    @KidCarmi
 Dockerfile                  @KidCarmi
-install.sh                  @KidCarmi
+scripts/install.sh          @KidCarmi
 
 # ── Configuration schema — breaking changes need special care ───────────────
 config.go                   @KidCarmi

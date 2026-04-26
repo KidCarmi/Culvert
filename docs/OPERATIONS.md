@@ -9,6 +9,22 @@ It is intentionally small and focused on day-2 reality, not feature
 catalogues. For configuration knobs see the README; for architecture see
 `roadmap/PHASES.md`.
 
+## Installation
+
+Culvert ships with a single canonical installer that handles Docker
+Engine + Compose v2 setup across the major Linux distro families
+(Ubuntu, Debian, RHEL/CentOS/Rocky/Alma, Fedora, Amazon Linux, Arch),
+clones the repo, and starts the stack with `docker compose up -d --wait`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/scripts/install.sh | bash
+```
+
+After the installer finishes, follow the three post-install steps in the
+[README](../README.md#after-its-running): setup wizard, `/ready` check,
+and **Infrastructure → Diagnostics**. The rest of this guide assumes
+those steps are complete.
+
 ---
 
 ## 1. Two readiness surfaces
