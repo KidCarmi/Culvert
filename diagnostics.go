@@ -1,8 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -10,7 +15,11 @@ import (
 // OperatorContract is the aggregated, operator-visible health verdict for
 // the running node. It is a side-effect-free read of process state via the
 // safe accessors that already exist on each subsystem; the handler does no
-// disk I/O, no network probes, and triggers no fresh ClamAV/health pings.
+// disk writes, no network probes, and triggers no fresh ClamAV/health pings.
+// One bounded read of the latest config-version envelope is performed per
+// call (see configVersionSummary) so the rollback-readiness checks reflect
+// the current on-disk state — that read is read-only and never modifies
+// /data/config_versions.
 //
 // The shape is intentionally extensible: future PRs add checks by appending
 // to the Checks slice. Field names are stable JSON keys so the SPA and
@@ -122,6 +131,10 @@ func sessionSecretSet() bool {
 //   - never opens files, sockets, or pings external daemons
 //   - safe to call concurrently from the admin API
 func buildOperatorContract() OperatorContract {
+	// One read per call: scan configVersionsDir, parse the latest
+	// envelope, run validateConfigBackup on it. Shared across the
+	// three config-version checks so they don't each re-read the file.
+	cv := summarizeLatestConfigVersion()
 	checks := []OperatorContractCheck{
 		checkStorage(),
 		checkPolicyLoaded(),
@@ -132,6 +145,9 @@ func buildOperatorContract() OperatorContract {
 		checkUnauthMode(),
 		checkUpdaterURL(),
 		checkConfigSnapshotValidator(),
+		checkConfigVersionsPresent(cv),
+		checkConfigVersionsReadable(cv),
+		checkConfigRollbackValidation(cv),
 	}
 	return OperatorContract{
 		Verdict:     rollUpVerdict(checks),
@@ -367,6 +383,185 @@ func checkConfigSnapshotValidator() OperatorContractCheck {
 		Code:    "config_snapshot_validator",
 		Status:  diagOK,
 		Message: "config snapshot validator available",
+	}
+}
+
+// ── config-version checks ────────────────────────────────────────────────
+//
+// These three checks expose the existing config-versioning subsystem
+// (configversion.go) as diagnostics. They reuse the canonical numeric
+// version-selection logic and the existing validateConfigBackup helper —
+// no new backup/restore primitives are introduced here.
+
+// configVersionSummary aggregates one read of the latest config version
+// envelope. Built once per /api/diagnostics call so the three
+// config-version checks share I/O. Read-only — no files are created,
+// modified, or removed by populating this struct.
+type configVersionSummary struct {
+	Count         int           // count of v{N}.json files on disk
+	LatestVersion int           // highest numeric N found; 0 when none
+	Found         bool          // true when at least one valid v{N}.json exists
+	DirAccessible bool          // true when configVersionsDir could be opened
+	LoadErr       error         // non-nil when the latest envelope failed to read or parse
+	BadShape      bool          // envelope parsed but meta is missing or has zero version
+	Backup        *configBackup // parsed config (only when LoadErr/BadShape are nil)
+	Warnings      []string      // validateConfigBackup result on Backup
+}
+
+// summarizeLatestConfigVersion is the production entry point used by
+// the diagnostics handler. It scans configVersionsDir.
+func summarizeLatestConfigVersion() configVersionSummary {
+	return summarizeLatestConfigVersionAt(configVersionsDir)
+}
+
+// summarizeLatestConfigVersionAt is the dir-parameterised inner form.
+// Tests pass a tempdir to exercise present / readable / validation
+// paths without touching the production path constant.
+//
+// Latest version is selected strictly by numeric version parsed from
+// the v{N}.json filename — never by file modified time. This matches
+// the semantics of initConfigVersioning, pruneConfigVersions, and
+// listConfigVersions.
+func summarizeLatestConfigVersionAt(dir string) configVersionSummary {
+	var sum configVersionSummary
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return sum
+	}
+	sum.DirAccessible = true
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "v") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		numStr := strings.TrimSuffix(strings.TrimPrefix(name, "v"), ".json")
+		n, perr := strconv.Atoi(numStr)
+		if perr != nil || n <= 0 {
+			continue
+		}
+		sum.Count++
+		if !sum.Found || n > sum.LatestVersion {
+			sum.LatestVersion = n
+			sum.Found = true
+		}
+	}
+	if !sum.Found {
+		return sum
+	}
+	// loadConfigVersion intentionally ignores meta, so we cannot reuse
+	// it for envelope-shape checks. Read the file and parse both halves
+	// here. This is the only read this function performs — and it is
+	// strictly read-only.
+	path := filepath.Join(dir, fmt.Sprintf("v%d.json", sum.LatestVersion))
+	data, rerr := os.ReadFile(path) // #nosec G304 -- path built from dir + validated v{N}.json
+	if rerr != nil {
+		sum.LoadErr = rerr
+		return sum
+	}
+	var env struct {
+		Meta   ConfigVersion `json:"meta"`
+		Config configBackup  `json:"config"`
+	}
+	if uerr := json.Unmarshal(data, &env); uerr != nil {
+		sum.LoadErr = uerr
+		return sum
+	}
+	// Confirm envelope structure: a valid envelope has a populated meta
+	// block with a positive version number. A missing or zeroed meta
+	// means the file is not a usable rollback target.
+	if env.Meta.Version <= 0 {
+		sum.BadShape = true
+		return sum
+	}
+	sum.Backup = &env.Config
+	sum.Warnings = validateConfigBackup(&env.Config)
+	return sum
+}
+
+func checkConfigVersionsPresent(s configVersionSummary) OperatorContractCheck {
+	if s.Found {
+		return OperatorContractCheck{
+			Code:    "config_versions_present",
+			Status:  diagOK,
+			Message: fmt.Sprintf("%d config version(s) on disk; latest is v%d", s.Count, s.LatestVersion),
+		}
+	}
+	return OperatorContractCheck{
+		Code:           "config_versions_present",
+		Status:         diagWarn,
+		Message:        "no config versions found — automatic rollback is unavailable until a config change is made",
+		OperatorAction: "Make any config change in the admin UI to seed an initial v1 snapshot, or restore the config_versions directory from a /data backup.",
+	}
+}
+
+func checkConfigVersionsReadable(s configVersionSummary) OperatorContractCheck {
+	if !s.Found {
+		// No version on disk: the previous check already flags this.
+		// This row stays informational so a single root cause does not
+		// cascade into multiple operator alerts.
+		return OperatorContractCheck{
+			Code:    "config_versions_readable",
+			Status:  diagOK,
+			Message: "no version file to read",
+		}
+	}
+	if s.LoadErr != nil {
+		return OperatorContractCheck{
+			Code:           "config_versions_readable",
+			Status:         diagFail,
+			Message:        fmt.Sprintf("latest config version v%d is unreadable or corrupt", s.LatestVersion),
+			OperatorAction: "Inspect the latest v{N}.json under the config versions directory; if it is truncated or invalid JSON, remove it (a prior intact version remains usable) or restore the directory from a /data backup, then restart the proxy.",
+		}
+	}
+	if s.BadShape {
+		return OperatorContractCheck{
+			Code:           "config_versions_readable",
+			Status:         diagFail,
+			Message:        fmt.Sprintf("latest config version v%d has a malformed envelope (missing meta block)", s.LatestVersion),
+			OperatorAction: "The file does not match the {meta, config} envelope shape Culvert writes. Remove it (a prior intact version remains usable) or restore the directory from a /data backup, then restart the proxy.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "config_versions_readable",
+		Status:  diagOK,
+		Message: fmt.Sprintf("latest config version v%d parses cleanly", s.LatestVersion),
+	}
+}
+
+func checkConfigRollbackValidation(s configVersionSummary) OperatorContractCheck {
+	if !s.Found {
+		return OperatorContractCheck{
+			Code:    "config_rollback_validation",
+			Status:  diagOK,
+			Message: "no version to validate",
+		}
+	}
+	// Per spec: fail only when parse/load failed.
+	if s.LoadErr != nil || s.BadShape {
+		return OperatorContractCheck{
+			Code:           "config_rollback_validation",
+			Status:         diagFail,
+			Message:        fmt.Sprintf("cannot validate latest config version v%d — file failed to parse", s.LatestVersion),
+			OperatorAction: "Resolve the parse error reported by config_versions_readable, then re-check diagnostics.",
+		}
+	}
+	if n := len(s.Warnings); n > 0 {
+		// We deliberately do NOT echo the raw validateConfigBackup
+		// warning strings here — they include actual config field
+		// values from the backup. Operators can pull the specifics via
+		// POST /api/config/versions { "version": N, "dry_run": true }
+		// which is the existing, role-gated path.
+		return OperatorContractCheck{
+			Code:           "config_rollback_validation",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("latest config version v%d would roll back with %d validation warning(s)", s.LatestVersion, n),
+			OperatorAction: "Run a dry-run rollback via POST /api/config/versions {\"version\":N,\"dry_run\":true} to inspect the warnings, then either roll back to an earlier version or accept the warnings.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "config_rollback_validation",
+		Status:  diagOK,
+		Message: fmt.Sprintf("latest config version v%d passes pre-flight validation", s.LatestVersion),
 	}
 }
 
