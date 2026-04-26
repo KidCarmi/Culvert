@@ -5,9 +5,46 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// withCachedStorageState saves and restores both dataDir and the cached
+// writability state so a test can drive the cache without leaking into
+// neighbours. Call from any test that mutates either.
+func withCachedStorageState(t *testing.T) {
+	t.Helper()
+	prevDir := dataDir
+	prevState := storageWritableState.Load()
+	t.Cleanup(func() {
+		dataDir = prevDir
+		if prevState == nil {
+			// atomic.Value cannot be cleared once written; store the
+			// "unknown" sentinel so storageWritability() reports the
+			// pre-test default.
+			storageWritableState.Store(storageStateUnknown)
+		} else {
+			storageWritableState.Store(prevState)
+		}
+	})
+}
+
+// primeWritable points dataDir at a fresh tempdir and runs the probe so
+// the cache reports writable. Used by tests that need the diagnostics
+// "default OK" baseline.
+func primeWritable(t *testing.T) string {
+	t.Helper()
+	withCachedStorageState(t)
+	dir := t.TempDir()
+	dataDir = dir
+	probeStorageWritability()
+	if got := storageWritability(); got != storageStateWritable {
+		t.Fatalf("primeWritable: cache = %q, want %q", got, storageStateWritable)
+	}
+	return dir
+}
 
 // viewerCtx attaches RoleViewer to the request context — the minimum role
 // /api/diagnostics requires.
@@ -36,6 +73,7 @@ func decodeContract(t *testing.T, w *httptest.ResponseRecorder) OperatorContract
 }
 
 func TestApiDiagnostics_DefaultOK(t *testing.T) {
+	primeWritable(t) // baseline expects storage_path=ok
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 
@@ -299,4 +337,119 @@ func hasLongHexRun(s string) bool {
 		}
 	}
 	return false
+}
+
+// ── storage writability probe ─────────────────────────────────────────────
+
+func TestProbeStorageWritability_Writable(t *testing.T) {
+	withCachedStorageState(t)
+	dataDir = t.TempDir()
+
+	probeStorageWritability()
+
+	if got := storageWritability(); got != storageStateWritable {
+		t.Errorf("got %q, want %q", got, storageStateWritable)
+	}
+	// The probe must clean up after itself — no leftover temp files.
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".culvert-writability-probe-") {
+			t.Errorf("probe left temp file behind: %s", e.Name())
+		}
+	}
+
+	// checkStorage must report ok with a non-empty message.
+	ck := checkStorage()
+	if ck.Status != diagOK {
+		t.Errorf("checkStorage status = %q, want ok", ck.Status)
+	}
+	if ck.Message == "" {
+		t.Error("checkStorage message is empty")
+	}
+}
+
+func TestProbeStorageWritability_Unwritable(t *testing.T) {
+	withCachedStorageState(t)
+	// Point at a path whose parent does not exist. os.CreateTemp fails
+	// with ENOENT — robust against the test running as root (chmod
+	// would not be enforced for uid 0).
+	dataDir = filepath.Join(t.TempDir(), "deliberately", "missing", "subdir")
+
+	probeStorageWritability()
+
+	if got := storageWritability(); got != storageStateUnwritable {
+		t.Errorf("got %q, want %q", got, storageStateUnwritable)
+	}
+	ck := checkStorage()
+	if ck.Status != diagFail {
+		t.Errorf("checkStorage status = %q, want fail", ck.Status)
+	}
+	if ck.OperatorAction == "" {
+		t.Error("checkStorage operator_action is empty for fail")
+	}
+}
+
+func TestProbeStorageWritability_NoDataDir(t *testing.T) {
+	withCachedStorageState(t)
+	dataDir = ""
+
+	probeStorageWritability()
+
+	if got := storageWritability(); got != storageStateUnknown {
+		t.Errorf("got %q, want %q", got, storageStateUnknown)
+	}
+	ck := checkStorage()
+	if ck.Status != diagWarn {
+		t.Errorf("checkStorage status = %q, want warn", ck.Status)
+	}
+	if ck.OperatorAction == "" {
+		t.Error("checkStorage operator_action is empty for warn")
+	}
+}
+
+// TestApiDiagnostics_NoIOOnRepeatedCalls proves the handler does not
+// re-probe storage on every call. We probe once against a tempdir, then
+// remove the directory and call apiDiagnostics ten times. The cached
+// "writable" verdict must persist — a real I/O probe would now see the
+// missing directory and downgrade to fail.
+func TestApiDiagnostics_NoIOOnRepeatedCalls(t *testing.T) {
+	withCachedStorageState(t)
+	dir := t.TempDir()
+	dataDir = dir
+	probeStorageWritability()
+	if got := storageWritability(); got != storageStateWritable {
+		t.Fatalf("setup: cache = %q, want writable", got)
+	}
+
+	// Make subsequent disk access impossible: replace the directory with
+	// nothing. CreateTemp on this path would now fail.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		w := httptest.NewRecorder()
+		apiDiagnostics(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("iter %d: status = %d", i, w.Code)
+		}
+		c := decodeContract(t, w)
+		var found *OperatorContractCheck
+		for j := range c.Checks {
+			if c.Checks[j].Code == "storage_path" {
+				found = &c.Checks[j]
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("iter %d: storage_path missing", i)
+		}
+		if found.Status != diagOK {
+			t.Errorf("iter %d: storage_path status = %q, want ok (handler re-probed disk!)", i, found.Status)
+		}
+	}
 }
