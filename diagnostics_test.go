@@ -717,3 +717,99 @@ func TestConfigVersionsCheck_NoBackupContentLeak(t *testing.T) {
 		}
 	}
 }
+
+// ── failure-mode validation matrix (PR #159) ──────────────────────────────
+//
+// These tests pin specific failure modes for the operator-contract
+// surface, complementing the readiness tests in misc_test.go. The matrix
+// (scenario / expected / test name) is documented in the PR body.
+
+// TestApiDiagnostics_SessionSecretMissingFail — Scenario 1, diagnostics
+// side. Companion to TestHandleReady_SessionSecretMissing503 in
+// misc_test.go which covers the readiness side. Asserts that, with no
+// admin session HMAC initialised, /api/diagnostics returns 200 (the
+// endpoint itself is healthy and responsive) but the session_secret
+// row reports fail with a non-empty operator_action.
+func TestApiDiagnostics_SessionSecretMissingFail(t *testing.T) {
+	prev := sessionSecret
+	sessionSecret = nil
+	t.Cleanup(func() { sessionSecret = prev })
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (handler stays responsive)", w.Code)
+	}
+	c := decodeContract(t, w)
+	var found *OperatorContractCheck
+	for i := range c.Checks {
+		if c.Checks[i].Code == "session_secret" {
+			found = &c.Checks[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("session_secret check missing from report")
+	}
+	if found.Status != diagFail {
+		t.Errorf("session_secret status = %q, want fail", found.Status)
+	}
+	if found.OperatorAction == "" {
+		t.Error("session_secret fail must include operator_action")
+	}
+}
+
+// TestApiDiagnostics_EmptyPolicyWarn — Scenario 3, diagnostics side.
+// Explicit assertion that policy_loaded surfaces as warn (not fail)
+// when the ruleset is empty. The default test process has policyStore
+// at version 0 / no rules; this test snapshots and restores the store
+// so it is hermetic regardless of run order with future policy tests.
+func TestApiDiagnostics_EmptyPolicyWarn(t *testing.T) {
+	policyStore.mu.Lock()
+	prevRules := policyStore.rules
+	prevVersion := policyStore.version
+	prevUpdated := policyStore.updatedAt
+	policyStore.rules = nil
+	policyStore.version = 0
+	policyStore.updatedAt = ""
+	policyStore.mu.Unlock()
+	t.Cleanup(func() {
+		policyStore.mu.Lock()
+		policyStore.rules = prevRules
+		policyStore.version = prevVersion
+		policyStore.updatedAt = prevUpdated
+		policyStore.mu.Unlock()
+	})
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	c := decodeContract(t, w)
+	var found *OperatorContractCheck
+	for i := range c.Checks {
+		if c.Checks[i].Code == "policy_loaded" {
+			found = &c.Checks[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("policy_loaded check missing from report")
+	}
+	if found.Status != diagWarn {
+		t.Errorf("policy_loaded status = %q, want warn (empty ruleset must NOT escalate to fail — default-deny is a valid Zero-Trust posture)", found.Status)
+	}
+	if found.OperatorAction == "" {
+		t.Error("policy_loaded warn must include operator_action")
+	}
+	// Belt and braces: top-level verdict must not have escalated to
+	// fail purely because of empty policy.
+	if c.Verdict == diagFail {
+		t.Errorf("top-level verdict = %q, want ok or warn (empty policy alone must not fail the report)", c.Verdict)
+	}
+}
