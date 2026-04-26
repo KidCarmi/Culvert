@@ -109,6 +109,7 @@ type startupState struct {
 	scanSvcListen       *string
 	scanSvcURL          *string
 	updaterURLFlag      *string
+	updaterURLAllowFlag *string
 	uiSANsFlag          *string
 	trustFwdHeaders     *bool
 	resetPwUser         *string
@@ -242,6 +243,7 @@ func parseFlags(s *startupState) {
 	s.scanSvcListen = flag.String("scan-svc-listen", "", "Run as scan microservice sidecar on this address (e.g. :8484)")
 	s.scanSvcURL = flag.String("scan-svc-url", "", "Remote scan service URL (e.g. http://scan-svc:8484) — disables local ClamAV/YARA")
 	s.updaterURLFlag = flag.String("updater-url", "", "Updater sidecar URL (default http://culvert-updater:7123)")
+	s.updaterURLAllowFlag = flag.String("updater-url-allowlist", "", "H4: comma-separated allowlist of permitted non-default updater URLs (empty ⇒ default + loopback only)")
 	s.uiSANsFlag = flag.String("ui-san", "", "Additional TLS SANs for self-signed cert (comma-separated IPs/hostnames)")
 	s.trustFwdHeaders = flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
 	s.resetPwUser = flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
@@ -961,6 +963,17 @@ func initBackgroundServices(s *startupState) {
 	go startAlertRetryLoop(appLifecycleCtx)
 
 	// ── Docker self-update system ────────────────────────────────────────────
+	// H4: install the operator-curated allowlist BEFORE validating the
+	// configured updater URL — validateUpdaterURL consults it.
+	allowlist := append([]string(nil), s.fc.Update.URLAllowlist...)
+	if cli := strings.TrimSpace(*s.updaterURLAllowFlag); cli != "" {
+		for _, entry := range strings.Split(cli, ",") {
+			if e := strings.TrimSpace(entry); e != "" {
+				allowlist = append(allowlist, e)
+			}
+		}
+	}
+	SetUpdaterURLAllowlist(allowlist)
 	if u := firstStr(*s.updaterURLFlag, s.fc.Update.UpdaterURL); u != "" {
 		if err := validateUpdaterURL(u); err != nil {
 			logWarnf("Update: invalid updater URL %q: %v — using default", u, err)

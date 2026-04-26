@@ -66,11 +66,43 @@ func (u *updateInfo) snapshot() map[string]any {
 
 // ── Updater client ──────────────────────────────────────────────────────────
 
-var updaterURL = "http://culvert-updater:7123"
+// defaultUpdaterURL is the trusted Docker-Compose default. The proxy
+// allows this URL unconditionally — it is the in-cluster sidecar
+// reachable only inside the Docker network. Any other URL must be
+// either loopback or explicitly listed in updaterURLAllowlist before
+// validateUpdaterURL accepts it (H4 fix).
+const defaultUpdaterURL = "http://culvert-updater:7123"
+
+var updaterURL = defaultUpdaterURL
+
+// updaterURLAllowlist is the operator-curated set of URLs the proxy is
+// permitted to talk to as its updater. Populated at startup from the
+// --updater-url-allowlist CLI flag and/or update.url_allowlist YAML
+// field. Empty means "default + loopback only" — admins who want a
+// custom updater URL must opt in by listing it here at proxy startup,
+// where it cannot be modified through the admin API alone (H4 fix).
+var updaterURLAllowlist []string
+
+// SetUpdaterURLAllowlist replaces the package allowlist. Called once at
+// startup from main.initBackgroundServices. Entries are kept verbatim
+// and matched as exact strings against the configured updater URL.
+func SetUpdaterURLAllowlist(urls []string) {
+	updaterURLAllowlist = append(updaterURLAllowlist[:0], urls...)
+}
 
 // validateUpdaterURL checks that the updater URL uses http/https and does not
 // point at a private/internal IP (SSRF guard). Called at startup to reject
 // misconfigured or malicious updater URLs from config files.
+//
+// H4: in addition to the SSRF/scheme checks, the URL must be one of:
+//   - the package default (defaultUpdaterURL)
+//   - a loopback IP literal (local sidecar use case)
+//   - an entry in updaterURLAllowlist (operator opt-in)
+//
+// The check at this layer guards against admin-API config writes
+// pointing the proxy at an attacker-controlled updater. Without it,
+// any later config-mutation path that bypasses startup-time validation
+// could redirect the rolling-update flow to a malicious binary.
 func validateUpdaterURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -83,11 +115,7 @@ func validateUpdaterURL(raw string) error {
 	if host == "" {
 		return fmt.Errorf("empty hostname")
 	}
-	// Allow Docker internal DNS names (compose service names) — these won't
-	// resolve from the host but are valid within a compose network.
-	// Only block if the name resolves to a metadata/loopback address.
 	if ip := net.ParseIP(host); ip != nil {
-		// Bare IP: block metadata endpoint (169.254.169.254) and loopback.
 		if ip.IsLoopback() {
 			return nil // loopback is expected for local sidecar
 		}
@@ -95,7 +123,17 @@ func validateUpdaterURL(raw string) error {
 			return fmt.Errorf("metadata endpoint not allowed")
 		}
 	}
-	return nil
+	// H4: trust constraint. The default URL is always accepted; any
+	// other URL must be in the operator-curated allowlist.
+	if raw == defaultUpdaterURL {
+		return nil
+	}
+	for _, allowed := range updaterURLAllowlist {
+		if raw == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("updater URL %q not in allowlist (set --updater-url-allowlist or update.url_allowlist to permit non-default URLs)", raw)
 }
 
 // updaterToken reads the shared secret from the token file.

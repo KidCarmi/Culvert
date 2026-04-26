@@ -125,7 +125,8 @@ type FileConfig struct {
 
 	// Update configures the Docker self-update system.
 	Update struct {
-		UpdaterURL string `yaml:"updater_url"` // URL of the updater sidecar (default: http://culvert-updater:7123)
+		UpdaterURL   string   `yaml:"updater_url"`   // URL of the updater sidecar (default: http://culvert-updater:7123)
+		URLAllowlist []string `yaml:"url_allowlist"` // H4: operator-curated trusted updater URLs; empty ⇒ default + loopback only
 	} `yaml:"update"`
 
 	// Cluster configures Control Plane / Data Plane multi-node mode.
