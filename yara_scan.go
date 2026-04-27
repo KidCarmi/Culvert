@@ -445,8 +445,11 @@ const maxYARAInflight = 50
 // Tier 1.3: visibility into silent degradation.
 const yaraDegradedThreshold = (maxYARAInflight * 80) / 100
 
-// matchRegexWithTimeout runs re.Match(data) in a goroutine and returns false
-// if the match does not complete within the given timeout (ReDoS prevention).
+// matchRegexWithTimeout runs re.Match(data) in a goroutine and returns true
+// (fail-closed / suspicious) if the match does not complete within the given
+// timeout (ReDoS prevention) or when the inflight goroutine cap is reached.
+// Fail-closed at saturation is consistent with the timeout case: an engine
+// that cannot evaluate a rule must not silently allow content through.
 // Abandoned goroutines are tracked and capped at maxYARAInflight to prevent leaks.
 func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
 	inflight := yaraInflight.Load()
@@ -458,7 +461,7 @@ func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration
 			Source: "yara",
 			Detail: fmt.Sprintf("regex skipped: inflight=%d max=%d — YARA engine saturated", inflight, maxYARAInflight),
 		})
-		return false
+		return true // fail-closed: treat saturation as suspicious, consistent with timeout behavior
 	}
 	// Tier 1.3: Warn once we're approaching the cap so admins have a chance
 	// to react before matches start being silently dropped.
