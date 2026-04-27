@@ -468,8 +468,8 @@ func TestMatchRegexWithTimeout_InflightCap(t *testing.T) {
 	defer yaraInflight.Store(old)
 
 	// Store a value well above the cap so straggler Add(-1) calls from
-	// previous tests can't drop it below maxYARAInflight.
-	yaraInflight.Store(int64(maxYARAInflight) + 100)
+	// previous tests can't drop it below the runtime max.
+	yaraInflight.Store(yaraGetMaxInflight() + 100)
 	re := regexp.MustCompile(`test`)
 	// Must return true (fail-closed) when the inflight cap is reached.
 	// Saturation must never silently allow content through.
@@ -489,7 +489,7 @@ func TestYARA_SaturationFailsClosed(t *testing.T) {
 	old := yaraInflight.Load()
 	defer yaraInflight.Store(old)
 
-	yaraInflight.Store(int64(maxYARAInflight))
+	yaraInflight.Store(yaraGetMaxInflight())
 
 	re := regexp.MustCompile(`clean`)
 	// Even content that would otherwise not match any rule must be treated

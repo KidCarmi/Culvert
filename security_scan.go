@@ -506,7 +506,7 @@ func (ss *SecurityScanner) scanBodyInner(data []byte, hash string) *SecurityScan
 	}
 
 	// YARA scan.
-	if globalYARA.Enabled() {
+	if yaraGetEnabled() && globalYARA.Enabled() {
 		if matches := globalYARA.Match(data); len(matches) > 0 {
 			reason := strings.Join(matches, ", ")
 			atomic.AddInt64(&statYARABlocked, 1)
@@ -679,7 +679,12 @@ func secScanStatusMap() map[string]interface{} {
 		"yara_rules":            globalYARA.Count(),
 		"yara_warnings":         len(globalYARA.Warnings()),       // Tier 2.1
 		"yara_inflight":         yaraInflight.Load(),              // Tier 1.3
-		"yara_inflight_max":     int64(maxYARAInflight),           // Tier 1.3
+		"yara_inflight_max":     yaraGetMaxInflight(),             // Tier 1.3
+		"yara_enabled":          yaraGetEnabled(),
+		"yara_timeout_secs":     yaraGetTimeoutSecs(),
+		"yara_on_timeout":       yaraGetOnTimeout(),
+		"yara_on_saturation":    yaraGetOnSaturation(),
+		"yara_alert_degraded":   yaraGetAlertDegraded(),
 		"threat_feed_entries":   feedTotal,
 		"threat_feed_last_sync": feedLastSync,
 		"threat_feed_interval":  feedInterval.String(),

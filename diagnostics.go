@@ -143,6 +143,7 @@ func buildOperatorContract() OperatorContract {
 		checkCDR(),
 		checkClusterPosture(),
 		checkUnauthMode(),
+		checkYARAEnginePosture(),
 		checkUpdaterURL(),
 		checkConfigSnapshotValidator(),
 		checkConfigVersionsPresent(cv),
@@ -344,6 +345,42 @@ func checkUnauthMode() OperatorContractCheck {
 		Code:    "unauth_mode",
 		Status:  diagOK,
 		Message: "client authentication enforced (or no IdP configured)",
+	}
+}
+
+// checkYARAEnginePosture warns when either on_timeout or on_saturation is set
+// to fail_open_with_alert, or when YARA scanning has been disabled by admin
+// override. Both are valid operator choices, but require explicit visibility.
+func checkYARAEnginePosture() OperatorContractCheck {
+	if !yaraGetEnabled() {
+		return OperatorContractCheck{
+			Code:           "yara_engine_posture",
+			Status:         diagWarn,
+			Message:        "YARA scanning is disabled by admin override",
+			OperatorAction: "Re-enable YARA under Security Scanning → YARA Engine Settings if content scanning is required.",
+		}
+	}
+	timeout := yaraGetOnTimeout()
+	sat := yaraGetOnSaturation()
+	if timeout == yaraFailOpenWithAlert || sat == yaraFailOpenWithAlert {
+		parts := []string{}
+		if timeout == yaraFailOpenWithAlert {
+			parts = append(parts, "on_timeout=fail_open_with_alert")
+		}
+		if sat == yaraFailOpenWithAlert {
+			parts = append(parts, "on_saturation=fail_open_with_alert")
+		}
+		return OperatorContractCheck{
+			Code:           "yara_engine_posture",
+			Status:         diagWarn,
+			Message:        "YARA engine posture: " + strings.Join(parts, ", ") + " — unscanned content may pass through on engine stress",
+			OperatorAction: "Review YARA Engine Settings under Security Scanning; set both policies to fail_closed to restore Zero Trust posture.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "yara_engine_posture",
+		Status:  diagOK,
+		Message: "YARA engine posture: fail-closed on timeout and saturation",
 	}
 }
 
