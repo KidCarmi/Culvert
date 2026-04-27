@@ -468,11 +468,35 @@ func TestMatchRegexWithTimeout_InflightCap(t *testing.T) {
 	defer yaraInflight.Store(old)
 
 	// Store a value well above the cap so straggler Add(-1) calls from
-	// previous tests can't drop it below maxYARAInflight.
-	yaraInflight.Store(int64(maxYARAInflight) + 100)
+	// previous tests can't drop it below the runtime max.
+	yaraInflight.Store(yaraGetMaxInflight() + 100)
 	re := regexp.MustCompile(`test`)
-	// Should return false immediately because inflight cap is reached.
-	if matchRegexWithTimeout(re, []byte("test data"), time.Second) {
-		t.Error("should return false when inflight cap reached")
+	// Must return true (fail-closed) when the inflight cap is reached.
+	// Saturation must never silently allow content through.
+	if !matchRegexWithTimeout(re, []byte("test data"), time.Second) {
+		t.Error("should return true (fail-closed) when inflight cap reached")
+	}
+}
+
+// TestYARA_SaturationFailsClosed is the named regression test for the security
+// fix that ensures YARA engine saturation fails closed rather than silently
+// allowing content through. At maxYARAInflight the engine cannot evaluate
+// rules, so it must treat the content as suspicious (return true), consistent
+// with the existing timeout fail-closed behavior.
+func TestYARA_SaturationFailsClosed(t *testing.T) {
+	time.Sleep(10 * time.Millisecond)
+
+	old := yaraInflight.Load()
+	defer yaraInflight.Store(old)
+
+	yaraInflight.Store(yaraGetMaxInflight())
+
+	re := regexp.MustCompile(`clean`)
+	// Even content that would otherwise not match any rule must be treated
+	// as suspicious when the engine is saturated.
+	result := matchRegexWithTimeout(re, []byte("completely clean content"), time.Second)
+	if !result {
+		t.Error("YARA saturation must fail-closed (return true); " +
+			"returning false silently allows unscanned content through")
 	}
 }

@@ -1006,6 +1006,51 @@ tr.dragging  { opacity: .4; }
             </div>
           </div>
 
+          <!-- YARA Engine Settings -->
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">YARA Engine Settings</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Configure regex timeout, concurrency limits, and failure posture. Secure defaults are fail-closed — alert-only modes require explicit admin consent.</div>
+            <div id="yara-settings-warn" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:.78rem;color:var(--yellow)">
+              Warning: fail_open_with_alert allows unscanned content to pass through when the engine is under stress. This weakens Zero Trust posture. Ensure alerting is operational before using this mode.
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:10px">
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">YARA Scanning
+                <select id="yara-setting-enabled" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">Regex Timeout (seconds)
+                <input id="yara-setting-timeout" type="number" min="1" max="60" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">Max Inflight Goroutines
+                <input id="yara-setting-maxinflight" type="number" min="1" max="500" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">On Timeout
+                <select id="yara-setting-ontimeout" onchange="yaraSettingCheckWarn()" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+                  <option value="fail_closed">fail_closed (secure default)</option>
+                  <option value="fail_open_with_alert">fail_open_with_alert</option>
+                </select>
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">On Saturation
+                <select id="yara-setting-onsaturation" onchange="yaraSettingCheckWarn()" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+                  <option value="fail_closed">fail_closed (secure default)</option>
+                  <option value="fail_open_with_alert">fail_open_with_alert</option>
+                </select>
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">Alert on Degraded
+                <select id="yara-setting-alertdegraded" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+                  <option value="true">Yes (recommended)</option>
+                  <option value="false">No</option>
+                </select>
+              </label>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn ghost sm" data-click="saveYARASettings">Save YARA Settings</button>
+              <div id="yara-settings-status" style="font-size:.78rem;display:none"></div>
+            </div>
+          </div>
+
           <!-- Scan exclusions (Tier 3.3) -->
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
             <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">Scan Exclusions</div>
@@ -3429,6 +3474,7 @@ document.addEventListener('click', e => {
     case 'saveYARARule':      saveYARARule(); break;
     case 'deleteYARARule':    deleteYARARule(); break;
     case 'selectYARARule':    selectYARARule(arg); break;
+    case 'saveYARASettings':  saveYARASettings(); break;
     case 'saveScanExclusions': saveScanExclusions(); break;
     case 'saveDPIBypass':     saveDPIBypass(); break;
     case 'addTFAllowlistDomain': addTFAllowlistDomain(); break;
@@ -5082,6 +5128,7 @@ async function loadSecurity() {
   loadSecScanStatus();
   loadTFAllowlist();
   loadYARARules();
+  loadYARASettings();
   loadScanExclusions();
   loadDPIBypass();
 }
@@ -5328,6 +5375,56 @@ async function reloadYARA() {
   } catch(e) {
     statusEl.style.color = 'var(--red)';
     statusEl.textContent = 'Reload failed: ' + e.message;
+  }
+}
+
+// ── YARA Engine Settings ──────────────────────────────────────────────────
+async function loadYARASettings() {
+  try {
+    const s = await api('/api/security-scan/yara/settings');
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = String(val); };
+    set('yara-setting-enabled',       s.enabled);
+    set('yara-setting-timeout',       s.timeout_secs);
+    set('yara-setting-maxinflight',   s.max_inflight);
+    set('yara-setting-ontimeout',     s.on_timeout);
+    set('yara-setting-onsaturation',  s.on_saturation);
+    set('yara-setting-alertdegraded', s.alert_degraded);
+    yaraSettingCheckWarn();
+  } catch(e) { console.error('loadYARASettings:', e); }
+}
+
+function yaraSettingCheckWarn() {
+  const ot = document.getElementById('yara-setting-ontimeout');
+  const os = document.getElementById('yara-setting-onsaturation');
+  const warn = document.getElementById('yara-settings-warn');
+  if (!warn) return;
+  const risky = (ot && ot.value === 'fail_open_with_alert') || (os && os.value === 'fail_open_with_alert');
+  warn.style.display = risky ? 'block' : 'none';
+}
+
+async function saveYARASettings() {
+  const statusEl = document.getElementById('yara-settings-status');
+  statusEl.style.display = 'block';
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = 'Saving…';
+  try {
+    const get = id => document.getElementById(id)?.value;
+    const body = {
+      enabled:        get('yara-setting-enabled') === 'true',
+      timeout_secs:   parseInt(get('yara-setting-timeout'), 10),
+      max_inflight:   parseInt(get('yara-setting-maxinflight'), 10),
+      on_timeout:     get('yara-setting-ontimeout'),
+      on_saturation:  get('yara-setting-onsaturation'),
+      alert_degraded: get('yara-setting-alertdegraded') === 'true',
+    };
+    await api('/api/security-scan/yara/settings', { method: 'PUT', body: JSON.stringify(body) });
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = 'Saved.';
+    setTimeout(() => { statusEl.style.display = 'none'; }, 2000);
+    loadSecScanStatus();
+  } catch(e) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'Error: ' + e.message;
   }
 }
 

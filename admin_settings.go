@@ -59,6 +59,18 @@ type AdminSettings struct {
 
 	// SaaS category feed
 	SaaSFeedURL string `json:"saas_feed_url,omitempty"`
+
+	// YARA engine runtime configuration.
+	// YARASettingsSaved is a sentinel: when false the YARA fields below are not
+	// applied on load, preventing zero-value bools from overriding init() defaults
+	// on installations that pre-date this feature.
+	YARASettingsSaved bool   `json:"yara_settings_saved"`
+	YARAEnabled       bool   `json:"yara_enabled"`
+	YARATimeoutSecs   int64  `json:"yara_timeout_secs,omitempty"`
+	YARAMaxInflight   int64  `json:"yara_max_inflight,omitempty"`
+	YARAOnTimeout     string `json:"yara_on_timeout,omitempty"`
+	YARAOnSaturation  string `json:"yara_on_saturation,omitempty"`
+	YARAAlertDegraded bool   `json:"yara_alert_degraded"`
 }
 
 var (
@@ -87,6 +99,7 @@ func LoadAdminSettings(path string) {
 	applyAdminSecurity(&s)
 	applyAdminServices(&s)
 	applyAdminNetwork(&s)
+	applyAdminYARA(&s)
 
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
@@ -168,6 +181,29 @@ func applyAdminNetwork(s *AdminSettings) {
 	}
 }
 
+// applyAdminYARA restores YARA engine settings saved via the Admin GUI.
+// Only applied when YARASettingsSaved is true, preventing zero-value bools
+// from disabling YARA on installations that pre-date this feature.
+func applyAdminYARA(s *AdminSettings) {
+	if !s.YARASettingsSaved {
+		return
+	}
+	yaraSetEnabled(s.YARAEnabled)
+	if s.YARATimeoutSecs > 0 {
+		yaraSetTimeoutSecs(s.YARATimeoutSecs)
+	}
+	if s.YARAMaxInflight > 0 {
+		yaraSetMaxInflight(s.YARAMaxInflight)
+	}
+	if s.YARAOnTimeout != "" {
+		yaraSetOnTimeout(s.YARAOnTimeout)
+	}
+	if s.YARAOnSaturation != "" {
+		yaraSetOnSaturation(s.YARAOnSaturation)
+	}
+	yaraSetAlertDegraded(s.YARAAlertDegraded)
+}
+
 // SaveAdminSettings snapshots all current runtime values and writes them
 // atomically to the settings file. Called after every API mutation.
 func SaveAdminSettings() {
@@ -232,6 +268,15 @@ func SaveAdminSettings() {
 		s.SaaSFeedURL = saasURL
 		s.BlocklistFeedInterval = feedInterval.String()
 	}
+
+	// YARA engine settings
+	s.YARASettingsSaved = true
+	s.YARAEnabled = yaraGetEnabled()
+	s.YARATimeoutSecs = yaraGetTimeoutSecs()
+	s.YARAMaxInflight = yaraGetMaxInflight()
+	s.YARAOnTimeout = yaraGetOnTimeout()
+	s.YARAOnSaturation = yaraGetOnSaturation()
+	s.YARAAlertDegraded = yaraGetAlertDegraded()
 
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

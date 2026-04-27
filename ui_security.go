@@ -592,6 +592,83 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 //   PUT    /api/security-scan/yara/rules/{name}    — update rule file (JSON body)
 //   DELETE /api/security-scan/yara/rules/{name}    — remove rule file
 //
+// yaraSettingsMap returns the current YARA engine runtime config as a map
+// suitable for JSON serialisation.
+func yaraSettingsMap() map[string]any {
+	return map[string]any{
+		"enabled":        yaraGetEnabled(),
+		"timeout_secs":   yaraGetTimeoutSecs(),
+		"max_inflight":   yaraGetMaxInflight(),
+		"on_timeout":     yaraGetOnTimeout(),
+		"on_saturation":  yaraGetOnSaturation(),
+		"alert_degraded": yaraGetAlertDegraded(),
+	}
+}
+
+// validateYARASettings returns an error if any setting value is out of range.
+func validateYARASettings(timeoutSecs, maxInflight int64, onTimeout, onSaturation string) error {
+	if timeoutSecs < 1 || timeoutSecs > 60 {
+		return fmt.Errorf("timeout_secs must be between 1 and 60")
+	}
+	if maxInflight < 1 || maxInflight > 500 {
+		return fmt.Errorf("max_inflight must be between 1 and 500")
+	}
+	valid := map[string]bool{yaraFailClosed: true, yaraFailOpenWithAlert: true}
+	if !valid[onTimeout] {
+		return fmt.Errorf("on_timeout must be %q or %q", yaraFailClosed, yaraFailOpenWithAlert)
+	}
+	if !valid[onSaturation] {
+		return fmt.Errorf("on_saturation must be %q or %q", yaraFailClosed, yaraFailOpenWithAlert)
+	}
+	return nil
+}
+
+// GET /api/security-scan/yara/settings — read YARA engine runtime config.
+// PUT /api/security-scan/yara/settings — update YARA engine runtime config.
+func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, yaraSettingsMap())
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Enabled       bool   `json:"enabled"`
+			TimeoutSecs   int64  `json:"timeout_secs"`
+			MaxInflight   int64  `json:"max_inflight"`
+			OnTimeout     string `json:"on_timeout"`
+			OnSaturation  string `json:"on_saturation"`
+			AlertDegraded bool   `json:"alert_degraded"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := validateYARASettings(body.TimeoutSecs, body.MaxInflight, body.OnTimeout, body.OnSaturation); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		prev := yaraSettingsMap()
+		yaraSetEnabled(body.Enabled)
+		yaraSetTimeoutSecs(body.TimeoutSecs)
+		yaraSetMaxInflight(body.MaxInflight)
+		yaraSetOnTimeout(body.OnTimeout)
+		yaraSetOnSaturation(body.OnSaturation)
+		yaraSetAlertDegraded(body.AlertDegraded)
+		auditEventDiff(r, "security.yara-settings", "yara_engine", "", prev, yaraSettingsMap())
+		adminSettingsSave()
+		jsonOK(w, yaraSettingsMap())
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // "name" in the path / body always refers to the *file stem* (no extension).
 // Rule files may bundle many YARA rules; the `file_rules` field in the GET
 // response maps each file to its contained rule identifiers for display.

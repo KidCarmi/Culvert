@@ -418,13 +418,64 @@ func evalYARARule(r *yaraCompiledRule, data []byte) bool {
 	}
 }
 
-// yaraRegexTimeout limits how long a single regex match may run.
-// Prevents ReDoS from pathological patterns or crafted input.
-const yaraRegexTimeout = 5 * time.Second
+// yaraFailClosed / yaraFailOpenWithAlert are the two posture strings for the
+// on_timeout and on_saturation policies.
+const (
+	yaraFailClosed        = "fail_closed"
+	yaraFailOpenWithAlert = "fail_open_with_alert"
+)
+
+// Runtime-configurable YARA engine parameters. Defaults match the original
+// hardcoded constants; all access goes through the typed getters below.
+// Set via Admin GUI under Security Scanning → YARA Engine Settings.
+var (
+	yaraEngineEnabledVar atomic.Bool  // admin on/off toggle; default true
+	yaraMaxInflightVar   atomic.Int64 // default 50
+	yaraTimeoutSecsVar   atomic.Int64 // default 5 seconds
+	yaraOnTimeoutVar     atomic.Value // "fail_closed" | "fail_open_with_alert"
+	yaraOnSaturationVar  atomic.Value // "fail_closed" | "fail_open_with_alert"
+	yaraAlertDegradedVar atomic.Bool  // default true
+)
+
+func init() {
+	yaraEngineEnabledVar.Store(true)
+	yaraMaxInflightVar.Store(int64(50))
+	yaraTimeoutSecsVar.Store(int64(5))
+	yaraOnTimeoutVar.Store(yaraFailClosed)
+	yaraOnSaturationVar.Store(yaraFailClosed)
+	yaraAlertDegradedVar.Store(true)
+}
+
+// Getters — called from the scan hot-path; must not block.
+func yaraGetEnabled() bool       { return yaraEngineEnabledVar.Load() }
+func yaraGetMaxInflight() int64  { return yaraMaxInflightVar.Load() }
+func yaraGetTimeoutSecs() int64  { return yaraTimeoutSecsVar.Load() }
+func yaraGetAlertDegraded() bool { return yaraAlertDegradedVar.Load() }
+func yaraGetOnTimeout() string {
+	if v, ok := yaraOnTimeoutVar.Load().(string); ok && v != "" {
+		return v
+	}
+	return yaraFailClosed
+}
+func yaraGetOnSaturation() string {
+	if v, ok := yaraOnSaturationVar.Load().(string); ok && v != "" {
+		return v
+	}
+	return yaraFailClosed
+}
+
+// Setters — called from the Admin API handler and LoadAdminSettings.
+func yaraSetEnabled(v bool)        { yaraEngineEnabledVar.Store(v) }
+func yaraSetMaxInflight(n int64)   { yaraMaxInflightVar.Store(n) }
+func yaraSetTimeoutSecs(n int64)   { yaraTimeoutSecsVar.Store(n) }
+func yaraSetOnTimeout(v string)    { yaraOnTimeoutVar.Store(v) }
+func yaraSetOnSaturation(v string) { yaraOnSaturationVar.Store(v) }
+func yaraSetAlertDegraded(v bool)  { yaraAlertDegradedVar.Store(v) }
 
 func matchYARAString(s *yaraStringDef, data []byte) bool {
 	if s.re != nil {
-		return matchRegexWithTimeout(s.re, data, yaraRegexTimeout)
+		timeout := time.Duration(yaraGetTimeoutSecs()) * time.Second
+		return matchRegexWithTimeout(s.re, data, timeout)
 	}
 	if s.noCase {
 		return bytes.Contains(bytes.ToLower(data), bytes.ToLower(s.literal))
@@ -435,39 +486,60 @@ func matchYARAString(s *yaraStringDef, data []byte) bool {
 // yaraInflight tracks abandoned regex goroutines to prevent unbounded accumulation.
 var yaraInflight atomic.Int64
 
-// maxYARAInflight caps the number of concurrent timed-out regex goroutines.
-// Beyond this limit, new regex matches are skipped entirely.
-const maxYARAInflight = 50
+// yaraSaturationCheck returns (saturated, result). When saturated is true, the
+// caller must return result immediately without attempting the regex match.
+// Posture is controlled by yaraOnSaturationVar: fail_closed returns true (block),
+// fail_open_with_alert returns false (allow) and fires a degraded alert.
+func yaraSaturationCheck(inflight int64) (bool, bool) {
+	max := yaraGetMaxInflight()
+	if inflight < max {
+		return false, false
+	}
+	logWarnf("YARA: regex skipped: too many in-flight goroutines (%d)", inflight)
+	if yaraGetAlertDegraded() {
+		go fireAlert("yara_degraded", AlertPayload{
+			Source: "yara",
+			Detail: fmt.Sprintf("regex skipped: inflight=%d max=%d — YARA engine saturated", inflight, max),
+		})
+	}
+	return true, yaraGetOnSaturation() != yaraFailOpenWithAlert
+}
 
-// yaraDegradedThreshold is the inflight goroutine count that triggers the
-// yara_degraded alert. At 80% of the hard cap we warn admins that the rule
-// engine is approaching the point where new scans will be skipped.
-// Tier 1.3: visibility into silent degradation.
-const yaraDegradedThreshold = (maxYARAInflight * 80) / 100
+// yaraDegradedCheck fires a degraded alert when inflight is approaching the cap.
+// Tier 1.3: visibility into approaching saturation before matches start dropping.
+func yaraDegradedCheck(inflight int64) {
+	if !yaraGetAlertDegraded() {
+		return
+	}
+	max := yaraGetMaxInflight()
+	if inflight >= (max*80)/100 {
+		go fireAlert("yara_degraded", AlertPayload{
+			Source: "yara",
+			Detail: fmt.Sprintf("inflight=%d/%d — approaching YARA saturation", inflight, max),
+		})
+	}
+}
 
-// matchRegexWithTimeout runs re.Match(data) in a goroutine and returns false
-// if the match does not complete within the given timeout (ReDoS prevention).
-// Abandoned goroutines are tracked and capped at maxYARAInflight to prevent leaks.
+// yaraTimeoutResult logs the timeout and returns the posture-controlled decision.
+// Posture is controlled by yaraOnTimeoutVar: fail_closed returns true (block),
+// fail_open_with_alert returns false (allow).
+func yaraTimeoutResult(timeout time.Duration, pattern string) bool {
+	logWarnf("YARA: regex timeout after %s on pattern %q (inflight: %d)",
+		timeout, sanitizeLog(pattern), yaraInflight.Load())
+	return yaraGetOnTimeout() != yaraFailOpenWithAlert
+}
+
+// matchRegexWithTimeout runs re.Match(data) in a goroutine. Returns true
+// (fail-closed / suspicious) when the match does not complete within timeout
+// or when the inflight cap is reached, unless the admin has explicitly chosen
+// fail_open_with_alert for that posture.
+// Abandoned goroutines are tracked via yaraInflight to prevent unbounded leaks.
 func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
 	inflight := yaraInflight.Load()
-	if inflight >= maxYARAInflight {
-		logWarnf("YARA: regex skipped: too many in-flight goroutines (%d)", inflight)
-		// Tier 1.3: Fire degraded alert when we're actively skipping regex matches.
-		// fireAlert has a 30s dedup window so storms are naturally throttled.
-		go fireAlert("yara_degraded", AlertPayload{
-			Source: "yara",
-			Detail: fmt.Sprintf("regex skipped: inflight=%d max=%d — YARA engine saturated", inflight, maxYARAInflight),
-		})
-		return false
+	if saturated, result := yaraSaturationCheck(inflight); saturated {
+		return result
 	}
-	// Tier 1.3: Warn once we're approaching the cap so admins have a chance
-	// to react before matches start being silently dropped.
-	if inflight >= yaraDegradedThreshold {
-		go fireAlert("yara_degraded", AlertPayload{
-			Source: "yara",
-			Detail: fmt.Sprintf("inflight=%d/%d — approaching YARA saturation", inflight, maxYARAInflight),
-		})
-	}
+	yaraDegradedCheck(inflight)
 	ch := make(chan bool, 1)
 	yaraInflight.Add(1)
 	go func() {
@@ -478,9 +550,7 @@ func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration
 	case matched := <-ch:
 		return matched
 	case <-time.After(timeout):
-		logWarnf("YARA: regex timeout after %s on pattern %q (inflight: %d)",
-			timeout, sanitizeLog(re.String()), yaraInflight.Load())
-		return true // S16: fail-closed — treat timeout as suspicious match (Zero Trust)
+		return yaraTimeoutResult(timeout, re.String())
 	}
 }
 
