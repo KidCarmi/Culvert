@@ -203,6 +203,13 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(c) //nolint:errcheck
 	case http.MethodPost:
+		// PAC config drives every Windows / browser proxy client; mutation is
+		// admin-only. Without this gate any authenticated UI user (including
+		// RoleViewer) could repoint the entire fleet to a chosen upstream.
+		// See docs/C15_UNKNOWN_AUDIT.md §3.1 for the audit finding.
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
 		var c PACConfig
 		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
