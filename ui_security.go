@@ -521,6 +521,9 @@ func apiSecFeedsSync(w http.ResponseWriter, r *http.Request) {
 	}
 	// Run the sync synchronously so the response reflects the updated data.
 	globalThreatFeed.Sync()
+	// Audit the manual sync — admin-only operation that mutates the data
+	// driving every block decision. See docs/C15_UNKNOWN_AUDIT.md §3.2.
+	auditEvent(r, "security.feeds_sync", "manual", "")
 	jsonOK(w, secScanStatusMap())
 }
 
