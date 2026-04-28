@@ -291,8 +291,17 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				if isBrowser && r.Method != http.MethodConnect {
 					// Route browser to appropriate IdP based on email domain hint.
 					loginURL := resolveCaptivePortalURL(r)
-					if loginURL != "" {
-						http.Redirect(w, r, loginURL, http.StatusFound)
+					// Inline guard for static-analysis visibility:
+					// resolveCaptivePortalURL returns either a same-origin
+					// path ("/auth/select?relay=...") or an admin-configured
+					// absolute http(s) IdP URL. isSafeCaptiveRedirect rejects
+					// protocol-relative ("//evil"), data:/javascript:, and
+					// any other shape (covered by TestIsSafeCaptiveRedirect).
+					if loginURL != "" && isSafeCaptiveRedirect(loginURL) {
+						// gosec G710's SSA pass cannot follow the
+						// isSafeCaptiveRedirect predicate; the guard above is
+						// the actual safety check.
+						http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
 						return
 					}
 				}
@@ -840,6 +849,32 @@ func isSafeRedirectURL(raw string) bool {
 	// DNS failure now also returns an error (fail-closed), so unresolvable
 	// hosts are rejected as unsafe redirect destinations.
 	return isPrivateHost(u.Host) == nil
+}
+
+// isSafeCaptiveRedirect validates a captive-portal redirect target produced
+// by resolveCaptivePortalURL. Two shapes are accepted:
+//   1. A same-origin path beginning with "/" (but not "//", which would be a
+//      protocol-relative URL pointing at an attacker host).
+//   2. An absolute http(s) URL — admin-configured via the IdP registry.
+// Anything else is rejected. This duplicates a small amount of logic so the
+// shape check is visible to static analysis at the http.Redirect call site.
+func isSafeCaptiveRedirect(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	// Same-origin path. Reject "//evil" (protocol-relative) and "/\" (which
+	// some browsers normalize to "//").
+	if strings.HasPrefix(raw, "/") {
+		return !strings.HasPrefix(raw, "//") && !strings.HasPrefix(raw, "/\\")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	return u.Host != ""
 }
 
 // isDNSError returns true when err wraps a *net.DNSError.
