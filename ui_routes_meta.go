@@ -1,13 +1,13 @@
 package main
 
-// ── Phase C1: Route Metadata Table (SHADOW / REPORT-ONLY) ─────────────────
+// ── Phase C1 + C1.5: Route Metadata Table (SHADOW / REPORT-ONLY) ──────────
 //
 // uiRoutes is the canonical, alphabetised metadata for every admin-UI
 // route. It supersedes the hand-maintained d0KnownRoutes mirror as the
 // authoritative inventory source for D0 regression tests.
 //
 // PHASE C1 SHADOW MODE — every field below is documentation only:
-//   • MinRole, Mutating, AuditExpected, Public, Domain, Handler are
+//   • Methods entries (MinRole, Mutating, AuditExpected, Method) are
 //     declarations of intent. Nothing in the request lifecycle reads
 //     these fields. uiAuthMiddleware still uses its hand-coded
 //     allowlist; per-handler requireRole calls still gate RBAC; the
@@ -17,9 +17,16 @@ package main
 //     registered mux, and so Phase C2 can switch enforcement on without
 //     introducing the table at the same time.
 //
+// PHASE C1.5 EVOLUTION — schema is now method-aware. Each route carries
+// a Methods slice so handlers with split per-method behaviour
+// (typically GET=Viewer, POST/PUT/DELETE=Operator-or-Admin) can be
+// expressed precisely. The C1.5 AST scanner cross-checks every
+// per-method entry against the handler's actual requireRole and
+// auditEvent calls.
+//
 // PHASE C2 (NOT YET): the metadata becomes authoritative. Middleware
-// will look up MinRole, Mutating, etc. from this table instead of
-// duplicating the logic at each call site.
+// will look up Methods[r.Method].MinRole / Mutating from this table
+// instead of duplicating the logic at each call site.
 
 // RolePublic is a sentinel UIRole used in metadata to mark a route as
 // intentionally exposed without authentication. It is NOT enrolled in
@@ -27,331 +34,529 @@ package main
 // real role — the value is documentation, not an enforcement primitive.
 const RolePublic UIRole = "public"
 
+// MethodAny ("*") is the wildcard method in metadata. Used for routes
+// whose handler applies behaviour uniformly across all methods, OR
+// whose method dispatch is internal/dynamic (apiIdPRouter parses path
+// segments; apiBootstrapRouter delegates to its own state machine).
+// Per the Bucket-D policy in C1.5, MethodAny is used only when explicit
+// per-method entries cannot be safely derived.
+const MethodAny = "*"
+
+// uiRouteMethod captures the per-method contract for one route. All
+// fields are SHADOW-MODE documentation; nothing in the request
+// lifecycle reads them.
+type uiRouteMethod struct {
+	Method        string // "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS" | MethodAny
+	MinRole       UIRole // intended minimum role for THIS method
+	Mutating      bool   // intended state-changing classification (per method)
+	AuditExpected bool   // handler is expected to call auditEvent on this method's success
+	// Note is an optional human-readable comment explaining a non-obvious
+	// classification (e.g. GET branch protected only by uiAuthMiddleware
+	// without an explicit requireRole call).
+	Note string
+}
+
 // uiRouteMetadata captures the intended contract of one admin-UI route.
 // See the package-level comment above for SHADOW-MODE caveats.
 type uiRouteMetadata struct {
-	Path          string // ServeMux pattern (exact path or trailing-slash prefix)
-	Handler       string // handler function name, for documentation/tooling
-	Domain        string // panel grouping owning the route ("auth", "policy", ...)
-	Public        bool   // intended public-allowlist membership (doc only)
-	MinRole       UIRole // intended minimum role (doc only)
-	Mutating      bool   // route accepts at least one mutating method (doc only)
-	AuditExpected bool   // handler is expected to call auditEvent on success (doc only)
+	Path    string          // ServeMux pattern (exact path or trailing-slash prefix)
+	Handler string          // handler function name, for documentation/tooling
+	Domain  string          // panel grouping owning the route ("auth", "policy", ...)
+	Public  bool            // intended public-allowlist membership (doc only)
+	Methods []uiRouteMethod // per-method contract (length ≥ 1)
 }
 
 // uiRoutes is the alphabetised metadata table for all 131 admin-UI routes.
-// Length is locked by TestC1_RouteMetadata_Locked131; bidirectional parity
-// with the wired mux is checked by TestC1_RouteMetadata_Forward and
-// TestC1_RouteMetadata_Reverse.
 //
-// MinRole reflects the LOWEST role the handler accepts on any path
-// through it (a switch-on-method handler that allows GET=Viewer and
-// POST=Admin records MinRole=RoleViewer here).
+// MIGRATION BUCKETS (per the C1.5 schema-evolution decision):
 //
-// Mutating is true for any route whose handler has at least one
-// POST/PUT/DELETE branch.
+//   - Bucket A — multi-method handlers with distinct roles per method:
+//     one Methods entry per observed method, AST-derived role/audit.
+//   - Bucket B — single-method handlers: one Methods entry.
+//   - Bucket C — uniform multi-method handlers (same role on every
+//     method): explicit per-method entries (Policy A — precision over
+//     compactness for C2 enforcement).
+//   - Bucket D — dynamic / internal-router handlers: a single
+//     {Method: MethodAny, ...} entry. Role/Mutating/AuditExpected are
+//     declared based on intended doctrine, not AST signal.
 //
-// AuditExpected is true when the handler calls auditEvent on a
-// successful mutation; status/read-only routes are false.
+// GET-WITHOUT-REQUIREROLE policy: when the AST shows a `case http.MethodGet`
+// branch with no requireRole call but the route is gated by
+// uiAuthMiddleware (Public=false), the GET entry uses MinRole: RoleViewer
+// with a Note explaining the AST observation.
 var uiRoutes = []uiRouteMetadata{
 	// ── Static SPA ────────────────────────────────────────────────────────
-	{Path: "/", Handler: "serveUIShell", Domain: "static",
-		Public: true, MinRole: RolePublic, Mutating: false, AuditExpected: false},
+	{Path: "/", Handler: "serveUIShell", Domain: "static", Public: true,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic}}},
 
 	// ── Setup bootstrap (public allowlist /api/setup) ─────────────────────
-	{Path: "/api/setup/status", Handler: "apiSetupStatus", Domain: "setup",
-		Public: true, MinRole: RolePublic, Mutating: false, AuditExpected: false},
-	{Path: "/api/setup/complete", Handler: "apiSetupComplete", Domain: "setup",
-		Public: true, MinRole: RolePublic, Mutating: true, AuditExpected: true},
+	{Path: "/api/setup/status", Handler: "apiSetupStatus", Domain: "setup", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic}}},
+	{Path: "/api/setup/complete", Handler: "apiSetupComplete", Domain: "setup", Public: true,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RolePublic, Mutating: true, AuditExpected: true}}},
 
 	// ── Admin session auth ────────────────────────────────────────────────
-	{Path: "/api/auth/login", Handler: "apiAuthLogin", Domain: "auth",
-		Public: true, MinRole: RolePublic, Mutating: true, AuditExpected: true},
-	{Path: "/api/auth/status", Handler: "apiAuthStatus", Domain: "auth",
-		Public: true, MinRole: RolePublic, Mutating: false, AuditExpected: false},
-	{Path: "/api/auth/logout", Handler: "apiAuthLogout", Domain: "auth",
-		Public: true, MinRole: RolePublic, Mutating: true, AuditExpected: true},
-	{Path: "/api/auth/users", Handler: "apiAuthUsers", Domain: "auth",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/auth/change-password", Handler: "apiAuthChangePassword", Domain: "auth",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
+	{Path: "/api/auth/login", Handler: "apiAuthLogin", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RolePublic, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/auth/status", Handler: "apiAuthStatus", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic}}},
+	{Path: "/api/auth/logout", Handler: "apiAuthLogout", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RolePublic, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/auth/users", Handler: "apiAuthUsers", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleAdmin},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/auth/change-password", Handler: "apiAuthChangePassword", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true, AuditExpected: true}}},
 
 	// ── Generic IdP framework ─────────────────────────────────────────────
-	{Path: "/api/idp", Handler: "apiIdPList", Domain: "auth",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/idp/discover", Handler: "apiIdPDiscover", Domain: "auth",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: false},
-	{Path: "/api/idp/", Handler: "apiIdPRouter", Domain: "auth",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+	{Path: "/api/idp", Handler: "apiIdPList", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/idp/discover", Handler: "apiIdPDiscover", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true}}},
+	{Path: "/api/idp/", Handler: "apiIdPRouter", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "internal path-segment router; per-method dispatch happens inside the handler"}}},
 
 	// ── Auth callbacks (browser redirects from IdPs, public allowlist) ────
-	{Path: "/auth/oidc/callback", Handler: "authOIDCCallback", Domain: "auth",
-		Public: true, MinRole: RolePublic, Mutating: false, AuditExpected: false},
-	{Path: "/auth/saml/callback", Handler: "authSAMLCallback", Domain: "auth",
-		Public: true, MinRole: RolePublic, Mutating: false, AuditExpected: false},
-	{Path: "/auth/select", Handler: "authSelectProvider", Domain: "auth",
-		Public: true, MinRole: RolePublic, Mutating: false, AuditExpected: false},
-	{Path: "/auth/logout", Handler: "authLogout", Domain: "auth",
-		Public: true, MinRole: RolePublic, Mutating: false, AuditExpected: false},
+	{Path: "/auth/oidc/callback", Handler: "authOIDCCallback", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Note: "IdP redirect target; method varies"}}},
+	{Path: "/auth/saml/callback", Handler: "authSAMLCallback", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RolePublic, Mutating: true, Note: "SAML POST binding"}}},
+	{Path: "/auth/select", Handler: "authSelectProvider", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic}}},
+	{Path: "/auth/logout", Handler: "authLogout", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Note: "session clear; method-agnostic"}}},
 
-	// ── Dashboard / live stats ────────────────────────────────────────────
-	{Path: "/api/stats", Handler: "apiStats", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/dashboard/health", Handler: "apiDashboardHealth", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/dashboard/threats", Handler: "apiDashboardThreats", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/dashboard/top-rules", Handler: "apiDashboardTopRules", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/timeseries", Handler: "apiTimeseries", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/logs", Handler: "apiLogs", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/top-hosts", Handler: "apiTopHosts", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/audit", Handler: "apiAudit", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/events", Handler: "apiEvents", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/country-traffic", Handler: "apiCountryTraffic", Domain: "dashboard",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
+	// ── Dashboard / live stats. The dashboard handlers do not gate on
+	// method (no `switch r.Method`); the requireRole(viewer) call is
+	// unconditional. Metadata uses MethodAny for these — Bucket D.
+	// /api/audit explicitly checks GET and is therefore Bucket B. ─────────
+	{Path: "/api/stats", Handler: "apiStats", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
+	{Path: "/api/dashboard/health", Handler: "apiDashboardHealth", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
+	{Path: "/api/dashboard/threats", Handler: "apiDashboardThreats", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
+	{Path: "/api/dashboard/top-rules", Handler: "apiDashboardTopRules", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
+	{Path: "/api/timeseries", Handler: "apiTimeseries", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
+	{Path: "/api/logs", Handler: "apiLogs", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
+	{Path: "/api/top-hosts", Handler: "apiTopHosts", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
+	{Path: "/api/audit", Handler: "apiAudit", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/events", Handler: "apiEvents", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Note: "SSE stream"}}},
+	{Path: "/api/country-traffic", Handler: "apiCountryTraffic", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
 
-	// ── Policy / blocklist / filtering ────────────────────────────────────
-	{Path: "/api/blocklist", Handler: "apiBlocklist", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/fileblock", Handler: "apiFileblock", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/fileblock/profiles", Handler: "apiFileblockProfiles", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/rewrite", Handler: "apiRewrite", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/policy", Handler: "apiPolicy", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/policy/reorder", Handler: "apiPolicyReorder", Domain: "policy",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: true},
-	{Path: "/api/policy/move", Handler: "apiPolicyMove", Domain: "policy",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: true},
-	{Path: "/api/policy/test", Handler: "apiPolicyTest", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: false},
-	{Path: "/api/default-action", Handler: "apiDefaultAction", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/blocklist/mode", Handler: "apiBlocklistMode", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/blocklist/feed", Handler: "apiBlocklistFeed", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/blocklist/feed/sync", Handler: "apiBlocklistFeedSync", Domain: "policy",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: true},
-	{Path: "/api/blocklist/exceptions", Handler: "apiBlocklistExceptions", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/category-groups", Handler: "apiCategoryGroups", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/urlcat", Handler: "apiURLCat", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/urlcat/host", Handler: "apiURLCatHost", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/urlcat/lookup", Handler: "apiURLCatLookup", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/blockpage", Handler: "apiBlockPage", Domain: "policy",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
+	// ── Policy / blocklist / filtering (Bucket A — multi-method distinct) ──
+	{Path: "/api/blocklist", Handler: "apiBlocklist", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/fileblock", Handler: "apiFileblock", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/fileblock/profiles", Handler: "apiFileblockProfiles", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/rewrite", Handler: "apiRewrite", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/policy", Handler: "apiPolicy", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/policy/reorder", Handler: "apiPolicyReorder", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/policy/move", Handler: "apiPolicyMove", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/policy/test", Handler: "apiPolicyTest", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "POST is read-only in spirit (dry-run policy match), no audit"}}},
+	{Path: "/api/default-action", Handler: "apiDefaultAction", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/blocklist/mode", Handler: "apiBlocklistMode", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/blocklist/feed", Handler: "apiBlocklistFeed", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/blocklist/feed/sync", Handler: "apiBlocklistFeedSync", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/blocklist/exceptions", Handler: "apiBlocklistExceptions", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/category-groups", Handler: "apiCategoryGroups", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/urlcat", Handler: "apiURLCat", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/urlcat/host", Handler: "apiURLCatHost", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/urlcat/lookup", Handler: "apiURLCatLookup", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
+	{Path: "/api/blockpage", Handler: "apiBlockPage", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 
 	// ── PAC file ──────────────────────────────────────────────────────────
-	{Path: "/proxy.pac", Handler: "servePACFile", Domain: "pac",
-		Public: true, MinRole: RolePublic, Mutating: false, AuditExpected: false},
-	{Path: "/api/pac-config", Handler: "apiPACConfig", Domain: "pac",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
+	{Path: "/proxy.pac", Handler: "servePACFile", Domain: "pac", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "Windows PAC clients cannot send credentials"}}},
+	{Path: "/api/pac-config", Handler: "apiPACConfig", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "no direct requireRole; gating delegated"},
+		}},
 
 	// ── Security: TLS inspect (CA, certs, SSL bypass) ─────────────────────
-	{Path: "/api/security", Handler: "apiSecurity", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/ca-cert", Handler: "apiCACert", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/certs/upload", Handler: "apiCertsUpload", Domain: "security",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/ssl-bypass", Handler: "apiSSLBypass", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/content-scan", Handler: "apiContentScan", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
+	{Path: "/api/security", Handler: "apiSecurity", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/ca-cert", Handler: "apiCACert", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/certs/upload", Handler: "apiCertsUpload", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/ssl-bypass", Handler: "apiSSLBypass", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/content-scan", Handler: "apiContentScan", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
 
 	// ── Security: ClamAV / YARA / Threat Feeds ────────────────────────────
-	{Path: "/api/security-scan/status", Handler: "apiSecScanStatus", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/security-scan/feeds/sync", Handler: "apiSecFeedsSync", Domain: "security",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: true},
-	{Path: "/api/security-scan/feeds/domain-allowlist", Handler: "apiDomainAllowlist", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/security-scan/yara/reload", Handler: "apiSecYARAReload", Domain: "security",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: true},
-	{Path: "/api/security-scan/yara/rules", Handler: "apiSecYARARules", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/security-scan/yara/rules/", Handler: "apiSecYARARules", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/security-scan/yara/validate", Handler: "apiSecYARAValidate", Domain: "security",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: false},
-	{Path: "/api/security-scan/yara/settings", Handler: "apiSecYARASettings", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/security-scan/exclusions", Handler: "apiSecScanExclusions", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/security-scan/svc", Handler: "apiScanSvcConfig", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/security-scan/cache", Handler: "apiScanCache", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/content-scan/bypass", Handler: "apiContentScanBypass", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
+	{Path: "/api/security-scan/status", Handler: "apiSecScanStatus", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/security-scan/feeds/sync", Handler: "apiSecFeedsSync", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "no direct auditEvent observed (delegated)"}}},
+	{Path: "/api/security-scan/feeds/domain-allowlist", Handler: "apiDomainAllowlist", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, Note: "no direct auditEvent observed (delegated)"},
+		}},
+	{Path: "/api/security-scan/yara/reload", Handler: "apiSecYARAReload", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/security-scan/yara/rules", Handler: "apiSecYARARules", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/security-scan/yara/rules/", Handler: "apiSecYARARules", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/security-scan/yara/validate", Handler: "apiSecYARAValidate", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, Note: "dry-run validation; no audit"}}},
+	{Path: "/api/security-scan/yara/settings", Handler: "apiSecYARASettings", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/security-scan/exclusions", Handler: "apiSecScanExclusions", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/security-scan/svc", Handler: "apiScanSvcConfig", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/security-scan/cache", Handler: "apiScanCache", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/content-scan/bypass", Handler: "apiContentScanBypass", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 
 	// ── Security: alert webhooks ──────────────────────────────────────────
-	{Path: "/api/alerts/webhooks", Handler: "apiAlertsWebhooks", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/alerts/webhooks/test", Handler: "apiAlertsWebhookTest", Domain: "security",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: false},
-	{Path: "/api/alerts/webhooks/history", Handler: "apiAlertsDeliveryHist", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
+	{Path: "/api/alerts/webhooks", Handler: "apiAlertsWebhooks", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/alerts/webhooks/test", Handler: "apiAlertsWebhookTest", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, Note: "test-fire only; no audit"}}},
+	{Path: "/api/alerts/webhooks/history", Handler: "apiAlertsDeliveryHist", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
 
 	// ── Security: CA management ───────────────────────────────────────────
-	{Path: "/api/ca/status", Handler: "apiCAStatus", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/ca/key-provider", Handler: "apiCAKeyProvider", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/ca/download", Handler: "apiCADownload", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/ca/cache-clear", Handler: "apiCACacheClear", Domain: "security",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/ca/rotate", Handler: "apiCARotate", Domain: "security",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+	{Path: "/api/ca/status", Handler: "apiCAStatus", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/ca/key-provider", Handler: "apiCAKeyProvider", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/ca/download", Handler: "apiCADownload", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/ca/cache-clear", Handler: "apiCACacheClear", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/ca/rotate", Handler: "apiCARotate", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
 
 	// ── Security: OCSP, GeoIP ─────────────────────────────────────────────
-	{Path: "/api/ocsp", Handler: "apiOCSPConfig", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/geoip", Handler: "apiGeoIPConfig", Domain: "security",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
+	{Path: "/api/ocsp", Handler: "apiOCSPConfig", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/geoip", Handler: "apiGeoIPConfig", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
 
-	// ── Settings panel (Option-A panel grouping; handlers may live in
-	// logger.go / metrics.go / otlp.go / connlimit.go / blockpage.go) ──────
-	{Path: "/api/settings", Handler: "apiSettings", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/export", Handler: "apiExport", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/config/export", Handler: "apiConfigExport", Domain: "settings",
-		Public: false, MinRole: RoleAdmin, Mutating: false, AuditExpected: true},
-	{Path: "/api/config/import", Handler: "apiConfigImport", Domain: "settings",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/config/versions", Handler: "apiConfigVersions", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/config/diff", Handler: "apiConfigDiff", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/settings/unauth-mode", Handler: "apiUnauthMode", Domain: "settings",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/settings/log-level", Handler: "apiLogLevel", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/settings/network", Handler: "apiNetworkSettings", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/session-timeout", Handler: "apiSessionTimeout", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/session-secret", Handler: "apiSessionSecret", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/ui-allow-ips", Handler: "apiUIAllowIPs", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/syslog", Handler: "apiSyslogConfig", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/syslog/test", Handler: "apiSyslogTest", Domain: "settings",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: false},
-	{Path: "/api/logger", Handler: "apiLoggerConfig", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/metrics-config", Handler: "apiMetricsConfig", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/otlp", Handler: "apiOTLPConfig", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/connlimit", Handler: "apiConnLimit", Domain: "settings",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
+	// ── Settings panel (Option-A panel grouping) ──────────────────────────
+	{Path: "/api/settings", Handler: "apiSettings", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/export", Handler: "apiExport", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
+	{Path: "/api/config/export", Handler: "apiConfigExport", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleAdmin, AuditExpected: true}}},
+	{Path: "/api/config/import", Handler: "apiConfigImport", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/config/versions", Handler: "apiConfigVersions", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "rollback; audit delegated"},
+		}},
+	{Path: "/api/config/diff", Handler: "apiConfigDiff", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/settings/unauth-mode", Handler: "apiUnauthMode", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/settings/log-level", Handler: "apiLogLevel", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/settings/network", Handler: "apiNetworkSettings", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/session-timeout", Handler: "apiSessionTimeout", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/session-secret", Handler: "apiSessionSecret", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/ui-allow-ips", Handler: "apiUIAllowIPs", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleAdmin, Note: "AST shows requireRole(admin) for both methods (uniform)"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/syslog", Handler: "apiSyslogConfig", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleAdmin, Note: "AST shows requireRole(admin) for both methods (uniform)"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/syslog/test", Handler: "apiSyslogTest", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "test-fire only; no audit"}}},
+	{Path: "/api/logger", Handler: "apiLoggerConfig", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/metrics-config", Handler: "apiMetricsConfig", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/otlp", Handler: "apiOTLPConfig", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleAdmin, Note: "AST shows requireRole(admin) for both methods (uniform)"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/connlimit", Handler: "apiConnLimit", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 
 	// ── Cluster: upstream proxy chain ─────────────────────────────────────
-	{Path: "/api/upstream", Handler: "apiUpstream", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/upstream/settings", Handler: "apiUpstreamSettings", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/upstream/health", Handler: "apiUpstreamHealth", Domain: "cluster",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: false},
+	{Path: "/api/upstream", Handler: "apiUpstream", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/upstream/settings", Handler: "apiUpstreamSettings", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
+	{Path: "/api/upstream/health", Handler: "apiUpstreamHealth", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "force health check; no audit"}}},
 
-	// ── Cluster: multi-node management ────────────────────────────────────
-	{Path: "/api/cluster/status", Handler: "apiClusterStatus", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cluster/mode", Handler: "apiClusterMode", Domain: "cluster",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/cluster/tokens", Handler: "apiClusterTokens", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/cluster/nodes", Handler: "apiClusterNodes", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cluster/revoke", Handler: "apiClusterRevoke", Domain: "cluster",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/cluster/labels", Handler: "apiClusterLabels", Domain: "cluster",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: true},
-	{Path: "/api/cluster/node-groups", Handler: "apiNodeGroups", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/cluster/node-groups/membership", Handler: "apiNodeGroupMembership", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cluster/drain", Handler: "apiClusterDrain", Domain: "cluster",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: true},
-	{Path: "/api/cluster/metrics", Handler: "apiClusterMetrics", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cluster/ca", Handler: "apiClusterCA", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/cluster/rate-limits", Handler: "apiClusterRateLimits", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cluster/audit", Handler: "apiClusterAudit", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cluster/revocations", Handler: "apiClusterRevocations", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cluster/rotation", Handler: "apiClusterRotation", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cluster/ha", Handler: "apiClusterHA", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cluster/bandwidth", Handler: "apiBandwidthPolicies", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/cluster/bootstrap/", Handler: "apiBootstrapRouter", Domain: "cluster",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
+	// ── Cluster: multi-node ───────────────────────────────────────────────
+	{Path: "/api/cluster/status", Handler: "apiClusterStatus", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/mode", Handler: "apiClusterMode", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "switches CP/DP role; audit delegated"}}},
+	{Path: "/api/cluster/tokens", Handler: "apiClusterTokens", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "audit delegated"},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, Note: "audit delegated"},
+		}},
+	{Path: "/api/cluster/nodes", Handler: "apiClusterNodes", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/revoke", Handler: "apiClusterRevoke", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/cluster/labels", Handler: "apiClusterLabels", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/cluster/node-groups", Handler: "apiNodeGroups", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "audit delegated"},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, Note: "audit delegated"},
+		}},
+	{Path: "/api/cluster/node-groups/membership", Handler: "apiNodeGroupMembership", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/drain", Handler: "apiClusterDrain", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/cluster/metrics", Handler: "apiClusterMetrics", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/ca", Handler: "apiClusterCA", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/cluster/rate-limits", Handler: "apiClusterRateLimits", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/audit", Handler: "apiClusterAudit", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/revocations", Handler: "apiClusterRevocations", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/rotation", Handler: "apiClusterRotation", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/ha", Handler: "apiClusterHA", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "no direct auditEvent observed"},
+		}},
+	{Path: "/api/cluster/bandwidth", Handler: "apiBandwidthPolicies", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/cluster/bootstrap/", Handler: "apiBootstrapRouter", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Note: "token-authed bootstrap dispatch; gating delegated to handler"}}},
 
-	// ── Updates: self-update + rolling cluster update ─────────────────────
-	{Path: "/api/update/status", Handler: "apiUpdateStatus", Domain: "update",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/update/check", Handler: "apiUpdateCheck", Domain: "update",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: false},
-	{Path: "/api/update/apply", Handler: "apiUpdateApply", Domain: "update",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/update/preview", Handler: "apiUpdatePreview", Domain: "update",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: false},
-	{Path: "/api/update/reports", Handler: "apiUpdateReports", Domain: "update",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/update/rollback", Handler: "apiUpdateRollback", Domain: "update",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/update/rollback/status", Handler: "apiUpdateRollbackStatus", Domain: "update",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/update/session", Handler: "apiUpdateSession", Domain: "update",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/update/cluster", Handler: "apiClusterUpdate", Domain: "update",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/update/cluster/status", Handler: "apiClusterUpdateStatus", Domain: "update",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/update/registry", Handler: "apiRegistrySettings", Domain: "update",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+	// ── Updates ───────────────────────────────────────────────────────────
+	{Path: "/api/update/status", Handler: "apiUpdateStatus", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
+	{Path: "/api/update/check", Handler: "apiUpdateCheck", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, Note: "no direct requireRole; gating delegated"}}},
+	{Path: "/api/update/apply", Handler: "apiUpdateApply", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "no direct requireRole; gating delegated; SSE stream"}}},
+	{Path: "/api/update/preview", Handler: "apiUpdatePreview", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "config diff preview; no direct requireRole"}}},
+	{Path: "/api/update/reports", Handler: "apiUpdateReports", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
+	{Path: "/api/update/rollback", Handler: "apiUpdateRollback", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "no direct requireRole; gating delegated"}}},
+	{Path: "/api/update/rollback/status", Handler: "apiUpdateRollbackStatus", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
+	{Path: "/api/update/session", Handler: "apiUpdateSession", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "SSE re-attach; no direct requireRole"}}},
+	{Path: "/api/update/cluster", Handler: "apiClusterUpdate", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "no direct requireRole; gating delegated"}}},
+	{Path: "/api/update/cluster/status", Handler: "apiClusterUpdateStatus", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
+	{Path: "/api/update/registry", Handler: "apiRegistrySettings", Domain: "update", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleAdmin, Note: "no direct requireRole; gating delegated"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "no direct requireRole; gating delegated"},
+		}},
 
 	// ── CDR (Sluice) integration ──────────────────────────────────────────
-	{Path: "/api/cdr/config", Handler: "apiCDRConfig", Domain: "cdr",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/cdr/instances", Handler: "apiCDRInstances", Domain: "cdr",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/cdr/instances/enroll", Handler: "apiCDREnroll", Domain: "cdr",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/cdr/instances/revoke", Handler: "apiCDRRevokeRPC", Domain: "cdr",
-		Public: false, MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
-	{Path: "/api/cdr/policies", Handler: "apiCDRPolicies", Domain: "cdr",
-		Public: false, MinRole: RoleViewer, Mutating: true, AuditExpected: true},
-	{Path: "/api/cdr/health", Handler: "apiCDRHealth", Domain: "cdr",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/api/cdr/test", Handler: "apiCDRTest", Domain: "cdr",
-		Public: false, MinRole: RoleOperator, Mutating: true, AuditExpected: false},
+	{Path: "/api/cdr/config", Handler: "apiCDRConfig", Domain: "cdr", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, Note: "no direct auditEvent observed"},
+		}},
+	{Path: "/api/cdr/instances", Handler: "apiCDRInstances", Domain: "cdr", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/cdr/instances/enroll", Handler: "apiCDREnroll", Domain: "cdr", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/cdr/instances/revoke", Handler: "apiCDRRevokeRPC", Domain: "cdr", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/cdr/policies", Handler: "apiCDRPolicies", Domain: "cdr", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/cdr/health", Handler: "apiCDRHealth", Domain: "cdr", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cdr/test", Handler: "apiCDRTest", Domain: "cdr", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
 
 	// ── Observability ─────────────────────────────────────────────────────
-	{Path: "/api/diagnostics", Handler: "apiDiagnostics", Domain: "observability",
-		Public: false, MinRole: RoleViewer, Mutating: false, AuditExpected: false},
-	{Path: "/healthz", Handler: "apiHealthz", Domain: "observability",
-		Public: true, MinRole: RolePublic, Mutating: false, AuditExpected: false},
+	{Path: "/api/diagnostics", Handler: "apiDiagnostics", Domain: "observability", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/healthz", Handler: "apiHealthz", Domain: "observability", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "LB probe"}}},
 }

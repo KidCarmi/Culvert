@@ -35,10 +35,10 @@ import (
 
 // ── Per-method analysis types (Phase C1.5 evolution) ──────────────────────
 //
-// MethodAny matches any HTTP method. Used in metadata for routes whose
-// handler genuinely applies the same behavior to all methods, or whose
-// routing is dynamic / internal and cannot be safely pinned by AST.
-const MethodAny = "*"
+// MethodAny ("*") is defined in ui_routes_meta.go — used both by the
+// metadata schema (for routes whose handler delegates routing) and by
+// this scanner (as the catch-all bucket for calls not pinned to a
+// specific method).
 
 // methodBehavior captures the per-method AST findings for one handler:
 // which roles its requireRole calls accept inside that method's case
@@ -85,9 +85,9 @@ type minRoleClassification struct {
 //
 // Two views coexist:
 //
-//   • Aggregate view (rawMethods, methods, minRole, callsAudit) — used by
+//   - Aggregate view (rawMethods, methods, minRole, callsAudit) — used by
 //     the original three TestC15_* tests; treats the handler as a whole.
-//   • Per-method view (byMethod) — populated by the upgraded scanner
+//   - Per-method view (byMethod) — populated by the upgraded scanner
 //     with conservative method-context tracking. Each entry maps an
 //     HTTP method (or MethodAny) to the requireRole / auditEvent calls
 //     attributed to that method's scope.
@@ -292,19 +292,22 @@ func sortedJoin(lines []string) string {
 	return strings.Join(lines, "\n")
 }
 
-// ── Test 1: MinRole parity ────────────────────────────────────────────────
+// ── Test 1: per-method MinRole parity ─────────────────────────────────────
 
-// TestC15_MinRole_MetadataMatchesHandler reports cases where the
-// MinRole declared in uiRoutes does not match the lowest role any
-// direct requireRole call in the handler permits.
+// TestC15_MinRole_MetadataMatchesHandler reports cases where the per-
+// method MinRole declared in uiRoutes contradicts what the AST scanner
+// observed for that method.
 //
 // Failure modes:
 //
-//   - Public route whose handler nonetheless calls requireRole — fails.
-//   - Non-public route whose handler has no direct requireRole call —
-//     logged as UNKNOWN (handler may delegate to a helper that gates).
-//   - Non-public route where metadata MinRole differs from the lowest
-//     requireRole role in the handler body — fails.
+//   - Public route whose handler nonetheless has any direct requireRole
+//     call attributed to the declared method — fails.
+//   - Non-public, specific-method entry where metadata MinRole differs
+//     from the AST's lowest role for that method — fails.
+//   - MethodAny entry where metadata MinRole differs from the AST's
+//     aggregate lowest role across all attributed methods — fails.
+//   - Non-public method with NO AST signal — logged UNKNOWN (handler
+//     may delegate to a helper that gates).
 func TestC15_MinRole_MetadataMatchesHandler(t *testing.T) {
 	handlers := scanHandlers(t)
 	var mismatches, unknowns []string
@@ -317,24 +320,29 @@ func TestC15_MinRole_MetadataMatchesHandler(t *testing.T) {
 				r.Handler, r.Path))
 			continue
 		}
-		if r.Public {
-			if beh.minRole.confident {
-				mismatches = append(mismatches, fmt.Sprintf(
-					"  %s (path=%q, file=%s:%d): metadata Public=true but handler calls requireRole(%v)",
-					r.Handler, r.Path, beh.file, beh.line, beh.minRole.rolesSeen))
+		for _, m := range r.Methods {
+			label := r.Handler + " " + m.Method
+			astRole, astHas := astMinRoleFor(beh, m.Method)
+
+			if r.Public {
+				if astHas {
+					mismatches = append(mismatches, fmt.Sprintf(
+						"  %s (path=%q, file=%s:%d): metadata Public=true but handler has requireRole call attributed to %s (rolesSeen=%v)",
+						label, r.Path, beh.file, beh.line, m.Method, rolesForMethod(beh, m.Method)))
+				}
+				continue
 			}
-			continue
-		}
-		if !beh.minRole.confident {
-			unknowns = append(unknowns, fmt.Sprintf(
-				"  %s (path=%q, file=%s:%d): non-public route but no direct requireRole call (may delegate to a helper) — metadata MinRole=%s",
-				r.Handler, r.Path, beh.file, beh.line, r.MinRole))
-			continue
-		}
-		if beh.minRole.minRole != r.MinRole {
-			mismatches = append(mismatches, fmt.Sprintf(
-				"  %s (path=%q, file=%s:%d): metadata MinRole=%s, handler lowest requireRole=%s (rolesSeen=%v)",
-				r.Handler, r.Path, beh.file, beh.line, r.MinRole, beh.minRole.minRole, beh.minRole.rolesSeen))
+			if !astHas {
+				unknowns = append(unknowns, fmt.Sprintf(
+					"  %s (path=%q, file=%s:%d): metadata MinRole=%s, but no requireRole call attributed to %s (delegated?)",
+					label, r.Path, beh.file, beh.line, m.MinRole, m.Method))
+				continue
+			}
+			if astRole != m.MinRole {
+				mismatches = append(mismatches, fmt.Sprintf(
+					"  %s (path=%q, file=%s:%d): metadata MinRole=%s, handler lowest requireRole=%s (rolesSeen=%v)",
+					label, r.Path, beh.file, beh.line, m.MinRole, astRole, rolesForMethod(beh, m.Method)))
+			}
 		}
 	}
 
@@ -346,74 +354,45 @@ func TestC15_MinRole_MetadataMatchesHandler(t *testing.T) {
 	}
 }
 
-// ── Test 2: Mutating parity ───────────────────────────────────────────────
+// ── Test 2: per-method Mutating parity ────────────────────────────────────
 
 // TestC15_Mutating_MetadataMatchesHandler reports cases where the
-// Mutating flag in uiRoutes contradicts the http.MethodX literals
-// observed in the handler body.
-//
-// Failure modes:
-//
-//   - Mutating=true but handler references no POST/PUT/DELETE/PATCH literal
-//     and DOES reference at least one read-only method literal — fails.
-//   - Mutating=false but handler references at least one
-//     POST/PUT/DELETE/PATCH literal — fails.
-//   - Handler references no http.MethodX literal at all — UNKNOWN (handler
-//     may not gate on method, or may delegate). Logged.
+// per-method Mutating flag is inconsistent with the HTTP method's
+// conventional safety (POST/PUT/DELETE/PATCH are mutating; GET/HEAD/
+// OPTIONS are not). MethodAny entries are not method-checked here
+// (their Mutating is doctrine-driven, not derivable).
 func TestC15_Mutating_MetadataMatchesHandler(t *testing.T) {
-	handlers := scanHandlers(t)
-	var mismatches, unknowns []string
-
+	var mismatches []string
 	for _, r := range uiRoutes {
-		beh, ok := handlers[r.Handler]
-		if !ok {
-			continue // already covered as UNKNOWN by the MinRole test
-		}
-		switch beh.methods {
-		case methodsUnknown:
-			unknowns = append(unknowns, fmt.Sprintf(
-				"  %s (path=%q, file=%s:%d): no http.MethodX literal in body — metadata Mutating=%v",
-				r.Handler, r.Path, beh.file, beh.line, r.Mutating))
-		case methodsMutating:
-			if !r.Mutating {
-				mismatches = append(mismatches, fmt.Sprintf(
-					"  %s (path=%q, file=%s:%d): metadata Mutating=false, handler references mutating method(s): %v",
-					r.Handler, r.Path, beh.file, beh.line, sortedKeys(beh.rawMethods)))
+		for _, m := range r.Methods {
+			if m.Method == MethodAny {
+				continue
 			}
-		case methodsReadOnly:
-			if r.Mutating {
+			expected := isMutatingMethod(m.Method)
+			if m.Mutating != expected {
 				mismatches = append(mismatches, fmt.Sprintf(
-					"  %s (path=%q, file=%s:%d): metadata Mutating=true, handler references only read-only method(s): %v",
-					r.Handler, r.Path, beh.file, beh.line, sortedKeys(beh.rawMethods)))
+					"  %s %s (path=%q): metadata Mutating=%v, conventional Mutating=%v",
+					r.Handler, m.Method, r.Path, m.Mutating, expected))
 			}
 		}
-	}
-
-	if len(unknowns) > 0 {
-		t.Logf("C1.5 Mutating — %d UNKNOWN (informational):\n%s", len(unknowns), sortedJoin(unknowns))
 	}
 	if len(mismatches) > 0 {
 		t.Errorf("C1.5 Mutating — %d MISMATCHES:\n%s", len(mismatches), sortedJoin(mismatches))
 	}
 }
 
-// ── Test 3: AuditExpected parity ──────────────────────────────────────────
+// ── Test 3: per-method AuditExpected parity ───────────────────────────────
 
 // TestC15_AuditExpected_MetadataMatchesHandler reports cases where the
-// AuditExpected flag in uiRoutes contradicts whether the handler body
-// directly invokes auditEvent or auditEventDiff.
+// per-method AuditExpected flag contradicts whether the handler body
+// directly invokes auditEvent / auditEventDiff for that method.
 //
-// Failure modes:
+// Asymmetric on purpose:
 //
-//   - AuditExpected=true but handler has no direct audit call — UNKNOWN
-//     (handler may delegate to a helper that audits). Logged, not failed.
-//   - AuditExpected=false but handler does call audit directly — fails
-//     (the metadata is hiding an audit event the handler genuinely emits).
-//
-// Asymmetric on purpose: false negatives ("we said true but it's a
-// helper that audits") are common and acceptable in C1.5 shadow mode;
-// false positives ("we said false but it audits anyway") are noise the
-// metadata should reflect.
+//   - AuditExpected=true but no direct audit call — UNKNOWN (handler may
+//     delegate to a helper that audits). Logged, not failed.
+//   - AuditExpected=false but handler calls audit directly — fails (the
+//     metadata is hiding an audit event the handler emits).
 func TestC15_AuditExpected_MetadataMatchesHandler(t *testing.T) {
 	handlers := scanHandlers(t)
 	var mismatches, unknowns []string
@@ -423,15 +402,18 @@ func TestC15_AuditExpected_MetadataMatchesHandler(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if r.AuditExpected && !beh.callsAudit {
-			unknowns = append(unknowns, fmt.Sprintf(
-				"  %s (path=%q, file=%s:%d): metadata AuditExpected=true but no direct auditEvent call (may delegate)",
-				r.Handler, r.Path, beh.file, beh.line))
-		}
-		if !r.AuditExpected && beh.callsAudit {
-			mismatches = append(mismatches, fmt.Sprintf(
-				"  %s (path=%q, file=%s:%d): metadata AuditExpected=false but handler directly calls auditEvent",
-				r.Handler, r.Path, beh.file, beh.line))
+		for _, m := range r.Methods {
+			astAudits := astAuditsFor(beh, m.Method)
+			if m.AuditExpected && !astAudits {
+				unknowns = append(unknowns, fmt.Sprintf(
+					"  %s %s (path=%q, file=%s:%d): metadata AuditExpected=true but no direct auditEvent call attributed to %s (may delegate)",
+					r.Handler, m.Method, r.Path, beh.file, beh.line, m.Method))
+			}
+			if !m.AuditExpected && astAudits {
+				mismatches = append(mismatches, fmt.Sprintf(
+					"  %s %s (path=%q, file=%s:%d): metadata AuditExpected=false but handler calls auditEvent for %s",
+					r.Handler, m.Method, r.Path, beh.file, beh.line, m.Method))
+			}
 		}
 	}
 
@@ -441,6 +423,77 @@ func TestC15_AuditExpected_MetadataMatchesHandler(t *testing.T) {
 	if len(mismatches) > 0 {
 		t.Errorf("C1.5 AuditExpected — %d MISMATCHES:\n%s", len(mismatches), sortedJoin(mismatches))
 	}
+}
+
+// ── Per-method test helpers ───────────────────────────────────────────────
+
+// astMinRoleFor returns the lowest role the AST attributed to the given
+// metadata method. For specific methods, looks up beh.byMethod[method].
+// For MethodAny, aggregates across every entry in beh.byMethod (the
+// metadata says "any method" so any AST observation counts).
+func astMinRoleFor(beh *handlerBehavior, method string) (UIRole, bool) {
+	if method == MethodAny {
+		var lowest UIRole
+		seen := false
+		for _, mb := range beh.byMethod {
+			if r := mb.minRole(); r != "" {
+				seen = true
+				if lowest == "" || rolePriorityOf(r) < rolePriorityOf(lowest) {
+					lowest = r
+				}
+			}
+		}
+		return lowest, seen
+	}
+	mb := beh.byMethod[method]
+	if mb == nil {
+		return "", false
+	}
+	r := mb.minRole()
+	return r, r != ""
+}
+
+// rolesForMethod returns the unique roles AST saw under the given
+// method scope (or aggregated across all methods for MethodAny).
+func rolesForMethod(beh *handlerBehavior, method string) []UIRole {
+	if method == MethodAny {
+		var all []UIRole
+		for _, mb := range beh.byMethod {
+			all = append(all, mb.rolesSeen...)
+		}
+		return uniqRoles(all)
+	}
+	if mb := beh.byMethod[method]; mb != nil {
+		return uniqRoles(mb.rolesSeen)
+	}
+	return nil
+}
+
+// astAuditsFor returns true when the AST attributed an auditEvent call
+// to the metadata method's scope.
+func astAuditsFor(beh *handlerBehavior, method string) bool {
+	if method == MethodAny {
+		for _, mb := range beh.byMethod {
+			if mb.callsAudit {
+				return true
+			}
+		}
+		return false
+	}
+	if mb := beh.byMethod[method]; mb != nil {
+		return mb.callsAudit
+	}
+	return false
+}
+
+// isMutatingMethod returns true for HTTP methods that conventionally
+// change state. Mirrors securityMiddleware's isMutating expression.
+func isMutatingMethod(method string) bool {
+	switch method {
+	case "POST", "PUT", "DELETE", "PATCH":
+		return true
+	}
+	return false
 }
 
 // sortedKeys returns the sorted keys of a string-keyed map.
@@ -638,7 +691,7 @@ func extractMethodsFromCase(cc *ast.CaseClause) []string {
 // This test always passes; it is a reporting tool, not a regression
 // gate. Run with -v:
 //
-//   go test -count=1 -v -run TestC15_Dump_PerMethodFindings ./...
+//	go test -count=1 -v -run TestC15_Dump_PerMethodFindings ./...
 func TestC15_Dump_PerMethodFindings(t *testing.T) {
 	handlers := scanHandlers(t)
 
