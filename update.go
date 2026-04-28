@@ -1005,3 +1005,22 @@ func apiRegistrySettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
+// registerUpdateRoutes wires the self-update + rolling-cluster-update
+// endpoints. /api/update/cluster and /api/update/cluster/status are
+// intentionally grouped here (panel-driven, per the B-phase planning),
+// not under registerClusterRoutes. All routes are gated by
+// uiAuthMiddleware; per-handler RBAC is the handler's responsibility.
+func registerUpdateRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/update/status", apiUpdateStatus)                  // GET — version info
+	mux.HandleFunc("/api/update/check", apiUpdateCheck)                    // POST — trigger version check
+	mux.HandleFunc("/api/update/apply", apiUpdateApply)                    // POST — apply update (SSE)
+	mux.HandleFunc("/api/update/preview", apiUpdatePreview)                // POST — config diff preview
+	mux.HandleFunc("/api/update/reports", apiUpdateReports)                // GET — list/download reports
+	mux.HandleFunc("/api/update/rollback", apiUpdateRollback)              // POST — rollback
+	mux.HandleFunc("/api/update/rollback/status", apiUpdateRollbackStatus) // GET — rollback availability
+	mux.HandleFunc("/api/update/session", apiUpdateSession)                // GET — active update session (SSE re-attach)
+	mux.HandleFunc("/api/update/cluster", apiClusterUpdate)                // POST — start rolling update
+	mux.HandleFunc("/api/update/cluster/status", apiClusterUpdateStatus)   // GET — rolling update progress
+	mux.HandleFunc("/api/update/registry", apiRegistrySettings)            // GET/POST — registry settings
+}
