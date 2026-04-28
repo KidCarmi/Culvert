@@ -523,3 +523,35 @@ func apiClusterMetrics(w http.ResponseWriter, r *http.Request) {
 // resolveOTLPHeaders builds the OTLP auth headers map from the name+value
 // fields. If both are empty, preserves the existing headers (admin changed
 // endpoint but didn't re-enter the auth token).
+
+// registerClusterRoutes wires the upstream-proxy chaining endpoints and
+// the multi-node cluster admin endpoints. /healthz is intentionally
+// public and lives under registerObservabilityRoutes, not here. All
+// routes are gated by uiAuthMiddleware (except /healthz handled
+// elsewhere); per-handler RBAC is the handler's responsibility.
+func registerClusterRoutes(mux *http.ServeMux) {
+	// ── Upstream proxy chaining ──────────────────────────────────────────
+	mux.HandleFunc("/api/upstream", apiUpstream)                  // GET list / POST add
+	mux.HandleFunc("/api/upstream/settings", apiUpstreamSettings) // GET/PUT circuit breaker
+	mux.HandleFunc("/api/upstream/health", apiUpstreamHealth)     // POST force health check
+
+	// ── Cluster / multi-node ─────────────────────────────────────────────
+	mux.HandleFunc("/api/cluster/status", apiClusterStatus)                       // GET this node + connected nodes
+	mux.HandleFunc("/api/cluster/mode", apiClusterMode)                           // POST enable control-plane mode
+	mux.HandleFunc("/api/cluster/tokens", apiClusterTokens)                       // GET list / POST create / DELETE remove
+	mux.HandleFunc("/api/cluster/nodes", apiClusterNodes)                         // GET enrolled nodes
+	mux.HandleFunc("/api/cluster/revoke", apiClusterRevoke)                       // POST revoke a node
+	mux.HandleFunc("/api/cluster/labels", apiClusterLabels)                       // POST set node labels
+	mux.HandleFunc("/api/cluster/node-groups", apiNodeGroups)                     // GET list / POST create / DELETE remove
+	mux.HandleFunc("/api/cluster/node-groups/membership", apiNodeGroupMembership) // GET group membership (F9)
+	mux.HandleFunc("/api/cluster/drain", apiClusterDrain)                         // POST toggle node drain mode
+	mux.HandleFunc("/api/cluster/metrics", apiClusterMetrics)                     // GET aggregated cluster metrics
+	mux.HandleFunc("/api/cluster/ca", apiClusterCA)                               // GET info / POST import cluster CA
+	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits)              // GET distributed RL status
+	mux.HandleFunc("/api/cluster/audit", apiClusterAudit)                         // GET centralized audit log
+	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations)             // GET revocation sync status
+	mux.HandleFunc("/api/cluster/rotation", apiClusterRotation)                   // GET CA rotation progress
+	mux.HandleFunc("/api/cluster/ha", apiClusterHA)                               // GET HA status
+	mux.HandleFunc("/api/cluster/bandwidth", apiBandwidthPolicies)                // GET/POST/DELETE bandwidth QoS policies
+	mux.HandleFunc("/api/cluster/bootstrap/", apiBootstrapRouter)                 // GET bootstrap script/compose (token-authed)
+}

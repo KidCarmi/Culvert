@@ -1207,3 +1207,34 @@ func apiSSLBypass(w http.ResponseWriter, r *http.Request) {
 //	GET    → {"patterns": [...], "count": N, "blocked_total": N}
 //	POST   → {"pattern": "evil-keyword"} or {"patterns": ["p1","p2"]}
 //	DELETE → ?pattern=evil-keyword
+
+// registerPolicyRoutes wires the policy engine, blocklist, file-block,
+// rewrite, URL category, and block-page admin endpoints. All routes are
+// gated by uiAuthMiddleware; per-handler RBAC is the handler's
+// responsibility.
+func registerPolicyRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/blocklist", apiBlocklist)
+	mux.HandleFunc("/api/fileblock", apiFileblock)
+	mux.HandleFunc("/api/fileblock/profiles", apiFileblockProfiles)
+	mux.HandleFunc("/api/rewrite", apiRewrite)
+	mux.HandleFunc("/api/policy", apiPolicy)
+	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
+	mux.HandleFunc("/api/policy/move", apiPolicyMove)
+	mux.HandleFunc("/api/policy/test", apiPolicyTest)
+	mux.HandleFunc("/api/default-action", apiDefaultAction)
+
+	// Blocklist mode + feed sync.
+	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)             // GET/POST blocklist mode
+	mux.HandleFunc("/api/blocklist/feed", apiBlocklistFeed)             // GET/POST feed URL+interval
+	mux.HandleFunc("/api/blocklist/feed/sync", apiBlocklistFeedSync)    // POST force-sync
+	mux.HandleFunc("/api/blocklist/exceptions", apiBlocklistExceptions) // GET/POST/DELETE
+
+	// URL Categories (dynamic host-list management).
+	mux.HandleFunc("/api/category-groups", apiCategoryGroups) // GET/POST/PUT/DELETE category groups
+	mux.HandleFunc("/api/urlcat", apiURLCat)                  // GET/POST/PUT/DELETE categories
+	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)         // POST/DELETE individual hosts
+	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)     // GET — resolve a domain to its category
+
+	// Block page template (shown to users blocked by a policy rule).
+	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update
+}

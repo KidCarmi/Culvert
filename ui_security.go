@@ -1176,3 +1176,47 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 // Logger Config API
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// registerSecurityRoutes wires the security panel: TLS inspect (CA + cert
+// upload + SSL bypass), DPI content scanning, ClamAV/YARA/threat-feed
+// scanning, alert webhooks, OCSP, and GeoIP status. All routes are gated
+// by uiAuthMiddleware; per-handler RBAC is the handler's responsibility.
+func registerSecurityRoutes(mux *http.ServeMux) {
+	// ── Core security knobs + TLS inspect ─────────────────────────────────
+	mux.HandleFunc("/api/security", apiSecurity)
+	mux.HandleFunc("/api/ca-cert", apiCACert)
+	mux.HandleFunc("/api/certs/upload", apiCertsUpload)
+	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)
+	mux.HandleFunc("/api/content-scan", apiContentScan)
+
+	// ── Security scanning (ClamAV / YARA / Threat Feeds) ─────────────────
+	mux.HandleFunc("/api/security-scan/status", apiSecScanStatus)                   // GET
+	mux.HandleFunc("/api/security-scan/feeds/sync", apiSecFeedsSync)                // POST — force immediate sync
+	mux.HandleFunc("/api/security-scan/feeds/domain-allowlist", apiDomainAllowlist) // GET/PUT — threat feed domain allowlist
+	mux.HandleFunc("/api/security-scan/yara/reload", apiSecYARAReload)              // POST — reload YARA rules from dir
+	mux.HandleFunc("/api/security-scan/yara/rules", apiSecYARARules)                // GET/POST/PUT/DELETE — list / CRUD YARA rule files
+	mux.HandleFunc("/api/security-scan/yara/rules/", apiSecYARARules)               // PUT/DELETE /api/security-scan/yara/rules/{name}
+	mux.HandleFunc("/api/security-scan/yara/validate", apiSecYARAValidate)          // POST — dry-run validate a YARA rule source
+	mux.HandleFunc("/api/security-scan/yara/settings", apiSecYARASettings)          // GET/PUT — YARA engine runtime config
+	mux.HandleFunc("/api/security-scan/exclusions", apiSecScanExclusions)           // GET/PUT — scan exclusion hashes/hosts
+	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                      // GET — scan service mode info
+	mux.HandleFunc("/api/security-scan/cache", apiScanCache)                        // GET/DELETE — scan hash cache stats & purge
+	mux.HandleFunc("/api/content-scan/bypass", apiContentScanBypass)                // GET/PUT — DPI bypass host list
+
+	// ── Alert webhooks ───────────────────────────────────────────────────
+	mux.HandleFunc("/api/alerts/webhooks", apiAlertsWebhooks)             // GET list / POST create
+	mux.HandleFunc("/api/alerts/webhooks/test", apiAlertsWebhookTest)     // POST — test-fire
+	mux.HandleFunc("/api/alerts/webhooks/history", apiAlertsDeliveryHist) // GET — delivery history (Finding 8.1)
+
+	// ── CA management ────────────────────────────────────────────────────
+	mux.HandleFunc("/api/ca/status", apiCAStatus)            // GET — CA info + cache + rotation + dual-CA
+	mux.HandleFunc("/api/ca/key-provider", apiCAKeyProvider) // GET key provider status
+	mux.HandleFunc("/api/ca/download", apiCADownload)        // GET — PEM download
+	mux.HandleFunc("/api/ca/cache-clear", apiCACacheClear)   // POST — clear leaf cert cache
+	mux.HandleFunc("/api/ca/rotate", apiCARotate)            // POST — force CA rotation
+
+	// ── OCSP management ─────────────────────────────────────────────────
+	mux.HandleFunc("/api/ocsp", apiOCSPConfig) // GET status / POST toggle
+
+	// ── GeoIP status ────────────────────────────────────────────────────
+	mux.HandleFunc("/api/geoip", apiGeoIPConfig)
+}

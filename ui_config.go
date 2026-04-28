@@ -1139,3 +1139,53 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
+// registerDashboardRoutes wires the dashboard / live-stats endpoints. All
+// routes are gated by uiAuthMiddleware; per-handler RBAC is the handler's
+// responsibility.
+func registerDashboardRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/stats", apiStats)
+	mux.HandleFunc("/api/dashboard/health", apiDashboardHealth)
+	mux.HandleFunc("/api/dashboard/threats", apiDashboardThreats)
+	mux.HandleFunc("/api/dashboard/top-rules", apiDashboardTopRules)
+	mux.HandleFunc("/api/timeseries", apiTimeseries)
+	mux.HandleFunc("/api/logs", apiLogs)
+	mux.HandleFunc("/api/top-hosts", apiTopHosts)
+	mux.HandleFunc("/api/audit", apiAudit)
+	mux.HandleFunc("/api/events", apiEvents) // SSE live dashboard
+	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
+}
+
+// registerSettingsRoutes wires the Settings admin panel — Option A panel
+// grouping: handlers may live in logger.go, metrics.go, otlp.go,
+// connlimit.go, etc., but they are registered here because the admin
+// panel groups them under "Settings". All routes are gated by
+// uiAuthMiddleware; per-handler RBAC is the handler's responsibility.
+func registerSettingsRoutes(mux *http.ServeMux) {
+	// ── Core settings + raw export ────────────────────────────────────────
+	mux.HandleFunc("/api/settings", apiSettings)
+	mux.HandleFunc("/api/export", apiExport)
+
+	// ── Backup / restore / config versioning ──────────────────────────────
+	mux.HandleFunc("/api/config/export", apiConfigExport)     // GET — download backup JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)     // POST — restore from backup JSON
+	mux.HandleFunc("/api/config/versions", apiConfigVersions) // GET list / POST rollback
+	mux.HandleFunc("/api/config/diff", apiConfigDiff)         // GET diff between versions
+
+	// ── Auth / network / session settings ─────────────────────────────────
+	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode)  // PUT — toggle proxy auth requirement
+	mux.HandleFunc("/api/settings/log-level", apiLogLevel)      // GET/PUT runtime log level
+	mux.HandleFunc("/api/settings/network", apiNetworkSettings) // GET/POST network & TLS settings
+	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)   // GET/POST session TTL (hours)
+	mux.HandleFunc("/api/session-secret", apiSessionSecret)     // GET/POST shared signing key
+	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)          // GET/POST UI access IP allowlist
+
+	// ── Syslog / logger / metrics / OTLP / connlimit (handlers in
+	// dedicated files, registered here per Option A). ─────────────────────
+	mux.HandleFunc("/api/syslog", apiSyslogConfig)          // GET/POST syslog forwarding
+	mux.HandleFunc("/api/syslog/test", apiSyslogTest)       // POST syslog test message
+	mux.HandleFunc("/api/logger", apiLoggerConfig)          //
+	mux.HandleFunc("/api/metrics-config", apiMetricsConfig) //
+	mux.HandleFunc("/api/otlp", apiOTLPConfig)              //
+	mux.HandleFunc("/api/connlimit", apiConnLimit)          // GET status / POST update
+}

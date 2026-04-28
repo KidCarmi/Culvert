@@ -618,3 +618,14 @@ func apiDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, buildOperatorContract())
 }
+
+// registerObservabilityRoutes wires the operator-facing observability
+// endpoints. /healthz is intentionally unauthenticated (LB probe);
+// uiAuthMiddleware does NOT gate it because it is on the public-route
+// allowlist by absolute path. /api/diagnostics requires viewer role.
+// The apiHealthz handler lives in ha.go; the apiDiagnostics handler
+// lives in this file.
+func registerObservabilityRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/diagnostics", apiDiagnostics) // GET — aggregated operator contract (viewer)
+	mux.HandleFunc("/healthz", apiHealthz)             // GET unauthenticated health check (LB probe)
+}
