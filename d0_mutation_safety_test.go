@@ -181,3 +181,24 @@ func TestD0_RateLimit_NotAppliedToReads(t *testing.T) {
 		}
 	}
 }
+
+// TestD0_Chain_HealthzReachable is the smallest possible end-to-end smoke
+// of the full middleware chain composition. /healthz is public (non-/api/
+// so uiAuthMiddleware passes it through), is GET so securityMiddleware's
+// CSRF + body + rate-limit checks are no-ops, and is unrestricted by
+// uiIPGuardMiddleware when no allowlist is set. Anything other than 200
+// here means the chain wiring itself broke.
+func TestD0_Chain_HealthzReachable(t *testing.T) {
+	d0EnableLocalAuth(t)
+
+	handler := d0WrappedHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
+	req.RemoteAddr = "198.51.100.36:0"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("/healthz through full chain: got %d, want 200 (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+}
