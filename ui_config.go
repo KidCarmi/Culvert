@@ -1139,3 +1139,19 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
+// registerDashboardRoutes wires the dashboard / live-stats endpoints. All
+// routes are gated by uiAuthMiddleware; per-handler RBAC is the handler's
+// responsibility.
+func registerDashboardRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/stats", apiStats)
+	mux.HandleFunc("/api/dashboard/health", apiDashboardHealth)
+	mux.HandleFunc("/api/dashboard/threats", apiDashboardThreats)
+	mux.HandleFunc("/api/dashboard/top-rules", apiDashboardTopRules)
+	mux.HandleFunc("/api/timeseries", apiTimeseries)
+	mux.HandleFunc("/api/logs", apiLogs)
+	mux.HandleFunc("/api/top-hosts", apiTopHosts)
+	mux.HandleFunc("/api/audit", apiAudit)
+	mux.HandleFunc("/api/events", apiEvents) // SSE live dashboard
+	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
+}

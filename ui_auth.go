@@ -646,6 +646,40 @@ func authLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
+// registerSetupRoutes wires the first-run setup endpoints. Both routes are
+// public (allowlisted in uiAuthMiddleware) so a fresh install can configure
+// itself before any admin user exists.
+func registerSetupRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/setup/status", apiSetupStatus)
+	mux.HandleFunc("/api/setup/complete", apiSetupComplete)
+}
+
+// registerAuthRoutes wires admin session login/logout, RBAC user
+// management, the generic IdP framework, and the IdP redirect callbacks.
+// Login/logout/status and the /auth/* callbacks are public; the rest are
+// gated by uiAuthMiddleware + per-handler requireRole.
+func registerAuthRoutes(mux *http.ServeMux) {
+	// ── Admin session auth ────────────────────────────────────────────────
+	mux.HandleFunc("/api/auth/login", apiAuthLogin)
+	mux.HandleFunc("/api/auth/status", apiAuthStatus)
+	mux.HandleFunc("/api/auth/logout", apiAuthLogout)
+	mux.HandleFunc("/api/auth/users", apiAuthUsers)                    // RBAC user management (admin only)
+	mux.HandleFunc("/api/auth/change-password", apiAuthChangePassword) // self-service password change (any role)
+
+	// ── Generic IdP Framework ─────────────────────────────────────────────
+	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
+	mux.HandleFunc("/api/idp/discover", apiIdPDiscover) // POST: run OIDC discovery (must be before /api/idp/)
+	mux.HandleFunc("/api/idp/", apiIdPRouter)           // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
+
+	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
+	// These are reached by browser redirects from IdPs (not admin UI calls).
+	// They are registered on the same UI port; the proxy port handles traffic.
+	mux.HandleFunc("/auth/oidc/callback", authOIDCCallback)
+	mux.HandleFunc("/auth/saml/callback", authSAMLCallback)
+	mux.HandleFunc("/auth/select", authSelectProvider) // IdP selection screen
+	mux.HandleFunc("/auth/logout", authLogout)
+}
+
 // ── Security scan API ─────────────────────────────────────────────────────────
 
 // GET /api/security-scan/status — returns ClamAV connectivity, YARA rule count,

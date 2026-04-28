@@ -39,3 +39,10 @@ func serveUIShell(staticServer http.Handler) http.HandlerFunc {
 		w.Write([]byte(body)) //nolint:errcheck
 	}
 }
+
+// registerStaticRoutes wires the SPA shell route. staticServer handles all
+// non-shell static assets (logo, css, etc.) via fall-through inside
+// serveUIShell.
+func registerStaticRoutes(mux *http.ServeMux, staticServer http.Handler) {
+	mux.HandleFunc("/", serveUIShell(staticServer))
+}

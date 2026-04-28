@@ -36,29 +36,22 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	staticServer := http.FileServer(http.FS(sub))
 
 	mux := http.NewServeMux()
-	// Serve index.html with per-request CSP nonce injection; all other
-	// static assets (logo.png, etc.) are served directly from the embed.
-	mux.HandleFunc("/", serveUIShell(staticServer))
-	mux.HandleFunc("/api/setup/status", apiSetupStatus)
-	mux.HandleFunc("/api/setup/complete", apiSetupComplete)
-	mux.HandleFunc("/api/stats", apiStats)
-	mux.HandleFunc("/api/dashboard/health", apiDashboardHealth)
-	mux.HandleFunc("/api/dashboard/threats", apiDashboardThreats)
-	mux.HandleFunc("/api/dashboard/top-rules", apiDashboardTopRules)
-	mux.HandleFunc("/api/timeseries", apiTimeseries)
-	mux.HandleFunc("/api/logs", apiLogs)
-	mux.HandleFunc("/api/top-hosts", apiTopHosts)
-	mux.HandleFunc("/api/blocklist", apiBlocklist)
-	mux.HandleFunc("/api/fileblock", apiFileblock)
-	mux.HandleFunc("/api/fileblock/profiles", apiFileblockProfiles)
+
+	// ── Phase B1: grouped registrations ─────────────────────────────────
+	// Helpers live alongside their handler files. See docs/UI_REFACTOR_AUDIT.md.
+	registerStaticRoutes(mux, staticServer) // ui_static.go
+	registerSetupRoutes(mux)                // ui_auth.go
+	registerAuthRoutes(mux)                 // ui_auth.go
+	registerDashboardRoutes(mux)            // ui_config.go
+	registerPolicyRoutes(mux)               // ui_policy.go
+	registerPACRoutes(mux)                  // pac.go
+
+	// ── Phase B2 (pending): the routes below remain flat for now and will
+	// be grouped into register*Routes helpers in the next refactor PR.
+	// ────────────────────────────────────────────────────────────────────
 	mux.HandleFunc("/api/settings", apiSettings)
 	mux.HandleFunc("/api/security", apiSecurity)
 	mux.HandleFunc("/api/export", apiExport)
-	mux.HandleFunc("/api/rewrite", apiRewrite)
-	mux.HandleFunc("/api/policy", apiPolicy)
-	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
-	mux.HandleFunc("/api/policy/move", apiPolicyMove)
-	mux.HandleFunc("/api/policy/test", apiPolicyTest)
 
 	// CDR (Sluice) integration — Phase 2c admin API.
 	mux.HandleFunc("/api/cdr/config", apiCDRConfig)
@@ -72,24 +65,16 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/certs/upload", apiCertsUpload)
 	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)
 	mux.HandleFunc("/api/content-scan", apiContentScan)
-	mux.HandleFunc("/api/audit", apiAudit)
-	mux.HandleFunc("/api/events", apiEvents) // SSE live dashboard
-	mux.HandleFunc("/api/country-traffic", apiCountryTraffic)
-	mux.HandleFunc("/api/default-action", apiDefaultAction)
-	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)             // GET/POST blocklist mode
-	mux.HandleFunc("/api/blocklist/feed", apiBlocklistFeed)             // GET/POST feed URL+interval
-	mux.HandleFunc("/api/blocklist/feed/sync", apiBlocklistFeedSync)    // POST force-sync
-	mux.HandleFunc("/api/blocklist/exceptions", apiBlocklistExceptions) // GET/POST/DELETE
-	mux.HandleFunc("/api/config/export", apiConfigExport)               // GET — download backup JSON
-	mux.HandleFunc("/api/config/import", apiConfigImport)               // POST — restore from backup JSON
-	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode)          // PUT — toggle proxy auth requirement
-	mux.HandleFunc("/api/settings/log-level", apiLogLevel)              // GET/PUT runtime log level
-	mux.HandleFunc("/api/settings/network", apiNetworkSettings)         // GET/POST network & TLS settings
-	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)           // GET/POST session TTL (hours)
-	mux.HandleFunc("/api/session-secret", apiSessionSecret)             // GET/POST shared signing key
-	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)                  // GET/POST UI access IP allowlist
-	mux.HandleFunc("/api/syslog", apiSyslogConfig)                      // GET/POST syslog forwarding
-	mux.HandleFunc("/api/syslog/test", apiSyslogTest)                   // POST syslog test message
+	mux.HandleFunc("/api/config/export", apiConfigExport)       // GET — download backup JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)       // POST — restore from backup JSON
+	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode)  // PUT — toggle proxy auth requirement
+	mux.HandleFunc("/api/settings/log-level", apiLogLevel)      // GET/PUT runtime log level
+	mux.HandleFunc("/api/settings/network", apiNetworkSettings) // GET/POST network & TLS settings
+	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)   // GET/POST session TTL (hours)
+	mux.HandleFunc("/api/session-secret", apiSessionSecret)     // GET/POST shared signing key
+	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)          // GET/POST UI access IP allowlist
+	mux.HandleFunc("/api/syslog", apiSyslogConfig)              // GET/POST syslog forwarding
+	mux.HandleFunc("/api/syslog/test", apiSyslogTest)           // POST syslog test message
 
 	// ── Security scanning (ClamAV / YARA / Threat Feeds) ─────────────────
 	mux.HandleFunc("/api/security-scan/status", apiSecScanStatus)                   // GET
@@ -104,24 +89,6 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                      // GET — scan service mode info
 	mux.HandleFunc("/api/security-scan/cache", apiScanCache)                        // GET/DELETE — scan hash cache stats & purge
 	mux.HandleFunc("/api/content-scan/bypass", apiContentScanBypass)                // GET/PUT — DPI bypass host list
-
-	// ── URL Categories (dynamic host-list management) ─────────────────────
-	mux.HandleFunc("/api/category-groups", apiCategoryGroups) // GET/POST/PUT/DELETE category groups
-	mux.HandleFunc("/api/urlcat", apiURLCat)                  // GET/POST/PUT/DELETE categories
-	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)         // POST/DELETE individual hosts
-	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)     // GET — resolve a domain to its category
-
-	// ── Admin session auth ────────────────────────────────────────────────
-	mux.HandleFunc("/api/auth/login", apiAuthLogin)
-	mux.HandleFunc("/api/auth/status", apiAuthStatus)
-	mux.HandleFunc("/api/auth/logout", apiAuthLogout)
-	mux.HandleFunc("/api/auth/users", apiAuthUsers)                    // RBAC user management (admin only)
-	mux.HandleFunc("/api/auth/change-password", apiAuthChangePassword) // self-service password change (any role)
-
-	// ── Generic IdP Framework ─────────────────────────────────────────────
-	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
-	mux.HandleFunc("/api/idp/discover", apiIdPDiscover) // POST: run OIDC discovery (must be before /api/idp/)
-	mux.HandleFunc("/api/idp/", apiIdPRouter)           // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
 
 	// ── Alert webhooks ───────────────────────────────────────────────────
 	mux.HandleFunc("/api/alerts/webhooks", apiAlertsWebhooks)             // GET list / POST create
@@ -168,9 +135,6 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	// ── Connection limit ─────────────────────────────────────────────────
 	mux.HandleFunc("/api/connlimit", apiConnLimit) // GET status / POST update
 
-	// ── Block page template ──────────────────────────────────────────────
-	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update
-
 	// ── Upstream proxy chaining ──────────────────────────────────────────
 	mux.HandleFunc("/api/upstream", apiUpstream)                  // GET list / POST add
 	mux.HandleFunc("/api/upstream/settings", apiUpstreamSettings) // GET/PUT circuit breaker
@@ -199,18 +163,6 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 
 	// ── Operator diagnostics ────────────────────────────────────────────
 	mux.HandleFunc("/api/diagnostics", apiDiagnostics) // GET — aggregated operator contract (viewer)
-
-	// ── PAC file ─────────────────────────────────────────────────────────
-	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
-	mux.HandleFunc("/api/pac-config", apiPACConfig)
-
-	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
-	// These are reached by browser redirects from IdPs (not admin UI calls).
-	// They are registered on the same UI port; the proxy port handles traffic.
-	mux.HandleFunc("/auth/oidc/callback", authOIDCCallback)
-	mux.HandleFunc("/auth/saml/callback", authSAMLCallback)
-	mux.HandleFunc("/auth/select", authSelectProvider) // IdP selection screen
-	mux.HandleFunc("/auth/logout", authLogout)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),

@@ -235,3 +235,12 @@ func servePACFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	fmt.Fprint(w, pac)
 }
+
+// registerPACRoutes wires the PAC file endpoint and its admin config API.
+// /proxy.pac is intentionally unauthenticated (Windows PAC clients cannot
+// send credentials) and is on the public-route allowlist in
+// uiAuthMiddleware. /api/pac-config is gated like every other /api/*.
+func registerPACRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
+	mux.HandleFunc("/api/pac-config", apiPACConfig)
+}
