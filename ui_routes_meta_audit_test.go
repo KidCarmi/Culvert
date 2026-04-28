@@ -223,16 +223,12 @@ func analyzeHandler(fn *ast.FuncDecl) *handlerBehavior {
 			case "auditEvent", "auditEventDiff":
 				beh.callsAudit = true
 			case "requireRole":
-				if len(x.Args) >= 3 {
-					if rid, ok := x.Args[2].(*ast.Ident); ok {
-						if role := identToRole(rid.Name); role != "" {
-							beh.minRole.rolesSeen = append(beh.minRole.rolesSeen, role)
-							if !beh.minRole.confident || rolePriorityOf(role) < rolePriorityOf(beh.minRole.minRole) {
-								beh.minRole.minRole = role
-							}
-							beh.minRole.confident = true
-						}
+				if role := extractRequireRoleArg(x); role != "" {
+					beh.minRole.rolesSeen = append(beh.minRole.rolesSeen, role)
+					if !beh.minRole.confident || rolePriorityOf(role) < rolePriorityOf(beh.minRole.minRole) {
+						beh.minRole.minRole = role
 					}
+					beh.minRole.confident = true
 				}
 			}
 		}
@@ -588,16 +584,51 @@ func collectMethodCalls(node ast.Node, method string, beh *handlerBehavior) {
 		case "auditEvent", "auditEventDiff":
 			beh.recordAudit(method)
 		case "requireRole":
-			if len(call.Args) >= 3 {
-				if rid, ok := call.Args[2].(*ast.Ident); ok {
-					if role := identToRole(rid.Name); role != "" {
-						beh.recordRole(method, role)
-					}
-				}
+			if role := extractRequireRoleArg(call); role != "" {
+				beh.recordRole(method, role)
 			}
 		}
 		return true
 	})
+}
+
+// extractRequireRoleArg returns the UIRole value from a requireRole(w, r, X)
+// call, or "" if the third argument is not in a recognised form.
+//
+// Two forms are recognised:
+//   - Named constant: requireRole(w, r, RoleAdmin) — *ast.Ident
+//   - String literal: requireRole(w, r, "admin")  — *ast.BasicLit (STRING)
+//
+// The string-literal form is used in update.go / update_cluster.go and
+// would otherwise be invisible to AST detection.
+func extractRequireRoleArg(call *ast.CallExpr) UIRole {
+	if len(call.Args) < 3 {
+		return ""
+	}
+	switch a := call.Args[2].(type) {
+	case *ast.Ident:
+		return identToRole(a.Name)
+	case *ast.BasicLit:
+		if a.Kind != token.STRING {
+			return ""
+		}
+		// Strip surrounding quotes from the literal.
+		s := a.Value
+		if len(s) >= 2 && (s[0] == '"' || s[0] == '`') {
+			s = s[1 : len(s)-1]
+		}
+		switch s {
+		case "admin":
+			return RoleAdmin
+		case "operator":
+			return RoleOperator
+		case "viewer":
+			return RoleViewer
+		case "public":
+			return RolePublic
+		}
+	}
+	return ""
 }
 
 // classifyMethodReturnGuard recognises `if r.Method != http.MethodX { ...; return }`
