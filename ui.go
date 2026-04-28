@@ -3,12 +3,9 @@ package main
 import (
 	"embed"
 	"fmt"
-	"html"
 	"io/fs"
 	"log"
 	"net/http"
-	"strings"
-	"sync"
 	"time"
 )
 
@@ -17,6 +14,12 @@ var staticFiles embed.FS
 
 // uiCfg* hold startup config values for read-only display in the admin UI.
 // Set once in main() after config is loaded; safe to read without locks.
+//
+// Middleware (CSP nonce, IP guard, security headers, auth) lives in
+// ui_middleware.go. Session cookie helpers live in ui_session.go. RBAC
+// helpers live in ui_rbac.go. The SPA shell + cachedIndexHTML live in
+// ui_static.go. CA rotation state (pendingCARotation) lives in
+// ui_security.go.
 var (
 	uiCfgGeoIPDB   string
 	uiCfgLogFile   string
@@ -24,47 +27,18 @@ var (
 	uiCfgLogFormat string
 )
 
-// pendingCARotation holds a confirmation token for the two-step CA rotation flow.
-// An admin must first request rotation (receives a token), then confirm with that token.
-var pendingCARotation struct {
-	sync.Mutex
-	token   string
-	expires time.Time
-}
-
-// cachedIndexHTML holds the embedded index.html template with __CSP_NONCE__
-// placeholders. Read once at startup to avoid re-reading the embed on every
-// page load.
-//
-// Middleware (CSP nonce, IP guard, security headers, auth) lives in
-// ui_middleware.go. Session cookie helpers live in ui_session.go. RBAC
-// helpers live in ui_rbac.go.
-var cachedIndexHTML []byte
-
 func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen // route registration; each line is one endpoint
 	sub, _ := fs.Sub(staticFiles, "static")
 
 	// Pre-read index.html from embed for nonce injection.
-	if data, err := fs.ReadFile(sub, "index.html"); err == nil {
-		cachedIndexHTML = data
-	}
+	loadUIShell(sub)
 
 	staticServer := http.FileServer(http.FS(sub))
 
 	mux := http.NewServeMux()
 	// Serve index.html with per-request CSP nonce injection; all other
 	// static assets (logo.png, etc.) are served directly from the embed.
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
-			staticServer.ServeHTTP(w, r)
-			return
-		}
-		// Read nonce from context (set by securityMiddleware).
-		nonce, _ := r.Context().Value(cspNonceKey{}).(string)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		body := strings.ReplaceAll(string(cachedIndexHTML), "__CSP_NONCE__", html.EscapeString(nonce))
-		w.Write([]byte(body)) //nolint:errcheck
-	})
+	mux.HandleFunc("/", serveUIShell(staticServer))
 	mux.HandleFunc("/api/setup/status", apiSetupStatus)
 	mux.HandleFunc("/api/setup/complete", apiSetupComplete)
 	mux.HandleFunc("/api/stats", apiStats)

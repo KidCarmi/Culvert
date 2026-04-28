@@ -8,9 +8,17 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
+// pendingCARotation holds a confirmation token for the two-step CA rotation flow.
+// An admin must first request rotation (receives a token), then confirm with that token.
+var pendingCARotation struct {
+	sync.Mutex
+	token   string
+	expires time.Time
+}
 
 // ── Alert Webhooks ─────────────────────────────────────────────────────────
 
