@@ -80,11 +80,17 @@ func d0Request(method, path, remoteAddr string) *http.Request {
 	return r
 }
 
-// d0KnownRoutes is the locked inventory of every UI/admin route registered
-// across the 12 register*Routes helpers. The list is alphabetical for easy
-// visual scan. Updating it is intentional: a route addition or removal
-// requires a deliberate edit here, which keeps the inventory in lock-step
-// with the codebase.
+// d0KnownRoutes is the hand-maintained mirror of every UI/admin route
+// registered across the 12 register*Routes helpers, sorted alphabetically
+// for easy visual scan.
+//
+// IMPORTANT — coverage is one-directional. The companion test asserts
+// that every entry here resolves in the wired mux, so a route REMOVED or
+// RENAMED in a helper without updating this list will fail. A route
+// ADDED to a helper without updating this list will NOT fail (count
+// stays at 131). Closing that reverse-direction gap is a Phase C1 task:
+// once the metadata table exists it can become the authoritative
+// inventory source and the inventory check can become bidirectional.
 var d0KnownRoutes = []string{
 	"/",
 	"/api/alerts/webhooks",
@@ -219,16 +225,24 @@ var d0KnownRoutes = []string{
 	"/proxy.pac",
 }
 
-// TestD0_RouteInventory_Locked131 is the canonical regression lock for
-// the admin-UI route surface. It enforces two invariants:
+// TestD0_RouteInventory_Locked131 is the regression lock for the
+// admin-UI route surface. It enforces two invariants:
 //
 //  1. d0KnownRoutes contains exactly 131 entries (count locked).
 //  2. Every entry resolves through the wired mux to a non-empty pattern
 //     (the helper actually registered it).
 //
-// A 132nd route added to a register*Routes helper without updating
-// d0KnownRoutes will fail invariant (1). A route renamed in the helper
-// but not here will fail invariant (2).
+// FAILURE MATRIX (mirrored in d0KnownRoutes' docstring):
+//
+//   • Add route to a helper, list unchanged          → does NOT fail
+//     (count stays 131; the new pattern is not checked). Closing this
+//     reverse-direction gap is a Phase C1 deliverable.
+//   • Add route to a helper AND to d0KnownRoutes     → fails invariant 1
+//     (count goes to 132).
+//   • Remove or rename a route in a helper           → fails invariant 2
+//     (the now-orphaned list entry resolves to "" pattern).
+//   • Remove an entry from d0KnownRoutes only        → fails invariant 1
+//     (count goes to 130).
 func TestD0_RouteInventory_Locked131(t *testing.T) {
 	const want = 131
 	if got := len(d0KnownRoutes); got != want {
