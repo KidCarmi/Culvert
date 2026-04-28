@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 )
 
@@ -80,169 +81,59 @@ func d0Request(method, path, remoteAddr string) *http.Request {
 	return r
 }
 
-// d0KnownRoutes is the hand-maintained mirror of every UI/admin route
-// registered across the 12 register*Routes helpers, sorted alphabetically
-// for easy visual scan.
+// d0KnownRoutes is the alphabetised inventory of every UI/admin route the
+// admin server registers. It is DERIVED from uiRoutes (Phase C1 metadata
+// table) so the metadata stays the single source of truth.
 //
-// IMPORTANT — coverage is one-directional. The companion test asserts
-// that every entry here resolves in the wired mux, so a route REMOVED or
-// RENAMED in a helper without updating this list will fail. A route
-// ADDED to a helper without updating this list will NOT fail (count
-// stays at 131). Closing that reverse-direction gap is a Phase C1 task:
-// once the metadata table exists it can become the authoritative
-// inventory source and the inventory check can become bidirectional.
-var d0KnownRoutes = []string{
-	"/",
-	"/api/alerts/webhooks",
-	"/api/alerts/webhooks/history",
-	"/api/alerts/webhooks/test",
-	"/api/audit",
-	"/api/auth/change-password",
-	"/api/auth/login",
-	"/api/auth/logout",
-	"/api/auth/status",
-	"/api/auth/users",
-	"/api/blocklist",
-	"/api/blocklist/exceptions",
-	"/api/blocklist/feed",
-	"/api/blocklist/feed/sync",
-	"/api/blocklist/mode",
-	"/api/blockpage",
-	"/api/ca-cert",
-	"/api/ca/cache-clear",
-	"/api/ca/download",
-	"/api/ca/key-provider",
-	"/api/ca/rotate",
-	"/api/ca/status",
-	"/api/category-groups",
-	"/api/cdr/config",
-	"/api/cdr/health",
-	"/api/cdr/instances",
-	"/api/cdr/instances/enroll",
-	"/api/cdr/instances/revoke",
-	"/api/cdr/policies",
-	"/api/cdr/test",
-	"/api/certs/upload",
-	"/api/cluster/audit",
-	"/api/cluster/bandwidth",
-	"/api/cluster/bootstrap/",
-	"/api/cluster/ca",
-	"/api/cluster/drain",
-	"/api/cluster/ha",
-	"/api/cluster/labels",
-	"/api/cluster/metrics",
-	"/api/cluster/mode",
-	"/api/cluster/node-groups",
-	"/api/cluster/node-groups/membership",
-	"/api/cluster/nodes",
-	"/api/cluster/rate-limits",
-	"/api/cluster/revocations",
-	"/api/cluster/revoke",
-	"/api/cluster/rotation",
-	"/api/cluster/status",
-	"/api/cluster/tokens",
-	"/api/config/diff",
-	"/api/config/export",
-	"/api/config/import",
-	"/api/config/versions",
-	"/api/connlimit",
-	"/api/content-scan",
-	"/api/content-scan/bypass",
-	"/api/country-traffic",
-	"/api/dashboard/health",
-	"/api/dashboard/threats",
-	"/api/dashboard/top-rules",
-	"/api/default-action",
-	"/api/diagnostics",
-	"/api/events",
-	"/api/export",
-	"/api/fileblock",
-	"/api/fileblock/profiles",
-	"/api/geoip",
-	"/api/idp",
-	"/api/idp/",
-	"/api/idp/discover",
-	"/api/logger",
-	"/api/logs",
-	"/api/metrics-config",
-	"/api/ocsp",
-	"/api/otlp",
-	"/api/pac-config",
-	"/api/policy",
-	"/api/policy/move",
-	"/api/policy/reorder",
-	"/api/policy/test",
-	"/api/rewrite",
-	"/api/security",
-	"/api/security-scan/cache",
-	"/api/security-scan/exclusions",
-	"/api/security-scan/feeds/domain-allowlist",
-	"/api/security-scan/feeds/sync",
-	"/api/security-scan/status",
-	"/api/security-scan/svc",
-	"/api/security-scan/yara/reload",
-	"/api/security-scan/yara/rules",
-	"/api/security-scan/yara/rules/",
-	"/api/security-scan/yara/settings",
-	"/api/security-scan/yara/validate",
-	"/api/session-secret",
-	"/api/session-timeout",
-	"/api/settings",
-	"/api/settings/log-level",
-	"/api/settings/network",
-	"/api/settings/unauth-mode",
-	"/api/setup/complete",
-	"/api/setup/status",
-	"/api/ssl-bypass",
-	"/api/stats",
-	"/api/syslog",
-	"/api/syslog/test",
-	"/api/timeseries",
-	"/api/top-hosts",
-	"/api/ui-allow-ips",
-	"/api/update/apply",
-	"/api/update/check",
-	"/api/update/cluster",
-	"/api/update/cluster/status",
-	"/api/update/preview",
-	"/api/update/registry",
-	"/api/update/reports",
-	"/api/update/rollback",
-	"/api/update/rollback/status",
-	"/api/update/session",
-	"/api/update/status",
-	"/api/upstream",
-	"/api/upstream/health",
-	"/api/upstream/settings",
-	"/api/urlcat",
-	"/api/urlcat/host",
-	"/api/urlcat/lookup",
-	"/auth/logout",
-	"/auth/oidc/callback",
-	"/auth/saml/callback",
-	"/auth/select",
-	"/healthz",
-	"/proxy.pac",
-}
+// Coverage history:
+//
+//   - Pre-C1 — d0KnownRoutes was a hand-maintained 131-entry list,
+//     mirroring the helpers. Coverage was one-directional: a route
+//     added to a helper without updating the list was silently missed.
+//   - Post-C1 — d0KnownRoutes is derived from uiRoutes, and the
+//     reverse-inventory gap is closed by
+//     TestC1_RouteMetadata_Reverse_AllMuxRegistrationsHaveMetadata,
+//     which AST-scans the helper sources and fails if any registered
+//     path is absent from uiRoutes.
+//
+// Together with the C1 forward test, the bidirectional contract is:
+//
+//	uiRoutes  ⇔  every register*Routes helper's mux.HandleFunc calls
+var d0KnownRoutes = func() []string {
+	out := make([]string, 0, len(uiRoutes))
+	seen := make(map[string]bool, len(uiRoutes))
+	for _, r := range uiRoutes {
+		if seen[r.Path] {
+			continue // duplicates are flagged by TestC1_RouteMetadata_Locked131
+		}
+		seen[r.Path] = true
+		out = append(out, r.Path)
+	}
+	sort.Strings(out)
+	return out
+}()
 
-// TestD0_RouteInventory_Locked131 is the regression lock for the
-// admin-UI route surface. It enforces two invariants:
+// TestD0_RouteInventory_Locked131 is the D0 regression lock for the
+// admin-UI route surface. After Phase C1 it enforces two invariants
+// against d0KnownRoutes (now derived from uiRoutes):
 //
 //  1. d0KnownRoutes contains exactly 131 entries (count locked).
-//  2. Every entry resolves through the wired mux to a non-empty pattern
-//     (the helper actually registered it).
+//  2. Every entry resolves through the wired mux to a non-empty pattern.
 //
-// FAILURE MATRIX (mirrored in d0KnownRoutes' docstring):
+// POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
+// reverse-direction gap that existed in pre-C1 D0 is now closed by
+// TestC1_RouteMetadata_Reverse_AllMuxRegistrationsHaveMetadata):
 //
-//   • Add route to a helper, list unchanged          → does NOT fail
-//     (count stays 131; the new pattern is not checked). Closing this
-//     reverse-direction gap is a Phase C1 deliverable.
-//   • Add route to a helper AND to d0KnownRoutes     → fails invariant 1
-//     (count goes to 132).
-//   • Remove or rename a route in a helper           → fails invariant 2
-//     (the now-orphaned list entry resolves to "" pattern).
-//   • Remove an entry from d0KnownRoutes only        → fails invariant 1
-//     (count goes to 130).
+//   - Add route to a helper but not to uiRoutes      → fails the C1
+//     reverse test (registered route has no metadata entry).
+//   - Add route to uiRoutes but not to a helper      → fails the C1
+//     forward test AND this D0 test (path doesn't resolve in mux).
+//   - Add route to BOTH helper AND uiRoutes           → fails this D0
+//     test on count (132 ≠ 131) AND the C1 count test.
+//   - Remove or rename a route in a helper           → fails the C1
+//     forward test AND this D0 test.
+//   - Remove an entry from uiRoutes only             → fails C1 reverse
+//     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked131(t *testing.T) {
 	const want = 131
 	if got := len(d0KnownRoutes); got != want {
