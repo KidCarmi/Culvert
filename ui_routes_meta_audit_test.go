@@ -33,6 +33,34 @@ import (
 //   TestC15_Mutating_MetadataMatchesHandler
 //   TestC15_AuditExpected_MetadataMatchesHandler
 
+// ── Per-method analysis types (Phase C1.5 evolution) ──────────────────────
+//
+// MethodAny matches any HTTP method. Used in metadata for routes whose
+// handler genuinely applies the same behavior to all methods, or whose
+// routing is dynamic / internal and cannot be safely pinned by AST.
+const MethodAny = "*"
+
+// methodBehavior captures the per-method AST findings for one handler:
+// which roles its requireRole calls accept inside that method's case
+// block (or guard region), and whether any auditEvent call appears in
+// the same scope.
+type methodBehavior struct {
+	rolesSeen  []UIRole // every role argument seen for requireRole in this method's scope
+	callsAudit bool     // any direct auditEvent / auditEventDiff in this scope
+}
+
+// minRole returns the lowest-priority role observed for this method,
+// or "" if no requireRole call was attributed to this method.
+func (b *methodBehavior) minRole() UIRole {
+	var lowest UIRole
+	for _, r := range b.rolesSeen {
+		if lowest == "" || rolePriorityOf(r) < rolePriorityOf(lowest) {
+			lowest = r
+		}
+	}
+	return lowest
+}
+
 // ── AST scanner ───────────────────────────────────────────────────────────
 
 // methodClassification summarises which HTTP methods appear as
@@ -53,14 +81,54 @@ type minRoleClassification struct {
 	rolesSeen []UIRole // every role argument observed (for diagnostics)
 }
 
-// handlerBehavior aggregates all three C1.5 signals for one handler.
+// handlerBehavior aggregates all C1.5 signals for one handler.
+//
+// Two views coexist:
+//
+//   • Aggregate view (rawMethods, methods, minRole, callsAudit) — used by
+//     the original three TestC15_* tests; treats the handler as a whole.
+//   • Per-method view (byMethod) — populated by the upgraded scanner
+//     with conservative method-context tracking. Each entry maps an
+//     HTTP method (or MethodAny) to the requireRole / auditEvent calls
+//     attributed to that method's scope.
 type handlerBehavior struct {
 	file       string
 	line       int
-	rawMethods map[string]bool // "GET", "POST", ... presence of http.MethodX literal
+	rawMethods map[string]bool // aggregate: presence of http.MethodX literal anywhere
 	methods    methodClassification
 	minRole    minRoleClassification
-	callsAudit bool // any direct auditEvent or auditEventDiff call
+	callsAudit bool // aggregate: any direct auditEvent or auditEventDiff call
+
+	// byMethod is the per-method attribution. Keys are upper-case HTTP
+	// methods ("GET", "POST", ...) or MethodAny ("*") for calls the
+	// scanner could not confidently pin to a specific method.
+	byMethod map[string]*methodBehavior
+}
+
+// recordRole adds a requireRole observation under the given method scope.
+func (h *handlerBehavior) recordRole(method string, role UIRole) {
+	if h.byMethod == nil {
+		h.byMethod = map[string]*methodBehavior{}
+	}
+	mb := h.byMethod[method]
+	if mb == nil {
+		mb = &methodBehavior{}
+		h.byMethod[method] = mb
+	}
+	mb.rolesSeen = append(mb.rolesSeen, role)
+}
+
+// recordAudit marks that an auditEvent call was attributed to method.
+func (h *handlerBehavior) recordAudit(method string) {
+	if h.byMethod == nil {
+		h.byMethod = map[string]*methodBehavior{}
+	}
+	mb := h.byMethod[method]
+	if mb == nil {
+		mb = &methodBehavior{}
+		h.byMethod[method] = mb
+	}
+	mb.callsAudit = true
 }
 
 var (
@@ -116,11 +184,26 @@ func doScanHandlers() (map[string]*handlerBehavior, error) {
 
 // analyzeHandler walks the body of fn and records all C1.5 signals.
 // Conservative: only direct calls / literals are detected.
+//
+// Two passes are performed:
+//
+//  1. ast.Inspect over the whole body — populates the aggregate fields
+//     (rawMethods, minRole.rolesSeen, callsAudit). These match the
+//     pre-evolution behavior used by the original TestC15_* tests.
+//  2. walkBodyPerMethod — sequential top-level pass that attributes
+//     each requireRole / auditEvent call to a specific HTTP method
+//     when the method context is OBVIOUS (case in switch r.Method;
+//     gate-before-handle if-guard returning on wrong method). All
+//     other calls are attributed to MethodAny.
 func analyzeHandler(fn *ast.FuncDecl) *handlerBehavior {
 	beh := &handlerBehavior{rawMethods: map[string]bool{}}
 	if fn.Body == nil {
 		return beh
 	}
+	// Pass 2: sequential per-method attribution.
+	walkBodyPerMethod(fn.Body, MethodAny, beh)
+
+	// Pass 1: original aggregate scan (kept for the existing tests).
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.SelectorExpr:
@@ -367,5 +450,297 @@ func sortedKeys(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// ── Conservative per-method context walker ────────────────────────────────
+//
+// walkBodyPerMethod walks the top-level statements of a function body
+// sequentially, maintaining an "active method" that defaults to
+// MethodAny. The active method is narrowed only for stable, obvious
+// patterns:
+//
+//   • switch r.Method { case http.MethodX: ... } — calls inside that
+//     case body are attributed to X. Default case inherits the active
+//     method from outside the switch.
+//   • if r.Method != http.MethodX { ...return... } at the top level —
+//     all subsequent top-level statements are attributed to X (the
+//     gate-before-handle pattern). The if body is NOT scanned (it only
+//     runs on the rejected path).
+//
+// Anything else falls under MethodAny. The walker is intentionally
+// conservative; it does not attempt to follow control flow into nested
+// blocks, helper-function calls, or complex conditionals.
+
+func walkBodyPerMethod(body *ast.BlockStmt, active string, beh *handlerBehavior) {
+	if body == nil {
+		return
+	}
+	for _, stmt := range body.List {
+		switch s := stmt.(type) {
+		case *ast.IfStmt:
+			if guarded, ok := classifyMethodReturnGuard(s); ok {
+				// "if r.Method != http.MethodX { return }" — narrow active method.
+				active = guarded
+				continue
+			}
+			// Generic if — recurse with current active method.
+			collectMethodCalls(s, active, beh)
+
+		case *ast.SwitchStmt:
+			if isSwitchOnRequestMethod(s) {
+				for _, c := range s.Body.List {
+					cc, ok := c.(*ast.CaseClause)
+					if !ok {
+						continue
+					}
+					methods := extractMethodsFromCase(cc)
+					if len(methods) == 0 {
+						// default case — inherits the outer active method.
+						for _, st := range cc.Body {
+							collectMethodCalls(st, active, beh)
+						}
+						continue
+					}
+					for _, m := range methods {
+						for _, st := range cc.Body {
+							collectMethodCalls(st, m, beh)
+						}
+					}
+				}
+				continue
+			}
+			// Generic switch — recurse with current active method.
+			collectMethodCalls(s, active, beh)
+
+		default:
+			collectMethodCalls(s, active, beh)
+		}
+	}
+}
+
+// collectMethodCalls walks every requireRole / auditEvent call inside
+// node and attributes each to method.
+func collectMethodCalls(node ast.Node, method string, beh *handlerBehavior) {
+	ast.Inspect(node, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		switch id.Name {
+		case "auditEvent", "auditEventDiff":
+			beh.recordAudit(method)
+		case "requireRole":
+			if len(call.Args) >= 3 {
+				if rid, ok := call.Args[2].(*ast.Ident); ok {
+					if role := identToRole(rid.Name); role != "" {
+						beh.recordRole(method, role)
+					}
+				}
+			}
+		}
+		return true
+	})
+}
+
+// classifyMethodReturnGuard recognises `if r.Method != http.MethodX { ...; return }`
+// at top level. Returns (X, true) on match, ("", false) otherwise.
+// Conservative: requires a bare != comparison, no else clause, and a
+// return statement somewhere in the body.
+func classifyMethodReturnGuard(s *ast.IfStmt) (string, bool) {
+	if s.Else != nil || s.Init != nil {
+		return "", false
+	}
+	bin, ok := s.Cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.NEQ {
+		return "", false
+	}
+	method := extractMethodLiteral(bin.X)
+	if method == "" {
+		method = extractMethodLiteral(bin.Y)
+	}
+	if method == "" {
+		return "", false
+	}
+	if !exprIsRequestMethod(bin.X) && !exprIsRequestMethod(bin.Y) {
+		return "", false
+	}
+	// Body must contain at least one return statement.
+	bodyHasReturn := false
+	for _, stmt := range s.Body.List {
+		if _, ok := stmt.(*ast.ReturnStmt); ok {
+			bodyHasReturn = true
+			break
+		}
+	}
+	if !bodyHasReturn {
+		return "", false
+	}
+	return method, true
+}
+
+// extractMethodLiteral returns "POST" / "GET" / etc. when expr is a
+// http.MethodX selector, or "" otherwise.
+func extractMethodLiteral(expr ast.Expr) string {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || pkg.Name != "http" {
+		return ""
+	}
+	if !strings.HasPrefix(sel.Sel.Name, "Method") || sel.Sel.Name == "Method" {
+		return ""
+	}
+	return strings.ToUpper(strings.TrimPrefix(sel.Sel.Name, "Method"))
+}
+
+// exprIsRequestMethod returns true when expr looks like a `.Method`
+// field access (e.g. `r.Method`). Receiver name is not validated.
+func exprIsRequestMethod(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	return sel.Sel.Name == "Method"
+}
+
+// isSwitchOnRequestMethod returns true when s is `switch r.Method { ... }`.
+func isSwitchOnRequestMethod(s *ast.SwitchStmt) bool {
+	return s.Tag != nil && exprIsRequestMethod(s.Tag)
+}
+
+// extractMethodsFromCase returns each "POST"/"GET"/... method
+// constant in a `case http.MethodX [, http.MethodY]:` clause. Empty
+// for the default case.
+func extractMethodsFromCase(cc *ast.CaseClause) []string {
+	out := make([]string, 0, len(cc.List))
+	for _, expr := range cc.List {
+		if m := extractMethodLiteral(expr); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// ── Per-method dump (review aid for schema migration) ─────────────────────
+
+// TestC15_Dump_PerMethodFindings prints, for every handler referenced by
+// uiRoutes, the per-method AST findings produced by the upgraded
+// scanner. The output is the source-of-truth input for migrating
+// uiRoutes from single-MinRole to per-method shape.
+//
+// This test always passes; it is a reporting tool, not a regression
+// gate. Run with -v:
+//
+//   go test -count=1 -v -run TestC15_Dump_PerMethodFindings ./...
+func TestC15_Dump_PerMethodFindings(t *testing.T) {
+	handlers := scanHandlers(t)
+
+	// Stable iteration: walk uiRoutes in definition order, dedup by handler.
+	seen := make(map[string]bool, len(uiRoutes))
+	type row struct {
+		handler string
+		path    string
+		file    string
+		line    int
+		methods []string // formatted per-method lines
+	}
+	var rows []row
+
+	methodOrder := []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", MethodAny}
+
+	for _, r := range uiRoutes {
+		if seen[r.Handler] {
+			continue
+		}
+		seen[r.Handler] = true
+
+		beh, ok := handlers[r.Handler]
+		if !ok {
+			rows = append(rows, row{
+				handler: r.Handler,
+				path:    r.Path,
+				methods: []string{"  HANDLER NOT FOUND (closure / method / generated)"},
+			})
+			continue
+		}
+
+		var lines []string
+		for _, m := range methodOrder {
+			mb, ok := beh.byMethod[m]
+			if !ok {
+				continue
+			}
+			roles := uniqRoles(mb.rolesSeen)
+			minRoleStr := string(mb.minRole())
+			if minRoleStr == "" {
+				minRoleStr = "(none)"
+			}
+			audit := "no"
+			if mb.callsAudit {
+				audit = "yes"
+			}
+			lines = append(lines, fmt.Sprintf(
+				"  %-7s minRole=%-10s audit=%-3s rolesSeen=%v",
+				m, minRoleStr, audit, roles))
+		}
+		// If byMethod is empty entirely (handler has no requireRole/audit calls),
+		// note that explicitly.
+		if len(lines) == 0 {
+			lines = []string{"  (no requireRole or auditEvent calls anywhere — likely public, delegated, or routing-only)"}
+		}
+
+		// Also include the aggregate http.MethodX literal set for context.
+		methodLits := sortedKeys(beh.rawMethods)
+		if len(methodLits) == 0 {
+			lines = append(lines, "  http.MethodX literals seen: (none)")
+		} else {
+			lines = append(lines, fmt.Sprintf("  http.MethodX literals seen: %v", methodLits))
+		}
+
+		rows = append(rows, row{
+			handler: r.Handler,
+			path:    r.Path,
+			file:    beh.file,
+			line:    beh.line,
+			methods: lines,
+		})
+	}
+
+	// Stable output: alphabetical by handler.
+	sort.Slice(rows, func(i, j int) bool { return rows[i].handler < rows[j].handler })
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "\n──── C1.5 Per-Method AST Dump (%d unique handlers) ────\n", len(rows))
+	for _, r := range rows {
+		loc := ""
+		if r.file != "" {
+			loc = fmt.Sprintf(" %s:%d", r.file, r.line)
+		}
+		fmt.Fprintf(&sb, "\n%s (path=%q)%s\n", r.handler, r.path, loc)
+		for _, l := range r.methods {
+			fmt.Fprintln(&sb, l)
+		}
+	}
+	t.Log(sb.String())
+}
+
+// uniqRoles returns the unique roles in slice (preserving sort order).
+func uniqRoles(roles []UIRole) []UIRole {
+	seen := map[UIRole]bool{}
+	var out []UIRole
+	for _, r := range roles {
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return rolePriorityOf(out[i]) < rolePriorityOf(out[j]) })
 	return out
 }
