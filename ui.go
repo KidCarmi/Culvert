@@ -53,6 +53,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	registerUpdateRoutes(mux)        // update.go         — 11 routes
 	registerCDRRoutes(mux)           // cdr_ui.go         —  7 routes
 	registerObservabilityRoutes(mux) // diagnostics.go    —  2 routes (incl. /healthz)
+	registerGovernanceRoutes(mux)    // ui_governance.go  —  1 route  (C3, admin-only)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),

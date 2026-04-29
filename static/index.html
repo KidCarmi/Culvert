@@ -408,6 +408,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="diagnostics" data-min-role="admin">
       <span class="icon">🩺</span> Diagnostics
     </div>
+    <div class="nav-item" data-view="governance" data-min-role="admin">
+      <span class="icon">🛡️</span> Governance
+    </div>
 
     <div class="nav-section">Tools</div>
     <div class="nav-item" data-view="policy-tester">
@@ -3371,6 +3374,54 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-diagnostics -->
 
+    <!-- ═══ GOVERNANCE (C3 — control-plane visibility, read-only) ═══════ -->
+    <div class="view" id="view-governance">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Control-plane Governance</span>
+          <button class="btn ghost sm" data-click="loadGovernance">↺ Refresh</button>
+        </div>
+        <div style="padding:16px;display:grid;gap:12px">
+          <div id="gov-summary" style="display:flex;align-items:center;gap:12px">
+            <span id="gov-status-badge" style="padding:4px 10px;border-radius:999px;font-size:.75rem;font-weight:700;background:var(--surface2);color:var(--muted)">—</span>
+            <span id="gov-generated-at" style="color:var(--muted);font-size:.75rem"></span>
+            <span id="gov-schema" style="color:var(--muted);font-size:.7rem;margin-left:auto"></span>
+          </div>
+
+          <div style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
+            <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+              <div style="font-size:.78rem;color:var(--muted);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Route Inventory</div>
+              <div id="gov-route-summary" style="font-size:.85rem;line-height:1.7"></div>
+            </div>
+            <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+              <div style="font-size:.78rem;color:var(--muted);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">C2 Runtime</div>
+              <div id="gov-c2-state" style="font-size:.85rem;line-height:1.7"></div>
+            </div>
+            <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+              <div style="font-size:.78rem;color:var(--muted);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">C2 Counters</div>
+              <div id="gov-counters" style="font-size:.85rem;line-height:1.7;font-family:monospace"></div>
+            </div>
+          </div>
+
+          <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+            <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Routes by Role</div>
+            <div id="gov-by-role" style="display:grid;gap:6px;font-size:.82rem;font-family:monospace"></div>
+          </div>
+
+          <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+            <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Governance Health</div>
+            <div id="gov-health-axes" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px"></div>
+            <div id="gov-issues" style="display:grid;gap:6px"></div>
+          </div>
+
+          <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+            <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Test Layers</div>
+            <div id="gov-test-layers" style="display:grid;gap:6px;font-size:.8rem"></div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-governance -->
+
     <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
     <!-- (embedded inside Security panel later, but available as standalone) -->
 
@@ -3609,6 +3660,7 @@ document.addEventListener('click', e => {
     // ── Cluster ──
     case 'loadCluster':       loadCluster(); break;
     case 'loadDiagnostics':   loadDiagnostics(); break;
+    case 'loadGovernance':    loadGovernance(); break;
     case 'enableControlPlane': enableControlPlane(); break;
     case 'enableHA':          enableHA(); break;
     case 'copyHADeployCmd':   copyHADeployCmd(); break;
@@ -3887,6 +3939,7 @@ function switchView(name) {
   if (name === 'updates')        loadUpdates();
   if (name === 'cdr')            loadCDRData();
   if (name === 'diagnostics')    loadDiagnostics();
+  if (name === 'governance')     loadGovernance();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -8733,6 +8786,108 @@ async function loadDiagnostics() {
     }).join('') || '<div style="color:var(--muted);font-size:.8rem">No checks reported.</div>';
   } catch (e) {
     list.innerHTML = `<div style="color:#ef4444;font-size:.85rem">Failed to load diagnostics: ${escHtml(e.message || String(e))}</div>`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Governance — Control-plane visibility (C3, read-only)
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadGovernance() {
+  const badge = document.getElementById('gov-status-badge');
+  const ts = document.getElementById('gov-generated-at');
+  const schema = document.getElementById('gov-schema');
+  if (!badge) return;
+  // num normalises arbitrary JSON values to a finite Number. Avoids the
+  // |0 / >>>0 idioms that silently truncate counter values to 32 bits.
+  const num = v => Number.isFinite(Number(v)) ? Number(v) : 0;
+  try {
+    const r = await api('/api/governance/control-plane');
+    if (!r) return;
+    const palette = {
+      healthy: { bg: 'rgba(34,197,94,.15)',  fg: '#22c55e', label: 'HEALTHY' },
+      ok:      { bg: 'rgba(34,197,94,.15)',  fg: '#22c55e', label: 'OK'      },
+      warn:    { bg: 'rgba(245,158,11,.18)', fg: '#f59e0b', label: 'WARN'    },
+      drift:   { bg: 'rgba(239,68,68,.18)',  fg: '#ef4444', label: 'DRIFT'   },
+    };
+    const health = r.governance_health || {};
+    const top = palette[health.status] || palette.ok;
+    badge.textContent = top.label;
+    badge.style.background = top.bg;
+    badge.style.color = top.fg;
+    ts.textContent = r.generated_at ? `as of ${new Date(r.generated_at).toLocaleString()}` : '';
+    schema.textContent = r.schema_version ? `schema v${r.schema_version}` : '';
+
+    const routes = r.routes || {};
+    const totals = routes.totals || {};
+    document.getElementById('gov-route-summary').innerHTML = `
+      <div><strong>${num(routes.total)}</strong> routes total</div>
+      <div>${num(routes.public)} public &middot; ${num(routes.protected)} protected</div>
+      <div>${num(routes.method_entries)} method entries &middot; ${num(routes.method_any_routes)} use MethodAny</div>
+      <div style="color:var(--muted);font-size:.78rem">Mutating: ${num(totals.mutating)} &middot; AuditExpected: ${num(totals.audit_expected)}</div>
+    `;
+
+    const c2 = r.c2 || {};
+    const modeColor = c2.mode === 'enforce' ? '#22c55e' : '#f59e0b';
+    document.getElementById('gov-c2-state').innerHTML = `
+      <div>Mode: <strong style="color:${modeColor}">${escHtml(c2.mode || 'unknown')}</strong></div>
+      <div>Default: ${escHtml(c2.default_mode || 'unknown')}</div>
+      <div>Kill switch: <code style="font-size:.78rem">${escHtml(c2.kill_switch_env || '')}</code> ${c2.kill_switch_active ? '<span style="color:#f59e0b">active</span>' : '<span style="color:var(--muted)">inactive</span>'}</div>
+      <div style="color:var(--muted);font-size:.78rem">Read once at startup &mdash; runtime mutation not supported</div>
+    `;
+
+    const ctr = r.counters || {};
+    const wouldDeny = num(ctr.would_deny);
+    const enforceDenied = num(ctr.enforce_denied);
+    const missingMeta = num(ctr.missing_meta);
+    const noPolicy = num(ctr.no_policy);
+    const auditMissing = num(ctr.audit_missing);
+    document.getElementById('gov-counters').innerHTML = `
+      <div>would_deny:     <strong>${wouldDeny}</strong></div>
+      <div>enforce_denied: <strong>${enforceDenied}</strong></div>
+      <div>missing_meta:   <strong style="color:${missingMeta?'#ef4444':''}">${missingMeta}</strong></div>
+      <div>no_policy:      <strong style="color:${noPolicy?'#ef4444':''}">${noPolicy}</strong></div>
+      <div>audit_missing:  <strong style="color:${auditMissing?'#f59e0b':''}">${auditMissing}</strong></div>
+    `;
+
+    const byRole = routes.by_min_role || {};
+    document.getElementById('gov-by-role').innerHTML = ['admin','operator','viewer','public'].map(role => {
+      const a = byRole[role] || {};
+      return `<div>${role.padEnd(9, ' ').replace(/ /g,'&nbsp;')} methods=<strong>${num(a.methods)}</strong> &middot; mutating=${num(a.mutating)} &middot; audit=${num(a.audit_expected)}</div>`;
+    }).join('');
+
+    const axes = ['metadata_parity', 'audit_completion', 'enforce_consistency'];
+    document.getElementById('gov-health-axes').innerHTML = axes.map(k => {
+      const v = palette[health[k]] || palette.ok;
+      return `<span style="padding:3px 9px;border-radius:999px;font-size:.7rem;font-weight:600;background:${v.bg};color:${v.fg}">${escHtml(k)}: ${v.label}</span>`;
+    }).join('');
+
+    const issues = Array.isArray(health.issues) ? health.issues : [];
+    document.getElementById('gov-issues').innerHTML = issues.length === 0
+      ? '<div style="color:var(--muted);font-size:.8rem">No outstanding issues.</div>'
+      : issues.map(i => {
+          const sv = palette[i.severity] || palette.warn;
+          return `<div style="border:1px solid var(--border);border-left:4px solid ${sv.fg};border-radius:6px;padding:8px 10px;background:var(--surface2)">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="padding:2px 8px;border-radius:999px;font-size:.68rem;font-weight:700;background:${sv.bg};color:${sv.fg}">${sv.label}</span>
+              <code style="font-size:.78rem;color:var(--muted)">${escHtml(i.code)}</code>
+              ${i.count ? `<span style="font-size:.72rem;color:var(--muted)">count=${num(i.count)}</span>` : ''}
+            </div>
+            <div style="margin-top:4px;font-size:.82rem">${escHtml(i.hint || '')}</div>
+          </div>`;
+        }).join('');
+
+    const layers = Array.isArray(r.test_layers) ? r.test_layers : [];
+    document.getElementById('gov-test-layers').innerHTML = layers.map(l => {
+      const tag = l.runtime
+        ? `<span style="color:#22c55e;font-weight:600">runtime</span>${l.mode ? ` &middot; mode=${escHtml(l.mode)}` : ''}`
+        : `<span style="color:var(--muted)">CI-only</span>`;
+      return `<div><strong>${escHtml(l.id)}</strong> &mdash; ${escHtml(l.purpose)} <span style="color:var(--muted);font-size:.72rem;margin-left:4px">(${tag})</span></div>`;
+    }).join('') || '<div style="color:var(--muted);font-size:.8rem">No test layers reported.</div>';
+  } catch (e) {
+    badge.textContent = 'ERROR';
+    badge.style.background = 'rgba(239,68,68,.18)';
+    badge.style.color = '#ef4444';
+    document.getElementById('gov-issues').innerHTML = `<div style="color:#ef4444;font-size:.85rem">Failed to load governance snapshot: ${escHtml(e.message || String(e))}</div>`;
   }
 }
 

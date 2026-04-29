@@ -66,7 +66,7 @@ type uiRouteMetadata struct {
 	Methods []uiRouteMethod // per-method contract (length ≥ 1)
 }
 
-// uiRoutes is the alphabetised metadata table for all 131 admin-UI routes.
+// uiRoutes is the alphabetised metadata table for all 132 admin-UI routes.
 //
 // MIGRATION BUCKETS (per the C1.5 schema-evolution decision):
 //
@@ -560,4 +560,8 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
 	{Path: "/healthz", Handler: "apiHealthz", Domain: "observability", Public: true,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "LB probe"}}},
+
+	// ── Governance (Phase C3 — read-only control-plane visibility) ───────
+	{Path: "/api/governance/control-plane", Handler: "apiGovernanceControlPlane", Domain: "governance", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleAdmin, Note: "C3: read-only governance surface; admin-only by design"}}},
 }
