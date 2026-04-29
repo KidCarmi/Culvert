@@ -25,6 +25,13 @@ ha_config.json
 # Sensitive runtime state (these live in /data volume, not in git)
 data/
 
+# Runtime-generated caches written to the working directory by the
+# binary on first start. The seed list default_categories.json IS
+# tracked; these two files are mutable per-instance state and should
+# never be committed.
+categories.json
+fileprofiles.json
+
 # Atomic-write temp files
 *.tmp
 
