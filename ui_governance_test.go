@@ -115,6 +115,39 @@ func TestApiGovernance_MethodGate(t *testing.T) {
 	}
 }
 
+// TestApiGovernance_NonAdminMutatingMethodsNoDisclosure — pins the
+// belt-and-braces contract that a non-admin sending a non-GET method
+// (which the route does not even support) cannot pry the snapshot
+// out of the handler. The current implementation orders the method
+// gate BEFORE requireRole, so the response is 405 rather than 403,
+// but in either case the body must not contain any governance field
+// names. If the handler order is ever swapped, this test still
+// passes — it asserts denial AND non-disclosure, not a specific
+// status code.
+func TestApiGovernance_NonAdminMutatingMethodsNoDisclosure(t *testing.T) {
+	leakyKeys := []string{
+		"schema_version", "routes", "counters", "governance_health",
+		"test_layers", "would_deny", "by_min_role",
+	}
+	for _, role := range []UIRole{RoleViewer, RoleOperator, UIRole("")} {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+			t.Run(string(role)+"_"+method, func(t *testing.T) {
+				w := httptest.NewRecorder()
+				apiGovernanceControlPlane(w, govReq(method, role))
+				if w.Code == http.StatusOK {
+					t.Fatalf("role=%q method=%q got 200 — non-admin must NEVER receive the snapshot", role, method)
+				}
+				body := w.Body.String()
+				for _, k := range leakyKeys {
+					if strings.Contains(body, `"`+k+`"`) {
+						t.Errorf("role=%q method=%q response body leaked key %q (status=%d, body=%s)", role, method, k, w.Code, body)
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestApiGovernance_InventoryConsistency — the route summary must
 // agree with the metadata table on every derivable invariant. This
 // catches drift between summariseRoutes and uiRoutes if the schema
