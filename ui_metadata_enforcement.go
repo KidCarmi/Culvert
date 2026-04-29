@@ -90,9 +90,12 @@ func readC2EnforceMode() string {
 var c2ShadowWouldDenyTotal atomic.Int64
 
 // c2ShadowMissingMetaTotal counts requests whose path did not resolve
-// to any uiRoutes entry. C1's reverse-inventory test is supposed to
-// keep this at 0 in normal operation; non-zero increments indicate
-// drift between the helpers and the metadata table.
+// to any uiRoutes entry (including the "/" catch-all). C1's reverse-
+// inventory test is the structural backstop that keeps this at 0;
+// non-zero increments at runtime indicate drift between the helpers
+// and the metadata table that escaped the test gate. Static-asset
+// traffic falls back to the "/" catch-all and does NOT increment this
+// counter.
 var c2ShadowMissingMetaTotal atomic.Int64
 
 // c2ShadowNoPolicyTotal counts requests whose route resolved but whose
@@ -129,15 +132,29 @@ type metadataIndex struct {
 
 // buildMetadataIndex constructs the index from the global uiRoutes.
 // Called once via sync.Once at first lookup.
+//
+// "/" is the catch-all pattern in *http.ServeMux: it matches an exact
+// "/" request AND any path no more-specific pattern owns (e.g.
+// "/index.html", "/static/logo.png", "/favicon.ico"). To mirror that
+// resolution, the "/" entry is registered in BOTH the exact map (for
+// the fast path on a direct "/" request) AND the prefix list (for the
+// catch-all fallback on every other unmatched path). The prefix list
+// is sorted by len(Path) DESC, so "/" is always tried LAST and never
+// shadows a more-specific prefix.
 func buildMetadataIndex() *metadataIndex {
 	idx := &metadataIndex{
 		exact:  make(map[string]uiRouteMetadata, len(uiRoutes)),
 		prefix: make([]uiRouteMetadata, 0, 8),
 	}
 	for _, r := range uiRoutes {
-		if strings.HasSuffix(r.Path, "/") && r.Path != "/" {
+		switch {
+		case r.Path == "/":
+			// Catch-all — register in BOTH maps.
+			idx.exact[r.Path] = r
 			idx.prefix = append(idx.prefix, r)
-		} else {
+		case strings.HasSuffix(r.Path, "/"):
+			idx.prefix = append(idx.prefix, r)
+		default:
 			idx.exact[r.Path] = r
 		}
 	}

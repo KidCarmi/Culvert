@@ -72,16 +72,50 @@ func TestC2_MetadataIndex_PrefixMatch(t *testing.T) {
 	}
 }
 
-// TestC2_MetadataIndex_NotFound confirms unknown paths return false.
-func TestC2_MetadataIndex_NotFound(t *testing.T) {
+// TestC2_MetadataIndex_RootCatchAll confirms that paths owned by the
+// "/" catch-all (SPA shell + static assets) resolve to the "/" entry,
+// matching *http.ServeMux's behavior. Without this, normal UI page
+// loads would falsely register as missing-metadata in production.
+func TestC2_MetadataIndex_RootCatchAll(t *testing.T) {
+	idx := buildMetadataIndex()
+	for _, probe := range []string{
+		"/",
+		"/index.html",
+		"/logo.png",
+		"/static/css/main.css",
+		"/favicon.ico",
+	} {
+		t.Run(probe, func(t *testing.T) {
+			m, ok := idx.Lookup(probe)
+			if !ok {
+				t.Fatalf("Lookup(%q): expected catch-all match, got !ok", probe)
+			}
+			if m.Path != "/" {
+				t.Errorf("Lookup(%q) Path=%q, want '/'", probe, m.Path)
+			}
+		})
+	}
+}
+
+// TestC2_MetadataIndex_UnknownPathFallsToRoot confirms paths with no
+// more-specific match also fall to the "/" catch-all (mirroring the
+// mux). Previously this was tested as "expected not found" — that was
+// wrong because *http.ServeMux always dispatches such paths to the
+// "/" handler (which then returns 404 from staticServer).
+func TestC2_MetadataIndex_UnknownPathFallsToRoot(t *testing.T) {
 	idx := buildMetadataIndex()
 	for _, p := range []string{
 		"/totally-unknown",
 		"/api/does/not/exist",
 		"/api/policyy", // typo — must not collide with /api/policy
 	} {
-		if _, ok := idx.Lookup(p); ok {
-			t.Errorf("Lookup(%q): expected not found", p)
+		m, ok := idx.Lookup(p)
+		if !ok {
+			t.Errorf("Lookup(%q): expected catch-all to '/'", p)
+			continue
+		}
+		if m.Path != "/" {
+			t.Errorf("Lookup(%q) Path=%q, want '/' (catch-all)", p, m.Path)
 		}
 	}
 }
@@ -210,11 +244,21 @@ func TestC2_Evaluate_PublicRouteSkipped(t *testing.T) {
 	}
 }
 
-// TestC2_Evaluate_MissingMetadata confirms unknown paths return
-// Matched=false with the missing-metadata reason.
+// TestC2_Evaluate_MissingMetadata confirms an empty index (simulating
+// drift where the metadata table is missing entirely) is reported as
+// Matched=false with empty MetaPath.
+//
+// We use a synthetic empty index instead of the real one because the
+// real index includes the "/" catch-all, which means production
+// traffic NEVER misses (every path falls back to "/"). The
+// missing-meta path is a defense-in-depth check that fires only on
+// genuine drift.
 func TestC2_Evaluate_MissingMetadata(t *testing.T) {
-	idx := buildMetadataIndex()
-	d := c2Evaluate(c2Req(http.MethodGet, "/api/no-such-endpoint", RoleAdmin), idx)
+	emptyIdx := &metadataIndex{
+		exact:  map[string]uiRouteMetadata{},
+		prefix: nil,
+	}
+	d := c2Evaluate(c2Req(http.MethodGet, "/api/no-such-endpoint", RoleAdmin), emptyIdx)
 	if d.Matched {
 		t.Errorf("Matched=true for unknown path; reason=%q", d.Reason)
 	}
@@ -290,17 +334,29 @@ func TestC2_Middleware_WouldDenyIncrementsCounter(t *testing.T) {
 	}
 }
 
-// TestC2_Middleware_MissingMetaIncrementsCounter confirms an unknown
-// path increments the missing-metadata counter (and request still
-// proceeds).
+// TestC2_Middleware_MissingMetaIncrementsCounter confirms the
+// missing-metadata counter still works when the index genuinely lacks
+// an entry for the path. Production traffic never hits this path
+// because uiRoutes contains the "/" catch-all; the counter exists for
+// defense-in-depth against drift that would otherwise be silent.
+//
+// We swap the package-level c2Index for an empty one for the duration
+// of this test, then restore.
 func TestC2_Middleware_MissingMetaIncrementsCounter(t *testing.T) {
-	resetC2Index()
+	_ = getC2Index() // ensure sync.Once has fired before we swap
+	oldIdx := c2Index
+	c2Index = &metadataIndex{
+		exact:  map[string]uiRouteMetadata{},
+		prefix: nil,
+	}
+	t.Cleanup(func() { c2Index = oldIdx })
+
 	before := c2CounterSnapshot()
 
 	noop := &c2NoopReachedHandler{}
 	mw := uiMetadataEnforcement(noop)
 	mw.ServeHTTP(httptest.NewRecorder(),
-		c2Req(http.MethodGet, "/api/this-route-does-not-exist", RoleAdmin))
+		c2Req(http.MethodGet, "/anything", RoleAdmin))
 
 	after := c2CounterSnapshot()
 	if got, want := after.MissingMeta-before.MissingMeta, int64(1); got != want {
@@ -308,6 +364,36 @@ func TestC2_Middleware_MissingMetaIncrementsCounter(t *testing.T) {
 	}
 	if !noop.called {
 		t.Errorf("handler NOT reached on missing-metadata — must be soft-fail")
+	}
+}
+
+// TestC2_Middleware_StaticAssetDoesNotIncrementMissingMeta is the
+// regression lock for the chatgpt-codex review finding (PR #170): a
+// production /index.html / /logo.png / /static/* request must NOT
+// increment missing-metadata. Pre-fix this counter would jump on
+// every page load, drowning real drift signal in noise.
+func TestC2_Middleware_StaticAssetDoesNotIncrementMissingMeta(t *testing.T) {
+	resetC2Index()
+	before := c2CounterSnapshot()
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+	for _, probe := range []string{
+		"/",
+		"/index.html",
+		"/logo.png",
+		"/static/css/main.css",
+	} {
+		mw.ServeHTTP(httptest.NewRecorder(),
+			c2Req(http.MethodGet, probe, RolePublic))
+	}
+
+	after := c2CounterSnapshot()
+	if got := after.MissingMeta - before.MissingMeta; got != 0 {
+		t.Errorf("MissingMeta incremented on static-asset traffic: delta=%d", got)
+	}
+	if got := after.WouldDeny - before.WouldDeny; got != 0 {
+		t.Errorf("WouldDeny incremented on static-asset traffic: delta=%d", got)
 	}
 }
 
