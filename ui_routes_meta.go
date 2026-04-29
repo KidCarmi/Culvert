@@ -283,7 +283,8 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/security-scan/status", Handler: "apiSecScanStatus", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
 	{Path: "/api/security-scan/feeds/sync", Handler: "apiSecFeedsSync", Domain: "security", Public: false,
-		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "no direct auditEvent observed (delegated)"}}},
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "manual threat-feed sync; auditEvent added per C1.5 audit §3.2"}}},
 	{Path: "/api/security-scan/feeds/domain-allowlist", Handler: "apiDomainAllowlist", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
