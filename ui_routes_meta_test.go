@@ -23,13 +23,17 @@ import (
 // uiAuthMiddleware and per-handler requireRole calls. Phase C2 will
 // flip the enforcement switch.
 
-// TestC1_RouteMetadata_Locked131 enforces two structural invariants on
+// TestC1_RouteMetadata_Locked132 enforces two structural invariants on
 // the uiRoutes table itself:
 //
-//  1. Length is exactly 131 entries.
+//  1. Length is exactly 132 entries.
 //  2. Every Path appears at most once (no accidental duplicates).
-func TestC1_RouteMetadata_Locked131(t *testing.T) {
-	const want = 131
+//
+// Count history:
+//   - 131 — pre-C3 baseline (Phase C2/C2c).
+//   - 132 — Phase C3 added /api/governance/control-plane.
+func TestC1_RouteMetadata_Locked132(t *testing.T) {
+	const want = 132
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -134,6 +138,7 @@ var helperSourceFiles = []string{
 	"update.go",
 	"cdr_ui.go",
 	"diagnostics.go",
+	"ui_governance.go",
 }
 
 // scanRegisteredRoutes returns every route path registered by a
