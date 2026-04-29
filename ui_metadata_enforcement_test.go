@@ -294,27 +294,37 @@ func (h *c2NoopReachedHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request)
 	w.WriteHeader(http.StatusOK)
 }
 
-// TestC2_Middleware_ShadowAlwaysReachesHandler is the central C2a
-// invariant: even a request that WOULD be denied by C2's evaluation
-// MUST still reach the downstream handler. The whole point of shadow
-// mode is to surface deny decisions without acting on them.
+// TestC2_Middleware_ShadowAlwaysReachesHandler pins the shadow-mode
+// invariant: even a request that WOULD be denied MUST still reach the
+// handler when c2Mode() == c2ModeShadow. C2b's default is enforce, so
+// this test forces shadow mode explicitly to keep the regression lock.
 func TestC2_Middleware_ShadowAlwaysReachesHandler(t *testing.T) {
-	// Reset the index so test ordering doesn't matter.
+	withC2Mode(t, c2ModeShadow)
 	resetC2Index()
 	noop := &c2NoopReachedHandler{}
 	mw := uiMetadataEnforcement(noop)
 
-	// Viewer hitting admin-only route — would-deny under C2b.
+	// Viewer hitting admin-only route — would-deny.
 	req := c2Req(http.MethodPost, "/api/auth/users", RoleViewer)
 	rec := httptest.NewRecorder()
 	mw.ServeHTTP(rec, req)
 
 	if !noop.called {
-		t.Errorf("downstream handler NOT reached — C2a is blocking, but it must be shadow-only")
+		t.Errorf("downstream handler NOT reached — shadow mode must let would-deny pass through")
 	}
 	if rec.Code == http.StatusForbidden {
-		t.Errorf("got 403 — C2a must not block in shadow mode")
+		t.Errorf("got 403 — shadow mode must NOT block")
 	}
+}
+
+// withC2Mode swaps c2EnforceMode for the duration of a test and
+// restores the original value via t.Cleanup. Tests that need a
+// specific mode must call this BEFORE constructing middleware.
+func withC2Mode(t *testing.T, mode string) {
+	t.Helper()
+	oldMode := c2EnforceMode
+	c2EnforceMode = mode
+	t.Cleanup(func() { c2EnforceMode = oldMode })
 }
 
 // TestC2_Middleware_WouldDenyIncrementsCounter confirms the would-deny
@@ -419,16 +429,19 @@ func TestC2_Middleware_AdminPathDoesNotIncrementWouldDeny(t *testing.T) {
 
 // ── 5. Kill switch ────────────────────────────────────────────────────────
 
-// TestC2_KillSwitch_DefaultIsShadow confirms the parsed enforcement
-// mode defaults to shadow when CULVERT_C2_ENFORCE is unset/empty.
+// TestC2_KillSwitch_DefaultIsEnforce confirms C2b's fail-closed default:
+// the parsed mode is c2ModeEnforce when CULVERT_C2_ENFORCE is unset/empty.
+// This was c2ModeShadow in C2a; the inversion is intentional so a
+// missing/typo'd env var fails closed (enforce) rather than silently
+// running in shadow.
 //
 // We invoke readC2EnforceMode directly (the public env var was already
 // parsed at package init into c2EnforceMode; we re-parse to test the
 // reader function in isolation).
-func TestC2_KillSwitch_DefaultIsShadow(t *testing.T) {
+func TestC2_KillSwitch_DefaultIsEnforce(t *testing.T) {
 	t.Setenv(c2EnforceEnvVar, "")
-	if got := readC2EnforceMode(); got != c2ModeShadow {
-		t.Errorf("default mode = %q, want %q", got, c2ModeShadow)
+	if got := readC2EnforceMode(); got != c2ModeEnforce {
+		t.Errorf("default mode = %q, want %q (C2b is fail-closed)", got, c2ModeEnforce)
 	}
 }
 
@@ -457,15 +470,29 @@ func TestC2_KillSwitch_RecognisesEnforceValues(t *testing.T) {
 	}
 }
 
-// TestC2_KillSwitch_DefaultsShadowOnGarbage confirms unknown values
-// (including the explicit "false" disable string) resolve to shadow,
-// not to a third "unknown" mode.
-func TestC2_KillSwitch_DefaultsShadowOnGarbage(t *testing.T) {
-	for _, v := range []string{"false", "0", "no", "off", "garbage"} {
+// TestC2_KillSwitch_FalseValuesForceShadow confirms ONLY the explicit
+// false-ish set ("false"/"0"/"no"/"off") forces shadow. Anything else
+// — unknown strings, typos — resolves to enforce (fail-closed).
+func TestC2_KillSwitch_FalseValuesForceShadow(t *testing.T) {
+	for _, v := range []string{"false", "FALSE", "False", "0", "no", "NO", "off", "OFF"} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv(c2EnforceEnvVar, v)
 			if got := readC2EnforceMode(); got != c2ModeShadow {
-				t.Errorf("%q parsed as %q, want %q (default-deny on unknown values)", v, got, c2ModeShadow)
+				t.Errorf("%q parsed as %q, want %q (kill switch must force shadow)", v, got, c2ModeShadow)
+			}
+		})
+	}
+}
+
+// TestC2_KillSwitch_GarbageDefaultsEnforce confirms a typo'd env value
+// resolves to enforce (fail-closed). Critical: this means
+// CULVERT_C2_ENFORCE=falsy-typo cannot accidentally disable enforcement.
+func TestC2_KillSwitch_GarbageDefaultsEnforce(t *testing.T) {
+	for _, v := range []string{"garbage", "fals", "tru", "maybe"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv(c2EnforceEnvVar, v)
+			if got := readC2EnforceMode(); got != c2ModeEnforce {
+				t.Errorf("%q parsed as %q, want %q (typos must fail closed)", v, got, c2ModeEnforce)
 			}
 		})
 	}
@@ -476,4 +503,226 @@ func TestC2_KillSwitch_DefaultsShadowOnGarbage(t *testing.T) {
 // Cheap because building the index walks 131 entries.
 func resetC2Index() {
 	c2Index = buildMetadataIndex()
+}
+
+// ── 6. C2b enforcement tests ──────────────────────────────────────────────
+//
+// These tests pin the C2b enforcement contract — the moment shadow mode
+// flips to actual 403s. The previous shadow-mode tests stay; this group
+// adds the affirmative blocking behavior.
+
+// TestC2_Enforce_ViewerHitsAdmin_403 is the central C2b invariant:
+// in enforce mode, a session role below the per-method MinRole
+// produces 403 BEFORE the handler runs.
+func TestC2_Enforce_ViewerHitsAdmin_403(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleViewer))
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("Viewer POST: got %d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if noop.called {
+		t.Errorf("downstream handler reached — C2b must block in enforce mode")
+	}
+}
+
+// TestC2_Enforce_AdminHitsAdmin_OK confirms the happy path is
+// unaffected by enforcement: an admin role on an admin-only route
+// passes through cleanly.
+func TestC2_Enforce_AdminHitsAdmin_OK(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleAdmin))
+
+	if rec.Code == http.StatusForbidden {
+		t.Errorf("Admin POST blocked: got 403 (RBAC over-rejects admin); body=%s", rec.Body.String())
+	}
+	if !noop.called {
+		t.Errorf("downstream handler not reached for admin happy path")
+	}
+}
+
+// TestC2_Enforce_KillSwitchForcesShadow confirms CULVERT_C2_ENFORCE=false
+// (parsed into c2ModeShadow) reverts to shadow behavior even on a
+// would-deny request. Operators must be able to disable the enforcement
+// gate without rebuilding.
+func TestC2_Enforce_KillSwitchForcesShadow(t *testing.T) {
+	// Force shadow mode (simulating CULVERT_C2_ENFORCE=false at startup).
+	withC2Mode(t, c2ModeShadow)
+	resetC2Index()
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+
+	before := c2CounterSnapshot()
+
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleViewer))
+
+	if rec.Code == http.StatusForbidden {
+		t.Errorf("kill switch failed: got 403 in shadow mode; body=%s", rec.Body.String())
+	}
+	if !noop.called {
+		t.Errorf("downstream handler not reached in shadow mode — kill switch should let the request pass")
+	}
+
+	after := c2CounterSnapshot()
+	if got := after.WouldDeny - before.WouldDeny; got != 1 {
+		t.Errorf("WouldDeny counter delta=%d, want 1 (decision still recorded in shadow)", got)
+	}
+	if got := after.EnforceDenied - before.EnforceDenied; got != 0 {
+		t.Errorf("EnforceDenied counter delta=%d, want 0 (no actual deny in shadow mode)", got)
+	}
+}
+
+// TestC2_Enforce_PublicRouteNeverBlocked confirms public routes remain
+// uiAuthMiddleware's domain. Even with C2 enforcing, a public POST
+// (e.g. /api/auth/login with no role context) MUST proceed.
+func TestC2_Enforce_PublicRouteNeverBlocked(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+
+	rec := httptest.NewRecorder()
+	// No role in context — uiAuthMiddleware's allowlist would let this
+	// through in production. C2 must not block public routes.
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", http.NoBody)
+	req.RemoteAddr = "198.51.100.70:0"
+	mw.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusForbidden {
+		t.Errorf("public route blocked by C2: got 403 — uiAuthMiddleware allowlist must remain authoritative")
+	}
+	if !noop.called {
+		t.Errorf("downstream handler not reached for public route")
+	}
+}
+
+// TestC2_Enforce_MissingMetadataNeverBlocks confirms missing metadata
+// remains soft-fail in BOTH modes. Even in enforce mode, a path the
+// metadata table doesn't know about must reach the handler — drift is
+// observability, not a production outage; handler-level requireRole
+// remains the real backstop.
+func TestC2_Enforce_MissingMetadataNeverBlocks(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+
+	// Swap c2Index for an empty one so the lookup genuinely misses
+	// (the production catch-all "/" entry would otherwise resolve
+	// every path).
+	_ = getC2Index()
+	oldIdx := c2Index
+	c2Index = &metadataIndex{
+		exact:  map[string]uiRouteMetadata{},
+		prefix: nil,
+	}
+	t.Cleanup(func() { c2Index = oldIdx })
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+
+	before := c2CounterSnapshot()
+
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/some-drift-path", RoleViewer))
+
+	if rec.Code == http.StatusForbidden {
+		t.Errorf("missing-meta path blocked in enforce: got 403 — soft-fail invariant broken")
+	}
+	if !noop.called {
+		t.Errorf("downstream handler not reached on missing meta — must be soft-fail in BOTH modes")
+	}
+	after := c2CounterSnapshot()
+	if got := after.MissingMeta - before.MissingMeta; got != 1 {
+		t.Errorf("MissingMeta delta=%d, want 1", got)
+	}
+	if got := after.EnforceDenied - before.EnforceDenied; got != 0 {
+		t.Errorf("EnforceDenied delta=%d, want 0 (missing-meta must not increment enforce counter)", got)
+	}
+}
+
+// TestC2_Enforce_NoMethodPolicyNeverBlocks confirms the no-policy
+// soft-fail path also stays open in enforce mode. /api/audit declares
+// only GET; a hypothetical PATCH must not be 403'd by C2 (the handler
+// itself returns 405).
+func TestC2_Enforce_NoMethodPolicyNeverBlocks(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req("PATCH", "/api/audit", RoleViewer))
+
+	if rec.Code == http.StatusForbidden {
+		t.Errorf("no-policy path blocked in enforce: got 403 — soft-fail invariant broken")
+	}
+	if !noop.called {
+		t.Errorf("downstream handler not reached on no-policy path")
+	}
+}
+
+// TestC2_Enforce_DenyIncrementsBothCounters is the counters-sanity
+// regression. In enforce mode, a would-deny MUST increment both
+// counters by exactly one each — the policy decision and the
+// enforcement action move in lock-step.
+func TestC2_Enforce_DenyIncrementsBothCounters(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+
+	before := c2CounterSnapshot()
+
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleViewer))
+
+	after := c2CounterSnapshot()
+	if got := after.WouldDeny - before.WouldDeny; got != 1 {
+		t.Errorf("WouldDeny delta=%d, want 1", got)
+	}
+	if got := after.EnforceDenied - before.EnforceDenied; got != 1 {
+		t.Errorf("EnforceDenied delta=%d, want 1 (must lock-step with WouldDeny in enforce mode)", got)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("response code = %d, want 403", rec.Code)
+	}
+}
+
+// TestC2_Enforce_ShadowDoesNotIncrementEnforceCounter confirms the
+// EnforceDenied counter only moves in enforce mode. Shadow mode
+// records the policy decision (WouldDeny) but never the action.
+func TestC2_Enforce_ShadowDoesNotIncrementEnforceCounter(t *testing.T) {
+	withC2Mode(t, c2ModeShadow)
+	resetC2Index()
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+
+	before := c2CounterSnapshot()
+
+	mw.ServeHTTP(httptest.NewRecorder(),
+		c2Req(http.MethodPost, "/api/auth/users", RoleViewer))
+
+	after := c2CounterSnapshot()
+	if got := after.WouldDeny - before.WouldDeny; got != 1 {
+		t.Errorf("WouldDeny delta=%d, want 1 (decision recorded)", got)
+	}
+	if got := after.EnforceDenied - before.EnforceDenied; got != 0 {
+		t.Errorf("EnforceDenied delta=%d, want 0 (no enforcement in shadow)", got)
+	}
 }
