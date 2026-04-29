@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"sort"
@@ -124,6 +125,13 @@ var c2ShadowMissingMetaTotal atomic.Int64
 // per design — the request still proceeds in both modes.
 var c2ShadowNoPolicyTotal atomic.Int64
 
+// c2AuditMissingTotal counts SUCCESSFUL requests (2xx/3xx) where the
+// metadata declared AuditExpected=true but no auditEvent /
+// auditEventDiff call was observed in the handler. C2c observability
+// only — never blocks the request. Failed requests (4xx/5xx) are
+// excluded because most failure paths legitimately skip auditing.
+var c2AuditMissingTotal atomic.Int64
+
 // c2CounterSnapshot returns the current values of all C2 counters,
 // useful for test introspection. Returned in a stable struct so test
 // assertions don't have to load atomics individually.
@@ -132,6 +140,7 @@ type c2Counters struct {
 	EnforceDenied int64 // request actually 403'd (enforce mode only)
 	MissingMeta   int64 // path resolves to nothing (soft-fail, both modes)
 	NoPolicy      int64 // method has no policy + no MethodAny (soft-fail, both modes)
+	AuditMissing  int64 // AuditExpected=true on a successful request but no audit emitted (C2c)
 }
 
 func c2CounterSnapshot() c2Counters {
@@ -140,6 +149,7 @@ func c2CounterSnapshot() c2Counters {
 		EnforceDenied: c2EnforceDeniedTotal.Load(),
 		MissingMeta:   c2ShadowMissingMetaTotal.Load(),
 		NoPolicy:      c2ShadowNoPolicyTotal.Load(),
+		AuditMissing:  c2AuditMissingTotal.Load(),
 	}
 }
 
@@ -335,6 +345,81 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 
 // ── Middleware ────────────────────────────────────────────────────────────
 
+// ── C2c — audit-completion observability (REPORT-ONLY) ────────────────────
+//
+// C2c piggy-backs on uiMetadataEnforcement to verify that every
+// successful request whose metadata declares AuditExpected=true ALSO
+// emitted at least one auditEvent / auditEventDiff call. The check
+// produces a single WARN log line per gap; it never blocks a request,
+// never changes RBAC, never alters mutation handling.
+//
+// Mechanism:
+//
+//   1. The middleware injects a *atomic.Bool into the request context
+//      under c2AuditedKey{} BEFORE calling next.ServeHTTP.
+//   2. auditEventDiff (in ui_helpers.go) checks for the flag and flips
+//      it to true on the first audit emission. Subsequent emissions
+//      are no-ops on the flag (one-bit signal).
+//   3. After next.ServeHTTP returns, the middleware reads the flag and
+//      the response status. A WARN line fires only when:
+//        - status is in [200, 400) (success-ish — failed requests
+//          legitimately skip auditing)
+//        - metadata declared AuditExpected=true for the matched
+//          (path, method)
+//        - the flag is false (no audit emitted)
+//   4. Hijacked / never-written responses (status == 0) are treated as
+//      "unknown" and skipped to avoid false positives on streaming
+//      handlers that flush headers without explicit WriteHeader.
+
+// c2AuditedKey is the context key under which uiMetadataEnforcement
+// stores the per-request audit-emission flag.
+type c2AuditedKey struct{}
+
+// statusWriter wraps http.ResponseWriter to capture the response
+// status code. Default value 0 is treated as "no header written"
+// downstream; any explicit WriteHeader call updates the field.
+//
+// The wrapper does NOT intercept Write — Go's stdlib already calls
+// WriteHeader(200) implicitly on first Write, so the field will be
+// populated for all normally-completing handlers.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	if sw.status == 0 {
+		sw.status = code
+	}
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+// effectiveStatus returns the actual HTTP status the handler emitted.
+// A handler that calls Write() without WriteHeader() yields 200 via
+// the stdlib's implicit-header behaviour. A handler that returns
+// without writing anything (status == 0) is treated as "unknown" by
+// callers — they should skip the C2c audit check in that case.
+func (sw *statusWriter) effectiveStatus() int {
+	if sw.status == 0 {
+		return 0
+	}
+	return sw.status
+}
+
+// markAuditEmitted is called by auditEventDiff (ui_helpers.go) when a
+// request has a c2AuditedKey flag in its context. Returns silently
+// when no flag is present so non-UI callers (e.g. internal periodic
+// audit emissions, or other services calling auditEvent during
+// startup) are unaffected.
+func markAuditEmitted(r *http.Request) {
+	if r == nil {
+		return
+	}
+	if flag, ok := r.Context().Value(c2AuditedKey{}).(*atomic.Bool); ok {
+		flag.Store(true)
+	}
+}
+
 // uiMetadataEnforcement is the C2 metadata-driven enforcement
 // middleware. The middleware sits between uiAuthMiddleware and the
 // mux:
@@ -359,6 +444,7 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 //   - Shadow  + would-deny → "C2-shadow: WOULD-DENY ..."
 //   - Missing meta         → "C2: no metadata ..." (from c2EvaluateAndLog)
 //   - No method policy     → "C2: no method policy ..." (from c2EvaluateAndLog)
+//   - Audit gap (C2c)      → "C2: audit missing ..." (post-handler, success only)
 //   - Otherwise            → no log line.
 func uiMetadataEnforcement(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -375,6 +461,64 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 			logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
 				d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
 		}
-		next.ServeHTTP(w, r)
+
+		// C2c — audit-completion observability.
+		//
+		// Re-resolve the per-method policy entry for this request. If
+		// the route has no metadata, no method policy, or
+		// AuditExpected=false, there is nothing to track and we skip
+		// the instrumentation entirely (no flag injection, no writer
+		// wrapping).
+		policy, expectAudit := c2AuditPolicy(r, d)
+		if !expectAudit {
+			next.ServeHTTP(w, r)
+			return
+		}
+		_ = policy // reserved for future C2c expansions; suppresses U1000 if audit blocks early.
+
+		var audited atomic.Bool
+		ctx := context.WithValue(r.Context(), c2AuditedKey{}, &audited)
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r.WithContext(ctx))
+
+		// Post-handler decision. Skip on:
+		//   - unknown status (handler hijacked or never wrote) — avoids
+		//     false positives on streaming endpoints
+		//   - failed status (>=400) — failure paths legitimately skip
+		//     auditing; audit-on-failure would be a separate concern
+		//   - audit emitted — happy path, silent
+		status := sw.effectiveStatus()
+		if status == 0 || status >= 400 || audited.Load() {
+			return
+		}
+		c2AuditMissingTotal.Add(1)
+		logger.Printf("C2: audit missing for route=%q method=%q meta_path=%q status=%d",
+			d.Path, d.Method, d.MetaPath, status)
 	})
+}
+
+// c2AuditPolicy resolves the per-method policy entry for the request
+// and reports whether AuditExpected applies. Returns (policy, true)
+// when AuditExpected=true; (zero, false) otherwise — including for
+// missing metadata, no-method-policy, public routes (uiAuthMiddleware
+// allowlist owns those — C2c stays out), and routes that declare
+// AuditExpected=false.
+func c2AuditPolicy(r *http.Request, d c2Decision) (uiRouteMethod, bool) {
+	if d.MetaPath == "" {
+		return uiRouteMethod{}, false
+	}
+	meta, ok := getC2Index().Lookup(d.MetaPath)
+	if !ok {
+		return uiRouteMethod{}, false
+	}
+	if meta.Public {
+		// Public routes are uiAuthMiddleware's domain. C2c does not
+		// own audit-completion enforcement for them.
+		return uiRouteMethod{}, false
+	}
+	policy, ok := meta.PolicyForMethod(r.Method)
+	if !ok || !policy.AuditExpected {
+		return uiRouteMethod{}, false
+	}
+	return policy, true
 }

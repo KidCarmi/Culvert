@@ -799,3 +799,254 @@ func TestC2_Shadow_WouldDenyEmitsExactlyOneLogLine(t *testing.T) {
 		t.Errorf("expected exactly 1 C2-* line in shadow-mode would-deny, got %d:\n%s", got, out)
 	}
 }
+
+// ── 7. C2c audit-completion observability tests ──────────────────────────
+//
+// These tests pin the C2c contract: a successful request whose
+// metadata declares AuditExpected=true MUST emit at least one
+// auditEvent / auditEventDiff call, or the middleware logs a single
+// WARN line and increments c2AuditMissingTotal. Failed requests
+// (4xx/5xx) and routes with AuditExpected=false produce no warning.
+// C2c never blocks a request.
+
+// c2RoleHandler returns an http.Handler that always returns 200 and
+// optionally calls auditEvent on its way out. Used by C2c tests to
+// simulate handlers that do or do not audit.
+func c2RoleHandler(audit bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if audit {
+			auditEvent(r, "test.audit", "c2c", "")
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+// c2FailHandler returns a handler that responds with the given
+// status. Used to verify failed requests skip the C2c warning.
+func c2FailHandler(status int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+	})
+}
+
+// TestC2c_AuditExpected_Emitted_NoWarning is the happy path: an
+// admin POSTs to /api/auth/users (AuditExpected=true) and the
+// handler emits an audit event. No warning, counter unchanged.
+func TestC2c_AuditExpected_Emitted_NoWarning(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	before := c2CounterSnapshot()
+
+	mw := uiMetadataEnforcement(c2RoleHandler(true))
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleAdmin))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if strings.Contains(buf.String(), "audit missing") {
+		t.Errorf("unexpected audit-missing warning when handler audited:\n%s", buf.String())
+	}
+	after := c2CounterSnapshot()
+	if got := after.AuditMissing - before.AuditMissing; got != 0 {
+		t.Errorf("AuditMissing delta=%d, want 0", got)
+	}
+}
+
+// TestC2c_AuditExpected_NotEmitted_Warning is the central C2c
+// invariant: AuditExpected=true on a successful request without an
+// audit emission MUST log a warning and increment the counter.
+func TestC2c_AuditExpected_NotEmitted_Warning(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	before := c2CounterSnapshot()
+
+	mw := uiMetadataEnforcement(c2RoleHandler(false))
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleAdmin))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "C2: audit missing") {
+		t.Errorf("expected C2 audit-missing warning; got:\n%s", out)
+	}
+	if !strings.Contains(out, "/api/auth/users") {
+		t.Errorf("warning did not include the route path; got:\n%s", out)
+	}
+	if got := strings.Count(out, "audit missing"); got != 1 {
+		t.Errorf("expected exactly 1 audit-missing line, got %d:\n%s", got, out)
+	}
+	after := c2CounterSnapshot()
+	if got := after.AuditMissing - before.AuditMissing; got != 1 {
+		t.Errorf("AuditMissing delta=%d, want 1", got)
+	}
+}
+
+// TestC2c_AuditNotExpected_NoWarning confirms routes whose metadata
+// declares AuditExpected=false produce no warning regardless of
+// whether the handler audited.
+func TestC2c_AuditNotExpected_NoWarning(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	before := c2CounterSnapshot()
+
+	// /api/audit GET is metadata-declared AuditExpected=false. The
+	// handler does not audit; we must NOT log a warning.
+	mw := uiMetadataEnforcement(c2RoleHandler(false))
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodGet, "/api/audit", RoleViewer))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if strings.Contains(buf.String(), "audit missing") {
+		t.Errorf("unexpected warning for AuditExpected=false route:\n%s", buf.String())
+	}
+	after := c2CounterSnapshot()
+	if got := after.AuditMissing - before.AuditMissing; got != 0 {
+		t.Errorf("AuditMissing delta=%d, want 0", got)
+	}
+}
+
+// TestC2c_FailedRequest_NoWarning confirms failed requests (4xx/5xx)
+// skip the audit-completion check entirely. Most error paths
+// legitimately don't audit, and warning on every failure would drown
+// real gaps in noise.
+func TestC2c_FailedRequest_NoWarning(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	before := c2CounterSnapshot()
+
+	// Admin POSTs to /api/auth/users (AuditExpected=true). Handler
+	// returns 400 without auditing. C2c must NOT warn — failed
+	// requests are exempt.
+	mw := uiMetadataEnforcement(c2FailHandler(http.StatusBadRequest))
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleAdmin))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if strings.Contains(buf.String(), "audit missing") {
+		t.Errorf("unexpected warning on failed request:\n%s", buf.String())
+	}
+	after := c2CounterSnapshot()
+	if got := after.AuditMissing - before.AuditMissing; got != 0 {
+		t.Errorf("AuditMissing delta=%d, want 0 (failed requests must skip)", got)
+	}
+}
+
+// TestC2c_NeverBlocksRequest pins the no-blocking invariant: even
+// when the audit-completion check fires, the response code stays 200
+// and the handler reaches its end. C2c is observability only.
+func TestC2c_NeverBlocksRequest(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	var handlerEnd bool
+	mw := uiMetadataEnforcement(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// AuditExpected=true on this route, but handler does NOT audit.
+		w.WriteHeader(http.StatusOK)
+		handlerEnd = true
+	}))
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleAdmin))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("C2c blocked successful request: got %d, want 200", rec.Code)
+	}
+	if !handlerEnd {
+		t.Errorf("handler did not reach end — C2c must never block")
+	}
+	if !strings.Contains(buf.String(), "audit missing") {
+		t.Errorf("expected audit-missing warning regardless; got:\n%s", buf.String())
+	}
+}
+
+// TestC2c_OneWarningPerRequest pins the no-double-log invariant.
+// Even if the handler is invoked through several layers, the
+// middleware emits at most one C2 audit-missing line per request.
+func TestC2c_OneWarningPerRequest(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	mw := uiMetadataEnforcement(c2RoleHandler(false))
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleAdmin))
+
+	if got := strings.Count(buf.String(), "audit missing"); got != 1 {
+		t.Errorf("expected exactly 1 audit-missing line, got %d:\n%s", got, buf.String())
+	}
+}
+
+// TestC2c_PublicRoute_NoWarning confirms public routes are exempt
+// from the audit-completion check (consistent with C2's overall
+// "uiAuthMiddleware owns public routes" doctrine).
+func TestC2c_PublicRoute_NoWarning(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	before := c2CounterSnapshot()
+
+	// /api/auth/login POST is Public=true with AuditExpected=true in
+	// metadata. C2c does not own public routes; a public response
+	// without audit must not warn.
+	mw := uiMetadataEnforcement(c2RoleHandler(false))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", http.NoBody)
+	req.RemoteAddr = "198.51.100.71:0"
+	// no role context — public route
+	mw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if strings.Contains(buf.String(), "audit missing") {
+		t.Errorf("public route emitted audit-missing warning — must be exempt:\n%s", buf.String())
+	}
+	after := c2CounterSnapshot()
+	if got := after.AuditMissing - before.AuditMissing; got != 0 {
+		t.Errorf("AuditMissing delta=%d, want 0 on public route", got)
+	}
+}
