@@ -9,21 +9,29 @@ import (
 	"sync/atomic"
 )
 
-// ── Phase C2a — Metadata enforcement (SHADOW / DRY-RUN) ───────────────────
+// ── Phase C2b — Metadata enforcement (ENFORCE by default) ────────────────
 //
-// C2a is the FIRST step of the C2 enforcement rollout. It introduces the
-// uiMetadataEnforcement middleware between uiAuthMiddleware and the mux,
-// where it:
+// C2b activates the enforcement branch in uiMetadataEnforcement. When
+// the metadata says a request lacks the per-method MinRole, the
+// middleware returns 403 BEFORE reaching the handler. Defense-in-depth
+// is preserved: handler-level requireRole calls remain in place as the
+// real backstop.
 //
-//   1. Looks up the route metadata for the incoming request.
-//   2. Evaluates whether the session role meets the per-method MinRole.
-//   3. LOGS would-deny decisions and increments a counter.
-//   4. ALWAYS passes the request through to the handler (no blocking).
+// Decision flow per request:
 //
-// C2a is intentionally non-enforcing. It exists so we can prove on real
-// traffic that the metadata table's enforcement decisions match what the
-// existing handler-level requireRole calls would do, BEFORE turning the
-// metadata into the authoritative gate (C2b).
+//   1. Look up route metadata for r.URL.Path.
+//   2. If no metadata entry → soft-fail (handler-level requireRole stays
+//      authoritative). Counter increments; request proceeds.
+//   3. If route is public → C2 stays out (uiAuthMiddleware allowlist).
+//   4. If method has no policy and no MethodAny fallback → soft-fail.
+//   5. If session role meets MinRole → allow.
+//   6. Otherwise:
+//        - In c2ModeShadow: log + count would-deny, request proceeds.
+//        - In c2ModeEnforce: log + count would-deny, increment
+//          c2EnforceDeniedTotal, return 403.
+//
+// The shadow branch is preserved so operators can revert to dry-run
+// at any time via CULVERT_C2_ENFORCE=false (no rebuild required).
 //
 // Defense-in-depth principle (per the maintainer's design sign-off):
 //   • Existing handler-level requireRole calls remain in place.
@@ -45,15 +53,17 @@ import (
 // shadows. The variable is read once at process startup; runtime
 // admin-API mutation is NOT supported (governance risk).
 //
-//	value      C2a behavior         C2b behavior (future)
-//	─────      ────────────         ─────────────────────
-//	"" / "0"   shadow (default)     shadow
-//	"false"    shadow               shadow (force-disable enforcement)
-//	"true"     shadow (no-op here)  enforce (default in C2b)
-//	"1"        shadow (no-op here)  enforce
+//	value             behavior
+//	──────            ────────
+//	"" (unset)        enforce (default in C2b — fail-closed)
+//	"true" / "1"      enforce
+//	"yes" / "on"      enforce
+//	(any other)       enforce (anything not explicitly false-ish)
+//	"false" / "0"     shadow (kill switch — log only, no blocking)
+//	"no" / "off"      shadow (kill switch — log only, no blocking)
 //
-// In C2a the variable is parsed and exposed but the enforcement branch
-// does not exist yet; C2b will add the conditional that consumes it.
+// Default is enforce so a missing/typo'd env var fails closed. Only
+// the explicit false-ish set forces shadow.
 const c2EnforceEnvVar = "CULVERT_C2_ENFORCE"
 
 const (
@@ -61,33 +71,44 @@ const (
 	c2ModeEnforce = "enforce"
 )
 
-// c2EnforceMode reflects the parsed CULVERT_C2_ENFORCE env var. C2a
-// treats every value as shadow because no enforcement branch exists
-// yet; C2b will activate the consumer. Read via c2Mode() so the
-// variable has at least one consumer until C2b lands.
+// c2EnforceMode reflects the parsed CULVERT_C2_ENFORCE env var.
+// Read via c2Mode() so the access point is uniform.
 var c2EnforceMode = readC2EnforceMode()
 
 // c2Mode returns the currently active C2 enforcement mode (one of
-// c2ModeShadow / c2ModeEnforce). In C2a the value is observation-only;
-// the middleware is hard-shadow regardless. C2b will branch on this
-// to activate the actual deny path.
+// c2ModeShadow / c2ModeEnforce). The middleware branches on this
+// to decide whether a would-deny becomes a 403 or just a log line.
 func c2Mode() string { return c2EnforceMode }
 
+// readC2EnforceMode parses CULVERT_C2_ENFORCE. C2b inverts the C2a
+// default: only explicit false-ish values force shadow; everything
+// else (unset, unknown, or true-ish) resolves to enforce. This is
+// fail-closed: a typo'd env var produces enforce, not shadow.
 func readC2EnforceMode() string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(c2EnforceEnvVar))) {
-	case "true", "1", "yes", "on":
-		return c2ModeEnforce
-	default:
+	case "false", "0", "no", "off":
 		return c2ModeShadow
+	default:
+		return c2ModeEnforce
 	}
 }
 
 // ── Counters (test-introspectable; Prometheus exposure deferred to C2b) ──
 
 // c2ShadowWouldDenyTotal counts decisions where the session role was
-// strictly lower than the metadata's per-method MinRole. In C2a the
-// request still proceeds; in C2b a non-zero increment ⇒ a 403.
+// strictly lower than the metadata's per-method MinRole. Increments
+// in BOTH shadow and enforce mode — it tracks the policy decision,
+// not the action. In enforce mode every increment also produces a
+// 403 (counted separately by c2EnforceDeniedTotal). The "Shadow"
+// prefix is historical: the counter exists for both modes.
 var c2ShadowWouldDenyTotal atomic.Int64
+
+// c2EnforceDeniedTotal counts requests where the metadata-driven gate
+// actually returned 403. In shadow mode this counter STAYS AT ZERO
+// even when c2ShadowWouldDenyTotal increments; in enforce mode the
+// two counters move in lock-step. The delta between them is the
+// signal operators watch when flipping the kill switch.
+var c2EnforceDeniedTotal atomic.Int64
 
 // c2ShadowMissingMetaTotal counts requests whose path did not resolve
 // to any uiRoutes entry (including the "/" catch-all). C1's reverse-
@@ -95,28 +116,30 @@ var c2ShadowWouldDenyTotal atomic.Int64
 // non-zero increments at runtime indicate drift between the helpers
 // and the metadata table that escaped the test gate. Static-asset
 // traffic falls back to the "/" catch-all and does NOT increment this
-// counter.
+// counter. Stays soft-fail in BOTH modes — never produces a 403.
 var c2ShadowMissingMetaTotal atomic.Int64
 
 // c2ShadowNoPolicyTotal counts requests whose route resolved but whose
 // HTTP method has no Methods entry and no MethodAny fallback. Soft-fail
-// per design — the request still proceeds.
+// per design — the request still proceeds in both modes.
 var c2ShadowNoPolicyTotal atomic.Int64
 
 // c2CounterSnapshot returns the current values of all C2 counters,
 // useful for test introspection. Returned in a stable struct so test
 // assertions don't have to load atomics individually.
 type c2Counters struct {
-	WouldDeny   int64
-	MissingMeta int64
-	NoPolicy    int64
+	WouldDeny     int64 // policy says deny (any mode)
+	EnforceDenied int64 // request actually 403'd (enforce mode only)
+	MissingMeta   int64 // path resolves to nothing (soft-fail, both modes)
+	NoPolicy      int64 // method has no policy + no MethodAny (soft-fail, both modes)
 }
 
 func c2CounterSnapshot() c2Counters {
 	return c2Counters{
-		WouldDeny:   c2ShadowWouldDenyTotal.Load(),
-		MissingMeta: c2ShadowMissingMetaTotal.Load(),
-		NoPolicy:    c2ShadowNoPolicyTotal.Load(),
+		WouldDeny:     c2ShadowWouldDenyTotal.Load(),
+		EnforceDenied: c2EnforceDeniedTotal.Load(),
+		MissingMeta:   c2ShadowMissingMetaTotal.Load(),
+		NoPolicy:      c2ShadowNoPolicyTotal.Load(),
 	}
 }
 
@@ -274,8 +297,17 @@ func c2Evaluate(r *http.Request, idx *metadataIndex) c2Decision {
 }
 
 // c2EvaluateAndLog runs c2Evaluate, increments the appropriate counter,
-// and emits a log line for would-deny / missing-metadata / no-policy
-// outcomes. Returns the decision so middlewares can inspect it.
+// and emits a log line for missing-metadata / no-policy outcomes —
+// these are mode-agnostic soft-fails. Returns the decision so the
+// middleware can inspect it.
+//
+// IMPORTANT: would-deny LOGGING is intentionally deferred to the
+// middleware. The middleware knows the current c2Mode() and emits a
+// single mode-specific line — "C2-shadow: WOULD-DENY" in shadow mode
+// or "C2-enforce: DENIED" in enforce mode. The would-deny COUNTER
+// (c2ShadowWouldDenyTotal) is still incremented here because the
+// counter tracks the policy decision (mode-agnostic), not the
+// action.
 func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 	d := c2Evaluate(r, idx)
 
@@ -283,17 +315,20 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 	case !d.Matched && d.MetaPath == "":
 		// Missing metadata entry entirely.
 		c2ShadowMissingMetaTotal.Add(1)
-		logger.Printf("C2-shadow: no metadata for path=%q method=%q (drift between helpers and uiRoutes)",
+		logger.Printf("C2: no metadata for path=%q method=%q (drift between helpers and uiRoutes)",
 			d.Path, d.Method)
 	case !d.Matched && d.MetaPath != "":
 		// Path resolved but method had no policy.
 		c2ShadowNoPolicyTotal.Add(1)
-		logger.Printf("C2-shadow: no method policy for path=%q method=%q meta_path=%q",
+		logger.Printf("C2: no method policy for path=%q method=%q meta_path=%q",
 			d.Path, d.Method, d.MetaPath)
 	case d.WouldDeny:
 		c2ShadowWouldDenyTotal.Add(1)
-		logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
-			d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
+		// Log emission deferred to the middleware so the message can
+		// reflect the active mode (shadow → "WOULD-DENY";
+		// enforce → "DENIED"). Emitting here would mislabel enforced
+		// denials as shadow decisions and double the deny-path log
+		// volume.
 	}
 	return d
 }
@@ -301,9 +336,8 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 // ── Middleware ────────────────────────────────────────────────────────────
 
 // uiMetadataEnforcement is the C2 metadata-driven enforcement
-// middleware. In C2a it ALWAYS passes the request through after
-// shadow-evaluating the decision; C2b will add the actual deny
-// branch. The middleware sits between uiAuthMiddleware and the mux:
+// middleware. The middleware sits between uiAuthMiddleware and the
+// mux:
 //
 //	uiIPGuardMiddleware ∘ securityMiddleware ∘ uiAuthMiddleware
 //	                   ∘ uiMetadataEnforcement ∘ mux
@@ -311,12 +345,36 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 // uiAuthMiddleware has already either rejected the request (401) or
 // injected uiRoleKey{} into the context. C2 reads that role and
 // compares it against the per-method MinRole declared in uiRoutes.
+//
+// Decision summary:
+//   - d.WouldDeny + c2Mode()==c2ModeEnforce → 403 (request blocked)
+//   - d.WouldDeny + c2Mode()==c2ModeShadow  → log only, request proceeds
+//   - !d.Matched (missing meta or no method policy) → soft-fail in
+//     both modes; handler-level requireRole is the real backstop.
+//   - Public routes → never blocked (uiAuthMiddleware allowlist).
+//   - Otherwise → request proceeds.
+//
+// Log structure (one line per request):
+//   - Enforce + would-deny → "C2-enforce: DENIED ..."
+//   - Shadow  + would-deny → "C2-shadow: WOULD-DENY ..."
+//   - Missing meta         → "C2: no metadata ..." (from c2EvaluateAndLog)
+//   - No method policy     → "C2: no method policy ..." (from c2EvaluateAndLog)
+//   - Otherwise            → no log line.
 func uiMetadataEnforcement(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c2EvaluateAndLog(r, getC2Index())
-		// SHADOW MODE — request always proceeds. C2b will insert the
-		// `if d.WouldDeny && c2EnforceMode == c2ModeEnforce { 403 }`
-		// branch HERE.
+		d := c2EvaluateAndLog(r, getC2Index())
+		if d.WouldDeny {
+			if c2Mode() == c2ModeEnforce {
+				c2EnforceDeniedTotal.Add(1)
+				logger.Printf("C2-enforce: DENIED path=%q method=%q session_role=%q required=%q meta_path=%q",
+					d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			// Shadow mode — record the dry-run decision.
+			logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
+				d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
