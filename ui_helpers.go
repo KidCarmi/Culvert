@@ -20,6 +20,13 @@ func auditEvent(r *http.Request, action, object, detail string) {
 
 // auditEventDiff records an audit event with optional before/after JSON snapshots.
 func auditEventDiff(r *http.Request, action, object, detail string, before, after any) {
+	// C2c — observability hook. When the request was wrapped by
+	// uiMetadataEnforcement (the admin UI middleware chain), flip the
+	// per-request audit-emission flag to true. Plain non-UI callers
+	// have no flag in context and this is a no-op. See
+	// ui_metadata_enforcement.go for the post-handler check.
+	markAuditEmitted(r)
+
 	actor, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if actor == "" {
 		actor = r.RemoteAddr
