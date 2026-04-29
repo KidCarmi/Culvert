@@ -8797,6 +8797,9 @@ async function loadGovernance() {
   const ts = document.getElementById('gov-generated-at');
   const schema = document.getElementById('gov-schema');
   if (!badge) return;
+  // num normalises arbitrary JSON values to a finite Number. Avoids the
+  // |0 / >>>0 idioms that silently truncate counter values to 32 bits.
+  const num = v => Number.isFinite(Number(v)) ? Number(v) : 0;
   try {
     const r = await api('/api/governance/control-plane');
     if (!r) return;
@@ -8815,11 +8818,12 @@ async function loadGovernance() {
     schema.textContent = r.schema_version ? `schema v${r.schema_version}` : '';
 
     const routes = r.routes || {};
+    const totals = routes.totals || {};
     document.getElementById('gov-route-summary').innerHTML = `
-      <div><strong>${routes.total || 0}</strong> routes total</div>
-      <div>${routes.public || 0} public &middot; ${routes.protected || 0} protected</div>
-      <div>${routes.method_entries || 0} method entries &middot; ${routes.method_any_routes || 0} use MethodAny</div>
-      <div style="color:var(--muted);font-size:.78rem">Mutating: ${(routes.totals||{}).mutating||0} &middot; AuditExpected: ${(routes.totals||{}).audit_expected||0}</div>
+      <div><strong>${num(routes.total)}</strong> routes total</div>
+      <div>${num(routes.public)} public &middot; ${num(routes.protected)} protected</div>
+      <div>${num(routes.method_entries)} method entries &middot; ${num(routes.method_any_routes)} use MethodAny</div>
+      <div style="color:var(--muted);font-size:.78rem">Mutating: ${num(totals.mutating)} &middot; AuditExpected: ${num(totals.audit_expected)}</div>
     `;
 
     const c2 = r.c2 || {};
@@ -8832,18 +8836,23 @@ async function loadGovernance() {
     `;
 
     const ctr = r.counters || {};
+    const wouldDeny = num(ctr.would_deny);
+    const enforceDenied = num(ctr.enforce_denied);
+    const missingMeta = num(ctr.missing_meta);
+    const noPolicy = num(ctr.no_policy);
+    const auditMissing = num(ctr.audit_missing);
     document.getElementById('gov-counters').innerHTML = `
-      <div>would_deny:     <strong>${ctr.would_deny|0}</strong></div>
-      <div>enforce_denied: <strong>${ctr.enforce_denied|0}</strong></div>
-      <div>missing_meta:   <strong style="color:${(ctr.missing_meta|0)?'#ef4444':''}">${ctr.missing_meta|0}</strong></div>
-      <div>no_policy:      <strong style="color:${(ctr.no_policy|0)?'#ef4444':''}">${ctr.no_policy|0}</strong></div>
-      <div>audit_missing:  <strong style="color:${(ctr.audit_missing|0)?'#f59e0b':''}">${ctr.audit_missing|0}</strong></div>
+      <div>would_deny:     <strong>${wouldDeny}</strong></div>
+      <div>enforce_denied: <strong>${enforceDenied}</strong></div>
+      <div>missing_meta:   <strong style="color:${missingMeta?'#ef4444':''}">${missingMeta}</strong></div>
+      <div>no_policy:      <strong style="color:${noPolicy?'#ef4444':''}">${noPolicy}</strong></div>
+      <div>audit_missing:  <strong style="color:${auditMissing?'#f59e0b':''}">${auditMissing}</strong></div>
     `;
 
     const byRole = routes.by_min_role || {};
     document.getElementById('gov-by-role').innerHTML = ['admin','operator','viewer','public'].map(role => {
       const a = byRole[role] || {};
-      return `<div>${role.padEnd(9, ' ').replace(/ /g,'&nbsp;')} methods=<strong>${a.methods|0}</strong> &middot; mutating=${a.mutating|0} &middot; audit=${a.audit_expected|0}</div>`;
+      return `<div>${role.padEnd(9, ' ').replace(/ /g,'&nbsp;')} methods=<strong>${num(a.methods)}</strong> &middot; mutating=${num(a.mutating)} &middot; audit=${num(a.audit_expected)}</div>`;
     }).join('');
 
     const axes = ['metadata_parity', 'audit_completion', 'enforce_consistency'];
@@ -8861,7 +8870,7 @@ async function loadGovernance() {
             <div style="display:flex;align-items:center;gap:8px">
               <span style="padding:2px 8px;border-radius:999px;font-size:.68rem;font-weight:700;background:${sv.bg};color:${sv.fg}">${sv.label}</span>
               <code style="font-size:.78rem;color:var(--muted)">${escHtml(i.code)}</code>
-              ${i.count ? `<span style="font-size:.72rem;color:var(--muted)">count=${i.count|0}</span>` : ''}
+              ${i.count ? `<span style="font-size:.72rem;color:var(--muted)">count=${num(i.count)}</span>` : ''}
             </div>
             <div style="margin-top:4px;font-size:.82rem">${escHtml(i.hint || '')}</div>
           </div>`;
