@@ -177,7 +177,7 @@ uiIPGuardMiddleware → securityMiddleware → uiAuthMiddleware → uiMetadataEn
 These are non-negotiable for any change touching the admin API:
 
 1. **No route without metadata.** Every `mux.HandleFunc` path must have a matching `uiRoutes` entry. C1 forward/reverse parity tests enforce this.
-2. **Metadata must never be more permissive than handler behavior.** If the handler enforces admin, metadata cannot say viewer. C1.5 AST parity tests enforce this.
+2. **Metadata must never be more permissive than handler behavior.** If the handler enforces admin, metadata cannot say viewer. C1.5 AST parity tests enforce this for directly detectable handler behavior; dynamic/delegated handlers must be documented and reviewed.
 3. **Resolution order: specific method > MethodAny > soft-fail.** Don't use `MethodAny` to paper over a method-specific contract.
 4. **Missing metadata / no method policy must NEVER block requests.** Both are soft-fail in shadow and enforce mode — they log + count, the handler-level `requireRole` remains the real backstop.
 5. **Public routes are owned by `uiAuthMiddleware` only.** C2 stays out (`RolePublic` is documentation, not enforcement). Don't add public-route gates to C2.
@@ -188,8 +188,8 @@ These are non-negotiable for any change touching the admin API:
 
 Each layer has its own test suite — keep them green when modifying the admin API.
 
-- **D0** (`d0_*_test.go`) — route inventory pinned at the canonical count; auth allowlist, CSRF, body-limit, and rate-limit invariants.
-- **C1** (`ui_routes_meta_test.go`) — forward + reverse parity between `uiRoutes` and the actual `mux.HandleFunc` registrations (source-scan based).
+- **D0** (`d0_*_test.go`) — route/auth/security baseline invariants: route inventory pinned at the canonical count, auth allowlist, CSRF, body-limit, and rate-limit checks.
+- **C1** (`ui_routes_meta_test.go`) — bidirectional route/metadata parity layer: forward (every `uiRoutes` entry has a matching `mux.HandleFunc`) and reverse (every `mux.HandleFunc` has a matching `uiRoutes` entry), source-scan based.
 - **C1.5** (`ui_routes_meta_audit_test.go`) — AST-walk parity between metadata `MinRole`/`Mutating` and the per-method behavior of each handler (`requireRole` calls, method switches).
 - **C2** (`ui_metadata_enforcement_test.go`) — middleware enforcement: shadow mode is silent, enforce mode returns 403, kill switch toggles correctly, missing-meta and no-policy stay soft-fail.
 - **C2c** (`ui_metadata_enforcement_test.go` — `TestC2c_*`) — audit-completion observability: warns on success without audit, silent on failure / hijacked / public / `AuditExpected=false`, never blocks the request.
