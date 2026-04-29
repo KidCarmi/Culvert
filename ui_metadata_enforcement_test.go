@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -724,5 +727,75 @@ func TestC2_Enforce_ShadowDoesNotIncrementEnforceCounter(t *testing.T) {
 	}
 	if got := after.EnforceDenied - before.EnforceDenied; got != 0 {
 		t.Errorf("EnforceDenied delta=%d, want 0 (no enforcement in shadow)", got)
+	}
+}
+
+// TestC2_Enforce_DenyEmitsExactlyOneLogLine pins the regression for
+// the chatgpt-codex P2 review on PR #171: in enforce mode, a denied
+// request must produce exactly ONE log line ("C2-enforce: DENIED ...")
+// and NOT the shadow-mode "WOULD-DENY" line. Pre-fix the middleware
+// emitted both, mislabeling enforced denials as shadow decisions and
+// doubling the deny-path log volume.
+func TestC2_Enforce_DenyEmitsExactlyOneLogLine(t *testing.T) {
+	withC2Mode(t, c2ModeEnforce)
+	resetC2Index()
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleViewer))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403", rec.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "C2-enforce: DENIED") {
+		t.Errorf("expected one C2-enforce DENIED line; got:\n%s", out)
+	}
+	if strings.Contains(out, "WOULD-DENY") {
+		t.Errorf("enforce mode emitted shadow WOULD-DENY line — log dedup broken; got:\n%s", out)
+	}
+	if got := strings.Count(out, "C2-"); got != 1 {
+		t.Errorf("expected exactly 1 C2-* line in enforce-mode deny, got %d:\n%s", got, out)
+	}
+}
+
+// TestC2_Shadow_WouldDenyEmitsExactlyOneLogLine is the symmetric
+// regression: in shadow mode, a would-deny request emits exactly ONE
+// "C2-shadow: WOULD-DENY" line and NOT the enforce "DENIED" line.
+func TestC2_Shadow_WouldDenyEmitsExactlyOneLogLine(t *testing.T) {
+	withC2Mode(t, c2ModeShadow)
+	resetC2Index()
+
+	var buf bytes.Buffer
+	old := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = old })
+
+	noop := &c2NoopReachedHandler{}
+	mw := uiMetadataEnforcement(noop)
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, c2Req(http.MethodPost, "/api/auth/users", RoleViewer))
+
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("shadow mode blocked: got 403")
+	}
+	if !noop.called {
+		t.Fatalf("shadow mode did not reach handler")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "C2-shadow: WOULD-DENY") {
+		t.Errorf("expected C2-shadow WOULD-DENY line; got:\n%s", out)
+	}
+	if strings.Contains(out, "DENIED") {
+		t.Errorf("shadow mode emitted enforce DENIED line; got:\n%s", out)
+	}
+	if got := strings.Count(out, "C2-"); got != 1 {
+		t.Errorf("expected exactly 1 C2-* line in shadow-mode would-deny, got %d:\n%s", got, out)
 	}
 }

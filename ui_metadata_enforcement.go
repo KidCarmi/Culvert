@@ -297,8 +297,17 @@ func c2Evaluate(r *http.Request, idx *metadataIndex) c2Decision {
 }
 
 // c2EvaluateAndLog runs c2Evaluate, increments the appropriate counter,
-// and emits a log line for would-deny / missing-metadata / no-policy
-// outcomes. Returns the decision so middlewares can inspect it.
+// and emits a log line for missing-metadata / no-policy outcomes —
+// these are mode-agnostic soft-fails. Returns the decision so the
+// middleware can inspect it.
+//
+// IMPORTANT: would-deny LOGGING is intentionally deferred to the
+// middleware. The middleware knows the current c2Mode() and emits a
+// single mode-specific line — "C2-shadow: WOULD-DENY" in shadow mode
+// or "C2-enforce: DENIED" in enforce mode. The would-deny COUNTER
+// (c2ShadowWouldDenyTotal) is still incremented here because the
+// counter tracks the policy decision (mode-agnostic), not the
+// action.
 func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 	d := c2Evaluate(r, idx)
 
@@ -306,17 +315,20 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 	case !d.Matched && d.MetaPath == "":
 		// Missing metadata entry entirely.
 		c2ShadowMissingMetaTotal.Add(1)
-		logger.Printf("C2-shadow: no metadata for path=%q method=%q (drift between helpers and uiRoutes)",
+		logger.Printf("C2: no metadata for path=%q method=%q (drift between helpers and uiRoutes)",
 			d.Path, d.Method)
 	case !d.Matched && d.MetaPath != "":
 		// Path resolved but method had no policy.
 		c2ShadowNoPolicyTotal.Add(1)
-		logger.Printf("C2-shadow: no method policy for path=%q method=%q meta_path=%q",
+		logger.Printf("C2: no method policy for path=%q method=%q meta_path=%q",
 			d.Path, d.Method, d.MetaPath)
 	case d.WouldDeny:
 		c2ShadowWouldDenyTotal.Add(1)
-		logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
-			d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
+		// Log emission deferred to the middleware so the message can
+		// reflect the active mode (shadow → "WOULD-DENY";
+		// enforce → "DENIED"). Emitting here would mislabel enforced
+		// denials as shadow decisions and double the deny-path log
+		// volume.
 	}
 	return d
 }
@@ -341,15 +353,27 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 //     both modes; handler-level requireRole is the real backstop.
 //   - Public routes → never blocked (uiAuthMiddleware allowlist).
 //   - Otherwise → request proceeds.
+//
+// Log structure (one line per request):
+//   - Enforce + would-deny → "C2-enforce: DENIED ..."
+//   - Shadow  + would-deny → "C2-shadow: WOULD-DENY ..."
+//   - Missing meta         → "C2: no metadata ..." (from c2EvaluateAndLog)
+//   - No method policy     → "C2: no method policy ..." (from c2EvaluateAndLog)
+//   - Otherwise            → no log line.
 func uiMetadataEnforcement(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		d := c2EvaluateAndLog(r, getC2Index())
-		if d.WouldDeny && c2Mode() == c2ModeEnforce {
-			c2EnforceDeniedTotal.Add(1)
-			logger.Printf("C2-enforce: DENIED path=%q method=%q session_role=%q required=%q meta_path=%q",
+		if d.WouldDeny {
+			if c2Mode() == c2ModeEnforce {
+				c2EnforceDeniedTotal.Add(1)
+				logger.Printf("C2-enforce: DENIED path=%q method=%q session_role=%q required=%q meta_path=%q",
+					d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			// Shadow mode — record the dry-run decision.
+			logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
 				d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
 		}
 		next.ServeHTTP(w, r)
 	})
