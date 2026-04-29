@@ -13,7 +13,12 @@ socks5.go     — SOCKS5 protocol handler (RFC 1928/1929)
 policy.go     — Policy engine: rule evaluation, FQDN/category/GeoIP/schedule matching
 store.go      — Persistent state: blocklist, request log, audit log, config store
 ca.go         — Root CA management, leaf cert signing, encrypted CA bundle (AES-GCM + PBKDF2), LRU cert cache
-ui.go         — Admin API + SPA (14 panels), RBAC (admin/operator/viewer)
+ui.go         — startUI bootstrap only (no direct mux.HandleFunc; routes registered via register*Routes helpers)
+ui_routes_meta.go — uiRoutes: single source of truth for route metadata (method-aware via Methods []uiRouteMethod)
+ui_metadata_enforcement.go — C2 metadata-driven middleware (MinRole enforcement + AuditExpected observability)
+ui_auth.go / ui_config.go / ui_policy.go / ui_security.go / ui_cluster.go / ui_static.go / cdr_ui.go / pac.go / update.go / diagnostics.go — per-domain register*Routes helpers + handlers
+ui_helpers.go — auditEvent / auditEventDiff / decodeJSON / shared validators
+ui_middleware.go / ui_session.go / ui_rbac.go — middleware chain, session cookies, RBAC helpers
 session.go    — HMAC-SHA256 signed session cookies, revocation list, dynamic Secure flag
 auth.go       — Local bcrypt auth
 auth_ldap.go  — LDAP bind + search auth with group resolution
@@ -87,6 +92,7 @@ docker compose up -d
 ## Key Environment Variables
 
 - `CULVERT_CA_PASSPHRASE` — CA private key encryption passphrase (required for SSL inspect)
+- `CULVERT_C2_ENFORCE` — C2 metadata-driven RBAC mode. Default = enforce (fail-closed). Set to `false`/`0`/`no`/`off` to revert to shadow (log-only) mode without rebuild. Read once at startup.
 
 ## Code Conventions
 
@@ -103,7 +109,7 @@ docker compose up -d
 - **Tests**: Test files use `_test.go` suffix, same package (whitebox)
 - **Lint suppressions**: Use `//nolint:errcheck` with reason comment; `// #nosec G402` for gosec
 - **GUI parity**: Every new CLI flag or config option MUST have a corresponding admin API endpoint AND a UI panel/section so the user can manage it from the GUI. CLI-only features are not acceptable — the admin must have full control from the web interface.
-- **API pattern**: Admin API handlers follow `apiXxx(w, r)` naming, registered in `startUI()` in `ui.go`. Use `requireRole(w, r, "admin")` for write operations, `requireRole(w, r, "viewer")` for reads.
+- **API pattern**: Admin API handlers follow `apiXxx(w, r)` naming, registered through `register*Routes` helpers and represented in `uiRoutes` metadata (`ui_routes_meta.go`). Use `requireRole(w, r, "admin")` for write operations, `requireRole(w, r, "viewer")` for reads — handler-level RBAC stays as defense-in-depth even with C2 active.
 - **UI pattern**: SPA panels in `static/index.html` use `data-view="name"` attributes. New panels need a nav-item in the sidebar, a view div, and JS load/render functions.
 - **Config versioning**: Config-mutating API handlers must call `saveConfigVersion(actor, action)` after `auditEvent()` to create automatic snapshots.
 - **Range iteration**: Use index-based range (`for i := range slice`) for large structs (PolicyRule 240 bytes, EnrolledNode 176 bytes) to avoid `rangeValCopy` gocritic warnings.
@@ -140,3 +146,50 @@ docker compose up -d
 - **ConfigSnapshot sync**: CP pushes `ConfigSnapshot` to DP nodes containing policy rules, blocklist, PAC exclusions, threat feed data, session HMAC, bandwidth policies, and node groups
 - **Cluster gaps**: All 8 items from CLUSTER-GAPS.md implemented: PAC sync, rolling upgrades, config versioning, geo-aware grouping, bandwidth/QoS, secrets sync, threat feed sync, config diff
 - **Roadmap**: See `roadmap/PHASES.md` for development phases (1–6), `roadmap/ROADMAP.md` for production deployment action items, `roadmap/FEATURE-COVERAGE.md` for GUI coverage audit, `roadmap/UI-DESIGN.md` for panel design reference, `roadmap/CLUSTER-GAPS.md` for cluster gap analysis, `roadmap/docker-system-update.md` for Docker self-update system design, `roadmap/roadmap-day2.md` for day-2 code review findings (108 items across 8 domains)
+
+## Admin UI / Control Plane
+
+The admin API is wired in three layers — `startUI()` only composes them, never registers routes itself.
+
+**Route registration**
+- `startUI()` MUST NOT contain `mux.HandleFunc` calls. All routes are registered through per-domain `register*Routes(mux, ...)` helpers (e.g. `registerPolicyRoutes`, `registerSecurityRoutes`).
+- `uiRoutes` in `ui_routes_meta.go` is the **single source of truth** for route metadata. Adding a route means: (1) register it via a `register*Routes` helper, (2) add a corresponding `uiRouteMetadata` entry to `uiRoutes`.
+- Metadata is **method-aware** via `Methods []uiRouteMethod`. Each entry declares `Method`, `MinRole`, `Mutating`, `AuditExpected`, plus an optional note. `MethodAny` (`"*"`) is the catch-all when a handler intentionally treats every method the same.
+
+**Middleware chain (outer → inner)**
+
+```
+uiIPGuardMiddleware → securityMiddleware → uiAuthMiddleware → uiMetadataEnforcement → mux
+```
+
+- `uiAuthMiddleware` owns the public-route allowlist and injects `uiRoleKey{}` into the request context.
+- `uiMetadataEnforcement` (C2) reads that role and gates the request against per-method `MinRole` from `uiRoutes`. **Active by default** — fail-closed.
+- `securityMiddleware` still owns CSRF, body-limit, and rate-limit decisions based on the HTTP method. The `Mutating` flag in metadata is **informational only**; it does not alter middleware behavior.
+
+**Kill switch**
+- `CULVERT_C2_ENFORCE=false` (or `0`/`no`/`off`) reverts C2 to shadow mode (log-only, never blocks). Read once at startup; admin-API runtime mutation is intentionally not supported.
+
+**AuditExpected (C2c)**
+- Pure observability. After a 2xx/3xx response, if metadata says `AuditExpected=true` and no `auditEvent`/`auditEventDiff` ran, the middleware emits one `C2: audit missing ...` log line and increments `c2AuditMissingTotal`. Failed requests, hijacked responses, and public routes are skipped. C2c **never** blocks a request.
+
+### Admin UI / Control Plane Invariants
+
+These are non-negotiable for any change touching the admin API:
+
+1. **No route without metadata.** Every `mux.HandleFunc` path must have a matching `uiRoutes` entry. C1 forward/reverse parity tests enforce this.
+2. **Metadata must never be more permissive than handler behavior.** If the handler enforces admin, metadata cannot say viewer. C1.5 AST parity tests enforce this.
+3. **Resolution order: specific method > MethodAny > soft-fail.** Don't use `MethodAny` to paper over a method-specific contract.
+4. **Missing metadata / no method policy must NEVER block requests.** Both are soft-fail in shadow and enforce mode — they log + count, the handler-level `requireRole` remains the real backstop.
+5. **Public routes are owned by `uiAuthMiddleware` only.** C2 stays out (`RolePublic` is documentation, not enforcement). Don't add public-route gates to C2.
+6. **Do not remove handler-level `requireRole`.** C2 is an additional gate, not a replacement. Defense-in-depth is the contract.
+7. **C2 must never allow what the handler denies.** If they ever disagree, the handler wins by design — C2's role is to add denials, never to widen access.
+
+### Testing Guarantees
+
+Each layer has its own test suite — keep them green when modifying the admin API.
+
+- **D0** (`d0_*_test.go`) — route inventory pinned at the canonical count; auth allowlist, CSRF, body-limit, and rate-limit invariants.
+- **C1** (`ui_routes_meta_test.go`) — forward + reverse parity between `uiRoutes` and the actual `mux.HandleFunc` registrations (source-scan based).
+- **C1.5** (`ui_routes_meta_audit_test.go`) — AST-walk parity between metadata `MinRole`/`Mutating` and the per-method behavior of each handler (`requireRole` calls, method switches).
+- **C2** (`ui_metadata_enforcement_test.go`) — middleware enforcement: shadow mode is silent, enforce mode returns 403, kill switch toggles correctly, missing-meta and no-policy stay soft-fail.
+- **C2c** (`ui_metadata_enforcement_test.go` — `TestC2c_*`) — audit-completion observability: warns on success without audit, silent on failure / hijacked / public / `AuditExpected=false`, never blocks the request.
