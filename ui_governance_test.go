@@ -425,14 +425,43 @@ func TestApiGovernance_HealthDerivation(t *testing.T) {
 			wantIssueCodes: []string{"missing_metadata_nonzero"},
 		},
 		{
-			name:           "no-policy-drift",
+			// C3.1 severity tweak: no_policy alone is now warn, not drift.
+			// Rationale: the counter can be triggered by a client sending
+			// a method the route does not accept (PATCH against a GET-only
+			// route, scanner probes, etc.) on a route that IS in metadata.
+			// Drift is reserved for genuine governance/config anomalies
+			// (missing_meta, enforce_denied-in-shadow).
+			name:           "no-policy-warn",
 			counters:       governanceCounters{NoPolicy: 1},
+			mode:           c2ModeEnforce,
+			wantStatus:     statusWarn,
+			wantParity:     healthWarn,
+			wantAudit:      healthOK,
+			wantEnforce:    healthOK,
+			wantIssueCodes: []string{"no_method_policy_nonzero"},
+		},
+		{
+			// missing_meta + no_policy: drift wins on metadata_parity
+			// (drift > warn) and the overall status is drift.
+			name:           "missing-meta-plus-no-policy-drift",
+			counters:       governanceCounters{MissingMeta: 1, NoPolicy: 1},
 			mode:           c2ModeEnforce,
 			wantStatus:     statusDrift,
 			wantParity:     healthDrift,
 			wantAudit:      healthOK,
 			wantEnforce:    healthOK,
-			wantIssueCodes: []string{"no_method_policy_nonzero"},
+			wantIssueCodes: []string{"missing_metadata_nonzero", "no_method_policy_nonzero"},
+		},
+		{
+			// no_policy + audit_missing: both are warn-tier, status warn.
+			name:           "no-policy-plus-audit-missing-warn",
+			counters:       governanceCounters{NoPolicy: 2, AuditMissing: 3},
+			mode:           c2ModeEnforce,
+			wantStatus:     statusWarn,
+			wantParity:     healthWarn,
+			wantAudit:      healthWarn,
+			wantEnforce:    healthOK,
+			wantIssueCodes: []string{"no_method_policy_nonzero", "audit_missing_nonzero"},
 		},
 		{
 			name:           "enforce-denied-in-shadow",

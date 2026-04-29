@@ -280,6 +280,26 @@ func summariseRoutes(routes []uiRouteMetadata) governanceRoutesSummary {
 // deriveGovernanceHealth applies the documented rules over the counter
 // snapshot and the active C2 mode. Returns a fully-populated health
 // struct; Issues is nil-safe (encoded as []) when everything is OK.
+//
+// Severity policy (C3.1):
+//
+//   - missing_meta > 0  → metadata_parity = drift, status = drift.
+//     This counter only increments when a path the mux dispatches
+//     resolves to NO uiRoutes entry. Under C1's reverse-parity test
+//     this is impossible at runtime, so a non-zero value indicates
+//     genuine governance/config drift and warrants investigation.
+//   - no_policy > 0     → metadata_parity = warn,  status ≥ warn.
+//     This counter increments when a request reaches a route that
+//     IS in metadata but whose HTTP method has no policy and no
+//     MethodAny fallback. It can be triggered by genuine drift
+//     (we forgot to declare a method) OR by client-side noise (a
+//     scanner / typo'd curl / bot probing PATCH against a GET-only
+//     route). Demoting to warn keeps the indicator from flipping
+//     the global status to drift on benign client traffic.
+//   - audit_missing > 0 → audit_completion = warn, status ≥ warn.
+//   - enforce_denied > 0 in shadow mode → enforce_consistency =
+//     drift, status = drift (the kill-switch contract is read-once;
+//     a non-zero counter in shadow is a real anomaly).
 func deriveGovernanceHealth(c governanceCounters, mode string) governanceHealth {
 	h := governanceHealth{
 		MetadataParity:     healthOK,
@@ -288,24 +308,32 @@ func deriveGovernanceHealth(c governanceCounters, mode string) governanceHealth 
 		Issues:             []governanceHealthIssue{},
 	}
 
-	if c.MissingMeta > 0 || c.NoPolicy > 0 {
+	if c.MissingMeta > 0 {
 		h.MetadataParity = healthDrift
-		if c.MissingMeta > 0 {
-			h.Issues = append(h.Issues, governanceHealthIssue{
-				Code:     "missing_metadata_nonzero",
-				Severity: healthDrift,
-				Count:    c.MissingMeta,
-				Hint:     "One or more requests resolved to no uiRoutes entry. Grep logs for 'C2: no metadata' and reconcile the helper registration with the metadata table.",
-			})
+		h.Issues = append(h.Issues, governanceHealthIssue{
+			Code:     "missing_metadata_nonzero",
+			Severity: healthDrift,
+			Count:    c.MissingMeta,
+			Hint:     "One or more requests resolved to no uiRoutes entry. Grep logs for 'C2: no metadata' and reconcile the helper registration with the metadata table.",
+		})
+	}
+	if c.NoPolicy > 0 {
+		// no_policy can be triggered by client-side noise — a scanner,
+		// a typo'd curl, or any client sending a method the route does
+		// not accept (e.g. PATCH against a GET-only route). When the
+		// metadata IS in drift it will also fire, so the counter is
+		// still worth surfacing — just at warn severity, not drift.
+		// Only escalate metadata_parity to warn if missing_meta has not
+		// already pushed it to drift (drift > warn).
+		if h.MetadataParity == healthOK {
+			h.MetadataParity = healthWarn
 		}
-		if c.NoPolicy > 0 {
-			h.Issues = append(h.Issues, governanceHealthIssue{
-				Code:     "no_method_policy_nonzero",
-				Severity: healthDrift,
-				Count:    c.NoPolicy,
-				Hint:     "One or more requests hit a route whose method has no exact policy and no MethodAny fallback. Grep logs for 'C2: no method policy' and add the missing per-method entry.",
-			})
-		}
+		h.Issues = append(h.Issues, governanceHealthIssue{
+			Code:     "no_method_policy_nonzero",
+			Severity: healthWarn,
+			Count:    c.NoPolicy,
+			Hint:     "One or more requests hit a route whose method has no exact policy and no MethodAny fallback. This can also be triggered by a client sending a method the route does not accept (e.g. PATCH against a GET-only route). Grep logs for 'C2: no method policy' to identify whether the cause is genuine metadata drift (add the missing per-method entry) or client-side noise (no action needed).",
+		})
 	}
 	if c.AuditMissing > 0 {
 		h.AuditCompletion = healthWarn
@@ -331,10 +359,15 @@ func deriveGovernanceHealth(c governanceCounters, mode string) governanceHealth 
 		})
 	}
 
+	// Status precedence: drift > warn > healthy.
+	// drift fires only on genuine governance/config anomalies
+	// (missing_meta or enforce_denied-in-shadow); warn is the
+	// catch-all for noisy-but-actionable signals (no_policy,
+	// audit_missing).
 	switch {
-	case h.MetadataParity != healthOK || h.EnforceConsistency != healthOK:
+	case c.MissingMeta > 0 || (mode == c2ModeShadow && c.EnforceDenied > 0):
 		h.Status = statusDrift
-	case h.AuditCompletion != healthOK:
+	case c.NoPolicy > 0 || c.AuditMissing > 0:
 		h.Status = statusWarn
 	default:
 		h.Status = statusHealthy
