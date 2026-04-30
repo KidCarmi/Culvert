@@ -100,6 +100,24 @@ func TestSaveLoadCA_NoPassphrase(t *testing.T) {
 	}
 }
 
+// TestCertManager_SaveCA_NoTmpLeak verifies the hardened SaveCA writer
+// (atomicWriteFile via D1.1e) does not leave orphaned *.tmp.* files in
+// the parent directory. Plain-PEM path is sufficient — the encrypted
+// path is exercised by TestSaveLoadCA_WithPassphrase and the rotation
+// suite, which use the same writer.
+func TestCertManager_SaveCA_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	if err := cm.InitCA(); err != nil {
+		t.Fatalf("InitCA: %v", err)
+	}
+	path := filepath.Join(dir, "ca-plain.pem")
+	if err := cm.SaveCA(path, ""); err != nil {
+		t.Fatalf("SaveCA: %v", err)
+	}
+	assertNoTmpLeak(t, dir)
+}
+
 // ── LoadOrInitCA ──────────────────────────────────────────────────────────────
 
 func TestLoadOrInitCA_CreatesFile(t *testing.T) {

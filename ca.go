@@ -167,17 +167,12 @@ func (cm *CertManager) SaveCA(path, passphrase string) error {
 			return fmt.Errorf("CA encrypt: %w", err)
 		}
 	}
-	// Atomic write: write to temp file, then rename. This prevents the CA bundle
-	// from being corrupted if the process crashes mid-write or disk fills up.
+	// Atomic write via the hardened helper: unique tmp + chmod + fsync(file)
+	// + rename + parent-dir fsync (best-effort) + cleanup on error.
 	// 0600 — owner-readable only; CA private key material.
 	cleanPath := filepath.Clean(path)
-	tmpPath := cleanPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil { // #nosec G703
-		return fmt.Errorf("CA write temp: %w", err)
-	}
-	if err := os.Rename(tmpPath, cleanPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("CA rename: %w", err)
+	if err := atomicWriteFile(cleanPath, data, 0o600); err != nil {
+		return fmt.Errorf("CA write: %w", err)
 	}
 	return nil
 }
