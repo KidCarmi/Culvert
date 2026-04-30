@@ -172,6 +172,14 @@ uiIPGuardMiddleware → securityMiddleware → uiAuthMiddleware → uiMetadataEn
 **AuditExpected (C2c)**
 - Pure observability. After a 2xx/3xx response, if metadata says `AuditExpected=true` and no `auditEvent`/`auditEventDiff` ran, the middleware emits one `C2: audit missing ...` log line and increments `c2AuditMissingTotal`. Failed requests, hijacked responses, and public routes are skipped. C2c **never** blocks a request.
 
+**Governance surface (C3)**
+- `GET /api/governance/control-plane` (admin-only) exposes route inventory, C2 mode, the five C2 counters, derived health, and the parity-test pyramid (D0/C1/C1.5/C2/C2c). Read-only and side-effect-free; no Prometheus exposure, no AST replay, no schema mutation. The kill switch stays env-only and read-once.
+- C3 health severity policy (`deriveGovernanceHealth`):
+  - `missing_meta > 0` → `metadata_parity = drift`, status = `drift`. C1 reverse-parity should make this impossible at runtime, so any non-zero value is genuine governance/config drift.
+  - `no_policy > 0` → `metadata_parity = warn`, status ≥ `warn`. The counter can be triggered by a client sending a method the route does not accept (e.g. PATCH against a GET-only route, scanner probes); reserving drift for `missing_meta` keeps the indicator from flipping to drift on benign client traffic.
+  - `audit_missing > 0` → `audit_completion = warn`, status ≥ `warn`.
+  - `enforce_denied > 0` while `mode = shadow` → `enforce_consistency = drift`, status = `drift` (the kill-switch contract is read-once at startup).
+
 ### Admin UI / Control Plane Invariants
 
 These are non-negotiable for any change touching the admin API:
