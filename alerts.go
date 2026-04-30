@@ -389,8 +389,11 @@ const (
 	alertRetryMax      = 3
 	alertRetryBaseSec  = 5 // exponential: 5s, 15s, 45s
 	alertRetryQueueMax = 500
-	alertRetryFile     = "/data/alert_retry_queue.json"
 )
+
+// alertRetryFile is a var (not const) so tests can redirect writes to a
+// temp dir. Production code never reassigns it.
+var alertRetryFile = "/data/alert_retry_queue.json"
 
 // retryEntry represents a failed webhook delivery queued for retry.
 type retryEntry struct {
@@ -496,5 +499,5 @@ func saveAlertRetryQueueLocked() {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(alertRetryFile, data, 0o600)
+	_ = atomicWriteFile(alertRetryFile, data, 0o600)
 }

@@ -566,7 +566,7 @@ func (b *Blocklist) saveMode() {
 	if b.path == "" {
 		return
 	}
-	os.WriteFile(b.path+".mode", []byte(b.mode), 0600) //nolint:errcheck
+	_ = atomicWriteFile(b.path+".mode", []byte(b.mode), 0o600)
 }
 
 func (b *Blocklist) Load(path string) error {
@@ -744,18 +744,11 @@ func (b *Blocklist) saveExceptions() {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	tmp := b.path + ".exceptions.tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) // #nosec G304
-	if err != nil {
-		return
-	}
+	var sb strings.Builder
 	for h := range b.exceptions {
-		fmt.Fprintln(f, h)
+		fmt.Fprintln(&sb, h)
 	}
-	if err := f.Close(); err != nil {
-		return
-	}
-	os.Rename(tmp, b.path+".exceptions") //nolint:errcheck
+	_ = atomicWriteFile(b.path+".exceptions", []byte(sb.String()), 0o600)
 }
 
 // IsBlocked reports whether a request to host should be blocked.
@@ -809,18 +802,11 @@ func (b *Blocklist) saveManual() {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	tmp := b.path + ".manual.tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) // #nosec G304
-	if err != nil {
-		return
-	}
+	var sb strings.Builder
 	for h := range b.manual {
-		fmt.Fprintln(f, h)
+		fmt.Fprintln(&sb, h)
 	}
-	if err := f.Close(); err != nil {
-		return
-	}
-	os.Rename(tmp, b.path+".manual") //nolint:errcheck
+	_ = atomicWriteFile(b.path+".manual", []byte(sb.String()), 0o600)
 }
 
 func (b *Blocklist) Remove(host string) {

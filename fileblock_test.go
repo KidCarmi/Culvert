@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 )
 
@@ -281,4 +282,16 @@ func TestProxy_FileBlockPolicyProfile_AllowsClean(t *testing.T) {
 	if rec.Code == http.StatusForbidden {
 		t.Errorf("expected non-403 for .txt, got %d (body=%q)", rec.Code, rec.Body.String())
 	}
+}
+
+// TestFileBlocker_Save_NoTmpLeak verifies the converted writer does not
+// leave orphaned *.tmp.* files. fb.Add triggers fb.save internally.
+func TestFileBlocker_Save_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	fb := &FileBlocker{
+		path:       filepath.Join(dir, "fileblock.json"),
+		extensions: map[string]bool{},
+	}
+	fb.Add(".exe")
+	assertNoTmpLeak(t, dir)
 }

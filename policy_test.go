@@ -822,3 +822,17 @@ func TestEvaluate_CategoryAnyWithFQDN(t *testing.T) {
 		t.Errorf("expected no match for non-matching FQDN with CategoryAny, got %+v", m)
 	}
 }
+
+// TestPolicyStore_SaveMeta_NoTmpLeak verifies the converted .meta sidecar
+// writer (atomicWriteFile) does not leave orphaned *.tmp.* files. Save()
+// writes both the primary policy file (out-of-scope old temp+rename
+// pattern) and .meta (in-scope, hardened); assertNoTmpLeak only matches
+// the new helper's *.tmp.* pattern, so this isolates .meta correctness.
+func TestPolicyStore_SaveMeta_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	ps := newTestPolicyStore()
+	ps.path = filepath.Join(dir, "policy.json")
+	ps.Add(PolicyRule{Priority: 10, Name: "tmpleak-test", Action: ActionAllow})
+	ps.Save()
+	assertNoTmpLeak(t, dir)
+}
