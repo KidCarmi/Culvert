@@ -355,7 +355,7 @@ func deriveGovernanceHealth(c governanceCounters, mode string) governanceHealth 
 			Code:     "enforce_denied_in_shadow",
 			Severity: healthDrift,
 			Count:    c.EnforceDenied,
-			Hint:     "C2 mode is shadow but the enforce-denied counter is non-zero. The kill switch is read once at startup; investigate whether the process started in enforce and was reconfigured, or whether the counter was bumped by an unintended path.",
+			Hint:     "C2 mode is shadow but the enforce-denied counter is non-zero. The kill switch is read once at startup so this should be impossible at runtime — investigate whether the C2 middleware has a bug or whether the counter was incremented by a code path other than the enforce branch.",
 		})
 	}
 

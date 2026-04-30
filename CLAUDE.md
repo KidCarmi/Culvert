@@ -179,6 +179,12 @@ uiIPGuardMiddleware → securityMiddleware → uiAuthMiddleware → uiMetadataEn
   - `no_policy > 0` → `metadata_parity = warn`, status ≥ `warn`. The counter can be triggered by a client sending a method the route does not accept (e.g. PATCH against a GET-only route, scanner probes); reserving drift for `missing_meta` keeps the indicator from flipping to drift on benign client traffic.
   - `audit_missing > 0` → `audit_completion = warn`, status ≥ `warn`.
   - `enforce_denied > 0` while `mode = shadow` → `enforce_consistency = drift`, status = `drift` (the kill-switch contract is read-once at startup).
+- The five C2 counters surfaced by C3 (one-line definitions):
+  - `would_deny` — session role was below the per-method `MinRole`. Increments in BOTH shadow and enforce modes; tracks the policy decision regardless of action.
+  - `enforce_denied` — request actually got a 403 from the metadata-driven gate. Stays at zero in shadow mode; in enforce mode it moves in lock-step with `would_deny`.
+  - `missing_meta` — request path resolved through the mux but had no matching `uiRoutes` entry (the static `/` catch-all absorbs unknown paths, so this is rare in practice). Soft-fail; never blocks a request.
+  - `no_policy` — path matched a `uiRoutes` entry but the HTTP method had no exact policy and no `MethodAny` fallback. Soft-fail; never blocks a request. Triggered both by genuine drift and by clients sending unsupported methods (see severity policy above).
+  - `audit_missing` — successful request (2xx/3xx) on an `AuditExpected=true` route did not emit an `auditEvent`/`auditEventDiff` call (C2c observability).
 
 ### Admin UI / Control Plane Invariants
 
@@ -201,3 +207,7 @@ Each layer has its own test suite — keep them green when modifying the admin A
 - **C1.5** (`ui_routes_meta_audit_test.go`) — AST-walk parity between metadata `MinRole`/`Mutating` and the per-method behavior of each handler (`requireRole` calls, method switches).
 - **C2** (`ui_metadata_enforcement_test.go`) — middleware enforcement: shadow mode is silent, enforce mode returns 403, kill switch toggles correctly, missing-meta and no-policy stay soft-fail.
 - **C2c** (`ui_metadata_enforcement_test.go` — `TestC2c_*`) — audit-completion observability: warns on success without audit, silent on failure / hijacked / public / `AuditExpected=false`, never blocks the request.
+
+### Test-authoring pitfalls
+
+- **Audit ring saturation.** The in-memory audit ring is bounded at `maxAuditLogs = 500`. Tests MUST NOT assert on `len(auditGet())` deltas (e.g. `len(after) == len(before)+1`) because under `-count=2 -shuffle=on` the cumulative suite saturates the ring and `len()` stops growing — adding a new entry evicts the oldest. The determinism gate (`QA · Determinism`) re-runs the suite shuffled to flush these out. Instead, assert on entry **content**: scan `auditGet()` for an entry matching a unique discriminator (`Actor` IP from a TEST-NET-2 reserved range, plus `Action`/`Object`, plus a baseline `TS` captured before the call). See `security_feedsync_audit_test.go` for the canonical pattern.
