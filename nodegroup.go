@@ -134,7 +134,7 @@ func (s *NodeGroupStore) saveLocked() {
 		logger.Printf("NodeGroups: marshal error: %v", err)
 		return
 	}
-	if err := os.WriteFile(s.path, data, 0o600); err != nil {
+	if err := atomicWriteFile(s.path, data, 0o600); err != nil {
 		logger.Printf("NodeGroups: write error: %v", err)
 	}
 }

@@ -194,6 +194,23 @@ func TestNodeGroupStore_Persistence(t *testing.T) {
 	}
 }
 
+// TestNodeGroupStore_Save_NoTmpLeak verifies that the converted writer
+// (atomicWriteFile) does not leave orphaned *.tmp.* files in the parent
+// directory after a successful Save. Regression guard for D1.1b.
+func TestNodeGroupStore_Save_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	s := NewNodeGroupStore(filepath.Join(dir, "ng.json"))
+	if _, err := s.Add(NodeGroup{
+		Name:          "tmpleak-test",
+		LabelSelector: map[string]string{"region": "us-east"},
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// Add() persists internally via Save(); call Save() again to be explicit.
+	s.Save()
+	assertNoTmpLeak(t, dir)
+}
+
 func TestNodeGroupStore_ReplaceAll(t *testing.T) {
 	dir := t.TempDir()
 	s := NewNodeGroupStore(filepath.Join(dir, "ng.json"))

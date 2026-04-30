@@ -69,6 +69,36 @@ func TestClusterStore_LoadSave(t *testing.T) {
 	}
 }
 
+// TestClusterStore_Save_NoTmpLeak verifies that the converted writer
+// (atomicWriteFile) does not leave orphaned *.tmp.* files in the parent
+// directory after a successful Save. Regression guard for D1.1b.
+func TestClusterStore_Save_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cluster.json")
+
+	cs := &ClusterStore{
+		st: ClusterState{
+			Nodes:   make(map[string]*EnrolledNode),
+			Tokens:  make(map[string]*EnrollToken),
+			Revoked: []RevokedCert{},
+		},
+	}
+	if err := cs.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cs.RegisterNode(&EnrolledNode{
+		NodeID:     "dp-tmpleak-1",
+		CertSerial: "deadbeef",
+		CertExpiry: time.Now().Add(24 * time.Hour),
+		EnrolledAt: time.Now(),
+		Status:     "connected",
+	})
+	if err := cs.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	assertNoTmpLeak(t, dir)
+}
+
 func TestClusterStore_LoadCorruptedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cluster.json")

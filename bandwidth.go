@@ -197,7 +197,7 @@ func (m *BandwidthManager) saveLocked() {
 		logger.Printf("Bandwidth: marshal error: %v", err)
 		return
 	}
-	if err := os.WriteFile(m.path, data, 0o600); err != nil {
+	if err := atomicWriteFile(m.path, data, 0o600); err != nil {
 		logger.Printf("Bandwidth: failed to write %s: %v", m.path, err)
 	}
 }
