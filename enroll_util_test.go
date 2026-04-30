@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -276,7 +277,7 @@ func TestAtomicWriteFile_ConcurrentSamePath(t *testing.T) {
 	}
 	matched := false
 	for _, p := range payloads {
-		if string(got) == string(p) {
+		if bytes.Equal(got, p) {
 			matched = true
 			break
 		}
@@ -294,7 +295,7 @@ func TestAtomicWriteFile_NoTmpLeakOnRenameFail(t *testing.T) {
 	// file onto a non-empty directory fails on POSIX, exercising the cleanup
 	// path after the temp file has been written.
 	target := filepath.Join(dir, "blocked")
-	if err := os.Mkdir(target, 0o755); err != nil {
+	if err := os.Mkdir(target, 0o750); err != nil {
 		t.Fatalf("mkdir target: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(target, "child"), []byte("x"), 0o600); err != nil {
