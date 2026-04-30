@@ -369,10 +369,22 @@ func TestE2E_CounterCleanlinessOnNavigation(t *testing.T) {
 	}
 	after := c2CounterSnapshot()
 
-	// Per-axis deltas. would_deny is intentionally NOT asserted here
-	// because admin meets every per-method MinRole — if it ever moved
-	// it would indicate a route demanding more than admin, which
-	// would be a separate bug.
+	// Per-axis deltas. Admin happy-path navigation must not move ANY
+	// C2/C2c/C4 counter — admin meets every per-method MinRole, so
+	// even would_deny / enforce_denied should stay at zero. Any
+	// movement here indicates a real regression: would_deny means a
+	// route declares a MinRole stricter than admin (which doesn't
+	// exist), missing_meta means metadata drift, no_policy means a
+	// method has no per-method or MethodAny entry, role_divergence
+	// means the handler enforces a role stricter than metadata even
+	// for an admin session, and audit_missing means a navigated GET
+	// silently dropped its expected audit.
+	if d := after.WouldDeny - before.WouldDeny; d != 0 {
+		t.Errorf("would_deny delta = %d; want 0 (admin should clear every per-method MinRole)", d)
+	}
+	if d := after.EnforceDenied - before.EnforceDenied; d != 0 {
+		t.Errorf("enforce_denied delta = %d; want 0 (admin should never receive a 403 from C2)", d)
+	}
 	if d := after.MissingMeta - before.MissingMeta; d != 0 {
 		t.Errorf("missing_meta delta = %d; want 0 (drift between mux and uiRoutes)", d)
 	}
