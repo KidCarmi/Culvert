@@ -292,6 +292,7 @@ func TestApiGovernance_CountersRoundTrip(t *testing.T) {
 	c2ShadowMissingMetaTotal.Add(1)
 	c2ShadowNoPolicyTotal.Add(4)
 	c2AuditMissingTotal.Add(5)
+	c2RoleDivergenceTotal.Add(6)
 	t.Cleanup(func() {
 		// Restore atomics so other tests see the pre-test baseline.
 		c2ShadowWouldDenyTotal.Store(before.WouldDeny)
@@ -299,6 +300,7 @@ func TestApiGovernance_CountersRoundTrip(t *testing.T) {
 		c2ShadowMissingMetaTotal.Store(before.MissingMeta)
 		c2ShadowNoPolicyTotal.Store(before.NoPolicy)
 		c2AuditMissingTotal.Store(before.AuditMissing)
+		c2RoleDivergenceTotal.Store(before.RoleDivergence)
 	})
 
 	snap := buildGovernanceSnapshot()
@@ -316,6 +318,9 @@ func TestApiGovernance_CountersRoundTrip(t *testing.T) {
 	}
 	if got, want := snap.Counters.AuditMissing-before.AuditMissing, int64(5); got != want {
 		t.Errorf("audit_missing delta = %d, want %d", got, want)
+	}
+	if got, want := snap.Counters.RoleDivergence-before.RoleDivergence, int64(6); got != want {
+		t.Errorf("role_divergence delta = %d, want %d", got, want)
 	}
 }
 
@@ -384,6 +389,7 @@ func TestApiGovernance_HealthDerivation(t *testing.T) {
 		wantParity     string
 		wantAudit      string
 		wantEnforce    string
+		wantDivergence string // empty == healthOK (default for older table rows)
 		wantIssueCodes []string
 	}{
 		{
@@ -492,6 +498,34 @@ func TestApiGovernance_HealthDerivation(t *testing.T) {
 			wantEnforce:    healthOK,
 			wantIssueCodes: []string{"missing_metadata_nonzero", "audit_missing_nonzero"},
 		},
+		{
+			// C4: role_divergence alone is warn-tier. A viewer probing
+			// /api/idp/{id} PUT legitimately produces this signal, so
+			// drift would be too strong.
+			name:           "role-divergence-warn",
+			counters:       governanceCounters{RoleDivergence: 7},
+			mode:           c2ModeEnforce,
+			wantStatus:     statusWarn,
+			wantParity:     healthOK,
+			wantAudit:      healthOK,
+			wantEnforce:    healthOK,
+			wantDivergence: healthWarn,
+			wantIssueCodes: []string{"role_divergence_nonzero"},
+		},
+		{
+			// drift+warn mix that includes role_divergence. drift wins
+			// on overall status (per the precedence rule), but
+			// role_divergence still ends up at warn, not drift.
+			name:           "missing-meta-plus-role-divergence-drift",
+			counters:       governanceCounters{MissingMeta: 1, RoleDivergence: 2},
+			mode:           c2ModeEnforce,
+			wantStatus:     statusDrift,
+			wantParity:     healthDrift,
+			wantAudit:      healthOK,
+			wantEnforce:    healthOK,
+			wantDivergence: healthWarn,
+			wantIssueCodes: []string{"missing_metadata_nonzero", "role_divergence_nonzero"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -508,6 +542,13 @@ func TestApiGovernance_HealthDerivation(t *testing.T) {
 			if h.EnforceConsistency != tc.wantEnforce {
 				t.Errorf("enforce_consistency = %q, want %q", h.EnforceConsistency, tc.wantEnforce)
 			}
+			wantDiv := tc.wantDivergence
+			if wantDiv == "" {
+				wantDiv = healthOK // older table rows default to OK
+			}
+			if h.RoleDivergence != wantDiv {
+				t.Errorf("role_divergence = %q, want %q", h.RoleDivergence, wantDiv)
+			}
 			gotCodes := make([]string, 0, len(h.Issues))
 			for _, i := range h.Issues {
 				gotCodes = append(gotCodes, i.Code)
@@ -523,7 +564,7 @@ func TestApiGovernance_HealthDerivation(t *testing.T) {
 }
 
 // TestApiGovernance_TestLayerCatalogIsHonest — the test_layers slice
-// must label C2/C2c as runtime and D0/C1/C1.5 as CI-only. The
+// must label C2/C2c/C4 as runtime and D0/C1/C1.5 as CI-only. The
 // governance endpoint is forbidden from claiming to re-execute parity
 // scanners at request time (per CLAUDE.md / scope).
 func TestApiGovernance_TestLayerCatalogIsHonest(t *testing.T) {
@@ -531,7 +572,7 @@ func TestApiGovernance_TestLayerCatalogIsHonest(t *testing.T) {
 	layers := governanceTestLayerCatalog(c2Mode())
 	want := map[string]bool{ // id → runtime
 		"D0": false, "C1": false, "C1.5": false,
-		"C2": true, "C2c": true,
+		"C2": true, "C2c": true, "C4": true,
 	}
 	if len(layers) != len(want) {
 		t.Errorf("got %d layers, want %d", len(layers), len(want))
@@ -584,12 +625,12 @@ func TestApiGovernance_JSONSchemaStability(t *testing.T) {
 		t.Error("c2 is not an object")
 	}
 	if ctr, ok := doc["counters"].(map[string]any); ok {
-		mustHave(ctr, []string{"would_deny", "enforce_denied", "missing_meta", "no_policy", "audit_missing"}, "counters")
+		mustHave(ctr, []string{"would_deny", "enforce_denied", "missing_meta", "no_policy", "audit_missing", "role_divergence"}, "counters")
 	} else {
 		t.Error("counters is not an object")
 	}
 	if h, ok := doc["governance_health"].(map[string]any); ok {
-		mustHave(h, []string{"status", "metadata_parity", "audit_completion", "enforce_consistency", "issues"}, "governance_health")
+		mustHave(h, []string{"status", "metadata_parity", "audit_completion", "enforce_consistency", "role_divergence", "issues"}, "governance_health")
 	} else {
 		t.Error("governance_health is not an object")
 	}

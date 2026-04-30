@@ -32,10 +32,18 @@ func sessionAdmin(r *http.Request) string {
 
 // requireRole returns true when the current session has at least minRole.
 // Writes HTTP 403 and returns false when the check fails.
+//
+// On the failure branch, requireRole calls recordRoleDivergence (C4)
+// before writing the 403. recordRoleDivergence is purely
+// observability: it never touches the response writer and never
+// affects the return value. The 403 below is the real, only response —
+// requireRole remains the defense-in-depth backstop, exactly as
+// invariant #6 in CLAUDE.md requires.
 func requireRole(w http.ResponseWriter, r *http.Request, minRole UIRole) bool {
 	if uiRole(r).HasRole(minRole) {
 		return true
 	}
+	recordRoleDivergence(r, minRole)
 	http.Error(w, "Forbidden: insufficient role", http.StatusForbidden)
 	return false
 }

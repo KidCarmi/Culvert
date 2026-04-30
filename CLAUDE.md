@@ -172,19 +172,26 @@ uiIPGuardMiddleware → securityMiddleware → uiAuthMiddleware → uiMetadataEn
 **AuditExpected (C2c)**
 - Pure observability. After a 2xx/3xx response, if metadata says `AuditExpected=true` and no `auditEvent`/`auditEventDiff` ran, the middleware emits one `C2: audit missing ...` log line and increments `c2AuditMissingTotal`. Failed requests, hijacked responses, and public routes are skipped. C2c **never** blocks a request.
 
+**Role-divergence detector (C4 — REPORT-ONLY)**
+- Pure observability. When the C2 middleware admits a request whose per-method `MinRole` is *lower* than what the handler-level `requireRole` ultimately demands (e.g. `apiIdPRouter` declares `MethodAny=viewer` but `apiIdPItem`'s PUT branch calls `requireRole(RoleAdmin)`), C4 increments `c2RoleDivergenceTotal` and emits one `C2: role divergence ...` log line. The middleware injects the C2-evaluated `MinRole` into the request context; `requireRole`'s failure branch reads that value and compares against the role it just rejected.
+- C4 **never** blocks, allows, or alters the response. The handler's existing `requireRole` writes the 403 itself; C4 only observes the decision after the fact. Defense-in-depth (invariant #6) is preserved; the handler is still the real backstop.
+- Audit ring is intentionally untouched — divergence events are governance observability, not admin-action audit. They flow out via the structured logger and the C3 governance endpoint only.
+
 **Governance surface (C3)**
-- `GET /api/governance/control-plane` (admin-only) exposes route inventory, C2 mode, the five C2 counters, derived health, and the parity-test pyramid (D0/C1/C1.5/C2/C2c). Read-only and side-effect-free; no Prometheus exposure, no AST replay, no schema mutation. The kill switch stays env-only and read-once.
+- `GET /api/governance/control-plane` (admin-only) exposes route inventory, C2 mode, the six C2 counters, derived health (four axes), and the parity-test pyramid (D0/C1/C1.5/C2/C2c/C4). Read-only and side-effect-free; no Prometheus exposure, no AST replay, no schema mutation. The kill switch stays env-only and read-once.
 - C3 health severity policy (`deriveGovernanceHealth`):
   - `missing_meta > 0` → `metadata_parity = drift`, status = `drift`. C1 reverse-parity should make this impossible at runtime, so any non-zero value is genuine governance/config drift.
   - `no_policy > 0` → `metadata_parity = warn`, status ≥ `warn`. The counter can be triggered by a client sending a method the route does not accept (e.g. PATCH against a GET-only route, scanner probes); reserving drift for `missing_meta` keeps the indicator from flipping to drift on benign client traffic.
   - `audit_missing > 0` → `audit_completion = warn`, status ≥ `warn`.
   - `enforce_denied > 0` while `mode = shadow` → `enforce_consistency = drift`, status = `drift` (the kill-switch contract is read-once at startup).
-- The five C2 counters surfaced by C3 (one-line definitions):
+  - `role_divergence > 0` → `role_divergence = warn`, status ≥ `warn`. Triggered legitimately by viewers probing admin-only sub-actions on dynamic dispatchers; reserved for warn rather than drift to avoid noise on benign client traffic.
+- The six C2 counters surfaced by C3 (one-line definitions):
   - `would_deny` — session role was below the per-method `MinRole`. Increments in BOTH shadow and enforce modes; tracks the policy decision regardless of action.
   - `enforce_denied` — request actually got a 403 from the metadata-driven gate. Stays at zero in shadow mode; in enforce mode it moves in lock-step with `would_deny`.
   - `missing_meta` — request path resolved through the mux but had no matching `uiRoutes` entry (the static `/` catch-all absorbs unknown paths, so this is rare in practice). Soft-fail; never blocks a request.
   - `no_policy` — path matched a `uiRoutes` entry but the HTTP method had no exact policy and no `MethodAny` fallback. Soft-fail; never blocks a request. Triggered both by genuine drift and by clients sending unsupported methods (see severity policy above).
   - `audit_missing` — successful request (2xx/3xx) on an `AuditExpected=true` route did not emit an `auditEvent`/`auditEventDiff` call (C2c observability).
+  - `role_divergence` — handler-level `requireRole` rejected a request whose C2-evaluated `MinRole` was strictly lower (i.e. metadata was more permissive than the handler's actual contract). Increments at most once per request, on the failure branch of `requireRole`. Observability only; never blocks.
 
 ### Admin UI / Control Plane Invariants
 
@@ -207,6 +214,7 @@ Each layer has its own test suite — keep them green when modifying the admin A
 - **C1.5** (`ui_routes_meta_audit_test.go`) — AST-walk parity between metadata `MinRole`/`Mutating` and the per-method behavior of each handler (`requireRole` calls, method switches).
 - **C2** (`ui_metadata_enforcement_test.go`) — middleware enforcement: shadow mode is silent, enforce mode returns 403, kill switch toggles correctly, missing-meta and no-policy stay soft-fail.
 - **C2c** (`ui_metadata_enforcement_test.go` — `TestC2c_*`) — audit-completion observability: warns on success without audit, silent on failure / hijacked / public / `AuditExpected=false`, never blocks the request.
+- **C4** (`ui_metadata_divergence_test.go` — `TestC4_*`) — report-only role-divergence detector: increments `c2RoleDivergenceTotal` and emits a structured log line when the handler's `requireRole(R)` rejects a request whose C2-evaluated `MinRole` was strictly lower. Tests cover the canonical viewer-on-admin-route case via `apiIdPRouter`, the parity case (no event), the C2-stricter case (no event), and the response-decision invariance proof (C4 cannot change the 403 the handler already wrote).
 
 ### Test-authoring pitfalls
 

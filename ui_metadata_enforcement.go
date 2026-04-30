@@ -136,20 +136,22 @@ var c2AuditMissingTotal atomic.Int64
 // useful for test introspection. Returned in a stable struct so test
 // assertions don't have to load atomics individually.
 type c2Counters struct {
-	WouldDeny     int64 // policy says deny (any mode)
-	EnforceDenied int64 // request actually 403'd (enforce mode only)
-	MissingMeta   int64 // path resolves to nothing (soft-fail, both modes)
-	NoPolicy      int64 // method has no policy + no MethodAny (soft-fail, both modes)
-	AuditMissing  int64 // AuditExpected=true on a successful request but no audit emitted (C2c)
+	WouldDeny      int64 // policy says deny (any mode)
+	EnforceDenied  int64 // request actually 403'd (enforce mode only)
+	MissingMeta    int64 // path resolves to nothing (soft-fail, both modes)
+	NoPolicy       int64 // method has no policy + no MethodAny (soft-fail, both modes)
+	AuditMissing   int64 // AuditExpected=true on a successful request but no audit emitted (C2c)
+	RoleDivergence int64 // handler's requireRole demanded a stricter role than C2 metadata (C4)
 }
 
 func c2CounterSnapshot() c2Counters {
 	return c2Counters{
-		WouldDeny:     c2ShadowWouldDenyTotal.Load(),
-		EnforceDenied: c2EnforceDeniedTotal.Load(),
-		MissingMeta:   c2ShadowMissingMetaTotal.Load(),
-		NoPolicy:      c2ShadowNoPolicyTotal.Load(),
-		AuditMissing:  c2AuditMissingTotal.Load(),
+		WouldDeny:      c2ShadowWouldDenyTotal.Load(),
+		EnforceDenied:  c2EnforceDeniedTotal.Load(),
+		MissingMeta:    c2ShadowMissingMetaTotal.Load(),
+		NoPolicy:       c2ShadowNoPolicyTotal.Load(),
+		AuditMissing:   c2AuditMissingTotal.Load(),
+		RoleDivergence: c2RoleDivergenceTotal.Load(),
 	}
 }
 
@@ -461,6 +463,14 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 			logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
 				d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
 		}
+
+		// C4 — inject the C2-evaluated MinRole into the request context
+		// so requireRole's failure branch can detect "metadata more
+		// permissive than handler" divergence. No-op when d.RequiredRole
+		// is empty (public, missing-meta, or no-policy paths) — those
+		// cases legitimately leave the context untouched and
+		// recordRoleDivergence stays a no-op for them.
+		r = withC2EvaluatedRole(r, d.RequiredRole)
 
 		// C2c — audit-completion observability.
 		//
