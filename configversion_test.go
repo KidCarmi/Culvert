@@ -67,6 +67,81 @@ func TestApiConfigDiff_InvalidFrom(t *testing.T) {
 	}
 }
 
+// TestSaveConfigVersion_WritesValidJSON verifies that saveConfigVersion
+// produces a syntactically valid JSON envelope on disk after the writer
+// was converted to the hardened atomicWriteFile helper. Redirects
+// configVersionsDir to a temp dir to avoid touching /data.
+func TestSaveConfigVersion_WritesValidJSON(t *testing.T) {
+	tmp := t.TempDir()
+
+	origDir := configVersionsDir
+	configVersionsDir = tmp
+	t.Cleanup(func() { configVersionsDir = origDir })
+
+	configVersionMu.Lock()
+	origSeq := configVersionSeq
+	configVersionMu.Unlock()
+	t.Cleanup(func() {
+		configVersionMu.Lock()
+		configVersionSeq = origSeq
+		configVersionMu.Unlock()
+	})
+
+	saveConfigVersion("d1.1a-test", "test-action")
+
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("read temp dir: %v", err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected 1 file, got %d: %v", len(entries), names)
+	}
+
+	name := entries[0].Name()
+	if !strings.HasPrefix(name, "v") || !strings.HasSuffix(name, ".json") {
+		t.Errorf("unexpected filename: %s", name)
+	}
+	if strings.Contains(name, ".tmp.") {
+		t.Errorf("tmp file leaked into directory: %s", name)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmp, name))
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+
+	var envelope struct {
+		Meta   ConfigVersion `json:"meta"`
+		Config configBackup  `json:"config"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("envelope is not valid JSON: %v\nbody: %s", err, data)
+	}
+
+	if envelope.Meta.Actor != "d1.1a-test" {
+		t.Errorf("Meta.Actor = %q, want d1.1a-test", envelope.Meta.Actor)
+	}
+	if envelope.Meta.Action != "test-action" {
+		t.Errorf("Meta.Action = %q, want test-action", envelope.Meta.Action)
+	}
+	if envelope.Meta.Version <= 0 {
+		t.Errorf("Meta.Version = %d, want > 0", envelope.Meta.Version)
+	}
+
+	// Verify file mode is 0o600 (the perm passed to atomicWriteFile).
+	info, err := os.Stat(filepath.Join(tmp, name))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("file mode = %o, want 0o600", got)
+	}
+}
+
 func TestRollbackConfigVersion_InvalidVersion(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/config/versions",
 		strings.NewReader(`{"version":0}`))

@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -1761,12 +1762,72 @@ func certNeedsRenewal(certFile string) (int, bool) {
 	return days, days <= 30
 }
 
-// atomicWriteFile writes data to path atomically via a .tmp rename.
-func atomicWriteFile(path string, data []byte) error {
-	if err := os.WriteFile(path+".tmp", data, 0o600); err != nil {
-		return err
+// atomicWriteFile writes data to path durably: unique temp in same dir,
+// chmod, fsync(file), close, rename, fsync(parent dir).
+// Cleans up the temp file on any error after creation.
+//
+// Parent-dir fsync semantics (after the rename has succeeded):
+//   - If the parent dir cannot be opened, skip silently (some filesystems and
+//     Windows do not allow opening a directory for sync). The rename itself
+//     has already published the new file.
+//   - If d.Sync() returns EINVAL / ENOTSUP / EOPNOTSUPP, the filesystem does
+//     not support fsync on directories — skip silently. The temp+rename above
+//     already provides every durability guarantee that filesystem can offer.
+//   - Any other Sync error is propagated as a real durability failure.
+//   - The dir handle is always closed; a Close error is propagated only when
+//     Sync did not already report an error.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	f, err := os.CreateTemp(dir, base+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("atomic write %s: create temp: %w", path, err)
 	}
-	return os.Rename(path+".tmp", path)
+	tmp := f.Name()
+	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		cleanup()
+		return fmt.Errorf("atomic write %s: write: %w", path, err)
+	}
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		cleanup()
+		return fmt.Errorf("atomic write %s: chmod: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return fmt.Errorf("atomic write %s: fsync: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("atomic write %s: close: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		cleanup()
+		return fmt.Errorf("atomic write %s: rename: %w", path, err)
+	}
+
+	d, err := os.Open(dir)
+	if err != nil {
+		// Best-effort: opening a directory for sync is not portable.
+		return nil
+	}
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil &&
+		!errors.Is(syncErr, syscall.EINVAL) &&
+		!errors.Is(syncErr, syscall.ENOTSUP) &&
+		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
+		return fmt.Errorf("atomic write %s: parent dir fsync: %w", path, syncErr)
+	}
+	if closeErr != nil && syncErr == nil {
+		return fmt.Errorf("atomic write %s: parent dir close: %w", path, closeErr)
+	}
+	return nil
 }
 
 // forceRenewDPCert renews the DP cert unconditionally (triggered by CA rotation).
@@ -1809,14 +1870,14 @@ func renewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile,
 	if err != nil {
 		return fmt.Errorf("marshal key: %w", err)
 	}
-	if err := atomicWriteFile(certFile, []byte(resp.CertPEM)); err != nil {
+	if err := atomicWriteFile(certFile, []byte(resp.CertPEM), 0o600); err != nil {
 		return fmt.Errorf("write cert: %w", err)
 	}
-	if err := atomicWriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
+	if err := atomicWriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
 		return fmt.Errorf("write key: %w", err)
 	}
 	if resp.CAPEM != "" {
-		if err := atomicWriteFile(caFile, []byte(resp.CAPEM)); err != nil {
+		if err := atomicWriteFile(caFile, []byte(resp.CAPEM), 0o600); err != nil {
 			return fmt.Errorf("write CA: %w", err)
 		}
 	}

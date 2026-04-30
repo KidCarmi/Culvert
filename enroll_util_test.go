@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,9 +11,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -174,7 +179,7 @@ func TestAtomicWriteFile_Basic(t *testing.T) {
 	path := filepath.Join(dir, "test.json")
 	data := []byte(`{"key":"value"}`)
 
-	if err := atomicWriteFile(path, data); err != nil {
+	if err := atomicWriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("atomicWriteFile: %v", err)
 	}
 
@@ -186,10 +191,7 @@ func TestAtomicWriteFile_Basic(t *testing.T) {
 		t.Fatalf("content = %q, want %q", got, data)
 	}
 
-	// Temp file should not exist.
-	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
-		t.Fatal(".tmp file should not remain after atomic write")
-	}
+	assertNoTmpLeak(t, dir)
 }
 
 func TestAtomicWriteFile_Overwrite(t *testing.T) {
@@ -197,19 +199,128 @@ func TestAtomicWriteFile_Overwrite(t *testing.T) {
 	path := filepath.Join(dir, "test.txt")
 	_ = os.WriteFile(path, []byte("old"), 0o600)
 
-	if err := atomicWriteFile(path, []byte("new")); err != nil {
+	if err := atomicWriteFile(path, []byte("new"), 0o600); err != nil {
 		t.Fatalf("atomicWriteFile: %v", err)
 	}
 	got, _ := os.ReadFile(path)
 	if string(got) != "new" {
 		t.Fatalf("content = %q, want new", got)
 	}
+	assertNoTmpLeak(t, dir)
 }
 
 func TestAtomicWriteFile_InvalidDir(t *testing.T) {
-	err := atomicWriteFile("/nonexistent/dir/file.txt", []byte("data"))
+	err := atomicWriteFile("/nonexistent/dir/file.txt", []byte("data"), 0o600)
 	if err == nil {
 		t.Fatal("expected error for invalid directory")
+	}
+}
+
+func TestAtomicWriteFile_PreservesPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission semantics not applicable on Windows")
+	}
+	dir := t.TempDir()
+
+	cases := []os.FileMode{0o600, 0o640, 0o644}
+	for _, want := range cases {
+		want := want
+		t.Run(fmt.Sprintf("perm_%o", want), func(t *testing.T) {
+			path := filepath.Join(dir, fmt.Sprintf("perm_%o.txt", want))
+			if err := atomicWriteFile(path, []byte("x"), want); err != nil {
+				t.Fatalf("atomicWriteFile: %v", err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			got := info.Mode().Perm()
+			if got != want {
+				t.Fatalf("perm = %o, want %o", got, want)
+			}
+		})
+	}
+}
+
+func TestAtomicWriteFile_ConcurrentSamePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "race.json")
+
+	const n = 16
+	payloads := make([][]byte, n)
+	for i := range payloads {
+		payloads[i] = []byte(fmt.Sprintf(`{"writer":%d}`, i))
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(p []byte) {
+			defer wg.Done()
+			if err := atomicWriteFile(path, p, 0o600); err != nil {
+				errCh <- err
+			}
+		}(payloads[i])
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent atomicWriteFile failed: %v", err)
+	}
+
+	// Final content must be exactly one of the payloads (no torn writes,
+	// no interleaving). Atomic rename guarantees one writer wins cleanly.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	matched := false
+	for _, p := range payloads {
+		if bytes.Equal(got, p) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Fatalf("final content not one of inputs: got %q", got)
+	}
+
+	assertNoTmpLeak(t, dir)
+}
+
+func TestAtomicWriteFile_NoTmpLeakOnRenameFail(t *testing.T) {
+	dir := t.TempDir()
+	// Create a non-empty directory at the target path. os.Rename of a regular
+	// file onto a non-empty directory fails on POSIX, exercising the cleanup
+	// path after the temp file has been written.
+	target := filepath.Join(dir, "blocked")
+	if err := os.Mkdir(target, 0o750); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "child"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	err := atomicWriteFile(target, []byte("data"), 0o600)
+	if err == nil {
+		t.Fatal("expected error renaming onto a non-empty directory")
+	}
+	assertNoTmpLeak(t, dir)
+}
+
+// assertNoTmpLeak fails the test if any *.tmp.* file from atomicWriteFile
+// remains in dir.
+func assertNoTmpLeak(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("orphaned tmp file: %s", e.Name())
+		}
 	}
 }
 

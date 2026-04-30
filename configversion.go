@@ -19,7 +19,10 @@ import (
 	"time"
 )
 
-const configVersionsDir = "/data/config_versions"
+// configVersionsDir is a var (not const) so tests can redirect writes to a
+// temp dir. Production code never reassigns it.
+var configVersionsDir = "/data/config_versions"
+
 const maxConfigVersions = 50
 
 // ConfigVersion is metadata for a stored config snapshot.
@@ -103,7 +106,7 @@ func saveConfigVersion(actor, action string) {
 	}
 
 	path := filepath.Join(configVersionsDir, fmt.Sprintf("v%d.json", seq))
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := atomicWriteFile(path, data, 0o600); err != nil {
 		logger.Printf("ConfigVersion: write error: %v", err)
 		return
 	}
