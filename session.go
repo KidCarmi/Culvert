@@ -39,6 +39,24 @@ func initSessionSecret() {
 	}
 }
 
+// newSessionJti returns a fresh 128-bit random session identifier, hex
+// encoded. Stamped into every newly-issued Session by the cookie
+// issuers so two same-second logins for the same user produce distinct
+// b64 payloads (and therefore distinct HMACs and cookie values). The
+// only collision space is 2^128, far beyond birthday-bound concerns
+// for any plausible deployment.
+//
+// crypto/rand failure is treated the same as initSessionSecret's:
+// fail loudly. A session machinery that cannot generate randomness is
+// unsafe to keep running.
+func newSessionJti() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("session: failed to generate jti: %v", err))
+	}
+	return hex.EncodeToString(b[:])
+}
+
 // initSessionSecretFromConfig applies a config-file session secret.
 // Called after config is loaded, before the UI starts.
 func initSessionSecretFromConfig(hexKey string) {
@@ -275,6 +293,16 @@ type Session struct {
 	Provider string   `json:"pvd"`
 	Role     string   `json:"role,omitempty"` // UI admin role: admin|operator|viewer
 	Exp      int64    `json:"exp"`            // Unix timestamp
+	// Jti is a 128-bit random session identifier (hex-encoded). Added in
+	// Phase C5.1 to make the JSON payload unique per login even when two
+	// logins for the same user happen in the same wall-clock second —
+	// without Jti the (Sub, Role, Exp-in-seconds) tuple yielded a
+	// byte-identical payload, identical b64, identical HMAC, and an
+	// effectively-revoked cookie if any prior login of that tuple had
+	// been revoked. omitempty keeps legacy cookies (issued before C5.1)
+	// decoding cleanly: their Jti unmarshals to "" and the field is
+	// simply absent on the wire.
+	Jti string `json:"jti,omitempty"`
 }
 
 // Identity converts the session payload into the canonical Identity object.
@@ -362,6 +390,7 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, id *Identity) erro
 		Groups:   id.Groups,
 		Provider: id.Provider,
 		Exp:      time.Now().Add(getSessionTTL()).Unix(),
+		Jti:      newSessionJti(),
 	}
 	value, err := encodeSession(s)
 	if err != nil {
