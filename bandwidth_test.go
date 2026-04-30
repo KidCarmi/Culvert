@@ -224,6 +224,24 @@ func TestBandwidthManager_Persistence(t *testing.T) {
 	}
 }
 
+// TestBandwidthManager_Save_NoTmpLeak verifies that the converted writer
+// (atomicWriteFile) does not leave orphaned *.tmp.* files in the parent
+// directory after a successful Save. Regression guard for D1.1b.
+func TestBandwidthManager_Save_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	m := NewBandwidthManager(filepath.Join(dir, "bw.json"))
+	if _, err := m.Add(BandwidthPolicy{
+		Name:           "tmpleak-test",
+		LabelSelector:  map[string]string{"role": "edge"},
+		MaxBytesPerSec: 1024,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// Add() persists internally via Save(); call Save() again to be explicit.
+	m.Save()
+	assertNoTmpLeak(t, dir)
+}
+
 func TestBandwidthManager_AllowBytes(t *testing.T) {
 	dir := t.TempDir()
 	m := NewBandwidthManager(filepath.Join(dir, "bw.json"))

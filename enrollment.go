@@ -155,6 +155,11 @@ func (cs *ClusterStore) Load(path string) error {
 }
 
 // Save persists cluster state to disk.
+//
+// Uses RLock so concurrent admin-handler Save() calls do not block each
+// other. atomicWriteFile keeps each write atomic on its own (unique tmp
+// + rename), but switching to Lock for stronger serialization is worth
+// re-evaluating in a follow-up.
 func (cs *ClusterStore) Save() error {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -170,7 +175,7 @@ func (cs *ClusterStore) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("marshal cluster state: %w", err)
 	}
-	return os.WriteFile(cs.path, data, 0o600)
+	return atomicWriteFile(cs.path, data, 0o600)
 }
 
 // ─── Token Management ────────────────────────────────────────────────────────
