@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -1762,8 +1763,19 @@ func certNeedsRenewal(certFile string) (int, bool) {
 }
 
 // atomicWriteFile writes data to path durably: unique temp in same dir,
-// chmod, fsync(file), close, rename, fsync(parent dir, best-effort).
+// chmod, fsync(file), close, rename, fsync(parent dir).
 // Cleans up the temp file on any error after creation.
+//
+// Parent-dir fsync semantics (after the rename has succeeded):
+//   - If the parent dir cannot be opened, skip silently (some filesystems and
+//     Windows do not allow opening a directory for sync). The rename itself
+//     has already published the new file.
+//   - If d.Sync() returns EINVAL / ENOTSUP / EOPNOTSUPP, the filesystem does
+//     not support fsync on directories — skip silently. The temp+rename above
+//     already provides every durability guarantee that filesystem can offer.
+//   - Any other Sync error is propagated as a real durability failure.
+//   - The dir handle is always closed; a Close error is propagated only when
+//     Sync did not already report an error.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
@@ -1798,10 +1810,22 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		cleanup()
 		return fmt.Errorf("atomic write %s: rename: %w", path, err)
 	}
-	// Parent-dir fsync is best-effort: returns ENOTSUP on some filesystems / Windows.
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+
+	d, err := os.Open(dir)
+	if err != nil {
+		// Best-effort: opening a directory for sync is not portable.
+		return nil
+	}
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil &&
+		!errors.Is(syncErr, syscall.EINVAL) &&
+		!errors.Is(syncErr, syscall.ENOTSUP) &&
+		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
+		return fmt.Errorf("atomic write %s: parent dir fsync: %w", path, syncErr)
+	}
+	if closeErr != nil && syncErr == nil {
+		return fmt.Errorf("atomic write %s: parent dir close: %w", path, closeErr)
 	}
 	return nil
 }
