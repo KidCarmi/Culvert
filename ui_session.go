@@ -23,6 +23,7 @@ func setUISessionCookie(w http.ResponseWriter, r *http.Request, username string,
 		Provider: "local",
 		Role:     string(role),
 		Exp:      time.Now().Add(getSessionTTL()).Unix(),
+		Jti:      newSessionJti(),
 	}
 	value, err := encodeSession(s)
 	if err != nil {
