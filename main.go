@@ -1761,12 +1761,49 @@ func certNeedsRenewal(certFile string) (int, bool) {
 	return days, days <= 30
 }
 
-// atomicWriteFile writes data to path atomically via a .tmp rename.
-func atomicWriteFile(path string, data []byte) error {
-	if err := os.WriteFile(path+".tmp", data, 0o600); err != nil {
-		return err
+// atomicWriteFile writes data to path durably: unique temp in same dir,
+// chmod, fsync(file), close, rename, fsync(parent dir, best-effort).
+// Cleans up the temp file on any error after creation.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	f, err := os.CreateTemp(dir, base+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("atomic write %s: create temp: %w", path, err)
 	}
-	return os.Rename(path+".tmp", path)
+	tmp := f.Name()
+	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		cleanup()
+		return fmt.Errorf("atomic write %s: write: %w", path, err)
+	}
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		cleanup()
+		return fmt.Errorf("atomic write %s: chmod: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return fmt.Errorf("atomic write %s: fsync: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("atomic write %s: close: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		cleanup()
+		return fmt.Errorf("atomic write %s: rename: %w", path, err)
+	}
+	// Parent-dir fsync is best-effort: returns ENOTSUP on some filesystems / Windows.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // forceRenewDPCert renews the DP cert unconditionally (triggered by CA rotation).
@@ -1809,14 +1846,14 @@ func renewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile,
 	if err != nil {
 		return fmt.Errorf("marshal key: %w", err)
 	}
-	if err := atomicWriteFile(certFile, []byte(resp.CertPEM)); err != nil {
+	if err := atomicWriteFile(certFile, []byte(resp.CertPEM), 0o600); err != nil {
 		return fmt.Errorf("write cert: %w", err)
 	}
-	if err := atomicWriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
+	if err := atomicWriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
 		return fmt.Errorf("write key: %w", err)
 	}
 	if resp.CAPEM != "" {
-		if err := atomicWriteFile(caFile, []byte(resp.CAPEM)); err != nil {
+		if err := atomicWriteFile(caFile, []byte(resp.CAPEM), 0o600); err != nil {
 			return fmt.Errorf("write CA: %w", err)
 		}
 	}
