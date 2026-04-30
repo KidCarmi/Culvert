@@ -108,30 +108,30 @@ type governanceC2State struct {
 
 // governanceCounters is a verbatim copy of c2CounterSnapshot in JSON-
 // friendly form. Keeping the field set identical means the SPA can
-// render the same five tiles operators already see in the C2 logs.
+// render the same tiles operators already see in the C2 logs. C4 added
+// the role_divergence counter; the SPA gracefully falls back to 0 for
+// older snapshots so the schema bump is forward-compatible.
 type governanceCounters struct {
-	WouldDeny     int64 `json:"would_deny"`
-	EnforceDenied int64 `json:"enforce_denied"`
-	MissingMeta   int64 `json:"missing_meta"`
-	NoPolicy      int64 `json:"no_policy"`
-	AuditMissing  int64 `json:"audit_missing"`
+	WouldDeny      int64 `json:"would_deny"`
+	EnforceDenied  int64 `json:"enforce_denied"`
+	MissingMeta    int64 `json:"missing_meta"`
+	NoPolicy       int64 `json:"no_policy"`
+	AuditMissing   int64 `json:"audit_missing"`
+	RoleDivergence int64 `json:"role_divergence"`
 }
 
-// governanceHealth is a tri-axis derivation over the counter snapshot
-// and the active C2 mode. None of the axis fields require I/O.
-//
-// Derivation rules (kept in code so they are testable, not in YAML):
-//   - metadata_parity:    "ok" iff missing_meta == 0 && no_policy == 0
-//   - audit_completion:   "ok" iff audit_missing == 0
-//   - enforce_consistency:"ok" iff (mode=="enforce") OR enforce_denied == 0
-//   - status:             "drift"  if metadata_parity != "ok" OR enforce_consistency != "ok"
-//     "warn"   else if audit_completion != "ok"
-//     "healthy" otherwise
+// governanceHealth is a four-axis derivation over the counter snapshot
+// and the active C2 mode. None of the axis fields require I/O. See
+// deriveGovernanceHealth for the full severity policy. C4 adds the
+// role_divergence axis at warn severity (not drift) because a viewer
+// probing an admin-only sub-action legitimately triggers it and that
+// should not flip the global indicator to drift.
 type governanceHealth struct {
 	Status             string                  `json:"status"`
 	MetadataParity     string                  `json:"metadata_parity"`
 	AuditCompletion    string                  `json:"audit_completion"`
 	EnforceConsistency string                  `json:"enforce_consistency"`
+	RoleDivergence     string                  `json:"role_divergence"`
 	Issues             []governanceHealthIssue `json:"issues"`
 }
 
@@ -300,11 +300,18 @@ func summariseRoutes(routes []uiRouteMetadata) governanceRoutesSummary {
 //   - enforce_denied > 0 in shadow mode → enforce_consistency =
 //     drift, status = drift (the kill-switch contract is read-once;
 //     a non-zero counter in shadow is a real anomaly).
+//   - role_divergence > 0 → role_divergence = warn, status ≥ warn.
+//     C4 increments this counter when the handler-level requireRole
+//     rejected a request whose C2-evaluated MinRole was strictly
+//     lower (i.e. metadata was more permissive than the handler's
+//     actual contract — a viewer probing an admin-only sub-action
+//     legitimately produces this signal).
 func deriveGovernanceHealth(c governanceCounters, mode string) governanceHealth {
 	h := governanceHealth{
 		MetadataParity:     healthOK,
 		AuditCompletion:    healthOK,
 		EnforceConsistency: healthOK,
+		RoleDivergence:     healthOK,
 		Issues:             []governanceHealthIssue{},
 	}
 
@@ -358,16 +365,25 @@ func deriveGovernanceHealth(c governanceCounters, mode string) governanceHealth 
 			Hint:     "C2 mode is shadow but the enforce-denied counter is non-zero. The kill switch is read once at startup so this should be impossible at runtime — investigate whether the C2 middleware has a bug or whether the counter was incremented by a code path other than the enforce branch.",
 		})
 	}
+	if c.RoleDivergence > 0 {
+		h.RoleDivergence = healthWarn
+		h.Issues = append(h.Issues, governanceHealthIssue{
+			Code:     "role_divergence_nonzero",
+			Severity: healthWarn,
+			Count:    c.RoleDivergence,
+			Hint:     "One or more handler-level requireRole calls rejected a request whose C2-evaluated MinRole was strictly lower — i.e. the metadata was more permissive than the handler's actual contract. Grep logs for 'C2: role divergence' to see which routes; this is normal for dynamic-handler dispatchers like /api/idp/, but persistent divergence elsewhere may indicate metadata that should be tightened.",
+		})
+	}
 
 	// Status precedence: drift > warn > healthy.
 	// drift fires only on genuine governance/config anomalies
 	// (missing_meta or enforce_denied-in-shadow); warn is the
 	// catch-all for noisy-but-actionable signals (no_policy,
-	// audit_missing).
+	// audit_missing, role_divergence).
 	switch {
 	case c.MissingMeta > 0 || (mode == c2ModeShadow && c.EnforceDenied > 0):
 		h.Status = statusDrift
-	case c.NoPolicy > 0 || c.AuditMissing > 0:
+	case c.NoPolicy > 0 || c.AuditMissing > 0 || c.RoleDivergence > 0:
 		h.Status = statusWarn
 	default:
 		h.Status = statusHealthy
@@ -387,6 +403,7 @@ func governanceTestLayerCatalog(mode string) []governanceTestLayer {
 		{ID: "C1.5", Purpose: "AST parity between metadata and handler", Runtime: false},
 		{ID: "C2", Purpose: "metadata enforcement middleware", Runtime: true, Mode: mode},
 		{ID: "C2c", Purpose: "audit-completion observability", Runtime: true},
+		{ID: "C4", Purpose: "report-only role-divergence detector", Runtime: true},
 	}
 }
 
