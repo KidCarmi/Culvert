@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -450,6 +451,151 @@ func TestClusterCA_InitOrLoad(t *testing.T) {
 	if ca2.CACertFingerprint() != ca.CACertFingerprint() {
 		t.Fatal("reloaded CA should have same fingerprint")
 	}
+}
+
+// ── D1.1f: bootstrap consistency tests ─────────────────────────────────────
+
+// seedClusterCAFiles bootstraps a clusterCA into a fresh temp dir and
+// returns the cert and key PEM bytes. Used by partial-pair / mismatch
+// tests to obtain real, parseable PEM material.
+func seedClusterCAFiles(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := (&clusterCA{}).InitOrLoad(dir); err != nil {
+		t.Fatalf("seed bootstrap: %v", err)
+	}
+	var err error
+	certPEM, err = os.ReadFile(filepath.Join(dir, "cluster-ca.crt"))
+	if err != nil {
+		t.Fatalf("seed read cert: %v", err)
+	}
+	keyPEM, err = os.ReadFile(filepath.Join(dir, "cluster-ca.key"))
+	if err != nil {
+		t.Fatalf("seed read key: %v", err)
+	}
+	return certPEM, keyPEM
+}
+
+func TestClusterCA_PartialPair_CertOnly_FailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, _ := seedClusterCAFiles(t)
+	if err := os.WriteFile(filepath.Join(dir, "cluster-ca.crt"), certPEM, 0o600); err != nil {
+		t.Fatalf("write seed cert: %v", err)
+	}
+
+	ca := &clusterCA{}
+	err := ca.InitOrLoad(dir)
+	if err == nil {
+		t.Fatal("expected error on partial pair (cert only)")
+	}
+	if !strings.Contains(err.Error(), "partial pair") {
+		t.Errorf("error should mention partial pair, got: %v", err)
+	}
+
+	// Surviving cert must NOT have been overwritten.
+	after, err := os.ReadFile(filepath.Join(dir, "cluster-ca.crt"))
+	if err != nil {
+		t.Fatalf("read cert after: %v", err)
+	}
+	if !bytes.Equal(after, certPEM) {
+		t.Error("cert was overwritten despite partial-pair detection")
+	}
+	// Key must still be missing — bootstrap refused to create one.
+	if _, err := os.Stat(filepath.Join(dir, "cluster-ca.key")); !os.IsNotExist(err) {
+		t.Errorf("key should not have been created; stat err = %v", err)
+	}
+}
+
+func TestClusterCA_PartialPair_KeyOnly_FailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	_, keyPEM := seedClusterCAFiles(t)
+	if err := os.WriteFile(filepath.Join(dir, "cluster-ca.key"), keyPEM, 0o600); err != nil {
+		t.Fatalf("write seed key: %v", err)
+	}
+
+	ca := &clusterCA{}
+	err := ca.InitOrLoad(dir)
+	if err == nil {
+		t.Fatal("expected error on partial pair (key only)")
+	}
+	if !strings.Contains(err.Error(), "partial pair") {
+		t.Errorf("error should mention partial pair, got: %v", err)
+	}
+
+	after, err := os.ReadFile(filepath.Join(dir, "cluster-ca.key"))
+	if err != nil {
+		t.Fatalf("read key after: %v", err)
+	}
+	if !bytes.Equal(after, keyPEM) {
+		t.Error("key was overwritten despite partial-pair detection")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cluster-ca.crt")); !os.IsNotExist(err) {
+		t.Errorf("cert should not have been created; stat err = %v", err)
+	}
+}
+
+func TestClusterCA_EmptyDir_BootstrapsSuccessfully(t *testing.T) {
+	dir := t.TempDir()
+	ca := &clusterCA{}
+	if err := ca.InitOrLoad(dir); err != nil {
+		t.Fatalf("InitOrLoad on empty dir: %v", err)
+	}
+	if !ca.Ready() {
+		t.Error("CA should be ready after bootstrap on empty dir")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cluster-ca.crt")); err != nil {
+		t.Fatalf("cluster-ca.crt missing after bootstrap: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cluster-ca.key")); err != nil {
+		t.Fatalf("cluster-ca.key missing after bootstrap: %v", err)
+	}
+}
+
+func TestClusterCA_MatchedPair_LoadsSuccessfully(t *testing.T) {
+	dir := t.TempDir()
+	if err := (&clusterCA{}).InitOrLoad(dir); err != nil {
+		t.Fatalf("seed bootstrap: %v", err)
+	}
+	// Reload from disk into a fresh struct — should succeed (matched pair).
+	ca2 := &clusterCA{}
+	if err := ca2.InitOrLoad(dir); err != nil {
+		t.Fatalf("InitOrLoad reload: %v", err)
+	}
+	if !ca2.Ready() {
+		t.Error("CA should be ready after reload")
+	}
+}
+
+func TestClusterCA_MismatchedPair_FailsClosed(t *testing.T) {
+	dir := t.TempDir()
+
+	// Bootstrap two distinct CAs in separate seed dirs and mix the halves.
+	certA, _ := seedClusterCAFiles(t)
+	_, keyB := seedClusterCAFiles(t)
+
+	if err := os.WriteFile(filepath.Join(dir, "cluster-ca.crt"), certA, 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cluster-ca.key"), keyB, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	ca := &clusterCA{}
+	err := ca.InitOrLoad(dir)
+	if err == nil {
+		t.Fatal("expected error on mismatched cert/key pair")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error should mention mismatch, got: %v", err)
+	}
+}
+
+func TestClusterCA_Bootstrap_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	if err := (&clusterCA{}).InitOrLoad(dir); err != nil {
+		t.Fatalf("InitOrLoad: %v", err)
+	}
+	assertNoTmpLeak(t, dir)
 }
 
 func TestClusterCA_SignCSR(t *testing.T) {
