@@ -476,61 +476,51 @@ func seedClusterCAFiles(t *testing.T) (certPEM, keyPEM []byte) {
 	return certPEM, keyPEM
 }
 
-func TestClusterCA_PartialPair_CertOnly_FailsClosed(t *testing.T) {
-	dir := t.TempDir()
-	certPEM, _ := seedClusterCAFiles(t)
-	if err := os.WriteFile(filepath.Join(dir, "cluster-ca.crt"), certPEM, 0o600); err != nil {
-		t.Fatalf("write seed cert: %v", err)
+func TestClusterCA_PartialPair_FailsClosed(t *testing.T) {
+	cases := []struct {
+		name    string
+		present string // file pre-created on disk
+		absent  string // file that must remain absent after InitOrLoad
+		useCert bool   // true → seed `present` with cert PEM; false → key PEM
+	}{
+		{name: "cert_only", present: "cluster-ca.crt", absent: "cluster-ca.key", useCert: true},
+		{name: "key_only", present: "cluster-ca.key", absent: "cluster-ca.crt", useCert: false},
 	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			certPEM, keyPEM := seedClusterCAFiles(t)
+			seed := keyPEM
+			if c.useCert {
+				seed = certPEM
+			}
+			if err := os.WriteFile(filepath.Join(dir, c.present), seed, 0o600); err != nil {
+				t.Fatalf("write seed: %v", err)
+			}
 
-	ca := &clusterCA{}
-	err := ca.InitOrLoad(dir)
-	if err == nil {
-		t.Fatal("expected error on partial pair (cert only)")
-	}
-	if !strings.Contains(err.Error(), "partial pair") {
-		t.Errorf("error should mention partial pair, got: %v", err)
-	}
+			ca := &clusterCA{}
+			err := ca.InitOrLoad(dir)
+			if err == nil {
+				t.Fatalf("expected error on partial pair (%s)", c.name)
+			}
+			if !strings.Contains(err.Error(), "partial pair") {
+				t.Errorf("error should mention partial pair, got: %v", err)
+			}
 
-	// Surviving cert must NOT have been overwritten.
-	after, err := os.ReadFile(filepath.Join(dir, "cluster-ca.crt"))
-	if err != nil {
-		t.Fatalf("read cert after: %v", err)
-	}
-	if !bytes.Equal(after, certPEM) {
-		t.Error("cert was overwritten despite partial-pair detection")
-	}
-	// Key must still be missing — bootstrap refused to create one.
-	if _, err := os.Stat(filepath.Join(dir, "cluster-ca.key")); !os.IsNotExist(err) {
-		t.Errorf("key should not have been created; stat err = %v", err)
-	}
-}
-
-func TestClusterCA_PartialPair_KeyOnly_FailsClosed(t *testing.T) {
-	dir := t.TempDir()
-	_, keyPEM := seedClusterCAFiles(t)
-	if err := os.WriteFile(filepath.Join(dir, "cluster-ca.key"), keyPEM, 0o600); err != nil {
-		t.Fatalf("write seed key: %v", err)
-	}
-
-	ca := &clusterCA{}
-	err := ca.InitOrLoad(dir)
-	if err == nil {
-		t.Fatal("expected error on partial pair (key only)")
-	}
-	if !strings.Contains(err.Error(), "partial pair") {
-		t.Errorf("error should mention partial pair, got: %v", err)
-	}
-
-	after, err := os.ReadFile(filepath.Join(dir, "cluster-ca.key"))
-	if err != nil {
-		t.Fatalf("read key after: %v", err)
-	}
-	if !bytes.Equal(after, keyPEM) {
-		t.Error("key was overwritten despite partial-pair detection")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "cluster-ca.crt")); !os.IsNotExist(err) {
-		t.Errorf("cert should not have been created; stat err = %v", err)
+			// Surviving file must NOT have been overwritten.
+			after, err := os.ReadFile(filepath.Join(dir, c.present))
+			if err != nil {
+				t.Fatalf("read %s after: %v", c.present, err)
+			}
+			if !bytes.Equal(after, seed) {
+				t.Errorf("%s was overwritten despite partial-pair detection", c.present)
+			}
+			// Missing file must still be missing — bootstrap refused to create one.
+			if _, err := os.Stat(filepath.Join(dir, c.absent)); !os.IsNotExist(err) {
+				t.Errorf("%s should not have been created; stat err = %v", c.absent, err)
+			}
+		})
 	}
 }
 
