@@ -431,7 +431,7 @@ func (ps *PolicyStore) saveMeta() {
 	m := policyMeta{Version: ps.version, UpdatedAt: ps.updatedAt}
 	ps.mu.RUnlock()
 	data, _ := json.Marshal(m)
-	os.WriteFile(ps.path+".meta", data, 0o600) //nolint:errcheck
+	_ = atomicWriteFile(ps.path+".meta", data, 0o600)
 }
 
 // Save persists the current rules to disk (skips HitCount — runtime only).

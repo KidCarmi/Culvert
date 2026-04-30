@@ -59,7 +59,7 @@ func (fb *FileBlocker) save() {
 		exts = append(exts, ext)
 	}
 	data, _ := json.Marshal(exts)
-	os.WriteFile(fb.path, data, 0o600) //nolint:errcheck -- best-effort
+	_ = atomicWriteFile(fb.path, data, 0o600)
 }
 
 // defaultBlockedExts is loaded at startup when no config override is provided.

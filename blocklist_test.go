@@ -107,3 +107,39 @@ func TestBlocklist_LoadSave(t *testing.T) {
 		t.Error("extra.com should survive Save/Load round-trip")
 	}
 }
+
+// ── Sidecar atomic-write regression guards (D1.1c) ─────────────────────────
+
+// freshBLWithSidecars returns a Blocklist with all map fields initialized,
+// including the sidecar-backed `manual` and `exceptions` sets which freshBL
+// does not initialize. Required for AddManual / AddException to not panic.
+func freshBLWithSidecars(path string) *Blocklist {
+	return &Blocklist{
+		path:       path,
+		exact:      map[string]bool{},
+		wildcards:  map[string]bool{},
+		manual:     map[string]bool{},
+		exceptions: map[string]bool{},
+	}
+}
+
+func TestBlocklist_SaveMode_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	b := freshBLWithSidecars(filepath.Join(dir, "blocklist.txt"))
+	b.SetMode("block")
+	assertNoTmpLeak(t, dir)
+}
+
+func TestBlocklist_SaveExceptions_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	b := freshBLWithSidecars(filepath.Join(dir, "blocklist.txt"))
+	b.AddException("ok.example.com")
+	assertNoTmpLeak(t, dir)
+}
+
+func TestBlocklist_SaveManual_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	b := freshBLWithSidecars(filepath.Join(dir, "blocklist.txt"))
+	b.AddManual("manual.example.com")
+	assertNoTmpLeak(t, dir)
+}
