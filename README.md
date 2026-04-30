@@ -84,7 +84,7 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 
 ### Admin Web UI
 
-19-panel single-page application with real-time updates:
+Single-page application with real-time updates:
 
 | Panel | Description |
 |-------|-------------|
@@ -106,6 +106,8 @@ Deploy it with `docker-compose up -d` and you get a production-ready proxy with 
 | Config Versions | Auto-snapshot history, side-by-side diff, one-click rollback |
 | PAC | PAC file generator with custom exclusions |
 | Audit Log | Tamper-evident JSONL trail of all admin actions |
+| Diagnostics | Operator contract — storage, policy load, root CA, session HMAC, CDR, cluster TLS posture, updater URL, config-version health, risky-but-allowed warnings |
+| Governance | Read-only control-plane visibility — route inventory, C2/C2c/C4 counters, derived health, parity-test catalog (admin-only) |
 | Users | User management with RBAC role assignment |
 | Settings | Session timeout, UI access control, syslog, config export/import |
 
@@ -496,6 +498,7 @@ Distributed (Data Plane):
 | Variable | Description |
 |----------|-------------|
 | `CULVERT_CA_PASSPHRASE` | CA private key encryption passphrase (required for SSL inspection) |
+| `CULVERT_C2_ENFORCE` | C2 metadata-driven admin RBAC enforcement mode. Default = `enforce` (fail-closed). Set to `false`/`0`/`no`/`off` to revert to shadow (log-only) mode without rebuild. Read once at startup. |
 
 ---
 
@@ -567,7 +570,8 @@ Culvert follows a defence-in-depth approach:
 | **Brute-force** | IP + user lockout after 5 failures (15 min cooldown) |
 | **Admin API rate limiting** | 60 req/min per IP on mutating endpoints |
 | **Slowloris** | 60s read deadline on SSL-inspected connections |
-| **Session security** | HMAC-SHA256 signed cookies; dynamic `Secure` flag; fixation prevention |
+| **Session security** | HMAC-SHA256 signed cookies with per-session 128-bit Jti; dynamic `Secure` flag; fixation prevention; revocation list with disk persistence and gRPC gossip |
+| **Admin RBAC defense-in-depth** | Metadata-driven C2 enforcement layer in addition to per-handler `requireRole`; report-only audit-completion (C2c) and role-divergence (C4) detectors; governance health surface at `/api/governance/control-plane` |
 | **CA key protection** | AES-256-GCM + PBKDF2-SHA256 (600k iterations) at rest |
 | **OCSP/CRL** | Upstream certificate revocation checking (fail-closed) |
 | **Hop-by-hop** | RFC 7230 compliant - parses `Connection` header for dynamic names |
@@ -619,7 +623,7 @@ proxy.go           - HTTP/HTTPS/WebSocket handler, SSL inspection, structured lo
 socks5.go          - SOCKS5 server (RFC 1928/1929)
 policy.go          - PBAC engine: rule evaluation, conflict detection, GeoIP fail-closed
 session.go         - HMAC-SHA256 signed cookies, revocation, dynamic Secure flag
-ui.go              - Admin Web UI (47 REST endpoints, RBAC, audit enrichment)
+ui.go              - Admin Web UI bootstrap; routes are registered via register*Routes helpers and tracked in uiRoutes (see CLAUDE.md for the canonical inventory and C2/C2c/C4 governance machinery)
 store.go           - Config, blocklist, request log, time-series, audit log
 security.go        - IP filter, rate limiter, SSRF guard, DNS cache
 security_scan.go   - ClamAV + YARA + threat feed scan coordinator
