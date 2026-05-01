@@ -20,6 +20,10 @@ import (
 	"testing"
 )
 
+//nolint:funlen,dupl // Table-driven case list is intentionally long; cross-file
+// duplication with coldstart_nodegroups_test.go is by design — the two artifacts
+// have structurally identical loaders and the symmetry is part of the regression
+// guard. Refactoring to a shared helper would obscure per-artifact assertions.
 func TestColdStart_Bandwidth_Cases(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -89,7 +93,7 @@ func TestColdStart_Bandwidth_Cases(t *testing.T) {
 				if p.Name != "" {
 					t.Errorf("Name should be zero value, got %q", p.Name)
 				}
-				if p.LabelSelector != nil && len(p.LabelSelector) != 0 {
+				if len(p.LabelSelector) != 0 {
 					t.Errorf("LabelSelector should be empty, got %v", p.LabelSelector)
 				}
 				if p.MaxBytesPerSec != 4096 {
