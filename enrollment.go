@@ -731,14 +731,34 @@ func (ca *clusterCA) InitOrLoad(dir string) error {
 		return err
 	}
 
-	// Try loading existing CA.
-	certPEM, err1 := os.ReadFile(certPath)
-	keyPEM, err2 := os.ReadFile(keyPath)
-	if err1 == nil && err2 == nil {
-		return ca.loadFromPEM(certPEM, keyPEM)
+	// Inspect on-disk state. Distinguish four cases:
+	//   (true,  true)  → load existing pair (cross-validated by loadFromPEM)
+	//   (false, false) → fresh bootstrap (fall through)
+	//   (true,  false) or (false, true) → fail closed: refuse to overwrite
+	//     a surviving file with a regenerated CA. Operator must remove both
+	//     files for a clean re-bootstrap, or restore the missing one.
+	certPEM, certErr := os.ReadFile(certPath)
+	keyPEM, keyErr := os.ReadFile(keyPath)
+	certMissing := certErr != nil && os.IsNotExist(certErr)
+	keyMissing := keyErr != nil && os.IsNotExist(keyErr)
+
+	// Surface non-ENOENT read errors (permission, I/O, etc.) — fail closed.
+	if certErr != nil && !certMissing {
+		return fmt.Errorf("read cluster CA cert %q: %w", certPath, certErr)
+	}
+	if keyErr != nil && !keyMissing {
+		return fmt.Errorf("read cluster CA key %q: %w", keyPath, keyErr)
 	}
 
-	// Generate new cluster CA.
+	switch {
+	case !certMissing && !keyMissing:
+		return ca.loadFromPEM(certPEM, keyPEM)
+	case !certMissing && keyMissing:
+		return fmt.Errorf("cluster CA bootstrap: partial pair on disk (cert %q present, key %q missing) — refuse to overwrite; remove both files for fresh bootstrap or restore the missing one", certPath, keyPath)
+	case certMissing && !keyMissing:
+		return fmt.Errorf("cluster CA bootstrap: partial pair on disk (cert %q missing, key %q present) — refuse to overwrite; remove both files for fresh bootstrap or restore the missing one", certPath, keyPath)
+	}
+	// Both missing — generate new cluster CA.
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generate cluster CA key: %w", err)
@@ -779,10 +799,14 @@ func (ca *clusterCA) InitOrLoad(dir string) error {
 	}
 	keyPEMBlock := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
-	if err := os.WriteFile(certPath, certPEMBlock, 0o600); err != nil {
+	// Each file written via the hardened atomic helper. Note: this does
+	// NOT make the two-file bootstrap atomic — a crash between cert and
+	// key writes still leaves a partial pair. That state is detected on
+	// next startup by the partial-pair check above and fails closed.
+	if err := atomicWriteFile(certPath, certPEMBlock, 0o600); err != nil {
 		return fmt.Errorf("write cluster CA cert: %w", err)
 	}
-	if err := os.WriteFile(keyPath, keyPEMBlock, 0o600); err != nil {
+	if err := atomicWriteFile(keyPath, keyPEMBlock, 0o600); err != nil {
 		return fmt.Errorf("write cluster CA key: %w", err)
 	}
 
@@ -810,6 +834,21 @@ func (ca *clusterCA) loadFromPEM(certPEM, keyPEM []byte) error {
 	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
 	if err != nil {
 		return fmt.Errorf("parse cluster CA key: %w", err)
+	}
+
+	// Cross-validate: cert public key must match private key public component.
+	// Cluster CA is ECDSA P-256 by construction (see InitOrLoad); a non-ECDSA
+	// cert public key is rejected explicitly so any future RSA/Ed25519 swap
+	// must update this check intentionally rather than silently bypassing it.
+	certPub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("cluster CA cert public key is %T, expected *ecdsa.PublicKey", cert.PublicKey)
+	}
+	keyPub := &key.PublicKey
+	if certPub.Curve != keyPub.Curve ||
+		certPub.X.Cmp(keyPub.X) != 0 ||
+		certPub.Y.Cmp(keyPub.Y) != 0 {
+		return fmt.Errorf("cluster CA cert/key mismatch: public keys do not agree")
 	}
 
 	ca.cert = cert
