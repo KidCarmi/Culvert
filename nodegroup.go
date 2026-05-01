@@ -52,6 +52,13 @@ func NewNodeGroupStore(path string) *NodeGroupStore {
 	if s.groups == nil {
 		s.groups = []NodeGroup{}
 	}
+	// D1.1h: surface groups missing required fields. Loader keeps the
+	// entry; warn so operators can spot match-nothing groups.
+	for i, g := range s.groups {
+		if g.Name == "" || len(g.LabelSelector) == 0 {
+			logger.Printf("Loader: node_groups.json: group[%d] missing required field(s) at %q — keeping (D1.2-flag-F6)", i, sanitizeLog(path))
+		}
+	}
 	return s
 }
 

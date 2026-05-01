@@ -188,6 +188,12 @@ func (cm *CertManager) LoadCA(path, passphrase string) error {
 	var plaintext []byte
 	if passphrase == "" || len(data) < 5 || [4]byte(data[:4]) != caMagic {
 		// Plain PEM (no magic header) or empty passphrase.
+		// D1.1h: surface the surprising case where a passphrase is set
+		// but the file lacks the magic header (a plain-PEM bundle written
+		// before the passphrase was added). Behavior unchanged.
+		if passphrase != "" && len(data) >= 5 {
+			logger.Printf("Loader: ca.bundle: plain PEM accepted while passphrase is set — magic header absent at %q (D1.2-flag-F2)", sanitizeLog(path))
+		}
 		plaintext = data
 	} else {
 		plaintext, err = decryptBundle(data, []byte(passphrase))

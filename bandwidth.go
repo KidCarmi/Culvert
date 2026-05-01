@@ -105,6 +105,13 @@ func NewBandwidthManager(path string) *BandwidthManager {
 	if m.policies == nil {
 		m.policies = []BandwidthPolicy{}
 	}
+	// D1.1h: surface policies missing required fields. Loader keeps the
+	// entry; warn so operators can spot match-nothing policies.
+	for i, p := range m.policies {
+		if p.Name == "" || len(p.LabelSelector) == 0 {
+			logger.Printf("Loader: bandwidth.json: policy[%d] missing required field(s) at %q — keeping (D1.2-flag-F6)", i, sanitizeLog(path))
+		}
+	}
 
 	// Build token buckets for loaded policies.
 	for i := range m.policies {
