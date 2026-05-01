@@ -182,16 +182,22 @@ func listConfigVersions(w http.ResponseWriter) {
 		if !strings.HasPrefix(e.Name(), "v") || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(configVersionsDir, e.Name()))
+		fullPath := filepath.Join(configVersionsDir, e.Name())
+		data, err := os.ReadFile(fullPath)
 		if err != nil {
+			// D1.1h: surface skipped files — the rollback UI never sees
+			// them otherwise. Behavior unchanged.
+			logger.Printf("Loader: config_versions: skipping unreadable %q: %v (D1.2-flag-F5)", sanitizeLog(fullPath), err)
 			continue
 		}
 		var envelope struct {
 			Meta ConfigVersion `json:"meta"`
 		}
-		if json.Unmarshal(data, &envelope) == nil {
-			versions = append(versions, envelope.Meta)
+		if jerr := json.Unmarshal(data, &envelope); jerr != nil {
+			logger.Printf("Loader: config_versions: skipping unparseable %q: %v (D1.2-flag-F5)", sanitizeLog(fullPath), jerr)
+			continue
 		}
+		versions = append(versions, envelope.Meta)
 	}
 
 	// Sort descending by version number.

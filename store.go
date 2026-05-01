@@ -574,28 +574,42 @@ func (b *Blocklist) Load(path string) error {
 	// Load mode sidecar.
 	if data, err := os.ReadFile(path + ".mode"); err == nil {
 		m := strings.TrimSpace(string(data))
-		if m == "allow" {
+		switch {
+		case m == "allow":
 			b.mode = "allow"
+		case m != "":
+			// D1.1h: anything other than "allow" silently keeps the
+			// default ("block"). Surface it so operators can see typos
+			// or case mistakes; behavior unchanged.
+			logger.Printf("Loader: blocklist.mode: unrecognized value %q at %q, mode left at default (D1.2-flag-F3)", sanitizeLog(m), sanitizeLog(path+".mode"))
 		}
 	}
 	// Load manual sidecar — tracks which hosts were added by an admin.
 	manual := map[string]bool{}
 	if data, err := os.ReadFile(path + ".manual"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
+		for i, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
-			if line != "" {
-				manual[line] = true
+			if line == "" {
+				continue
 			}
+			if !looksLikeHostname(line) {
+				logger.Printf("Loader: blocklist.manual: line %d at %q does not look like a hostname: %q — accepting anyway (D1.2-flag-F4)", i+1, sanitizeLog(path+".manual"), sanitizeLog(line))
+			}
+			manual[line] = true
 		}
 	}
 	// Load exceptions sidecar — hosts that are never blocked regardless of the list.
 	exceptions := map[string]bool{}
 	if data, err := os.ReadFile(path + ".exceptions"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
+		for i, line := range strings.Split(string(data), "\n") {
 			line = strings.ToLower(strings.TrimSpace(line))
-			if line != "" {
-				exceptions[line] = true
+			if line == "" {
+				continue
 			}
+			if !looksLikeHostname(line) {
+				logger.Printf("Loader: blocklist.exceptions: line %d at %q does not look like a hostname: %q — accepting anyway (D1.2-flag-F4)", i+1, sanitizeLog(path+".exceptions"), sanitizeLog(line))
+			}
+			exceptions[line] = true
 		}
 	}
 	f, err := os.Open(path)
@@ -749,6 +763,28 @@ func (b *Blocklist) saveExceptions() {
 		fmt.Fprintln(&sb, h)
 	}
 	_ = atomicWriteFile(b.path+".exceptions", []byte(sb.String()), 0o600)
+}
+
+// looksLikeHostname returns true if s plausibly resembles a hostname.
+// Used only by Blocklist.Load for D1.1h observability logging — the
+// loader still accepts arbitrary lines regardless. The check is
+// intentionally loose: just enough to flag obviously-not-a-host
+// content (whitespace, special chars, control bytes).
+func looksLikeHostname(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == '_' || r == '*':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // IsBlocked reports whether a request to host should be blocked.
@@ -1294,6 +1330,7 @@ func (c *Config) LoadUIUsersFile() error {
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
+		logger.Printf("Loader: ui_users.json: file %q missing — caller may bootstrap defaults (D1.2-flag-F1)", sanitizeLog(path))
 		return nil
 	}
 	if err != nil {
