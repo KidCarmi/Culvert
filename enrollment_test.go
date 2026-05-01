@@ -588,6 +588,73 @@ func TestClusterCA_Bootstrap_NoTmpLeak(t *testing.T) {
 	assertNoTmpLeak(t, dir)
 }
 
+// ── D1.1g: renewal-path consistency tests ─────────────────────────────────
+
+// TestClusterCA_PartialRenewal_DetectedOnRestart simulates the failure
+// window in ImportCA where rename(cert) succeeds but rename(key) does not
+// (or the process crashes between the two writes). After D1.1g, ImportCA
+// uses two atomicWriteFile calls — each file is durable on its own, but
+// the two-file commit is still not atomic. The post-condition is that on
+// next startup, D1.1f's cross-validation in loadFromPEM detects the
+// mismatched pair and InitOrLoad fails closed.
+func TestClusterCA_PartialRenewal_DetectedOnRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	// Bootstrap CA1 in dir. ca holds CA1 cert/key in memory and on disk.
+	ca := &clusterCA{}
+	if err := ca.InitOrLoad(dir); err != nil {
+		t.Fatalf("bootstrap CA1: %v", err)
+	}
+	keyPath := filepath.Join(dir, "cluster-ca.key")
+	oldKeyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read CA1 key: %v", err)
+	}
+
+	// Generate CA2 by bootstrapping into a separate seed dir, then
+	// import its cert+key into ca. After ImportCA returns, dir contains
+	// CA2's cert and CA2's key (matched pair).
+	newCertPEM, newKeyPEM := seedClusterCAFiles(t)
+	if err := ca.ImportCA(newCertPEM, newKeyPEM); err != nil {
+		t.Fatalf("ImportCA CA2: %v", err)
+	}
+
+	// Simulate the partial-renewal outcome: the cert rename committed,
+	// the key rename did not (or a crash landed between them). On disk
+	// we now have CA2's cert paired with CA1's key.
+	if err := os.WriteFile(keyPath, oldKeyPEM, 0o600); err != nil {
+		t.Fatalf("revert key file: %v", err)
+	}
+
+	// A fresh clusterCA loading dir must fail closed via cross-validation.
+	ca2 := &clusterCA{}
+	err = ca2.InitOrLoad(dir)
+	if err == nil {
+		t.Fatal("expected error on partial-renewal mismatch")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error should mention mismatch (cross-validation), got: %v", err)
+	}
+}
+
+// TestClusterCA_ImportCA_NoTmpLeak verifies that the converted ImportCA
+// writers (atomicWriteFile per file) do not leave orphaned *.tmp.* files
+// in the dir after a successful renewal.
+func TestClusterCA_ImportCA_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+
+	ca := &clusterCA{}
+	if err := ca.InitOrLoad(dir); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	newCertPEM, newKeyPEM := seedClusterCAFiles(t)
+	if err := ca.ImportCA(newCertPEM, newKeyPEM); err != nil {
+		t.Fatalf("ImportCA: %v", err)
+	}
+
+	assertNoTmpLeak(t, dir)
+}
+
 func TestClusterCA_SignCSR(t *testing.T) {
 	dir := t.TempDir()
 
