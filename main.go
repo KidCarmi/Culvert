@@ -114,6 +114,7 @@ type startupState struct {
 	uiSANsFlag          *string
 	trustFwdHeaders     *bool
 	resetPwUser         *string
+	backupOut           *string
 	cdrEnabledFlag      *bool
 	cdrEndpointFlag     *string
 	cdrFailModeFlag     *string
@@ -248,6 +249,7 @@ func parseFlags(s *startupState) {
 	s.uiSANsFlag = flag.String("ui-san", "", "Additional TLS SANs for self-signed cert (comma-separated IPs/hostnames)")
 	s.trustFwdHeaders = flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
 	s.resetPwUser = flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
+	s.backupOut = flag.String("backup", "", "Pack /data into a tar.gz at the given path and exit (D1.3a)")
 	// CDR / Sluice integration (Phase 1: single-instance client with TOFU pinning).
 	s.cdrEnabledFlag = flag.Bool("cdr-enabled", false, "Enable Sluice CDR integration (strip macros/JS/OLE from downloads)")
 	s.cdrEndpointFlag = flag.String("cdr-endpoint", "", "Sluice gRPC endpoint (e.g. sluice:8443)")
@@ -262,6 +264,15 @@ func parseFlags(s *startupState) {
 }
 // handleOneShotCommands handles one-shot CLI commands that exit before starting the proxy.
 func handleOneShotCommands(s *startupState) {
+	// ── One-shot: backup/export (D1.3a) ────────────────────────────────────
+	if *s.backupOut != "" {
+		if err := runBackup(*s.backupOut, dataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Backup error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Backup written to %s\n", *s.backupOut)
+		os.Exit(0)
+	}
 	// ── One-shot: password reset (Finding 5.1) ─────────────────────────────
 	if *s.resetPwUser != "" {
 		parts := strings.SplitN(*s.resetPwUser, ":", 2)
