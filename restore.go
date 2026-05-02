@@ -148,7 +148,7 @@ type commitAnalysis struct {
 // returns nil on success. Returns an error on any validation rule
 // failure. Never writes to dataDir.
 func runRestoreDryRun(tarPath, dataDir, passphrase string, opts restoreOpts) error {
-	summary, files, err := validateBackup(tarPath, dataDir, passphrase)
+	summary, _, files, err := validateBackup(tarPath, dataDir, passphrase)
 	if err != nil {
 		return err
 	}
@@ -161,25 +161,27 @@ func runRestoreDryRun(tarPath, dataDir, passphrase string, opts restoreOpts) err
 }
 
 // validateBackup runs every D1.3b.1 rule against the tarball at tarPath.
-// Returns the parsed summary, the in-memory file map (so the caller can
-// run further analysis without re-reading the tarball), and an error.
-func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary, map[string][]byte, error) {
+// Returns the parsed summary, the parsed manifest (so commit-path
+// staging can read per-file modes without re-parsing), the in-memory
+// file map (so the caller can run further analysis without re-reading
+// the tarball), and an error.
+func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary, *backupManifest, map[string][]byte, error) {
 	files, order, err := readTarball(tarPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	manifest, err := parseAndValidateManifest(files, order)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if err := validateBidirectionalPresence(manifest, files); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if err := validateFileChecksumsAndModes(manifest, files); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	summary := &restoreSummary{
@@ -198,10 +200,10 @@ func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary,
 	}
 
 	if err := validateTier1Artifacts(files, passphrase, summary); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return summary, files, nil
+	return summary, manifest, files, nil
 }
 
 // readTarball opens path, gunzips, reads every entry into memory, and
@@ -250,6 +252,13 @@ func readTarball(path string) (map[string][]byte, []string, error) {
 		if _, exists := files[hdr.Name]; exists {
 			return nil, nil, fmt.Errorf("restore: duplicate tarball entry: %q", hdr.Name)
 		}
+		// Restore namespace: every entry except manifest.json must live
+		// under "data/". Defense in depth — D1.3a's pack code only
+		// produces "data/..." paths, but a hand-crafted tarball can
+		// violate this.
+		if hdr.Name != "manifest.json" && !strings.HasPrefix(hdr.Name, "data/") {
+			return nil, nil, fmt.Errorf("restore: tarball entry outside data/ namespace: %q", hdr.Name)
+		}
 		body, err := io.ReadAll(tr)
 		if err != nil {
 			return nil, nil, fmt.Errorf("restore: read %q: %w", hdr.Name, err)
@@ -284,6 +293,15 @@ func parseAndValidateManifest(files map[string][]byte, order []string) (*backupM
 	}
 	if len(manifest.Files) == 0 {
 		return nil, fmt.Errorf("restore: manifest contains no files (empty backup cannot restore)")
+	}
+	// Restore namespace: every manifest entry must live under "data/".
+	// Mirrors the readTarball check; runs early so a bad manifest
+	// produces a clear namespace error rather than a downstream
+	// presence/parse error.
+	for _, f := range manifest.Files {
+		if !strings.HasPrefix(f.Path, "data/") {
+			return nil, fmt.Errorf("restore: manifest path outside data/ namespace: %q", f.Path)
+		}
 	}
 	return &manifest, nil
 }
@@ -718,7 +736,7 @@ var commitInjectBetweenRenames func() error
 // exist; error message names the exact `mv` recovery command.
 func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) error {
 	// Steps 1–2 (reuse).
-	summary, files, err := validateBackup(tarPath, dataDir, passphrase)
+	summary, manifest, files, err := validateBackup(tarPath, dataDir, passphrase)
 	if err != nil {
 		return err
 	}
@@ -750,7 +768,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	fmt.Fprintf(os.Stdout, "  Backup of current /data will be at: %s\n\n", bakPath)
 
 	// Step 5: stage to disk.
-	if err := stageArtifacts(stagingDir, dataDir, files, opts.Mode); err != nil {
+	if err := stageArtifacts(stagingDir, dataDir, files, manifest, opts.Mode); err != nil {
 		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
 		return fmt.Errorf("restore: stage failed: %w", err)
 	}
@@ -794,18 +812,31 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 }
 
 // stageArtifacts creates stagingDir and populates it according to the
-// mode predicate. Pass 1 writes tarball-sourced artifacts. Pass 2 walks
-// current dataDir for preserve-from-current artifacts (this is the gap
-// flagged in PR #194 review — must walk live /data, not just paths
-// in the manifest).
-func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, mode restoreMode) error {
+// mode predicate. Pass 1 writes tarball-sourced artifacts using each
+// file's manifest mode. Pass 2 walks current dataDir for preserve-
+// from-current artifacts using each live file's existing mode (this is
+// the gap flagged in PR #194 review — must walk live /data, not just
+// paths in the manifest).
+func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifest *backupManifest, mode restoreMode) error {
 	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir staging: %w", err)
 	}
 
+	// Index manifest modes by path so pass 1 doesn't scan per-file.
+	manifestMode := map[string]os.FileMode{}
+	for _, f := range manifest.Files {
+		perm, perr := strconv.ParseUint(f.Mode, 8, 32)
+		if perr != nil {
+			return fmt.Errorf("invalid manifest mode %q for %s: %w", f.Mode, f.Path, perr)
+		}
+		manifestMode[f.Path] = os.FileMode(perm) & os.ModePerm
+	}
+
 	written := map[string]bool{}
 
-	// Pass 1 — tarball-sourced artifacts.
+	// Pass 1 — tarball-sourced artifacts. Mode comes from the manifest
+	// so the restored file mirrors what the operator backed up (e.g.
+	// 0o644 for version.txt vs 0o600 for everything else).
 	for path, body := range files {
 		if path == "manifest.json" {
 			continue
@@ -818,7 +849,15 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, mode re
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return fmt.Errorf("mkdir for %s: %w", rel, err)
 		}
-		if err := atomicWriteFile(target, body, 0o600); err != nil {
+		perm, ok := manifestMode[path]
+		if !ok {
+			// Defense in depth: every tarball entry is required to be
+			// in the manifest by validateBidirectionalPresence; if the
+			// indexer somehow missed it, fail closed rather than fall
+			// back to a hardcoded mode.
+			return fmt.Errorf("stage tarball %s: missing manifest mode entry", path)
+		}
+		if err := atomicWriteFile(target, body, perm); err != nil {
 			return fmt.Errorf("stage tarball %s: %w", path, err)
 		}
 		written[path] = true
@@ -861,7 +900,9 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, mode re
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return fmt.Errorf("mkdir for %s: %w", rel, err)
 		}
-		if err := atomicWriteFile(target, body, 0o600); err != nil {
+		// Preserve current file's mode — restored copy should mirror
+		// what was on disk before the restore.
+		if err := atomicWriteFile(target, body, info.Mode().Perm()); err != nil {
 			return fmt.Errorf("stage current %s: %w", p, err)
 		}
 		written[tarballPath] = true

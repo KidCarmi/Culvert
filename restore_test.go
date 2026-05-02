@@ -1215,3 +1215,123 @@ func TestRestoreCommit_TrustRootOnly_PreservesCurrentOnlyFiles(t *testing.T) {
 		t.Errorf("current-only file content changed: got %s, want %s", body, currentOnlyBody)
 	}
 }
+
+// ── 35. Tar entry outside data/ namespace rejected ───────────────────
+
+func TestRestore_DryRun_TarEntryOutsideDataNamespace_Rejected(t *testing.T) {
+	src := makeValidBackup(t)
+	dest := filepath.Join(t.TempDir(), "outside-namespace.tar.gz")
+	repackTarball(t, src, dest, func(files map[string][]byte, order *[]string) {
+		// Inject an entry whose path doesn't start with "data/" and
+		// isn't manifest.json. A naive extractor could write it
+		// outside the intended /data tree on commit.
+		files["outside.json"] = []byte(`{"smuggled":true}`)
+		*order = append(*order, "outside.json")
+	})
+	dataDir := t.TempDir()
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
+	if err == nil || !strings.Contains(err.Error(), "outside data/ namespace") {
+		t.Errorf("expected outside-namespace error, got: %v", err)
+	}
+	assertNoDataMutation(t, dataDir)
+}
+
+// ── 36. Manifest path outside data/ namespace rejected ───────────────
+
+func TestRestore_DryRun_ManifestPathOutsideDataNamespace_Rejected(t *testing.T) {
+	src := makeValidBackup(t)
+	dest := filepath.Join(t.TempDir(), "manifest-outside-namespace.tar.gz")
+	repackTarball(t, src, dest, func(files map[string][]byte, _ *[]string) {
+		// Rewrite the manifest to claim a path that doesn't start
+		// with "data/". Don't put a corresponding tar entry — the
+		// namespace check should fire BEFORE bidirectional presence,
+		// so the test isolates the manifest-namespace rule.
+		var m backupManifest
+		_ = json.Unmarshal(files["manifest.json"], &m)
+		fakeBody := []byte(`{"smuggled":true}`)
+		fakeSum := sha256.Sum256(fakeBody)
+		m.Files = append(m.Files, backupManifestFile{
+			Path:   "outside/path.json",
+			Size:   int64(len(fakeBody)),
+			SHA256: hex.EncodeToString(fakeSum[:]),
+			Mode:   "0600",
+		})
+		body, _ := json.MarshalIndent(m, "", "  ")
+		files["manifest.json"] = body
+	})
+	dataDir := t.TempDir()
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
+	if err == nil || !strings.Contains(err.Error(), "manifest path outside data/ namespace") {
+		t.Errorf("expected manifest-namespace error, got: %v", err)
+	}
+	assertNoDataMutation(t, dataDir)
+}
+
+// ── 37. Tarball-sourced restore preserves manifest mode ──────────────
+
+func TestRestoreCommit_PreservesManifestMode(t *testing.T) {
+	// Build a backup whose ui_users.json was on disk with mode 0o640
+	// (non-default). The restore must produce 0o640 in /data, not the
+	// previous hardcoded 0o600.
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json",
+		[]byte(`{"users":[{"username":"alice","role":"admin","pass_hash":"deadbeef"}]}`),
+		0o640)
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+
+	restoreDataDir := t.TempDir()
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(out, restoreDataDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(restoreDataDir, "ui_users.json"))
+	if err != nil {
+		t.Fatalf("stat restored: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Errorf("restored ui_users.json mode = %o, want 0640 (preserved from manifest)", got)
+	}
+}
+
+// ── 38. Preserve-from-current restore preserves current mode ─────────
+
+func TestRestoreCommit_TrustRootOnly_PreservesCurrentMode(t *testing.T) {
+	// Backup has CA + ui_users (0o600). Current /data has ui_users
+	// at mode 0o644. Trust-root-only mode preserves current ui_users,
+	// so the restored mode must be 0o644 (current's), not 0o600 (the
+	// previous hardcoded value).
+	src, _ := makeBackupWithRealCA(t,
+		[]uiUserRecord{{Username: "alice", Role: RoleAdmin}}, 0)
+
+	currentDir := t.TempDir()
+	if err := (&clusterCA{}).InitOrLoad(currentDir); err != nil {
+		t.Fatalf("InitOrLoad current: %v", err)
+	}
+	bobBody := []byte(`{"users":[{"username":"bob","role":"admin","pass_hash":"abc"}]}`)
+	if err := os.WriteFile(filepath.Join(currentDir, "ui_users.json"), bobBody, 0o644); err != nil {
+		t.Fatalf("write current ui_users 0o644: %v", err)
+	}
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeTrustRootOnly, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(currentDir, "ui_users.json"))
+	if err != nil {
+		t.Fatalf("stat restored: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("restored ui_users.json mode = %o, want 0644 (preserved from current /data)", got)
+	}
+}
