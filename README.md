@@ -315,6 +315,8 @@ Three things to do once the containers are up:
    Returns `200` with `{"status":"ready", "checks":{...}}` when ready, `503` with `"status":"not_ready"` when a gating check fails. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the full checks-map reference.
 3. **Open Diagnostics** — Admin UI → **Infrastructure → Diagnostics**. The page surfaces the operator contract: storage path, policy load, root CA, session HMAC, CDR, cluster TLS posture, updater URL, config-version health, and any active risky-but-allowed warnings (`cluster-insecure`, unauth mode). Resolve any `fail` rows before exposing the proxy to clients.
 
+> **Backup & restore.** For the supported Docker Compose backup, restore, and cleanup commands, see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
+
 #### With custom config
 
 ```bash
