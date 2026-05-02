@@ -41,7 +41,7 @@ func readBackupTarball(t *testing.T, outPath string) (backupManifest, map[string
 	if err != nil {
 		t.Fatalf("gunzip: %v", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 
 	tr := tar.NewReader(gz)
 	files := map[string][]byte{}
@@ -74,16 +74,15 @@ func readBackupTarball(t *testing.T, outPath string) (backupManifest, map[string
 }
 
 // seedFile writes a file with body and perm under dir.
-func seedFile(t *testing.T, dir, rel string, body []byte, perm os.FileMode) string {
+func seedFile(t *testing.T, dir, rel string, body []byte, perm os.FileMode) {
 	t.Helper()
 	full := filepath.Join(dir, rel)
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
 		t.Fatalf("mkdir parent of %s: %v", rel, err)
 	}
 	if err := os.WriteFile(full, body, perm); err != nil {
 		t.Fatalf("write %s: %v", rel, err)
 	}
-	return full
 }
 
 // ── 1. Manifest is present and well-formed ──────────────────────────
