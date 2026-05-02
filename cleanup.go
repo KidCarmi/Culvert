@@ -17,7 +17,12 @@ package main
 //  5. Symlinks are never followed and never deleted.
 //  6. Files are never deleted (only directories).
 //  7. Dry-run is the default; --confirm is required for destruction.
-//  8. Suspicious entries → WARN on stderr, never silently hidden.
+//  8. Two-tier admission: names that don't match the leftover regex at
+//     all are silently ignored (we don't warn on every unrelated sibling
+//     next to dataDir). Regex-shaped candidates that fail any safety
+//     check (symlink, non-directory, parent mismatch, bad timestamp, bad
+//     pid, lstat error, size walk error) emit a WARN on stderr and are
+//     never silently hidden.
 //  9. Fail closed on any ambiguity.
 //  10. Sort order is deterministic (timestamp asc, pid asc, name asc).
 
@@ -55,9 +60,13 @@ type leftover struct {
 	SizeBytes int64
 }
 
-// skipReason describes a directory entry that was rejected during
-// admission. Surfaced as WARN lines on stderr so suspicious entries are
-// never silently hidden.
+// skipReason describes a regex-shaped candidate that was rejected by an
+// admission safety check (symlink, non-directory, parent mismatch, bad
+// timestamp, bad pid, lstat error, size walk error). Surfaced as WARN
+// lines on stderr so regex-shaped candidates that fail safety checks
+// are never silently hidden. Note: directory entries whose names do not
+// match the leftover regex at all are silently ignored — they're not
+// near-misses, just unrelated siblings of dataDir.
 type skipReason struct {
 	Path   string
 	Reason string
