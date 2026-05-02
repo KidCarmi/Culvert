@@ -15,11 +15,15 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -45,38 +49,136 @@ type restoreSummary struct {
 	CABundleEncrypted bool   // true if ca.bundle starts with caMagic
 }
 
+// restoreMode selects which artifacts come from the tarball vs. are
+// preserved from current /data when D1.3b.2's commit path runs. D1.3b.2a
+// reasons about the same predicates in dry-run, but never writes.
+type restoreMode int
+
+const (
+	modeFull restoreMode = iota
+	modeTrustRootOnly
+	modeStateOnly
+)
+
+func (m restoreMode) String() string {
+	switch m {
+	case modeFull:
+		return "full"
+	case modeTrustRootOnly:
+		return "trust-root-only"
+	case modeStateOnly:
+		return "state-only"
+	}
+	return "unknown"
+}
+
+// parseRestoreMode normalizes the CLI string. Empty == default ("full").
+func parseRestoreMode(s string) (restoreMode, error) {
+	switch s {
+	case "", "full":
+		return modeFull, nil
+	case "trust-root-only":
+		return modeTrustRootOnly, nil
+	case "state-only":
+		return modeStateOnly, nil
+	}
+	return 0, fmt.Errorf("unknown mode %q (must be: full, trust-root-only, state-only)", s)
+}
+
+// fromTarball returns true iff the artifact at tarballPath would be
+// taken from the tarball under this mode. The complement is preserved
+// from current /data.
+func (m restoreMode) fromTarball(tarballPath string) bool {
+	isCABundle := tarballPath == "data/ca.bundle"
+	isClusterCAPair := tarballPath == "data/cluster-ca.crt" || tarballPath == "data/cluster-ca.key"
+	switch m {
+	case modeFull:
+		return true
+	case modeTrustRootOnly:
+		return isCABundle || isClusterCAPair
+	case modeStateOnly:
+		return !(isCABundle || isClusterCAPair)
+	}
+	return false
+}
+
+// restoreOpts groups the operator-supplied flags that govern dry-run
+// analysis output. D1.3b.2a inspects them; D1.3b.2b will gate the
+// destructive commit on the same flags.
+type restoreOpts struct {
+	Mode                  restoreMode
+	AcceptDPReenrollment  bool
+	AllowCounterRollback  bool
+}
+
+// commitAnalysis is the read-only delta between current /data and the
+// post-merge result that a commit (under restoreOpts.Mode) would produce.
+// All fields are computed from in-memory tarball + on-disk reads of
+// current /data; nothing is written.
+type commitAnalysis struct {
+	Mode restoreMode
+
+	// Cluster CA delta.
+	CurrentCAFingerprint   string // empty if current has no parseable cluster-ca.crt
+	RestoredCAFingerprint  string // empty if neither tarball nor current would contribute
+	CAFingerprintChanged   bool
+	CurrentEnrolledNodes   int
+
+	// ui_users delta.
+	CurrentUsers           []string // sorted, distinct
+	RestoredUsers          []string // sorted, distinct, post-merge
+	UsersAddedByRestore    []string // sorted: restored ∖ current
+	UsersRemovedByRestore  []string // sorted: current ∖ restored
+	TOTPCounterRollbacks   []string // sorted usernames where restored.counter < current.counter
+
+	// File source counts (informational for the summary).
+	FilesFromTarball int
+	FilesFromCurrent int
+
+	// Guard outcomes (precomputed for the summary printer).
+	DPGuardWouldBlock     bool // CAFingerprintChanged && CurrentEnrolledNodes > 0 && !AcceptDPReenrollment
+	DPGuardActive         bool // would block OR was accepted
+	TOTPGuardWouldBlock   bool // len(TOTPCounterRollbacks) > 0 && !AllowCounterRollback
+	TOTPGuardActive       bool
+}
+
 // runRestoreDryRun is the CLI entrypoint. Validates tarPath end-to-end,
-// prints a plan to stdout on success, returns an error on any rule
+// computes the mode-aware analysis, prints the plan to stdout, and
+// returns nil on success. Returns an error on any validation rule
 // failure. Never writes to dataDir.
-func runRestoreDryRun(tarPath, dataDir, passphrase string) error {
-	summary, err := validateBackup(tarPath, dataDir, passphrase)
+func runRestoreDryRun(tarPath, dataDir, passphrase string, opts restoreOpts) error {
+	summary, files, err := validateBackup(tarPath, dataDir, passphrase)
 	if err != nil {
 		return err
 	}
-	printRestoreSummary(os.Stdout, summary)
+	analysis, err := analyzeCommit(files, dataDir, opts)
+	if err != nil {
+		return err
+	}
+	printRestoreSummary(os.Stdout, summary, analysis)
 	return nil
 }
 
 // validateBackup runs every D1.3b.1 rule against the tarball at tarPath.
-// dataDir is reserved for D1.3b.2's pre-commit cross-checks; D1.3b.1
-// does not read it.
-func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary, error) {
+// Returns the parsed summary, the in-memory file map (so the caller can
+// run further analysis without re-reading the tarball), and an error.
+func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary, map[string][]byte, error) {
 	files, order, err := readTarball(tarPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	manifest, err := parseAndValidateManifest(files, order)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err := validateBidirectionalPresence(manifest, files); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err := validateFileChecksumsAndModes(manifest, files); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	summary := &restoreSummary{
@@ -95,10 +197,10 @@ func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary,
 	}
 
 	if err := validateTier1Artifacts(files, passphrase, summary); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return summary, nil
+	return summary, files, nil
 }
 
 // readTarball opens path, gunzips, reads every entry into memory, and
@@ -325,27 +427,253 @@ func validateCABundle(data []byte, passphrase string) error {
 	return nil
 }
 
+// analyzeCommit reads current dataDir (read-only) and computes the delta
+// between current state and what a commit under opts.Mode would produce.
+// Never writes anything. Returns a commitAnalysis suitable for guard
+// inspection and summary printing.
+func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*commitAnalysis, error) {
+	a := &commitAnalysis{Mode: opts.Mode}
+
+	// Per-mode merge: count how many files come from the tarball vs.
+	// from current /data. Manifest paths drive the count.
+	//
+	// D1.3b.2b NOTE: this counter is intentionally manifest-driven —
+	// it answers "of the paths in the backup, which would the mode
+	// pull from current /data?" When the stager lands, it must walk
+	// /data directly to copy every preserved artifact, not only paths
+	// that happen to also exist in the backup manifest. Otherwise an
+	// artifact present in current /data but absent from the backup
+	// (e.g. a feature added between snapshot and now, in
+	// trust-root-only mode) would be lost during stage.
+	for path := range files {
+		if path == "manifest.json" {
+			continue
+		}
+		if opts.Mode.fromTarball(path) {
+			a.FilesFromTarball++
+		} else {
+			a.FilesFromCurrent++
+		}
+	}
+
+	// Cluster CA fingerprint delta.
+	a.CurrentCAFingerprint = currentCAFingerprint(dataDir)
+	a.RestoredCAFingerprint = restoredCAFingerprint(files, dataDir, opts.Mode)
+	a.CAFingerprintChanged = a.CurrentCAFingerprint != "" &&
+		a.RestoredCAFingerprint != "" &&
+		a.CurrentCAFingerprint != a.RestoredCAFingerprint
+
+	// Enrolled DPs in current cluster.json (read-only).
+	a.CurrentEnrolledNodes = currentEnrolledNodeCount(dataDir)
+
+	// DP re-enrollment guard.
+	dpWouldNeedFlag := a.CAFingerprintChanged && a.CurrentEnrolledNodes > 0
+	a.DPGuardActive = dpWouldNeedFlag
+	a.DPGuardWouldBlock = dpWouldNeedFlag && !opts.AcceptDPReenrollment
+
+	// ui_users analysis (post-merge).
+	currentUsers := readUsersForAnalysis(currentUIUsersBody(dataDir))
+	restoredUsers := readUsersForAnalysis(restoredUIUsersBody(files, dataDir, opts.Mode))
+	a.CurrentUsers = sortedUsernames(currentUsers)
+	a.RestoredUsers = sortedUsernames(restoredUsers)
+	a.UsersAddedByRestore = setDifference(a.RestoredUsers, a.CurrentUsers)
+	a.UsersRemovedByRestore = setDifference(a.CurrentUsers, a.RestoredUsers)
+
+	// TOTP counter rollback: present in both, restored counter < current.
+	for username, restoredCounter := range restoredUsers {
+		if currentCounter, ok := currentUsers[username]; ok {
+			if restoredCounter < currentCounter {
+				a.TOTPCounterRollbacks = append(a.TOTPCounterRollbacks, username)
+			}
+		}
+	}
+	sort.Strings(a.TOTPCounterRollbacks)
+	totpWouldNeedFlag := len(a.TOTPCounterRollbacks) > 0
+	a.TOTPGuardActive = totpWouldNeedFlag
+	a.TOTPGuardWouldBlock = totpWouldNeedFlag && !opts.AllowCounterRollback
+
+	return a, nil
+}
+
+func currentCAFingerprint(dataDir string) string {
+	body, err := os.ReadFile(filepath.Join(dataDir, "cluster-ca.crt")) // #nosec G304 -- operator-controlled
+	if err != nil {
+		return ""
+	}
+	return computeCAFingerprintFromPEM(body)
+}
+
+func restoredCAFingerprint(files map[string][]byte, dataDir string, mode restoreMode) string {
+	if mode.fromTarball("data/cluster-ca.crt") {
+		return computeCAFingerprintFromPEM(files["data/cluster-ca.crt"])
+	}
+	return currentCAFingerprint(dataDir)
+}
+
+func computeCAFingerprintFromPEM(certPEM []byte) string {
+	if len(certPEM) == 0 {
+		return ""
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return ""
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(cert.Raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func currentEnrolledNodeCount(dataDir string) int {
+	body, err := os.ReadFile(filepath.Join(dataDir, "cluster.json")) // #nosec G304 -- operator-controlled
+	if err != nil {
+		return 0
+	}
+	var st ClusterState
+	if err := json.Unmarshal(body, &st); err != nil {
+		return 0
+	}
+	return len(st.Nodes)
+}
+
+func currentUIUsersBody(dataDir string) []byte {
+	body, err := os.ReadFile(filepath.Join(dataDir, "ui_users.json")) // #nosec G304 -- operator-controlled
+	if err != nil {
+		return nil
+	}
+	return body
+}
+
+func restoredUIUsersBody(files map[string][]byte, dataDir string, mode restoreMode) []byte {
+	if mode.fromTarball("data/ui_users.json") {
+		return files["data/ui_users.json"]
+	}
+	return currentUIUsersBody(dataDir)
+}
+
+// readUsersForAnalysis parses ui_users.json bytes (envelope-then-bare-array)
+// into a map of username → totp_last_counter. Empty map on parse failure
+// or absent file (caller decides what that means).
+func readUsersForAnalysis(data []byte) map[string]int64 {
+	out := map[string]int64{}
+	if len(data) == 0 {
+		return out
+	}
+	var env uiUsersFileEnvelope
+	if err := json.Unmarshal(data, &env); err == nil && env.Users != nil {
+		for _, u := range env.Users {
+			out[u.Username] = u.TOTPLastCounter
+		}
+		return out
+	}
+	var records []uiUserRecord
+	if err := json.Unmarshal(data, &records); err == nil {
+		for _, u := range records {
+			out[u.Username] = u.TOTPLastCounter
+		}
+	}
+	return out
+}
+
+func sortedUsernames(m map[string]int64) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// setDifference returns sorted (a ∖ b). Both inputs must be pre-sorted
+// (sortedUsernames does this).
+func setDifference(a, b []string) []string {
+	bSet := make(map[string]struct{}, len(b))
+	for _, x := range b {
+		bSet[x] = struct{}{}
+	}
+	var out []string
+	for _, x := range a {
+		if _, in := bSet[x]; !in {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
 // printRestoreSummary writes the dry-run plan in a fixed shape so tests
-// can assert on key lines. Uses fmt.Fprintf rather than logger because
-// runRestoreDryRun is a one-shot CLI command that runs before logger
-// initialization.
-func printRestoreSummary(w io.Writer, s *restoreSummary) {
-	fmt.Fprintf(w, "Restore plan (dry-run):\n\n")
+// can assert on key lines. Mode-aware: includes per-mode merge counts,
+// CA fingerprint delta, DP roster delta, TOTP rollback lines, and guard
+// status. Uses fmt.Fprintf rather than logger because runRestoreDryRun
+// is a one-shot CLI command that runs before logger initialization.
+func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
+	fmt.Fprintf(w, "Restore plan (dry-run, --mode=%s):\n\n", a.Mode)
 	fmt.Fprintf(w, "Backup metadata:\n")
 	fmt.Fprintf(w, "  Source:           %s\n", s.BackupPath)
 	fmt.Fprintf(w, "  Schema version:   %d\n", s.SchemaVersion)
 	fmt.Fprintf(w, "  Created at:       %s\n", s.CreatedAt)
 	fmt.Fprintf(w, "  Culvert version:  %s\n", s.CulvertVersion)
+
 	fmt.Fprintf(w, "\nManifest:\n")
 	fmt.Fprintf(w, "  Files total:         %d\n", s.TotalFiles)
 	fmt.Fprintf(w, "  Required (Tier 1):   %d\n", s.Tier1Files)
 	fmt.Fprintf(w, "  Optional (Tier 2):   %d\n", s.Tier2Files)
+
+	fmt.Fprintf(w, "\nMode-specific merge:\n")
+	fmt.Fprintf(w, "  From tarball:    %d file(s)\n", a.FilesFromTarball)
+	fmt.Fprintf(w, "  From current:    %d file(s)\n", a.FilesFromCurrent)
+
+	fmt.Fprintf(w, "\nCluster CA:\n")
+	if a.CurrentCAFingerprint == "" {
+		fmt.Fprintf(w, "  Current:    (none on disk)\n")
+	} else {
+		fmt.Fprintf(w, "  Current:    %s (%d enrolled DP(s))\n", a.CurrentCAFingerprint, a.CurrentEnrolledNodes)
+	}
+	if a.RestoredCAFingerprint == "" {
+		fmt.Fprintf(w, "  Restored:   (none would be present)\n")
+	} else {
+		fmt.Fprintf(w, "  Restored:   %s\n", a.RestoredCAFingerprint)
+	}
+	switch {
+	case a.DPGuardWouldBlock:
+		fmt.Fprintf(w, "  ⚠ DP re-enrollment required: %d DP(s) would need to re-enroll.\n", a.CurrentEnrolledNodes)
+		fmt.Fprintf(w, "    Pass --accept-dp-reenrollment to allow commit (D1.3b.2).\n")
+	case a.DPGuardActive:
+		fmt.Fprintf(w, "  ⓘ DP re-enrollment accepted: %d DP(s) will need to re-enroll under restored CA.\n", a.CurrentEnrolledNodes)
+	case a.CAFingerprintChanged:
+		fmt.Fprintf(w, "  CA fingerprint changes; no enrolled DPs affected.\n")
+	default:
+		fmt.Fprintf(w, "  CA fingerprint unchanged.\n")
+	}
+
+	fmt.Fprintf(w, "\nAdmin accounts:\n")
+	fmt.Fprintf(w, "  Current:   %d (%s)\n", len(a.CurrentUsers), strings.Join(a.CurrentUsers, ", "))
+	fmt.Fprintf(w, "  Restored:  %d (%s)\n", len(a.RestoredUsers), strings.Join(a.RestoredUsers, ", "))
+	if len(a.UsersAddedByRestore) > 0 {
+		fmt.Fprintf(w, "  Will be added:    %s\n", strings.Join(a.UsersAddedByRestore, ", "))
+	}
+	if len(a.UsersRemovedByRestore) > 0 {
+		fmt.Fprintf(w, "  Will be removed:  %s\n", strings.Join(a.UsersRemovedByRestore, ", "))
+	}
+
+	fmt.Fprintf(w, "\nTOTP counter rollbacks:\n")
+	switch {
+	case a.TOTPGuardWouldBlock:
+		fmt.Fprintf(w, "  ⚠ %d user(s) would have TOTP counter roll back: %s\n", len(a.TOTPCounterRollbacks), strings.Join(a.TOTPCounterRollbacks, ", "))
+		fmt.Fprintf(w, "    Pass --allow-counter-rollback to allow commit (D1.3b.2).\n")
+	case a.TOTPGuardActive:
+		fmt.Fprintf(w, "  ⓘ %d user(s) accepted TOTP counter rollback: %s\n", len(a.TOTPCounterRollbacks), strings.Join(a.TOTPCounterRollbacks, ", "))
+	default:
+		fmt.Fprintf(w, "  none.\n")
+	}
+
 	fmt.Fprintf(w, "\nValidation: PASS\n")
 	if s.AdminCount > 0 {
-		fmt.Fprintf(w, "  ui_users.json:                %d admin account(s)\n", s.AdminCount)
+		fmt.Fprintf(w, "  ui_users.json:                %d admin account(s) in restored manifest\n", s.AdminCount)
 	}
 	if s.EnrolledDPCount > 0 {
-		fmt.Fprintf(w, "  cluster.json:                 %d enrolled DP(s)\n", s.EnrolledDPCount)
+		fmt.Fprintf(w, "  cluster.json:                 %d enrolled DP(s) in restored manifest\n", s.EnrolledDPCount)
 	}
 	if s.CAFingerprint != "" {
 		fmt.Fprintf(w, "  cluster CA cross-validation:  PASS (%s)\n", s.CAFingerprint)
@@ -353,6 +681,7 @@ func printRestoreSummary(w io.Writer, s *restoreSummary) {
 	if s.CABundleEncrypted {
 		fmt.Fprintf(w, "  ca.bundle decrypt:            PASS (encrypted)\n")
 	}
+
 	fmt.Fprintf(w, "\nThis was a dry-run. No files were written. /data unchanged.\n")
-	fmt.Fprintf(w, "D1.3b.2 will add --confirm to commit a restore.\n")
+	fmt.Fprintf(w, "D1.3b.2b will add --confirm to commit a restore.\n")
 }
