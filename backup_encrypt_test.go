@@ -431,3 +431,89 @@ func TestDecryptBackupBlob_HeaderItersBelowFloor(t *testing.T) {
 		t.Fatalf("expected 'below minimum' rejection, got: %v", err)
 	}
 }
+
+// TestBackupEncrypt_NoFixedTmpFile verifies the encrypted writer no
+// longer reintroduces the fixed-suffix temp-file pattern. After a
+// successful encrypted backup, no "<out>.tmp" file is left in the
+// destination directory, and only the published outPath plus
+// pre-existing entries appear in the dir.
+func TestBackupEncrypt_NoFixedTmpFile(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json",
+		[]byte(`{"users":[{"username":"admin","role":"admin","pass_hash":"deadbeef"}]}`), 0o600)
+	seedFile(t, dataDir, "cluster.json", []byte(`{"nodes":{}}`), 0o600)
+	seedFile(t, dataDir, "config_versions/v1.json", []byte(`{"meta":{"version":1}}`), 0o600)
+
+	outDir := t.TempDir()
+	out := filepath.Join(outDir, "backup.tar.gz.enc")
+
+	if err := runBackupEncrypted(out, dataDir, testBackupPassphrase); err != nil {
+		t.Fatalf("runBackupEncrypted: %v", err)
+	}
+
+	// The fixed-suffix path must NOT exist.
+	if _, err := os.Lstat(out + ".tmp"); err == nil {
+		t.Errorf("fixed temp file %q must not exist after successful encrypt", out+".tmp")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("unexpected stat err on fixed temp file: %v", err)
+	}
+
+	// The output dir should contain only the published file.
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(out) {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected only %q in outDir, got %v", filepath.Base(out), names)
+	}
+}
+
+// TestBackupEncrypt_StaleTmpDoesNotAffect verifies a leftover
+// "<out>.tmp" file from a prior aborted run does not interfere with a
+// new encrypted backup. atomicWriteFile uses os.CreateTemp with a
+// random suffix, so it cannot collide with the legacy fixed name —
+// the stale file must remain untouched (not the destination of a
+// rename) and the new backup must publish at outPath as usual.
+func TestBackupEncrypt_StaleTmpDoesNotAffect(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json",
+		[]byte(`{"users":[{"username":"admin","role":"admin","pass_hash":"deadbeef"}]}`), 0o600)
+	seedFile(t, dataDir, "cluster.json", []byte(`{"nodes":{}}`), 0o600)
+	seedFile(t, dataDir, "config_versions/v1.json", []byte(`{"meta":{"version":1}}`), 0o600)
+
+	outDir := t.TempDir()
+	out := filepath.Join(outDir, "backup.tar.gz.enc")
+	staleTmp := out + ".tmp"
+	staleBody := []byte("STALE — must not be touched by the encrypted writer")
+	if err := os.WriteFile(staleTmp, staleBody, 0o600); err != nil { // #nosec G304 G703 -- test temp path under t.TempDir()
+		t.Fatalf("seed stale tmp: %v", err)
+	}
+
+	if err := runBackupEncrypted(out, dataDir, testBackupPassphrase); err != nil {
+		t.Fatalf("runBackupEncrypted: %v", err)
+	}
+
+	// Encrypted output landed at the canonical path.
+	body, err := os.ReadFile(out) // #nosec G304 G703 -- test temp path under t.TempDir()
+	if err != nil {
+		t.Fatalf("read out: %v", err)
+	}
+	if !isEncryptedBackupBlob(body) {
+		t.Fatal("output does not carry the encrypted magic")
+	}
+
+	// Stale fixed-suffix tmp file must still exist with its original
+	// body (atomicWriteFile generated a unique tmp name; the legacy
+	// stale file was never touched).
+	got, err := os.ReadFile(staleTmp) // #nosec G304 G703 -- test temp path under t.TempDir()
+	if err != nil {
+		t.Fatalf("stale tmp must still exist: %v", err)
+	}
+	if !bytes.Equal(got, staleBody) {
+		t.Fatalf("stale tmp body was modified; got %q want %q", got, staleBody)
+	}
+}

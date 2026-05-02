@@ -358,13 +358,16 @@ func writeBackupTarball(outPath string, manifestBytes []byte, packed []packedFil
 	return nil
 }
 
-//nolint:funlen // Mirrors writeBackupTarball's per-step error+cleanup
-// shape; splitting would scatter the cleanup calls and obscure failure
-// paths. writeEncryptedBackupTarball builds the same tar.gz envelope
-// as writeBackupTarball but in memory, then seals it with AES-256-GCM
-// using a passphrase-derived key (D1.4). The atomic outPath+".tmp" →
-// rename → parent-dir fsync sequence matches the unencrypted path so
-// no-overwrite and durability semantics are identical.
+// writeEncryptedBackupTarball builds the same tar.gz envelope as
+// writeBackupTarball but in memory, then seals it with AES-256-GCM
+// using a passphrase-derived key (D1.4). Atomic publication and
+// parent-dir durability are delegated to the project's hardened
+// atomicWriteFile (unique per-call CreateTemp temp name → fsync →
+// rename → parent-dir fsync, with cleanup on every error path), so
+// the encrypted writer cannot reintroduce the fixed ".tmp" suffix
+// pattern and is unaffected by any stale "<out>.tmp" left over from
+// prior runs. The no-overwrite contract lives at the top of
+// runBackupWith (preserved by both code paths).
 func writeEncryptedBackupTarball(outPath string, manifestBytes []byte, packed []packedFile, passphrase string) error {
 	// Build the unencrypted tar.gz in memory.
 	var buf bytes.Buffer
@@ -404,40 +407,13 @@ func writeEncryptedBackupTarball(outPath string, manifestBytes []byte, packed []
 	if err != nil {
 		return fmt.Errorf("backup encrypt: %w", err)
 	}
-	// Best-effort wipe of the plaintext gzip buffer; the underlying
-	// arrays may already have been GC-mirrored, but we do the right
-	// thing within stdlib semantics.
+	// Best-effort wipe of the plaintext gzip buffer; underlying arrays
+	// may already be GC-mirrored, but we do the right thing within
+	// stdlib semantics.
 	zeroBytes(buf.Bytes())
 
-	// Atomic write — same shape as writeBackupTarball.
-	tmpPath := outPath + ".tmp"
-	out, err := os.Create(tmpPath) // #nosec G304 -- operator-controlled path
-	if err != nil {
-		return fmt.Errorf("backup encrypt: create output: %w", err)
-	}
-	cleanup := func() { _ = os.Remove(tmpPath) }
-
-	if _, err := out.Write(encrypted); err != nil {
-		_ = out.Close()
-		cleanup()
-		return fmt.Errorf("backup encrypt: write: %w", err)
-	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		cleanup()
-		return fmt.Errorf("backup encrypt: sync: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("backup encrypt: close: %w", err)
-	}
-	if err := os.Rename(tmpPath, outPath); err != nil {
-		cleanup()
-		return fmt.Errorf("backup encrypt: rename: %w", err)
-	}
-	if d, derr := os.Open(filepath.Dir(outPath)); derr == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	if err := atomicWriteFile(outPath, encrypted, 0o600); err != nil {
+		return fmt.Errorf("backup encrypt: %w", err)
 	}
 	return nil
 }
