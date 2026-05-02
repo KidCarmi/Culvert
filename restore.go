@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // restoreSchemaVersion is the manifest envelope version this PR accepts.
@@ -684,4 +685,185 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 
 	fmt.Fprintf(w, "\nThis was a dry-run. No files were written. /data unchanged.\n")
 	fmt.Fprintf(w, "D1.3b.2b will add --confirm to commit a restore.\n")
+}
+
+// ─── D1.3b.2b: destructive commit path ──────────────────────────────────────
+
+// commitInjectBetweenRenames is a test seam — production keeps it nil.
+// Tests set it before calling runRestoreCommit to simulate a failure
+// (or process death) between rename A and rename B, exercising the
+// recovery-message code path. Set via t.Cleanup back to nil.
+var commitInjectBetweenRenames func() error
+
+// runRestoreCommit performs a destructive restore: validate, analyze,
+// enforce guards, stage, swap. Caller must stop the proxy first
+// (offline restore only). On success, current /data has been replaced
+// by the restored content and the prior /data is preserved at
+// /data.bak.<timestamp>.
+//
+// Step ordering (single failure boundary at the swap):
+//
+//	1. validate  (D1.3b.1; no /data writes)
+//	2. analyze   (D1.3b.2a; no /data writes)
+//	3. guards    (D1.3b.2a precomputed; reject if WouldBlock)
+//	4. summary   (mode-aware; informational)
+//	5. stage     (mkdir /data.staging.<ts>; write per mode predicate)
+//	6. rename A  (current /data → /data.bak.<ts>)
+//	7. rename B  (staging → /data) + parent-dir fsync
+//	8. final     (print success + .bak path)
+//
+// If 1–5 fail: /data unchanged, staging cleaned up.
+// If 6 fails: /data unchanged, staging cleaned up.
+// If 7 fails (or process is killed between 6 and 7): /data does not
+// exist; error message names the exact `mv` recovery command.
+func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) error {
+	// Steps 1–2 (reuse).
+	summary, files, err := validateBackup(tarPath, dataDir, passphrase)
+	if err != nil {
+		return err
+	}
+	analysis, err := analyzeCommit(files, dataDir, opts)
+	if err != nil {
+		return err
+	}
+
+	// Step 3: enforce guards before any destructive operation.
+	if analysis.DPGuardWouldBlock {
+		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
+			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
+	}
+	if analysis.TOTPGuardWouldBlock {
+		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
+			len(analysis.TOTPCounterRollbacks), strings.Join(analysis.TOTPCounterRollbacks, ", "))
+	}
+
+	// Step 4: print summary so the operator sees the plan one last time.
+	printRestoreSummary(os.Stdout, summary, analysis)
+
+	// Anchor timestamps + paths now so failure messages can name them.
+	timestamp := time.Now().UTC().Format("20060102T150405Z")
+	stagingDir := dataDir + ".staging." + timestamp
+	bakPath := dataDir + ".bak." + timestamp
+
+	fmt.Fprintf(os.Stdout, "\nCommitting restore now.\n")
+	fmt.Fprintf(os.Stdout, "  Staging dir: %s\n", stagingDir)
+	fmt.Fprintf(os.Stdout, "  Backup of current /data will be at: %s\n\n", bakPath)
+
+	// Step 5: stage to disk.
+	if err := stageArtifacts(stagingDir, dataDir, files, opts.Mode); err != nil {
+		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
+		return fmt.Errorf("restore: stage failed: %w", err)
+	}
+
+	// Step 6: rename current /data → .bak.
+	if err := os.Rename(dataDir, bakPath); err != nil {
+		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
+		return fmt.Errorf("restore: rename current %s → %s: %w", dataDir, bakPath, err)
+	}
+
+	// Critical window: /data does not exist between renames.
+	if commitInjectBetweenRenames != nil {
+		if err := commitInjectBetweenRenames(); err != nil {
+			return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; injected: %w",
+				dataDir, bakPath, dataDir, err)
+		}
+	}
+
+	// Step 7: rename staging → /data.
+	if err := os.Rename(stagingDir, dataDir); err != nil {
+		return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; rename staging→/data failed: %w",
+			dataDir, bakPath, dataDir, err)
+	}
+
+	// Parent-dir fsync (best-effort, mirrors atomicWriteFile pattern).
+	if d, derr := os.Open(filepath.Dir(dataDir)); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+
+	// Step 8.
+	fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
+	fmt.Fprintf(os.Stdout, "  Previous /data preserved at: %s\n", bakPath)
+	fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove manually when no longer needed.)\n")
+	return nil
+}
+
+// stageArtifacts creates stagingDir and populates it according to the
+// mode predicate. Pass 1 writes tarball-sourced artifacts. Pass 2 walks
+// current dataDir for preserve-from-current artifacts (this is the gap
+// flagged in PR #194 review — must walk live /data, not just paths
+// in the manifest).
+func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, mode restoreMode) error {
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir staging: %w", err)
+	}
+
+	written := map[string]bool{}
+
+	// Pass 1 — tarball-sourced artifacts.
+	for path, body := range files {
+		if path == "manifest.json" {
+			continue
+		}
+		if !mode.fromTarball(path) {
+			continue
+		}
+		rel := strings.TrimPrefix(path, "data/")
+		target := filepath.Join(stagingDir, rel)
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return fmt.Errorf("mkdir for %s: %w", rel, err)
+		}
+		if err := atomicWriteFile(target, body, 0o600); err != nil {
+			return fmt.Errorf("stage tarball %s: %w", path, err)
+		}
+		written[path] = true
+	}
+
+	// Pass 2 — preserve-from-current artifacts. Walk live dataDir so
+	// files present in current /data but absent from the backup
+	// manifest are still preserved (e.g. files added by features
+	// introduced after the backup snapshot, in non-full modes).
+	walkErr := filepath.Walk(dataDir, func(p string, info os.FileInfo, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Skip symlinks for the same reason D1.3a's pack does:
+			// don't follow into surprise targets.
+			return nil
+		}
+		rel, relErr := filepath.Rel(dataDir, p)
+		if relErr != nil {
+			return relErr
+		}
+		tarballPath := "data/" + filepath.ToSlash(rel)
+		if mode.fromTarball(tarballPath) {
+			// Tarball-source — pass 1 handled it (or it's a tarball
+			// path that simply isn't in current /data).
+			return nil
+		}
+		if written[tarballPath] {
+			return nil
+		}
+		body, err := os.ReadFile(p) // #nosec G304 -- operator-controlled, walked from dataDir
+		if err != nil {
+			return fmt.Errorf("read current %s: %w", p, err)
+		}
+		target := filepath.Join(stagingDir, rel)
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return fmt.Errorf("mkdir for %s: %w", rel, err)
+		}
+		if err := atomicWriteFile(target, body, 0o600); err != nil {
+			return fmt.Errorf("stage current %s: %w", p, err)
+		}
+		written[tarballPath] = true
+		return nil
+	})
+	if walkErr != nil {
+		return fmt.Errorf("stage from current: %w", walkErr)
+	}
+	return nil
 }
