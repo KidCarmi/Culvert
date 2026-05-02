@@ -1465,3 +1465,33 @@ func TestRestoreCommit_StageArtifacts_RefusesPreExistingStagingDir(t *testing.T)
 		t.Errorf("error should mention exclusive mkdir, got: %v", err)
 	}
 }
+
+// TestGuardWithinDir pins the defense-in-depth zip-slip guard used by
+// stageArtifacts. readTarball already rejects ".." components, but the
+// local guard at the write site is what CodeQL actually traces.
+func TestGuardWithinDir(t *testing.T) {
+	base := t.TempDir()
+	cases := []struct {
+		name    string
+		target  string
+		wantErr bool
+	}{
+		{"inside", filepath.Join(base, "foo"), false},
+		{"nested inside", filepath.Join(base, "a", "b", "c"), false},
+		{"equals base", base, false},
+		{"escape via dotdot", filepath.Join(base, "..", "evil"), true},
+		{"escape via deep dotdot", filepath.Join(base, "a", "..", "..", "evil"), true},
+		{"absolute outside", "/etc/passwd", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := guardWithinDir(base, tc.target)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for %q, got nil", tc.target)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error for %q, got %v", tc.target, err)
+			}
+		})
+	}
+}

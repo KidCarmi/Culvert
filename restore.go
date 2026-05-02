@@ -269,6 +269,31 @@ func readTarball(path string) (map[string][]byte, []string, error) {
 	return files, order, nil
 }
 
+// guardWithinDir returns nil iff target lies inside (or equals) base.
+// Defense-in-depth zip-slip guard at filesystem-write sites: even though
+// readTarball already rejects ".." path components and absolute paths,
+// CodeQL cannot trace those guards across the call boundary into
+// stageArtifacts. A local re-check at the write site makes the
+// invariant visible to static analysis (CWE-22).
+func guardWithinDir(base, target string) error {
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return fmt.Errorf("guard base abs: %w", err)
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("guard target abs: %w", err)
+	}
+	rel, err := filepath.Rel(absBase, absTarget)
+	if err != nil {
+		return fmt.Errorf("guard rel: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("path %q escapes %q", target, base)
+	}
+	return nil
+}
+
 func parseAndValidateManifest(files map[string][]byte, order []string) (*backupManifest, error) {
 	manifestBytes, ok := files["manifest.json"]
 	if !ok {
@@ -875,6 +900,14 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 		}
 		rel := strings.TrimPrefix(path, "data/")
 		target := filepath.Join(stagingDir, rel)
+		// Defense-in-depth zip-slip guard at the write site. readTarball
+		// already rejects ".." components and absolute paths, but those
+		// guards are cross-function so CodeQL cannot trace them. A local
+		// re-check here makes the invariant visible to static analysis
+		// (and to any future caller wiring a different reader in).
+		if err := guardWithinDir(stagingDir, target); err != nil {
+			return fmt.Errorf("stage tarball %s: %w", path, err)
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return fmt.Errorf("mkdir for %s: %w", rel, err)
 		}
@@ -932,6 +965,12 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 			return fmt.Errorf("read current %s: %w", p, err)
 		}
 		target := filepath.Join(stagingDir, rel)
+		// Defense-in-depth zip-slip guard (mirrors pass 1). filepath.Walk
+		// already returns paths under dataDir, but the local re-check
+		// makes the invariant visible to static analysis.
+		if err := guardWithinDir(stagingDir, target); err != nil {
+			return fmt.Errorf("stage current %s: %w", p, err)
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return fmt.Errorf("mkdir for %s: %w", rel, err)
 		}
