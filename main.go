@@ -58,61 +58,61 @@ var dataDir = "/data"
 // PR2's main() extraction.
 type startupState struct {
 	// ── CLI flag pointers (all set in parseFlags) ─────────────────────────
-	configPath          *string
-	proxyPort           *int
-	uiPortFlag          *int
-	user                *string
-	pass                *string
-	blockFile           *string
-	logFilePath         *string
-	logMaxMB            *int
-	tlsCert             *string
-	tlsKey              *string
-	rateLimitRPM        *int
-	ipMode              *string
-	socks5Port          *int
-	metricsTok          *string
-	cpGRPCAddr          *string
-	cpGRPCCert          *string
-	cpGRPCKey           *string
-	cpGRPCCA            *string
-	haJoin              *string
-	haToken             *string
-	dpCPAddr            *string
-	dpNodeID            *string
-	dpCert              *string
-	dpKey               *string
-	dpCA                *string
-	policyFile          *string
-	caPath              *string
-	auditLog            *string
-	requestLogPath      *string
-	requestLogMaxMB     *int
-	syslogAddr          *string
-	syslogFormat        *string
-	otlpEndpoint        *string
-	uiAllowIP           *string
-	sessionHrs          *int
-	geoIPDB             *string
-	clamavAddr          *string
-	yaraRulesDir        *string
-	threatFeedDB        *string
-	uiUsersFile         *string
-	fileProfilesFile    *string
-	uiNoTLS             *bool
-	catFeedDB           *string
-	catFeedURL          *string
-	catSyncIntvl        *string
-	enrollURL           *string
-	clusterDB           *string
-	clusterInsecureFlag *bool
-	revocationsFile     *string
-	scanSvcListen       *string
-	scanSvcURL          *string
-	updaterURLFlag      *string
-	updaterURLAllowFlag *string
-	uiSANsFlag          *string
-	trustFwdHeaders     *bool
+	configPath              *string
+	proxyPort               *int
+	uiPortFlag              *int
+	user                    *string
+	pass                    *string
+	blockFile               *string
+	logFilePath             *string
+	logMaxMB                *int
+	tlsCert                 *string
+	tlsKey                  *string
+	rateLimitRPM            *int
+	ipMode                  *string
+	socks5Port              *int
+	metricsTok              *string
+	cpGRPCAddr              *string
+	cpGRPCCert              *string
+	cpGRPCKey               *string
+	cpGRPCCA                *string
+	haJoin                  *string
+	haToken                 *string
+	dpCPAddr                *string
+	dpNodeID                *string
+	dpCert                  *string
+	dpKey                   *string
+	dpCA                    *string
+	policyFile              *string
+	caPath                  *string
+	auditLog                *string
+	requestLogPath          *string
+	requestLogMaxMB         *int
+	syslogAddr              *string
+	syslogFormat            *string
+	otlpEndpoint            *string
+	uiAllowIP               *string
+	sessionHrs              *int
+	geoIPDB                 *string
+	clamavAddr              *string
+	yaraRulesDir            *string
+	threatFeedDB            *string
+	uiUsersFile             *string
+	fileProfilesFile        *string
+	uiNoTLS                 *bool
+	catFeedDB               *string
+	catFeedURL              *string
+	catSyncIntvl            *string
+	enrollURL               *string
+	clusterDB               *string
+	clusterInsecureFlag     *bool
+	revocationsFile         *string
+	scanSvcListen           *string
+	scanSvcURL              *string
+	updaterURLFlag          *string
+	updaterURLAllowFlag     *string
+	uiSANsFlag              *string
+	trustFwdHeaders         *bool
 	resetPwUser             *string
 	backupOut               *string
 	restoreIn               *string
@@ -120,15 +120,19 @@ type startupState struct {
 	restoreConfirm          *bool
 	restoreAcceptDPReenroll *bool
 	restoreAllowCounterRB   *bool
+	listLeftovers           *bool
+	cleanupLeftovers        *bool
+	cleanupOlderThan        *string
+	cleanupKeepLast         *int
 	cdrEnabledFlag          *bool
-	cdrEndpointFlag     *string
-	cdrFailModeFlag     *string
-	cdrProfileFlag      *string
-	cdrModeFlag         *string
-	cdrTimeoutFlag      *int
-	cdrMaxSizeFlag      *int
-	cdrFingerprintFlag  *string
-	cdrCertsDirFlag     *string
+	cdrEndpointFlag         *string
+	cdrFailModeFlag         *string
+	cdrProfileFlag          *string
+	cdrModeFlag             *string
+	cdrTimeoutFlag          *int
+	cdrMaxSizeFlag          *int
+	cdrFingerprintFlag      *string
+	cdrCertsDirFlag         *string
 
 	// ── Derived locals shared across init functions ──────────────────────
 	fc             *FileConfig
@@ -195,6 +199,7 @@ func main() {
 	quit, _ := installSignalHandlers(s)
 	runProxyUntilShutdown(s, proxySrv, quit)
 }
+
 // parseFlags reads every CLI flag into the shared startup state.
 func parseFlags(s *startupState) {
 	// ── CLI flags ────────────────────────────────────────────────────────────
@@ -260,6 +265,10 @@ func parseFlags(s *startupState) {
 	s.restoreConfirm = flag.Bool("confirm", false, "Commit the restore destructively (D1.3b.2b). Without --confirm, --restore is a dry-run.")
 	s.restoreAcceptDPReenroll = flag.Bool("accept-dp-reenrollment", false, "Acknowledge that restoring will require enrolled DPs to re-enroll (D1.3b.2a/b)")
 	s.restoreAllowCounterRB = flag.Bool("allow-counter-rollback", false, "Acknowledge that restoring will roll back TOTP counters for some users (D1.3b.2a/b)")
+	s.listLeftovers = flag.Bool("list-restore-leftovers", false, "List restore leftover .bak/.staging dirs (siblings of dataDir) and exit (D1.3c)")
+	s.cleanupLeftovers = flag.Bool("cleanup-restore-leftovers", false, "Plan/execute cleanup of restore leftover .bak/.staging dirs and exit; dry-run unless --confirm is set (D1.3c)")
+	s.cleanupOlderThan = flag.String("older-than", "", "Cleanup filter: only candidates older than this duration (strict time.ParseDuration syntax, e.g. 168h, 720h) (D1.3c)")
+	s.cleanupKeepLast = flag.Int("keep-last", 0, "Cleanup filter: always keep the N newest .bak directories; .staging is unaffected (D1.3c)")
 	// CDR / Sluice integration (Phase 1: single-instance client with TOFU pinning).
 	s.cdrEnabledFlag = flag.Bool("cdr-enabled", false, "Enable Sluice CDR integration (strip macros/JS/OLE from downloads)")
 	s.cdrEndpointFlag = flag.String("cdr-endpoint", "", "Sluice gRPC endpoint (e.g. sluice:8443)")
@@ -272,6 +281,7 @@ func parseFlags(s *startupState) {
 	s.cdrCertsDirFlag = flag.String("cdr-certs-dir", "", "Directory holding Sluice mTLS client bundle (ca.pem, client.pem, client.key)")
 	flag.Parse()
 }
+
 // handleOneShotCommands handles one-shot CLI commands that exit before starting the proxy.
 func handleOneShotCommands(s *startupState) {
 	// ── One-shot: backup/export (D1.3a) ────────────────────────────────────
@@ -309,6 +319,44 @@ func handleOneShotCommands(s *startupState) {
 				fmt.Fprintf(os.Stderr, "Restore validation error: %v\n", err)
 				os.Exit(1)
 			}
+		}
+		os.Exit(0)
+	}
+	// ── One-shot: list restore leftovers (D1.3c) ───────────────────────────
+	if *s.listLeftovers {
+		if err := runListLeftovers(dataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "List leftovers error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	// ── One-shot: cleanup restore leftovers (D1.3c) ────────────────────────
+	if *s.cleanupLeftovers {
+		var older time.Duration
+		if *s.cleanupOlderThan != "" {
+			d, perr := time.ParseDuration(*s.cleanupOlderThan)
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "Cleanup error: invalid --older-than: %v\n", perr)
+				os.Exit(1)
+			}
+			if d <= 0 {
+				fmt.Fprintln(os.Stderr, "Cleanup error: --older-than must be positive")
+				os.Exit(1)
+			}
+			older = d
+		}
+		if *s.cleanupKeepLast < 0 {
+			fmt.Fprintln(os.Stderr, "Cleanup error: --keep-last must be >= 0")
+			os.Exit(1)
+		}
+		opts := cleanupOpts{
+			Confirm:   *s.restoreConfirm,
+			OlderThan: older,
+			KeepLast:  *s.cleanupKeepLast,
+		}
+		if err := runCleanupLeftovers(dataDir, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "Cleanup error: %v\n", err)
+			os.Exit(1)
 		}
 		os.Exit(0)
 	}
@@ -381,6 +429,7 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
 }
+
 // initUIExtras is the PR3 expansion shim: resolve the UI-extras slice
 // (TLS SANs + trust-forwarded-headers) and apply it.
 func initUIExtras(s *startupState) {
@@ -425,6 +474,7 @@ func initAuth(s *startupState) {
 		}
 	}
 }
+
 // initSession is the PR3 expansion shim: resolve the session slice
 // (HMAC secret + revocations file + TTL) and apply it.
 func initSession(s *startupState) {
@@ -475,6 +525,7 @@ func initObservability(s *startupState) {
 		}
 	}
 }
+
 // initGeoIP is the PR3 expansion shim: resolve the GeoIP DB slice, stash
 // the resolved path on startupState for startAdminUI, and apply it.
 func initGeoIP(s *startupState) {
@@ -500,6 +551,7 @@ func initPAC(s *startupState) {
 		log.Fatalf("%v", err)
 	}
 }
+
 // initLegacyAuthProviders is the PR3 expansion shim: resolve the legacy
 // LDAP / OIDC-introspection provider slice and apply it.
 func initLegacyAuthProviders(s *startupState) {
@@ -514,6 +566,7 @@ func initLegacyAuthProviders(s *startupState) {
 func initMetricsToken(s *startupState) {
 	loadMetricsToken(resolveMetricsTokenStartupConfig(s.fc, *s.metricsTok))
 }
+
 // initCluster starts Control Plane / Data Plane gRPC and HA failover.
 func initCluster(s *startupState) {
 	// ── Control Plane / Data Plane gRPC ──────────────────────────────────────
@@ -587,6 +640,7 @@ func initCluster(s *startupState) {
 		startDataPlane(appLifecycleCtx, dpAddr, dpNID, dpCertF, dpKeyF, dpCAF)
 	}
 }
+
 // initConnAndRateLimit configures per-IP connection limits, IP filter, and rate limiter.
 func initConnAndRateLimit(s *startupState) {
 	// ── Security: Connection limit per IP ────────────────────────────────────
@@ -660,6 +714,7 @@ func initBlocklist(s *startupState) {
 		blFeedSyncer = newBlocklistSyncer(bl, "", blFeedDefaultInterval)
 	}
 }
+
 // initRootCA loads or initialises the Root CA used for SSL inspection.
 func initRootCA(s *startupState) {
 	// ── Root CA for SSL inspection ────────────────────────────────────────────
@@ -772,6 +827,7 @@ func initURLCategories(s *startupState) {
 		logger.Printf("CatFeedDB: BadgerDB at %s, sync every %s", *s.catFeedDB, syncD)
 	}
 }
+
 // initFileBlocking sets up the file-extension blocker and named file-type profiles.
 // initFileBlocking is the PR3 follow-up pilot shim: resolve the
 // file-blocking slice of FileConfig and hand it to the domain loader.
@@ -801,6 +857,7 @@ func initRewriteAndDefaultAction(s *startupState) {
 	cfg := resolveRewriteDefaultActionStartupConfig(s.fc)
 	loadRewriteAndDefaultAction(cfg, len(policyStore.List()))
 }
+
 // initScanning wires up ClamAV, YARA, threat feeds, and the optional scan microservice sidecar.
 func initScanning(s *startupState) {
 	// ── Security scanning: ClamAV + YARA + Threat Feeds ─────────────────────
@@ -901,6 +958,7 @@ func initScanning(s *startupState) {
 		}
 	}
 }
+
 // initUpstreamProxy configures parent-proxy chaining when configured.
 func initUpstreamProxy(s *startupState) {
 	// ── Upstream proxy chaining ──────────────────────────────────────────────
@@ -999,6 +1057,7 @@ func initCDR(s *startupState) {
 			sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
 	}
 }
+
 // initMTLSAndOCSP is the PR3 expansion shim: resolve the upstream
 // mTLS + OCSP slice and apply it.
 func initMTLSAndOCSP(s *startupState) {
@@ -1087,6 +1146,7 @@ func startAdminUI(s *startupState) {
 	uiCfgLogFormat = s.fc.LogFormat
 	go startUI(s.uPort, s.cert, s.key, *s.uiNoTLS)
 }
+
 // buildAndStartProxyServer constructs the proxy HTTP server and logs startup.
 func buildAndStartProxyServer(s *startupState) *http.Server {
 	// ── Proxy server ─────────────────────────────────────────────────────────
@@ -1153,6 +1213,7 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 	}()
 	return quit, sighup
 }
+
 // runProxyUntilShutdown starts the proxy goroutine, blocks on quit, then runs
 // the graceful shutdown sequence in its exact original order.
 func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.Signal) {
@@ -1294,7 +1355,7 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	type checkResult struct {
-		Status string `json:"status"`           // "ok" or "fail"
+		Status string `json:"status"` // "ok" or "fail"
 		Detail string `json:"detail,omitempty"`
 	}
 	checks := map[string]*checkResult{}
@@ -1590,8 +1651,8 @@ func runEnrollment(enrollURLStr string) (*dpEnrollmentConfig, error) {
 
 // enrollmentInfo holds parsed enrollment URL components.
 type enrollmentInfo struct {
-	CPAddr      string
-	Token       string
+	CPAddr        string
+	Token         string
 	CAFingerprint string // sha256:hex (from ?ca-fp= query param)
 }
 
