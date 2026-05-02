@@ -145,7 +145,7 @@ docker compose up -d
 - **Bandwidth/QoS**: Token bucket rate limiting per label group, configurable rates (KB/s, MB/s, GB/s), stored in `/data/bandwidth_policies.json`
 - **ConfigSnapshot sync**: CP pushes `ConfigSnapshot` to DP nodes containing policy rules, blocklist, PAC exclusions, threat feed data, session HMAC, bandwidth policies, and node groups
 - **Cluster gaps**: All 8 items from CLUSTER-GAPS.md implemented: PAC sync, rolling upgrades, config versioning, geo-aware grouping, bandwidth/QoS, secrets sync, threat feed sync, config diff
-- **Roadmap**: See `roadmap/PHASES.md` for development phases (1–6), `roadmap/ROADMAP.md` for production deployment action items, `roadmap/FEATURE-COVERAGE.md` for GUI coverage audit, `roadmap/UI-DESIGN.md` for panel design reference, `roadmap/CLUSTER-GAPS.md` for cluster gap analysis, `roadmap/docker-system-update.md` for Docker self-update system design, `roadmap/roadmap-day2.md` for day-2 code review findings (108 items across 8 domains)
+- **Roadmap**: See `roadmap/PHASES.md` for development phases (1–6), `roadmap/ROADMAP.md` for production deployment action items, `roadmap/FEATURE-COVERAGE.md` for GUI coverage audit, `roadmap/UI-DESIGN.md` for panel design reference, `roadmap/CLUSTER-GAPS.md` for cluster gap analysis, `roadmap/D1.6-maintenance-agent-design.md` for the Maintenance Agent / host-operations design (supersedes the deprecated `roadmap/docker-system-update.md`), `roadmap/roadmap-day2.md` for day-2 code review findings (108 items across 8 domains)
 
 ## Admin UI / Control Plane
 

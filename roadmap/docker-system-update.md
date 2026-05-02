@@ -1,5 +1,13 @@
 # Docker Self-Update System Design
 
+> **⚠️ Status: SUPERSEDED — DEPRECATED.** This document is preserved for historical context and is no longer the active design. It is **superseded by [`D1.6-maintenance-agent-design.md`](./D1.6-maintenance-agent-design.md)** (Maintenance Agent / Host Operations).
+>
+> **Why deprecated:** the architecture below assumes the GUI/CP container drives Docker via a mounted `/var/run/docker.sock`. That trust posture is too broad for the production deployments we want to support. D1.6 redraws the boundary so the GUI/CP **never** speaks to Docker directly; a scoped, host-side Maintenance Agent does.
+>
+> **Important:** the update *capability* is **not** being deleted — only this specific design is. New work targets D1.6.
+
+---
+
 Enterprise-grade GUI-driven update system for Culvert Docker deployments.
 Supports standalone and multi-node cluster modes with zero-downtime rolling updates.
 
