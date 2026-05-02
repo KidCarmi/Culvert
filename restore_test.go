@@ -797,3 +797,701 @@ func equalSnapshots(a, b map[string]string) bool {
 	}
 	return true
 }
+
+// ─── D1.3b.2b: destructive commit path tests ────────────────────────────────
+
+// readBak finds the .bak.<timestamp> sibling created by a successful
+// restore commit. Test-only convenience.
+func readBak(t *testing.T, dataDir string) (string, bool) {
+	t.Helper()
+	parent := filepath.Dir(dataDir)
+	base := filepath.Base(dataDir)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatalf("readdir parent: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), base+".bak.") {
+			return filepath.Join(parent, e.Name()), true
+		}
+	}
+	return "", false
+}
+
+// stagingExists returns true if any .staging.<suffix> sibling of
+// dataDir is on disk. Should be false after success or atomic-failure
+// scenarios.
+func stagingExists(t *testing.T, dataDir string) bool {
+	t.Helper()
+	parent := filepath.Dir(dataDir)
+	base := filepath.Base(dataDir)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatalf("readdir parent: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), base+".staging.") {
+			return true
+		}
+	}
+	return false
+}
+
+// fileSHA returns hex sha256 of a file body, or "" if missing.
+func fileSHA(t *testing.T, path string) string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+// makeCommitFixture builds a backup tarball and a separate "current
+// /data" dir suitable for end-to-end commit tests. Both have a real
+// cluster CA (different from each other) so DP-fingerprint guard
+// scenarios can be triggered when wanted.
+//
+// Returns: (tarballPath, dataDir, backupCAFingerprint, currentCAFingerprint)
+func makeCommitFixture(t *testing.T, currentEnrolledNodes int) (string, string, string, string) {
+	t.Helper()
+	// Backup source: bootstrap CA + minimal Tier 1 content.
+	backupSrc, backupFP := makeBackupWithRealCA(t,
+		[]uiUserRecord{{Username: "alice", Role: RoleAdmin, TOTPLastCounter: 5}}, 0)
+
+	// Current /data: distinct CA + distinct user roster.
+	currentDir := seedCurrentDataDir(t, true,
+		[]uiUserRecord{{Username: "bob", Role: RoleAdmin, TOTPLastCounter: 3}}, currentEnrolledNodes)
+	currentFP := currentCAFingerprint(currentDir)
+
+	return backupSrc, currentDir, backupFP, currentFP
+}
+
+// commitOptsFull is the most common test combo.
+func commitOptsFull() restoreOpts { return restoreOpts{Mode: modeFull} }
+
+// ── 23. Full restore round-trip ──────────────────────────────────────
+
+func TestRestoreCommit_ModeFull_RoundTrip(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+
+	out, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("commit: %v\nstdout: %s", err, out)
+	}
+
+	// /data now reflects backup: alice in ui_users.json (not bob).
+	body, err := os.ReadFile(filepath.Join(currentDir, "ui_users.json"))
+	if err != nil {
+		t.Fatalf("read ui_users.json: %v", err)
+	}
+	if !strings.Contains(string(body), "alice") {
+		t.Errorf("after full commit, ui_users should contain alice; got %s", body)
+	}
+	if strings.Contains(string(body), "bob") {
+		t.Errorf("after full commit, ui_users should NOT contain bob; got %s", body)
+	}
+
+	// .bak preserved with prior content.
+	bakPath, ok := readBak(t, currentDir)
+	if !ok {
+		t.Fatal(".bak should exist after successful commit")
+	}
+	bakBody, _ := os.ReadFile(filepath.Join(bakPath, "ui_users.json"))
+	if !strings.Contains(string(bakBody), "bob") {
+		t.Errorf(".bak ui_users should contain bob (pre-restore state); got %s", bakBody)
+	}
+
+	// Staging dir gone.
+	if stagingExists(t, currentDir) {
+		t.Error("staging dir should not remain after successful commit")
+	}
+}
+
+// ── 24. Trust-root-only preserves state ──────────────────────────────
+
+func TestRestoreCommit_ModeTrustRootOnly_PreservesState(t *testing.T) {
+	src, currentDir, backupFP, _ := makeCommitFixture(t, 0)
+
+	preBody, _ := os.ReadFile(filepath.Join(currentDir, "ui_users.json"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeTrustRootOnly, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// CA artifacts should match the backup (replaced).
+	currentFPAfter := currentCAFingerprint(currentDir)
+	if currentFPAfter != backupFP {
+		t.Errorf("trust-root-only: CA fingerprint = %s, want backup's %s", currentFPAfter, backupFP)
+	}
+
+	// ui_users.json should be byte-identical to pre-restore (preserved).
+	postBody, _ := os.ReadFile(filepath.Join(currentDir, "ui_users.json"))
+	if string(postBody) != string(preBody) {
+		t.Errorf("trust-root-only should preserve ui_users; pre=%s post=%s", preBody, postBody)
+	}
+}
+
+// ── 25. State-only preserves CA ──────────────────────────────────────
+
+func TestRestoreCommit_ModeStateOnly_PreservesCA(t *testing.T) {
+	src, currentDir, _, originalCurrentFP := makeCommitFixture(t, 0)
+
+	// Snapshot the current cluster-ca.crt body for byte-comparison after.
+	preCASha := fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeStateOnly})
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// CA fingerprint should still match pre-restore (preserved).
+	postFP := currentCAFingerprint(currentDir)
+	if postFP != originalCurrentFP {
+		t.Errorf("state-only: CA fingerprint = %s, want preserved %s", postFP, originalCurrentFP)
+	}
+	if fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt")) != preCASha {
+		t.Error("state-only: cluster-ca.crt body should be byte-identical to pre-restore")
+	}
+
+	// ui_users should be from backup (alice, not bob).
+	body, _ := os.ReadFile(filepath.Join(currentDir, "ui_users.json"))
+	if !strings.Contains(string(body), "alice") {
+		t.Errorf("state-only: ui_users should contain alice (from backup); got %s", body)
+	}
+}
+
+// ── 26. Validation failure → no swap ─────────────────────────────────
+
+func TestRestoreCommit_ValidationFailure_NoSwap(t *testing.T) {
+	// Build a backup, then corrupt the manifest sha so validation fails.
+	src := makeValidBackup(t)
+	dest := filepath.Join(t.TempDir(), "bad-sha.tar.gz")
+	repackTarball(t, src, dest, func(files map[string][]byte, _ *[]string) {
+		files["data/ui_users.json"] = []byte(`{"users":[{"username":"x","role":"admin","pass_hash":"01234567"}]}`)
+	})
+	currentDir := seedCurrentDataDir(t, true, []uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 0)
+	preCASha := fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(dest, currentDir, "", commitOptsFull())
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+
+	// /data unchanged: cluster-ca.crt body unchanged.
+	if fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt")) != preCASha {
+		t.Error("/data should be untouched on validation failure")
+	}
+	// No .bak, no staging.
+	if _, ok := readBak(t, currentDir); ok {
+		t.Error(".bak should not exist after validation failure")
+	}
+	if stagingExists(t, currentDir) {
+		t.Error("staging should not exist after validation failure")
+	}
+}
+
+// ── 27. DP guard blocks without flag ─────────────────────────────────
+
+func TestRestoreCommit_DPGuard_BlocksWithoutFlag(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 3) // 3 enrolled nodes
+	preCASha := fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", commitOptsFull())
+	})
+	if err == nil {
+		t.Fatal("expected DP guard error")
+	}
+	if !strings.Contains(err.Error(), "--accept-dp-reenrollment") {
+		t.Errorf("error should name the required flag, got: %v", err)
+	}
+
+	if fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt")) != preCASha {
+		t.Error("/data should be untouched when DP guard fires")
+	}
+	if _, ok := readBak(t, currentDir); ok {
+		t.Error(".bak should not exist when DP guard fires")
+	}
+	if stagingExists(t, currentDir) {
+		t.Error("staging should not exist when DP guard fires")
+	}
+}
+
+// ── 28. DP guard allows with flag ────────────────────────────────────
+
+func TestRestoreCommit_DPGuard_AllowsWithFlag(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 3)
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("commit with flag should succeed: %v", err)
+	}
+	if _, ok := readBak(t, currentDir); !ok {
+		t.Error(".bak should exist after successful commit")
+	}
+}
+
+// ── 29. TOTP guard blocks without flag ───────────────────────────────
+
+func TestRestoreCommit_TOTPGuard_BlocksWithoutFlag(t *testing.T) {
+	// Backup has alice counter=5; current has alice counter=10 → rollback.
+	src, _ := makeBackupWithRealCA(t,
+		[]uiUserRecord{{Username: "alice", Role: RoleAdmin, TOTPLastCounter: 5}}, 0)
+	currentDir := seedCurrentDataDir(t, false,
+		[]uiUserRecord{{Username: "alice", Role: RoleAdmin, TOTPLastCounter: 10}}, 0)
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", commitOptsFull())
+	})
+	if err == nil {
+		t.Fatal("expected TOTP guard error")
+	}
+	if !strings.Contains(err.Error(), "--allow-counter-rollback") {
+		t.Errorf("error should name the required flag, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "alice") {
+		t.Errorf("error should name the affected user, got: %v", err)
+	}
+	if _, ok := readBak(t, currentDir); ok {
+		t.Error(".bak should not exist when TOTP guard fires")
+	}
+}
+
+// ── 30. TOTP guard allows with flag ──────────────────────────────────
+
+func TestRestoreCommit_TOTPGuard_AllowsWithFlag(t *testing.T) {
+	src, _ := makeBackupWithRealCA(t,
+		[]uiUserRecord{{Username: "alice", Role: RoleAdmin, TOTPLastCounter: 5}}, 0)
+	currentDir := seedCurrentDataDir(t, false,
+		[]uiUserRecord{{Username: "alice", Role: RoleAdmin, TOTPLastCounter: 10}}, 0)
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AllowCounterRollback: true})
+	})
+	if err != nil {
+		t.Fatalf("commit with flag should succeed: %v", err)
+	}
+}
+
+// ── 31. Injection between renames emits recovery command ─────────────
+
+func TestRestoreCommit_InjectionBetweenRenames_RecoveryMessage(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+
+	commitInjectBetweenRenames = func() error { return fmt.Errorf("simulated kill") }
+	t.Cleanup(func() { commitInjectBetweenRenames = nil })
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err == nil {
+		t.Fatal("expected interruption error")
+	}
+	if !strings.Contains(err.Error(), "COMMIT INTERRUPTED") {
+		t.Errorf("error should mention COMMIT INTERRUPTED, got: %v", err)
+	}
+
+	// Recovery instruction must contain the exact .bak path so the
+	// operator can copy/paste.
+	bakPath, ok := readBak(t, currentDir)
+	if !ok {
+		t.Fatal(".bak should exist after interrupted commit (rename A succeeded)")
+	}
+	wantMV := fmt.Sprintf("mv %s %s", bakPath, currentDir)
+	if !strings.Contains(err.Error(), wantMV) {
+		t.Errorf("error should contain recovery command %q, got: %v", wantMV, err)
+	}
+
+	// Staging dir must be cleaned even on between-renames failure, so
+	// the operator's only recovery path is the .bak (no ambiguity).
+	if stagingExists(t, currentDir) {
+		t.Error("staging dir should be cleaned even on between-renames failure")
+	}
+
+	// Cleanup: do the manual recovery so test directories stay tidy.
+	if rerr := os.Rename(bakPath, currentDir); rerr != nil {
+		t.Logf("post-test cleanup mv: %v", rerr)
+	}
+}
+
+// ── 32. .bak preserved (not auto-deleted) ────────────────────────────
+
+func TestRestoreCommit_BakPreservedNotAutoDeleted(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	bakPath, ok := readBak(t, currentDir)
+	if !ok {
+		t.Fatal(".bak should exist after successful commit")
+	}
+	// .bak still readable (i.e. real directory).
+	entries, err := os.ReadDir(bakPath)
+	if err != nil {
+		t.Fatalf(".bak should be a real directory: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Error(".bak should contain prior /data content")
+	}
+}
+
+// ── 33. Dry-run without --confirm still non-destructive ──────────────
+
+func TestRestoreCommit_NoConfirm_StillDryRun(t *testing.T) {
+	// runRestoreDryRun is the no-confirm path; tests that it does not
+	// touch /data even when runRestoreCommit exists in the same package.
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+	preCASha := fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt")) != preCASha {
+		t.Error("dry-run must not modify /data")
+	}
+	if _, ok := readBak(t, currentDir); ok {
+		t.Error("dry-run must not create .bak")
+	}
+	if stagingExists(t, currentDir) {
+		t.Error("dry-run must not create staging")
+	}
+}
+
+// ── 34. Current-only files preserved in non-full modes ───────────────
+//
+// Pins the PR #194 review note: the stager must walk live /data, not
+// just manifest paths. Otherwise files present in current /data but
+// absent from the backup would be lost in trust-root-only / state-only.
+func TestRestoreCommit_TrustRootOnly_PreservesCurrentOnlyFiles(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+
+	// Add a "current-only" file that does not exist in the backup.
+	currentOnlyPath := filepath.Join(currentDir, "extra-feature.json")
+	currentOnlyBody := []byte(`{"added_after_backup_snapshot":true}`)
+	if err := os.WriteFile(currentOnlyPath, currentOnlyBody, 0o600); err != nil {
+		t.Fatalf("write current-only file: %v", err)
+	}
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeTrustRootOnly, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// extra-feature.json should still be there (preserved by pass-2 walk).
+	body, err := os.ReadFile(filepath.Join(currentDir, "extra-feature.json"))
+	if err != nil {
+		t.Fatalf("current-only file should be preserved by trust-root-only mode: %v", err)
+	}
+	if string(body) != string(currentOnlyBody) {
+		t.Errorf("current-only file content changed: got %s, want %s", body, currentOnlyBody)
+	}
+}
+
+// ── 35. Tar entry outside data/ namespace rejected ───────────────────
+
+func TestRestore_DryRun_TarEntryOutsideDataNamespace_Rejected(t *testing.T) {
+	src := makeValidBackup(t)
+	dest := filepath.Join(t.TempDir(), "outside-namespace.tar.gz")
+	repackTarball(t, src, dest, func(files map[string][]byte, order *[]string) {
+		// Inject an entry whose path doesn't start with "data/" and
+		// isn't manifest.json. A naive extractor could write it
+		// outside the intended /data tree on commit.
+		files["outside.json"] = []byte(`{"smuggled":true}`)
+		*order = append(*order, "outside.json")
+	})
+	dataDir := t.TempDir()
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
+	if err == nil || !strings.Contains(err.Error(), "outside data/ namespace") {
+		t.Errorf("expected outside-namespace error, got: %v", err)
+	}
+	assertNoDataMutation(t, dataDir)
+}
+
+// ── 36. Manifest path outside data/ namespace rejected ───────────────
+//
+//nolint:dupl // Structurally similar to TestRestore_DryRun_ManifestReferencesMissingFile
+// (both inject a fake manifest entry via repackTarball) but tests a
+// different rule (namespace vs presence). Refactoring to a shared
+// helper would obscure which rule each case isolates.
+func TestRestore_DryRun_ManifestPathOutsideDataNamespace_Rejected(t *testing.T) {
+	src := makeValidBackup(t)
+	dest := filepath.Join(t.TempDir(), "manifest-outside-namespace.tar.gz")
+	repackTarball(t, src, dest, func(files map[string][]byte, _ *[]string) {
+		// Rewrite the manifest to claim a path that doesn't start
+		// with "data/". Don't put a corresponding tar entry — the
+		// namespace check should fire BEFORE bidirectional presence,
+		// so the test isolates the manifest-namespace rule.
+		var m backupManifest
+		_ = json.Unmarshal(files["manifest.json"], &m)
+		fakeBody := []byte(`{"smuggled":true}`)
+		fakeSum := sha256.Sum256(fakeBody)
+		m.Files = append(m.Files, backupManifestFile{
+			Path:   "outside/path.json",
+			Size:   int64(len(fakeBody)),
+			SHA256: hex.EncodeToString(fakeSum[:]),
+			Mode:   "0600",
+		})
+		body, _ := json.MarshalIndent(m, "", "  ")
+		files["manifest.json"] = body
+	})
+	dataDir := t.TempDir()
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
+	if err == nil || !strings.Contains(err.Error(), "manifest path outside data/ namespace") {
+		t.Errorf("expected manifest-namespace error, got: %v", err)
+	}
+	assertNoDataMutation(t, dataDir)
+}
+
+// ── 37. Tarball-sourced restore preserves manifest mode ──────────────
+
+func TestRestoreCommit_PreservesManifestMode(t *testing.T) {
+	// Build a backup whose ui_users.json was on disk with mode 0o640
+	// (non-default). The restore must produce 0o640 in /data, not the
+	// previous hardcoded 0o600.
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json",
+		[]byte(`{"users":[{"username":"alice","role":"admin","pass_hash":"deadbeef"}]}`),
+		0o640)
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+
+	restoreDataDir := t.TempDir()
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(out, restoreDataDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(restoreDataDir, "ui_users.json"))
+	if err != nil {
+		t.Fatalf("stat restored: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Errorf("restored ui_users.json mode = %o, want 0640 (preserved from manifest)", got)
+	}
+}
+
+// ── 38. Preserve-from-current restore preserves current mode ─────────
+
+func TestRestoreCommit_TrustRootOnly_PreservesCurrentMode(t *testing.T) {
+	// Backup has CA + ui_users (0o600). Current /data has ui_users
+	// at mode 0o644. Trust-root-only mode preserves current ui_users,
+	// so the restored mode must be 0o644 (current's), not 0o600 (the
+	// previous hardcoded value).
+	src, _ := makeBackupWithRealCA(t,
+		[]uiUserRecord{{Username: "alice", Role: RoleAdmin}}, 0)
+
+	currentDir := t.TempDir()
+	if err := (&clusterCA{}).InitOrLoad(currentDir); err != nil {
+		t.Fatalf("InitOrLoad current: %v", err)
+	}
+	bobBody := []byte(`{"users":[{"username":"bob","role":"admin","pass_hash":"abc"}]}`)
+	// #nosec G306 -- 0o644 is the explicit subject of this test (mode preservation across restore)
+	if err := os.WriteFile(filepath.Join(currentDir, "ui_users.json"), bobBody, 0o644); err != nil {
+		t.Fatalf("write current ui_users 0o644: %v", err)
+	}
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeTrustRootOnly, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(currentDir, "ui_users.json"))
+	if err != nil {
+		t.Fatalf("stat restored: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("restored ui_users.json mode = %o, want 0644 (preserved from current /data)", got)
+	}
+}
+
+// ── 39. Pre-existing staging dir aborts before /data is touched ──────
+
+func TestRestoreCommit_PreExistingStagingDir_AbortsBeforeDataTouched(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+
+	// Pre-create the staging dir at the path runRestoreCommit will
+	// derive (timestamp+pid). Since we can't predict timestamp here,
+	// we pre-create EVERY .staging.* path by precomputing the suffix.
+	// Simpler: pre-create ALL siblings matching the expected glob.
+	// Even simpler: make every possible derivation collide by creating
+	// the exact path the function will produce — we know it uses
+	// time.Now + os.Getpid, so create one matching that.
+	suffix := fmt.Sprintf("%s-%d",
+		time.Now().UTC().Format("20060102T150405Z"), os.Getpid())
+	stagingDir := currentDir + ".staging." + suffix
+	if err := os.Mkdir(stagingDir, 0o700); err != nil {
+		t.Fatalf("pre-create staging: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stagingDir) })
+
+	// Mark the pre-existing dir with a sentinel file so we can prove
+	// it was NOT touched (i.e. no stale reuse).
+	sentinel := filepath.Join(stagingDir, "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("pre-existing"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	preCASha := fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err == nil {
+		t.Fatal("expected staging-collision error")
+	}
+	if !strings.Contains(err.Error(), "staging path") || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error should mention staging-path collision, got: %v", err)
+	}
+
+	// /data must be untouched (commit never started).
+	if fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt")) != preCASha {
+		t.Error("/data should not be touched on staging collision")
+	}
+	// No .bak should exist.
+	if _, ok := readBak(t, currentDir); ok {
+		t.Error(".bak should not exist on staging collision")
+	}
+	// Sentinel must be intact — proves no stale reuse.
+	body, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("sentinel should still exist: %v", err)
+	}
+	if string(body) != "pre-existing" {
+		t.Errorf("sentinel body changed; restore reused stale staging dir")
+	}
+}
+
+// ── 40. Pre-existing bak dir aborts before /data is touched ──────────
+
+func TestRestoreCommit_PreExistingBakDir_AbortsBeforeDataTouched(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+
+	// Pre-create the bak dir at the path runRestoreCommit will derive.
+	suffix := fmt.Sprintf("%s-%d",
+		time.Now().UTC().Format("20060102T150405Z"), os.Getpid())
+	bakPath := currentDir + ".bak." + suffix
+	if err := os.Mkdir(bakPath, 0o700); err != nil {
+		t.Fatalf("pre-create bak: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(bakPath) })
+
+	preCASha := fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err == nil {
+		t.Fatal("expected bak-collision error")
+	}
+	if !strings.Contains(err.Error(), "backup path") || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error should mention backup-path collision, got: %v", err)
+	}
+
+	// /data must be untouched (commit never started).
+	if fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt")) != preCASha {
+		t.Error("/data should not be touched on bak collision")
+	}
+	// No staging dir should be created.
+	if stagingExists(t, currentDir) {
+		t.Error("staging dir should not be created when bak collision detected first")
+	}
+}
+
+// ── 41. No stale staging content is reused (race-condition guard) ────
+//
+// Even if the pre-check missed a same-instant creation between Stat
+// and Mkdir (TOCTOU), the os.Mkdir (not MkdirAll) call inside
+// stageArtifacts must still fail closed. Simulates this by skipping
+// the runRestoreCommit pre-check (calling stageArtifacts directly
+// against a pre-created staging dir).
+func TestRestoreCommit_StageArtifacts_RefusesPreExistingStagingDir(t *testing.T) {
+	currentDir := t.TempDir()
+	stagingDir := currentDir + ".staging.test"
+	if err := os.Mkdir(stagingDir, 0o700); err != nil {
+		t.Fatalf("pre-create staging: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stagingDir) })
+
+	// Minimal manifest (zero entries OK for this test — we never get
+	// past the staging-root mkdir).
+	manifest := &backupManifest{SchemaVersion: 1, Files: nil}
+	files := map[string][]byte{}
+
+	err := stageArtifacts(stagingDir, currentDir, files, manifest, modeFull)
+	if err == nil {
+		t.Fatal("stageArtifacts should fail when staging root already exists")
+	}
+	if !strings.Contains(err.Error(), "exclusive") {
+		t.Errorf("error should mention exclusive mkdir, got: %v", err)
+	}
+}
+
+// TestGuardWithinDir pins the defense-in-depth zip-slip guard used by
+// stageArtifacts. readTarball already rejects ".." components, but the
+// local guard at the write site is what CodeQL actually traces.
+func TestGuardWithinDir(t *testing.T) {
+	base := t.TempDir()
+	cases := []struct {
+		name    string
+		target  string
+		wantErr bool
+	}{
+		{"inside", filepath.Join(base, "foo"), false},
+		{"nested inside", filepath.Join(base, "a", "b", "c"), false},
+		{"equals base", base, false},
+		{"escape via dotdot", filepath.Join(base, "..", "evil"), true},
+		{"escape via deep dotdot", filepath.Join(base, "a", "..", "..", "evil"), true},
+		{"absolute outside", "/etc/passwd", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := guardWithinDir(base, tc.target)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for %q, got nil", tc.target)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error for %q, got %v", tc.target, err)
+			}
+		})
+	}
+}

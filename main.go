@@ -113,13 +113,14 @@ type startupState struct {
 	updaterURLAllowFlag *string
 	uiSANsFlag          *string
 	trustFwdHeaders     *bool
-	resetPwUser            *string
-	backupOut              *string
-	restoreIn              *string
-	restoreMode            *string
+	resetPwUser             *string
+	backupOut               *string
+	restoreIn               *string
+	restoreMode             *string
+	restoreConfirm          *bool
 	restoreAcceptDPReenroll *bool
-	restoreAllowCounterRB  *bool
-	cdrEnabledFlag         *bool
+	restoreAllowCounterRB   *bool
+	cdrEnabledFlag          *bool
 	cdrEndpointFlag     *string
 	cdrFailModeFlag     *string
 	cdrProfileFlag      *string
@@ -256,8 +257,9 @@ func parseFlags(s *startupState) {
 	s.backupOut = flag.String("backup", "", "Pack /data into a tar.gz at the given path and exit (D1.3a)")
 	s.restoreIn = flag.String("restore", "", "Validate a backup tarball and print restore plan (dry-run; D1.3b.1)")
 	s.restoreMode = flag.String("mode", "", "Restore mode: full | trust-root-only | state-only (D1.3b.2a; default: full)")
-	s.restoreAcceptDPReenroll = flag.Bool("accept-dp-reenrollment", false, "Acknowledge that restoring will require enrolled DPs to re-enroll (D1.3b.2a; informational in dry-run)")
-	s.restoreAllowCounterRB = flag.Bool("allow-counter-rollback", false, "Acknowledge that restoring will roll back TOTP counters for some users (D1.3b.2a; informational in dry-run)")
+	s.restoreConfirm = flag.Bool("confirm", false, "Commit the restore destructively (D1.3b.2b). Without --confirm, --restore is a dry-run.")
+	s.restoreAcceptDPReenroll = flag.Bool("accept-dp-reenrollment", false, "Acknowledge that restoring will require enrolled DPs to re-enroll (D1.3b.2a/b)")
+	s.restoreAllowCounterRB = flag.Bool("allow-counter-rollback", false, "Acknowledge that restoring will roll back TOTP counters for some users (D1.3b.2a/b)")
 	// CDR / Sluice integration (Phase 1: single-instance client with TOFU pinning).
 	s.cdrEnabledFlag = flag.Bool("cdr-enabled", false, "Enable Sluice CDR integration (strip macros/JS/OLE from downloads)")
 	s.cdrEndpointFlag = flag.String("cdr-endpoint", "", "Sluice gRPC endpoint (e.g. sluice:8443)")
@@ -281,7 +283,10 @@ func handleOneShotCommands(s *startupState) {
 		fmt.Printf("Backup written to %s\n", *s.backupOut)
 		os.Exit(0)
 	}
-	// ── One-shot: restore dry-run validation (D1.3b.1 + D1.3b.2a) ─────────
+	// ── One-shot: restore (D1.3b.1 dry-run + D1.3b.2a analyzer + D1.3b.2b commit) ─
+	//nolint:nestif // Same one-shot dispatch shape as --reset-password
+	// and --backup; flattening into helpers would scatter the dry-run
+	// vs commit branching and obscure the os.Exit semantics.
 	if *s.restoreIn != "" {
 		passphrase := os.Getenv(caPassphraseEnv)
 		mode, merr := parseRestoreMode(*s.restoreMode)
@@ -294,9 +299,16 @@ func handleOneShotCommands(s *startupState) {
 			AcceptDPReenrollment: *s.restoreAcceptDPReenroll,
 			AllowCounterRollback: *s.restoreAllowCounterRB,
 		}
-		if err := runRestoreDryRun(*s.restoreIn, dataDir, passphrase, opts); err != nil {
-			fmt.Fprintf(os.Stderr, "Restore validation error: %v\n", err)
-			os.Exit(1)
+		if *s.restoreConfirm {
+			if err := runRestoreCommit(*s.restoreIn, dataDir, passphrase, opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Restore commit error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			if err := runRestoreDryRun(*s.restoreIn, dataDir, passphrase, opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Restore validation error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		os.Exit(0)
 	}

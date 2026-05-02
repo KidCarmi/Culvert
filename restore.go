@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // restoreSchemaVersion is the manifest envelope version this PR accepts.
@@ -147,7 +148,7 @@ type commitAnalysis struct {
 // returns nil on success. Returns an error on any validation rule
 // failure. Never writes to dataDir.
 func runRestoreDryRun(tarPath, dataDir, passphrase string, opts restoreOpts) error {
-	summary, files, err := validateBackup(tarPath, dataDir, passphrase)
+	summary, _, files, err := validateBackup(tarPath, dataDir, passphrase)
 	if err != nil {
 		return err
 	}
@@ -160,25 +161,27 @@ func runRestoreDryRun(tarPath, dataDir, passphrase string, opts restoreOpts) err
 }
 
 // validateBackup runs every D1.3b.1 rule against the tarball at tarPath.
-// Returns the parsed summary, the in-memory file map (so the caller can
-// run further analysis without re-reading the tarball), and an error.
-func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary, map[string][]byte, error) {
+// Returns the parsed summary, the parsed manifest (so commit-path
+// staging can read per-file modes without re-parsing), the in-memory
+// file map (so the caller can run further analysis without re-reading
+// the tarball), and an error.
+func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary, *backupManifest, map[string][]byte, error) {
 	files, order, err := readTarball(tarPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	manifest, err := parseAndValidateManifest(files, order)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if err := validateBidirectionalPresence(manifest, files); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if err := validateFileChecksumsAndModes(manifest, files); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	summary := &restoreSummary{
@@ -197,10 +200,10 @@ func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary,
 	}
 
 	if err := validateTier1Artifacts(files, passphrase, summary); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return summary, files, nil
+	return summary, manifest, files, nil
 }
 
 // readTarball opens path, gunzips, reads every entry into memory, and
@@ -249,6 +252,13 @@ func readTarball(path string) (map[string][]byte, []string, error) {
 		if _, exists := files[hdr.Name]; exists {
 			return nil, nil, fmt.Errorf("restore: duplicate tarball entry: %q", hdr.Name)
 		}
+		// Restore namespace: every entry except manifest.json must live
+		// under "data/". Defense in depth — D1.3a's pack code only
+		// produces "data/..." paths, but a hand-crafted tarball can
+		// violate this.
+		if hdr.Name != "manifest.json" && !strings.HasPrefix(hdr.Name, "data/") {
+			return nil, nil, fmt.Errorf("restore: tarball entry outside data/ namespace: %q", hdr.Name)
+		}
 		body, err := io.ReadAll(tr)
 		if err != nil {
 			return nil, nil, fmt.Errorf("restore: read %q: %w", hdr.Name, err)
@@ -257,6 +267,31 @@ func readTarball(path string) (map[string][]byte, []string, error) {
 		order = append(order, hdr.Name)
 	}
 	return files, order, nil
+}
+
+// guardWithinDir returns nil iff target lies inside (or equals) base.
+// Defense-in-depth zip-slip guard at filesystem-write sites: even though
+// readTarball already rejects ".." path components and absolute paths,
+// CodeQL cannot trace those guards across the call boundary into
+// stageArtifacts. A local re-check at the write site makes the
+// invariant visible to static analysis (CWE-22).
+func guardWithinDir(base, target string) error {
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return fmt.Errorf("guard base abs: %w", err)
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("guard target abs: %w", err)
+	}
+	rel, err := filepath.Rel(absBase, absTarget)
+	if err != nil {
+		return fmt.Errorf("guard rel: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("path %q escapes %q", target, base)
+	}
+	return nil
 }
 
 func parseAndValidateManifest(files map[string][]byte, order []string) (*backupManifest, error) {
@@ -283,6 +318,15 @@ func parseAndValidateManifest(files map[string][]byte, order []string) (*backupM
 	}
 	if len(manifest.Files) == 0 {
 		return nil, fmt.Errorf("restore: manifest contains no files (empty backup cannot restore)")
+	}
+	// Restore namespace: every manifest entry must live under "data/".
+	// Mirrors the readTarball check; runs early so a bad manifest
+	// produces a clear namespace error rather than a downstream
+	// presence/parse error.
+	for _, f := range manifest.Files {
+		if !strings.HasPrefix(f.Path, "data/") {
+			return nil, fmt.Errorf("restore: manifest path outside data/ namespace: %q", f.Path)
+		}
 	}
 	return &manifest, nil
 }
@@ -684,4 +728,262 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 
 	fmt.Fprintf(w, "\nThis was a dry-run. No files were written. /data unchanged.\n")
 	fmt.Fprintf(w, "D1.3b.2b will add --confirm to commit a restore.\n")
+}
+
+// ─── D1.3b.2b: destructive commit path ──────────────────────────────────────
+
+// commitInjectBetweenRenames is a test seam — production keeps it nil.
+// Tests set it before calling runRestoreCommit to simulate a failure
+// (or process death) between rename A and rename B, exercising the
+// recovery-message code path. Set via t.Cleanup back to nil.
+var commitInjectBetweenRenames func() error
+
+// runRestoreCommit performs a destructive restore: validate, analyze,
+// enforce guards, stage, swap. Caller must stop the proxy first
+// (offline restore only). On success, current /data has been replaced
+// by the restored content and the prior /data is preserved at
+// /data.bak.<timestamp>.
+//
+// Step ordering (single failure boundary at the swap):
+//
+//	1. validate  (D1.3b.1; no /data writes)
+//	2. analyze   (D1.3b.2a; no /data writes)
+//	3. guards    (D1.3b.2a precomputed; reject if WouldBlock)
+//	4. summary   (mode-aware; informational)
+//	5. stage     (mkdir /data.staging.<ts>; write per mode predicate)
+//	6. rename A  (current /data → /data.bak.<ts>)
+//	7. rename B  (staging → /data) + parent-dir fsync
+//	8. final     (print success + .bak path)
+//
+// If 1–5 fail: /data unchanged, staging cleaned up.
+// If 6 fails: /data unchanged, staging cleaned up.
+// If 7 fails (or process is killed between 6 and 7): /data does not
+// exist; error message names the exact `mv` recovery command.
+func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) error {
+	// Steps 1–2 (reuse).
+	summary, manifest, files, err := validateBackup(tarPath, dataDir, passphrase)
+	if err != nil {
+		return err
+	}
+	analysis, err := analyzeCommit(files, dataDir, opts)
+	if err != nil {
+		return err
+	}
+
+	// Step 3: enforce guards before any destructive operation.
+	if analysis.DPGuardWouldBlock {
+		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
+			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
+	}
+	if analysis.TOTPGuardWouldBlock {
+		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
+			len(analysis.TOTPCounterRollbacks), strings.Join(analysis.TOTPCounterRollbacks, ", "))
+	}
+
+	// Step 4: print summary so the operator sees the plan one last time.
+	printRestoreSummary(os.Stdout, summary, analysis)
+
+	// Anchor paths now so failure messages can name them. Suffix is
+	// timestamp + PID so:
+	//   - same-second retries from different processes don't collide
+	//   - the operator can copy-paste the printed paths verbatim
+	//   - staging and bak share a correlated suffix
+	suffix := fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405Z"), os.Getpid())
+	stagingDir := dataDir + ".staging." + suffix
+	bakPath := dataDir + ".bak." + suffix
+
+	// Collision pre-check: refuse to proceed if either path already
+	// exists on disk. Catches stale state from a prior failed restore
+	// (e.g. operator killed the process mid-stage) and prevents
+	// accidental reuse of either dir.
+	if _, err := os.Stat(stagingDir); err == nil {
+		return fmt.Errorf("restore: staging path %q already exists; remove it before retrying", stagingDir)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("restore: stat staging path %q: %w", stagingDir, err)
+	}
+	if _, err := os.Stat(bakPath); err == nil {
+		return fmt.Errorf("restore: backup path %q already exists; remove it before retrying", bakPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("restore: stat backup path %q: %w", bakPath, err)
+	}
+
+	fmt.Fprintf(os.Stdout, "\nCommitting restore now.\n")
+	fmt.Fprintf(os.Stdout, "  Staging dir: %s\n", stagingDir)
+	fmt.Fprintf(os.Stdout, "  Backup of current /data will be at: %s\n\n", bakPath)
+
+	// Step 5: stage to disk.
+	if err := stageArtifacts(stagingDir, dataDir, files, manifest, opts.Mode); err != nil {
+		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
+		return fmt.Errorf("restore: stage failed: %w", err)
+	}
+
+	// Step 6: rename current /data → .bak.
+	if err := os.Rename(dataDir, bakPath); err != nil {
+		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
+		return fmt.Errorf("restore: rename current %s → %s: %w", dataDir, bakPath, err)
+	}
+
+	// Critical window: /data does not exist between renames. On failure
+	// here, clean up staging so the operator's only recovery path is the
+	// .bak (no ambiguity between option A "revert via .bak" and option B
+	// "promote staging"). The .bak is preserved either way.
+	if commitInjectBetweenRenames != nil {
+		if err := commitInjectBetweenRenames(); err != nil {
+			_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
+			return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; injected: %w",
+				dataDir, bakPath, dataDir, err)
+		}
+	}
+
+	// Step 7: rename staging → /data.
+	if err := os.Rename(stagingDir, dataDir); err != nil {
+		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
+		return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; rename staging→/data failed: %w",
+			dataDir, bakPath, dataDir, err)
+	}
+
+	// Parent-dir fsync (best-effort, mirrors atomicWriteFile pattern).
+	if d, derr := os.Open(filepath.Dir(dataDir)); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+
+	// Step 8.
+	fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
+	fmt.Fprintf(os.Stdout, "  Previous /data preserved at: %s\n", bakPath)
+	fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove manually when no longer needed.)\n")
+	return nil
+}
+
+// stageArtifacts creates stagingDir and populates it according to the
+// mode predicate. Pass 1 writes tarball-sourced artifacts using each
+// file's manifest mode. Pass 2 walks current dataDir for preserve-
+// from-current artifacts using each live file's existing mode (this is
+// the gap flagged in PR #194 review — must walk live /data, not just
+// paths in the manifest).
+//
+//nolint:gocognit,cyclop // Two-pass structure (tarball first, walk-
+// current second) is intentionally inlined so the mode predicate,
+// mkdir, per-file mode resolution, and atomicWriteFile contract are
+// all visible at one call site. Extracting helpers would scatter the
+// staging contract across functions and obscure the per-pass invariants.
+func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifest *backupManifest, mode restoreMode) error {
+	// os.Mkdir (exclusive), not os.MkdirAll, for the staging root —
+	// fail closed if a prior failed restore left a same-named dir on
+	// disk so we never reuse stale staging content. Subdirectories
+	// inside staging still use MkdirAll (created on demand).
+	if err := os.Mkdir(stagingDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir staging (exclusive): %w", err)
+	}
+
+	// Index manifest modes by path so pass 1 doesn't scan per-file.
+	manifestMode := map[string]os.FileMode{}
+	for _, f := range manifest.Files {
+		perm, perr := strconv.ParseUint(f.Mode, 8, 32)
+		if perr != nil {
+			return fmt.Errorf("invalid manifest mode %q for %s: %w", f.Mode, f.Path, perr)
+		}
+		manifestMode[f.Path] = os.FileMode(perm) & os.ModePerm
+	}
+
+	written := map[string]bool{}
+
+	// Pass 1 — tarball-sourced artifacts. Mode comes from the manifest
+	// so the restored file mirrors what the operator backed up (e.g.
+	// 0o644 for version.txt vs 0o600 for everything else).
+	for path, body := range files {
+		if path == "manifest.json" {
+			continue
+		}
+		if !mode.fromTarball(path) {
+			continue
+		}
+		rel := strings.TrimPrefix(path, "data/")
+		target := filepath.Join(stagingDir, rel)
+		// Defense-in-depth zip-slip guard at the write site. readTarball
+		// already rejects ".." components and absolute paths, but those
+		// guards are cross-function so CodeQL cannot trace them. A local
+		// re-check here makes the invariant visible to static analysis
+		// (and to any future caller wiring a different reader in).
+		if err := guardWithinDir(stagingDir, target); err != nil {
+			return fmt.Errorf("stage tarball %s: %w", path, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return fmt.Errorf("mkdir for %s: %w", rel, err)
+		}
+		perm, ok := manifestMode[path]
+		if !ok {
+			// Defense in depth: every tarball entry is required to be
+			// in the manifest by validateBidirectionalPresence; if the
+			// indexer somehow missed it, fail closed rather than fall
+			// back to a hardcoded mode.
+			return fmt.Errorf("stage tarball %s: missing manifest mode entry", path)
+		}
+		if err := atomicWriteFile(target, body, perm); err != nil {
+			return fmt.Errorf("stage tarball %s: %w", path, err)
+		}
+		written[path] = true
+	}
+
+	// Pass 2 — preserve-from-current artifacts. Walk live dataDir so
+	// files present in current /data but absent from the backup
+	// manifest are still preserved (e.g. files added by features
+	// introduced after the backup snapshot, in non-full modes).
+	walkErr := filepath.Walk(dataDir, func(p string, info os.FileInfo, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Skip symlinks for the same reason D1.3a's pack does:
+			// don't follow into surprise targets.
+			return nil
+		}
+		rel, relErr := filepath.Rel(dataDir, p)
+		if relErr != nil {
+			return relErr
+		}
+		tarballPath := "data/" + filepath.ToSlash(rel)
+		if mode.fromTarball(tarballPath) {
+			// Tarball-source — pass 1 handled it (or it's a tarball
+			// path that simply isn't in current /data).
+			return nil
+		}
+		if written[tarballPath] {
+			return nil
+		}
+		// #nosec G304,G122 -- offline restore only (service stopped per
+		// design), operator-controlled /data tree walked from dataDir,
+		// symlinks already skipped above so the walked path cannot
+		// escape /data via TOCTOU. Refactoring to a root-scoped API
+		// (os.Root) is full-restore-flow surgery and out of D1.3b.2b
+		// scope.
+		body, err := os.ReadFile(p)
+		if err != nil {
+			return fmt.Errorf("read current %s: %w", p, err)
+		}
+		target := filepath.Join(stagingDir, rel)
+		// Defense-in-depth zip-slip guard (mirrors pass 1). filepath.Walk
+		// already returns paths under dataDir, but the local re-check
+		// makes the invariant visible to static analysis.
+		if err := guardWithinDir(stagingDir, target); err != nil {
+			return fmt.Errorf("stage current %s: %w", p, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return fmt.Errorf("mkdir for %s: %w", rel, err)
+		}
+		// Preserve current file's mode — restored copy should mirror
+		// what was on disk before the restore.
+		if err := atomicWriteFile(target, body, info.Mode().Perm()); err != nil {
+			return fmt.Errorf("stage current %s: %w", p, err)
+		}
+		written[tarballPath] = true
+		return nil
+	})
+	if walkErr != nil {
+		return fmt.Errorf("stage from current: %w", walkErr)
+	}
+	return nil
 }
