@@ -103,6 +103,58 @@ func resolveDataDirRoots(dataDir string) (parent, base, abs string, err error) {
 	return parent, base, abs, nil
 }
 
+// admitEntry runs the per-entry admission rules used by discoverLeftovers.
+// Returns (lo, nil) for an admitted candidate, (nil, &skipReason) for a
+// regex-match that failed a safety rule, (lo, &skipReason) for an
+// admitted candidate whose size walk failed (informational warning),
+// and (nil, nil) for entries whose name does not match the leftover
+// regex at all (silent ignore — not a near-miss).
+func admitEntry(entry os.DirEntry, parent, abs string, re *regexp.Regexp) (*leftover, *skipReason) {
+	name := entry.Name()
+	m := re.FindStringSubmatch(name)
+	if m == nil {
+		return nil, nil
+	}
+	full := filepath.Join(parent, name)
+	if filepath.Dir(full) != parent {
+		return nil, &skipReason{Path: full, Reason: "candidate parent mismatch"}
+	}
+	if filepath.Clean(full) == abs {
+		// Cannot happen because regex requires a "<base>.bak." or
+		// "<base>.staging." prefix, but defense-in-depth.
+		return nil, &skipReason{Path: full, Reason: "candidate equals data dir"}
+	}
+	info, err := os.Lstat(full)
+	if err != nil {
+		return nil, &skipReason{Path: full, Reason: fmt.Sprintf("lstat: %v", err)}
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, &skipReason{Path: full, Reason: "symlink (refusing to follow)"}
+	}
+	if !info.IsDir() {
+		return nil, &skipReason{Path: full, Reason: "not a directory"}
+	}
+	ts, terr := time.ParseInLocation("20060102T150405Z", m[2], time.UTC)
+	if terr != nil {
+		return nil, &skipReason{Path: full, Reason: fmt.Sprintf("invalid timestamp: %v", terr)}
+	}
+	pid, perr := strconv.Atoi(m[3])
+	if perr != nil || pid < 0 {
+		return nil, &skipReason{Path: full, Reason: "invalid pid component"}
+	}
+	kind := leftoverBak
+	if m[1] == "staging" {
+		kind = leftoverStaging
+	}
+	size, sizeErr := dirSizeBytes(full)
+	lo := &leftover{Path: full, Kind: kind, Timestamp: ts, PID: pid, SizeBytes: size}
+	if sizeErr != nil {
+		// Size is informational; admit but warn.
+		return lo, &skipReason{Path: full, Reason: fmt.Sprintf("size walk failed: %v", sizeErr)}
+	}
+	return lo, nil
+}
+
 // discoverLeftovers reads the parent of dataDir and returns admitted
 // leftovers and a list of warnings about regex-near-misses or
 // non-directory / symlink candidates. Discovery is non-recursive and
@@ -124,63 +176,13 @@ func discoverLeftovers(dataDir string) ([]leftover, []skipReason, error) {
 		skipped []skipReason
 	)
 	for _, entry := range entries {
-		name := entry.Name()
-		m := re.FindStringSubmatch(name)
-		if m == nil {
-			// Not a leftover-shaped name; silent (not a near-miss).
-			continue
+		lo, skip := admitEntry(entry, parent, abs, re)
+		if skip != nil {
+			skipped = append(skipped, *skip)
 		}
-		full := filepath.Join(parent, name)
-		// Defensive: reject if Join somehow escaped parent.
-		if filepath.Dir(full) != parent {
-			skipped = append(skipped, skipReason{Path: full, Reason: "candidate parent mismatch"})
-			continue
+		if lo != nil {
+			valid = append(valid, *lo)
 		}
-		if filepath.Clean(full) == abs {
-			// Cannot happen because regex requires a "<base>.bak." or
-			// "<base>.staging." prefix, but defense-in-depth.
-			skipped = append(skipped, skipReason{Path: full, Reason: "candidate equals data dir"})
-			continue
-		}
-		info, err := os.Lstat(full)
-		if err != nil {
-			skipped = append(skipped, skipReason{Path: full, Reason: fmt.Sprintf("lstat: %v", err)})
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			skipped = append(skipped, skipReason{Path: full, Reason: "symlink (refusing to follow)"})
-			continue
-		}
-		if !info.IsDir() {
-			skipped = append(skipped, skipReason{Path: full, Reason: "not a directory"})
-			continue
-		}
-		ts, terr := time.ParseInLocation("20060102T150405Z", m[2], time.UTC)
-		if terr != nil {
-			skipped = append(skipped, skipReason{Path: full, Reason: fmt.Sprintf("invalid timestamp: %v", terr)})
-			continue
-		}
-		pid, perr := strconv.Atoi(m[3])
-		if perr != nil || pid < 0 {
-			skipped = append(skipped, skipReason{Path: full, Reason: "invalid pid component"})
-			continue
-		}
-		kind := leftoverBak
-		if m[1] == "staging" {
-			kind = leftoverStaging
-		}
-		size, sizeErr := dirSizeBytes(full)
-		if sizeErr != nil {
-			// Size is informational; record warning but still admit.
-			skipped = append(skipped, skipReason{Path: full, Reason: fmt.Sprintf("size walk failed: %v", sizeErr)})
-		}
-		valid = append(valid, leftover{
-			Path:      full,
-			Kind:      kind,
-			Timestamp: ts,
-			PID:       pid,
-			SizeBytes: size,
-		})
 	}
 
 	sort.Slice(valid, func(i, j int) bool {
@@ -279,17 +281,17 @@ func runListLeftovers(dataDir string) error {
 
 func writeLeftoverList(stdout, stderr io.Writer, valid []leftover, skipped []skipReason, now time.Time) error {
 	if len(valid) == 0 {
-		fmt.Fprintln(stdout, "No restore leftovers found.")
+		_, _ = fmt.Fprintln(stdout, "No restore leftovers found.")
 	} else {
-		fmt.Fprintf(stdout, "%-60s %-8s %-12s %s\n", "PATH", "TYPE", "AGE", "SIZE")
+		_, _ = fmt.Fprintf(stdout, "%-60s %-8s %-12s %s\n", "PATH", "TYPE", "AGE", "SIZE")
 		for i := range valid {
 			lo := valid[i]
-			fmt.Fprintf(stdout, "%-60s %-8s %-12s %s\n",
+			_, _ = fmt.Fprintf(stdout, "%-60s %-8s %-12s %s\n",
 				lo.Path, string(lo.Kind), formatAge(now.Sub(lo.Timestamp)), formatBytes(lo.SizeBytes))
 		}
 	}
 	for i := range skipped {
-		fmt.Fprintf(stderr, "WARN: skipping %s: %s\n", skipped[i].Path, skipped[i].Reason)
+		_, _ = fmt.Fprintf(stderr, "WARN: skipping %s: %s\n", skipped[i].Path, skipped[i].Reason)
 	}
 	return nil
 }
@@ -307,12 +309,12 @@ func runCleanupLeftovers(dataDir string, opts cleanupOpts) error {
 		return err
 	}
 	for i := range skipped {
-		fmt.Fprintf(os.Stderr, "WARN: skipping %s: %s\n", skipped[i].Path, skipped[i].Reason)
+		_, _ = fmt.Fprintf(os.Stderr, "WARN: skipping %s: %s\n", skipped[i].Path, skipped[i].Reason)
 	}
 	now := time.Now().UTC()
 	plan := applyCleanupFilters(valid, opts, now)
 	if len(plan) == 0 {
-		fmt.Fprintln(os.Stdout, "No candidates match the given filters.")
+		_, _ = fmt.Fprintln(os.Stdout, "No candidates match the given filters.")
 		return nil
 	}
 
@@ -323,20 +325,20 @@ func runCleanupLeftovers(dataDir string, opts cleanupOpts) error {
 	re := compileLeftoverNameRE(base)
 
 	if !opts.Confirm {
-		fmt.Fprintln(os.Stdout, "Cleanup plan (dry-run — no changes will be made):")
+		_, _ = fmt.Fprintln(os.Stdout, "Cleanup plan (dry-run — no changes will be made):")
 		var totalBytes int64
 		for i := range plan {
 			lo := plan[i]
-			fmt.Fprintf(os.Stdout, "  WILL DELETE  %s   (%s, %s, %s)\n",
+			_, _ = fmt.Fprintf(os.Stdout, "  WILL DELETE  %s   (%s, %s, %s)\n",
 				lo.Path, formatBytes(lo.SizeBytes), formatAge(now.Sub(lo.Timestamp)), string(lo.Kind))
 			totalBytes += lo.SizeBytes
 		}
-		fmt.Fprintf(os.Stdout, "\nTotal: %d directories, %s\n", len(plan), formatBytes(totalBytes))
-		fmt.Fprintln(os.Stdout, "Re-run with --confirm to execute deletion.")
+		_, _ = fmt.Fprintf(os.Stdout, "\nTotal: %d directories, %s\n", len(plan), formatBytes(totalBytes))
+		_, _ = fmt.Fprintln(os.Stdout, "Re-run with --confirm to execute deletion.")
 		return nil
 	}
 
-	fmt.Fprintln(os.Stdout, "Cleanup (DESTRUCTIVE — deleting now):")
+	_, _ = fmt.Fprintln(os.Stdout, "Cleanup (DESTRUCTIVE — deleting now):")
 	var (
 		deleted      int
 		deletedBytes int64
@@ -346,19 +348,19 @@ func runCleanupLeftovers(dataDir string, opts cleanupOpts) error {
 		lo := plan[i]
 		if derr := deleteOneLeftover(lo, parent, abs, re); derr != nil {
 			failed++
-			fmt.Fprintf(os.Stderr, "ERROR: %s: %v\n", lo.Path, derr)
+			_, _ = fmt.Fprintf(os.Stderr, "ERROR: %s: %v\n", lo.Path, derr)
 			pathSafe := lo.Path
 			logger.Printf("cleanup: failed to delete %q: %v", sanitizeLog(pathSafe), derr)
 			continue
 		}
 		deleted++
 		deletedBytes += lo.SizeBytes
-		fmt.Fprintf(os.Stdout, "  DELETED      %s   (%s)\n", lo.Path, formatBytes(lo.SizeBytes))
+		_, _ = fmt.Fprintf(os.Stdout, "  DELETED      %s   (%s)\n", lo.Path, formatBytes(lo.SizeBytes))
 		logger.Printf("cleanup: deleted %q (%d bytes)", sanitizeLog(lo.Path), lo.SizeBytes)
 	}
-	fmt.Fprintf(os.Stdout, "\nTotal deleted: %d directories, %s\n", deleted, formatBytes(deletedBytes))
+	_, _ = fmt.Fprintf(os.Stdout, "\nTotal deleted: %d directories, %s\n", deleted, formatBytes(deletedBytes))
 	if failed > 0 {
-		fmt.Fprintf(os.Stderr, "Errors: %d candidate(s) could not be deleted; rerun to retry.\n", failed)
+		_, _ = fmt.Fprintf(os.Stderr, "Errors: %d candidate(s) could not be deleted; rerun to retry.\n", failed)
 		return fmt.Errorf("cleanup: %d failure(s)", failed)
 	}
 	return nil

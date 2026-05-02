@@ -39,9 +39,11 @@ func seedDataDir(t *testing.T, parent string) string {
 	return d
 }
 
-// leftoverName builds a valid leftover dirname for the given base.
-func leftoverName(base, kind string, ts time.Time, pid int) string {
-	return fmt.Sprintf("%s.%s.%s-%d", base, kind, ts.UTC().Format("20060102T150405Z"), pid)
+// leftoverName builds a valid leftover dirname. Tests always exercise the
+// "data" base name (the seed used by seedDataDir), so the function takes
+// only kind/ts/pid.
+func leftoverName(kind string, ts time.Time, pid int) string {
+	return fmt.Sprintf("data.%s.%s-%d", kind, ts.UTC().Format("20060102T150405Z"), pid)
 }
 
 // pathsOf returns the .Path field of each leftover, in order.
@@ -58,7 +60,7 @@ func pathsOf(in []leftover) []string {
 func TestCleanup_ListFindsValidBak(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := seedDataDir(t, parent)
-	want := makeDir(t, parent, leftoverName("data", "bak", time.Now().UTC().Add(-2*time.Hour), 1234))
+	want := makeDir(t, parent, leftoverName("bak", time.Now().UTC().Add(-2*time.Hour), 1234))
 
 	valid, skipped, err := discoverLeftovers(dataDir)
 	if err != nil {
@@ -78,7 +80,7 @@ func TestCleanup_ListFindsValidBak(t *testing.T) {
 func TestCleanup_ListFindsValidStaging(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := seedDataDir(t, parent)
-	want := makeDir(t, parent, leftoverName("data", "staging", time.Now().UTC().Add(-1*time.Hour), 5)) //nolint:gomnd
+	want := makeDir(t, parent, leftoverName("staging", time.Now().UTC().Add(-1*time.Hour), 5))
 
 	valid, _, err := discoverLeftovers(dataDir)
 	if err != nil {
@@ -128,8 +130,8 @@ func TestCleanup_IgnoresNonMatchingDirs(t *testing.T) {
 func TestCleanup_DryRunDeletesNothing(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := seedDataDir(t, parent)
-	bak := makeDir(t, parent, leftoverName("data", "bak", time.Now().UTC().Add(-3*time.Hour), 7))
-	stg := makeDir(t, parent, leftoverName("data", "staging", time.Now().UTC().Add(-1*time.Hour), 9))
+	bak := makeDir(t, parent, leftoverName("bak", time.Now().UTC().Add(-3*time.Hour), 7))
+	stg := makeDir(t, parent, leftoverName("staging", time.Now().UTC().Add(-1*time.Hour), 9))
 
 	if err := runCleanupLeftovers(dataDir, cleanupOpts{Confirm: false}); err != nil {
 		t.Fatalf("dry-run: %v", err)
@@ -144,8 +146,8 @@ func TestCleanup_DryRunDeletesNothing(t *testing.T) {
 func TestCleanup_ConfirmDeletes(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := seedDataDir(t, parent)
-	bak := makeDir(t, parent, leftoverName("data", "bak", time.Now().UTC().Add(-3*time.Hour), 7))
-	stg := makeDir(t, parent, leftoverName("data", "staging", time.Now().UTC().Add(-1*time.Hour), 9))
+	bak := makeDir(t, parent, leftoverName("bak", time.Now().UTC().Add(-3*time.Hour), 7))
+	stg := makeDir(t, parent, leftoverName("staging", time.Now().UTC().Add(-1*time.Hour), 9))
 	keepRandom := makeDir(t, parent, "unrelated")
 
 	if err := runCleanupLeftovers(dataDir, cleanupOpts{Confirm: true}); err != nil {
@@ -173,7 +175,7 @@ func TestCleanup_RefusesSymlinkCandidate(t *testing.T) {
 	if err := os.WriteFile(targetMarker, []byte("safe"), 0o600); err != nil {
 		t.Fatalf("seed target: %v", err)
 	}
-	link := filepath.Join(parent, leftoverName("data", "bak", time.Now().UTC().Add(-1*time.Hour), 1))
+	link := filepath.Join(parent, leftoverName("bak", time.Now().UTC().Add(-1*time.Hour), 1))
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
@@ -208,7 +210,7 @@ func TestCleanup_RefusesSymlinkCandidate(t *testing.T) {
 func TestCleanup_ReLstatBeforeDeletion(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := seedDataDir(t, parent)
-	cand := makeDir(t, parent, leftoverName("data", "bak", time.Now().UTC().Add(-1*time.Hour), 1))
+	cand := makeDir(t, parent, leftoverName("bak", time.Now().UTC().Add(-1*time.Hour), 1))
 
 	// Sentinel target that the swapped-in symlink will point to.
 	sentinel := t.TempDir()
@@ -244,7 +246,7 @@ func TestCleanup_NeverDeletesCurrentDataDir(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := seedDataDir(t, parent)
 	marker := filepath.Join(dataDir, "marker.txt")
-	bak := makeDir(t, parent, leftoverName("data", "bak", time.Now().UTC().Add(-1*time.Hour), 1))
+	bak := makeDir(t, parent, leftoverName("bak", time.Now().UTC().Add(-1*time.Hour), 1))
 
 	if err := runCleanupLeftovers(dataDir, cleanupOpts{Confirm: true}); err != nil {
 		t.Fatalf("cleanup: %v", err)
@@ -268,7 +270,7 @@ func TestCleanup_KeepLastN(t *testing.T) {
 	var dirs []string
 	for i := 0; i < 5; i++ {
 		ts := now.Add(time.Duration(-(5 - i)) * time.Hour)
-		dirs = append(dirs, makeDir(t, parent, leftoverName("data", "bak", ts, 100+i)))
+		dirs = append(dirs, makeDir(t, parent, leftoverName("bak", ts, 100+i)))
 	}
 
 	if err := runCleanupLeftovers(dataDir, cleanupOpts{Confirm: true, KeepLast: 2}); err != nil {
@@ -293,9 +295,9 @@ func TestCleanup_OlderThan(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := seedDataDir(t, parent)
 	now := time.Now().UTC()
-	dRecent := makeDir(t, parent, leftoverName("data", "bak", now.Add(-1*time.Hour), 1))
-	dMid := makeDir(t, parent, leftoverName("data", "bak", now.Add(-24*time.Hour), 2))
-	dStale := makeDir(t, parent, leftoverName("data", "bak", now.Add(-240*time.Hour), 3))
+	dRecent := makeDir(t, parent, leftoverName("bak", now.Add(-1*time.Hour), 1))
+	dMid := makeDir(t, parent, leftoverName("bak", now.Add(-24*time.Hour), 2))
+	dStale := makeDir(t, parent, leftoverName("bak", now.Add(-240*time.Hour), 3))
 
 	if err := runCleanupLeftovers(dataDir, cleanupOpts{Confirm: true, OlderThan: 168 * time.Hour}); err != nil {
 		t.Fatalf("cleanup: %v", err)
@@ -315,11 +317,11 @@ func TestCleanup_KeepLastDoesNotApplyToStaging(t *testing.T) {
 	dataDir := seedDataDir(t, parent)
 	now := time.Now().UTC()
 	// Two .bak (so keep-last=2 retains both) plus three .staging.
-	bak1 := makeDir(t, parent, leftoverName("data", "bak", now.Add(-2*time.Hour), 1))
-	bak2 := makeDir(t, parent, leftoverName("data", "bak", now.Add(-1*time.Hour), 2))
-	stg1 := makeDir(t, parent, leftoverName("data", "staging", now.Add(-3*time.Hour), 10))
-	stg2 := makeDir(t, parent, leftoverName("data", "staging", now.Add(-2*time.Hour), 11))
-	stg3 := makeDir(t, parent, leftoverName("data", "staging", now.Add(-1*time.Hour), 12))
+	bak1 := makeDir(t, parent, leftoverName("bak", now.Add(-2*time.Hour), 1))
+	bak2 := makeDir(t, parent, leftoverName("bak", now.Add(-1*time.Hour), 2))
+	stg1 := makeDir(t, parent, leftoverName("staging", now.Add(-3*time.Hour), 10))
+	stg2 := makeDir(t, parent, leftoverName("staging", now.Add(-2*time.Hour), 11))
+	stg3 := makeDir(t, parent, leftoverName("staging", now.Add(-1*time.Hour), 12))
 
 	if err := runCleanupLeftovers(dataDir, cleanupOpts{Confirm: true, KeepLast: 2}); err != nil {
 		t.Fatalf("cleanup: %v", err)
@@ -337,24 +339,24 @@ func TestCleanup_KeepLastDoesNotApplyToStaging(t *testing.T) {
 }
 
 func TestCleanup_RefusesIfDataDirRoot(t *testing.T) {
-	if _, _, err := discoverLeftoversWrapper("/"); err == nil {
+	if err := discoverLeftoversWrapper("/"); err == nil {
 		t.Fatalf("expected error for dataDir=/")
 	}
-	if _, _, err := discoverLeftoversWrapper(""); err == nil {
+	if err := discoverLeftoversWrapper(""); err == nil {
 		t.Fatalf("expected error for empty dataDir")
 	}
 }
 
 // discoverLeftoversWrapper exists so the test never accidentally calls
-// discoverLeftovers on the real "/" root if the guard regresses.
-func discoverLeftoversWrapper(d string) ([]leftover, []skipReason, error) {
+// discoverLeftovers on the real "/" root if the guard regresses. Returns
+// only the error since the leftover/skipReason results are unused here.
+func discoverLeftoversWrapper(d string) error {
 	if d == "/" || d == "" {
-		// Drive the same code path: if resolveDataDirRoots returns an
-		// error, discoverLeftovers returns it before any os.ReadDir.
 		_, _, _, err := resolveDataDirRoots(d)
-		return nil, nil, err
+		return err
 	}
-	return discoverLeftovers(d)
+	_, _, err := discoverLeftovers(d)
+	return err
 }
 
 func TestCleanup_DeterministicOrder(t *testing.T) {
@@ -362,9 +364,9 @@ func TestCleanup_DeterministicOrder(t *testing.T) {
 	dataDir := seedDataDir(t, parent)
 	now := time.Now().UTC()
 	// Out-of-order creation; identical-timestamp pair tests pid tie-break.
-	a := makeDir(t, parent, leftoverName("data", "bak", now.Add(-2*time.Hour), 50))
-	b := makeDir(t, parent, leftoverName("data", "bak", now.Add(-1*time.Hour), 1))
-	c := makeDir(t, parent, leftoverName("data", "staging", now.Add(-2*time.Hour), 2))
+	a := makeDir(t, parent, leftoverName("bak", now.Add(-2*time.Hour), 50))
+	b := makeDir(t, parent, leftoverName("bak", now.Add(-1*time.Hour), 1))
+	c := makeDir(t, parent, leftoverName("staging", now.Add(-2*time.Hour), 2))
 
 	valid, _, err := discoverLeftovers(dataDir)
 	if err != nil {
@@ -383,9 +385,9 @@ func TestCleanup_PartialFailureContinues(t *testing.T) {
 	parent := t.TempDir()
 	dataDir := seedDataDir(t, parent)
 	now := time.Now().UTC()
-	a := makeDir(t, parent, leftoverName("data", "bak", now.Add(-3*time.Hour), 1))
-	b := makeDir(t, parent, leftoverName("data", "bak", now.Add(-2*time.Hour), 2))
-	c := makeDir(t, parent, leftoverName("data", "bak", now.Add(-1*time.Hour), 3))
+	a := makeDir(t, parent, leftoverName("bak", now.Add(-3*time.Hour), 1))
+	b := makeDir(t, parent, leftoverName("bak", now.Add(-2*time.Hour), 2))
+	c := makeDir(t, parent, leftoverName("bak", now.Add(-1*time.Hour), 3))
 
 	// Hook causes the middle candidate's re-Lstat to fail closed by
 	// swapping the dir for a regular file.
@@ -432,7 +434,7 @@ func TestCleanup_NestedPathRefused(t *testing.T) {
 	// non-recursive, so it must be invisible.
 	sub := makeDir(t, parent, "subdir")
 	subsub := makeDir(t, sub, "deeper")
-	hidden := makeDir(t, subsub, leftoverName("data", "bak", time.Now().UTC().Add(-1*time.Hour), 1))
+	hidden := makeDir(t, subsub, leftoverName("bak", time.Now().UTC().Add(-1*time.Hour), 1))
 
 	valid, _, err := discoverLeftovers(dataDir)
 	if err != nil {

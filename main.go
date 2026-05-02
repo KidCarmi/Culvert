@@ -283,6 +283,12 @@ func parseFlags(s *startupState) {
 }
 
 // handleOneShotCommands handles one-shot CLI commands that exit before starting the proxy.
+//
+// distinct os.Exit semantics and its own error reporting. Splitting per
+// branch into helpers would scatter the exit codes and obscure the
+// dispatcher shape — readability beats the metric here.
+//
+//nolint:cyclop,gocognit // Flat one-shot dispatch table: each branch has
 func handleOneShotCommands(s *startupState) {
 	// ── One-shot: backup/export (D1.3a) ────────────────────────────────────
 	if *s.backupOut != "" {
@@ -332,29 +338,7 @@ func handleOneShotCommands(s *startupState) {
 	}
 	// ── One-shot: cleanup restore leftovers (D1.3c) ────────────────────────
 	if *s.cleanupLeftovers {
-		var older time.Duration
-		if *s.cleanupOlderThan != "" {
-			d, perr := time.ParseDuration(*s.cleanupOlderThan)
-			if perr != nil {
-				fmt.Fprintf(os.Stderr, "Cleanup error: invalid --older-than: %v\n", perr)
-				os.Exit(1)
-			}
-			if d <= 0 {
-				fmt.Fprintln(os.Stderr, "Cleanup error: --older-than must be positive")
-				os.Exit(1)
-			}
-			older = d
-		}
-		if *s.cleanupKeepLast < 0 {
-			fmt.Fprintln(os.Stderr, "Cleanup error: --keep-last must be >= 0")
-			os.Exit(1)
-		}
-		opts := cleanupOpts{
-			Confirm:   *s.restoreConfirm,
-			OlderThan: older,
-			KeepLast:  *s.cleanupKeepLast,
-		}
-		if err := runCleanupLeftovers(dataDir, opts); err != nil {
+		if err := runCleanupCommand(s); err != nil {
 			fmt.Fprintf(os.Stderr, "Cleanup error: %v\n", err)
 			os.Exit(1)
 		}
@@ -384,6 +368,31 @@ func handleOneShotCommands(s *startupState) {
 		fmt.Printf("Password reset for %q (role=admin). You can now start the proxy.\n", parts[0])
 		os.Exit(0)
 	}
+}
+
+// runCleanupCommand parses cleanup-restore-leftovers flags and dispatches
+// to runCleanupLeftovers. Extracted from handleOneShotCommands so the
+// dispatch table stays flat (avoids nestif on the cleanup branch).
+func runCleanupCommand(s *startupState) error {
+	var older time.Duration
+	if *s.cleanupOlderThan != "" {
+		d, perr := time.ParseDuration(*s.cleanupOlderThan)
+		if perr != nil {
+			return fmt.Errorf("invalid --older-than: %w", perr)
+		}
+		if d <= 0 {
+			return fmt.Errorf("--older-than must be positive")
+		}
+		older = d
+	}
+	if *s.cleanupKeepLast < 0 {
+		return fmt.Errorf("--keep-last must be >= 0")
+	}
+	return runCleanupLeftovers(dataDir, cleanupOpts{
+		Confirm:   *s.restoreConfirm,
+		OlderThan: older,
+		KeepLast:  *s.cleanupKeepLast,
+	})
 }
 
 // setInsecureFlag propagates the --cluster-insecure flag to the package global.
