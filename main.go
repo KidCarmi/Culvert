@@ -284,6 +284,9 @@ func handleOneShotCommands(s *startupState) {
 		os.Exit(0)
 	}
 	// ── One-shot: restore (D1.3b.1 dry-run + D1.3b.2a analyzer + D1.3b.2b commit) ─
+	//nolint:nestif // Same one-shot dispatch shape as --reset-password
+	// and --backup; flattening into helpers would scatter the dry-run
+	// vs commit branching and obscure the os.Exit semantics.
 	if *s.restoreIn != "" {
 		passphrase := os.Getenv(caPassphraseEnv)
 		mode, merr := parseRestoreMode(*s.restoreMode)

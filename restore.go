@@ -836,6 +836,12 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 // from-current artifacts using each live file's existing mode (this is
 // the gap flagged in PR #194 review — must walk live /data, not just
 // paths in the manifest).
+//
+//nolint:gocognit // Two-pass structure (tarball first, walk-current
+// second) is intentionally inlined so the mode predicate, mkdir,
+// per-file mode resolution, and atomicWriteFile contract are all
+// visible at one call site. Extracting helpers would scatter the
+// staging contract across functions and obscure the per-pass invariants.
 func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifest *backupManifest, mode restoreMode) error {
 	// os.Mkdir (exclusive), not os.MkdirAll, for the staging root —
 	// fail closed if a prior failed restore left a same-named dir on
@@ -915,7 +921,13 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 		if written[tarballPath] {
 			return nil
 		}
-		body, err := os.ReadFile(p) // #nosec G304 -- operator-controlled, walked from dataDir
+		// #nosec G304,G122 -- offline restore only (service stopped per
+		// design), operator-controlled /data tree walked from dataDir,
+		// symlinks already skipped above so the walked path cannot
+		// escape /data via TOCTOU. Refactoring to a root-scoped API
+		// (os.Root) is full-restore-flow surgery and out of D1.3b.2b
+		// scope.
+		body, err := os.ReadFile(p)
 		if err != nil {
 			return fmt.Errorf("read current %s: %w", p, err)
 		}

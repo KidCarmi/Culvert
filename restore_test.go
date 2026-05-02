@@ -818,9 +818,10 @@ func readBak(t *testing.T, dataDir string) (string, bool) {
 	return "", false
 }
 
-// readStaging finds the .staging.<timestamp> sibling. Should be absent
-// after success or atomic-failure scenarios.
-func readStaging(t *testing.T, dataDir string) (string, bool) {
+// stagingExists returns true if any .staging.<suffix> sibling of
+// dataDir is on disk. Should be false after success or atomic-failure
+// scenarios.
+func stagingExists(t *testing.T, dataDir string) bool {
 	t.Helper()
 	parent := filepath.Dir(dataDir)
 	base := filepath.Base(dataDir)
@@ -830,10 +831,10 @@ func readStaging(t *testing.T, dataDir string) (string, bool) {
 	}
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), base+".staging.") {
-			return filepath.Join(parent, e.Name()), true
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 // fileSHA returns hex sha256 of a file body, or "" if missing.
@@ -906,7 +907,7 @@ func TestRestoreCommit_ModeFull_RoundTrip(t *testing.T) {
 	}
 
 	// Staging dir gone.
-	if _, exists := readStaging(t, currentDir); exists {
+	if stagingExists(t, currentDir) {
 		t.Error("staging dir should not remain after successful commit")
 	}
 }
@@ -998,7 +999,7 @@ func TestRestoreCommit_ValidationFailure_NoSwap(t *testing.T) {
 	if _, ok := readBak(t, currentDir); ok {
 		t.Error(".bak should not exist after validation failure")
 	}
-	if _, ok := readStaging(t, currentDir); ok {
+	if stagingExists(t, currentDir) {
 		t.Error("staging should not exist after validation failure")
 	}
 }
@@ -1025,7 +1026,7 @@ func TestRestoreCommit_DPGuard_BlocksWithoutFlag(t *testing.T) {
 	if _, ok := readBak(t, currentDir); ok {
 		t.Error(".bak should not exist when DP guard fires")
 	}
-	if _, ok := readStaging(t, currentDir); ok {
+	if stagingExists(t, currentDir) {
 		t.Error("staging should not exist when DP guard fires")
 	}
 }
@@ -1122,7 +1123,7 @@ func TestRestoreCommit_InjectionBetweenRenames_RecoveryMessage(t *testing.T) {
 
 	// Staging dir must be cleaned even on between-renames failure, so
 	// the operator's only recovery path is the .bak (no ambiguity).
-	if _, ok := readStaging(t, currentDir); ok {
+	if stagingExists(t, currentDir) {
 		t.Error("staging dir should be cleaned even on between-renames failure")
 	}
 
@@ -1178,7 +1179,7 @@ func TestRestoreCommit_NoConfirm_StillDryRun(t *testing.T) {
 	if _, ok := readBak(t, currentDir); ok {
 		t.Error("dry-run must not create .bak")
 	}
-	if _, ok := readStaging(t, currentDir); ok {
+	if stagingExists(t, currentDir) {
 		t.Error("dry-run must not create staging")
 	}
 }
@@ -1237,7 +1238,11 @@ func TestRestore_DryRun_TarEntryOutsideDataNamespace_Rejected(t *testing.T) {
 }
 
 // ── 36. Manifest path outside data/ namespace rejected ───────────────
-
+//
+//nolint:dupl // Structurally similar to TestRestore_DryRun_ManifestReferencesMissingFile
+// (both inject a fake manifest entry via repackTarball) but tests a
+// different rule (namespace vs presence). Refactoring to a shared
+// helper would obscure which rule each case isolates.
 func TestRestore_DryRun_ManifestPathOutsideDataNamespace_Rejected(t *testing.T) {
 	src := makeValidBackup(t)
 	dest := filepath.Join(t.TempDir(), "manifest-outside-namespace.tar.gz")
@@ -1315,6 +1320,7 @@ func TestRestoreCommit_TrustRootOnly_PreservesCurrentMode(t *testing.T) {
 		t.Fatalf("InitOrLoad current: %v", err)
 	}
 	bobBody := []byte(`{"users":[{"username":"bob","role":"admin","pass_hash":"abc"}]}`)
+	// #nosec G306 -- 0o644 is the explicit subject of this test (mode preservation across restore)
 	if err := os.WriteFile(filepath.Join(currentDir, "ui_users.json"), bobBody, 0o644); err != nil {
 		t.Fatalf("write current ui_users 0o644: %v", err)
 	}
@@ -1426,7 +1432,7 @@ func TestRestoreCommit_PreExistingBakDir_AbortsBeforeDataTouched(t *testing.T) {
 		t.Error("/data should not be touched on bak collision")
 	}
 	// No staging dir should be created.
-	if _, ok := readStaging(t, currentDir); ok {
+	if stagingExists(t, currentDir) {
 		t.Error("staging dir should not be created when bak collision detected first")
 	}
 }
