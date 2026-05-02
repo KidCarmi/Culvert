@@ -436,6 +436,15 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 
 	// Per-mode merge: count how many files come from the tarball vs.
 	// from current /data. Manifest paths drive the count.
+	//
+	// D1.3b.2b NOTE: this counter is intentionally manifest-driven —
+	// it answers "of the paths in the backup, which would the mode
+	// pull from current /data?" When the stager lands, it must walk
+	// /data directly to copy every preserved artifact, not only paths
+	// that happen to also exist in the backup manifest. Otherwise an
+	// artifact present in current /data but absent from the backup
+	// (e.g. a feature added between snapshot and now, in
+	// trust-root-only mode) would be lost during stage.
 	for path := range files {
 		if path == "manifest.json" {
 			continue
