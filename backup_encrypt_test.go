@@ -71,7 +71,7 @@ func snapshotFiles(t *testing.T, dir string) map[string]bool {
 
 func TestBackupEncrypt_BlobIsEncrypted(t *testing.T) {
 	out := makeEncryptedBackup(t)
-	body, err := os.ReadFile(out)
+	body, err := os.ReadFile(out) // #nosec G304 G703 -- test temp path under t.TempDir()
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestBackupEncrypt_MissingPassphraseFails(t *testing.T) {
 
 func TestBackupEncrypt_TamperedCiphertext(t *testing.T) {
 	out := makeEncryptedBackup(t)
-	body, err := os.ReadFile(out)
+	body, err := os.ReadFile(out) // #nosec G304 G703 -- test temp path under t.TempDir()
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestBackupEncrypt_TamperedCiphertext(t *testing.T) {
 		t.Fatalf("backup too short (%d bytes) for ciphertext-tamper test", len(body))
 	}
 	body[idx] ^= 0xFF
-	if err := os.WriteFile(out, body, 0o600); err != nil {
+	if err := os.WriteFile(out, body, 0o600); err != nil { // #nosec G304 G703 -- test temp path under t.TempDir()
 		t.Fatalf("write: %v", err)
 	}
 
@@ -169,12 +169,12 @@ func TestBackupEncrypt_TamperedCiphertext(t *testing.T) {
 
 func TestBackupEncrypt_TruncatedCiphertext(t *testing.T) {
 	out := makeEncryptedBackup(t)
-	body, err := os.ReadFile(out)
+	body, err := os.ReadFile(out) // #nosec G304 G703 -- test temp path under t.TempDir()
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	// Drop the last byte → GCM tag check fails.
-	if err := os.WriteFile(out, body[:len(body)-1], 0o600); err != nil {
+	if err := os.WriteFile(out, body[:len(body)-1], 0o600); err != nil { // #nosec G304 G703 -- test temp path under t.TempDir()
 		t.Fatalf("write: %v", err)
 	}
 	dataDir := t.TempDir()
@@ -194,12 +194,12 @@ func TestBackupEncrypt_TruncatedCiphertext(t *testing.T) {
 
 func TestBackupEncrypt_TamperedMagic(t *testing.T) {
 	out := makeEncryptedBackup(t)
-	body, err := os.ReadFile(out)
+	body, err := os.ReadFile(out) // #nosec G304 G703 -- test temp path under t.TempDir()
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	body[0] ^= 0xFF // break the magic
-	if err := os.WriteFile(out, body, 0o600); err != nil {
+	if err := os.WriteFile(out, body, 0o600); err != nil { // #nosec G304 G703 -- test temp path under t.TempDir()
 		t.Fatalf("write: %v", err)
 	}
 	dataDir := t.TempDir()
@@ -222,14 +222,14 @@ func TestBackupEncrypt_TamperedMagic(t *testing.T) {
 
 func TestBackupEncrypt_TamperedHeaderItersFailsAAD(t *testing.T) {
 	out := makeEncryptedBackup(t)
-	body, err := os.ReadFile(out)
+	body, err := os.ReadFile(out) // #nosec G304 G703 -- test temp path under t.TempDir()
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	// Change one of the iterations bytes (offsets 10..13). Stays above
 	// the 100k floor (so we exercise the AAD path, not the floor check).
 	body[12] ^= 0x01
-	if err := os.WriteFile(out, body, 0o600); err != nil {
+	if err := os.WriteFile(out, body, 0o600); err != nil { // #nosec G304 G703 -- test temp path under t.TempDir()
 		t.Fatalf("write: %v", err)
 	}
 	dataDir := t.TempDir()
@@ -253,11 +253,11 @@ func TestBackupEncrypt_HeaderAADCrossSwap(t *testing.T) {
 	a := makeEncryptedBackup(t)
 	b := makeEncryptedBackup(t)
 
-	bodyA, err := os.ReadFile(a)
+	bodyA, err := os.ReadFile(a) // #nosec G304 G703 -- test temp path under t.TempDir()
 	if err != nil {
 		t.Fatalf("read a: %v", err)
 	}
-	bodyB, err := os.ReadFile(b)
+	bodyB, err := os.ReadFile(b) // #nosec G304 G703 -- test temp path under t.TempDir()
 	if err != nil {
 		t.Fatalf("read b: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestBackupEncrypt_HeaderAADCrossSwap(t *testing.T) {
 	swapped = append(swapped, bodyB[backupEncHdrLen:]...)
 
 	swappedPath := filepath.Join(t.TempDir(), "swapped.tar.gz.enc")
-	if err := os.WriteFile(swappedPath, swapped, 0o600); err != nil {
+	if err := os.WriteFile(swappedPath, swapped, 0o600); err != nil { // #nosec G304 G703 -- test temp path under t.TempDir()
 		t.Fatalf("write swapped: %v", err)
 	}
 
@@ -300,7 +300,7 @@ func TestBackupEncrypt_LegacyUnencryptedRestores(t *testing.T) {
 	if err := runBackup(out, dataDir); err != nil {
 		t.Fatalf("legacy backup: %v", err)
 	}
-	body, err := os.ReadFile(out)
+	body, err := os.ReadFile(out) // #nosec G304 G703 -- test temp path under t.TempDir()
 	if err != nil {
 		t.Fatalf("read legacy: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestBackupEncrypt_RefusesOverwrite(t *testing.T) {
 	seedFile(t, dataDir, "config_versions/v1.json", []byte(`{"meta":{"version":1}}`), 0o600)
 
 	out := filepath.Join(t.TempDir(), "exists.tar.gz.enc")
-	if err := os.WriteFile(out, []byte("preexisting"), 0o600); err != nil {
+	if err := os.WriteFile(out, []byte("preexisting"), 0o600); err != nil { // #nosec G304 G703 -- test temp path under t.TempDir()
 		t.Fatalf("seed exists: %v", err)
 	}
 
@@ -386,7 +386,7 @@ func TestBackupEncrypt_RefusesOverwrite(t *testing.T) {
 		t.Fatalf("expected 'already exists' error, got: %v", err)
 	}
 	// Pre-existing file body untouched.
-	body, _ := os.ReadFile(out)
+	body, _ := os.ReadFile(out) // #nosec G304 G703 -- test temp path under t.TempDir()
 	if string(body) != "preexisting" {
 		t.Fatalf("pre-existing file was overwritten: %q", string(body))
 	}

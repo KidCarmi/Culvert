@@ -155,13 +155,15 @@ func decryptBackupBlob(blob []byte, passphrase string) ([]byte, error) {
 }
 
 // buildBackupEncHeader serializes the 43-byte fixed header. Used as
-// AAD during seal and as the AAD-input again during open.
-func buildBackupEncHeader(salt, nonce []byte, iters int) []byte {
+// AAD during seal and as the AAD-input again during open. iters is
+// uint32 so the binary.PutUint32 call needs no conversion — passing a
+// signed int and converting trips gosec G115.
+func buildBackupEncHeader(salt, nonce []byte, iters uint32) []byte {
 	hdr := make([]byte, 0, backupEncHdrLen)
 	hdr = append(hdr, []byte(backupEncMagic)...)
 	hdr = append(hdr, backupEncVersion, backupEncKDFPBKDF2)
 	var iterBuf [4]byte
-	binary.BigEndian.PutUint32(iterBuf[:], uint32(iters)) //nolint:gosec // iters bounded by const
+	binary.BigEndian.PutUint32(iterBuf[:], iters)
 	hdr = append(hdr, iterBuf[:]...)
 	hdr = append(hdr, salt...)
 	hdr = append(hdr, backupEncCipherAESGCM)
