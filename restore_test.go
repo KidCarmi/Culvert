@@ -397,3 +397,77 @@ func TestRestore_DryRun_NoBakOrDataModification(t *testing.T) {
 		}
 	}
 }
+
+// ── 12. Absolute path in tarball entry rejected ─────────────────────
+
+func TestRestore_DryRun_AbsoluteTarPathRejected(t *testing.T) {
+	src := makeValidBackup(t)
+	dest := filepath.Join(t.TempDir(), "absolute-path.tar.gz")
+	repackTarball(t, src, dest, func(files map[string][]byte, order *[]string) {
+		// Inject a tarball entry whose name is an absolute path.
+		// Such a name would, on careless extraction, write outside the
+		// destination root.
+		files["/etc/passwd"] = []byte("smuggled")
+		*order = append(*order, "/etc/passwd")
+	})
+	dataDir := t.TempDir()
+	err := runRestoreDryRun(dest, dataDir, "")
+	if err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Errorf("expected absolute-path error, got: %v", err)
+	}
+	assertNoDataMutation(t, dataDir)
+}
+
+// ── 13. Duplicate tar entry name rejected ───────────────────────────
+
+func TestRestore_DryRun_DuplicateTarEntryRejected(t *testing.T) {
+	src := makeValidBackup(t)
+	dest := filepath.Join(t.TempDir(), "duplicate-entry.tar.gz")
+	repackTarball(t, src, dest, func(files map[string][]byte, order *[]string) {
+		// Append the same name a second time — repackTarball writes one
+		// tar header per entry in `order`, so this produces two headers
+		// with identical Name fields. A map-based reader would silently
+		// overwrite the first; D1.3b.1's guard must fail closed.
+		*order = append(*order, "data/ui_users.json")
+	})
+	dataDir := t.TempDir()
+	err := runRestoreDryRun(dest, dataDir, "")
+	if err == nil || !strings.Contains(err.Error(), "duplicate tarball entry") {
+		t.Errorf("expected duplicate-tarball-entry error, got: %v", err)
+	}
+	assertNoDataMutation(t, dataDir)
+}
+
+// ── 14. Empty manifest rejected ─────────────────────────────────────
+
+func TestRestore_DryRun_EmptyManifestRejected(t *testing.T) {
+	src := makeValidBackup(t)
+	dest := filepath.Join(t.TempDir(), "empty-manifest.tar.gz")
+	repackTarball(t, src, dest, func(files map[string][]byte, order *[]string) {
+		// Drop every non-manifest entry, then rewrite manifest.json with
+		// an empty files slice. This isolates the empty-manifest rule
+		// from rule 2 (reverse presence) which would otherwise fire on
+		// the leftover tarball entries.
+		newOrder := []string{}
+		for _, n := range *order {
+			if n == "manifest.json" {
+				newOrder = append(newOrder, n)
+				continue
+			}
+			delete(files, n)
+		}
+		*order = newOrder
+
+		var m backupManifest
+		_ = json.Unmarshal(files["manifest.json"], &m)
+		m.Files = nil
+		body, _ := json.MarshalIndent(m, "", "  ")
+		files["manifest.json"] = body
+	})
+	dataDir := t.TempDir()
+	err := runRestoreDryRun(dest, dataDir, "")
+	if err == nil || !strings.Contains(err.Error(), "no files") {
+		t.Errorf("expected empty-manifest error, got: %v", err)
+	}
+	assertNoDataMutation(t, dataDir)
+}

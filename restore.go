@@ -127,11 +127,25 @@ func readTarball(path string) (map[string][]byte, []string, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("restore: tar read: %w", err)
 		}
-		// Path-traversal guard on tarball entries — defense in depth.
+		// Absolute-path guard: tar entries must be relative under the
+		// backup namespace. Reject anything starting with "/" so a
+		// hand-crafted tarball can't try to write outside /data on
+		// extraction (defense in depth — D1.3b.1 doesn't extract,
+		// but the contract is shared with D1.3b.2 which will).
+		if strings.HasPrefix(hdr.Name, "/") {
+			return nil, nil, fmt.Errorf("restore: tarball entry has absolute path: %q", hdr.Name)
+		}
+		// Path-traversal guard: reject any component equal to "..".
 		for _, part := range strings.Split(hdr.Name, "/") {
 			if part == ".." {
 				return nil, nil, fmt.Errorf("restore: tarball entry has path traversal: %q", hdr.Name)
 			}
+		}
+		// Duplicate-entry guard: tar format allows multiple headers with
+		// the same name; a map-based reader would silently overwrite the
+		// earlier entry. Fail closed instead.
+		if _, exists := files[hdr.Name]; exists {
+			return nil, nil, fmt.Errorf("restore: duplicate tarball entry: %q", hdr.Name)
 		}
 		body, err := io.ReadAll(tr)
 		if err != nil {
@@ -164,6 +178,9 @@ func parseAndValidateManifest(files map[string][]byte, order []string) (*backupM
 	}
 	if manifest.CulvertVersion == "" {
 		return nil, fmt.Errorf("restore: manifest missing culvert_version")
+	}
+	if len(manifest.Files) == 0 {
+		return nil, fmt.Errorf("restore: manifest contains no files (empty backup cannot restore)")
 	}
 	return &manifest, nil
 }
