@@ -761,9 +761,13 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 		return fmt.Errorf("restore: rename current %s → %s: %w", dataDir, bakPath, err)
 	}
 
-	// Critical window: /data does not exist between renames.
+	// Critical window: /data does not exist between renames. On failure
+	// here, clean up staging so the operator's only recovery path is the
+	// .bak (no ambiguity between option A "revert via .bak" and option B
+	// "promote staging"). The .bak is preserved either way.
 	if commitInjectBetweenRenames != nil {
 		if err := commitInjectBetweenRenames(); err != nil {
+			_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
 			return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; injected: %w",
 				dataDir, bakPath, dataDir, err)
 		}
@@ -771,6 +775,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 
 	// Step 7: rename staging → /data.
 	if err := os.Rename(stagingDir, dataDir); err != nil {
+		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
 		return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; rename staging→/data failed: %w",
 			dataDir, bakPath, dataDir, err)
 	}

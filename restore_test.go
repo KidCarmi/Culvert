@@ -1120,6 +1120,12 @@ func TestRestoreCommit_InjectionBetweenRenames_RecoveryMessage(t *testing.T) {
 		t.Errorf("error should contain recovery command %q, got: %v", wantMV, err)
 	}
 
+	// Staging dir must be cleaned even on between-renames failure, so
+	// the operator's only recovery path is the .bak (no ambiguity).
+	if _, ok := readStaging(t, currentDir); ok {
+		t.Error("staging dir should be cleaned even on between-renames failure")
+	}
+
 	// Cleanup: do the manual recovery so test directories stay tidy.
 	if rerr := os.Rename(bakPath, currentDir); rerr != nil {
 		t.Logf("post-test cleanup mv: %v", rerr)
