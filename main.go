@@ -115,6 +115,7 @@ type startupState struct {
 	trustFwdHeaders     *bool
 	resetPwUser         *string
 	backupOut           *string
+	restoreIn           *string
 	cdrEnabledFlag      *bool
 	cdrEndpointFlag     *string
 	cdrFailModeFlag     *string
@@ -250,6 +251,7 @@ func parseFlags(s *startupState) {
 	s.trustFwdHeaders = flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
 	s.resetPwUser = flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
 	s.backupOut = flag.String("backup", "", "Pack /data into a tar.gz at the given path and exit (D1.3a)")
+	s.restoreIn = flag.String("restore", "", "Validate a backup tarball and print restore plan (dry-run; D1.3b.1)")
 	// CDR / Sluice integration (Phase 1: single-instance client with TOFU pinning).
 	s.cdrEnabledFlag = flag.Bool("cdr-enabled", false, "Enable Sluice CDR integration (strip macros/JS/OLE from downloads)")
 	s.cdrEndpointFlag = flag.String("cdr-endpoint", "", "Sluice gRPC endpoint (e.g. sluice:8443)")
@@ -271,6 +273,15 @@ func handleOneShotCommands(s *startupState) {
 			os.Exit(1)
 		}
 		fmt.Printf("Backup written to %s\n", *s.backupOut)
+		os.Exit(0)
+	}
+	// ── One-shot: restore dry-run validation (D1.3b.1) ────────────────────
+	if *s.restoreIn != "" {
+		passphrase := os.Getenv(caPassphraseEnv)
+		if err := runRestoreDryRun(*s.restoreIn, dataDir, passphrase); err != nil {
+			fmt.Fprintf(os.Stderr, "Restore validation error: %v\n", err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	// ── One-shot: password reset (Finding 5.1) ─────────────────────────────
