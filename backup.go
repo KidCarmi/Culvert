@@ -97,7 +97,25 @@ type packedFile struct {
 	body []byte
 }
 
+// runBackupWith reads each artifact's full body into memory in pass 1, builds
+// the manifest (which depends on every file's sha256), and then writes the
+// tarball in pass 2 with the manifest as the first entry.
+//
+// Memory tradeoff: total in-memory cost is the sum of all packed file sizes.
+// For typical /data this is a few MB (config_versions × ~1KB each). If
+// config_versions/ ever grows pathologically large, this should switch to a
+// streaming pass-1 (hash-only, no body retention) followed by pass-2 re-read.
+// Out of scope for D1.3a — typical operator deployments are well under 100MB.
 func runBackupWith(outPath string, artifacts []backupArtifact) error {
+	// Refuse to overwrite an existing output file. Operators must remove
+	// the prior backup or choose a different path. Prevents accidental
+	// destruction of the only backup via a typo.
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		return fmt.Errorf("backup: output path %q already exists; remove it or choose a different path", outPath)
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("backup: stat output path %q: %w", outPath, statErr)
+	}
+
 	manifestFiles, packed, missingStrict, missingFirstRun, err := collectArtifacts(artifacts)
 	if err != nil {
 		return err
@@ -190,7 +208,23 @@ func collectArtifacts(artifacts []backupArtifact) (
 }
 
 func packOne(srcPath, tarPath string, info os.FileInfo, required bool, manifestFiles *[]backupManifestFile, packed *[]packedFile) error {
-	body, err := os.ReadFile(srcPath) // #nosec G304 -- operator-controlled path
+	// Path-traversal guard: refuse any tarPath whose path components include
+	// ".." — defense in depth against pathological filenames in walked
+	// directories. Component-level check (won't reject legitimate filenames
+	// that contain ".." substrings like "foo..bar.json").
+	for _, part := range strings.Split(tarPath, "/") {
+		if part == ".." {
+			return fmt.Errorf("backup: refusing to pack path with traversal: %q", tarPath)
+		}
+	}
+	// Symlinks in the source dir would cause os.ReadFile below to follow
+	// them, potentially reading outside /data (e.g. a symlink in
+	// config_versions/ pointing at /etc/passwd). Skip with a warning.
+	if info.Mode()&os.ModeSymlink != 0 {
+		fmt.Fprintf(os.Stderr, "Backup: skipping symlink %q (refusing to follow)\n", srcPath)
+		return nil
+	}
+	body, err := os.ReadFile(srcPath) // #nosec G304 -- operator-controlled path; symlinks rejected above
 	if err != nil {
 		return fmt.Errorf("backup: read %q: %w", srcPath, err)
 	}
@@ -293,6 +327,14 @@ func writeBackupTarball(outPath string, manifestBytes []byte, packed []packedFil
 	if err := os.Rename(tmpPath, outPath); err != nil {
 		cleanup()
 		return fmt.Errorf("backup: rename: %w", err)
+	}
+	// Parent-dir fsync makes the rename durable on POSIX (matches D1.1a's
+	// atomicWriteFile pattern). Best-effort: ENOTSUP on some filesystems and
+	// Windows is silently ignored — the rename has already published the
+	// file at the application level.
+	if d, derr := os.Open(filepath.Dir(outPath)); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }
