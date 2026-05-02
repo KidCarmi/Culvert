@@ -353,6 +353,39 @@ func TestBackup_ConfigVersionsRecursive(t *testing.T) {
 	}
 }
 
+// ── 8. Symlink top-level artifact is skipped ────────────────────────
+
+// TestBackup_SymlinkTopLevelSkipped verifies the Lstat guard added in
+// the pre-merge audit: if a top-level artifact is a symlink (e.g. an
+// attacker replaced /data/ca.bundle with a link to /etc/passwd),
+// packOne refuses to follow it and the file is omitted from the
+// tarball. Pinned to prove that the Lstat path matches the
+// filepath.Walk path's symlink semantics.
+func TestBackup_SymlinkTopLevelSkipped(t *testing.T) {
+	dataDir := t.TempDir()
+	// A real file the symlink will point at.
+	target := filepath.Join(t.TempDir(), "secret-target")
+	if err := os.WriteFile(target, []byte("would-be-leaked"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	// /data/ca.bundle is a symlink to that file.
+	if err := os.Symlink(target, filepath.Join(dataDir, "ca.bundle")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	// And a normal file so the backup has at least one entry.
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+
+	if _, ok := files["data/ca.bundle"]; ok {
+		t.Errorf("symlinked top-level artifact must be skipped; got data/ca.bundle in tarball")
+	}
+}
+
 // sortedNames returns a sorted slice of keys for friendlier error output.
 func sortedNames(m map[string][]byte) []string {
 	out := make([]string, 0, len(m))

@@ -159,7 +159,14 @@ func collectArtifacts(artifacts []backupArtifact) (
 	err error,
 ) {
 	for _, a := range artifacts {
-		info, statErr := os.Stat(a.SrcPath)
+		// Lstat (not Stat) so symlinked top-level artifacts are detected
+		// before we follow them. The packOne symlink check below depends
+		// on info.Mode() reporting ModeSymlink for symlinks; os.Stat would
+		// transparently resolve the link and report the target's type,
+		// bypassing the guard. filepath.Walk already uses Lstat internally
+		// for the recursive case (config_versions/), so this aligns the
+		// two paths.
+		info, statErr := os.Lstat(a.SrcPath)
 		if statErr != nil {
 			if !os.IsNotExist(statErr) {
 				return nil, nil, nil, nil, fmt.Errorf("backup: stat %q: %w", a.SrcPath, statErr)
