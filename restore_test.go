@@ -11,6 +11,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,7 +141,7 @@ func assertNoDataMutation(t *testing.T, dataDir string) {
 func TestRestore_DryRun_ValidBackup(t *testing.T) {
 	src := makeValidBackup(t)
 	dataDir := t.TempDir()
-	if err := runRestoreDryRun(src, dataDir, ""); err != nil {
+	if err := runRestoreDryRun(src, dataDir, "", restoreOpts{}); err != nil {
 		t.Fatalf("dry-run on valid backup: %v", err)
 	}
 	assertNoDataMutation(t, dataDir)
@@ -162,7 +164,7 @@ func TestRestore_DryRun_ManifestMissing(t *testing.T) {
 		*order = newOrder
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "manifest.json missing") {
 		t.Errorf("expected manifest-missing error, got: %v", err)
 	}
@@ -176,7 +178,7 @@ func TestRestore_DryRun_ManifestMalformed(t *testing.T) {
 		files["manifest.json"] = []byte("this is not json")
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "manifest unmarshal") {
 		t.Errorf("expected manifest-unmarshal error, got: %v", err)
 	}
@@ -196,7 +198,7 @@ func TestRestore_DryRun_UnsupportedSchemaVersion(t *testing.T) {
 		files["manifest.json"] = body
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "schema_version 99") {
 		t.Errorf("expected schema-version error, got: %v", err)
 	}
@@ -225,7 +227,7 @@ func TestRestore_DryRun_ManifestReferencesMissingFile(t *testing.T) {
 		files["manifest.json"] = body
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "missing from tarball") {
 		t.Errorf("expected missing-from-tarball error, got: %v", err)
 	}
@@ -243,7 +245,7 @@ func TestRestore_DryRun_TarEntryNotInManifest(t *testing.T) {
 		*order = append(*order, "data/extra.json")
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "not referenced by manifest") {
 		t.Errorf("expected not-in-manifest error, got: %v", err)
 	}
@@ -266,7 +268,7 @@ func TestRestore_DryRun_DuplicateManifestPath(t *testing.T) {
 		files["manifest.json"] = body
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate manifest path") {
 		t.Errorf("expected duplicate-path error, got: %v", err)
 	}
@@ -287,7 +289,7 @@ func TestRestore_DryRun_Sha256Mismatch(t *testing.T) {
 		files["data/ui_users.json"] = newBody
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Errorf("expected sha256-mismatch error, got: %v", err)
 	}
@@ -304,7 +306,7 @@ func TestRestore_DryRun_CorruptTier1ClusterJSON(t *testing.T) {
 		rebuildManifest(t, files, *order) // keep sha consistent so we hit parse, not sha
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "cluster.json") {
 		t.Errorf("expected cluster.json parse error, got: %v", err)
 	}
@@ -342,7 +344,7 @@ func TestRestore_DryRun_ClusterCAMismatch(t *testing.T) {
 	}
 
 	restoreDataDir := t.TempDir()
-	err = runRestoreDryRun(out, restoreDataDir, "")
+	err = runRestoreDryRun(out, restoreDataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "cluster CA pair") {
 		t.Errorf("expected cluster CA pair error, got: %v", err)
 	}
@@ -365,7 +367,7 @@ func TestRestore_DryRun_EncryptedBundleWithoutPassphrase(t *testing.T) {
 	}
 
 	restoreDataDir := t.TempDir()
-	err := runRestoreDryRun(out, restoreDataDir, "")
+	err := runRestoreDryRun(out, restoreDataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "passphrase") {
 		t.Errorf("expected passphrase error, got: %v", err)
 	}
@@ -379,7 +381,7 @@ func TestRestore_DryRun_NoBakOrDataModification(t *testing.T) {
 	dataDir := t.TempDir()
 	parent := filepath.Dir(dataDir)
 
-	if err := runRestoreDryRun(src, dataDir, ""); err != nil {
+	if err := runRestoreDryRun(src, dataDir, "", restoreOpts{}); err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
 
@@ -411,7 +413,7 @@ func TestRestore_DryRun_AbsoluteTarPathRejected(t *testing.T) {
 		*order = append(*order, "/etc/passwd")
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "absolute path") {
 		t.Errorf("expected absolute-path error, got: %v", err)
 	}
@@ -431,7 +433,7 @@ func TestRestore_DryRun_DuplicateTarEntryRejected(t *testing.T) {
 		*order = append(*order, "data/ui_users.json")
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate tarball entry") {
 		t.Errorf("expected duplicate-tarball-entry error, got: %v", err)
 	}
@@ -465,9 +467,333 @@ func TestRestore_DryRun_EmptyManifestRejected(t *testing.T) {
 		files["manifest.json"] = body
 	})
 	dataDir := t.TempDir()
-	err := runRestoreDryRun(dest, dataDir, "")
+	err := runRestoreDryRun(dest, dataDir, "", restoreOpts{})
 	if err == nil || !strings.Contains(err.Error(), "no files") {
 		t.Errorf("expected empty-manifest error, got: %v", err)
 	}
 	assertNoDataMutation(t, dataDir)
+}
+
+// ── D1.3b.2a: analyzer + mode + guards ───────────────────────────────
+
+// captureStdout swaps os.Stdout for a pipe during fn, returns captured
+// output. Used to assert on the dry-run summary printed by
+// runRestoreDryRun.
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = orig })
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fn()
+		_ = w.Close()
+	}()
+
+	out, _ := io.ReadAll(r)
+	return string(out), <-errCh
+}
+
+// makeBackupWithRealCA bootstraps a real cluster CA + ui_users.json
+// + cluster.json into a temp dir and packs it. Returns (tarballPath,
+// caFingerprint).
+func makeBackupWithRealCA(t *testing.T, users []uiUserRecord, enrolledNodes int) (string, string) {
+	t.Helper()
+	dataDir := t.TempDir()
+	ca := &clusterCA{}
+	if err := ca.InitOrLoad(dataDir); err != nil {
+		t.Fatalf("InitOrLoad: %v", err)
+	}
+	caFP := ""
+	if cert := ca.cert; cert != nil {
+		sum := sha256.Sum256(cert.Raw)
+		caFP = "sha256:" + hex.EncodeToString(sum[:])
+	}
+
+	// ui_users.json envelope.
+	env := uiUsersFileEnvelope{Users: users}
+	body, _ := json.Marshal(env)
+	seedFile(t, dataDir, "ui_users.json", body, 0o600)
+
+	// cluster.json with optional enrolled nodes.
+	state := struct {
+		Nodes map[string]any `json:"nodes"`
+	}{Nodes: map[string]any{}}
+	for i := 0; i < enrolledNodes; i++ {
+		state.Nodes[fmt.Sprintf("dp-%d", i)] = map[string]any{"node_id": fmt.Sprintf("dp-%d", i)}
+	}
+	clusterBody, _ := json.Marshal(state)
+	seedFile(t, dataDir, "cluster.json", clusterBody, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	return out, caFP
+}
+
+// seedCurrentDataDir writes a minimal current /data with optional
+// cluster CA, ui_users, and enrolled nodes — used for analyzer tests
+// that compare backup state to current state.
+func seedCurrentDataDir(t *testing.T, withCA bool, users []uiUserRecord, enrolledNodes int) string {
+	t.Helper()
+	dir := t.TempDir()
+	if withCA {
+		if err := (&clusterCA{}).InitOrLoad(dir); err != nil {
+			t.Fatalf("InitOrLoad current: %v", err)
+		}
+	}
+	if users != nil {
+		env := uiUsersFileEnvelope{Users: users}
+		body, _ := json.Marshal(env)
+		seedFile(t, dir, "ui_users.json", body, 0o600)
+	}
+	if enrolledNodes > 0 {
+		state := struct {
+			Nodes map[string]any `json:"nodes"`
+		}{Nodes: map[string]any{}}
+		for i := 0; i < enrolledNodes; i++ {
+			state.Nodes[fmt.Sprintf("dp-%d", i)] = map[string]any{"node_id": fmt.Sprintf("dp-%d", i)}
+		}
+		body, _ := json.Marshal(state)
+		seedFile(t, dir, "cluster.json", body, 0o600)
+	}
+	return dir
+}
+
+// ── 15. Mode summary: full ───────────────────────────────────────────
+
+func TestRestore_DryRun_ModeFull_Summary(t *testing.T) {
+	src, _ := makeBackupWithRealCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin}}, 0)
+	currentDir := t.TempDir()
+
+	out, err := captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: modeFull})
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(out, "--mode=full") {
+		t.Errorf("summary should mention --mode=full, got:\n%s", out)
+	}
+	if !strings.Contains(out, "From tarball:") {
+		t.Errorf("summary should include merge counts, got:\n%s", out)
+	}
+	assertNoDataMutation(t, currentDir)
+}
+
+// ── 16. Mode summary: trust-root-only ────────────────────────────────
+
+func TestRestore_DryRun_ModeTrustRootOnly_Summary(t *testing.T) {
+	src, _ := makeBackupWithRealCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin}}, 0)
+	currentDir := seedCurrentDataDir(t, true, []uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 0)
+
+	out, err := captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: modeTrustRootOnly})
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(out, "--mode=trust-root-only") {
+		t.Errorf("summary should mention --mode=trust-root-only, got:\n%s", out)
+	}
+	// Trust-root-only preserves ui_users.json from current → restored
+	// summary should list bob (current's user), not alice (tarball's user).
+	if !strings.Contains(out, "bob") {
+		t.Errorf("trust-root-only mode preserves current ui_users; expected bob in summary, got:\n%s", out)
+	}
+	if strings.Contains(out, "alice") {
+		t.Errorf("trust-root-only mode preserves current ui_users; alice (tarball-only) should not appear, got:\n%s", out)
+	}
+}
+
+// ── 17. Mode summary: state-only ─────────────────────────────────────
+
+func TestRestore_DryRun_ModeStateOnly_Summary(t *testing.T) {
+	src, _ := makeBackupWithRealCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin}}, 0)
+	currentDir := seedCurrentDataDir(t, true, []uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 0)
+
+	out, err := captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: modeStateOnly})
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(out, "--mode=state-only") {
+		t.Errorf("summary should mention --mode=state-only, got:\n%s", out)
+	}
+	// State-only preserves CA from current. Both backups bootstrapped
+	// their own CA so fingerprints differ; preserving current means
+	// the restored fingerprint should equal the current fingerprint.
+	if !strings.Contains(out, "CA fingerprint unchanged") {
+		t.Errorf("state-only mode preserves current CA; expected fingerprint-unchanged line, got:\n%s", out)
+	}
+	// State-only restores ui_users from tarball → alice should appear.
+	if !strings.Contains(out, "alice") {
+		t.Errorf("state-only mode restores ui_users from tarball; expected alice in summary, got:\n%s", out)
+	}
+}
+
+// ── 18. DP re-enrollment guard detected ──────────────────────────────
+
+func TestRestore_DryRun_DPReenrollmentGuard_Detected(t *testing.T) {
+	// Backup has a different CA than current /data, AND current /data
+	// has enrolled DPs → DP guard fires.
+	src, _ := makeBackupWithRealCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin}}, 0)
+	currentDir := seedCurrentDataDir(t, true, nil, 3) // 3 enrolled DPs in current
+
+	// Without --accept-dp-reenrollment.
+	out, err := captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: modeFull})
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(out, "DP re-enrollment required") {
+		t.Errorf("expected DP-guard warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "--accept-dp-reenrollment") {
+		t.Errorf("warning should name the flag operators must pass for D1.3b.2b commit, got:\n%s", out)
+	}
+
+	// With --accept-dp-reenrollment.
+	out, err = captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err != nil {
+		t.Fatalf("dry-run with accept flag: %v", err)
+	}
+	if !strings.Contains(out, "DP re-enrollment accepted") {
+		t.Errorf("expected accepted-flag line, got:\n%s", out)
+	}
+}
+
+// ── 19. TOTP rollback detected ───────────────────────────────────────
+
+func TestRestore_DryRun_TOTPRollbackGuard_Detected(t *testing.T) {
+	// Backup has alice with counter=5; current has alice with counter=10
+	// → restoring would roll alice's counter back to 5.
+	src, _ := makeBackupWithRealCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin, TOTPLastCounter: 5}}, 0)
+	currentDir := seedCurrentDataDir(t, false, []uiUserRecord{{Username: "alice", Role: RoleAdmin, TOTPLastCounter: 10}}, 0)
+
+	// Without --allow-counter-rollback.
+	out, err := captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: modeFull})
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(out, "TOTP counter roll back") {
+		t.Errorf("expected TOTP rollback warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "alice") {
+		t.Errorf("warning should name affected user, got:\n%s", out)
+	}
+	if !strings.Contains(out, "--allow-counter-rollback") {
+		t.Errorf("warning should name the flag operators must pass for D1.3b.2b commit, got:\n%s", out)
+	}
+
+	// With --allow-counter-rollback.
+	out, err = captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: modeFull, AllowCounterRollback: true})
+	})
+	if err != nil {
+		t.Fatalf("dry-run with allow flag: %v", err)
+	}
+	if !strings.Contains(out, "accepted TOTP counter rollback") {
+		t.Errorf("expected accepted-flag line, got:\n%s", out)
+	}
+}
+
+// ── 20. Users removed listed ─────────────────────────────────────────
+
+func TestRestore_DryRun_UsersRemoved_Listed(t *testing.T) {
+	// Backup has alice; current has alice + dave → restoring removes dave.
+	src, _ := makeBackupWithRealCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin}}, 0)
+	currentDir := seedCurrentDataDir(t, false,
+		[]uiUserRecord{{Username: "alice", Role: RoleAdmin}, {Username: "dave", Role: RoleAdmin}}, 0)
+
+	out, err := captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: modeFull})
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(out, "Will be removed:") {
+		t.Errorf("expected 'Will be removed:' line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "dave") {
+		t.Errorf("removed-user line should name dave, got:\n%s", out)
+	}
+}
+
+// ── 21. Dry-run does not modify /data (mode-aware) ───────────────────
+
+func TestRestore_DryRun_AnalyzerDoesNotMutateData(t *testing.T) {
+	src, _ := makeBackupWithRealCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin}}, 0)
+	currentDir := seedCurrentDataDir(t, true, []uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 2)
+
+	// Snapshot current /data contents.
+	before, err := snapshotDir(t, currentDir)
+	if err != nil {
+		t.Fatalf("snapshot before: %v", err)
+	}
+
+	for _, mode := range []restoreMode{modeFull, modeTrustRootOnly, modeStateOnly} {
+		_, err := captureStdout(t, func() error {
+			return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: mode})
+		})
+		if err != nil {
+			t.Fatalf("dry-run mode=%s: %v", mode, err)
+		}
+	}
+
+	after, err := snapshotDir(t, currentDir)
+	if err != nil {
+		t.Fatalf("snapshot after: %v", err)
+	}
+	if !equalSnapshots(before, after) {
+		t.Errorf("analyzer mutated /data; before=%v after=%v", before, after)
+	}
+}
+
+// snapshotDir returns map[relPath] -> sha256 hex of body for every file
+// under dir. Used to prove dry-run leaves /data byte-identical.
+func snapshotDir(t *testing.T, dir string) (map[string]string, error) {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		body, err := os.ReadFile(path) // #nosec G304 -- test-controlled path
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, path)
+		sum := sha256.Sum256(body)
+		out[rel] = hex.EncodeToString(sum[:])
+		return nil
+	})
+	return out, err
+}
+
+func equalSnapshots(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		if vb, ok := b[k]; !ok || vb != va {
+			return false
+		}
+	}
+	return true
 }
