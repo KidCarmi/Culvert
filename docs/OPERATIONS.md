@@ -173,35 +173,38 @@ Run these once when bringing up a new node, in order:
 
 ## 4. Backup and restore for `/data`
 
-Culvert keeps **all** persistent state under the data directory.
+Culvert keeps **all** persistent state under the data directory. The
+supported backup and restore path is the built-in `--backup` /
+`--restore` CLI driven through the profile-gated `cli` service in
+`docker-compose.yml`. See
+**[`docs/operator/docker-compose-backup-restore.md`](operator/docker-compose-backup-restore.md)**
+for the full operator surface: encrypted backup, restore dry-run,
+restore commit (offline), leftover cleanup, passphrase handling, and
+the runtime-vs-offline matrix.
 
-> **Docker Compose deployments:** the supported path is the built-in
-> `--backup` / `--restore` CLI driven through the profile-gated `cli`
-> service. See **[`docs/operator/docker-compose-backup-restore.md`](operator/docker-compose-backup-restore.md)**
-> for the full surface (encrypted backup, restore dry-run, restore
-> commit, leftover cleanup, passphrase handling).
+### Manual `tar -C /data -czf …` is unsupported
 
-### Why the legacy `tar -C /data -czf …` recipe is deprecated
+Filesystem-level `tar` of `/data` is **not** a supported backup
+mechanism and the resulting archives **cannot be restored** by Culvert.
+Manual `tar` bypasses the Culvert backup format's guarantees:
 
-Earlier versions of this guide recommended a manual `tar` of `/data`.
-That path is **deprecated** for any deployment running D1.3 (released
-with the in-binary `--backup` CLI) or later, because it bypasses the
-guarantees the Culvert backup format provides:
+- No `manifest.json` (sha256, size, mode, tier per artifact).
+- No `schema_version` envelope; the restore validator only accepts
+  archives produced by `--backup`.
+- No checksum verification before swapping `/data`.
+- No CA-bundle cross-validation (cluster CA fingerprint vs.
+  `cluster.json` enrolled-DP set).
+- No Tier-3 exclusion — manual `tar` includes logs, hashcache, hit
+  counters, and other operational state that should not survive a
+  restore.
+- No atomic rename swap; no `/data.bak.<ts>-<pid>` rollback dir.
+- No restore dry-run, no DP re-enrollment guard, no TOTP counter
+  rollback guard.
+- No `--encrypt` integration — operator has to bring their own
+  encryption.
 
-| Manual `tar` | Culvert `--backup` |
-|---|---|
-| No manifest | `manifest.json` lists every file with sha256, size, mode, and Tier (1 = required, 2 = optional, 3 = excluded) |
-| No schema versioning | `schema_version=1` envelope; restore refuses unknown versions |
-| No checksum verification | Restore re-checks every sha256 before swapping `/data` |
-| No CA-bundle cross-validation | Restore decrypts the CA bundle and cross-references `cluster.json` ↔ `cluster-ca.crt` before commit |
-| Includes Tier 3 noise (logs, hashcache, hit counters) | Tier 3 is excluded by design — backups stay small |
-| Restore is a destructive `rm -rf /data/* && tar -xzf` | Restore does an atomic rename swap with `/data.bak.<ts>-<pid>` preserved for rollback, plus a dry-run-first contract |
-| Encryption is the operator's problem | `--encrypt` flag + `CULVERT_BACKUP_PASSPHRASE`: AES-256-GCM, PBKDF2-SHA256, header-bound AAD |
-
-Tarballs not produced by `--backup` will not pass the restore validator
-and cannot be used to recover state. If you have legacy `tar`-based
-backups from before D1.3, take a fresh `--backup` before relying on the
-restore tooling.
+Use the `cli` service for everything backup-related. The operator doc
+linked above is the only supported reference.
 
 ### What's inside `/data`
 

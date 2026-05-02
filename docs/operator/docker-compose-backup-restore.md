@@ -1,9 +1,9 @@
 # Docker Compose — Backup & Restore
 
 This is the supported operator path for Culvert backup, restore, and cleanup
-when running under Docker Compose. It supersedes the legacy
-`tar -C /data -czf …` guidance in `docs/OPERATIONS.md § 4`, which bypasses
-Culvert's manifest, sha256, schema-version, and CA-bundle cross-validation.
+when running under Docker Compose. Manual filesystem-level `tar` of `/data`
+is **not** supported — see § 12 and `docs/OPERATIONS.md § 4` for why and what
+to do instead.
 
 > **TL;DR**
 >
@@ -385,10 +385,12 @@ shown in § 2.
 - **Don't run restore commit while `proxy` is up.** Always
   `docker compose down` first. The CLI does not detect a running
   daemon on the same host — operator discipline enforces this.
-- **Don't use the legacy `tar -C /data -czf …` recipe.** It bypasses
-  the manifest, sha256, schema-version, and CA-bundle cross-validation
-  that D1.3 introduced. The Culvert restore tool will not accept tarballs
-  that were not produced by `--backup`.
+- **Don't use a manual `tar -C /data -czf …` recipe.** Manual tarballs
+  bypass the manifest, sha256, schema-version, and CA-bundle
+  cross-validation that the Culvert backup format provides — the
+  restore tool will refuse anything not produced by `--backup`. There
+  is no supported workflow for restoring from a filesystem-level
+  `tar`.
 - **Don't off-host copy unencrypted backups.** They contain ui_users
   hashes, TOTP secrets, the cluster CA private key, and session HMAC.
   Use `--encrypt` for anything that leaves the host.
