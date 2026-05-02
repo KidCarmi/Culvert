@@ -6,6 +6,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -87,9 +88,17 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 
 // runBackup is the CLI entrypoint. Packs the default Tier-1+2 artifact
 // list rooted at dataDir into outPath, atomically (writes to outPath+".tmp"
-// then renames).
+// then renames). Unencrypted (D1.3a).
 func runBackup(outPath, dataDir string) error {
-	return runBackupWith(outPath, defaultBackupArtifacts(dataDir))
+	return runBackupWith(outPath, defaultBackupArtifacts(dataDir), "")
+}
+
+// runBackupEncrypted is the encrypted CLI entrypoint (D1.4). Same packing
+// path as runBackup, but the resulting tar.gz is sealed with AES-256-GCM
+// using a passphrase-derived key (PBKDF2-SHA256, 600k iterations).
+// Refuses to overwrite an existing output file (matches D1.3a semantics).
+func runBackupEncrypted(outPath, dataDir, passphrase string) error {
+	return runBackupWith(outPath, defaultBackupArtifacts(dataDir), passphrase)
 }
 
 type packedFile struct {
@@ -106,7 +115,7 @@ type packedFile struct {
 // config_versions/ ever grows pathologically large, this should switch to a
 // streaming pass-1 (hash-only, no body retention) followed by pass-2 re-read.
 // Out of scope for D1.3a — typical operator deployments are well under 100MB.
-func runBackupWith(outPath string, artifacts []backupArtifact) error {
+func runBackupWith(outPath string, artifacts []backupArtifact, passphrase string) error {
 	// Refuse to overwrite an existing output file. Operators must remove
 	// the prior backup or choose a different path. Prevents accidental
 	// destruction of the only backup via a typo.
@@ -144,6 +153,9 @@ func runBackupWith(outPath string, artifacts []backupArtifact) error {
 		return fmt.Errorf("backup: marshal manifest: %w", err)
 	}
 
+	if passphrase != "" {
+		return writeEncryptedBackupTarball(outPath, manifestBytes, packed, passphrase)
+	}
 	return writeBackupTarball(outPath, manifestBytes, packed)
 }
 
@@ -339,6 +351,90 @@ func writeBackupTarball(outPath string, manifestBytes []byte, packed []packedFil
 	// atomicWriteFile pattern). Best-effort: ENOTSUP on some filesystems and
 	// Windows is silently ignored — the rename has already published the
 	// file at the application level.
+	if d, derr := os.Open(filepath.Dir(outPath)); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
+//nolint:funlen // Mirrors writeBackupTarball's per-step error+cleanup
+// shape; splitting would scatter the cleanup calls and obscure failure
+// paths. writeEncryptedBackupTarball builds the same tar.gz envelope
+// as writeBackupTarball but in memory, then seals it with AES-256-GCM
+// using a passphrase-derived key (D1.4). The atomic outPath+".tmp" →
+// rename → parent-dir fsync sequence matches the unencrypted path so
+// no-overwrite and durability semantics are identical.
+func writeEncryptedBackupTarball(outPath string, manifestBytes []byte, packed []packedFile, passphrase string) error {
+	// Build the unencrypted tar.gz in memory.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+
+	mhdr := &tar.Header{
+		Name:     "manifest.json",
+		Mode:     0o600,
+		Size:     int64(len(manifestBytes)),
+		ModTime:  time.Now().UTC(),
+		Typeflag: tar.TypeReg,
+	}
+	if werr := tw.WriteHeader(mhdr); werr != nil {
+		return fmt.Errorf("backup encrypt: write manifest header: %w", werr)
+	}
+	if _, werr := tw.Write(manifestBytes); werr != nil {
+		return fmt.Errorf("backup encrypt: write manifest body: %w", werr)
+	}
+	for _, pf := range packed {
+		if werr := tw.WriteHeader(pf.hdr); werr != nil {
+			return fmt.Errorf("backup encrypt: write %q header: %w", pf.hdr.Name, werr)
+		}
+		if _, werr := tw.Write(pf.body); werr != nil {
+			return fmt.Errorf("backup encrypt: write %q body: %w", pf.hdr.Name, werr)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("backup encrypt: close tar: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return fmt.Errorf("backup encrypt: close gzip: %w", err)
+	}
+
+	// Seal the in-memory tar.gz under the passphrase.
+	encrypted, err := encryptBackupBlob(buf.Bytes(), passphrase)
+	if err != nil {
+		return fmt.Errorf("backup encrypt: %w", err)
+	}
+	// Best-effort wipe of the plaintext gzip buffer; the underlying
+	// arrays may already have been GC-mirrored, but we do the right
+	// thing within stdlib semantics.
+	zeroBytes(buf.Bytes())
+
+	// Atomic write — same shape as writeBackupTarball.
+	tmpPath := outPath + ".tmp"
+	out, err := os.Create(tmpPath) // #nosec G304 -- operator-controlled path
+	if err != nil {
+		return fmt.Errorf("backup encrypt: create output: %w", err)
+	}
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	if _, err := out.Write(encrypted); err != nil {
+		_ = out.Close()
+		cleanup()
+		return fmt.Errorf("backup encrypt: write: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		cleanup()
+		return fmt.Errorf("backup encrypt: sync: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("backup encrypt: close: %w", err)
+	}
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		cleanup()
+		return fmt.Errorf("backup encrypt: rename: %w", err)
+	}
 	if d, derr := os.Open(filepath.Dir(outPath)); derr == nil {
 		_ = d.Sync()
 		_ = d.Close()

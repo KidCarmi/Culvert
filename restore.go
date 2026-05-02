@@ -13,6 +13,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"crypto/x509"
@@ -107,9 +108,14 @@ func (m restoreMode) fromTarball(tarballPath string) bool {
 // analysis output. D1.3b.2a inspects them; D1.3b.2b will gate the
 // destructive commit on the same flags.
 type restoreOpts struct {
-	Mode                  restoreMode
-	AcceptDPReenrollment  bool
-	AllowCounterRollback  bool
+	Mode                 restoreMode
+	AcceptDPReenrollment bool
+	AllowCounterRollback bool
+	// BackupPassphrase decrypts an encrypted (D1.4) backup blob. Empty
+	// means "expect an unencrypted D1.3a backup"; the restore reader
+	// detects encryption from magic bytes and demands a non-empty
+	// passphrase only when the magic matches.
+	BackupPassphrase string
 }
 
 // commitAnalysis is the read-only delta between current /data and the
@@ -120,27 +126,27 @@ type commitAnalysis struct {
 	Mode restoreMode
 
 	// Cluster CA delta.
-	CurrentCAFingerprint   string // empty if current has no parseable cluster-ca.crt
-	RestoredCAFingerprint  string // empty if neither tarball nor current would contribute
-	CAFingerprintChanged   bool
-	CurrentEnrolledNodes   int
+	CurrentCAFingerprint  string // empty if current has no parseable cluster-ca.crt
+	RestoredCAFingerprint string // empty if neither tarball nor current would contribute
+	CAFingerprintChanged  bool
+	CurrentEnrolledNodes  int
 
 	// ui_users delta.
-	CurrentUsers           []string // sorted, distinct
-	RestoredUsers          []string // sorted, distinct, post-merge
-	UsersAddedByRestore    []string // sorted: restored ∖ current
-	UsersRemovedByRestore  []string // sorted: current ∖ restored
-	TOTPCounterRollbacks   []string // sorted usernames where restored.counter < current.counter
+	CurrentUsers          []string // sorted, distinct
+	RestoredUsers         []string // sorted, distinct, post-merge
+	UsersAddedByRestore   []string // sorted: restored ∖ current
+	UsersRemovedByRestore []string // sorted: current ∖ restored
+	TOTPCounterRollbacks  []string // sorted usernames where restored.counter < current.counter
 
 	// File source counts (informational for the summary).
 	FilesFromTarball int
 	FilesFromCurrent int
 
 	// Guard outcomes (precomputed for the summary printer).
-	DPGuardWouldBlock     bool // CAFingerprintChanged && CurrentEnrolledNodes > 0 && !AcceptDPReenrollment
-	DPGuardActive         bool // would block OR was accepted
-	TOTPGuardWouldBlock   bool // len(TOTPCounterRollbacks) > 0 && !AllowCounterRollback
-	TOTPGuardActive       bool
+	DPGuardWouldBlock   bool // CAFingerprintChanged && CurrentEnrolledNodes > 0 && !AcceptDPReenrollment
+	DPGuardActive       bool // would block OR was accepted
+	TOTPGuardWouldBlock bool // len(TOTPCounterRollbacks) > 0 && !AllowCounterRollback
+	TOTPGuardActive     bool
 }
 
 // runRestoreDryRun is the CLI entrypoint. Validates tarPath end-to-end,
@@ -148,7 +154,7 @@ type commitAnalysis struct {
 // returns nil on success. Returns an error on any validation rule
 // failure. Never writes to dataDir.
 func runRestoreDryRun(tarPath, dataDir, passphrase string, opts restoreOpts) error {
-	summary, _, files, err := validateBackup(tarPath, dataDir, passphrase)
+	summary, _, files, err := validateBackup(tarPath, dataDir, passphrase, opts.BackupPassphrase)
 	if err != nil {
 		return err
 	}
@@ -165,8 +171,8 @@ func runRestoreDryRun(tarPath, dataDir, passphrase string, opts restoreOpts) err
 // staging can read per-file modes without re-parsing), the in-memory
 // file map (so the caller can run further analysis without re-reading
 // the tarball), and an error.
-func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary, *backupManifest, map[string][]byte, error) {
-	files, order, err := readTarball(tarPath)
+func validateBackup(tarPath, _ /*dataDir*/, passphrase, backupPassphrase string) (*restoreSummary, *backupManifest, map[string][]byte, error) {
+	files, order, err := readTarball(tarPath, backupPassphrase)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -206,16 +212,43 @@ func validateBackup(tarPath, _ /*dataDir*/, passphrase string) (*restoreSummary,
 	return summary, manifest, files, nil
 }
 
-// readTarball opens path, gunzips, reads every entry into memory, and
-// returns the file map + header order. Path-traversal-guards every entry.
-func readTarball(path string) (map[string][]byte, []string, error) {
-	f, err := os.Open(path) // #nosec G304 -- operator-controlled path
+// loadAndMaybeDecrypt reads the backup at path and returns the
+// (possibly decrypted) tar.gz bytes. If the on-disk blob carries the
+// D1.4 encrypted magic, the caller-supplied passphrase is required and
+// the blob is decrypted in memory; the encrypted bytes are best-effort
+// wiped before the decrypted bytes are returned. Plaintext is never
+// written to disk.
+func loadAndMaybeDecrypt(path, backupPassphrase string) ([]byte, error) {
+	blob, err := os.ReadFile(path) // #nosec G304 -- operator-controlled path
 	if err != nil {
-		return nil, nil, fmt.Errorf("restore: open tarball: %w", err)
+		return nil, fmt.Errorf("restore: read tarball: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	if !isEncryptedBackupBlob(blob) {
+		return blob, nil
+	}
+	if backupPassphrase == "" {
+		return nil, fmt.Errorf("restore: encrypted backup detected but %s is not set", backupPassphraseEnv)
+	}
+	plain, derr := decryptBackupBlob(blob, backupPassphrase)
+	if derr != nil {
+		return nil, fmt.Errorf("restore: %w", derr)
+	}
+	zeroBytes(blob)
+	return plain, nil
+}
 
-	gz, err := gzip.NewReader(f)
+// readTarball opens path, decrypts (D1.4) or sniffs gzip (D1.3a) based
+// on the magic of the first eight bytes, gunzips, reads every entry
+// into memory, and returns the file map + header order.
+// Path-traversal-guards every entry. Plaintext is never written to
+// disk: when the file is encrypted, decryption produces an in-memory
+// byte slice that's gunzipped via bytes.Reader.
+func readTarball(path, backupPassphrase string) (map[string][]byte, []string, error) {
+	blob, err := loadAndMaybeDecrypt(path, backupPassphrase)
+	if err != nil {
+		return nil, nil, err
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(blob))
 	if err != nil {
 		return nil, nil, fmt.Errorf("restore: gunzip: %w", err)
 	}
@@ -746,14 +779,14 @@ var commitInjectBetweenRenames func() error
 //
 // Step ordering (single failure boundary at the swap):
 //
-//	1. validate  (D1.3b.1; no /data writes)
-//	2. analyze   (D1.3b.2a; no /data writes)
-//	3. guards    (D1.3b.2a precomputed; reject if WouldBlock)
-//	4. summary   (mode-aware; informational)
-//	5. stage     (mkdir /data.staging.<ts>; write per mode predicate)
-//	6. rename A  (current /data → /data.bak.<ts>)
-//	7. rename B  (staging → /data) + parent-dir fsync
-//	8. final     (print success + .bak path)
+//  1. validate  (D1.3b.1; no /data writes)
+//  2. analyze   (D1.3b.2a; no /data writes)
+//  3. guards    (D1.3b.2a precomputed; reject if WouldBlock)
+//  4. summary   (mode-aware; informational)
+//  5. stage     (mkdir /data.staging.<ts>; write per mode predicate)
+//  6. rename A  (current /data → /data.bak.<ts>)
+//  7. rename B  (staging → /data) + parent-dir fsync
+//  8. final     (print success + .bak path)
 //
 // If 1–5 fail: /data unchanged, staging cleaned up.
 // If 6 fails: /data unchanged, staging cleaned up.
@@ -761,7 +794,7 @@ var commitInjectBetweenRenames func() error
 // exist; error message names the exact `mv` recovery command.
 func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) error {
 	// Steps 1–2 (reuse).
-	summary, manifest, files, err := validateBackup(tarPath, dataDir, passphrase)
+	summary, manifest, files, err := validateBackup(tarPath, dataDir, passphrase, opts.BackupPassphrase)
 	if err != nil {
 		return err
 	}

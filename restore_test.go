@@ -45,7 +45,7 @@ func makeValidBackup(t *testing.T) string {
 // validation failures).
 func repackTarball(t *testing.T, srcPath, destPath string, transform func(files map[string][]byte, order *[]string)) {
 	t.Helper()
-	files, order, err := readTarball(srcPath)
+	files, order, err := readTarball(srcPath, "")
 	if err != nil {
 		t.Fatalf("repack: read %s: %v", srcPath, err)
 	}
@@ -1239,10 +1239,11 @@ func TestRestore_DryRun_TarEntryOutsideDataNamespace_Rejected(t *testing.T) {
 
 // ── 36. Manifest path outside data/ namespace rejected ───────────────
 //
-//nolint:dupl // Structurally similar to TestRestore_DryRun_ManifestReferencesMissingFile
 // (both inject a fake manifest entry via repackTarball) but tests a
 // different rule (namespace vs presence). Refactoring to a shared
 // helper would obscure which rule each case isolates.
+//
+//nolint:dupl // Structurally similar to TestRestore_DryRun_ManifestReferencesMissingFile
 func TestRestore_DryRun_ManifestPathOutsideDataNamespace_Rejected(t *testing.T) {
 	src := makeValidBackup(t)
 	dest := filepath.Join(t.TempDir(), "manifest-outside-namespace.tar.gz")
