@@ -837,10 +837,10 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 // the gap flagged in PR #194 review — must walk live /data, not just
 // paths in the manifest).
 //
-//nolint:gocognit // Two-pass structure (tarball first, walk-current
-// second) is intentionally inlined so the mode predicate, mkdir,
-// per-file mode resolution, and atomicWriteFile contract are all
-// visible at one call site. Extracting helpers would scatter the
+//nolint:gocognit,cyclop // Two-pass structure (tarball first, walk-
+// current second) is intentionally inlined so the mode predicate,
+// mkdir, per-file mode resolution, and atomicWriteFile contract are
+// all visible at one call site. Extracting helpers would scatter the
 // staging contract across functions and obscure the per-pass invariants.
 func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifest *backupManifest, mode restoreMode) error {
 	// os.Mkdir (exclusive), not os.MkdirAll, for the staging root —
