@@ -758,10 +758,29 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	// Step 4: print summary so the operator sees the plan one last time.
 	printRestoreSummary(os.Stdout, summary, analysis)
 
-	// Anchor timestamps + paths now so failure messages can name them.
-	timestamp := time.Now().UTC().Format("20060102T150405Z")
-	stagingDir := dataDir + ".staging." + timestamp
-	bakPath := dataDir + ".bak." + timestamp
+	// Anchor paths now so failure messages can name them. Suffix is
+	// timestamp + PID so:
+	//   - same-second retries from different processes don't collide
+	//   - the operator can copy-paste the printed paths verbatim
+	//   - staging and bak share a correlated suffix
+	suffix := fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405Z"), os.Getpid())
+	stagingDir := dataDir + ".staging." + suffix
+	bakPath := dataDir + ".bak." + suffix
+
+	// Collision pre-check: refuse to proceed if either path already
+	// exists on disk. Catches stale state from a prior failed restore
+	// (e.g. operator killed the process mid-stage) and prevents
+	// accidental reuse of either dir.
+	if _, err := os.Stat(stagingDir); err == nil {
+		return fmt.Errorf("restore: staging path %q already exists; remove it before retrying", stagingDir)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("restore: stat staging path %q: %w", stagingDir, err)
+	}
+	if _, err := os.Stat(bakPath); err == nil {
+		return fmt.Errorf("restore: backup path %q already exists; remove it before retrying", bakPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("restore: stat backup path %q: %w", bakPath, err)
+	}
 
 	fmt.Fprintf(os.Stdout, "\nCommitting restore now.\n")
 	fmt.Fprintf(os.Stdout, "  Staging dir: %s\n", stagingDir)
@@ -818,8 +837,12 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 // the gap flagged in PR #194 review — must walk live /data, not just
 // paths in the manifest).
 func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifest *backupManifest, mode restoreMode) error {
-	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
-		return fmt.Errorf("mkdir staging: %w", err)
+	// os.Mkdir (exclusive), not os.MkdirAll, for the staging root —
+	// fail closed if a prior failed restore left a same-named dir on
+	// disk so we never reuse stale staging content. Subdirectories
+	// inside staging still use MkdirAll (created on demand).
+	if err := os.Mkdir(stagingDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir staging (exclusive): %w", err)
 	}
 
 	// Index manifest modes by path so pass 1 doesn't scan per-file.

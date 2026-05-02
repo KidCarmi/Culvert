@@ -1335,3 +1335,127 @@ func TestRestoreCommit_TrustRootOnly_PreservesCurrentMode(t *testing.T) {
 		t.Errorf("restored ui_users.json mode = %o, want 0644 (preserved from current /data)", got)
 	}
 }
+
+// ── 39. Pre-existing staging dir aborts before /data is touched ──────
+
+func TestRestoreCommit_PreExistingStagingDir_AbortsBeforeDataTouched(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+
+	// Pre-create the staging dir at the path runRestoreCommit will
+	// derive (timestamp+pid). Since we can't predict timestamp here,
+	// we pre-create EVERY .staging.* path by precomputing the suffix.
+	// Simpler: pre-create ALL siblings matching the expected glob.
+	// Even simpler: make every possible derivation collide by creating
+	// the exact path the function will produce — we know it uses
+	// time.Now + os.Getpid, so create one matching that.
+	suffix := fmt.Sprintf("%s-%d",
+		time.Now().UTC().Format("20060102T150405Z"), os.Getpid())
+	stagingDir := currentDir + ".staging." + suffix
+	if err := os.Mkdir(stagingDir, 0o700); err != nil {
+		t.Fatalf("pre-create staging: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stagingDir) })
+
+	// Mark the pre-existing dir with a sentinel file so we can prove
+	// it was NOT touched (i.e. no stale reuse).
+	sentinel := filepath.Join(stagingDir, "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("pre-existing"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	preCASha := fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err == nil {
+		t.Fatal("expected staging-collision error")
+	}
+	if !strings.Contains(err.Error(), "staging path") || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error should mention staging-path collision, got: %v", err)
+	}
+
+	// /data must be untouched (commit never started).
+	if fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt")) != preCASha {
+		t.Error("/data should not be touched on staging collision")
+	}
+	// No .bak should exist.
+	if _, ok := readBak(t, currentDir); ok {
+		t.Error(".bak should not exist on staging collision")
+	}
+	// Sentinel must be intact — proves no stale reuse.
+	body, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("sentinel should still exist: %v", err)
+	}
+	if string(body) != "pre-existing" {
+		t.Errorf("sentinel body changed; restore reused stale staging dir")
+	}
+}
+
+// ── 40. Pre-existing bak dir aborts before /data is touched ──────────
+
+func TestRestoreCommit_PreExistingBakDir_AbortsBeforeDataTouched(t *testing.T) {
+	src, currentDir, _, _ := makeCommitFixture(t, 0)
+
+	// Pre-create the bak dir at the path runRestoreCommit will derive.
+	suffix := fmt.Sprintf("%s-%d",
+		time.Now().UTC().Format("20060102T150405Z"), os.Getpid())
+	bakPath := currentDir + ".bak." + suffix
+	if err := os.Mkdir(bakPath, 0o700); err != nil {
+		t.Fatalf("pre-create bak: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(bakPath) })
+
+	preCASha := fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "",
+			restoreOpts{Mode: modeFull, AcceptDPReenrollment: true})
+	})
+	if err == nil {
+		t.Fatal("expected bak-collision error")
+	}
+	if !strings.Contains(err.Error(), "backup path") || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error should mention backup-path collision, got: %v", err)
+	}
+
+	// /data must be untouched (commit never started).
+	if fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt")) != preCASha {
+		t.Error("/data should not be touched on bak collision")
+	}
+	// No staging dir should be created.
+	if _, ok := readStaging(t, currentDir); ok {
+		t.Error("staging dir should not be created when bak collision detected first")
+	}
+}
+
+// ── 41. No stale staging content is reused (race-condition guard) ────
+//
+// Even if the pre-check missed a same-instant creation between Stat
+// and Mkdir (TOCTOU), the os.Mkdir (not MkdirAll) call inside
+// stageArtifacts must still fail closed. Simulates this by skipping
+// the runRestoreCommit pre-check (calling stageArtifacts directly
+// against a pre-created staging dir).
+func TestRestoreCommit_StageArtifacts_RefusesPreExistingStagingDir(t *testing.T) {
+	currentDir := t.TempDir()
+	stagingDir := currentDir + ".staging.test"
+	if err := os.Mkdir(stagingDir, 0o700); err != nil {
+		t.Fatalf("pre-create staging: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stagingDir) })
+
+	// Minimal manifest (zero entries OK for this test — we never get
+	// past the staging-root mkdir).
+	manifest := &backupManifest{SchemaVersion: 1, Files: nil}
+	files := map[string][]byte{}
+
+	err := stageArtifacts(stagingDir, currentDir, files, manifest, modeFull)
+	if err == nil {
+		t.Fatal("stageArtifacts should fail when staging root already exists")
+	}
+	if !strings.Contains(err.Error(), "exclusive") {
+		t.Errorf("error should mention exclusive mkdir, got: %v", err)
+	}
+}
