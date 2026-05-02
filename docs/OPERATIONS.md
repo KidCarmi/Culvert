@@ -173,27 +173,40 @@ Run these once when bringing up a new node, in order:
 
 ## 4. Backup and restore for `/data`
 
-Culvert keeps **all** persistent state under the data directory. A
-filesystem-level snapshot of `/data` is a complete backup.
+Culvert keeps **all** persistent state under the data directory. The
+supported backup and restore path is the built-in `--backup` /
+`--restore` CLI driven through the profile-gated `cli` service in
+`docker-compose.yml`. See
+**[`docs/operator/docker-compose-backup-restore.md`](operator/docker-compose-backup-restore.md)**
+for the full operator surface: encrypted backup, restore dry-run,
+restore commit (offline), leftover cleanup, passphrase handling, and
+the runtime-vs-offline matrix.
 
-**To back up:**
+### Manual `tar -C /data -czf …` is unsupported
 
-```bash
-# Take an atomic snapshot. Stop the proxy or use a snapshotting filesystem
-# (LVM, ZFS, btrfs) for crash-consistent state.
-tar -C /data -czf culvert-backup-$(date +%F).tar.gz .
-```
+Filesystem-level `tar` of `/data` is **not** a supported backup
+mechanism and the resulting archives **cannot be restored** by Culvert.
+Manual `tar` bypasses the Culvert backup format's guarantees:
 
-**To restore:**
+- No `manifest.json` (sha256, size, mode, tier per artifact).
+- No `schema_version` envelope; the restore validator only accepts
+  archives produced by `--backup`.
+- No checksum verification before swapping `/data`.
+- No CA-bundle cross-validation (cluster CA fingerprint vs.
+  `cluster.json` enrolled-DP set).
+- No Tier-3 exclusion — manual `tar` includes logs, hashcache, hit
+  counters, and other operational state that should not survive a
+  restore.
+- No atomic rename swap; no `/data.bak.<ts>-<pid>` rollback dir.
+- No restore dry-run, no DP re-enrollment guard, no TOTP counter
+  rollback guard.
+- No `--encrypt` integration — operator has to bring their own
+  encryption.
 
-```bash
-systemctl stop culvert
-rm -rf /data/*
-tar -C /data -xzf culvert-backup-YYYY-MM-DD.tar.gz
-systemctl start culvert
-```
+Use the `cli` service for everything backup-related. The operator doc
+linked above is the only supported reference.
 
-**What's inside `/data`:**
+### What's inside `/data`
 
 * `ca.bundle` — encrypted root CA (passphrase required to use)
 * `policy.json[.meta]` — policy ruleset and version

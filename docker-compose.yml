@@ -127,7 +127,50 @@ services:
       timeout: 5s
       retries: 3
 
+  # ── Culvert CLI (D1.5 operator contract) ────────────────────────────────
+  # One-shot operator container for backup, restore, and cleanup commands.
+  # Profile-gated, so `docker compose up -d` does NOT start it. Invoke as:
+  #
+  #   docker compose --profile cli run --rm cli <flags>
+  #
+  # Examples:
+  #
+  #   # Encrypted backup (production default)
+  #   docker compose --profile cli run --rm \
+  #     -e CULVERT_BACKUP_PASSPHRASE \
+  #     cli --encrypt \
+  #         --backup /backup/culvert-$(date -u +%Y%m%dT%H%M%SZ).tar.gz.enc
+  #
+  #   # Restore dry-run (safe while proxy is up)
+  #   docker compose --profile cli run --rm \
+  #     -e CULVERT_BACKUP_PASSPHRASE \
+  #     cli --restore /backup/culvert-20260501T030000Z.tar.gz.enc
+  #
+  #   # List restore leftovers
+  #   docker compose --profile cli run --rm cli --list-restore-leftovers
+  #
+  # See docs/operator/docker-compose-backup-restore.md for the full surface.
+  #
+  # Same image as `proxy` so the CLI and the daemon never version-skew.
+  # Mounts /data rw and /backup rw. Does NOT mount /var/run/docker.sock
+  # and does NOT expose any ports. Restore commit is offline-only — stop
+  # the daemon first (`docker compose down`) before running --confirm.
+  cli:
+    image: ghcr.io/kidcarmi/culvert:latest
+    # Uncomment to build locally (mirrors the proxy service):
+    # build: .
+    profiles: ["cli"]
+    volumes:
+      - proxy-data:/data
+      - culvert-backups:/backup
+    # Operator supplies one-shot flags via `run --rm cli <flags>`. The
+    # Dockerfile ENTRYPOINT is `./culvert`; the empty command here clears
+    # the daemon CMD so an accidental `docker compose --profile cli up -d`
+    # would not start a second proxy.
+    command: []
+
 volumes:
   proxy-data:
-  clamav-db:      # ClamAV signature database — persisted to skip re-download on restart
-  updater-state:  # writable rollback state for the updater sidecar (survives self-update)
+  clamav-db:        # ClamAV signature database — persisted to skip re-download on restart
+  updater-state:   # writable rollback state for the updater sidecar (survives self-update)
+  culvert-backups: # backup archives produced by the cli service (D1.5; mounted at /backup, only in cli)
