@@ -115,6 +115,7 @@ type startupState struct {
 	trustFwdHeaders         *bool
 	resetPwUser             *string
 	backupOut               *string
+	backupEncrypt           *bool
 	restoreIn               *string
 	restoreMode             *string
 	restoreConfirm          *bool
@@ -260,6 +261,7 @@ func parseFlags(s *startupState) {
 	s.trustFwdHeaders = flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
 	s.resetPwUser = flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
 	s.backupOut = flag.String("backup", "", "Pack /data into a tar.gz at the given path and exit (D1.3a)")
+	s.backupEncrypt = flag.Bool("encrypt", false, "Encrypt the --backup tarball with AES-256-GCM (D1.4); requires "+backupPassphraseEnv+" env var. Lose the passphrase, lose the backup.")
 	s.restoreIn = flag.String("restore", "", "Validate a backup tarball and print restore plan (dry-run; D1.3b.1)")
 	s.restoreMode = flag.String("mode", "", "Restore mode: full | trust-root-only | state-only (D1.3b.2a; default: full)")
 	s.restoreConfirm = flag.Bool("confirm", false, "Commit the restore destructively (D1.3b.2b). Without --confirm, --restore is a dry-run.")
@@ -290,13 +292,12 @@ func parseFlags(s *startupState) {
 //
 //nolint:cyclop,gocognit // Flat one-shot dispatch table: each branch has
 func handleOneShotCommands(s *startupState) {
-	// ── One-shot: backup/export (D1.3a) ────────────────────────────────────
+	// ── One-shot: backup/export (D1.3a unencrypted; D1.4 encrypted) ───────
 	if *s.backupOut != "" {
-		if err := runBackup(*s.backupOut, dataDir); err != nil {
+		if err := runBackupCommand(s); err != nil {
 			fmt.Fprintf(os.Stderr, "Backup error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Backup written to %s\n", *s.backupOut)
 		os.Exit(0)
 	}
 	// ── One-shot: restore (D1.3b.1 dry-run + D1.3b.2a analyzer + D1.3b.2b commit) ─
@@ -314,6 +315,7 @@ func handleOneShotCommands(s *startupState) {
 			Mode:                 mode,
 			AcceptDPReenrollment: *s.restoreAcceptDPReenroll,
 			AllowCounterRollback: *s.restoreAllowCounterRB,
+			BackupPassphrase:     os.Getenv(backupPassphraseEnv),
 		}
 		if *s.restoreConfirm {
 			if err := runRestoreCommit(*s.restoreIn, dataDir, passphrase, opts); err != nil {
@@ -373,6 +375,33 @@ func handleOneShotCommands(s *startupState) {
 // runCleanupCommand parses cleanup-restore-leftovers flags and dispatches
 // to runCleanupLeftovers. Extracted from handleOneShotCommands so the
 // dispatch table stays flat (avoids nestif on the cleanup branch).
+// runBackupCommand dispatches the --backup one-shot. Without --encrypt,
+// produces a D1.3a unencrypted tar.gz. With --encrypt, demands the
+// CULVERT_BACKUP_PASSPHRASE env var, warns on short passphrases, and
+// produces a D1.4 AES-256-GCM-sealed blob. Refuses to overwrite an
+// existing output path (matches D1.3a semantics).
+func runBackupCommand(s *startupState) error {
+	if *s.backupEncrypt {
+		passphrase := os.Getenv(backupPassphraseEnv)
+		if passphrase == "" {
+			return fmt.Errorf("--encrypt requires %s env var (D1.4 does not support interactive prompts)", backupPassphraseEnv)
+		}
+		if len(passphrase) < backupPassphraseMinLen {
+			fmt.Fprintf(os.Stderr, "WARN: backup passphrase is shorter than %d chars; AES-256 strength is gated by passphrase entropy\n", backupPassphraseMinLen)
+		}
+		if err := runBackupEncrypted(*s.backupOut, dataDir, passphrase); err != nil {
+			return err
+		}
+		fmt.Printf("Backup written to %s (encrypted, AES-256-GCM, PBKDF2-SHA256/%d)\n", *s.backupOut, backupEncKDFIters)
+		return nil
+	}
+	if err := runBackup(*s.backupOut, dataDir); err != nil {
+		return err
+	}
+	fmt.Printf("Backup written to %s\n", *s.backupOut)
+	return nil
+}
+
 func runCleanupCommand(s *startupState) error {
 	var older time.Duration
 	if *s.cleanupOlderThan != "" {

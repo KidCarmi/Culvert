@@ -311,7 +311,7 @@ func TestBackup_MissingRequired_NotFirstRunOptional_Errors(t *testing.T) {
 		},
 	}
 
-	err := runBackupWith(out, artifacts)
+	err := runBackupWith(out, artifacts, "")
 	if err == nil {
 		t.Fatal("expected error on missing strict-required artifact, got nil")
 	}
@@ -395,4 +395,3 @@ func sortedNames(m map[string][]byte) []string {
 	sort.Strings(out)
 	return out
 }
-
