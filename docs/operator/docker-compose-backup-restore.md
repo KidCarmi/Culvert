@@ -7,9 +7,13 @@ to do instead.
 
 > **TL;DR**
 >
+> Ensure `CULVERT_BACKUP_PASSPHRASE` is already exported in your shell
+> env (sourced from `.env`, `pass`/`gopass`, or a secrets manager — see
+> § 9). Then:
+>
 > ```bash
 > # Encrypted backup — production default.
-> CULVERT_BACKUP_PASSPHRASE=… docker compose --profile cli run --rm \
+> docker compose --profile cli run --rm \
 >   -e CULVERT_BACKUP_PASSPHRASE \
 >   cli --encrypt \
 >       --backup /backup/culvert-$(date -u +%Y%m%dT%H%M%SZ).tar.gz.enc
