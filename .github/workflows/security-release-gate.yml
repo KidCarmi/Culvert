@@ -65,6 +65,19 @@ jobs:
             -fmt=text \
             ./...
 
+      - name: Run gosec on cmd/culvert-maint (nested module)
+        # gosec walks Go-module boundaries — `./...` from the repo root
+        # does not descend into the nested cmd/culvert-maint module, so
+        # the privileged host-side agent's code requires its own pass.
+        # qa-gate.yml's qa-agent job runs the same scan; this is the
+        # belt-and-suspenders run that surfaces findings in the Security
+        # gate's logs as well.
+        working-directory: cmd/culvert-maint
+        run: |
+          gosec -exclude=G104,G302,G304,G401,G402,G704 \
+            -fmt=text \
+            ./...
+
       - name: Upload SARIF to GitHub Security tab
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
@@ -288,11 +301,22 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
-      - name: Run staticcheck
+      - name: Run staticcheck (proxy module — root)
         uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1
         with:
           version: "2025.1"
           install-go: false
+
+      - name: Run staticcheck (cmd/culvert-maint nested module)
+        # The action above runs from the repo root; it does NOT descend
+        # into nested modules. The agent module is scanned by its own
+        # qa-agent job in qa-gate.yml; this is the parallel run inside
+        # the Security gate so coverage is visible here as well.
+        uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1
+        with:
+          version: "2025.1"
+          install-go: false
+          working-directory: cmd/culvert-maint
 
   # ─── 9. Race-condition & coverage tests ────────────────────────────────────
   tests-race:

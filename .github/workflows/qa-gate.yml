@@ -393,6 +393,120 @@ jobs:
         # that single test with -v so a schema break is called out loudly.
         run: go test -v -run TestConfig_TOTPLastCounter_PersistsThroughFile ./...
 
+  # ─── G. Maintenance Agent (cmd/culvert-maint) ──────────────────────────────
+  # The agent is a separate Go module — `go test ./...` from the repo root
+  # does NOT descend into nested modules, so its tests would silently fall
+  # outside the gate without an explicit job here. D1.6a introduces a
+  # privileged host-side agent; CI coverage of the new module is mandatory
+  # before merge.
+  qa-agent:
+    name: "QA · Maintenance Agent (cmd/culvert-maint)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: cmd/culvert-maint/go.sum
+
+      - name: Download agent dependencies
+        working-directory: cmd/culvert-maint
+        run: go mod download
+
+      - name: Verify go.mod / go.sum are tidy
+        working-directory: cmd/culvert-maint
+        run: |
+          cp go.mod go.mod.before
+          cp go.sum go.sum.before
+          go mod tidy
+          if ! diff -q go.mod go.mod.before >/dev/null || ! diff -q go.sum go.sum.before >/dev/null; then
+            echo "::error::go.mod / go.sum drift in cmd/culvert-maint after `go mod tidy`"
+            diff go.mod.before go.mod || true
+            diff go.sum.before go.sum || true
+            exit 1
+          fi
+
+      - name: Compile (strict)
+        working-directory: cmd/culvert-maint
+        run: go build -o /tmp/culvert-maint .
+
+      - name: go vet (agent module)
+        working-directory: cmd/culvert-maint
+        run: go vet ./...
+
+      - name: Tests with race detector
+        working-directory: cmd/culvert-maint
+        env:
+          TEST_SEED: "20260421"
+        run: go test -race -count=1 -timeout=10m -v ./...
+
+      - name: Determinism — shuffled double run
+        working-directory: cmd/culvert-maint
+        env:
+          TEST_SEED: "20260421"
+        run: go test -count=2 -shuffle=on -timeout=10m ./...
+
+      - name: Install golangci-lint
+        # The reviewdog action in code-review.yml runs from the repo root
+        # and does not descend into the nested module. Here we run it
+        # explicitly inside cmd/culvert-maint with the same project config.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.5.0
+
+      - name: golangci-lint (agent module)
+        working-directory: cmd/culvert-maint
+        run: $(go env GOPATH)/bin/golangci-lint run --timeout=5m ./...
+
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+      - name: gosec (agent module)
+        working-directory: cmd/culvert-maint
+        run: |
+          $(go env GOPATH)/bin/gosec \
+            -exclude=G104,G302,G304,G401,G402,G704 \
+            -fmt=text \
+            ./...
+
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2025.1
+
+      - name: staticcheck (agent module)
+        working-directory: cmd/culvert-maint
+        run: $(go env GOPATH)/bin/staticcheck ./...
+
+      - name: shellcheck install.sh
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck packaging/culvert-maint/install.sh
+
+      - name: visudo -c sudoers grammar
+        # The shipped sudoers file uses `{compose_file}` as a placeholder
+        # in the allowed-command position; the operator replaces it at
+        # install time. visudo -c validates sudoers grammar; the
+        # placeholder is treated as a literal arg, which is grammatically
+        # valid even though it would never match a real `docker compose`
+        # invocation until substituted.
+        run: |
+          sudo visudo -c -f packaging/sudoers/culvert-maint
+
+      - name: systemd-analyze verify (best-effort)
+        # systemd-analyze verifies unit file syntax AND that ExecStart
+        # resolves to an executable file. Stage the freshly-built binary
+        # at the unit file's documented path so the verification is
+        # meaningful. continue-on-error stays on so a transitive runner-
+        # image change (e.g. systemd-analyze going missing) does not
+        # block the gate.
+        continue-on-error: true
+        run: |
+          sudo install -m 0755 /tmp/culvert-maint /usr/local/bin/culvert-maint
+          systemd-analyze verify packaging/systemd/culvert-maint.service
+
   # ─── Gate summary ───────────────────────────────────────────────────────────
   qa-gate-approved:
     name: "✅ QA Gate — APPROVED"
@@ -404,6 +518,7 @@ jobs:
       - qa-infra-compose
       - qa-os
       - qa-contract
+      - qa-agent
     steps:
       - name: Summarise
         run: |
@@ -418,6 +533,7 @@ jobs:
           | Infra (Docker Compose) | qa-infra-compose | ✅ |
           | OS / environment  | qa-os | ✅ |
           | On-disk contract  | qa-contract | ✅ |
+          | Maintenance Agent (cmd/culvert-maint) | qa-agent | ✅ |
 
           **Interpretation**
           - If `qa-logic` was the only red job, the code is wrong.
