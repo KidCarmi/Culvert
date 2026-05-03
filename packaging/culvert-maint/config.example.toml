@@ -6,13 +6,20 @@
 # All keys are documented in roadmap/D1.6-maintenance-agent-
 # implementation-plan.md § 1.3. The agent fails closed on any missing
 # required key, unknown enum value, malformed duration / URL / regex,
-# or non-absolute path. There are NO silent fallbacks.
+# or non-absolute path. There is no silent fallback on invalid values;
+# documented defaults apply only when optional keys are omitted.
 
 # ── Required ───────────────────────────────────────────────────────────────
 
 # Directory containing the operator's docker-compose.yml. The agent's
 # cwd for every `docker compose` invocation. Required; no default.
 compose_project_dir = "/srv/culvert"
+
+# UID-or-username allowlist for UDS peer authentication. The agent
+# refuses to start with an empty list. Each entry is either a numeric
+# UID or a username that exists on the host. Required; no default.
+# Single config surface — there is no equivalent CLI flag.
+allow_peers = ["culvert-cp"]
 
 # ── Optional — defaults shown ──────────────────────────────────────────────
 

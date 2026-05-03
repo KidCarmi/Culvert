@@ -81,24 +81,52 @@ type Config struct {
 
 	// Default upgrade-target image-ref allowlist (compiled regex).
 	ImageAllowlist *regexp.Regexp
+
+	// AllowPeers is the closed list of UID-or-username tokens permitted
+	// to connect to the agent's UDS. The agent refuses to start with
+	// an empty list. The CLI flag --allow-peers is now removed; this
+	// is the single config surface.
+	AllowPeers []string
+}
+
+// IsAllowedBackupPath reports whether p (a path AS SEEN BY THE CLI
+// CONTAINER) is allowed by AllowedBackupDir. Uses path-component
+// containment: `/backup` allows `/backup` itself and `/backup/...`,
+// but does NOT allow `/backup2` or `/backupOTHER`.
+//
+// Future D1.6b backup/restore handlers MUST go through this helper —
+// a naive strings.HasPrefix check would let `/backup2/x` slip past a
+// `/backup` policy.
+func (c *Config) IsAllowedBackupPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	clean := filepath.Clean(p)
+	allowed := filepath.Clean(c.AllowedBackupDir)
+	if clean == allowed {
+		return true
+	}
+	prefix := allowed + string(filepath.Separator)
+	return strings.HasPrefix(clean, prefix)
 }
 
 // rawConfig mirrors the TOML on-disk layout. Unknown keys cause Load to
 // fail (toml.DecodeFile with strict mode).
 type rawConfig struct {
-	ComposeProjectDir string `toml:"compose_project_dir"`
-	ComposeFile       string `toml:"compose_file"`
-	SocketPath        string `toml:"socket_path"`
-	StateDir          string `toml:"state_dir"`
-	PrivilegeMode     string `toml:"privilege_mode"`
-	HealthBaseURL     string `toml:"health_base_url"`
-	HealthPath        string `toml:"health_path"`
-	ReadyPath         string `toml:"ready_path"`
-	OperationTimeout  string `toml:"operation_timeout"`
-	StageTimeout      string `toml:"stage_timeout"`
-	LogRetentionDays  *int   `toml:"log_retention_days"`
-	AllowedBackupDir  string `toml:"allowed_backup_dir"`
-	ImageAllowlist    string `toml:"image_allowlist"`
+	ComposeProjectDir string   `toml:"compose_project_dir"`
+	ComposeFile       string   `toml:"compose_file"`
+	SocketPath        string   `toml:"socket_path"`
+	StateDir          string   `toml:"state_dir"`
+	PrivilegeMode     string   `toml:"privilege_mode"`
+	HealthBaseURL     string   `toml:"health_base_url"`
+	HealthPath        string   `toml:"health_path"`
+	ReadyPath         string   `toml:"ready_path"`
+	OperationTimeout  string   `toml:"operation_timeout"`
+	StageTimeout      string   `toml:"stage_timeout"`
+	LogRetentionDays  *int     `toml:"log_retention_days"`
+	AllowedBackupDir  string   `toml:"allowed_backup_dir"`
+	ImageAllowlist    string   `toml:"image_allowlist"`
+	AllowPeers        []string `toml:"allow_peers"`
 }
 
 const (
@@ -225,22 +253,18 @@ func validate(raw *rawConfig) (*Config, error) {
 	}
 	cfg.HealthBaseURL = hu
 
-	// health_path / ready_path — default /health and /ready. Must start with /.
-	hp := raw.HealthPath
-	if hp == "" {
-		hp = defaultHealthPath
-	}
-	if !strings.HasPrefix(hp, "/") {
-		return nil, fmt.Errorf("config: health_path must start with /, got %q", hp)
+	// health_path / ready_path — default /health and /ready. Must
+	// start with exactly one /, contain no whitespace, and be free of
+	// control characters.
+	hp, herr := validateHealthPath("health_path", raw.HealthPath, defaultHealthPath)
+	if herr != nil {
+		return nil, herr
 	}
 	cfg.HealthPath = hp
 
-	rp := raw.ReadyPath
-	if rp == "" {
-		rp = defaultReadyPath
-	}
-	if !strings.HasPrefix(rp, "/") {
-		return nil, fmt.Errorf("config: ready_path must start with /, got %q", rp)
+	rp, rerr := validateHealthPath("ready_path", raw.ReadyPath, defaultReadyPath)
+	if rerr != nil {
+		return nil, rerr
 	}
 	cfg.ReadyPath = rp
 
@@ -303,5 +327,42 @@ func validate(raw *rawConfig) (*Config, error) {
 	}
 	cfg.ImageAllowlist = rx
 
+	// allow_peers — required, no default. Validated only as non-empty
+	// shape here; the resolution to a concrete UID set happens in
+	// internal/auth.NewPolicy at startup.
+	if len(raw.AllowPeers) == 0 {
+		return nil, errors.New("config: allow_peers is required (UID or username allowlist)")
+	}
+	for i, p := range raw.AllowPeers {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			return nil, fmt.Errorf("config: allow_peers[%d] is empty", i)
+		}
+		if strings.ContainsAny(t, "\n\r\t") {
+			return nil, fmt.Errorf("config: allow_peers[%d] contains whitespace control chars: %q", i, p)
+		}
+		cfg.AllowPeers = append(cfg.AllowPeers, t)
+	}
+
 	return cfg, nil
+}
+
+// validateHealthPath returns either the supplied path (if non-empty
+// and well-formed) or the default. Rejects values with control
+// characters or whitespace, paths that don't start with '/', and
+// trailing slashes (Compose paths are bare).
+func validateHealthPath(name, supplied, def string) (string, error) {
+	v := supplied
+	if v == "" {
+		v = def
+	}
+	if !strings.HasPrefix(v, "/") {
+		return "", fmt.Errorf("config: %s must start with /, got %q", name, v)
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7F || r == ' ' || r == '\t' {
+			return "", fmt.Errorf("config: %s contains control or whitespace char: %q", name, v)
+		}
+	}
+	return v, nil
 }

@@ -62,29 +62,32 @@ type Op struct {
 	Result         map[string]interface{} `json:"result,omitempty"`
 }
 
+// stateChangingKinds is the production allowlist of operation kinds
+// that acquire the global maintenance lock. D1.6a ships an empty list
+// — there are no production state-changing kinds in this slice. Each
+// future slice (D1.6b/c) adds its kinds here alongside the matching
+// API handler, runner template, sudoers entry, and tests (per § 4.6
+// four-step contract).
+var stateChangingKinds = map[string]struct{}{
+	// D1.6a: empty by design.
+}
+
+// SyntheticStateChangingKind is exported for tests that need to
+// exercise the lock framework without introducing a production kind.
+// Production handlers MUST NOT emit this kind.
+const SyntheticStateChangingKind = "synthetic.state-changing"
+
 // IsStateChanging reports whether kind mutates /data, /backup, the
-// stack, or persistent state. Read-only kinds run concurrently; state-
-// changing kinds compete for the global maintenance lock (§ 4.9).
-//
-// D1.6a ships the predicate but no actual state-changing kinds. The
-// list is the authoritative one — code should not introduce new kinds
-// without updating this function.
+// stack, or persistent state. Read-only kinds run concurrently;
+// state-changing kinds compete for the global maintenance lock
+// (§ 4.9). The synthetic kind is recognised so tests can exercise the
+// lock framework; production handlers must not use it.
 func IsStateChanging(kind string) bool {
-	switch kind {
-	// D1.6a: no state-changing kinds.
-	case
-		// D1.6b — these are placeholders; the slice that adds the
-		// endpoint also flips IsStateChanging by adding the case.
-		"backup.create",
-		"restore.commit",
-		"cleanups.create",
-		// D1.6c.
-		"upgrades.apply",
-		"rollbacks.create":
+	if kind == SyntheticStateChangingKind {
 		return true
-	default:
-		return false
 	}
+	_, ok := stateChangingKinds[kind]
+	return ok
 }
 
 // FailureReason is a stable string that classifies why an op failed.

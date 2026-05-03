@@ -135,32 +135,48 @@ func Recent(path string, n int) ([]Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: read %s: %w", path, err)
 	}
-	return parseTail(all, n), nil
+	events, err := parseTail(all, n)
+	if err != nil {
+		return nil, fmt.Errorf("audit: parse %s: %w", path, err)
+	}
+	return events, nil
 }
 
-// parseTail parses a JSONL byte buffer and returns the last n events.
-// Malformed lines are silently skipped — audit.jsonl is supposed to be
-// well-formed; we don't fail the whole read on a partial trailing line.
-func parseTail(data []byte, n int) []Event {
+// parseTail parses a JSONL byte buffer and returns the last n events,
+// or an error if a complete line fails to decode (audit corruption).
+//
+// Tolerated: a malformed *trailing* line that has no terminating
+// newline — that's the expected shape during a torn write. Such a line
+// is silently dropped.
+//
+// Rejected: any complete line (one that ends with \n) that fails JSON
+// decode. Audit corruption is a real signal and silently skipping
+// would hide tampering or filesystem damage. The caller surfaces the
+// error to the operator.
+func parseTail(data []byte, n int) ([]Event, error) {
 	var events []Event
 	start := 0
+	lineNum := 0
 	for i := 0; i < len(data); i++ {
 		if data[i] != '\n' {
 			continue
 		}
+		lineNum++
 		if i > start {
 			var ev Event
-			if jerr := json.Unmarshal(data[start:i], &ev); jerr == nil {
-				events = append(events, ev)
+			if jerr := json.Unmarshal(data[start:i], &ev); jerr != nil {
+				// Complete line (terminated with \n) that fails decode
+				// is corruption — fail closed.
+				return nil, fmt.Errorf("audit: malformed line %d: %w", lineNum, jerr)
 			}
-			// Malformed lines are silently skipped — audit.jsonl is
-			// supposed to be well-formed, but we don't fail the whole
-			// read on a partial last line.
+			events = append(events, ev)
 		}
 		start = i + 1
 	}
 	if start < len(data) {
-		// Trailing line without newline (probably mid-write).
+		// Trailing line without terminating newline. Expected shape
+		// during a torn write; tolerate by silently dropping if it
+		// fails decode. Successfully-decoded trailing line is admitted.
 		var ev Event
 		if jerr := json.Unmarshal(data[start:], &ev); jerr == nil {
 			events = append(events, ev)
@@ -169,5 +185,5 @@ func parseTail(data []byte, n int) []Event {
 	if len(events) > n {
 		events = events[len(events)-n:]
 	}
-	return events
+	return events, nil
 }

@@ -199,7 +199,7 @@ func TestRecent_HandlesPartialTrailingLine(t *testing.T) {
 	body := "" +
 		`{"ts":"2026-05-03T00:00:00Z","actor":"a","op_id":"1","kind":"k","outcome":"started","params":{}}` + "\n" +
 		`{"ts":"2026-05-03T00:00:01Z","actor":"a","op_id":"2","kind":"k","outcome":"started","params":{}}` + "\n" +
-		`{"ts":"2026-05-03T00:00:02Z","actor":"a","op_id":"3","ki` // truncated mid-write
+		`{"ts":"2026-05-03T00:00:02Z","actor":"a","op_id":"3","ki` // truncated mid-write (no trailing \n)
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil { //nolint:gosec // test temp path
 		t.Fatalf("write: %v", err)
 	}
@@ -209,5 +209,27 @@ func TestRecent_HandlesPartialTrailingLine(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Errorf("expected 2 valid events (ignoring partial trailing), got %d", len(got))
+	}
+}
+
+// TestRecent_FailsOnMalformedCompleteLine ensures audit corruption is
+// surfaced rather than silently skipped. Tolerated case: torn write
+// without a trailing newline. Rejected case: a complete line ending
+// with \n that fails JSON decode (real corruption signal).
+func TestRecent_FailsOnMalformedCompleteLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "audit.jsonl")
+	body := "" +
+		`{"ts":"2026-05-03T00:00:00Z","actor":"a","op_id":"1","kind":"k","outcome":"started","params":{}}` + "\n" +
+		"this-is-not-json-at-all\n" + // complete line — must error
+		`{"ts":"2026-05-03T00:00:02Z","actor":"a","op_id":"3","kind":"k","outcome":"started","params":{}}` + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil { //nolint:gosec // test temp path
+		t.Fatalf("write: %v", err)
+	}
+	_, err := Recent(p, 10)
+	if err == nil {
+		t.Fatal("expected error on malformed complete line — silent skip would hide corruption")
+	}
+	if !strings.Contains(err.Error(), "malformed") {
+		t.Errorf("error should mention 'malformed', got: %v", err)
 	}
 }

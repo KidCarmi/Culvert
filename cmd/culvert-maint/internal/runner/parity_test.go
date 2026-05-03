@@ -42,6 +42,61 @@ func TestParity_TemplatesMatchSudoersAllowlist(t *testing.T) {
 	}
 }
 
+// TestParity_SudoersAreFullyPathBound rejects any registered template
+// whose sudoers line is NOT bound to the full compose path. This is
+// the foot-gun the original review caught: a template with
+// `-f {compose_file}` would let sudo accept the bare filename from
+// any cwd the agent process could be coerced into.
+func TestParity_SudoersAreFullyPathBound(t *testing.T) {
+	for _, tmpl := range Registry() {
+		// Templates that touch the compose project must reference the
+		// full {compose_path} placeholder, never bare {compose_file}.
+		if strings.Contains(tmpl.Sudoers, "{compose_file}") &&
+			!strings.Contains(tmpl.Sudoers, "{compose_path}") {
+			t.Errorf("template %q sudoers line uses bare {compose_file} — must use {compose_path} so the allowlist is path-bound: %q",
+				tmpl.ID, tmpl.Sudoers)
+		}
+		// Sudoers must never reference a relative path token.
+		if strings.HasPrefix(tmpl.Sudoers, "./") || strings.HasPrefix(tmpl.Sudoers, "../") {
+			t.Errorf("template %q sudoers line begins with a relative path: %q", tmpl.ID, tmpl.Sudoers)
+		}
+	}
+}
+
+// TestParity_D1_6aRegistryIsMinimal asserts D1.6a ships exactly the
+// compose.status template and no future-slice entries leaked through.
+// D1.6b/c MUST update this assertion when their entries land alongside
+// the matching runner methods, sudoers lines, and API handlers.
+func TestParity_D1_6aRegistryIsMinimal(t *testing.T) {
+	reg := Registry()
+	if len(reg) != 1 {
+		var ids []string
+		for _, tmpl := range reg {
+			ids = append(ids, string(tmpl.ID))
+		}
+		t.Fatalf("D1.6a runner registry must contain exactly one template; got %d: %v", len(reg), ids)
+	}
+	if reg[0].ID != TemplateComposeStatus {
+		t.Errorf("D1.6a registry must contain compose.status only; got %q", reg[0].ID)
+	}
+	if reg[0].StateChanging {
+		t.Errorf("compose.status must NOT be state-changing")
+	}
+	// Sudoers must have exactly one entry — no backup/restore/cleanup/
+	// up/down/pull/run leakage.
+	allowed := parseSudoersTemplates(t, findSudoersFile(t))
+	if len(allowed) != 1 {
+		t.Errorf("D1.6a sudoers file must contain exactly one entry; got %d: %v", len(allowed), allowed)
+	}
+	for k := range allowed {
+		for _, banned := range []string{"--backup", "--restore", "--cleanup-restore-leftovers", "up -d", "down", "pull", "manifest inspect", "run --rm cli"} {
+			if strings.Contains(k, banned) {
+				t.Errorf("D1.6a sudoers entry %q contains future-slice token %q — must not leak", k, banned)
+			}
+		}
+	}
+}
+
 // findSudoersFile walks up from this file's directory looking for
 // packaging/sudoers/culvert-maint. The repo root is wherever that path
 // first resolves.

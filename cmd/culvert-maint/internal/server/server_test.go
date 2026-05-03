@@ -119,6 +119,40 @@ func TestSocketCreatedWithMode0660(t *testing.T) {
 	}
 }
 
+func TestListen_RefusesSymlinkAtSocketPath(t *testing.T) {
+	tmp := t.TempDir()
+	sockPath := filepath.Join(tmp, "agent.sock")
+	target := filepath.Join(tmp, "elsewhere")
+	if err := os.WriteFile(target, []byte(""), 0o600); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	if err := os.Symlink(target, sockPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := listen(sockPath); err == nil {
+		t.Fatal("expected listen() to refuse a symlink at socket path")
+	}
+	// Symlink must remain — listen() must NOT remove it.
+	if fi, err := os.Lstat(sockPath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("symlink unexpectedly modified or removed: fi=%v err=%v", fi, err)
+	}
+}
+
+func TestListen_RefusesNonSocketRegularFileAtSocketPath(t *testing.T) {
+	tmp := t.TempDir()
+	sockPath := filepath.Join(tmp, "agent.sock")
+	if err := os.WriteFile(sockPath, []byte("not a socket"), 0o600); err != nil {
+		t.Fatalf("seed regular file: %v", err)
+	}
+	if _, err := listen(sockPath); err == nil {
+		t.Fatal("expected listen() to refuse non-socket file at socket path")
+	}
+	// Regular file must remain.
+	if fi, err := os.Lstat(sockPath); err != nil || !fi.Mode().IsRegular() {
+		t.Errorf("regular file at socket path unexpectedly modified: fi=%v err=%v", fi, err)
+	}
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	sock, stop := startTestServer(t, &fakeStatus{}, nil, "")
 	defer stop()

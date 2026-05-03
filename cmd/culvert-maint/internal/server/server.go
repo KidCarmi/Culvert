@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
@@ -123,12 +125,18 @@ func listen(path string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("server: mkdir socket parent: %w", err)
 	}
-	// Remove any stale socket from a prior run; refuse to clobber a
-	// non-socket file.
+	// Refuse symlinks at the socket path entirely — even a symlink
+	// pointing to a real socket could be a redirect to an
+	// attacker-controlled endpoint. Lstat (not Stat) so the symlink
+	// itself shows up.
 	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("server: socket path %q is a symlink; refusing to remove or follow", path)
+		}
 		if fi.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("server: socket path %q exists and is not a socket; refusing to remove", path)
 		}
+		// Stale socket from a prior run — safe to remove.
 		if rerr := os.Remove(path); rerr != nil {
 			return nil, fmt.Errorf("server: remove stale socket: %w", rerr)
 		}
@@ -208,8 +216,10 @@ func (s *Server) Close() error {
 }
 
 // routes installs the D1.6a route set. Future endpoints are explicitly
-// rejected with 404 here so a stray client request never falls through
-// to the catch-all behaviour.
+// 404'd here so a stray client request never falls through to the
+// catch-all. Every /v1/* path is authenticated — including the explicit
+// 404 endpoints — so an unauthorised peer cannot enumerate the surface
+// (peer gets 403, never 404).
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
@@ -218,17 +228,32 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/audit", s.withAuth(s.handleAudit))
 	mux.HandleFunc("GET /v1/operations/", s.withAuth(s.handleOperationsRouter))
 
-	// Future endpoints — explicit 404 in D1.6a.
-	mux.HandleFunc("/v1/backups", s.notImplemented)
-	mux.HandleFunc("/v1/backups/", s.notImplemented)
-	mux.HandleFunc("/v1/restores/dryrun", s.notImplemented)
-	mux.HandleFunc("/v1/restores/commit", s.notImplemented)
-	mux.HandleFunc("/v1/cleanups", s.notImplemented)
-	mux.HandleFunc("/v1/upgrades/check", s.notImplemented)
-	mux.HandleFunc("/v1/upgrades/apply", s.notImplemented)
-	mux.HandleFunc("/v1/rollbacks", s.notImplemented)
+	// Future endpoints — explicit 404 in D1.6a, authenticated so an
+	// unauthorised peer gets 403 consistently.
+	notImpl := s.withAuth(func(w http.ResponseWriter, r *http.Request, _ auth.PeerInfo) {
+		s.notImplemented(w, r)
+	})
+	for _, p := range []string{
+		"/v1/backups",
+		"/v1/backups/",
+		"/v1/restores/dryrun",
+		"/v1/restores/commit",
+		"/v1/cleanups",
+		"/v1/upgrades/check",
+		"/v1/upgrades/apply",
+		"/v1/rollbacks",
+	} {
+		mux.HandleFunc(p, notImpl)
+	}
 
-	// Catch-all for everything else.
+	// Authenticated catch-all under /v1/* so unknown /v1 paths get a
+	// peer-rejection rather than leaking that the path doesn't exist.
+	mux.HandleFunc("/v1/", s.withAuth(func(w http.ResponseWriter, r *http.Request, _ auth.PeerInfo) {
+		s.notFound(w, r)
+	}))
+
+	// Anything outside /v1/* is unauthenticated 404 — these aren't
+	// agent endpoints at all.
 	mux.HandleFunc("/", s.notFound)
 
 	return mux
@@ -363,20 +388,16 @@ func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, fmt.Sprintf(`{"error":"not_found","path":%q}`, r.URL.Path), http.StatusNotFound)
 }
 
-// validOpID accepts ULIDs (26 chars Base32-Crockford). Limits the
-// surface for path-injection in logs.
+// validOpID accepts only canonical ULIDs (26 chars,
+// Base32-Crockford alphabet, no lowercase, no I/L/O/U). Uses
+// ulid.ParseStrict so the surface for path-injection in logs is
+// bound to exactly the IDs the agent itself emits.
 func validOpID(s string) bool {
 	if len(s) != 26 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		isDigit := c >= '0' && c <= '9'
-		isUpper := c >= 'A' && c <= 'Z'
-		isLower := c >= 'a' && c <= 'z'
-		if !isDigit && !isUpper && !isLower {
-			return false
-		}
+	if _, err := ulid.ParseStrict(s); err != nil {
+		return false
 	}
 	return true
 }

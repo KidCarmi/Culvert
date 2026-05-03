@@ -14,14 +14,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"culvert-maint/internal/audit"
@@ -36,8 +34,6 @@ import (
 func main() {
 	var (
 		configPath = flag.String("config", "/etc/culvert-maint/config.toml", "Path to config.toml")
-		// Comma-separated list of UIDs or usernames allowed to connect over the UDS.
-		allowPeers = flag.String("allow-peers", "", "Comma-separated allowlist of UIDs or usernames (required)")
 		printVer   = flag.Bool("version", false, "Print version and exit")
 	)
 	flag.Parse()
@@ -47,12 +43,12 @@ func main() {
 		return
 	}
 
-	if err := run(*configPath, *allowPeers); err != nil {
+	if err := run(*configPath); err != nil {
 		log.Fatalf("culvert-maint: %v", err)
 	}
 }
 
-func run(configPath, allowPeers string) error {
+func run(configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -63,10 +59,7 @@ func run(configPath, allowPeers string) error {
 		log.Printf("WARN: privilege_mode=docker_group_lab — effectively root-equivalent; not for production")
 	}
 
-	if strings.TrimSpace(allowPeers) == "" {
-		return errors.New("--allow-peers required (operator must specify the CP UID/username)")
-	}
-	pol, err := auth.NewPolicy(splitCSV(allowPeers))
+	pol, err := auth.NewPolicy(cfg.AllowPeers)
 	if err != nil {
 		return fmt.Errorf("auth policy: %w", err)
 	}
@@ -128,15 +121,4 @@ func run(configPath, allowPeers string) error {
 	}
 	log.Printf("culvert-maint: shutdown")
 	return nil
-}
-
-func splitCSV(s string) []string {
-	parts := strings.Split(s, ",")
-	out := parts[:0]
-	for _, p := range parts {
-		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
 }

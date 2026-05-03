@@ -31,26 +31,32 @@ func TestState_IsTerminal(t *testing.T) {
 	}
 }
 
-func TestIsStateChanging_KnownAndUnknown(t *testing.T) {
-	stateChanging := []string{
+func TestIsStateChanging_D16a_NoProductionKinds(t *testing.T) {
+	// Synthetic kind is the only state-changing kind in D1.6a — used
+	// by tests to exercise the lock framework without introducing
+	// real production state-changing operations.
+	if !IsStateChanging(SyntheticStateChangingKind) {
+		t.Errorf("%q (synthetic, test-only) should be state-changing", SyntheticStateChangingKind)
+	}
+
+	// D1.6b/c kinds are NOT yet wired in production; they must NOT be
+	// reported as state-changing in D1.6a. When D1.6b lands, the
+	// stateChangingKinds map will gain these entries together with
+	// matching handler + template + sudoers + tests.
+	for _, k := range []string{
 		"backup.create",
 		"restore.commit",
 		"cleanups.create",
 		"upgrades.apply",
 		"rollbacks.create",
-	}
-	for _, k := range stateChanging {
-		if !IsStateChanging(k) {
-			t.Errorf("%q should be state-changing", k)
+	} {
+		if IsStateChanging(k) {
+			t.Errorf("D1.6a must not treat %q as state-changing — that kind belongs to a future slice", k)
 		}
 	}
-	readOnly := []string{
-		"restore.dryrun",
-		"upgrades.check",
-		"status.read",
-		"unknown.kind",
-	}
-	for _, k := range readOnly {
+
+	// Read-only kinds and unknowns are never state-changing.
+	for _, k := range []string{"restore.dryrun", "upgrades.check", "status.read", "unknown.kind", ""} {
 		if IsStateChanging(k) {
 			t.Errorf("%q should NOT be state-changing", k)
 		}
@@ -87,7 +93,7 @@ func TestManager_ReadOnlyOpsRunConcurrently(t *testing.T) {
 
 func TestManager_StateChangingOpAcquiresLock(t *testing.T) {
 	m := NewManager(nil)
-	op, err := m.Begin("backup.create", "actor", "", nil)
+	op, err := m.Begin(SyntheticStateChangingKind, "actor", "", nil)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -102,11 +108,11 @@ func TestManager_StateChangingOpAcquiresLock(t *testing.T) {
 
 func TestManager_SecondStateChangingOpReturnsConflict(t *testing.T) {
 	m := NewManager(nil)
-	o1, err := m.Begin("backup.create", "actor1", "", nil)
+	o1, err := m.Begin(SyntheticStateChangingKind, "actor1", "", nil)
 	if err != nil {
 		t.Fatalf("first state-changing: %v", err)
 	}
-	_, err = m.Begin("upgrades.apply", "actor2", "", nil)
+	_, err = m.Begin(SyntheticStateChangingKind, "actor2", "", nil)
 	if err == nil {
 		t.Fatal("expected conflict on second state-changing op")
 	}
@@ -136,7 +142,7 @@ func asConflict(err error, out **Conflict) bool {
 
 func TestManager_FinishReleasesLockAndAllowsNextOp(t *testing.T) {
 	m := NewManager(nil)
-	o1, err := m.Begin("backup.create", "actor1", "", nil)
+	o1, err := m.Begin(SyntheticStateChangingKind, "actor1", "", nil)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -146,7 +152,7 @@ func TestManager_FinishReleasesLockAndAllowsNextOp(t *testing.T) {
 	if m.Holder() != nil {
 		t.Errorf("Holder must be nil after Finish")
 	}
-	o2, err := m.Begin("upgrades.apply", "actor2", "", nil)
+	o2, err := m.Begin(SyntheticStateChangingKind, "actor2", "", nil)
 	if err != nil {
 		t.Fatalf("second op should now succeed: %v", err)
 	}
@@ -158,7 +164,7 @@ func TestManager_FinishReleasesLockAndAllowsNextOp(t *testing.T) {
 func TestManager_FinishRecordsTerminalStateAndReason(t *testing.T) {
 	clock := time.Date(2026, 5, 3, 1, 23, 45, 0, time.UTC)
 	m := NewManager(func() time.Time { return clock })
-	op, err := m.Begin("backup.create", "actor", "", nil)
+	op, err := m.Begin(SyntheticStateChangingKind, "actor", "", nil)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -182,7 +188,7 @@ func TestManager_FinishRecordsTerminalStateAndReason(t *testing.T) {
 
 func TestManager_FinishRejectsNonTerminalState(t *testing.T) {
 	m := NewManager(nil)
-	op, _ := m.Begin("backup.create", "a", "", nil)
+	op, _ := m.Begin(SyntheticStateChangingKind, "a", "", nil)
 	if err := m.Finish(op.ID, StateRunning, "", nil); err == nil {
 		t.Error("expected error finishing into running")
 	}
@@ -201,7 +207,7 @@ func TestManager_FinishUnknownIDFails(t *testing.T) {
 func TestManager_AddStageAppendsAndStamps(t *testing.T) {
 	clock := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	m := NewManager(func() time.Time { return clock })
-	op, _ := m.Begin("backup.create", "actor", "", nil)
+	op, _ := m.Begin(SyntheticStateChangingKind, "actor", "", nil)
 
 	if err := m.AddStage(op.ID, Stage{Name: "preflight", State: StateSucceeded}); err != nil {
 		t.Fatalf("AddStage: %v", err)
@@ -223,7 +229,7 @@ func TestManager_AddStageAppendsAndStamps(t *testing.T) {
 
 func TestManager_GetReturnsSnapshot(t *testing.T) {
 	m := NewManager(nil)
-	op, _ := m.Begin("backup.create", "actor", "", map[string]interface{}{"k": "v"})
+	op, _ := m.Begin(SyntheticStateChangingKind, "actor", "", map[string]interface{}{"k": "v"})
 
 	snap := m.Get(op.ID)
 	if snap == nil {
@@ -253,7 +259,7 @@ func TestManager_MarkAllInterruptedReturnsZeroForD16a(t *testing.T) {
 
 func TestManager_BeginStoresIdempotencyKey(t *testing.T) {
 	m := NewManager(nil)
-	op, _ := m.Begin("backup.create", "a", "abc-123", nil)
+	op, _ := m.Begin(SyntheticStateChangingKind, "a", "abc-123", nil)
 	got := m.Get(op.ID)
 	if got.IdempotencyKey != "abc-123" {
 		t.Errorf("idempotency_key: got %q", got.IdempotencyKey)

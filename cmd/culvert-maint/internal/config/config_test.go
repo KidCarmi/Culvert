@@ -20,9 +20,11 @@ func writeConfig(t *testing.T, body string) string {
 	return p
 }
 
-// minimalValid is the smallest valid config body — only the required key
-// is set; all other fields receive their defaults.
-const minimalValid = `compose_project_dir = "/srv/culvert"`
+// minimalValid is the smallest valid config body — only the required
+// keys (compose_project_dir, allow_peers) are set; all other fields
+// receive their defaults.
+const minimalValid = `compose_project_dir = "/srv/culvert"
+allow_peers = ["culvert-cp"]`
 
 // TestLoad_DefaultsApplied exercises one branch per config key.
 // Splitting would obscure which keys are checked against which defaults.
@@ -82,13 +84,42 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 }
 
 func TestLoad_MissingComposeProjectDirFailsClosed(t *testing.T) {
-	p := writeConfig(t, ``) // empty body — required key missing
+	// Body has allow_peers but not compose_project_dir.
+	p := writeConfig(t, `allow_peers = ["culvert-cp"]`)
 	_, err := Load(p)
 	if err == nil {
 		t.Fatal("expected error when compose_project_dir missing")
 	}
 	if !strings.Contains(err.Error(), "compose_project_dir") {
 		t.Errorf("error must name compose_project_dir, got: %v", err)
+	}
+}
+
+func TestLoad_MissingAllowPeersFailsClosed(t *testing.T) {
+	// Body has compose_project_dir but not allow_peers.
+	_, err := Load(writeConfig(t, `compose_project_dir = "/srv/culvert"`))
+	if err == nil {
+		t.Fatal("expected error when allow_peers missing")
+	}
+	if !strings.Contains(err.Error(), "allow_peers") {
+		t.Errorf("error must name allow_peers, got: %v", err)
+	}
+}
+
+func TestLoad_AllowPeersWithEmptyEntryFailsClosed(t *testing.T) {
+	body := `compose_project_dir = "/srv/culvert"
+allow_peers = ["culvert-cp", ""]`
+	_, err := Load(writeConfig(t, body))
+	if err == nil {
+		t.Fatal("expected error for empty allow_peers entry")
+	}
+}
+
+func TestLoad_AllowPeersWithControlCharFailsClosed(t *testing.T) {
+	body := "compose_project_dir = \"/srv/culvert\"\nallow_peers = [\"culvert\\ncp\"]"
+	_, err := Load(writeConfig(t, body))
+	if err == nil {
+		t.Fatal("expected error for allow_peers entry containing control chars")
 	}
 }
 
@@ -233,5 +264,97 @@ func TestLoad_EmptyPathReturnsError(t *testing.T) {
 	_, err := Load("")
 	if err == nil {
 		t.Fatal("expected error for empty path")
+	}
+}
+
+func TestLoad_HealthPathRejectsControlCharsAndWhitespace(t *testing.T) {
+	// TOML basic strings interpret \n / \t escapes; the validator
+	// must reject the decoded value. Spaces are also rejected.
+	cases := []string{
+		`"/health space"`, // whitespace
+		`"/health\nfoo"`,  // newline
+		`"/health\tfoo"`,  // tab
+	}
+	for _, lit := range cases {
+		body := minimalValid + "\nhealth_path = " + lit
+		_, err := Load(writeConfig(t, body))
+		if err == nil {
+			t.Errorf("expected error for health_path=%s, got nil", lit)
+		}
+	}
+}
+
+func TestLoad_ReadyPathRejectsRelative(t *testing.T) {
+	body := minimalValid + "\nready_path = \"ready\""
+	_, err := Load(writeConfig(t, body))
+	if err == nil {
+		t.Fatal("expected error for relative ready_path")
+	}
+}
+
+// TestImageAllowlist_DefaultMatches asserts the default regex accepts
+// the documented image refs and rejects everything else.
+func TestImageAllowlist_DefaultMatches(t *testing.T) {
+	cfg, err := Load(writeConfig(t, minimalValid))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	accept := []string{
+		"ghcr.io/kidcarmi/culvert:v1.2.3",
+		"ghcr.io/kidcarmi/culvert:latest",
+		"ghcr.io/kidcarmi/culvert@sha256:" + strings.Repeat("a", 64),
+	}
+	reject := []string{
+		"docker.io/library/alpine:latest",
+		"ghcr.io/kidcarmi/culvert-extra:v1",
+		"ghcr.io/kidcarmi/culvert:bad/tag",
+		"ghcr.io/kidcarmi/culvert@sha256:short",
+		"ghcr.io/kidcarmi/culvert@sha256:" + strings.Repeat("z", 64), // non-hex
+		"",
+	}
+	for _, ref := range accept {
+		if !cfg.ImageAllowlist.MatchString(ref) {
+			t.Errorf("default ImageAllowlist should accept %q", ref)
+		}
+	}
+	for _, ref := range reject {
+		if cfg.ImageAllowlist.MatchString(ref) {
+			t.Errorf("default ImageAllowlist should REJECT %q", ref)
+		}
+	}
+}
+
+// TestIsAllowedBackupPath verifies the helper rejects neighbour
+// directories that share a string prefix (the /backup vs /backup2
+// foot-gun).
+func TestIsAllowedBackupPath(t *testing.T) {
+	cfg, err := Load(writeConfig(t, minimalValid))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Default allowed_backup_dir = /backup
+	accept := []string{
+		"/backup",
+		"/backup/x.tar.gz.enc",
+		"/backup/sub/dir/y.tar.gz",
+	}
+	reject := []string{
+		"",
+		"/backup2",
+		"/backup2/x",
+		"/backup-other",
+		"/etc/passwd",
+		"backup",
+		"/data",
+	}
+	for _, p := range accept {
+		if !cfg.IsAllowedBackupPath(p) {
+			t.Errorf("IsAllowedBackupPath(%q) = false, want true", p)
+		}
+	}
+	for _, p := range reject {
+		if cfg.IsAllowedBackupPath(p) {
+			t.Errorf("IsAllowedBackupPath(%q) = true, want false", p)
+		}
 	}
 }

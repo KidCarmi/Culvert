@@ -27,6 +27,9 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -69,12 +72,18 @@ type Template struct {
 // packaging/sudoers/culvert-maint AND add the runner method that
 // invokes it AND the API handler that calls the runner method (per
 // the D1.6 implementation plan § 4.6 four-step contract).
+//
+// The placeholder `{compose_path}` expands to the *full*
+// `<compose_project_dir>/<compose_file>` path at build time. The
+// sudoers entry must be path-bound to the same full path — sudo's
+// arg matching does NOT honor cwd, so the agent's `cmd.Dir` setting
+// alone is not enough to bound privilege.
 func Registry() []Template {
 	return []Template{
 		{
 			ID:            TemplateComposeStatus,
-			BaseArgv:      []string{"docker", "compose", "-f", "{compose_file}", "ps"},
-			Sudoers:       "/usr/bin/docker compose -f {compose_file} ps",
+			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "ps", "--format", "json"},
+			Sudoers:       "/usr/bin/docker compose -f {compose_path} ps --format json",
 			StateChanging: false,
 		},
 	}
@@ -149,16 +158,35 @@ const (
 	sigtermGrace      = 5 * time.Second
 )
 
-// New constructs a Runner. composeProjectDir must be absolute.
+// envNameRE bounds the shape of forwarded environment variable names:
+// uppercase ASCII, digits, underscore; must start with a letter or
+// underscore. The runner refuses to forward names outside this set so
+// a config bug cannot inject `=`-laden or newline-laden tokens.
+var envNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+// New constructs a Runner. ComposeProjectDir must be absolute and
+// already cleaned. ComposeFile must be a bare filename (no path
+// separator, no traversal). EnvAllow names are validated against
+// envNameRE; deduplication and sorting are deferred to buildEnv.
 func New(opts Options) (*Runner, error) {
 	if opts.ComposeProjectDir == "" {
 		return nil, errors.New("runner: ComposeProjectDir required")
 	}
+	if !filepath.IsAbs(opts.ComposeProjectDir) {
+		return nil, fmt.Errorf("runner: ComposeProjectDir must be absolute, got %q", opts.ComposeProjectDir)
+	}
 	if opts.ComposeFile == "" {
 		return nil, errors.New("runner: ComposeFile required")
 	}
+	if opts.ComposeFile != filepath.Base(opts.ComposeFile) ||
+		strings.ContainsAny(opts.ComposeFile, "/\\") {
+		return nil, fmt.Errorf("runner: ComposeFile must be a bare filename, got %q", opts.ComposeFile)
+	}
 	if opts.StageTimeout <= 0 {
 		return nil, errors.New("runner: StageTimeout must be positive")
+	}
+	if opts.CaptureMax < 0 {
+		return nil, fmt.Errorf("runner: CaptureMax must be >= 0, got %d", opts.CaptureMax)
 	}
 	captureMax := opts.CaptureMax
 	if captureMax == 0 {
@@ -172,9 +200,15 @@ func New(opts Options) (*Runner, error) {
 	if sudo == "" {
 		sudo = "sudo"
 	}
-	envAllow := append([]string(nil), opts.EnvAllow...)
+	envAllow := make([]string, 0, len(opts.EnvAllow))
+	for _, name := range opts.EnvAllow {
+		if !envNameRE.MatchString(name) {
+			return nil, fmt.Errorf("runner: EnvAllow name %q is not a valid env-var name", name)
+		}
+		envAllow = append(envAllow, name)
+	}
 	return &Runner{
-		composeProjectDir: opts.ComposeProjectDir,
+		composeProjectDir: filepath.Clean(opts.ComposeProjectDir),
 		composeFile:       opts.ComposeFile,
 		useSudo:           opts.UseSudo,
 		envAllow:          envAllow,
@@ -197,8 +231,9 @@ func (r *Runner) ComposeStatus(ctx context.Context) (*Result, error) {
 }
 
 // buildArgv expands a Template's BaseArgv with the configured compose
-// file path. Placeholders like "{compose_file}" are replaced exactly.
-// argv[0] is the executable; the runner prepends "sudo" if useSudo.
+// path. Placeholder `{compose_path}` is replaced with the absolute
+// `<compose_project_dir>/<compose_file>` path. argv[0] is the
+// executable; the runner prepends `sudo -n` if useSudo.
 //
 // D1.6a templates have no operator-supplied positional args. D1.6b/c
 // expansions will accept validated args via additional methods.
@@ -207,12 +242,13 @@ func (r *Runner) buildArgv(tmpl *Template) []string {
 	if r.useSudo {
 		out = append(out, r.sudoBinary, "-n")
 	}
+	composePath := filepath.Join(r.composeProjectDir, r.composeFile)
 	for _, a := range tmpl.BaseArgv {
 		switch a {
 		case "docker":
 			out = append(out, r.dockerBinary)
-		case "{compose_file}":
-			out = append(out, r.composeFile)
+		case "{compose_path}":
+			out = append(out, composePath)
 		default:
 			out = append(out, a)
 		}
@@ -299,22 +335,20 @@ func (r *Runner) waitCmd(cmd *exec.Cmd) error {
 	return cmd.Wait()
 }
 
-// buildEnv returns the env to forward to the child process. The runner
-// builds env from scratch — os.Environ() is NOT inherited. Defaults:
-// PATH, HOME, LANG, TZ. Plus EnvAllow names (whose values are read
-// from the agent process env at exec time).
+// buildEnv returns the env to forward to the child process in a
+// deterministic order — defaults first (fixed order: PATH, HOME, LANG,
+// TZ), then EnvAllow names sorted alphabetically. The runner builds
+// env from scratch — os.Environ() is NOT inherited.
 func (r *Runner) buildEnv() []string {
-	defaults := map[string]string{
-		"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"HOME": "/var/lib/culvert-maint",
-		"LANG": "C.UTF-8",
-		"TZ":   "UTC",
+	env := []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=/var/lib/culvert-maint",
+		"LANG=C.UTF-8",
+		"TZ=UTC",
 	}
-	env := make([]string, 0, len(defaults)+len(r.envAllow))
-	for k, v := range defaults {
-		env = append(env, k+"="+v)
-	}
-	for _, name := range r.envAllow {
+	names := append([]string(nil), r.envAllow...)
+	sort.Strings(names)
+	for _, name := range names {
 		v, ok := lookupEnv(name)
 		if !ok {
 			continue
@@ -340,7 +374,13 @@ type boundedBuffer struct {
 }
 
 // newBoundedBuffer constructs a buffer that caps at capBytes total.
+// Non-positive capBytes is treated as zero (every write is dropped
+// and Truncated() reports true) — defensive against a misconfigured
+// caller; the production path enforces CaptureMax >= 0 in New().
 func newBoundedBuffer(capBytes int) *boundedBuffer {
+	if capBytes < 0 {
+		capBytes = 0
+	}
 	return &boundedBuffer{cap: capBytes}
 }
 

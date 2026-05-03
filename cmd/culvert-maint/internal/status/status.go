@@ -1,15 +1,24 @@
 // Package status implements the StatusProvider consumed by GET /v1/status.
 //
 // D1.6a behavior:
-//   - calls runner.ComposeStatus to query the running compose stack
-//   - parses `docker compose ps --format json` output (best effort) — if
-//     parsing fails the agent surfaces the raw error in compose_error
-//     and reports compose_stack_up=false rather than failing the request
+//   - calls runner.ComposeStatus to query the running compose stack;
+//     the runner template runs `docker compose -f <compose_path> ps
+//     --format json`
+//   - parses Compose v2 NDJSON output line-by-line with bufio.Scanner;
+//     also accepts the JSON-array form some Compose versions emit
+//   - reports compose_stack_up=true ONLY when the `proxy` service is
+//     in the "running" state — sidecar-only states (clamav up, proxy
+//     down) do NOT count as stack-up to avoid overclaiming
+//   - on parse or runner error, surfaces the cause in compose_error
+//     and reports compose_stack_up=false rather than failing the
+//     request
 //   - flags the docker_group_lab privilege mode in the response so the
 //     GUI/CP can display a "broad privilege" warning
 package status
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +29,11 @@ import (
 	"culvert-maint/internal/runner"
 	"culvert-maint/internal/server"
 )
+
+// proxyServiceName is the name of the Culvert proxy service inside the
+// supplied docker-compose.yml. Its `running` state is the canonical
+// signal for compose_stack_up=true.
+const proxyServiceName = "proxy"
 
 // Provider is the production StatusProvider.
 type Provider struct {
@@ -79,8 +93,12 @@ func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 		return st, nil
 	}
 	st.ComposeServices = services
+	// compose_stack_up is true only when the proxy service is running.
+	// Sidecar-only states (clamav up, proxy down) deliberately do NOT
+	// count — the operator-facing meaning of "stack up" is "the
+	// product is reachable", which requires proxy.
 	for _, s := range services {
-		if strings.EqualFold(s.State, "running") {
+		if s.Name == proxyServiceName && strings.EqualFold(s.State, "running") {
 			st.ComposeStackUp = true
 			break
 		}
@@ -89,22 +107,40 @@ func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 }
 
 // parseComposePS parses `docker compose ps --format json` output.
-// Compose v2 emits one JSON object per line (NDJSON-ish); we accept
-// both NDJSON and a single JSON-array form.
+// Compose v2 emits one JSON object per line (NDJSON). Some versions
+// emit a single JSON array; we fall back to that shape if NDJSON
+// parsing yields nothing usable.
+//
+// Malformed individual lines are skipped (Compose has been observed
+// to emit warning lines mixed with JSON in some configurations); the
+// function returns whatever it can parse rather than failing the
+// whole status call.
 func parseComposePS(stdout []byte) ([]server.ServiceStatus, error) {
 	if len(stdout) == 0 {
 		return nil, nil
 	}
-	// Try NDJSON first.
+	// Heuristic: if the first non-whitespace byte is '[' it's the
+	// array form; otherwise treat as NDJSON.
+	trimmed := bytes.TrimLeft(stdout, " \t\r\n")
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		return parseComposePSArray(stdout)
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var services []server.ServiceStatus
-	dec := json.NewDecoder(strings.NewReader(string(stdout)))
-	for dec.More() {
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
 		var entry composePSEntry
-		if err := dec.Decode(&entry); err != nil {
-			// Maybe it's a single JSON array; retry once.
-			return parseComposePSArray(stdout)
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
 		}
 		services = append(services, entry.toServiceStatus())
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return services, nil
 }

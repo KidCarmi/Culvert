@@ -27,17 +27,33 @@
 #   - D1.6c adds pull proxy and manifest inspect <allowed-image>.
 #
 # Operator install steps:
-#   1. Replace {compose_project_dir} below with the absolute path to
-#      your compose project (the dir containing docker-compose.yml).
-#   2. Replace {compose_file} with the actual filename (typically
-#      docker-compose.yml).
-#   3. Validate the file:    visudo -c -f /etc/sudoers.d/culvert-maint
-#   4. Install with mode 0440:
-#        install -m 0440 -o root -g root \
-#            packaging/sudoers/culvert-maint \
-#            /etc/sudoers.d/culvert-maint
+#   The recommended path is to run packaging/culvert-maint/install.sh,
+#   which reads compose_project_dir and compose_file from
+#   /etc/culvert-maint/config.toml, renders the sudoers file with the
+#   *full* compose path, runs `visudo -c` to validate, and refuses to
+#   complete the install if any placeholder remains.
+#
+#   For manual installation, replace {compose_path} below with the
+#   absolute, joined path:
+#       <compose_project_dir>/<compose_file>
+#   Then validate with:
+#       visudo -c -f /etc/sudoers.d/culvert-maint
+#   And install with mode 0440 root:root:
+#       install -m 0440 -o root -g root \
+#           packaging/sudoers/culvert-maint \
+#           /etc/sudoers.d/culvert-maint
+#
+# IMPORTANT: this file MUST be path-bound. sudo's exact-arg matching
+# does NOT honor the agent's process cwd; without the absolute path
+# the allowlist would accept the same `docker compose -f X ps` from
+# any working directory the agent could be coerced into. The static
+# parity test (cmd/culvert-maint/internal/runner/parity_test.go)
+# enforces this — D1.6a registry has exactly one template
+# (compose.status) and its sudoers line uses {compose_path}, never a
+# bare filename.
 
 # D1.6a — minimal read-only entry for /v1/status.
-# Template: compose.status (BaseArgv = ["docker", "compose", "-f",
-# "{compose_file}", "ps"])
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_file} ps
+# Template: compose.status
+#   BaseArgv = ["docker", "compose", "-f", "{compose_path}", "ps",
+#               "--format", "json"]
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} ps --format json

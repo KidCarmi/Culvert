@@ -68,10 +68,25 @@ func TestRun_ArgvAndCwdPropagated(t *testing.T) {
 		t.Fatalf("ComposeStatus: %v", err)
 	}
 	out := string(res.Stdout)
-	for _, want := range []string{"ARG:" + bin, "ARG:compose", "ARG:-f", "ARG:docker-compose.yml", "ARG:ps"} {
+	expectedComposePath := dir + "/docker-compose.yml"
+	for _, want := range []string{
+		"ARG:" + bin,
+		"ARG:compose",
+		"ARG:-f",
+		"ARG:" + expectedComposePath, // full path, not bare filename
+		"ARG:ps",
+		"ARG:--format",
+		"ARG:json",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in argv output:\n%s", want, out)
 		}
+	}
+	// Sudoers is path-bound: the bare filename must NOT appear by itself
+	// as an argv entry. (`docker-compose.yml` would match a path-loose
+	// sudoers rule; the full path must.)
+	if strings.Contains(out, "ARG:docker-compose.yml\n") {
+		t.Errorf("argv contains bare compose filename — sudoers rule would not be path-bound:\n%s", out)
 	}
 	for _, banned := range []string{"ARG:sh", "ARG:bash", "ARG:-c"} {
 		if strings.Contains(out, banned) {
@@ -197,17 +212,67 @@ func TestRun_SudoPrependedWhenUseSudo(t *testing.T) {
 }
 
 func TestNew_FailsClosedOnInvalidOptions(t *testing.T) {
-	_, err := New(Options{ComposeProjectDir: "", ComposeFile: "x", StageTimeout: time.Second})
-	if err == nil {
-		t.Error("expected error for empty ComposeProjectDir")
+	cases := []struct {
+		name string
+		opts Options
+	}{
+		{"empty ComposeProjectDir", Options{ComposeProjectDir: "", ComposeFile: "x", StageTimeout: time.Second}},
+		{"relative ComposeProjectDir", Options{ComposeProjectDir: "relative/path", ComposeFile: "y", StageTimeout: time.Second}},
+		{"empty ComposeFile", Options{ComposeProjectDir: "/x", ComposeFile: "", StageTimeout: time.Second}},
+		{"ComposeFile with slash", Options{ComposeProjectDir: "/x", ComposeFile: "sub/compose.yml", StageTimeout: time.Second}},
+		{"ComposeFile with backslash", Options{ComposeProjectDir: "/x", ComposeFile: `sub\compose.yml`, StageTimeout: time.Second}},
+		{"ComposeFile traversal", Options{ComposeProjectDir: "/x", ComposeFile: "../etc/passwd", StageTimeout: time.Second}},
+		{"zero StageTimeout", Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: 0}},
+		{"negative CaptureMax", Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: time.Second, CaptureMax: -1}},
+		{"env name with =", Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: time.Second, EnvAllow: []string{"BAD=NAME"}}},
+		{"env name lowercase", Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: time.Second, EnvAllow: []string{"bad_name"}}},
+		{"env name with newline", Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: time.Second, EnvAllow: []string{"BAD\nNAME"}}},
+		{"env name leading digit", Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: time.Second, EnvAllow: []string{"1BAD"}}},
 	}
-	_, err = New(Options{ComposeProjectDir: "/x", ComposeFile: "", StageTimeout: time.Second})
-	if err == nil {
-		t.Error("expected error for empty ComposeFile")
+	for _, c := range cases {
+		_, err := New(c.opts)
+		if err == nil {
+			t.Errorf("%s: expected error, got nil", c.name)
+		}
 	}
-	_, err = New(Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: 0})
-	if err == nil {
-		t.Error("expected error for zero StageTimeout")
+}
+
+func TestBuildEnv_DeterministicOrder(t *testing.T) {
+	t.Setenv("ZZ_TAIL", "z")
+	t.Setenv("AA_HEAD", "a")
+	t.Setenv("MM_MID", "m")
+	r, err := New(Options{
+		ComposeProjectDir: "/srv/x",
+		ComposeFile:       "docker-compose.yml",
+		StageTimeout:      time.Second,
+		EnvAllow:          []string{"MM_MID", "AA_HEAD", "ZZ_TAIL"},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got := r.buildEnv()
+	if len(got) < 7 {
+		t.Fatalf("got %d entries, want >=7", len(got))
+	}
+	// Defaults always first in fixed order.
+	wantPrefix := []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=/var/lib/culvert-maint",
+		"LANG=C.UTF-8",
+		"TZ=UTC",
+	}
+	for i, want := range wantPrefix {
+		if got[i] != want {
+			t.Errorf("env[%d]: got %q want %q", i, got[i], want)
+		}
+	}
+	// EnvAllow alphabetised after defaults.
+	wantTail := []string{"AA_HEAD=a", "MM_MID=m", "ZZ_TAIL=z"}
+	for i, want := range wantTail {
+		idx := len(wantPrefix) + i
+		if got[idx] != want {
+			t.Errorf("env[%d]: got %q want %q", idx, got[idx], want)
+		}
 	}
 }
 

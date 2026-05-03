@@ -14,7 +14,19 @@
 # never runs as root. All Docker operations are gated through either
 # (a) sudoers + path-bound allowlist (production default), or
 # (b) docker group membership (dev/lab opt-in; effectively root-equiv).
-# See /etc/culvert-maint/config.toml `privilege_mode`.
+# See /etc/culvert-maint/config.toml `privilege_mode` and `allow_peers`.
+#
+# IMPORTANT — NoNewPrivileges:
+#   This unit deliberately does NOT set `NoNewPrivileges=true`.
+#   privilege_mode=sudoers (the production default) requires the agent
+#   to call `sudo -n docker compose ...`, and sudo's setuid escalation
+#   does not work under PR_SET_NO_NEW_PRIVS. The trade-off is bounded:
+#   the sudoers allowlist (/etc/sudoers.d/culvert-maint) is the
+#   privilege boundary, and the kernel-level hardening below still
+#   applies. If `privilege_mode=docker_group_lab` is in use, operators
+#   may add `NoNewPrivileges=true` via a drop-in
+#   (/etc/systemd/system/culvert-maint.service.d/*.conf) — but
+#   docker_group_lab is dev/lab only.
 
 [Unit]
 Description=Culvert Maintenance Agent
@@ -27,16 +39,15 @@ Type=simple
 User=culvert-maint
 Group=culvert-maint
 
-# Operator must edit this line to set the CP UID/username allowlist.
-# Multiple values are comma-separated, e.g. AllowPeers=culvert-cp or
-# AllowPeers=1234,5678. The agent refuses to start with an empty list.
-ExecStart=/usr/local/bin/culvert-maint --config /etc/culvert-maint/config.toml --allow-peers culvert-cp
+# allow_peers is now a config-only key (see /etc/culvert-maint/config.toml).
+# There is NO --allow-peers flag — operators have one config surface.
+ExecStart=/usr/local/bin/culvert-maint --config /etc/culvert-maint/config.toml
 
 Restart=on-failure
 RestartSec=5s
 
 # ── Hardening (kernel-level, applies regardless of privilege_mode) ─────────
-NoNewPrivileges=true
+# NoNewPrivileges intentionally omitted — see header comment.
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
@@ -56,7 +67,10 @@ ProtectKernelLogs=true
 ProtectProc=invisible
 ProcSubset=pid
 
-# Writable paths the agent needs.
+# Writable paths the agent needs:
+#  - /var/lib/culvert-maint for state (audit log, op logs)
+#  - /run for the UDS socket file (a future hardening pass may move
+#    to RuntimeDirectory= and a /run/culvert-maint/ subdir)
 ReadWritePaths=/var/lib/culvert-maint /run
 
 # Capability set: empty by default. The agent does not need any
