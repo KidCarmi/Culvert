@@ -1,0 +1,43 @@
+# Culvert Maintenance Agent — sudoers allowlist
+#
+# This file is the SINGLE SOURCE OF TRUTH for which `docker compose`
+# invocations the agent is allowed to run when privilege_mode=sudoers
+# (the production default; see roadmap/D1.6-maintenance-agent-
+# implementation-plan.md § 4.5).
+#
+# The agent's command runner prepends `sudo -n` to every templated
+# invocation; sudo's exact-arg matching enforces that the agent cannot
+# deviate from this list, even with an in-process bug.
+#
+# Adding a new operation requires the four-step contract from § 4.6:
+#   1. Typed API handler in the agent.
+#   2. Command template in internal/runner.
+#   3. Sudoers allowlist entry HERE (this file).
+#   4. Tests, including the parity test that asserts every runner
+#      template has a matching line and vice versa.
+#
+# Skipping any of the four is a review block.
+#
+# D1.6a scope: only the minimal `docker compose ps` entry needed by
+# /v1/status. NO backup, restore, cleanup, upgrade, rollback, up, down,
+# pull, or manifest-inspect entries in this file. Those land with their
+# corresponding operations:
+#   - D1.6b adds run --rm cli --backup, --restore, --restore --confirm,
+#     --cleanup-restore-leftovers, up -d, down.
+#   - D1.6c adds pull proxy and manifest inspect <allowed-image>.
+#
+# Operator install steps:
+#   1. Replace {compose_project_dir} below with the absolute path to
+#      your compose project (the dir containing docker-compose.yml).
+#   2. Replace {compose_file} with the actual filename (typically
+#      docker-compose.yml).
+#   3. Validate the file:    visudo -c -f /etc/sudoers.d/culvert-maint
+#   4. Install with mode 0440:
+#        install -m 0440 -o root -g root \
+#            packaging/sudoers/culvert-maint \
+#            /etc/sudoers.d/culvert-maint
+
+# D1.6a — minimal read-only entry for /v1/status.
+# Template: compose.status (BaseArgv = ["docker", "compose", "-f",
+# "{compose_file}", "ps"])
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_file} ps

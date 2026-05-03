@@ -1,0 +1,73 @@
+# Culvert Maintenance Agent (D1.6a)
+#
+# Host-side systemd service that exposes a Unix-domain-socket API for
+# the CP/GUI to drive backup, restore, cleanup, and (later) upgrade
+# operations against the Culvert Docker Compose stack.
+#
+# D1.6a is the foundation slice: read-only API only. State-changing
+# operations (backup/restore/cleanup/upgrade/rollback) land in
+# D1.6b/c.
+#
+# Install: see packaging/culvert-maint/install.sh
+#
+# This unit runs as the unprivileged `culvert-maint` user. The agent
+# never runs as root. All Docker operations are gated through either
+# (a) sudoers + path-bound allowlist (production default), or
+# (b) docker group membership (dev/lab opt-in; effectively root-equiv).
+# See /etc/culvert-maint/config.toml `privilege_mode`.
+
+[Unit]
+Description=Culvert Maintenance Agent
+Documentation=https://github.com/KidCarmi/Culvert/blob/main/roadmap/D1.6-maintenance-agent-implementation-plan.md
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=culvert-maint
+Group=culvert-maint
+
+# Operator must edit this line to set the CP UID/username allowlist.
+# Multiple values are comma-separated, e.g. AllowPeers=culvert-cp or
+# AllowPeers=1234,5678. The agent refuses to start with an empty list.
+ExecStart=/usr/local/bin/culvert-maint --config /etc/culvert-maint/config.toml --allow-peers culvert-cp
+
+Restart=on-failure
+RestartSec=5s
+
+# ── Hardening (kernel-level, applies regardless of privilege_mode) ─────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+
+# Writable paths the agent needs.
+ReadWritePaths=/var/lib/culvert-maint /run
+
+# Capability set: empty by default. The agent does not need any
+# capabilities to do its own work; sudo / docker provides the
+# privilege when needed.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Resource sanity.
+LimitNOFILE=4096
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
