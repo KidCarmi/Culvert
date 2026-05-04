@@ -31,32 +31,36 @@ func TestState_IsTerminal(t *testing.T) {
 	}
 }
 
-func TestIsStateChanging_D16a_NoProductionKinds(t *testing.T) {
-	// Synthetic kind is the only state-changing kind in D1.6a — used
-	// by tests to exercise the lock framework without introducing
-	// real production state-changing operations.
+func TestIsStateChanging_ProductionAndFutureKinds(t *testing.T) {
+	// Synthetic kind is reserved for tests that need to exercise the
+	// lock framework without depending on a specific production kind.
 	if !IsStateChanging(SyntheticStateChangingKind) {
 		t.Errorf("%q (synthetic, test-only) should be state-changing", SyntheticStateChangingKind)
 	}
 
-	// D1.6b/c kinds are NOT yet wired in production; they must NOT be
-	// reported as state-changing in D1.6a. When D1.6b lands, the
-	// stateChangingKinds map will gain these entries together with
-	// matching handler + template + sudoers + tests.
+	// D1.6b production kinds.
+	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit} {
+		if !IsStateChanging(k) {
+			t.Errorf("D1.6b production kind %q must be state-changing", k)
+		}
+	}
+
+	// D1.6c/d kinds are NOT yet wired; they must NOT be reported as
+	// state-changing until the slice that adds them lands.
 	for _, k := range []string{
-		"backup.create",
-		"restore.commit",
-		"cleanups.create",
 		"upgrades.apply",
 		"rollbacks.create",
 	} {
 		if IsStateChanging(k) {
-			t.Errorf("D1.6a must not treat %q as state-changing — that kind belongs to a future slice", k)
+			t.Errorf("future kind %q must not be state-changing yet", k)
 		}
 	}
 
 	// Read-only kinds and unknowns are never state-changing.
-	for _, k := range []string{"restore.dryrun", "upgrades.check", "status.read", "unknown.kind", ""} {
+	for _, k := range []string{
+		KindBackupList, KindRestoreDryRun, KindCleanupDryRun,
+		"upgrades.check", "status.read", "unknown.kind", "",
+	} {
 		if IsStateChanging(k) {
 			t.Errorf("%q should NOT be state-changing", k)
 		}
@@ -263,5 +267,115 @@ func TestManager_BeginStoresIdempotencyKey(t *testing.T) {
 	got := m.Get(op.ID)
 	if got.IdempotencyKey != "abc-123" {
 		t.Errorf("idempotency_key: got %q", got.IdempotencyKey)
+	}
+}
+
+// D1.6b — production state-changing kinds.
+func TestIsStateChanging_D16bKinds(t *testing.T) {
+	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit} {
+		if !IsStateChanging(k) {
+			t.Errorf("%s should be state-changing", k)
+		}
+	}
+	for _, k := range []string{KindBackupList, KindRestoreDryRun, KindCleanupDryRun} {
+		if IsStateChanging(k) {
+			t.Errorf("%s must NOT be state-changing (read-only)", k)
+		}
+	}
+}
+
+// D1.6b — idempotency dedup.
+func TestBeginIdempotent_DupReturnsSameOp(t *testing.T) {
+	m := NewManager(nil)
+	a, deduped, err := m.BeginIdempotent(KindBackupList, "uid=1,user=cp", "key-A", nil)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if deduped {
+		t.Errorf("first call must not be deduped")
+	}
+	b, deduped, err := m.BeginIdempotent(KindBackupList, "uid=1,user=cp", "key-A", nil)
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if !deduped {
+		t.Errorf("second call with same (actor,kind,key) must be deduped")
+	}
+	if b.ID != a.ID {
+		t.Errorf("dedup must return same op_id; got %s vs %s", b.ID, a.ID)
+	}
+}
+
+func TestBeginIdempotent_DifferentActorIsNotDeduped(t *testing.T) {
+	m := NewManager(nil)
+	a, _, err := m.BeginIdempotent(KindBackupList, "uid=1,user=cp", "k", nil)
+	if err != nil {
+		t.Fatalf("a: %v", err)
+	}
+	b, deduped, err := m.BeginIdempotent(KindBackupList, "uid=2,user=other", "k", nil)
+	if err != nil {
+		t.Fatalf("b: %v", err)
+	}
+	if deduped || b.ID == a.ID {
+		t.Errorf("same key + different actor must produce a fresh op")
+	}
+}
+
+func TestBeginIdempotent_DifferentKindIsNotDeduped(t *testing.T) {
+	m := NewManager(nil)
+	a, _, _ := m.BeginIdempotent(KindBackupList, "uid=1,user=cp", "k", nil)
+	b, deduped, _ := m.BeginIdempotent(KindRestoreDryRun, "uid=1,user=cp", "k", nil)
+	if deduped || b.ID == a.ID {
+		t.Errorf("same actor+key but different kind must produce a fresh op")
+	}
+}
+
+func TestBeginIdempotent_EmptyKeyDisablesDedup(t *testing.T) {
+	m := NewManager(nil)
+	a, deduped, _ := m.BeginIdempotent(KindBackupList, "uid=1", "", nil)
+	if deduped {
+		t.Error("first call without key cannot be deduped")
+	}
+	b, deduped, _ := m.BeginIdempotent(KindBackupList, "uid=1", "", nil)
+	if deduped {
+		t.Error("empty key must always admit a fresh op")
+	}
+	if b.ID == a.ID {
+		t.Errorf("empty key must produce distinct op_ids; got same: %s", a.ID)
+	}
+}
+
+// Dedup runs BEFORE the lock check: a second submission of a
+// state-changing op with a duplicate key must NOT return 409.
+func TestBeginIdempotent_DedupBeforeLockCheck(t *testing.T) {
+	m := NewManager(nil)
+	a, _, err := m.BeginIdempotent(KindBackupCreate, "uid=1,user=cp", "k", nil)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	b, deduped, err := m.BeginIdempotent(KindBackupCreate, "uid=1,user=cp", "k", nil)
+	if err != nil {
+		t.Fatalf("dup must not 409: %v", err)
+	}
+	if !deduped {
+		t.Error("dup state-changing call should be deduped, not blocked by lock")
+	}
+	if b.ID != a.ID {
+		t.Errorf("dedup must return original op_id")
+	}
+	if IsConflict(err) {
+		t.Errorf("dup must NOT be Conflict")
+	}
+}
+
+// Without dedup, the second state-changing op fights for the lock.
+func TestBeginIdempotent_DifferentKeyReturns409OnLockedSlot(t *testing.T) {
+	m := NewManager(nil)
+	if _, _, err := m.BeginIdempotent(KindBackupCreate, "uid=1", "k1", nil); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	_, _, err := m.BeginIdempotent(KindBackupCreate, "uid=2", "k2", nil)
+	if !IsConflict(err) {
+		t.Errorf("second state-changing op with different key must be 409, got: %v", err)
 	}
 }
