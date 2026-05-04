@@ -27,7 +27,9 @@ func TestParity_TemplatesMatchSudoersAllowlist(t *testing.T) {
 
 	registered := make(map[string]struct{})
 	for _, tmpl := range Registry() {
-		registered[normalize(tmpl.Sudoers)] = struct{}{}
+		for _, line := range tmpl.SudoersLines {
+			registered[normalize(line)] = struct{}{}
+		}
 	}
 
 	for k := range registered {
@@ -43,56 +45,73 @@ func TestParity_TemplatesMatchSudoersAllowlist(t *testing.T) {
 }
 
 // TestParity_SudoersAreFullyPathBound rejects any registered template
-// whose sudoers line is NOT bound to the full compose path. This is
+// whose sudoers lines are NOT bound to the full compose path. This is
 // the foot-gun the original review caught: a template with
 // `-f {compose_file}` would let sudo accept the bare filename from
 // any cwd the agent process could be coerced into.
 func TestParity_SudoersAreFullyPathBound(t *testing.T) {
 	for _, tmpl := range Registry() {
-		// Templates that touch the compose project must reference the
-		// full {compose_path} placeholder, never bare {compose_file}.
-		if strings.Contains(tmpl.Sudoers, "{compose_file}") &&
-			!strings.Contains(tmpl.Sudoers, "{compose_path}") {
-			t.Errorf("template %q sudoers line uses bare {compose_file} — must use {compose_path} so the allowlist is path-bound: %q",
-				tmpl.ID, tmpl.Sudoers)
-		}
-		// Sudoers must never reference a relative path token.
-		if strings.HasPrefix(tmpl.Sudoers, "./") || strings.HasPrefix(tmpl.Sudoers, "../") {
-			t.Errorf("template %q sudoers line begins with a relative path: %q", tmpl.ID, tmpl.Sudoers)
+		for _, line := range tmpl.SudoersLines {
+			// Templates that touch the compose project must reference
+			// the full {compose_path} placeholder, never bare {compose_file}.
+			if strings.Contains(line, "{compose_file}") &&
+				!strings.Contains(line, "{compose_path}") {
+				t.Errorf("template %q sudoers line uses bare {compose_file} — must use {compose_path} so the allowlist is path-bound: %q",
+					tmpl.ID, line)
+			}
+			// Sudoers must never reference a relative path token.
+			if strings.HasPrefix(line, "./") || strings.HasPrefix(line, "../") {
+				t.Errorf("template %q sudoers line begins with a relative path: %q", tmpl.ID, line)
+			}
 		}
 	}
 }
 
-// TestParity_D1_6aRegistryIsMinimal asserts D1.6a ships exactly the
-// compose.status template and no future-slice entries leaked through.
-// D1.6b/c MUST update this assertion when their entries land alongside
-// the matching runner methods, sudoers lines, and API handlers.
-func TestParity_D1_6aRegistryIsMinimal(t *testing.T) {
-	reg := Registry()
-	if len(reg) != 1 {
-		var ids []string
-		for _, tmpl := range reg {
-			ids = append(ids, string(tmpl.ID))
+// TestParity_D16bRegistryShape asserts the D1.6b registry contains
+// exactly the templates the slice was scoped to add, and that each
+// template carries SudoersLines (no template skips its allowlist
+// contract).
+func TestParity_D16bRegistryShape(t *testing.T) {
+	wantIDs := map[TemplateID]struct{}{
+		TemplateComposeStatus:               {},
+		TemplateComposeCLIBackupEncrypted:   {},
+		TemplateComposeCLIBackupUnencrypted: {},
+		TemplateComposeCLIBackupList:        {},
+		TemplateComposeCLIRestoreDryRun:     {},
+		TemplateComposeCLIRestoreCommit:     {},
+		TemplateComposeDown:                 {},
+		TemplateComposeUp:                   {},
+		TemplateComposeCLICleanupDryRun:     {},
+		TemplateComposeCLICleanupCommit:     {},
+	}
+	gotIDs := map[TemplateID]struct{}{}
+	for _, tmpl := range Registry() {
+		gotIDs[tmpl.ID] = struct{}{}
+		if len(tmpl.SudoersLines) == 0 {
+			t.Errorf("template %q has no SudoersLines — every template must declare its allowlist", tmpl.ID)
 		}
-		t.Fatalf("D1.6a runner registry must contain exactly one template; got %d: %v", len(reg), ids)
 	}
-	if reg[0].ID != TemplateComposeStatus {
-		t.Errorf("D1.6a registry must contain compose.status only; got %q", reg[0].ID)
+	for id := range wantIDs {
+		if _, ok := gotIDs[id]; !ok {
+			t.Errorf("registry missing expected template %q", id)
+		}
 	}
-	if reg[0].StateChanging {
-		t.Errorf("compose.status must NOT be state-changing")
+	for id := range gotIDs {
+		if _, ok := wantIDs[id]; !ok {
+			t.Errorf("registry has unexpected template %q (D1.6b scope is closed)", id)
+		}
 	}
-	// Sudoers must have exactly one entry — no backup/restore/cleanup/
-	// up/down/pull/run leakage.
-	allowed := parseSudoersTemplates(t, findSudoersFile(t))
-	if len(allowed) != 1 {
-		t.Errorf("D1.6a sudoers file must contain exactly one entry; got %d: %v", len(allowed), allowed)
-	}
-	for k := range allowed {
-		for _, banned := range []string{"--backup", "--restore", "--cleanup-restore-leftovers", "up -d", "down", "pull", "manifest inspect", "run --rm cli"} {
-			if strings.Contains(k, banned) {
-				t.Errorf("D1.6a sudoers entry %q contains future-slice token %q — must not leak", k, banned)
-			}
+	// Restore templates MUST have exactly 12 lines each (3 modes ×
+	// 4 flag combos). No fewer (would be incomplete coverage), no
+	// more (would mean extra wildcard surface leaked through).
+	for _, id := range []TemplateID{TemplateComposeCLIRestoreDryRun, TemplateComposeCLIRestoreCommit} {
+		tmpl := templateByID(id)
+		if tmpl == nil {
+			t.Errorf("template %q missing from registry", id)
+			continue
+		}
+		if got := len(tmpl.SudoersLines); got != 12 {
+			t.Errorf("template %q must enumerate exactly 12 sudoers lines (3 modes × 4 flag combos); got %d", id, got)
 		}
 	}
 }
