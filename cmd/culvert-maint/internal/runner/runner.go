@@ -448,6 +448,23 @@ func (r *Runner) EnvAllowSnapshot() []string {
 	return out
 }
 
+// SetExecHooksForTest replaces the runner's exec start/wait hooks.
+// Production code never calls this; tests inject capture-and-fake
+// behaviour. Either argument may be nil to leave the corresponding
+// hook unchanged.
+//
+// This is intentionally exported so other packages' tests
+// (internal/server's handler tests in particular) can drive the
+// runner without spawning real `docker` processes.
+func (r *Runner) SetExecHooksForTest(start, wait func(*exec.Cmd) error) {
+	if start != nil {
+		r.execStartFn = start
+	}
+	if wait != nil {
+		r.execWaitFn = wait
+	}
+}
+
 // envAllowed reports whether name is in the runner's EnvAllow.
 func (r *Runner) envAllowed(name string) bool {
 	for _, n := range r.envAllow {

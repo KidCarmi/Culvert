@@ -7,23 +7,23 @@
 //
 // Common pattern (POST handlers — backup.create, restore.*, cleanup):
 //
-//   1. Decode JSON body into a typed request struct.
-//   2. Validate every field. Reject with 400 on any malformed input.
-//   3. Resolve passphrase_ref (env:NAME only in D1.6b). The resolved
-//      value is held in a local string variable for the duration of
-//      this handler — never logged, never put into the op record's
-//      params, never echoed in the audit event. Only the *reference*
-//      (env:NAME) is recorded; the resolved value flows into the
-//      runner via env overlay.
-//   4. Build a sanitized params map for the audit event (passphrase_ref
-//      preserved; resolved value NEVER included).
-//   5. Call ops.Manager.BeginIdempotent. On 409 (lock conflict),
-//      return 409 with the holder's snapshot. On dedupe hit, return
-//      202 with the prior op_id so the caller's retry is a no-op.
-//   6. Open a per-op log file. If creation fails, finish the op as
-//      failed (validation reason) and return 500.
-//   7. Spawn the orchestrator goroutine with the stage list. Return
-//      202 immediately with the op_id.
+//  1. Decode JSON body into a typed request struct.
+//  2. Validate every field. Reject with 400 on any malformed input.
+//  3. Resolve passphrase_ref (env:NAME only in D1.6b). The resolved
+//     value is held in a local string variable for the duration of
+//     this handler — never logged, never put into the op record's
+//     params, never echoed in the audit event. Only the *reference*
+//     (env:NAME) is recorded; the resolved value flows into the
+//     runner via env overlay.
+//  4. Build a sanitized params map for the audit event (passphrase_ref
+//     preserved; resolved value NEVER included).
+//  5. Call ops.Manager.BeginIdempotent. On 409 (lock conflict),
+//     return 409 with the holder's snapshot. On dedupe hit, return
+//     202 with the prior op_id so the caller's retry is a no-op.
+//  6. Open a per-op log file. If creation fails, finish the op as
+//     failed (validation reason) and return 500.
+//  7. Spawn the orchestrator goroutine with the stage list. Return
+//     202 immediately with the op_id.
 //
 // GET /v1/backups is the only synchronous handler — it does its work
 // inline and returns 200 with the parsed JSON list.
@@ -312,12 +312,12 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 // ─── POST /v1/restores/dryrun and /commit ──────────────────────────
 
 type restoreRequest struct {
-	Path                  string `json:"path"`
-	Mode                  string `json:"mode"`
-	PassphraseRef         string `json:"passphrase_ref,omitempty"`
-	AcceptDPReenrollment  bool   `json:"accept_dp_reenrollment,omitempty"`
-	AllowCounterRollback  bool   `json:"allow_counter_rollback,omitempty"`
-	IdempotencyKey        string `json:"idempotency_key,omitempty"`
+	Path                 string `json:"path"`
+	Mode                 string `json:"mode"`
+	PassphraseRef        string `json:"passphrase_ref,omitempty"`
+	AcceptDPReenrollment bool   `json:"accept_dp_reenrollment,omitempty"`
+	AllowCounterRollback bool   `json:"allow_counter_rollback,omitempty"`
+	IdempotencyKey       string `json:"idempotency_key,omitempty"`
 }
 
 func (s *Server) handleRestoreDryRun(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo) {
@@ -328,7 +328,7 @@ func (s *Server) handleRestoreCommit(w http.ResponseWriter, r *http.Request, pee
 	s.handleRestore(w, r, peer, true)
 }
 
-//nolint:cyclop // single-pass orchestration; splitting hides the down→commit→up→health ordering
+//nolint:cyclop,funlen,nestif // single-pass orchestration; splitting hides the down→commit→up→health ordering
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo, commit bool) {
 	if s.opts.Runner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "runner_not_wired"})
@@ -360,11 +360,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 	}
 
 	params := map[string]interface{}{
-		"path":                    req.Path,
-		"mode":                    req.Mode,
-		"accept_dp_reenrollment":  req.AcceptDPReenrollment,
-		"allow_counter_rollback":  req.AllowCounterRollback,
-		"passphrase_ref":          req.PassphraseRef,
+		"path":                   req.Path,
+		"mode":                   req.Mode,
+		"accept_dp_reenrollment": req.AcceptDPReenrollment,
+		"allow_counter_rollback": req.AllowCounterRollback,
+		"passphrase_ref":         req.PassphraseRef,
 	}
 
 	acceptDP := req.AcceptDPReenrollment
