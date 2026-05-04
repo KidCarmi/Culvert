@@ -56,43 +56,46 @@ const (
 
 // ─── shared helpers ────────────────────────────────────────────────
 
-// resolvePassphraseRef resolves a passphrase_ref string into a value
-// string. Supported schemes:
+// validatePassphraseRefShape checks that a non-empty passphrase_ref
+// has the supported shape (env:NAME) AND that NAME is in the runner's
+// EnvAllow. It does NOT read os.Getenv — that's a separate step
+// reserved for newly admitted ops (so a duplicate request with a
+// transiently-missing env var still dedupes correctly per
+// idempotency_key).
 //
-//   - "env:NAME" — reads os.Getenv("NAME"). Errors if NAME is not in
-//     the runner's EnvAllow (so secrets cannot smuggle through env
-//     names the operator did not pre-approve) OR if NAME is unset OR
-//     empty.
-//
-// "" passes through as ("", nil) — caller decides whether empty is
-// allowed for the operation. "file:/path" support is deferred to
-// D1.6c per the kickoff.
-//
-// The returned value is never logged. Callers MUST keep it in a local
-// variable and pass it directly into runner methods via the env
-// overlay path — never into params, never into result, never into
-// audit fields.
-func resolvePassphraseRef(ref string, runnerEnvAllow []string) (string, error) {
+// Empty ref passes through as nil — the caller decides whether empty
+// is allowed for the operation.
+func validatePassphraseRefShape(ref string, runnerEnvAllow []string) error {
 	if ref == "" {
-		return "", nil
+		return nil
 	}
 	if !strings.HasPrefix(ref, "env:") {
-		return "", fmt.Errorf("passphrase_ref: only env:NAME is supported in D1.6b, got %q", ref)
+		return fmt.Errorf("passphrase_ref: only env:NAME is supported in D1.6b, got %q", ref)
 	}
 	name := strings.TrimPrefix(ref, "env:")
 	if name == "" {
-		return "", errors.New("passphrase_ref: env: prefix with empty name")
+		return errors.New("passphrase_ref: env: prefix with empty name")
 	}
-	allowed := false
 	for _, n := range runnerEnvAllow {
 		if n == name {
-			allowed = true
-			break
+			return nil
 		}
 	}
-	if !allowed {
-		return "", fmt.Errorf("passphrase_ref: env name %q is not in the runner's EnvAllow", name)
+	return fmt.Errorf("passphrase_ref: env name %q is not in the runner's EnvAllow", name)
+}
+
+// readPassphraseFromEnv reads the env var named by ref (which MUST
+// already be shape-validated). Returns "" if ref is empty (caller
+// decides whether that's an error). Returns an error if ref is
+// non-empty but the env var is unset or empty.
+//
+// This is called ONLY for newly admitted ops, never for deduped
+// requests — see startAsyncOp.
+func readPassphraseFromEnv(ref string) (string, error) {
+	if ref == "" {
+		return "", nil
 	}
+	name := strings.TrimPrefix(ref, "env:")
 	v := os.Getenv(name)
 	if v == "" {
 		return "", fmt.Errorf("passphrase_ref: env var %q is unset or empty", name)
@@ -118,17 +121,23 @@ func decodeJSONBody(r *http.Request, dst interface{}) error {
 	return nil
 }
 
-// startAsyncOp does the common work of admitting an operation and
-// kicking off its orchestrator goroutine. Returns the op snapshot the
-// handler will echo back to the caller (with deduped flag), or an
-// error suitable for an HTTP 4xx/5xx response.
+// startAsyncOp admits an operation and (for newly admitted ops) calls
+// the buildStages closure to construct the stage list, then spawns
+// the orchestrator goroutine. For deduped requests, buildStages is
+// NEVER called — so a retry with a missing env var still returns the
+// existing op_id without trying to resolve secrets.
 //
-// Caller is responsible for: decoding the request, building the
-// params map (sanitised for audit — no raw secrets), and constructing
-// the stage list (which closures will pull the resolved passphrase
-// from a local variable). The returned op may be nil only when the
-// returned error is non-nil.
-func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempotencyKey string, paramsForAudit map[string]interface{}, stages []ops.FlowStage) (*ops.Op, bool, *opError) {
+// Caller is responsible for: decoding the request, validating its
+// SHAPE (filename, mode, passphrase_ref scheme + env name in
+// EnvAllow), and building the sanitised params map (no raw secrets).
+//
+// buildStages is called only for newly admitted ops. Inside it, the
+// caller resolves any late-bound state (passphrase env reads, file
+// reads) and constructs the FlowStage list. If buildStages returns
+// an *opError, the op is finished with ReasonValidation and the
+// error is propagated to the caller — the op record will be
+// observable via /v1/operations/{id} as failed.
+func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempotencyKey string, paramsForAudit map[string]interface{}, buildStages func() ([]ops.FlowStage, *opError)) (*ops.Op, bool, *opError) {
 	op, deduped, err := s.opts.Ops.BeginIdempotent(kind, peer.String(), idempotencyKey, paramsForAudit)
 	if err != nil {
 		if ops.IsConflict(err) {
@@ -142,9 +151,18 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		return nil, false, &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": err.Error()}}
 	}
 	if deduped {
-		// A duplicate submission — return the prior op snapshot,
-		// no goroutine spawn.
+		// Duplicate submission — return the prior op snapshot, NO
+		// stage build, NO goroutine spawn. This is the contract:
+		// a retry with the same idempotency_key returns the
+		// original op_id even if the late-bound resources (env
+		// vars, files) are no longer present.
 		return op, true, nil
+	}
+	// Newly admitted op — late-bound stage construction happens here.
+	stages, herr := buildStages()
+	if herr != nil {
+		_ = s.opts.Ops.Finish(op.ID, ops.StateFailed, ops.ReasonValidation, map[string]interface{}{"agent_error": "build_stages: late validation failed"})
+		return nil, false, herr
 	}
 	oplog, oerr := ops.OpenOpLog(s.opts.StateDir, op.ID)
 	if oerr != nil {
@@ -152,8 +170,11 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		return nil, false, &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "open_op_log_failed"}}
 	}
 	deps := ops.OrchestratorDeps{Manager: s.opts.Ops, Audit: s.opts.Audit, OpLog: oplog}
-	// Goroutine owns oplog now; orchestrator closes it on exit.
-	go ops.Run(context.Background(), deps, op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, stages)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), s.opts.Cfg.OperationTimeout)
+		defer cancel()
+		ops.Run(ctx, deps, op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, stages)
+	}()
 	return op, false, nil
 }
 
@@ -236,47 +257,55 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request, peer
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "encrypt=false must not include passphrase_ref"})
 		return
 	}
-	resolved, err := resolvePassphraseRef(req.PassphraseRef, s.opts.Runner.EnvAllowSnapshot())
-	if err != nil {
+	// Shape-validate passphrase_ref BEFORE BeginIdempotent — env
+	// read is deferred to buildStages so a deduped retry with a
+	// transiently-missing env var still returns the existing op_id.
+	if err := validatePassphraseRefShape(req.PassphraseRef, s.opts.Runner.EnvAllowSnapshot()); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
 	// Sanitised audit params — passphrase_ref preserved (a reference,
-	// not the value); the resolved passphrase is captured in a local
-	// closure variable below and is NEVER inserted into params or
-	// any other audited field.
+	// not the value); the resolved passphrase will be captured by a
+	// closure inside buildStages and is NEVER inserted into params
+	// or any other audited field.
 	params := map[string]interface{}{
 		"filename":       req.Filename,
 		"encrypt":        req.Encrypt,
 		"passphrase_ref": req.PassphraseRef,
 	}
 
-	// Build the single backup stage. The closure captures `resolved`
-	// — when this goroutine runs, it pulls the value from the
-	// closure, hands it to the runner via env overlay, and never
-	// stores it anywhere else.
 	filename := req.Filename
 	encrypt := req.Encrypt
-	stage := ops.FlowStage{
-		Name:          "run_cli_backup",
-		FailureReason: ops.ReasonCLIError,
-		Run: func(ctx context.Context) ([]byte, []byte, error) {
-			var res *runner.Result
-			var rerr error
-			if encrypt {
-				res, rerr = s.opts.Runner.ComposeBackupEncrypted(ctx, filename, resolved)
-			} else {
-				res, rerr = s.opts.Runner.ComposeBackupUnencrypted(ctx, filename)
-			}
-			if res == nil {
-				return nil, nil, rerr
-			}
-			return res.Stdout, res.Stderr, rerr
-		},
-	}
+	passRef := req.PassphraseRef
 
-	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindBackupCreate, req.IdempotencyKey, params, []ops.FlowStage{stage})
+	// buildStages runs ONLY for newly admitted ops. It resolves the
+	// passphrase from the env at this point (not earlier), so a
+	// deduped retry never has to read the env at all.
+	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindBackupCreate, req.IdempotencyKey, params, func() ([]ops.FlowStage, *opError) {
+		resolved, rerr := readPassphraseFromEnv(passRef)
+		if rerr != nil {
+			return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
+		}
+		stage := ops.FlowStage{
+			Name:          "run_cli_backup",
+			FailureReason: ops.ReasonCLIError,
+			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				var res *runner.Result
+				var rerr2 error
+				if encrypt {
+					res, rerr2 = s.opts.Runner.ComposeBackupEncrypted(ctx, filename, resolved)
+				} else {
+					res, rerr2 = s.opts.Runner.ComposeBackupUnencrypted(ctx, filename)
+				}
+				if res == nil {
+					return nil, nil, rerr2
+				}
+				return res.Stdout, res.Stderr, rerr2
+			},
+		}
+		return []ops.FlowStage{stage}, nil
+	})
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
 		return
@@ -286,14 +315,27 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request, peer
 
 // ─── GET /v1/backups (backup.list) ─────────────────────────────────
 
+// backupListEntry is the on-the-wire shape produced by the proxy CLI's
+// `--list-backups` flag (see root list_backups.go). The agent
+// re-encodes after parsing so we never forward malformed bytes
+// claiming to be application/json.
+type backupListEntry struct {
+	Filename   string `json:"filename"`
+	Path       string `json:"path"`
+	SizeBytes  int64  `json:"size_bytes"`
+	ModifiedAt string `json:"modified_at"` // RFC3339 string; not parsed
+	Encrypted  bool   `json:"encrypted"`
+}
+
 func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo) {
 	if s.opts.Runner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "runner_not_wired"})
 		return
 	}
 	// Synchronous. The cli container scans /backup and emits a JSON
-	// array; we proxy that verbatim. Read-only — no audit, no op
-	// record.
+	// array on stdout; the agent unmarshals it (so a malformed CLI
+	// output produces a clean 500 rather than corrupting the Content-
+	// Type contract) and re-encodes via writeJSON.
 	res, err := s.opts.Runner.ComposeBackupList(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
@@ -302,10 +344,19 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 		})
 		return
 	}
-	// Forward the JSON array as-is.
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(res.Stdout)
+	var entries []backupListEntry
+	if jerr := json.Unmarshal(res.Stdout, &entries); jerr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error":  "list_backups_parse_failed",
+			"detail": jerr.Error(),
+		})
+		return
+	}
+	// nil → []; the wire shape is always an array, never null.
+	if entries == nil {
+		entries = []backupListEntry{}
+	}
+	writeJSON(w, http.StatusOK, entries)
 	_ = peer
 }
 
@@ -353,8 +404,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode must be one of full|trust-root-only|state-only"})
 		return
 	}
-	resolved, err := resolvePassphraseRef(req.PassphraseRef, s.opts.Runner.EnvAllowSnapshot())
-	if err != nil {
+	// Shape-validate passphrase_ref BEFORE BeginIdempotent. Env read
+	// is deferred to buildStages so a deduped retry never has to
+	// re-read os.Getenv.
+	if err := validatePassphraseRefShape(req.PassphraseRef, s.opts.Runner.EnvAllowSnapshot()); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -369,10 +422,42 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 
 	acceptDP := req.AcceptDPReenrollment
 	allowCounter := req.AllowCounterRollback
-	var stages []ops.FlowStage
+	passRef := req.PassphraseRef
 
+	buildStages := func() ([]ops.FlowStage, *opError) {
+		// passphrase_ref is OPTIONAL for restore (cli detects
+		// encryption via magic bytes). If a ref was supplied but
+		// the env var is empty, fail late so the dedup-retry path
+		// is unaffected.
+		resolved, rerr := readPassphraseFromEnv(passRef)
+		if rerr != nil {
+			return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
+		}
+		return s.buildRestoreStages(commit, filename, mode, acceptDP, allowCounter, resolved), nil
+	}
+
+	kind := ops.KindRestoreDryRun
+	if commit {
+		kind = ops.KindRestoreCommit
+	}
+	op, deduped, herr := s.startAsyncOp(r, peer, kind, req.IdempotencyKey, params, buildStages)
+	if herr != nil {
+		writeJSON(w, herr.Status, herr.Body)
+		return
+	}
+	writeOpResponse(w, op, deduped)
+}
+
+// buildRestoreStages constructs the stage list for restore.dryrun
+// (commit=false, single stage) or restore.commit (commit=true, four
+// stages: down → cli --restore --confirm → up [best-effort] →
+// health_check [best-effort]). Extracted from handleRestore so the
+// late-binding closure stays compact.
+//
+//nolint:funlen // single-pass orchestration sequence — splitting hides the down→commit→up→health ordering
+func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.RestoreMode, acceptDP, allowCounter bool, resolved string) []ops.FlowStage {
 	if !commit {
-		stages = []ops.FlowStage{
+		return []ops.FlowStage{
 			{
 				Name:          "run_cli_restore_dryrun",
 				FailureReason: ops.ReasonCLIError,
@@ -385,77 +470,74 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 				},
 			},
 		}
-	} else {
-		probeFactory := s.opts.HealthProbeFactory
-		stages = []ops.FlowStage{
-			{
-				Name:          "stop_stack",
-				FailureReason: ops.ReasonCommandError,
-				Run: func(ctx context.Context) ([]byte, []byte, error) {
-					res, rerr := s.opts.Runner.ComposeDown(ctx)
-					if res == nil {
-						return nil, nil, rerr
-					}
-					return res.Stdout, res.Stderr, rerr
-				},
-			},
-			{
-				Name:          "run_cli_restore_commit",
-				FailureReason: ops.ReasonCLIError,
-				Run: func(ctx context.Context) ([]byte, []byte, error) {
-					res, rerr := s.opts.Runner.ComposeRestoreCommit(ctx, filename, mode, acceptDP, allowCounter, resolved)
-					if res == nil {
-						return nil, nil, rerr
-					}
-					return res.Stdout, res.Stderr, rerr
-				},
-			},
-			{
-				// Best-effort recovery: try to bring the stack back
-				// up even if the restore commit failed. Op stays
-				// failed (first failure wins), but the operator log
-				// shows whether the recovery worked.
-				Name:            "start_stack",
-				ContinueOnError: true,
-				FailureReason:   ops.ReasonCommandError,
-				Run: func(ctx context.Context) ([]byte, []byte, error) {
-					res, rerr := s.opts.Runner.ComposeUp(ctx)
-					if res == nil {
-						return nil, nil, rerr
-					}
-					return res.Stdout, res.Stderr, rerr
-				},
-			},
-			{
-				Name:          "health_check",
-				FailureReason: ops.ReasonHealthFailed,
-				Run: func(ctx context.Context) ([]byte, []byte, error) {
-					probe := probeFactory()
-					hr, herr := probe.Run(ctx)
-					if herr != nil {
-						return nil, nil, herr
-					}
-					summary := fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
-						hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
-					if hr.Failed() {
-						return []byte(summary), nil, errors.New(hr.ReadyDetail)
-					}
-					return []byte(summary), nil, nil
-				},
-			},
-		}
 	}
-
-	kind := ops.KindRestoreDryRun
-	if commit {
-		kind = ops.KindRestoreCommit
+	probeFactory := s.opts.HealthProbeFactory
+	return []ops.FlowStage{
+		{
+			Name:          "stop_stack",
+			FailureReason: ops.ReasonCommandError,
+			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				res, rerr := s.opts.Runner.ComposeDown(ctx)
+				if res == nil {
+					return nil, nil, rerr
+				}
+				return res.Stdout, res.Stderr, rerr
+			},
+		},
+		{
+			Name:          "run_cli_restore_commit",
+			FailureReason: ops.ReasonCLIError,
+			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				res, rerr := s.opts.Runner.ComposeRestoreCommit(ctx, filename, mode, acceptDP, allowCounter, resolved)
+				if res == nil {
+					return nil, nil, rerr
+				}
+				return res.Stdout, res.Stderr, rerr
+			},
+		},
+		{
+			// Best-effort recovery: try to bring the stack back
+			// up even if the restore commit failed. Op stays
+			// failed (first failure wins), but the operator log
+			// shows whether the recovery worked.
+			Name:            "start_stack",
+			ContinueOnError: true,
+			FailureReason:   ops.ReasonCommandError,
+			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				res, rerr := s.opts.Runner.ComposeUp(ctx)
+				if res == nil {
+					return nil, nil, rerr
+				}
+				return res.Stdout, res.Stderr, rerr
+			},
+		},
+		{
+			// ContinueOnError=true so health_check ALWAYS runs
+			// after start_stack, even when restore failed. The
+			// operator needs to see whether the recovery
+			// brought the stack back; first-failure-wins still
+			// preserves the audit reason from the earlier
+			// stage. Without this flag, a failed restore would
+			// abort here and leave the operator guessing
+			// whether `compose up` actually worked.
+			Name:            "health_check",
+			ContinueOnError: true,
+			FailureReason:   ops.ReasonHealthFailed,
+			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				probe := probeFactory()
+				hr, herr := probe.Run(ctx)
+				if herr != nil {
+					return nil, nil, herr
+				}
+				summary := fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
+					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
+				if hr.Failed() {
+					return []byte(summary), nil, errors.New(hr.ReadyDetail)
+				}
+				return []byte(summary), nil, nil
+			},
+		},
 	}
-	op, deduped, herr := s.startAsyncOp(r, peer, kind, req.IdempotencyKey, params, stages)
-	if herr != nil {
-		writeJSON(w, herr.Status, herr.Body)
-		return
-	}
-	writeOpResponse(w, op, deduped)
 }
 
 // ─── POST /v1/cleanups ─────────────────────────────────────────────
@@ -495,29 +577,33 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request, peer auth
 	confirm := req.Confirm
 	older := req.OlderThan
 	keep := req.KeepLast
-	stage := ops.FlowStage{
-		Name:          "run_cli_cleanup",
-		FailureReason: ops.ReasonCLIError,
-		Run: func(ctx context.Context) ([]byte, []byte, error) {
-			var res *runner.Result
-			var rerr error
-			if confirm {
-				res, rerr = s.opts.Runner.ComposeCleanupCommit(ctx, older, keep)
-			} else {
-				res, rerr = s.opts.Runner.ComposeCleanupDryRun(ctx, older, keep)
-			}
-			if res == nil {
-				return nil, nil, rerr
-			}
-			return res.Stdout, res.Stderr, rerr
-		},
+
+	buildStages := func() ([]ops.FlowStage, *opError) {
+		stage := ops.FlowStage{
+			Name:          "run_cli_cleanup",
+			FailureReason: ops.ReasonCLIError,
+			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				var res *runner.Result
+				var rerr error
+				if confirm {
+					res, rerr = s.opts.Runner.ComposeCleanupCommit(ctx, older, keep)
+				} else {
+					res, rerr = s.opts.Runner.ComposeCleanupDryRun(ctx, older, keep)
+				}
+				if res == nil {
+					return nil, nil, rerr
+				}
+				return res.Stdout, res.Stderr, rerr
+			},
+		}
+		return []ops.FlowStage{stage}, nil
 	}
 
 	kind := ops.KindCleanupDryRun
 	if confirm {
 		kind = ops.KindCleanupCommit
 	}
-	op, deduped, herr := s.startAsyncOp(r, peer, kind, req.IdempotencyKey, params, []ops.FlowStage{stage})
+	op, deduped, herr := s.startAsyncOp(r, peer, kind, req.IdempotencyKey, params, buildStages)
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
 		return

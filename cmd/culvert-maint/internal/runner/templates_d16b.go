@@ -110,12 +110,29 @@ func ValidateOlderThan(dur string) error { return validateOlderThan(dur) }
 // ValidateKeepLast is the exported wrapper around validateKeepLast.
 func ValidateKeepLast(n int) error { return validateKeepLast(n) }
 
+// olderThanRE bounds the on-the-wire older_than string shape. The
+// sudoers entry uses `--older-than *` (one bounded wildcard token),
+// so the agent's validator is the only barrier between operator
+// input and a sudo argv. We accept ONLY the time.ParseDuration
+// alphabet — digits, optional decimal, and one of the unit suffixes
+// — with no surrounding whitespace, control characters, or shell
+// metacharacters. time.ParseDuration alone tolerates nothing weird,
+// but we belt-and-braces with this regex so an upstream bug that
+// builds the string differently still fails loudly.
+var olderThanRE = regexp.MustCompile(`^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)$`)
+
 // validateOlderThan parses dur and bounds its range. The cleanup CLI
 // also parses with time.ParseDuration; the agent enforces the same
-// strictness up-front so an invalid request never reaches sudo.
+// strictness up-front so an invalid request never reaches sudo. The
+// surface area is tightened further by olderThanRE which rejects
+// whitespace, control chars, and shell metacharacters before we even
+// hand the string to time.ParseDuration.
 func validateOlderThan(dur string) error {
 	if dur == "" {
 		return errors.New("older_than: empty")
+	}
+	if !olderThanRE.MatchString(dur) {
+		return fmt.Errorf("older_than: must match ^[0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h)$ with no whitespace, control chars, or shell metacharacters; got %q", dur)
 	}
 	d, err := time.ParseDuration(dur)
 	if err != nil {

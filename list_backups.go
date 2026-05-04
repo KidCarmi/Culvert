@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -57,12 +58,18 @@ func runListBackups(dir string, out io.Writer) error {
 	}
 	out_entries := make([]backupListEntry, 0, len(entries))
 	for _, e := range entries {
-		// Skip non-regular entries (dirs, symlinks, devices, sockets).
+		// Skip non-regular entries via DirEntry.Type() — this does
+		// NOT follow symlinks (unlike os.Stat). Symlinks, dirs,
+		// devices, sockets, etc. are filtered out on the cheap.
 		if !e.Type().IsRegular() {
 			continue
 		}
+		// Also Lstat (NOT Stat) the entry to confirm it's still a
+		// regular file at the moment we care about size/mtime; this
+		// guards against TOCTOU where a real file at ReadDir time is
+		// replaced by a symlink before we read it.
 		full := filepath.Join(dir, e.Name())
-		fi, ferr := os.Stat(full) //nolint:gosec // listing the operator-supplied backup dir is the whole point
+		fi, ferr := os.Lstat(full) //nolint:gosec // listing the operator-supplied backup dir is the whole point
 		if ferr != nil {
 			continue
 		}
@@ -92,8 +99,12 @@ func runListBackups(dir string, out io.Writer) error {
 // of path equal backupEncMagic. Returns false on any read error
 // (unreadable file, too short, etc.) — the caller treats false as
 // "encrypted=unknown-or-no" and that is fine for an informational list.
+//
+// Open uses O_NOFOLLOW so a symlink-replacement race after the
+// caller's DirEntry.Type() / Lstat checks cannot trick us into
+// reading from an unintended target.
 func peekEncryptedMagic(path string) bool {
-	f, err := os.Open(path) //nolint:gosec // intentional: classify the operator-supplied backup file
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // intentional: classify the operator-supplied backup file
 	if err != nil {
 		return false
 	}

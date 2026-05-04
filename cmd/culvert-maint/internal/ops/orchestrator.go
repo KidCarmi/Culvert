@@ -166,6 +166,18 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 	finalReason := FailureReason("")
 	if finalState == StateFailed {
 		finalReason = firstReason
+		// Operation-level timeout overrides any stage-level
+		// failure reason. cfg.OperationTimeout is enforced by the
+		// caller via context.WithTimeout(ctx, cfg.OperationTimeout);
+		// when the deadline fires, every in-flight stage's
+		// runner-level ctx is also cancelled. We promote that to
+		// ReasonTimeout here so the audit trail makes the cause
+		// unambiguous (rather than blaming whichever stage's
+		// runner.Run happened to return DeadlineExceeded first).
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			finalReason = ReasonTimeout
+			_ = deps.OpLog.Note("agent", "operation_timeout reached; promoting failure reason to timeout")
+		}
 	}
 
 	_ = deps.Manager.Finish(opID, finalState, finalReason, nil)

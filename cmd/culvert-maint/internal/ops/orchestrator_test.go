@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"culvert-maint/internal/audit"
 )
@@ -247,6 +248,51 @@ func TestRun_PropagatesIdempotencyKeyToAudit(t *testing.T) {
 	body := rig.auditContent(t)
 	if !strings.Contains(body, `"idempotency_key":"key-XYZ"`) {
 		t.Errorf("audit missing idempotency_key=key-XYZ:\n%s", body)
+	}
+}
+
+// Operation-level timeout: a long-running stage that respects its
+// context should be cancelled when ctx hits its deadline; the op's
+// final reason must be ReasonTimeout (overriding any stage reason).
+func TestRun_OperationTimeoutMarksReasonTimeout(t *testing.T) {
+	rig := newOrchTestRig(t)
+
+	// Stage that blocks until ctx is cancelled — simulates a real
+	// CLI command that respects timeouts.
+	blockingStage := FlowStage{
+		Name: "block",
+		// FailureReason intentionally NOT ReasonTimeout — we want
+		// to prove the orchestrator promotes the reason regardless
+		// of what the stage declared.
+		FailureReason: ReasonCLIError,
+		Run: func(ctx context.Context) ([]byte, []byte, error) {
+			<-ctx.Done()
+			return nil, nil, ctx.Err()
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	Run(ctx, rig.deps, rig.opID, KindBackupCreate, "uid=1", nil, "",
+		[]FlowStage{blockingStage},
+	)
+
+	op := rig.mgr.Get(rig.opID)
+	if op.State != StateFailed {
+		t.Errorf("state: got %s want failed", op.State)
+	}
+	if op.FailureReason != string(ReasonTimeout) {
+		t.Errorf("failure_reason: got %q want %q (timeout must override stage reason)",
+			op.FailureReason, ReasonTimeout)
+	}
+	body := rig.auditContent(t)
+	if !strings.Contains(body, `"failure_reason":"timeout"`) {
+		t.Errorf("audit must record timeout reason: %s", body)
+	}
+	logBody := rig.opLogContent(t)
+	if !strings.Contains(logBody, "operation_timeout reached") {
+		t.Errorf("op-log must note the timeout promotion:\n%s", logBody)
 	}
 }
 
