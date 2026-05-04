@@ -157,7 +157,7 @@ case "$COMPOSE_FILE" in
         exit 1
         ;;
     */* | *\\* )
-        echo "install.sh: ERROR — compose_file must be a bare filename (no '/' or '\\'), got '$COMPOSE_FILE'" >&2
+        echo "install.sh: ERROR — compose_file must be a bare filename (no slash or backslash), got '$COMPOSE_FILE'" >&2
         exit 1
         ;;
 esac
