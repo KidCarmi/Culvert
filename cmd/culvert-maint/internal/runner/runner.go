@@ -439,6 +439,15 @@ func (r *Runner) buildEnvWithOverlay(envOverlay map[string]string) []string {
 	return env
 }
 
+// EnvAllowSnapshot returns a copy of the runner's EnvAllow list. Used
+// by handlers that need to validate a `passphrase_ref: env:NAME`
+// against the closed allowlist before calling the runner.
+func (r *Runner) EnvAllowSnapshot() []string {
+	out := make([]string, len(r.envAllow))
+	copy(out, r.envAllow)
+	return out
+}
+
 // envAllowed reports whether name is in the runner's EnvAllow.
 func (r *Runner) envAllowed(name string) bool {
 	for _, n := range r.envAllow {

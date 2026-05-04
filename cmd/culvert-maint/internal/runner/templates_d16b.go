@@ -75,9 +75,16 @@ func (m RestoreMode) IsValid() bool {
 // Length 1..255.
 var backupFilenameRE = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,255}$`)
 
-// validateBackupFilename is the canonical filename validator. Returns
+// ValidateBackupFilename is the canonical filename validator. Returns
 // an error if the filename has a path separator, traversal sequence,
-// shell metacharacter, or otherwise fails the bounded regex.
+// shell metacharacter, or otherwise fails the bounded regex. Exported
+// so handlers can validate before attempting to call a runner method.
+func ValidateBackupFilename(filename string) error {
+	return validateBackupFilename(filename)
+}
+
+// validateBackupFilename is the unexported implementation kept for
+// internal callers that don't need the exported wrapper.
 func validateBackupFilename(filename string) error {
 	if filename == "" {
 		return errors.New("backup filename: empty")
@@ -96,6 +103,12 @@ func validateBackupFilename(filename string) error {
 	}
 	return nil
 }
+
+// ValidateOlderThan is the exported wrapper around validateOlderThan.
+func ValidateOlderThan(dur string) error { return validateOlderThan(dur) }
+
+// ValidateKeepLast is the exported wrapper around validateKeepLast.
+func ValidateKeepLast(n int) error { return validateKeepLast(n) }
 
 // validateOlderThan parses dur and bounds its range. The cleanup CLI
 // also parses with time.ParseDuration; the agent enforces the same

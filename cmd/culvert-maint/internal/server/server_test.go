@@ -301,17 +301,17 @@ func TestOperationsLogsEndpoint_404WhenMissing(t *testing.T) {
 	}
 }
 
-// TestFutureEndpointsReturn404 — every D1.6b/c path must 404 in D1.6a.
+// TestFutureEndpointsReturn404 — every D1.6c/d path NOT YET WIRED
+// must still 404. D1.6b activated /v1/backups, /v1/restores/*, and
+// /v1/cleanups; the closed list of "future" endpoints is upgrades and
+// rollbacks. Tests for the active endpoints live alongside their
+// handlers.
 func TestFutureEndpointsReturn404(t *testing.T) {
 	sock, stop := startTestServer(t, &fakeStatus{}, nil, "")
 	defer stop()
 
 	cli := udsClient(sock)
 	for _, path := range []string{
-		"/v1/backups",
-		"/v1/restores/dryrun",
-		"/v1/restores/commit",
-		"/v1/cleanups",
 		"/v1/upgrades/check",
 		"/v1/upgrades/apply",
 		"/v1/rollbacks",
