@@ -368,6 +368,64 @@ func TestBeginIdempotent_DedupBeforeLockCheck(t *testing.T) {
 	}
 }
 
+// Item #10: idempotency cache TTL + opportunistic purge.
+//
+// Old entries (whose `When` is older than the manager's
+// idempCacheTTL relative to the manager's clock) are cleaned up
+// opportunistically the next time BeginIdempotent runs. This keeps
+// the cache from growing unboundedly over a long process lifetime.
+func TestBeginIdempotent_PurgeStaleEntries(t *testing.T) {
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	m := NewManagerWithTTL(clock, 1*time.Hour)
+
+	// Admit an op at t=0 with an idempotency_key.
+	if _, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "key-old", nil); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if got := m.IdempCacheSize(); got != 1 {
+		t.Errorf("after first call cache size: got %d want 1", got)
+	}
+
+	// Advance the clock by 2h (past the 1h TTL). The next
+	// BeginIdempotent should purge the stale entry.
+	now = now.Add(2 * time.Hour)
+	if _, _, err := m.BeginIdempotent(KindBackupList, "uid=2", "key-new", nil); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	// Cache should now contain only the fresh entry — the stale one
+	// was purged opportunistically.
+	if got := m.IdempCacheSize(); got != 1 {
+		t.Errorf("after purge cache size: got %d want 1 (stale entry should be gone)", got)
+	}
+
+	// Verify the OLD key no longer dedupes — readmitting under
+	// "key-old" produces a fresh op_id, NOT the stale one.
+	freshOp, deduped, _ := m.BeginIdempotent(KindBackupList, "uid=1", "key-old", nil)
+	if deduped {
+		t.Errorf("purged stale entry must NOT dedupe; got deduped=true")
+	}
+	if freshOp == nil {
+		t.Fatal("expected fresh op")
+	}
+	if got := m.IdempCacheSize(); got != 2 {
+		t.Errorf("after readmit cache size: got %d want 2", got)
+	}
+}
+
+// TTL=0 (or default) keeps backward compat for callers that don't
+// care about TTL — the default 24h applies.
+func TestNewManager_AppliesDefaultIdempTTL(t *testing.T) {
+	m := NewManager(nil)
+	if m.idempCacheTTL != DefaultIdempCacheTTL {
+		t.Errorf("default TTL: got %s want %s", m.idempCacheTTL, DefaultIdempCacheTTL)
+	}
+	m2 := NewManagerWithTTL(nil, 0)
+	if m2.idempCacheTTL != DefaultIdempCacheTTL {
+		t.Errorf("TTL=0 should fall back to default; got %s", m2.idempCacheTTL)
+	}
+}
+
 // Without dedup, the second state-changing op fights for the lock.
 func TestBeginIdempotent_DifferentKeyReturns409OnLockedSlot(t *testing.T) {
 	m := NewManager(nil)

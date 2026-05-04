@@ -80,7 +80,7 @@ func (d OrchestratorDeps) Validate() error {
 // op-log lifecycle: the OpLog is closed unconditionally on Run's exit,
 // regardless of success / failure / panic.
 //
-//nolint:cyclop,funlen // single-pass orchestration; splitting hides the start→stages→finish ordering
+//nolint:cyclop,funlen,gocognit // single-pass orchestration; splitting hides the start→stages→finish ordering
 func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, params map[string]interface{}, idempotencyKey string, stages []FlowStage) {
 	if err := deps.Validate(); err != nil {
 		// Configuration error — should be unreachable in production
@@ -125,6 +125,15 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		}
 
 		started := time.Now().UTC()
+		// If a previous stage already failed and we're proceeding
+		// only because this stage is ContinueOnError-tagged, mark
+		// the run as "recovery" in the op log. Operators reading
+		// /v1/operations/{id}/logs after a failure can immediately
+		// see which stages ran for diagnostic / recovery reasons
+		// vs. as the original happy-path flow.
+		if firstErr != nil && s.ContinueOnError {
+			_ = deps.OpLog.Note(s.Name, fmt.Sprintf("recovery: running after earlier failure at stage=%s", firstErrStage))
+		}
 		_ = deps.OpLog.StageStart(s.Name)
 
 		stdout, stderr, runErr := s.Run(ctx)
@@ -164,6 +173,7 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 	}
 
 	finalReason := FailureReason("")
+	timedOut := false
 	if finalState == StateFailed {
 		finalReason = firstReason
 		// Operation-level timeout overrides any stage-level
@@ -176,11 +186,25 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		// runner.Run happened to return DeadlineExceeded first).
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			finalReason = ReasonTimeout
+			timedOut = true
 			_ = deps.OpLog.Note("agent", "operation_timeout reached; promoting failure reason to timeout")
 		}
 	}
 
-	_ = deps.Manager.Finish(opID, finalState, finalReason, nil)
+	// Result map: surface timeout-ness explicitly so an operator
+	// inspecting `/v1/operations/{id}` sees the timeout flag without
+	// having to cross-reference the audit trail. Any future
+	// orchestrator-level metadata can be added here.
+	var result map[string]interface{}
+	if timedOut {
+		result = map[string]interface{}{
+			"timed_out":               true,
+			"timed_out_at_stage":      firstErrStage,
+			"original_failure_reason": string(firstReason),
+		}
+	}
+
+	_ = deps.Manager.Finish(opID, finalState, finalReason, result)
 
 	now := time.Now().UTC()
 	endEvent := audit.Event{

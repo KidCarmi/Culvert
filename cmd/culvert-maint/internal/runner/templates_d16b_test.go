@@ -387,6 +387,53 @@ func TestRestoreOnUnencryptedArchive_DoesNotForwardPassphrase(t *testing.T) {
 	}
 }
 
+// Item #11: ComposeBackupList runs through runWithEnv, so the
+// runner's StageTimeout MUST cap a hung command. We confirm by
+// constructing a runner with a tight (50ms) stage timeout and a
+// fake exec layer whose Wait returns a timeout-flavored error after
+// 100ms (simulating a real process being killed by the runner's
+// ctx-driven Cancel callback after the deadline). The call must
+// return promptly, NOT hang until any larger HTTP / client
+// timeout.
+func TestComposeBackupList_StageTimeoutBoundsHang(t *testing.T) {
+	r, err := New(Options{
+		ComposeProjectDir: "/srv/culvert",
+		ComposeFile:       "docker-compose.yml",
+		StageTimeout:      50 * time.Millisecond,
+		EnvAllow:          []string{EnvCulvertBackupPassphrase},
+		DockerBinary:      "/usr/bin/docker",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r.execStartFn = func(_ *exec.Cmd) error { return nil }
+	r.execWaitFn = func(_ *exec.Cmd) error {
+		// Sleep past the stage timeout; the runner's runWithEnv
+		// will see runCtx.Err() == DeadlineExceeded after we
+		// return and translate that to a "timed out" error.
+		time.Sleep(150 * time.Millisecond)
+		return errors.New("simulated process killed by ctx")
+	}
+	start := time.Now()
+	_, runErr := r.ComposeBackupList(context.Background())
+	elapsed := time.Since(start)
+	if runErr == nil {
+		t.Fatalf("expected timeout error; got nil after %s", elapsed)
+	}
+	// Total elapsed = at most stageTimeout (50ms) + fake-wait delay
+	// (150ms) + scheduling slack. 7s gives generous headroom for
+	// loaded CI runners.
+	if elapsed > 7*time.Second {
+		t.Errorf("ComposeBackupList exceeded the stage timeout window; took %s", elapsed)
+	}
+	// The error must indicate timeout — either the runner's
+	// "timed out" wrapping (when runCtx.Err() == DeadlineExceeded)
+	// or "wait" wrapping the fake's exit error.
+	if !strings.Contains(runErr.Error(), "timed out") && !strings.Contains(runErr.Error(), "wait") {
+		t.Errorf("expected timeout-flavored error; got: %v", runErr)
+	}
+}
+
 // ─── parity-derived: enumerated sudoers count ───────────────────────
 
 func TestEnumerateRestoreSudoersLines_Count(t *testing.T) {

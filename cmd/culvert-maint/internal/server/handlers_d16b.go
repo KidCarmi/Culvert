@@ -8,25 +8,52 @@
 // Common pattern (POST handlers — backup.create, restore.*, cleanup):
 //
 //  1. Decode JSON body into a typed request struct.
-//  2. Validate every field. Reject with 400 on any malformed input.
-//  3. Resolve passphrase_ref (env:NAME only in D1.6b). The resolved
-//     value is held in a local string variable for the duration of
-//     this handler — never logged, never put into the op record's
-//     params, never echoed in the audit event. Only the *reference*
-//     (env:NAME) is recorded; the resolved value flows into the
-//     runner via env overlay.
-//  4. Build a sanitized params map for the audit event (passphrase_ref
-//     preserved; resolved value NEVER included).
-//  5. Call ops.Manager.BeginIdempotent. On 409 (lock conflict),
-//     return 409 with the holder's snapshot. On dedupe hit, return
-//     202 with the prior op_id so the caller's retry is a no-op.
-//  6. Open a per-op log file. If creation fails, finish the op as
-//     failed (validation reason) and return 500.
-//  7. Spawn the orchestrator goroutine with the stage list. Return
-//     202 immediately with the op_id.
+//  2. SHAPE-validate every field. Reject with 400 on any malformed
+//     input. For passphrase_ref this means: env:NAME prefix, name
+//     non-empty, name in the runner's EnvAllow. NO env read yet —
+//     so a deduped retry with a transiently-missing env var still
+//     dedupes correctly.
+//  3. Build a sanitised params map for the audit event. The
+//     `passphrase_ref` reference is preserved; the resolved value
+//     is NEVER included (it is read inside buildStages and held in
+//     a stage-closure local).
+//  4. Call ops.Manager.BeginIdempotent (via startAsyncOp).
+//     - On 409 (lock conflict by another in-flight state-changing
+//     op): startAsyncOp returns *opError with status 409 and the
+//     holder's snapshot.
+//     - On dedupe hit (same actor + kind + idempotency_key as a
+//     prior in-flight op): startAsyncOp returns the prior op
+//     snapshot with deduped=true; writeOpResponse returns
+//     HTTP 200 OK (no new work was started).
+//  5. For newly admitted ops, startAsyncOp invokes the buildStages
+//     callback which (a) reads the passphrase from env if a ref was
+//     given, and (b) constructs the FlowStage list. If that fails,
+//     the op is recorded as admission-time failed (audit pair
+//     emitted, op record marked failed) and the error response
+//     carries the op_id so the caller can fetch
+//     /v1/operations/{id} for diagnostics.
+//  6. The per-op log file is opened. Failure here also produces
+//     an admission-time failure with op_id surfaced.
+//  7. Spawn the orchestrator goroutine. Return HTTP 202 Accepted
+//     with the op_id immediately; stages run in the background.
 //
 // GET /v1/backups is the only synchronous handler — it does its work
-// inline and returns 200 with the parsed JSON list.
+// inline and returns 200 with the parsed JSON list (the cli's stdout
+// is unmarshalled into a typed slice and re-encoded so a malformed
+// cli output produces a clean 500 list_backups_parse_failed rather
+// than corrupting the Content-Type contract).
+//
+// Restore-without-passphrase note: passphrase_ref is OPTIONAL on both
+// /v1/restores/dryrun and /v1/restores/commit because the cli
+// container detects encrypted vs unencrypted from the file's magic
+// bytes. If the operator submits an encrypted archive without a
+// passphrase_ref, the agent does NOT detect this up-front (no
+// pre-flight magic-byte sniff in D1.6b) — the cli inside the
+// container will fail decryption, and the agent surfaces that as a
+// stage-level cli_error in the per-op log. Operators receive an
+// unambiguous decryption-error message; they just receive it later
+// (after stop_stack runs) than they would with an early sniff.
+// Adding the early sniff is a D1.6c follow-up.
 package server
 
 import (
@@ -39,6 +66,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
@@ -134,9 +162,19 @@ func decodeJSONBody(r *http.Request, dst interface{}) error {
 // buildStages is called only for newly admitted ops. Inside it, the
 // caller resolves any late-bound state (passphrase env reads, file
 // reads) and constructs the FlowStage list. If buildStages returns
-// an *opError, the op is finished with ReasonValidation and the
-// error is propagated to the caller — the op record will be
-// observable via /v1/operations/{id} as failed.
+// an *opError, the op is finished with ReasonValidation, an audit
+// failed event is emitted (so the admission-time failure shows up
+// in the same audit trail as orchestrator-time failures), and the
+// op_id is folded into the error body — the caller can hit
+// GET /v1/operations/{op_id} for diagnostics even though the op
+// failed before any stage ran.
+//
+// Response status: 202 Accepted for newly admitted ops with stages
+// running; 200 OK for deduped retries (no new work started); the
+// caller-provided opError carries its own status (typically 400 or
+// 500) for admission-time failures.
+//
+//nolint:cyclop // single-pass admission flow; splitting hides the dedup→build→spawn ordering
 func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempotencyKey string, paramsForAudit map[string]interface{}, buildStages func() ([]ops.FlowStage, *opError)) (*ops.Op, bool, *opError) {
 	op, deduped, err := s.opts.Ops.BeginIdempotent(kind, peer.String(), idempotencyKey, paramsForAudit)
 	if err != nil {
@@ -161,13 +199,14 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 	// Newly admitted op — late-bound stage construction happens here.
 	stages, herr := buildStages()
 	if herr != nil {
-		_ = s.opts.Ops.Finish(op.ID, ops.StateFailed, ops.ReasonValidation, map[string]interface{}{"agent_error": "build_stages: late validation failed"})
-		return nil, false, herr
+		s.recordAdmissionFailure(op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, "build_stages_failed")
+		return nil, false, augmentErrorWithOp(herr, op.ID)
 	}
 	oplog, oerr := ops.OpenOpLog(s.opts.StateDir, op.ID)
 	if oerr != nil {
-		_ = s.opts.Ops.Finish(op.ID, ops.StateFailed, ops.ReasonValidation, map[string]interface{}{"agent_error": "open op log: " + oerr.Error()})
-		return nil, false, &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "open_op_log_failed"}}
+		s.recordAdmissionFailure(op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, "open_op_log: "+oerr.Error())
+		herr = &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "open_op_log_failed"}}
+		return nil, false, augmentErrorWithOp(herr, op.ID)
 	}
 	deps := ops.OrchestratorDeps{Manager: s.opts.Ops, Audit: s.opts.Audit, OpLog: oplog}
 	go func() {
@@ -176,6 +215,74 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		ops.Run(ctx, deps, op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, stages)
 	}()
 	return op, false, nil
+}
+
+// recordAdmissionFailure marks the admitted op failed AND emits a
+// matching pair of audit events (started + failed). Without this,
+// an op that fails before any stage runs would never appear in
+// audit.jsonl — only in the in-memory op map — and operators
+// reviewing the audit trail would have no record of the attempt.
+//
+// Reason is always ReasonValidation for admission-time failures
+// (build_stages closure failure, op-log open failure). The detail
+// string is folded into the agent_error key on the op result so
+// operators can correlate the audit entry with the op record via
+// the op_id.
+func (s *Server) recordAdmissionFailure(opID, kind, actor string, params map[string]interface{}, idempotencyKey, detail string) {
+	now := time.Now().UTC()
+	// started event — pairs with the failed event below so the
+	// audit trail shows both transitions, matching how the
+	// orchestrator emits events for stages that DO run.
+	_ = s.opts.Audit.Write(audit.Event{
+		Actor:          actor,
+		OpID:           opID,
+		Kind:           kind,
+		Params:         params,
+		Outcome:        audit.OutcomeStarted,
+		IdempotencyKey: idempotencyKey,
+	})
+	_ = s.opts.Ops.Finish(opID, ops.StateFailed, ops.ReasonValidation, map[string]interface{}{
+		"agent_error": detail,
+	})
+	_ = s.opts.Audit.Write(audit.Event{
+		Actor:          actor,
+		OpID:           opID,
+		Kind:           kind,
+		Params:         params,
+		Outcome:        audit.OutcomeFailed,
+		OutcomeAt:      &now,
+		FailureReason:  string(ops.ReasonValidation),
+		IdempotencyKey: idempotencyKey,
+	})
+}
+
+// augmentErrorWithOp folds the op_id and "state":"failed" into an
+// admission-time error body so the caller can fetch the op record
+// via /v1/operations/{op_id} for diagnostics. Without this, callers
+// see a 400/500 with no way to correlate it back to a persistent
+// op record.
+func augmentErrorWithOp(herr *opError, opID string) *opError {
+	if herr == nil {
+		return nil
+	}
+	out := map[string]interface{}{
+		"op_id": opID,
+		"state": "failed",
+	}
+	switch existing := herr.Body.(type) {
+	case map[string]string:
+		for k, v := range existing {
+			out[k] = v
+		}
+	case map[string]interface{}:
+		for k, v := range existing {
+			out[k] = v
+		}
+	default:
+		out["error"] = fmt.Sprintf("%v", existing)
+	}
+	herr.Body = out
+	return herr
 }
 
 // opError is the typed error startAsyncOp returns to the handler.
@@ -356,8 +463,61 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 	if entries == nil {
 		entries = []backupListEntry{}
 	}
+	// Per-entry shape validation. The cli is trusted enough that we
+	// accept its output, but a buggy or compromised cli could emit
+	// entries that would mislead the operator (path traversal in
+	// "path", negative size_bytes from an integer overflow, empty
+	// filename), so we surface a clean 500 rather than serve them
+	// up with the agent's stamp of approval.
+	if verr := validateBackupListEntries(entries, s.opts.Cfg.AllowedBackupDir); verr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error":  "list_backups_invalid_entry",
+			"detail": verr.Error(),
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, entries)
 	_ = peer
+}
+
+// validateBackupListEntries enforces the per-entry shape contract for
+// what GET /v1/backups will surface to clients. Returns the first
+// error (with the entry index for operator-facing diagnostics) or nil.
+//
+// Rules:
+//   - filename must be non-empty and a bare basename (no path
+//     separators, no traversal). Same shape the encrypted-backup
+//     handler enforces for create.
+//   - path must be inside allowedBackupDir AND its basename must
+//     equal filename (so a misbehaving cli cannot list filename="a"
+//     with path="/etc/passwd").
+//   - size_bytes must be non-negative.
+func validateBackupListEntries(entries []backupListEntry, allowedBackupDir string) error {
+	for i, e := range entries {
+		if e.Filename == "" {
+			return fmt.Errorf("entry[%d]: empty filename", i)
+		}
+		if err := runner.ValidateBackupFilename(e.Filename); err != nil {
+			return fmt.Errorf("entry[%d]: %w", i, err)
+		}
+		if e.Path == "" {
+			return fmt.Errorf("entry[%d]: empty path", i)
+		}
+		clean := filepath.Clean(e.Path)
+		if clean != e.Path {
+			return fmt.Errorf("entry[%d]: path %q is not in canonical form", i, e.Path)
+		}
+		// path must live directly under allowedBackupDir.
+		expected := filepath.Join(allowedBackupDir, e.Filename)
+		if clean != expected {
+			return fmt.Errorf("entry[%d]: path %q does not match basename %q under %q",
+				i, e.Path, e.Filename, allowedBackupDir)
+		}
+		if e.SizeBytes < 0 {
+			return fmt.Errorf("entry[%d]: negative size_bytes %d", i, e.SizeBytes)
+		}
+	}
+	return nil
 }
 
 // ─── POST /v1/restores/dryrun and /commit ──────────────────────────

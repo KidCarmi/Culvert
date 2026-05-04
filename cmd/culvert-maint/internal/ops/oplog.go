@@ -18,6 +18,19 @@ import (
 // streams it back verbatim. The agent's HTTP path is read-only; the
 // orchestrator that runs the op is the sole writer.
 //
+// DURABILITY: this is a BEST-EFFORT operator transcript, NOT a
+// durable audit record. Writes are NOT fsync'd. A torn write at
+// agent restart can leave a half-line in the file, and the
+// orchestrator is unable to detect or recover from that. Operators
+// reading /v1/operations/{op_id}/logs may see a truncated last line.
+// For the durable, fsync'd audit-of-record, see audit.jsonl
+// (internal/audit) — every state transition the operator cares
+// about (started, succeeded, failed, with op_id, kind, actor,
+// failure_reason) is recorded there. The op-log is for diagnostic
+// stage-by-stage detail (captured stdout/stderr, intermediate
+// notes) that would bloat the audit JSONL if recorded with the
+// same durability guarantees.
+//
 // Schema: a free-form append-only text stream, NOT JSON. Each call
 // writes a self-contained line prefixed with a UTC RFC3339 timestamp
 // and the calling stage name. Truncation is not supported — operators
@@ -104,9 +117,13 @@ func (l *OpLog) StageEnd(stageName string, state State, note string) error {
 // streams are truncated with a "...<truncated>..." marker on the last
 // line.
 //
-// Sanitization: NUL bytes and other ASCII controls are stripped;
-// printable UTF-8 (incl. tab) is preserved. This matches what an
-// operator would see in `journalctl -u culvert-maint`.
+// Sanitization: NUL and other ASCII control bytes (range 0x00-0x08,
+// 0x0B-0x0C, 0x0E-0x1F, plus 0x7F DEL) are REPLACED with '?' — they
+// are NOT stripped (that would shift the byte offsets of surrounding
+// content and confuse anyone diffing CLI output against the captured
+// log). Tab (0x09), newline (0x0A), and CR (0x0D) are preserved so
+// the line structure of the captured stream stays intact and `tail
+// -f` of the operator log remains readable.
 func (l *OpLog) Capture(stageName, stream string, body []byte, maxBytes int) error {
 	if len(body) == 0 {
 		return nil
@@ -155,35 +172,43 @@ func (l *OpLog) write(stageName, kind, body string) error {
 	return err
 }
 
-// sanitizeOneLine trims the input to a single line and caps its length
-// at maxBytes. Control characters (other than tab) are replaced with
-// '?'. Used for human notes / error strings — never for raw command
-// output (use sanitizeMultiLine instead).
+// sanitizeOneLine trims the input to a single line and caps its
+// length at maxBytes. Control bytes (other than tab) are REPLACED
+// with '?' — they are not stripped, so the log keeps the original
+// length structure of the input. Used for human notes / error
+// strings — never for raw command output (use sanitizeMultiLine
+// instead).
 func sanitizeOneLine(s string, maxBytes int) string {
 	// Drop everything from the first newline onward so a multi-line
 	// error message becomes a single log entry.
 	if i := strings.IndexAny(s, "\n\r"); i >= 0 {
 		s = s[:i]
 	}
-	s = stripCtrl(s)
+	s = replaceCtrl(s)
 	if maxBytes > 0 && len(s) > maxBytes {
 		s = s[:maxBytes-1] + "…"
 	}
 	return s
 }
 
-// sanitizeMultiLine strips control characters except tab and newline,
-// preserving the line structure of captured stdout/stderr.
+// sanitizeMultiLine REPLACES control bytes (except tab/newline/CR)
+// with '?', preserving the line structure of captured stdout/stderr.
+// "Sanitize" — not "strip"; the byte length of the output equals the
+// input.
 func sanitizeMultiLine(s string) string {
-	return stripCtrl(s)
+	return replaceCtrl(s)
 }
 
-// stripCtrl replaces ASCII control chars (0x00-0x08, 0x0B-0x0C,
+// replaceCtrl replaces ASCII control bytes (0x00-0x08, 0x0B-0x0C,
 // 0x0E-0x1F, 0x7F) with '?'. Tab (0x09) and newline (0x0A) are
 // preserved. Carriage return (0x0D) is preserved so caller's
-// CRLF-terminated stdout doesn't lose its line endings (we split on \n
-// later anyway).
-func stripCtrl(s string) string {
+// CRLF-terminated stdout doesn't lose its line endings (we split on
+// \n later anyway).
+//
+// Naming note: this used to be called stripCtrl, but the function
+// REPLACES rather than strips — output length equals input length.
+// The new name reflects the actual behavior.
+func replaceCtrl(s string) string {
 	if s == "" {
 		return s
 	}

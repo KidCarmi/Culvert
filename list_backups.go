@@ -103,6 +103,20 @@ func runListBackups(dir string, out io.Writer) error {
 // Open uses O_NOFOLLOW so a symlink-replacement race after the
 // caller's DirEntry.Type() / Lstat checks cannot trick us into
 // reading from an unintended target.
+//
+// PLATFORM: syscall.O_NOFOLLOW is defined on Linux (and most other
+// POSIX-y systems Go supports), but NOT on Windows. The Maintenance
+// Agent (which is the primary consumer of `--list-backups`) is
+// declared Linux-only by the D1.6 implementation plan
+// (`packaging/systemd/culvert-maint.service` is a systemd unit;
+// SO_PEERCRED auth is Linux-specific). The proxy CLI itself happens
+// to compile and run on other systems for D1.3a/b backup/restore
+// operations, so a future port to Windows would need to either
+// drop the NOFOLLOW guard for `--list-backups` (with a documented
+// caveat) or thread a build-tag through this file. For D1.6b we
+// keep the Linux-anchored constant; the build will fail loudly on
+// any platform that doesn't define syscall.O_NOFOLLOW, which is a
+// better failure mode than silently following symlinks.
 func peekEncryptedMagic(path string) bool {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // intentional: classify the operator-supplied backup file
 	if err != nil {

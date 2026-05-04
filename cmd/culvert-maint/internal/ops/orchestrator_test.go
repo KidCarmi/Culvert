@@ -251,6 +251,86 @@ func TestRun_PropagatesIdempotencyKeyToAudit(t *testing.T) {
 	}
 }
 
+// When a ContinueOnError stage runs only because an earlier stage
+// failed, the orchestrator must mark its op-log entry with a
+// "recovery:" note so the operator can immediately distinguish a
+// happy-path execution from a diagnostic / recovery one.
+func TestRun_RecoveryNoteOnContinueOnErrorAfterFailure(t *testing.T) {
+	rig := newOrchTestRig(t)
+	Run(context.Background(), rig.deps, rig.opID, KindRestoreCommit, "uid=1", nil, "",
+		[]FlowStage{
+			failStage("first", "boom", ReasonCLIError),
+			{
+				Name:            "best_effort",
+				ContinueOnError: true,
+				Run: func(_ context.Context) ([]byte, []byte, error) {
+					return []byte("ran for recovery"), nil, nil
+				},
+			},
+		},
+	)
+	body := rig.opLogContent(t)
+	if !strings.Contains(body, "best_effort\tNOTE\trecovery: running after earlier failure at stage=first") {
+		t.Errorf("op-log must mark best-effort recovery note:\n%s", body)
+	}
+	// Sanity: the recovery note does NOT fire when there is no
+	// earlier failure.
+	rig2 := newOrchTestRig(t)
+	Run(context.Background(), rig2.deps, rig2.opID, KindBackupCreate, "uid=1", nil, "",
+		[]FlowStage{
+			{
+				Name:            "best_effort",
+				ContinueOnError: true,
+				Run:             func(_ context.Context) ([]byte, []byte, error) { return nil, nil, nil },
+			},
+		},
+	)
+	body2 := rig2.opLogContent(t)
+	if strings.Contains(body2, "recovery: running after earlier failure") {
+		t.Errorf("recovery note must NOT fire on a clean ContinueOnError stage:\n%s", body2)
+	}
+}
+
+// Item #7 follow-on: timeout produces a result map with timed_out=true
+// AND the original failure reason is preserved in the result for
+// diagnostics (even though the audit failure_reason is promoted to
+// "timeout").
+func TestRun_TimeoutSurfaceInOpResult(t *testing.T) {
+	rig := newOrchTestRig(t)
+	blockingStage := FlowStage{
+		Name:          "block",
+		FailureReason: ReasonCLIError,
+		Run: func(ctx context.Context) ([]byte, []byte, error) {
+			<-ctx.Done()
+			return nil, nil, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	Run(ctx, rig.deps, rig.opID, KindBackupCreate, "uid=1", nil, "",
+		[]FlowStage{blockingStage},
+	)
+	op := rig.mgr.Get(rig.opID)
+	if op.State != StateFailed {
+		t.Fatalf("state: got %s want failed", op.State)
+	}
+	if op.FailureReason != string(ReasonTimeout) {
+		t.Errorf("failure_reason: got %q want timeout", op.FailureReason)
+	}
+	if op.Result == nil {
+		t.Fatalf("op.Result must be populated on timeout; got nil")
+	}
+	if v, _ := op.Result["timed_out"].(bool); !v {
+		t.Errorf("op.Result[timed_out] must be true; got %v", op.Result)
+	}
+	if v, _ := op.Result["original_failure_reason"].(string); v != string(ReasonCLIError) {
+		t.Errorf("op.Result[original_failure_reason]: got %q want %q", v, ReasonCLIError)
+	}
+	if v, _ := op.Result["timed_out_at_stage"].(string); v != "block" {
+		t.Errorf("op.Result[timed_out_at_stage]: got %q want %q", v, "block")
+	}
+}
+
 // Operation-level timeout: a long-running stage that respects its
 // context should be cancelled when ctx hits its deadline; the op's
 // final reason must be ReasonTimeout (overriding any stage reason).

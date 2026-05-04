@@ -79,7 +79,15 @@ func run(configPath string) error {
 	}
 	defer func() { _ = al.Close() }()
 
-	mgr := ops.NewManager(nil)
+	// Idempotency-cache TTL is the larger of operation_timeout and
+	// 24h: an operator retrying an in-flight or recently-completed op
+	// MUST hit the dedupe path; anything older than that is almost
+	// certainly fresh-intent retry that we want to admit as new work.
+	idempTTL := ops.DefaultIdempCacheTTL
+	if cfg.OperationTimeout > idempTTL {
+		idempTTL = cfg.OperationTimeout
+	}
+	mgr := ops.NewManagerWithTTL(nil, idempTTL)
 	// D1.6a: nothing on disk to scan, but the contract is in place for D1.6b/c.
 	mgr.MarkAllInterrupted()
 
