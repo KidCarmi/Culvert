@@ -254,8 +254,10 @@ func validate(raw *rawConfig) (*Config, error) {
 	cfg.HealthBaseURL = hu
 
 	// health_path / ready_path — default /health and /ready. Must
-	// start with exactly one /, contain no whitespace, and be free of
-	// control characters.
+	// start with /, must not contain control chars, spaces, or tabs.
+	// Trailing slashes and double slashes are NOT rejected (the HTTP
+	// client tolerates them); operators who want to assert canonical
+	// shape can do so out of band.
 	hp, herr := validateHealthPath("health_path", raw.HealthPath, defaultHealthPath)
 	if herr != nil {
 		return nil, herr

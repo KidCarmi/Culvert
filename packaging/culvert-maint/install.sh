@@ -120,6 +120,11 @@ PROJECT_DIR=$(extract_toml_string compose_project_dir || true)
 COMPOSE_FILE=$(extract_toml_string compose_file || true)
 [ -z "$COMPOSE_FILE" ] && COMPOSE_FILE=docker-compose.yml
 
+# --- Validate compose_project_dir ---------------------------------------
+# The Go side (internal/config) already enforces these on agent start;
+# we re-validate here because the sudoers entry is rendered BEFORE the
+# agent runs. A malformed value at this stage would either fail visudo -c
+# or produce an allowlist line that does not match real invocations.
 if [ -z "$PROJECT_DIR" ]; then
     echo "install.sh: ERROR — compose_project_dir not found in $CONFIG_DEST" >&2
     echo "install.sh: edit $CONFIG_DEST first, then re-run install.sh" >&2
@@ -132,14 +137,54 @@ case "$PROJECT_DIR" in
         exit 1
         ;;
 esac
+# Reject control characters / whitespace / quotes that would break sudoers
+# grammar or sed substitution. POSIX [:cntrl:] covers \0..\x1f and \x7f.
+case "$PROJECT_DIR" in
+    *[[:cntrl:]]* | *' '* | *'	'* | *'"'* | *"'"* )
+        echo "install.sh: ERROR — compose_project_dir contains whitespace/quotes/control chars: '$PROJECT_DIR'" >&2
+        exit 1
+        ;;
+esac
+
+# --- Validate compose_file ---------------------------------------------
+# Must be a bare filename (no slashes, no backslash, not "." or "..").
+# This is the same shape the Go config validator enforces; we mirror it
+# here so the rendered sudoers line can never contain a path-traversal
+# component or a directory prefix.
+case "$COMPOSE_FILE" in
+    "." | ".." )
+        echo "install.sh: ERROR — compose_file must not be '.' or '..', got '$COMPOSE_FILE'" >&2
+        exit 1
+        ;;
+    */* | *\\* )
+        echo "install.sh: ERROR — compose_file must be a bare filename (no '/' or '\\'), got '$COMPOSE_FILE'" >&2
+        exit 1
+        ;;
+esac
+case "$COMPOSE_FILE" in
+    *[[:cntrl:]]* | *' '* | *'	'* | *'"'* | *"'"* )
+        echo "install.sh: ERROR — compose_file contains whitespace/quotes/control chars: '$COMPOSE_FILE'" >&2
+        exit 1
+        ;;
+esac
 
 COMPOSE_PATH="$PROJECT_DIR/$COMPOSE_FILE"
 RENDERED_SUDOERS=$(mktemp)
 trap 'rm -f "$RENDERED_SUDOERS"' EXIT
 
+# Escape characters that are special on the REPLACEMENT side of `sed s|…|…|`:
+#   \   — literal backslash
+#   &   — replaced with the entire match
+#   |   — our chosen delimiter
+# Order matters: backslash MUST be escaped first so we don't double-escape
+# the escapes we add for & and |. We deliberately do NOT escape `/` because
+# the delimiter is `|`, not `/`.
+ESCAPED_PATH=$(printf '%s' "$COMPOSE_PATH" \
+    | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g')
+
 # Substitute {compose_path} with the resolved absolute path.
 # `sed` with a non-/ delimiter accommodates path slashes.
-sed "s|{compose_path}|$COMPOSE_PATH|g" "$SUDOERS_TEMPLATE" > "$RENDERED_SUDOERS"
+sed "s|{compose_path}|$ESCAPED_PATH|g" "$SUDOERS_TEMPLATE" > "$RENDERED_SUDOERS"
 
 # Refuse to install a sudoers file with leftover placeholders.
 if grep -q '{compose_path}\|{compose_file}\|{compose_project_dir}' "$RENDERED_SUDOERS"; then

@@ -16,9 +16,12 @@
 //   - Per-command timeout (SIGTERM → 5s grace → SIGKILL).
 //
 // D1.6a registers exactly one template: TemplateComposeStatus
-// ("docker compose -f <compose_file> ps"). D1.6b/c add backup,
-// restore, cleanup, pull, manifest-inspect templates as they land,
-// each with a matching sudoers entry per the parity test.
+// ("docker compose -f <compose_path> ps --format json", where
+// <compose_path> is the absolute <compose_project_dir>/<compose_file>
+// resolved at build time and bound by the matching sudoers entry).
+// D1.6b/c add backup, restore, cleanup, pull, manifest-inspect
+// templates as they land, each with a matching sudoers entry per the
+// parity test.
 package runner
 
 import (
@@ -39,8 +42,10 @@ import (
 type TemplateID string
 
 const (
-	// TemplateComposeStatus runs `docker compose -f <compose_file> ps`
-	// in the configured project directory. Used by /v1/status. The
+	// TemplateComposeStatus runs
+	// `docker compose -f <compose_path> ps --format json`, where
+	// <compose_path> is the absolute compose-file path resolved from
+	// compose_project_dir + compose_file. Used by /v1/status. The
 	// only template that exists in D1.6a.
 	TemplateComposeStatus TemplateID = "compose.status"
 )

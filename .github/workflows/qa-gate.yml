@@ -486,24 +486,30 @@ jobs:
           shellcheck packaging/culvert-maint/install.sh
 
       - name: visudo -c sudoers grammar
-        # The shipped sudoers file uses `{compose_file}` as a placeholder
-        # in the allowed-command position; the operator replaces it at
-        # install time. visudo -c validates sudoers grammar; the
-        # placeholder is treated as a literal arg, which is grammatically
-        # valid even though it would never match a real `docker compose`
-        # invocation until substituted.
+        # The shipped sudoers file uses `{compose_path}` as a placeholder
+        # in the allowed-command position (the absolute compose-file path
+        # built from compose_project_dir + compose_file); the operator
+        # replaces it at install time via packaging/culvert-maint/install.sh.
+        # visudo -c validates sudoers grammar; the placeholder is treated
+        # as a literal arg, which is grammatically valid even though it
+        # would never match a real `docker compose` invocation until
+        # substituted.
         run: |
           sudo visudo -c -f packaging/sudoers/culvert-maint
 
-      - name: systemd-analyze verify (best-effort)
+      - name: systemd-analyze verify
         # systemd-analyze verifies unit file syntax AND that ExecStart
         # resolves to an executable file. Stage the freshly-built binary
         # at the unit file's documented path so the verification is
-        # meaningful. continue-on-error stays on so a transitive runner-
-        # image change (e.g. systemd-analyze going missing) does not
-        # block the gate.
-        continue-on-error: true
+        # meaningful. We gate on `command -v systemd-analyze` so the step
+        # is skipped on hypothetical runner images that lack systemd-
+        # analyze entirely; if it is present, failure must block the gate
+        # (no continue-on-error mask).
         run: |
+          if ! command -v systemd-analyze >/dev/null 2>&1; then
+            echo "systemd-analyze not present on runner; skipping verify"
+            exit 0
+          fi
           sudo install -m 0755 /tmp/culvert-maint /usr/local/bin/culvert-maint
           systemd-analyze verify packaging/systemd/culvert-maint.service
 

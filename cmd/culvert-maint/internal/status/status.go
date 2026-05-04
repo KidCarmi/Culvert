@@ -111,10 +111,13 @@ func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 // emit a single JSON array; we fall back to that shape if NDJSON
 // parsing yields nothing usable.
 //
-// Malformed individual lines are skipped (Compose has been observed
-// to emit warning lines mixed with JSON in some configurations); the
-// function returns whatever it can parse rather than failing the
-// whole status call.
+// Mixed warning/log lines are tolerated — non-`{` lines and blank
+// lines are skipped silently. Lines that DO start with `{` but fail
+// to JSON-decode are tracked: if every `{`-prefixed line fails to
+// parse, parseComposePS returns an error so the caller can surface
+// "parse_compose_ps: …" in compose_error rather than reporting an
+// empty stack (which would look identical to "compose stack down"
+// to the GUI).
 func parseComposePS(stdout []byte) ([]server.ServiceStatus, error) {
 	if len(stdout) == 0 {
 		return nil, nil
@@ -127,20 +130,33 @@ func parseComposePS(stdout []byte) ([]server.ServiceStatus, error) {
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(stdout))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	var services []server.ServiceStatus
+	var (
+		services    []server.ServiceStatus
+		candidates  int
+		parsed      int
+		firstParseE error
+	)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 || line[0] != '{' {
 			continue
 		}
+		candidates++
 		var entry composePSEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
+			if firstParseE == nil {
+				firstParseE = err
+			}
 			continue
 		}
+		parsed++
 		services = append(services, entry.toServiceStatus())
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
+	}
+	if candidates > 0 && parsed == 0 {
+		return nil, errors.New("all NDJSON lines failed to decode: " + firstParseE.Error())
 	}
 	return services, nil
 }

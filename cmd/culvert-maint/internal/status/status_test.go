@@ -222,6 +222,60 @@ func TestSnapshot_HandlesComposeFailureGracefully(t *testing.T) {
 	}
 }
 
+// All `{`-prefixed lines are present but every one fails to decode.
+// The parser must surface this as compose_error rather than reporting
+// an empty service list (which would be indistinguishable from
+// "compose stack down" to the GUI).
+func TestSnapshot_AllJSONLinesUnparseableSurfacesError(t *testing.T) {
+	bin := fakeBin(t)
+	t.Setenv("FAKE_STDOUT",
+		`{"Name":"culvert","Service":"proxy","State":`+"\n"+ // truncated
+			`{"this is not"}`+"\n"+ // malformed
+			`{garbage`+"\n", // garbage
+	)
+	p := newProvider(t, bin, config.PrivilegeSudoers)
+
+	st, err := p.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if st.ComposeError == "" {
+		t.Errorf("compose_error should be set when all NDJSON lines fail to decode; got empty")
+	}
+	if !strings.Contains(st.ComposeError, "parse_compose_ps") {
+		t.Errorf("compose_error should be prefixed with parse_compose_ps:, got %q", st.ComposeError)
+	}
+	if st.ComposeStackUp {
+		t.Errorf("compose_stack_up must be false when parse failed")
+	}
+	if len(st.ComposeServices) != 0 {
+		t.Errorf("services should be empty on parse failure, got %d", len(st.ComposeServices))
+	}
+}
+
+// A single garbage line mixed with one valid line is tolerated — the
+// caller wanted whatever could be parsed. No compose_error.
+func TestSnapshot_MixedValidAndJunkIsTolerated(t *testing.T) {
+	bin := fakeBin(t)
+	t.Setenv("FAKE_STDOUT",
+		`WARN: some compose warning`+"\n"+
+			`{"Name":"culvert","Service":"proxy","State":"running","Image":"x"}`+"\n"+
+			`{garbage`+"\n",
+	)
+	p := newProvider(t, bin, config.PrivilegeSudoers)
+
+	st, err := p.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if st.ComposeError != "" {
+		t.Errorf("compose_error should be empty when at least one line parsed; got %q", st.ComposeError)
+	}
+	if !st.ComposeStackUp {
+		t.Errorf("compose_stack_up should be true (proxy line parsed)")
+	}
+}
+
 func TestNew_FailsClosedOnNilDeps(t *testing.T) {
 	if _, err := New(nil, nil, nil); err == nil {
 		t.Error("expected error on nil deps")
