@@ -12,19 +12,18 @@
 # Adding a new operation requires the four-step contract from § 4.6:
 #   1. Typed API handler in the agent.
 #   2. Command template in internal/runner.
-#   3. Sudoers allowlist entry HERE (this file).
+#   3. Sudoers allowlist entries HERE (this file).
 #   4. Tests, including the parity test that asserts every runner
-#      template has a matching line and vice versa.
+#      template has matching lines and vice versa.
 #
 # Skipping any of the four is a review block.
 #
-# D1.6a scope: only the minimal `docker compose ps` entry needed by
-# /v1/status. NO backup, restore, cleanup, upgrade, rollback, up, down,
-# pull, or manifest-inspect entries in this file. Those land with their
-# corresponding operations:
-#   - D1.6b adds run --rm cli --backup, --restore, --restore --confirm,
-#     --cleanup-restore-leftovers, up -d, down.
-#   - D1.6c adds pull proxy and manifest inspect <allowed-image>.
+# D1.6a scope: minimal `docker compose ps` entry for /v1/status.
+# D1.6b scope: backup (encrypted/unencrypted/list), restore
+#   (dryrun/commit, fully enumerated), compose down, compose up -d,
+#   cleanup leftovers (dryrun/commit). NO upgrade, rollback,
+#   manifest-inspect, pull yet.
+# D1.6c will add pull proxy and manifest inspect <allowed-image>.
 #
 # Operator install steps:
 #   The recommended path is to run packaging/culvert-maint/install.sh,
@@ -46,14 +45,73 @@
 # IMPORTANT: this file MUST be path-bound. sudo's exact-arg matching
 # does NOT honor the agent's process cwd; without the absolute path
 # the allowlist would accept the same `docker compose -f X ps` from
-# any working directory the agent could be coerced into. The static
-# parity test (cmd/culvert-maint/internal/runner/parity_test.go)
-# enforces this — D1.6a registry has exactly one template
-# (compose.status) and its sudoers line uses {compose_path}, never a
-# bare filename.
+# any working directory the agent could be coerced into.
+#
+# Wildcards (`*`) in this file each match exactly ONE argv token. The
+# wildcards live ONLY in argv positions where the agent enforces
+# strong validation upstream:
+#   - /backup/*  — agent validates the filename matches
+#                  ^[a-zA-Z0-9._-]{1,255}$ before sudo is invoked.
+#   - --older-than * --keep-last *
+#                — agent enforces time.ParseDuration shape with bounds
+#                  (1h to 1y) and integer keep_last in 0..100.
+# Restore-flag combinations (mode + --accept-dp-reenrollment +
+# --allow-counter-rollback) are fully ENUMERATED rather than wildcarded:
+# 3 modes × 4 flag combinations × 2 templates (dryrun, commit) = 24
+# lines. No trailing `*` is used to collapse the enumeration — that
+# would broaden the privilege boundary just for readability.
+#
+# The static parity test
+# (cmd/culvert-maint/internal/runner/parity_test.go) asserts the union
+# of every Template.SudoersLines exactly matches the entries below: no
+# missing, no dead surface.
 
-# D1.6a — minimal read-only entry for /v1/status.
-# Template: compose.status
-#   BaseArgv = ["docker", "compose", "-f", "{compose_path}", "ps",
-#               "--format", "json"]
+# ─── compose.status (D1.6a) ─────────────────────────────────────────
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} ps --format json
+
+# ─── compose.cli.backup.* (D1.6b) ───────────────────────────────────
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --encrypt --backup /backup/*
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --backup /backup/*
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --list-backups --backup-dir /backup
+
+# ─── compose.cli.restore.dryrun (D1.6b) ─────────────────────────────
+# 3 modes × 4 flag combos = 12 enumerated lines. Canonical argv order:
+#   --restore /backup/* --mode <mode>
+#   [--accept-dp-reenrollment]
+#   [--allow-counter-rollback]
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode full
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode full --accept-dp-reenrollment
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode full --allow-counter-rollback
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode full --accept-dp-reenrollment --allow-counter-rollback
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode trust-root-only
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode trust-root-only --accept-dp-reenrollment
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode trust-root-only --allow-counter-rollback
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode trust-root-only --accept-dp-reenrollment --allow-counter-rollback
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode state-only
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode state-only --accept-dp-reenrollment
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode state-only --allow-counter-rollback
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode state-only --accept-dp-reenrollment --allow-counter-rollback
+
+# ─── compose.cli.restore.commit (D1.6b) ─────────────────────────────
+# Same 12 combinations as dryrun, each with a trailing --confirm.
+# State-changing — acquires the global maintenance lock.
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode full --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode full --accept-dp-reenrollment --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode full --allow-counter-rollback --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode full --accept-dp-reenrollment --allow-counter-rollback --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode trust-root-only --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode trust-root-only --accept-dp-reenrollment --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode trust-root-only --allow-counter-rollback --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode trust-root-only --accept-dp-reenrollment --allow-counter-rollback --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode state-only --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode state-only --accept-dp-reenrollment --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode state-only --allow-counter-rollback --confirm
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* --mode state-only --accept-dp-reenrollment --allow-counter-rollback --confirm
+
+# ─── compose.down / compose.up (D1.6b — used by restore.commit) ─────
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} down
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} up -d
+
+# ─── compose.cli.cleanup.* (D1.6b) ──────────────────────────────────
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --cleanup-restore-leftovers --older-than * --keep-last *
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --cleanup-restore-leftovers --older-than * --keep-last * --confirm

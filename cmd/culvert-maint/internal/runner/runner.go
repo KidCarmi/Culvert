@@ -48,6 +48,35 @@ const (
 	// compose_project_dir + compose_file. Used by /v1/status. The
 	// only template that exists in D1.6a.
 	TemplateComposeStatus TemplateID = "compose.status"
+
+	// TemplateComposeCLIBackupEncrypted runs the encrypted-backup
+	// flow via the compose `cli` profile. See templates_d16b.go for
+	// argv shape and validators. State-changing.
+	TemplateComposeCLIBackupEncrypted TemplateID = "compose.cli.backup.encrypted"
+	// TemplateComposeCLIBackupUnencrypted runs the unencrypted-backup
+	// flow. State-changing.
+	TemplateComposeCLIBackupUnencrypted TemplateID = "compose.cli.backup.unencrypted"
+	// TemplateComposeCLIBackupList runs `cli --list-backups` and
+	// emits a JSON array on stdout. Read-only.
+	TemplateComposeCLIBackupList TemplateID = "compose.cli.backup.list"
+	// TemplateComposeCLIRestoreDryRun validates a backup and prints
+	// the restore plan without mutating state. Read-only; no --confirm.
+	TemplateComposeCLIRestoreDryRun TemplateID = "compose.cli.restore.dryrun"
+	// TemplateComposeCLIRestoreCommit applies a restore destructively.
+	// State-changing; argv terminates with --confirm.
+	TemplateComposeCLIRestoreCommit TemplateID = "compose.cli.restore.commit"
+	// TemplateComposeDown runs `docker compose -f <p> down`.
+	// State-changing (used by restore.commit).
+	TemplateComposeDown TemplateID = "compose.down"
+	// TemplateComposeUp runs `docker compose -f <p> up -d`.
+	// State-changing (used by restore.commit).
+	TemplateComposeUp TemplateID = "compose.up"
+	// TemplateComposeCLICleanupDryRun runs cleanup without --confirm.
+	// Read-only (prints the would-be cleanup plan).
+	TemplateComposeCLICleanupDryRun TemplateID = "compose.cli.cleanup.dryrun"
+	// TemplateComposeCLICleanupCommit runs cleanup with --confirm.
+	// State-changing.
+	TemplateComposeCLICleanupCommit TemplateID = "compose.cli.cleanup.commit"
 )
 
 // Template is a fixed command pattern with positional arguments. The
@@ -57,11 +86,17 @@ type Template struct {
 	ID       TemplateID
 	BaseArgv []string
 
-	// Sudoers is the documentation-of-record for what command line
-	// must be allow-listed in /etc/sudoers.d/culvert-maint for this
-	// template. The static parity test cross-checks this string
-	// against the on-disk sudoers file.
-	Sudoers string
+	// SudoersLines is the documentation-of-record for what command
+	// lines must be allow-listed in /etc/sudoers.d/culvert-maint for
+	// this template. A simple template (e.g. compose.status,
+	// compose.cli.backup.list) has exactly one line. Templates with
+	// enumerable variation (e.g. restore: 3 modes × 4 optional-flag
+	// combos = 12 lines) have one entry per real combination — the
+	// agent never broadens the privilege boundary with a trailing
+	// wildcard. The static parity test asserts the union of every
+	// template's SudoersLines exactly matches the on-disk sudoers
+	// file (no missing, no dead entries).
+	SudoersLines []string
 
 	// StateChanging mirrors ops.IsStateChanging; included on the
 	// template so the parity test and any later sudoers-generator can
@@ -84,14 +119,16 @@ type Template struct {
 // arg matching does NOT honor cwd, so the agent's `cmd.Dir` setting
 // alone is not enough to bound privilege.
 func Registry() []Template {
-	return []Template{
+	templates := []Template{
 		{
 			ID:            TemplateComposeStatus,
 			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "ps", "--format", "json"},
-			Sudoers:       "/usr/bin/docker compose -f {compose_path} ps --format json",
+			SudoersLines:  []string{"/usr/bin/docker compose -f {compose_path} ps --format json"},
 			StateChanging: false,
 		},
 	}
+	templates = append(templates, d16bTemplates()...)
+	return templates
 }
 
 // templateByID returns a *Template or nil.
@@ -261,16 +298,35 @@ func (r *Runner) buildArgv(tmpl *Template) []string {
 	return out
 }
 
-// run executes argv with bounded stdout/stderr capture, fixed cwd, env
-// allowlist, and per-command timeout (with SIGTERM → SIGKILL grace).
+// run executes argv with no per-call env overlay. Equivalent to
+// runWithEnv(ctx, argv, nil) — preserved for D1.6a callers.
+func (r *Runner) run(ctx context.Context, argv []string) (*Result, error) {
+	return r.runWithEnv(ctx, argv, nil)
+}
+
+// runWithEnv executes argv with bounded stdout/stderr capture, fixed
+// cwd, env allowlist, per-command timeout (with SIGTERM → SIGKILL
+// grace), and an optional per-call env overlay.
+//
+// envOverlay maps env-var name → value. Every name MUST be a member of
+// the runner's EnvAllow (set at New()-time); a name outside EnvAllow
+// is rejected before exec — the closed-allowlist invariant is never
+// circumvented. Empty-string values represent "unset for this call",
+// which suppresses fallback to os.Getenv() for that name.
+//
 // Single straight-line orchestration; splitting into per-step helpers
 // would scatter the cleanup paths and obscure the SIGTERM/SIGKILL
 // ordering.
 //
 //nolint:cyclop // single-pass orchestration; splitting obscures SIGTERM/SIGKILL ordering
-func (r *Runner) run(ctx context.Context, argv []string) (*Result, error) {
+func (r *Runner) runWithEnv(ctx context.Context, argv []string, envOverlay map[string]string) (*Result, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("runner: empty argv")
+	}
+	for name := range envOverlay {
+		if !r.envAllowed(name) {
+			return nil, fmt.Errorf("runner: env overlay name %q is not in EnvAllow (closed allowlist)", name)
+		}
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, r.stageTimeout)
@@ -278,7 +334,7 @@ func (r *Runner) run(ctx context.Context, argv []string) (*Result, error) {
 
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...) // #nosec G204 -- argv comes from a fixed template registry, never operator input
 	cmd.Dir = r.composeProjectDir
-	cmd.Env = r.buildEnv()
+	cmd.Env = r.buildEnvWithOverlay(envOverlay)
 
 	stdout := newBoundedBuffer(r.captureMax)
 	stderr := newBoundedBuffer(r.captureMax)
@@ -342,9 +398,21 @@ func (r *Runner) waitCmd(cmd *exec.Cmd) error {
 
 // buildEnv returns the env to forward to the child process in a
 // deterministic order — defaults first (fixed order: PATH, HOME, LANG,
-// TZ), then EnvAllow names sorted alphabetically. The runner builds
-// env from scratch — os.Environ() is NOT inherited.
+// TZ), then EnvAllow names sorted alphabetically resolved from
+// os.Getenv. Equivalent to buildEnvWithOverlay(nil).
 func (r *Runner) buildEnv() []string {
+	return r.buildEnvWithOverlay(nil)
+}
+
+// buildEnvWithOverlay is buildEnv with a per-call value map. For each
+// EnvAllow name, the overlay (if present) takes precedence: a non-empty
+// overlay value is used verbatim; an empty overlay value suppresses the
+// variable for this call (no fallback to os.Getenv). Names absent from
+// the overlay fall back to os.Getenv.
+//
+// The overlay's keys MUST already be validated as members of EnvAllow
+// — runWithEnv enforces that invariant before invoking buildEnvWithOverlay.
+func (r *Runner) buildEnvWithOverlay(envOverlay map[string]string) []string {
 	env := []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"HOME=/var/lib/culvert-maint",
@@ -354,6 +422,14 @@ func (r *Runner) buildEnv() []string {
 	names := append([]string(nil), r.envAllow...)
 	sort.Strings(names)
 	for _, name := range names {
+		if v, ok := envOverlay[name]; ok {
+			if v == "" {
+				// Explicit unset for this call. Do NOT fall back to os.Getenv.
+				continue
+			}
+			env = append(env, name+"="+v)
+			continue
+		}
 		v, ok := lookupEnv(name)
 		if !ok {
 			continue
@@ -361,6 +437,42 @@ func (r *Runner) buildEnv() []string {
 		env = append(env, name+"="+v)
 	}
 	return env
+}
+
+// EnvAllowSnapshot returns a copy of the runner's EnvAllow list. Used
+// by handlers that need to validate a `passphrase_ref: env:NAME`
+// against the closed allowlist before calling the runner.
+func (r *Runner) EnvAllowSnapshot() []string {
+	out := make([]string, len(r.envAllow))
+	copy(out, r.envAllow)
+	return out
+}
+
+// SetExecHooksForTest replaces the runner's exec start/wait hooks.
+// Production code never calls this; tests inject capture-and-fake
+// behaviour. Either argument may be nil to leave the corresponding
+// hook unchanged.
+//
+// This is intentionally exported so other packages' tests
+// (internal/server's handler tests in particular) can drive the
+// runner without spawning real `docker` processes.
+func (r *Runner) SetExecHooksForTest(start, wait func(*exec.Cmd) error) {
+	if start != nil {
+		r.execStartFn = start
+	}
+	if wait != nil {
+		r.execWaitFn = wait
+	}
+}
+
+// envAllowed reports whether name is in the runner's EnvAllow.
+func (r *Runner) envAllowed(name string) bool {
+	for _, n := range r.envAllow {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupEnv is a thin wrapper to make the env source mockable in

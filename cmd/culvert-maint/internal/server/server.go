@@ -29,7 +29,9 @@ import (
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
+	"culvert-maint/internal/health"
 	"culvert-maint/internal/ops"
+	"culvert-maint/internal/runner"
 )
 
 // Version is the agent version string. Overridable at link time:
@@ -77,6 +79,15 @@ type Options struct {
 	Status    StatusProvider
 	StateDir  string // for /v1/operations/{id}/logs
 	AuditPath string // for GET /v1/audit
+
+	// Runner is the command runner used by D1.6b handlers. May be
+	// nil only in unit tests that exercise non-D1.6b paths; the
+	// production constructor in main wires a real *runner.Runner.
+	Runner *runner.Runner
+
+	// HealthProbeFactory builds a fresh health.Probe per restore
+	// operation. May be nil in tests that don't exercise restore.
+	HealthProbeFactory func() health.Probe
 }
 
 // Server is the agent's HTTP server. Construct with New, run with
@@ -228,17 +239,19 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/audit", s.withAuth(s.handleAudit))
 	mux.HandleFunc("GET /v1/operations/", s.withAuth(s.handleOperationsRouter))
 
-	// Future endpoints — explicit 404 in D1.6a, authenticated so an
+	// D1.6b operation endpoints.
+	mux.HandleFunc("POST /v1/backups", s.withAuth(s.handleBackupCreate))
+	mux.HandleFunc("GET /v1/backups", s.withAuth(s.handleBackupList))
+	mux.HandleFunc("POST /v1/restores/dryrun", s.withAuth(s.handleRestoreDryRun))
+	mux.HandleFunc("POST /v1/restores/commit", s.withAuth(s.handleRestoreCommit))
+	mux.HandleFunc("POST /v1/cleanups", s.withAuth(s.handleCleanup))
+
+	// Future endpoints — explicit 404, authenticated so an
 	// unauthorised peer gets 403 consistently.
 	notImpl := s.withAuth(func(w http.ResponseWriter, r *http.Request, _ auth.PeerInfo) {
 		s.notImplemented(w, r)
 	})
 	for _, p := range []string{
-		"/v1/backups",
-		"/v1/backups/",
-		"/v1/restores/dryrun",
-		"/v1/restores/commit",
-		"/v1/cleanups",
 		"/v1/upgrades/check",
 		"/v1/upgrades/apply",
 		"/v1/rollbacks",

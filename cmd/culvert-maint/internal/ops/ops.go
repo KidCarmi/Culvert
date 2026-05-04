@@ -62,14 +62,30 @@ type Op struct {
 	Result         map[string]interface{} `json:"result,omitempty"`
 }
 
+// Operation kind constants. Stable strings; part of the audit schema.
+//
+// Cleanup is split into .dryrun and .commit deliberately so the
+// state-changing decision is encoded in the kind, not in the params.
+// The lock-check path never has to inspect params — IsStateChanging
+// resolves the question from the kind alone.
+const (
+	KindBackupCreate  = "backup.create"
+	KindBackupList    = "backup.list"
+	KindRestoreDryRun = "restore.dryrun"
+	KindRestoreCommit = "restore.commit"
+	KindCleanupDryRun = "cleanup.dryrun"
+	KindCleanupCommit = "cleanup.commit"
+)
+
 // stateChangingKinds is the production allowlist of operation kinds
-// that acquire the global maintenance lock. D1.6a ships an empty list
-// — there are no production state-changing kinds in this slice. Each
-// future slice (D1.6b/c) adds its kinds here alongside the matching
-// API handler, runner template, sudoers entry, and tests (per § 4.6
-// four-step contract).
+// that acquire the global maintenance lock. D1.6b activates this for
+// backup.create, restore.commit, and cleanup.commit. The four-step
+// § 4.6 contract — handler + template + sudoers + tests — is
+// satisfied for each entry by the matching D1.6b PR.
 var stateChangingKinds = map[string]struct{}{
-	// D1.6a: empty by design.
+	KindBackupCreate:  {},
+	KindRestoreCommit: {},
+	KindCleanupCommit: {},
 }
 
 // SyntheticStateChangingKind is exported for tests that need to
@@ -132,24 +148,66 @@ func IsConflict(err error) bool {
 	return errors.As(err, &c)
 }
 
+// idempEntry caches the op_id we admitted for a given
+// (actor, kind, idempotency_key) tuple so that a duplicate submission
+// returns the same op_id rather than starting a parallel operation.
+type idempEntry struct {
+	OpID string
+	When time.Time
+}
+
+// DefaultIdempCacheTTL bounds how long an idempotency-cache entry
+// remains live. The TTL is a soft expiry — entries past their TTL
+// are NOT actively purged on a timer; instead, BeginIdempotent
+// purges expired entries opportunistically as it walks the cache.
+// This keeps the manager goroutine-free and prevents unbounded
+// growth from many unique keys over a long process lifetime.
+//
+// 24h is intentionally generous: the largest legitimate
+// idempotency-replay window is "the operator retries a backup that
+// took most of a day to run". Entries older than 24h are statistically
+// stale (the original op has long since terminated; a "duplicate"
+// after that is almost certainly a fresh-intent retry that the
+// operator wants treated as new work).
+const DefaultIdempCacheTTL = 24 * time.Hour
+
 // Manager owns the in-memory active-op map and the global maintenance
 // lock. Goroutine-safe.
 type Manager struct {
 	mu     sync.Mutex
 	active map[string]*Op // by op_id
 	holder *Op            // current state-changing op holding the lock, or nil
-	now    func() time.Time
+	// idempCache maps "actor|kind|idempotency_key" → most recent op_id
+	// admitted for that tuple. Entries are purged opportunistically
+	// once they exceed idempCacheTTL. Lifetime = process lifetime;
+	// on restart the cache is empty (which is correct: prior ops
+	// were marked interrupted, so a resubmit must produce a fresh op).
+	idempCache    map[string]idempEntry
+	idempCacheTTL time.Duration
+	now           func() time.Time
 }
 
 // NewManager returns a fresh Manager. clock may be nil (defaults to
 // time.Now); tests inject a deterministic clock.
 func NewManager(clock func() time.Time) *Manager {
+	return NewManagerWithTTL(clock, DefaultIdempCacheTTL)
+}
+
+// NewManagerWithTTL constructs a Manager with a non-default
+// idempotency-cache TTL. Mainly for tests that want to exercise
+// purge logic against an artificially short window.
+func NewManagerWithTTL(clock func() time.Time, idempTTL time.Duration) *Manager {
 	if clock == nil {
 		clock = func() time.Time { return time.Now().UTC() }
 	}
+	if idempTTL <= 0 {
+		idempTTL = DefaultIdempCacheTTL
+	}
 	return &Manager{
-		active: map[string]*Op{},
-		now:    clock,
+		active:        map[string]*Op{},
+		idempCache:    map[string]idempEntry{},
+		idempCacheTTL: idempTTL,
+		now:           clock,
 	}
 }
 
@@ -189,6 +247,117 @@ func (m *Manager) Begin(kind, actor, idempotencyKey string, params map[string]in
 	}
 	m.active[op.ID] = op
 	return m.cloneLocked(op), nil
+}
+
+// BeginIdempotent is the idempotency-aware Begin. If idempotencyKey is
+// non-empty and a prior op was admitted for the same
+// (actor, kind, idempotency_key) tuple — and that op still exists in
+// the active map — the prior op snapshot is returned with
+// deduped=true. Otherwise this admits a new op via Begin and records
+// the (tuple → op_id) mapping in the idempotency cache.
+//
+// Dedup runs BEFORE the state-changing-lock check (per § 2.5). A
+// duplicate submission of a state-changing op while the original is
+// still running returns the original op snapshot — not a 409.
+//
+// Empty idempotencyKey disables dedup entirely; every call admits a
+// fresh op.
+func (m *Manager) BeginIdempotent(kind, actor, idempotencyKey string, params map[string]interface{}) (*Op, bool, error) {
+	if kind == "" || actor == "" {
+		return nil, false, errors.New("ops: kind and actor are required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Opportunistic purge: walk the idempotency cache and drop any
+	// entry whose age exceeds idempCacheTTL. This runs at most once
+	// per BeginIdempotent call, in O(N) over the cache size, holding
+	// m.mu — acceptable because (a) the cache is bounded by the
+	// number of distinct (actor,kind,key) tuples seen within
+	// idempCacheTTL, (b) the same lock is held for the rest of the
+	// function anyway, and (c) the alternative (a goroutine-driven
+	// timer) would complicate Manager's shutdown story. The purge is
+	// also self-throttling: as the cache shrinks past the TTL
+	// boundary, subsequent walks find less work to do.
+	m.purgeIdempCacheLocked()
+
+	if idempotencyKey != "" {
+		cacheKey := idempCacheKey(actor, kind, idempotencyKey)
+		if entry, ok := m.idempCache[cacheKey]; ok {
+			if existing, alive := m.active[entry.OpID]; alive {
+				return m.cloneLocked(existing), true, nil
+			}
+			// Cache references a dropped op; clear and fall through
+			// to admit a fresh op. Defensive against future eviction.
+			delete(m.idempCache, cacheKey)
+		}
+	}
+
+	stateChanging := IsStateChanging(kind)
+	if stateChanging && m.holder != nil {
+		return nil, false, &Conflict{Holder: m.cloneLocked(m.holder)}
+	}
+
+	op := &Op{
+		ID:             NewID(),
+		Kind:           kind,
+		State:          StateRunning,
+		Actor:          actor,
+		IdempotencyKey: idempotencyKey,
+		Started:        m.now(),
+		Params:         params,
+		Progress:       []Stage{},
+	}
+	if stateChanging {
+		op.LockHeldBy = op.ID
+		m.holder = op
+	}
+	m.active[op.ID] = op
+	if idempotencyKey != "" {
+		m.idempCache[idempCacheKey(actor, kind, idempotencyKey)] = idempEntry{
+			OpID: op.ID,
+			When: m.now(),
+		}
+	}
+	return m.cloneLocked(op), false, nil
+}
+
+// idempCacheKey is the shape of an entry in Manager.idempCache. Pipe
+// is reserved (not allowed in actor/kind by upstream validators) so it
+// cannot collide with an embedded user value.
+func idempCacheKey(actor, kind, idempotencyKey string) string {
+	return actor + "|" + kind + "|" + idempotencyKey
+}
+
+// purgeIdempCacheLocked drops every cache entry whose age exceeds
+// m.idempCacheTTL. Caller MUST hold m.mu.
+//
+// We accept the O(N) walk on every BeginIdempotent because (a) the
+// cache size is bounded by the number of unique
+// (actor,kind,idempotency_key) tuples seen within the TTL window,
+// (b) idempotency keys are operator-supplied and naturally bounded
+// in practice (CP retries reuse keys), and (c) the alternative
+// (a per-Manager goroutine + ticker) would require a Stop() method
+// on Manager and complicate the shutdown story for tests and main.
+func (m *Manager) purgeIdempCacheLocked() {
+	if len(m.idempCache) == 0 {
+		return
+	}
+	cutoff := m.now().Add(-m.idempCacheTTL)
+	for k, e := range m.idempCache {
+		if e.When.Before(cutoff) {
+			delete(m.idempCache, k)
+		}
+	}
+}
+
+// IdempCacheSize returns the current count of entries in the
+// idempotency cache. Mainly useful for tests that need to assert
+// purge behavior; production code has no need to inspect this.
+func (m *Manager) IdempCacheSize() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.idempCache)
 }
 
 // Finish transitions opID to terminal state. If reason is non-empty it

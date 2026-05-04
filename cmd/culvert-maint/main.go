@@ -25,6 +25,7 @@ import (
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
+	"culvert-maint/internal/health"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 	"culvert-maint/internal/server"
@@ -78,7 +79,15 @@ func run(configPath string) error {
 	}
 	defer func() { _ = al.Close() }()
 
-	mgr := ops.NewManager(nil)
+	// Idempotency-cache TTL is the larger of operation_timeout and
+	// 24h: an operator retrying an in-flight or recently-completed op
+	// MUST hit the dedupe path; anything older than that is almost
+	// certainly fresh-intent retry that we want to admit as new work.
+	idempTTL := ops.DefaultIdempCacheTTL
+	if cfg.OperationTimeout > idempTTL {
+		idempTTL = cfg.OperationTimeout
+	}
+	mgr := ops.NewManagerWithTTL(nil, idempTTL)
 	// D1.6a: nothing on disk to scan, but the contract is in place for D1.6b/c.
 	mgr.MarkAllInterrupted()
 
@@ -87,7 +96,11 @@ func run(configPath string) error {
 		ComposeFile:       cfg.ComposeFile,
 		UseSudo:           cfg.PrivilegeMode == config.PrivilegeSudoers,
 		StageTimeout:      cfg.StageTimeout,
-		EnvAllow:          []string{}, // D1.6a status only — no secrets to forward
+		// D1.6b adds CULVERT_BACKUP_PASSPHRASE so encrypted-backup
+		// and restore-with-encrypted-archive operations can forward
+		// the resolved value into the cli container via env overlay.
+		// All other secrets enter D1.6c/d as needed.
+		EnvAllow: []string{runner.EnvCulvertBackupPassphrase},
 	})
 	if err != nil {
 		return fmt.Errorf("runner: %w", err)
@@ -106,6 +119,15 @@ func run(configPath string) error {
 		Status:    stp,
 		StateDir:  cfg.StateDir,
 		AuditPath: auditPath,
+		Runner:    r,
+		HealthProbeFactory: func() health.Probe {
+			return health.Probe{
+				BaseURL:    cfg.HealthBaseURL,
+				HealthPath: cfg.HealthPath,
+				ReadyPath:  cfg.ReadyPath,
+				// Defaults applied by Probe.withDefaults.
+			}
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("server: %w", err)

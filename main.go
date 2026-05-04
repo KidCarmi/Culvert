@@ -125,6 +125,8 @@ type startupState struct {
 	cleanupLeftovers        *bool
 	cleanupOlderThan        *string
 	cleanupKeepLast         *int
+	listBackups             *bool
+	listBackupsDir          *string
 	cdrEnabledFlag          *bool
 	cdrEndpointFlag         *string
 	cdrFailModeFlag         *string
@@ -271,6 +273,8 @@ func parseFlags(s *startupState) {
 	s.cleanupLeftovers = flag.Bool("cleanup-restore-leftovers", false, "Plan/execute cleanup of restore leftover .bak/.staging dirs and exit; dry-run unless --confirm is set (D1.3c)")
 	s.cleanupOlderThan = flag.String("older-than", "", "Cleanup filter: only candidates older than this duration (strict time.ParseDuration syntax, e.g. 168h, 720h) (D1.3c)")
 	s.cleanupKeepLast = flag.Int("keep-last", 0, "Cleanup filter: always keep the N newest .bak directories; .staging is unaffected (D1.3c)")
+	s.listBackups = flag.Bool("list-backups", false, "List backup archives in --backup-dir (default /backup) as a JSON array on stdout and exit (D1.6b)")
+	s.listBackupsDir = flag.String("backup-dir", "/backup", "Directory scanned by --list-backups; must be an absolute path (D1.6b)")
 	// CDR / Sluice integration (Phase 1: single-instance client with TOFU pinning).
 	s.cdrEnabledFlag = flag.Bool("cdr-enabled", false, "Enable Sluice CDR integration (strip macros/JS/OLE from downloads)")
 	s.cdrEndpointFlag = flag.String("cdr-endpoint", "", "Sluice gRPC endpoint (e.g. sluice:8443)")
@@ -334,6 +338,14 @@ func handleOneShotCommands(s *startupState) {
 	if *s.listLeftovers {
 		if err := runListLeftovers(dataDir); err != nil {
 			fmt.Fprintf(os.Stderr, "List leftovers error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	// ── One-shot: list backup archives (D1.6b) ─────────────────────────────
+	if *s.listBackups {
+		if err := runListBackups(*s.listBackupsDir, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "List backups error: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)

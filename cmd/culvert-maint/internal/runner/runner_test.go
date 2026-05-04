@@ -276,16 +276,26 @@ func TestBuildEnv_DeterministicOrder(t *testing.T) {
 	}
 }
 
-func TestRegistry_HasComposeStatusOnly_D16a(t *testing.T) {
-	reg := Registry()
-	if len(reg) != 1 {
-		t.Fatalf("D1.6a registry size: got %d, want 1", len(reg))
+func TestRegistry_ContainsComposeStatusD16a(t *testing.T) {
+	// D1.6b registry must still include compose.status (read-only,
+	// drives /v1/status). The closed-set assertion across all D1.6b
+	// templates lives in TestParity_D16bRegistryShape.
+	var found *Template
+	for _, tmpl := range Registry() {
+		if tmpl.ID == TemplateComposeStatus {
+			t := tmpl
+			found = &t
+			break
+		}
 	}
-	if reg[0].ID != TemplateComposeStatus {
-		t.Errorf("D1.6a should have only TemplateComposeStatus, got %q", reg[0].ID)
+	if found == nil {
+		t.Fatalf("Registry must include %q", TemplateComposeStatus)
 	}
-	if reg[0].StateChanging {
+	if found.StateChanging {
 		t.Errorf("compose.status must not be state-changing")
+	}
+	if len(found.SudoersLines) != 1 {
+		t.Errorf("compose.status must have exactly one sudoers line; got %d", len(found.SudoersLines))
 	}
 }
 
