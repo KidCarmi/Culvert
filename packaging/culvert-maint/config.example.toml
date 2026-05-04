@@ -1,0 +1,81 @@
+# Culvert Maintenance Agent — sample configuration
+#
+# Install path: /etc/culvert-maint/config.toml
+# Mode: 0640, owner root:culvert-maint
+#
+# All keys are documented in roadmap/D1.6-maintenance-agent-
+# implementation-plan.md § 1.3. The agent fails closed on any missing
+# required key, unknown enum value, malformed duration / URL / regex,
+# or non-absolute path. There is no silent fallback on invalid values;
+# documented defaults apply only when optional keys are omitted.
+
+# ── Required ───────────────────────────────────────────────────────────────
+
+# Directory containing the operator's docker-compose.yml. The agent's
+# cwd for every `docker compose` invocation. Required; no default.
+compose_project_dir = "/srv/culvert"
+
+# UID-or-username allowlist for UDS peer authentication. The agent
+# refuses to start with an empty list. Each entry is either a numeric
+# UID or a username that exists on the host. Required; no default.
+# Single config surface — there is no equivalent CLI flag.
+allow_peers = ["culvert-cp"]
+
+# ── Optional — defaults shown ──────────────────────────────────────────────
+
+# Filename within compose_project_dir. Must be a bare filename
+# (no path separator).
+compose_file = "docker-compose.yml"
+
+# UDS path for the agent's API. Mode is fixed at 0660 regardless.
+socket_path = "/run/culvert-maint.sock"
+
+# State directory root: audit log, per-op logs, optional state.json.
+state_dir = "/var/lib/culvert-maint"
+
+# Privilege mode:
+#   "sudoers"          — production default. Agent prepends `sudo -n` to
+#                        every docker compose invocation; the sudoers
+#                        allowlist (/etc/sudoers.d/culvert-maint) bounds
+#                        privilege.
+#   "docker_group_lab" — dev/lab opt-in. The culvert-maint user is in
+#                        the `docker` group, which is effectively
+#                        root-equivalent. NOT for production. The agent
+#                        emits a WARN log line on startup and a
+#                        privilege_warning field in /v1/status.
+privilege_mode = "sudoers"
+
+# Host-published proxy endpoint for health checks. Change when the
+# proxy port has been remapped or fronted by a TLS terminator.
+health_base_url = "http://127.0.0.1:8080"
+health_path = "/health"
+ready_path = "/ready"
+
+# Hard ceiling on a single operation. Exceeding triggers cancel +
+# `failed` with reason `timeout`.
+operation_timeout = "30m"
+
+# Default per-stage timeout. Per-stage overrides allowed in code.
+stage_timeout = "5m"
+
+# Retention for operations/<op_id>.log and audit.jsonl.
+log_retention_days = 30
+
+# Backup-path policy. Every --backup / --restore argument the agent
+# forwards to the cli service must, after filepath.Clean, have this
+# prefix.
+#
+# IMPORTANT: this is the path AS SEEN BY THE CLI CONTAINER, not the
+# host filesystem. The agent never reads or writes that path directly.
+# The cli container mounts the culvert-backups volume at /backup per
+# D1.5; the default below matches the supplied compose. Operators who
+# remap cli's /backup mount must update this key to keep the prefix
+# check meaningful.
+allowed_backup_dir = "/backup"
+
+# D1.6c upgrade target allowlist (regex). The default accepts only
+# ghcr.io/kidcarmi/culvert with a tag or @sha256: digest. Operators
+# may broaden this regex to add other registries, but the per-request
+# allowlist cannot be bypassed. Use a TOML literal string (single
+# quotes) so backslashes are NOT interpreted as escapes.
+image_allowlist = '^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$'
