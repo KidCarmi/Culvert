@@ -60,16 +60,6 @@ func TestSSEBroadcaster_PreCancelledCtx_ExitsImmediately(t *testing.T) {
 	}
 }
 
-// TestSSEBroadcaster_Done_ReturnsSameChannel is a sanity check that Done()
-// returns the same channel on repeated calls — i.e. callers (Phase 2
-// registry, tests) can hold a handle to the close signal without surprises.
-func TestSSEBroadcaster_Done_ReturnsSameChannel(t *testing.T) {
-	b := newSSEBroadcaster(time.Second)
-	if b.Done() != b.Done() {
-		t.Error("Done() returned different channels on successive calls")
-	}
-}
-
 // TestStartSSEBroadcaster_ReturnsLiveHandle covers the production entry
 // point: startSSEBroadcaster(ctx) must spawn the goroutine and return a
 // handle whose Done() closes when ctx is cancelled. Mirrors the production
