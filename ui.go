@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -27,7 +28,12 @@ var (
 	uiCfgLogFormat string
 )
 
-func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen // route registration; each line is one endpoint
+// newAdminUIServer constructs the admin UI *http.Server with the same mux,
+// middleware chain, and timeouts that startUI uses, but without binding a
+// listener. Extracted so tests can drive the same server against an explicit
+// net.Listener (avoiding port-discovery TOCTOU) and so startUI can return a
+// shutdown handle to runProxyUntilShutdown. P1.1 / S4.AdminUI.
+func newAdminUIServer(port int) *http.Server { //nolint:funlen // route registration; each line is one endpoint
 	sub, _ := fs.Sub(staticFiles, "static")
 
 	// Pre-read index.html from embed for nonce injection.
@@ -55,7 +61,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 	registerObservabilityRoutes(mux) // diagnostics.go    —  2 routes (incl. /healthz)
 	registerGovernanceRoutes(mux)    // ui_governance.go  —  1 route  (C3, admin-only)
 
-	srv := &http.Server{
+	return &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
 		Handler:      uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(uiMetadataEnforcement(mux)))),
 		ReadTimeout:  15 * time.Second,
@@ -63,13 +69,24 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 		IdleTimeout:  60 * time.Second,
 		ErrorLog:     log.New(&tlsErrorFilter{}, "", 0), // suppress noisy TLS handshake errors
 	}
+}
+
+// startUI launches the admin UI HTTP server and returns the *http.Server
+// handle so runProxyUntilShutdown can call Shutdown(ctx) on it. The actual
+// listen goroutine is spawned internally; the returned server is the
+// shutdown handle. Errors from ListenAndServe* that are not http.ErrServerClosed
+// remain fatal — only the clean-shutdown sentinel is filtered.
+func startUI(port int, certFile, keyFile string, noTLS bool) *http.Server {
+	srv := newAdminUIServer(port)
 
 	if certFile != "" && keyFile != "" {
 		logger.Printf("UITLS: https://localhost:%d (custom cert)", port)
-		if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil {
-			logger.Fatalf("UI TLS error: %v", err)
-		}
-		return
+		go func() {
+			if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Fatalf("UI TLS error: %v", err)
+			}
+		}()
+		return srv
 	}
 
 	// Auto self-signed TLS — only when explicitly requested.
@@ -80,15 +97,20 @@ func startUI(port int, certFile, keyFile string, noTLS bool) { //nolint:funlen /
 		} else {
 			srv.TLSConfig = tlsCfg
 			logger.Printf("UITLS: https://localhost:%d (self-signed)", port)
-			if err := srv.ListenAndServeTLS("", ""); err != nil {
-				logger.Fatalf("UI TLS error: %v", err)
-			}
-			return
+			go func() {
+				if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					logger.Fatalf("UI TLS error: %v", err)
+				}
+			}()
+			return srv
 		}
 	}
 
 	logger.Printf("UIHTTP: http://localhost:%d", port)
-	if err := srv.ListenAndServe(); err != nil {
-		logger.Fatalf("UI server error: %v", err)
-	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Fatalf("UI server error: %v", err)
+		}
+	}()
+	return srv
 }

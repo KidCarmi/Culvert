@@ -158,6 +158,7 @@ type startupState struct {
 	rlCleanupCancel context.CancelFunc
 	feedSyncer      *FeedSyncer
 	scanSvc         *ScanService
+	adminUISrv      *http.Server // P1.1 / S4.AdminUI: graceful shutdown handle
 }
 
 func main() {
@@ -1187,14 +1188,17 @@ func initPersistentAdminState(s *startupState) {
 	LoadAdminSettings(filepath.Join(dataDir, "admin_settings.json"))
 }
 
-// startAdminUI wires UI globals and launches the admin UI goroutine.
+// startAdminUI wires UI globals and launches the admin UI server.
+// The server's listen goroutine is spawned inside startUI; the returned
+// *http.Server handle is stashed on startupState so runProxyUntilShutdown
+// can call Shutdown(ctx) on it during graceful teardown. P1.1 / S4.AdminUI.
 func startAdminUI(s *startupState) {
 	// ── Web UI ────────────────────────────────────────────────────────────
 	uiCfgGeoIPDB = s.geoDBVal
 	uiCfgLogFile = s.lPath
 	uiCfgLogMaxMB = s.lMaxMB
 	uiCfgLogFormat = s.fc.LogFormat
-	go startUI(s.uPort, s.cert, s.key, *s.uiNoTLS)
+	s.adminUISrv = startUI(s.uPort, s.cert, s.key, *s.uiNoTLS)
 }
 
 // buildAndStartProxyServer constructs the proxy HTTP server and logs startup.
@@ -1300,6 +1304,15 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	// Shut down scan microservice sidecar if running.
 	if s.scanSvc != nil {
 		s.scanSvc.Shutdown(ctx) //nolint:errcheck -- best-effort shutdown
+	}
+
+	// P1.1 / S4.AdminUI: stop accepting new admin UI requests before draining
+	// the proxy so admins can no longer mutate config mid-shutdown. In-flight
+	// requests finish on the shared 30 s ctx. Nil-safe for the early-fail path.
+	if s.adminUISrv != nil {
+		if err := s.adminUISrv.Shutdown(ctx); err != nil {
+			logger.Printf("Admin UI shutdown error: %v", err)
+		}
 	}
 
 	if err := proxySrv.Shutdown(ctx); err != nil {
