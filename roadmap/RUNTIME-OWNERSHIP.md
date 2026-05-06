@@ -79,7 +79,7 @@ Each PR is sized for one Claude Code implementation pass + human review (~200–
 >
 > **Next step:** **P2.1 — minimal `Shutdownable` + `shutdownRegistry`** (≤80 LOC of production code, no call sites yet). Not a broad runtime framework, not package-wide DI — just the smallest type that lets P2.2 wire the five P1 owners plus the ~10 existing teardown calls into one ordered table.
 
-Each PR introduces one small owner type with `Start(ctx)` / `Stop(ctx) error` for one detached goroutine. **No registry yet** — the registry is Phase 2 once we have ≥3 concrete owners. Order is deliberate: Admin UI first, because it is the most useful **reference implementation** for owned server shutdown (real `*http.Server`, real in-flight requests).
+Each PR introduces a small ownership shape — owner type, returned server handle, or cancellable helper loop — that gives the detached resource an explicit lifecycle and a testable shutdown/exit signal. **No registry yet** — the registry is Phase 2 once we have ≥3 concrete owners. Order is deliberate: Admin UI first, because it is the most useful **reference implementation** for owned server shutdown (real `*http.Server`, real in-flight requests).
 
 #### P1.1 — Admin UI graceful shutdown handle (`adminUIServer`) `[travel-ok]`
 - **Status:** ✅ DONE — merged in PR #210.
