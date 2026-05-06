@@ -88,6 +88,35 @@ func TestSocks5Server_StopNilReceiver(t *testing.T) {
 	}
 }
 
+// TestSocks5Server_NilListenerSafe pins the defensive contract on a server
+// constructed from a nil listener (which can only happen if a future caller
+// passes nil into newSOCKS5Server). Each method must short-circuit instead
+// of nil-derefing the underlying listener. No started flag, no mutex — just
+// a small defensive guard at each entry point.
+func TestSocks5Server_NilListenerSafe(t *testing.T) {
+	srv := newSOCKS5Server(nil)
+
+	// Start does not panic.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("Start panicked on nil listener: %v", r)
+			}
+		}()
+		srv.Start()
+	}()
+
+	// Stop returns nil — no goroutine to join, no listener to close.
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Errorf("Stop returned %v; want nil for nil-listener server", err)
+	}
+
+	// Addr returns nil rather than nil-derefing s.ln.
+	if a := srv.Addr(); a != nil {
+		t.Errorf("Addr returned %v; want nil for nil-listener server", a)
+	}
+}
+
 // TestSocks5Server_StopIdempotent pins the idempotent contract: calling
 // Stop twice (once successful, once on an already-closed listener) must
 // return nil both times. A buggy implementation that surfaced

@@ -51,20 +51,34 @@ func startSOCKS5(port int) *socks5Server {
 	return srv
 }
 
-// Start spawns the accept-loop goroutine. Must not be called more than once.
+// Start spawns the accept-loop goroutine. No-ops on a nil receiver or a
+// server constructed from a nil listener; that branch exists so future
+// callers cannot panic the serve loop. Must not be called more than once
+// on the same non-nil-listener server.
 func (s *socks5Server) Start() {
+	if s == nil || s.ln == nil {
+		return
+	}
 	go s.serve()
 }
 
 // Addr returns the listener's bound address (useful for logs and tests).
-func (s *socks5Server) Addr() net.Addr { return s.ln.Addr() }
+// Returns nil if the receiver or its listener is nil.
+func (s *socks5Server) Addr() net.Addr {
+	if s == nil || s.ln == nil {
+		return nil
+	}
+	return s.ln.Addr()
+}
 
 // Stop closes the listener and waits for the accept loop to exit, bounded
-// by ctx. Nil-safe and idempotent: a nil receiver returns nil; a second
-// call after a successful Stop returns nil because closing an already-
-// closed listener is filtered. P1.5 / S4.SOCKS5.
+// by ctx. Nil-safe and idempotent: a nil receiver or a nil-listener server
+// returns nil; a second call after a successful Stop returns nil because
+// closing an already-closed listener is filtered. Stop expects Start to
+// have been called for a non-nil listener (production goes through
+// startSOCKS5, which does both). P1.5 / S4.SOCKS5.
 func (s *socks5Server) Stop(ctx context.Context) error {
-	if s == nil {
+	if s == nil || s.ln == nil {
 		return nil
 	}
 	closeErr := s.ln.Close()
