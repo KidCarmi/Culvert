@@ -42,8 +42,17 @@ func TestSighupReloader_InvokesReloadOnSignal(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	go r.run(ctx)
+	// Phase 1 ownership pattern: every goroutine started by a test must be
+	// joined before test exit. t.Cleanup survives early t.Fatal returns.
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-r.Done():
+		case <-time.After(time.Second):
+			t.Error("reloader did not exit during test cleanup")
+		}
+	})
 
 	sigCh <- syscall.SIGHUP
 
