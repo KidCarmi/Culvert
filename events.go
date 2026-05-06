@@ -89,10 +89,9 @@ func newSSEBroadcaster(interval time.Duration) *sseBroadcaster {
 	}
 }
 
-// Done returns a channel that is closed when run exits. close(b.done) is the
-// LAST deferred call in run, so receiving from Done is proof that the
-// goroutine fully returned and the underlying ticker was stopped (defers run
-// in LIFO order).
+// Done returns a channel that is closed after run returns. Because
+// ticker.Stop is deferred before close(done) (defers run in LIFO order),
+// the implementation stops the ticker before Done closes.
 func (b *sseBroadcaster) Done() <-chan struct{} { return b.done }
 
 // run blocks until ctx is cancelled. Stops the underlying ticker and closes

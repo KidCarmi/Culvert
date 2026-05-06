@@ -12,35 +12,28 @@ import (
 //
 //   "the SSE broadcaster cannot remain detached after lifecycle cancellation."
 //
-// Receiving from b.Done() proves the run goroutine fully returned. Because
-// run is structured as:
-//
-//   defer close(b.done)      // outer-defer  — runs LAST
-//   defer ticker.Stop()      // inner-defer — runs FIRST
-//
-// any reception on Done() is also proof that ticker.Stop() ran (defers fire
-// in LIFO order). No goroutine leak detection or runtime.NumGoroutine
-// snapshot is therefore needed: the channel close is the contract.
+// Done closes after run() returns. Because ticker.Stop is deferred before
+// close(done), the implementation stops the ticker before Done closes. The
+// tests treat Done as the black-box exit signal — they do not assert
+// directly on ticker state. No goroutine leak detection or
+// runtime.NumGoroutine snapshot is therefore needed: the channel close is
+// the contract.
 
 // TestSSEBroadcaster_ExitsOnContextCancel is the core shutdown-invariant
-// test. We start the broadcaster with a short interval (so any latent
-// "wait for next tick" path would be quick to surface), let it run, cancel
-// its context, and require Done to close inside a generous bound.
+// test: cancel the broadcaster's context, require Done to close inside a
+// generous bound. We do not sleep to "wait for a tick" — the invariant is
+// "ctx cancel → Done closes", regardless of where the goroutine is in its
+// loop. The pre-cancelled-ctx test below covers the other ordering edge.
 func TestSSEBroadcaster_ExitsOnContextCancel(t *testing.T) {
 	b := newSSEBroadcaster(10 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go b.run(ctx)
-
-	// Let at least one tick fire so the goroutine is genuinely inside the
-	// select loop (not still racing toward the first iteration).
-	time.Sleep(30 * time.Millisecond)
-
 	cancel()
 
 	select {
 	case <-b.Done():
-		// Pass — goroutine returned, ticker was stopped.
+		// Pass — run returned.
 	case <-time.After(time.Second):
 		t.Fatal("sseBroadcaster did not exit within 1s of context cancellation; goroutine is detached")
 	}
