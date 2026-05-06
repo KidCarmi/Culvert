@@ -242,6 +242,23 @@ func (p *UpstreamPool) HealthCheck() {
 	}
 }
 
+// runUpstreamHealthCheckLoop runs pool.HealthCheck at the given interval until
+// ctx is cancelled, stopping the underlying ticker on exit. Extracted so the
+// shutdown invariant — "the loop must exit on context cancellation" — is unit-
+// testable without spinning up the rest of initUpstreamPool. P1.3 / S4.UpstreamHealth.
+func runUpstreamHealthCheckLoop(ctx context.Context, pool *UpstreamPool, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pool.HealthCheck()
+		}
+	}
+}
+
 // ─── Config types ────────────────────────────────────────────────────────────
 
 // UpstreamEntry is one parent proxy from config.yaml.

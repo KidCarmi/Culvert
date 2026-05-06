@@ -1605,13 +1605,10 @@ func initUpstreamPool(fc *FileConfig) {
 	if err != nil || d <= 0 {
 		return
 	}
-	go func() {
-		t := time.NewTicker(d)
-		defer t.Stop()
-		for range t.C {
-			upstreamPool.HealthCheck()
-		}
-	}()
+	// P1.3 / S4.UpstreamHealth: parented to appLifecycleCtx so the loop exits
+	// when runProxyUntilShutdown calls appLifecycleCancel(). The previous
+	// `for range t.C` loop had no cancellation path.
+	go runUpstreamHealthCheckLoop(appLifecycleCtx, upstreamPool, d)
 }
 
 // initClusterCA initialises the cluster CA for node enrollment.
