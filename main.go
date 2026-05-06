@@ -158,7 +158,8 @@ type startupState struct {
 	rlCleanupCancel context.CancelFunc
 	feedSyncer      *FeedSyncer
 	scanSvc         *ScanService
-	adminUISrv      *http.Server // P1.1 / S4.AdminUI: graceful shutdown handle
+	adminUISrv      *http.Server   // P1.1 / S4.AdminUI: graceful shutdown handle
+	socks5Srv       *socks5Server  // P1.5 / S4.SOCKS5: listener-close shutdown handle
 }
 
 func main() {
@@ -1158,12 +1159,14 @@ func initBackgroundServices(s *startupState) {
 	recoverClusterUpdate()
 }
 
-// initSOCKS5 starts the optional SOCKS5 listener.
+// initSOCKS5 starts the optional SOCKS5 listener. The accept loop is owned
+// by socks5Server (constructed inside startSOCKS5), which is Stop'able via
+// runProxyUntilShutdown. P1.5 / S4.SOCKS5.
 func initSOCKS5(s *startupState) {
 	// ── SOCKS5 server (optional) ─────────────────────────────────────────────
 	socks5PortVal := firstNonZero(*s.socks5Port, s.fc.Proxy.SOCKS5Port)
 	if socks5PortVal > 0 {
-		go startSOCKS5(socks5PortVal)
+		s.socks5Srv = startSOCKS5(socks5PortVal)
 	}
 }
 
@@ -1376,6 +1379,21 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	// shutdownAdminUI is nil-safe for the early-fail path.
 	if err := shutdownAdminUI(ctx, s.adminUISrv); err != nil {
 		logger.Printf("Admin UI shutdown error: %v", err)
+	}
+
+	// P1.5 / S4.SOCKS5: close the SOCKS5 listener so it stops accepting new
+	// connections. Bounded to 2s — closing a TCP listener is sub-millisecond,
+	// but the cap is paranoia against an unforeseen accept-loop wedge so
+	// SOCKS5 cannot consume the remaining shutdown budget before proxy drain.
+	// Does NOT drain in-flight SOCKS5 tunnels — they keep their per-conn 30s
+	// deadlines (set in handleSOCKS5). Graceful tunnel drain is tracked for
+	// Phase 2. Stop is nil-safe for the early-fail path.
+	if s.socks5Srv != nil {
+		socksCtx, socksCancel := context.WithTimeout(ctx, 2*time.Second)
+		if err := s.socks5Srv.Stop(socksCtx); err != nil {
+			logger.Printf("SOCKS5 shutdown error: %v", err)
+		}
+		socksCancel()
 	}
 
 	if err := proxySrv.Shutdown(ctx); err != nil {

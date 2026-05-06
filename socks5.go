@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,18 +11,105 @@ import (
 	"time"
 )
 
-// startSOCKS5 listens for SOCKS5 connections on the given port.
-// Supports CONNECT (TCP proxy) only; UDP ASSOCIATE is rejected.
+// socks5Server owns the SOCKS5 accept loop. It wraps a pre-bound listener
+// and spawns one handleSOCKS5 goroutine per accepted connection. Stop closes
+// the listener, which causes Accept to return net.ErrClosed; the serve loop
+// treats that as the expected stop signal and returns. P1.5 / S4.SOCKS5.
+//
+// Out of scope here: in-flight SOCKS5 tunnels are NOT drained on Stop —
+// they continue running on their own per-conn 30s deadlines (set in
+// handleSOCKS5). Graceful tunnel drain is tracked separately for Phase 2.
+type socks5Server struct {
+	ln   net.Listener
+	done chan struct{}
+}
+
+// newSOCKS5Server wraps a pre-bound listener. Tests use this directly with
+// a 127.0.0.1:0 listener; production callers go through startSOCKS5 which
+// also binds the listener.
+func newSOCKS5Server(ln net.Listener) *socks5Server {
+	return &socks5Server{
+		ln:   ln,
+		done: make(chan struct{}),
+	}
+}
+
+// startSOCKS5 binds a TCP listener for SOCKS5 connections, constructs the
+// owner, and spawns the accept loop. Bind failure is fatal — preserving the
+// previous startSOCKS5 behaviour. Returns the server so initSOCKS5 can stash
+// the handle on startupState for runProxyUntilShutdown to Stop.
+// Supports CONNECT (TCP proxy) only; UDP ASSOCIATE is rejected by handleSOCKS5.
 // Respects the global blocklist, IP filter, rate limiter, and plugin chain.
-func startSOCKS5(port int) {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+func startSOCKS5(port int) *socks5Server {
+	// Use ListenConfig.Listen(ctx, ...) per project policy (CLAUDE.md
+	// "HTTP contexts" + golangci noctx); ctx is Background here because
+	// startup binding is synchronous and not user-cancellable.
+	lc := &net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		logger.Fatalf("SOCKS5 listen error: %v", err)
 	}
+	srv := newSOCKS5Server(ln)
+	srv.Start()
 	logger.Printf("SOCKS5: socks5://localhost:%d", port)
+	return srv
+}
+
+// Start spawns the accept-loop goroutine. No-ops on a nil receiver or a
+// server constructed from a nil listener; that branch exists so future
+// callers cannot panic the serve loop. Must not be called more than once
+// on the same non-nil-listener server.
+func (s *socks5Server) Start() {
+	if s == nil || s.ln == nil {
+		return
+	}
+	go s.serve()
+}
+
+// Addr returns the listener's bound address (useful for logs and tests).
+// Returns nil if the receiver or its listener is nil.
+func (s *socks5Server) Addr() net.Addr {
+	if s == nil || s.ln == nil {
+		return nil
+	}
+	return s.ln.Addr()
+}
+
+// Stop closes the listener and waits for the accept loop to exit, bounded
+// by ctx. Nil-safe and idempotent: a nil receiver or a nil-listener server
+// returns nil; a second call after a successful Stop returns nil because
+// closing an already-closed listener is filtered. Stop expects Start to
+// have been called for a non-nil listener (production goes through
+// startSOCKS5, which does both). P1.5 / S4.SOCKS5.
+func (s *socks5Server) Stop(ctx context.Context) error {
+	if s == nil || s.ln == nil {
+		return nil
+	}
+	closeErr := s.ln.Close()
+	select {
+	case <-s.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if errors.Is(closeErr, net.ErrClosed) {
+		return nil
+	}
+	return closeErr
+}
+
+// serve is the accept loop. Returns cleanly when the listener is closed
+// (errors.Is(err, net.ErrClosed)); other accept errors are logged and the
+// loop continues, matching the previous startSOCKS5 behaviour for transient
+// failures.
+func (s *socks5Server) serve() {
+	defer close(s.done)
 	for {
-		conn, err := ln.Accept()
+		conn, err := s.ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				// Stop closed the listener; expected stop signal.
+				return
+			}
 			logger.Printf("SOCKS5 accept error: %v", err)
 			continue
 		}
