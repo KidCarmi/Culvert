@@ -66,9 +66,23 @@ Each PR is sized for one Claude Code implementation pass + human review (~200–
 
 ### Phase 1 — Own detached runtime resources
 
+> **Status:** ✅ **COMPLETE.** All five S4 detached-runtime resources are now owned, cancellable, and stoppable.
+>
+> Merged PRs:
+> - **#210** — P1.1 Admin UI graceful shutdown handle (`adminUIServer`)
+> - **#211** — P1.2 SSE broadcaster shutdown (`sseBroadcaster`)
+> - **#212** — P1.3 Upstream health-check context plumbing (`runUpstreamHealthCheckLoop`)
+> - **#213** — P1.4 SIGHUP reloader (`sighupReloader`)
+> - **#214** — P1.5 SOCKS5 listener ownership (`socks5Server`)
+>
+> **Deliberately deferred:** in-flight SOCKS5 tunnel drain (per-conn 30 s deadlines remain the stop signal for active tunnels; graceful drain lands with the Phase 2 registry).
+>
+> **Next step:** **P2.1 — minimal `Shutdownable` + `shutdownRegistry`** (≤80 LOC of production code, no call sites yet). Not a broad runtime framework, not package-wide DI — just the smallest type that lets P2.2 wire the five P1 owners plus the ~10 existing teardown calls into one ordered table.
+
 Each PR introduces one small owner type with `Start(ctx)` / `Stop(ctx) error` for one detached goroutine. **No registry yet** — the registry is Phase 2 once we have ≥3 concrete owners. Order is deliberate: Admin UI first, because it is the most useful **reference implementation** for owned server shutdown (real `*http.Server`, real in-flight requests).
 
 #### P1.1 — Admin UI graceful shutdown handle (`adminUIServer`) `[travel-ok]`
+- **Status:** ✅ DONE — merged in PR #210.
 - **Targets:** S4.AdminUI.
 - **Objective:** `startUI` returns `*http.Server` (or a small `adminUIServer` wrapper); `startAdminUI` retains the handle on `startupState`; shutdown calls `srv.Shutdown(ctx)` instead of letting the goroutine die abruptly. **Reference implementation for the rest of Phase 1.**
 - **Files:** `ui.go`, `main.go` (`startAdminUI`, `runProxyUntilShutdown`, `startupState`).
@@ -78,6 +92,7 @@ Each PR introduces one small owner type with `Start(ctx)` / `Stop(ctx) error` fo
 - **What not to touch:** route registration, middleware chain, RBAC, C2/C2c/C4 metadata.
 
 #### P1.2 — SSE broadcaster shutdown (`sseBroadcaster`) `[travel-ok]`
+- **Status:** ✅ DONE — merged in PR #211.
 - **Targets:** S4.SSE.
 - **Objective:** wrap the bare `for range ticker.C` in `events.go:73` in an `sseBroadcaster` with `Start(ctx)` / `Stop()`. Single-line call-site change in `initBackgroundServices`.
 - **Files:** `events.go`, `main.go` (`initBackgroundServices`).
@@ -87,6 +102,7 @@ Each PR introduces one small owner type with `Start(ctx)` / `Stop(ctx) error` fo
 - **What not to touch:** SSE hub, dashboard payload, websocket upgrade.
 
 #### P1.3 — Upstream health-check context plumbing `[travel-ok]`
+- **Status:** ✅ DONE — merged in PR #212.
 - **Targets:** S4.UpstreamHealth.
 - **Objective:** the bare goroutine in `initUpstreamPool` (`main.go:1590`) selects on `appLifecycleCtx.Done()`, matching the rate-limit cleanup pattern.
 - **Files:** `main.go` (`initUpstreamPool`), possibly `upstream.go` (`HealthCheck` may take `ctx`).
@@ -96,6 +112,7 @@ Each PR introduces one small owner type with `Start(ctx)` / `Stop(ctx) error` fo
 - **What not to touch:** `applyUpstreamProxy`, circuit breaker, transport mutation (S6 territory — Phase 5).
 
 #### P1.4 — SIGHUP ownership (`sighupReloader`) `[travel-ok]`
+- **Status:** ✅ DONE — merged in PR #213.
 - **Targets:** S4.SIGHUP.
 - **Objective:** wrap the bare `for range sighup` (`main.go:1248`) in `sighupReloader{configPath, applyHotReload}` with `Start(ctx)` / `Stop()`.
 - **Files:** `main.go` (`installSignalHandlers`).
@@ -104,6 +121,7 @@ Each PR introduces one small owner type with `Start(ctx)` / `Stop(ctx) error` fo
 - **What not to touch:** `applyHotReload` semantics, hot-reload tests.
 
 #### P1.5 — SOCKS5 listener ownership (`socks5Server`) `[travel-ok]`
+- **Status:** ✅ DONE — merged in PR #214. **In-flight SOCKS5 tunnel drain is deliberately deferred** — active tunnels still rely on their per-conn 30 s deadlines from `handleSOCKS5`. Graceful drain (with `activeConns`-style tracking) is a Phase 2 follow-up.
 - **Targets:** S4.SOCKS5.
 - **Objective:** `startSOCKS5` becomes a constructor returning `socks5Server{ln, …}` with `Start()` / `Stop(ctx) error`. `Stop` closes the listener; the accept loop treats the resulting error as "stopped".
 - **Files:** `socks5.go`, `main.go` (`initSOCKS5`, `runProxyUntilShutdown`, `startupState`).
@@ -233,15 +251,13 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 ---
 
-## 5. Recommended first 3 implementation PRs
+## 5. Recommended next PR
 
-After this docs PR (P0.2) lands, the next three PRs should be — in order:
+Phase 1 is complete (PRs #210–#214 merged). The next implementation PR is:
 
-1. **P1.1 — Admin UI graceful shutdown handle.** First because it is the most useful **reference implementation** for owned server shutdown: real `*http.Server`, real in-flight requests, real `Shutdown(ctx)` semantics. P1.2–P1.5 will copy its shape.
-2. **P1.2 — SSE broadcaster shutdown.** Smallest detached-goroutine fix; isolated file; trivial cancel-on-context test.
-3. **P1.3 — Upstream health-check context plumbing.** Same pattern as the rate-limit cleanup goroutine; very localised diff.
+- **P2.1 — Define `Shutdownable` + `shutdownRegistry` (no behaviour change)** `[travel-ok]`. Smallest possible registry: ≤80 LOC of production code, full unit-test coverage, **no call sites yet**. P2.2 (which wires the five P1 owners + the existing teardown calls into one ordered table) is the next-after-next, but it is a separate PR so the type can land and be reviewed in isolation.
 
-All three are `[travel-ok]` — unit-test surface only, no lab needed.
+This is **not** a broad runtime framework or a DI container — just the smallest type that lets us replace the hand-ordered teardown in `runProxyUntilShutdown` with a single registered table. The Phase 1 owners already conform: each has a `Stop(ctx) error` (or equivalent) and is reachable from `startupState`.
 
 ---
 
