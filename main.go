@@ -1307,19 +1307,14 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	}
 
 	// P1.1 / S4.AdminUI: stop accepting new admin UI requests before draining
-	// the proxy so admins can no longer mutate config mid-shutdown. Bounded to
-	// 5s via a sub-context so an active SSE stream (admin dashboard open during
-	// restart) cannot consume the entire 30s grace window — the proxy still
-	// gets ≥25s for tunnel drain. The admin UI has WriteTimeout=0 for SSE, so
-	// http.Server.Shutdown will wait for in-flight handlers (including SSE) to
-	// complete or the sub-deadline to expire, whichever happens first.
-	// Nil-safe for the early-fail path.
-	if s.adminUISrv != nil {
-		uiCtx, uiCancel := context.WithTimeout(ctx, 5*time.Second)
-		if err := s.adminUISrv.Shutdown(uiCtx); err != nil {
-			logger.Printf("Admin UI shutdown error: %v", err)
-		}
-		uiCancel()
+	// the proxy so admins can no longer mutate config mid-shutdown. Admin UI
+	// shutdown is capped at 5s (adminUIShutdownTimeout) so it cannot consume
+	// the entire remaining shutdown budget before proxy drain — important
+	// because admin UI WriteTimeout=0 (SSE long-lived streams) means Shutdown
+	// would otherwise block on in-flight handlers until the parent ctx expires.
+	// shutdownAdminUI is nil-safe for the early-fail path.
+	if err := shutdownAdminUI(ctx, s.adminUISrv); err != nil {
+		logger.Printf("Admin UI shutdown error: %v", err)
 	}
 
 	if err := proxySrv.Shutdown(ctx); err != nil {

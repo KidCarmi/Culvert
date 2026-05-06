@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"errors"
 	"fmt"
@@ -9,6 +10,27 @@ import (
 	"net/http"
 	"time"
 )
+
+// adminUIShutdownTimeout caps the admin UI graceful shutdown window so an
+// active SSE stream (admin dashboard open during restart) cannot consume the
+// entire parent shutdown budget before proxy drain. WriteTimeout=0 on the
+// admin UI server (set in newAdminUIServer for SSE) means in-flight handlers
+// would otherwise block Shutdown until the parent ctx expires. P1.1 / S4.AdminUI.
+const adminUIShutdownTimeout = 5 * time.Second
+
+// shutdownAdminUI gracefully shuts down the admin UI server, capped at
+// adminUIShutdownTimeout via a sub-context derived from ctx. Returns nil if
+// srv is nil (early-fail path that never assigned the handle). The returned
+// error is the underlying http.Server.Shutdown error — typically nil on
+// clean drain, or context.DeadlineExceeded if the cap fires. P1.1 / S4.AdminUI.
+func shutdownAdminUI(ctx context.Context, srv *http.Server) error {
+	if srv == nil {
+		return nil
+	}
+	uiCtx, cancel := context.WithTimeout(ctx, adminUIShutdownTimeout)
+	defer cancel()
+	return srv.Shutdown(uiCtx)
+}
 
 //go:embed static
 var staticFiles embed.FS

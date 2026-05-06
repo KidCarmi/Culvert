@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -142,27 +143,142 @@ func TestAdminUIServer_ShutdownReturnsBeforeDeadline(t *testing.T) {
 	}
 }
 
-// TestRunProxyUntilShutdown_NilAdminUISrv_Safe documents that the shutdown
-// branch is a no-op when s.adminUISrv is nil (early-fail path that never
-// assigned the handle). We exercise the exact branch shape inline rather than
-// invoking runProxyUntilShutdown — that function blocks on a quit channel and
-// touches dozens of globals; the nil-guard contract is small and local.
-func TestRunProxyUntilShutdown_NilAdminUISrv_Safe(t *testing.T) {
-	s := &startupState{}
-	if s.adminUISrv != nil {
-		t.Fatal("zero-value startupState must have nil adminUISrv")
+// TestShutdownAdminUI_NilSrv_ReturnsNil documents that the helper is a no-op
+// when srv is nil (early-fail path that never assigned the handle in
+// startupState). Replaces the previous defensive panic-guard test now that
+// the helper has a clean nil branch.
+func TestShutdownAdminUI_NilSrv_ReturnsNil(t *testing.T) {
+	if err := shutdownAdminUI(context.Background(), nil); err != nil {
+		t.Errorf("shutdownAdminUI(ctx, nil) = %v; want nil", err)
+	}
+}
+
+// TestShutdownAdminUI_BoundedByChildTimeout proves the Codex P1 fix on
+// PR #210: when the admin UI has an in-flight handler that won't complete on
+// its own (e.g. an SSE stream blocked on writes), shutdownAdminUI returns at
+// the 5s child-context cap, NOT after the full parent ctx deadline. This
+// preserves the parent's remaining budget for downstream shutdown steps
+// (proxy drain, tunnel drain).
+//
+// Setup:
+//   - Bare *http.Server with a handler that blocks on a release channel.
+//   - Listen on 127.0.0.1:0; serve via srv.Serve(ln).
+//   - Fire one in-flight request; wait until the handler is entered.
+//   - Parent ctx with a 30s deadline.
+//
+// Assertions:
+//   - shutdownAdminUI returns within ~5s (not 30s).
+//   - Returned error is context.DeadlineExceeded (the child cap fired).
+//   - Parent ctx is not expired and still has ≥20s remaining.
+//
+// Cleanup:
+//   - Release the handler so the in-flight request unblocks.
+//   - srv.Close() to forcibly drop any remaining connections.
+//   - Join all goroutines.
+func TestShutdownAdminUI_BoundedByChildTimeout(t *testing.T) {
+	release := make(chan struct{})
+	handlerEntered := make(chan struct{})
+	var entered sync.Once
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		entered.Do(func() { close(handlerEntered) })
+		<-release
+		w.WriteHeader(http.StatusOK)
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+
+	srv := &http.Server{
+		Handler:     handler,
+		ReadTimeout: 5 * time.Second,
+		// WriteTimeout: 0 mirrors the real admin UI (SSE-friendly), and is
+		// what makes Shutdown block on the in-flight handler in the first place.
 	}
 
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("nil adminUISrv branch panicked: %v", r)
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = srv.Serve(ln)
+	}()
+
+	reqDone := make(chan struct{})
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer reqCancel()
+	go func() {
+		defer close(reqDone)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "http://"+addr+"/", http.NoBody)
+		if err != nil {
+			return
+		}
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	// Wait for the handler to be entered so we know Shutdown will see an
+	// active request and have to wait for it.
+	select {
+	case <-handlerEntered:
+	case <-time.After(2 * time.Second):
+		_ = srv.Close()
+		t.Fatal("handler was never entered; in-flight request never reached the server")
+	}
 
-	if s.adminUISrv != nil {
-		_ = s.adminUISrv.Shutdown(ctx)
+	// Parent ctx with a 30s deadline. Mirrors the 30s budget in
+	// runProxyUntilShutdown, but the exact value doesn't matter — what matters
+	// is that we can prove the child timeout fires first.
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer parentCancel()
+	parentDeadline, _ := parentCtx.Deadline()
+
+	start := time.Now()
+	shutdownErr := shutdownAdminUI(parentCtx, srv)
+	elapsed := time.Since(start)
+
+	// Bounded by the 5s child cap (adminUIShutdownTimeout). The polling
+	// interval inside http.Server.Shutdown means the upper bound can be
+	// slightly above 5s in practice; 7s is a generous ceiling.
+	if elapsed > 7*time.Second {
+		t.Errorf("shutdownAdminUI returned in %v; expected ≤7s (child cap is %v)", elapsed, adminUIShutdownTimeout)
+	}
+	// And it must NOT have returned instantly — that would mean the in-flight
+	// handler was not actually keeping Shutdown busy, invalidating the test.
+	if elapsed < 4*time.Second {
+		t.Errorf("shutdownAdminUI returned in %v; expected ~%v (handler should have blocked Shutdown)", elapsed, adminUIShutdownTimeout)
+	}
+
+	// The error must be the child ctx deadline, not nil and not the parent.
+	if !errors.Is(shutdownErr, context.DeadlineExceeded) {
+		t.Errorf("shutdownAdminUI err = %v; want context.DeadlineExceeded", shutdownErr)
+	}
+
+	// Parent ctx must still be alive and have most of its budget left.
+	if err := parentCtx.Err(); err != nil {
+		t.Errorf("parent ctx expired during shutdownAdminUI: %v", err)
+	}
+	if remaining := time.Until(parentDeadline); remaining < 20*time.Second {
+		t.Errorf("parent ctx remaining = %v; expected ≥20s after 5s child cap", remaining)
+	}
+
+	// Cleanup: release the handler so the in-flight goroutine can finish,
+	// then forcibly close the server (Shutdown returned with deadline
+	// exceeded; in-flight handlers and listeners are still alive).
+	close(release)
+	_ = srv.Close()
+	select {
+	case <-serveDone:
+	case <-time.After(2 * time.Second):
+		t.Error("Serve goroutine did not exit within 2s of srv.Close()")
+	}
+	select {
+	case <-reqDone:
+	case <-time.After(2 * time.Second):
+		t.Error("in-flight request goroutine did not exit within 2s of srv.Close()")
 	}
 }
