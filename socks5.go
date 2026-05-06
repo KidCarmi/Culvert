@@ -41,7 +41,11 @@ func newSOCKS5Server(ln net.Listener) *socks5Server {
 // Supports CONNECT (TCP proxy) only; UDP ASSOCIATE is rejected by handleSOCKS5.
 // Respects the global blocklist, IP filter, rate limiter, and plugin chain.
 func startSOCKS5(port int) *socks5Server {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	// Use ListenConfig.Listen(ctx, ...) per project policy (CLAUDE.md
+	// "HTTP contexts" + golangci noctx); ctx is Background here because
+	// startup binding is synchronous and not user-cancellable.
+	lc := &net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		logger.Fatalf("SOCKS5 listen error: %v", err)
 	}
