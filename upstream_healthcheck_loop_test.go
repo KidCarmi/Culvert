@@ -72,3 +72,40 @@ func TestRunUpstreamHealthCheckLoop_PreCancelledCtx_ExitsImmediately(t *testing.
 		t.Fatal("runUpstreamHealthCheckLoop did not exit promptly when ctx was already cancelled; the loop is waiting on the ticker instead of ctx.Done()")
 	}
 }
+
+// TestRunUpstreamHealthCheckLoop_InvalidInputsReturn pins the helper's
+// defensive contract: nil pool, zero interval, or negative interval all
+// short-circuit to an immediate return. The production caller validates
+// these inputs already, but this test guards against future callers that
+// might forget — and against time.NewTicker(0) panicking, which would
+// otherwise wedge any caller passing a zero/negative interval.
+func TestRunUpstreamHealthCheckLoop_InvalidInputsReturn(t *testing.T) {
+	cases := []struct {
+		name     string
+		pool     *UpstreamPool
+		interval time.Duration
+	}{
+		{"nil pool, positive interval", nil, time.Second},
+		{"non-nil pool, zero interval", &UpstreamPool{}, 0},
+		{"non-nil pool, negative interval", &UpstreamPool{}, -1 * time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				// Background ctx — the function must NOT need cancellation to
+				// exit; the early-return guard is what's under test.
+				runUpstreamHealthCheckLoop(context.Background(), tc.pool, tc.interval)
+			}()
+
+			select {
+			case <-done:
+				// Pass — guard fired.
+			case <-time.After(200 * time.Millisecond):
+				t.Fatalf("runUpstreamHealthCheckLoop(%s) did not return promptly; the defensive guard is missing or wedged", tc.name)
+			}
+		})
+	}
+}

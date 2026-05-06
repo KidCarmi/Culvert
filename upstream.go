@@ -245,8 +245,16 @@ func (p *UpstreamPool) HealthCheck() {
 // runUpstreamHealthCheckLoop runs pool.HealthCheck at the given interval until
 // ctx is cancelled, stopping the underlying ticker on exit. Extracted so the
 // shutdown invariant — "the loop must exit on context cancellation" — is unit-
-// testable without spinning up the rest of initUpstreamPool. P1.3 / S4.UpstreamHealth.
+// testable without spinning up the rest of initUpstreamPool.
+//
+// Defensive contract: returns immediately for a nil pool or a non-positive
+// interval. The production caller (initUpstreamPool) already validates these,
+// but the standalone helper guards itself so future callers cannot panic
+// (nil-deref) or wedge on a zero-interval ticker. P1.3 / S4.UpstreamHealth.
 func runUpstreamHealthCheckLoop(ctx context.Context, pool *UpstreamPool, interval time.Duration) {
+	if pool == nil || interval <= 0 {
+		return
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
