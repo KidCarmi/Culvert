@@ -54,7 +54,7 @@ Each PR is sized for one Claude Code implementation pass + human review (~200–
 ### Phase 0 — Lock current reality
 
 #### P0.1 — Pin the extracted-slice convention
-- **Status:** **DONE.** Covered by merged PR #207 (`claude/review-file-blocking-startup-gqfUd`) which shipped `startup_slice_contract_test.go` plus the ARCH_DISCOVERY / CLAUDE.md sync. **Do not expand** with AST purity checks now — over-reach for the convention layer.
+- **Status:** DONE / in-flight via PR #207; once #207 merges, this phase is complete. **Do not expand** with AST purity checks now — over-reach for the convention layer.
 - **Targets:** discovery hygiene (covers nothing on the SPOF list directly).
 
 #### P0.2 — Adopt this roadmap as a stable source of truth `[travel-ok]`
@@ -187,7 +187,7 @@ All follow the established `<domain>_startup_config.go` + `<domain>_startup.go` 
 - **What not to touch:** audit ring, audit-completion C2c contract.
 
 #### P4.4 — Extract `initAuth`
-- **Gate:** only after P0.1 contract test asserts the slice never reads beyond the auth section of `FileConfig` (already covered by PR #207's mutation test plus the existing scope of `startup_slice_contract_test.go` — confirm in the PR description).
+- **Gate:** only after the startup slice contract is merged and the auth slice scope is explicitly verified in the PR description.
 - **Files:** `auth_startup.go`, `auth_startup_config.go`, `auth_startup_test.go`, `main.go`.
 - **Risk:** MEDIUM. `cfg` is the auth singleton, also UI-mutable.
 - **Acceptance:** D0 auth safety, `pkce_ui2_test.go`, `auth_oidc_test.go` green.
@@ -276,6 +276,6 @@ All three are `[travel-ok]` — unit-test surface only, no lab needed.
 ### Review strategy
 
 - **Per PR:** description must (1) cite the SPOF row ID(s), (2) copy the "What not to touch" list verbatim, (3) be `[travel-ok]` or **lab-required** in the title prefix.
-- **Required green:** `go test -race -count=1`, C1 / C1.5 / C2 / C2c / C4, `goleak` (or equivalent) on any PR that adds or removes a goroutine owner.
+- **Required green:** `go test -race -count=1`, C1 / C1.5 / C2 / C2c / C4, plus a goleak-style assertion or equivalent bounded wait/stop test on any PR that adds or removes a goroutine owner.
 - **Determinism gate:** any new test must pass under `-count=2 -shuffle=on`.
 - **Phase boundaries:** before opening the next phase's first PR, update this document's checklist (if added) so phase progress is visible to future Claude sessions.
