@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -69,45 +70,95 @@ type DashboardPayload struct {
 	LatestVersion     string         `json:"latestVersion,omitempty"`
 }
 
-// startSSEBroadcaster runs the ticker that pushes stats to all SSE clients.
-func startSSEBroadcaster() {
-	ticker := time.NewTicker(time.Second)
-	go func() {
-		for range ticker.C {
-			if hub.ClientCount() == 0 {
-				continue
-			}
-			series, _, _ := tsGet()
-			var sum int64
-			for _, v := range series {
-				sum += v
-			}
-			rps := float64(sum) / 60.0
+// sseBroadcaster owns the live-dashboard ticker that pushes DashboardPayload
+// updates to the global SSE hub. The goroutine exits when its context is
+// cancelled — which is the only stop signal in production (appLifecycleCtx
+// is cancelled by runProxyUntilShutdown). P1.2 / S4.SSE.
+type sseBroadcaster struct {
+	interval time.Duration
+	done     chan struct{}
+}
 
-			globalUpdateInfo.mu.RLock()
-			updAvail := globalUpdateInfo.updateAvailable
-			updLatest := globalUpdateInfo.latestVersion
-			globalUpdateInfo.mu.RUnlock()
+// newSSEBroadcaster returns a broadcaster that ticks at the given interval.
+// Production callers use time.Second; tests pass a smaller interval to keep
+// cancellation tests fast without changing production behaviour.
+func newSSEBroadcaster(interval time.Duration) *sseBroadcaster {
+	return &sseBroadcaster{
+		interval: interval,
+		done:     make(chan struct{}),
+	}
+}
 
-			payload := DashboardPayload{
-				ActiveConns:   getActiveConns(),
-				TotalRequests: atomic.LoadInt64(&statTotal),
-				Blocked:       atomic.LoadInt64(&statBlocked),
-				AuthFail:      atomic.LoadInt64(&statAuthFail),
-				RPS:           rps,
-				TopCountries:  countryTraffic.Top(15),
-				UptimeSec:         int64(time.Since(startTime).Seconds()),
-				ClamBlocked:       atomic.LoadInt64(&statClamBlocked),
-				YARABlocked:       atomic.LoadInt64(&statYARABlocked),
-				DPIBlocked:        atomic.LoadInt64(&statDPIBlocked),
-				ThreatFeedBlocked: atomic.LoadInt64(&statThreatFeedBlocked),
-				UpdateAvailable:   updAvail,
-				LatestVersion:     updLatest,
-			}
-			data, _ := json.Marshal(payload)
-			hub.broadcast(data)
+// Done returns a channel that is closed when run exits. close(b.done) is the
+// LAST deferred call in run, so receiving from Done is proof that the
+// goroutine fully returned and the underlying ticker was stopped (defers run
+// in LIFO order).
+func (b *sseBroadcaster) Done() <-chan struct{} { return b.done }
+
+// run blocks until ctx is cancelled. Stops the underlying ticker and closes
+// b.done on exit. Must not be called more than once on the same broadcaster.
+func (b *sseBroadcaster) run(ctx context.Context) {
+	defer close(b.done)
+	ticker := time.NewTicker(b.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.tick()
 		}
-	}()
+	}
+}
+
+// tick assembles one DashboardPayload and broadcasts it to the SSE hub.
+// Skipped silently when no clients are connected. Body is byte-equivalent
+// to the original startSSEBroadcaster ticker body — payload schema, hub
+// behaviour, and dashboard contract are unchanged.
+func (b *sseBroadcaster) tick() {
+	if hub.ClientCount() == 0 {
+		return
+	}
+	series, _, _ := tsGet()
+	var sum int64
+	for _, v := range series {
+		sum += v
+	}
+	rps := float64(sum) / 60.0
+
+	globalUpdateInfo.mu.RLock()
+	updAvail := globalUpdateInfo.updateAvailable
+	updLatest := globalUpdateInfo.latestVersion
+	globalUpdateInfo.mu.RUnlock()
+
+	payload := DashboardPayload{
+		ActiveConns:       getActiveConns(),
+		TotalRequests:     atomic.LoadInt64(&statTotal),
+		Blocked:           atomic.LoadInt64(&statBlocked),
+		AuthFail:          atomic.LoadInt64(&statAuthFail),
+		RPS:               rps,
+		TopCountries:      countryTraffic.Top(15),
+		UptimeSec:         int64(time.Since(startTime).Seconds()),
+		ClamBlocked:       atomic.LoadInt64(&statClamBlocked),
+		YARABlocked:       atomic.LoadInt64(&statYARABlocked),
+		DPIBlocked:        atomic.LoadInt64(&statDPIBlocked),
+		ThreatFeedBlocked: atomic.LoadInt64(&statThreatFeedBlocked),
+		UpdateAvailable:   updAvail,
+		LatestVersion:     updLatest,
+	}
+	data, _ := json.Marshal(payload)
+	hub.broadcast(data)
+}
+
+// startSSEBroadcaster spawns the live-dashboard broadcaster goroutine
+// parented to ctx. Production interval is 1 s. Returns the *sseBroadcaster
+// so tests (and, eventually, the Phase 2 shutdown registry) can wait on
+// Done(). The production caller in initBackgroundServices discards the
+// handle; the goroutine exits when appLifecycleCtx is cancelled.
+func startSSEBroadcaster(ctx context.Context) *sseBroadcaster {
+	b := newSSEBroadcaster(time.Second)
+	go b.run(ctx)
+	return b
 }
 
 // apiEvents is the SSE endpoint. Clients connect and receive live dashboard data.
