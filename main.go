@@ -1242,6 +1242,62 @@ func buildAndStartProxyServer(s *startupState) *http.Server {
 	return proxySrv
 }
 
+// sighupReloader owns the SIGHUP hot-reload goroutine. The goroutine exits
+// when ctx is cancelled (lifecycle shutdown); on exit it calls signal.Stop
+// on the signal channel so the OS-level signal handler is detached cleanly.
+// P1.4 / S4.SIGHUP.
+//
+// The signal channel is supplied by the caller — production wires a
+// signal.Notify-registered channel; tests pass an unregistered channel
+// (signal.Stop is documented as a no-op for channels that were never
+// registered, so the production teardown path is safe to exercise from tests).
+type sighupReloader struct {
+	sigCh  chan os.Signal
+	reload func()
+	done   chan struct{}
+}
+
+// newSighupReloader wires a reloader to the given signal channel and reload
+// callback. The reloader does not register the channel — it expects the
+// caller to have done so (production) or to pass an unregistered channel
+// (tests).
+func newSighupReloader(sigCh chan os.Signal, reload func()) *sighupReloader {
+	return &sighupReloader{
+		sigCh:  sigCh,
+		reload: reload,
+		done:   make(chan struct{}),
+	}
+}
+
+// Done returns a channel that is closed after run returns. The
+// implementation defers close(r.done) first and signal.Stop second; defers
+// run LIFO, so signal.Stop runs before close(done) — the signal handler is
+// detached before Done closes.
+func (r *sighupReloader) Done() <-chan struct{} { return r.done }
+
+// run blocks until ctx is cancelled. On each SIGHUP received it invokes
+// the reload callback. Non-SIGHUP values are ignored. A closed signal
+// channel terminates the loop (ok == false) so a stale or test-controlled
+// channel cannot spin the reload callback. Must not be called more than
+// once on the same reloader.
+func (r *sighupReloader) run(ctx context.Context) {
+	defer close(r.done)
+	defer signal.Stop(r.sigCh)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig, ok := <-r.sigCh:
+			if !ok {
+				return
+			}
+			if sig == syscall.SIGHUP {
+				r.reload()
+			}
+		}
+	}
+}
+
 // installSignalHandlers registers SIGINT/SIGTERM/SIGHUP handlers and spawns the SIGHUP
 // hot-reload goroutine. Returns the quit and sighup channels (caller uses quit to block).
 func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
@@ -1250,24 +1306,26 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	// ── Hot config reload (SIGHUP) ──────────────────────────────────────────
+	// P1.4 / S4.SIGHUP: the SIGHUP loop is owned by sighupReloader and parented
+	// to appLifecycleCtx. The reload behaviour (configPath → loadFileConfig →
+	// applyHotReload) is preserved exactly.
 	sighup = make(chan os.Signal, 1)
 	signal.Notify(sighup, syscall.SIGHUP)
-	go func() {
-		for range sighup {
-			if *s.configPath == "" {
-				logger.Println("SIGHUP received but no -config path set; ignoring")
-				continue
-			}
-			logger.Printf("SIGHUP received — reloading config from %s", *s.configPath)
-			reloaded, err := loadFileConfig(*s.configPath)
-			if err != nil {
-				logger.Printf("Config reload error: %v — keeping current config", err)
-				continue
-			}
-			applyHotReload(reloaded)
-			logger.Println("Config reloaded successfully")
+	reloader := newSighupReloader(sighup, func() {
+		if *s.configPath == "" {
+			logger.Println("SIGHUP received but no -config path set; ignoring")
+			return
 		}
-	}()
+		logger.Printf("SIGHUP received — reloading config from %s", *s.configPath)
+		reloaded, err := loadFileConfig(*s.configPath)
+		if err != nil {
+			logger.Printf("Config reload error: %v — keeping current config", err)
+			return
+		}
+		applyHotReload(reloaded)
+		logger.Println("Config reloaded successfully")
+	})
+	go reloader.run(appLifecycleCtx)
 	return quit, sighup
 }
 
