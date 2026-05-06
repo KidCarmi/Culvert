@@ -67,10 +67,15 @@ func TestAdminUIServer_ShutdownReturnsBeforeDeadline(t *testing.T) {
 	}()
 
 	// Bounded poll for "server is accepting" — up to 2 s in 20 ms steps.
+	// Use net.Dialer.DialContext (not net.DialTimeout) per project policy
+	// (CLAUDE.md "HTTP contexts" + golangci noctx).
+	dialer := &net.Dialer{Timeout: 100 * time.Millisecond}
 	ready := false
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		dialCtx, dialCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		conn, err := dialer.DialContext(dialCtx, "tcp", addr)
+		dialCancel()
 		if err == nil {
 			conn.Close()
 			ready = true
@@ -88,9 +93,17 @@ func TestAdminUIServer_ShutdownReturnsBeforeDeadline(t *testing.T) {
 	// uiMetadataEnforcement → mux) actually serviced the request, not just
 	// that the listener accepted a TCP connection. We deliberately don't
 	// assert a specific status code; this is a liveness probe, not a
-	// behaviour test.
+	// behaviour test. http.NewRequestWithContext + client.Do per project
+	// policy (CLAUDE.md "HTTP contexts" + golangci noctx).
 	client := &http.Client{Timeout: time.Second}
-	resp, err := client.Get("http://" + addr + "/")
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), time.Second)
+	defer reqCancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "http://"+addr+"/", http.NoBody)
+	if err != nil {
+		_ = srv.Close()
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		_ = srv.Close()
 		t.Fatalf("HTTP request to %s failed: %v", addr, err)
@@ -120,7 +133,10 @@ func TestAdminUIServer_ShutdownReturnsBeforeDeadline(t *testing.T) {
 	}
 
 	// Subsequent dial must be refused — server stopped accepting.
-	if conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
+	postCtx, postCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer postCancel()
+	postDialer := &net.Dialer{Timeout: 200 * time.Millisecond}
+	if conn, err := postDialer.DialContext(postCtx, "tcp", addr); err == nil {
 		conn.Close()
 		t.Errorf("dial succeeded after Shutdown; server should be closed at %s", addr)
 	}
