@@ -1118,7 +1118,10 @@ func initMTLSAndOCSP(s *startupState) {
 // initBackgroundServices starts SSE, alert retry, updater, and cluster recovery.
 func initBackgroundServices(s *startupState) {
 	// ── SSE live dashboard broadcaster ───────────────────────────────────────
-	startSSEBroadcaster()
+	// P1.2 / S4.SSE: parented to appLifecycleCtx so the goroutine exits when
+	// runProxyUntilShutdown calls appLifecycleCancel(). Handle discarded here;
+	// Phase 2's shutdown registry will pick it up if needed.
+	startSSEBroadcaster(appLifecycleCtx)
 
 	// ── F16: Alert retry queue ──────────────────────────────────────────────
 	go startAlertRetryLoop(appLifecycleCtx)
