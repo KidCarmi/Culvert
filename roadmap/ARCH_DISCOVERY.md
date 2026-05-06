@@ -298,6 +298,23 @@ Many globals, goroutines, or external gRPC/network; touching them demands carefu
 
 Extract **one** safe-zone slice first — suggest `initFileBlocking` OR `initSSLBypassAndDPI` — as a pilot for the `resolvedConfig` + domain-package pattern. Validate the pattern end-to-end (including CI + qa-gate) before widening the scope.
 
+### Pilot status — shipped
+
+All 11 SAFE-zone slices listed above have been extracted using the
+`<domain>_startup_config.go` (resolver + DTO) + `<domain>_startup.go`
+(loader) + `<domain>_startup_test.go` (per-slice tests) layout:
+
+`fileblock`, `inspection_rules` (= `initSSLBypassAndDPI`), `geoip`, `pac`,
+`mtls_ocsp`, `ui_extras`, `legacy_auth_providers`, `rewrite_default_action`,
+`ui_access_policy`, `metrics_token`, `session`.
+
+Each `init*` in `main.go` is now a thin shim that calls the resolver and
+then the loader. Cross-slice convention (resolver purity + determinism) is
+pinned by `startup_slice_contract_test.go`. Re-extracting these is a no-op;
+future "extract the next slice" work should pick from the MEDIUM-risk list
+(`initBlocklist`, `initObservability`, `initConnAndRateLimit`, …) rather
+than churning the SAFE pilots.
+
 ---
 
 # Appendix — Raw agent outputs

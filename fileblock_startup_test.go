@@ -215,3 +215,48 @@ func TestLoadFileBlocking_ProfilesErrorIsWrapped(t *testing.T) {
 		t.Errorf("error namespace lost: %q", msg)
 	}
 }
+
+// ── initFileBlocking shim ─────────────────────────────────────────────────
+
+// The shim must swallow loadFileBlocking errors (log-only, non-fatal) and
+// must still leave fileBlocker populated with the default extensions so
+// the proxy's URL/Content-Type checks remain effective even when the
+// profile-store file is corrupt. Locks the "missing/invalid file is
+// degraded — not crashed" contract operators rely on.
+func TestInitFileBlocking_ShimSwallowsLoadError(t *testing.T) {
+	resetFileBlockingStores(t)
+	ensureFileblockTestLogger(t)
+	withTempDataDir(t)
+
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte("not json"), 0o600); err != nil {
+		t.Fatalf("write bad file: %v", err)
+	}
+
+	badPath := bad
+	s := &startupState{
+		fc:               &FileConfig{},
+		fileProfilesFile: &badPath,
+	}
+
+	// Must not panic; must not call os.Exit. Run under recover so a
+	// regression to logger.Fatalf/log.Fatalf surfaces as a test failure
+	// rather than killing the test binary.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("initFileBlocking panicked on malformed profiles file: %v", r)
+			}
+		}()
+		initFileBlocking(s)
+	}()
+
+	// Contract: loadFileBlockerExtensions runs BEFORE the failing
+	// globalProfileStore.Load, so default extensions are still seeded.
+	// fc.FileBlock.Extensions is empty here ⇒ defaultBlockedExts.
+	if got := fileBlocker.Count(); got != len(defaultBlockedExts) {
+		t.Errorf("fileBlocker.Count after shim error path = %d, want %d (defaults)",
+			got, len(defaultBlockedExts))
+	}
+}
