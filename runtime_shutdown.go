@@ -46,13 +46,19 @@ type shutdownRegistry struct {
 // Register adds a hook. name is a human-readable identifier used in error
 // messages and logs. order determines execution order (lower runs first).
 // Hooks with the same order run in registration order. Panics if stop is
-// nil.
+// nil, or if Register is called after RunAll has executed — silently
+// dropping a late registration would let a wiring mistake (e.g. P2.2
+// registering a hook after the shutdown path already ran in tests) skip
+// shutdown logic without warning.
 func (r *shutdownRegistry) Register(name string, order int, stop func(context.Context) error) {
 	if stop == nil {
 		panic(fmt.Sprintf("shutdownRegistry: nil stop function for hook %q", name))
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.ran {
+		panic(fmt.Sprintf("shutdownRegistry: register after RunAll for hook %q", name))
+	}
 	r.hooks = append(r.hooks, shutdownHook{name: name, order: order, stop: stop})
 }
 

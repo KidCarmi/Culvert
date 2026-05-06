@@ -5,6 +5,8 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -148,5 +150,62 @@ func TestShutdownRegistry_EmptyRunAllReturnsNil(t *testing.T) {
 	var r shutdownRegistry
 	if err := r.RunAll(context.Background()); err != nil {
 		t.Errorf("empty RunAll returned %v; want nil", err)
+	}
+}
+
+// TestShutdownRegistry_RegisterAfterRunAllPanics pins the
+// "no late hook registration" contract: once RunAll has executed,
+// registering another hook is a programming error (the hook would never
+// run because the registry is already drained) and must fail fast.
+func TestShutdownRegistry_RegisterAfterRunAllPanics(t *testing.T) {
+	var r shutdownRegistry
+	r.Register("first", 0, func(context.Context) error { return nil })
+	if err := r.RunAll(context.Background()); err != nil {
+		t.Fatalf("RunAll: %v", err)
+	}
+
+	defer func() {
+		if rec := recover(); rec == nil {
+			t.Fatal("Register after RunAll did not panic")
+		}
+	}()
+	r.Register("late", 0, func(context.Context) error { return nil })
+}
+
+// TestShutdownRegistry_ConcurrentRunAllRunsHooksOnce pins the
+// concurrent-idempotency contract: two goroutines calling RunAll at the
+// same time must result in the hook running exactly once, with both calls
+// returning a clean nil. The internal mutex protects r.ran; the goroutine
+// that wins the race takes a snapshot and runs the hook, the other
+// observes ran=true and returns immediately.
+func TestShutdownRegistry_ConcurrentRunAllRunsHooksOnce(t *testing.T) {
+	var r shutdownRegistry
+	var ranCount atomic.Int32
+	r.Register("once", 0, func(context.Context) error {
+		ranCount.Add(1)
+		return nil
+	})
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		err1 = r.RunAll(context.Background())
+	}()
+	go func() {
+		defer wg.Done()
+		err2 = r.RunAll(context.Background())
+	}()
+	wg.Wait()
+
+	if got := ranCount.Load(); got != 1 {
+		t.Errorf("hook ran %d times under concurrent RunAll; want exactly 1", got)
+	}
+	if err1 != nil {
+		t.Errorf("first RunAll returned %v; want nil", err1)
+	}
+	if err2 != nil {
+		t.Errorf("second RunAll returned %v; want nil", err2)
 	}
 }
