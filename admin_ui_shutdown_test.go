@@ -83,6 +83,20 @@ func TestAdminUIServer_ShutdownReturnsBeforeDeadline(t *testing.T) {
 		t.Fatalf("admin UI server never accepted connections at %s", addr)
 	}
 
+	// Real HTTP request — any valid HTTP response proves the handler chain
+	// (uiIPGuardMiddleware → securityMiddleware → uiAuthMiddleware →
+	// uiMetadataEnforcement → mux) actually serviced the request, not just
+	// that the listener accepted a TCP connection. We deliberately don't
+	// assert a specific status code; this is a liveness probe, not a
+	// behaviour test.
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Get("http://" + addr + "/")
+	if err != nil {
+		_ = srv.Close()
+		t.Fatalf("HTTP request to %s failed: %v", addr, err)
+	}
+	resp.Body.Close()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
