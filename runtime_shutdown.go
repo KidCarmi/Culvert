@@ -90,3 +90,14 @@ func (r *shutdownRegistry) RunAll(ctx context.Context) error {
 	}
 	return errors.Join(errs...)
 }
+
+// hooksSnapshot returns a copy of the registered hooks in registration
+// order (NOT execution order — execution sorts by `order`). Intended for
+// test inspection of wiring; not part of the production contract.
+func (r *shutdownRegistry) hooksSnapshot() []shutdownHook {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]shutdownHook, len(r.hooks))
+	copy(out, r.hooks)
+	return out
+}
