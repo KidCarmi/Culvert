@@ -1333,14 +1333,17 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 }
 
 // runProxyUntilShutdown starts the proxy goroutine, blocks on quit, then
-// runs the graceful shutdown sequence via shutdownRegistry. Hook registration
-// order, hook execution order, and per-hook log messages are byte-equivalent
-// to the previous hand-ordered body — see registerProxyShutdownHooks.
+// runs the graceful shutdown sequence via shutdownRegistry. Hook execution
+// order, per-hook log messages, and the 30s shutdown budget's start point
+// are byte-equivalent to the previous hand-ordered body. P2.2 / S5.
 //
-// P2.2 / S5: replaces the hand-ordered teardown with one ordered table.
-// Tunnel drain remains time-driven (not ctx-driven) per the original
-// contract; appLifecycleCancel and rlCleanupCancel run as hooks but their
-// CancelFunc semantics are unchanged.
+// Two registries by design: the early registry (HA, gRPC, CDR, lifecycle
+// cancel, rate-limit cleanup) runs with context.Background() — these calls
+// pre-dated the 30s ctx in the original body and were never under any
+// shutdown timeout. The late registry (scan-svc, admin UI, SOCKS5, proxy,
+// tunnel drain, log/syslog/db closers) runs under a fresh 30s ctx whose
+// `cancel` is deferred to the end. Splitting the sequence into two
+// registries keeps the 30s budget scoped exactly as it was pre-PR.
 func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.Signal) {
 	go func() {
 		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -1351,50 +1354,77 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	<-quit
 	logger.Println("Shutting down gracefully…")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	var early, late shutdownRegistry
+	registerEarlyShutdownHooks(&early, s)
+	registerLateShutdownHooks(&late, s, proxySrv)
+	runShutdownSequence(&early, &late, 30*time.Second)
 
-	var reg shutdownRegistry
-	registerProxyShutdownHooks(&reg, s, proxySrv)
-	if err := reg.RunAll(ctx); err != nil {
-		// All hooks currently log per-hook on failure and return nil, so
-		// this branch is unreachable today. Kept as a backstop for future
-		// hooks that opt into registry-level error aggregation.
-		logger.Printf("Shutdown error(s): %v", err)
-	}
 	logger.Println("Stopped.")
 }
 
+// runShutdownSequence runs the early registry with context.Background()
+// (no shutdown budget), then creates a fresh ctx with the supplied late
+// budget and runs the late registry. The late ctx's cancel is deferred so
+// it runs at function exit, mirroring the original
+// `defer cancel()` placement in runProxyUntilShutdown.
+//
+// Extracted so the budget-vs-no-budget contract — the entire reason this
+// PR splits into two registries — is unit-testable end to end without
+// touching production globals. P2.2 / S5.
+func runShutdownSequence(early, late *shutdownRegistry, lateBudget time.Duration) {
+	if err := early.RunAll(context.Background()); err != nil {
+		logger.Printf("Early shutdown error(s): %v", err)
+	}
+
+	// 30s shutdown budget begins HERE — same point as the original
+	// `ctx, cancel := context.WithTimeout(...)` in the pre-P2.2 body,
+	// after the rate-limit cleanup cancel and before scanSvc.Shutdown.
+	ctx, cancel := context.WithTimeout(context.Background(), lateBudget)
+	defer cancel()
+
+	if err := late.RunAll(ctx); err != nil {
+		// All late hooks currently log per-hook on failure and return nil,
+		// so this branch is unreachable today. Kept as a backstop for
+		// future hooks that opt into registry-level error aggregation.
+		logger.Printf("Shutdown error(s): %v", err)
+	}
+}
+
 // shutdown hook order constants. Gaps of 10 leave room for future inserts
-// without renumbering. P2.2 / S5.
+// without renumbering. Hooks at or below shutdownEarlyLateBoundary belong
+// in registerEarlyShutdownHooks (no shutdown budget); hooks above it belong
+// in registerLateShutdownHooks (under the 30s budget). P2.2 / S5.
 const (
 	shutdownOrderHAStop                 = 10
 	shutdownOrderControlPlaneGRPCStop   = 20
 	shutdownOrderCDRClientShutdown      = 30
 	shutdownOrderAppLifecycleCancel     = 40
 	shutdownOrderRateLimitCleanupCancel = 50
-	shutdownOrderScanSvcShutdown        = 60
-	shutdownOrderAdminUIShutdown        = 70
-	shutdownOrderSOCKS5ListenerStop     = 80
-	shutdownOrderProxyServerShutdown    = 90
-	shutdownOrderTunnelDrain            = 100
-	shutdownOrderSyslogClose            = 110
-	shutdownOrderCommunityDBClose       = 120
-	shutdownOrderRequestLogClose        = 130
-	shutdownOrderLogCloser              = 140
+
+	// shutdownEarlyLateBoundary is the cut-line: orders <= this run in
+	// the early phase (bg ctx, no budget); orders > this run in the late
+	// phase (30s ctx). Encoded as a constant so the test suite can pin
+	// the split structurally.
+	shutdownEarlyLateBoundary = 50
+
+	shutdownOrderScanSvcShutdown     = 60
+	shutdownOrderAdminUIShutdown     = 70
+	shutdownOrderSOCKS5ListenerStop  = 80
+	shutdownOrderProxyServerShutdown = 90
+	shutdownOrderTunnelDrain         = 100
+	shutdownOrderSyslogClose         = 110
+	shutdownOrderCommunityDBClose    = 120
+	shutdownOrderRequestLogClose     = 130
+	shutdownOrderLogCloser           = 140
 )
 
-// registerProxyShutdownHooks populates reg with the canonical 14-hook
-// shutdown sequence for the running proxy. Each hook's body is byte-
-// equivalent to the previous hand-ordered teardown in runProxyUntilShutdown:
-// per-hook log messages and best-effort error suppression are preserved as
-// they were. Hooks return nil today — registry-level error aggregation is
-// reserved for a future PR.
-//
-// Extracted so unit tests can inspect the wired hook list (via
-// shutdownRegistry.hooksSnapshot) without invoking RunAll or touching any
-// production global at run-time. P2.2 / S5.
-func registerProxyShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv *http.Server) {
+// registerEarlyShutdownHooks registers the pre-budget shutdown hooks: HA,
+// control-plane gRPC, CDR client, app lifecycle cancel, rate-limit cleanup
+// cancel. These ran BEFORE the 30s ctx in the pre-P2.2 hand-ordered body
+// and continue to run with context.Background() — they are not subject to
+// any shutdown timeout. None of them observe ctx; they ignore the parameter.
+// P2.2 / S5.
+func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 	// Stop HA leader election and release lock before gRPC shutdown.
 	reg.Register("ha-stop", shutdownOrderHAStop, func(context.Context) error {
 		globalHA.Stop()
@@ -1412,7 +1442,7 @@ func registerProxyShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv
 		shutdownCDRClient()
 		return nil
 	})
-	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.)
+	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.).
 	reg.Register("app-lifecycle-cancel", shutdownOrderAppLifecycleCancel, func(context.Context) error {
 		appLifecycleCancel()
 		return nil
@@ -1423,6 +1453,19 @@ func registerProxyShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv
 		}
 		return nil
 	})
+}
+
+// registerLateShutdownHooks registers the budget-bound shutdown hooks: scan
+// service, Admin UI, SOCKS5 listener, proxy server, tunnel drain, syslog
+// close, community DB close, request log close, log closer. These run under
+// the 30s ctx that runShutdownSequence creates after the early phase
+// completes; the ctx is observed by hooks that take it (scanSvc, adminUI,
+// socks5, proxySrv) and ignored by io.Closer-style hooks.
+//
+// Per-hook log messages and best-effort error suppression are byte-
+// equivalent to the previous hand-ordered body. Hooks return nil today;
+// registry-level error aggregation is reserved for a future PR. P2.2 / S5.
+func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv *http.Server) {
 	// Shut down scan microservice sidecar if running. Best-effort: error suppressed.
 	reg.Register("scan-svc-shutdown", shutdownOrderScanSvcShutdown, func(ctx context.Context) error {
 		if s.scanSvc != nil {
