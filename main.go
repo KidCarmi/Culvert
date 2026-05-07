@@ -1332,8 +1332,15 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 	return quit, sighup
 }
 
-// runProxyUntilShutdown starts the proxy goroutine, blocks on quit, then runs
-// the graceful shutdown sequence in its exact original order.
+// runProxyUntilShutdown starts the proxy goroutine, blocks on quit, then
+// runs the graceful shutdown sequence via shutdownRegistry. Hook registration
+// order, hook execution order, and per-hook log messages are byte-equivalent
+// to the previous hand-ordered body — see registerProxyShutdownHooks.
+//
+// P2.2 / S5: replaces the hand-ordered teardown with one ordered table.
+// Tunnel drain remains time-driven (not ctx-driven) per the original
+// contract; appLifecycleCancel and rlCleanupCancel run as hooks but their
+// CancelFunc semantics are unchanged.
 func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.Signal) {
 	go func() {
 		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -1344,99 +1351,166 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	<-quit
 	logger.Println("Shutting down gracefully…")
 
-	// Stop HA leader election and release lock before gRPC shutdown.
-	globalHA.Stop()
-
-	// Gracefully stop gRPC server first (drains in-flight RPCs).
-	StopControlPlaneGRPC()
-
-	// Close the CDR client before cancelling lifecycle context so any
-	// in-flight Sanitize streams get a clean tear-down rather than a
-	// context-cancelled transport error.
-	shutdownCDRClient()
-
-	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.)
-	appLifecycleCancel()
-
-	if s.rlCleanupCancel != nil {
-		s.rlCleanupCancel()
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Shut down scan microservice sidecar if running.
-	if s.scanSvc != nil {
-		s.scanSvc.Shutdown(ctx) //nolint:errcheck -- best-effort shutdown
+	var reg shutdownRegistry
+	registerProxyShutdownHooks(&reg, s, proxySrv)
+	if err := reg.RunAll(ctx); err != nil {
+		// All hooks currently log per-hook on failure and return nil, so
+		// this branch is unreachable today. Kept as a backstop for future
+		// hooks that opt into registry-level error aggregation.
+		logger.Printf("Shutdown error(s): %v", err)
 	}
+	logger.Println("Stopped.")
+}
 
+// shutdown hook order constants. Gaps of 10 leave room for future inserts
+// without renumbering. P2.2 / S5.
+const (
+	shutdownOrderHAStop                 = 10
+	shutdownOrderControlPlaneGRPCStop   = 20
+	shutdownOrderCDRClientShutdown      = 30
+	shutdownOrderAppLifecycleCancel     = 40
+	shutdownOrderRateLimitCleanupCancel = 50
+	shutdownOrderScanSvcShutdown        = 60
+	shutdownOrderAdminUIShutdown        = 70
+	shutdownOrderSOCKS5ListenerStop     = 80
+	shutdownOrderProxyServerShutdown    = 90
+	shutdownOrderTunnelDrain            = 100
+	shutdownOrderSyslogClose            = 110
+	shutdownOrderCommunityDBClose       = 120
+	shutdownOrderRequestLogClose        = 130
+	shutdownOrderLogCloser              = 140
+)
+
+// registerProxyShutdownHooks populates reg with the canonical 14-hook
+// shutdown sequence for the running proxy. Each hook's body is byte-
+// equivalent to the previous hand-ordered teardown in runProxyUntilShutdown:
+// per-hook log messages and best-effort error suppression are preserved as
+// they were. Hooks return nil today — registry-level error aggregation is
+// reserved for a future PR.
+//
+// Extracted so unit tests can inspect the wired hook list (via
+// shutdownRegistry.hooksSnapshot) without invoking RunAll or touching any
+// production global at run-time. P2.2 / S5.
+func registerProxyShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv *http.Server) {
+	// Stop HA leader election and release lock before gRPC shutdown.
+	reg.Register("ha-stop", shutdownOrderHAStop, func(context.Context) error {
+		globalHA.Stop()
+		return nil
+	})
+	// Gracefully stop gRPC server (drains in-flight RPCs).
+	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(context.Context) error {
+		StopControlPlaneGRPC()
+		return nil
+	})
+	// Close the CDR client before cancelling lifecycle context so any
+	// in-flight Sanitize streams get a clean tear-down rather than a
+	// context-cancelled transport error.
+	reg.Register("cdr-client-shutdown", shutdownOrderCDRClientShutdown, func(context.Context) error {
+		shutdownCDRClient()
+		return nil
+	})
+	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.)
+	reg.Register("app-lifecycle-cancel", shutdownOrderAppLifecycleCancel, func(context.Context) error {
+		appLifecycleCancel()
+		return nil
+	})
+	reg.Register("rate-limit-cleanup-cancel", shutdownOrderRateLimitCleanupCancel, func(context.Context) error {
+		if s.rlCleanupCancel != nil {
+			s.rlCleanupCancel()
+		}
+		return nil
+	})
+	// Shut down scan microservice sidecar if running. Best-effort: error suppressed.
+	reg.Register("scan-svc-shutdown", shutdownOrderScanSvcShutdown, func(ctx context.Context) error {
+		if s.scanSvc != nil {
+			_ = s.scanSvc.Shutdown(ctx)
+		}
+		return nil
+	})
 	// P1.1 / S4.AdminUI: stop accepting new admin UI requests before draining
-	// the proxy so admins can no longer mutate config mid-shutdown. Admin UI
-	// shutdown is capped at 5s (adminUIShutdownTimeout) so it cannot consume
-	// the entire remaining shutdown budget before proxy drain — important
-	// because admin UI WriteTimeout=0 (SSE long-lived streams) means Shutdown
-	// would otherwise block on in-flight handlers until the parent ctx expires.
-	// shutdownAdminUI is nil-safe for the early-fail path.
-	if err := shutdownAdminUI(ctx, s.adminUISrv); err != nil {
-		logger.Printf("Admin UI shutdown error: %v", err)
-	}
-
-	// P1.5 / S4.SOCKS5: close the SOCKS5 listener so it stops accepting new
-	// connections. Bounded to 2s — closing a TCP listener is sub-millisecond,
-	// but the cap is paranoia against an unforeseen accept-loop wedge so
-	// SOCKS5 cannot consume the remaining shutdown budget before proxy drain.
-	// Does NOT drain in-flight SOCKS5 tunnels — they keep their per-conn 30s
-	// deadlines (set in handleSOCKS5). Graceful tunnel drain is tracked for
-	// Phase 2. Stop is nil-safe for the early-fail path.
-	if s.socks5Srv != nil {
+	// the proxy. shutdownAdminUI builds a 5s sub-context internally so an
+	// active SSE stream cannot consume the entire shutdown budget.
+	reg.Register("admin-ui-shutdown", shutdownOrderAdminUIShutdown, func(ctx context.Context) error {
+		if err := shutdownAdminUI(ctx, s.adminUISrv); err != nil {
+			logger.Printf("Admin UI shutdown error: %v", err)
+		}
+		return nil
+	})
+	// P1.5 / S4.SOCKS5: close the SOCKS5 listener. Bounded to 2s via a
+	// sub-context. Does NOT drain in-flight SOCKS5 tunnels — they keep
+	// their per-conn 30s deadlines (set in handleSOCKS5).
+	reg.Register("socks5-listener-stop", shutdownOrderSOCKS5ListenerStop, func(ctx context.Context) error {
+		if s.socks5Srv == nil {
+			return nil
+		}
 		socksCtx, socksCancel := context.WithTimeout(ctx, 2*time.Second)
+		defer socksCancel()
 		if err := s.socks5Srv.Stop(socksCtx); err != nil {
 			logger.Printf("SOCKS5 shutdown error: %v", err)
 		}
-		socksCancel()
-	}
-
-	if err := proxySrv.Shutdown(ctx); err != nil {
-		logger.Printf("Shutdown error: %v", err)
-	}
-
-	// Drain active tunnels (CONNECT/WebSocket). proxySrv.Shutdown only closes
-	// HTTP/1.x idle connections; hijacked tunnels need time to finish.
-	active := atomic.LoadInt64(&activeConns)
-	if active > 0 {
+		return nil
+	})
+	reg.Register("proxy-server-shutdown", shutdownOrderProxyServerShutdown, func(ctx context.Context) error {
+		if err := proxySrv.Shutdown(ctx); err != nil {
+			logger.Printf("Shutdown error: %v", err)
+		}
+		return nil
+	})
+	// Drain active tunnels (CONNECT/WebSocket). proxySrv.Shutdown only
+	// closes HTTP/1.x idle connections; hijacked tunnels need time to
+	// finish. 15s drain budget is independent of the parent ctx, matching
+	// the original behaviour exactly.
+	reg.Register("tunnel-drain", shutdownOrderTunnelDrain, func(context.Context) error {
+		active := atomic.LoadInt64(&activeConns)
+		if active <= 0 {
+			return nil
+		}
 		logger.Printf("Draining %d active tunnel(s)…", active)
 		drainDeadline := time.After(15 * time.Second)
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
-	drainLoop:
 		for {
 			select {
 			case <-drainDeadline:
 				logger.Printf("Drain timeout: %d tunnel(s) still active", atomic.LoadInt64(&activeConns))
-				break drainLoop
+				return nil
 			case <-ticker.C:
 				if atomic.LoadInt64(&activeConns) <= 0 {
 					logger.Println("All tunnels drained")
-					break drainLoop
+					return nil
 				}
 			}
 		}
-	}
-	if globalSyslog != nil {
-		globalSyslog.Close() //nolint:errcheck // best-effort flush on shutdown
-	}
-	if communityDB != nil {
-		if err := communityDB.Close(); err != nil {
-			logger.Printf("CatFeedDB: close error: %v", err)
+	})
+	reg.Register("syslog-close", shutdownOrderSyslogClose, func(context.Context) error {
+		if globalSyslog != nil {
+			_ = globalSyslog.Close() // best-effort flush
 		}
-	}
-	if requestLogCloser != nil {
-		requestLogCloser.Close() //nolint:errcheck // best-effort flush on shutdown
-	}
-	if s.logCloser != nil {
-		s.logCloser.Close()
-	}
-	logger.Println("Stopped.")
+		return nil
+	})
+	reg.Register("community-db-close", shutdownOrderCommunityDBClose, func(context.Context) error {
+		if communityDB != nil {
+			if err := communityDB.Close(); err != nil {
+				logger.Printf("CatFeedDB: close error: %v", err)
+			}
+		}
+		return nil
+	})
+	reg.Register("request-log-close", shutdownOrderRequestLogClose, func(context.Context) error {
+		if requestLogCloser != nil {
+			_ = requestLogCloser.Close() // best-effort flush
+		}
+		return nil
+	})
+	reg.Register("log-closer", shutdownOrderLogCloser, func(context.Context) error {
+		if s.logCloser != nil {
+			_ = s.logCloser.Close()
+		}
+		return nil
+	})
 }
 
 // handleHealth returns liveness + readiness details for monitoring tools.
