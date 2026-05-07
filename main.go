@@ -1455,6 +1455,35 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 	})
 }
 
+// drainActiveTunnels drains in-flight CONNECT/WebSocket tunnels after the
+// proxy server's HTTP listener has shut down. proxySrv.Shutdown only closes
+// HTTP/1.x idle connections; hijacked tunnels need time to finish. The 15s
+// drain budget is independent of the parent ctx — extracted as a named
+// function (rather than an inline closure inside registerLateShutdownHooks)
+// to keep the wiring function's cognitive complexity low. P2.2 / S5.
+func drainActiveTunnels(context.Context) error {
+	active := atomic.LoadInt64(&activeConns)
+	if active <= 0 {
+		return nil
+	}
+	logger.Printf("Draining %d active tunnel(s)…", active)
+	drainDeadline := time.After(15 * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-drainDeadline:
+			logger.Printf("Drain timeout: %d tunnel(s) still active", atomic.LoadInt64(&activeConns))
+			return nil
+		case <-ticker.C:
+			if atomic.LoadInt64(&activeConns) <= 0 {
+				logger.Println("All tunnels drained")
+				return nil
+			}
+		}
+	}
+}
+
 // registerLateShutdownHooks registers the budget-bound shutdown hooks: scan
 // service, Admin UI, SOCKS5 listener, proxy server, tunnel drain, syslog
 // close, community DB close, request log close, log closer. These run under
@@ -1506,28 +1535,7 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 	// closes HTTP/1.x idle connections; hijacked tunnels need time to
 	// finish. 15s drain budget is independent of the parent ctx, matching
 	// the original behaviour exactly.
-	reg.Register("tunnel-drain", shutdownOrderTunnelDrain, func(context.Context) error {
-		active := atomic.LoadInt64(&activeConns)
-		if active <= 0 {
-			return nil
-		}
-		logger.Printf("Draining %d active tunnel(s)…", active)
-		drainDeadline := time.After(15 * time.Second)
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-drainDeadline:
-				logger.Printf("Drain timeout: %d tunnel(s) still active", atomic.LoadInt64(&activeConns))
-				return nil
-			case <-ticker.C:
-				if atomic.LoadInt64(&activeConns) <= 0 {
-					logger.Println("All tunnels drained")
-					return nil
-				}
-			}
-		}
-	})
+	reg.Register("tunnel-drain", shutdownOrderTunnelDrain, drainActiveTunnels)
 	reg.Register("syslog-close", shutdownOrderSyslogClose, func(context.Context) error {
 		if globalSyslog != nil {
 			_ = globalSyslog.Close() // best-effort flush

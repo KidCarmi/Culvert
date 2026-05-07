@@ -16,6 +16,15 @@ import (
 // without invoking RunAll. Hook closures are inspected by name + order only
 // and never called, so no production global is touched at run-time.
 
+// testInertHTTPServer returns an *http.Server that satisfies gosec G112
+// (Slowloris) by setting ReadHeaderTimeout. It is passed to
+// registerLateShutdownHooks but the Shutdown closure is never invoked in
+// these tests, so the timeout value is purely cosmetic — any non-zero
+// value works.
+func testInertHTTPServer() *http.Server {
+	return &http.Server{ReadHeaderTimeout: time.Second}
+}
+
 // canonicalEarlyShutdownHooks pins the exact early-phase sequence. These
 // hooks ran BEFORE the 30s ctx was created in the original body, so they
 // continue to run with context.Background().
@@ -73,7 +82,7 @@ func TestRegisterEarlyShutdownHooks_OrderMatchesCanonical(t *testing.T) {
 // hook by name and order.
 func TestRegisterLateShutdownHooks_OrderMatchesCanonical(t *testing.T) {
 	var reg shutdownRegistry
-	registerLateShutdownHooks(&reg, &startupState{}, &http.Server{})
+	registerLateShutdownHooks(&reg, &startupState{}, testInertHTTPServer())
 
 	hooks := reg.hooksSnapshot()
 	if len(hooks) != len(canonicalLateShutdownHooks) {
@@ -97,7 +106,7 @@ func TestRegisterLateShutdownHooks_OrderMatchesCanonical(t *testing.T) {
 func TestEarlyAndLateShutdownHooks_OrdersDoNotOverlap(t *testing.T) {
 	var early, late shutdownRegistry
 	registerEarlyShutdownHooks(&early, &startupState{})
-	registerLateShutdownHooks(&late, &startupState{}, &http.Server{})
+	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
 
 	for _, h := range early.hooksSnapshot() {
 		if h.order > shutdownEarlyLateBoundary {
@@ -116,7 +125,7 @@ func TestEarlyAndLateShutdownHooks_OrdersDoNotOverlap(t *testing.T) {
 func TestRegisterShutdownHooks_OrdersAreStrictlyAscending(t *testing.T) {
 	var early, late shutdownRegistry
 	registerEarlyShutdownHooks(&early, &startupState{})
-	registerLateShutdownHooks(&late, &startupState{}, &http.Server{})
+	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
 
 	for _, phase := range []struct {
 		label string
@@ -141,7 +150,7 @@ func TestRegisterShutdownHooks_OrdersAreStrictlyAscending(t *testing.T) {
 func TestRegisterShutdownHooks_NoNilStops(t *testing.T) {
 	var early, late shutdownRegistry
 	registerEarlyShutdownHooks(&early, &startupState{})
-	registerLateShutdownHooks(&late, &startupState{}, &http.Server{})
+	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
 
 	for _, h := range early.hooksSnapshot() {
 		if h.stop == nil {
@@ -163,7 +172,7 @@ func TestRegisterShutdownHooks_NoNilStops(t *testing.T) {
 func TestRegisterShutdownHooks_NamesAreUniqueAcrossPhases(t *testing.T) {
 	var early, late shutdownRegistry
 	registerEarlyShutdownHooks(&early, &startupState{})
-	registerLateShutdownHooks(&late, &startupState{}, &http.Server{})
+	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
 
 	seen := make(map[string]string) // name → phase
 	check := func(phase string, hooks []shutdownHook) {
