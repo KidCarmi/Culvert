@@ -133,7 +133,23 @@ Each PR introduces a small ownership shape — owner type, returned server handl
 
 ### Phase 2 — Minimal shutdown registry
 
+> **Status:** ✅ **COMPLETE.** `shutdownRegistry` exists and is tested; `runProxyUntilShutdown` uses early + late registries.
+>
+> Merged PRs:
+> - **#216** — P2.1 minimal `shutdownRegistry` (type + tests; no call sites)
+> - **#217** — P2.2 wire registry into shutdown path with early/late split
+>
+> **Shape pinned by P2.2:**
+> - Early hooks (orders 10–50): `globalHA.Stop`, `StopControlPlaneGRPC`, `shutdownCDRClient`, `appLifecycleCancel`, `s.rlCleanupCancel`. Run under `context.Background()` — no shutdown budget.
+> - The 30 s shutdown ctx is created at the original boundary: **after** rate-limit cleanup cancel, **before** `scanSvc.Shutdown`. `defer cancel` runs at the end.
+> - Late hooks (orders 60–140): `scanSvc.Shutdown`, `shutdownAdminUI`, `socks5Server.Stop`, `proxySrv.Shutdown`, `drainActiveTunnels`, `globalSyslog.Close`, `communityDB.Close`, `requestLogCloser.Close`, `s.logCloser.Close`. Run under the fresh 30 s ctx.
+> - Tunnel drain remains 15 s time-driven (own `time.After` + 500 ms ticker), independent of the parent ctx — preserved exactly.
+> - Per-hook log strings, best-effort error suppression, and Admin UI 5 s / SOCKS5 2 s sub-contexts are all byte-equivalent to the pre-PR body.
+>
+> **Next step:** **P3.1 — final-flush opt-in for PAC, fileBlocker, profile store** (S7). Phase 3 is state durability, not more shutdown refactor.
+
 #### P2.1 — Define `Shutdownable` + `shutdownRegistry` (no behaviour change) `[travel-ok]`
+- **Status:** ✅ DONE — merged in PR #216.
 - **Targets:** S5.
 - **Objective:** introduce `Shutdownable` + `shutdownRegistry` with `Register(name, order, fn)` and `RunAll(ctx)`. **No call sites use it yet.**
 - **Files:** `runtime_shutdown.go` (new), `runtime_shutdown_test.go` (new).
@@ -142,6 +158,7 @@ Each PR introduces a small ownership shape — owner type, returned server handl
 - **What not to touch:** `runProxyUntilShutdown`.
 
 #### P2.2 — Wire P1.\* owners into the registry; rewrite `runProxyUntilShutdown` body to call `RunAll`
+- **Status:** ✅ DONE — merged in PR #217. Body now uses two registries (early/late) so the 30 s budget is byte-equivalent to the pre-PR scope.
 - **Targets:** S5.
 - **Objective:** register P1.1–P1.5 owners plus the existing teardown calls (`globalHA.Stop`, `StopControlPlaneGRPC`, `shutdownCDRClient`, `appLifecycleCancel`, `s.rlCleanupCancel`, `s.scanSvc.Shutdown`, `proxySrv.Shutdown`, `globalSyslog.Close`, `communityDB.Close`, `requestLogCloser.Close`, `s.logCloser.Close`) with explicit `order`. Body shrinks to ~10 lines: register, block on quit, run all.
 - **Tests:** registry ordering test on a stub set; existing tunnel-drain stays inline inside the proxy `Stop` hook.
@@ -150,6 +167,7 @@ Each PR introduces a small ownership shape — owner type, returned server handl
 - **What not to touch:** tunnel-drain timing (15 s), `appLifecycleCancel` semantics.
 
 #### P2.3 — Shutdown order + timeout test suite `[travel-ok]`
+- **Status:** ⚖️ **Folded into PR #217.** The canonical-order test surface (`TestRegisterEarlyShutdownHooks_OrderMatchesCanonical`, `TestRegisterLateShutdownHooks_OrderMatchesCanonical`, `TestEarlyAndLateShutdownHooks_OrdersDoNotOverlap`, `TestRegisterShutdownHooks_OrdersAreStrictlyAscending`, `TestRunShutdownSequence_EarlyCtxHasNoDeadline_LateCtxDoes`) shipped with P2.2 and pins the ordering + budget contracts the P2.3 spec called for. A separate per-hook *timeout* suite is **not** required today — Admin UI (5 s) and SOCKS5 (2 s) sub-contexts are owned by their respective hooks and are pinned by their P1.1 / P1.5 tests; the late phase shares one 30 s budget. If a future PR adds a hook with its own per-hook timeout contract, that PR can add its own focused test.
 - **Targets:** S5.
 - **Objective:** pin canonical ordering + per-step timeout budget so future refactors can't silently drift.
 - **Files:** `runtime_shutdown_order_test.go` (new).
@@ -253,11 +271,11 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 ## 5. Recommended next PR
 
-Phase 1 is complete (PRs #210–#214 merged). The next implementation PR is:
+Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). The next implementation PR is:
 
-- **P2.1 — Define `Shutdownable` + `shutdownRegistry` (no behaviour change)** `[travel-ok]`. Smallest possible registry: ≤80 LOC of production code, full unit-test coverage, **no call sites yet**. P2.2 (which wires the five P1 owners + the existing teardown calls into one ordered table) is the next-after-next, but it is a separate PR so the type can land and be reviewed in isolation.
+- **P3.1 — Final-flush opt-in: PAC, fileBlocker, profile store** `[travel-ok]`. Three low-risk stores opt into a `Save(ctx) error` shutdown hook so config changes pending in memory at SIGINT time are flushed instead of lost. Each store already has a `Save()` method; this PR threads ctx through and registers each as a late-phase shutdown hook (after the proxy server stops accepting traffic, before the io.Closer batch).
 
-This is **not** a broad runtime framework or a DI container — just the smallest type that lets us replace the hand-ordered teardown in `runProxyUntilShutdown` with a single registered table. The Phase 1 owners already conform: each has a `Stop(ctx) error` (or equivalent) and is reachable from `startupState`.
+Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 just adds opt-in `Save(ctx)` hooks for stores that today rely on save-on-write. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
 
 ---
 
