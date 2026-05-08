@@ -273,7 +273,7 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). The next implementation PR is:
 
-- **P3.1 — Final-flush opt-in: PAC, fileBlocker, profile store** `[travel-ok]`. Three low-risk stores opt into a `Save(ctx) error` shutdown hook so config changes pending in memory at SIGINT time are flushed instead of lost. Each store already has a `Save()` method; this PR threads ctx through and registers each as a late-phase shutdown hook (after the proxy server stops accepting traffic, before the io.Closer batch).
+- **P3.1 — Final-flush opt-in: PAC, fileBlocker, profile store** `[travel-ok]`. Evaluate and add focused `Save(ctx)` shutdown hooks where appropriate so pending in-memory changes can be flushed during shutdown, while preserving existing shutdown order and persistence semantics.
 
 Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 just adds opt-in `Save(ctx)` hooks for stores that today rely on save-on-write. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
 
