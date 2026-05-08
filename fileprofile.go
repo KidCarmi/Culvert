@@ -119,13 +119,18 @@ func (s *FileProfileStore) List() []*FileExtProfile {
 	return out
 }
 
-// ReplaceAll atomically replaces all profiles (used by cluster config sync).
+// ReplaceAll atomically replaces all profiles in memory and persists the
+// new set (used by cluster config sync). Disk failure is logged; the
+// in-memory swap is authoritative — the next CP heartbeat will re-attempt.
 func (s *FileProfileStore) ReplaceAll(profiles []FileExtProfile) {
 	s.mu.Lock()
 	s.profiles = make([]*FileExtProfile, len(profiles))
 	for i := range profiles {
 		p := profiles[i]
 		s.profiles[i] = &p
+	}
+	if err := s.saveLocked(); err != nil {
+		logger.Printf("FileProfileStore: ReplaceAll persist: %v", err)
 	}
 	s.mu.Unlock()
 }
