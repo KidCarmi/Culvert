@@ -146,7 +146,7 @@ Each PR introduces a small ownership shape — owner type, returned server handl
 > - Tunnel drain remains 15 s time-driven (own `time.After` + 500 ms ticker), independent of the parent ctx — preserved exactly.
 > - Per-hook log strings, best-effort error suppression, and Admin UI 5 s / SOCKS5 2 s sub-contexts are all byte-equivalent to the pre-PR body.
 >
-> **Next step:** **P3.1 — final-flush opt-in for PAC, fileBlocker, profile store** (S7). Phase 3 is state durability, not more shutdown refactor.
+> **Next step:** **P3.2 — policy store / node groups / bandwidth durability** (S7). P3.1 closed out as discovery — see entry below; PAC, fileBlocker, and profile store already rely on synchronous save-on-write and did not need shutdown flush hooks.
 
 #### P2.1 — Define `Shutdownable` + `shutdownRegistry` (no behaviour change) `[travel-ok]`
 - **Status:** ✅ DONE — merged in PR #216.
@@ -180,10 +180,28 @@ Each PR introduces a small ownership shape — owner type, returned server handl
 
 All PRs target S7. Travel-friendly except **P3.4** (cluster).
 
-#### P3.1 — Final-flush opt-in: PAC, fileBlocker, profile store `[travel-ok]`
-- **Files:** `pac.go`, `fileblock.go`, `fileprofile.go`, `runtime_shutdown.go`.
-- **Tests:** mutate, `Save(ctx)`, reopen, assert.
-- **Risk:** LOW.
+#### P3.1 — Discovery closeout: PAC, fileBlocker, profile store already save-on-write `[travel-ok]`
+- **Status:** ✅ **DISCOVERY COMPLETE / SCOPE-CORRECTED.** No production code changes — no shutdown flush hooks added, no `Save(ctx)` wired into the registry, no shutdown order changes, no on-disk format changes.
+- **Targets:** S7 (low-severity portion).
+- **Finding:** PAC and fileBlocker already have complete synchronous save-on-write persistence; flush-on-shutdown would be pure redundancy. The profile store has one narrow persistence gap (`ReplaceAll` mutates memory only), but flushing it on shutdown would paper over a deeper non-atomicity issue in `saveLocked` rather than fix it. Net: broad shutdown-flush hooks are intentionally NOT added in P3.1.
+- **Per-store summary:**
+  - **PAC** (`pac.go`): every external mutation goes through `PACStore.Set`, which writes synchronously via tmp+rename (atomic, but not fsynced — see follow-up #1).
+  - **fileBlocker** (`fileblock.go`): every external mutation goes through `Add`/`Remove`/`ClearAll`, which call `save()` synchronously via `atomicWriteFile` (fsynced + atomic). Already the most durable of the three.
+  - **profile store** (`fileprofile.go`): UI mutations save synchronously via `Create`/`Update`/`Delete`. **`ReplaceAll` does not persist** — see follow-ups #2 and #3.
+- **What not to touch:** on-disk JSON formats; `Load` semantics; persistence architecture (no DB, no abstraction layer); shutdown ordering; the audit-log / request-log file handles (P3.3); any `Save(ctx)` wiring into `runtime_shutdown.go`.
+
+##### P3.1 follow-up work (tracked separately, NOT P3.1 itself)
+
+These are pre-existing durability issues uncovered by the P3.1 discovery. They are **intentionally split into future dedicated PRs** rather than silently hardened under P3.1:
+
+1. **`PACStore.Set` is atomic-via-rename but not fsynced** (`pac.go:82–86`). Switching the write path to `atomicWriteFile` would bring durability up to fileBlocker's level (fsync(file) + tmp + rename + best-effort fsync(parent dir)). Small, mechanical change. Independent of #2 and #3 — can ship at any time.
+2. **`FileProfileStore.saveLocked` uses plain `os.WriteFile`** (`fileprofile.go:96–105`). Not atomic, not fsynced — a crash mid-write can leave a truncated/empty `fileprofiles.json`. Switching to `atomicWriteFile` is the **prerequisite** for any further work on this store. Separate PR.
+3. **`FileProfileStore.ReplaceAll` does not persist** (`fileprofile.go:122–131`). Cluster-pushed profile updates on a DP node are kept in memory only until the next `Create`/`Update`/`Delete` triggers a save. The fix is one call to `s.saveLocked` inside `ReplaceAll`. Separate PR, **gated on follow-up #2** so we are not amplifying a non-atomic write across the cluster apply path.
+
+**Preferred future sequencing:**
+- **(a) follow-up #2 first** — harden `FileProfileStore.saveLocked` durability via `atomicWriteFile`.
+- **(b) then follow-up #3** — persist `ReplaceAll` once the underlying write is atomic.
+- Follow-up #1 (PAC `Set`) is independent of the profile-store chain and can ship at any time.
 
 #### P3.2 — Final-flush opt-in: policy store, node groups, bandwidth `[travel-ok]`
 - **Files:** `policy.go`, `nodegroup.go`, `bandwidth.go`.
@@ -271,11 +289,11 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 ## 5. Recommended next PR
 
-Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). The next implementation PR is:
+Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery — see the P3.1 entry above for findings; PAC, fileBlocker, and profile store already rely on synchronous save-on-write and did not justify shutdown flush hooks. The next implementation PR is:
 
-- **P3.1 — Final-flush opt-in: PAC, fileBlocker, profile store** `[travel-ok]`. Evaluate and add focused `Save(ctx)` shutdown hooks where appropriate so pending in-memory changes can be flushed during shutdown, while preserving existing shutdown order and persistence semantics.
+- **P3.2 — policy store / node groups / bandwidth durability** `[travel-ok]`. **Apply the same discovery-first pattern as P3.1**: confirm whether each store relies on save-on-write before adding any flush hook. Hooks should only land if the discovery proves a real in-memory-only window — not as blanket coverage.
 
-Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 just adds opt-in `Save(ctx)` hooks for stores that today rely on save-on-write. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
+Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 only adds opt-in `Save(ctx)` hooks where the discovery proves a real durability gap. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
 
 ---
 
