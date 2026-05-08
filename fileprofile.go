@@ -101,7 +101,7 @@ func (s *FileProfileStore) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o600)
+	return atomicWriteFile(s.path, data, 0o600)
 }
 
 func (s *FileProfileStore) Save() error {
