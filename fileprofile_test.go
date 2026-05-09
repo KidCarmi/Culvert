@@ -97,3 +97,124 @@ func TestFileProfileStore_Save_OverwritePersists(t *testing.T) {
 		t.Fatalf("Extensions = %v, want [.new]", got.Extensions)
 	}
 }
+
+// ── ReplaceAll persistence (P3.1 follow-up #3) ────────────────────────────
+
+// ReplaceAll persists the new profile set so DP nodes survive restart with
+// the latest cluster-pushed state.
+func TestFileProfileStore_ReplaceAll_PersistsAndReloads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fileprofiles.json")
+
+	a := &FileProfileStore{}
+	if err := a.Load(path); err != nil {
+		t.Fatalf("Load (first-run seed): %v", err)
+	}
+	a.ReplaceAll([]FileExtProfile{
+		{ID: "p1", Name: "Cluster", Extensions: []string{".cl"}},
+		{ID: "p2", Name: "Cluster2", Extensions: []string{".cl2"}},
+	})
+
+	b := &FileProfileStore{}
+	if err := b.Load(path); err != nil {
+		t.Fatalf("Load (reopen): %v", err)
+	}
+	if got := len(b.List()); got != 2 {
+		t.Fatalf("len = %d, want 2", got)
+	}
+	if got := b.GetByName("Cluster"); got == nil {
+		t.Fatal("Cluster profile missing after reload")
+	} else if len(got.Extensions) != 1 || got.Extensions[0] != ".cl" {
+		t.Fatalf("Cluster.Extensions = %v, want [.cl]", got.Extensions)
+	}
+	if got := b.GetByName("Cluster2"); got == nil {
+		t.Fatal("Cluster2 profile missing after reload")
+	} else if len(got.Extensions) != 1 || got.Extensions[0] != ".cl2" {
+		t.Fatalf("Cluster2.Extensions = %v, want [.cl2]", got.Extensions)
+	}
+}
+
+// ReplaceAll's atomicWriteFile path must not orphan *.tmp.* files in the
+// parent directory.
+func TestFileProfileStore_ReplaceAll_NoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fileprofiles.json")
+
+	s := &FileProfileStore{}
+	if err := s.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	s.ReplaceAll([]FileExtProfile{
+		{ID: "x", Name: "X", Extensions: []string{".x"}},
+	})
+	s.ReplaceAll([]FileExtProfile{
+		{ID: "y", Name: "Y", Extensions: []string{".y"}},
+	})
+
+	assertNoTmpLeak(t, dir)
+}
+
+// ReplaceAll is replacement, not merge: any pre-existing profile must be
+// gone after the call, both in memory and on disk.
+func TestFileProfileStore_ReplaceAll_OverwritesPreviousState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fileprofiles.json")
+
+	a := &FileProfileStore{}
+	if err := a.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := a.Create("Old", []string{".o"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	a.ReplaceAll([]FileExtProfile{
+		{ID: "p1", Name: "New", Extensions: []string{".n"}},
+	})
+
+	b := &FileProfileStore{}
+	if err := b.Load(path); err != nil {
+		t.Fatalf("Load (reopen): %v", err)
+	}
+	if b.GetByName("Old") != nil {
+		t.Error("Old profile still present after ReplaceAll")
+	}
+	if got := b.GetByName("New"); got == nil {
+		t.Fatal("New profile missing after ReplaceAll")
+	}
+}
+
+// With no path configured, saveLocked early-returns. ReplaceAll must still
+// apply the in-memory swap and must not panic.
+func TestFileProfileStore_ReplaceAll_EmptyPathNoOps(t *testing.T) {
+	s := &FileProfileStore{}
+	s.ReplaceAll([]FileExtProfile{
+		{ID: "p1", Name: "InMem", Extensions: []string{".m"}},
+	})
+	got := s.List()
+	if len(got) != 1 || got[0].Name != "InMem" {
+		t.Fatalf("List = %+v, want [InMem]", got)
+	}
+}
+
+// Persistence is best-effort: if saveLocked fails (parent directory
+// missing), the in-memory swap still happens and the call must not panic.
+func TestFileProfileStore_ReplaceAll_PersistFailureDoesNotPanic(t *testing.T) {
+	ensureFileblockTestLogger(t)
+
+	dir := t.TempDir()
+	// Path under a directory that doesn't exist — atomicWriteFile fails at
+	// os.CreateTemp because the parent dir is missing.
+	path := filepath.Join(dir, "missing", "fileprofiles.json")
+
+	s := &FileProfileStore{}
+	s.path = path // bypass Load — Load would fail in the same place
+
+	s.ReplaceAll([]FileExtProfile{
+		{ID: "p1", Name: "InMem", Extensions: []string{".m"}},
+	})
+
+	got := s.List()
+	if len(got) != 1 || got[0].Name != "InMem" {
+		t.Fatalf("List = %+v, want [InMem]", got)
+	}
+}
