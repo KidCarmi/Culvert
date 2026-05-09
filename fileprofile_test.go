@@ -119,12 +119,18 @@ func TestFileProfileStore_ReplaceAll_PersistsAndReloads(t *testing.T) {
 	if err := b.Load(path); err != nil {
 		t.Fatalf("Load (reopen): %v", err)
 	}
-	got := b.List()
-	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2", len(got))
+	if got := len(b.List()); got != 2 {
+		t.Fatalf("len = %d, want 2", got)
 	}
-	if got[0].Name != "Cluster" || got[1].Name != "Cluster2" {
-		t.Fatalf("names = [%q %q], want [Cluster Cluster2]", got[0].Name, got[1].Name)
+	if got := b.GetByName("Cluster"); got == nil {
+		t.Fatal("Cluster profile missing after reload")
+	} else if len(got.Extensions) != 1 || got.Extensions[0] != ".cl" {
+		t.Fatalf("Cluster.Extensions = %v, want [.cl]", got.Extensions)
+	}
+	if got := b.GetByName("Cluster2"); got == nil {
+		t.Fatal("Cluster2 profile missing after reload")
+	} else if len(got.Extensions) != 1 || got.Extensions[0] != ".cl2" {
+		t.Fatalf("Cluster2.Extensions = %v, want [.cl2]", got.Extensions)
 	}
 }
 
