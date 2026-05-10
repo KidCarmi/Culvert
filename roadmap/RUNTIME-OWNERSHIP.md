@@ -203,9 +203,26 @@ These are pre-existing durability issues uncovered by the P3.1 discovery. They a
 - **(b) then follow-up #3** — persist `ReplaceAll` once the underlying write is atomic.
 - Follow-up #1 (PAC `Set`) is independent of the profile-store chain and can ship at any time.
 
-#### P3.2 — Final-flush opt-in: policy store, node groups, bandwidth `[travel-ok]`
-- **Files:** `policy.go`, `nodegroup.go`, `bandwidth.go`.
-- **Risk:** LOW–MEDIUM. Hot-reload path unchanged.
+#### P3.2 — Discovery closeout: node groups + bandwidth already complete; policy store has two split follow-ups `[travel-ok]`
+- **Status:** ✅ **DISCOVERY COMPLETE / SCOPE-CORRECTED.** No production code changes — no shutdown flush hooks added, no `Save(ctx)` wired into the registry, no shutdown order changes, no on-disk format changes.
+- **Targets:** S7 (low-severity portion).
+- **Finding:** Two of the three stores are already fully durable; the third (policy store) has two pre-existing gaps that exactly mirror what P3.1 fixed for the file-profile store. Flush-on-shutdown would be pure redundancy for node groups and bandwidth, and would not address either of the policy-store gaps (atomicity is per-write; the cluster-apply gap is at the source). Net: shutdown flush hooks are intentionally NOT added in P3.2.
+- **Per-store summary:**
+  - **NodeGroupStore** (`nodegroup.go`): every mutator (`Add`, `Delete`, `ReplaceAll`) calls `saveLocked` synchronously, which uses `atomicWriteFile` (fsynced + atomic). Already complete.
+  - **BandwidthManager** (`bandwidth.go`): every mutator (`Add`, `Delete`, `ReplaceAll`) calls `saveLocked` synchronously, which uses `atomicWriteFile`. Token-bucket counters are intentionally transient and re-base from elapsed time on restart — persisting them would be wrong. Already complete.
+  - **PolicyStore** (`policy.go`): caller-side Save convention (UI handlers explicitly call `policyStore.Save()` after every mutation; verified at `ui_policy.go:726, 768, 792, 820, 856, 967`, `ui_config.go:418`, `configversion.go:349`). Two gaps — see P3.2a and P3.2b below.
+- **What not to touch:** on-disk JSON formats; `Load` semantics; policy matching / `Evaluate` / `sortLocked` / `DetectConflicts`; node-group label-match semantics; bandwidth enforcement / token-bucket math / `AllowBytes` / `FindPolicy`; persistence architecture; shutdown ordering; any `Save(ctx)` wiring into `runtime_shutdown.go`.
+
+##### P3.2 follow-up work (tracked separately, NOT P3.2 itself)
+
+These are pre-existing policy-store durability issues uncovered by the P3.2 discovery. They are **intentionally split into future dedicated PRs** rather than bundled under P3.2:
+
+- **P3.2a** — **`PolicyStore.Save()` main-file write uses plain `os.WriteFile` + `os.Rename`** (`policy.go:458, 461`). Atomic via the rename guarantee on POSIX same-fs, but **not fsynced**. The companion `saveMeta` (line 434) already uses `atomicWriteFile`; the main file does not. The existing test `TestPolicyStore_SaveMeta_NoTmpLeak` (`policy_test.go:826–838`) explicitly notes this as the "out-of-scope old temp+rename pattern". Switching the main write to `atomicWriteFile` brings the policy store up to the same durability level as the node-group, bandwidth, and file-profile stores. **Mirror of P3.1 follow-up #2** (which shipped as PR #221). Separate PR.
+- **P3.2b** — **`policyStore.ReplaceAll` is not persisted by the cluster apply path** (`controlplane.go:1490`). DP nodes that receive a CP-pushed rule set via `applyConfigSnapshot` keep the new rules in memory only; on restart, `Load` reads stale data until the next heartbeat re-converges. Fix is **caller-side** (`policyStore.Save()` immediately after `policyStore.ReplaceAll(...)` in `applyConfigSnapshot`), respecting PolicyStore's existing convention that mutators don't save internally — every UI handler already does this explicitly. **Mirror of P3.1 follow-up #3** (which shipped as PR #222) — different shape: caller-side rather than internal save. Separate PR, **gated on P3.2a** so we are not amplifying a non-fsynced write across the cluster apply path.
+
+**Preferred future sequencing:**
+- **(a) P3.2a first** — harden `PolicyStore.Save()` durability via `atomicWriteFile`.
+- **(b) then P3.2b** — persist `ReplaceAll` (caller-side) in `applyConfigSnapshot` once the underlying write is fully atomic-durable.
 
 #### P3.3 — Final-flush opt-in: config versioning, audit log handle, request log handle `[travel-ok]`
 - **Files:** `configversion.go`, `logger.go` (audit/request portions), `runtime_shutdown.go`.
@@ -289,9 +306,9 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 ## 5. Recommended next PR
 
-Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery — see the P3.1 entry above for findings; PAC, fileBlocker, and profile store already rely on synchronous save-on-write and did not justify shutdown flush hooks. The next implementation PR is:
+Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery (see P3.1 entry above; follow-ups #2 and #3 shipped as PRs #221 and #222). P3.2 also closed out as discovery — see the P3.2 entry above; node groups and bandwidth are already fully durable, and the policy-store gaps are split into P3.2a and P3.2b. The next implementation PR is:
 
-- **P3.2 — policy store / node groups / bandwidth durability** `[travel-ok]`. **Apply the same discovery-first pattern as P3.1**: confirm whether each store relies on save-on-write before adding any flush hook. Hooks should only land if the discovery proves a real in-memory-only window — not as blanket coverage.
+- **P3.2a — harden `PolicyStore.Save()` main-file write via `atomicWriteFile`** `[travel-ok]`. Mechanical change in `policy.go` (replace the `os.WriteFile` + `os.Rename` pair at lines 458, 461 with a single `atomicWriteFile` call) plus focused tests in `policy_test.go` mirroring PR #221's shape. Prerequisite for P3.2b.
 
 Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 only adds opt-in `Save(ctx)` hooks where the discovery proves a real durability gap. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
 
