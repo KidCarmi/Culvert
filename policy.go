@@ -452,13 +452,8 @@ func (ps *PolicyStore) Save() {
 	if err != nil {
 		return
 	}
-	// Write to a temp file then rename for an atomic replace — a crash
-	// mid-write must not corrupt the persisted rule file.
-	tmp := ps.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, ps.path)
+	// Atomic + durable write — temp file, fsync, rename, parent-dir fsync.
+	_ = atomicWriteFile(ps.path, data, 0o600)
 	ps.saveMeta()
 }
 
