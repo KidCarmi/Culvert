@@ -375,12 +375,13 @@ func TestApplyConfigSnapshot_PolicyRulesPersist(t *testing.T) {
 	origRules := policyStore.List()
 	origPath := policyStore.path
 	t.Cleanup(func() {
-		policyStore.ReplaceAll(origRules)
 		policyStore.path = origPath
+		policyStore.ReplaceAll(origRules)
 	})
 
 	dir := t.TempDir()
-	policyStore.path = filepath.Join(dir, "policy.json")
+	path := filepath.Join(dir, "policy.json")
+	policyStore.path = path
 
 	snap := ConfigSnapshot{
 		Version: 1,
@@ -392,7 +393,7 @@ func TestApplyConfigSnapshot_PolicyRulesPersist(t *testing.T) {
 
 	// Reload via a fresh PolicyStore and assert the rule is on disk.
 	fresh := &PolicyStore{}
-	if err := fresh.Load(policyStore.path); err != nil {
+	if err := fresh.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	rules := fresh.List()
