@@ -823,11 +823,13 @@ func TestEvaluate_CategoryAnyWithFQDN(t *testing.T) {
 	}
 }
 
-// TestPolicyStore_SaveMeta_NoTmpLeak verifies the converted .meta sidecar
-// writer (atomicWriteFile) does not leave orphaned *.tmp.* files. Save()
-// writes both the primary policy file (out-of-scope old temp+rename
-// pattern) and .meta (in-scope, hardened); assertNoTmpLeak only matches
-// the new helper's *.tmp.* pattern, so this isolates .meta correctness.
+// TestPolicyStore_SaveMeta_NoTmpLeak verifies the .meta sidecar writer
+// (atomicWriteFile) does not leave orphaned *.tmp.* files. Save() writes
+// both the primary policy file and the .meta sidecar; both now use
+// atomicWriteFile (P3.2a hardened the primary write path). The assertion
+// covers the whole directory, so this test transitively pins both writes.
+// TestPolicyStore_Save_MainFileNoTmpLeak below pins the primary write
+// path explicitly.
 func TestPolicyStore_SaveMeta_NoTmpLeak(t *testing.T) {
 	dir := t.TempDir()
 	ps := newTestPolicyStore()
@@ -835,4 +837,34 @@ func TestPolicyStore_SaveMeta_NoTmpLeak(t *testing.T) {
 	ps.Add(PolicyRule{Priority: 10, Name: "tmpleak-test", Action: ActionAllow})
 	ps.Save()
 	assertNoTmpLeak(t, dir)
+}
+
+// TestPolicyStore_Save_MainFileNoTmpLeak pins the primary policy file's
+// atomicWriteFile cleanup contract (P3.2a). Mirrors the per-store pattern
+// established by TestFileBlocker_Save_NoTmpLeak and
+// TestFileProfileStore_Save_NoTmpLeak.
+func TestPolicyStore_Save_MainFileNoTmpLeak(t *testing.T) {
+	dir := t.TempDir()
+	ps := newTestPolicyStore()
+	ps.path = filepath.Join(dir, "policy.json")
+	ps.Add(PolicyRule{Priority: 1, Name: "main-tmpleak-test", Action: ActionAllow})
+	ps.Save()
+	assertNoTmpLeak(t, dir)
+}
+
+// TestPolicyStore_Save_MetaSkippedOnMainWriteFailure pins that saveMeta is
+// NOT called when the primary file write fails. Otherwise the .meta sidecar
+// could record a newer version/timestamp than the rules on disk after a
+// partial-write failure (ENOSPC/EIO mid-Save).
+func TestPolicyStore_Save_MetaSkippedOnMainWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	ps := newTestPolicyStore()
+	// Path under a directory that doesn't exist — atomicWriteFile fails
+	// at os.CreateTemp because the parent dir is missing.
+	ps.path = filepath.Join(dir, "missing", "policy.json")
+	ps.Add(PolicyRule{Priority: 1, Name: "main-write-fails", Action: ActionAllow})
+	ps.Save()
+	if _, err := os.Stat(ps.path + ".meta"); !os.IsNotExist(err) {
+		t.Fatalf(".meta sidecar must not exist when main write fails (stat err=%v)", err)
+	}
 }
