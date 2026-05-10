@@ -453,7 +453,11 @@ func (ps *PolicyStore) Save() {
 		return
 	}
 	// Atomic + durable write — temp file, fsync, rename, parent-dir fsync.
-	_ = atomicWriteFile(ps.path, data, 0o600)
+	// Skip saveMeta on failure so the .meta sidecar can't record a newer
+	// version/timestamp than the rules actually on disk.
+	if err := atomicWriteFile(ps.path, data, 0o600); err != nil {
+		return
+	}
 	ps.saveMeta()
 }
 

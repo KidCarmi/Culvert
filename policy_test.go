@@ -851,3 +851,20 @@ func TestPolicyStore_Save_MainFileNoTmpLeak(t *testing.T) {
 	ps.Save()
 	assertNoTmpLeak(t, dir)
 }
+
+// TestPolicyStore_Save_MetaSkippedOnMainWriteFailure pins that saveMeta is
+// NOT called when the primary file write fails. Otherwise the .meta sidecar
+// could record a newer version/timestamp than the rules on disk after a
+// partial-write failure (ENOSPC/EIO mid-Save).
+func TestPolicyStore_Save_MetaSkippedOnMainWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	ps := newTestPolicyStore()
+	// Path under a directory that doesn't exist — atomicWriteFile fails
+	// at os.CreateTemp because the parent dir is missing.
+	ps.path = filepath.Join(dir, "missing", "policy.json")
+	ps.Add(PolicyRule{Priority: 1, Name: "main-write-fails", Action: ActionAllow})
+	ps.Save()
+	if _, err := os.Stat(ps.path + ".meta"); !os.IsNotExist(err) {
+		t.Fatalf(".meta sidecar must not exist when main write fails (stat err=%v)", err)
+	}
+}
