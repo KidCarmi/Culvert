@@ -7,9 +7,82 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// snapshotLateShutdownGlobals saves and zeroes every package-level handle
+// that registerLateShutdownHooks can touch, then restores them on
+// t.Cleanup. Without this, running the late registry in a test would
+// close unrelated globals (syslog connection, community DB, request log
+// file, etc.) that other tests in the same binary may depend on under
+// -shuffle=on or -count=N.
+//
+// Zeroing each pointer turns its hook into a nil-guarded no-op, leaving
+// only the audit-log-close hook live for the test to exercise. Callers
+// configure the audit globals themselves after this returns.
+//
+// The startupState passed to registerLateShutdownHooks remains a fresh
+// zero value (s.scanSvc, s.adminUISrv, s.socks5Srv, s.logCloser all
+// nil), so those hooks already no-op without snapshotting.
+func snapshotLateShutdownGlobals(t *testing.T) {
+	t.Helper()
+
+	// Audit log globals (store.go).
+	oldAuditFile := auditLogFile
+	oldAuditCloser := auditCloser
+	oldAuditPath := auditLogFilePath
+	oldAuditLog := auditLog
+
+	// Request log globals (store.go).
+	oldReqWriter := requestLogWriter
+	oldReqCloser := requestLogCloser
+	oldReqPath := requestLogFilePath
+
+	// Syslog (syslog.go).
+	oldSyslog := globalSyslog
+
+	// Community feed DB (catdb.go).
+	oldCommunityDB := communityDB
+
+	// Tunnel-drain hook polls this atomic counter. Snapshot defensively
+	// so the test's drain returns immediately (active == 0) regardless of
+	// what other tests left behind.
+	oldActiveConns := atomic.LoadInt64(&activeConns)
+
+	auditLogFile = nil
+	auditCloser = nil
+	auditLogFilePath = ""
+	auditMu.Lock()
+	auditLog = nil
+	auditMu.Unlock()
+
+	requestLogWriter = nil
+	requestLogCloser = nil
+	requestLogFilePath = ""
+
+	globalSyslog = nil
+	communityDB = nil
+	atomic.StoreInt64(&activeConns, 0)
+
+	t.Cleanup(func() {
+		auditLogFile = oldAuditFile
+		auditCloser = oldAuditCloser
+		auditLogFilePath = oldAuditPath
+		auditMu.Lock()
+		auditLog = oldAuditLog
+		auditMu.Unlock()
+
+		requestLogWriter = oldReqWriter
+		requestLogCloser = oldReqCloser
+		requestLogFilePath = oldReqPath
+
+		globalSyslog = oldSyslog
+		communityDB = oldCommunityDB
+		atomic.StoreInt64(&activeConns, oldActiveConns)
+	})
+}
 
 // TestAuditLogCloseHook_RoundTrip exercises the audit-log-close hook end to
 // end: write one entry with a unique discriminator, run the late shutdown
@@ -24,32 +97,10 @@ import (
 // timestamp-suffixed Action) makes the entry uniquely identifiable across
 // shuffled cumulative runs.
 func TestAuditLogCloseHook_RoundTrip(t *testing.T) {
+	snapshotLateShutdownGlobals(t)
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
-
-	// Snapshot audit globals and restore on cleanup so this test is safe
-	// under -shuffle=on and -count=N.
-	oldFile := auditLogFile
-	oldCloser := auditCloser
-	oldPath := auditLogFilePath
-	oldLog := auditLog
-	auditLogFile = nil
-	auditCloser = nil
-	auditLogFilePath = ""
-	auditMu.Lock()
-	auditLog = nil
-	auditMu.Unlock()
-	t.Cleanup(func() {
-		if auditCloser != nil {
-			_ = auditCloser.Close()
-		}
-		auditLogFile = oldFile
-		auditCloser = oldCloser
-		auditLogFilePath = oldPath
-		auditMu.Lock()
-		auditLog = oldLog
-		auditMu.Unlock()
-	})
 
 	if err := InitAuditLog(path); err != nil {
 		t.Fatalf("InitAuditLog: %v", err)
@@ -74,6 +125,8 @@ func TestAuditLogCloseHook_RoundTrip(t *testing.T) {
 
 	// Run the late shutdown hooks. The audit-log-close hook is in the
 	// late registry between request-log-close (130) and log-closer (140).
+	// All other late hooks no-op because snapshotLateShutdownGlobals
+	// zeroed the globals they would otherwise touch.
 	var late shutdownRegistry
 	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -82,8 +135,13 @@ func TestAuditLogCloseHook_RoundTrip(t *testing.T) {
 		t.Fatalf("late.RunAll: %v", err)
 	}
 
-	// File handle should now be closed. Read the file back from disk and
-	// assert our unique discriminator was persisted.
+	// auditCloser has just been closed by the hook. Clear it so the
+	// snapshot cleanup doesn't attempt a double-close on the *os.File.
+	auditCloser = nil
+	auditLogFile = nil
+
+	// Read the file back from disk and assert our unique discriminator
+	// was persisted.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read audit log after shutdown: %v", err)
@@ -98,17 +156,7 @@ func TestAuditLogCloseHook_RoundTrip(t *testing.T) {
 // audit log was configured at startup (path was empty). The registry must
 // still run all hooks without panicking.
 func TestAuditLogCloseHook_NilCloserIsNoOp(t *testing.T) {
-	oldFile := auditLogFile
-	oldCloser := auditCloser
-	oldPath := auditLogFilePath
-	auditLogFile = nil
-	auditCloser = nil
-	auditLogFilePath = ""
-	t.Cleanup(func() {
-		auditLogFile = oldFile
-		auditCloser = oldCloser
-		auditLogFilePath = oldPath
-	})
+	snapshotLateShutdownGlobals(t)
 
 	var late shutdownRegistry
 	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
