@@ -120,10 +120,10 @@ func TestAuditLogCloseHook_NilCloserIsNoOp(t *testing.T) {
 }
 
 func truncForLog(b []byte) string {
-	const max = 256
+	const maxLen = 256
 	s := string(b)
-	if len(s) > max {
-		return s[:max] + "…"
+	if len(s) > maxLen {
+		return s[:maxLen] + "…"
 	}
 	return strings.TrimSpace(s)
 }
