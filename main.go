@@ -1415,6 +1415,7 @@ const (
 	shutdownOrderSyslogClose         = 110
 	shutdownOrderCommunityDBClose    = 120
 	shutdownOrderRequestLogClose     = 130
+	shutdownOrderAuditLogClose       = 135
 	shutdownOrderLogCloser           = 140
 )
 
@@ -1553,6 +1554,16 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 	reg.Register("request-log-close", shutdownOrderRequestLogClose, func(context.Context) error {
 		if requestLogCloser != nil {
 			_ = requestLogCloser.Close() // best-effort flush
+		}
+		return nil
+	})
+	// P3.3 / S7. Release the audit-log file descriptor. Writes are
+	// synchronous, unbuffered, kernel-side already on disk — this closes
+	// the OS handle to eliminate the FD leak flagged as Risk #6 in
+	// ARCH_DISCOVERY. Best-effort, byte-equivalent to request-log-close.
+	reg.Register("audit-log-close", shutdownOrderAuditLogClose, func(context.Context) error {
+		if auditCloser != nil {
+			_ = auditCloser.Close() // best-effort FD release
 		}
 		return nil
 	})
