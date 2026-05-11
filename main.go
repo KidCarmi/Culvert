@@ -734,37 +734,14 @@ func initConnAndRateLimit(s *startupState) {
 	}
 }
 
-// initBlocklist loads the blocklist from disk and starts the blocklist feed syncer.
+// initBlocklist loads the blocklist from disk and starts the blocklist feed
+// syncer. P4.1 / S1: the implementation lives in blocklist_startup.go +
+// blocklist_startup_config.go; this is a thin shim that resolves the slice
+// config and hands it to the loader. s.blPath is the already-resolved path
+// from loadFileConfigAndFlags — keep it as the single source of truth for
+// path precedence.
 func initBlocklist(s *startupState) {
-	// ── Blocklist ────────────────────────────────────────────────────────────
-	if s.blPath != "" {
-		if err := bl.Load(s.blPath); err != nil {
-			if os.IsNotExist(err) {
-				logger.Printf("Blocklist not found at %s — starting with empty list", s.blPath)
-			} else {
-				logger.Fatalf("Cannot load blocklist: %v", err)
-			}
-		} else {
-			logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), s.blPath)
-		}
-	}
-
-	// ── Blocklist feed sync ───────────────────────────────────────────────────
-	blFeedURL := s.fc.Proxy.BlocklistFeedURL
-	if blFeedURL != "" {
-		blFeedInterval := blFeedDefaultInterval
-		// Local name `iv` (not `s`) to avoid shadowing the *startupState parameter.
-		if iv := s.fc.Proxy.BlocklistFeedInterval; iv != "" {
-			if d, err := time.ParseDuration(iv); err == nil && d > 0 {
-				blFeedInterval = d
-			}
-		}
-		blFeedSyncer = newBlocklistSyncer(bl, blFeedURL, blFeedInterval)
-		blFeedSyncer.Start(appLifecycleCtx)
-		logger.Printf("BlocklistFeed: syncing from %s every %s", blFeedURL, blFeedInterval)
-	} else {
-		blFeedSyncer = newBlocklistSyncer(bl, "", blFeedDefaultInterval)
-	}
+	loadBlocklist(resolveBlocklistStartupConfig(s.fc, s.blPath), appLifecycleCtx)
 }
 
 // initRootCA loads or initialises the Root CA used for SSL inspection.
