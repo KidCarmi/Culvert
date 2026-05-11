@@ -226,11 +226,16 @@ These are pre-existing policy-store durability issues uncovered by the P3.2 disc
 - ✅ **P3.2b** shipped after (PR #225) — persisted `ReplaceAll` (caller-side) in `applyConfigSnapshot` once the underlying write was fully atomic-durable.
 - ☐ **P3.2c** deferred — HA-layer optimization, separate from the durability sequence.
 
-#### P3.3 — Final-flush opt-in: config versioning, audit log handle, request log handle `[travel-ok]`
-- **Files:** `configversion.go`, `logger.go` (audit/request portions), `runtime_shutdown.go`.
-- **Tests:** must respect the audit-ring saturation pitfall (see CLAUDE.md "Test-authoring pitfalls"): assert on entry **content** with a unique discriminator, not on `len(auditGet())` deltas.
-- **Risk:** LOW.
-- **Acceptance:** audit-log file handle no longer leaks on SIGKILL-timeout (Risk #5 from ARCH_DISCOVERY).
+#### P3.3 — Final-flush opt-in: audit-log-close hook (scope reduced) `[travel-ok]`
+- **Status:** ✅ **SCOPE-REDUCED via discovery.** Two of the three nominal P3.3 targets need no production change:
+  - **Config versioning** (`configversion.go`) — every `saveConfigVersion` calls `atomicWriteFile` synchronously on the mutating goroutine. No buffer, no long-lived handle. A shutdown hook would be a no-op decorator. **No production change.**
+  - **Request log handle** (`requestLogCloser` in `store.go:144–175`) — already released by the `request-log-close` hook at `shutdownOrderRequestLogClose=130` (pinned in `canonicalLateShutdownHooks`). **No production change.**
+  - **Audit log handle** (`auditCloser` in `store.go:288–331`) — opened by `InitAuditLog`, **never closed**. The declaration comment literally says `// close on shutdown` but no shutdown path did so. This is the actual gap.
+- **Files:** `main.go` (order constant + late-registry hook), `runtime_shutdown_wiring_test.go` (canonical-list pin), `audit_close_hook_test.go` (focused round-trip + nil-closer no-op).
+- **Implementation:** adds `shutdownOrderAuditLogClose = 135` between `request-log-close=130` and `log-closer=140`, plus a best-effort `auditCloser.Close()` hook in `registerLateShutdownHooks`. Byte-equivalent to the existing `request-log-close` and `syslog-close` patterns — error suppressed, ctx ignored, returns `nil` to the registry.
+- **Tests:** assert on entry **content** with a unique discriminator (CLAUDE.md "Test-authoring pitfalls" — never `len(auditGet())` deltas).
+- **Risk:** LOW. Insertion only — no shutdown reorder, no schema change, no `rotatingFile.Close()` change, no fsync redesign.
+- **Acceptance:** audit-log file handle is released as part of the late shutdown phase. Resolves Risk #6 from ARCH_DISCOVERY (file-descriptor leak; data was already on disk via synchronous unbuffered writes).
 
 #### P3.4 — Final-flush opt-in: cluster store heartbeat — **lab-required**
 - **Targets:** S7 (MEDIUM-severity portion).
@@ -308,9 +313,9 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 ## 5. Recommended next PR
 
-Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. The next implementation PR is:
+Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. P3.3 scope was reduced via discovery to the `audit-log-close` hook only (config versioning and request log handle confirmed no-op — see the P3.3 entry above). **P3.4 is gated on the P6.4 cluster discovery merge.** The next unblocked implementation PR is:
 
-- **P3.3 — Final-flush opt-in: config versioning, audit log handle, request log handle** `[travel-ok]`. **Apply the same discovery-first pattern as P3.1 and P3.2**: confirm whether each store/handle relies on save-on-write before adding any flush hook. Audit-touching tests must respect the audit-ring saturation pitfall in CLAUDE.md (assert on entry content with a unique discriminator, never `len(auditGet())` deltas).
+- **P4.1 — Extract `initBlocklist`** `[travel-ok]` (Phase 4, S1 god-object reduction). Follows the established `<domain>_startup_config.go` + `<domain>_startup.go` + `<domain>_startup_test.go` convention from PR3. One blocklist syncer goroutine parented to `appLifecycleCtx`; live-mutable store. Do NOT touch `applyHotReload`, `bl.Load` semantics, or blocklist feed cadence.
 
 Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 only adds opt-in `Save(ctx)` hooks where the discovery proves a real durability gap. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
 

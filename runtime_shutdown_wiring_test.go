@@ -54,6 +54,7 @@ var canonicalLateShutdownHooks = []struct {
 	{"syslog-close", shutdownOrderSyslogClose},
 	{"community-db-close", shutdownOrderCommunityDBClose},
 	{"request-log-close", shutdownOrderRequestLogClose},
+	{"audit-log-close", shutdownOrderAuditLogClose},
 	{"log-closer", shutdownOrderLogCloser},
 }
 
