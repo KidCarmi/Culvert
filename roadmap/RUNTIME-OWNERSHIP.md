@@ -249,10 +249,11 @@ These are pre-existing policy-store durability issues uncovered by the P3.2 disc
 
 All follow the established `<domain>_startup_config.go` + `<domain>_startup.go` + `<domain>_startup_test.go` convention from PR3. Targets S1.
 
-#### P4.1 — Extract `initBlocklist` `[travel-ok]`
-- **Files:** `blocklist_startup.go`, `blocklist_startup_config.go`, `blocklist_startup_test.go`, `main.go`.
-- **Risk:** MEDIUM. One blocklist syncer goroutine parented to `appLifecycleCtx`; live-mutable store.
-- **What not to touch:** `applyHotReload`, `bl.Load` semantics, blocklist feed cadence.
+#### P4.1 — Extract `initBlocklist` ✅ DONE `[travel-ok]`
+- **Status:** ✅ shipped. `initBlocklist` is now a 2-line shim that calls `resolveBlocklistStartupConfig(s.fc, s.blPath)` (the resolver owns `FeedInterval` parsing + default) and `loadBlocklist(cfg, appLifecycleCtx)` (the loader owns the side effects: `bl.Load`, `blFeedSyncer = newBlocklistSyncer(...)`, optional `Start(ctx)`). `s.blPath` remains the single source of truth for path precedence — the shim does NOT re-read `*s.blockFile`. Pinned in `startup_slice_contract_test.go` (12th slice).
+- **Files:** `blocklist_startup.go`, `blocklist_startup_config.go`, `blocklist_startup_test.go`, `main.go`, `startup_slice_contract_test.go`.
+- **Preserved invariants:** `bl.Load` semantics; `logger.Fatalf` on non-`IsNotExist` load error; identical log strings; `blFeedSyncer` always assigned (UI handlers depend on this); `Start(ctx)` only when `FeedURL != ""`; syncer goroutine parented to `appLifecycleCtx` (cancelled by the existing early-phase `app-lifecycle-cancel` hook). No new `startupState` field; no new shutdown hook; `applyHotReload` untouched.
+- **Risk:** MEDIUM (live-mutable `bl` store + one goroutine) — contained via the loader's explicit ctx parameter (tests pass per-test cancellable ctx; no leaked goroutines under `-shuffle=on` / `-count=2`).
 
 #### P4.2 — Extract `initConnAndRateLimit` `[travel-ok]`
 - **Files:** `connlimit_startup.go`, `connlimit_startup_config.go`, `connlimit_startup_test.go`, `main.go`.
@@ -313,9 +314,9 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 ## 5. Recommended next PR
 
-Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. P3.3 scope was reduced via discovery to the `audit-log-close` hook only (config versioning and request log handle confirmed no-op — see the P3.3 entry above). **P3.4 is gated on the P6.4 cluster discovery merge.** The next unblocked implementation PR is:
+Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. P3.3 scope was reduced via discovery to the `audit-log-close` hook only (PR #227). **P3.4 is gated on the P6.4 cluster discovery merge.** P4.1 (`initBlocklist` extraction) shipped as the 12th startup slice. The next unblocked implementation PR is:
 
-- **P4.1 — Extract `initBlocklist`** `[travel-ok]` (Phase 4, S1 god-object reduction). Follows the established `<domain>_startup_config.go` + `<domain>_startup.go` + `<domain>_startup_test.go` convention from PR3. One blocklist syncer goroutine parented to `appLifecycleCtx`; live-mutable store. Do NOT touch `applyHotReload`, `bl.Load` semantics, or blocklist feed cadence.
+- **P4.2 — Extract `initConnAndRateLimit`** `[travel-ok]` (Phase 4, S1 god-object reduction). Follows the same `<domain>_startup_config.go` + `<domain>_startup.go` + `<domain>_startup_test.go` convention. Keep `s.rlCleanupCancel` carry on `startupState` (already consumed by the Phase 2 shutdown registry's `rate-limit-cleanup-cancel` early hook). Do NOT touch the `applyHotReload` rate-limit path or the sharded-mutex internals.
 
 Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 only adds opt-in `Save(ctx)` hooks where the discovery proves a real durability gap. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
 
