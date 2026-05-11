@@ -15,8 +15,11 @@ package main
 //     at admin_settings.go:161 and ui_policy.go:245 rely on it being
 //     non-nil after init.
 //   - .Start(ctx) is only invoked when cfg.FeedURL != "". The empty-
-//     URL branch constructs the syncer with default interval but
-//     never spawns the goroutine.
+//     URL branch constructs the syncer with blFeedDefaultInterval
+//     (NOT cfg.FeedInterval) to match the pre-extraction behaviour:
+//     a user-set blocklist_feed_interval is dormant until a feed URL
+//     is configured, at which point the admin API's SetFeed() takes
+//     over interval management.
 
 import (
 	"context"
@@ -29,23 +32,34 @@ import (
 // existing early-phase `app-lifecycle-cancel` shutdown hook stops it
 // at SIGTERM. Tests pass a per-test cancellable ctx.
 func loadBlocklist(cfg blocklistStartupConfig, ctx context.Context) {
-	if cfg.Path != "" {
-		if err := bl.Load(cfg.Path); err != nil {
-			if os.IsNotExist(err) {
-				logger.Printf("Blocklist not found at %s — starting with empty list", cfg.Path)
-			} else {
-				logger.Fatalf("Cannot load blocklist: %v", err)
-			}
-		} else {
-			logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), cfg.Path)
-		}
-	}
+	tryLoadBlocklistFile(cfg.Path)
 
 	if cfg.FeedURL != "" {
 		blFeedSyncer = newBlocklistSyncer(bl, cfg.FeedURL, cfg.FeedInterval)
 		blFeedSyncer.Start(ctx)
 		logger.Printf("BlocklistFeed: syncing from %s every %s", cfg.FeedURL, cfg.FeedInterval)
 	} else {
-		blFeedSyncer = newBlocklistSyncer(bl, "", cfg.FeedInterval)
+		// Empty-URL branch intentionally pins to blFeedDefaultInterval
+		// rather than cfg.FeedInterval — see file-level invariants.
+		blFeedSyncer = newBlocklistSyncer(bl, "", blFeedDefaultInterval)
+	}
+}
+
+// tryLoadBlocklistFile applies the pre-extraction file-load semantics
+// for path. Extracted from loadBlocklist to keep the nesting depth
+// inside loadBlocklist below the linter threshold; behaviour and log
+// strings are byte-equivalent to the inline form.
+func tryLoadBlocklistFile(path string) {
+	if path == "" {
+		return
+	}
+	err := bl.Load(path)
+	switch {
+	case err == nil:
+		logger.Printf("Blocklist loaded: %d entries from %s", bl.Count(), path)
+	case os.IsNotExist(err):
+		logger.Printf("Blocklist not found at %s — starting with empty list", path)
+	default:
+		logger.Fatalf("Cannot load blocklist: %v", err)
 	}
 }

@@ -140,6 +140,39 @@ func TestLoadBlocklist_EmptyConfigStillAssignsSyncer(t *testing.T) {
 	}
 }
 
+// TestLoadBlocklist_EmptyURLPinsDefaultInterval guards the
+// behaviour-preservation invariant that the empty-URL branch always
+// constructs blFeedSyncer with blFeedDefaultInterval, regardless of
+// cfg.FeedInterval. The pre-extraction body hard-coded
+// blFeedDefaultInterval in this branch; if a future refactor passes
+// cfg.FeedInterval through instead, the admin API's first read of
+// blFeedSyncer.Stats() would expose a user-set
+// blocklist_feed_interval value even though auto-sync was disabled
+// at startup.
+func TestLoadBlocklist_EmptyURLPinsDefaultInterval(t *testing.T) {
+	ensureBlocklistStartupTestLogger(t)
+	snapshotBlocklistGlobals(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// cfg.FeedInterval is non-default but cfg.FeedURL is empty — the
+	// loader MUST pin the syncer to blFeedDefaultInterval.
+	loadBlocklist(blocklistStartupConfig{
+		FeedURL:      "",
+		FeedInterval: 30 * time.Minute,
+	}, ctx)
+
+	if blFeedSyncer == nil {
+		t.Fatal("blFeedSyncer must be non-nil")
+	}
+	_, _, _, interval := blFeedSyncer.Stats()
+	if interval != blFeedDefaultInterval {
+		t.Errorf("empty-URL branch must pin to default; got interval = %v, want %v",
+			interval, blFeedDefaultInterval)
+	}
+}
+
 func TestLoadBlocklist_LoadsFromTempFile(t *testing.T) {
 	ensureBlocklistStartupTestLogger(t)
 	snapshotBlocklistGlobals(t)
