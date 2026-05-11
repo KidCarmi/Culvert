@@ -1488,6 +1488,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// Policy rules.
 	if snap.PolicyRules != nil {
 		policyStore.ReplaceAll(snap.PolicyRules)
+		policyStore.Save()
 	}
 
 	// SSL bypass patterns.

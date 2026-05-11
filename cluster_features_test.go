@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -358,5 +359,51 @@ func TestApplyConfigSnapshot_FullPolicy(t *testing.T) {
 	rr := rewriter.List()
 	if len(rr) != 1 || rr[0].Host != "*.example.com" {
 		t.Errorf("rewrite rules not applied: %v", rr)
+	}
+}
+
+// TestApplyConfigSnapshot_PolicyRulesPersist exercises P3.2b: applyConfigSnapshot
+// must persist the cluster-pushed policy rules to disk so a DP node survives
+// restart with the most recent CP-applied snapshot instead of stale state.
+//
+// Snapshot+restore the policyStore globals (rules + path) so this test stays
+// deterministic under -shuffle=on. policyStore.path is empty by default in
+// the test process; restoring it on cleanup keeps other tests that touch
+// policyStore via applyConfigSnapshot from accidentally writing to a stale
+// tempdir.
+func TestApplyConfigSnapshot_PolicyRulesPersist(t *testing.T) {
+	origRules := policyStore.List()
+	origPath := policyStore.path
+	t.Cleanup(func() {
+		policyStore.path = origPath
+		policyStore.ReplaceAll(origRules)
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	policyStore.path = path
+
+	snap := ConfigSnapshot{
+		Version: 1,
+		PolicyRules: []PolicyRule{
+			{Priority: 1, Name: "persist-test", DestFQDN: "test.com", Action: ActionAllow},
+		},
+	}
+	applyConfigSnapshot(snap)
+
+	// Reload via a fresh PolicyStore and assert the rule is on disk.
+	fresh := &PolicyStore{}
+	if err := fresh.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rules := fresh.List()
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule on disk, got %d", len(rules))
+	}
+	if rules[0].Name != "persist-test" {
+		t.Fatalf("expected rule Name=%q, got %q", "persist-test", rules[0].Name)
+	}
+	if rules[0].DestFQDN != "test.com" {
+		t.Fatalf("expected rule DestFQDN=%q, got %q", "test.com", rules[0].DestFQDN)
 	}
 }
