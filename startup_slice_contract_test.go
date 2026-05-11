@@ -3,7 +3,8 @@ package main
 // startup_slice_contract_test.go — pins the cross-slice convention for the
 // already-extracted startup slices that landed under the
 // `<domain>_startup_config.go` + `<domain>_startup.go` pattern. The 11
-// PR3 pilots plus blocklist (P4.1) are covered today.
+// PR3 pilots plus blocklist (P4.1) and conn_and_rate_limit (P4.2) are
+// covered today.
 //
 // Goal: when someone adds a 12th slice or refactors an existing one, this
 // test surfaces drift early without requiring an AST walk. Three simple
@@ -40,6 +41,7 @@ func TestStartupSliceContract_PureAndDeterministic(t *testing.T) {
 	}{
 		{"fileblock", func(fc *FileConfig) any { return resolveFileBlockStartupConfig(fc, "") }},
 		{"blocklist", func(fc *FileConfig) any { return resolveBlocklistStartupConfig(fc, "") }},
+		{"conn_and_rate_limit", func(fc *FileConfig) any { return resolveConnAndRateLimitStartupConfig(fc, "", 0) }},
 		{"geoip", func(fc *FileConfig) any { return resolveGeoIPStartupConfig(fc, "") }},
 		{"inspection_rules", func(fc *FileConfig) any { return resolveInspectionRulesConfig(fc) }},
 		{"legacy_auth_providers", func(fc *FileConfig) any { return resolveLegacyAuthProvidersStartupConfig(fc, "") }},
