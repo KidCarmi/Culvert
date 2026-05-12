@@ -536,46 +536,24 @@ func initSession(s *startupState) {
 	}
 }
 
-// initObservability configures syslog, OTLP export, and persistent audit/request logs.
+// initObservability configures syslog, OTLP export, and persistent
+// audit/request logs. P4.3 / S1: the implementation lives in
+// observability_startup.go + observability_startup_config.go; this is
+// a thin shim that resolves the slice config and hands it to the
+// loader. No carry to startupState — the file-handle closers stay on
+// their package globals (globalSyslog, auditCloser, requestLogCloser)
+// and continue to be read by the existing syslog-close / audit-log-
+// close / request-log-close shutdown hooks.
 func initObservability(s *startupState) {
-	// ── Syslog / SIEM forwarding ──────────────────────────────────────────────
-	syslogVal := firstStr(*s.syslogAddr, s.fc.SyslogAddr)
-	syslogFmtVal := firstStr(*s.syslogFormat, s.fc.SyslogFormat)
-	if syslogVal != "" {
-		if err := InitSyslog(syslogVal, syslogFmtVal); err != nil {
-			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
-		} else {
-			syslogConfigured = syslogVal
-		}
-	}
-
-	// ── OTLP export (metrics + traces) ──────────────────────────────────────
-	otlpVal := firstStr(*s.otlpEndpoint, s.fc.OTLPEndpoint)
-	if otlpVal != "" {
-		globalOTLP.Configure(otlpVal, nil)
-		globalOTLPTraces.Configure(otlpVal, nil)
-	}
-
-	// ── Persistent audit log ──────────────────────────────────────────────────
-	auditLogVal := firstStr(*s.auditLog, s.fc.AuditLogFile)
-	if auditLogVal != "" {
-		if err := InitAuditLog(auditLogVal); err != nil {
-			logger.Printf("Audit: log file error (%v) — falling back to in-memory", err)
-		} else {
-			logger.Printf("Audit: persisting to %s", auditLogVal)
-		}
-	}
-
-	// ── Persistent request log (Finding 6.1) ────────────────────────────────
-	reqLogVal := firstStr(*s.requestLogPath, s.fc.RequestLogFile)
-	reqLogMB := firstNonZero(*s.requestLogMaxMB, s.fc.RequestLogMaxMB, 100)
-	if reqLogVal != "" {
-		if err := initRequestLog(reqLogVal, reqLogMB); err != nil {
-			logger.Printf("RequestLog: file error (%v) — falling back to in-memory only", err)
-		} else {
-			logger.Printf("RequestLog: persisting to %s (max %d MB)", reqLogVal, reqLogMB)
-		}
-	}
+	loadObservability(resolveObservabilityStartupConfig(
+		s.fc,
+		*s.syslogAddr,
+		*s.syslogFormat,
+		*s.otlpEndpoint,
+		*s.auditLog,
+		*s.requestLogPath,
+		*s.requestLogMaxMB,
+	))
 }
 
 // initGeoIP is the PR3 expansion shim: resolve the GeoIP DB slice, stash
