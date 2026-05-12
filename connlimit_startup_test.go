@@ -247,8 +247,9 @@ func TestRateLimitCleanupLoop_ExitsOnContextDone(t *testing.T) {
 		close(done)
 	}()
 
-	// Give the goroutine a moment to enter the select.
-	time.Sleep(10 * time.Millisecond)
+	// Cancel immediately — the goroutine's select arm will pick up
+	// ctx.Done() whether it's already in the select or scheduled
+	// shortly after. No sleep needed.
 	cancel()
 
 	select {
