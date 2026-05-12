@@ -1,0 +1,357 @@
+package main
+
+// observability_startup_test.go — P4.3 / S1 coverage for the
+// extracted observability startup slice.
+//
+// Resolver tests are pure (no globals touched). Loader tests
+// snapshot/restore the eleven package-level observability globals
+// via t.Cleanup so they are safe under -shuffle=on / -count=2.
+// File handles opened during tests are closed in cleanup; OTLP
+// exporters spawned by Configure() are Stop()'d before pointer
+// restore so no pushLoop goroutines leak across tests.
+//
+// CLAUDE.md "Test-authoring pitfalls": no len(auditGet()) delta
+// assertions — the few tests that exercise audit-log init verify
+// post-conditions on auditCloser / auditLogFilePath instead.
+
+import (
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+var observabilityStartupLoggerMu sync.Mutex
+
+func ensureObservabilityStartupTestLogger(t *testing.T) {
+	t.Helper()
+	observabilityStartupLoggerMu.Lock()
+	defer observabilityStartupLoggerMu.Unlock()
+	if logger == nil {
+		logger = log.New(os.Stderr, "[test] ", 0)
+	}
+}
+
+// freshOTLPExporter constructs a zero-state OTLPExporter for tests.
+// Mirrors the package-level initialiser at otlp.go:45–51.
+func freshOTLPExporter() *OTLPExporter {
+	return &OTLPExporter{
+		interval: 15 * time.Second,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	}
+}
+
+// freshOTLPSpanExporter constructs a zero-state OTLPSpanExporter for
+// tests. Mirrors otlp_traces.go:67–.
+func freshOTLPSpanExporter() *OTLPSpanExporter {
+	return &OTLPSpanExporter{
+		interval: 15 * time.Second,
+		client:   &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// snapshotObservabilityGlobals saves and zeroes every package-level
+// global that loadObservability can touch, then restores them on
+// t.Cleanup. Any file handle or goroutine spawned by the test-under-
+// test is closed/stopped in cleanup BEFORE the restore so the
+// suite stays clean under -shuffle=on / -count=2.
+func snapshotObservabilityGlobals(t *testing.T) {
+	t.Helper()
+
+	// Syslog forwarding (syslog.go + ui_config.go:648).
+	oldSyslogConfigured := syslogConfigured
+	oldGlobalSyslog := globalSyslog
+
+	// OTLP (otlp.go + otlp_traces.go).
+	oldGlobalOTLP := globalOTLP
+	oldGlobalOTLPTraces := globalOTLPTraces
+
+	// Audit log (store.go).
+	oldAuditLogFile := auditLogFile
+	oldAuditCloser := auditCloser
+	oldAuditLogFilePath := auditLogFilePath
+	oldAuditLog := auditLog
+
+	// Request log (store.go).
+	oldRequestLogWriter := requestLogWriter
+	oldRequestLogCloser := requestLogCloser
+	oldRequestLogFilePath := requestLogFilePath
+
+	syslogConfigured = ""
+	globalSyslog = nil
+	globalOTLP = freshOTLPExporter()
+	globalOTLPTraces = freshOTLPSpanExporter()
+	auditLogFile = nil
+	auditCloser = nil
+	auditLogFilePath = ""
+	auditMu.Lock()
+	auditLog = nil
+	auditMu.Unlock()
+	requestLogWriter = nil
+	requestLogCloser = nil
+	requestLogFilePath = ""
+
+	t.Cleanup(func() {
+		// Close handles + stop goroutines the test opened on the
+		// fresh instances before restoring originals.
+		if globalSyslog != nil {
+			_ = globalSyslog.Close()
+		}
+		globalOTLP.Stop()
+		globalOTLPTraces.Stop()
+		if auditCloser != nil {
+			_ = auditCloser.Close()
+		}
+		if requestLogCloser != nil {
+			_ = requestLogCloser.Close()
+		}
+		syslogConfigured = oldSyslogConfigured
+		globalSyslog = oldGlobalSyslog
+		globalOTLP = oldGlobalOTLP
+		globalOTLPTraces = oldGlobalOTLPTraces
+		auditLogFile = oldAuditLogFile
+		auditCloser = oldAuditCloser
+		auditLogFilePath = oldAuditLogFilePath
+		auditMu.Lock()
+		auditLog = oldAuditLog
+		auditMu.Unlock()
+		requestLogWriter = oldRequestLogWriter
+		requestLogCloser = oldRequestLogCloser
+		requestLogFilePath = oldRequestLogFilePath
+	})
+}
+
+// ─── Resolver ────────────────────────────────────────────────────────
+
+func TestResolveObservabilityStartupConfig_Defaults(t *testing.T) {
+	got := resolveObservabilityStartupConfig(&FileConfig{}, "", "", "", "", "", 0)
+	if got.SyslogAddr != "" || got.SyslogFormat != "" || got.OTLPEndpoint != "" ||
+		got.AuditLogPath != "" || got.RequestLogPath != "" {
+		t.Errorf("non-empty defaults in zero-value DTO: %+v", got)
+	}
+	if got.RequestLogMaxMB != 100 {
+		t.Errorf("RequestLogMaxMB = %d; want 100 default", got.RequestLogMaxMB)
+	}
+}
+
+func TestResolveObservabilityStartupConfig_CLIWinsOverFC(t *testing.T) {
+	fc := &FileConfig{}
+	fc.SyslogAddr = "fc-syslog"
+	fc.SyslogFormat = "fc-fmt"
+	fc.OTLPEndpoint = "fc-otlp"
+	fc.AuditLogFile = "/fc/audit"
+	fc.RequestLogFile = "/fc/req"
+	fc.RequestLogMaxMB = 200
+
+	got := resolveObservabilityStartupConfig(fc,
+		"cli-syslog", "cli-fmt", "cli-otlp", "/cli/audit", "/cli/req", 50,
+	)
+
+	want := observabilityStartupConfig{
+		SyslogAddr:      "cli-syslog",
+		SyslogFormat:    "cli-fmt",
+		OTLPEndpoint:    "cli-otlp",
+		AuditLogPath:    "/cli/audit",
+		RequestLogPath:  "/cli/req",
+		RequestLogMaxMB: 50,
+	}
+	if got != want {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestResolveObservabilityStartupConfig_FCFallback(t *testing.T) {
+	fc := &FileConfig{}
+	fc.SyslogAddr = "fc-syslog"
+	fc.SyslogFormat = "fc-fmt"
+	fc.OTLPEndpoint = "fc-otlp"
+	fc.AuditLogFile = "/fc/audit"
+	fc.RequestLogFile = "/fc/req"
+	fc.RequestLogMaxMB = 200
+
+	got := resolveObservabilityStartupConfig(fc, "", "", "", "", "", 0)
+	want := observabilityStartupConfig{
+		SyslogAddr:      "fc-syslog",
+		SyslogFormat:    "fc-fmt",
+		OTLPEndpoint:    "fc-otlp",
+		AuditLogPath:    "/fc/audit",
+		RequestLogPath:  "/fc/req",
+		RequestLogMaxMB: 200,
+	}
+	if got != want {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestResolveObservabilityStartupConfig_RequestLogMaxMB_DefaultWhenBothZero(t *testing.T) {
+	got := resolveObservabilityStartupConfig(&FileConfig{}, "", "", "", "", "", 0)
+	if got.RequestLogMaxMB != 100 {
+		t.Errorf("RequestLogMaxMB = %d; want 100", got.RequestLogMaxMB)
+	}
+}
+
+func TestResolveObservabilityStartupConfig_RequestLogMaxMB_FCWinsWhenCLIZero(t *testing.T) {
+	fc := &FileConfig{}
+	fc.RequestLogMaxMB = 25
+	got := resolveObservabilityStartupConfig(fc, "", "", "", "", "", 0)
+	if got.RequestLogMaxMB != 25 {
+		t.Errorf("RequestLogMaxMB = %d; want 25 (FC > 0 beats default)", got.RequestLogMaxMB)
+	}
+}
+
+// ─── Loader ──────────────────────────────────────────────────────────
+
+func TestLoadObservability_EmptyConfigIsNoOp(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	loadObservability(observabilityStartupConfig{})
+
+	if syslogConfigured != "" {
+		t.Errorf("syslogConfigured = %q; want empty", syslogConfigured)
+	}
+	if globalSyslog != nil {
+		t.Errorf("globalSyslog = %v; want nil", globalSyslog)
+	}
+	if globalOTLP.Enabled() {
+		t.Errorf("globalOTLP.Enabled() = true; want false")
+	}
+	if globalOTLPTraces.Enabled() {
+		t.Errorf("globalOTLPTraces.Enabled() = true; want false")
+	}
+	if auditCloser != nil {
+		t.Errorf("auditCloser = %v; want nil", auditCloser)
+	}
+	if requestLogCloser != nil {
+		t.Errorf("requestLogCloser = %v; want nil", requestLogCloser)
+	}
+}
+
+func TestLoadObservability_AuditLogOpens(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	loadObservability(observabilityStartupConfig{
+		AuditLogPath:    path,
+		RequestLogMaxMB: 100,
+	})
+
+	if auditCloser == nil {
+		t.Fatal("auditCloser == nil after AuditLogPath set; want non-nil")
+	}
+	if auditLogFilePath != path {
+		t.Errorf("auditLogFilePath = %q; want %q", auditLogFilePath, path)
+	}
+}
+
+func TestLoadObservability_RequestLogOpens(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	path := filepath.Join(t.TempDir(), "request.jsonl")
+	loadObservability(observabilityStartupConfig{
+		RequestLogPath:  path,
+		RequestLogMaxMB: 10,
+	})
+
+	if requestLogCloser == nil {
+		t.Fatal("requestLogCloser == nil after RequestLogPath set; want non-nil")
+	}
+	if requestLogFilePath != path {
+		t.Errorf("requestLogFilePath = %q; want %q", requestLogFilePath, path)
+	}
+}
+
+func TestLoadObservability_SyslogUnreachableLogged(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	// tcp://127.0.0.1:1 — no listener; InitSyslog returns an error.
+	loadObservability(observabilityStartupConfig{
+		SyslogAddr:      "tcp://127.0.0.1:1",
+		RequestLogMaxMB: 100,
+	})
+
+	if syslogConfigured != "" {
+		t.Errorf("syslogConfigured = %q; want empty after unreachable syslog", syslogConfigured)
+	}
+	if globalSyslog != nil {
+		t.Errorf("globalSyslog = %v; want nil after failed dial", globalSyslog)
+	}
+}
+
+func TestLoadObservability_SyslogSuccessSetsConfigured(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	// Bind an ephemeral UDP listener so InitSyslog succeeds.
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen UDP: %v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	addr := pc.LocalAddr().String()
+
+	cfgAddr := "udp://" + addr
+	loadObservability(observabilityStartupConfig{
+		SyslogAddr:      cfgAddr,
+		SyslogFormat:    "rfc3164",
+		RequestLogMaxMB: 100,
+	})
+
+	if syslogConfigured != cfgAddr {
+		t.Errorf("syslogConfigured = %q; want %q", syslogConfigured, cfgAddr)
+	}
+	if globalSyslog == nil {
+		t.Error("globalSyslog == nil after successful InitSyslog")
+	}
+}
+
+func TestLoadObservability_OTLPEndpointConfigured(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	// Endpoint string is just stored; pushLoop spawns but won't
+	// reach a real collector. snapshotObservabilityGlobals.Cleanup
+	// calls Stop() on both exporters.
+	const endpoint = "http://otlp.invalid:4318"
+	loadObservability(observabilityStartupConfig{
+		OTLPEndpoint:    endpoint,
+		RequestLogMaxMB: 100,
+	})
+
+	if !globalOTLP.Enabled() {
+		t.Error("globalOTLP.Enabled() = false; want true after Configure")
+	}
+	if got := globalOTLP.Endpoint(); !strings.HasPrefix(got, "http://otlp.invalid") {
+		t.Errorf("globalOTLP.Endpoint() = %q; want prefix %q", got, "http://otlp.invalid")
+	}
+	if !globalOTLPTraces.Enabled() {
+		t.Error("globalOTLPTraces.Enabled() = false; want true after Configure")
+	}
+}
+
+func TestLoadObservability_OTLPEmptyLeavesGlobalsDisabled(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	loadObservability(observabilityStartupConfig{
+		// OTLPEndpoint left empty.
+		RequestLogMaxMB: 100,
+	})
+
+	if globalOTLP.Enabled() {
+		t.Error("globalOTLP.Enabled() = true; want false when OTLPEndpoint is empty")
+	}
+	if globalOTLPTraces.Enabled() {
+		t.Error("globalOTLPTraces.Enabled() = true; want false when OTLPEndpoint is empty")
+	}
+}
