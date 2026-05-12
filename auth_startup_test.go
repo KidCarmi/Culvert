@@ -103,7 +103,7 @@ func TestLoadAuth_SetsLocalBcrypt(t *testing.T) {
 	snapshotAuthGlobals(t)
 
 	const testUser = "p4-4-test-admin"
-	const testPass = "P4-4-test-password!"
+	const testPass = "P4-4-test-password!" // #nosec G101 -- synthetic test fixture; never leaves this test
 
 	loadAuth(authStartupConfig{
 		AuthUser: testUser,
