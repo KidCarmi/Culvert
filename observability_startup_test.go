@@ -15,6 +15,7 @@ package main
 // post-conditions on auditCloser / auditLogFilePath instead.
 
 import (
+	"context"
 	"log"
 	"net"
 	"net/http"
@@ -293,7 +294,8 @@ func TestLoadObservability_SyslogSuccessSetsConfigured(t *testing.T) {
 	snapshotObservabilityGlobals(t)
 
 	// Bind an ephemeral UDP listener so InitSyslog succeeds.
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen UDP: %v", err)
 	}
