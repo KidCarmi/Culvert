@@ -267,12 +267,13 @@ All follow the established `<domain>_startup_config.go` + `<domain>_startup.go` 
 - **Preserved invariants:** four independent guarded sub-blocks (syslog / OTLP / audit log / request log); identical log strings; non-fatal error paths; `syslogConfigured` written only after `InitSyslog` success (preserves the dual-write contract with `admin_settings.go:140`); the three file-handle closers (`globalSyslog`, `auditCloser`, `requestLogCloser`) stay on package globals and continue to be read by the existing `syslog-close=110`, `request-log-close=130`, `audit-log-close=135` shutdown hooks (untouched). `RequestLogMaxMB` default of 100 preserved. `applyHotReload` does not touch observability — unchanged.
 - **Risk:** MEDIUM (five subsystems, three file handles opened, two OTLP goroutines spawned by `Configure`) — contained via the test-side `snapshotObservabilityGlobals(t)` helper that saves and zeroes all 11 observability globals, closes any test-opened handles, and `Stop()`s test-spawned OTLP exporters in `t.Cleanup` before pointer restore (no goroutine leaks under `-shuffle=on` / `-count=2`).
 
-#### P4.4 — Extract `initAuth`
-- **Gate:** only after the startup slice contract is merged and the auth slice scope is explicitly verified in the PR description.
-- **Files:** `auth_startup.go`, `auth_startup_config.go`, `auth_startup_test.go`, `main.go`.
-- **Risk:** MEDIUM. `cfg` is the auth singleton, also UI-mutable.
-- **Acceptance:** D0 auth safety, `pkce_ui2_test.go`, `auth_oidc_test.go` green.
-- **What not to touch:** `cfg` itself (live-mutable; out of god-object scope).
+#### P4.4 — Extract `initAuth` ✅ DONE
+- **Status:** ✅ shipped. `initAuth` is now a thin shim that calls `loadAuth(resolveAuthStartupConfig(s.pPort, s.uPort, s.authU, s.authP, *s.uiUsersFile))`. Trivial constructor (no `*FileConfig` parameter — pac convention) plus a void loader that wraps the existing `cfg.SetAuth` / `cfg.SetUIUsersFile` / `cfg.LoadUIUsersFile` API calls. Pinned in `startup_slice_contract_test.go` (15th slice — Phase 4 god-object reduction complete).
+- **Files:** `auth_startup.go`, `auth_startup_config.go`, `auth_startup_test.go`, `main.go`, `startup_slice_contract_test.go`.
+- **Scope verification (required by the gate):** The slice covers ONLY `cfg.ProxyPort`, `cfg.UIPort`, `cfg.SetAuth`, `cfg.SetUIUsersFile`, `cfg.LoadUIUsersFile`. Out of scope and untouched: LDAP / OIDC introspection (owned by `legacy_auth_providers_startup` slice + IdP registry), SAML / OIDC-flow IdPs (runtime via `auth_idp.go`), session (owned by `session_startup` slice), MFA / TOTP, middleware routing, RBAC, the `cfg` singleton's ownership / lock / surface, and `applyHotReload` (which does not touch auth).
+- **Preserved invariants:** log.Fatalf on `SetAuth` error (sole fatal site); identical log strings; UI users file load is guarded by `UIUsersFile != ""`; success log line emits only when `cfg.AuthEnabled()` is true after load; the pre-`initAuth` `cfg.SetUIUsersFile + LoadUIUsersFile` call in `handleOneShotCommands` (--reset-password path, `main.go:374–375`) is unchanged and still runs before normal startup.
+- **Risk:** LOW (lower than P4.2/P4.3 — no goroutines, no retained file handles, no shutdown-hook coupling, no hot-reload coupling, no cluster-sync coupling). The `cfg` singleton is unchanged — the slice only wraps existing caller-side API calls, same pattern as P4.1 (`bl.Load`), P4.2 (`connLimiter.Enable`), P4.3 (`InitSyslog`/`InitAuditLog`/`initRequestLog`).
+- **Acceptance criteria met:** D0 auth safety + `pkce_ui2_test.go` + `auth_oidc_test.go` all green (verified via targeted run).
 
 ---
 
@@ -316,9 +317,9 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 ## 5. Recommended next PR
 
-Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. P3.3 scope was reduced via discovery to the `audit-log-close` hook only (PR #227). **P3.4 is gated on the P6.4 cluster discovery merge.** P4.1 (`initBlocklist`, PR #228) shipped as the 12th startup slice; P4.2 (`initConnAndRateLimit`, PR #230) as the 13th; P4.3 (`initObservability`) as the 14th. The next implementation PR is:
+Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. P3.3 scope was reduced via discovery to the `audit-log-close` hook only (PR #227). **P3.4 is gated on the P6.4 cluster discovery merge.** **Phase 4 is complete:** P4.1 (`initBlocklist`, PR #228) shipped as the 12th startup slice; P4.2 (`initConnAndRateLimit`, PR #230) as the 13th; P4.3 (`initObservability`, PR #231) as the 14th; P4.4 (`initAuth`) as the 15th. The next implementation PR is:
 
-- **P4.4 — Extract `initAuth`** (Phase 4, S1 god-object reduction). **Gated** per the P4.4 entry above — only after the startup-slice contract is merged AND the auth slice scope is explicitly verified in the PR description. `cfg` is the auth singleton and is UI-mutable; the slice must NOT touch `cfg` itself (live-mutable; out of god-object scope) or change auth behaviour. Acceptance: D0 auth safety + `pkce_ui2_test.go` + `auth_oidc_test.go` green.
+- **P5.1 — Discovery only: document `upstreamTransport` mutation graph** `[travel-ok]` (Phase 5, S6). Output: `roadmap/UPSTREAM-TRANSPORT-DISCOVERY.md`. **No production code.** Map every site that mutates the in-place `upstreamTransport` (`proxy.go:961`) plus its read consumers, then propose whether atomic-pointer swap or a `Save(ctx)`-style hand-off fits — gated by the discovery before any code change.
 
 Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 only adds opt-in `Save(ctx)` hooks where the discovery proves a real durability gap. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
 

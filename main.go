@@ -505,26 +505,22 @@ func initLifecycleContext(s *startupState) {
 	appLifecycleCtx, appLifecycleCancel = context.WithCancel(context.Background()) // #nosec G118 -- cancel is deferred in main()
 }
 
-// initAuth wires basic auth and loads persisted UI users.
+// initAuth wires basic auth and loads persisted UI users. P4.4 / S1:
+// the implementation lives in auth_startup.go + auth_startup_config.go;
+// this is a thin shim that resolves the slice config and hands it to
+// the loader. All five inputs are already-resolved scalars from
+// startupState (4 fields populated by loadFileConfigAndFlags, plus
+// *s.uiUsersFile which is CLI-only). The `cfg` package-global
+// singleton is unchanged — the loader only wraps existing cfg
+// method calls.
 func initAuth(s *startupState) {
-	// ── Config ───────────────────────────────────────────────────────────────
-	cfg.ProxyPort = s.pPort
-	cfg.UIPort = s.uPort
-	if err := cfg.SetAuth(s.authU, s.authP); err != nil {
-		log.Fatalf("Failed to set auth: %v", err)
-	}
-
-	// ── UI user persistence ───────────────────────────────────────────────────
-	// Load previously-created admin users from disk so auth survives restarts.
-	// The file is written whenever a user is created/modified/deleted via the UI.
-	if *s.uiUsersFile != "" {
-		cfg.SetUIUsersFile(*s.uiUsersFile)
-		if err := cfg.LoadUIUsersFile(); err != nil {
-			logger.Printf("UIUsers: failed to load %s: %v", *s.uiUsersFile, err)
-		} else if cfg.AuthEnabled() {
-			logger.Printf("UIUsers: loaded from %s", *s.uiUsersFile)
-		}
-	}
+	loadAuth(resolveAuthStartupConfig(
+		s.pPort,
+		s.uPort,
+		s.authU,
+		s.authP,
+		*s.uiUsersFile,
+	))
 }
 
 // initSession is the PR3 expansion shim: resolve the session slice
