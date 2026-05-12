@@ -255,10 +255,11 @@ All follow the established `<domain>_startup_config.go` + `<domain>_startup.go` 
 - **Preserved invariants:** `bl.Load` semantics; `logger.Fatalf` on non-`IsNotExist` load error; identical log strings; `blFeedSyncer` always assigned (UI handlers depend on this); `Start(ctx)` only when `FeedURL != ""`; syncer goroutine parented to `appLifecycleCtx` (cancelled by the existing early-phase `app-lifecycle-cancel` hook). No new `startupState` field; no new shutdown hook; `applyHotReload` untouched.
 - **Risk:** MEDIUM (live-mutable `bl` store + one goroutine) — contained via the loader's explicit ctx parameter (tests pass per-test cancellable ctx; no leaked goroutines under `-shuffle=on` / `-count=2`).
 
-#### P4.2 — Extract `initConnAndRateLimit` `[travel-ok]`
-- **Files:** `connlimit_startup.go`, `connlimit_startup_config.go`, `connlimit_startup_test.go`, `main.go`.
-- **Risk:** MEDIUM. Keep `s.rlCleanupCancel` carry until Phase 2 registry consumes it.
-- **What not to touch:** `applyHotReload` rate-limit path, sharded mutex internals.
+#### P4.2 — Extract `initConnAndRateLimit` ✅ DONE `[travel-ok]`
+- **Status:** ✅ shipped. `initConnAndRateLimit` is now a 2-line shim that calls `resolveConnAndRateLimitStartupConfig(s.fc, s.ipModeVal, s.rlRPM)` and `s.rlCleanupCancel = loadConnAndRateLimit(cfg, appLifecycleCtx)`. The loader returns the cleanup-goroutine cancel func (or `nil` when `RateLimitRPM <= 0`) so the Phase 2 registry's `rate-limit-cleanup-cancel` early hook still works unchanged. Pinned in `startup_slice_contract_test.go` (13th slice).
+- **Files:** `connlimit_startup.go`, `connlimit_startup_config.go`, `connlimit_startup_test.go`, `main.go`, `startup_slice_contract_test.go`.
+- **Preserved invariants:** `connLimiter.Enable` only when `MaxConnsPerIP > 0`; `ipf.SetMode + Add` only when `IPMode != ""`; invalid IP entries warn and continue (no fatal); `rl.Configure(N, time.Minute)` only when `RateLimitRPM > 0`; 5-minute cleanup goroutine spawned **only** when rate-limit is enabled; identical log strings; goroutine parented on `appLifecycleCtx` via the shim (cancelled by both the early-phase `app-lifecycle-cancel` hook AND the explicit `rate-limit-cleanup-cancel` hook). `rateLimitCleanupLoop(ctx)` is extracted from the inline goroutine for testability and to keep the loader flat (pre-empts the nestif warning hit on P4.1). No new `startupState` fields; no shutdown-registry changes; `applyHotReload` rate-limit + IP-filter path untouched.
+- **Risk:** MEDIUM (three live-mutable globals + one goroutine with cancel round-trip via `startupState`) — contained via the loader's explicit `parentCtx` parameter (tests pass per-test cancellable ctx) and snapshot/restore of `connLimiter`/`ipf`/`rl` in `t.Cleanup`.
 
 #### P4.3 — Extract `initObservability` `[travel-ok]`
 - **Files:** `observability_startup.go`, `observability_startup_config.go`, `observability_startup_test.go`, `main.go`.
@@ -314,9 +315,9 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 ## 5. Recommended next PR
 
-Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. P3.3 scope was reduced via discovery to the `audit-log-close` hook only (PR #227). **P3.4 is gated on the P6.4 cluster discovery merge.** P4.1 (`initBlocklist` extraction) shipped as the 12th startup slice. The next unblocked implementation PR is:
+Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. P3.3 scope was reduced via discovery to the `audit-log-close` hook only (PR #227). **P3.4 is gated on the P6.4 cluster discovery merge.** P4.1 (`initBlocklist`, PR #228) shipped as the 12th startup slice; P4.2 (`initConnAndRateLimit`) shipped as the 13th. The next unblocked implementation PR is:
 
-- **P4.2 — Extract `initConnAndRateLimit`** `[travel-ok]` (Phase 4, S1 god-object reduction). Follows the same `<domain>_startup_config.go` + `<domain>_startup.go` + `<domain>_startup_test.go` convention. Keep `s.rlCleanupCancel` carry on `startupState` (already consumed by the Phase 2 shutdown registry's `rate-limit-cleanup-cancel` early hook). Do NOT touch the `applyHotReload` rate-limit path or the sharded-mutex internals.
+- **P4.3 — Extract `initObservability`** `[travel-ok]` (Phase 4, S1 god-object reduction). Same `<domain>_startup_config.go` + `<domain>_startup.go` + `<domain>_startup_test.go` convention. Coordinate with the P3.3 audit-log-close hook so the close paths stay correct. Do NOT touch the audit ring or the audit-completion C2c contract.
 
 Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 only adds opt-in `Save(ctx)` hooks where the discovery proves a real durability gap. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
 

@@ -693,45 +693,20 @@ func initCluster(s *startupState) {
 	}
 }
 
-// initConnAndRateLimit configures per-IP connection limits, IP filter, and rate limiter.
+// initConnAndRateLimit configures per-IP connection limits, IP filter, and
+// rate limiter. P4.2 / S1: the implementation lives in connlimit_startup.go
+// + connlimit_startup_config.go; this is a thin shim that resolves the
+// slice config, hands it to the loader, and stores the returned cancel
+// func on startupState so the early-phase `rate-limit-cleanup-cancel`
+// shutdown hook (main.go:1428–1430) can stop the cleanup goroutine.
+// s.ipModeVal and s.rlRPM are the already-resolved values from
+// loadFileConfigAndFlags — keep them as the single source of truth for
+// the CLI / FileConfig precedence rules.
 func initConnAndRateLimit(s *startupState) {
-	// ── Security: Connection limit per IP ────────────────────────────────────
-	if s.fc.Security.MaxConnsPerIP > 0 {
-		connLimiter.Enable(s.fc.Security.MaxConnsPerIP)
-		logger.Printf("ConnLimit: max %d connections per IP", s.fc.Security.MaxConnsPerIP)
-	}
-
-	// ── Security: IP filter ──────────────────────────────────────────────────
-	if s.ipModeVal != "" {
-		ipf.SetMode(s.ipModeVal)
-		for _, entry := range s.fc.Security.IPList {
-			if err := ipf.Add(entry); err != nil {
-				logger.Printf("IP filter: invalid entry %q: %v", entry, err)
-			}
-		}
-		logger.Printf("IPFilter: mode=%s entries=%d", s.ipModeVal, len(s.fc.Security.IPList))
-	}
-
-	// ── Security: Rate limiter ───────────────────────────────────────────────
-	if s.rlRPM > 0 {
-		rl.Configure(s.rlRPM, time.Minute)
-		logger.Printf("RateLimit: %d req/min per IP", s.rlRPM)
-		var rlCtx context.Context
-		rlCtx, s.rlCleanupCancel = context.WithCancel(appLifecycleCtx)
-		go func() {
-			t := time.NewTicker(5 * time.Minute)
-			defer t.Stop()
-			for {
-				select {
-				case <-rlCtx.Done():
-					return
-				case <-t.C:
-					rl.Cleanup()
-					ssrfDNSCache.Cleanup()
-				}
-			}
-		}()
-	}
+	s.rlCleanupCancel = loadConnAndRateLimit(
+		resolveConnAndRateLimitStartupConfig(s.fc, s.ipModeVal, s.rlRPM),
+		appLifecycleCtx,
+	)
 }
 
 // initBlocklist loads the blocklist from disk and starts the blocklist feed
