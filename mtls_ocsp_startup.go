@@ -8,10 +8,12 @@ package main
 // upstream connections proceed without mTLS (matches original
 // behaviour); OCSP is best-effort by design.
 //
-// P5.3 ownership: BOTH branches (mTLS + OCSP) compose into ONE
-// transport swap so the new transport carries the fully-resolved
-// TLS config before publication. No in-place mutation of the
-// published transport occurs.
+// P5.3 ownership: BOTH branches (mTLS + OCSP) update the operator's
+// TLS template (upstreamOpTLSCfg) from inside a single swap closure.
+// The swap then publishes a fresh transport with a Clone of the
+// updated template attached. The stdlib's lazy h2 setup mutates the
+// CLONE, never the template — so the next swap can read the
+// template race-free.
 
 import (
 	"crypto/tls"
@@ -24,14 +26,13 @@ import (
 //   - Empty cfg ⇒ no-op (no swap).
 //   - Bad cert ⇒ logged; mTLS not applied; OCSP still applied if
 //     cfg.OCSPCheck=true.
-//   - When the existing TLSClientConfig already has a non-zero
+//   - When the existing TLS template already has a non-zero
 //     MinVersion (operator pre-set), it is preserved.
-//   - When TLSClientConfig is fresh, the mTLS branch defaults
+//   - When the template is fresh, the mTLS branch defaults
 //     MinVersion to TLS 1.2; the OCSP-only branch defaults to TLS
 //     1.3. This matches the pre-P5.3 asymmetry exactly.
 //   - Existing Certificates / VerifyPeerCertificate / VerifyConnection
-//     fields on a pre-set TLSClientConfig are replaced by this swap
-//     (matches pre-P5.3 mutation behaviour).
+//     fields on a pre-set template are replaced by this update.
 func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
 	var clientCert *tls.Certificate
 	if cfg.ClientCertFile != "" && cfg.ClientKeyFile != "" {
@@ -43,7 +44,6 @@ func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
 		}
 	}
 
-	// If neither mTLS nor OCSP applies, no transport state changes.
 	if clientCert == nil && !cfg.OCSPCheck {
 		return
 	}
@@ -53,22 +53,26 @@ func loadMTLSAndOCSP(cfg mtlsOCSPStartupConfig) {
 	}
 
 	swapUpstreamTransport(func(old *http.Transport) *http.Transport {
-		newT := cloneTransport(old)
-		tlsCfg := cloneTLSConfig(newT.TLSClientConfig)
+		// Update upstreamOpTLSCfg under the held write mutex.
+		// Subsequent swaps will attach a Clone of it.
+		if upstreamOpTLSCfg == nil {
+			upstreamOpTLSCfg = &tls.Config{} // #nosec G402 -- MinVersion set by the branches below
+		}
 		if clientCert != nil {
-			if tlsCfg.MinVersion == 0 {
-				tlsCfg.MinVersion = tls.VersionTLS12
+			if upstreamOpTLSCfg.MinVersion == 0 {
+				upstreamOpTLSCfg.MinVersion = tls.VersionTLS12
 			}
-			tlsCfg.Certificates = []tls.Certificate{*clientCert}
+			upstreamOpTLSCfg.Certificates = []tls.Certificate{*clientCert}
 		}
 		if cfg.OCSPCheck {
-			if tlsCfg.MinVersion == 0 {
-				tlsCfg.MinVersion = tls.VersionTLS13
+			if upstreamOpTLSCfg.MinVersion == 0 {
+				upstreamOpTLSCfg.MinVersion = tls.VersionTLS13
 			}
-			ConfigureTLSConfigOCSP(tlsCfg)
+			ConfigureTLSConfigOCSP(upstreamOpTLSCfg)
 		}
-		newT.TLSClientConfig = tlsCfg
-		return newT
+		// Return a fresh transport carrying static config from old.
+		// The swap will auto-attach a Clone of upstreamOpTLSCfg.
+		return cloneTransport(old)
 	})
 
 	if clientCert != nil {

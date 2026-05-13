@@ -31,16 +31,26 @@ func ensureMTLSOCSPTestLogger(t *testing.T) {
 }
 
 // resetMTLSOCSPGlobals snapshots/restores the entire upstream
-// transport pointer plus globalOCSP.enabled for isolation under
+// transport pointer, the operator's TLS template
+// (upstreamOpTLSCfg), and globalOCSP.enabled for isolation under
 // -shuffle. P5.3: published transports are read-only; tests
 // snapshot via Load() and restore via Store() rather than mutating
-// fields on a published transport.
+// fields on a published transport. The op TLS template is held
+// under upstreamTransportWriteMu; we snapshot under the same lock.
 func resetMTLSOCSPGlobals(t *testing.T) {
 	t.Helper()
 	origPtr := upstreamTransportPtr.Load()
 	origOCSP := globalOCSP.Enabled()
+	upstreamTransportWriteMu.Lock()
+	origOpTLS := upstreamOpTLSCfg
+	// Clear at start so tests don't inherit state from a prior test.
+	upstreamOpTLSCfg = nil
+	upstreamTransportWriteMu.Unlock()
 	t.Cleanup(func() {
 		upstreamTransportPtr.Store(origPtr)
+		upstreamTransportWriteMu.Lock()
+		upstreamOpTLSCfg = origOpTLS
+		upstreamTransportWriteMu.Unlock()
 		if origOCSP {
 			globalOCSP.Enable()
 		} else {
@@ -153,8 +163,15 @@ func TestLoadMTLSAndOCSP_PreservesExistingTLSConfig(t *testing.T) {
 	// "field values preserved," which is the same operator-visible
 	// guarantee.
 	existing := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: "preset.example"}
+	// P5.3: seed the operator's TLS template AND publish a transport
+	// carrying the same fields. The next loadMTLSAndOCSP swap will
+	// read from upstreamOpTLSCfg, not from the published transport's
+	// TLSClientConfig (which the stdlib may lazily mutate).
+	upstreamTransportWriteMu.Lock()
+	upstreamOpTLSCfg = existing.Clone()
+	upstreamTransportWriteMu.Unlock()
 	newT := cloneTransport(getUpstreamTransport())
-	newT.TLSClientConfig = existing
+	newT.TLSClientConfig = existing.Clone()
 	upstreamTransportPtr.Store(newT)
 
 	dir := t.TempDir()

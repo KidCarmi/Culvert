@@ -262,10 +262,15 @@ func TestAPIOCSPConfig_GETShape(t *testing.T) {
 // since Enable calls ConfigureTransportOCSP which mutates the shared transport.
 func TestAPIOCSPConfig_POSTTogglesEnabled(t *testing.T) {
 	origEnabled := globalOCSP.Enabled()
-	// P5.3: snapshot the entire transport pointer rather than the
-	// TLSClientConfig field. apiOCSPConfig now installs OCSP via
-	// swapUpstreamTransport, which publishes a NEW transport.
+	// P5.3: snapshot the entire transport pointer + operator TLS
+	// template. apiOCSPConfig now installs OCSP via
+	// swapUpstreamTransport, which publishes a NEW transport with a
+	// Clone of the operator template attached.
 	origPtr := upstreamTransportPtr.Load()
+	upstreamTransportWriteMu.Lock()
+	origOpTLS := upstreamOpTLSCfg
+	upstreamOpTLSCfg = nil
+	upstreamTransportWriteMu.Unlock()
 	t.Cleanup(func() {
 		if origEnabled {
 			globalOCSP.Enable()
@@ -273,6 +278,9 @@ func TestAPIOCSPConfig_POSTTogglesEnabled(t *testing.T) {
 			globalOCSP.Disable()
 		}
 		upstreamTransportPtr.Store(origPtr)
+		upstreamTransportWriteMu.Lock()
+		upstreamOpTLSCfg = origOpTLS
+		upstreamTransportWriteMu.Unlock()
 	})
 
 	// Start from disabled + a fresh transport (no TLS config) so the

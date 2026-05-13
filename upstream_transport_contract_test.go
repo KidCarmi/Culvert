@@ -37,20 +37,28 @@ import (
 )
 
 // snapshotUpstreamProxyAndPool saves the current upstream transport
-// pointer and the current upstreamPool entries, restoring both on
-// t.Cleanup so tests are safe under -shuffle=on / -count=2 even when
-// other tests in the same binary also configure the pool. P5.3:
-// snapshots the entire transport pointer via atomic.Pointer.Load()
-// rather than mutating fields on a published transport.
+// pointer, the operator's TLS template (upstreamOpTLSCfg), and the
+// current upstreamPool entries, restoring them on t.Cleanup so tests
+// are safe under -shuffle=on / -count=2 even when other tests in the
+// same binary also configure the pool. P5.3: published transports
+// are read-only; snapshot via Load(), restore via Store().
 func snapshotUpstreamProxyAndPool(t *testing.T) {
 	t.Helper()
 	origPtr := upstreamTransportPtr.Load()
+	upstreamTransportWriteMu.Lock()
+	origOpTLS := upstreamOpTLSCfg
+	// Clear at start so tests don't inherit state from a prior test.
+	upstreamOpTLSCfg = nil
+	upstreamTransportWriteMu.Unlock()
 	// upstreamPool has an internal sync.RWMutex; we cannot snapshot
 	// its fields safely, so we restore by replaying Configure with
 	// an empty slice on cleanup. This is the same approach the
 	// existing TestApplyUpstreamProxy_SetsTransportProxy uses.
 	t.Cleanup(func() {
 		upstreamTransportPtr.Store(origPtr)
+		upstreamTransportWriteMu.Lock()
+		upstreamOpTLSCfg = origOpTLS
+		upstreamTransportWriteMu.Unlock()
 		upstreamPool.Configure(nil, 0, 0)
 	})
 }
@@ -186,8 +194,14 @@ func TestUpstreamTransport_PreservesExistingTLSConfig_WithMTLSAndOCSP(t *testing
 		MinVersion: tls.VersionTLS13,
 		ServerName: "p5-2-preset.contract.invalid",
 	}
+	// P5.3: seed the operator's TLS template AND publish a transport
+	// carrying the same fields. The next loadMTLSAndOCSP swap will
+	// read from upstreamOpTLSCfg, not from the published transport.
+	upstreamTransportWriteMu.Lock()
+	upstreamOpTLSCfg = existing.Clone()
+	upstreamTransportWriteMu.Unlock()
 	newT := cloneTransport(getUpstreamTransport())
-	newT.TLSClientConfig = existing
+	newT.TLSClientConfig = existing.Clone()
 	upstreamTransportPtr.Store(newT)
 
 	dir := t.TempDir()

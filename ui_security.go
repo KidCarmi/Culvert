@@ -1152,19 +1152,19 @@ func apiOCSPConfig(w http.ResponseWriter, r *http.Request) {
 		if body.Enabled {
 			globalOCSP.Enable()
 			// P5.3: route through swapUpstreamTransport so the OCSP
-			// verify callbacks are installed on a freshly-cloned
-			// *tls.Config that no concurrent reader can observe
-			// mid-write. ConfigureTLSConfigOCSP operates on the
-			// caller-owned cloned TLS config.
+			// verify callbacks land on the operator's TLS template
+			// (upstreamOpTLSCfg). The swap attaches a Clone of the
+			// updated template to the new transport — the stdlib's
+			// lazy h2 setup mutates the clone, not the template.
 			swapUpstreamTransport(func(old *http.Transport) *http.Transport {
-				newT := cloneTransport(old)
-				tlsCfg := cloneTLSConfig(newT.TLSClientConfig)
-				if tlsCfg.MinVersion == 0 {
-					tlsCfg.MinVersion = tls.VersionTLS13
+				if upstreamOpTLSCfg == nil {
+					upstreamOpTLSCfg = &tls.Config{MinVersion: tls.VersionTLS13}
 				}
-				ConfigureTLSConfigOCSP(tlsCfg)
-				newT.TLSClientConfig = tlsCfg
-				return newT
+				if upstreamOpTLSCfg.MinVersion == 0 {
+					upstreamOpTLSCfg.MinVersion = tls.VersionTLS13
+				}
+				ConfigureTLSConfigOCSP(upstreamOpTLSCfg)
+				return cloneTransport(old)
 			})
 		} else {
 			globalOCSP.Disable()

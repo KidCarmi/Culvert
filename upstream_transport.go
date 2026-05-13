@@ -3,28 +3,34 @@ package main
 // upstream_transport.go — P5.3 / S6 ownership surface for the shared
 // upstream-direction *http.Transport.
 //
-// The transport is held behind atomic.Pointer with a package-level
-// writer mutex serializing swaps. The model is "immutable-after-
-// publish by convention" — atomic.Pointer.Load() returns a plain
-// *http.Transport whose fields remain mutable, so the contract is
-// enforced as a stack: API shape (no in-place mutator on the read
-// surface) + this file's docstrings + CLAUDE.md note + code review
-// + the P5.2 contract tests + the P5.3 race tests in
-// upstream_transport_race_test.go (any unsynchronized concurrent
-// write trips the race detector).
+// Model:
+//   - The transport is held behind atomic.Pointer.
+//   - Writes are serialized by upstreamTransportWriteMu.
+//   - The operator's TLS template (upstreamOpTLSCfg) is held under
+//     the same mutex and NEVER attached directly to a published
+//     transport — each swap attaches a fresh Clone() so the stdlib's
+//     lazy h2 setup (which mutates Transport.TLSClientConfig.NextProtos
+//     and TLSClientConfig pointer on first RoundTrip) writes onto the
+//     CLONE, not onto the template.
+//   - cloneTransport copies static config fields ONLY. It does NOT
+//     copy TLSClientConfig or TLSNextProto, because both are
+//     stdlib-lazy-mutated and reading them races against in-flight
+//     RoundTrip calls (caught by the P5.3 race tests).
+//   - swapUpstreamTransport auto-attaches a Clone of the operator's
+//     TLS template to the new transport when the updater closure
+//     does not provide its own TLSClientConfig.
 //
 // Rules (also documented in CLAUDE.md):
 //
 //   - getUpstreamTransport() returns a read-only snapshot. Callers
-//     MUST NOT mutate any of the returned transport's fields.
-//   - To change the transport, call swapUpstreamTransport(update).
-//     The update closure receives the current transport and MUST
-//     return a NEW *http.Transport — it MUST NOT mutate the input.
-//   - cloneTransport and cloneTLSConfig are the only approved
-//     helpers for seeding a new instance from an existing one.
-//   - All hot-path readers (proxy.go) and all writer call sites
-//     (applyUpstreamProxy, loadMTLSAndOCSP, apiOCSPConfig) route
-//     through this surface. No other access is permitted.
+//     MUST NOT mutate the returned transport's fields.
+//   - swapUpstreamTransport(update) is the only approved mutation
+//     API. The update closure receives the current transport and
+//     MUST return a NEW *http.Transport — it MUST NOT mutate the
+//     input. Use cloneTransport to seed the new instance.
+//   - Mutators that change TLS state MUST update upstreamOpTLSCfg
+//     from inside the closure (under the write mutex). The swap
+//     attaches a Clone of upstreamOpTLSCfg to the new transport.
 //
 // Background: roadmap/UPSTREAM-TRANSPORT-DISCOVERY.md (P5.1),
 // roadmap/UPSTREAM-TRANSPORT-OWNERSHIP-MODEL.md (P5.3 design),
@@ -39,43 +45,46 @@ import (
 )
 
 // upstreamTransportPtr holds the current published transport. Reads
-// via Load() are the hot-path read surface. Writes via Store() must
-// go through swapUpstreamTransport so the writer mutex serializes
-// concurrent swaps and the old transport's idle conns get closed.
+// via Load() are the hot-path read surface.
 var upstreamTransportPtr atomic.Pointer[http.Transport]
 
 // upstreamTransportWriteMu serializes writers. Readers do NOT take
-// this lock. Without it, two concurrent writers could each Load the
-// same starting transport, build their respective new versions, and
-// the second Store would clobber the first writer's update.
+// this lock. It also protects upstreamOpTLSCfg.
 var upstreamTransportWriteMu sync.Mutex
+
+// upstreamOpTLSCfg is the operator's TLS template. Protected by
+// upstreamTransportWriteMu. NEVER attached directly to a published
+// transport — swapUpstreamTransport attaches Clone() copies so the
+// stdlib's lazy h2 setup mutates the clone, not the template. nil
+// when no TLS state is configured (HTTP-only upstreams).
+var upstreamOpTLSCfg *tls.Config
 
 func init() {
 	upstreamTransportPtr.Store(newBaseUpstreamTransport())
 }
 
 // getUpstreamTransport returns the currently-published transport.
-// The returned pointer MUST be treated as read-only. To mutate, use
-// swapUpstreamTransport.
+// The returned pointer MUST be treated as read-only.
 func getUpstreamTransport() *http.Transport {
 	return upstreamTransportPtr.Load()
 }
 
-// swapUpstreamTransport is the only approved mutation API. It:
-//  1. Takes the writer mutex (serializing concurrent writers).
-//  2. Loads the current transport.
-//  3. Invokes update(old) to obtain a NEW *http.Transport.
-//  4. If update returned the same pointer, returns without swapping
-//     (no-op cleanly handles "writer decided nothing changed").
-//  5. Stores the new transport.
-//  6. Synchronously calls old.CloseIdleConnections() to release the
-//     previous transport's idle keepalive connections. In-flight
-//     requests holding the old transport via their per-request
-//     http.Client are NOT interrupted — they retain a strong
-//     reference and only IDLE conns are torn down.
+// swapUpstreamTransport is the only approved mutation API.
 //
-// The update closure MUST NOT mutate its input. Use cloneTransport
-// to seed a new instance.
+// 1. Takes the writer mutex (serializing writers).
+// 2. Loads the current transport.
+// 3. Invokes update(old) for a NEW *http.Transport. The closure
+//    may also update upstreamOpTLSCfg under the held lock.
+// 4. If newT is nil or equal to old, returns without swapping.
+// 5. If newT.TLSClientConfig is nil and upstreamOpTLSCfg is non-nil,
+//    attaches a Clone of upstreamOpTLSCfg to newT.TLSClientConfig.
+//    This is the race-safety contract: stdlib's lazy h2 setup
+//    mutates the CLONE, not the operator's template.
+// 6. Stores the new transport.
+// 7. Synchronously calls old.CloseIdleConnections() to release the
+//    previous transport's idle keepalive connections. In-flight
+//    requests holding the old transport via their per-request
+//    http.Client are NOT interrupted.
 func swapUpstreamTransport(update func(old *http.Transport) *http.Transport) {
 	upstreamTransportWriteMu.Lock()
 	defer upstreamTransportWriteMu.Unlock()
@@ -83,6 +92,9 @@ func swapUpstreamTransport(update func(old *http.Transport) *http.Transport) {
 	newT := update(old)
 	if newT == nil || newT == old {
 		return
+	}
+	if newT.TLSClientConfig == nil && upstreamOpTLSCfg != nil {
+		newT.TLSClientConfig = upstreamOpTLSCfg.Clone()
 	}
 	upstreamTransportPtr.Store(newT)
 	if old != nil {
@@ -92,8 +104,9 @@ func swapUpstreamTransport(update func(old *http.Transport) *http.Transport) {
 
 // newBaseUpstreamTransport constructs the initial transport with the
 // static pool sizing and buffer constants the proxy hot path needs.
-// Used by init() and by tests that want a clean transport baseline.
-// Field values mirror the pre-P5.3 declaration in proxy.go.
+// TLSClientConfig and TLSNextProto are intentionally left nil — the
+// stdlib will lazy-init them on first request, or the swap path will
+// attach a clone of upstreamOpTLSCfg.
 func newBaseUpstreamTransport() *http.Transport {
 	return &http.Transport{
 		MaxIdleConns:          512,
@@ -108,14 +121,24 @@ func newBaseUpstreamTransport() *http.Transport {
 	}
 }
 
-// cloneTransport produces a fresh *http.Transport with the exported
-// configuration fields copied from old. Internal connection-pool
-// state (idle conns, perHost maps) is intentionally NOT copied — a
-// new transport must start its own pool. Function fields, pointer
-// fields, maps, and slices are copied by reference; the TLSClientConfig
-// pointer is reused as-is and callers that intend to mutate TLS state
-// MUST replace cloned.TLSClientConfig with cloneTLSConfig(cloned.TLSClientConfig)
-// before mutating, so the old (shared) *tls.Config is never modified.
+// cloneTransport produces a fresh *http.Transport with the static
+// configuration fields copied from old. Two fields are
+// INTENTIONALLY NOT copied because the stdlib mutates them lazily
+// on first RoundTrip (caught by the P5.3 race tests):
+//
+//   - TLSClientConfig: stdlib's h2 setup assigns a fresh *tls.Config
+//     here if nil, and appends "h2" / "http/1.1" to its NextProtos
+//     slice. Reading the field while another goroutine drives
+//     RoundTrip races. The swap path attaches a Clone of
+//     upstreamOpTLSCfg instead.
+//   - TLSNextProto: stdlib's h2 setup assigns a fresh map here if
+//     nil. Same race surface. The new transport gets its own
+//     lazy-init on first request.
+//
+// Internal connection-pool state (idle conns, perHost maps) is
+// non-exported and not copied; a new transport starts its own pool.
+// Function fields, slices, and maps are copied by reference (Go's
+// value semantics for struct copies are field-by-field).
 //
 // If old is nil, returns a fresh base transport.
 func cloneTransport(old *http.Transport) *http.Transport {
@@ -126,7 +149,6 @@ func cloneTransport(old *http.Transport) *http.Transport {
 		Proxy:                  old.Proxy,
 		DialContext:            old.DialContext,
 		DialTLSContext:         old.DialTLSContext,
-		TLSClientConfig:        old.TLSClientConfig,
 		TLSHandshakeTimeout:    old.TLSHandshakeTimeout,
 		DisableKeepAlives:      old.DisableKeepAlives,
 		DisableCompression:     old.DisableCompression,
@@ -136,30 +158,27 @@ func cloneTransport(old *http.Transport) *http.Transport {
 		IdleConnTimeout:        old.IdleConnTimeout,
 		ResponseHeaderTimeout:  old.ResponseHeaderTimeout,
 		ExpectContinueTimeout:  old.ExpectContinueTimeout,
-		TLSNextProto:           old.TLSNextProto,
 		ProxyConnectHeader:     old.ProxyConnectHeader,
 		GetProxyConnectHeader:  old.GetProxyConnectHeader,
 		MaxResponseHeaderBytes: old.MaxResponseHeaderBytes,
 		WriteBufferSize:        old.WriteBufferSize,
 		ReadBufferSize:         old.ReadBufferSize,
 		ForceAttemptHTTP2:      old.ForceAttemptHTTP2,
+		// TLSClientConfig and TLSNextProto: see docstring — not copied.
 	}
 }
 
 // cloneTLSConfig returns a deep clone of old via the stdlib
-// (*tls.Config).Clone(). Use this whenever an updater closure needs
-// to mutate TLS state (Certificates, VerifyPeerCertificate, etc.) —
-// without it, the mutation would touch the *tls.Config the OLD
-// transport still references, reintroducing the R-2/R-4 race class.
+// (*tls.Config).Clone(). Caller must own old exclusively — typically
+// this means old is upstreamOpTLSCfg (held under the write mutex)
+// or a freshly-allocated *tls.Config inside a swap closure.
 //
-// If old is nil, returns an empty *tls.Config (no MinVersion set —
-// callers that care about MinVersion set their own default; this
-// preserves the pre-P5.3 asymmetry where the mTLS branch defaulted
-// to TLS 1.2 and the OCSP branch defaulted to TLS 1.3 depending on
-// which one ran first).
+// If old is nil, returns an empty *tls.Config — callers set
+// MinVersion explicitly (mTLS branch → TLS 1.2; OCSP-only → TLS 1.3,
+// preserving pre-P5.3 semantics).
 func cloneTLSConfig(old *tls.Config) *tls.Config {
 	if old == nil {
-		return &tls.Config{} // #nosec G402 -- MinVersion is set by the caller branch (mTLS=TLS1.2, OCSP=TLS1.3) to preserve pre-P5.3 semantics
+		return &tls.Config{} // #nosec G402 -- MinVersion is set by the caller branch (mTLS=TLS1.2, OCSP=TLS1.3)
 	}
 	return old.Clone()
 }
