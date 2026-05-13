@@ -36,19 +36,21 @@ import (
 	"time"
 )
 
-// snapshotUpstreamProxyAndPool saves the current upstreamTransport.Proxy
-// closure and the current upstreamPool entries, restoring both on
+// snapshotUpstreamProxyAndPool saves the current upstream transport
+// pointer and the current upstreamPool entries, restoring both on
 // t.Cleanup so tests are safe under -shuffle=on / -count=2 even when
-// other tests in the same binary also configure the pool.
+// other tests in the same binary also configure the pool. P5.3:
+// snapshots the entire transport pointer via atomic.Pointer.Load()
+// rather than mutating fields on a published transport.
 func snapshotUpstreamProxyAndPool(t *testing.T) {
 	t.Helper()
-	origProxy := upstreamTransport.Proxy
+	origPtr := upstreamTransportPtr.Load()
 	// upstreamPool has an internal sync.RWMutex; we cannot snapshot
 	// its fields safely, so we restore by replaying Configure with
 	// an empty slice on cleanup. This is the same approach the
 	// existing TestApplyUpstreamProxy_SetsTransportProxy uses.
 	t.Cleanup(func() {
-		upstreamTransport.Proxy = origProxy
+		upstreamTransportPtr.Store(origPtr)
 		upstreamPool.Configure(nil, 0, 0)
 	})
 }
@@ -70,10 +72,11 @@ func TestUpstreamTransport_StartupComposition_PoolThenMTLSOCSP(t *testing.T) {
 
 	// Bootstrap: start from a clean transport (no pre-existing TLS
 	// config) so the assertions reflect what a fresh process sees.
-	upstreamTransport.TLSClientConfig = nil
+	// P5.3: published transports are read-only; reset via Store().
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
 
 	// Step 27 equivalent: configure the pool and install the proxy
-	// closure on upstreamTransport.Proxy.
+	// closure via swapUpstreamTransport.
 	upstreamPool.Configure(
 		[]UpstreamEntry{{URL: "http://contract.test.invalid:3128"}},
 		5,
@@ -91,11 +94,12 @@ func TestUpstreamTransport_StartupComposition_PoolThenMTLSOCSP(t *testing.T) {
 	})
 
 	// Post-condition: every field the discovery report identified
-	// must be present.
-	if upstreamTransport.Proxy == nil {
+	// must be present on the currently-published transport.
+	current := getUpstreamTransport()
+	if current.Proxy == nil {
 		t.Error("upstreamTransport.Proxy is nil; applyUpstreamProxy did not install the closure")
 	}
-	tlsCfg := upstreamTransport.TLSClientConfig
+	tlsCfg := current.TLSClientConfig
 	if tlsCfg == nil {
 		t.Fatal("upstreamTransport.TLSClientConfig is nil; loadMTLSAndOCSP did not initialise it")
 	}
@@ -131,7 +135,7 @@ func TestUpstreamTransport_PostStartup_HasBothMTLSAndOCSP(t *testing.T) {
 	ensureMTLSOCSPTestLogger(t)
 	resetMTLSOCSPGlobals(t)
 
-	upstreamTransport.TLSClientConfig = nil
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
 
 	dir := t.TempDir()
 	certPath, keyPath := writeTestClientCert(t, dir)
@@ -141,7 +145,7 @@ func TestUpstreamTransport_PostStartup_HasBothMTLSAndOCSP(t *testing.T) {
 		OCSPCheck:      true,
 	})
 
-	tlsCfg := upstreamTransport.TLSClientConfig
+	tlsCfg := getUpstreamTransport().TLSClientConfig
 	if tlsCfg == nil {
 		t.Fatal("TLSClientConfig is nil after loadMTLSAndOCSP with both mTLS + OCSP")
 	}
@@ -176,12 +180,15 @@ func TestUpstreamTransport_PreservesExistingTLSConfig_WithMTLSAndOCSP(t *testing
 
 	// Operator pre-set their own TLS config — e.g. a corporate
 	// ServerName pin and a stricter MinVersion than mTLS bootstrap
-	// would choose.
+	// would choose. P5.3: publish via a fresh transport (no field
+	// mutation on the global).
 	existing := &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		ServerName: "p5-2-preset.contract.invalid",
 	}
-	upstreamTransport.TLSClientConfig = existing
+	newT := cloneTransport(getUpstreamTransport())
+	newT.TLSClientConfig = existing
+	upstreamTransportPtr.Store(newT)
 
 	dir := t.TempDir()
 	certPath, keyPath := writeTestClientCert(t, dir)
@@ -191,9 +198,15 @@ func TestUpstreamTransport_PreservesExistingTLSConfig_WithMTLSAndOCSP(t *testing
 		OCSPCheck:      true,
 	})
 
-	tlsCfg := upstreamTransport.TLSClientConfig
-	if tlsCfg != existing {
-		t.Fatal("TLSClientConfig pointer was replaced; loadMTLSAndOCSP must reuse the existing pointer")
+	// P5.3 contract change: loadMTLSAndOCSP now CLONES the existing
+	// TLSClientConfig (via tls.Config.Clone) rather than reusing the
+	// same pointer. The operator-visible guarantee is unchanged:
+	// pre-set field values are preserved. The strict pointer-equality
+	// assertion is dropped in favour of field-value preservation, which
+	// is the actual contract the operator cares about.
+	tlsCfg := getUpstreamTransport().TLSClientConfig
+	if tlsCfg == nil {
+		t.Fatal("TLSClientConfig is nil after swap; loadMTLSAndOCSP did not install a TLS config")
 	}
 	// Pre-existing fields preserved.
 	if tlsCfg.MinVersion != tls.VersionTLS13 {

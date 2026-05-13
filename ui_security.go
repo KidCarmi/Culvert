@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1150,7 +1151,21 @@ func apiOCSPConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Enabled {
 			globalOCSP.Enable()
-			ConfigureTransportOCSP(upstreamTransport)
+			// P5.3: route through swapUpstreamTransport so the OCSP
+			// verify callbacks are installed on a freshly-cloned
+			// *tls.Config that no concurrent reader can observe
+			// mid-write. ConfigureTLSConfigOCSP operates on the
+			// caller-owned cloned TLS config.
+			swapUpstreamTransport(func(old *http.Transport) *http.Transport {
+				newT := cloneTransport(old)
+				tlsCfg := cloneTLSConfig(newT.TLSClientConfig)
+				if tlsCfg.MinVersion == 0 {
+					tlsCfg.MinVersion = tls.VersionTLS13
+				}
+				ConfigureTLSConfigOCSP(tlsCfg)
+				newT.TLSClientConfig = tlsCfg
+				return newT
+			})
 		} else {
 			globalOCSP.Disable()
 		}
