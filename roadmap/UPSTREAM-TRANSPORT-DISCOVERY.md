@@ -87,7 +87,7 @@ Declared at `ocsp.go:42`. Carries:
 |---|---|---|---|
 | `applyHotReload(fc)` | `upstreamPool.Configure` + `applyUpstreamProxy()` (writes `upstreamTransport.Proxy`) | SIGHUP | **None** — direct field write |
 | `apiUpstreamProxies` POST | `upstreamPool.Configure` + `applyUpstreamProxy()` | Admin API | **None** |
-| `apiRestoreBackup` (`ui_config.go:521`) | `upstreamPool.Configure` only (does NOT call `applyUpstreamProxy`) | Admin API | **None** — observable bug: a restore won't activate the pool until SIGHUP or a re-POST |
+| `apiRestoreBackup` (`ui_config.go:521`) | `upstreamPool.Configure` only (does NOT call `applyUpstreamProxy`) | Admin API | **None** — cosmetic asymmetry, NOT a functional outage: the `ProxyFunc` closure (`upstream.go:195–202`) captures the pool by pointer, so subsequent requests observe the new proxies via `p.Next()` without any write to `upstreamTransport.Proxy`. See §6 R-3 for the full analysis. (Edge case: if startup had no upstream proxies configured, `upstreamTransport.Proxy` was never set, so the closure does not yet exist — that narrow from-zero case is the only functional gap.) |
 | `apiOCSPConfig` POST `Enabled=true` (`ui_security.go:1153`) | `ConfigureTransportOCSP(upstreamTransport)` — writes `TLSClientConfig{,.VerifyPeerCertificate,.VerifyConnection}` | Admin API | **None** |
 | `apiOCSPConfig` POST `Enabled=false` | `globalOCSP.Disable()` only — does **not** clear the `VerifyPeerCertificate` / `VerifyConnection` callbacks on `upstreamTransport.TLSClientConfig` | Admin API | The callbacks remain wired; they no-op because `globalOCSP.enabled` is the atomic gate. Behaviour-preserving, but worth noting. |
 
