@@ -10,9 +10,9 @@
 
 **Option A — `atomic.Pointer[http.Transport]` + package-level `sync.Mutex` for serializing writers + immutable-after-publish convention.**
 
-In one sentence: the read/write asymmetry (every proxied request reads the transport; mutations happen ~1–10 times/day) plus the program-wide "correctness and ownership clarity first" criterion both point at atomic.Pointer, where the *type system itself* enforces the "you cannot modify a published transport, you can only publish a new one" rule.
+In one sentence: the read/write asymmetry (every proxied request reads the transport; mutations happen ~1–10 times/day) plus the program-wide "correctness and ownership clarity first" criterion both point at atomic.Pointer, where the *API shape* removes the "modify in place" path — there is no setter on the read surface, only Load and Store, so the natural way to change anything is to build and publish a new transport.
 
-**Immutable-after-publish semantics are mandatory.** That is the entire correctness argument. Direct field mutation on a loaded transport becomes a convention violation, easy to spot in code review and detectable by the P5.2 contract suite and the new P5.3 race tests.
+**Immutable-after-publish is a convention, not a type-system guarantee.** `atomic.Pointer[http.Transport].Load()` returns a plain `*http.Transport` whose fields remain mutable; a determined caller can do `t := getUpstreamTransport(); t.Proxy = x` and produce exactly the race class P5.3 is meant to eliminate. **The enforcement stack is layered**: API shape (no in-place mutator) + docstring + CLAUDE.md convention + code review + the P5.2 contract suite + the new P5.3 race tests (the race detector will flag the local-variable bypass as a concurrent write vs the production hot-path read). No single layer is sufficient on its own; the combination is.
 
 ---
 
@@ -85,8 +85,8 @@ Both options require build-new-transport semantics to fix R-4. **Option A makes 
 |---|---|---|
 | Who owns transport creation | The builder helpers (`cloneTransport`, `newBaseUpstreamTransport`) | Same builders |
 | Who is allowed to mutate transports | Nobody after Store; only builders | API surface allows `.Get()` users to mutate, **convention** forbids it |
-| Direct field mutation outside builder | **Impossible by convention; API has no setter on the read surface** | Possible — `.Get()` returns a `*http.Transport` whose fields ARE writeable |
-| Immutable-after-publish enforcement | Built into the read API (`Load()` returns a value treated as read-only by convention) | Requires social discipline OR deep-copy on `Get()` (impractical) |
+| Direct field mutation outside builder | API has no setter on the read surface — the natural path is build-new. But the loaded pointer's fields ARE writeable; convention + code review + race tests are the actual enforcement. | Possible — `.Get()` returns a `*http.Transport` whose fields ARE writeable; same convention/review/test stack required. |
+| Immutable-after-publish enforcement | Layered: API shape (no in-place mutator) + docstring + CLAUDE.md note + code review + P5.2/P5.3 tests | Same layers required; the API surface invites the same misuse pattern. |
 
 **Outcome.** Option A wins decisively. This is the ownership story that justifies P5.3.
 
@@ -131,9 +131,17 @@ Both options require build-new-transport semantics to fix R-4. **Option A makes 
 
 **Risk of partial migration / hidden direct field writes:**
 
-Under Option A: the global variable `upstreamTransport` is **removed**. Any code that referenced it gets a compile error. The compiler catches every site. There is no possible "hidden write" — direct field mutation requires `getUpstreamTransport().Proxy = …` which is syntactically obvious and reviewable. A grep for `getUpstreamTransport\(\)\.\w+\s*=` would catch any such write trivially.
+Under Option A: the global variable `upstreamTransport` is **removed**. Any code that *references it by name* gets a compile error. That catches the obvious cases — every existing read/write at the call sites listed in P5.1.
 
-**Outcome.** Option A's migration is compile-checked. Every miss surfaces at build time.
+**Direct-field-write loopholes are NOT impossible**, however. A future caller can write `t := getUpstreamTransport(); t.Proxy = …` and bypass any inline-form grep. The migration's actual safety story is the layered enforcement from §0:
+
+- API shape — there is no in-place mutator on the read surface, so the path-of-least-resistance is `swapUpstreamTransport`.
+- Docstring + CLAUDE.md note — published transports are read-only; mutate via `swapUpstreamTransport` only.
+- Code review — reviewers MUST flag any write to a value derived from `getUpstreamTransport()`, including the local-variable bind form.
+- Lint pattern — a stricter grep that catches both forms: roughly `(getUpstreamTransport\(\)|\w+\s*:=\s*getUpstreamTransport\(\))[\s\S]{0,200}?\.\w+\s*=`. Imperfect but flags the obvious cases for human review.
+- Test enforcement — the P5.2 contract tests detect post-condition violations; the P5.3 race tests (Category A in the lab plan) detect *unsynchronized* writes via the race detector regardless of how the mutation was introduced. A `t := getUpstreamTransport(); t.Proxy = x` racing against the hot-path read trips `-race` exactly like a direct write does today.
+
+**Outcome.** Option A's migration is **compile-checked at the original call sites** (no silent rename miss) and **race-checked at runtime** (the lab tests flag the local-variable bypass as a concurrent write). Neither is type-system enforcement; both are real backstops.
 
 ### 1.8 Future extensibility
 
@@ -310,8 +318,8 @@ This is the shape of the **next** PR. **Not part of this docs PR.**
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Missed reader site (someone still reads via the old global name) | HIGH | Removing the `upstreamTransport` global causes a compile error at every missed site. No silent miss possible. |
-| Missed writer site (someone still mutates fields directly) | MEDIUM | Compile error at the global; remaining sites caught by code review. P5.2 contract tests detect post-condition violations. |
+| Missed reader site referencing the global by name | HIGH | Removing the `upstreamTransport` global causes a compile error at every such site. References by the old name cannot silently survive. |
+| Future writer mutates fields via the local-variable bypass (`t := getUpstreamTransport(); t.Proxy = x`) | MEDIUM | NOT caught by a compile error. Mitigations are layered (§1.7, §2.5): docstring + CLAUDE.md note + code review + lint pattern + the P5.3 race tests (any unsynchronized concurrent write trips `-race`). The race detector backstop is the strongest of these. |
 | Subtle clone bug (`cloneTransport` misses a field) | MEDIUM | The `http.Transport` struct is well-documented; clone helper is small and unit-tested. Add a test that asserts every field of a cloned transport matches the input. |
 | In-flight requests broken by transport swap | LOW | In-flight requests hold the old transport via their per-request `http.Client`. `CloseIdleConnections()` only closes IDLE conns; active conns survive. Verified by lab test A1. |
 | `old.CloseIdleConnections()` blocks the swap path | LOW | Doc'd as non-blocking; only triggers immediate close on already-idle conns. If we observe blocking in lab, change to `go old.CloseIdleConnections()`. |
