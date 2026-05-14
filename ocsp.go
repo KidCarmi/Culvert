@@ -212,12 +212,14 @@ func (oc *OCSPChecker) queryOCSP(leaf, issuer *x509.Certificate, responderURL st
 }
 
 // ConfigureTLSConfigOCSP installs the OCSP verify callbacks on a
-// caller-owned *tls.Config. The caller MUST own cfg exclusively (i.e.
-// cfg was just produced by cloneTLSConfig and has not yet been
-// attached to a published *http.Transport). Mutating a tls.Config
-// while a TLS handshake is reading its fields is a documented data
-// race; callers route through this helper from inside a
-// swapUpstreamTransport closure so cfg is not yet visible to readers.
+// caller-owned *tls.Config. The caller MUST own cfg exclusively —
+// typically cfg is the operator template upstreamOpTLSCfg held under
+// upstreamTransportWriteMu, mutated inside a swapUpstreamTransport
+// closure. Mutating a tls.Config while a TLS handshake is reading
+// its fields is a documented data race; the swap path attaches a
+// Clone (via cloneTLSConfig) of the operator template to the
+// published transport so the published config is never the same
+// pointer the caller mutates here.
 //
 // VerifyConnection is set alongside VerifyPeerCertificate so resumed
 // sessions also undergo revocation checks (gosec G123).

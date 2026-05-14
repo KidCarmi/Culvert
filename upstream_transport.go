@@ -94,7 +94,7 @@ func swapUpstreamTransport(update func(old *http.Transport) *http.Transport) {
 		return
 	}
 	if newT.TLSClientConfig == nil && upstreamOpTLSCfg != nil {
-		newT.TLSClientConfig = upstreamOpTLSCfg.Clone()
+		newT.TLSClientConfig = cloneTLSConfig(upstreamOpTLSCfg)
 	}
 	upstreamTransportPtr.Store(newT)
 	if old != nil {
