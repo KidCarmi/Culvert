@@ -22,7 +22,7 @@ What is **NOT** uncovered by this discovery:
 
 - No hot-path race surface on the existing locks (`CertManager.mu`, `clusterCA.mu`, `cpTLSConfig.mu`, `ClusterStore.mu`).
 - No undocumented goroutine spawn site missing cancellation — both long-lived background loops (CA-rotation ticker, heartbeat monitor) take an explicit `context.Context` and exit on `<-ctx.Done()`.
-- No undocumented persistence path — `ca.bundle`, `cluster-ca.crt`, `cluster-ca.key`, and `cluster.json` are the four on-disk artifacts; all four are in the Tier-2 backup list at `backup.go:62–65`.
+- No undocumented persistence path — `ca.bundle`, `cluster-ca.crt`, `cluster-ca.key`, and `cluster.json` are the four on-disk artifacts; all four are in the Tier-1 backup list at `backup.go:62–65`.
 - No undocumented mutation surface — `apiCARotate`, `apiCertsUpload`, `apiCACacheClear` are the three CA-mutating admin endpoints (plus `apiOCSPConfig` which is P5.3 territory, not P6.3).
 
 **Backup / restore ownership** (cert material on disk, passphrase handling, restore semantics) is explicitly **out of P6 scope** per the program doc — D1.3 / D1.6 own it. This discovery records the on-disk artifacts but does not recommend changes to their handling.
@@ -281,7 +281,7 @@ All writers in §2.1 are sequential. No concurrent reader yet because the proxy 
 | `globalOCSP` cache | **not persisted** (P5.3 territory) | N/A | N/A |
 | Upstream mTLS template | **not persisted** (P5.3 territory) | N/A | N/A |
 
-Backup tier coverage (`backup.go:62–65`): `ca.bundle`, `cluster-ca.crt`, `cluster-ca.key`, `cluster.json` all listed as `Required: true, OptionalFirstRun: true`. **All four are Tier-2 backed.** Restore semantics (`CULVERT_CA_PASSPHRASE` matching, cluster-CA key trust-on-restore, etc.) are owned by D1.3 / D1.6 per `RUNTIME-OWNERSHIP.md` §2 — **out of P6 scope**.
+Backup tier coverage (`backup.go:60–66`): `ca.bundle`, `cluster-ca.crt`, `cluster-ca.key`, `cluster.json` all listed as `Required: true, OptionalFirstRun: true` in the **Tier-1 required** section (commented `// ── Tier 1 — required, but all first-run-optional in practice`). **All four are Tier-1 backed** — `Required: true` is the per-artifact source of truth for tier classification. Restore semantics (`CULVERT_CA_PASSPHRASE` matching, cluster-CA key trust-on-restore, etc.) are owned by D1.3 / D1.6 per `RUNTIME-OWNERSHIP.md` §2 — **out of P6 scope**.
 
 ### 5.2 SIGHUP / hot reload
 
@@ -423,7 +423,7 @@ These were uncovered during this discovery but are out of P6.3's scope. They are
 - `tls.go:21–141` — `selfSignedTLS()` admin-UI cert generation, SAN auto-detection.
 - `ha.go:209–232` — HA standby `ImportCASilent` paths (encrypted + deprecated plaintext fallback).
 - `ocsp.go:37–42` — `globalOCSP` (P5.3 territory; referenced only for trust-flow completeness).
-- `backup.go:62–65` — Tier-2 backup inclusion of `ca.bundle`, `cluster-ca.crt`, `cluster-ca.key`, `cluster.json`.
+- `backup.go:60–66` — Tier-1 backup inclusion of `ca.bundle`, `cluster-ca.crt`, `cluster-ca.key`, `cluster.json` (the Tier-1 section comment is at `:60`; the four artifacts are at `:62–65`).
 - `ui_security.go:18–23, 217, 226–249, 253–295, 339, 355, 396, 411, 981–1007, 1009–1025, 1027–1038, 1040–1110, 1113, 1134–1177` — `pendingCARotation`, every `saveConfigVersion` site (none CA-related), and the seven CA-touching admin handlers.
 - Tests: `ca_test.go`, `ca_rotation_test.go`, `enrollment_test.go`, `enroll_util_test.go`, `controlplane_extra_test.go`, `controlplane_verifynodecert_security_test.go`, `controlplane_getconfig_security_test.go`, `controlplane_snapshot_bounds_test.go`, `coldstart_clusterca_test.go`, `mtls_ocsp_startup_test.go`, `upstream_transport_race_test.go`, `upstream_transport_swap_test.go`.
 - `roadmap/RUNTIME-OWNERSHIP.md` §2 (S8 out-of-scope clarification), §3 Phase shape, §4 P6.3 entry, §5 "Recommended next PR".
