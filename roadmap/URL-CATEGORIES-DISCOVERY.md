@@ -8,12 +8,12 @@
 
 ## 0. Executive verdict
 
-`initURLCategories` is a four-store init site (catStore + categoryGroups + SaaS feed + community BadgerDB) with one **correctly-parented** background goroutine (UT1 `FeedSyncer`) and one **detached** background goroutine (`globalSaaSFeed.syncLoop`) that survives `appLifecycleCancel()`. The community BadgerDB has an owned `Close()` path wired into the late-shutdown registry at `shutdownOrderCommunityDBClose=120` (PR #217 / P2.2). No persistent on-disk corruption surface was found — BadgerDB owns its own MVCC, `catStore.Save()` uses tmp+rename, and `categories.json` lives on the Tier-2 backup list.
+`initURLCategories` is a four-store init site (catStore + categoryGroups + SaaS feed + community BadgerDB) with one **correctly-parented** background goroutine (UT1 `FeedSyncer`) and one **detached** background goroutine (`globalSaaSFeed.syncLoop`) that survives `appLifecycleCancel()`. The community BadgerDB has an owned `Close()` path wired into the late-shutdown registry at `shutdownOrderCommunityDBClose=120` (PR #217 / P2.2). **No active concurrent-corruption surface was found** — BadgerDB owns its own MVCC, `catStore` / `globalCategoryGroups` are guarded by RWMutexes, and `Save()` writes via tmp+rename. **However, durability gaps exist and are tracked separately** in §10 (atomic-but-not-fsynced writes; `ReplaceAll` paths that mutate memory only).
 
-Two pre-existing durability gaps **mirror prior P3 follow-up findings** and are NOT P6.1 scope:
+Two pre-existing durability gaps **mirror prior P3 follow-up findings** and are NOT P6.1 scope. Both gaps affect `catStore` **and** `globalCategoryGroups` symmetrically (the verification subsection in §1.4 confirms parity):
 
-1. `catStore.Save()` is atomic-via-rename but **not fsynced** (`policy.go:166–170`). Direct mirror of P3.1 follow-up #1 (`PACStore.Set`, `pac.go:82–86`) and P3.2a (`PolicyStore.Save`, fixed in PR #224).
-2. `catStore.ReplaceAll()` mutates memory only and **does not persist** (`policy.go:187–197`). Direct mirror of P3.1 follow-up #3 (`FileProfileStore.ReplaceAll`, fixed in PR #222) and P3.2b (`policyStore.ReplaceAll`, fixed via caller-side `Save()` in PR #225 — the cluster-apply gap on a DP node).
+1. `catStore.Save()` and `globalCategoryGroups.Save()` are both atomic-via-rename but **not fsynced** (`policy.go:166–170`, `categorygroup.go:115–142`). Direct mirror of P3.1 follow-up #1 (`PACStore.Set`, `pac.go:82–86`) and P3.2a (`PolicyStore.Save`, fixed in PR #224).
+2. `catStore.ReplaceAll()` and `globalCategoryGroups.ReplaceAll()` both mutate memory only and **do not persist** (`policy.go:187–197`, `categorygroup.go:241–257`). Direct mirror of P3.1 follow-up #3 (`FileProfileStore.ReplaceAll`, fixed in PR #222) and P3.2b (`policyStore.ReplaceAll`, fixed via caller-side `Save()` in PR #225 — the cluster-apply gap on a DP node).
 
 One additional **runtime-ownership gap** worth filing for triage separately from P6.1:
 
@@ -86,9 +86,22 @@ Nil when `--cat-feed-db == ""`. Opened via `openCommunityDB(dir)` at `catdb.go:3
 
 The community DB has **no separate in-memory index**. All lookups go straight to BadgerDB via `Lookup(host)` (`catdb.go:75–98`), which walks `host` → `host[after first dot]` → … `tld` until it finds a key or runs out of labels.
 
-### 1.4 `globalCategoryGroups` — sibling Layer-1 store
+### 1.4 `globalCategoryGroups` — sibling Layer-1 store (verification)
 
-Declared in `policy.go` (separate file scope). Persisted to `category_groups.json` via its own `Save()`. **Distinct file**, distinct mutex. Out of P6.1 ownership analysis beyond noting it shares the `initURLCategories` init site.
+Declared at `categorygroup.go:44–53` as a package global `var globalCategoryGroups = &CategoryGroupStore{...}`. Persisted to `category_groups.json` under `dataDir`. Initialised inside `initURLCategories` at `main.go:776–778`, which makes it in-scope for this discovery rather than truly adjacent.
+
+Verification (parallels the §1.2 catStore analysis):
+
+| Axis | `globalCategoryGroups` | Mirror of `catStore`? |
+|---|---|---|
+| Synchronisation | `mu sync.RWMutex` (`categorygroup.go:45`) — all mutators take write lock, hot-path `GetByName` / `MatchesHost` take RLock | Yes |
+| `Save()` | `categorygroup.go:115–142` — `json.MarshalIndent` → `os.WriteFile` to `path+".tmp"` → `os.Rename`. Atomic-via-rename, **not fsynced**. | Yes — same gap (UC-1 mirror) |
+| `ReplaceAll()` | `categorygroup.go:241–257` — builds new map + order, swaps under brief write lock. **Does NOT call `Save()`** | Yes — same gap (UC-2 mirror) |
+| `ConfigSnapshot` carriage | `CategoryGroups []CategoryGroup` (`controlplane.go:116`); cap `maxSnapCategoryGroups = 1_000` (`:154, 183`). DP applier: `globalCategoryGroups.ReplaceAll(snap.CategoryGroups)` (`:1582–1583`). CP capture: `snap.CategoryGroups = globalCategoryGroups.List()` (`:1677`). | Yes — same shape as `URLCategories` carriage |
+| Shutdown / lifecycle | No background goroutine spawned. No shutdown hook needed; state is on disk via synchronous save-on-write. `Load()` is the only startup-time read. | Symmetric — neither store has a shutdown hook |
+| Admin API | `apiCategoryGroups` (`ui_policy.go:342–418`) — calls `Save()` **and** `saveConfigVersion(...)` after every mutation. | Asymmetric — `apiURLCat` calls `Save()` but NOT `saveConfigVersion()` (see UC-4 in §10) |
+
+**Net:** `globalCategoryGroups` mirrors `catStore`'s durability gaps (UC-1, UC-2) but is **better** than `catStore` on the config-versioning axis (UC-4 only applies to `catStore` / `apiURLCat`). Both stores are otherwise structurally identical. The UC-1 and UC-2 entries in §10 apply to both stores; the UC-2 cluster-apply fix would need a paired `globalCategoryGroups.Save()` call after `applyConfigSnapshot`'s `ReplaceAll` at `controlplane.go:1583`.
 
 ### 1.5 `globalSaaSFeed` — Layer-1 supplemental syncer
 
@@ -253,12 +266,12 @@ A rollback v3→v2 therefore restores category-group state but **not** the catSt
 | Field | Carried by ConfigSnapshot | DP apply | CP capture |
 |---|---|---|---|
 | `catStore` entries | ✅ `URLCategories []CategoryEntry` (`controlplane.go:86`) | `catStore.ReplaceAll(snap.URLCategories)` (`:1502–1504`) — **no `Save()` after the swap** — see §10 finding #2 | `snap.URLCategories = catStore.All()` (`:1635–1636`) |
-| `globalCategoryGroups` | ⚠ verify out of P6.1 scope | ⚠ | ⚠ |
+| `globalCategoryGroups` | ✅ `CategoryGroups []CategoryGroup` (`controlplane.go:116`); cap `maxSnapCategoryGroups = 1_000` (`:154, 183`) | `globalCategoryGroups.ReplaceAll(snap.CategoryGroups)` (`:1582–1583`) — **no `Save()` after the swap** — same UC-2 pattern as catStore | `snap.CategoryGroups = globalCategoryGroups.List()` (`:1677`) |
 | `globalSaaSFeed` state | ❌ not carried | – | – |
 | `communityDB` contents | ❌ not carried | – | – |
 | `FeedSyncer` state | ❌ not carried | – | – |
 
-The cluster-apply `ReplaceAll` gap exactly mirrors the P3.1#3 / P3.2b pattern: in-memory state is updated, but a DP restart between the heartbeat and the next admin mutation loses the cluster-pushed state. Pre-existing — see §10 finding #2.
+The cluster-apply `ReplaceAll` gap exactly mirrors the P3.1#3 / P3.2b pattern: in-memory state is updated, but a DP restart between the heartbeat and the next admin mutation loses the cluster-pushed state. **The gap applies symmetrically to both `catStore` and `globalCategoryGroups`** — see §1.4 verification and §10 finding #2.
 
 ---
 
@@ -314,7 +327,7 @@ This document. **Complete.** No production code; no roadmap expansion; no specul
 ### 9.2 Implications for Phase 6 sequencing
 
 - The four P6 discoveries (P6.1 URL categories, P6.2 scanning, P6.3 Root CA, P6.4 cluster) remain **independent**. P6.1 does not gate any of the others.
-- **None of the findings in this discovery warrant an in-program Phase 6 implementation PR.** The race surfaces are resolved by existing synchronization. The three pre-existing durability / lifecycle gaps (§10 #1–#3) and the config-version asymmetry (§10 #4) belong in the same "tracked-separately follow-up" bucket as P3.1#1, P3.2c, and U-1…U-6 — not a new program phase.
+- **None of the findings in this discovery warrant an in-program Phase 6 implementation PR.** The race surfaces are resolved by existing synchronization. The eight tracked follow-ups (§10 UC-1…UC-8) — durability, lifecycle hygiene, audit/observability, and one optional contract-test addition — belong in the same "tracked-separately follow-up" bucket as P3.1#1, P3.2c, and U-1…U-6 — not a new program phase.
 - **P3.4 cluster heartbeat flush remains gated on P6.4 cluster discovery**, NOT on P6.1. P6.1 does not contribute material to the cluster-runtime mutation graph beyond confirming `URLCategories` flows through `ConfigSnapshot` with a `ReplaceAll` (no-persist) apply.
 
 ### 9.3 What this discovery does NOT recommend
@@ -331,22 +344,24 @@ These are uncovered during this discovery but are out of P6.1's scope. They are 
 
 | ID | Finding | Pre-existing? | Mirror |
 |---|---|---|---|
-| **UC-1** | `catStore.Save()` is atomic-via-rename but not fsynced (`policy.go:166–170`). Switching to `atomicWriteFile` would bring durability up to `fileBlocker` / `policyStore` (post-P3.2a) parity. Small, mechanical. | Yes | P3.1 follow-up #1 (PAC `Set`); P3.2a (`PolicyStore.Save`, PR #224) |
-| **UC-2** | `catStore.ReplaceAll(...)` mutates memory only and does not persist (`policy.go:187–197`). DP nodes restarted between a CP heartbeat and the next admin mutation lose the cluster-pushed catStore. Fix is **caller-side** `catStore.Save()` after `ReplaceAll(...)` in `applyConfigSnapshot` at `controlplane.go:1503`, matching CategoryStore's caller-side `Save()` convention (mirrors P3.2b's PolicyStore fix). **Gated on UC-1** so we don't amplify a non-atomic write across the cluster apply path. | Yes | P3.1 follow-up #3 (`FileProfileStore.ReplaceAll`, PR #222); P3.2b (PR #225) |
-| **UC-3** | `globalSaaSFeed.syncLoop` runs under `context.Background()` (`saas_feed.go:73`) and `Stop()` is never called from any shutdown hook. Detached goroutine; S4-class lifecycle gap. The fix shape is small (own a `saasFeedRunner` with `Start(ctx) / Stop()`, parent on `appLifecycleCtx`, plus a no-op late-shutdown hook for symmetry) but the missing-call-site list is the actual hazard — adding the hook without updating `admin_settings.go:164`'s reconfigure path would race the new and old goroutines briefly. | Yes | P1.2 (`sseBroadcaster`, PR #211); P1.3 (upstream health-check, PR #212) |
+| **UC-1** | `catStore.Save()` (`policy.go:166–170`) **and** `globalCategoryGroups.Save()` (`categorygroup.go:115–142`) are atomic-via-rename but not fsynced. Switching to `atomicWriteFile` would bring durability up to `fileBlocker` / `policyStore` (post-P3.2a) parity. Small, mechanical. **Both stores in one follow-up** since they share the gap and the fix shape. | Yes | P3.1 follow-up #1 (PAC `Set`); P3.2a (`PolicyStore.Save`, PR #224) |
+| **UC-2** | `catStore.ReplaceAll(...)` (`policy.go:187–197`) **and** `globalCategoryGroups.ReplaceAll(...)` (`categorygroup.go:241–257`) mutate memory only and do not persist. DP nodes restarted between a CP heartbeat and the next admin mutation lose the cluster-pushed state. Fix is **caller-side** — call `.Save()` immediately after `ReplaceAll(...)` in `applyConfigSnapshot` at `controlplane.go:1503` (catStore) and `:1583` (categoryGroups), matching both stores' caller-side `Save()` convention (mirrors P3.2b's PolicyStore fix). **Hard-gated on UC-1: do NOT implement UC-2 before UC-1 hardens both `Save()` paths with `atomicWriteFile` / fsync semantics** — otherwise UC-2 amplifies a non-fsynced write across every cluster apply, exactly the failure mode P3.2a / P3.2b's sequencing was designed to prevent. | Yes | P3.1 follow-up #3 (`FileProfileStore.ReplaceAll`, PR #222); P3.2b (PR #225) |
+| **UC-3** | `globalSaaSFeed.syncLoop` runs under `context.Background()` (`saas_feed.go:73`) and `globalSaaSFeed.Stop()` is never called from any shutdown hook. Detached goroutine; S4-class lifecycle gap. Possible fix shapes (to be decided in the follow-up PR, **not** this discovery): (a) parent the goroutine to `appLifecycleCtx`; (b) add a late-shutdown hook that calls `globalSaaSFeed.Stop()`. Exact design — including how to keep the reconfigure path at `admin_settings.go:164` race-free across the change — is out of P6.1 scope. | Yes | P1.2 (`sseBroadcaster`, PR #211); P1.3 (upstream health-check, PR #212) |
 | **UC-4** | `apiURLCat` POST/PUT/DELETE and `apiURLCatHost` POST/DELETE call `auditEvent(...)` but do **not** call `saveConfigVersion(...)`. Compare to `apiCategoryGroups` at `ui_policy.go:372, 392, 417` which call both. Asymmetric vs. the `CLAUDE.md` invariant for config-mutating API handlers. Pre-existing; rollback v3→v2 leaves the catStore at its current state. | Yes | None — this is a new finding in the same family as the U-* observations in P5.1 §10 |
 | **UC-5** | `controlplane.go` `applyConfigSnapshot` does not `auditEvent(...)` the application of cluster-pushed categories on a DP node. Operators looking at the audit ring on a DP cannot tell whether a category change came from a local admin or from CP. Cosmetic; consistent with how other cluster-applied fields are handled today. | Yes | None |
 | **UC-6** | No metrics instrumentation for the URL-category subsystem (`metrics.go` has no `culvert_categories_*` counter family). `FeedSyncer.Stats()` and `SaaSFeedSyncer.Stats()` are exposed only via admin endpoints. Observability gap; operators cannot alert on "feed sync stuck". | Yes | None |
 | **UC-7** | `FeedSyncer.downloadAndParse` builds its HTTP request with `context.Background()` (`feedsync.go:192`); cannot be cancelled by `appLifecycleCancel()`. Termination is bounded by `feedSyncHTTPTimeout`. Cosmetic — the goroutine still exits cleanly. | Yes | None |
+| **UC-8** | No race contract test interleaves `catStore.Set` / `.AddHost` / `.ReplaceAll` (or the `globalCategoryGroups` equivalents) with concurrent `matchCategoryInStore` / `MatchesHost` calls under `-race`. The existing RWMutex makes this clean by construction (§6 C-1), but a focused contract test would prove it and pin the invariant against future refactors. Low-cost, ~one focused test file (mirrors the P5.3 Category-A race test pattern at a much smaller scope — no httptest fixtures needed). | Yes (gap) | P5.3 Category A race tests in `upstream_transport_race_test.go` |
 
-**None of UC-1 through UC-7 are required for P6 to advance.** They are observability + lifecycle hygiene rather than blockers. Sequencing suggestions:
+**None of UC-1 through UC-8 are required for P6 to advance.** They are observability + lifecycle hygiene rather than blockers. Sequencing suggestions:
 
-- **UC-1 first** (independent, mechanical) — mirrors PR #224 exactly.
-- **UC-2 after UC-1** — gated on UC-1 for the same reason P3.2b waited on P3.2a.
-- **UC-3** independent of UC-1/UC-2 — can ship at any time; small contract surface.
+- **UC-1 first** (independent, mechanical) — mirrors PR #224 exactly. Covers both `catStore.Save` and `globalCategoryGroups.Save` in one PR.
+- **UC-2 after UC-1** — **hard-gated** on UC-1 (see UC-2 row). Same reason P3.2b waited on P3.2a. Covers the cluster-apply paths for both stores symmetrically.
+- **UC-3** independent of UC-1/UC-2 — can ship at any time; design choice between context parenting and shutdown-hook deferred to the implementation PR.
 - **UC-4 / UC-5** independent observability fixes; one-line additions per handler.
 - **UC-6** is its own minor metrics PR; not blocking.
 - **UC-7** is the lowest priority; the timeout already bounds the worst case.
+- **UC-8** independent of all of the above — pure test-only addition. Safe to ship at any time.
 
 ---
 
