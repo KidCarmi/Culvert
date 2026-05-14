@@ -30,14 +30,27 @@ func ensureMTLSOCSPTestLogger(t *testing.T) {
 	}
 }
 
-// resetMTLSOCSPGlobals snapshots/restores upstreamTransport.TLSClientConfig
-// and globalOCSP.enabled for isolation under -shuffle.
+// resetMTLSOCSPGlobals snapshots/restores the entire upstream
+// transport pointer, the operator's TLS template
+// (upstreamOpTLSCfg), and globalOCSP.enabled for isolation under
+// -shuffle. P5.3: published transports are read-only; tests
+// snapshot via Load() and restore via Store() rather than mutating
+// fields on a published transport. The op TLS template is held
+// under upstreamTransportWriteMu; we snapshot under the same lock.
 func resetMTLSOCSPGlobals(t *testing.T) {
 	t.Helper()
-	origTLS := upstreamTransport.TLSClientConfig
+	origPtr := upstreamTransportPtr.Load()
 	origOCSP := globalOCSP.Enabled()
+	upstreamTransportWriteMu.Lock()
+	origOpTLS := upstreamOpTLSCfg
+	// Clear at start so tests don't inherit state from a prior test.
+	upstreamOpTLSCfg = nil
+	upstreamTransportWriteMu.Unlock()
 	t.Cleanup(func() {
-		upstreamTransport.TLSClientConfig = origTLS
+		upstreamTransportPtr.Store(origPtr)
+		upstreamTransportWriteMu.Lock()
+		upstreamOpTLSCfg = origOpTLS
+		upstreamTransportWriteMu.Unlock()
 		if origOCSP {
 			globalOCSP.Enable()
 		} else {
@@ -102,9 +115,11 @@ func TestResolveMTLSOCSPStartupConfig_CopiesAllFields(t *testing.T) {
 func TestLoadMTLSAndOCSP_AllEmptyIsNoop(t *testing.T) {
 	resetMTLSOCSPGlobals(t)
 	ensureMTLSOCSPTestLogger(t)
-	upstreamTransport.TLSClientConfig = nil
+	// P5.3: start from a fresh transport with no TLS config; loader
+	// must perform no swap for an empty cfg.
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
 	loadMTLSAndOCSP(mtlsOCSPStartupConfig{})
-	if upstreamTransport.TLSClientConfig != nil {
+	if getUpstreamTransport().TLSClientConfig != nil {
 		t.Error("TLSClientConfig should remain nil when no mTLS configured")
 	}
 	if globalOCSP.Enabled() {
@@ -115,7 +130,7 @@ func TestLoadMTLSAndOCSP_AllEmptyIsNoop(t *testing.T) {
 func TestLoadMTLSAndOCSP_LoadsClientCert(t *testing.T) {
 	resetMTLSOCSPGlobals(t)
 	ensureMTLSOCSPTestLogger(t)
-	upstreamTransport.TLSClientConfig = nil
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
 
 	dir := t.TempDir()
 	certPath, keyPath := writeTestClientCert(t, dir)
@@ -125,14 +140,15 @@ func TestLoadMTLSAndOCSP_LoadsClientCert(t *testing.T) {
 		ClientKeyFile:  keyPath,
 	})
 
-	if upstreamTransport.TLSClientConfig == nil {
+	tlsCfg := getUpstreamTransport().TLSClientConfig
+	if tlsCfg == nil {
 		t.Fatal("TLSClientConfig should be initialised")
 	}
-	if len(upstreamTransport.TLSClientConfig.Certificates) != 1 {
-		t.Errorf("expected 1 client cert; got %d", len(upstreamTransport.TLSClientConfig.Certificates))
+	if len(tlsCfg.Certificates) != 1 {
+		t.Errorf("expected 1 client cert; got %d", len(tlsCfg.Certificates))
 	}
-	if upstreamTransport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
-		t.Errorf("MinVersion should be TLS1.2; got %v", upstreamTransport.TLSClientConfig.MinVersion)
+	if tlsCfg.MinVersion != tls.VersionTLS12 {
+		t.Errorf("MinVersion should be TLS1.2; got %v", tlsCfg.MinVersion)
 	}
 }
 
@@ -140,26 +156,44 @@ func TestLoadMTLSAndOCSP_PreservesExistingTLSConfig(t *testing.T) {
 	resetMTLSOCSPGlobals(t)
 	ensureMTLSOCSPTestLogger(t)
 	// Pre-existing TLS config (e.g. an upstream-trust-anchor config) must
-	// not be overwritten — only Certificates is replaced.
+	// not have its FIELD VALUES overwritten — only Certificates is
+	// replaced. P5.3 note: the swap clones TLSClientConfig via
+	// (*tls.Config).Clone(), so the resulting pointer is a NEW instance;
+	// pre-P5.3's "same pointer reused" contract becomes
+	// "field values preserved," which is the same operator-visible
+	// guarantee.
 	existing := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: "preset.example"}
-	upstreamTransport.TLSClientConfig = existing
+	// P5.3: seed the operator's TLS template AND publish a transport
+	// carrying the same fields. The next loadMTLSAndOCSP swap will
+	// read from upstreamOpTLSCfg, not from the published transport's
+	// TLSClientConfig (which the stdlib may lazily mutate).
+	upstreamTransportWriteMu.Lock()
+	upstreamOpTLSCfg = existing.Clone()
+	upstreamTransportWriteMu.Unlock()
+	newT := cloneTransport(getUpstreamTransport())
+	newT.TLSClientConfig = existing.Clone()
+	upstreamTransportPtr.Store(newT)
 
 	dir := t.TempDir()
 	certPath, keyPath := writeTestClientCert(t, dir)
 	loadMTLSAndOCSP(mtlsOCSPStartupConfig{ClientCertFile: certPath, ClientKeyFile: keyPath})
 
-	if upstreamTransport.TLSClientConfig != existing {
-		t.Error("existing TLSClientConfig pointer should be reused")
+	tlsCfg := getUpstreamTransport().TLSClientConfig
+	if tlsCfg.ServerName != "preset.example" {
+		t.Errorf("ServerName clobbered: got %q", tlsCfg.ServerName)
 	}
-	if upstreamTransport.TLSClientConfig.ServerName != "preset.example" {
-		t.Errorf("ServerName clobbered: got %q", upstreamTransport.TLSClientConfig.ServerName)
+	if tlsCfg.MinVersion != tls.VersionTLS13 {
+		t.Errorf("MinVersion clobbered: got %v", tlsCfg.MinVersion)
+	}
+	if len(tlsCfg.Certificates) != 1 {
+		t.Errorf("expected 1 client cert after mTLS load; got %d", len(tlsCfg.Certificates))
 	}
 }
 
 func TestLoadMTLSAndOCSP_BadCertIsNonFatal(t *testing.T) {
 	resetMTLSOCSPGlobals(t)
 	ensureMTLSOCSPTestLogger(t)
-	upstreamTransport.TLSClientConfig = nil
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
 
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "bad.crt")
@@ -170,9 +204,10 @@ func TestLoadMTLSAndOCSP_BadCertIsNonFatal(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte("not a pem"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	// Must not panic; TLSClientConfig must remain nil (no mTLS applied).
+	// Must not panic; TLSClientConfig must remain nil (no mTLS applied;
+	// OCSP not requested, so the swap does not run at all).
 	loadMTLSAndOCSP(mtlsOCSPStartupConfig{ClientCertFile: certPath, ClientKeyFile: keyPath})
-	if upstreamTransport.TLSClientConfig != nil {
+	if getUpstreamTransport().TLSClientConfig != nil {
 		t.Error("TLSClientConfig should remain nil after bad-cert load")
 	}
 }

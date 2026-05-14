@@ -211,15 +211,24 @@ func (oc *OCSPChecker) queryOCSP(leaf, issuer *x509.Certificate, responderURL st
 	return ocspResp.Status == ocsp.Revoked, nil
 }
 
-// ConfigureTransportOCSP adds OCSP verification to the upstream transport's
-// TLS configuration. VerifyConnection is set alongside VerifyPeerCertificate
-// to ensure resumed sessions also undergo revocation checks (gosec G123).
-func ConfigureTransportOCSP(t *http.Transport) {
-	if t.TLSClientConfig == nil {
-		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+// ConfigureTLSConfigOCSP installs the OCSP verify callbacks on a
+// caller-owned *tls.Config. The caller MUST own cfg exclusively —
+// typically cfg is the operator template upstreamOpTLSCfg held under
+// upstreamTransportWriteMu, mutated inside a swapUpstreamTransport
+// closure. Mutating a tls.Config while a TLS handshake is reading
+// its fields is a documented data race; the swap path attaches a
+// Clone (via cloneTLSConfig) of the operator template to the
+// published transport so the published config is never the same
+// pointer the caller mutates here.
+//
+// VerifyConnection is set alongside VerifyPeerCertificate so resumed
+// sessions also undergo revocation checks (gosec G123).
+func ConfigureTLSConfigOCSP(cfg *tls.Config) {
+	if cfg == nil {
+		return
 	}
-	t.TLSClientConfig.VerifyPeerCertificate = globalOCSP.VerifyPeerCertificate // #nosec G123 -- VerifyConnection is set immediately below
-	t.TLSClientConfig.VerifyConnection = func(cs tls.ConnectionState) error {
+	cfg.VerifyPeerCertificate = globalOCSP.VerifyPeerCertificate // #nosec G123 -- VerifyConnection is set immediately below
+	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
 		// For resumed sessions, VerifyPeerCertificate is not called, so we
 		// run the OCSP check here as well.
 		if len(cs.PeerCertificates) == 0 {
@@ -235,6 +244,26 @@ func ConfigureTransportOCSP(t *http.Transport) {
 		}
 		return globalOCSP.VerifyPeerCertificate(rawCerts, chains)
 	}
+}
+
+// ConfigureTransportOCSP adds OCSP verification to a caller-owned
+// *http.Transport's TLS configuration. P5.3: this function is the
+// back-compat wrapper around ConfigureTLSConfigOCSP and MUST only be
+// called inside a swapUpstreamTransport closure on a freshly-cloned
+// transport — never on the currently-published transport. Mutating a
+// published transport's TLSClientConfig races against in-flight TLS
+// handshakes.
+//
+// Semantics preserved vs pre-P5.3:
+//   - If TLSClientConfig is nil, a fresh *tls.Config with
+//     MinVersion=TLS1.3 is allocated (the historical OCSP-only
+//     default).
+//   - VerifyPeerCertificate and VerifyConnection are installed.
+func ConfigureTransportOCSP(t *http.Transport) {
+	if t.TLSClientConfig == nil {
+		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+	}
+	ConfigureTLSConfigOCSP(t.TLSClientConfig)
 }
 
 // CleanupCache evicts expired entries from the OCSP cache.

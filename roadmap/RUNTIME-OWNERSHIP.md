@@ -289,11 +289,13 @@ Targets S6.
 - **Files:** `upstream_transport_contract_test.go` (new).
 - **Tests:** assert mTLS certs + OCSP wrapper both present after init; informational test for wrong-order case (`t.Skip` with reason until P5.3).
 
-#### P5.3 — Single-constructor `upstreamTransport` (assign-once) — **lab-required**
-- **Gate:** P5.1 + P5.2 merged + lab smoke.
-- **Files:** `upstream.go`, `mtls_ocsp_startup.go`, `main.go`.
-- **Risk:** MEDIUM-HIGH.
-- **Acceptance:** single construction site; no post-hoc mutation; `coldstart_*` green; race-free.
+#### P5.3 — Single-constructor `upstreamTransport` (assign-once) ✅ DONE
+- **Status:** ✅ shipped. The shared upstream `*http.Transport` is now held behind `atomic.Pointer[http.Transport]` with a package-level writer mutex serializing swaps. The chosen ownership model is documented in `roadmap/UPSTREAM-TRANSPORT-OWNERSHIP-MODEL.md`; the CI-backed lab tests it specifies are in `upstream_transport_race_test.go` (A1–A4) and `upstream_transport_swap_test.go` (B1, B2, C1, C2, E1).
+- **Files:** `upstream_transport.go` (new), `proxy.go`, `mtls_ocsp_startup.go`, `ocsp.go`, `ui_security.go`, `mtls_ocsp_startup_test.go`, `upstream_test.go`, `upstream_transport_contract_test.go`, `ui_security_coverage_test.go`, `upstream_transport_race_test.go` (new), `upstream_transport_swap_test.go` (new), `CLAUDE.md`.
+- **Ownership rules in force:** reads route through `getUpstreamTransport()` exclusively; writes route through `swapUpstreamTransport(update)` exclusively; `update` MUST build a NEW transport via `cloneTransport` + `cloneTLSConfig` and MUST NOT mutate the input; direct field assignment on a loaded transport is forbidden (CLAUDE.md convention note); idle conns on the old transport are closed synchronously after each swap.
+- **Race surfaces eliminated:** R-1 (`upstreamTransport.Proxy` field write vs stdlib `RoundTrip` read), R-2 (`TLSClientConfig` rebuild vs TLS handshake reads), R-4 (torn-write window in `ConfigureTransportOCSP`). Verified by Category A race tests running under `-race`.
+- **Acceptance criteria met:** single construction site (`newBaseUpstreamTransport` in `upstream_transport.go`); no post-hoc mutation of published transports; existing tests including `coldstart_*` and the P5.2 contracts green; race-free under `go test -race -count=1`.
+- **Lab gate:** the rollout still benefits from real-lab / soak validation per the lab plan's §3 "Limitations vs a real lab" table (FD exhaustion, P99 latency under churn, real OCSP responder behaviour, real upstream-proxy quirks). CI tests prove correctness; the lab proves production readiness.
 
 ---
 
@@ -317,9 +319,9 @@ Output: `roadmap/CLUSTER-RUNTIME-DISCOVERY.md`. **Required gate for P3.4.**
 
 ## 5. Recommended next PR
 
-Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. P3.3 scope was reduced via discovery to the `audit-log-close` hook only (PR #227). **P3.4 is gated on the P6.4 cluster discovery merge.** **Phase 4 is complete:** P4.1 (`initBlocklist`, PR #228) shipped as the 12th startup slice; P4.2 (`initConnAndRateLimit`, PR #230) as the 13th; P4.3 (`initObservability`, PR #231) as the 14th; P4.4 (`initAuth`) as the 15th. The next implementation PR is:
+Phases 1 and 2 are complete (PRs #210–#214 for Phase 1, PRs #216–#217 for Phase 2). P3.1 closed out as discovery; follow-ups #2 and #3 shipped as PRs #221 and #222. P3.2 closed out as discovery (PR #223); follow-ups P3.2a and P3.2b shipped as PRs #224 and #225. P3.2c (HA-layer sync version-guard optimization) is deferred and non-blocking. P3.3 scope was reduced via discovery to the `audit-log-close` hook only (PR #227). **P3.4 is gated on the P6.4 cluster discovery merge.** **Phase 4 is complete:** P4.1 (`initBlocklist`, PR #228) shipped as the 12th startup slice; P4.2 (`initConnAndRateLimit`, PR #230) as the 13th; P4.3 (`initObservability`, PR #231) as the 14th; P4.4 (`initAuth`, PR #232) as the 15th. **Phase 5 is complete:** P5.1 (mutation-graph discovery, PR #233), P5.2 (contract tests, PR #234), P5.2.1 (CI lab plan, PR #235), P5.3 design (ownership model, PR #236), P5.3 implementation (this PR). The next unblocked implementation step is:
 
-- **P5.1 — Discovery only: document `upstreamTransport` mutation graph** `[travel-ok]` (Phase 5, S6). Output: `roadmap/UPSTREAM-TRANSPORT-DISCOVERY.md`. **No production code.** Map every site that mutates the in-place `upstreamTransport` (`proxy.go:961`) plus its read consumers, then propose whether atomic-pointer swap or a `Save(ctx)`-style hand-off fits — gated by the discovery before any code change.
+- **Phase 6 discovery PRs.** Phase 6 is discovery-only — each P6.x produces a `roadmap/*-DISCOVERY.md` artefact. Start with P6.1 (`initURLCategories` + community BadgerDB) if no other priority intervenes; the four P6 discoveries are independent and can be sequenced as resources allow. **P3.4 unblocks once P6.4 cluster discovery is merged.**
 
 Phase 3 is **state durability**, not more shutdown refactor. The shutdown registry from Phase 2 is the wiring substrate; Phase 3 only adds opt-in `Save(ctx)` hooks where the discovery proves a real durability gap. **Not** a re-architecting of persistence — the on-disk format and `Load()` paths are untouched.
 

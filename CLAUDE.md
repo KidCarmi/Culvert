@@ -116,6 +116,7 @@ docker compose up -d
 - **gosec G117**: Avoid struct field names or JSON tags matching secret patterns (e.g. `secret`, `password`, `token`). Rename to non-matching names (e.g. `SessionHMAC` instead of `SessionSecret`).
 - **gosec G124**: When cookies use dynamic `Secure` flag (e.g. `isSecureRequest(r)`), suppress with `// #nosec G124 -- dynamic Secure flag`.
 - **Cyclomatic complexity**: Keep functions under cyclop threshold of 15. Extract helpers for complex switch/if chains.
+- **`upstreamTransport` is read-only after publication**: the shared upstream `*http.Transport` is owned by `upstream_transport.go` (P5.3 / S6). Read via `getUpstreamTransport()`. Mutate via `swapUpstreamTransport(update)` only — the update closure builds a NEW `*http.Transport` (use `cloneTransport` + `cloneTLSConfig`) and MUST NOT mutate its input. Direct field assignment on a loaded transport (`getUpstreamTransport().Proxy = …`, including the local-variable bind form `t := getUpstreamTransport(); t.Proxy = …`) is forbidden — it races against the proxy hot path's reads.
 
 ## CI Pipelines
 

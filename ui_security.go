@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1150,7 +1151,21 @@ func apiOCSPConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Enabled {
 			globalOCSP.Enable()
-			ConfigureTransportOCSP(upstreamTransport)
+			// P5.3: route through swapUpstreamTransport so the OCSP
+			// verify callbacks land on the operator's TLS template
+			// (upstreamOpTLSCfg). The swap attaches a Clone of the
+			// updated template to the new transport — the stdlib's
+			// lazy h2 setup mutates the clone, not the template.
+			swapUpstreamTransport(func(old *http.Transport) *http.Transport {
+				if upstreamOpTLSCfg == nil {
+					upstreamOpTLSCfg = &tls.Config{MinVersion: tls.VersionTLS13}
+				}
+				if upstreamOpTLSCfg.MinVersion == 0 {
+					upstreamOpTLSCfg.MinVersion = tls.VersionTLS13
+				}
+				ConfigureTLSConfigOCSP(upstreamOpTLSCfg)
+				return cloneTransport(old)
+			})
 		} else {
 			globalOCSP.Disable()
 		}

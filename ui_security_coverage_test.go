@@ -262,22 +262,33 @@ func TestAPIOCSPConfig_GETShape(t *testing.T) {
 // since Enable calls ConfigureTransportOCSP which mutates the shared transport.
 func TestAPIOCSPConfig_POSTTogglesEnabled(t *testing.T) {
 	origEnabled := globalOCSP.Enabled()
-	origTLSConf := upstreamTransport.TLSClientConfig
+	// P5.3: snapshot the entire transport pointer + operator TLS
+	// template. apiOCSPConfig now installs OCSP via
+	// swapUpstreamTransport, which publishes a NEW transport with a
+	// Clone of the operator template attached.
+	origPtr := upstreamTransportPtr.Load()
+	upstreamTransportWriteMu.Lock()
+	origOpTLS := upstreamOpTLSCfg
+	upstreamOpTLSCfg = nil
+	upstreamTransportWriteMu.Unlock()
 	t.Cleanup(func() {
 		if origEnabled {
 			globalOCSP.Enable()
 		} else {
 			globalOCSP.Disable()
 		}
-		upstreamTransport.TLSClientConfig = origTLSConf
+		upstreamTransportPtr.Store(origPtr)
+		upstreamTransportWriteMu.Lock()
+		upstreamOpTLSCfg = origOpTLS
+		upstreamTransportWriteMu.Unlock()
 	})
 
-	// Start from disabled + nil TLS config so ConfigureTransportOCSP takes the
-	// "create with MinVersion=TLS13" branch deterministically regardless of
-	// what an earlier test (TestConfigureTransportOCSP in ocsp_test.go) may
-	// have left installed on the shared upstreamTransport.
+	// Start from disabled + a fresh transport (no TLS config) so the
+	// OCSP swap path takes the "create with MinVersion=TLS13" branch
+	// deterministically regardless of what an earlier test may have
+	// left installed on the shared upstream transport.
 	globalOCSP.Disable()
-	upstreamTransport.TLSClientConfig = nil
+	upstreamTransportPtr.Store(newBaseUpstreamTransport())
 
 	w := httptest.NewRecorder()
 	apiOCSPConfig(w, jsonReq(http.MethodPost, "/api/ocsp", map[string]any{"enabled": true}))
@@ -285,17 +296,18 @@ func TestAPIOCSPConfig_POSTTogglesEnabled(t *testing.T) {
 	if !globalOCSP.Enabled() {
 		t.Fatal("POST enabled=true did not enable OCSP")
 	}
-	if upstreamTransport.TLSClientConfig == nil {
-		t.Fatal("POST enabled=true must install TLSClientConfig on upstreamTransport")
+	current := getUpstreamTransport()
+	if current.TLSClientConfig == nil {
+		t.Fatal("POST enabled=true must install TLSClientConfig on the upstream transport")
 	}
-	if upstreamTransport.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+	if current.TLSClientConfig.MinVersion < tls.VersionTLS12 {
 		t.Errorf("upstreamTransport MinVersion = 0x%x, want >= TLS 1.2",
-			upstreamTransport.TLSClientConfig.MinVersion)
+			current.TLSClientConfig.MinVersion)
 	}
-	if upstreamTransport.TLSClientConfig.VerifyPeerCertificate == nil {
+	if current.TLSClientConfig.VerifyPeerCertificate == nil {
 		t.Error("POST enabled=true must install VerifyPeerCertificate")
 	}
-	if upstreamTransport.TLSClientConfig.VerifyConnection == nil {
+	if current.TLSClientConfig.VerifyConnection == nil {
 		t.Error("POST enabled=true must install VerifyConnection (resumed-session path)")
 	}
 

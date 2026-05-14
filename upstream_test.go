@@ -292,8 +292,10 @@ func TestUpstreamPool_ConcurrentNext(t *testing.T) {
 // ── applyUpstreamProxy ──────────────────────────────────────────────────────
 
 func TestApplyUpstreamProxy_SetsTransportProxy(t *testing.T) {
-	origProxy := upstreamTransport.Proxy
-	defer func() { upstreamTransport.Proxy = origProxy }()
+	// P5.3: snapshot/restore via the new atomic pointer surface
+	// rather than direct field assignment on the published transport.
+	origPtr := upstreamTransportPtr.Load()
+	defer upstreamTransportPtr.Store(origPtr)
 
 	// Configure the global pool directly (avoids copying mutex).
 	upstreamPool.Configure([]UpstreamEntry{{URL: "http://test.proxy:8080"}}, 5, time.Minute)
@@ -301,11 +303,12 @@ func TestApplyUpstreamProxy_SetsTransportProxy(t *testing.T) {
 
 	applyUpstreamProxy()
 
-	if upstreamTransport.Proxy == nil {
+	current := getUpstreamTransport()
+	if current.Proxy == nil {
 		t.Fatal("expected transport Proxy to be set")
 	}
 
-	u, err := upstreamTransport.Proxy(nil)
+	u, err := current.Proxy(nil)
 	if err != nil {
 		t.Fatalf("Proxy func error: %v", err)
 	}

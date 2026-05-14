@@ -669,7 +669,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	rewriter.ApplyRequest(host, r.Header)
 
 	client := &http.Client{
-		Transport: upstreamTransport,
+		Transport: getUpstreamTransport(),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -1018,27 +1018,25 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, t
 	}
 }
 
-// upstreamTransport is a shared http.Transport used by handleHTTP so that
-// connections to upstream servers are pooled across requests, avoiding the
-// overhead of a new TCP/TLS handshake per proxied request.
-var upstreamTransport = &http.Transport{
-	MaxIdleConns:          512,
-	MaxIdleConnsPerHost:   64,
-	MaxConnsPerHost:       0, // unlimited — let the OS handle it
-	IdleConnTimeout:       120 * time.Second,
-	TLSHandshakeTimeout:  10 * time.Second,
-	ResponseHeaderTimeout: 30 * time.Second,
-	DisableCompression:    false,
-	WriteBufferSize:       64 * 1024, // 64 KB
-	ReadBufferSize:        64 * 1024, // 64 KB
-}
+// The shared upstream http.Transport is owned by upstream_transport.go
+// (P5.3 / S6). Production code reads it via getUpstreamTransport() and
+// mutates it via swapUpstreamTransport(update). Direct field mutation
+// on a loaded transport is forbidden — see upstream_transport.go and
+// CLAUDE.md for the convention.
 
 // applyUpstreamProxy configures the shared transport to route through parent
-// proxies when the upstream pool is active.
+// proxies when the upstream pool is active. P5.3: routes through
+// swapUpstreamTransport so the swap is atomic vs concurrent readers.
 func applyUpstreamProxy() {
-	if upstreamPool.Enabled() {
-		upstreamTransport.Proxy = upstreamPool.ProxyFunc()
+	if !upstreamPool.Enabled() {
+		return
 	}
+	proxyFn := upstreamPool.ProxyFunc()
+	swapUpstreamTransport(func(old *http.Transport) *http.Transport {
+		newT := cloneTransport(old)
+		newT.Proxy = proxyFn
+		return newT
+	})
 }
 
 // handleTunnelBypass is the original transparent TCP tunnel (Bypass mode).
