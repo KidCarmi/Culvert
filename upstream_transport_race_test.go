@@ -231,10 +231,6 @@ func TestUpstreamTransport_OCSPMutationUnderTLSTraffic(t *testing.T) {
 			req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, dst.URL, nil)
 			resp, err := client.Do(req)
 			if err != nil {
-				// During OCSP swap-in, the VerifyConnection / VerifyPeerCertificate
-				// callbacks may run against the test cert and reject it (the test
-				// cert is not OCSP-stapled). That's expected; we only care that
-				// the race detector stays quiet.
 				if errors.Is(err, x509.UnknownAuthorityError{}) {
 					handshakeFailures.Add(1)
 				}
@@ -248,40 +244,46 @@ func TestUpstreamTransport_OCSPMutationUnderTLSTraffic(t *testing.T) {
 
 	g.Go(func() {
 		for i := 0; i < a2MutationIters; i++ {
-			// Install OCSP onto a freshly-cloned tls.Config; mirrors
-			// the apiOCSPConfig swap path.
+			// Install OCSP onto the OPERATOR'S TLS template
+			// (upstreamOpTLSCfg) under the held write mutex. The swap
+			// auto-attaches a Clone of the template to the new
+			// transport — preserving the RootCAs that
+			// installTLSConfigForTesting seeded. Mutating
+			// upstreamOpTLSCfg directly here is safe because we are
+			// inside the swap closure which holds
+			// upstreamTransportWriteMu (the template's lock).
 			swapUpstreamTransport(func(old *http.Transport) *http.Transport {
-				newT := cloneTransport(old)
-				tlsCfg := cloneTLSConfig(newT.TLSClientConfig)
-				if tlsCfg.MinVersion == 0 {
-					tlsCfg.MinVersion = tls.VersionTLS12
+				if upstreamOpTLSCfg == nil {
+					upstreamOpTLSCfg = &tls.Config{MinVersion: tls.VersionTLS12}
 				}
-				ConfigureTLSConfigOCSP(tlsCfg)
-				newT.TLSClientConfig = tlsCfg
-				return newT
+				ConfigureTLSConfigOCSP(upstreamOpTLSCfg)
+				return cloneTransport(old)
 			})
-			// Counterpart "disable" swap — clears the OCSP callbacks
-			// by installing a fresh TLS config preserving RootCAs.
+			// Counterpart "clear OCSP" swap: nil the verify callbacks
+			// on the operator template (RootCAs / Certificates /
+			// MinVersion preserved). The swap re-clones the template
+			// onto the new transport.
 			swapUpstreamTransport(func(old *http.Transport) *http.Transport {
-				newT := cloneTransport(old)
-				// Clone current config, drop the verifiers.
-				tlsCfg := cloneTLSConfig(newT.TLSClientConfig)
-				tlsCfg.VerifyPeerCertificate = nil
-				tlsCfg.VerifyConnection = nil
-				newT.TLSClientConfig = tlsCfg
-				return newT
+				if upstreamOpTLSCfg != nil {
+					upstreamOpTLSCfg.VerifyPeerCertificate = nil
+					upstreamOpTLSCfg.VerifyConnection = nil
+				}
+				return cloneTransport(old)
 			})
 		}
 	})
 
 	g.Wait()
 
-	// Success criterion: completes without a race detector report.
-	// We do NOT require trafficOK > 0 because the OCSP verify
-	// callback can reject the test cert (it's not OCSP-stapled);
-	// the race-detector cleanliness is the actual contract. The
-	// counters are exercised via Add() inside the goroutines, which
-	// satisfies Go's "must be used" rule without copying the lock.
+	// Fixture sanity: with RootCAs preserved across the OCSP
+	// install/clear churn AND globalOCSP staying disabled (its
+	// verify methods early-return when !Enabled), HTTPS requests
+	// must succeed. If trafficOK == 0 the fixture is broken — the
+	// test would otherwise pass under -race without proving real
+	// traffic occurred (the bug fixed in this commit).
+	if trafficOK.Load() == 0 {
+		t.Errorf("zero successful HTTPS requests across %d iterations; fixture broken — likely the OCSP-install closure clobbered RootCAs (handshakeFailures=%d)", a2TrafficIters, handshakeFailures.Load())
+	}
 }
 
 // ────────────────────────────────────────────────────────────────────
