@@ -3,15 +3,18 @@ package main
 // auth_startup_test.go — P4.4 / S1 coverage for the extracted auth
 // startup slice.
 //
-// Resolver tests are pure (no globals touched). Loader tests
-// mutate the package-global `cfg` singleton; isolation follows the
-// established d0_helpers_test.go / pkce_ui2_test.go patterns:
-//   - cfg.SetAuth("", "") clears local bcrypt credentials.
-//   - cfg.SetUIUsersFile("") clears the persisted-users path.
-//   - cfg.DeleteUIUser(name) removes a specific test user.
-// All UI users created by tests use a unique discriminator prefix
-// so cleanup is precise and tests cannot collide with each other
-// or with pre-existing users under -shuffle=on / -count=2.
+// Resolver tests are pure (no globals touched). Loader tests mutate
+// the package-global `cfg` singleton; isolation is via whitebox
+// snapshot+restore of the auth-related fields (ProxyPort, UIPort,
+// user, passHash, uiUsers, uiUsersFile) under cfg.mu.Lock.
+//
+// **Do NOT** restore via production APIs like cfg.SetAuth("", "") +
+// cfg.DeleteUIUser(name): those go through guardrails (e.g.
+// "cannot delete the last admin user") that depend on the *current*
+// cfg.uiUsers state, which is non-deterministic under -shuffle=on
+// -count=2. snapshotAuthGlobals captures the unexported fields by
+// direct field access and restores them by direct assignment, so
+// cleanup is structurally deterministic regardless of test order.
 
 import (
 	"log"
@@ -32,26 +35,50 @@ func ensureAuthStartupTestLogger(t *testing.T) {
 	}
 }
 
-// snapshotAuthGlobals saves the cfg state that loadAuth touches and
-// arranges restoration on t.Cleanup. cfg has unexported fields
-// (user, passHash, uiUsers, uiUsersFile) that can only be cleared
-// via cfg's own API — the cleanup uses those APIs rather than
-// reaching into the struct.
+// snapshotAuthGlobals captures every cfg field the loadAuth slice
+// touches and restores them on t.Cleanup. It bypasses production
+// APIs (SetAuth, SetUIUser, DeleteUIUser, SetUIUsersFile) so cleanup
+// cannot be foiled by production guardrails — specifically the
+// "cannot delete the last admin user" check in DeleteUIUser, which
+// fails non-deterministically under -shuffle=on -count=2 when other
+// tests' residual cfg.uiUsers state makes the seeded user the last
+// admin.
 //
-// The cleanup uses cfg.SetAuth("", "") (clears local bcrypt) and
-// cfg.SetUIUsersFile("") (clears the persisted-users path),
-// matching the existing test conventions in d0_helpers_test.go and
-// pkce_ui2_test.go. Any UI users created during a test must be
-// cleaned up by that test via cfg.DeleteUIUser(name).
+// The snapshot deep-copies cfg.uiUsers (map + per-user uiAdminUser
+// struct + the passHash / backupCodes slices) so the test can
+// mutate the live map freely; restoration replaces the map
+// wholesale. cfg.cache is cleared after restore because passHash
+// changes invalidate cached verify results.
 func snapshotAuthGlobals(t *testing.T) {
 	t.Helper()
+	cfg.mu.Lock()
 	oldProxyPort := cfg.ProxyPort
 	oldUIPort := cfg.UIPort
+	oldUser := cfg.user
+	oldPassHash := append([]byte(nil), cfg.passHash...)
+	oldUIUsersFile := cfg.uiUsersFile
+	var oldUIUsers map[string]*uiAdminUser
+	if cfg.uiUsers != nil {
+		oldUIUsers = make(map[string]*uiAdminUser, len(cfg.uiUsers))
+		for k, v := range cfg.uiUsers {
+			uCopy := *v
+			uCopy.passHash = append([]byte(nil), v.passHash...)
+			uCopy.backupCodes = append([]string(nil), v.backupCodes...)
+			oldUIUsers[k] = &uCopy
+		}
+	}
+	cfg.mu.Unlock()
+
 	t.Cleanup(func() {
+		cfg.mu.Lock()
 		cfg.ProxyPort = oldProxyPort
 		cfg.UIPort = oldUIPort
-		_ = cfg.SetAuth("", "")
-		cfg.SetUIUsersFile("")
+		cfg.user = oldUser
+		cfg.passHash = oldPassHash
+		cfg.uiUsersFile = oldUIUsersFile
+		cfg.uiUsers = oldUIUsers
+		cfg.mu.Unlock()
+		cfg.cache.clear()
 	})
 }
 
@@ -170,15 +197,17 @@ func TestLoadAuth_LoadsUIUsersFromFile(t *testing.T) {
 	if err := cfg.SaveUIUsersFile(); err != nil {
 		t.Fatalf("seed SaveUIUsersFile: %v", err)
 	}
-	// Reset path + remove the user so loadAuth has to repopulate
-	// from disk to make the post-condition meaningful.
+	// Reset path + remove the in-memory copy of the seeded user so
+	// loadAuth has to repopulate from disk to make the post-condition
+	// meaningful. Bypass cfg.DeleteUIUser to avoid the production
+	// "cannot delete the last admin user" guard, which fails
+	// non-deterministically under -shuffle=on -count=2. The
+	// snapshotAuthGlobals helper restores cfg.uiUsers wholesale on
+	// t.Cleanup, so we do not need a manual cleanup here.
 	cfg.SetUIUsersFile("")
-	if err := cfg.DeleteUIUser(seedUser); err != nil {
-		t.Fatalf("seed DeleteUIUser: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cfg.DeleteUIUser(seedUser)
-	})
+	cfg.mu.Lock()
+	delete(cfg.uiUsers, seedUser)
+	cfg.mu.Unlock()
 
 	// Now exercise the loader.
 	loadAuth(authStartupConfig{
