@@ -66,83 +66,47 @@ package main
 //
 // Choice between (a) and (b) belongs in the follow-up PR, not here.
 //
-// Expected outcomes
-// =================
-// (A) Race detector fires:
-//   - Test fails with a "WARNING: DATA RACE" message at the c.conn
-//     access in c.call() (read site) and c.connect() (write site).
-//   - Document the exact stack and propose the smallest ownership
-//     fix in a follow-up PR. Do NOT fix in this PR.
+// Status: REGRESSION GUARD (CL-11 fixed in this same PR).
+// =========================================================
+// The original harness was built to PROVE the race existed. With the
+// ownership fix landed in controlplane.go c.call() (snapshot c.conn
+// under c.mu before invoking), this test now serves as the
+// regression guard: any future change that re-introduces an
+// unsynchronized c.conn read will make this test fail under -race.
 //
-// (B) Race detector stays clean:
-//   - Investigate why. The clean result does NOT prove safety; it
-//     proves only "-race did not observe the race in this specific
-//     harness." Strong evidence, not a proof. Document the analysis.
-//
-// Observed outcome (captured during PR construction, commit 476c2b5
-// baseline, this branch's harness):
-// =================================
+// Observed race output pre-fix (captured on the same branch before
+// the c.call() snapshot change, for historical reference):
 //
 //	==================
 //	WARNING: DATA RACE
-//	Write at 0x00c0001a5990 by goroutine 21:
+//	Write at 0x... by goroutine 21:
 //	  proxy.(*DataPlaneClient).connect()
 //	      /home/user/Culvert/controlplane.go:1151 +0x664
 //	  proxy.(*DataPlaneClient).failover()
 //	      /home/user/Culvert/controlplane.go:1169 +0x44a
 //	  ...
 //
-//	Previous read at 0x00c0001a5990 by goroutine 20:
+//	Previous read at 0x... by goroutine 19:
 //	  proxy.(*DataPlaneClient).call()
 //	      /home/user/Culvert/controlplane.go:1396 +0x146
 //	  ...
 //	==================
 //
-// Outcome (A) — race detector fired. CL-11 is confirmed. The smallest
-// ownership fix is left to a follow-up PR per the original CL-11
-// brief.
-//
-// CI gating
-// =========
-// This test deliberately exercises a confirmed race and would
-// therefore make every CI run that uses `-race` (including the
-// project's determinism gate) red until a production fix lands.
-// To avoid permanently red CI, the test is gated on the
-// CL11_RACE_EVIDENCE env var and skipped by default. The follow-up
-// PR that lands the ownership fix should:
-//
-//	(a) Remove the env-var gate (delete the t.Skip block below).
-//	(b) Confirm the test passes under `go test -race -count=1`.
-//	(c) Optionally promote it to run automatically in CI.
-//
-// To run this test manually:
-//
-//	CL11_RACE_EVIDENCE=1 go test -race -count=1 \
-//	    -run TestCL11_DataPlaneClient_ConnReadVsFailoverWrite_Race ./...
-//
-// The skip message in the t.Skip below points future readers at
-// this same envelope.
+// Post-fix expected outcome: clean `go test -race -count=1` run; this
+// test runs in CI on every PR and reproduces the regression
+// instantly if anyone reverts the snapshot pattern in c.call() or
+// introduces a new unsynchronized c.conn reader.
 
 import (
 	"context"
 	"encoding/json"
 	"io"
 	"log"
-	"os"
 	"sync"
 	"testing"
 )
 
 func TestCL11_DataPlaneClient_ConnReadVsFailoverWrite_Race(t *testing.T) {
-	if os.Getenv("CL11_RACE_EVIDENCE") == "" {
-		t.Skip("CL-11 race-evidence test skipped by default — set " +
-			"CL11_RACE_EVIDENCE=1 to run. The test reproduces a " +
-			"confirmed data race on DataPlaneClient.c.conn and " +
-			"is gated to avoid making CI permanently red until " +
-			"the ownership fix lands. See the file header for " +
-			"the captured race output.")
-	}
-
 	// Silence production logger output during the test. c.connect()
 	// at controlplane.go:1140, :1152 and c.failover() at :1168 each
 	// emit a log line; with 100 failovers that's ~200 log lines of

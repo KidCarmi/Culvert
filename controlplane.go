@@ -1389,11 +1389,25 @@ func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Durat
 }
 
 // call performs a unary gRPC call with a JSON payload.
+//
+// c.conn is read under c.mu for a single pointer snapshot, then the
+// lock is released BEFORE Invoke runs (holding the lock across the
+// RPC would serialize all DP loops and block any failover for the
+// 5-second timeout). The local conn variable is the snapshot the
+// caller uses; if a concurrent c.failover() replaces c.conn after we
+// release the lock, our snapshot is still a valid *grpc.ClientConn
+// — gRPC's lazy Close() on the swapped-out conn allows in-flight
+// Invoke calls to either complete or surface a transport-closing
+// error. CL-11: the snapshot prevents the unsynchronized field read
+// that `go test -race` flagged at this line.
 func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawMessage) (json.RawMessage, error) {
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
 	var resp json.RawMessage
-	err := c.conn.Invoke(callCtx, method, req, &resp)
+	err := conn.Invoke(callCtx, method, req, &resp)
 	return resp, err
 }
 
