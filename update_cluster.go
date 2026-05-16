@@ -71,7 +71,10 @@ type UpdateProgressReport struct {
 
 var clusterUpdateState ClusterUpdateState
 
-const clusterUpdateFile = "/data/cluster_update.json"
+// clusterUpdateFile is the on-disk path for the rolling-update
+// progress state. Declared as var (not const) so tests can override
+// it; production callers do not mutate this value at runtime.
+var clusterUpdateFile = "/data/cluster_update.json"
 
 // ── State persistence ───────────────────────────────────────────────────────
 
@@ -83,13 +86,12 @@ func (s *ClusterUpdateState) persist() {
 		logger.Printf("cluster update persist error: %v", err)
 		return
 	}
-	tmp := clusterUpdateFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// CL-7: atomicWriteFile replaces the previous manual tmp+rename
+	// path (which was atomic but NOT fsynced). The helper does
+	// unique tmp + chmod + fsync(file) + rename + best-effort
+	// fsync(parent dir).
+	if err := atomicWriteFile(clusterUpdateFile, data, 0o600); err != nil {
 		logger.Printf("cluster update write error: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, clusterUpdateFile); err != nil {
-		logger.Printf("cluster update rename error: %v", err)
 	}
 }
 

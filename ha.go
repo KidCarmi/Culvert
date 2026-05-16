@@ -296,7 +296,11 @@ func saveHAConfig(cfg *haConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(haConfigPath(), data, 0o600)
+	// CL-7: atomicWriteFile gives unique tmp + chmod + fsync(file) +
+	// rename + best-effort fsync(parent dir) — replaces the previous
+	// plain os.WriteFile which left a non-durable / potentially-
+	// truncated file on crash.
+	return atomicWriteFile(haConfigPath(), data, 0o600)
 }
 
 func loadHAConfig() (*haConfig, error) {
