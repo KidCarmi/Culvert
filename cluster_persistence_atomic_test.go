@@ -111,8 +111,8 @@ func TestCL7_SaveHAConfig_AtomicWriteFile(t *testing.T) {
 	clusterDBPathGlobal = filepath.Join(dir, "cluster.json")
 
 	cfg := &haConfig{
-		Enabled:  true,
-		Token:    "cl7-test-token-32-bytes-base64-padded-aaaa",
+		Enabled: true,
+		Token:   "cl7-test-token-32-bytes-base64-padded-aaaa", // #nosec G101 -- synthetic test fixture; never leaves this test
 		PeerAddr: "127.0.0.1:50051",
 		Role:     "leader",
 	}
