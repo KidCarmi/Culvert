@@ -822,6 +822,17 @@ func (b *Blocklist) Add(host string) {
 // wholesale-replacement pattern that previously zeroed those
 // local fields and orphaned the persistence path. Per-host parsing
 // mirrors Add: "*.example.com" → wildcard, otherwise → exact.
+//
+// IMPORTANT: AddManual (store.go:847–857) writes admin-added hosts
+// to BOTH the metadata map (b.manual) AND the enforcement maps
+// (b.exact / b.wildcards). The enforcement maps are what IsBlocked
+// consults; b.manual is just the attribution set. We therefore
+// re-inject every b.manual host into the new enforcement maps
+// before the swap so admin-added blocks survive every cluster
+// sync. Without this re-injection (pre-fix and my first-pass
+// ReplaceFeedEntries had the same defect; flagged by Codex on
+// PR #249), admin manual blocks would silently disappear from
+// enforcement on every snapshot apply.
 func (b *Blocklist) ReplaceFeedEntries(hosts []string) {
 	newExact := map[string]bool{}
 	newWildcards := map[string]bool{}
@@ -837,6 +848,17 @@ func (b *Blocklist) ReplaceFeedEntries(hosts []string) {
 		}
 	}
 	b.mu.Lock()
+	// Re-inject admin-added manual entries into the enforcement
+	// maps. b.manual is the attribution set; the entries are also
+	// normalised at AddManual time so no further trim/lowercase is
+	// needed here.
+	for h := range b.manual {
+		if strings.HasPrefix(h, "*.") {
+			newWildcards[h[1:]] = true
+		} else {
+			newExact[h] = true
+		}
+	}
 	b.exact = newExact
 	b.wildcards = newWildcards
 	b.mu.Unlock()

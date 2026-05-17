@@ -149,19 +149,8 @@ func TestApplyConfigSnapshot_BlocklistPreservesLocalState(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocklist.txt")
-
 	if err := os.WriteFile(path, []byte("initial-feed.example\n"), 0o600); err != nil {
 		t.Fatalf("seed main: %v", err)
-	}
-	// Seed sidecars so bl.Load sets mode / manual / exceptions.
-	if err := os.WriteFile(path+".mode", []byte("allow"), 0o600); err != nil {
-		t.Fatalf("seed mode: %v", err)
-	}
-	if err := os.WriteFile(path+".manual", []byte("admin-added.example\n"), 0o600); err != nil {
-		t.Fatalf("seed manual: %v", err)
-	}
-	if err := os.WriteFile(path+".exceptions", []byte("never-block.example\n"), 0o600); err != nil {
-		t.Fatalf("seed exceptions: %v", err)
 	}
 
 	bl = &Blocklist{
@@ -174,44 +163,103 @@ func TestApplyConfigSnapshot_BlocklistPreservesLocalState(t *testing.T) {
 		t.Fatalf("bl.Load: %v", err)
 	}
 
-	// Invariants from the load.
-	if bl.Mode() != "allow" {
-		t.Fatalf("invariant: bl.Mode() = %q, want allow (after sidecar load)", bl.Mode())
+	// Simulate the runtime admin sequence under default BLOCK mode
+	// so IsBlocked has its straightforward meaning ("listed host is
+	// blocked"). AddManual writes to BOTH the metadata map AND the
+	// enforcement maps (store.go:847–857); AddException writes to
+	// b.exceptions which short-circuits IsBlocked to false. The
+	// .manual / .exceptions sidecars are populated as side effects.
+	bl.AddManual("admin-blocked.example")
+	bl.AddException("never-block.example")
+
+	// Invariants before apply (BLOCK mode): manual block is
+	// enforced; exception bypasses enforcement.
+	if !bl.IsBlocked("admin-blocked.example") {
+		t.Fatalf("invariant: bl.IsBlocked(admin-blocked.example) = false after AddManual")
 	}
-	gotExceptions := bl.ListExceptions()
-	if len(gotExceptions) != 1 || gotExceptions[0] != "never-block.example" {
-		t.Fatalf("invariant: exceptions = %v, want [never-block.example]", gotExceptions)
+	if bl.IsBlocked("never-block.example") {
+		t.Fatalf("invariant: bl.IsBlocked(never-block.example) = true; exception should bypass")
 	}
 
-	// Apply a snapshot — the cluster snapshot has no fields for
-	// mode/manual/exceptions, so those must survive untouched.
+	// Apply a snapshot. The cluster snapshot has no fields for
+	// manual / exceptions, so those must survive untouched.
 	snap := ConfigSnapshot{
 		Version:      1,
 		BlockedHosts: []string{"cluster-pushed.example"},
 	}
 	applyConfigSnapshot(snap)
 
-	// Post-apply: mode / manual / exceptions must all still be present.
-	if bl.Mode() != "allow" {
-		t.Errorf("post-apply: bl.Mode() = %q, want allow (mode was zeroed by wholesale replacement)", bl.Mode())
+	// Post-apply assertions:
+	//
+	//   (1) Cluster-pushed feed host is enforced (basic apply works).
+	if !bl.IsBlocked("cluster-pushed.example") {
+		t.Errorf("post-apply: cluster-pushed.example not blocked in memory")
 	}
-	gotExceptions = bl.ListExceptions()
+	//   (2) Admin manual block IS STILL ENFORCED. AddManual wrote
+	//       to both b.manual (metadata) and b.exact (enforcement);
+	//       ReplaceFeedEntries must re-inject the b.manual hosts
+	//       into the new enforcement maps so IsBlocked still
+	//       returns true. This is the Codex-flagged property
+	//       (PR #249).
+	if !bl.IsBlocked("admin-blocked.example") {
+		t.Errorf("post-apply: bl.IsBlocked(admin-blocked.example) = false — admin manual block was dropped from enforcement maps on cluster sync")
+	}
+	//   (3) Exception is preserved (DP-local state; bypasses IsBlocked).
+	if bl.IsBlocked("never-block.example") {
+		t.Errorf("post-apply: bl.IsBlocked(never-block.example) = true — exception was zeroed on cluster sync")
+	}
+	gotExceptions := bl.ListExceptions()
 	if len(gotExceptions) != 1 || gotExceptions[0] != "never-block.example" {
-		t.Errorf("post-apply: exceptions = %v, want [never-block.example] (exceptions zeroed by wholesale replacement)", gotExceptions)
+		t.Errorf("post-apply: exceptions = %v, want [never-block.example]", gotExceptions)
 	}
-	// Manual hosts are tracked by bl.manual map; List() returns
-	// every blocked host (exact ∪ wildcards), so manual entries
-	// appear there if they were pre-loaded. Check via IsBlocked.
-	if !bl.IsBlocked("admin-added.example") {
-		// admin-added was loaded into b.manual but not into b.exact
-		// (load semantics — manual is a tag-set, not an entry-set).
-		// IsBlocked may not reflect it; instead assert b.manual is
-		// non-empty via a direct whitebox check.
-		bl.mu.RLock()
-		hasAdminAdded := bl.manual["admin-added.example"]
-		bl.mu.RUnlock()
-		if !hasAdminAdded {
-			t.Errorf("post-apply: bl.manual lost admin-added.example (wholesale replacement zeroed manual map)")
-		}
+	//   (4) Manual attribution survives in metadata.
+	bl.mu.RLock()
+	hasManual := bl.manual["admin-blocked.example"]
+	bl.mu.RUnlock()
+	if !hasManual {
+		t.Errorf("post-apply: bl.manual lost admin-blocked.example attribution")
+	}
+}
+
+// TestApplyConfigSnapshot_BlocklistPreservesMode is a separate test
+// because SetMode("allow") inverts IsBlocked semantics (the list
+// becomes an allowlist), which would confuse the manual/exception
+// assertions in TestApplyConfigSnapshot_BlocklistPreservesLocalState.
+// This test focuses solely on mode preservation, verified via
+// bl.Mode() (a direct read, not affected by allow-mode inversion).
+func TestApplyConfigSnapshot_BlocklistPreservesMode(t *testing.T) {
+	ensureClusterPersistTestLogger(t)
+	snapshotBL(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blocklist.txt")
+	if err := os.WriteFile(path, []byte("initial-feed.example\n"), 0o600); err != nil {
+		t.Fatalf("seed main: %v", err)
+	}
+
+	bl = &Blocklist{
+		exact:      map[string]bool{},
+		wildcards:  map[string]bool{},
+		manual:     map[string]bool{},
+		exceptions: map[string]bool{},
+	}
+	if err := bl.Load(path); err != nil {
+		t.Fatalf("bl.Load: %v", err)
+	}
+
+	// Set a non-default mode so we can distinguish "preserved"
+	// from "reverted to default ('block')".
+	bl.SetMode("allow")
+	if bl.Mode() != "allow" {
+		t.Fatalf("invariant: bl.Mode() = %q, want allow after SetMode", bl.Mode())
+	}
+
+	applyConfigSnapshot(ConfigSnapshot{
+		Version:      1,
+		BlockedHosts: []string{"cluster-pushed.example"},
+	})
+
+	if bl.Mode() != "allow" {
+		t.Errorf("post-apply: bl.Mode() = %q, want allow (mode reverted on cluster sync)", bl.Mode())
 	}
 }
