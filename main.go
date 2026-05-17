@@ -1969,7 +1969,14 @@ func persistEnrollCerts(privKey *ecdsa.PrivateKey, resp *EnrollResponse, cpAddr,
 		CAFile:   caPath,
 	}
 	ecJSON, _ := json.MarshalIndent(ec, "", "  ")
-	if err := os.WriteFile(enrollmentConfigFile, ecJSON, 0o600); err != nil {
+	// CL-7: atomicWriteFile gives unique tmp + chmod + fsync(file) +
+	// rename + best-effort fsync(parent dir) — replaces the previous
+	// plain os.WriteFile which left a non-durable / potentially-
+	// truncated file on crash. The sibling cert/key/CA writes above
+	// (lines ~1953/1956/1959) share the same pre-existing defect but
+	// are intentionally out of CL-7 scope; flagged in the PR body as
+	// a deferred follow-up.
+	if err := atomicWriteFile(enrollmentConfigFile, ecJSON, 0o600); err != nil {
 		return nil, fmt.Errorf("write enrollment config: %w", err)
 	}
 
