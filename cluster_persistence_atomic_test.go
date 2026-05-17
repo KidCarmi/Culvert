@@ -30,7 +30,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log"
 	"os"
@@ -270,12 +272,107 @@ func TestCL7_PersistEnrollCerts_ConfigAtomicWriteFile(t *testing.T) {
 	}
 
 	// Sanity: confirm the sibling cert/key/CA files were created by
-	// the function (they are CL-7-out-of-scope, but their absence
-	// would mean persistEnrollCerts didn't run to completion and
-	// the dp_enrollment.json assertion above could be a false-OK).
+	// the function. (Their atomicity is verified separately by
+	// TestPersistEnrollCerts_SiblingCertsAtomicWriteFile below —
+	// originally CL-7-out-of-scope, hardened in the
+	// persistEnrollCerts-sibling follow-up PR.)
 	for _, name := range []string{"dp-node.crt", "dp-node.key", "cluster-ca.crt"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("sibling output %q missing: %v", name, err)
 		}
+	}
+}
+
+// TestPersistEnrollCerts_SiblingCertsAtomicWriteFile is the sibling
+// follow-up to CL-7 / PR #244. The three writes at the top of
+// persistEnrollCerts (main.go:1953/1956/1959) — `./dp-node.crt`,
+// `./dp-node.key`, `./cluster-ca.crt` — were left using plain
+// os.WriteFile in PR #244 because the discovery-doc CL-7 entry
+// named only main.go:1972 (the enrollment-config JSON). This PR
+// routes the three sibling writes through atomicWriteFile too.
+//
+// Asserts the same call-site-wiring contract as the other Bucket-4
+// hardening tests: each file exists with mode 0o600 after
+// persistEnrollCerts returns, no *.tmp.* leftovers remain in the
+// directory (atomicWriteFile's cleanup contract), and the on-disk
+// content round-trips byte-for-byte from the EnrollResponse input.
+func TestPersistEnrollCerts_SiblingCertsAtomicWriteFile(t *testing.T) {
+	ensureClusterPersistTestLogger(t)
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey: %v", err)
+	}
+	const (
+		wantCertPEM = "-----BEGIN CERTIFICATE-----\nsibling-test-cert\n-----END CERTIFICATE-----\n"
+		wantCAPEM   = "-----BEGIN CERTIFICATE-----\nsibling-test-ca\n-----END CERTIFICATE-----\n"
+	)
+	resp := &EnrollResponse{
+		CertPEM: wantCertPEM,
+		CAPEM:   wantCAPEM,
+	}
+
+	ec, err := persistEnrollCerts(privKey, resp, "127.0.0.1:50051", "sibling-test-node")
+	if err != nil {
+		t.Fatalf("persistEnrollCerts: %v", err)
+	}
+	if ec == nil {
+		t.Fatal("persistEnrollCerts returned nil config")
+	}
+
+	// Mode + no-tmp-leftover assertions on each of the three
+	// sibling files. assertNoTmpLeftovers runs once over the
+	// whole tempdir.
+	for _, name := range []string{"dp-node.crt", "dp-node.key", "cluster-ca.crt"} {
+		assertFileMode0600(t, filepath.Join(dir, name))
+	}
+	assertNoTmpLeftovers(t, dir)
+
+	// Content round-trip: each file should contain exactly the
+	// bytes persistEnrollCerts was handed. The key is derived from
+	// privKey so we can't compare against a hard-coded literal;
+	// we assert the PEM marshalled by persistEnrollCerts parses
+	// back to the same key bytes.
+	gotCert, err := os.ReadFile(filepath.Join(dir, "dp-node.crt"))
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	if string(gotCert) != wantCertPEM {
+		t.Errorf("dp-node.crt content mismatch:\ngot:  %q\nwant: %q", string(gotCert), wantCertPEM)
+	}
+
+	gotCA, err := os.ReadFile(filepath.Join(dir, "cluster-ca.crt"))
+	if err != nil {
+		t.Fatalf("read CA: %v", err)
+	}
+	if string(gotCA) != wantCAPEM {
+		t.Errorf("cluster-ca.crt content mismatch:\ngot:  %q\nwant: %q", string(gotCA), wantCAPEM)
+	}
+
+	// Key round-trip: parse the on-disk PEM and confirm the curve
+	// + D scalar match the originally-generated key.
+	gotKey, err := os.ReadFile(filepath.Join(dir, "dp-node.key"))
+	if err != nil {
+		t.Fatalf("read key: %v", err)
+	}
+	block, _ := pem.Decode(gotKey)
+	if block == nil {
+		t.Fatalf("dp-node.key: PEM decode returned nil")
+	}
+	if block.Type != "EC PRIVATE KEY" {
+		t.Errorf("dp-node.key: PEM type = %q, want EC PRIVATE KEY", block.Type)
+	}
+	loadedKey, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("ParseECPrivateKey: %v", err)
+	}
+	if loadedKey.Curve != privKey.Curve {
+		t.Errorf("dp-node.key: curve mismatch")
+	}
+	if loadedKey.D.Cmp(privKey.D) != 0 {
+		t.Errorf("dp-node.key: D scalar mismatch")
 	}
 }

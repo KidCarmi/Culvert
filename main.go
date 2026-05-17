@@ -1950,13 +1950,19 @@ func persistEnrollCerts(privKey *ecdsa.PrivateKey, resp *EnrollResponse, cpAddr,
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
-	if err := os.WriteFile(certPath, []byte(resp.CertPEM), 0o600); err != nil {
+	// Bucket-4 durability hardening: atomicWriteFile gives unique
+	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
+	// dir) — replaces the previous plain os.WriteFile which left a
+	// non-durable / potentially-truncated file on crash. Sibling
+	// follow-up to CL-7 / PR #244 (which hardened the
+	// dp_enrollment.json branch a few lines below).
+	if err := atomicWriteFile(certPath, []byte(resp.CertPEM), 0o600); err != nil {
 		return nil, fmt.Errorf("write cert: %w", err)
 	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+	if err := atomicWriteFile(keyPath, keyPEM, 0o600); err != nil {
 		return nil, fmt.Errorf("write key: %w", err)
 	}
-	if err := os.WriteFile(caPath, []byte(resp.CAPEM), 0o600); err != nil {
+	if err := atomicWriteFile(caPath, []byte(resp.CAPEM), 0o600); err != nil {
 		return nil, fmt.Errorf("write CA: %w", err)
 	}
 
