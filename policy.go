@@ -163,11 +163,11 @@ func (cs *CategoryStore) Save() {
 	if err != nil {
 		return
 	}
-	tmp := cs.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, cs.path)
+	// Bucket-4 durability hardening: atomicWriteFile gives unique
+	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
+	// dir) — replaces the previous os.WriteFile+os.Rename which was
+	// atomic-via-rename but NOT fsynced (P6.1 UC-1).
+	_ = atomicWriteFile(cs.path, data, 0o600)
 }
 
 // All returns a copy of all category entries.
@@ -1073,11 +1073,11 @@ func (m *SSLBypassMatcher) Save() {
 	if err != nil {
 		return
 	}
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, m.path)
+	// Bucket-4 durability hardening: atomicWriteFile gives unique
+	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
+	// dir) — replaces the previous os.WriteFile+os.Rename which was
+	// atomic-via-rename but NOT fsynced.
+	_ = atomicWriteFile(m.path, data, 0o600)
 }
 
 // Add appends a single pattern. No-ops if the pattern is already present.
