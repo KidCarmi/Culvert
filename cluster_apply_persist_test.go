@@ -130,6 +130,12 @@ func TestApplyConfigSnapshot_FileProfilesPersist(t *testing.T) {
 // (bandwidth.go:52) — nil by default in tests; constructed at startup
 // in main.go:1113. The test installs a tempdir-scoped instance for
 // the duration of the test.
+//
+//nolint:dupl // Intentional structural symmetry with
+// TestApplyConfigSnapshot_NodeGroupsPersist — each test exercises a
+// heterogeneous store type (BandwidthManager vs NodeGroupStore) with
+// distinct constructors, field shapes, and assertions. A shared
+// helper would require type-switch or generics for marginal benefit.
 func TestApplyConfigSnapshot_BandwidthPoliciesPersist(t *testing.T) {
 	origMgr := globalBandwidth
 	t.Cleanup(func() { globalBandwidth = origMgr })
@@ -252,6 +258,10 @@ func TestApplyConfigSnapshot_FileBlockExtensionsPersist(t *testing.T) {
 // (nodegroup.go:40) — nil by default in tests; constructed at startup
 // in main.go:1110. The test installs a tempdir-scoped instance for
 // the duration of the test.
+//
+//nolint:dupl // Intentional structural symmetry with
+// TestApplyConfigSnapshot_BandwidthPoliciesPersist — see the rationale
+// on that test.
 func TestApplyConfigSnapshot_NodeGroupsPersist(t *testing.T) {
 	origStore := globalNodeGroups
 	t.Cleanup(func() { globalNodeGroups = origStore })
