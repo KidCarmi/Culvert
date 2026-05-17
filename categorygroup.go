@@ -134,11 +134,11 @@ func (s *CategoryGroupStore) Save() {
 	if err != nil {
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, path)
+	// Bucket-4 durability hardening: atomicWriteFile gives unique
+	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
+	// dir) — replaces the previous os.WriteFile+os.Rename which was
+	// atomic-via-rename but NOT fsynced (P6.1 UC-1).
+	_ = atomicWriteFile(path, data, 0o600)
 }
 
 // List returns a copy of all groups (safe for JSON serialization).

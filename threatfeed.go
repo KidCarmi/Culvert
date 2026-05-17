@@ -432,11 +432,11 @@ func (tf *ThreatFeed) saveToDisk() error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	tmp := tf.dbPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil { // #nosec G306
-		return fmt.Errorf("write tmp: %w", err)
-	}
-	return os.Rename(tmp, tf.dbPath)
+	// Bucket-4 durability hardening: atomicWriteFile gives unique
+	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
+	// dir) — replaces the previous os.WriteFile+os.Rename which was
+	// atomic-via-rename but NOT fsynced (P6.2 SC-4).
+	return atomicWriteFile(tf.dbPath, data, 0o600)
 }
 
 // ExportURLs returns a copy of the URL threat map as url→unix-timestamp.

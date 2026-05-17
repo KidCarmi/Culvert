@@ -143,11 +143,11 @@ func (s *ContentScanner) Save() {
 	if path == "" || data == nil {
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil { // #nosec G306
-		return
-	}
-	os.Rename(tmp, path) //nolint:errcheck
+	// Bucket-4 durability hardening: atomicWriteFile gives unique
+	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
+	// dir) — replaces the previous os.WriteFile+os.Rename which was
+	// atomic-via-rename but NOT fsynced (P6.2 SC-4).
+	_ = atomicWriteFile(path, data, 0o600)
 }
 
 // SetBypassHosts atomically replaces the DPI bypass host list. Hosts are
