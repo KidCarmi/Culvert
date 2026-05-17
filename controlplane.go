@@ -1464,20 +1464,16 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		return
 	}
 
-	// Blocklist. All four maps MUST be pre-allocated — AddManual/AddException
-	// on a Data Plane node after a snapshot push would otherwise panic with
-	// "assignment to entry in nil map" (production defect caught by the
-	// qa-determinism gate).
-	newBL := &Blocklist{
-		exact:      map[string]bool{},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
-	for _, h := range snap.BlockedHosts {
-		newBL.Add(h)
-	}
-	bl = newBL
+	// Blocklist — in-place feed-entry replacement preserves the
+	// package-global bl's path / mode / manual / exceptions (the
+	// DP-local state that isn't in the cluster snapshot). The
+	// previous wholesale `bl = newBL` pattern zeroed those local
+	// fields and orphaned the persistence path so caller-side Save
+	// became a no-op (CL-1 final gap, P3.4). ReplaceFeedEntries
+	// touches only exact + wildcards under bl.mu.Lock; bl.Save()
+	// then persists via the Bucket-4-hardened atomicWriteFile path.
+	bl.ReplaceFeedEntries(snap.BlockedHosts)
+	bl.Save()
 
 	// IP filter.
 	newIPF := &IPFilter{single: map[string]bool{}}
