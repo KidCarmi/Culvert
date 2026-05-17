@@ -1509,12 +1509,19 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	if snap.SSLBypassPatterns != nil {
 		if err := sslBypass.Set(snap.SSLBypassPatterns); err != nil {
 			logger.Printf("DataPlane: SSL bypass patterns: %v", err)
+		} else {
+			// P3.4 caller-side persist (Bucket-4 fsync-safe Save
+			// hardened in PR #246).
+			sslBypass.Save()
 		}
 	}
 
 	// URL categories.
 	if snap.URLCategories != nil {
 		catStore.ReplaceAll(snap.URLCategories)
+		// P3.4 caller-side persist (Bucket-4 fsync-safe Save
+		// hardened in PR #246).
+		catStore.Save()
 	}
 
 	// File profiles.
@@ -1531,6 +1538,10 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	if snap.DPIPatterns != nil {
 		if err := dpiScanner.Set(snap.DPIPatterns); err != nil {
 			logger.Printf("DataPlane: DPI patterns: %v", err)
+		} else {
+			// P3.4 caller-side persist (Bucket-4 fsync-safe Save
+			// hardened in PR #246).
+			dpiScanner.Save()
 		}
 	}
 
@@ -1569,10 +1580,16 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// Threat feed data (only if populated — can be large).
 	if len(snap.ThreatFeedURLs) > 0 || len(snap.ThreatFeedDomains) > 0 {
 		globalThreatFeed.ImportFeedData(snap.ThreatFeedURLs, snap.ThreatFeedDomains)
+		// P3.4 caller-side persist (Bucket-4 fsync-safe Save hardened
+		// in PR #246). ImportFeedData does NOT auto-persist;
+		// SetDomainAllowlist below DOES, so the Save call is paired
+		// only with ImportFeedData here.
+		globalThreatFeed.Save()
 		logger.Printf("DataPlane: imported threat feed (%d URLs, %d domains)",
 			len(snap.ThreatFeedURLs), len(snap.ThreatFeedDomains))
 	}
 	if snap.ThreatDomainAllowlist != nil {
+		// SetDomainAllowlist auto-persists internally (threatfeed.go:266).
 		globalThreatFeed.SetDomainAllowlist(snap.ThreatDomainAllowlist)
 	}
 
@@ -1595,6 +1612,9 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// Category groups.
 	if snap.CategoryGroups != nil {
 		globalCategoryGroups.ReplaceAll(snap.CategoryGroups)
+		// P3.4 caller-side persist (Bucket-4 fsync-safe Save
+		// hardened in PR #246).
+		globalCategoryGroups.Save()
 	}
 
 	// Global file-block extensions (CRIT-2).

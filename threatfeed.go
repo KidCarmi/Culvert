@@ -439,6 +439,22 @@ func (tf *ThreatFeed) saveToDisk() error {
 	return atomicWriteFile(tf.dbPath, data, 0o600)
 }
 
+// Save is the caller-facing wrapper around saveToDisk. Used by paths
+// like applyConfigSnapshot that mutate via ImportFeedData — which
+// does NOT auto-persist (unlike SetDomainAllowlist /
+// AddDomainAllowlist / RemoveDomainAllowlist which call saveToDisk
+// internally). Errors are logged, not returned, to match the
+// void-Save convention of the other Bucket-1 snapshot stores
+// (policyStore, globalProfileStore, etc.).
+func (tf *ThreatFeed) Save() {
+	if tf.dbPath == "" {
+		return
+	}
+	if err := tf.saveToDisk(); err != nil {
+		logger.Printf("ThreatFeed: Save failed: %v", err)
+	}
+}
+
 // ExportURLs returns a copy of the URL threat map as url→unix-timestamp.
 // Used by the Control Plane to include feed data in config sync.
 func (tf *ThreatFeed) ExportURLs() map[string]int64 {
