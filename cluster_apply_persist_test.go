@@ -298,3 +298,227 @@ func TestApplyConfigSnapshot_NodeGroupsPersist(t *testing.T) {
 		t.Errorf("loaded[0].Priority = %d, want 10", loaded[0].Priority)
 	}
 }
+
+// ─── P3.4 caller-side Save hooks (PR after #246) ────────────────────
+//
+// The five tests below verify the caller-side .Save() hooks installed
+// in applyConfigSnapshot for the Bucket-4 stores whose Save methods
+// were hardened to atomicWriteFile in PR #246. Mirror of the
+// _FileProfilesPersist / _NodeGroupsPersist pattern above.
+
+// TestApplyConfigSnapshot_SSLBypassPatternsPersist exercises the
+// caller-side sslBypass.Save() hook after sslBypass.Set() in
+// applyConfigSnapshot's snap.SSLBypassPatterns branch.
+func TestApplyConfigSnapshot_SSLBypassPatternsPersist(t *testing.T) {
+	origPath := sslBypass.path
+	origPatterns := sslBypass.List()
+	t.Cleanup(func() {
+		sslBypass.path = origPath
+		_ = sslBypass.Set(origPatterns)
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ssl_bypass.json")
+	sslBypass.path = path
+
+	snap := ConfigSnapshot{
+		Version:           1,
+		SSLBypassPatterns: []string{"*.p34-test-bank.example", "*.p34-test-pay.example"},
+	}
+	applyConfigSnapshot(snap)
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
+	}
+
+	fresh := &SSLBypassMatcher{}
+	if err := fresh.Load(path); err != nil {
+		t.Fatalf("fresh.Load: %v", err)
+	}
+	patterns := fresh.List()
+	if len(patterns) != 2 {
+		t.Fatalf("loaded %d patterns, want 2", len(patterns))
+	}
+}
+
+// TestApplyConfigSnapshot_URLCategoriesPersist exercises the
+// caller-side catStore.Save() hook after catStore.ReplaceAll() in
+// applyConfigSnapshot's snap.URLCategories branch (P6.1 UC-2 closure).
+func TestApplyConfigSnapshot_URLCategoriesPersist(t *testing.T) {
+	origPath := catStore.path
+	origEntries := catStore.All()
+	t.Cleanup(func() {
+		catStore.path = origPath
+		catStore.ReplaceAll(origEntries)
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "categories.json")
+	catStore.path = path
+
+	snap := ConfigSnapshot{
+		Version: 1,
+		URLCategories: []CategoryEntry{
+			{Name: "p34-test-cat", Hosts: []string{"p34.example", "test.example"}},
+		},
+	}
+	applyConfigSnapshot(snap)
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
+	}
+
+	fresh := newCategoryStore(nil)
+	if err := fresh.Load(path); err != nil {
+		t.Fatalf("fresh.Load: %v", err)
+	}
+	entries := fresh.All()
+	if len(entries) != 1 {
+		t.Fatalf("loaded %d entries, want 1", len(entries))
+	}
+	if entries[0].Name != "p34-test-cat" {
+		t.Errorf("entries[0].Name = %q, want p34-test-cat", entries[0].Name)
+	}
+}
+
+// TestApplyConfigSnapshot_DPIPatternsPersist exercises the
+// caller-side dpiScanner.Save() hook after dpiScanner.Set() in
+// applyConfigSnapshot's snap.DPIPatterns branch (P6.2 SC-3 closure).
+func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
+	origPath := dpiScanner.path
+	origPatterns := append([]string(nil), dpiScanner.raw...)
+	t.Cleanup(func() {
+		dpiScanner.path = origPath
+		_ = dpiScanner.Set(origPatterns)
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dpi_patterns.json")
+	dpiScanner.path = path
+
+	snap := ConfigSnapshot{
+		Version:     1,
+		DPIPatterns: []string{`p34-test-dpi-pattern`},
+	}
+	applyConfigSnapshot(snap)
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
+	}
+
+	fresh := &ContentScanner{bypassHosts: map[string]bool{}}
+	if err := fresh.Load(path); err != nil {
+		t.Fatalf("fresh.Load: %v", err)
+	}
+	if len(fresh.raw) != 1 {
+		t.Fatalf("loaded %d patterns, want 1", len(fresh.raw))
+	}
+	if fresh.raw[0] != "p34-test-dpi-pattern" {
+		t.Errorf("fresh.raw[0] = %q, want p34-test-dpi-pattern", fresh.raw[0])
+	}
+}
+
+// TestApplyConfigSnapshot_ThreatFeedPersist exercises the
+// caller-side globalThreatFeed.Save() hook after ImportFeedData in
+// applyConfigSnapshot's threat-feed branch (P6.2 SC-3 / SC-4 closure).
+//
+// SetDomainAllowlist already auto-persists internally
+// (threatfeed.go:266); ImportFeedData does NOT — this test verifies
+// the latter branch becomes durable after the caller-side hook.
+func TestApplyConfigSnapshot_ThreatFeedPersist(t *testing.T) {
+	origDbPath := globalThreatFeed.dbPath
+	t.Cleanup(func() {
+		globalThreatFeed.mu.Lock()
+		globalThreatFeed.dbPath = origDbPath
+		globalThreatFeed.urls = map[string]feedEntry{}
+		globalThreatFeed.domains = map[string]feedEntry{}
+		globalThreatFeed.mu.Unlock()
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "threatfeed.json")
+	globalThreatFeed.mu.Lock()
+	globalThreatFeed.dbPath = path
+	globalThreatFeed.mu.Unlock()
+
+	snap := ConfigSnapshot{
+		Version: 1,
+		ThreatFeedURLs: map[string]int64{
+			"http://p34-threat.example/x": 1700000000,
+		},
+		ThreatFeedDomains: map[string]int64{
+			"p34-threat.example": 1700000000,
+		},
+	}
+	applyConfigSnapshot(snap)
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
+	}
+
+	// Round-trip via partial JSON decode (feedDB is unexported; tags
+	// are snake_case per threatfeed.go:42–47).
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %q: %v", path, err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	urls, ok := decoded["urls"].(map[string]any)
+	if !ok {
+		t.Fatalf("on-disk feedDB urls map missing or wrong type")
+	}
+	if _, ok := urls["http://p34-threat.example/x"]; !ok {
+		t.Errorf("on-disk urls missing seeded entry; got keys: %v", keysOf(urls))
+	}
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// TestApplyConfigSnapshot_CategoryGroupsPersist exercises the
+// caller-side globalCategoryGroups.Save() hook after ReplaceAll in
+// applyConfigSnapshot's snap.CategoryGroups branch (P6.1 UC-2 closure).
+func TestApplyConfigSnapshot_CategoryGroupsPersist(t *testing.T) {
+	origPath := globalCategoryGroups.path
+	origGroups := globalCategoryGroups.List()
+	t.Cleanup(func() {
+		globalCategoryGroups.path = origPath
+		globalCategoryGroups.ReplaceAll(origGroups)
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "category_groups.json")
+	globalCategoryGroups.path = path
+
+	snap := ConfigSnapshot{
+		Version: 1,
+		CategoryGroups: []CategoryGroup{
+			{Name: "p34-test-group", Categories: []string{"Adult", "Gambling"}},
+		},
+	}
+	applyConfigSnapshot(snap)
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
+	}
+
+	fresh := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	if err := fresh.Load(path); err != nil {
+		t.Fatalf("fresh.Load: %v", err)
+	}
+	groups := fresh.List()
+	if len(groups) != 1 {
+		t.Fatalf("loaded %d groups, want 1", len(groups))
+	}
+	if groups[0].Name != "p34-test-group" {
+		t.Errorf("groups[0].Name = %q, want p34-test-group", groups[0].Name)
+	}
+}
