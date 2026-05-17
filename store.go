@@ -647,24 +647,24 @@ func (b *Blocklist) Save() {
 		return
 	}
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-	// Write to a temp file first, then rename for an atomic replace so a crash
-	// mid-write never leaves a partially-written (corrupt) blocklist on disk.
-	tmp := b.path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) // #nosec G304 -- path is operator-configured
-	if err != nil {
-		return
-	}
+	var buf strings.Builder
 	for h := range b.exact {
-		fmt.Fprintln(f, h)
+		buf.WriteString(h)
+		buf.WriteByte('\n')
 	}
 	for suffix := range b.wildcards {
-		fmt.Fprintln(f, "*"+suffix) // ".example.com" → "*.example.com"
+		// ".example.com" → "*.example.com"
+		buf.WriteByte('*')
+		buf.WriteString(suffix)
+		buf.WriteByte('\n')
 	}
-	if err := f.Close(); err != nil {
-		return
-	}
-	os.Rename(tmp, b.path) //nolint:errcheck
+	path := b.path
+	b.mu.RUnlock()
+	// CL-1 / Bucket-4 durability hardening: atomicWriteFile gives
+	// unique tmp + chmod + fsync(file) + rename + best-effort
+	// fsync(parent dir) — replaces the previous os.OpenFile+os.Rename
+	// path which was atomic-via-rename but NOT fsynced.
+	_ = atomicWriteFile(path, []byte(buf.String()), 0o600)
 }
 
 // isListed reports whether host matches any entry in the list (mode-agnostic).
@@ -813,6 +813,54 @@ func (b *Blocklist) Add(host string) {
 	} else {
 		b.exact[host] = true
 	}
+	b.mu.Unlock()
+}
+
+// ReplaceFeedEntries replaces the feed-pushed entries (exact +
+// wildcards) in place, leaving DP-local state (path, mode, manual,
+// exceptions) intact. Used by applyConfigSnapshot to avoid the
+// wholesale-replacement pattern that previously zeroed those
+// local fields and orphaned the persistence path. Per-host parsing
+// mirrors Add: "*.example.com" → wildcard, otherwise → exact.
+//
+// IMPORTANT: AddManual (store.go:847–857) writes admin-added hosts
+// to BOTH the metadata map (b.manual) AND the enforcement maps
+// (b.exact / b.wildcards). The enforcement maps are what IsBlocked
+// consults; b.manual is just the attribution set. We therefore
+// re-inject every b.manual host into the new enforcement maps
+// before the swap so admin-added blocks survive every cluster
+// sync. Without this re-injection (pre-fix and my first-pass
+// ReplaceFeedEntries had the same defect; flagged by Codex on
+// PR #249), admin manual blocks would silently disappear from
+// enforcement on every snapshot apply.
+func (b *Blocklist) ReplaceFeedEntries(hosts []string) {
+	newExact := map[string]bool{}
+	newWildcards := map[string]bool{}
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if strings.HasPrefix(h, "*.") {
+			newWildcards[h[1:]] = true
+		} else {
+			newExact[h] = true
+		}
+	}
+	b.mu.Lock()
+	// Re-inject admin-added manual entries into the enforcement
+	// maps. b.manual is the attribution set; the entries are also
+	// normalised at AddManual time so no further trim/lowercase is
+	// needed here.
+	for h := range b.manual {
+		if strings.HasPrefix(h, "*.") {
+			newWildcards[h[1:]] = true
+		} else {
+			newExact[h] = true
+		}
+	}
+	b.exact = newExact
+	b.wildcards = newWildcards
 	b.mu.Unlock()
 }
 
