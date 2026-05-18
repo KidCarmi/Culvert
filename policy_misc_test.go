@@ -121,6 +121,14 @@ func TestServeBlockPage(t *testing.T) {
 // ─── apiAuthLogin ─────────────────────────────────────────────────────────────
 
 func TestAPIAuthLogin_InvalidCreds(t *testing.T) {
+	// Whitebox snapshot+restore of loginLimiter.entries. The test
+	// records one failed login per iteration; without this isolation
+	// the same test's own iterations under -count=N (N >= 6) would
+	// accumulate failures and trip the lockout, causing iter 6+ to
+	// see 429 instead of 401. Helper + regression guard live in
+	// lockout_isolation_test.go.
+	snapshotLoginLimiter(t)
+
 	// Set up auth
 	_ = cfg.SetAuth("logintest", "correctpass123")
 	defer cfg.SetAuth("", "") //nolint:errcheck // test teardown; reset errors are non-actionable
