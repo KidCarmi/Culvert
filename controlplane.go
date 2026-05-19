@@ -1614,11 +1614,12 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	}
 
 	// Global file-block extensions (CRIT-2).
+	// CL-13: ReplaceAll triggers exactly one atomicWriteFile call
+	// regardless of len(snap.FileBlockExtensions). The previous
+	// ClearAll + per-extension Add loop produced N+1 fsynced writes
+	// per snapshot apply (cap 10_000 per maxSnapFileBlockExtensions).
 	if snap.FileBlockExtensions != nil {
-		fileBlocker.ClearAll()
-		for _, ext := range snap.FileBlockExtensions {
-			fileBlocker.Add(ext)
-		}
+		fileBlocker.ReplaceAll(snap.FileBlockExtensions)
 	}
 
 	// OTLP endpoint (CRIT-3).
