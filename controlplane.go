@@ -1772,6 +1772,26 @@ func rebuildCPCertPool() {
 	logger.Printf("ControlPlane: TLS client CA pool rebuilt")
 }
 
+// getCPTLSConfigForClient is the per-handshake snapshot hook for the
+// CP-side TLS config. Invoked by the stdlib once per ClientHello.
+// CA-7 fix: the stdlib was previously reading cpTLSConfig.cfg.ClientCAs
+// directly during the handshake (unsynchronized) while rebuildCPCertPool
+// wrote that same field under cpTLSConfig.mu — confirmed data race in
+// TestCA7_CpTLSConfig_ClientCAsConcurrentReadVsWrite_Race pre-fix.
+// Routing the read through this callback takes cpTLSConfig.mu and
+// returns a Clone() whose ClientCAs is a pointer to the (immutable
+// post-publication) *x509.CertPool. A concurrent rebuild assigns a
+// NEW pool to the original cfg.ClientCAs field; the clone keeps the
+// pointer to the OLD pool — different memory location, no race.
+func getCPTLSConfigForClient(_ *tls.ClientHelloInfo) (*tls.Config, error) {
+	cpTLSConfig.mu.Lock()
+	defer cpTLSConfig.mu.Unlock()
+	if cpTLSConfig.cfg == nil {
+		return nil, nil // stdlib falls back to listener cfg
+	}
+	return cpTLSConfig.cfg.Clone(), nil
+}
+
 func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCredentials, error) {
 	if strings.Contains(certFile, "..") || strings.Contains(keyFile, "..") || strings.Contains(caFile, "..") {
 		return nil, fmt.Errorf("invalid cert/key/ca path: directory traversal not allowed")
@@ -1794,6 +1814,11 @@ func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 		// VerifyClientCertIfGiven allows unenrolled nodes to call Enroll
 		// without a client cert, while still verifying certs from enrolled nodes.
 		tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
+
+		// CA-7 fix: route per-handshake reads through getCPTLSConfigForClient
+		// so concurrent rebuildCPCertPool writes cannot race with the
+		// stdlib's cfg.ClientCAs read inside processCertsFromClient.
+		tlsCfg.GetConfigForClient = getCPTLSConfigForClient
 
 		// Store reference for dynamic cert pool rebuild on CA rotation.
 		cpTLSConfig.mu.Lock()
