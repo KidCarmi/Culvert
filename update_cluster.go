@@ -316,8 +316,22 @@ func startClusterUpdate(targetTag, initiator string, budget ErrorBudgetConfig) e
 	// (CL-3). Inner loops keep their own bounded contexts; the
 	// persistence + recoverClusterUpdate contract remains the safety net
 	// for mid-action process kill.
-	go runClusterUpdate(appLifecycleCtx)
+	go runClusterUpdate(resolveLifecycleCtx())
 	return nil
+}
+
+// resolveLifecycleCtx returns appLifecycleCtx, falling back to
+// context.Background() when the global is nil. appLifecycleCtx is a
+// package-global set by initLifecycleContext during main(); reaching
+// startClusterUpdate before that wire-up (test binaries that hit this
+// path directly, alternate startup flows) would otherwise pass nil to
+// runClusterUpdate, and ctx.Err() on a nil interface would panic.
+// Codex P2 catch on PR #256.
+func resolveLifecycleCtx() context.Context {
+	if appLifecycleCtx == nil {
+		return context.Background()
+	}
+	return appLifecycleCtx
 }
 
 // clusterUpdateAbortOnShutdown returns true if ctx has been cancelled,
@@ -424,51 +438,7 @@ func runClusterUpdate(ctx context.Context) {
 
 	// F6: Canary soak period — wait and verify health.
 	if canaryCount > 0 && len(remainingNodes) > 0 {
-		soakDur := time.Duration(canarySoakSec) * time.Second
-		if soakDur < 30*time.Second {
-			soakDur = 30 * time.Second
-		}
-		clusterUpdateState.mu.Lock()
-		clusterUpdateState.Phase = "canary_soak"
-		clusterUpdateState.mu.Unlock()
-		clusterUpdateState.persist()
-
-		logger.Printf("cluster update: canary soak period (%s) — monitoring %d canary nodes",
-			soakDur, len(canaryNodes))
-		time.Sleep(soakDur)
-
-		// F8: After soak, verify canary nodes are still healthy.
-		clusterUpdateState.mu.Lock()
-		canaryFails := clusterUpdateState.Failures
-		clusterUpdateState.mu.Unlock()
-		if canaryFails > 0 {
-			if autoRollback {
-				triggerAutoRollback("canary soak failed: %d failures during soak period", canaryFails)
-			} else {
-				clusterUpdateState.mu.Lock()
-				clusterUpdateState.Phase = "halted"
-				clusterUpdateState.mu.Unlock()
-				clusterUpdateState.persist()
-				logger.Printf("cluster update HALTED: canary soak failed (%d failures)", canaryFails)
-			}
-			return
-		}
-
-		// CL-3 boundary 3: after the soak, before starting the remaining
-		// batch. The soak itself is a bare time.Sleep and does not
-		// observe ctx — interrupting it would change canary semantics.
-		if clusterUpdateAbortOnShutdown(ctx) {
-			return
-		}
-
-		// Canary passed — continue with remaining nodes.
-		clusterUpdateState.mu.Lock()
-		clusterUpdateState.Phase = "updating_dps"
-		clusterUpdateState.mu.Unlock()
-		clusterUpdateState.persist()
-		logger.Printf("cluster update: canary soak passed — proceeding with %d remaining nodes", len(remainingNodes))
-
-		if !updateNodeBatch(remainingNodes, totalNodes, autoRollback) {
+		if !runCanarySoakAndRemaining(ctx, canaryNodes, remainingNodes, totalNodes, canarySoakSec, autoRollback) {
 			return
 		}
 	}
@@ -496,6 +466,61 @@ func runClusterUpdate(ctx context.Context) {
 		// Non-HA or standalone: update self directly.
 		updateCPDirect(targetTag)
 	}
+}
+
+// runCanarySoakAndRemaining handles the post-canary-batch soak period
+// and the remaining-nodes batch. Extracted from runClusterUpdate to
+// keep the orchestrator under the funlen / nestif lint thresholds; the
+// semantics are byte-equivalent to the inline body before extraction.
+// Returns true if the orchestrator should continue to Phase 2
+// (CP self-update), false if it should halt (canary failed, shutdown
+// at boundary 3, or remaining batch halted / auto-rolled-back).
+func runCanarySoakAndRemaining(ctx context.Context, canaryNodes, remainingNodes []EnrolledNode, totalNodes, canarySoakSec int, autoRollback bool) bool {
+	soakDur := time.Duration(canarySoakSec) * time.Second
+	if soakDur < 30*time.Second {
+		soakDur = 30 * time.Second
+	}
+	clusterUpdateState.mu.Lock()
+	clusterUpdateState.Phase = "canary_soak"
+	clusterUpdateState.mu.Unlock()
+	clusterUpdateState.persist()
+
+	logger.Printf("cluster update: canary soak period (%s) — monitoring %d canary nodes",
+		soakDur, len(canaryNodes))
+	time.Sleep(soakDur)
+
+	// F8: After soak, verify canary nodes are still healthy.
+	clusterUpdateState.mu.Lock()
+	canaryFails := clusterUpdateState.Failures
+	clusterUpdateState.mu.Unlock()
+	if canaryFails > 0 {
+		if autoRollback {
+			triggerAutoRollback("canary soak failed: %d failures during soak period", canaryFails)
+		} else {
+			clusterUpdateState.mu.Lock()
+			clusterUpdateState.Phase = "halted"
+			clusterUpdateState.mu.Unlock()
+			clusterUpdateState.persist()
+			logger.Printf("cluster update HALTED: canary soak failed (%d failures)", canaryFails)
+		}
+		return false
+	}
+
+	// CL-3 boundary 3: after the soak, before starting the remaining
+	// batch. The soak itself is a bare time.Sleep and does not observe
+	// ctx — interrupting it would change canary semantics.
+	if clusterUpdateAbortOnShutdown(ctx) {
+		return false
+	}
+
+	// Canary passed — continue with remaining nodes.
+	clusterUpdateState.mu.Lock()
+	clusterUpdateState.Phase = "updating_dps"
+	clusterUpdateState.mu.Unlock()
+	clusterUpdateState.persist()
+	logger.Printf("cluster update: canary soak passed — proceeding with %d remaining nodes", len(remainingNodes))
+
+	return updateNodeBatch(remainingNodes, totalNodes, autoRollback)
 }
 
 // updateCPDirect updates this CP directly via the local updater.

@@ -249,6 +249,39 @@ func TestCL3_AbortOnShutdown_HelperContract(t *testing.T) {
 	}
 }
 
+// TestCL3_ResolveLifecycleCtx_NilFallback pins the Codex P2 regression
+// guard from PR #256 review: appLifecycleCtx is a package-global
+// initialised by initLifecycleContext during main(); reaching
+// startClusterUpdate before that wire-up (test binaries that hit this
+// path directly, alternate startup flows) would otherwise hand
+// runClusterUpdate a nil context.Context interface and panic on the
+// first ctx.Err() call. resolveLifecycleCtx is the single allocation
+// point; this test pins its two branches directly.
+func TestCL3_ResolveLifecycleCtx_NilFallback(t *testing.T) {
+	// Snapshot + nil out appLifecycleCtx for the duration of the test.
+	savedCtx := appLifecycleCtx
+	t.Cleanup(func() { appLifecycleCtx = savedCtx })
+
+	appLifecycleCtx = nil
+	ctx := resolveLifecycleCtx()
+	if ctx == nil {
+		t.Fatal("resolveLifecycleCtx returned nil when appLifecycleCtx was nil; expected context.Background() fallback")
+	}
+	// A non-nil ctx must support ctx.Err() without panicking — that's
+	// the actual failure mode the guard prevents.
+	if err := ctx.Err(); err != nil {
+		t.Errorf("fallback ctx.Err() = %v; want nil (context.Background has no deadline and is never cancelled)", err)
+	}
+
+	// Branch 2: when appLifecycleCtx is set, return it unchanged.
+	bg, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	appLifecycleCtx = bg
+	if got := resolveLifecycleCtx(); got != bg {
+		t.Errorf("resolveLifecycleCtx returned %p; want %p (set value)", got, bg)
+	}
+}
+
 // TestCL3_RunClusterUpdate_IsConcurrencySafe pins that the
 // orchestrator can be spawned and observed via a done channel without
 // deadlocking against its own mutex. Belt-and-suspenders against a
