@@ -46,6 +46,7 @@ var canonicalLateShutdownHooks = []struct {
 	name  string
 	order int
 }{
+	{"cluster-store-flush", shutdownOrderClusterStoreFlush},
 	{"scan-svc-shutdown", shutdownOrderScanSvcShutdown},
 	{"admin-ui-shutdown", shutdownOrderAdminUIShutdown},
 	{"socks5-listener-stop", shutdownOrderSOCKS5ListenerStop},
