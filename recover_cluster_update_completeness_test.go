@@ -60,12 +60,15 @@ import (
 // state, points clusterUpdateFile at it, resets in-memory state, then
 // calls recoverClusterUpdate(). Snapshot/restore of the package
 // global is the caller's responsibility (use snapshotClusterUpdateState).
-func writeAndRecover(t *testing.T, state ClusterUpdateState) {
+//
+// Takes *ClusterUpdateState (not value) because the struct embeds a
+// sync.Mutex — passing by value triggers `go vet -copylocks`.
+func writeAndRecover(t *testing.T, state *ClusterUpdateState) {
 	t.Helper()
 	dir := t.TempDir()
 	clusterUpdateFile = filepath.Join(dir, "cluster_update.json")
 
-	data, err := json.MarshalIndent(&state, "", "  ")
+	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -152,7 +155,7 @@ func TestRecoverClusterUpdate_PhaseMatrix(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			writeAndRecover(t, ClusterUpdateState{
+			writeAndRecover(t, &ClusterUpdateState{
 				Active:    tc.diskActive,
 				Phase:     tc.diskPhase,
 				TargetTag: "v1.2.3-matrix",
@@ -179,7 +182,7 @@ func TestRecoverClusterUpdate_PhaseMatrix(t *testing.T) {
 func TestRecoverClusterUpdate_Canary_PreservesPerNodeStatus(t *testing.T) {
 	snapshotClusterUpdateState(t)
 
-	writeAndRecover(t, ClusterUpdateState{
+	writeAndRecover(t, &ClusterUpdateState{
 		Active:    true,
 		Phase:     "canary",
 		TargetTag: "v9.9.9-canary",
@@ -217,7 +220,7 @@ func TestRecoverClusterUpdate_Canary_PreservesPerNodeStatus(t *testing.T) {
 func TestRecoverClusterUpdate_CanarySoak_NoOrchestratorRunning(t *testing.T) {
 	snapshotClusterUpdateState(t)
 
-	writeAndRecover(t, ClusterUpdateState{
+	writeAndRecover(t, &ClusterUpdateState{
 		Active:    true,
 		Phase:     "canary_soak",
 		TargetTag: "v9.9.9-soak",
@@ -257,7 +260,7 @@ func TestRecoverClusterUpdate_CanarySoak_NoOrchestratorRunning(t *testing.T) {
 func TestRecoverClusterUpdate_AutoRollback_PreservesPhase(t *testing.T) {
 	snapshotClusterUpdateState(t)
 
-	writeAndRecover(t, ClusterUpdateState{
+	writeAndRecover(t, &ClusterUpdateState{
 		Active:      true,
 		Phase:       "auto_rollback",
 		TargetTag:   "v9.9.9-failed",
@@ -299,7 +302,7 @@ func TestRecoverClusterUpdate_AutoRollback_PreservesPhase(t *testing.T) {
 func TestRecoverClusterUpdate_CPRolledBack_PreservesPhase(t *testing.T) {
 	snapshotClusterUpdateState(t)
 
-	writeAndRecover(t, ClusterUpdateState{
+	writeAndRecover(t, &ClusterUpdateState{
 		Active:      true,
 		Phase:       "cp_rolled_back",
 		TargetTag:   "v9.9.9-cp-failed",
@@ -346,7 +349,7 @@ func TestRecoverClusterUpdate_AllPhasesUnblockNextUpdate(t *testing.T) {
 		"canary", "canary_soak", "auto_rollback", "cp_rolled_back",
 	} {
 		t.Run(phase, func(t *testing.T) {
-			writeAndRecover(t, ClusterUpdateState{
+			writeAndRecover(t, &ClusterUpdateState{
 				Active:    true,
 				Phase:     phase,
 				TargetTag: "v0.0.0-unblock-check",
