@@ -1019,6 +1019,44 @@ func recoverClusterUpdate() {
 		// Mark as halted so admin can resume from GUI.
 		clusterUpdateState.Phase = "halted"
 		clusterUpdateState.Active = false
+	case "canary":
+		// Canary batch was being updated when the orchestrator was killed.
+		// Mirror updating_dps semantics — the batch cannot resume automatically;
+		// per-node Status values are preserved in the Nodes map so the admin
+		// can see which canary nodes were already updated before halting.
+		logger.Printf("cluster update interrupted during canary batch — halting; inspect Nodes map for per-node status")
+		clusterUpdateState.Phase = "halted"
+		clusterUpdateState.Active = false
+	case "canary_soak":
+		// Orchestrator was sleeping through the post-canary soak; the
+		// post-soak failure-verification check did not run. No in-flight
+		// node operations to reconcile. Halt so the admin decides whether
+		// to abort or restart the rollout.
+		logger.Printf("cluster update interrupted during canary soak — halting; soak verification did not complete")
+		clusterUpdateState.Phase = "halted"
+		clusterUpdateState.Active = false
+	case "auto_rollback":
+		// triggerAutoRollback was actively rolling back previously-updated
+		// nodes to PreviousTag when the orchestrator was killed. Preserve
+		// Phase=auto_rollback so the operator-visible status retains the
+		// rollback context (apiClusterUpdateStatus surfaces Phase); per-node
+		// Status (rolling_back / rolled_back / rollback_failed) preserved in
+		// the Nodes map. Active=false ensures no zombie orchestrator.
+		// Operator must inspect node versions to determine final state — the
+		// recovery path explicitly does NOT re-attempt rollback (no
+		// orchestrator is spawned by recoverClusterUpdate).
+		logger.Printf("cluster update interrupted during auto-rollback — preserving Phase=auto_rollback for operator context; inspect Nodes map")
+		clusterUpdateState.Active = false
+	case "cp_rolled_back":
+		// updateCPDirect set Phase=cp_rolled_back when the updater HTTP
+		// request failed (before any container restart). In the normal flow
+		// runClusterUpdate's defer immediately flips Active=false. Seeing
+		// Active=true with this Phase on disk means a process kill in the
+		// tiny window between the inner persist (update_cluster.go ~538)
+		// and the defer's persist. The state is already terminal — DPs are
+		// updated, CP is not. Preserve Phase so the operator-visible status
+		// retains that signal; just flip Active.
+		clusterUpdateState.Active = false
 	}
 }
 
