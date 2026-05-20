@@ -88,6 +88,38 @@ func (fb *FileBlocker) Add(ext string) {
 	fb.mu.Unlock()
 }
 
+// ReplaceAll atomically replaces the in-memory extension set with
+// the normalised contents of exts and persists once. Per-element
+// semantics mirror Add exactly: lowercase + trim, leading-dot
+// inserted if missing, empty / bare-dot entries skipped,
+// duplicates collapsed by the set.
+//
+// CL-13: used by applyConfigSnapshot's FileBlockExtensions branch
+// to replace the prior ClearAll + per-extension Add loop, which
+// triggered N+1 atomicWriteFile syscalls per snapshot apply
+// (cap 10_000 extensions per maxSnapFileBlockExtensions). ReplaceAll
+// triggers exactly one save() call regardless of N.
+//
+// Save is invoked unconditionally — including when the new set is
+// equal to the existing set. Skipping save on equal content would
+// require deep-comparing maps under the lock and add a fast-path
+// that could deviate from the long-term durability guarantee, which
+// is out of CL-13 scope per the user brief.
+func (fb *FileBlocker) ReplaceAll(exts []string) {
+	newSet := make(map[string]bool, len(exts))
+	for _, e := range exts {
+		e = fb.norm(e)
+		if e == "" || e == "." {
+			continue
+		}
+		newSet[e] = true
+	}
+	fb.mu.Lock()
+	fb.extensions = newSet
+	fb.save()
+	fb.mu.Unlock()
+}
+
 func (fb *FileBlocker) Remove(ext string) { //nolint:unused // called from UI API
 	ext = fb.norm(ext)
 	fb.mu.Lock()
