@@ -43,13 +43,14 @@ import (
 	"time"
 )
 
-// TestAPIAuthChangePassword_DoesNotCreateConfigVersion is the
-// regression guard for the Category D-sec fix. With the
-// saveConfigVersion call re-added to apiAuthChangePassword, this
-// test fails because an envelope with Meta.Action="auth.password_change"
-// appears in the config-versions directory.
-func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
-	// Snapshot/restore the package globals this test mutates.
+// snapshotConfigVersionsDir redirects the package-global
+// configVersionsDir to a fresh t.TempDir() and resets
+// configVersionSeq to 0. Restores both on t.Cleanup. Returns the
+// tmp dir so the caller can inspect the snapshot files. Same
+// whitebox idiom as snapshotClusterUpdateState / snapshotLoginLimiter
+// from earlier PRs.
+func snapshotConfigVersionsDir(t *testing.T) string {
+	t.Helper()
 	tmp := t.TempDir()
 	origDir := configVersionsDir
 	configVersionsDir = tmp
@@ -64,9 +65,15 @@ func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
 		configVersionSeq = origSeq
 		configVersionMu.Unlock()
 	})
+	return tmp
+}
 
-	// Snapshot/restore cfg.uiUsers + auth fields so this test is
-	// isolated from siblings under -shuffle=on / -count=N.
+// snapshotCfgUIUsers captures and restores cfg.uiUsers + cfg.user +
+// cfg.passHash so tests that seed or mutate UI admin users do not
+// pollute siblings under -shuffle=on / -count=N. Same idiom as
+// PR #241 cfg.uiUsers snapshot.
+func snapshotCfgUIUsers(t *testing.T) {
+	t.Helper()
 	cfg.mu.Lock()
 	prevUsers := make(map[string]*uiAdminUser, len(cfg.uiUsers))
 	for k, v := range cfg.uiUsers {
@@ -82,6 +89,16 @@ func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
 		cfg.passHash = prevPassHash
 		cfg.mu.Unlock()
 	})
+}
+
+// TestAPIAuthChangePassword_DoesNotCreateConfigVersion is the
+// regression guard for the Category D-sec fix. With the
+// saveConfigVersion call re-added to apiAuthChangePassword, this
+// test fails because an envelope with Meta.Action="auth.password_change"
+// appears in the config-versions directory.
+func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
+	tmp := snapshotConfigVersionsDir(t)
+	snapshotCfgUIUsers(t)
 
 	const (
 		testUser    = "pwchange_no_version_test"
@@ -96,26 +113,25 @@ func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
 	// Mint a session cookie for the test user — apiAuthChangePassword
 	// reads sessionAdmin(r) (which reads the session cookie) and
 	// rejects username=="unknown".
-	sess := &Session{
+	cookieValue, err := encodeSession(&Session{
 		Sub:      testUser,
 		Provider: "local",
 		Role:     "admin",
 		Exp:      time.Now().Add(time.Hour).Unix(),
 		Jti:      newSessionJti(),
-	}
-	cookieValue, err := encodeSession(sess)
+	})
 	if err != nil {
 		t.Fatalf("encodeSession: %v", err)
 	}
 
-	body := strings.NewReader(`{"current_password":"` + testOldPass + `","new_password":"` + testNewPass + `"}`)
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", body)
-	r.Header.Set("Content-Type", "application/json")
-	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookieValue})
 	// Inject RoleAdmin into context so requireRole(RoleViewer) passes
 	// (the production middleware chain does this; we bypass middleware
 	// by calling the handler directly).
-	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
+	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin)
+	body := strings.NewReader(`{"current_password":"` + testOldPass + `","new_password":"` + testNewPass + `"}`)
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/auth/change-password", body)
+	r.Header.Set("Content-Type", "application/json")
+	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookieValue})
 
 	w := httptest.NewRecorder()
 	apiAuthChangePassword(w, r)
@@ -133,13 +149,19 @@ func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
 		t.Fatalf("VerifyUIUser with NEW password failed; the handler did not actually change the password")
 	}
 
-	// Now the key assertion: no config-version envelope with
-	// Action="auth.password_change" must exist in the tmp dir.
-	entries, err := os.ReadDir(tmp)
+	assertNoPasswordChangeVersion(t, tmp)
+}
+
+// assertNoPasswordChangeVersion reads every envelope in dir and
+// fails the test if any has Meta.Action="auth.password_change". This
+// is the key contract pinned by the test above; extracted to keep
+// the test body small.
+func assertNoPasswordChangeVersion(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read tmp dir: %v", err)
 	}
-
 	type envelope struct {
 		Meta struct {
 			Version int    `json:"version"`
@@ -147,9 +169,8 @@ func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
 			Action  string `json:"action"`
 		} `json:"meta"`
 	}
-
 	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join(tmp, e.Name()))
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		if err != nil {
 			t.Fatalf("read %s: %v", e.Name(), err)
 		}
