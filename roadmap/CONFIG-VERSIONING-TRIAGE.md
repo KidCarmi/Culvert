@@ -93,7 +93,7 @@ Format: `handler` (`file:line`) — mutation — persists where — `auditEvent`
 | `apiBlocklist` POST add | 112-113 | `bl.Add` | `bl.json` | YES | **YES** | YES | ✓ Correct |
 | `apiBlocklist` POST bulk_remove | 138-139 | `bl.Remove` | `bl.json` | YES | **YES** | YES | ✓ Correct |
 | `apiBlocklist` POST single remove | 149-150 | `bl.Remove` | `bl.json` | YES | **YES** | YES | ✓ Correct |
-| `apiBlocklistMode` PUT | 179-180 | `bl.SetMode` | `bl.json` | YES | **NO** | YES (`BlocklistMode`) | **GAP — tiny first case** |
+| `apiBlocklistMode` POST | 179-180 | `bl.SetMode` | `bl.json` | YES | **NO** | YES (`BlocklistMode`) | **GAP — tiny first case** |
 | `apiBlocklistFeed` POST set | 247-248 | feed URL config | `feed_cfg.json` | YES | NO | NO | (C) Out of surface |
 | `apiBlocklistFeed` POST sync | 267 | runtime trigger | n/a | YES | NO | n/a | (E) Runtime action, not config |
 | `apiBlocklistException` POST add | 315-316 | exception list | `bl.json`, separate set | YES | NO | NO | (C) Out of surface |
@@ -252,7 +252,7 @@ All 26 handlers in the policy / rules / blocklist / rewrite / SSL bypass / DPI /
 
 ### Category B — Genuine gap (in rollback surface, missing `saveConfigVersion`)
 
-**Exactly one entry: `apiBlocklistMode` PUT at `ui_policy.go:179-180`.** `bl.SetMode` is captured (`BlocklistMode` at `:64`) and applied (`:336-338`); the handler is part of the same file and same store family as `apiBlocklist` add/remove which already call `saveConfigVersion`. The omission is a one-line gap.
+**Exactly one entry: `apiBlocklistMode` POST at `ui_policy.go:179-180`.** `bl.SetMode` is captured (`BlocklistMode` at `:64`) and applied (`:336-338`); the handler is part of the same file and same store family as `apiBlocklist` add/remove which already call `saveConfigVersion`. The omission is a one-line gap.
 
 ### Category B′ — Adjacent struct fields not wired to capture/apply (gray zone)
 
@@ -320,7 +320,7 @@ Handlers covered: feed sync triggers (2), YARA reload, scan cache evict/clear (2
 
 ## 6. The "tiny, non-controversial first case" per the brief
 
-**`apiBlocklistMode` PUT at `ui_policy.go:179-180`** — the only Category B entry. The fix is a single line:
+**`apiBlocklistMode` POST at `ui_policy.go:179-180`** — the only Category B entry. The fix is a single line:
 
 ```go
 bl.SetMode(body.Mode)
