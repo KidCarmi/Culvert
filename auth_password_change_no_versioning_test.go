@@ -131,7 +131,17 @@ func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
 	body := strings.NewReader(`{"current_password":"` + testOldPass + `","new_password":"` + testNewPass + `"}`)
 	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/auth/change-password", body)
 	r.Header.Set("Content-Type", "application/json")
-	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookieValue})
+	// Cookie attributes are inert here — request never crosses the
+	// network; the handler just calls r.Cookie(name) which returns the
+	// value regardless. Setting Secure/HttpOnly/SameSite satisfies
+	// gosec G124 without a //nolint suppression.
+	r.AddCookie(&http.Cookie{
+		Name:     sessionCookieName,
+		Value:    cookieValue,
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
 
 	w := httptest.NewRecorder()
 	apiAuthChangePassword(w, r)
