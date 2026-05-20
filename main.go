@@ -1333,6 +1333,15 @@ const (
 	// the split structurally.
 	shutdownEarlyLateBoundary = 50
 
+	// shutdownOrderClusterStoreFlush runs first in the late phase. CL-2:
+	// closes the heartbeat-throttle window. UpdateNodeSeen only persists
+	// every 10th heartbeat (enrollment.go) and checkHeartbeats persists
+	// only when liveness/GC change something. Anything mutated in-memory
+	// since the last Save() is otherwise lost on shutdown. By this point
+	// in the sequence the gRPC server has stopped (no new heartbeats) and
+	// appLifecycleCancel has stopped the heartbeat monitor, so the Save
+	// races with nothing.
+	shutdownOrderClusterStoreFlush   = 55
 	shutdownOrderScanSvcShutdown     = 60
 	shutdownOrderAdminUIShutdown     = 70
 	shutdownOrderSOCKS5ListenerStop  = 80
@@ -1422,6 +1431,19 @@ func drainActiveTunnels(context.Context) error {
 // equivalent to the previous hand-ordered body. Hooks return nil today;
 // registry-level error aggregation is reserved for a future PR. P2.2 / S5.
 func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv *http.Server) {
+	// CL-2: flush in-memory cluster state to disk once at shutdown so the
+	// heartbeat-throttle gap (UpdateNodeSeen saves every 10th tick) cannot
+	// drop LastSeen/Status mutations on a graceful stop. Save() is RLock +
+	// atomicWriteFile; no path → no-op.
+	reg.Register("cluster-store-flush", shutdownOrderClusterStoreFlush, func(context.Context) error {
+		if globalClusterStore == nil {
+			return nil
+		}
+		if err := globalClusterStore.Save(); err != nil {
+			logger.Printf("Cluster store flush error: %v", err)
+		}
+		return nil
+	})
 	// Shut down scan microservice sidecar if running. Best-effort: error suppressed.
 	reg.Register("scan-svc-shutdown", shutdownOrderScanSvcShutdown, func(ctx context.Context) error {
 		if s.scanSvc != nil {
