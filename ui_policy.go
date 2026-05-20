@@ -178,6 +178,13 @@ func apiBlocklistMode(w http.ResponseWriter, r *http.Request) {
 		}
 		bl.SetMode(body.Mode)
 		auditEvent(r, "blocklist.mode", body.Mode, "")
+		// Snapshot for rollback: BlocklistMode is in the rollback
+		// surface (captureConfigBackup at configversion.go:64 +
+		// applyConfigBackup at :336-338). Sibling apiBlocklist add /
+		// remove handlers in this file already call saveConfigVersion;
+		// this omission was flagged as Category B (genuine gap) in
+		// roadmap/CONFIG-VERSIONING-TRIAGE.md.
+		saveConfigVersion(sessionAdmin(r), "blocklist.mode")
 		jsonOK(w, map[string]string{"mode": bl.Mode()})
 
 	default:
