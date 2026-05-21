@@ -30,30 +30,36 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ─── apiCDRConfigToggle ──────────────────────────────────────────────
 
 // TestCDRHygiene_ConfigToggle_NoConfigVersion exercises
 // PUT /api/cdr/config with {"enabled": true}, asserts 200, asserts the
-// audit ring contains a "cdr.config.toggle" entry, and asserts no
-// config-version envelope with that action exists on disk.
+// audit ring contains a "cdr.config.toggle" entry FROM THIS RUN (via
+// TS baseline + unique TEST-NET-2 Actor IP per CLAUDE.md test-authoring
+// pitfalls), and asserts no config-version envelope with that action
+// exists on disk.
 func TestCDRHygiene_ConfigToggle_NoConfigVersion(t *testing.T) {
 	resetCDRState(t)
 	redirectSentinelToTempDir(t)
 	tmp := snapshotConfigVersionsDir(t)
 
-	// PUT enable.
+	baselineTS := time.Now().UnixMilli()
+	const actorIP = "198.51.100.61"
+
 	w := httptest.NewRecorder()
-	apiCDRConfig(w, newAdminRequest(http.MethodPut, "/api/cdr/config",
-		[]byte(`{"enabled":true}`)))
+	r := newAdminRequest(http.MethodPut, "/api/cdr/config", []byte(`{"enabled":true}`))
+	r.RemoteAddr = actorIP + ":0"
+	apiCDRConfig(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
 	}
 	if !cdrActiveConfig().Enabled {
 		t.Fatal("runtime flag did not flip to enabled — handler did not reach audit")
 	}
-	assertAuditAction(t, "cdr.config.toggle")
+	assertCDRAuditFromThisRun(t, actorIP, "cdr.config.toggle", "cdr.enabled", baselineTS)
 	assertNoConfigVersionWithAction(t, tmp, "cdr.config.toggle")
 }
 
@@ -61,12 +67,17 @@ func TestCDRHygiene_ConfigToggle_NoConfigVersion(t *testing.T) {
 
 // TestCDRHygiene_InstanceRemove_NoConfigVersion seeds an instance,
 // DELETEs it, asserts 200, asserts the audit ring contains a
-// "cdr.instance.remove" entry, and asserts no config-version envelope.
+// "cdr.instance.remove" entry FROM THIS RUN, and asserts no
+// config-version envelope. The instance Name is a unique
+// discriminator that also appears as the audit Object.
 func TestCDRHygiene_InstanceRemove_NoConfigVersion(t *testing.T) {
 	resetCDRState(t)
 	tmp := snapshotConfigVersionsDir(t)
 
-	const name = "cdr-hygiene-instance-remove-target"
+	const (
+		name    = "cdr-hygiene-instance-remove-target"
+		actorIP = "198.51.100.62"
+	)
 	if _, err := cdrInstances.Add(CDREnrolledInstance{
 		Name:     name,
 		Endpoint: "sluice:8443",
@@ -74,16 +85,18 @@ func TestCDRHygiene_InstanceRemove_NoConfigVersion(t *testing.T) {
 		t.Fatalf("seed cdrInstances: %v", err)
 	}
 
+	baselineTS := time.Now().UnixMilli()
 	w := httptest.NewRecorder()
-	apiCDRInstances(w, newAdminRequest(http.MethodDelete,
-		"/api/cdr/instances?name="+name, nil))
+	r := newAdminRequest(http.MethodDelete, "/api/cdr/instances?name="+name, nil)
+	r.RemoteAddr = actorIP + ":0"
+	apiCDRInstances(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
 	}
 	if cdrInstances.Get(name) != nil {
 		t.Errorf("instance %q still in registry after DELETE", name)
 	}
-	assertAuditAction(t, "cdr.instance.remove")
+	assertCDRAuditFromThisRun(t, actorIP, "cdr.instance.remove", name, baselineTS)
 	assertNoConfigVersionWithAction(t, tmp, "cdr.instance.remove")
 }
 
@@ -91,25 +104,34 @@ func TestCDRHygiene_InstanceRemove_NoConfigVersion(t *testing.T) {
 
 // TestCDRHygiene_PolicyAdd_NoConfigVersion POSTs a minimal valid
 // policy rule, asserts 200, asserts the audit ring contains a
-// "cdr.policy.add" entry, and asserts no config-version envelope.
+// "cdr.policy.add" entry FROM THIS RUN, and asserts no config-version
+// envelope. The rule Name is a unique discriminator that also appears
+// as the audit Object.
 func TestCDRHygiene_PolicyAdd_NoConfigVersion(t *testing.T) {
 	resetCDRState(t)
 	tmp := snapshotConfigVersionsDir(t)
 
+	const (
+		name    = "cdr-hygiene-policy-add"
+		actorIP = "198.51.100.63"
+	)
 	rule := CDRPolicyRule{
 		Priority:    100,
-		Name:        "cdr-hygiene-policy-add",
+		Name:        name,
 		ProfileName: "default",
 		Mode:        "ENFORCE",
 	}
 	body, _ := json.Marshal(rule)
 
+	baselineTS := time.Now().UnixMilli()
 	w := httptest.NewRecorder()
-	apiCDRPolicies(w, newAdminRequest(http.MethodPost, "/api/cdr/policies", body))
+	r := newAdminRequest(http.MethodPost, "/api/cdr/policies", body)
+	r.RemoteAddr = actorIP + ":0"
+	apiCDRPolicies(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
 	}
-	assertAuditAction(t, "cdr.policy.add")
+	assertCDRAuditFromThisRun(t, actorIP, "cdr.policy.add", name, baselineTS)
 	assertNoConfigVersionWithAction(t, tmp, "cdr.policy.add")
 }
 
@@ -117,12 +139,15 @@ func TestCDRHygiene_PolicyAdd_NoConfigVersion(t *testing.T) {
 
 // TestCDRHygiene_PolicyRemove_NoConfigVersion seeds a policy rule
 // directly into cdrPolicyStore, DELETEs it via the handler, asserts
-// 200 + audit + no envelope.
+// 200 + audit FROM THIS RUN + no envelope.
 func TestCDRHygiene_PolicyRemove_NoConfigVersion(t *testing.T) {
 	resetCDRState(t)
 	tmp := snapshotConfigVersionsDir(t)
 
-	const name = "cdr-hygiene-policy-remove-target"
+	const (
+		name    = "cdr-hygiene-policy-remove-target"
+		actorIP = "198.51.100.64"
+	)
 	if _, err := cdrPolicyStore.Add(CDRPolicyRule{
 		Priority:    200,
 		Name:        name,
@@ -132,13 +157,15 @@ func TestCDRHygiene_PolicyRemove_NoConfigVersion(t *testing.T) {
 		t.Fatalf("seed cdrPolicyStore: %v", err)
 	}
 
+	baselineTS := time.Now().UnixMilli()
 	w := httptest.NewRecorder()
-	apiCDRPolicies(w, newAdminRequest(http.MethodDelete,
-		"/api/cdr/policies?name="+name, nil))
+	r := newAdminRequest(http.MethodDelete, "/api/cdr/policies?name="+name, nil)
+	r.RemoteAddr = actorIP + ":0"
+	apiCDRPolicies(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
 	}
-	assertAuditAction(t, "cdr.policy.remove")
+	assertCDRAuditFromThisRun(t, actorIP, "cdr.policy.remove", name, baselineTS)
 	assertNoConfigVersionWithAction(t, tmp, "cdr.policy.remove")
 }
 
@@ -180,23 +207,31 @@ func TestCDRHygiene_NoLiveSaveConfigVersionCallsInCDRUI(t *testing.T) {
 
 // ─── shared assertion helper ─────────────────────────────────────────
 
-// assertAuditAction scans the audit ring for an entry with the given
-// Action string. Per CLAUDE.md test-authoring pitfalls, does NOT
-// assert on len(auditGet()) deltas — the ring saturates at
-// maxAuditLogs=500.
+// assertCDRAuditFromThisRun scans the audit ring for an entry whose
+// (Actor, Action, Object) match the given values AND whose TS is
+// >= sinceTS. Per CLAUDE.md test-authoring pitfalls and the canonical
+// pattern in security_feedsync_audit_test.go: the Action string alone
+// is NOT a sufficient discriminator because sibling tests in the
+// suite (e.g. TestApiCDRConfigToggle_OnThenOff in cdr_ui_test.go)
+// emit the same Actions during the same -shuffle=on test binary
+// invocation, leaving matching entries in the global ring.
 //
-// Lighter than assertAuditEntryWithDiscriminator (used by the
-// security-PR tests) because these hygiene tests just need to confirm
-// the audit path executed; discriminator-based search is unnecessary
-// when the Action is unique per test and other tests in the suite
-// don't emit the same Action.
-func assertAuditAction(t *testing.T, action string) {
+// The three-axis discriminator (TEST-NET-2 Actor IP unique per
+// hygiene test + Action + Object + TS baseline) guarantees the entry
+// can only have been emitted by THIS test's invocation of the
+// production handler.
+//
+// Codex P2 catch on PR #265 — replaces the earlier (weaker)
+// assertAuditAction helper which only matched on Action.
+func assertCDRAuditFromThisRun(t *testing.T, actor, action, object string, sinceTS int64) {
 	t.Helper()
 	for _, e := range auditGet() {
-		if e.Action == action {
+		if e.Actor == actor && e.Action == action && e.Object == object && e.TS >= sinceTS {
 			return
 		}
 	}
-	t.Errorf("no audit entry with Action=%q found — proves audit path did NOT execute "+
-		"(test setup is broken OR the production removal removed too much)", action)
+	t.Errorf("no audit entry from this run found "+
+		"(Actor=%q Action=%q Object=%q TS>=%d) — proves audit path did NOT "+
+		"execute on this test's handler invocation (test setup is broken OR "+
+		"the production removal removed too much)", actor, action, object, sinceTS)
 }
