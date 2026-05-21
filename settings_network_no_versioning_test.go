@@ -66,6 +66,28 @@ func snapshotNetworkSettings(t *testing.T) {
 	})
 }
 
+// snapshotAdminSettingsPath captures and restores the package-global
+// adminSettingsPath under adminSettingsMu, then sets it to "" for the
+// test's duration. adminSettingsSave() spawns SaveAdminSettings() in a
+// goroutine that reads adminSettingsPath under the same mutex; an
+// empty path causes SaveAdminSettings to return immediately
+// (admin_settings.go:213-215) without writing to disk. This keeps the
+// test isolated from any global / shared admin-settings file the test
+// runner may have configured, without depending on the goroutine
+// completing before t.Cleanup restores the prior value.
+func snapshotAdminSettingsPath(t *testing.T) {
+	t.Helper()
+	adminSettingsMu.Lock()
+	prevPath := adminSettingsPath
+	adminSettingsPath = ""
+	adminSettingsMu.Unlock()
+	t.Cleanup(func() {
+		adminSettingsMu.Lock()
+		adminSettingsPath = prevPath
+		adminSettingsMu.Unlock()
+	})
+}
+
 // TestAPINetworkSettings_DoesNotCreateConfigVersion is the regression
 // guard for the Category D' (direction A) fix. With the
 // saveConfigVersion call restored on this handler, the test fails
@@ -74,6 +96,7 @@ func snapshotNetworkSettings(t *testing.T) {
 func TestAPINetworkSettings_DoesNotCreateConfigVersion(t *testing.T) {
 	tmp := snapshotConfigVersionsDir(t)
 	snapshotNetworkSettings(t)
+	snapshotAdminSettingsPath(t)
 
 	// Force baseline values DIFFERENT from what we'll POST so the
 	// mutation assertion is unambiguous.
