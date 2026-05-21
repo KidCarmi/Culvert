@@ -292,7 +292,15 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 		logger.Printf("UIUsers: failed to persist after password change: %v", err)
 	}
 	auditEvent(r, "auth.password_change", username, "self-service password change")
-	saveConfigVersion(sessionAdmin(r), "auth.password_change")
+	// Intentionally NOT calling saveConfigVersion: password hashes are
+	// excluded from the rollback surface (captureConfigBackup does NOT
+	// capture ui_users.json). Even if they were captured, rolling back
+	// to a prior version would restore the OLD password hash — a
+	// security regression by definition, since the operator typically
+	// changes the password because the prior one was compromised. The
+	// audit trail above is the appropriate observability tier; rollback
+	// is deliberately not. Category D-sec finding from
+	// roadmap/CONFIG-VERSIONING-TRIAGE.md.
 	jsonOK(w, map[string]any{"ok": true})
 }
 
