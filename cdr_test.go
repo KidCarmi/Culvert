@@ -151,6 +151,14 @@ func (f *fakeSluice) Enroll(ctx context.Context, _ *pb.EnrollRequest) (*pb.Enrol
 	}, nil
 }
 
+// RevokeClient is a minimal success stub used by the
+// cdr_revoke_rpc_no_versioning_test. Returns an empty response without
+// validating the request body; the test that depends on this exercises
+// the apiCDRRevokeRPC handler's success path past the gRPC call.
+func (f *fakeSluice) RevokeClient(_ context.Context, _ *pb.RevokeClientRequest) (*pb.RevokeClientResponse, error) {
+	return &pb.RevokeClientResponse{}, nil
+}
+
 // startFakeSluice brings up a bufconn-backed gRPC server with the given
 // server impl and returns a dialed CDRClient.  The caller defers stop.
 func startFakeSluice(t *testing.T, srv *fakeSluice) (client *CDRClient, stop func()) {

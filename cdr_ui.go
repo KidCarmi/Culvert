@@ -631,7 +631,16 @@ func apiCDRRevokeRPC(w http.ResponseWriter, r *http.Request) {
 	auditEventDiff(r, "cdr.instance.revoke_rpc", name,
 		fmt.Sprintf("fingerprint=%s reason=%q", shortFingerprint(fp), sanitizeLog(req.Reason)),
 		target, nil)
-	saveConfigVersion(sessionAdmin(r), "cdr.instance.revoke_rpc")
+	// Intentionally NOT calling saveConfigVersion: RPC revocation must
+	// never silently rollback. A revoke is issued because the credential
+	// or endpoint was compromised, misbehaving, or otherwise needs to be
+	// retired; restoring a revocation via "rollback to vN" would
+	// un-revoke the credential silently — a security regression by
+	// definition. Same shape as auth.password_change in PR #261. CDR
+	// state is also not in the rollback surface (captureConfigBackup
+	// does NOT read cdr_instances.json) so the call was misleading even
+	// before the security concern. Category D-sec finding from
+	// roadmap/CONFIG-VERSIONING-TRIAGE.md + roadmap/CATEGORY-D-PRIME-DIRECTION.md.
 	jsonOK(w, map[string]any{"revoked": name, "fingerprint": fp})
 }
 
