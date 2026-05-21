@@ -867,7 +867,25 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		auditEvent(r, "settings.network", "updated", fmt.Sprintf("base_url=%s trust_fwd=%s sans=%v",
 			strings.ReplaceAll(body.BaseURL, "\n", ""), safeTrustFwd, safeSANs))
 		adminSettingsSave()
-		saveConfigVersion(sessionAdmin(r), "settings.network")
+		// Intentionally NOT calling saveConfigVersion: network settings
+		// are operational, per-node, and not HA-replicated
+		// (proxyExternalBaseURL / uiExtraSANs / trustForwardedHeaders
+		// are not in ConfigSnapshot, captureConfigBackup, or
+		// applyConfigBackup). Automatic rollback would be genuinely
+		// dangerous in ways the rollback API doesn't communicate:
+		//   - trustForwardedHeaders flip-back can re-enable a
+		//     previously-disabled header-spoofing attack vector;
+		//   - uiExtraSANs changes trigger UI cert regeneration —
+		//     rollback causes cert churn that breaks browser
+		//     cert-pin caches;
+		//   - proxyExternalBaseURL controls OIDC redirect URIs and
+		//     PAC generation — rolling back to an old URL breaks
+		//     OIDC because registered redirect URIs on the IdP side
+		//     don't change in sync.
+		// Operators who need to revert these specific settings should
+		// re-POST with the old values. Category D' (direction A)
+		// finding from roadmap/CONFIG-VERSIONING-TRIAGE.md +
+		// roadmap/CATEGORY-D-PRIME-DIRECTION.md §4.
 		jsonOK(w, map[string]string{"status": "ok"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -182,8 +182,8 @@ func assertNoConfigVersionWithAction(t *testing.T, dir, action string) {
 			t.Fatalf("unmarshal %s: %v", e.Name(), err)
 		}
 		if env.Meta.Action == action {
-			t.Errorf("config-version envelope %s has Meta.Action=%q — the saveConfigVersion call was re-added; %s is security-sensitive (un-revocation regression) and MUST NOT create a config version (Category D-sec)",
-				e.Name(), env.Meta.Action, action)
+			t.Errorf("config-version envelope %s has Meta.Action=%q — the saveConfigVersion call was re-added; this handler is in Category D' (state not in the rollback surface) or D-sec (rollback would be a security regression) and MUST NOT create a config version. See roadmap/CONFIG-VERSIONING-TRIAGE.md + roadmap/CATEGORY-D-PRIME-DIRECTION.md.",
+				e.Name(), env.Meta.Action)
 		}
 	}
 }
