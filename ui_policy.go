@@ -485,6 +485,7 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 			return
 		}
 		auditEvent(r, "urlcat.create", body.Name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
+		saveConfigVersion(sessionAdmin(r), "urlcat.create")
 		jsonOK(w, map[string]string{"name": body.Name})
 
 	case http.MethodPut:
@@ -517,6 +518,7 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 			return
 		}
 		auditEvent(r, "urlcat.update", name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
+		saveConfigVersion(sessionAdmin(r), "urlcat.update")
 		jsonOK(w, map[string]string{"name": name})
 
 	case http.MethodDelete:
@@ -538,6 +540,7 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 			return
 		}
 		auditEvent(r, "urlcat.delete", name, "")
+		saveConfigVersion(sessionAdmin(r), "urlcat.delete")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -569,6 +572,7 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		auditEvent(r, "urlcat.host.add", body.Category, body.Host)
+		saveConfigVersion(sessionAdmin(r), "urlcat.host.add")
 		jsonOK(w, map[string]string{"category": body.Category, "host": body.Host})
 
 	case http.MethodDelete:
@@ -586,6 +590,7 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		auditEvent(r, "urlcat.host.remove", category, host)
+		saveConfigVersion(sessionAdmin(r), "urlcat.host.remove")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -657,6 +662,16 @@ type configBackup struct {
 	// decodes to nil). nil → apply skips; [] → apply wipes; populated
 	// → apply replaces.
 	CategoryGroups []CategoryGroup `json:"categoryGroups"`
+
+	// URLCategories extends the rollback surface to cover catStore
+	// (admin-managed Layer 1; communityDB Layer 2 is intentionally
+	// out-of-band). Per roadmap/URL-CATEGORIES-ROLLBACK-EXTENSION-SPEC.md
+	// §4.1: json:"urlCategories" WITHOUT omitempty so a snapshot
+	// recorded at zero categories serializes as `[]` and distinguishes
+	// itself from an old pre-extension snapshot (which simply lacks
+	// the field and decodes to nil). Same shape as CategoryGroups
+	// (PR #267) for consistency.
+	URLCategories []CategoryEntry `json:"urlCategories"`
 }
 
 // GET /api/config/export — download a full configuration backup as JSON.

@@ -34,6 +34,7 @@ Verified field-by-field by reading both `captureConfigBackup` and `applyConfigBa
 | Rate limit RPM | `rl.Limit()` | `:74` | `:378-380` (only if `> 0`) |
 | PAC config | `pacStore.Get()` | `:75-77` | `:383-387` |
 | Category groups (added PR #267) | `globalCategoryGroups.List()` | `captureConfigBackup` (CategoryGroups assignment) | `applyConfigBackup` (`ReplaceAll + Save` BEFORE PolicyRules) |
+| URL categories — admin Layer 1 (added PR #269) | `catStore.All()` | `captureConfigBackup` (URLCategories assignment) | `applyConfigBackup` (`ReplaceAll + Save` BEFORE CategoryGroups) |
 
 ### What is in `configBackup` struct but NOT in capture/apply
 
@@ -52,7 +53,7 @@ These fields are populated by the export endpoint (`ui_config.go` `apiConfigExpo
 
 ### What is entirely off the rollback surface
 
-Every other persistent admin-mutated store: `catStore` (URL categories), `globalThreatFeed`, `globalProfileStore` (file profiles), `globalNodeGroups`, `globalBandwidth`, CDR config, alert webhooks, IdP registry, session HMAC, syslog config, OTLP endpoint, metrics token, UI allow IPs, session timeout, log level, blockpage template, upstream proxies, conn-limiter config, YARA settings + rule files, scan exclusions + DPI bypass, OCSP toggle, MITM/UI cert uploads, cluster state (`globalClusterStore`), enrolled-node certs, cluster-CA material, rolling-update state, HA config.
+Every other persistent admin-mutated store: `globalThreatFeed`, `globalProfileStore` (file profiles), `globalNodeGroups`, `globalBandwidth`, CDR config, alert webhooks, IdP registry, session HMAC, syslog config, OTLP endpoint, metrics token, UI allow IPs, session timeout, log level, blockpage template, upstream proxies, conn-limiter config, YARA settings + rule files, scan exclusions + DPI bypass, OCSP toggle, MITM/UI cert uploads, cluster state (`globalClusterStore`), enrolled-node certs, cluster-CA material, rolling-update state, HA config.
 
 ---
 
@@ -102,11 +103,11 @@ Format: `handler` (`file:line`) — mutation — persists where — `auditEvent`
 | `apiCategoryGroups` POST add | 371-372 | `globalCategoryGroups` | `category_groups.json` | YES | **YES** | YES (extended PR #267) | ✓ Correct |
 | `apiCategoryGroups` PUT update | 392-393 | same | same | YES | **YES** | YES | ✓ Correct |
 | `apiCategoryGroups` DELETE | 417-418 | same | same | YES | **YES** | YES | ✓ Correct |
-| `apiURLCat` POST create | 479-480 | `catStore` | `categories.json` | YES | NO | NO | (C) Out of surface (P6.1 UC-4) |
-| `apiURLCat` PUT update | 511-512 | same | same | YES | NO | NO | (C) UC-4 |
-| `apiURLCat` DELETE | 532-533 | same | same | YES | NO | NO | (C) UC-4 |
-| `apiURLCatHost` POST add | 563-564 | same | same | YES | NO | NO | (C) UC-4 |
-| `apiURLCatHost` DELETE | 580-581 | same | same | YES | NO | NO | (C) UC-4 |
+| `apiURLCat` POST create | 479-480 | `catStore` | `categories.json` | YES | **YES** | YES (extended PR #269) | ✓ Correct |
+| `apiURLCat` PUT update | 511-512 | same | same | YES | **YES** | YES | ✓ Correct |
+| `apiURLCat` DELETE | 532-533 | same | same | YES | **YES** | YES | ✓ Correct |
+| `apiURLCatHost` POST add | 563-564 | same | same | YES | **YES** | YES | ✓ Correct |
+| `apiURLCatHost` DELETE | 580-581 | same | same | YES | **YES** | YES | ✓ Correct |
 | `apiRewrite` POST add | 663-665 | `rewriter` | `rewrite.json` | YES | **YES** | YES (`RewriteRules`) | ✓ Correct |
 | `apiRewrite` DELETE | 683-685 | same | same | YES | **YES** | YES | ✓ Correct |
 | `apiPolicyRules` POST add | 731-733 | `policyStore` | `policy.json` | YES | **YES** | YES | ✓ Correct |
