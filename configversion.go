@@ -82,6 +82,12 @@ func captureConfigBackup() *configBackup {
 		// serializes as "categoryGroups": [] and round-trips through
 		// apply as a wipe — see spec §6.4.
 		CategoryGroups: globalCategoryGroups.List(),
+		// URLCategories: rollback-surface extension per
+		// roadmap/URL-CATEGORIES-ROLLBACK-EXTENSION-SPEC.md. catStore.All()
+		// returns a non-nil empty slice for an empty store
+		// (policy.go:174-184), so a zero-category state serializes as
+		// "urlCategories": [] and round-trips through apply as a wipe.
+		URLCategories: catStore.All(),
 	}
 }
 
@@ -342,6 +348,28 @@ func applyConfigBackup(b *configBackup) {
 	bl.Save()
 	if b.BlocklistMode == "allow" || b.BlocklistMode == "block" {
 		bl.SetMode(b.BlocklistMode)
+	}
+
+	// URLCategories MUST be applied before CategoryGroups (which may
+	// reference categories by name) and before PolicyRules (which may
+	// reference groups that reference categories). The full dependency
+	// chain is PolicyRules → CategoryGroups → catStore; apply order
+	// is the reverse — leaf dependencies first. See
+	// roadmap/URL-CATEGORIES-ROLLBACK-EXTENSION-SPEC.md §4.4-§4.5.
+	//
+	// Layer 2 (communityDB) is intentionally NOT touched — rollback
+	// restores admin-managed catStore only. communityDB lookups
+	// continue across the apply window.
+	//
+	// Nil-skip vs explicit-empty (per spec §4.7):
+	//   - b.URLCategories == nil → old snapshot (pre-extension) or
+	//     explicit JSON null; leave live catStore untouched.
+	//   - b.URLCategories == [] → new snapshot recorded with zero
+	//     categories; ReplaceAll wipes the live store.
+	//   - populated → wholesale replace.
+	if b.URLCategories != nil {
+		catStore.ReplaceAll(b.URLCategories)
+		catStore.Save()
 	}
 
 	// CategoryGroups MUST be applied before PolicyRules. Policy rules
