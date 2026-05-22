@@ -82,46 +82,65 @@ func TestConfigVersion_URLCategories_RoundTrip(t *testing.T) {
 		t.Fatalf("delete CustomCat: %v", err)
 	}
 
-	// Read v1's envelope and apply.
-	entries, err := os.ReadDir(tmp)
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("expected v1 envelope on disk; entries=%d err=%v", len(entries), err)
-	}
-	data, err := os.ReadFile(filepath.Join(tmp, entries[0].Name()))
-	if err != nil {
-		t.Fatalf("read v1: %v", err)
-	}
-	var env struct {
-		Config configBackup `json:"config"`
-	}
-	if err := json.Unmarshal(data, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	applyConfigBackup(&env.Config)
+	loadAndApplyV1Envelope(t, tmp)
 
 	gotNames := listCategoryNames(t)
 	wantNames := []string{"customcat", "news"}
 	if !reflect.DeepEqual(gotNames, wantNames) {
 		t.Fatalf("categories after rollback = %v; want %v", gotNames, wantNames)
 	}
-
-	// Verify per-entry contents preserved.
-	all := catStore.All()
-	got := map[string][]string{}
-	for _, e := range all {
-		gh := append([]string(nil), e.Hosts...)
-		sort.Strings(gh)
-		got[e.Name] = gh
-	}
-	if !reflect.DeepEqual(got["News"], []string{"bbc.com", "cnn.com"}) {
-		t.Errorf("News hosts after rollback = %v; want [bbc.com cnn.com]", got["News"])
-	}
-	if !reflect.DeepEqual(got["CustomCat"], []string{"bar.example", "foo.example"}) {
-		t.Errorf("CustomCat hosts after rollback = %v; want [bar.example foo.example]", got["CustomCat"])
-	}
+	assertCatStoreHasEntry(t, "News", []string{"cnn.com", "bbc.com"})
+	assertCatStoreHasEntry(t, "CustomCat", []string{"foo.example", "bar.example"})
 }
 
 // ─── Test 2: Hazard URL-A regression ──────────────────────────────────
+
+// loadAndApplyV1Envelope reads the (single) config-version envelope
+// in tmp and applies it via applyConfigBackup. Used by the round-trip
+// and HazardURLA tests to keep their inline branch count low (cyclop
+// budget at 15 per function).
+func loadAndApplyV1Envelope(t *testing.T, tmp string) {
+	t.Helper()
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("read tmp dir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no envelope on disk")
+	}
+	data, err := os.ReadFile(filepath.Join(tmp, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read envelope: %v", err)
+	}
+	var env struct {
+		Config configBackup `json:"config"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	applyConfigBackup(&env.Config)
+}
+
+// assertCatStoreHasEntry fails the test if catStore lacks an entry
+// matching name (case-insensitive) or if its Hosts differ from
+// wantHosts (order-insensitive).
+func assertCatStoreHasEntry(t *testing.T, name string, wantHosts []string) {
+	t.Helper()
+	for _, e := range catStore.All() {
+		if !strings.EqualFold(e.Name, name) {
+			continue
+		}
+		gotHosts := append([]string(nil), e.Hosts...)
+		sort.Strings(gotHosts)
+		sortedWant := append([]string(nil), wantHosts...)
+		sort.Strings(sortedWant)
+		if !reflect.DeepEqual(gotHosts, sortedWant) {
+			t.Errorf("catStore[%q].Hosts = %v; want %v", name, gotHosts, sortedWant)
+		}
+		return
+	}
+	t.Fatalf("catStore missing entry %q", name)
+}
 
 // TestConfigVersion_URLCategories_HazardURLA pins the URL-A
 // regression: a custom category (Layer 1 only) referenced by a
@@ -160,19 +179,7 @@ func TestConfigVersion_URLCategories_HazardURLA(t *testing.T) {
 		t.Fatalf("delete CustomA: %v", err)
 	}
 
-	// Apply v1's envelope.
-	entries, _ := os.ReadDir(tmp)
-	if len(entries) == 0 {
-		t.Fatal("no envelope on disk")
-	}
-	data, _ := os.ReadFile(filepath.Join(tmp, entries[0].Name()))
-	var env struct {
-		Config configBackup `json:"config"`
-	}
-	if err := json.Unmarshal(data, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	applyConfigBackup(&env.Config)
+	loadAndApplyV1Envelope(t, tmp)
 
 	// All three layers must be restored.
 	if globalCategoryGroups.GetByName("G1") == nil {
@@ -183,24 +190,11 @@ func TestConfigVersion_URLCategories_HazardURLA(t *testing.T) {
 		t.Fatalf("policyStore = %+v; want [R1]", rules)
 	}
 	// The crucial new assertion: CustomA exists in catStore after
-	// rollback (was missing pre-extension).
-	all := catStore.All()
-	found := false
-	for _, e := range all {
-		if strings.EqualFold(e.Name, "CustomA") {
-			found = true
-			if !reflect.DeepEqual(e.Hosts, []string{"abc.example"}) {
-				t.Errorf("CustomA hosts after rollback = %v; want [abc.example]", e.Hosts)
-			}
-			break
-		}
-	}
-	if !found {
-		t.Fatal("CustomA missing from catStore after rollback — Hazard URL-A unresolved")
-	}
+	// rollback (was missing pre-extension). Hazard URL-A regression.
+	assertCatStoreHasEntry(t, "CustomA", []string{"abc.example"})
 
-	// Layer-1 lookup must now find abc.example → CustomA (which is
-	// the proxy hot path used by MatchesHost via lookupHostCategory).
+	// Layer-1 lookup must now find abc.example → CustomA (the proxy
+	// hot path used by MatchesHost via lookupHostCategory).
 	cat, tier, _ := lookupHostCategory("abc.example")
 	if cat != "CustomA" {
 		t.Errorf("lookupHostCategory(abc.example) = %q; want %q (Hazard URL-A regression)", cat, "CustomA")
@@ -298,16 +292,7 @@ func TestConfigVersion_URLCategories_BuiltInPreserved(t *testing.T) {
 		t.Fatalf("flip CustomCat: %v", err)
 	}
 
-	// Apply v1 envelope.
-	entries, _ := os.ReadDir(tmp)
-	data, _ := os.ReadFile(filepath.Join(tmp, entries[0].Name()))
-	var env struct {
-		Config configBackup `json:"config"`
-	}
-	if err := json.Unmarshal(data, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	applyConfigBackup(&env.Config)
+	loadAndApplyV1Envelope(t, tmp)
 
 	// BuiltIn flags must be restored to v1 values.
 	all := catStore.All()
@@ -331,7 +316,6 @@ func TestConfigVersion_URLCategories_BuiltInPreserved(t *testing.T) {
 // envelope with the right Meta.Action exists on disk.
 func runHandlerVersionTest(t *testing.T, action string, prepare func(t *testing.T),
 	method, target string, body []byte) {
-
 	t.Helper()
 	snapshotCatStore(t)
 	tmp := snapshotConfigVersionsDir(t)
