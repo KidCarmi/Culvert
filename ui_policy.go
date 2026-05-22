@@ -647,6 +647,16 @@ type configBackup struct {
 	UpstreamProxies     []UpstreamEntry `json:"upstreamProxies,omitempty"`     // Finding 10.3
 	ConnLimitEnabled    bool            `json:"connLimitEnabled,omitempty"`    // Finding 10.3
 	ConnLimitMaxPerIP   int             `json:"connLimitMaxPerIP,omitempty"`   // Finding 10.3
+
+	// CategoryGroups extends the rollback surface to cover the
+	// PolicyRules → CategoryGroup reference. Per
+	// roadmap/CATEGORYGROUPS-ROLLBACK-EXTENSION-SPEC.md §3.3:
+	// json:"categoryGroups" WITHOUT omitempty so a snapshot recorded
+	// at zero groups serializes as `[]` and distinguishes itself from
+	// an old pre-extension snapshot (which simply lacks the field and
+	// decodes to nil). nil → apply skips; [] → apply wipes; populated
+	// → apply replaces.
+	CategoryGroups []CategoryGroup `json:"categoryGroups"`
 }
 
 // GET /api/config/export — download a full configuration backup as JSON.
