@@ -75,6 +75,13 @@ func captureConfigBackup() *configBackup {
 		PACProxyHost:        pc.ProxyHost,
 		PACProxyPort:        pc.ProxyPort,
 		PACExclusions:       pc.Exclusions,
+		// CategoryGroups: rollback-surface extension per
+		// roadmap/CATEGORYGROUPS-ROLLBACK-EXTENSION-SPEC.md. List()
+		// returns a non-nil empty slice for an empty store
+		// (categorygroup.go:144-158), so a zero-group state
+		// serializes as "categoryGroups": [] and round-trips through
+		// apply as a wipe — see spec §6.4.
+		CategoryGroups: globalCategoryGroups.List(),
 	}
 }
 
@@ -335,6 +342,25 @@ func applyConfigBackup(b *configBackup) {
 	bl.Save()
 	if b.BlocklistMode == "allow" || b.BlocklistMode == "block" {
 		bl.SetMode(b.BlocklistMode)
+	}
+
+	// CategoryGroups MUST be applied before PolicyRules. Policy rules
+	// reference category groups by name (PolicyRule.DestCategoryGroup,
+	// matched at runtime via globalCategoryGroups.MatchesHost which
+	// fails closed for unknown groups). Restoring groups first ensures
+	// the post-apply state has every restored rule sees its referenced
+	// groups in their v2 form, not the pre-rollback form. See
+	// roadmap/CATEGORYGROUPS-ROLLBACK-EXTENSION-SPEC.md §3.3-§3.4.
+	//
+	// Nil-skip vs explicit-empty (per spec §6.4):
+	//   - b.CategoryGroups == nil → old snapshot (pre-extension) or
+	//     explicit JSON null; leave live state untouched.
+	//   - b.CategoryGroups == [] → new snapshot recorded with zero
+	//     groups; ReplaceAll wipes the live store.
+	//   - populated → wholesale replace.
+	if b.CategoryGroups != nil {
+		globalCategoryGroups.ReplaceAll(b.CategoryGroups)
+		globalCategoryGroups.Save()
 	}
 
 	// Policy rules: bulk replace.
