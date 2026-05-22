@@ -172,12 +172,27 @@ var validRules []PolicyRule
 
 Treatment of `b.CategoryGroups == nil` versus `[]CategoryGroup{}`:
 
-- **`nil` (backward compat):** old snapshot from before the extension. Skip the apply block entirely; leave current `globalCategoryGroups` untouched. See §6 for the migration argument.
-- **`[]CategoryGroup{}` (empty slice):** snapshot was taken from a state with zero category groups; restore that — i.e. wipe `globalCategoryGroups`. `ReplaceAll([]CategoryGroup{})` is the existing semantic.
+- **`nil` (backward compat):** old snapshot from before the extension, or any decoded JSON where the field is absent / explicit `null`. Skip the apply block entirely; leave current `globalCategoryGroups` untouched. See §6 for the migration argument.
+- **`[]CategoryGroup{}` (empty slice):** new snapshot recorded at a state with zero category groups; restore that — i.e. wipe `globalCategoryGroups`. `ReplaceAll([]CategoryGroup{})` is the existing wholesale-replace semantic and produces an empty live store.
+- **populated:** wholesale replace.
 
-This `nil` vs empty distinction MUST be preserved by `captureConfigBackup`. Today an empty slice from `List()` serializes as `null` due to `json.Marshal` of a nil `[]CategoryGroup` (Go's zero-value JSON encoding). To make the distinction reliable: either initialize to `[]CategoryGroup{}` explicitly in `captureConfigBackup` when there are zero groups, OR document that "absent field → skip apply" is the contract (which is what `nil` already does naturally and matches `ConfigSnapshot`'s existing pattern at `:1609`).
+To make this distinction observable end-to-end, **`captureConfigBackup` must always populate the field with a non-nil slice** (even when there are zero groups) AND **the struct tag must NOT use `omitempty`** (so the marshaller writes `"categoryGroups": []` rather than omitting the field):
 
-**Recommendation: match `ConfigSnapshot`'s pattern (skip on nil), and accept that round-tripping an empty state will not clear groups via rollback.** Operators who want to clear all groups can do so explicitly via the admin API. This matches the existing apply semantics for every other Category-Backup field that uses `nil`-skip.
+```go
+type configBackup struct {
+    // ... existing 17 fields ...
+
+    // CategoryGroups uses `json:"categoryGroups"` WITHOUT omitempty so
+    // that a snapshot recorded at zero groups serializes as `[]` and
+    // distinguishes itself from an old pre-extension snapshot which
+    // simply lacks the field (Go decodes that to nil). See §6.4.
+    CategoryGroups []CategoryGroup `json:"categoryGroups"`
+}
+```
+
+`globalCategoryGroups.List()` already returns a non-nil empty slice for an empty store (`categorygroup.go:144-158` uses `make([]CategoryGroup, 0, len(s.order))`), so no extra defensive init is required in `captureConfigBackup`. The capture call site at §3.2 produces `[]CategoryGroup{}` for the zero-group case directly.
+
+**This is the corrected recommendation; an earlier draft of this spec used `omitempty` and `nil`-skip, which left Hazard B unresolved (a rollback to a zero-group snapshot would NOT wipe current groups). The corrected JSON shape preserves Hazard B's resolution: a snapshot taken at "no groups" round-trips to "no groups" via rollback.**
 
 ### 3.4 Ordering rationale
 
@@ -187,7 +202,14 @@ This `nil` vs empty distinction MUST be preserved by `captureConfigBackup`. Toda
 2. **Mental model:** the operator-visible contract is "v2 restored". When the apply path returns, the state is consistent — every rule sees its target groups in their v2 form, not their pre-rollback form.
 3. **Mirror of ConfigSnapshot:** `applyConfigSnapshot` at `controlplane.go:1609` also applies CategoryGroups; placing it before PolicyRules in the rollback path keeps the two surfaces symmetrical.
 
-The reverse ordering (rules first, then groups) introduces a tiny window where rules reference yet-to-be-restored groups. That window is bounded by the `configRollbackMu` lock — no concurrent reads of the policy store happen during the apply — so it is not a correctness issue under the current locking, just a structural one.
+**Concurrent reads during apply — actual lock semantics.** `configRollbackMu` serializes `applyConfigBackup` callers against each other but does **NOT** exclude the proxy hot path or admin reads. The proxy reads `policyStore` and `globalCategoryGroups` via their own independent RWMutexes during a rollback apply. So an intermediate-state read by the proxy during the apply window IS observable — there is no implicit "no concurrent reads" guarantee from `configRollbackMu`.
+
+Given that, the ordering choice determines which intermediate state is observable rather than whether one exists at all:
+
+- **Groups-first (proposed):** request arriving mid-apply sees either (old policy + old groups) OR (old policy + new groups) OR (new policy + new groups). The (new policy + new groups) terminal state is correct. The (old policy + new groups) middle state still evaluates correctly because old policy rules either reference v2 groups already present in the new set, or reference groups that don't exist (fail-closed via `MatchesHost`). The (old policy + old groups) state is the pre-rollback state — no behavior change observed.
+- **Rules-first (rejected):** request mid-apply could see (new policy + old groups). New rules might reference groups that are still in their pre-rollback form (different categories than v2) or absent entirely. Wrong behavior, not just stale.
+
+Both orderings produce a brief observable intermediate-state window. Groups-first picks the safer set of intermediates. The ordering choice does NOT eliminate the window and **does NOT rely on any lock** beyond the per-store RWMutexes that already protect each individual `ReplaceAll`.
 
 `globalCategoryGroups.Save()` after the `ReplaceAll` mirrors the existing `controlplane.go:1613` pattern (caller-side persist on top of `atomicWriteFile`).
 
@@ -281,7 +303,7 @@ Two tests in this file mutate `globalCategoryGroups`; under `-shuffle=on -count=
 
 - It does NOT prove behavior under HA failover (CategoryGroups extension is rollback-only; HA already syncs them).
 - It does NOT prove behavior with malformed snapshots (per §4.1 decision — out of scope; future hardening PR).
-- It does NOT prove behavior under concurrent admin mutations during rollback (the existing `configRollbackMu` lock already serializes; this is implicit and untested at all surface entries today).
+- It does NOT prove behavior under concurrent admin mutations during rollback. `configRollbackMu` serializes only the rollback callers themselves — the proxy hot path and admin reads continue to access `policyStore` and `globalCategoryGroups` via their own RWMutexes during the apply window. See §3.4 for the corrected lock semantics and why groups-first ordering is the safer of the two observable intermediate-state windows.
 
 ---
 
@@ -310,12 +332,20 @@ The 50-version cap (`configversion.go:81` documentation + `pruneConfigVersions`)
 | `"categoryGroups": []` (explicit empty) | Live `globalCategoryGroups` wiped (operator's intent at snapshot time was "no groups") |
 | `"categoryGroups": [...]` (populated) | Live `globalCategoryGroups` replaced wholesale |
 
-The `null` vs `[]` distinction relies on Go's `json.Marshal` behavior: a `nil` slice with `omitempty` is omitted entirely; a `nil` slice without `omitempty` becomes `null`; an empty non-nil slice becomes `[]`. With the proposed `json:"categoryGroups,omitempty"` tag:
+The distinction between absent / `null` / `[]` relies on Go's `json` encoding rules:
 
-- `captureConfigBackup` with zero groups → `omitempty` omits the field. Old + new snapshots look identical at this corner.
-- A future tool that explicitly wants to record "empty by design" would set the slice to `[]CategoryGroup{}` and omit `omitempty` — but that's a separate downstream concern.
+- A struct field tagged `omitempty` with a nil OR empty slice is omitted entirely from the output (just the field name disappears).
+- A struct field NOT tagged `omitempty` with a nil slice marshals as `"field": null`.
+- A struct field NOT tagged `omitempty` with a non-nil empty slice marshals as `"field": []`.
 
-**Recommendation: use `omitempty` for cleaner backwards-compat (old and new snapshots with no groups serialize identically; only populated snapshots differ).**
+The spec recommends the tag **`json:"categoryGroups"`** (NO `omitempty`) combined with `captureConfigBackup` always populating from `globalCategoryGroups.List()` (which returns a non-nil empty slice for an empty store). Result:
+
+- `captureConfigBackup` with zero groups → marshals as `"categoryGroups": []` → decodes to non-nil empty slice → apply WIPES live groups. Hazard B's zero-groups case is resolved.
+- `captureConfigBackup` with N groups → marshals as `"categoryGroups": [...]` → apply replaces. Standard case.
+- Pre-extension snapshot file → no `categoryGroups` field → decodes to nil → apply skips. Backward-compat preserved.
+- An explicit `"categoryGroups": null` (which `captureConfigBackup` will never produce, but a hand-edited / future-tool snapshot could) decodes to nil → apply skips. Same as the absent case, intentionally lenient.
+
+**Earlier draft rejected:** the original spec proposed `omitempty` + nil-skip. Codex P1 (PR #266 review) flagged that this leaves Hazard B unresolved — a snapshot taken at zero groups would omit the field entirely → decode to nil → apply skip → orphan groups persist after rollback. The corrected JSON shape above explicitly distinguishes "field absent in old snapshot" (nil → skip) from "snapshot recorded zero groups" (`[]` → wipe), so Hazard B's resolution is preserved across the full domain.
 
 ---
 
