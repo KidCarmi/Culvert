@@ -34,7 +34,7 @@ import (
 // global globalCategoryGroups pointer (and re-initialises the in-test
 // store with a tmp path so Save() goes to TempDir). Mirrors
 // snapshotGlobalClusterStore from PR #255.
-func snapshotGlobalCategoryGroups(t *testing.T) string {
+func snapshotGlobalCategoryGroups(t *testing.T) {
 	t.Helper()
 	orig := globalCategoryGroups
 	dir := t.TempDir()
@@ -44,7 +44,6 @@ func snapshotGlobalCategoryGroups(t *testing.T) string {
 	}
 	globalCategoryGroups = fresh
 	t.Cleanup(func() { globalCategoryGroups = orig })
-	return fresh.path
 }
 
 // snapshotPolicyStoreForTest captures and restores the policyStore
