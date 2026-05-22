@@ -19,8 +19,19 @@ package main
 // and test are admin-only because they exercise live credentials / the
 // engine path.
 //
-// Every mutation calls `saveConfigVersion(actor, action)` so the admin can
-// diff + rollback from the Config Versions panel.
+// Config rollback (saveConfigVersion): CDR mutations DO NOT call
+// saveConfigVersion. CDR state (cdr_enabled, cdr_instances.json,
+// cdr_policies.json) is per-CP local and not in the rollback surface —
+// captureConfigBackup (configversion.go) does not read it, and
+// applyConfigBackup does not restore it. The earlier header comment
+// claiming "every mutation calls saveConfigVersion ... so the admin can
+// rollback" was aspirational and not honored by the implementation;
+// per roadmap/CATEGORY-D-PRIME-DIRECTION.md §3 the misleading
+// saveConfigVersion calls have been removed. The audit trail
+// (auditEvent / auditEventDiff) remains the appropriate observability
+// tier. cdr.instance.revoke_rpc is additionally security-sensitive
+// (must never silently un-revoke a compromised credential); see
+// apiCDRRevokeRPC for the contract.
 
 import (
 	"bytes"
@@ -124,7 +135,7 @@ func apiCDRConfigToggle(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEventDiff(r, "cdr.config.toggle", "cdr.enabled",
 		fmt.Sprintf("enabled=%t", req.Enabled), before.Enabled, req.Enabled)
-	saveConfigVersion(sessionAdmin(r), "cdr.config.toggle")
+	// No saveConfigVersion — see file header for the rollback contract.
 	jsonOK(w, map[string]any{
 		"enabled":      req.Enabled,
 		"clientActive": cdrActiveClient() != nil,
@@ -202,7 +213,7 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 		}
 
 		auditEventDiff(r, "cdr.instance.remove", name, "removed enrolled Sluice instance", inst, nil)
-		saveConfigVersion(sessionAdmin(r), "cdr.instance.remove")
+		// No saveConfigVersion — see file header.
 		jsonOK(w, map[string]any{"removed": name})
 
 	default:
@@ -331,7 +342,7 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 	auditEventDiff(r, "cdr.instance.enroll", req.Name,
 		fmt.Sprintf("endpoint=%s fingerprint=%s", req.Endpoint, shortFingerprint(req.ServerFingerprint)),
 		nil, stored)
-	saveConfigVersion(sessionAdmin(r), "cdr.instance.enroll")
+	// No saveConfigVersion — see file header.
 	jsonOK(w, stored)
 }
 
@@ -512,7 +523,7 @@ func apiCDRPolicies(w http.ResponseWriter, r *http.Request) {
 		auditEventDiff(r, "cdr.policy.add", added.Name,
 			fmt.Sprintf("priority=%d profile=%s mode=%s", added.Priority, added.ProfileName, added.Mode),
 			nil, added)
-		saveConfigVersion(sessionAdmin(r), "cdr.policy.add")
+		// No saveConfigVersion — see file header.
 		jsonOK(w, added)
 
 	case http.MethodDelete:
@@ -534,7 +545,7 @@ func apiCDRPolicies(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		auditEventDiff(r, "cdr.policy.remove", name, "removed CDR policy rule", name, nil)
-		saveConfigVersion(sessionAdmin(r), "cdr.policy.remove")
+		// No saveConfigVersion — see file header.
 		jsonOK(w, map[string]any{"removed": name})
 
 	default:
@@ -913,8 +924,8 @@ func daysUntil(t time.Time) int {
 	return int(time.Until(t).Hours() / 24)
 }
 
-// jsonOK / decodeJSON / auditEventDiff / saveConfigVersion / sessionAdmin
-// live in ui.go and configversion.go respectively.  No redefinition here.
+// jsonOK / decodeJSON / auditEventDiff / sessionAdmin live in ui.go
+// and configversion.go respectively. No redefinition here.
 
 // unused guard — keeps the json import alive if a caller comments out the
 // JSON paths during iteration.  Harmless in production.
