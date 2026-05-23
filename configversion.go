@@ -88,6 +88,12 @@ func captureConfigBackup() *configBackup {
 		// (policy.go:174-184), so a zero-category state serializes as
 		// "urlCategories": [] and round-trips through apply as a wipe.
 		URLCategories: catStore.All(),
+		// ContentScanBypassHosts: rollback-surface extension per
+		// roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md. BypassHosts()
+		// returns a non-nil empty slice for an empty store
+		// (scanner.go), so a zero-bypass state serializes as
+		// "contentScanBypassHosts": [] and round-trips as a wipe.
+		ContentScanBypassHosts: dpiScanner.BypassHosts(),
 	}
 }
 
@@ -409,6 +415,18 @@ func applyConfigBackup(b *configBackup) {
 	// SSL bypass + content scan: replace all.
 	_ = sslBypass.Set(b.SSLBypass)
 	sslBypass.Save()
+	// dpiScanner bypass hosts + content scan patterns share a single
+	// content_scan.json envelope (scanner.go Save). Apply both
+	// in-memory first, then ONE Save() so the on-disk file is written
+	// once and never persists an intermediate (bypass-restored,
+	// patterns-stale) state. ContentScanBypassHosts is nil-skip:
+	//   - nil   → old/absent snapshot; leave bypass list untouched.
+	//   - []    → snapshot recorded zero bypass hosts; wipe.
+	//   - [...] → wholesale replace.
+	// See roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md §8.
+	if b.ContentScanBypassHosts != nil {
+		dpiScanner.SetBypassHosts(b.ContentScanBypassHosts)
+	}
 	_ = dpiScanner.Set(b.ContentScanPatterns)
 	dpiScanner.Save()
 
