@@ -140,10 +140,10 @@ Format: `handler` (`file:line`) — mutation — persists where — `auditEvent`
 | `apiFileProfiles` DELETE | 490 | same | same | YES | NO | NO | (C) |
 | `apiSecurityFeedsSync` | 527 | runtime feed sync | n/a | YES | NO | n/a | (E) Runtime action |
 | `apiSecurityYARAReload` | 590 | YARA in-memory + hashcache | n/a | YES | NO | n/a | (E) Runtime action |
-| `apiSecurityYARASettings` | 675 | YARA settings | `yara_settings.json` | YES | NO | NO | (C) Out of surface (P6.2 SC-1) |
-| `apiSecurityYARAWrite` | 753 | YARA rule files | `yara/*.yara` | YES | NO | NO | (C) SC-1; binary files |
-| `apiSecurityYARADelete` | 778 | YARA rule files | same | YES | NO | NO | (C) SC-1 |
-| `apiSecurityScanExclusions` | 865 | `scan_exclusions.json` | file | YES | NO | NO | (C) SC-1 |
+| `apiSecurityYARASettings` | 675 | YARA settings | `yara_settings.json` | YES | NO | NO | **(D-sec)** Documented out-of-surface (P6.2 SC-1, closed PR #274): rollback could un-harden `yara_on_timeout` / `yara_on_saturation` / `yara_enabled` posture. |
+| `apiSecurityYARAWrite` | 753 | YARA rule files | `yara/*.yara` | YES | NO | NO | **(D-ops)** Documented out-of-surface (PR #274): filesystem rule files, usually externally VCS-managed; not JSON-blob admin state. |
+| `apiSecurityYARADelete` | 778 | YARA rule files | same | YES | NO | NO | **(D-ops)** Documented out-of-surface (PR #274): same as YARA write. |
+| `apiSecurityScanExclusions` | 865 | `scan_exclusions.json` | file | YES | NO | NO | **(D-sec)** Documented out-of-surface (PR #274): exclusions are trust-elevation lists; rollback could re-add a removed exclusion (re-trusting a binary/host the operator just chose to scan). Same shape as `auth.password_change`. |
 | `apiContentScanBypass` | 902 | DPI bypass | file | YES | **YES** | YES (extended PR #273) | ✓ Correct |
 | `apiScanCache` evict | 964 | cache | in-memory | YES | NO | n/a | (E) Runtime |
 | `apiScanCache` clear | 968 | cache | in-memory | YES | NO | n/a | (E) Runtime |
@@ -273,7 +273,9 @@ Affected handlers: `apiAlertWebhooks` (3), `apiBlockPage`, `apiUpstreamProxies`,
 
 (C) = persistent state but not in surface; (C-topology) = operational topology where rollback is conceptually wrong; (C-runtime) folded into Category E below.
 
-Handlers covered: blocklist feed config (2), blocklist exceptions (2), URL categories (5 — P6.1 UC-4), file profiles (3), YARA settings + rules + rule files (4 — P6.2 SC-1), scan exclusions + DPI bypass (2 — SC-1), OCSP toggle, syslog config (2), session timeout, OTLP (2), bandwidth policies (2), node groups (2), cluster labels, cluster drain.
+Handlers covered: blocklist feed config (2), blocklist exceptions (2), file profiles (3), OCSP toggle, syslog config (2), session timeout, OTLP (2), bandwidth policies (2), node groups (2), cluster labels, cluster drain.
+
+**Resolved out of Category C since this doc's first revision:** URL categories (5 — P6.1 UC-4) moved ON-surface in PR #269; DPI bypass hosts moved ON-surface in PR #273; YARA settings, YARA rule files, and scan exclusions moved to **Category D** (D-sec / D-ops, documented out-of-surface) in PR #274 — see §4.2 rows + the Category D list below.
 
 **Decision:** these should NOT be added to the rollback surface unilaterally. Each requires extending `captureConfigBackup`/`applyConfigBackup` to be useful AND requires a design call on whether rolling back is operationally correct. Most are operational topology where rollback is conceptually wrong.
 
@@ -296,6 +298,12 @@ These mutations exist on disk but rolling back to a prior version would create a
 - `apiIdP*` — rolling back IdP could lock out admins
 - `apiUpdate registry settings` — could revert credentials
 - `cdr.instance.revoke_rpc` — un-revokes an RPC instance
+- `apiSecurityYARASettings` (PR #274) — rollback could un-harden `yara_on_timeout` / `yara_on_saturation` / `yara_enabled`, silently relaxing a scanner posture the operator deliberately tightened
+- `apiSecurityScanExclusions` (PR #274) — exclusions are trust-elevation lists (excluded hashes/hosts skip scanning); rollback could re-add a removed exclusion, re-trusting a binary/host the operator just chose to scan. Same shape as `auth.password_change`.
+
+**D-ops sub-class — operational / external-management mismatch (rollback is technically possible but operationally wrong), NOT a security regression:**
+
+- `apiSecurityYARAWrite` / `apiSecurityYARADelete` (PR #274) — YARA rules are individual `.yara`/`.yar` files on disk, compiled at engine load, and typically managed in an operator's external VCS. The Culvert admin API is an emergency-edit path, not the source of truth. Embedding full rule sources in every config snapshot would be invasive and conflict with the external-VCS workflow; the "rollback restores YARA rules" expectation is weak by convention.
 
 **Decision:** do not add `saveConfigVersion` to any of these. For the existing `auth.password_change` `saveConfigVersion` call, **remove it** as part of a small security follow-up PR.
 
@@ -354,9 +362,9 @@ Per the brief: "Do not implement fixes in this PR." The list below is a sequenci
 
 4. **Decide B′ direction** — design call: complete the `AlertWebhooks` / `BlockPageHTML` / `UpstreamProxies` / `ConnLimit*` / `RateLimitExempt` extension started under "Finding 10.3", OR remove those fields from the struct. Independent of #3.
 
-5. **P6.1 UC-4 (URL categories)** — extending the rollback surface to include `catStore` requires paired changes to capture/apply AND adds versioning to all 5 `apiURLCat*` handlers. Group with #3 if direction 2 is chosen there.
+5. **P6.1 UC-4 (URL categories) — RESOLVED (PR #269).** `catStore` extended into capture/apply + all 5 `apiURLCat*` handlers gained `saveConfigVersion`.
 
-6. **P6.2 SC-1 (scanner config)** — extending to YARA settings / rules + scan exclusions + DPI bypass is the largest single addition; should be its own design discussion.
+6. **P6.2 SC-1 (scanner config) — RESOLVED (PRs #272–#274).** Per `roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md`, the scanner group was triaged per-store rather than as one block: DPI bypass hosts extended into the surface (PR #273, direction B); YARA settings + scan exclusions documented out-of-surface as D-sec, YARA rule files as D-ops (PR #274). DPI patterns were already in surface. Runtime triggers stay Category E.
 
 7. **P6.3 CA-1 / CA-related handlers** — explicitly DECIDE these are out-of-surface and document it (mirror of how `apiScanCache` is documented as transient). Not a code change; a comment + a row in the doc.
 

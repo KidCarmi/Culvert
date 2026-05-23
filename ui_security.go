@@ -674,6 +674,12 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 		yaraSetAlertDegraded(body.AlertDegraded)
 		auditEventDiff(r, "security.yara-settings", "yara_engine", "", prev, yaraSettingsMap())
 		adminSettingsSave()
+		// Intentionally NOT calling saveConfigVersion: YARA engine
+		// settings are out of the rollback surface by design (D-sec,
+		// CONFIG-VERSIONING-TRIAGE.md §4.2). Rolling back could
+		// un-harden yara_on_timeout / yara_on_saturation / yara_enabled
+		// — silently relaxing a scanner posture the operator chose to
+		// tighten.
 		jsonOK(w, yaraSettingsMap())
 
 	default:
@@ -751,6 +757,11 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 		// Hash cache must be cleared on any rule change (Tier 1.1 applies to CRUD).
 		globalSecScanner.cache.Clear()
 		auditEvent(r, "security.yara-write", req.Name, fmt.Sprintf("%d warning(s)", len(warnings)))
+		// Intentionally NOT calling saveConfigVersion: YARA rule files
+		// are out of the rollback surface by design (D-ops,
+		// CONFIG-VERSIONING-TRIAGE.md §4.2). Rules are filesystem
+		// artifacts compiled at engine load, typically managed in an
+		// operator's external VCS — not JSON-blob admin state.
 		jsonOK(w, map[string]any{
 			"name":          req.Name,
 			"warnings":      warnings,
@@ -776,6 +787,9 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 		}
 		globalSecScanner.cache.Clear()
 		auditEvent(r, "security.yara-delete", name, "rule removed and cache cleared")
+		// Intentionally NOT calling saveConfigVersion: YARA rule files
+		// are out of the rollback surface by design (D-ops,
+		// CONFIG-VERSIONING-TRIAGE.md §4.2). See the yara-write branch.
 		jsonOK(w, map[string]any{
 			"deleted":       name,
 			"yara_rules":    globalYARA.Count(),
@@ -863,6 +877,13 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 			logger.Printf("ScanExclusions: save error: %v", err)
 		}
 		auditEvent(r, "security.scan-exclusions", "update", fmt.Sprintf("%d hash(es), %d host(s)", len(req.Hashes), len(req.Hosts)))
+		// Intentionally NOT calling saveConfigVersion: scan exclusions
+		// are out of the rollback surface by design (D-sec,
+		// CONFIG-VERSIONING-TRIAGE.md §4.2). Exclusions are
+		// trust-elevation lists (excluded hashes/hosts skip scanning);
+		// a rollback could re-add a removed exclusion, re-trusting a
+		// binary/host the operator just chose to scan. Same shape as
+		// auth.password_change.
 		hashes, hosts := globalScanExclusions.Lists()
 		jsonOK(w, map[string]any{
 			"hashes": hashes,
