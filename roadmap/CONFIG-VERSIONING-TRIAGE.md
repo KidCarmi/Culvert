@@ -35,6 +35,7 @@ Verified field-by-field by reading both `captureConfigBackup` and `applyConfigBa
 | PAC config | `pacStore.Get()` | `:75-77` | `:383-387` |
 | Category groups (added PR #267) | `globalCategoryGroups.List()` | `captureConfigBackup` (CategoryGroups assignment) | `applyConfigBackup` (`ReplaceAll + Save` BEFORE PolicyRules) |
 | URL categories — admin Layer 1 (added PR #269) | `catStore.All()` | `captureConfigBackup` (URLCategories assignment) | `applyConfigBackup` (`ReplaceAll + Save` BEFORE CategoryGroups) |
+| DPI bypass hosts (added PR #273) | `dpiScanner.BypassHosts()` | `captureConfigBackup` (ContentScanBypassHosts assignment) | `applyConfigBackup` (`SetBypassHosts` merged into the single `dpiScanner.Save()` with ContentScanPatterns) |
 
 ### What is in `configBackup` struct but NOT in capture/apply
 
@@ -53,7 +54,7 @@ These fields are populated by the export endpoint (`ui_config.go` `apiConfigExpo
 
 ### What is entirely off the rollback surface
 
-Every other persistent admin-mutated store: `globalThreatFeed`, `globalProfileStore` (file profiles), `globalNodeGroups`, `globalBandwidth`, CDR config, alert webhooks, IdP registry, session HMAC, syslog config, OTLP endpoint, metrics token, UI allow IPs, session timeout, log level, blockpage template, upstream proxies, conn-limiter config, YARA settings + rule files, scan exclusions + DPI bypass, OCSP toggle, MITM/UI cert uploads, cluster state (`globalClusterStore`), enrolled-node certs, cluster-CA material, rolling-update state, HA config.
+Every other persistent admin-mutated store: `globalThreatFeed`, `globalProfileStore` (file profiles), `globalNodeGroups`, `globalBandwidth`, CDR config, alert webhooks, IdP registry, session HMAC, syslog config, OTLP endpoint, metrics token, UI allow IPs, session timeout, log level, blockpage template, upstream proxies, conn-limiter config, YARA settings + rule files, scan exclusions, OCSP toggle, MITM/UI cert uploads, cluster state (`globalClusterStore`), enrolled-node certs, cluster-CA material, rolling-update state, HA config. (DPI bypass hosts moved ON-surface in PR #273 — see §1 surface table.)
 
 ---
 
@@ -143,7 +144,7 @@ Format: `handler` (`file:line`) — mutation — persists where — `auditEvent`
 | `apiSecurityYARAWrite` | 753 | YARA rule files | `yara/*.yara` | YES | NO | NO | (C) SC-1; binary files |
 | `apiSecurityYARADelete` | 778 | YARA rule files | same | YES | NO | NO | (C) SC-1 |
 | `apiSecurityScanExclusions` | 865 | `scan_exclusions.json` | file | YES | NO | NO | (C) SC-1 |
-| `apiContentScanBypass` | 902 | DPI bypass | file | YES | NO | NO | (C) SC-1 |
+| `apiContentScanBypass` | 902 | DPI bypass | file | YES | **YES** | YES (extended PR #273) | ✓ Correct |
 | `apiScanCache` evict | 964 | cache | in-memory | YES | NO | n/a | (E) Runtime |
 | `apiScanCache` clear | 968 | cache | in-memory | YES | NO | n/a | (E) Runtime |
 | `apiCACacheClear` | 1036 | leaf cert cache | in-memory LRU | YES | NO | n/a | (E) Runtime (P6.3 CA-1) |

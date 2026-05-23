@@ -672,6 +672,16 @@ type configBackup struct {
 	// the field and decodes to nil). Same shape as CategoryGroups
 	// (PR #267) for consistency.
 	URLCategories []CategoryEntry `json:"urlCategories"`
+
+	// ContentScanBypassHosts extends the rollback surface to cover
+	// dpiScanner's per-host DPI bypass list (the second half of the
+	// content_scan.json envelope; patterns are already covered by
+	// ContentScanPatterns above). Per
+	// roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md: json:"contentScanBypassHosts"
+	// WITHOUT omitempty so a snapshot recorded at zero bypass hosts
+	// serializes as `[]` (wipe on apply) and distinguishes itself from
+	// an old pre-extension snapshot (absent field → nil → skip).
+	ContentScanBypassHosts []string `json:"contentScanBypassHosts"`
 }
 
 // GET /api/config/export — download a full configuration backup as JSON.
