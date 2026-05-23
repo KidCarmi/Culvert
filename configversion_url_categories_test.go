@@ -426,3 +426,61 @@ func TestAPIURLCat_HostRemove_CreatesConfigVersion(t *testing.T) {
 		},
 		http.MethodDelete, "/api/urlcat/host?category=urlcat-test-hostremove&host=host.example", nil)
 }
+
+// ─── diffConfigs reports url-category changes ─────────────────────────
+
+// TestConfigVersion_URLCategories_DiffReportsChanges pins the
+// struct-slice diff gap for catStore: diffConfigs must surface
+// url_categories so rollback dry-run preflight reflects actual impact.
+// Without diffURLCategories, dry-run claims "no changes" even when apply
+// would add, remove, or edit a category's host list. The "changed"
+// (in-place Hosts edit) case is the one a naive added/removed-only
+// implementation would silently drop. findChange/assertNameInList are
+// defined in configversion_category_groups_test.go (same package).
+func TestConfigVersion_URLCategories_DiffReportsChanges(t *testing.T) {
+	a := &configBackup{URLCategories: []CategoryEntry{
+		{Name: "Keep", Hosts: []string{"keep.example"}},
+		{Name: "Edited", Hosts: []string{"a.example", "b.example"}},
+		{Name: "Removed", Hosts: []string{"gone.example"}},
+	}}
+	b := &configBackup{URLCategories: []CategoryEntry{
+		{Name: "Keep", Hosts: []string{"keep.example"}},
+		{Name: "Edited", Hosts: []string{"a.example"}}, // hosts changed
+		{Name: "Added", Hosts: []string{"new.example"}},
+	}}
+
+	change := findChange(t, diffConfigs(a, b), "url_categories")
+	assertNameInList(t, change.To, "added", "Added")
+	assertNameInList(t, change.From, "removed", "Removed")
+	assertNameInList(t, change.From, "changed", "Edited")
+}
+
+// TestConfigVersion_URLCategories_DiffNilSkipsField pins the apply-mirror
+// contract for catStore: applyConfigBackup skips a nil URLCategories
+// (old/absent snapshot → no-op), so the dry-run/preflight diff must skip
+// it too. Without the guard, rolling back to a pre-extension snapshot
+// would report every live category as "removed" while apply leaves them
+// untouched. assertNoChange is defined in
+// configversion_category_groups_test.go (same package).
+func TestConfigVersion_URLCategories_DiffNilSkipsField(t *testing.T) {
+	a := &configBackup{URLCategories: []CategoryEntry{
+		{Name: "Live", Hosts: []string{"live.example"}},
+	}}
+	b := &configBackup{ /* URLCategories nil — pre-extension snapshot */ }
+
+	assertNoChange(t, diffConfigs(a, b), "url_categories")
+}
+
+// TestConfigVersion_URLCategories_DiffEmptyReportsWipe pins the wipe half:
+// a non-nil empty []CategoryEntry{} is an explicit wipe (ReplaceAll([])),
+// so the diff MUST report live categories as removed. Guards against a
+// len()==0 skip that would swallow the wipe.
+func TestConfigVersion_URLCategories_DiffEmptyReportsWipe(t *testing.T) {
+	a := &configBackup{URLCategories: []CategoryEntry{
+		{Name: "Wiped", Hosts: []string{"x.example"}},
+	}}
+	b := &configBackup{URLCategories: []CategoryEntry{}} // explicit wipe
+
+	change := findChange(t, diffConfigs(a, b), "url_categories")
+	assertNameInList(t, change.From, "removed", "Wiped")
+}
