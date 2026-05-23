@@ -163,7 +163,7 @@ If an operator removes a hash from the exclusion list at v3 (because of a new Io
 | Store | Direction | Action |
 |---|---|---|
 | `dpiScanner.patterns` (already in surface) | A (correct) | No change — keep as-is. |
-| `dpiScanner.bypassHosts` | **B (extend surface)** | Add `BypassHosts []string` to `configBackup`; capture via `dpiScanner.BypassHosts()`; apply via `dpiScanner.SetBypassHosts(...) + Save()` (must order before pattern apply so single-file persistence is consistent). Add `saveConfigVersion` to `apiContentScanBypass` PUT. |
+| `dpiScanner.bypassHosts` | **B (extend surface)** | Add `BypassHosts []string` to `configBackup`; capture via `dpiScanner.BypassHosts()`; apply as a **single merged block: `SetBypassHosts(...)` (in-memory) → `Set(patterns)` (in-memory) → ONE `Save()`** — NOT a `SetBypassHosts + Save()` of its own. Both fields share the `content_scan.json` envelope (`scanner.go:124-148`); a separate Save before patterns are restored would write the file twice and persist an intermediate (bypass-restored / patterns-stale) state. See §8 for the exact block. Add `saveConfigVersion` to `apiContentScanBypass` PUT. |
 | YARA engine settings | **A (remove misleading) — but there's nothing to remove (handler never called `saveConfigVersion`).** Documented decision: NOT in surface; rollback is dangerous for security-toggle settings. | No code change. Triage doc row updated to mark "(D-sec) Documented out-of-surface — rollback would un-harden security posture". |
 | YARA rule files | **A (remove misleading) — same as above, nothing to remove.** Filesystem-shape mismatch + external VCS expectation. | No code change. Triage doc row updated to mark "(D-ops) Documented out-of-surface — filesystem state, VCS-managed outside Culvert". |
 | Scan exclusions (hashes + hosts) | **A (remove misleading) — same as above, nothing to remove.** Trust-elevation list; rollback re-adds removed exclusions. | No code change. Triage doc row updated to mark "(D-sec) Documented out-of-surface — re-adding an exclusion is a security regression". |
@@ -191,7 +191,7 @@ Per `roadmap/CATEGORY-D-PRIME-DIRECTION.md`'s precedent (small, focused PRs, no 
 - `ui_policy.go`: add `BypassHosts []string` to `configBackup` struct, tagged `json:"contentScanBypassHosts"` (no `omitempty`). Same shape as `URLCategories` in PR #269.
 - `configversion.go`:
   - `captureConfigBackup`: populate via `dpiScanner.BypassHosts()`.
-  - `applyConfigBackup`: apply via `dpiScanner.SetBypassHosts(...)` followed by the existing `dpiScanner.Save()`. **Ordering: BypassHosts MUST apply before ContentScanPatterns** because the single-file persistence is one envelope — applying them in two steps with two `Save()` calls would write the envelope twice. Cleaner: apply BypassHosts in-memory, then apply patterns, then a single Save. (Refactor allowed within the scope of this PR since it's a structural change required by the surface extension.)
+  - `applyConfigBackup`: replace the existing standalone `dpiScanner.Set(b.ContentScanPatterns)` + `dpiScanner.Save()` pair with ONE merged block — `SetBypassHosts(b.ContentScanBypassHosts)` (in-memory), then `Set(b.ContentScanPatterns)` (in-memory), then a SINGLE `dpiScanner.Save()`. **Do NOT add a second `Save()` for bypass hosts.** Both fields share the `content_scan.json` envelope (`scanner.go:124-148`); two `Save()` calls would write the file twice and the first write would persist an intermediate state (bypass-restored, patterns-stale). The exact block is in §8. (This is a structural change to the existing ContentScanPatterns apply, required by — and scoped to — the surface extension.)
 - `ui_security.go`: add `saveConfigVersion(sessionAdmin(r), "security.dpi-bypass")` to `apiContentScanBypass` PUT.
 - `CONFIG-VERSIONING-TRIAGE.md`: flip `apiContentScanBypass` row from "(C)" to "✓ Correct"; add `BypassHosts` row to §1 surface table.
 - Tests (~5):
@@ -269,7 +269,7 @@ Current `applyConfigBackup` order (after PR #267 + PR #269):
 4. PolicyRules
 5. RewriteRules
 6. SSLBypass
-7. ContentScanPatterns ← **insert BypassHosts apply BEFORE this**
+7. ContentScanPatterns ← **merge BypassHosts into this block; one `Save()` (see code below)**
 8. FileBlockExtensions
 9. IPFilter
 10. RateLimitRPM
