@@ -535,7 +535,43 @@ func diffConfigs(a, b *configBackup) []configChange {
 	// Rewrite rules: diff by host key.
 	diffRewriteRules(a.RewriteRules, b.RewriteRules, &changes)
 
+	// Category groups: diff by name key. On the rollback surface
+	// (captured via globalCategoryGroups.List, applied via ReplaceAll)
+	// but a struct slice, so diffStringList cannot cover it. An in-place
+	// edit of a group's Categories is the common admin mutation and must
+	// surface as "changed", not be silently dropped.
+	diffCategoryGroups(a.CategoryGroups, b.CategoryGroups, &changes)
+
+	// URL categories: diff by name key. Same struct-slice rationale as
+	// category groups; an admin edit to a category's Hosts (or BuiltIn
+	// flag) is reported as "changed".
+	diffURLCategories(a.URLCategories, b.URLCategories, &changes)
+
 	return changes
+}
+
+// sameStringSet reports whether two string slices contain the same
+// elements (multiset equality; order-independent). Used by the
+// struct-slice diff helpers to decide whether an entry's content
+// changed. Case-sensitive, matching diffStringList's exact-match
+// semantics.
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, v := range a {
+		counts[v]++
+	}
+	for _, v := range b {
+		counts[v]--
+	}
+	for _, n := range counts {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // diffStringList produces added/removed element-level diffs for string slices.
@@ -625,6 +661,78 @@ func diffRewriteRules(a, b []RewriteRule, out *[]configChange) {
 		*out = append(*out, configChange{
 			Field: "rewrite_rules",
 			From:  map[string]any{"count": len(a), "removed": removed},
+			To:    map[string]any{"count": len(b), "added": added},
+		})
+	}
+}
+
+// diffCategoryGroups compares category groups by name (case-insensitive,
+// matching the store's lowercase key convention). Reports added, removed,
+// and changed (same name, different Categories membership). Mirrors
+// diffPolicyRules' added/removed/changed shape.
+func diffCategoryGroups(a, b []CategoryGroup, out *[]configChange) {
+	mapA := make(map[string]CategoryGroup, len(a))
+	for i := range a {
+		mapA[strings.ToLower(a[i].Name)] = a[i]
+	}
+	mapB := make(map[string]CategoryGroup, len(b))
+	for i := range b {
+		mapB[strings.ToLower(b[i].Name)] = b[i]
+	}
+	var added, removed, changed []string
+	for key, gb := range mapB {
+		ga, ok := mapA[key]
+		if !ok {
+			added = append(added, gb.Name)
+		} else if !sameStringSet(ga.Categories, gb.Categories) {
+			changed = append(changed, gb.Name)
+		}
+	}
+	for key, ga := range mapA {
+		if _, ok := mapB[key]; !ok {
+			removed = append(removed, ga.Name)
+		}
+	}
+	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {
+		*out = append(*out, configChange{
+			Field: "category_groups",
+			From:  map[string]any{"count": len(a), "removed": removed, "changed": changed},
+			To:    map[string]any{"count": len(b), "added": added},
+		})
+	}
+}
+
+// diffURLCategories compares URL categories by name (case-insensitive,
+// matching catStore's lowercase index key). Reports added, removed, and
+// changed (same name, different Hosts membership OR BuiltIn flag — both
+// round-trip through rollback, so a flip is a real apply-time change).
+func diffURLCategories(a, b []CategoryEntry, out *[]configChange) {
+	mapA := make(map[string]CategoryEntry, len(a))
+	for i := range a {
+		mapA[strings.ToLower(a[i].Name)] = a[i]
+	}
+	mapB := make(map[string]CategoryEntry, len(b))
+	for i := range b {
+		mapB[strings.ToLower(b[i].Name)] = b[i]
+	}
+	var added, removed, changed []string
+	for key, eb := range mapB {
+		ea, ok := mapA[key]
+		if !ok {
+			added = append(added, eb.Name)
+		} else if ea.BuiltIn != eb.BuiltIn || !sameStringSet(ea.Hosts, eb.Hosts) {
+			changed = append(changed, eb.Name)
+		}
+	}
+	for key, ea := range mapA {
+		if _, ok := mapB[key]; !ok {
+			removed = append(removed, ea.Name)
+		}
+	}
+	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {
+		*out = append(*out, configChange{
+			Field: "url_categories",
+			From:  map[string]any{"count": len(a), "removed": removed, "changed": changed},
 			To:    map[string]any{"count": len(b), "added": added},
 		})
 	}

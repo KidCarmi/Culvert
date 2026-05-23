@@ -426,3 +426,31 @@ func TestAPIURLCat_HostRemove_CreatesConfigVersion(t *testing.T) {
 		},
 		http.MethodDelete, "/api/urlcat/host?category=urlcat-test-hostremove&host=host.example", nil)
 }
+
+// ─── diffConfigs reports url-category changes ─────────────────────────
+
+// TestConfigVersion_URLCategories_DiffReportsChanges pins the
+// struct-slice diff gap for catStore: diffConfigs must surface
+// url_categories so rollback dry-run preflight reflects actual impact.
+// Without diffURLCategories, dry-run claims "no changes" even when apply
+// would add, remove, or edit a category's host list. The "changed"
+// (in-place Hosts edit) case is the one a naive added/removed-only
+// implementation would silently drop. findChange/assertNameInList are
+// defined in configversion_category_groups_test.go (same package).
+func TestConfigVersion_URLCategories_DiffReportsChanges(t *testing.T) {
+	a := &configBackup{URLCategories: []CategoryEntry{
+		{Name: "Keep", Hosts: []string{"keep.example"}},
+		{Name: "Edited", Hosts: []string{"a.example", "b.example"}},
+		{Name: "Removed", Hosts: []string{"gone.example"}},
+	}}
+	b := &configBackup{URLCategories: []CategoryEntry{
+		{Name: "Keep", Hosts: []string{"keep.example"}},
+		{Name: "Edited", Hosts: []string{"a.example"}}, // hosts changed
+		{Name: "Added", Hosts: []string{"new.example"}},
+	}}
+
+	change := findChange(t, diffConfigs(a, b), "url_categories")
+	assertNameInList(t, change.To, "added", "Added")
+	assertNameInList(t, change.From, "removed", "Removed")
+	assertNameInList(t, change.From, "changed", "Edited")
+}

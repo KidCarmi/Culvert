@@ -301,6 +301,68 @@ func TestConfigVersion_CategoryGroups_EmptyMarshalsAsArray(t *testing.T) {
 	}
 }
 
+// ─── Test 6: diffConfigs reports category-group changes ───────────────
+
+// TestConfigVersion_CategoryGroups_DiffReportsChanges pins the
+// struct-slice diff gap: diffConfigs must surface category_groups so
+// rollback dry-run preflight reflects actual impact. Without
+// diffCategoryGroups, dry-run claims "no changes" even when apply would
+// add, remove, or edit a group. Covers all three sub-cases — the
+// "changed" (in-place Categories edit) case is the one a naive
+// added/removed-only implementation would silently drop.
+func TestConfigVersion_CategoryGroups_DiffReportsChanges(t *testing.T) {
+	a := &configBackup{CategoryGroups: []CategoryGroup{
+		{Name: "Keep", Categories: []string{"news"}},
+		{Name: "Edited", Categories: []string{"news", "saas"}},
+		{Name: "Removed", Categories: []string{"gambling"}},
+	}}
+	b := &configBackup{CategoryGroups: []CategoryGroup{
+		{Name: "Keep", Categories: []string{"news"}},
+		{Name: "Edited", Categories: []string{"news"}}, // categories changed
+		{Name: "Added", Categories: []string{"adult"}},
+	}}
+
+	change := findChange(t, diffConfigs(a, b), "category_groups")
+	assertNameInList(t, change.To, "added", "Added")
+	assertNameInList(t, change.From, "removed", "Removed")
+	assertNameInList(t, change.From, "changed", "Edited")
+}
+
+// findChange locates the configChange for a field in a diff result, or
+// fails the test. The failure message is the regression-catch signal:
+// when the production diff func is stashed, the field is absent.
+func findChange(t *testing.T, changes []configChange, field string) configChange {
+	t.Helper()
+	for _, c := range changes {
+		if c.Field == field {
+			return c
+		}
+	}
+	t.Fatalf("diffConfigs did not report %q; got %d change(s): %+v — dry-run preflight would be inaccurate", field, len(changes), changes)
+	return configChange{}
+}
+
+// assertNameInList asserts that name appears in the string slice keyed by
+// `key` inside a configChange From/To map. Order-independent (the diff
+// helpers iterate maps, so slice order is nondeterministic).
+func assertNameInList(t *testing.T, side any, key, name string) {
+	t.Helper()
+	m, ok := side.(map[string]any)
+	if !ok {
+		t.Fatalf("diff side is %T, want map[string]any", side)
+	}
+	list, ok := m[key].([]string)
+	if !ok {
+		t.Fatalf("diff side[%q] is %T, want []string (value: %+v)", key, m[key], m[key])
+	}
+	for _, v := range list {
+		if v == name {
+			return
+		}
+	}
+	t.Errorf("expected %q in diff %q list; got %v", name, key, list)
+}
+
 // containsCG is a tiny strings.Contains wrapper to avoid importing
 // strings just for one call. Named with CG suffix to avoid collision
 // with the package-level `contains` helper in enroll_util_test.go.
