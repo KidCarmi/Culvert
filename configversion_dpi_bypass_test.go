@@ -205,7 +205,64 @@ func assertConfigVersionWithAction(t *testing.T, dir, action string) {
 	t.Errorf("no config-version envelope with Meta.Action=%q found — handler did not call saveConfigVersion", action)
 }
 
-// ─── Test 6: single on-disk envelope after apply ──────────────────────
+// ─── Test 7: invalid-pattern snapshot does not produce mixed state ────
+
+// TestConfigVersion_DPIBypassHosts_InvalidPatternNoMixedState pins the
+// Codex P2 fix: a snapshot carrying an invalid regex must leave BOTH
+// patterns and bypass hosts at their pre-apply runtime values — never
+// a mixed state where bypass hosts are replaced but patterns are not.
+func TestConfigVersion_DPIBypassHosts_InvalidPatternNoMixedState(t *testing.T) {
+	snapshotDPIScanner(t)
+
+	// Establish a known-good runtime state.
+	if err := dpiScanner.Set([]string{"good-pattern"}); err != nil {
+		t.Fatalf("seed pattern: %v", err)
+	}
+	dpiScanner.SetBypassHosts([]string{"runtime.example"})
+
+	// Snapshot carries an INVALID regex (unbalanced paren) plus a
+	// different bypass-host set.
+	backup := configBackup{
+		Version:                1,
+		ExportedAt:             "test",
+		ContentScanPatterns:    []string{"valid", "in(valid"},
+		ContentScanBypassHosts: []string{"snapshot.example"},
+	}
+	applyConfigBackup(&backup)
+
+	// Patterns must be UNCHANGED (Set rejected the bad regex).
+	if pats := dpiScanner.List(); !reflect.DeepEqual(pats, []string{"good-pattern"}) {
+		t.Errorf("patterns after invalid-snapshot apply = %v; want [good-pattern] (unchanged)", pats)
+	}
+	// Bypass hosts must ALSO be unchanged — no mixed state.
+	if got := listBypassHosts(t); !reflect.DeepEqual(got, []string{"runtime.example"}) {
+		t.Errorf("bypass hosts after invalid-snapshot apply = %v; want [runtime.example] (unchanged — mixed state regression)", got)
+	}
+}
+
+// ─── Test 8: diffConfigs reports bypass-host changes ──────────────────
+
+// TestConfigVersion_DPIBypassHosts_DiffReportsChanges pins the Codex P2
+// fix: diffConfigs must include content_scan_bypass_hosts so rollback
+// dry-run preflight reflects the actual impact. Without it, dry-run
+// claims "no changes" even when apply would mutate bypass hosts.
+func TestConfigVersion_DPIBypassHosts_DiffReportsChanges(t *testing.T) {
+	a := &configBackup{ContentScanBypassHosts: []string{"keep.example", "removed.example"}}
+	b := &configBackup{ContentScanBypassHosts: []string{"keep.example", "added.example"}}
+
+	changes := diffConfigs(a, b)
+
+	var sawField bool
+	for _, c := range changes {
+		if c.Field == "content_scan_bypass_hosts" {
+			sawField = true
+		}
+	}
+	if !sawField {
+		t.Errorf("diffConfigs did not report content_scan_bypass_hosts changes; got %d change(s): %+v — dry-run preflight would be inaccurate", len(changes), changes)
+	}
+}
+
 
 // TestConfigVersion_DPIBypassHosts_SingleEnvelopeAfterApply verifies
 // the spec §8 single-Save contract: after a combined apply, the

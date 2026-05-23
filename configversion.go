@@ -419,16 +419,28 @@ func applyConfigBackup(b *configBackup) {
 	// content_scan.json envelope (scanner.go Save). Apply both
 	// in-memory first, then ONE Save() so the on-disk file is written
 	// once and never persists an intermediate (bypass-restored,
-	// patterns-stale) state. ContentScanBypassHosts is nil-skip:
+	// patterns-stale) state.
+	//
+	// Patterns are applied (and validated) FIRST: dpiScanner.Set
+	// returns an error and leaves the existing patterns unchanged when
+	// a snapshot carries an invalid regex. Only on success do we mutate
+	// bypass hosts and persist — otherwise a bad-pattern snapshot would
+	// leave patterns at the old runtime value while bypass hosts were
+	// already replaced, a silent mixed state matching neither the
+	// snapshot nor the prior state. In-memory order does not affect the
+	// single-envelope Save (both halves are applied before the one
+	// Save). See roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md §8.
+	//
+	// ContentScanBypassHosts is nil-skip:
 	//   - nil   → old/absent snapshot; leave bypass list untouched.
 	//   - []    → snapshot recorded zero bypass hosts; wipe.
 	//   - [...] → wholesale replace.
-	// See roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md §8.
-	if b.ContentScanBypassHosts != nil {
-		dpiScanner.SetBypassHosts(b.ContentScanBypassHosts)
+	if err := dpiScanner.Set(b.ContentScanPatterns); err == nil {
+		if b.ContentScanBypassHosts != nil {
+			dpiScanner.SetBypassHosts(b.ContentScanBypassHosts)
+		}
+		dpiScanner.Save()
 	}
-	_ = dpiScanner.Set(b.ContentScanPatterns)
-	dpiScanner.Save()
 
 	// File block extensions: remove all, then add.
 	for _, ext := range fileBlocker.List() {
@@ -512,6 +524,7 @@ func diffConfigs(a, b *configBackup) []configChange {
 	diffStringList("blocklist", a.Blocklist, b.Blocklist, &changes)
 	diffStringList("ssl_bypass", a.SSLBypass, b.SSLBypass, &changes)
 	diffStringList("content_scan_patterns", a.ContentScanPatterns, b.ContentScanPatterns, &changes)
+	diffStringList("content_scan_bypass_hosts", a.ContentScanBypassHosts, b.ContentScanBypassHosts, &changes)
 	diffStringList("file_block_extensions", a.FileBlockExtensions, b.FileBlockExtensions, &changes)
 	diffStringList("ip_list", a.IPList, b.IPList, &changes)
 	diffStringList("pac_exclusions", a.PACExclusions, b.PACExclusions, &changes)
