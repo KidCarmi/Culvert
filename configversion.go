@@ -535,17 +535,23 @@ func diffConfigs(a, b *configBackup) []configChange {
 	// Rewrite rules: diff by host key.
 	diffRewriteRules(a.RewriteRules, b.RewriteRules, &changes)
 
-	// Category groups: diff by name key. On the rollback surface
-	// (captured via globalCategoryGroups.List, applied via ReplaceAll)
-	// but a struct slice, so diffStringList cannot cover it. An in-place
-	// edit of a group's Categories is the common admin mutation and must
-	// surface as "changed", not be silently dropped.
-	diffCategoryGroups(a.CategoryGroups, b.CategoryGroups, &changes)
-
-	// URL categories: diff by name key. Same struct-slice rationale as
-	// category groups; an admin edit to a category's Hosts (or BuiltIn
-	// flag) is reported as "changed".
-	diffURLCategories(a.URLCategories, b.URLCategories, &changes)
+	// Category groups + URL categories: struct slices on the rollback
+	// surface (captured via List()/All(), applied via ReplaceAll). The
+	// nil guards MUST mirror applyConfigBackup exactly: a nil target slice
+	// is an old/absent snapshot field that apply skips (no-op), so the
+	// dry-run/preflight diff must skip it too — otherwise rolling back to
+	// a pre-extension snapshot would report every live group/category as
+	// "removed" while apply leaves them untouched. A non-nil empty slice
+	// is an explicit wipe (ReplaceAll([])) and DOES diff (reports the
+	// live entries as removed); hence the guard keys on nil, not len()==0.
+	// An in-place edit of a group's Categories / a category's Hosts (or
+	// BuiltIn flag) surfaces as "changed", not silently dropped.
+	if b.CategoryGroups != nil {
+		diffCategoryGroups(a.CategoryGroups, b.CategoryGroups, &changes)
+	}
+	if b.URLCategories != nil {
+		diffURLCategories(a.URLCategories, b.URLCategories, &changes)
+	}
 
 	return changes
 }

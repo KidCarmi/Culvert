@@ -454,3 +454,33 @@ func TestConfigVersion_URLCategories_DiffReportsChanges(t *testing.T) {
 	assertNameInList(t, change.From, "removed", "Removed")
 	assertNameInList(t, change.From, "changed", "Edited")
 }
+
+// TestConfigVersion_URLCategories_DiffNilSkipsField pins the apply-mirror
+// contract for catStore: applyConfigBackup skips a nil URLCategories
+// (old/absent snapshot → no-op), so the dry-run/preflight diff must skip
+// it too. Without the guard, rolling back to a pre-extension snapshot
+// would report every live category as "removed" while apply leaves them
+// untouched. assertNoChange is defined in
+// configversion_category_groups_test.go (same package).
+func TestConfigVersion_URLCategories_DiffNilSkipsField(t *testing.T) {
+	a := &configBackup{URLCategories: []CategoryEntry{
+		{Name: "Live", Hosts: []string{"live.example"}},
+	}}
+	b := &configBackup{ /* URLCategories nil — pre-extension snapshot */ }
+
+	assertNoChange(t, diffConfigs(a, b), "url_categories")
+}
+
+// TestConfigVersion_URLCategories_DiffEmptyReportsWipe pins the wipe half:
+// a non-nil empty []CategoryEntry{} is an explicit wipe (ReplaceAll([])),
+// so the diff MUST report live categories as removed. Guards against a
+// len()==0 skip that would swallow the wipe.
+func TestConfigVersion_URLCategories_DiffEmptyReportsWipe(t *testing.T) {
+	a := &configBackup{URLCategories: []CategoryEntry{
+		{Name: "Wiped", Hosts: []string{"x.example"}},
+	}}
+	b := &configBackup{URLCategories: []CategoryEntry{}} // explicit wipe
+
+	change := findChange(t, diffConfigs(a, b), "url_categories")
+	assertNameInList(t, change.From, "removed", "Wiped")
+}

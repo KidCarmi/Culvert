@@ -328,6 +328,38 @@ func TestConfigVersion_CategoryGroups_DiffReportsChanges(t *testing.T) {
 	assertNameInList(t, change.From, "changed", "Edited")
 }
 
+// ─── Test 7: diff mirrors applyConfigBackup nil-skip semantics ────────
+
+// TestConfigVersion_CategoryGroups_DiffNilSkipsField pins the
+// apply-mirror contract: applyConfigBackup skips a nil CategoryGroups
+// (old/absent snapshot → no-op), so the dry-run/preflight diff must skip
+// it too. Without the guard, rolling back to a pre-extension snapshot
+// would report every live group as "removed" while apply leaves them
+// untouched — a dangerously misleading preflight.
+func TestConfigVersion_CategoryGroups_DiffNilSkipsField(t *testing.T) {
+	a := &configBackup{CategoryGroups: []CategoryGroup{
+		{Name: "Live", Categories: []string{"news"}},
+	}}
+	b := &configBackup{ /* CategoryGroups nil — pre-extension snapshot */ }
+
+	assertNoChange(t, diffConfigs(a, b), "category_groups")
+}
+
+// TestConfigVersion_CategoryGroups_DiffEmptyReportsWipe pins the other
+// half of the contract: a non-nil empty []CategoryGroup{} is an explicit
+// wipe (applyConfigBackup → ReplaceAll([]) clears the store), so the diff
+// MUST report the live groups as removed. The nil-skip guard must key on
+// nil, not on len()==0 — otherwise this wipe would be silently dropped.
+func TestConfigVersion_CategoryGroups_DiffEmptyReportsWipe(t *testing.T) {
+	a := &configBackup{CategoryGroups: []CategoryGroup{
+		{Name: "Wiped", Categories: []string{"news"}},
+	}}
+	b := &configBackup{CategoryGroups: []CategoryGroup{}} // explicit wipe
+
+	change := findChange(t, diffConfigs(a, b), "category_groups")
+	assertNameInList(t, change.From, "removed", "Wiped")
+}
+
 // findChange locates the configChange for a field in a diff result, or
 // fails the test. The failure message is the regression-catch signal:
 // when the production diff func is stashed, the field is absent.
@@ -340,6 +372,18 @@ func findChange(t *testing.T, changes []configChange, field string) configChange
 	}
 	t.Fatalf("diffConfigs did not report %q; got %d change(s): %+v — dry-run preflight would be inaccurate", field, len(changes), changes)
 	return configChange{}
+}
+
+// assertNoChange fails the test if any configChange reports the given
+// field. Used to prove the diff skips a field whose target slice is nil,
+// mirroring applyConfigBackup's no-op.
+func assertNoChange(t *testing.T, changes []configChange, field string) {
+	t.Helper()
+	for _, c := range changes {
+		if c.Field == field {
+			t.Fatalf("diffConfigs reported %q (%+v) but target slice was nil — apply would skip (no-op), so dry-run must skip too", field, c)
+		}
+	}
 }
 
 // assertNameInList asserts that name appears in the string slice keyed by
