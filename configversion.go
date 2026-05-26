@@ -94,6 +94,12 @@ func captureConfigBackup() *configBackup {
 		// (scanner.go), so a zero-bypass state serializes as
 		// "contentScanBypassHosts": [] and round-trips as a wipe.
 		ContentScanBypassHosts: dpiScanner.BypassHosts(),
+		// RateLimitExempt: rollback-surface extension (Finding 10.3 PR-2).
+		// rl.ListExemptions() returns a non-nil empty slice (security.go:336),
+		// so a zero-exemption state serializes as "rateLimitExempt": [] and
+		// round-trips through apply as a wipe. Sibling RateLimitRPM is already
+		// captured above (rl.Limit()).
+		RateLimitExempt: rl.ListExemptions(),
 	}
 }
 
@@ -463,6 +469,19 @@ func applyConfigBackup(b *configBackup) {
 		rl.Configure(b.RateLimitRPM, time.Minute)
 	}
 
+	// RateLimitExempt: rollback-surface extension (Finding 10.3 PR-2). Mirrors
+	// the CategoryGroups/URLCategories nil-skip contract exactly:
+	//   nil       → old/pre-extension snapshot; leave live exemptions untouched.
+	//   []        → snapshot recorded zero exemptions; wipe the live whitelist.
+	//   populated → wholesale replace.
+	// rl.ReplaceExemptions builds the new IP/CIDR sets outside the lock and
+	// swaps under a single Lock, so there is never a partial/stale-exemption
+	// window. No admin_settings persistence here — matches RateLimitRPM above;
+	// the config-version apply path restores live state only.
+	if b.RateLimitExempt != nil {
+		rl.ReplaceExemptions(b.RateLimitExempt)
+	}
+
 	// PAC configuration: replace entirely from snapshot.
 	_ = pacStore.Set(PACConfig{
 		ProxyHost:  b.PACProxyHost,
@@ -528,6 +547,15 @@ func diffConfigs(a, b *configBackup) []configChange {
 	diffStringList("file_block_extensions", a.FileBlockExtensions, b.FileBlockExtensions, &changes)
 	diffStringList("ip_list", a.IPList, b.IPList, &changes)
 	diffStringList("pac_exclusions", a.PACExclusions, b.PACExclusions, &changes)
+
+	// RateLimitExempt is nil-guarded (unlike the always-captured []string
+	// fields above) because a pre-extension snapshot lacks the field → nil.
+	// Mirror applyConfigBackup's nil-skip: a nil target means "leave live
+	// exemptions untouched", so the diff must report nothing rather than flag
+	// every live exemption as removed. A non-nil [] still diffs (the wipe).
+	if b.RateLimitExempt != nil {
+		diffStringList("rate_limit_exempt", a.RateLimitExempt, b.RateLimitExempt, &changes)
+	}
 
 	// Policy rules: diff by priority key.
 	diffPolicyRules(a.PolicyRules, b.PolicyRules, &changes)

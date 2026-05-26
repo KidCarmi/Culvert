@@ -332,6 +332,30 @@ func (r *RateLimiter) RemoveExemption(entry string) {
 	r.exemptNets = filtered
 }
 
+// ReplaceExemptions atomically replaces the entire rate-limit whitelist.
+// Invalid entries are skipped; a nil or empty slice clears the whitelist.
+// The new IP/CIDR structures are built OUTSIDE the lock and swapped under a
+// single Lock, so a concurrent IsExempt reader never observes a partial or
+// stale-mixed state. Used by applyConfigBackup for config-version rollback
+// (the missing clear/replace primitive for the RateLimitExempt surface).
+func (r *RateLimiter) ReplaceExemptions(entries []string) {
+	ips := make(map[string]bool, len(entries))
+	var nets []*net.IPNet
+	for _, entry := range entries {
+		if _, cidr, err := net.ParseCIDR(entry); err == nil {
+			nets = append(nets, cidr)
+			continue
+		}
+		if ip := net.ParseIP(entry); ip != nil {
+			ips[ip.String()] = true
+		}
+	}
+	r.exemptMu.Lock()
+	r.exemptIPs = ips
+	r.exemptNets = nets
+	r.exemptMu.Unlock()
+}
+
 // ListExemptions returns all rate-limit whitelist entries.
 func (r *RateLimiter) ListExemptions() []string {
 	r.exemptMu.RLock()
