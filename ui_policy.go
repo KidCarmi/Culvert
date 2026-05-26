@@ -647,11 +647,41 @@ type configBackup struct {
 	PACProxyHost        string        `json:"pacProxyHost,omitempty"`
 	PACProxyPort        int           `json:"pacProxyPort,omitempty"`
 	PACExclusions       []string      `json:"pacExclusions,omitempty"`
-	AlertWebhooks       []AlertWebhook  `json:"alertWebhooks,omitempty"`       // Finding 10.3
-	BlockPageHTML       string          `json:"blockPageHTML,omitempty"`        // Finding 10.3
-	UpstreamProxies     []UpstreamEntry `json:"upstreamProxies,omitempty"`     // Finding 10.3
-	ConnLimitEnabled    bool            `json:"connLimitEnabled,omitempty"`    // Finding 10.3
-	ConnLimitMaxPerIP   int             `json:"connLimitMaxPerIP,omitempty"`   // Finding 10.3
+
+	// ── Export/import-only fields — intentionally NOT on the rollback surface ──
+	//
+	// The five fields below are serialized by apiConfigExport / apiConfigImport
+	// (ui_config.go) for configuration portability, but are deliberately NOT
+	// captured by captureConfigBackup, NOT applied by applyConfigBackup, and
+	// NOT reported by diffConfigs (configversion.go). Rolling back to a config
+	// version leaves these live values untouched by design. They keep
+	// `omitempty` precisely because they are export-only; do NOT wire them into
+	// the rollback capture/apply/diff path without first reading
+	// roadmap/CATEGORY-B-PRIME-FINDING-10.3-SPEC.md.
+	//
+	// Why each is off the rollback surface:
+	//   - AlertWebhooks: AlertStore.List() strips the HMAC Secret (alerts.go)
+	//     and Add() reassigns the ID, so the capture surface cannot round-trip
+	//     a webhook faithfully — a "restore" would silently drop signing
+	//     secrets and renumber IDs. Faithful capture would persist the secret
+	//     in plaintext in config-version files (gosec G117 concern).
+	//   - UpstreamProxies: a proxy URL may embed inline credentials
+	//     (user:pass@host); putting it on the rollback surface would persist
+	//     those credentials in plaintext across up to 50 config-version files.
+	//   - BlockPageHTML, ConnLimitEnabled, ConnLimitMaxPerIP: already restart-
+	//     durable via /data/admin_settings.json, and their handlers
+	//     (apiBlockPage, apiConnLimit) intentionally do NOT call
+	//     saveConfigVersion — operational settings, not versioned policy.
+	//
+	// NOTE: RateLimitExempt (above) is the one former Finding 10.3 field slated
+	// to JOIN the rollback surface — its handler already versions and its
+	// sibling RateLimitRPM is already covered. Tracked as PR-2 in the spec;
+	// intentionally left untouched here.
+	AlertWebhooks     []AlertWebhook  `json:"alertWebhooks,omitempty"`
+	BlockPageHTML     string          `json:"blockPageHTML,omitempty"`
+	UpstreamProxies   []UpstreamEntry `json:"upstreamProxies,omitempty"`
+	ConnLimitEnabled  bool            `json:"connLimitEnabled,omitempty"`
+	ConnLimitMaxPerIP int             `json:"connLimitMaxPerIP,omitempty"`
 
 	// CategoryGroups extends the rollback surface to cover the
 	// PolicyRules → CategoryGroup reference. Per
