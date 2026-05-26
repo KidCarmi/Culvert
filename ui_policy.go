@@ -643,7 +643,7 @@ type configBackup struct {
 	IPFilterMode        string        `json:"ipFilterMode"`
 	IPList              []string      `json:"ipList"`
 	RateLimitRPM        int           `json:"rateLimitRPM"`
-	RateLimitExempt     []string      `json:"rateLimitExempt,omitempty"`
+	RateLimitExempt     []string      `json:"rateLimitExempt"`
 	PACProxyHost        string        `json:"pacProxyHost,omitempty"`
 	PACProxyPort        int           `json:"pacProxyPort,omitempty"`
 	PACExclusions       []string      `json:"pacExclusions,omitempty"`
@@ -673,10 +673,15 @@ type configBackup struct {
 	//     (apiBlockPage, apiConnLimit) intentionally do NOT call
 	//     saveConfigVersion — operational settings, not versioned policy.
 	//
-	// NOTE: RateLimitExempt (above) is the one former Finding 10.3 field slated
-	// to JOIN the rollback surface — its handler already versions and its
-	// sibling RateLimitRPM is already covered. Tracked as PR-2 in the spec;
-	// intentionally left untouched here.
+	// NOTE: RateLimitExempt (above) is ON the rollback surface as of PR-2:
+	// captured by captureConfigBackup, applied by applyConfigBackup
+	// (nil→skip / []→wipe / populated→replace, via rl.ReplaceExemptions), and
+	// reported by diffConfigs. Its tag therefore omits `omitempty` (like
+	// CategoryGroups/URLCategories) so a zero-exemption snapshot serializes as
+	// [] and round-trips as a wipe. The handler (apiSettingsSecurity) already
+	// calls saveConfigVersion; sibling RateLimitRPM was already covered. It is
+	// NOT one of the five export/import-only fields below. See
+	// roadmap/CATEGORY-B-PRIME-FINDING-10.3-SPEC.md.
 	AlertWebhooks     []AlertWebhook  `json:"alertWebhooks,omitempty"`
 	BlockPageHTML     string          `json:"blockPageHTML,omitempty"`
 	UpstreamProxies   []UpstreamEntry `json:"upstreamProxies,omitempty"`
