@@ -4,8 +4,9 @@
 this PR. No `saveConfigVersion` changes, no rollback capture/apply changes, no
 ConfigSnapshot changes, no handler changes.
 
-**Question:** of the CA/cert and cluster-admin mutating handlers — all of which
-emit `auditEvent` but **never call `saveConfigVersion`** — does any belong on
+**Question:** of the CA/cert and cluster-admin mutating handlers — all of
+which emit an audit record (`auditEvent` or direct `auditAdd`) but **never
+call `saveConfigVersion`** — does any belong on
 the config-version rollback surface, or should they all be documented as
 intentionally out-of-surface? This closes the last two of the four
 cross-discovery groups (UC-4 ✅ #269, SC-1 ✅ #274, **CA-1**, **CL-8**) that
@@ -43,15 +44,18 @@ provisioning), never replicated as config.
 
 ## 1. Inventory (verified, code-grounded)
 
-All handlers confirmed to call `auditEvent` and **never** `saveConfigVersion`
-(grep: no `saveConfigVersion` in `ui_cluster.go` / `ca.go` / `enrollment.go`).
+All reviewed mutating handlers emit an audit record (`auditEvent` or direct
+`auditAdd`) and **never** call `saveConfigVersion` (grep: no
+`saveConfigVersion` in `ui_cluster.go` / `ca.go` / `enrollment.go`). The audit
+column below names the specific call where the distinction matters.
 
 ### 1a. CA / cert (P6.3 CA-1) — `ui_security.go`
 
 | Handler | Line | Method/role | Mutates | Persists to | audit |
 |---|---|---|---|---|---|
 | `apiCACert` | 226 | GET/viewer | — (returns CA PEM) | — | no |
-| `apiCertsUpload` | 253 | POST/admin | `certMgr.LoadCustomCA` (:278) / `ParseTLSPair` (:288) | runtime (MITM live; UI cert needs restart) | yes (:283/:293) |
+| `apiCertsUpload` (mitm) | 253 | POST/admin, `target="mitm"` | `certMgr.LoadCustomCA` (:278) — runtime certMgr mutation | runtime certMgr (live) | yes — `auditEvent` (:283) |
+| `apiCertsUpload` (ui) | 253 | POST/admin, `target="ui"` | `certMgr.ParseTLSPair` (:288) — **validate/parse only, no activation** | none — UI cert activation requires restart / external path | yes — `auditEvent` (:293) |
 | `apiCACacheClear` | 1052 | POST/admin | `certMgr.ClearCache` (:1060) | in-mem LRU only | yes (:1061) |
 | `apiCARotate` | 1065 | POST/admin | `certMgr.InitCA` (:1124) + `SaveCA` (:1129) | **`/data/ca.bundle` — encrypted AES-256-GCM + PBKDF2** (ca.go:153) | yes (:1097/:1133) |
 | `apiOCSPConfig` | 1159 | GET/viewer; POST/admin | `globalOCSP.Enable/Disable` (:1178/:1195) + transport swap | runtime | yes (:1197) |
@@ -60,13 +64,13 @@ All handlers confirmed to call `auditEvent` and **never** `saveConfigVersion`
 
 | Handler | Line | Method/role | Mutates | Persists to | audit |
 |---|---|---|---|---|---|
-| `apiClusterMode` | 50 | POST/admin | `enableControlPlane` | cluster.json | yes |
+| `apiClusterMode` | 50 | POST/admin | `enableControlPlane(..., clusterDBPathGlobal)` — sets CP/DP role, persists cluster role/topology | cluster.json | yes — direct `auditAdd` (:~94) |
 | `apiClusterTokenCreate` | 143 | POST/admin | `globalClusterStore.GenerateToken` (:192) | cluster.json (enrollment.go:163) | yes (:208) |
 | `apiClusterRevoke` | 234 | POST/admin | `globalClusterStore.RevokeNode` (:260, internal Save) | cluster.json | yes (:271) |
 | `apiClusterCA` | 279 | GET/viewer; POST/admin | `globalClusterCA.ImportCA` (:317) | cluster CA store | yes (:321) |
 | `apiClusterLabels` | 418 | POST/admin | `globalClusterStore.SetNodeLabels` (:445) | cluster.json | yes (:449) |
 | `apiClusterDrain` | 454 | POST/admin | `globalClusterStore.SetNodeDraining` (:474) | cluster.json | yes (:484) |
-| `apiClusterHAEnable` | ha.go:383 | POST/admin | `globalHA.EnableAsLeader` (:412) | runtime (HA token) | yes (:422) |
+| `apiClusterHAEnable` | ha.go:383 | POST/admin | `globalHA.EnableAsLeader` (:412) | runtime (HA token) | yes — direct `auditAdd` (:~422) |
 | `apiClusterUpdate` | update_cluster.go:1067 | POST/admin | `startClusterUpdate` (:1126) | runtime (`clusterUpdateState`) | yes (:1133) |
 
 Read-only (no classification needed): `apiClusterStatus`, `apiClusterNodes`,
@@ -93,15 +97,18 @@ already-tracked design item. This spec does not address it (see §5).
 | Class | Meaning | Handlers |
 |---|---|---|
 | **D-sec** | rollback = security regression (reverts a forward-only trust/secret decision) | `apiCARotate`, `apiCertsUpload`, `apiClusterCA`, `apiClusterRevoke`, `apiOCSPConfig` (posture) |
-| **D-topology / trust** | membership/enrollment; rollback conceptually wrong | `apiClusterTokenCreate`, `apiClusterLabels`, `apiClusterDrain` |
-| **Runtime-only / lifecycle (E)** | no persistent config to version | `apiCACacheClear`, `apiClusterMode`, `apiClusterHAEnable`, `apiClusterUpdate` |
+| **D-topology / trust / lifecycle** | cluster role, membership, or enrollment state where point-in-time rollback is conceptually wrong; persisted to cluster.json (or analogous) but not rollback-safe | `apiClusterMode` (role flip), `apiClusterTokenCreate`, `apiClusterLabels`, `apiClusterDrain` |
+| **Runtime-only / lifecycle (E)** | no persistent config to version; ephemeral runtime state reconstructed at start or by gossip | `apiCACacheClear`, `apiClusterHAEnable`, `apiClusterUpdate` |
 
 **Justification that none qualify for rollback inclusion:** every mutating
 handler here either (a) changes trust/secret material whose reversal is a
-security regression (§3.1), (b) changes cluster membership/topology where
-point-in-time rollback is semantically meaningless (a token an operator already
-used, a node already drained), or (c) mutates only ephemeral runtime state with
-nothing durable to restore. There is no handler whose state is both
+security regression (§3.1), (b) changes cluster role, membership, or
+enrollment state where point-in-time rollback is semantically meaningless (a
+role flip that already activated the control plane, a token an operator
+already used, a node already drained — even though some of this state is
+persisted to cluster.json, the persistence is for restart durability and HA
+sync, not for rollback semantics), or (c) mutates only ephemeral runtime
+state with nothing durable to restore. There is no handler whose state is both
 durable-config-like AND safe to silently reverse — the bar URL categories /
 DPI bypass / RateLimitExempt cleared when they were brought on-surface.
 
@@ -194,6 +201,7 @@ small PR, NOT bundled):**
 - **P6.3 CA-3** — cluster CA + DP node key plaintext at rest (§1c). A real
   key-at-rest design item, independent of rollback; reinforced by §3.3 but not
   fixed here.
-- Any audit-completeness review of these handlers (all emit `auditEvent`
-  today, so no gap analogous to the domain-allowlist one).
+- Any audit-completeness review of these handlers (all emit an audit record
+  today — `auditEvent` or direct `auditAdd` per the inventory — so no gap
+  analogous to the domain-allowlist one).
 - No CA/cluster/security-handler *behavior* changes of any kind in this track.
