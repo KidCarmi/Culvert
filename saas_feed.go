@@ -64,6 +64,14 @@ func (s *SaaSFeedSyncer) Configure(feedURL string, interval time.Duration) {
 	s.mu.Lock()
 	if s.cancel != nil {
 		s.cancel()
+		// Clear cancel/done now so the empty-URL path below leaves the
+		// "not running" state consistent (Done() returns nil). The
+		// non-empty-URL path re-installs fresh values further down. The
+		// old goroutine exits via its already-cancelled ctx and closes
+		// its captured done channel from inside the wrapper — callers
+		// that captured Done() before this reset still observe close.
+		s.cancel = nil
+		s.done = nil
 	}
 	s.feedURL = strings.TrimSpace(feedURL)
 	if interval > 0 {
@@ -95,12 +103,12 @@ func (s *SaaSFeedSyncer) Configure(feedURL string, interval time.Duration) {
 	logger.Printf("SaaSFeed: syncing from %s every %s", sanitizeLog(feedURL), s.interval)
 }
 
-// Done returns a channel that closes when the current syncLoop goroutine
-// exits, or nil when the syncer is not running. Lets callers (process
-// shutdown, tests) wait deterministically for the goroutine to finish
-// after cancellation. Each Configure call installs a fresh channel; a
-// caller that captured a previous channel will see it close when that
-// older goroutine exits.
+// Done returns the channel that closes when the current syncLoop
+// goroutine exits, or nil when the syncer is not running. Provided as a
+// test seam so the P6.1 UC-3 regression can wait deterministically for
+// the goroutine to actually finish after appLifecycleCtx is cancelled;
+// production code does not call this today. (A future shutdown-
+// sequencing change could use it, but that's out of scope here.)
 func (s *SaaSFeedSyncer) Done() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -114,6 +122,10 @@ func (s *SaaSFeedSyncer) Stop() {
 		s.cancel()
 		s.cancel = nil
 	}
+	// Pair with cancel so Done() returns nil for the now-stopped syncer;
+	// the cancelled goroutine still closes its captured done channel,
+	// which is what any caller that captured Done() before Stop sees.
+	s.done = nil
 	s.feedURL = ""
 	s.enabled.Store(false)
 	s.mu.Unlock()
