@@ -10,7 +10,6 @@ import (
 	"time"
 )
 
-
 // POST /api/auth/login — validate admin credentials, set session cookie.
 // When TOTP is enrolled for the user, a first-pass response of {"totp_required":true}
 // is returned (HTTP 200, no cookie); the client must re-POST with the totp field set.
@@ -391,7 +390,7 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, idpRegistry.All())
+		jsonOK(w, publicIdPProfiles(idpRegistry.All()))
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -408,7 +407,7 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 		}
 		auditEventDiff(r, "idp.create", p.ID, p.Name, nil, &p)
 		logger.Printf("UI: IdP profile created id=%q name=%q type=%q", sanitizeLog(p.ID), sanitizeLog(p.Name), sanitizeLog(string(p.Type)))
-		jsonOK(w, &p)
+		jsonOK(w, publicIdPProfile(&p))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -443,7 +442,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		jsonOK(w, p)
+		jsonOK(w, publicIdPProfile(p))
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -461,7 +460,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		auditEventDiff(r, "idp.update", id, p.Name, before, &p)
 		logger.Printf("UI: IdP profile updated id=%q name=%q", sanitizeLog(id), sanitizeLog(p.Name))
-		jsonOK(w, &p)
+		jsonOK(w, publicIdPProfile(&p))
 	case http.MethodDelete:
 		if !requireRole(w, r, RoleAdmin) {
 			return
