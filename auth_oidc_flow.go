@@ -206,10 +206,10 @@ func (j *jwksCache) refresh() error {
 // ---------------------------------------------------------------------------
 
 type pkceEntry struct {
-	verifier  string
-	nonce     string
-	relayURL  string
-	createdAt time.Time
+	verifier   string
+	nonce      string
+	relayURL   string
+	createdAt  time.Time
 	providerID string
 }
 
@@ -618,40 +618,43 @@ func (p *OIDCFlowProvider) introspect(username, token string) (*Identity, bool) 
 	}
 	defer resp.Body.Close()
 
-	var ir struct {
-		Active   bool        `json:"active"`
-		Sub      string      `json:"sub"`
-		Username string      `json:"username"`
-		Email    string      `json:"email"`
-		Name     string      `json:"name"`
-		Scope    string      `json:"scope"`
-		Aud      interface{} `json:"aud"`
-		Exp      int64       `json:"exp"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&ir); err != nil {
+	var claims map[string]interface{}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&claims); err != nil {
 		return nil, false
 	}
-	if !ir.Active {
+	active, _ := claims["active"].(bool)
+	if !active {
 		return nil, false
 	}
+	scope, _ := claims["scope"].(string)
 	if p.cfg.RequiredScope != "" {
-		if !strings.Contains(" "+ir.Scope+" ", " "+p.cfg.RequiredScope+" ") {
+		if !strings.Contains(" "+scope+" ", " "+p.cfg.RequiredScope+" ") {
 			return nil, false
 		}
 	}
+	if p.cfg.RequiredAudience != "" && !audienceContains(claims["aud"], p.cfg.RequiredAudience) {
+		return nil, false
+	}
 
-	sub := ir.Sub
+	sub, _ := claims["sub"].(string)
 	if sub == "" {
-		sub = ir.Username
+		sub, _ = claims["username"].(string)
 	}
 	if sub == "" {
 		sub = username
 	}
+	email, _ := claims["email"].(string)
+	name, _ := claims["name"].(string)
+	groupsClaim := p.cfg.GroupsClaim
+	if groupsClaim == "" {
+		groupsClaim = "groups"
+	}
 
 	id := &Identity{
 		Sub:      sub,
-		Email:    ir.Email,
-		Name:     ir.Name,
+		Email:    email,
+		Name:     name,
+		Groups:   extractStringSliceClaim(claims, groupsClaim),
 		Provider: p.profile.ID,
 	}
 	return id, true

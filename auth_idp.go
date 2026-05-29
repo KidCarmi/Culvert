@@ -279,6 +279,36 @@ func (r *IdPRegistry) All() []*IdPProfile {
 	return out
 }
 
+// publicIdPProfile returns a response-safe copy. Client secrets are write-only
+// API inputs and must not be exposed through viewer/admin read responses.
+func publicIdPProfile(p *IdPProfile) *IdPProfile {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	cp.EmailDomains = append([]string(nil), p.EmailDomains...)
+	cp.KnownGroups = append([]string(nil), p.KnownGroups...)
+	if p.OIDC != nil {
+		oidc := *p.OIDC
+		oidc.Scopes = append([]string(nil), p.OIDC.Scopes...)
+		oidc.ClientSecret = ""
+		cp.OIDC = &oidc
+	}
+	if p.SAML != nil {
+		saml := *p.SAML
+		cp.SAML = &saml
+	}
+	return &cp
+}
+
+func publicIdPProfiles(profiles []*IdPProfile) []*IdPProfile {
+	out := make([]*IdPProfile, len(profiles))
+	for i := range profiles {
+		out[i] = publicIdPProfile(profiles[i])
+	}
+	return out
+}
+
 // RouteByDomain returns the first enabled live provider whose EmailDomains
 // list contains domain (case-insensitive).  Returns nil if none match.
 // RouteByDomain returns the enabled provider whose email domain matches.
