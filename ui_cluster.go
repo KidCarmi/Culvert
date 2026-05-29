@@ -47,6 +47,12 @@ func countActiveTokens() int {
 }
 
 // apiClusterMode enables Control Plane mode at runtime from the admin GUI.
+//
+// Intentionally OUT of the config-version rollback surface — cluster
+// role/lifecycle state (CP/DP mode flip persisted to cluster.json);
+// rollback of a role flip is semantically meaningless once the control
+// plane has activated. Do NOT add saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (D-topology / lifecycle).
 func apiClusterMode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -140,6 +146,13 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop 
 	}
 }
 
+// apiClusterTokenCreate mints a one-shot node-enrollment token.
+//
+// Intentionally OUT of the config-version rollback surface — tokens
+// are membership/enrollment artifacts; rolling back could resurrect a
+// token an operator already consumed (or invalidate one in flight).
+// Do NOT add saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (D-topology / trust).
 func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
@@ -231,6 +244,11 @@ func apiClusterNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiClusterRevoke revokes an enrolled node.
+//
+// Intentionally OUT of the config-version rollback surface —
+// un-revoking a banned node via rollback is a security regression by
+// definition. Do NOT add saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (D-sec).
 func apiClusterRevoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -276,6 +294,14 @@ func apiClusterRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiClusterCA returns cluster CA info (GET) or imports a custom CA (POST).
+//
+// Intentionally OUT of the config-version rollback surface — cluster
+// CA material is a forward-only trust artifact, and a rollback would
+// flip the CAFingerprint (controlplane.go:1550-1560) and trigger
+// fleet-wide DP cert renewal against a reverted CA. Plus the cluster
+// CA private key must never enter plaintext config-version snapshot
+// files. Do NOT add saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (D-sec) and §3.2 (HA blast radius).
 func apiClusterCA(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -415,6 +441,11 @@ func apiClusterRotation(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/cluster/labels — set labels on a node.
+//
+// Intentionally OUT of the config-version rollback surface — node
+// labels are operational topology, not versioned policy. Do NOT add
+// saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (C-topology).
 func apiClusterLabels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -451,6 +482,12 @@ func apiClusterLabels(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/cluster/drain — toggle node drain/maintenance mode.
+//
+// Intentionally OUT of the config-version rollback surface — drain is
+// operational topology; rolling back a drain decision once traffic has
+// already been shifted is semantically wrong. Do NOT add
+// saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (C-topology).
 func apiClusterDrain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

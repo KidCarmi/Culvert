@@ -250,6 +250,11 @@ func apiCACert(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/certs/upload — upload a custom TLS certificate+key for the UI or MITM engine.
 // Body: multipart/form-data with fields: "cert" (PEM), "key" (PEM), "target" ("ui"|"mitm")
+//
+// Intentionally OUT of the config-version rollback surface — this is a
+// forward-only trust mutation; rolling back would silently restore
+// superseded MITM/UI certs. Do NOT add saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (D-sec).
 func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -531,6 +536,12 @@ func apiSecFeedsSync(w http.ResponseWriter, r *http.Request) {
 // GET /api/security-scan/feeds/domain-allowlist — list domains exempt from
 // domain-level threat feed blocking (URL-level blocking still applies).
 // PUT /api/security-scan/feeds/domain-allowlist — replace the allowlist.
+//
+// Allowlist state is HA-distributed via ConfigSnapshot.ThreatDomainAllowlist
+// (controlplane.go:104) and intentionally OUT of the config-version
+// rollback surface — putting it on rollback would create a CP/DP
+// dual-authority hazard. Do NOT add saveConfigVersion here.
+// See roadmap/DOMAIN-ALLOWLIST-ROLLBACK-CLASSIFICATION.md.
 func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1079,6 +1090,14 @@ func apiCACacheClear(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": true})
 }
 
+// apiCARotate rotates the Root CA.
+//
+// Intentionally OUT of the config-version rollback surface — CA
+// rotation is a forward-only trust decision; rolling back would
+// silently restore a superseded CA, plus risk writing CA private-key
+// material in plaintext to config-version snapshot files. Do NOT add
+// saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (D-sec).
 func apiCARotate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1173,6 +1192,13 @@ func apiCAKeyProvider(w http.ResponseWriter, r *http.Request) {
 // OCSP Management API
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// apiOCSPConfig manages OCSP/CRL revocation-check posture.
+//
+// Intentionally OUT of the config-version rollback surface — relaxing
+// revocation checking via rollback would silently re-permit traffic
+// to certs the admin deliberately tightened against. Do NOT add
+// saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (D-sec).
 func apiOCSPConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
