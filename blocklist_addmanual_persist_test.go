@@ -108,6 +108,99 @@ func TestBlocklist_AddManual_DuplicateNoCorruption(t *testing.T) {
 	}
 }
 
+// TestBlocklist_AddManualBulk_PersistsAllInOneSave pins the save-once
+// contract added per the Codex P2 review on PR #283: a batch of N hosts
+// (mixed exact + wildcard) goes through AddManualBulk and the whole set
+// survives reload via IsBlocked. Each entry must end up in the main file,
+// not just the .manual sidecar.
+func TestBlocklist_AddManualBulk_PersistsAllInOneSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blocklist.txt")
+
+	b := freshBLWithSidecars(path)
+	b.Save()
+
+	batch := []string{
+		"bulk-a.example",
+		"bulk-b.example",
+		"*.bulk-wild.example",
+	}
+	if got := b.AddManualBulk(batch); got != 3 {
+		t.Fatalf("AddManualBulk returned %d; want 3", got)
+	}
+
+	b2 := freshBLWithSidecars(path)
+	if err := b2.Load(path); err != nil {
+		t.Fatalf("reload Load: %v", err)
+	}
+	for _, h := range []string{"bulk-a.example", "bulk-b.example", "child.bulk-wild.example"} {
+		if !b2.IsBlocked(h) {
+			t.Errorf("bulk entry %q did not survive reload — main file save-once is broken", h)
+		}
+	}
+}
+
+// TestBlocklist_AddManualBulk_EmptyIsNoOp pins the "no disk write on
+// empty input" contract: AddManualBulk with no hosts (nil, empty, or
+// all-blank slice) must not touch the main file or the .manual sidecar.
+// The on-disk content captured before the call must match the content
+// after.
+func TestBlocklist_AddManualBulk_EmptyIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blocklist.txt")
+
+	b := freshBLWithSidecars(path)
+	b.Save()
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read main before: %v", err)
+	}
+
+	for _, batch := range [][]string{nil, {}, {"", "   ", "\t"}} {
+		if got := b.AddManualBulk(batch); got != 0 {
+			t.Fatalf("AddManualBulk(%v) returned %d; want 0", batch, got)
+		}
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read main after: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("empty-input AddManualBulk mutated main file:\nbefore=%q\nafter =%q", string(before), string(after))
+	}
+}
+
+// TestBlocklist_AddManualBulk_DuplicateNoCorruption pins the within-batch
+// dedupe contract: the same host appearing multiple times in the input
+// slice (e.g. accidental duplication in a JSON request) results in
+// exactly one line on disk after the single save.
+func TestBlocklist_AddManualBulk_DuplicateNoCorruption(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blocklist.txt")
+
+	b := freshBLWithSidecars(path)
+	b.Save()
+
+	const host = "bulk-dup.example"
+	b.AddManualBulk([]string{host, host, host})
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read main: %v", err)
+	}
+	got := 0
+	for _, line := range splitLines(string(data)) {
+		if line == host {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Fatalf("AddManualBulk duplicate produced %d %q lines; want 1 (data=%q)", got, host, string(data))
+	}
+}
+
 // splitLines is a tiny strings.Split wrapper kept local to avoid
 // importing strings just for this file.
 func splitLines(s string) []string {

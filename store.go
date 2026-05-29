@@ -875,6 +875,11 @@ func (b *Blocklist) ReplaceFeedEntries(hosts []string) {
 // survive restart, because Load reads the main file into b.exact /
 // b.wildcards (the maps IsBlocked consults) and the .manual sidecar
 // only restores attribution metadata.
+//
+// For bulk admin requests, prefer AddManualBulk: it does one save for
+// N hosts instead of N saves, avoiding the O(hosts × blocklist-size)
+// rewrite when the main file is large (e.g. a feed-backed blocklist
+// with hundreds of thousands of entries). Codex P2 review on PR #283.
 func (b *Blocklist) AddManual(host string) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	b.mu.Lock()
@@ -887,6 +892,51 @@ func (b *Blocklist) AddManual(host string) {
 	b.mu.Unlock()
 	b.saveManual()
 	b.Save()
+}
+
+// AddManualBulk adds multiple hosts as manually-managed admin entries
+// under a single write lock with a single saveManual + single Save call,
+// instead of one save per host. Use this for bulk admin requests; the
+// per-host normalization and dedupe match AddManual exactly (lowercase
+// + trim, empty hosts skipped, "*." → wildcard, otherwise exact). The
+// caller is responsible for any validation (length cap, wildcard
+// format) before invoking this method — invalid entries reaching here
+// are silently accepted, mirroring AddManual.
+//
+// Returns the number of hosts that passed normalization (non-empty
+// after trim) and were stored. A zero return means no on-disk write
+// happens, so calling with an empty or all-blank slice is a cheap no-op.
+//
+// Added per the Codex P2 review on PR #283: with per-call Save() inside
+// AddManual, a bulk POST of N hosts to a feed-backed blocklist rewrote
+// the entire main file N times (O(hosts × blocklist-size) disk work).
+// This save-once path preserves the durability guarantee while keeping
+// bulk cost O(blocklist-size).
+func (b *Blocklist) AddManualBulk(hosts []string) int {
+	if len(hosts) == 0 {
+		return 0
+	}
+	added := 0
+	b.mu.Lock()
+	for _, host := range hosts {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" {
+			continue
+		}
+		if strings.HasPrefix(host, "*.") {
+			b.wildcards[host[1:]] = true
+		} else {
+			b.exact[host] = true
+		}
+		b.manual[host] = true
+		added++
+	}
+	b.mu.Unlock()
+	if added > 0 {
+		b.saveManual()
+		b.Save()
+	}
+	return added
 }
 
 // saveManual persists the set of manually-added hosts to a sidecar file.
