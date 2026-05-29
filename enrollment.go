@@ -1088,6 +1088,7 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	// Bump config version so DP nodes pick up the new CA fingerprint on next poll.
 	globalConfigStore.Update(CurrentConfigSnapshot())
 
+	statClusterCARotations.Add(1)
 	return nil
 }
 

@@ -472,6 +472,7 @@ func (cm *CertManager) RotateIfNeeded(caPath, passphrase string) bool {
 		Detail: fmt.Sprintf("Root CA rotated — old CA valid until %s, new CA expires %s (dual-CA overlap active)", expiry.Format("2006-01-02"), newExpiry),
 		Source: "ca",
 	})
+	statCARotations.Add(1)
 	return true
 }
 

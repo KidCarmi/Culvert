@@ -14,11 +14,21 @@ package main
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
-// caWritePrometheus appends culvert_cert_cache_* metric lines. Called from
-// handleMetrics alongside the per-rule, latency, urlcat, and CDR writers.
-// Reads live state at scrape time via certMgr.CacheStats(); no hot-path cost.
+// CA rotation counters (CA-2 PR3). Label-free; incremented only on real
+// rotation success paths — never on startup/InitCA. No fingerprints, serials,
+// subjects, SANs, key material, or node IDs are recorded.
+var (
+	statCARotations        atomic.Int64 // Root CA rotations (auto RotateIfNeeded + manual apiCARotate)
+	statClusterCARotations atomic.Int64 // Cluster CA rotations/imports (ImportCA chokepoint)
+)
+
+// caWritePrometheus appends culvert_cert_cache_* and culvert_*_ca_rotations_*
+// metric lines. Called from handleMetrics alongside the per-rule, latency,
+// urlcat, and CDR writers. Reads live state at scrape time via
+// certMgr.CacheStats(); no hot-path cost.
 func caWritePrometheus(w *strings.Builder) {
 	hits, misses, size := certMgr.CacheStats()
 
@@ -33,4 +43,12 @@ func caWritePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cert_cache_size Current number of cached leaf certificates\n")
 	w.WriteString("# TYPE culvert_cert_cache_size gauge\n")
 	fmt.Fprintf(w, "culvert_cert_cache_size %d\n", size)
+
+	w.WriteString("\n# HELP culvert_ca_rotations_total Root CA rotations (auto-renewal and manual admin rotation)\n")
+	w.WriteString("# TYPE culvert_ca_rotations_total counter\n")
+	fmt.Fprintf(w, "culvert_ca_rotations_total %d\n", statCARotations.Load())
+
+	w.WriteString("\n# HELP culvert_cluster_ca_rotations_total Cluster CA rotations/imports (auto-renewal and manual import)\n")
+	w.WriteString("# TYPE culvert_cluster_ca_rotations_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_ca_rotations_total %d\n", statClusterCARotations.Load())
 }

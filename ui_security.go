@@ -1166,6 +1166,7 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 			logger.Printf("CA force-rotate: save failed: %v", err)
 		}
 	}
+	statCARotations.Add(1)
 	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API (confirmed)")
 	jsonOK(w, certMgr.CACertInfo())
 }
