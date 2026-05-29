@@ -197,7 +197,7 @@ audit ring and `apiClusterStatus` / `apiClusterHA` polling.
 | `culvert_enrollment_nodes` | gauge | count of enrolled nodes at scrape |
 | `culvert_enrollment_nodes_connected` | gauge | nodes with `Status=="connected"` at scrape |
 | `culvert_heartbeat_disconnects_total` | counter | the connected→disconnected transition in `checkHeartbeats` (`enrollment.go:608`) |
-| `culvert_cluster_store_saves_total` | counter | each `ClusterStore.Save()` (covers the "save frequency" ask) |
+| `culvert_cluster_store_saves_total` | counter | **`ClusterStore.saveLocked()`** (enrollment.go:170) — the single persistence chokepoint, NOT `Save()` (see note below) |
 | `culvert_ha_failovers_total` | counter | HA failover transition site (`globalHA` state change) |
 | `culvert_ha_role` | gauge | `0`=standby, `1`=active (fixed numeric encoding, not a label) |
 | `culvert_cluster_update_in_progress` | gauge | `1` while `runClusterUpdate` is active, else `0` |
@@ -211,6 +211,7 @@ this PR.
 
 **Where to wire.**
 - Counters at the named transition sites (token consume/fail, heartbeat disconnect, save, failover).
+- **`culvert_cluster_store_saves_total` MUST increment in `saveLocked()` (enrollment.go:170), not `Save()`.** `Save()` (enrollment.go:163) merely takes the lock and delegates to `saveLocked()`, but several production persistence paths call `saveLocked()` directly and bypass `Save()` entirely: token consumption (`:274`), node add/remove (`:505`, `:525`), heartbeat status transitions (`:552`, `:595`), HA-sync import (`:684`), and the CP-side hold-lock-through-save path (`controlplane.go:820`). Instrumenting only `Save()` would undercount a large class of writes and make save-cadence alerts unreliable. `saveLocked()` is the single chokepoint every persist flow routes through — instrument there. (Note: the increment runs under `cs.mu`, so use a plain `atomic.Int64` add to avoid any lock-ordering concern.)
 - Gauges read live at scrape from `ClusterStore` / `globalHA` under their existing locks.
 - `culvert_dp_poll_duration_seconds`: observe around the DP `pollLoop` RPC. **DP-side only** — this is local instrumentation of the poll call, **not** a `ConfigSnapshot` field and **not** an HA/sync change (those are out of scope).
 
