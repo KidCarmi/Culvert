@@ -150,6 +150,30 @@ func TestRequestedSAMLNameIDFormat_DefaultsStable(t *testing.T) {
 	}
 }
 
+func TestValidateSAMLNameIDFormat(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  string
+		wantErr bool
+	}{
+		{name: "default", format: "", wantErr: false},
+		{name: "email", format: string(saml.EmailAddressNameIDFormat), wantErr: false},
+		{name: "persistent", format: string(saml.PersistentNameIDFormat), wantErr: false},
+		{name: "transient", format: string(saml.TransientNameIDFormat), wantErr: true},
+		{name: "unspecified", format: string(saml.UnspecifiedNameIDFormat), wantErr: true},
+		{name: "unknown", format: "urn:example:nameid:custom", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSAMLNameIDFormat(tt.format)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateSAMLNameIDFormat(%q) error = %v, wantErr %v", tt.format, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestExtractSAMLIdentity_NilConfigUsesDefaults(t *testing.T) {
 	id := extractSAMLIdentity(samlTestAssertion("alice@example.com",
 		samlTestAttr("groups", "users"),

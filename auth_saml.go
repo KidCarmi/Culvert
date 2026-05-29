@@ -46,6 +46,9 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 	if cfg.MetadataURL == "" && cfg.MetadataXML == "" {
 		return nil, fmt.Errorf("saml[%s]: metadata_url or metadata_xml required", p.ID)
 	}
+	if err := validateSAMLNameIDFormat(cfg.NameIDFormat); err != nil {
+		return nil, fmt.Errorf("saml[%s] name_id_format: %w", p.ID, err)
+	}
 
 	idpMeta, err := fetchSAMLMetadata(cfg)
 	if err != nil {
@@ -260,6 +263,13 @@ func isStableSAMLNameIDFormat(format string) bool {
 	default:
 		return false
 	}
+}
+
+func validateSAMLNameIDFormat(format string) error {
+	if format == "" || isStableSAMLNameIDFormat(format) {
+		return nil
+	}
+	return fmt.Errorf("must be stable (emailAddress or persistent), got %q", format)
 }
 
 func requireStableSAMLIdentity(id *Identity) error {

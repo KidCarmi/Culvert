@@ -210,9 +210,14 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 			return fmt.Errorf("idp oidc issuer: %w", err)
 		}
 	}
-	if p.Type == IdPTypeSAML && p.SAML != nil && p.SAML.MetadataURL != "" {
-		if err := validateExternalURL(p.SAML.MetadataURL); err != nil {
-			return fmt.Errorf("idp saml metadata_url: %w", err)
+	if p.Type == IdPTypeSAML && p.SAML != nil {
+		if err := validateSAMLNameIDFormat(p.SAML.NameIDFormat); err != nil {
+			return fmt.Errorf("idp saml name_id_format: %w", err)
+		}
+		if p.SAML.MetadataURL != "" {
+			if err := validateExternalURL(p.SAML.MetadataURL); err != nil {
+				return fmt.Errorf("idp saml metadata_url: %w", err)
+			}
 		}
 	}
 
