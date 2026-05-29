@@ -16,6 +16,7 @@ package main
 // for the valid entries that already ran through AddManual.
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -167,7 +168,7 @@ func TestBlocklist_AddManualBulk_EmptyIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read main after: %v", err)
 	}
-	if string(before) != string(after) {
+	if !bytes.Equal(before, after) {
 		t.Fatalf("empty-input AddManualBulk mutated main file:\nbefore=%q\nafter =%q", string(before), string(after))
 	}
 }
