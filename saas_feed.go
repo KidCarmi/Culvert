@@ -35,14 +35,20 @@ var validSaaSFeedURL = regexp.MustCompile(`^https?://[^/]`)
 // SaaSFeedSyncer periodically fetches a remote JSON file containing
 // SaaS URL categories and merges them into catStore.
 type SaaSFeedSyncer struct {
-	mu           sync.Mutex
-	feedURL      string
-	interval     time.Duration
-	lastSync     time.Time
-	lastCount    int64
-	cancel       context.CancelFunc
-	client       *http.Client
-	enabled      atomic.Bool
+	mu        sync.Mutex
+	feedURL   string
+	interval  time.Duration
+	lastSync  time.Time
+	lastCount int64
+	cancel    context.CancelFunc
+	// done closes when the current syncLoop goroutine exits. nil when the
+	// syncer is not running. Each Configure call installs a fresh channel
+	// alongside the matching cancel func; Done() exposes the current one
+	// so callers (process shutdown, tests) can wait deterministically for
+	// the goroutine to actually exit after cancellation. Per P6.1 UC-3.
+	done    chan struct{}
+	client  *http.Client
+	enabled atomic.Bool
 }
 
 var globalSaaSFeed = &SaaSFeedSyncer{
@@ -58,6 +64,14 @@ func (s *SaaSFeedSyncer) Configure(feedURL string, interval time.Duration) {
 	s.mu.Lock()
 	if s.cancel != nil {
 		s.cancel()
+		// Clear cancel/done now so the empty-URL path below leaves the
+		// "not running" state consistent (Done() returns nil). The
+		// non-empty-URL path re-installs fresh values further down. The
+		// old goroutine exits via its already-cancelled ctx and closes
+		// its captured done channel from inside the wrapper — callers
+		// that captured Done() before this reset still observe close.
+		s.cancel = nil
+		s.done = nil
 	}
 	s.feedURL = strings.TrimSpace(feedURL)
 	if interval > 0 {
@@ -70,13 +84,35 @@ func (s *SaaSFeedSyncer) Configure(feedURL string, interval time.Duration) {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// P6.1 UC-3: parent the sync-loop context to appLifecycleCtx so a
+	// process shutdown (appLifecycleCancel) cancels this goroutine
+	// cleanly. resolveLifecycleCtx falls back to context.Background()
+	// when appLifecycleCtx is nil (test binaries / alternate startup
+	// flows), mirroring the CL-3 fix in update_cluster.go:323-335.
+	ctx, cancel := context.WithCancel(resolveLifecycleCtx())
+	done := make(chan struct{})
 	s.mu.Lock()
 	s.cancel = cancel
+	s.done = done
 	s.mu.Unlock()
 
-	go s.syncLoop(ctx)
+	go func() {
+		defer close(done)
+		s.syncLoop(ctx)
+	}()
 	logger.Printf("SaaSFeed: syncing from %s every %s", sanitizeLog(feedURL), s.interval)
+}
+
+// Done returns the channel that closes when the current syncLoop
+// goroutine exits, or nil when the syncer is not running. Provided as a
+// test seam so the P6.1 UC-3 regression can wait deterministically for
+// the goroutine to actually finish after appLifecycleCtx is cancelled;
+// production code does not call this today. (A future shutdown-
+// sequencing change could use it, but that's out of scope here.)
+func (s *SaaSFeedSyncer) Done() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.done
 }
 
 // Stop halts the sync loop.
@@ -86,6 +122,10 @@ func (s *SaaSFeedSyncer) Stop() {
 		s.cancel()
 		s.cancel = nil
 	}
+	// Pair with cancel so Done() returns nil for the now-stopped syncer;
+	// the cancelled goroutine still closes its captured done channel,
+	// which is what any caller that captured Done() before Stop sees.
+	s.done = nil
 	s.feedURL = ""
 	s.enabled.Store(false)
 	s.mu.Unlock()
