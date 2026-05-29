@@ -565,7 +565,13 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		// avoid writing admin-supplied domain strings into the audit
 		// ring (matches the connlimit / blockpage / upstream sibling
 		// pattern in ui_config.go).
-		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", len(body.Domains)), "")
+		//
+		// Count is read AFTER SetDomainAllowlist via the post-normalization
+		// DomainAllowlist() (threatfeed.go:255 trims, lowercases, skips
+		// empty, dedupes via map), so the audit reflects what was actually
+		// stored — raw len(body.Domains) over-reports when clients send
+		// blanks, duplicates, or case/whitespace variants (Codex P2 on PR #284).
+		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", len(globalThreatFeed.DomainAllowlist())), "")
 		jsonOK(w, map[string]any{"ok": true, "count": len(body.Domains)})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

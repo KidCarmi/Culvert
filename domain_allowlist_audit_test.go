@@ -70,6 +70,54 @@ func TestDomainAllowlist_PUT_RecordsAuditEntry(t *testing.T) {
 	}
 }
 
+// TestDomainAllowlist_PUT_AuditCountIsNormalized pins the Codex P2 fix
+// on PR #284: the audit object must reflect the count of domains actually
+// stored after SetDomainAllowlist normalizes (trim, lowercase, empty-skip,
+// map-dedupe), not the raw request slice length. Before the fix, an
+// admin sending blanks / duplicates / case-or-whitespace variants would
+// see e.g. "3 domain(s)" in the audit trail while only 1 was persisted,
+// making the security audit misleading for the exact mutation being
+// captured.
+func TestDomainAllowlist_PUT_AuditCountIsNormalized(t *testing.T) {
+	snapshotGlobalThreatFeedForAudit(t)
+	baselineTS := time.Now().UnixMilli()
+
+	// 4 raw entries → 1 unique after normalization:
+	//   "github.com"     → "github.com"
+	//   " github.com "   → "github.com" (trim collapses to same key)
+	//   ""               → skipped (empty after trim)
+	//   "GITHUB.COM"     → "github.com" (lowercase collapses to same key)
+	body, _ := json.Marshal(map[string]any{
+		"domains": []string{"github.com", " github.com ", "", "GITHUB.COM"},
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/security-scan/feeds/domain-allowlist", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "198.51.100.63:0" // unique TEST-NET-2 actor IP
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+
+	rec := httptest.NewRecorder()
+	apiDomainAllowlist(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT with dedupe-input: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	// The audit Object must report the NORMALIZED count (1), not the
+	// raw input length (4). Pre-fix this would be "4 domain(s)" and the
+	// match would miss.
+	if !hasMatchingAuditEntry(auditGet(), "198.51.100.63", "threatfeed.allowlist.update", "1 domain(s)", baselineTS) {
+		// Surface the actually-emitted object for diagnosis.
+		var actualObject string
+		for _, e := range auditGet() {
+			if e.Actor == "198.51.100.63" && e.Action == "threatfeed.allowlist.update" && e.TS >= baselineTS {
+				actualObject = e.Object
+				break
+			}
+		}
+		t.Fatalf("audit object did not reflect the normalized stored count; want \"1 domain(s)\", got %q — raw-length audit count regressed (Codex P2 on PR #284)", actualObject)
+	}
+}
+
 // TestDomainAllowlist_PUT_InvalidJSON_NoAuditEntry pins that the audit
 // emission is on the SUCCESS path only — invalid JSON returns 400
 // before SetDomainAllowlist runs, so no audit entry should appear.
