@@ -7,9 +7,13 @@ import (
 )
 
 func samlTestAssertion(nameID string, attrs ...saml.Attribute) *saml.Assertion {
+	return samlTestAssertionWithFormat(nameID, string(saml.EmailAddressNameIDFormat), attrs...)
+}
+
+func samlTestAssertionWithFormat(nameID, format string, attrs ...saml.Attribute) *saml.Assertion {
 	return &saml.Assertion{
 		Subject: &saml.Subject{
-			NameID: &saml.NameID{Value: nameID},
+			NameID: &saml.NameID{Value: nameID, Format: format},
 		},
 		AttributeStatements: []saml.AttributeStatement{
 			{Attributes: attrs},
@@ -70,6 +74,79 @@ func TestExtractSAMLIdentity_ConfiguredAttributes(t *testing.T) {
 	}
 	if len(id.Groups) != 2 || id.Groups[0] != "Engineering" || id.Groups[1] != "Admins" {
 		t.Fatalf("Groups = %v, want [Engineering Admins]", id.Groups)
+	}
+}
+
+func TestExtractSAMLIdentity_EmailFallbackForEmptyNameID(t *testing.T) {
+	id := extractSAMLIdentity(samlTestAssertion("",
+		samlTestAttr("email", "alice@example.com"),
+	), &SAMLProfileConfig{}, "saml-profile")
+
+	if id.Sub != "alice@example.com" {
+		t.Fatalf("Sub = %q, want email fallback alice@example.com", id.Sub)
+	}
+	if id.Email != "alice@example.com" {
+		t.Fatalf("Email = %q, want alice@example.com", id.Email)
+	}
+}
+
+func TestExtractSAMLIdentity_NoStableIdentity(t *testing.T) {
+	id := extractSAMLIdentity(samlTestAssertion(""), &SAMLProfileConfig{}, "saml-profile")
+
+	if id.Sub != "" || id.Email != "" {
+		t.Fatalf("expected no stable identity, got Sub=%q Email=%q", id.Sub, id.Email)
+	}
+	if err := requireStableSAMLIdentity(id); err == nil {
+		t.Fatal("expected missing stable identity to fail closed")
+	}
+}
+
+func TestExtractSAMLIdentity_RejectsTransientNameID(t *testing.T) {
+	id := extractSAMLIdentity(samlTestAssertionWithFormat(
+		"session-only-id",
+		string(saml.TransientNameIDFormat),
+	), &SAMLProfileConfig{}, "saml-profile")
+
+	if id.Sub != "" {
+		t.Fatalf("transient NameID was accepted as Sub=%q", id.Sub)
+	}
+	if err := requireStableSAMLIdentity(id); err == nil {
+		t.Fatal("expected transient-only NameID to fail stable identity check")
+	}
+}
+
+func TestExtractSAMLIdentity_RejectsUnspecifiedNameID(t *testing.T) {
+	id := extractSAMLIdentity(samlTestAssertionWithFormat(
+		"maybe-stable-id",
+		string(saml.UnspecifiedNameIDFormat),
+	), &SAMLProfileConfig{}, "saml-profile")
+
+	if id.Sub != "" {
+		t.Fatalf("unspecified NameID was accepted as Sub=%q", id.Sub)
+	}
+	if err := requireStableSAMLIdentity(id); err == nil {
+		t.Fatal("expected unspecified-only NameID to fail stable identity check")
+	}
+}
+
+func TestExtractSAMLIdentity_TransientNameIDUsesEmailFallback(t *testing.T) {
+	id := extractSAMLIdentity(samlTestAssertionWithFormat(
+		"session-only-id",
+		string(saml.TransientNameIDFormat),
+		samlTestAttr("email", "alice@example.com"),
+	), &SAMLProfileConfig{}, "saml-profile")
+
+	if id.Sub != "alice@example.com" {
+		t.Fatalf("Sub = %q, want email fallback alice@example.com", id.Sub)
+	}
+	if err := requireStableSAMLIdentity(id); err != nil {
+		t.Fatalf("email fallback should satisfy stable identity check: %v", err)
+	}
+}
+
+func TestRequestedSAMLNameIDFormat_DefaultsStable(t *testing.T) {
+	if got := requestedSAMLNameIDFormat(nil); got != string(saml.EmailAddressNameIDFormat) {
+		t.Fatalf("requestedSAMLNameIDFormat(nil) = %q, want emailAddress", got)
 	}
 }
 

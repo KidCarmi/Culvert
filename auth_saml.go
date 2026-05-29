@@ -72,6 +72,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("saml[%s] sp init: %w", p.ID, err)
 	}
+	middleware.ServiceProvider.AuthnNameIDFormat = saml.NameIDFormat(requestedSAMLNameIDFormat(cfg))
 
 	return &SAMLProvider{
 		profile:    p,
@@ -123,6 +124,9 @@ func (p *SAMLProvider) ExchangeAssertion(r *http.Request) (*Identity, string, er
 		return nil, "", fmt.Errorf("saml response validation: %w", err)
 	}
 	id := extractSAMLIdentity(assertion, p.cfg, p.profile.ID)
+	if err := requireStableSAMLIdentity(id); err != nil {
+		return nil, "", err
+	}
 	return id, relayState, nil
 }
 
@@ -189,9 +193,12 @@ func extractSAMLIdentity(a *saml.Assertion, cfg *SAMLProfileConfig, providerID s
 	id := &Identity{Provider: providerID}
 
 	if a.Subject != nil && a.Subject.NameID != nil {
-		id.Sub = a.Subject.NameID.Value
-		if strings.Contains(id.Sub, "@") {
-			id.Email = id.Sub
+		nameID := a.Subject.NameID
+		if isStableSAMLNameIDFormat(nameID.Format) {
+			id.Sub = nameID.Value
+			if strings.Contains(id.Sub, "@") {
+				id.Email = id.Sub
+			}
 		}
 	}
 
@@ -233,7 +240,33 @@ func extractSAMLIdentity(a *saml.Assertion, cfg *SAMLProfileConfig, providerID s
 			}
 		}
 	}
+	if id.Sub == "" && id.Email != "" {
+		id.Sub = id.Email
+	}
 	return id
+}
+
+func requestedSAMLNameIDFormat(cfg *SAMLProfileConfig) string {
+	if cfg != nil && cfg.NameIDFormat != "" {
+		return cfg.NameIDFormat
+	}
+	return string(saml.EmailAddressNameIDFormat)
+}
+
+func isStableSAMLNameIDFormat(format string) bool {
+	switch saml.NameIDFormat(format) {
+	case saml.EmailAddressNameIDFormat, saml.PersistentNameIDFormat:
+		return true
+	default:
+		return false
+	}
+}
+
+func requireStableSAMLIdentity(id *Identity) error {
+	if id == nil || id.Sub == "" {
+		return fmt.Errorf("saml response validation: missing stable identity")
+	}
+	return nil
 }
 
 func samlAttrValues(attr saml.Attribute) []string {
