@@ -166,25 +166,52 @@ func (rm *ruleMetrics) WritePrometheus(w *strings.Builder) {
 }
 
 // ─── Latency histogram ──────────────────────────────────────────────────────
-// Fixed-bucket histogram for request latency (Prometheus text format).
-// Buckets: 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, +Inf
+// Fixed-bucket histogram in Prometheus text format. Generalized so multiple
+// metrics can reuse the same lock-free implementation (CA-2 PR2): the name,
+// help text, and bucket layout are per-instance. newLatencyHistogram preserves
+// the original request-latency metric byte-for-byte.
 
 type latencyHistogram struct {
+	name    string    // metric name, e.g. culvert_request_duration_seconds
+	help    string    // HELP text
 	buckets []float64 // upper bounds (immutable after init)
 	counts  []int64   // per-bucket atomic counter
 	sumBits int64     // atomic float64 stored as int64 bits
 	total   int64     // atomic total observations
 }
 
-var latencyHist = newLatencyHistogram()
-
-func newLatencyHistogram() *latencyHistogram {
-	buckets := []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+// newHistogram builds a histogram with a custom name, help text, and bucket
+// upper bounds (seconds). Buckets should be ≥ 0.0001 so %g renders them as
+// plain decimals rather than scientific notation.
+func newHistogram(name, help string, buckets []float64) *latencyHistogram {
 	return &latencyHistogram{
+		name:    name,
+		help:    help,
 		buckets: buckets,
 		counts:  make([]int64, len(buckets)+1), // +1 for +Inf
 	}
 }
+
+var latencyHist = newLatencyHistogram()
+
+// newLatencyHistogram returns the request-latency histogram.
+// Buckets: 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, +Inf.
+func newLatencyHistogram() *latencyHistogram {
+	return newHistogram(
+		"culvert_request_duration_seconds",
+		"Request latency histogram",
+		[]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+	)
+}
+
+// certSignHist records leaf-certificate signing latency (CA-2 PR2). Signing is
+// an ECDSA P-256 keygen + x509.CreateCertificate — sub-millisecond to a few ms
+// — so the buckets are finer at the low end than the request histogram.
+var certSignHist = newHistogram(
+	"culvert_cert_sign_duration_seconds",
+	"Leaf certificate signing latency",
+	[]float64{0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1},
+)
 
 // Observe records a latency observation in seconds (lock-free).
 func (h *latencyHistogram) Observe(seconds float64) {
@@ -208,17 +235,17 @@ func (h *latencyHistogram) Observe(seconds float64) {
 
 // WritePrometheus writes the histogram in Prometheus text exposition format.
 func (h *latencyHistogram) WritePrometheus(w *strings.Builder) { //nolint:errcheck // strings.Builder.Write never returns an error
-	w.WriteString("\n# HELP culvert_request_duration_seconds Request latency histogram\n")
-	w.WriteString("# TYPE culvert_request_duration_seconds histogram\n")
+	fmt.Fprintf(w, "\n# HELP %s %s\n", h.name, h.help)
+	fmt.Fprintf(w, "# TYPE %s histogram\n", h.name)
 	var cumulative int64
 	for i, bound := range h.buckets {
 		cumulative += atomic.LoadInt64(&h.counts[i])
-		fmt.Fprintf(w, "culvert_request_duration_seconds_bucket{le=\"%g\"} %d\n", bound, cumulative)
+		fmt.Fprintf(w, "%s_bucket{le=\"%g\"} %d\n", h.name, bound, cumulative)
 	}
 	cumulative += atomic.LoadInt64(&h.counts[len(h.buckets)])
-	fmt.Fprintf(w, "culvert_request_duration_seconds_bucket{le=\"+Inf\"} %d\n", cumulative)
-	fmt.Fprintf(w, "culvert_request_duration_seconds_sum %f\n", math.Float64frombits(uint64(atomic.LoadInt64(&h.sumBits)))) // #nosec G115 -- bit reinterpret
-	fmt.Fprintf(w, "culvert_request_duration_seconds_count %d\n", atomic.LoadInt64(&h.total))
+	fmt.Fprintf(w, "%s_bucket{le=\"+Inf\"} %d\n", h.name, cumulative)
+	fmt.Fprintf(w, "%s_sum %f\n", h.name, math.Float64frombits(uint64(atomic.LoadInt64(&h.sumBits)))) // #nosec G115 -- bit reinterpret
+	fmt.Fprintf(w, "%s_count %d\n", h.name, atomic.LoadInt64(&h.total))
 }
 
 // metricsToken is the Bearer token required to access /metrics.
@@ -371,6 +398,7 @@ culvert_bytes_recv_total %d
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
 	caWritePrometheus(&ruleMetBuf)
+	certSignHist.WritePrometheus(&ruleMetBuf)
 	cdrWritePrometheus(&ruleMetBuf)
 	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
 }

@@ -624,10 +624,13 @@ func (cm *CertManager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, er
 	// count the miss independent of whether the sign below then succeeds.
 	cm.cacheMisses.Add(1)
 
+	// Observe signing latency for successful signs only (no cm.mu held here).
+	signStart := time.Now()
 	cert, err := cm.signLeaf(host)
 	if err != nil {
 		return nil, err
 	}
+	certSignHist.Observe(time.Since(signStart).Seconds())
 	cm.mu.Lock()
 	cm.cache[host] = &certCacheEntry{cert: cert, createdAt: now}
 	cm.cacheOrder = append(cm.cacheOrder, host)
