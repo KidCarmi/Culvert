@@ -39,7 +39,7 @@ const (
 	CategorySocial    URLCategory = "Social Media"
 	CategoryMalicious URLCategory = "Malicious"
 	CategoryNews      URLCategory = "News"
-	CategoryStreaming  URLCategory = "Streaming"
+	CategoryStreaming URLCategory = "Streaming"
 	CategoryGambling  URLCategory = "Gambling"
 	CategoryAdult     URLCategory = "Adult"
 	CategoryAny       URLCategory = "Any"
@@ -295,11 +295,11 @@ type FileProfileName string
 
 const (
 	FileProfileNone        FileProfileName = ""
-	FileProfileExecutables FileProfileName = "Executables"    // .exe .dll .bat .cmd .ps1 .scr .msi .pif .com .vbs
-	FileProfileArchives    FileProfileName = "Archives"       // .zip .rar .7z .tar .gz .bz2 .xz .cab
-	FileProfileDocuments   FileProfileName = "Documents"      // .doc .docm .xls .xlsm .ppt .pptm (macro-enabled)
-	FileProfileMedia       FileProfileName = "Media"          // .mp3 .mp4 .avi .mkv .mov .flv .wmv
-	FileProfileStrict      FileProfileName = "Strict"         // all of the above combined
+	FileProfileExecutables FileProfileName = "Executables" // .exe .dll .bat .cmd .ps1 .scr .msi .pif .com .vbs
+	FileProfileArchives    FileProfileName = "Archives"    // .zip .rar .7z .tar .gz .bz2 .xz .cab
+	FileProfileDocuments   FileProfileName = "Documents"   // .doc .docm .xls .xlsm .ppt .pptm (macro-enabled)
+	FileProfileMedia       FileProfileName = "Media"       // .mp3 .mp4 .avi .mkv .mov .flv .wmv
+	FileProfileStrict      FileProfileName = "Strict"      // all of the above combined
 )
 
 // fileProfileExts maps profile names to their blocked extensions.
@@ -313,25 +313,25 @@ var fileProfileExts = map[FileProfileName][]string{
 
 // PolicyRule is a single PBAC rule evaluated in priority order.
 type PolicyRule struct {
-	Priority       int             `json:"priority"`
-	Name           string          `json:"name"`
-	SourceIP       string          `json:"sourceIP"`       // single IP or CIDR; empty = any
-	SourceIdentity string          `json:"sourceIdentity"` // authenticated username; empty = any
-	SourceGroup    string          `json:"sourceGroup"`    // IdP group/role membership; empty = any
-	AuthSource     string          `json:"authSource"`     // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
-	DestFQDN          string          `json:"destFQDN"`          // exact or wildcard FQDN; empty = any
-	DestCategory      URLCategory     `json:"destCategory"`      // URL category; empty = any
-	DestCategoryGroup string          `json:"destCategoryGroup"` // category group name; empty = any
-	DestCountry       []string        `json:"destCountry"`       // ISO 3166-1 alpha-2 country codes; empty = any
-	Schedule       *PolicySchedule `json:"schedule,omitempty"` // nil = always active
-	SSLAction      SSLAction       `json:"sslAction"`      // Inspect | Bypass
-	FileFiltering  bool            `json:"fileFiltering"`  // enable file-type scanning
-	FileProfile    FileProfileName `json:"fileProfile"`    // named file-extension block profile
-	TLSSkipVerify  bool            `json:"tlsSkipVerify"`  // skip upstream cert verification (use with caution)
-	Action         PolicyAction    `json:"action"`
-	RedirectURL    string          `json:"redirectURL"` // used when Action == Redirect
-	Enabled        *bool           `json:"enabled,omitempty"` // nil or true = active; false = skipped during evaluation
-	HitCount       int64           `json:"hitCount"`    // runtime counter, not persisted
+	Priority          int             `json:"priority"`
+	Name              string          `json:"name"`
+	SourceIP          string          `json:"sourceIP"`           // single IP or CIDR; empty = any
+	SourceIdentity    string          `json:"sourceIdentity"`     // authenticated username; empty = any
+	SourceGroup       string          `json:"sourceGroup"`        // IdP group/role membership; empty = any
+	AuthSource        string          `json:"authSource"`         // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
+	DestFQDN          string          `json:"destFQDN"`           // exact or wildcard FQDN; empty = any
+	DestCategory      URLCategory     `json:"destCategory"`       // URL category; empty = any
+	DestCategoryGroup string          `json:"destCategoryGroup"`  // category group name; empty = any
+	DestCountry       []string        `json:"destCountry"`        // ISO 3166-1 alpha-2 country codes; empty = any
+	Schedule          *PolicySchedule `json:"schedule,omitempty"` // nil = always active
+	SSLAction         SSLAction       `json:"sslAction"`          // Inspect | Bypass
+	FileFiltering     bool            `json:"fileFiltering"`      // enable file-type scanning
+	FileProfile       FileProfileName `json:"fileProfile"`        // named file-extension block profile
+	TLSSkipVerify     bool            `json:"tlsSkipVerify"`      // skip upstream cert verification (use with caution)
+	Action            PolicyAction    `json:"action"`
+	RedirectURL       string          `json:"redirectURL"`       // used when Action == Redirect
+	Enabled           *bool           `json:"enabled,omitempty"` // nil or true = active; false = skipped during evaluation
+	HitCount          int64           `json:"hitCount"`          // runtime counter, not persisted
 }
 
 // ruleIsEnabled returns whether a rule is active. A nil Enabled pointer
@@ -779,8 +779,24 @@ func matchSource(rule *PolicyRule, clientIP, identity, authSource string, groups
 	ipOK := rule.SourceIP == "" || matchIPOrCIDR(rule.SourceIP, clientIP)
 	idOK := rule.SourceIdentity == "" || strings.EqualFold(rule.SourceIdentity, identity)
 	grpOK := rule.SourceGroup == "" || containsGroupCI(groups, rule.SourceGroup)
-	srcOK := rule.AuthSource == "" || strings.EqualFold(rule.AuthSource, authSource)
+	srcOK := rule.AuthSource == "" || matchAuthSource(rule.AuthSource, authSource)
 	return ipOK && idOK && grpOK && srcOK
+}
+
+func matchAuthSource(ruleAuthSource, actualAuthSource string) bool {
+	if strings.EqualFold(ruleAuthSource, actualAuthSource) {
+		return true
+	}
+	return strings.EqualFold(stripIdPPrefix(ruleAuthSource), stripIdPPrefix(actualAuthSource))
+}
+
+func stripIdPPrefix(source string) string {
+	for _, prefix := range []string{"oidc:", "saml:"} {
+		if rest, ok := strings.CutPrefix(source, prefix); ok && rest != "" {
+			return rest
+		}
+	}
+	return source
 }
 
 // containsGroupCI reports whether groups contains name (case-insensitive).
@@ -1002,9 +1018,9 @@ type bypassPattern struct {
 // JSON file so they survive restarts without modifying config.yaml.
 type SSLBypassMatcher struct {
 	mu       sync.RWMutex
-	raw      []string       // raw strings for persistence and API listing
+	raw      []string        // raw strings for persistence and API listing
 	compiled []bypassPattern // pre-compiled for fast matching
-	path     string         // optional JSON file path for persistence
+	path     string          // optional JSON file path for persistence
 }
 
 var sslBypass = &SSLBypassMatcher{}
