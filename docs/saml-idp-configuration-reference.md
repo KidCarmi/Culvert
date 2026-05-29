@@ -5,7 +5,7 @@ to create a Service Provider (SP) integration. It also documents what attributes
 in the SAML assertion, so those values can be mapped to the `SAMLProfileConfig` fields
 (`GroupsAttribute`, `EmailAttribute`, `NameAttribute`, `NameIDFormat`) in the IdP registry.
 
-**Last updated:** March 2026
+**Last updated:** May 2026
 **Applies to:** Culvert SAML SP (`auth_saml.go`, `auth_idp.go`)
 
 ---
@@ -31,21 +31,21 @@ The crewjam/saml library used by Culvert enforces SP-initiated SSO only
 
 ## NameID Format Reference
 
-Choose the format that best matches what the IdP will send. The value goes in the
+Choose a stable format that matches what the IdP will send. The value goes in the
 `nameIdFormat` field of `SAMLProfileConfig`.
 
 | Short Name | URN |
 |---|---|
 | **emailAddress** | `urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress` |
 | **persistent** | `urn:oasis:names:tc:SAML:2.0:nameid-format:persistent` |
-| **transient** | `urn:oasis:names:tc:SAML:2.0:nameid-format:transient` |
-| **unspecified** | `urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified` |
-| **kerberos** | `urn:oasis:names:tc:SAML:2.0:nameid-format:kerberos` |
-| **windowsDomain** | `urn:oasis:names:tc:SAML:1.1:nameid-format:WindowsDomainQualifiedName` |
 
 The SP defaults to `emailAddress` when `nameIdFormat` is left empty. For Entra ID and ADFS,
-`persistent` or `emailAddress` is recommended. For Keycloak, `emailAddress` or `username`
-(Keycloak-specific shorthand) is most common.
+`persistent` or `emailAddress` is recommended. For Keycloak, configure the client to emit
+the standard `emailAddress` URN.
+
+Culvert rejects transient, unspecified, custom, and provider-specific shorthand formats in
+`nameIdFormat`. Those formats do not give the proxy a stable subject for user-scoped policy
+matching and audit records.
 
 ---
 
@@ -460,8 +460,11 @@ As with Entra ID, leaving `emailAttribute` and `groupsAttribute` empty also work
 
 ### Typical NameID Format
 
-`urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress` (after the email-as-NameID rule)
-or `urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified` (ADFS default when no rule constrains it)
+`urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress` after the email-as-NameID rule.
+
+ADFS can default to `urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified` when no rule
+constrains the outgoing NameID format. Culvert rejects that format; add the transform rule
+above so ADFS emits `emailAddress`.
 
 ---
 
@@ -584,7 +587,7 @@ extracting identity data from an assertion:
 1. The value of `cfg.EmailAttribute` (admin-configured)
 2. `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress` (Entra ID / ADFS long-form URI)
 3. `urn:oid:0.9.2342.19200300.100.1.3` (eduPerson `mail` OID)
-4. NameID value, if it contains `@`
+4. Stable NameID value, if it contains `@`
 
 **Display name** — matched against (first wins):
 1. The value of `cfg.NameAttribute` (admin-configured)
