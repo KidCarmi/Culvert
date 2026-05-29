@@ -43,9 +43,9 @@ func TestMatchFQDN(t *testing.T) {
 		{"*.EXAMPLE.COM", "sub.example.com", true},
 
 		// 1.2 fix: IDNA normalization — Punycode hosts must match ASCII rules.
-		{"example.com", "xn--exmple-cua.com", false},              // punycode host ≠ example.com
-		{"münchen.de", "xn--mnchen-3ya.de", true},                  // both normalize to punycode
-		{"xn--mnchen-3ya.de", "münchen.de", true},                  // reverse also matches
+		{"example.com", "xn--exmple-cua.com", false}, // punycode host ≠ example.com
+		{"münchen.de", "xn--mnchen-3ya.de", true},    // both normalize to punycode
+		{"xn--mnchen-3ya.de", "münchen.de", true},    // reverse also matches
 	}
 	for _, c := range cases {
 		got := matchFQDN(c.pattern, c.host)
@@ -434,6 +434,34 @@ func TestPolicyStore_Evaluate_Groups(t *testing.T) {
 	m = ps.Evaluate("", "", "ldap", "any.com", []string{"users"})
 	if m != nil {
 		t.Error("expected no match when group not present")
+	}
+}
+
+func TestPolicyStore_Evaluate_AuthSourceLegacyIdPAlias(t *testing.T) {
+	tests := []struct {
+		name       string
+		ruleSource string
+		authSource string
+		wantMatch  bool
+	}{
+		{name: "canonical matches legacy oidc rule", ruleSource: "oidc:profile-id", authSource: "profile-id", wantMatch: true},
+		{name: "legacy oidc matches canonical rule", ruleSource: "profile-id", authSource: "oidc:profile-id", wantMatch: true},
+		{name: "canonical matches legacy saml rule", ruleSource: "saml:profile-id", authSource: "profile-id", wantMatch: true},
+		{name: "different provider does not match", ruleSource: "oidc:other-id", authSource: "profile-id", wantMatch: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ps := newTestPolicyStore()
+			ps.Add(PolicyRule{
+				Priority:   1,
+				AuthSource: tt.ruleSource,
+				Action:     ActionAllow,
+			})
+			got := ps.Evaluate("", "", tt.authSource, "any.com", nil) != nil
+			if got != tt.wantMatch {
+				t.Fatalf("match = %v, want %v", got, tt.wantMatch)
+			}
+		})
 	}
 }
 

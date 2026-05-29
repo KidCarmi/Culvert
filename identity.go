@@ -40,3 +40,10 @@ type IdentityProvider interface {
 	// provider does not support browser-based SSO.
 	CaptiveLoginURL(emailDomain string, r *http.Request) string
 }
+
+func identityAuthSource(id *Identity, fallback string) string {
+	if id != nil && id.Provider != "" {
+		return id.Provider
+	}
+	return fallback
+}

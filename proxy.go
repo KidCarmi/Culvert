@@ -249,11 +249,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				authenticatedIdentity = id.Email
 			}
 			authenticatedGroups = id.Groups
-			if id.Provider != "" {
-				authenticatedSource = id.Provider
-			} else {
-				authenticatedSource = "local"
-			}
+			authenticatedSource = identityAuthSource(id, "local")
 		} else {
 			// ── 2. Basic Auth header ──────────────────────────────────────────
 			u, p, ok := parseProxyAuth(r)
@@ -267,7 +263,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 							authenticatedIdentity = u
 						}
 						authenticatedGroups = id.Groups
-						authenticatedSource = prov.Name()
+						authenticatedSource = identityAuthSource(id, prov.Name())
 						authed = true
 						break
 					}
@@ -1187,8 +1183,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	peekBuf := bufio.NewReaderSize(rawClient, 1)
 	firstByte, err := peekBuf.Peek(1)
 	if err != nil {
-		rawClient.Close()              //nolint:errcheck // best-effort cleanup on peek failure
-		upstreamTLS.Close()            //nolint:errcheck // best-effort cleanup on peek failure
+		rawClient.Close()   //nolint:errcheck // best-effort cleanup on peek failure
+		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup on peek failure
 		logger.Printf("SSL_INSPECT peek error for %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}
@@ -1204,7 +1200,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			relayBufPool.Put(bp)
 			done <- struct{}{}
 		}
-		go relay(upstreamTLS, peekBuf) // client → upstream
+		go relay(upstreamTLS, peekBuf)   // client → upstream
 		go relay(rawClient, upstreamTLS) // upstream → client
 		<-done
 		rawClient.Close()
@@ -1224,7 +1220,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		NextProtos: []string{"http/1.1"},
 	})
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
-		clientTLS.Close()  //nolint:errcheck // best-effort cleanup on handshake failure
+		clientTLS.Close()   //nolint:errcheck // best-effort cleanup on handshake failure
 		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup on handshake failure
 		logger.Printf("SSL_INSPECT client TLS handshake error for %q: %v", sanitizeLog(hostOnly), err)
 		return
