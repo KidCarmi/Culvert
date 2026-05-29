@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,7 +21,7 @@ func resetSAMLStateStore(t *testing.T) {
 	})
 }
 
-func testSAMLRedirectProvider(t *testing.T, providerID string) *SAMLProvider {
+func testSAMLRedirectProvider(t *testing.T) *SAMLProvider {
 	t.Helper()
 	metadataURL, err := url.Parse("https://proxy.example/saml/metadata")
 	if err != nil {
@@ -31,7 +32,7 @@ func testSAMLRedirectProvider(t *testing.T, providerID string) *SAMLProvider {
 		t.Fatalf("ACS URL parse: %v", err)
 	}
 	return &SAMLProvider{
-		profile: &IdPProfile{ID: providerID, Type: IdPTypeSAML},
+		profile: &IdPProfile{ID: "corp-saml", Type: IdPTypeSAML},
 		cfg:     &SAMLProfileConfig{},
 		sp: &saml.ServiceProvider{
 			MetadataURL:       *metadataURL,
@@ -53,10 +54,10 @@ func testSAMLRedirectProvider(t *testing.T, providerID string) *SAMLProvider {
 
 func TestSAMLCaptiveLoginURLStoresRequestIDInRelayState(t *testing.T) {
 	resetSAMLStateStore(t)
-	prov := testSAMLRedirectProvider(t, "corp-saml")
+	prov := testSAMLRedirectProvider(t)
 	relayURL := "https://app.example/protected"
 
-	loginURL := prov.CaptiveLoginURL(relayURL, httptest.NewRequest(http.MethodGet, "/", nil))
+	loginURL := prov.CaptiveLoginURL(relayURL, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 	if loginURL == "" {
 		t.Fatal("CaptiveLoginURL returned empty URL")
 	}
@@ -92,8 +93,8 @@ func TestSAMLCaptiveLoginURLStoresRequestIDInRelayState(t *testing.T) {
 
 func TestSAMLExchangeAssertionRequiresKnownState(t *testing.T) {
 	resetSAMLStateStore(t)
-	prov := testSAMLRedirectProvider(t, "corp-saml")
-	r := httptest.NewRequest(http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
+	prov := testSAMLRedirectProvider(t)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
 		"RelayState":   {"missing"},
 		"SAMLResponse": {"not-base64"},
 	}.Encode()))
@@ -116,8 +117,8 @@ func TestSAMLExchangeAssertionProviderMismatchDoesNotConsumeState(t *testing.T) 
 		providerID: "other-saml",
 		createdAt:  time.Now(),
 	})
-	prov := testSAMLRedirectProvider(t, "corp-saml")
-	r := httptest.NewRequest(http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
+	prov := testSAMLRedirectProvider(t)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
 		"RelayState":   {"state-a"},
 		"SAMLResponse": {"not-base64"},
 	}.Encode()))
@@ -140,8 +141,8 @@ func TestSAMLExchangeAssertionConsumesStateBeforeValidation(t *testing.T) {
 		providerID: "corp-saml",
 		createdAt:  time.Now(),
 	})
-	prov := testSAMLRedirectProvider(t, "corp-saml")
-	r := httptest.NewRequest(http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
+	prov := testSAMLRedirectProvider(t)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
 		"RelayState":   {"state-a"},
 		"SAMLResponse": {"not-base64"},
 	}.Encode()))
