@@ -555,6 +555,23 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		}
 		globalThreatFeed.SetDomainAllowlist(body.Domains)
 		logger.Printf("ThreatFeed: domain allowlist updated (%d entries)", len(body.Domains))
+		// Closes the audit gap flagged by
+		// roadmap/DOMAIN-ALLOWLIST-ROLLBACK-CLASSIFICATION.md §3.5 and
+		// ui_routes_meta.go:291 ("no direct auditEvent observed"). The
+		// PUT is an admin-only, security-relevant mutation (it edits
+		// the set of domains that bypass threat-feed blocking — see
+		// threatfeed.go:236 DomainAllowlisted) and must leave an audit
+		// trail. Object holds a count summary; detail stays empty to
+		// avoid writing admin-supplied domain strings into the audit
+		// ring (matches the connlimit / blockpage / upstream sibling
+		// pattern in ui_config.go).
+		//
+		// Count is read AFTER SetDomainAllowlist via the post-normalization
+		// DomainAllowlist() (threatfeed.go:255 trims, lowercases, skips
+		// empty, dedupes via map), so the audit reflects what was actually
+		// stored — raw len(body.Domains) over-reports when clients send
+		// blanks, duplicates, or case/whitespace variants (Codex P2 on PR #284).
+		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", len(globalThreatFeed.DomainAllowlist())), "")
 		jsonOK(w, map[string]any{"ok": true, "count": len(body.Domains)})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
