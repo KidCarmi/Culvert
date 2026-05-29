@@ -174,9 +174,18 @@ func TestBlocklist_AddManualBulk_EmptyIsNoOp(t *testing.T) {
 }
 
 // TestBlocklist_AddManualBulk_DuplicateNoCorruption pins the within-batch
-// dedupe contract: the same host appearing multiple times in the input
-// slice (e.g. accidental duplication in a JSON request) results in
-// exactly one line on disk after the single save.
+// dedupe contract on three axes simultaneously:
+//   1. Return count is 1 — "added" reflects unique normalized entries
+//      ACTUALLY stored by this call (b.manual flipped false→true), not
+//      raw non-empty input count. Caller surfaces this as the API
+//      response's "added" field and the audit "N host(s)" detail, so
+//      inflating it on within-batch duplicates would mislead operators.
+//   2. Disk has exactly one line — map keys dedupe; saveManual + Save
+//      write each key once regardless of how many times it appeared in
+//      input.
+//   3. The entry survives reload via IsBlocked — the line that DID land
+//      on disk is the right one, in the right map, and is honored after
+//      a fresh Blocklist.Load.
 func TestBlocklist_AddManualBulk_DuplicateNoCorruption(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocklist.txt")
@@ -185,20 +194,31 @@ func TestBlocklist_AddManualBulk_DuplicateNoCorruption(t *testing.T) {
 	b.Save()
 
 	const host = "bulk-dup.example"
-	b.AddManualBulk([]string{host, host, host})
+	got := b.AddManualBulk([]string{host, host, host})
+	if got != 1 {
+		t.Fatalf("AddManualBulk([%q, %q, %q]) returned %d; want 1 (unique normalized entries stored, not raw input count)", host, host, host, got)
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read main: %v", err)
 	}
-	got := 0
+	hostLines := 0
 	for _, line := range splitLines(string(data)) {
 		if line == host {
-			got++
+			hostLines++
 		}
 	}
-	if got != 1 {
-		t.Fatalf("AddManualBulk duplicate produced %d %q lines; want 1 (data=%q)", got, host, string(data))
+	if hostLines != 1 {
+		t.Fatalf("AddManualBulk duplicate produced %d %q lines on disk; want 1 (data=%q)", hostLines, host, string(data))
+	}
+
+	b2 := freshBLWithSidecars(path)
+	if err := b2.Load(path); err != nil {
+		t.Fatalf("reload Load: %v", err)
+	}
+	if !b2.IsBlocked(host) {
+		t.Fatalf("duplicate-input AddManualBulk entry %q did not survive reload — the deduped line on disk must still be enforced", host)
 	}
 }
 

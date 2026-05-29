@@ -903,9 +903,14 @@ func (b *Blocklist) AddManual(host string) {
 // format) before invoking this method — invalid entries reaching here
 // are silently accepted, mirroring AddManual.
 //
-// Returns the number of hosts that passed normalization (non-empty
-// after trim) and were stored. A zero return means no on-disk write
-// happens, so calling with an empty or all-blank slice is a cheap no-op.
+// Returns the number of unique normalized entries actually stored by
+// THIS call — i.e. hosts whose admin attribution (b.manual) went from
+// false to true. Within-batch duplicates count once; cross-call repeats
+// of an already-attributed host count as 0. This matches the caller's
+// expectation that "added: N" in the API response and audit line
+// reflects net new admin entries, not raw non-empty input count. A
+// zero return means no on-disk write happens, so calling with an empty
+// or all-blank slice (or an all-duplicates slice) is a cheap no-op.
 //
 // Added per the Codex P2 review on PR #283: with per-call Save() inside
 // AddManual, a bulk POST of N hosts to a feed-backed blocklist rewrote
@@ -917,6 +922,16 @@ func (b *Blocklist) AddManualBulk(hosts []string) int {
 		return 0
 	}
 	added := 0
+	// dirty tracks whether ANY map (b.exact, b.wildcards, b.manual)
+	// flipped a key from false to true during this call. Save() must
+	// run on any flip — not only on a b.manual flip — so that recovery
+	// paths (e.g. a pre-fix-era stale main file where b.manual still
+	// has an entry but b.exact lost it) re-persist the now-corrected
+	// enforcement state. added is kept separate because it only counts
+	// net new admin attributions (b.manual false→true), which is the
+	// honest "stored by this call" number the API response and audit
+	// line should report.
+	dirty := false
 	b.mu.Lock()
 	for _, host := range hosts {
 		host = strings.ToLower(strings.TrimSpace(host))
@@ -924,15 +939,24 @@ func (b *Blocklist) AddManualBulk(hosts []string) int {
 			continue
 		}
 		if strings.HasPrefix(host, "*.") {
-			b.wildcards[host[1:]] = true
+			if !b.wildcards[host[1:]] {
+				b.wildcards[host[1:]] = true
+				dirty = true
+			}
 		} else {
-			b.exact[host] = true
+			if !b.exact[host] {
+				b.exact[host] = true
+				dirty = true
+			}
 		}
-		b.manual[host] = true
-		added++
+		if !b.manual[host] {
+			b.manual[host] = true
+			dirty = true
+			added++
+		}
 	}
 	b.mu.Unlock()
-	if added > 0 {
+	if dirty {
 		b.saveManual()
 		b.Save()
 	}
