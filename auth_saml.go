@@ -195,15 +195,18 @@ func extractSAMLIdentity(a *saml.Assertion, cfg *SAMLProfileConfig, providerID s
 		}
 	}
 
-	groupsAttr := cfg.GroupsAttribute
+	var groupsAttr, emailAttr, nameAttr string
+	if cfg != nil {
+		groupsAttr = cfg.GroupsAttribute
+		emailAttr = cfg.EmailAttribute
+		nameAttr = cfg.NameAttribute
+	}
 	if groupsAttr == "" {
 		groupsAttr = "groups"
 	}
-	emailAttr := cfg.EmailAttribute
 	if emailAttr == "" {
 		emailAttr = "email"
 	}
-	nameAttr := cfg.NameAttribute
 	if nameAttr == "" {
 		nameAttr = "displayName"
 	}
@@ -248,10 +251,10 @@ func samlAttrValues(attr saml.Attribute) []string {
 // ---------------------------------------------------------------------------
 
 var (
-	spKeyOnce  sync.Once
-	spKeyCache *rsa.PrivateKey
+	spKeyOnce   sync.Once
+	spKeyCache  *rsa.PrivateKey
 	spCertCache *x509.Certificate
-	spKeyErr   error
+	spKeyErr    error
 )
 
 // ensureSPKeyPair returns the SP's RSA private key and self-signed certificate.
