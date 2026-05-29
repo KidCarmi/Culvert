@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -47,6 +48,10 @@ type CertManager struct {
 	keyProvider KeyProvider // optional external HSM/KMS signer
 	cache       map[string]*certCacheEntry
 	cacheOrder  []string // insertion order for LRU eviction
+
+	// Leaf-cache effectiveness counters (CA-2). Lock-free; no identity data.
+	cacheHits   atomic.Int64
+	cacheMisses atomic.Int64
 
 	// Dual-CA overlap: secondary (old) CA kept during rotation window.
 	// Leaf certs include both CAs in the chain so clients trusting either
@@ -610,9 +615,14 @@ func (cm *CertManager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, er
 	if entry, ok := cm.cache[host]; ok && now.Sub(entry.createdAt) < certCacheTTL &&
 		(entry.cert.Leaf == nil || now.Before(entry.cert.Leaf.NotAfter)) {
 		cm.mu.RUnlock()
+		cm.cacheHits.Add(1)
 		return entry.cert, nil
 	}
 	cm.mu.RUnlock()
+
+	// Cache did not serve the request (absent, TTL-expired, or leaf-expired) —
+	// count the miss independent of whether the sign below then succeeds.
+	cm.cacheMisses.Add(1)
 
 	cert, err := cm.signLeaf(host)
 	if err != nil {
@@ -649,6 +659,15 @@ func (cm *CertManager) CertCacheLen() int {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	return len(cm.cache)
+}
+
+// CacheStats returns (hits, misses, currentSize) for the leaf-cert cache (CA-2).
+// Hits/misses are lock-free atomics; size is read under the cache lock.
+func (cm *CertManager) CacheStats() (hits, misses int64, size int) {
+	cm.mu.RLock()
+	size = len(cm.cache)
+	cm.mu.RUnlock()
+	return cm.cacheHits.Load(), cm.cacheMisses.Load(), size
 }
 
 // ClearCache removes all cached leaf certificates.
