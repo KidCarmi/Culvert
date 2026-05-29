@@ -164,36 +164,42 @@ func (s *SaaSFeedSyncer) Sync(ctx context.Context) {
 	}
 
 	if !validSaaSFeedURL.MatchString(feedURL) {
+		statSaaSFeedSyncFailures.Add(1)
 		logger.Printf("SaaSFeed: invalid URL: %s", sanitizeLog(feedURL))
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
+		statSaaSFeedSyncFailures.Add(1)
 		logger.Printf("SaaSFeed: request error: %v", err)
 		return
 	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		statSaaSFeedSyncFailures.Add(1)
 		logger.Printf("SaaSFeed: fetch error: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		statSaaSFeedSyncFailures.Add(1)
 		logger.Printf("SaaSFeed: HTTP %d from %s", resp.StatusCode, sanitizeLog(feedURL))
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10 MB cap
 	if err != nil {
+		statSaaSFeedSyncFailures.Add(1)
 		logger.Printf("SaaSFeed: read error: %v", err)
 		return
 	}
 
 	var categories []CategoryEntry
 	if err := json.Unmarshal(body, &categories); err != nil {
+		statSaaSFeedSyncFailures.Add(1)
 		logger.Printf("SaaSFeed: parse error: %v", err)
 		return
 	}

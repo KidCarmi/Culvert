@@ -163,12 +163,14 @@ func (fs *FeedSyncer) Sync() {
 
 	entries, err := downloadAndParse(fs.feedURL)
 	if err != nil {
+		statCategoryFeedSyncFailures.Add(1)
 		logger.Printf("FeedSync: download/parse failed: %v", err)
 		return
 	}
 	logger.Printf("FeedSync: parsed %d domain entries, writing to BadgerDB…", len(entries))
 
 	if err := fs.db.BulkWrite(entries); err != nil {
+		statCategoryFeedSyncFailures.Add(1)
 		logger.Printf("FeedSync: bulk write failed: %v", err)
 		return
 	}
