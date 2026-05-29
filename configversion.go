@@ -34,7 +34,7 @@ type ConfigVersion struct {
 }
 
 var (
-	configVersionMu sync.Mutex
+	configVersionMu  sync.Mutex
 	configVersionSeq int
 )
 
@@ -313,8 +313,8 @@ func validateConfigBackup(b *configBackup) []string {
 		warnings = append(warnings, fmt.Sprintf("invalid blocklist mode %q", b.BlocklistMode))
 	}
 
-	// Check default policy action is valid.
-	if b.DefaultAction != "" && b.DefaultAction != "allow" && b.DefaultAction != "block" {
+	// "deny" is the canonical runtime value; "block" is accepted for legacy snapshots.
+	if b.DefaultAction != "" && b.DefaultAction != "allow" && b.DefaultAction != "deny" && b.DefaultAction != "block" {
 		warnings = append(warnings, fmt.Sprintf("invalid default action %q", b.DefaultAction))
 	}
 
