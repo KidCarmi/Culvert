@@ -262,7 +262,7 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) { //nolint:errcheck /
 	bytesSent      := atomic.LoadInt64(&statBytesSent)
 	bytesRecv      := atomic.LoadInt64(&statBytesRecv)
 	feedEntries, _, _ := globalThreatFeed.Stats()
-	_, _, cacheSize := globalSecScanner.cache.Stats()
+	cacheHits, cacheMisses, cacheSize := globalSecScanner.cache.Stats()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
@@ -329,6 +329,14 @@ culvert_threat_feed_blocked_total %d
 # TYPE culvert_threat_feed_entries gauge
 culvert_threat_feed_entries %d
 
+# HELP culvert_scan_cache_hits_total Total SHA256 scan-cache hits (decision reused without rescanning)
+# TYPE culvert_scan_cache_hits_total counter
+culvert_scan_cache_hits_total %d
+
+# HELP culvert_scan_cache_misses_total Total SHA256 scan-cache misses (required a fresh scan)
+# TYPE culvert_scan_cache_misses_total counter
+culvert_scan_cache_misses_total %d
+
 # HELP culvert_scan_cache_size Current number of entries in the SHA256 scan result cache
 # TYPE culvert_scan_cache_size gauge
 culvert_scan_cache_size %d
@@ -351,6 +359,8 @@ culvert_bytes_recv_total %d
 		yaraBlocked,
 		feedBlocked,
 		feedEntries,
+		cacheHits,
+		cacheMisses,
 		int64(cacheSize),
 		bytesSent,
 		bytesRecv,
