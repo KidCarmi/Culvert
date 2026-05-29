@@ -399,6 +399,7 @@ culvert_bytes_recv_total %d
 	urlcatWritePrometheus(&ruleMetBuf)
 	caWritePrometheus(&ruleMetBuf)
 	certSignHist.WritePrometheus(&ruleMetBuf)
+	clusterWritePrometheus(&ruleMetBuf)
 	cdrWritePrometheus(&ruleMetBuf)
 	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
 }
