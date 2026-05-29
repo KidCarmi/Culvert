@@ -801,6 +801,7 @@ func initURLCategories(s *startupState) {
 			}
 		}
 		s.feedSyncer = newFeedSyncer(communityDB, *s.catFeedURL, syncD)
+		globalUT1FeedSyncer = s.feedSyncer // UC-6: expose Stats() to /metrics
 		s.feedSyncer.Start(appLifecycleCtx)
 		logger.Printf("CatFeedDB: BadgerDB at %s, sync every %s", *s.catFeedDB, syncD)
 	}
