@@ -1064,6 +1064,12 @@ func recoverClusterUpdate() {
 
 // apiClusterUpdate starts a rolling cluster update.
 // POST /api/update/cluster
+//
+// Intentionally OUT of the config-version rollback surface — rolling
+// update is a lifecycle action; clusterUpdateState is runtime-only and
+// there is no durable config to version. Do NOT add saveConfigVersion
+// here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (runtime/lifecycle).
 func apiClusterUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

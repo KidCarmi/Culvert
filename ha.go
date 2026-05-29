@@ -380,6 +380,11 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiClusterHAEnable enables HA mode at runtime from the admin GUI.
+//
+// Intentionally OUT of the config-version rollback surface — runtime
+// lifecycle action (HA leader-election state is ephemeral; no durable
+// config to version). Do NOT add saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (runtime/lifecycle).
 func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		LeaderAddr string `json:"leader_addr"` // this leader's externally reachable gRPC address
