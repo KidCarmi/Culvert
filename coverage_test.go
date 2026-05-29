@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ─── SSE hub (events.go) ─────────────────────────────────────────────────────
@@ -337,6 +338,51 @@ func TestHandleMetrics_WithToken_Unauthorized(t *testing.T) {
 	handleMetrics(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("handleMetrics with wrong token status = %d, want 401", w.Code)
+	}
+}
+
+// TestHandleMetrics_ScanCacheHitsMisses verifies SC-2: the scan hash-cache
+// hit/miss counters (already tracked by HashCache) are rendered to /metrics,
+// not just culvert_scan_cache_size. Drives the cache to a known, distinct
+// state (2 hits, 3 misses, 1 entry) so the assertions can't accidentally match
+// another metric's value, then scrapes /metrics and asserts all three lines.
+// Fails if the hit/miss render lines are removed.
+func TestHandleMetrics_ScanCacheHitsMisses(t *testing.T) {
+	oldTok := metricsToken
+	oldSec := globalSecScanner
+	t.Cleanup(func() {
+		metricsToken = oldTok
+		globalSecScanner = oldSec
+	})
+	metricsToken = ""
+
+	cache := newHashCache(10, time.Hour)
+	cache.Set("present", ScanCacheResult{Clean: true, Source: "clean"})
+	cache.Get("present")               // hit 1
+	cache.Get("present")               // hit 2
+	cache.Get("absent-1")              // miss 1
+	cache.Get("absent-2")              // miss 2
+	cache.Get("absent-3")              // miss 3
+	globalSecScanner = &SecurityScanner{cache: cache}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
+	handleMetrics(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleMetrics status = %d, want 200", w.Code)
+	}
+
+	body := w.Body.String()
+	for _, want := range []string{
+		"# TYPE culvert_scan_cache_hits_total counter",
+		"culvert_scan_cache_hits_total 2",
+		"# TYPE culvert_scan_cache_misses_total counter",
+		"culvert_scan_cache_misses_total 3",
+		"culvert_scan_cache_size 1", // preserved existing gauge
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("handleMetrics body missing %q\n--- body ---\n%s", want, body)
+		}
 	}
 }
 
