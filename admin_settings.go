@@ -257,10 +257,17 @@ func SaveAdminSettings() {
 	// Rewrite rules
 	s.RewriteRules = rewriter.List()
 
-	// Blocklist feed
-	feedURL, _, _, feedInterval := blFeedSyncer.Stats()
-	if feedURL != "" {
-		s.BlocklistFeedURL = feedURL
+	// Blocklist feed. blFeedSyncer is nil until main() runs loadBlocklistFeed,
+	// and SaveAdminSettings can run from a detached goroutine (adminSettingsSave)
+	// that outlives the caller — so guard against nil rather than deref it,
+	// mirroring the globalSyslog guard above.
+	var feedInterval time.Duration
+	if blFeedSyncer != nil {
+		feedURL, _, _, fi := blFeedSyncer.Stats()
+		feedInterval = fi
+		if feedURL != "" {
+			s.BlocklistFeedURL = feedURL
+		}
 	}
 
 	// SaaS feed
