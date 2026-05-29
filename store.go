@@ -865,7 +865,21 @@ func (b *Blocklist) ReplaceFeedEntries(hosts []string) {
 }
 
 // AddManual adds a host and marks it as manually managed by an admin.
-// Unlike Add (used by the feed syncer), this persists the source attribution.
+// Unlike Add (used by the feed syncer), this persists both the source
+// attribution (the .manual sidecar via saveManual) AND the enforcement
+// state (the main blocklist file via Save). The dual save makes the call
+// self-durable so a caller path that bails before its own deferred Save
+// (e.g. the apiBlocklist POST handler returning early on an invalid
+// wildcard mid-loop, ui_policy.go) cannot leave manual entries in
+// memory + sidecar but missing from the main file — which would not
+// survive restart, because Load reads the main file into b.exact /
+// b.wildcards (the maps IsBlocked consults) and the .manual sidecar
+// only restores attribution metadata.
+//
+// For bulk admin requests, prefer AddManualBulk: it does one save for
+// N hosts instead of N saves, avoiding the O(hosts × blocklist-size)
+// rewrite when the main file is large (e.g. a feed-backed blocklist
+// with hundreds of thousands of entries). Codex P2 review on PR #283.
 func (b *Blocklist) AddManual(host string) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	b.mu.Lock()
@@ -877,6 +891,76 @@ func (b *Blocklist) AddManual(host string) {
 	b.manual[host] = true
 	b.mu.Unlock()
 	b.saveManual()
+	b.Save()
+}
+
+// AddManualBulk adds multiple hosts as manually-managed admin entries
+// under a single write lock with a single saveManual + single Save call,
+// instead of one save per host. Use this for bulk admin requests; the
+// per-host normalization and dedupe match AddManual exactly (lowercase
+// + trim, empty hosts skipped, "*." → wildcard, otherwise exact). The
+// caller is responsible for any validation (length cap, wildcard
+// format) before invoking this method — invalid entries reaching here
+// are silently accepted, mirroring AddManual.
+//
+// Returns the number of unique normalized entries actually stored by
+// THIS call — i.e. hosts whose admin attribution (b.manual) went from
+// false to true. Within-batch duplicates count once; cross-call repeats
+// of an already-attributed host count as 0. This matches the caller's
+// expectation that "added: N" in the API response and audit line
+// reflects net new admin entries, not raw non-empty input count. A
+// zero return means no on-disk write happens, so calling with an empty
+// or all-blank slice (or an all-duplicates slice) is a cheap no-op.
+//
+// Added per the Codex P2 review on PR #283: with per-call Save() inside
+// AddManual, a bulk POST of N hosts to a feed-backed blocklist rewrote
+// the entire main file N times (O(hosts × blocklist-size) disk work).
+// This save-once path preserves the durability guarantee while keeping
+// bulk cost O(blocklist-size).
+func (b *Blocklist) AddManualBulk(hosts []string) int {
+	if len(hosts) == 0 {
+		return 0
+	}
+	added := 0
+	// dirty tracks whether ANY map (b.exact, b.wildcards, b.manual)
+	// flipped a key from false to true during this call. Save() must
+	// run on any flip — not only on a b.manual flip — so that recovery
+	// paths (e.g. a pre-fix-era stale main file where b.manual still
+	// has an entry but b.exact lost it) re-persist the now-corrected
+	// enforcement state. added is kept separate because it only counts
+	// net new admin attributions (b.manual false→true), which is the
+	// honest "stored by this call" number the API response and audit
+	// line should report.
+	dirty := false
+	b.mu.Lock()
+	for _, host := range hosts {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" {
+			continue
+		}
+		if strings.HasPrefix(host, "*.") {
+			if !b.wildcards[host[1:]] {
+				b.wildcards[host[1:]] = true
+				dirty = true
+			}
+		} else {
+			if !b.exact[host] {
+				b.exact[host] = true
+				dirty = true
+			}
+		}
+		if !b.manual[host] {
+			b.manual[host] = true
+			dirty = true
+			added++
+		}
+	}
+	b.mu.Unlock()
+	if dirty {
+		b.saveManual()
+		b.Save()
+	}
+	return added
 }
 
 // saveManual persists the set of manually-added hosts to a sidecar file.

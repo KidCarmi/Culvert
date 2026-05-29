@@ -88,6 +88,13 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		if body.Host != "" {
 			body.Hosts = append(body.Hosts, body.Host)
 		}
+		// Validate-first: collect normalized valid hosts; bail with 400
+		// on the first invalid wildcard so a bad entry mid-list never
+		// causes a partial mutation. Once all hosts validate, AddManualBulk
+		// does ONE save+sidecar write for the whole batch instead of N
+		// (Codex P2 on PR #283: per-host Save() turned bulk into
+		// O(hosts × blocklist-size) disk work on feed-backed blocklists).
+		valid := make([]string, 0, len(body.Hosts))
 		for _, h := range body.Hosts {
 			h = strings.TrimSpace(h)
 			if h == "" {
@@ -104,11 +111,12 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			bl.AddManual(h)
-			logger.Printf("UI: blocked %q", sanitizeLog(h))
-			added++
+			valid = append(valid, h)
 		}
-		bl.Save()
+		added = bl.AddManualBulk(valid)
+		for _, h := range valid {
+			logger.Printf("UI: blocked %q", sanitizeLog(h))
+		}
 		auditEvent(r, "blocklist.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
 		saveConfigVersion(sessionAdmin(r), "blocklist.add")
 		jsonOK(w, map[string]any{"added": added})
