@@ -109,6 +109,33 @@ func TestSAMLExchangeAssertionRequiresKnownState(t *testing.T) {
 	}
 }
 
+func TestSAMLExchangeAssertionRejectsExpiredState(t *testing.T) {
+	resetSAMLStateStore(t)
+	globalSAMLStateStore.set("expired-state", &samlStateEntry{
+		requestID:  "request-a",
+		relayURL:   "https://app.example/",
+		providerID: "corp-saml",
+		createdAt:  time.Now().Add(-samlStateTTL - time.Minute),
+	})
+	prov := testSAMLRedirectProvider(t)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
+		"RelayState":   {"expired-state"},
+		"SAMLResponse": {"not-base64"},
+	}.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	id, relay, err := prov.ExchangeAssertion(r)
+	if err == nil {
+		t.Fatal("expected expired SAML state to fail")
+	}
+	if id != nil || relay != "" {
+		t.Fatalf("got id=%+v relay=%q, want no identity or relay on expired state", id, relay)
+	}
+	if _, ok := globalSAMLStateStore.peek("expired-state"); ok {
+		t.Fatal("expired state should be removed")
+	}
+}
+
 func TestSAMLExchangeAssertionProviderMismatchDoesNotConsumeState(t *testing.T) {
 	resetSAMLStateStore(t)
 	globalSAMLStateStore.set("state-a", &samlStateEntry{

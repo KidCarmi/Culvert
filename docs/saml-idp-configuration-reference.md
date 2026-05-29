@@ -61,9 +61,11 @@ Any standards-compliant IdP requires at minimum:
 | **ACS URL** | `https://<base_url>/saml/acs` | HTTP-POST binding required |
 | **NameID Format** | `emailAddress` or `persistent` | Must match `nameIdFormat` config |
 | **SP Certificate** | Optional PEM cert from metadata | Only if IdP validates signed requests |
-| **Relay State** | Optional; set if IdP requires a default landing path | Passed through unchanged |
+| **Relay State** | Leave blank | Culvert supplies an opaque RelayState for each SP-initiated login |
 
 Binding: always use **HTTP-POST** for the ACS. HTTP-Redirect is only for the AuthnRequest.
+Do not configure an IdP default RelayState as a landing page; Culvert accepts only the
+opaque RelayState that it generated for the matching AuthnRequest.
 
 ### Attributes Sent in the Assertion
 
@@ -106,7 +108,7 @@ Path: **Applications → Applications → Create App Integration → SAML 2.0**
 | **Audience URI (SP Entity ID)** | `https://<base_url>/saml/metadata` |
 | **Name ID format** | `EmailAddress` (recommended) |
 | **Application username** | `Email` |
-| **Default RelayState** | Optional; set to your post-login landing page |
+| **Default RelayState** | Leave blank |
 | **Attribute Statements** | Add custom user attributes (see below) |
 | **Group Attribute Statements** | Add a group statement (see below) |
 

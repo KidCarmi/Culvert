@@ -95,7 +95,7 @@ func (p *SAMLProvider) Verify(_, _ string) bool { return false }
 func (p *SAMLProvider) ResolveIdentity(_, _ string) (*Identity, bool) { return nil, false }
 
 // CaptiveLoginURL generates a SAML AuthnRequest and returns the redirect URL.
-// relayURL is encoded as the SAMLRequest RelayState and returned after callback.
+// relayURL is stored server-side; RelayState carries an opaque request handle.
 func (p *SAMLProvider) CaptiveLoginURL(relayURL string, _ *http.Request) string {
 	authReq, err := p.sp.MakeAuthenticationRequest(
 		p.sp.GetSSOBindingLocation(saml.HTTPRedirectBinding),
