@@ -288,7 +288,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/security-scan/feeds/domain-allowlist", Handler: "apiDomainAllowlist", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
-			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, Note: "no direct auditEvent observed (delegated)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
 	{Path: "/api/security-scan/yara/reload", Handler: "apiSecYARAReload", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
