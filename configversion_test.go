@@ -267,3 +267,29 @@ func TestApiConfigDiff_VersionNotFound(t *testing.T) {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
+
+func TestValidateConfigBackup_DefaultAction(t *testing.T) {
+	cases := []struct {
+		action  string
+		wantErr bool
+	}{
+		{"", false},
+		{"allow", false},
+		{"deny", false},
+		{"block", false},
+		{"reject", true},
+	}
+	for _, tc := range cases {
+		b := &configBackup{DefaultAction: tc.action}
+		warns := validateConfigBackup(b)
+		hasErr := false
+		for _, w := range warns {
+			if strings.Contains(w, "default action") {
+				hasErr = true
+			}
+		}
+		if hasErr != tc.wantErr {
+			t.Errorf("DefaultAction=%q: wantErr=%v got warns=%v", tc.action, tc.wantErr, warns)
+		}
+	}
+}
