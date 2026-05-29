@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -45,7 +46,7 @@ func TestCAMetrics_CacheHitMissAndSize(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)
 	handleMetrics(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("handleMetrics status = %d, want 200", w.Code)
