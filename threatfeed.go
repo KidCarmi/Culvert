@@ -40,10 +40,17 @@ type feedEntry struct {
 
 // feedDB is the on-disk persistence format.
 type feedDB struct {
-	LastSync        time.Time            `json:"last_sync"`
-	URLs            map[string]feedEntry `json:"urls"`
-	Domains         map[string]feedEntry `json:"domains"`
-	DomainAllowlist []string             `json:"domain_allowlist,omitempty"`
+	LastSync time.Time            `json:"last_sync"`
+	URLs     map[string]feedEntry `json:"urls"`
+	Domains  map[string]feedEntry `json:"domains"`
+	// DomainAllowlist persists the admin-managed allowlist. Tag has NO
+	// `omitempty` so an admin-cleared (zero-entry) allowlist serializes
+	// as `"domain_allowlist": []` and round-trips through loadFromDisk
+	// as an explicit wipe — not as "field absent" which loadFromDisk
+	// treats as "keep the seeded defaults". Pre-fix this combination
+	// silently reverted explicit clears on every restart; see
+	// roadmap/DOMAIN-ALLOWLIST-ROLLBACK-CLASSIFICATION.md §3.3.
+	DomainAllowlist []string `json:"domain_allowlist"`
 }
 
 // ThreatFeed manages local copies of public threat intelligence lists.
@@ -398,8 +405,16 @@ func (tf *ThreatFeed) loadFromDisk(path string) error {
 	tf.urls = db.URLs
 	tf.domains = db.Domains
 	tf.lastSync = db.LastSync
-	// Restore persisted allowlist if present; otherwise keep seeded defaults.
-	if len(db.DomainAllowlist) > 0 {
+	// Restore the persisted allowlist. The guard keys on nil, not
+	// len()==0, so an admin-cleared explicit-empty `[]` (saved as
+	// `"domain_allowlist": []` per the no-omitempty tag) replaces the
+	// seeded defaults — i.e. the admin's clear survives restart. A nil
+	// value (field absent: legacy save from before the omitempty fix, or
+	// any pre-allowlist DB shape) is treated as "keep the seeded
+	// defaults", preserving backward compatibility. Mirrors the
+	// nil-vs-empty contract used by the rollback-surface stores
+	// (CategoryGroups / URLCategories / RateLimitExempt).
+	if db.DomainAllowlist != nil {
 		tf.domainAllowlist = make(map[string]bool, len(db.DomainAllowlist))
 		for _, d := range db.DomainAllowlist {
 			tf.domainAllowlist[strings.ToLower(d)] = true
