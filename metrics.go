@@ -370,6 +370,7 @@ culvert_bytes_recv_total %d
 	ruleMet.WritePrometheus(&ruleMetBuf)
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
+	caWritePrometheus(&ruleMetBuf)
 	cdrWritePrometheus(&ruleMetBuf)
 	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
 }
