@@ -865,7 +865,16 @@ func (b *Blocklist) ReplaceFeedEntries(hosts []string) {
 }
 
 // AddManual adds a host and marks it as manually managed by an admin.
-// Unlike Add (used by the feed syncer), this persists the source attribution.
+// Unlike Add (used by the feed syncer), this persists both the source
+// attribution (the .manual sidecar via saveManual) AND the enforcement
+// state (the main blocklist file via Save). The dual save makes the call
+// self-durable so a caller path that bails before its own deferred Save
+// (e.g. the apiBlocklist POST handler returning early on an invalid
+// wildcard mid-loop, ui_policy.go) cannot leave manual entries in
+// memory + sidecar but missing from the main file — which would not
+// survive restart, because Load reads the main file into b.exact /
+// b.wildcards (the maps IsBlocked consults) and the .manual sidecar
+// only restores attribution metadata.
 func (b *Blocklist) AddManual(host string) {
 	host = strings.ToLower(strings.TrimSpace(host))
 	b.mu.Lock()
@@ -877,6 +886,7 @@ func (b *Blocklist) AddManual(host string) {
 	b.manual[host] = true
 	b.mu.Unlock()
 	b.saveManual()
+	b.Save()
 }
 
 // saveManual persists the set of manually-added hosts to a sidecar file.
