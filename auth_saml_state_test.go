@@ -1,0 +1,160 @@
+package main
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/crewjam/saml"
+)
+
+func resetSAMLStateStore(t *testing.T) {
+	t.Helper()
+	orig := globalSAMLStateStore
+	globalSAMLStateStore = &samlStateStore{entries: make(map[string]*samlStateEntry)}
+	t.Cleanup(func() {
+		globalSAMLStateStore = orig
+	})
+}
+
+func testSAMLRedirectProvider(t *testing.T, providerID string) *SAMLProvider {
+	t.Helper()
+	metadataURL, err := url.Parse("https://proxy.example/saml/metadata")
+	if err != nil {
+		t.Fatalf("metadata URL parse: %v", err)
+	}
+	acsURL, err := url.Parse("https://proxy.example/auth/saml/callback")
+	if err != nil {
+		t.Fatalf("ACS URL parse: %v", err)
+	}
+	return &SAMLProvider{
+		profile: &IdPProfile{ID: providerID, Type: IdPTypeSAML},
+		cfg:     &SAMLProfileConfig{},
+		sp: &saml.ServiceProvider{
+			MetadataURL:       *metadataURL,
+			AcsURL:            *acsURL,
+			AuthnNameIDFormat: saml.EmailAddressNameIDFormat,
+			IDPMetadata: &saml.EntityDescriptor{
+				EntityID: "https://idp.example/metadata",
+				IDPSSODescriptors: []saml.IDPSSODescriptor{
+					{
+						SingleSignOnServices: []saml.Endpoint{
+							{Binding: saml.HTTPRedirectBinding, Location: "https://idp.example/sso"},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestSAMLCaptiveLoginURLStoresRequestIDInRelayState(t *testing.T) {
+	resetSAMLStateStore(t)
+	prov := testSAMLRedirectProvider(t, "corp-saml")
+	relayURL := "https://app.example/protected"
+
+	loginURL := prov.CaptiveLoginURL(relayURL, httptest.NewRequest(http.MethodGet, "/", nil))
+	if loginURL == "" {
+		t.Fatal("CaptiveLoginURL returned empty URL")
+	}
+	u, err := url.Parse(loginURL)
+	if err != nil {
+		t.Fatalf("login URL parse: %v", err)
+	}
+	if u.Host != "idp.example" {
+		t.Fatalf("login URL host = %q, want idp.example", u.Host)
+	}
+	state := u.Query().Get("RelayState")
+	if state == "" {
+		t.Fatal("RelayState was not set")
+	}
+	if state == relayURL {
+		t.Fatal("RelayState should be an opaque state handle, not the raw relay URL")
+	}
+
+	entry, ok := globalSAMLStateStore.peek(state)
+	if !ok {
+		t.Fatal("RelayState did not map to a stored SAML request")
+	}
+	if entry.providerID != "corp-saml" {
+		t.Fatalf("providerID = %q, want corp-saml", entry.providerID)
+	}
+	if entry.relayURL != relayURL {
+		t.Fatalf("relayURL = %q, want %q", entry.relayURL, relayURL)
+	}
+	if entry.requestID == "" {
+		t.Fatal("requestID was not stored")
+	}
+}
+
+func TestSAMLExchangeAssertionRequiresKnownState(t *testing.T) {
+	resetSAMLStateStore(t)
+	prov := testSAMLRedirectProvider(t, "corp-saml")
+	r := httptest.NewRequest(http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
+		"RelayState":   {"missing"},
+		"SAMLResponse": {"not-base64"},
+	}.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	id, relay, err := prov.ExchangeAssertion(r)
+	if err == nil {
+		t.Fatal("expected missing SAML state to fail")
+	}
+	if id != nil || relay != "" {
+		t.Fatalf("got id=%+v relay=%q, want no identity or relay on failure", id, relay)
+	}
+}
+
+func TestSAMLExchangeAssertionProviderMismatchDoesNotConsumeState(t *testing.T) {
+	resetSAMLStateStore(t)
+	globalSAMLStateStore.set("state-a", &samlStateEntry{
+		requestID:  "request-a",
+		relayURL:   "https://app.example/",
+		providerID: "other-saml",
+		createdAt:  time.Now(),
+	})
+	prov := testSAMLRedirectProvider(t, "corp-saml")
+	r := httptest.NewRequest(http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
+		"RelayState":   {"state-a"},
+		"SAMLResponse": {"not-base64"},
+	}.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	_, _, err := prov.ExchangeAssertion(r)
+	if err == nil {
+		t.Fatal("expected provider mismatch to fail")
+	}
+	if _, ok := globalSAMLStateStore.peek("state-a"); !ok {
+		t.Fatal("provider mismatch should not consume state before authSAMLCallback tries the owning provider")
+	}
+}
+
+func TestSAMLExchangeAssertionConsumesStateBeforeValidation(t *testing.T) {
+	resetSAMLStateStore(t)
+	globalSAMLStateStore.set("state-a", &samlStateEntry{
+		requestID:  "request-a",
+		relayURL:   "https://app.example/",
+		providerID: "corp-saml",
+		createdAt:  time.Now(),
+	})
+	prov := testSAMLRedirectProvider(t, "corp-saml")
+	r := httptest.NewRequest(http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
+		"RelayState":   {"state-a"},
+		"SAMLResponse": {"not-base64"},
+	}.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	id, relay, err := prov.ExchangeAssertion(r)
+	if err == nil {
+		t.Fatal("expected malformed SAMLResponse to fail")
+	}
+	if id != nil || relay != "" {
+		t.Fatalf("got id=%+v relay=%q, want no identity or relay on failure", id, relay)
+	}
+	if _, ok := globalSAMLStateStore.peek("state-a"); ok {
+		t.Fatal("state should be consumed before SAML response validation to prevent callback replay")
+	}
+}

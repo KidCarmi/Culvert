@@ -106,8 +106,16 @@ func (p *SAMLProvider) CaptiveLoginURL(relayURL string, _ *http.Request) string 
 		logger.Printf("SAML[%s] AuthnRequest error: %v", p.profile.ID, err)
 		return ""
 	}
-	redirectURL, err := authReq.Redirect(relayURL, p.sp)
+	state := mustRandHex(16)
+	globalSAMLStateStore.set(state, &samlStateEntry{
+		requestID:  authReq.ID,
+		relayURL:   relayURL,
+		providerID: p.profile.ID,
+		createdAt:  time.Now(),
+	})
+	redirectURL, err := authReq.Redirect(state, p.sp)
 	if err != nil {
+		globalSAMLStateStore.pop(state)
 		logger.Printf("SAML[%s] redirect build error: %v", p.profile.ID, err)
 		return ""
 	}
@@ -120,9 +128,22 @@ func (p *SAMLProvider) ExchangeAssertion(r *http.Request) (*Identity, string, er
 	if err := r.ParseForm(); err != nil {
 		return nil, "", fmt.Errorf("saml callback: form parse: %w", err)
 	}
-	relayState := r.FormValue("RelayState")
+	state := r.FormValue("RelayState")
+	entry, ok := globalSAMLStateStore.peek(state)
+	if !ok {
+		return nil, "", fmt.Errorf("saml callback: invalid or expired state")
+	}
+	if entry.providerID != p.profile.ID {
+		return nil, "", fmt.Errorf("saml callback: state belongs to different provider")
+	}
+	// authSAMLCallback tries each SAML provider; consume only after the
+	// state proves this provider owns the original AuthnRequest.
+	entry, ok = globalSAMLStateStore.pop(state)
+	if !ok {
+		return nil, "", fmt.Errorf("saml callback: invalid or expired state")
+	}
 
-	assertion, err := p.sp.ParseResponse(r, nil)
+	assertion, err := p.sp.ParseResponse(r, []string{entry.requestID})
 	if err != nil {
 		return nil, "", fmt.Errorf("saml response validation: %w", err)
 	}
@@ -130,7 +151,72 @@ func (p *SAMLProvider) ExchangeAssertion(r *http.Request) (*Identity, string, er
 	if err := requireStableSAMLIdentity(id); err != nil {
 		return nil, "", err
 	}
-	return id, relayState, nil
+	return id, entry.relayURL, nil
+}
+
+type samlStateEntry struct {
+	requestID  string
+	relayURL   string
+	providerID string
+	createdAt  time.Time
+}
+
+type samlStateStore struct {
+	mu      sync.Mutex
+	entries map[string]*samlStateEntry
+}
+
+const samlStateTTL = 10 * time.Minute
+const samlStateStoreMax = 1000
+
+var globalSAMLStateStore = &samlStateStore{entries: make(map[string]*samlStateEntry)}
+
+func (s *samlStateStore) set(state string, e *samlStateEntry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.entries) >= samlStateStoreMax {
+		now := time.Now()
+		for k, v := range s.entries {
+			if now.After(v.createdAt.Add(samlStateTTL)) {
+				delete(s.entries, k)
+			}
+		}
+		if len(s.entries) >= samlStateStoreMax {
+			for k := range s.entries {
+				delete(s.entries, k)
+				break
+			}
+		}
+	}
+	s.entries[state] = e
+}
+
+func (s *samlStateStore) peek(state string) (*samlStateEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[state]
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.createdAt) > samlStateTTL {
+		delete(s.entries, state)
+		return nil, false
+	}
+	return e, true
+}
+
+func (s *samlStateStore) pop(state string) (*samlStateEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[state]
+	if !ok {
+		return nil, false
+	}
+	delete(s.entries, state)
+	if time.Since(e.createdAt) > samlStateTTL {
+		return nil, false
+	}
+	return e, true
 }
 
 // ---------------------------------------------------------------------------
