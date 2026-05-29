@@ -1,7 +1,10 @@
 package main
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/crewjam/saml"
 )
 
 // ─── stringsEqualFold ─────────────────────────────────────────────────────────
@@ -60,6 +63,20 @@ func TestIdPRegistry_Upsert_ValidationErrors(t *testing.T) {
 	// Bad type
 	if err := r.Upsert(&IdPProfile{Name: "test", Type: "unknown"}); err == nil {
 		t.Error("Upsert with unknown type should fail")
+	}
+}
+
+func TestIdPRegistry_Upsert_RejectsUnstableSAMLNameIDFormat(t *testing.T) {
+	r := newTestRegistry()
+	p := samlProfile("bad-nameid", "Bad NameID")
+	p.SAML.NameIDFormat = string(saml.TransientNameIDFormat)
+
+	err := r.Upsert(p)
+	if err == nil {
+		t.Fatal("expected transient SAML NameIDFormat to fail validation")
+	}
+	if !strings.Contains(err.Error(), "name_id_format") {
+		t.Fatalf("error = %v, want name_id_format validation", err)
 	}
 }
 
