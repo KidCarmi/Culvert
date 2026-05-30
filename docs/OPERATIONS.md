@@ -168,6 +168,11 @@ Run these once when bringing up a new node, in order:
 7. **Open the Diagnostics page** (Infrastructure → Diagnostics). Resolve
    any `fail` entries before exposing the proxy to clients. Decide
    consciously about each `warn`.
+8. **SAML behind a load balancer.** If SAML IdPs are enabled in a clustered
+   or load-balanced deployment, configure affinity for the browser SSO path,
+   especially `/auth/saml/callback`. Culvert keeps SAML AuthnRequest state
+   in memory for one-time replay protection, so the IdP response must return
+   to the node that initiated the login.
 
 ---
 
