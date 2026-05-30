@@ -333,21 +333,21 @@ func extractSAMLIdentity(a *saml.Assertion, cfg *SAMLProfileConfig, providerID s
 	for _, stmt := range a.AttributeStatements {
 		for _, attr := range stmt.Attributes {
 			vals := samlAttrValues(attr)
-			switch attr.Name {
-			case emailAttr,
+			switch {
+			case samlAttrMatches(attr, emailAttr,
 				"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-				"urn:oid:0.9.2342.19200300.100.1.3":
+				"urn:oid:0.9.2342.19200300.100.1.3"):
 				if id.Email == "" && len(vals) > 0 {
 					id.Email = vals[0]
 				}
-			case nameAttr, "cn", "displayName",
-				"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name":
+			case samlAttrMatches(attr, nameAttr, "cn", "displayName",
+				"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"):
 				if id.Name == "" && len(vals) > 0 {
 					id.Name = vals[0]
 				}
-			case groupsAttr, "memberOf", "Role",
+			case samlAttrMatches(attr, groupsAttr, "memberOf", "Role",
 				"http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
-				"http://schemas.xmlsoap.org/claims/Group":
+				"http://schemas.xmlsoap.org/claims/Group"):
 				id.Groups = append(id.Groups, vals...)
 			}
 		}
@@ -356,6 +356,18 @@ func extractSAMLIdentity(a *saml.Assertion, cfg *SAMLProfileConfig, providerID s
 		id.Sub = id.Email
 	}
 	return id
+}
+
+func samlAttrMatches(attr saml.Attribute, names ...string) bool {
+	for _, name := range names {
+		switch name {
+		case "":
+			continue
+		case attr.Name, attr.FriendlyName:
+			return true
+		}
+	}
+	return false
 }
 
 func requestedSAMLNameIDFormat(cfg *SAMLProfileConfig) string {
