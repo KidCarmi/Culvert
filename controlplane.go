@@ -1212,23 +1212,21 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	if err != nil {
 		c.failCount++
 		logger.Printf("DataPlane: GetConfig error: %v", err)
-		// After 3 consecutive failures, attempt failover to another CP.
-		if c.failCount >= 3 && len(c.addrs) > 1 {
-			if c.failover() {
-				logger.Printf("DataPlane: failover succeeded — retrying GetConfig")
-				// Retry immediately on the new connection.
-				raw, err = c.call(ctx, methodGetConfig, json.RawMessage("{}"))
-				if err != nil {
-					logger.Printf("DataPlane: GetConfig error after failover: %v", err)
-					c.backoff(ctx)
-					return
-				}
-				// Fall through to apply.
-			} else {
-				c.backoff(ctx)
-				return
-			}
-		} else {
+		// Only attempt failover after 3 consecutive failures with a peer to
+		// fail over to; otherwise back off and retry the same CP next tick.
+		if c.failCount < 3 || len(c.addrs) <= 1 {
+			c.backoff(ctx)
+			return
+		}
+		if !c.failover() {
+			c.backoff(ctx)
+			return
+		}
+		logger.Printf("DataPlane: failover succeeded — retrying GetConfig")
+		// Retry immediately on the new connection; on success fall through to apply.
+		raw, err = c.call(ctx, methodGetConfig, json.RawMessage("{}"))
+		if err != nil {
+			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
 			c.backoff(ctx)
 			return
 		}
