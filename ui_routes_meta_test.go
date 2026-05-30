@@ -23,17 +23,18 @@ import (
 // uiAuthMiddleware and per-handler requireRole calls. Phase C2 will
 // flip the enforcement switch.
 
-// TestC1_RouteMetadata_Locked132 enforces two structural invariants on
+// TestC1_RouteMetadata_Locked133 enforces two structural invariants on
 // the uiRoutes table itself:
 //
-//  1. Length is exactly 132 entries.
+//  1. Length is exactly 133 entries.
 //  2. Every Path appears at most once (no accidental duplicates).
 //
 // Count history:
 //   - 131 — pre-C3 baseline (Phase C2/C2c).
 //   - 132 — Phase C3 added /api/governance/control-plane.
-func TestC1_RouteMetadata_Locked132(t *testing.T) {
-	const want = 132
+//   - 133 — SAML SP metadata endpoint added for IdP import.
+func TestC1_RouteMetadata_Locked133(t *testing.T) {
+	const want = 133
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

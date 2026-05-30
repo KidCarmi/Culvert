@@ -20,7 +20,7 @@ prefix in both the SP Entity ID and ACS URL.
 |---|---|---|
 | **SP Entity ID** | `https://<base_url>` | Unique identifier for this SP |
 | **ACS URL** | `https://<base_url>/auth/saml/callback` | Where the IdP POSTs the SAML response |
-| **SP Metadata URL** | Not exposed | Configure the SP values manually in the IdP |
+| **SP Metadata URL** | `https://<base_url>/auth/saml/metadata` | Optional import URL for IdPs that support SP metadata |
 | **SP Signing Certificate** | Not required by default | Only needed if you enable signed AuthnRequests in a future build |
 
 All ACS URLs **must** use HTTPS. HTTP is rejected by the SP and most IdPs.

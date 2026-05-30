@@ -83,6 +83,9 @@ func TestSAMLDocsUseRegisteredCallbackURL(t *testing.T) {
 	if !strings.Contains(doc, "| **SP Entity ID** | `https://<base_url>` |") {
 		t.Fatal("SAML docs should match the runtime SP EntityID")
 	}
+	if !strings.Contains(doc, "| **SP Metadata URL** | `https://<base_url>/auth/saml/metadata` |") {
+		t.Fatal("SAML docs should publish the runtime SP metadata URL")
+	}
 	forbidden := []string{
 		"https://<base_url>/saml/acs",
 		"https://<base_url>/saml/metadata",
