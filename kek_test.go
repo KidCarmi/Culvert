@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -229,6 +230,78 @@ func TestFileKEK_MalformedFileFailsClosed(t *testing.T) {
 	}
 }
 
+func TestFileKEK_TooPermissiveFileFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	kekPath := filepath.Join(dir, "kek.key")
+	// A correctly-sized KEK but group/world-readable (e.g. from a manual
+	// restore). Model B requires 0600; accepting 0644 would leave the wrapping
+	// key exposed, so loading must fail closed.
+	if err := os.WriteFile(kekPath, mustKEK(t, kekLen), 0o644); err != nil {
+		t.Fatalf("seed permissive kek: %v", err)
+	}
+	// os.WriteFile is subject to umask; force the mode explicitly.
+	if err := os.Chmod(kekPath, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	p := newFileKEKProvider(kekPath)
+	if _, err := p.KEK(); err == nil {
+		t.Fatal("expected too-permissive KEK file to fail closed, got nil error")
+	}
+
+	// Tightening to 0600 makes it loadable again (no regeneration).
+	if err := os.Chmod(kekPath, 0o600); err != nil {
+		t.Fatalf("chmod 600: %v", err)
+	}
+	if _, err := p.KEK(); err != nil {
+		t.Fatalf("expected 0600 KEK to load, got %v", err)
+	}
+}
+
+func TestFileKEK_ConcurrentGenerationConverges(t *testing.T) {
+	// Multiple providers racing on first use over the same path must all end up
+	// with the SAME persisted KEK — a race loser must re-read the winner's file,
+	// never return its own orphaned bytes (P1).
+	dir := t.TempDir()
+	kekPath := filepath.Join(dir, "kek.key")
+
+	const n = 8
+	results := make([][]byte, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = newFileKEKProvider(kekPath).KEK()
+		}(i)
+	}
+	wg.Wait()
+
+	for i := range n {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d: %v", i, errs[i])
+		}
+	}
+	// All returned KEKs must be identical and equal to the persisted file.
+	persisted, err := os.ReadFile(kekPath)
+	if err != nil {
+		t.Fatalf("read persisted kek: %v", err)
+	}
+	for i := range n {
+		if !kekEqual(results[i], persisted) {
+			t.Fatalf("goroutine %d returned a KEK that does not match the persisted file (orphaned key)", i)
+		}
+	}
+	// And the file is 0600.
+	fi, err := os.Stat(kekPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("kek file perm = %o, want 0600", perm)
+	}
+}
+
 func TestEnvKEK_RoundTripAndMissing(t *testing.T) {
 	const name = "CULVERT_KEK_TEST"
 	keyHex := hex.EncodeToString(mustKEK(t, kekLen))
@@ -260,7 +333,9 @@ func TestEnvKEK_RoundTripAndMissing(t *testing.T) {
 func TestEnvKEK_MissingAndMalformedFailClosed(t *testing.T) {
 	const name = "CULVERT_KEK_TEST_MISSING"
 	// Ensure unset.
-	os.Unsetenv(name)
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatalf("unsetenv: %v", err)
+	}
 	p := newEnvKEKProvider(name)
 	if _, err := p.KEK(); err == nil {
 		t.Fatal("expected missing env KEK to fail closed")
@@ -285,7 +360,9 @@ func TestResolveKEKProvider_Deterministic(t *testing.T) {
 	const name = "CULVERT_KEK_TEST_RESOLVE"
 
 	// No env set → file provider.
-	os.Unsetenv(name)
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatalf("unsetenv: %v", err)
+	}
 	if p := resolveKEKProvider(name, kekPath); p.Name() != "file" {
 		t.Fatalf("expected file provider when env unset, got %q", p.Name())
 	}

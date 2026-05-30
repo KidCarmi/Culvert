@@ -149,36 +149,90 @@ func newFileKEKProvider(path string) *fileKEKProvider {
 func (p *fileKEKProvider) Name() string { return "file" }
 
 // KEK returns the KEK bytes, generating and persisting a fresh random KEK on
-// first use if the file does not exist. An existing-but-unreadable or
-// wrong-sized file fails closed rather than silently regenerating (which would
-// destroy the ability to decrypt previously-written material).
+// first use if the file does not exist. An existing-but-unreadable, wrong-sized,
+// or too-permissive file fails closed rather than silently regenerating (which
+// would destroy the ability to decrypt previously-written material).
 func (p *fileKEKProvider) KEK() ([]byte, error) {
-	data, err := os.ReadFile(filepath.Clean(p.path)) // filepath.Clean guards path-traversal (G304)
-	switch {
-	case err == nil:
-		if len(data) != kekLen {
-			// Fail closed: a malformed KEK file is not silently replaced, since
-			// doing so would orphan any data already encrypted under the real KEK.
-			return nil, fmt.Errorf("kek: file %q has unexpected size %d (want %d)", p.path, len(data), kekLen)
-		}
-		out := make([]byte, kekLen)
-		copy(out, data)
-		return out, nil
-	case errors.Is(err, os.ErrNotExist):
+	if _, err := os.Stat(p.path); errors.Is(err, os.ErrNotExist) {
 		return p.generate()
-	default:
-		return nil, fmt.Errorf("kek: read key file: %w", err)
 	}
+	return p.load()
 }
 
-// generate creates a fresh random KEK and persists it 0600 via atomicWriteFile.
+// load reads and validates an existing KEK file: it must be exactly kekLen
+// bytes and must NOT be group/other-accessible (model B requires 0600 at rest,
+// ADR §5). A too-permissive file is rejected rather than chmod-fixed, because a
+// world-readable wrapping key may already have been exposed — failing closed
+// forces operator awareness instead of silently masking the exposure.
+func (p *fileKEKProvider) load() ([]byte, error) {
+	fi, err := os.Stat(p.path)
+	if err != nil {
+		return nil, fmt.Errorf("kek: stat key file: %w", err)
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		return nil, fmt.Errorf("kek: file %q has permissions %#o; require 0600 (no group/other access) — run: chmod 600 %q", p.path, perm, p.path)
+	}
+	data, err := os.ReadFile(filepath.Clean(p.path)) // filepath.Clean guards path-traversal (G304)
+	if err != nil {
+		return nil, fmt.Errorf("kek: read key file: %w", err)
+	}
+	if len(data) != kekLen {
+		// Fail closed: a malformed KEK file is not silently replaced, since
+		// doing so would orphan any data already encrypted under the real KEK.
+		return nil, fmt.Errorf("kek: file %q has unexpected size %d (want %d)", p.path, len(data), kekLen)
+	}
+	out := make([]byte, kekLen)
+	copy(out, data)
+	return out, nil
+}
+
+// generate creates a fresh random KEK and persists it 0600.
+//
+// It deliberately does NOT use atomicWriteFile: that helper renames over the
+// destination unconditionally, so two callers racing on first use (two
+// goroutines, or two processes sharing the data dir) could each generate a
+// different KEK and the later rename would orphan the earlier caller's
+// now-unpersisted key. Instead we write a fully-fsynced temp file and publish
+// it with os.Link, which fails with EEXIST if the target already exists. The
+// target therefore only ever appears as a complete file, and a caller that
+// loses the race re-reads the winner's persisted KEK rather than returning its
+// own orphaned bytes.
 func (p *fileKEKProvider) generate() ([]byte, error) {
 	kek := make([]byte, kekLen)
 	if _, err := rand.Read(kek); err != nil {
 		return nil, fmt.Errorf("kek: generate: %w", err)
 	}
-	if err := atomicWriteFile(p.path, kek, 0o600); err != nil {
-		return nil, fmt.Errorf("kek: persist generated key: %w", err)
+	dir := filepath.Dir(p.path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(p.path)+".tmp.*")
+	if err != nil {
+		return nil, fmt.Errorf("kek: create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // best-effort: removes the temp link, leaves the published target
+
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("kek: chmod temp: %w", err)
+	}
+	if _, err := tmp.Write(kek); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("kek: write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("kek: fsync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("kek: close temp: %w", err)
+	}
+
+	if err := os.Link(tmpName, p.path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// Lost the race (or the file appeared concurrently) — load the
+			// winner's complete, persisted KEK.
+			return p.load()
+		}
+		return nil, fmt.Errorf("kek: publish key file: %w", err)
 	}
 	return kek, nil
 }
