@@ -915,7 +915,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 // all visible at one call site. Extracting helpers would scatter the
 // staging contract across functions and obscure the per-pass invariants.
 //
-//nolint:gocognit,cyclop // Two-pass structure (tarball first, walk-
+//nolint:gocognit,cyclop,funlen // Two-pass structure (tarball first, walk-
 func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifest *backupManifest, mode restoreMode) error {
 	// os.Mkdir (exclusive), not os.MkdirAll, for the staging root —
 	// fail closed if a prior failed restore left a same-named dir on

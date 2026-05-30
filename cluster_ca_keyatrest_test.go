@@ -229,7 +229,8 @@ func TestClusterCAKey_WrongKEKFailsClosed(t *testing.T) {
 	}
 }
 
-// TestClusterCAKey_CorruptedCiphertextFailsClosed.
+// TestClusterCAKey_CorruptedCiphertextFailsClosed: a tampered envelope (flipped
+// tag byte) must fail closed on load and leave the CA uninitialized.
 func TestClusterCAKey_CorruptedCiphertextFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(clusterCAEncryptEnvVar, "true")
