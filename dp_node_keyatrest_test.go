@@ -188,7 +188,8 @@ func TestDPNodeKey_MissingKEKFailsClosed(t *testing.T) {
 	}
 }
 
-// TestDPNodeKey_WrongKEKFailsClosed.
+// TestDPNodeKey_WrongKEKFailsClosed: a different KEK cannot decrypt the
+// envelope and must fail closed.
 func TestDPNodeKey_WrongKEKFailsClosed(t *testing.T) {
 	t.Setenv(dpNodeKeyEncryptEnvVar, "true")
 	t.Setenv(envKEKName, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
@@ -219,7 +220,9 @@ func TestDPNodeKey_CorruptedCiphertextFailsClosed(t *testing.T) {
 	}
 }
 
-// TestDPNodeKey_MigrationCreatesReadableBakAndIsIdempotent.
+// TestDPNodeKey_MigrationCreatesReadableBakAndIsIdempotent: opt-in migration
+// encrypts the active key, leaves a readable plaintext .bak, and is a no-op on
+// re-run.
 func TestDPNodeKey_MigrationCreatesReadableBakAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "dp-node.key")
