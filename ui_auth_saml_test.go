@@ -48,3 +48,14 @@ func TestAuthSAMLCallbackLogsProviderRejection(t *testing.T) {
 		t.Fatalf("logs missing rejection reason: %q", got)
 	}
 }
+
+func TestAuthSAMLCallbackRequiresPOST(t *testing.T) {
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/auth/saml/callback", nil)
+	w := httptest.NewRecorder()
+
+	authSAMLCallback(w, r)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
