@@ -26,7 +26,16 @@ func withClusterCAGlobals(t *testing.T) {
 		globalConfigStore = origConfig
 	})
 	globalClusterStore = newTestClusterStore(t)
-	globalConfigStore = newTestConfigStore(t)
+	globalConfigStore = &ConfigStore{}
+	// Use a fresh, empty global cluster CA. ImportCA persists onto its
+	// receiver `ca` and then calls CurrentConfigSnapshot(), which reads
+	// globalClusterCA.CACertFingerprint() under that CA's RLock. Pointing the
+	// global at a *separate* empty CA (cert==nil → fingerprint returns fast)
+	// keeps the snapshot read off the receiver's held write lock. (A
+	// pre-existing self-deadlock exists if globalClusterCA IS the receiver
+	// being imported — out of scope for this key-encryption PR; mirrors the
+	// existing TestClusterCARotationCounter_ImportCAIncrements pattern.)
+	globalClusterCA = &clusterCA{}
 }
 
 func readFile(t *testing.T, path string) []byte {
@@ -36,6 +45,22 @@ func readFile(t *testing.T, path string) []byte {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return b
+}
+
+// genPlaintextClusterCAPair returns a fresh cluster-CA cert+key as plaintext
+// PEM, independent of the encryption env var (so ImportCA tests can feed it a
+// real plaintext key even while CULVERT_CLUSTER_CA_ENCRYPT is set). It mirrors
+// the InitOrLoad bootstrap by seeding into a temp dir with encryption disabled
+// and reading the resulting plaintext files back.
+func genPlaintextClusterCAPair(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv(clusterCAEncryptEnvVar, "") // ensure plaintext write
+	if err := (&clusterCA{}).InitOrLoad(dir); err != nil {
+		t.Fatalf("gen pair bootstrap: %v", err)
+	}
+	return readFile(t, filepath.Join(dir, "cluster-ca.crt")),
+		readFile(t, filepath.Join(dir, "cluster-ca.key"))
 }
 
 // TestClusterCAKey_PlaintextLoadsWhenDisabled: with encryption off, an existing
@@ -233,6 +258,9 @@ func TestClusterCAKey_CorruptedCiphertextFailsClosed(t *testing.T) {
 func TestClusterCAKey_ImportCAWritesEncrypted(t *testing.T) {
 	withClusterCAGlobals(t)
 	dir := t.TempDir()
+	// Generate the plaintext import pair BEFORE enabling encryption (the helper
+	// resets the env var), then enable encryption for the bootstrap + import.
+	newCert, newKey := genPlaintextClusterCAPair(t)
 	t.Setenv(clusterCAEncryptEnvVar, "true")
 	t.Setenv(envKEKName, "")
 
@@ -240,10 +268,7 @@ func TestClusterCAKey_ImportCAWritesEncrypted(t *testing.T) {
 	if err := ca.InitOrLoad(dir); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	globalClusterCA = ca
 
-	// A fresh CA pair to import.
-	newCert, newKey := seedClusterCAFiles(t)
 	if err := ca.ImportCA(newCert, newKey); err != nil {
 		t.Fatalf("ImportCA: %v", err)
 	}
@@ -276,7 +301,6 @@ func TestClusterCAKey_ImportCAPlaintextWhenDisabled(t *testing.T) {
 	if err := ca.InitOrLoad(dir); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	globalClusterCA = ca
 	newCert, newKey := seedClusterCAFiles(t)
 	if err := ca.ImportCA(newCert, newKey); err != nil {
 		t.Fatalf("ImportCA: %v", err)
@@ -320,6 +344,51 @@ func TestClusterCAKey_FailedMigrationPreservesReadableBak(t *testing.T) {
 	// And whichever is readable must equal the original.
 	if aerr == nil && !isEncryptedKeyFile(active) && !bytes.Equal(active, plain) {
 		t.Fatal("active key diverged from original after failed migration")
+	}
+}
+
+// TestClusterCAKey_RestoreValidatesEncryptedKey: the restore validator accepts
+// a backup whose cluster-ca.key is an encrypted PSCA envelope (cert-only
+// validation), and still accepts a plaintext key with full pair validation.
+// Guards the CA-3 P1: an opt-in encrypted install must not produce backups that
+// fail restore validation with "no PEM key block found".
+func TestClusterCAKey_RestoreValidatesEncryptedKey(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(clusterCAEncryptEnvVar, "true")
+	t.Setenv(envKEKName, "")
+	if err := (&clusterCA{}).InitOrLoad(dir); err != nil {
+		t.Fatalf("bootstrap encrypted: %v", err)
+	}
+	certBody := readFile(t, filepath.Join(dir, "cluster-ca.crt"))
+	keyBody := readFile(t, filepath.Join(dir, "cluster-ca.key"))
+	if !isEncryptedKeyFile(keyBody) {
+		t.Fatal("precondition: key should be encrypted")
+	}
+
+	// Encrypted key → validator must pass on cert-only and set a fingerprint.
+	var sum restoreSummary
+	files := map[string][]byte{
+		"data/cluster-ca.crt": certBody,
+		"data/cluster-ca.key": keyBody,
+	}
+	if err := validateTier1Artifacts(files, "", &sum); err != nil {
+		t.Fatalf("validate with encrypted key: %v", err)
+	}
+	if sum.CAFingerprint == "" {
+		t.Fatal("expected CA fingerprint from cert despite encrypted key")
+	}
+
+	// Plaintext pair → full validation still works.
+	pcert, pkey := genPlaintextClusterCAPair(t)
+	var sum2 restoreSummary
+	if err := validateTier1Artifacts(map[string][]byte{
+		"data/cluster-ca.crt": pcert,
+		"data/cluster-ca.key": pkey,
+	}, "", &sum2); err != nil {
+		t.Fatalf("validate with plaintext pair: %v", err)
+	}
+	if sum2.CAFingerprint == "" {
+		t.Fatal("expected CA fingerprint from plaintext pair")
 	}
 }
 

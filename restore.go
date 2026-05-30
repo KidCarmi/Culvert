@@ -430,13 +430,28 @@ func validateTier1Artifacts(files map[string][]byte, passphrase string, summary 
 	keyBody, hasKey := files["data/cluster-ca.key"]
 	switch {
 	case hasCert && hasKey:
-		ca := &clusterCA{}
-		if err := ca.loadFromPEM(certBody, keyBody); err != nil {
-			return fmt.Errorf("restore: cluster CA pair: %w", err)
-		}
-		if ca.cert != nil {
-			fp := sha256.Sum256(ca.cert.Raw)
+		// CA-3: when cluster CA key encryption is enabled (CULVERT_CLUSTER_CA_ENCRYPT),
+		// the archived cluster-ca.key is a PSCA envelope, not plaintext PEM.
+		// loadFromPEM only accepts plaintext, and this validator has no KEK, so
+		// validate the cert alone for an encrypted key (cross-validation against
+		// the key, and full KEK-based decrypt, are owned by the later
+		// backup/restore PR). A plaintext key still gets full pair validation.
+		if isEncryptedKeyFile(keyBody) {
+			cert, err := parseAndValidateCACert(certBody)
+			if err != nil {
+				return fmt.Errorf("restore: cluster CA cert (encrypted key present): %w", err)
+			}
+			fp := sha256.Sum256(cert.Raw)
 			summary.CAFingerprint = "sha256:" + hex.EncodeToString(fp[:])
+		} else {
+			ca := &clusterCA{}
+			if err := ca.loadFromPEM(certBody, keyBody); err != nil {
+				return fmt.Errorf("restore: cluster CA pair: %w", err)
+			}
+			if ca.cert != nil {
+				fp := sha256.Sum256(ca.cert.Raw)
+				summary.CAFingerprint = "sha256:" + hex.EncodeToString(fp[:])
+			}
 		}
 	case hasCert != hasKey:
 		return fmt.Errorf("restore: cluster CA partial pair in tarball (cert=%v key=%v)", hasCert, hasKey)
@@ -895,11 +910,12 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 // the gap flagged in PR #194 review — must walk live /data, not just
 // paths in the manifest).
 //
-//nolint:gocognit,cyclop // Two-pass structure (tarball first, walk-
 // current second) is intentionally inlined so the mode predicate,
 // mkdir, per-file mode resolution, and atomicWriteFile contract are
 // all visible at one call site. Extracting helpers would scatter the
 // staging contract across functions and obscure the per-pass invariants.
+//
+//nolint:gocognit,cyclop // Two-pass structure (tarball first, walk-
 func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifest *backupManifest, mode restoreMode) error {
 	// os.Mkdir (exclusive), not os.MkdirAll, for the staging root —
 	// fail closed if a prior failed restore left a same-named dir on
