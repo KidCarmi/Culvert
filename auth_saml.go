@@ -15,6 +15,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -159,13 +160,21 @@ func (p *SAMLProvider) ExchangeAssertion(r *http.Request) (*Identity, string, er
 
 	assertion, err := p.sp.ParseResponse(r, []string{entry.requestID})
 	if err != nil {
-		return nil, "", fmt.Errorf("saml response validation: %w", err)
+		return nil, "", fmt.Errorf("saml response validation: %w", samlValidationError(err))
 	}
 	id := extractSAMLIdentity(assertion, p.cfg, p.profile.ID)
 	if err := requireStableSAMLIdentity(id); err != nil {
 		return nil, "", err
 	}
 	return id, entry.relayURL, nil
+}
+
+func samlValidationError(err error) error {
+	var invalid *saml.InvalidResponseError
+	if errors.As(err, &invalid) && invalid.PrivateErr != nil {
+		return fmt.Errorf("%s: %w", invalid.PrivateErr, err)
+	}
+	return err
 }
 
 type samlStateEntry struct {

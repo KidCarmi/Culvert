@@ -587,6 +587,7 @@ func authSAMLCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		id, relayURL, err := samlProv.ExchangeAssertion(r)
 		if err != nil {
+			logger.Printf("SAML callback rejected by provider=%q: %s", sanitizeLog(samlProv.profile.ID), sanitizeLog(err.Error()))
 			continue // try next provider
 		}
 		if err := setSessionCookie(w, r, id); err != nil {
