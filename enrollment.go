@@ -234,7 +234,17 @@ type TokenInfo struct {
 // node ID and source IP. On success, it marks the token as consumed, persists
 // state to disk, and returns token metadata. The entire operation is atomic
 // under a single lock+save, preventing replay attacks after crashes.
-func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP string) (TokenInfo, error) {
+func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP string) (out TokenInfo, err error) {
+	// CL-9 PR1: count token outcomes. Runs after the method's explicit
+	// cs.mu.Unlock on every path; the atomic acquires no lock.
+	defer func() {
+		if err != nil {
+			statEnrollFailures.Add(1)
+		} else {
+			statEnrollTokensConsumed.Add(1)
+		}
+	}()
+
 	hash := hashToken(plaintext)
 
 	cs.mu.Lock()
@@ -384,6 +394,20 @@ func (cs *ClusterStore) ListNodes() []EnrolledNode {
 		result = append(result, *n)
 	}
 	return result
+}
+
+// NodeCounts returns the total number of enrolled nodes and the subset that
+// are currently "connected" (CL-9 PR1). Allocation-free; for scrape-time gauges.
+func (cs *ClusterStore) NodeCounts() (total, connected int) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	for _, n := range cs.st.Nodes {
+		total++
+		if n.Status == "connected" {
+			connected++
+		}
+	}
+	return
 }
 
 // SetNodeLabels replaces the label set on a node. Pass nil or empty map to clear.
