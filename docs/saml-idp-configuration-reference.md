@@ -13,14 +13,15 @@ in the SAML assertion, so those values can be mapped to the `SAMLProfileConfig` 
 ## Common SP Values (What You Provide to Every IdP)
 
 Before configuring any IdP, collect these values from your running Culvert instance. They are
-derived from the `base_url` in `config.yaml`.
+derived from the `base_url` in `config.yaml`. If `base_url` includes a path prefix, keep that
+prefix in both the SP Entity ID and ACS URL.
 
 | Field | Value Pattern | Description |
 |---|---|---|
-| **SP Entity ID** | `https://<base_url>/saml/metadata` | Unique identifier for this SP |
-| **ACS URL** | `https://<base_url>/saml/acs` | Where the IdP POSTs the SAML response |
-| **Metadata URL** | `https://<base_url>/saml/metadata` | Self-describing SP metadata (XML) |
-| **SP Signing Certificate** | Downloaded from the metadata URL | Optional; used if the IdP requires signed AuthnRequests |
+| **SP Entity ID** | `https://<base_url>` | Unique identifier for this SP |
+| **ACS URL** | `https://<base_url>/auth/saml/callback` | Where the IdP POSTs the SAML response |
+| **SP Metadata URL** | Not exposed | Configure the SP values manually in the IdP |
+| **SP Signing Certificate** | Not required by default | Only needed if you enable signed AuthnRequests in a future build |
 
 All ACS URLs **must** use HTTPS. HTTP is rejected by the SP and most IdPs.
 
@@ -57,10 +58,10 @@ Any standards-compliant IdP requires at minimum:
 
 | Field | Value | Notes |
 |---|---|---|
-| **SP Entity ID** | `https://<base_url>/saml/metadata` | Must be globally unique |
-| **ACS URL** | `https://<base_url>/saml/acs` | HTTP-POST binding required |
+| **SP Entity ID** | `https://<base_url>` | Must be globally unique |
+| **ACS URL** | `https://<base_url>/auth/saml/callback` | HTTP-POST binding required |
 | **NameID Format** | `emailAddress` or `persistent` | Must match `nameIdFormat` config |
-| **SP Certificate** | Optional PEM cert from metadata | Only if IdP validates signed requests |
+| **SP Certificate** | Not required by default | Only needed if you enable signed AuthnRequests in a future build |
 | **Relay State** | Leave blank | Culvert supplies an opaque RelayState for each SP-initiated login |
 
 Binding: always use **HTTP-POST** for the ACS. HTTP-Redirect is only for the AuthnRequest.
@@ -91,8 +92,9 @@ There is no mandated standard set beyond the NameID subject. Common practice:
 
 ### Metadata URL
 
-Available when the IdP publishes a standard metadata endpoint. Provide it as `metadataUrl`.
-If not available, paste the raw XML into `metadataXml`.
+This section refers to the IdP metadata URL, not Culvert SP metadata. Provide the IdP
+metadata as `metadataUrl`; if the IdP does not publish one, paste the raw IdP XML into
+`metadataXml`.
 
 ---
 
@@ -104,8 +106,8 @@ Path: **Applications → Applications → Create App Integration → SAML 2.0**
 
 | Okta Field | Value |
 |---|---|
-| **Single Sign-On URL** (ACS URL) | `https://<base_url>/saml/acs` |
-| **Audience URI (SP Entity ID)** | `https://<base_url>/saml/metadata` |
+| **Single Sign-On URL** (ACS URL) | `https://<base_url>/auth/saml/callback` |
+| **Audience URI (SP Entity ID)** | `https://<base_url>` |
 | **Name ID format** | `EmailAddress` (recommended) |
 | **Application username** | `Email` |
 | **Default RelayState** | Leave blank |
@@ -182,8 +184,8 @@ Then: **Single sign-on → SAML → Basic SAML Configuration**
 
 | Entra Field | Value | Required |
 |---|---|---|
-| **Identifier (Entity ID)** | `https://<base_url>/saml/metadata` | Yes |
-| **Reply URL (ACS URL)** | `https://<base_url>/saml/acs` | Yes |
+| **Identifier (Entity ID)** | `https://<base_url>` | Yes |
+| **Reply URL (ACS URL)** | `https://<base_url>/auth/saml/callback` | Yes |
 | **Sign on URL** | `https://<base_url>/` | Optional (SP-initiated) |
 | **Logout URL** | `https://<base_url>/logout` | Optional |
 
@@ -276,8 +278,8 @@ Super administrator privileges required.
 | Step | Field | Value |
 |---|---|---|
 | App details | App name | Any descriptive name |
-| Service Provider details | **ACS URL** | `https://<base_url>/saml/acs` |
-| Service Provider details | **Entity ID** | `https://<base_url>/saml/metadata` |
+| Service Provider details | **ACS URL** | `https://<base_url>/auth/saml/callback` |
+| Service Provider details | **Entity ID** | `https://<base_url>` |
 | Service Provider details | **Start URL** | Optional; leave blank for SP-initiated only |
 | Service Provider details | **Signed response** | Check if SP requires the full response to be signed (default: assertion only) |
 | Service Provider details | **Name ID format** | `EMAIL` |
@@ -351,20 +353,14 @@ Google always sends the user's primary email as the NameID value.
 
 Path: **AD FS Management → Relying Party Trusts → Add Relying Party Trust**
 
-#### Option A: Import from Metadata (Recommended)
-
-1. Select **Import data about the relying party published online or on a local network**.
-2. Enter `https://<base_url>/saml/metadata` as the Federation metadata address.
-3. ADFS will auto-populate the identifiers, ACS URL, and certificates.
-
-#### Option B: Manual Entry
+#### Manual Entry
 
 | Screen | Field | Value |
 |---|---|---|
 | Configure URL | Enable SAML 2.0 WebSSO protocol | Checked |
-| Configure URL | Relying party SAML 2.0 SSO service URL | `https://<base_url>/saml/acs` |
-| Configure Identifiers | Relying party trust identifier | `https://<base_url>/saml/metadata` |
-| Configure Certificate | Service Provider certificate | Import from SP metadata (optional) |
+| Configure URL | Relying party SAML 2.0 SSO service URL | `https://<base_url>/auth/saml/callback` |
+| Configure Identifiers | Relying party trust identifier | `https://<base_url>` |
+| Configure Certificate | Service Provider certificate | Not required by default |
 
 **Note:** ADFS requires HTTPS. HTTP ACS URLs will be rejected at configuration time.
 
@@ -479,16 +475,16 @@ Path: **Admin Console → Realm → Clients → Create client**
 | Field | Value | Notes |
 |---|---|---|
 | **Client type** | SAML | Select on creation screen |
-| **Client ID** | `https://<base_url>/saml/metadata` | This becomes the SP Entity ID |
+| **Client ID** | `https://<base_url>` | This becomes the SP Entity ID |
 | **Name** | Any descriptive label | |
 
 After saving, configure the **Settings** tab:
 
 | Setting | Value |
 |---|---|
-| **Valid redirect URIs** | `https://<base_url>/saml/acs` |
-| **Master SAML Processing URL** | `https://<base_url>/saml/acs` |
-| **Assertion Consumer Service POST Binding URL** | `https://<base_url>/saml/acs` |
+| **Valid redirect URIs** | `https://<base_url>/auth/saml/callback` |
+| **Master SAML Processing URL** | `https://<base_url>/auth/saml/callback` |
+| **Assertion Consumer Service POST Binding URL** | `https://<base_url>/auth/saml/callback` |
 | **Sign documents** | ON |
 | **Sign assertions** | ON (recommended) |
 | **Force Name ID Format** | ON |
@@ -497,7 +493,7 @@ After saving, configure the **Settings** tab:
 | **Encrypt Assertions** | OFF (unless SP handles decryption) |
 
 **Important:** The `Client ID` in Keycloak is the SP Entity ID. It must exactly match the
-`entityID` attribute in the SP metadata that Keycloak reads.
+SP Entity ID value shown above.
 
 #### Attribute Mappers
 
