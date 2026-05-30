@@ -221,7 +221,15 @@ func runRenewFor(pc *cdrPooledClient, inst *CDREnrolledInstance) {
 		logger.Printf("CDR: RenewCert %q: write cert tmp: %v", sanitizeLog(pc.Name), werr)
 		return
 	}
-	if werr := os.WriteFile(inst.ClientKeyPath+".tmp", resp.ClientKey, 0o600); werr != nil {
+	// CA-3: encrypt the client key at rest when enabled; plaintext otherwise.
+	// The cert above stays a plaintext public cert.
+	keyOut, kerr := encodeCDRClientKeyForWrite(inst.ClientKeyPath, resp.ClientKey)
+	if kerr != nil {
+		_ = os.Remove(inst.ClientCertPath + ".tmp")
+		logger.Printf("CDR: RenewCert %q: encrypt key: %v", sanitizeLog(pc.Name), kerr)
+		return
+	}
+	if werr := os.WriteFile(inst.ClientKeyPath+".tmp", keyOut, 0o600); werr != nil {
 		_ = os.Remove(inst.ClientCertPath + ".tmp")
 		logger.Printf("CDR: RenewCert %q: write key tmp: %v", sanitizeLog(pc.Name), werr)
 		return

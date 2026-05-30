@@ -414,5 +414,18 @@ func loadCDRCertBundle(caPath, certPath, keyPath string) (ca, cert, key []byte, 
 	if rerr != nil {
 		return nil, nil, nil, fmt.Errorf("cdr certs: read client key: %w", rerr)
 	}
-	return ca, cert, key, nil
+	// CA-3: opt-in one-time migration of an existing plaintext client key to
+	// encrypted-at-rest for THIS instance's key file (no-op when disabled,
+	// missing, or already encrypted). Done before decrypt so the returned key
+	// is plaintext regardless.
+	if merr := maybeMigrateCDRClientKey(keyPath); merr != nil {
+		return nil, nil, nil, fmt.Errorf("cdr certs: client key at-rest: %w", merr)
+	}
+	// CA-3: decrypt the client key if it is a PSCA envelope (content-driven,
+	// fail closed). Plaintext passes through. Cert + CA stay plaintext certs.
+	plainKey, _, derr := decryptCDRClientKey(keyPath, key)
+	if derr != nil {
+		return nil, nil, nil, fmt.Errorf("cdr certs: %w", derr)
+	}
+	return ca, cert, plainKey, nil
 }
