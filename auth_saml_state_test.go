@@ -52,6 +52,47 @@ func testSAMLRedirectProvider(t *testing.T) *SAMLProvider {
 	}
 }
 
+func TestConfigureSAMLServiceProviderURLsMatchesRegisteredCallback(t *testing.T) {
+	tests := []struct {
+		name       string
+		rootURL    string
+		wantEntity string
+		wantACS    string
+	}{
+		{
+			name:       "root base URL",
+			rootURL:    "https://proxy.example",
+			wantEntity: "https://proxy.example",
+			wantACS:    "https://proxy.example/auth/saml/callback",
+		},
+		{
+			name:       "path prefixed base URL",
+			rootURL:    "https://proxy.example/culvert",
+			wantEntity: "https://proxy.example/culvert",
+			wantACS:    "https://proxy.example/culvert/auth/saml/callback",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rootURL, err := url.Parse(tt.rootURL)
+			if err != nil {
+				t.Fatalf("root URL parse: %v", err)
+			}
+			sp := &saml.ServiceProvider{}
+
+			configureSAMLServiceProviderURLs(sp, rootURL)
+
+			if sp.EntityID != tt.wantEntity {
+				t.Fatalf("EntityID = %q, want %q", sp.EntityID, tt.wantEntity)
+			}
+			if got := sp.AcsURL.String(); got != tt.wantACS {
+				t.Fatalf("AcsURL = %q, want %q", got, tt.wantACS)
+			}
+		})
+	}
+}
+
 func TestSAMLCaptiveLoginURLStoresRequestIDInRelayState(t *testing.T) {
 	resetSAMLStateStore(t)
 	prov := testSAMLRedirectProvider(t)

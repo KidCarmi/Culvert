@@ -75,6 +75,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("saml[%s] sp init: %w", p.ID, err)
 	}
+	configureSAMLServiceProviderURLs(&middleware.ServiceProvider, rootURL)
 	middleware.ServiceProvider.AuthnNameIDFormat = saml.NameIDFormat(requestedSAMLNameIDFormat(cfg))
 
 	return &SAMLProvider{
@@ -83,6 +84,19 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		sp:         &middleware.ServiceProvider,
 		middleware: middleware,
 	}, nil
+}
+
+func configureSAMLServiceProviderURLs(sp *saml.ServiceProvider, rootURL *url.URL) {
+	if sp == nil || rootURL == nil {
+		return
+	}
+	sp.EntityID = rootURL.String()
+	acsURL := *rootURL
+	acsURL.Path = strings.TrimRight(acsURL.Path, "/") + "/auth/saml/callback"
+	acsURL.RawPath = ""
+	acsURL.RawQuery = ""
+	acsURL.Fragment = ""
+	sp.AcsURL = acsURL
 }
 
 func (p *SAMLProvider) Name() string { return "saml:" + p.profile.ID }

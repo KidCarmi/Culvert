@@ -69,3 +69,30 @@ func TestSAMLDocsDoNotRecommendDefaultRelayState(t *testing.T) {
 		}
 	}
 }
+
+func TestSAMLDocsUseRegisteredCallbackURL(t *testing.T) {
+	data, err := os.ReadFile("docs/saml-idp-configuration-reference.md")
+	if err != nil {
+		t.Fatalf("read SAML docs: %v", err)
+	}
+	doc := string(data)
+
+	if !strings.Contains(doc, "https://<base_url>/auth/saml/callback") {
+		t.Fatal("SAML docs should tell operators to use the registered callback URL")
+	}
+	if !strings.Contains(doc, "| **SP Entity ID** | `https://<base_url>` |") {
+		t.Fatal("SAML docs should match the runtime SP EntityID")
+	}
+	forbidden := []string{
+		"https://<base_url>/saml/acs",
+		"https://<base_url>/saml/metadata",
+		"SP Metadata URL** | `https://<base_url>`",
+		"Import data about the relying party published online",
+		"Import from SP metadata",
+	}
+	for _, value := range forbidden {
+		if strings.Contains(doc, value) {
+			t.Fatalf("SAML docs still contain stale SP URL guidance %q", value)
+		}
+	}
+}
