@@ -233,13 +233,14 @@ func TestFileKEK_MalformedFileFailsClosed(t *testing.T) {
 func TestFileKEK_TooPermissiveFileFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	kekPath := filepath.Join(dir, "kek.key")
-	// A correctly-sized KEK but group/world-readable (e.g. from a manual
-	// restore). Model B requires 0600; accepting 0644 would leave the wrapping
-	// key exposed, so loading must fail closed.
-	if err := os.WriteFile(kekPath, mustKEK(t, kekLen), 0o644); err != nil {
+	// A correctly-sized KEK that we then make group/world-readable (e.g. from a
+	// manual restore). Model B requires 0600; accepting 0644 would leave the
+	// wrapping key exposed, so loading must fail closed. Write at 0600 (gosec
+	// G306) and widen via Chmod below to create the too-permissive condition.
+	if err := os.WriteFile(kekPath, mustKEK(t, kekLen), 0o600); err != nil {
 		t.Fatalf("seed permissive kek: %v", err)
 	}
-	// os.WriteFile is subject to umask; force the mode explicitly.
+	// Widen to 0644 (also defeats umask, which os.WriteFile is subject to).
 	if err := os.Chmod(kekPath, 0o644); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
