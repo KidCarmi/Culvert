@@ -29,6 +29,12 @@ func samlTestAttr(name string, values ...string) saml.Attribute {
 	return out
 }
 
+func samlTestFriendlyAttr(name, friendlyName string, values ...string) saml.Attribute {
+	out := samlTestAttr(name, values...)
+	out.FriendlyName = friendlyName
+	return out
+}
+
 func TestExtractSAMLIdentity_DefaultAttributes(t *testing.T) {
 	id := extractSAMLIdentity(samlTestAssertion("alice@example.com",
 		samlTestAttr("displayName", "Alice Example"),
@@ -74,6 +80,26 @@ func TestExtractSAMLIdentity_ConfiguredAttributes(t *testing.T) {
 	}
 	if len(id.Groups) != 2 || id.Groups[0] != "Engineering" || id.Groups[1] != "Admins" {
 		t.Fatalf("Groups = %v, want [Engineering Admins]", id.Groups)
+	}
+}
+
+func TestExtractSAMLIdentity_MatchesFriendlyAttributeNames(t *testing.T) {
+	id := extractSAMLIdentity(samlTestAssertionWithFormat(
+		"persistent-id-123",
+		string(saml.PersistentNameIDFormat),
+		samlTestFriendlyAttr("urn:oid:0.9.2342.19200300.100.1.3", "email", "alice@example.com"),
+		samlTestFriendlyAttr("urn:oid:2.5.4.3", "displayName", "Alice Example"),
+		samlTestFriendlyAttr("urn:oid:1.3.6.1.4.1.5923.1.1.1.1", "groups", "users", "finance"),
+	), &SAMLProfileConfig{}, "corp-saml")
+
+	if id.Email != "alice@example.com" {
+		t.Fatalf("Email = %q, want alice@example.com", id.Email)
+	}
+	if id.Name != "Alice Example" {
+		t.Fatalf("Name = %q, want Alice Example", id.Name)
+	}
+	if len(id.Groups) != 2 || id.Groups[0] != "users" || id.Groups[1] != "finance" {
+		t.Fatalf("Groups = %v, want [users finance]", id.Groups)
 	}
 }
 
