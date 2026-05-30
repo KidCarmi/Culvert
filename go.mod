@@ -5,6 +5,7 @@ go 1.25.10
 require (
 	github.com/KidCarmi/Sluice v0.2.0
 	github.com/andybalholm/brotli v1.2.1
+	github.com/beevik/etree v1.6.0
 	github.com/crewjam/saml v0.5.1
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/go-ldap/ldap/v3 v3.4.13
@@ -20,7 +21,6 @@ require (
 
 require (
 	github.com/Azure/go-ntlmssp v0.1.0 // indirect
-	github.com/beevik/etree v1.6.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
