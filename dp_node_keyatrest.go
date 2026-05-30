@@ -146,11 +146,12 @@ func maybeMigrateDPNodeKey(keyPath string) error {
 	if isEncryptedKeyFile(raw) {
 		return nil // already encrypted — idempotent
 	}
-	// Validate it parses as a key before rewriting anything.
-	if block, _ := pem.Decode(raw); block == nil {
-		return fmt.Errorf("DP node key: existing file is not valid PEM; refusing to migrate")
-	} else if _, perr := x509.ParseECPrivateKey(block.Bytes); perr != nil {
-		return fmt.Errorf("DP node key: existing key does not parse; refusing to migrate: %w", perr)
+	// Validate it parses as a private key before rewriting anything. Accept any
+	// format TLS accepts (EC / PKCS#8 / PKCS#1 RSA): a manually-provisioned DP
+	// node (-dp-key) may carry a non-EC key that previously loaded via
+	// tls.LoadX509KeyPair, and migration must not lock those nodes out.
+	if err := parseAnyPrivateKeyPEM(raw); err != nil {
+		return fmt.Errorf("DP node key: existing key not parseable; refusing to migrate: %w", err)
 	}
 	return migrateDPNodeKeyToEncrypted(keyPath, raw)
 }
@@ -189,17 +190,34 @@ func verifyEncryptedDPNodeKey(keyPath string, wantPlainPEM []byte, p KEKProvider
 	if err != nil {
 		return err
 	}
-	block, _ := pem.Decode(got)
-	if block == nil {
-		return errors.New("decrypted key is not valid PEM")
-	}
-	if _, err := x509.ParseECPrivateKey(block.Bytes); err != nil {
+	if err := parseAnyPrivateKeyPEM(got); err != nil {
 		return fmt.Errorf("decrypted key does not parse: %w", err)
 	}
 	if !bytes.Equal(got, wantPlainPEM) {
 		return errors.New("decrypted key does not match source")
 	}
 	return nil
+}
+
+// parseAnyPrivateKeyPEM verifies that pemBytes contains a private key in any
+// format the TLS stack accepts (PKCS#8, PKCS#1 RSA, or SEC1 EC) — the same set
+// tls.X509KeyPair tolerates. Used to validate a DP node key before/after
+// migration without assuming ECDSA.
+func parseAnyPrivateKeyPEM(pemBytes []byte) error {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return errors.New("not valid PEM")
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		return nil
+	}
+	if _, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return nil
+	}
+	if _, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return nil
+	}
+	return errors.New("unsupported private key format (want PKCS#8, EC, or PKCS#1)")
 }
 
 // restoreDPNodeKeyPlaintext copies the quarantined plaintext back to keyPath so

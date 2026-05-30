@@ -12,6 +12,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -251,6 +252,45 @@ func TestDPNodeKey_MigrationCreatesReadableBakAndIsIdempotent(t *testing.T) {
 	}
 	if !bytes.Equal(encBefore, dpReadFile(t, keyPath)) {
 		t.Fatal("encrypted key changed on idempotent re-run")
+	}
+}
+
+// TestDPNodeKey_MigrationAcceptsNonECKey: a manually-provisioned DP node may
+// carry an RSA/PKCS#8 key (loadable by tls.LoadX509KeyPair). Migration must
+// accept and encrypt it, not abort on an EC-only parse check.
+func TestDPNodeKey_MigrationAcceptsNonECKey(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "dp-node.key")
+
+	// PKCS#8-wrapped RSA key (covers both the PKCS#8 and RSA acceptance paths).
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa gen: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+	if err != nil {
+		t.Fatalf("pkcs8 marshal: %v", err)
+	}
+	plain := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(keyPath, plain, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	t.Setenv(dpNodeKeyEncryptEnvVar, "1")
+	t.Setenv(envKEKName, "")
+	if err := maybeMigrateDPNodeKey(keyPath); err != nil {
+		t.Fatalf("migrate non-EC key: %v", err)
+	}
+	if !isEncryptedKeyFile(dpReadFile(t, keyPath)) {
+		t.Fatal("non-EC key not encrypted after migration")
+	}
+	// Decrypt round-trips back to the original PKCS#8 PEM.
+	got, _, err := decryptDPNodeKey(keyPath, dpReadFile(t, keyPath))
+	if err != nil {
+		t.Fatalf("decrypt migrated non-EC key: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatal("decrypted non-EC key does not match original")
 	}
 }
 
