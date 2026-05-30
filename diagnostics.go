@@ -142,6 +142,7 @@ func buildOperatorContract() OperatorContract {
 		checkSessionSecret(),
 		checkCDR(),
 		checkClusterPosture(),
+		checkSAMLStatePosture(),
 		checkUnauthMode(),
 		checkYARAEnginePosture(),
 		checkUpdaterURL(),
@@ -327,6 +328,34 @@ func checkClusterPosture() OperatorContractCheck {
 		Status:  diagOK,
 		Message: "cluster running with mTLS",
 	}
+}
+
+func checkSAMLStatePosture() OperatorContractCheck {
+	clusterRoleMu.RLock()
+	role := clusterRole.role
+	clusterRoleMu.RUnlock()
+	if role == "" || role == "standalone" || !hasLiveSAMLProvider() {
+		return OperatorContractCheck{
+			Code:    "saml_state_posture",
+			Status:  diagOK,
+			Message: "SAML callback state is local to this node (no clustered SAML IdP warning)",
+		}
+	}
+	return OperatorContractCheck{
+		Code:           "saml_state_posture",
+		Status:         diagWarn,
+		Message:        "SAML callback state is node-local while clustering is enabled",
+		OperatorAction: "Configure load-balancer affinity for SAML browser flows, especially /auth/saml/callback, so each response returns to the node that created the AuthnRequest.",
+	}
+}
+
+func hasLiveSAMLProvider() bool {
+	for _, prov := range idpRegistry.EnabledProviders() {
+		if _, ok := prov.(*SAMLProvider); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // checkUnauthMode is a visible WARN when the proxy is in unauthenticated

@@ -127,6 +127,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"session_secret":             false,
 		"cdr":                        false,
 		"cluster_posture":            false,
+		"saml_state_posture":         false,
 		"unauth_mode":                false,
 		"updater_url":                false,
 		"config_snapshot_validator":  false,
@@ -145,6 +146,15 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 			t.Errorf("expected check %q in default report", code)
 		}
 	}
+}
+
+func findDiagnosticCheck(c OperatorContract, code string) *OperatorContractCheck {
+	for i := range c.Checks {
+		if c.Checks[i].Code == code {
+			return &c.Checks[i]
+		}
+	}
+	return nil
 }
 
 func TestApiDiagnostics_WarnsOnClusterInsecure(t *testing.T) {
@@ -189,6 +199,51 @@ func TestApiDiagnostics_WarnsOnClusterInsecure(t *testing.T) {
 	}
 	if c.Verdict == diagFail {
 		t.Error("top-level verdict escalated to fail; clusterInsecure must remain a warn")
+	}
+}
+
+func TestApiDiagnostics_WarnsOnClusteredSAMLState(t *testing.T) {
+	prevRegistry := idpRegistry
+	prevInsecure := clusterInsecure
+	clusterRoleMu.Lock()
+	prevRole := clusterRole.role
+	clusterRole.role = "data-plane"
+	clusterRoleMu.Unlock()
+	clusterInsecure = false
+	idpRegistry = &IdPRegistry{
+		profiles: []*IdPProfile{{ID: "saml-diag", Name: "SAML", Type: IdPTypeSAML, Enabled: true}},
+		live: map[string]IdentityProvider{
+			"saml-diag": &SAMLProvider{profile: &IdPProfile{ID: "saml-diag", Type: IdPTypeSAML}},
+		},
+	}
+	t.Cleanup(func() {
+		idpRegistry = prevRegistry
+		clusterRoleMu.Lock()
+		clusterRole.role = prevRole
+		clusterRoleMu.Unlock()
+		clusterInsecure = prevInsecure
+	})
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	c := decodeContract(t, w)
+	found := findDiagnosticCheck(c, "saml_state_posture")
+	if found == nil {
+		t.Fatal("saml_state_posture check missing")
+	}
+	if found.Status != diagWarn {
+		t.Fatalf("saml_state_posture status = %q, want warn", found.Status)
+	}
+	if !strings.Contains(found.OperatorAction, "load-balancer affinity") {
+		t.Fatalf("operator_action = %q, want load-balancer affinity guidance", found.OperatorAction)
+	}
+	if c.Verdict == diagFail {
+		t.Fatal("clustered SAML state warning must not escalate diagnostics verdict to fail")
 	}
 }
 
@@ -310,8 +365,8 @@ func TestApiDiagnostics_NoSensitiveValues(t *testing.T) {
 		"secret-path",           // raw updater URL path
 		"sessionSecret",         // Go symbol leak
 		"CULVERT_SESSION_SECRET",
-		"-----BEGIN",            // PEM material
-		"/data/",                // raw filesystem paths
+		"-----BEGIN", // PEM material
+		"/data/",     // raw filesystem paths
 	}
 	for _, needle := range forbidden {
 		if strings.Contains(body, needle) {
@@ -495,12 +550,12 @@ func validEnvelope(version int) map[string]any {
 			"action":     "test.seed",
 		},
 		"config": map[string]any{
-			"version":        1,
-			"exportedAt":     "2026-04-26T00:00:00Z",
-			"blocklistMode":  "block",
-			"defaultAction":  "block",
-			"ipFilterMode":   "block",
-			"rateLimitRPM":   60,
+			"version":       1,
+			"exportedAt":    "2026-04-26T00:00:00Z",
+			"blocklistMode": "block",
+			"defaultAction": "block",
+			"ipFilterMode":  "block",
+			"rateLimitRPM":  60,
 		},
 	}
 }
