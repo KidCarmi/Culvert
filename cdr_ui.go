@@ -232,7 +232,18 @@ func shredCDRCerts(inst *CDREnrolledInstance) {
 	// escapes the root.  CodeQL sees the check as an explicit
 	// sanitiser for the os.Remove sink.
 	rootWithSep := cdrCertsRoot + string(filepath.Separator)
-	for _, p := range []string{inst.CACertPath, inst.ClientCertPath, inst.ClientKeyPath} {
+	paths := []string{inst.CACertPath, inst.ClientCertPath, inst.ClientKeyPath}
+	// CA-3: also purge the client-key at-rest sidecars (the encrypted-migration
+	// plaintext backup and the model-B KEK), so revoking a migrated instance
+	// leaves no raw private-key or wrapping-key material behind. Both are
+	// derived from ClientKeyPath and live under the same sanitised root.
+	if inst.ClientKeyPath != "" {
+		paths = append(paths,
+			inst.ClientKeyPath+".plaintext.bak",
+			inst.ClientKeyPath+cdrClientKEKSuffix,
+		)
+	}
+	for _, p := range paths {
 		if p == "" {
 			continue
 		}
