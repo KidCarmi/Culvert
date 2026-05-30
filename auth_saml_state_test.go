@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -90,6 +91,20 @@ func TestConfigureSAMLServiceProviderURLsMatchesRegisteredCallback(t *testing.T)
 				t.Fatalf("AcsURL = %q, want %q", got, tt.wantACS)
 			}
 		})
+	}
+}
+
+func TestSAMLValidationErrorIncludesPrivateCause(t *testing.T) {
+	err := samlValidationError(&saml.InvalidResponseError{
+		PrivateErr: errors.New("audience does not match service provider"),
+	})
+
+	if !strings.Contains(err.Error(), "audience does not match service provider") {
+		t.Fatalf("error %q missing private validation cause", err)
+	}
+	var invalid *saml.InvalidResponseError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("error chain should preserve InvalidResponseError, got %T", err)
 	}
 }
 
