@@ -1982,7 +1982,9 @@ func persistEnrollCerts(privKey *ecdsa.PrivateKey, resp *EnrollResponse, cpAddr,
 	if err := atomicWriteFile(certPath, []byte(resp.CertPEM), 0o600); err != nil {
 		return nil, fmt.Errorf("write cert: %w", err)
 	}
-	if err := atomicWriteFile(keyPath, keyPEM, 0o600); err != nil {
+	// CA-3: encrypt the DP node key at rest when enabled; plaintext otherwise.
+	// Cert and CA cert remain plaintext PEM.
+	if err := writeDPNodeKey(keyPath, keyPEM); err != nil {
 		return nil, fmt.Errorf("write key: %w", err)
 	}
 	if err := atomicWriteFile(caPath, []byte(resp.CAPEM), 0o600); err != nil {
@@ -2030,6 +2032,14 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	if certFile != "" {
 		if err := checkDPCertExpiry(certFile); err != nil {
 			logWarnf("ControlPlane: %v", err)
+		}
+	}
+	// CA-3: opt-in one-time migration of an existing plaintext DP node key to
+	// encrypted-at-rest, at the single startup load point (not on reconnect).
+	// Fails closed if an encrypted key is present but unreadable.
+	if keyFile != "" {
+		if err := maybeMigrateDPNodeKey(keyFile); err != nil {
+			logger.Fatalf("DataPlane: DP node key at-rest: %v", err)
 		}
 	}
 	dpClient, err := NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile)
@@ -2223,7 +2233,9 @@ func renewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile,
 	if err := atomicWriteFile(certFile, []byte(resp.CertPEM), 0o600); err != nil {
 		return fmt.Errorf("write cert: %w", err)
 	}
-	if err := atomicWriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+	// CA-3: renewal rewrites the private key (fresh CSR keypair); encrypt at
+	// rest when enabled, plaintext otherwise. Cert/CA remain plaintext PEM.
+	if err := writeDPNodeKey(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
 		return fmt.Errorf("write key: %w", err)
 	}
 	if resp.CAPEM != "" {
