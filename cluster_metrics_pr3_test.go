@@ -110,11 +110,13 @@ func TestClusterMetrics_UpdateGauges(t *testing.T) {
 		t.Errorf("updateProgressGauges() = (%d,%d,%d), want (1,2,3)", inProgress, completed, total)
 	}
 
+	// Inactive but Nodes intentionally retained for reporting: all three gauges
+	// must read 0, not the finished rollout's stale counts.
 	clusterUpdateState.mu.Lock()
 	clusterUpdateState.Active = false
 	clusterUpdateState.mu.Unlock()
-	if inProgress, _, _ := updateProgressGauges(); inProgress != 0 {
-		t.Errorf("in_progress = %d, want 0 when inactive", inProgress)
+	if inProgress, completed, total := updateProgressGauges(); inProgress != 0 || completed != 0 || total != 0 {
+		t.Errorf("idle gauges = (%d,%d,%d), want (0,0,0) when inactive (Nodes retained)", inProgress, completed, total)
 	}
 }
 

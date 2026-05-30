@@ -54,13 +54,17 @@ func haRoleCode() int {
 
 // updateProgressGauges reads the active rolling-update state at scrape time.
 // in_progress is 1 when an update is active; completed/total are node counts.
+// When no update is active all three read 0 — the Nodes map is intentionally
+// retained after a rollout for status/reporting, so completed/total are gated
+// on Active to avoid exporting a finished rollout's counts as current progress.
 // No hot-path increments — pure read under clusterUpdateState.mu.
 func updateProgressGauges() (inProgress, completed, total int) {
 	clusterUpdateState.mu.Lock()
 	defer clusterUpdateState.mu.Unlock()
-	if clusterUpdateState.Active {
-		inProgress = 1
+	if !clusterUpdateState.Active {
+		return 0, 0, 0
 	}
+	inProgress = 1
 	total = len(clusterUpdateState.Nodes)
 	for _, n := range clusterUpdateState.Nodes {
 		if n.Status == "complete" {
