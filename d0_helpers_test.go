@@ -17,7 +17,7 @@ import (
 // docs/UI_REFACTOR_AUDIT.md §6 (Phase D).
 //
 // Invariants covered:
-//   D0a (this file)              — route inventory locked at 132
+//   D0a (this file)              — route inventory locked at 133
 //   d0_auth_safety_test.go        — public stays public; non-public → 401
 //   d0_rbac_safety_test.go        — admin-only handlers reject viewer+operator
 //   d0_mutation_safety_test.go    — CSRF, body limit, rate limit on mutations
@@ -106,7 +106,7 @@ var d0KnownRoutes = func() []string {
 	seen := make(map[string]bool, len(uiRoutes))
 	for _, r := range uiRoutes {
 		if seen[r.Path] {
-			continue // duplicates are flagged by TestC1_RouteMetadata_Locked132
+			continue // duplicates are flagged by TestC1_RouteMetadata_Locked133
 		}
 		seen[r.Path] = true
 		out = append(out, r.Path)
@@ -115,16 +115,17 @@ var d0KnownRoutes = func() []string {
 	return out
 }()
 
-// TestD0_RouteInventory_Locked132 is the D0 regression lock for the
+// TestD0_RouteInventory_Locked133 is the D0 regression lock for the
 // admin-UI route surface. After Phase C1 it enforces two invariants
 // against d0KnownRoutes (now derived from uiRoutes):
 //
-//  1. d0KnownRoutes contains exactly 132 entries (count locked).
+//  1. d0KnownRoutes contains exactly 133 entries (count locked).
 //  2. Every entry resolves through the wired mux to a non-empty pattern.
 //
 // Count history:
 //   - 131 — pre-C3 baseline (Phase C2/C2c).
 //   - 132 — Phase C3 added /api/governance/control-plane.
+//   - 133 — SAML SP metadata endpoint added for IdP import.
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -135,13 +136,13 @@ var d0KnownRoutes = func() []string {
 //   - Add route to uiRoutes but not to a helper      → fails the C1
 //     forward test AND this D0 test (path doesn't resolve in mux).
 //   - Add route to BOTH helper AND uiRoutes           → fails this D0
-//     test on count (133 ≠ 132) AND the C1 count test.
+//     test on count AND the C1 count test.
 //   - Remove or rename a route in a helper           → fails the C1
 //     forward test AND this D0 test.
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
-func TestD0_RouteInventory_Locked132(t *testing.T) {
-	const want = 132
+func TestD0_RouteInventory_Locked133(t *testing.T) {
+	const want = 133
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

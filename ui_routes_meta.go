@@ -66,7 +66,7 @@ type uiRouteMetadata struct {
 	Methods []uiRouteMethod // per-method contract (length ≥ 1)
 }
 
-// uiRoutes is the alphabetised metadata table for all 132 admin-UI routes.
+// uiRoutes is the alphabetised metadata table for all 133 admin-UI routes.
 //
 // MIGRATION BUCKETS (per the C1.5 schema-evolution decision):
 //
@@ -128,6 +128,8 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Note: "IdP redirect target; method varies"}}},
 	{Path: "/auth/saml/callback", Handler: "authSAMLCallback", Domain: "auth", Public: true,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RolePublic, Mutating: true, Note: "SAML POST binding"}}},
+	{Path: "/auth/saml/metadata", Handler: "authSAMLMetadata", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "SP metadata import endpoint for IdP setup"}}},
 	{Path: "/auth/select", Handler: "authSelectProvider", Domain: "auth", Public: true,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic}}},
 	{Path: "/auth/logout", Handler: "authLogout", Domain: "auth", Public: true,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/xml"
 	"fmt"
 	"html"
 	"net"
@@ -8,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/crewjam/saml"
 )
 
 // POST /api/auth/login — validate admin credentials, set session cookie.
@@ -624,6 +627,60 @@ func authSAMLCallback(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "SAML authentication failed", http.StatusUnauthorized)
 }
 
+// GET /auth/saml/metadata
+// Publishes the Service Provider metadata admins can import into an IdP.
+func authSAMLMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	metadata, err := buildSAMLSPMetadata()
+	if err != nil {
+		logger.Printf("SAML metadata error: %v", err)
+		http.Error(w, "SAML metadata unavailable", http.StatusInternalServerError)
+		return
+	}
+	data, err := xml.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		logger.Printf("SAML metadata marshal error: %v", err)
+		http.Error(w, "SAML metadata unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/samlmetadata+xml; charset=utf-8")
+	_, _ = w.Write(data)
+}
+
+func buildSAMLSPMetadata() (*saml.EntityDescriptor, error) {
+	spKey, spCert, err := ensureSPKeyPair()
+	if err != nil {
+		return nil, err
+	}
+	rootURL, err := url.Parse(proxyBaseURL(nil))
+	if err != nil {
+		return nil, err
+	}
+	sp := &saml.ServiceProvider{
+		Key:               spKey,
+		Certificate:       spCert,
+		AuthnNameIDFormat: saml.EmailAddressNameIDFormat,
+	}
+	configureSAMLServiceProviderURLs(sp, rootURL)
+	metadata := sp.Metadata()
+	if len(metadata.SPSSODescriptors) > 0 {
+		// crewjam emits exactly one NameIDFormat from AuthnNameIDFormat; Culvert
+		// accepts both stable formats, so publish both for IdP metadata import.
+		metadata.SPSSODescriptors[0].NameIDFormats = supportedSAMLMetadataNameIDFormats()
+	}
+	return metadata, nil
+}
+
+func supportedSAMLMetadataNameIDFormats() []saml.NameIDFormat {
+	return []saml.NameIDFormat{
+		saml.EmailAddressNameIDFormat,
+		saml.PersistentNameIDFormat,
+	}
+}
+
 // GET /auth/select?relay=...  — IdP selection screen for multi-tenancy.
 // Renders a minimal HTML page listing all enabled providers.
 func authSelectProvider(w http.ResponseWriter, r *http.Request) {
@@ -689,6 +746,7 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	// They are registered on the same UI port; the proxy port handles traffic.
 	mux.HandleFunc("/auth/oidc/callback", authOIDCCallback)
 	mux.HandleFunc("/auth/saml/callback", authSAMLCallback)
+	mux.HandleFunc("/auth/saml/metadata", authSAMLMetadata)
 	mux.HandleFunc("/auth/select", authSelectProvider) // IdP selection screen
 	mux.HandleFunc("/auth/logout", authLogout)
 }
