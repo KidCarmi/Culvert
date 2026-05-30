@@ -1841,7 +1841,10 @@ func buildServerTLS(certFile, keyFile, caFile string) (credentials.TransportCred
 }
 
 func buildClientTLS(certFile, keyFile, caFile string) (credentials.TransportCredentials, error) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	// CA-3: the DP node key may be encrypted at rest (PSCA envelope). The
+	// loader decrypts it when needed (content-driven, fail closed); a plaintext
+	// key is loaded unchanged. The cert is always plaintext PEM.
+	cert, err := loadDPNodeKeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, err
 	}
