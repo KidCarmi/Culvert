@@ -210,6 +210,71 @@ Reuse the **generalized histogram from CA-2 PR2** (`newHistogram(name, help, buc
 Because it touches a different file (`controlplane.go`) and is DP-only, it is the
 natural candidate to **split into its own PR** (see §11) or defer if reviewers prefer.
 
+### 8.1 PR4 discovery findings (verified against `main`)
+
+Discovery confirmed the §8 sketch is implementable cleanly and corrects one claim.
+Findings:
+
+- **Polling path (verified):** `pollLoop` (`controlplane.go:1189`, launched DP-only at
+  `:1182` via `go c.pollLoop`) ticks `fetchAndApply`, whose **first statement** is the
+  steady-state poll `raw, err := c.call(ctx, methodGetConfig, json.RawMessage("{}"))`.
+  `c.call` (`controlplane.go`) wraps `conn.Invoke` with a fixed `5s` `context.WithTimeout`
+  — so a single `c.call` is the complete request/response lifecycle for one poll.
+- **Narrowest boundary:** wrap **only** the primary `methodGetConfig` `c.call` in
+  `fetchAndApply` (the first line), not `fetchAndApply` as a whole (which also does
+  `json.Unmarshal` + `validateConfigSnapshot` + `applyConfigSnapshot`) and **not** the
+  failover-retry `c.call` in the error branch. This times exactly the CP round-trip.
+- **Histogram reuse (verified):** the CA-2 PR2 generalization is in `main` —
+  `newHistogram(name, help, buckets)` (`metrics.go:186`) + the lock-free `Observe`
+  (`:217`) + per-instance `WritePrometheus` (`:237`). A package var
+  `dpPollHist = newHistogram("culvert_dp_poll_duration_seconds", …, <buckets>)` reuses it
+  directly; render via `dpPollHist.WritePrometheus` appended in `clusterWritePrometheus`
+  (or `handleMetrics`). No new histogram code.
+- **No labels / no identifiers required (verified):** the observation is a single
+  `float64` duration. The poll carries no per-CP identity into the metric — `c.addrs` /
+  `activeIdx` / `nodeID` stay out of it. No node IDs, hostnames, peer addresses, URLs, or
+  labels are needed. Fully label-free.
+- **Lock-ordering — correction to §8:** `c.call` reads `c.conn` **under `c.mu.Lock`**
+  (snapshots `conn` then unlocks before `Invoke`), so the read is *not* unsynchronized at
+  this call site (the CL-R-10/CL-11 concern is about other call sites and is out of
+  scope). The `Observe` we add runs **after** `c.call` returns, holds no lock, and is
+  lock-free — zero new ordering risk regardless.
+- **Error semantics:** **observe on success only** (`if err == nil`). A failed poll
+  (timeout / transport error) is not a latency sample — folding the 5s-timeout error
+  into the histogram would distort the distribution. Failures are already visible via the
+  existing `DataPlane: GetConfig error` log and the failover path; a separate
+  `culvert_dp_poll_failures_total` counter is **out of PR4 scope** (note for a possible
+  follow-up, not now).
+- **Metric:** `culvert_dp_poll_duration_seconds` (histogram). Buckets tuned for an
+  intra-cluster gRPC round-trip: `0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+  0.5, 1, 2.5` seconds (the 5s `c.call` timeout sits just past the top finite bucket, so
+  near-timeout slow polls land in `+Inf`).
+- **Exact observe location:** `controlplane.go`, `fetchAndApply`, around the **first**
+  `c.call(ctx, methodGetConfig, …)`:
+  ```go
+  t0 := time.Now()
+  raw, err := c.call(ctx, methodGetConfig, json.RawMessage("{}"))
+  if err == nil {
+      dpPollHist.Observe(time.Since(t0).Seconds())
+  }
+  ```
+- **Test strategy:** `fetchAndApply` needs a live gRPC conn, so existing DP tests
+  (`controlplane_snapshot_bounds_test.go:124`) deliberately exercise the *slice* logic
+  rather than the whole method. Mirror that: (1) **unit** — drive `dpPollHist.Observe(...)`
+  directly and assert `_count`/`_sum`/`_bucket` rendering and that `WritePrometheus` emits
+  the `culvert_dp_poll_duration_seconds_*` family; (2) **render** — scrape `/metrics` and
+  assert the family appears (zero observations on a CP/standalone node is valid); (3)
+  **wiring** — verify the call-site edit in the PR diff/review rather than a full gRPC
+  stub, OR add one `bufconn`-backed happy-path test if a lightweight CP stub is already
+  available in the test helpers (optional — the histogram-level unit test is the
+  load-bearing one). Counter/`_count` assertions use **deltas** for shuffle-safety; no
+  sleeps.
+
+**PR4 verdict:** measurable cleanly and safely. Single-line observe at one well-defined
+boundary, reuses existing histogram infrastructure, fully label-free, success-only
+semantics, no new lock-ordering risk. Recommend implementing as the final CL-9 slice.
+
+
 ## 9. Privacy / cardinality review (per hard rules)
 
 | Metric | Identity data touched? | Verdict |
