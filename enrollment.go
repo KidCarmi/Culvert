@@ -175,7 +175,11 @@ func (cs *ClusterStore) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("marshal cluster state: %w", err)
 	}
-	return atomicWriteFile(cs.path, data, 0o600)
+	if err := atomicWriteFile(cs.path, data, 0o600); err != nil {
+		return err
+	}
+	statClusterStoreSaves.Add(1) // CL-9 PR2: count successful persists
+	return nil
 }
 
 // ─── Token Management ────────────────────────────────────────────────────────
@@ -631,6 +635,7 @@ func (cs *ClusterStore) checkNodeLiveness(now time.Time) bool {
 		elapsed := now.Sub(node.LastSeen)
 		if elapsed > heartbeatTimeout && node.Status == "connected" {
 			node.Status = "disconnected"
+			statHeartbeatDisconnects.Add(1)
 			changed = true
 			logger.Printf("Enrollment: node %s unreachable (last seen %s ago)", node.NodeID, elapsed.Round(time.Second))
 		}
