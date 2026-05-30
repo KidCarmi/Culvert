@@ -39,6 +39,18 @@ var (
 // promotions are not counted.
 var statHAFailovers atomic.Int64
 
+// dpPollHist records DP→CP config-poll latency (CL-9 PR4). Observed only on a
+// successful primary methodGetConfig call in fetchAndApply (DP-node-only); a
+// CP/standalone node simply renders zero observations. Reuses the generalized
+// histogram from CA-2 PR2. Buckets tuned for an intra-cluster gRPC round-trip;
+// the 5s c.call timeout sits past the top finite bucket so near-timeout polls
+// land in +Inf.
+var dpPollHist = newHistogram(
+	"culvert_dp_poll_duration_seconds",
+	"Data-plane → control-plane config poll latency",
+	[]float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+)
+
 // haRoleCode maps the HA role string to a fixed numeric gauge value, so the
 // state is exposed without a role= label: 0=disabled, 1=leader, 2=standby.
 func haRoleCode() int {
@@ -128,4 +140,6 @@ func clusterWritePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cluster_update_total_nodes Nodes in scope for the active rolling update\n")
 	w.WriteString("# TYPE culvert_cluster_update_total_nodes gauge\n")
 	fmt.Fprintf(w, "culvert_cluster_update_total_nodes %d\n", total)
+
+	dpPollHist.WritePrometheus(w)
 }

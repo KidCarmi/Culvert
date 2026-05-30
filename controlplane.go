@@ -1202,7 +1202,13 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 }
 
 func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+	// CL-9 PR4: time the primary config poll (success only). Scope is exactly
+	// this c.call — not the failover retry, unmarshal, validate, or apply.
+	pollStart := time.Now()
 	raw, err := c.call(ctx, methodGetConfig, json.RawMessage("{}"))
+	if err == nil {
+		dpPollHist.Observe(time.Since(pollStart).Seconds())
+	}
 	if err != nil {
 		c.failCount++
 		logger.Printf("DataPlane: GetConfig error: %v", err)
