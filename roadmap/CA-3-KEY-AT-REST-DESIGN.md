@@ -357,9 +357,12 @@ Answers to the required MVP questions:
   secure backup) or the passphrase; documented break-glass in §9.
 - **Docker / non-interactive:** model C — inject `CULVERT_KEK` as a secret; data
   volume holds only ciphertext; no interactive prompt ever required.
-- **HA / clustered:** the KEK must be available to every CP that can promote;
-  cluster CA key encrypted with the shared KEK; DP keys encrypted with the local
-  node KEK. Details in §8.
+- **HA / clustered:** each node may use its **own per-node KEK** (model B is
+  valid for HA). The cluster CA key reaches a standby **in transit**, encrypted
+  with the shared **HA token** (not an at-rest KEK), and the standby re-encrypts
+  it at rest under its own local KEK. A shared at-rest KEK is therefore **not
+  required** for failover; model C (shared injected KEK) remains an *option* for
+  operators who prefer uniform key custody. Details in §8.
 
 **Why this MVP fits Culvert:** secure by default (B auto-generates, but §9
 documents its T2 limitation and how C closes it), deterministic, testable
@@ -382,30 +385,39 @@ Deterministic, auditable, idempotent (rules 7–8). Per key file:
    plaintext PEM.
 2. **Load + validate:** parse the PEM key (`x509.ParseECPrivateKey`); a parse
    failure is a hard error — do **not** overwrite or delete an unparseable file.
-3. **Encrypt to new format:** `encryptBundle(plaintextPEM, kek)` → `PSCA`
+3. **Quarantine the plaintext FIRST (copy, do not move):** copy the original to
+   a quarantine name (e.g. `cluster-ca.key.plaintext.bak`, 0600) **before
+   touching `path`**. Use a *copy*, not a rename — `path` must remain the
+   readable key until the encrypted replacement is written **and** verified.
+   This is the ordering correction: the encrypted write in step 5 replaces
+   `path` via rename-over, so the only safe rollback source after that point is
+   the `.bak` made here.
+4. **Encrypt to new format:** `encryptBundle(plaintextPEM, kek)` → `PSCA`
    envelope.
-4. **Atomic write encrypted file:** `atomicWriteFile(path, ciphertext, 0o600)`
+5. **Atomic write encrypted file:** `atomicWriteFile(path, ciphertext, 0o600)`
    — fsync-safe via the existing helper (rule reuses `ca.go`/`enrollment.go`
-   machinery).
-5. **Backup/rename old plaintext safely:** rename the original to a quarantine
-   name (e.g. `cluster-ca.key.plaintext.bak`, 0600) via atomic rename **before**
-   removing — never delete the only copy until the encrypted file is confirmed
-   loadable.
-6. **Verify round-trip:** re-read + `decryptBundle` the new file and confirm it
-   parses to the same key **before** quarantining/removing plaintext.
-7. **Quarantine or remove plaintext:** after a successful verified read, either
-   delete the `.bak` or leave it quarantined for a grace window (operator
-   choice; default = quarantine then warn). **Plaintext must not remain the
-   active load target** (rule: tests in §11 prove this).
+   machinery). This rename-over replaces the plaintext at `path`; the `.bak`
+   from step 3 is now the only plaintext copy.
+6. **Verify round-trip:** re-read `path` + `decryptBundle` and confirm it parses
+   to the same key. **On failure, restore `path` from the `.bak`** and fail
+   closed — never leave a `path` the subsystem cannot load.
+7. **Remove or retain the quarantine copy:** only after a successful verified
+   read, either delete the `.bak` or retain it for a grace window (operator
+   choice; default = retain + warn). **Plaintext must not remain the active
+   load target** — `path` is the encrypted file; `.bak` is recovery-only and is
+   never read for trust on the happy path (tests in §11 prove this).
 8. **Audit event:** emit `keyatrest.migrate.started` / `.completed` / `.failed`
    (§10) — object name + outcome only.
 9. **Idempotent re-run:** a file already in `PSCA` format is a no-op (detected
-   at step 1); re-running migration changes nothing.
-10. **Rollback on mid-migration failure:** if step 3/4/6 fails, the original
-    plaintext (or `.bak`) is still present and is the load target; the
-    subsystem fails closed with a clear error and the operator re-runs after
-    fixing the KEK. No partial/torn state becomes active (atomic rename
-    guarantees this).
+   at step 1); re-running migration changes nothing. A stale `.bak` from a prior
+   aborted run is overwritten by the fresh copy in step 3.
+10. **Rollback on mid-migration failure:** the `.bak` copy from step 3 is the
+    invariant that makes rollback real. If encryption (4), the encrypted write
+    (5), or verification (6) fails, restore `path` from `.bak`, the subsystem
+    fails closed with a clear error, and the operator re-runs after fixing the
+    KEK. Because step 3 copies before step 5 overwrites, a readable plaintext
+    key always exists at either `path` (pre-overwrite) or `.bak` (post-overwrite)
+    — there is no window in which the only copy of the key has been destroyed.
 
 **Rollout posture (recommended sequencing):**
 
@@ -470,18 +482,29 @@ This staged posture honors rule 8 (safe migration) and avoids a flag day.
 - **Do encrypted key files replicate?** No. Only public material
   (`CAFingerprint`) flows in `ConfigSnapshot`; DP certs flow via
   `Enroll`/`RenewCert` responses. CA-3 changes nothing here.
-- **Must the KEK be shared across CP nodes?** For the **cluster CA key**, yes —
-  any CP that can promote to leader must be able to decrypt it, so model C (a
-  shared injected secret) is the natural HA choice; model B's per-node `kek.key`
-  does **not** satisfy HA failover for the cluster CA and must be documented as
-  single-CP-only.
-- **Leader/standby expectations:** standby holds the same cluster-CA KEK out of
-  band; on promotion it decrypts the HA bundle (in transit) and persists
-  encrypted-at-rest locally.
-- **Failover if standby lacks the unlock secret:** **fail closed** — the standby
-  cannot promote to a working CP because it cannot decrypt the cluster CA key.
-  This is the correct, loud failure; document it as an HA prerequisite (the KEK
-  is part of HA provisioning, like the HA token).
+- **Must the at-rest KEK be shared across CP nodes? No.** The cluster CA key
+  reaches a standby **in transit**: `HAState.syncFromLeader` decrypts
+  `HAStateBundle.CAKeyEncrypted` with the **HA token** and imports it via
+  `ImportCASilent` (`ha.go:223–227`). The HA token — not any node's at-rest KEK
+  — is the shared secret, and HA already provisions it. A standby therefore does
+  **not** need the leader's at-rest KEK to receive the CA key or to promote. Each
+  node persists its **own** at-rest copy under its **own local KEK** (model B is
+  valid for HA). Model C (a shared injected KEK) stays an *option* for operators
+  who want uniform key custody across nodes, **not a requirement**.
+- **Leader/standby expectations:** the standby holds the shared **HA token** out
+  of band (as today); on promotion it decrypts the in-transit bundle with that
+  token, then persists its at-rest copy under its own local KEK. No shared
+  at-rest KEK is implied.
+- **Failover if the standby lacks its own local KEK:** for model B the local KEK
+  auto-generates, so the normal failover path does not fail closed on missing
+  at-rest material. The only fail-closed case is a standby that cannot obtain
+  the **HA token** (already an HA prerequisite today) or, under model A/C, cannot
+  obtain its configured KEK source at persist time — in which case it fails
+  closed loudly rather than persisting plaintext.
+- **Caveat (do not over-encrypt in transit):** because the cluster CA key is
+  already AES-256-GCM-encrypted in the HA bundle via the HA token, CA-3's
+  at-rest encryption must wrap the **on-disk** copy only — it must not change or
+  double-wrap the in-transit `CAKeyEncrypted` path.
 - **`ConfigSnapshot` carries only public material:** unchanged — only
   `CAFingerprint`. CA-3 must not add any key/secret to the snapshot.
 - **How DP nodes receive certs/keys:** unchanged — minted at enrollment, renewed
@@ -590,7 +613,7 @@ centers on the cluster CA and DP node keys, and the DP key's divergent path
 | **PR3** | **DP node key encryption / load / migration** | Encrypt `dp-node.key` (`persistEnrollCerts`, `main.go`); handle the CWD-relative path; migrate on DP start; **also** decide DP-key backup ownership (currently un-backed). |
 | **PR3b** | **CDR/Sluice client key encryption (secondary)** | Encrypt `ClientKeyPath` (`cdr_health.go runRenewFor` / `cdr_pool.go loadCDRCertBundle`); migrate; also upgrade its plain tmp+rename write to the hardened `atomicWriteFile`. Independent of the cluster path; ship after PR1. |
 | **PR4** | **Backup / DR rules + KEK exclusion** | Update `backup.go` + `D1.3a-backup-design.md` to exclude the model-B `kek.key`; document restore/break-glass (§9). (Backup-owning track co-sign.) |
-| **PR5** | **HA composition + CA-4 co-requisite** | Ensure on-disk encryption composes with `HAStateBundle.CAKeyEncrypted`; document the shared-KEK HA requirement; flag/coordinate removal of the deprecated plaintext `CAKeyPEM` (finding CA-4). |
+| **PR5** | **HA composition + CA-4 co-requisite** | Ensure on-disk encryption composes with the in-transit `HAStateBundle.CAKeyEncrypted` path (HA-token decrypt → per-node at-rest re-encrypt; **no shared at-rest KEK required**, §8); flag/coordinate removal of the deprecated plaintext `CAKeyPEM` (finding CA-4). |
 | **PR6** | **Audit / logging / diagnostics + UI status** | Wire the §10 events; add read-only unlock-status surface (locked/unlocked, source) to the admin UI per the GUI-parity rule; no secret accepted over the web. |
 | **PR7** | **Operator guide + docs** | `docs/operator/` how-to: KEK provisioning per deployment (Docker/K8s/systemd), migration runbook, DR/break-glass; cross-link this ADR. |
 
