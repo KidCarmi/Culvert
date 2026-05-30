@@ -219,7 +219,9 @@ func TestCDRClientKey_CorruptedCiphertextFailsClosed(t *testing.T) {
 
 // TestCDRClientKey_MigrationCreatesReadableBakAndIsIdempotent: opt-in migration
 // encrypts the active key, leaves a readable plaintext .bak, and is a no-op on
-// re-run.
+// re-run. Structural symmetry with the DP node key migration test is intentional.
+//
+//nolint:dupl // intentional parallel shape across key types, not accidental copy
 func TestCDRClientKey_MigrationCreatesReadableBakAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "client.key")
@@ -290,6 +292,43 @@ func TestCDRClientKey_FailedMigrationPreservesReadableBak(t *testing.T) {
 		(berr == nil && !isEncryptedKeyFile(bak) && bytes.Equal(bak, plain))
 	if !readable {
 		t.Fatal("no readable original plaintext key remains after failed migration")
+	}
+}
+
+// TestCDRClientKey_ShredRemovesSidecars: revoking/removing a migrated instance
+// must purge the at-rest sidecars (the plaintext-migration backup and the
+// model-B KEK) alongside the primary key/cert/CA, leaving no raw key material.
+// Writes under cdrCertsRoot, skipping gracefully if the env can't create it
+// (mirrors TestPersistCDREnrollment_WritesBundleAndRegisters).
+func TestCDRClientKey_ShredRemovesSidecars(t *testing.T) {
+	dir, err := cdrInstanceCertsDir("keyatrest-shred-test")
+	if err != nil || os.MkdirAll(dir, 0o700) != nil {
+		t.Skipf("cannot create dir under cdrCertsRoot in this env: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	caPath := filepath.Join(dir, "ca.pem")
+	certPath := filepath.Join(dir, "client.pem")
+	keyPath := filepath.Join(dir, "client.key")
+	bakPath := keyPath + ".plaintext.bak"
+	kekPath := keyPath + cdrClientKEKSuffix
+
+	for _, p := range []string{caPath, certPath, keyPath, bakPath, kekPath} {
+		if werr := os.WriteFile(p, []byte("x"), 0o600); werr != nil {
+			t.Fatalf("seed %s: %v", p, werr)
+		}
+	}
+
+	shredCDRCerts(&CDREnrolledInstance{
+		CACertPath:     caPath,
+		ClientCertPath: certPath,
+		ClientKeyPath:  keyPath,
+	})
+
+	for _, p := range []string{caPath, certPath, keyPath, bakPath, kekPath} {
+		if _, statErr := os.Stat(p); statErr == nil {
+			t.Fatalf("shred left %s behind", filepath.Base(p))
+		}
 	}
 }
 
