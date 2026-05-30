@@ -63,6 +63,17 @@ func TestAuthSAMLCallbackRequiresPOST(t *testing.T) {
 	}
 }
 
+func TestAuthSAMLMetadataRequiresGET(t *testing.T) {
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/auth/saml/metadata", nil)
+	w := httptest.NewRecorder()
+
+	authSAMLMetadata(w, r)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+}
+
 func TestAuthSAMLMetadataPublishesConfiguredSPValues(t *testing.T) {
 	origBaseURL := cfg.ProxyBaseURL()
 	SetProxyBaseURL("https://proxy.example/culvert")
@@ -100,4 +111,92 @@ func TestAuthSAMLMetadataPublishesConfiguredSPValues(t *testing.T) {
 	if formats[0] != saml.EmailAddressNameIDFormat || formats[1] != saml.PersistentNameIDFormat {
 		t.Fatalf("NameIDFormats = %+v, want emailAddress and persistent", formats)
 	}
+}
+
+func TestAuthSAMLMetadataRejectsUnstableNameIDFormats(t *testing.T) {
+	metadata := mustBuildSAMLMetadata(t, "https://proxy.example/culvert")
+	formats := metadata.SPSSODescriptors[0].NameIDFormats
+
+	for _, format := range formats {
+		if format == saml.TransientNameIDFormat || format == saml.UnspecifiedNameIDFormat {
+			t.Fatalf("metadata advertised unstable NameIDFormat %q in %+v", format, formats)
+		}
+		if !isStableSAMLNameIDFormat(string(format)) {
+			t.Fatalf("metadata advertised unsupported NameIDFormat %q in %+v", format, formats)
+		}
+	}
+}
+
+func TestAuthSAMLMetadataMatchesRuntimeAuthnRequestValues(t *testing.T) {
+	baseURL := "https://proxy.example/culvert"
+	metadata := mustBuildSAMLMetadata(t, baseURL)
+	spDescriptor := metadata.SPSSODescriptors[0]
+	if len(spDescriptor.AssertionConsumerServices) == 0 {
+		t.Fatal("metadata missing AssertionConsumerService")
+	}
+
+	rootURL, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse base URL: %v", err)
+	}
+	runtimeSP := &saml.ServiceProvider{
+		AuthnNameIDFormat: saml.PersistentNameIDFormat,
+		IDPMetadata: &saml.EntityDescriptor{
+			EntityID: "https://idp.example/metadata",
+			IDPSSODescriptors: []saml.IDPSSODescriptor{
+				{
+					SingleSignOnServices: []saml.Endpoint{
+						{Binding: saml.HTTPRedirectBinding, Location: "https://idp.example/sso"},
+					},
+				},
+			},
+		},
+	}
+	configureSAMLServiceProviderURLs(runtimeSP, rootURL)
+	authReq, err := runtimeSP.MakeAuthenticationRequest(
+		runtimeSP.GetSSOBindingLocation(saml.HTTPRedirectBinding),
+		saml.HTTPRedirectBinding,
+		saml.HTTPPostBinding,
+	)
+	if err != nil {
+		t.Fatalf("MakeAuthenticationRequest: %v", err)
+	}
+
+	if authReq.Issuer == nil || authReq.Issuer.Value != metadata.EntityID {
+		t.Fatalf("AuthnRequest issuer = %+v, want metadata EntityID %q", authReq.Issuer, metadata.EntityID)
+	}
+	if authReq.AssertionConsumerServiceURL != spDescriptor.AssertionConsumerServices[0].Location {
+		t.Fatalf("AuthnRequest ACS = %q, want metadata ACS %q", authReq.AssertionConsumerServiceURL, spDescriptor.AssertionConsumerServices[0].Location)
+	}
+	if authReq.NameIDPolicy == nil || authReq.NameIDPolicy.Format == nil || *authReq.NameIDPolicy.Format != string(saml.PersistentNameIDFormat) {
+		t.Fatalf("AuthnRequest NameIDPolicy = %+v, want persistent", authReq.NameIDPolicy)
+	}
+	if !samlMetadataFormatsContain(spDescriptor.NameIDFormats, saml.PersistentNameIDFormat) {
+		t.Fatalf("metadata NameIDFormats = %+v, want persistent to match runtime profile request", spDescriptor.NameIDFormats)
+	}
+}
+
+func mustBuildSAMLMetadata(t *testing.T, baseURL string) *saml.EntityDescriptor {
+	t.Helper()
+	origBaseURL := cfg.ProxyBaseURL()
+	SetProxyBaseURL(baseURL)
+	t.Cleanup(func() { SetProxyBaseURL(origBaseURL) })
+
+	metadata, err := buildSAMLSPMetadata()
+	if err != nil {
+		t.Fatalf("build SAML metadata: %v", err)
+	}
+	if len(metadata.SPSSODescriptors) != 1 {
+		t.Fatalf("SPSSODescriptors length = %d, want 1", len(metadata.SPSSODescriptors))
+	}
+	return metadata
+}
+
+func samlMetadataFormatsContain(formats []saml.NameIDFormat, want saml.NameIDFormat) bool {
+	for _, format := range formats {
+		if format == want {
+			return true
+		}
+	}
+	return false
 }
