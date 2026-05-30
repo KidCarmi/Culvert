@@ -781,7 +781,23 @@ func (ca *clusterCA) InitOrLoad(dir string) error {
 
 	switch {
 	case !certMissing && !keyMissing:
-		return ca.loadFromPEM(certPEM, keyPEM)
+		// CA-3: decrypt at-rest key if it is a PSCA envelope (content-driven,
+		// fail closed on KEK/corruption — never regenerate). loadFromPEM stays
+		// a pure plaintext-PEM parser.
+		plainKey, wasEncrypted, decErr := decryptClusterCAKey(ca.dir, keyPEM)
+		if decErr != nil {
+			return decErr
+		}
+		if err := ca.loadFromPEM(certPEM, plainKey); err != nil {
+			return err
+		}
+		// Opt-in migration: plaintext on disk + encryption enabled → migrate.
+		if !wasEncrypted && clusterCAKeyEncryptionEnabled() {
+			if err := migrateClusterCAKeyToEncrypted(ca.dir, keyPath, plainKey); err != nil {
+				return err
+			}
+		}
+		return nil
 	case !certMissing && keyMissing:
 		return fmt.Errorf("cluster CA bootstrap: partial pair on disk (cert %q present, key %q missing) — refuse to overwrite; remove both files for fresh bootstrap or restore the missing one", certPath, keyPath)
 	case certMissing && !keyMissing:
@@ -835,7 +851,8 @@ func (ca *clusterCA) InitOrLoad(dir string) error {
 	if err := atomicWriteFile(certPath, certPEMBlock, 0o600); err != nil {
 		return fmt.Errorf("write cluster CA cert: %w", err)
 	}
-	if err := atomicWriteFile(keyPath, keyPEMBlock, 0o600); err != nil {
+	// CA-3: encrypt the key at rest when enabled; plaintext otherwise.
+	if err := writeClusterCAKey(ca.dir, keyPath, keyPEMBlock); err != nil {
 		return fmt.Errorf("write cluster CA key: %w", err)
 	}
 
@@ -993,7 +1010,14 @@ func backupCAFiles(dir string, certPEM []byte, key *ecdsa.PrivateKey) {
 	_ = os.WriteFile(certBak, certPEM, 0o600)
 	if key != nil {
 		if der, err := x509.MarshalECPrivateKey(key); err == nil {
-			_ = os.WriteFile(keyBak, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600)
+			keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+			// CA-3: when encryption is enabled, the key .bak must not be left
+			// as plaintext on disk. Best-effort, consistent with this helper.
+			if clusterCAKeyEncryptionEnabled() {
+				_ = writeEncryptedFile(keyBak, keyPEM, clusterCAKEKProvider(dir))
+			} else {
+				_ = os.WriteFile(keyBak, keyPEM, 0o600)
+			}
 		}
 	}
 }
@@ -1088,7 +1112,8 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	if err := atomicWriteFile(certFile, certPEM, 0o600); err != nil {
 		return fmt.Errorf("write cluster CA cert: %w", err)
 	}
-	if err := atomicWriteFile(keyFile, keyPEM, 0o600); err != nil {
+	// CA-3: encrypt the key at rest when enabled; plaintext otherwise.
+	if err := writeClusterCAKey(dir, keyFile, keyPEM); err != nil {
 		return fmt.Errorf("write cluster CA key: %w", err)
 	}
 
