@@ -578,6 +578,11 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 // POST /auth/saml/callback
 // Called by the IdP's POST binding after SAML authentication.
 func authSAMLCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	// Determine which SAML provider this response belongs to.
 	// We try all enabled SAML providers and use the one that validates cleanly.
 	for _, prov := range idpRegistry.EnabledProviders() {
