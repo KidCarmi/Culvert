@@ -40,3 +40,32 @@ func TestSAMLDocsNameIDFormatAllowlistMatchesCode(t *testing.T) {
 		t.Fatal("SAML docs should explicitly warn that unstable NameID formats are rejected")
 	}
 }
+
+func TestSAMLDocsDoNotRecommendDefaultRelayState(t *testing.T) {
+	data, err := os.ReadFile("docs/saml-idp-configuration-reference.md")
+	if err != nil {
+		t.Fatalf("read SAML docs: %v", err)
+	}
+	doc := string(data)
+
+	required := []string{
+		"| **Relay State** | Leave blank | Culvert supplies an opaque RelayState for each SP-initiated login |",
+		"| **Default RelayState** | Leave blank |",
+		"Do not configure an IdP default RelayState as a landing page",
+	}
+	for _, want := range required {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("SAML docs missing RelayState guidance %q", want)
+		}
+	}
+
+	forbidden := []string{
+		"Passed through unchanged",
+		"set to your post-login landing page",
+	}
+	for _, value := range forbidden {
+		if strings.Contains(doc, value) {
+			t.Fatalf("SAML docs still contain unsafe RelayState guidance %q", value)
+		}
+	}
+}
