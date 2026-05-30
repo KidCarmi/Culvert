@@ -253,6 +253,7 @@ func (h *HAState) promote(grpcAddr, certFile, keyFile, caFile string, onPromote 
 	h.role = "leader"
 	h.since = time.Now()
 	h.mu.Unlock()
+	statHAFailovers.Add(1) // CL-9 PR3: count standby→leader promotions only
 
 	// Update persisted config.
 	_ = saveHAConfig(&haConfig{
