@@ -347,7 +347,9 @@ func extractSAMLIdentity(a *saml.Assertion, cfg *SAMLProfileConfig, providerID s
 				}
 			case samlAttrMatches(attr, groupsAttr, "memberOf", "Role",
 				"http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
-				"http://schemas.xmlsoap.org/claims/Group"):
+				"http://schemas.xmlsoap.org/claims/Group",
+				"eduPersonAffiliation",
+				"urn:oid:1.3.6.1.4.1.5923.1.1.1.1"):
 				id.Groups = append(id.Groups, vals...)
 			}
 		}

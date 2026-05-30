@@ -103,6 +103,18 @@ func TestExtractSAMLIdentity_MatchesFriendlyAttributeNames(t *testing.T) {
 	}
 }
 
+func TestExtractSAMLIdentity_MatchesEduPersonAffiliationGroups(t *testing.T) {
+	id := extractSAMLIdentity(samlTestAssertionWithFormat(
+		"persistent-id-123",
+		string(saml.PersistentNameIDFormat),
+		samlTestFriendlyAttr("urn:oid:1.3.6.1.4.1.5923.1.1.1.1", "eduPersonAffiliation", "users", "finance"),
+	), &SAMLProfileConfig{}, "corp-saml")
+
+	if len(id.Groups) != 2 || id.Groups[0] != "users" || id.Groups[1] != "finance" {
+		t.Fatalf("Groups = %v, want [users finance]", id.Groups)
+	}
+}
+
 func TestExtractSAMLIdentity_EmailFallbackForEmptyNameID(t *testing.T) {
 	id := extractSAMLIdentity(samlTestAssertion("",
 		samlTestAttr("email", "alice@example.com"),
