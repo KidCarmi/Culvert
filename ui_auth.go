@@ -457,6 +457,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		p.ID = id
+		preserveWriteOnlyIdPFields(before, &p)
 		if err := idpRegistry.Upsert(&p); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -478,6 +479,21 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func preserveWriteOnlyIdPFields(before, next *IdPProfile) {
+	if before == nil || next == nil {
+		return
+	}
+	if before.Type == IdPTypeSAML &&
+		next.Type == IdPTypeSAML &&
+		before.SAML != nil &&
+		next.SAML != nil &&
+		before.SAML.MetadataXML != "" &&
+		next.SAML.MetadataURL == "" &&
+		next.SAML.MetadataXML == "" {
+		next.SAML.MetadataXML = before.SAML.MetadataXML
 	}
 }
 

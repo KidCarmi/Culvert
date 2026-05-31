@@ -62,6 +62,55 @@ func TestAPIIdPItem_PutRejectsBadSAMLConfigWithoutReplacingProfile(t *testing.T)
 	}
 }
 
+func TestAPIIdPItem_PutPreservesInlineSAMLMetadataWhenRedactedFromForm(t *testing.T) {
+	withTestIdPRegistry(t)
+	original := samlProfile("api-inline-id", "Inline Metadata Profile")
+	original.SAML.MetadataXML = "<EntityDescriptor>preserve-inline-metadata</EntityDescriptor>"
+	if err := idpRegistry.Upsert(original); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := jsonReq(http.MethodPut, "/api/idp/api-inline-id", map[string]any{
+		"name":         "Renamed Inline Metadata Profile",
+		"type":         "saml",
+		"enabled":      false,
+		"knownGroups":  []string{"Engineering"},
+		"emailDomains": []string{"example.com"},
+		"saml": map[string]any{
+			"metadataUrl":     "",
+			"metadataXml":     "",
+			"nameIdFormat":    "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+			"groupsAttribute": "memberOf",
+			"emailAttribute":  "mail",
+			"nameAttribute":   "displayName",
+		},
+	})
+
+	apiIdPItem(w, r, "api-inline-id")
+
+	assertStatus(t, w, http.StatusOK)
+	if strings.Contains(w.Body.String(), "preserve-inline-metadata") || strings.Contains(w.Body.String(), "metadataXml") {
+		t.Fatalf("response leaked preserved metadata XML: %q", w.Body.String())
+	}
+	got := idpRegistry.Get("api-inline-id")
+	if got == nil || got.SAML == nil {
+		t.Fatal("profile missing after update")
+	}
+	if got.Name != "Renamed Inline Metadata Profile" {
+		t.Fatalf("profile name = %q, want update applied", got.Name)
+	}
+	if got.SAML.MetadataXML != "<EntityDescriptor>preserve-inline-metadata</EntityDescriptor>" {
+		t.Fatalf("stored metadataXml = %q, want preserved inline metadata", got.SAML.MetadataXML)
+	}
+	if got.SAML.MetadataURL != "" {
+		t.Fatalf("stored metadataUrl = %q, want empty", got.SAML.MetadataURL)
+	}
+	if got.SAML.NameIDFormat != "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent" {
+		t.Fatalf("stored nameIdFormat = %q, want updated value", got.SAML.NameIDFormat)
+	}
+}
+
 func withTestIdPRegistry(t *testing.T) {
 	t.Helper()
 	orig := idpRegistry
