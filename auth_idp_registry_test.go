@@ -80,6 +80,77 @@ func TestIdPRegistry_Upsert_RejectsUnstableSAMLNameIDFormat(t *testing.T) {
 	}
 }
 
+func TestIdPRegistry_Upsert_RejectsMissingSAMLMetadataSource(t *testing.T) {
+	r := newTestRegistry()
+	p := samlProfile("missing-metadata", "Missing Metadata")
+	p.SAML.MetadataXML = ""
+
+	err := r.Upsert(p)
+	if err == nil {
+		t.Fatal("expected missing SAML metadata source to fail validation")
+	}
+	if !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("error = %v, want exactly-one metadata validation", err)
+	}
+}
+
+func TestIdPRegistry_Upsert_RejectsMultipleSAMLMetadataSources(t *testing.T) {
+	r := newTestRegistry()
+	p := samlProfile("multiple-metadata", "Multiple Metadata")
+	p.SAML.MetadataURL = "https://idp.example/metadata"
+
+	err := r.Upsert(p)
+	if err == nil {
+		t.Fatal("expected multiple SAML metadata sources to fail validation")
+	}
+	if !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("error = %v, want exactly-one metadata validation", err)
+	}
+}
+
+func TestIdPRegistry_Upsert_RejectsUnsafeSAMLMetadataURL(t *testing.T) {
+	r := newTestRegistry()
+	p := samlProfile("unsafe-metadata-url", "Unsafe Metadata URL")
+	p.SAML.MetadataXML = ""
+	p.SAML.MetadataURL = "http://127.0.0.1/metadata"
+
+	err := r.Upsert(p)
+	if err == nil {
+		t.Fatal("expected unsafe SAML metadata URL to fail validation")
+	}
+	if !strings.Contains(err.Error(), "metadata_url") {
+		t.Fatalf("error = %v, want metadata_url validation", err)
+	}
+}
+
+func TestIdPRegistry_Upsert_CompileFailureDoesNotReplaceExistingProfile(t *testing.T) {
+	r := newTestRegistry()
+	original := samlProfile("stable-id", "Working Profile")
+	original.Enabled = false
+	if err := r.Upsert(original); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	replacement := samlProfile("stable-id", "Broken Replacement")
+	replacement.Enabled = true
+	replacement.SAML.MetadataXML = "<not-saml-metadata>"
+	err := r.Upsert(replacement)
+	if err == nil {
+		t.Fatal("expected enabled profile with malformed metadata to fail compile")
+	}
+
+	got := r.Get("stable-id")
+	if got == nil {
+		t.Fatal("original profile disappeared after failed replacement")
+	}
+	if got.Name != "Working Profile" || got.Enabled {
+		t.Fatalf("profile after failed replacement = %+v, want original disabled profile", got)
+	}
+	if _, ok := r.LiveProvider("stable-id"); ok {
+		t.Fatal("failed replacement should not install a live provider")
+	}
+}
+
 func TestIdPRegistry_Upsert_InMemory_Disabled(t *testing.T) {
 	r := newTestRegistry()
 	p := samlProfile("test-id-1", "Test IdP")
