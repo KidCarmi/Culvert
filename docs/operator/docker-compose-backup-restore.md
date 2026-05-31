@@ -338,6 +338,42 @@ invocation. Requires Compose v2 secret support or Swarm.
 This option is recommended for production deployments with multiple
 operators or when the passphrase is rotated by a non-human process.
 
+### 9.4 CA-3 key-at-rest: KEK handling & recovery
+
+CA-3 (key-at-rest) optionally encrypts the **private keys** Culvert stores —
+the cluster CA key (`cluster-ca.key`), the Data Plane node key
+(`dp-node.key`), and CDR/Sluice client keys — each enabled by its own opt-in
+env var (`CULVERT_CLUSTER_CA_ENCRYPT`, `CULVERT_DP_NODE_KEY_ENCRYPT`,
+`CULVERT_CDR_CLIENT_KEY_ENCRYPT`). When enabled, those files become encrypted
+`PSCA` envelopes on disk, unwrapped at load time by a **key-encryption key
+(KEK)** resolved as:
+
+1. `CULVERT_KEK` (a hex-encoded 32-byte key supplied via env / mounted secret), or
+2. a local model-B KEK file next to the key it wraps —
+   `cluster-ca.kek`, `dp-node.kek`, `<cdr-client-key>.kek`.
+
+**The backup archive never contains a KEK.** The Culvert backup format is a
+strict named allowlist, and the packer additionally refuses any `*.kek` file
+as defense-in-depth (so a KEK can never share an archive with the encrypted
+key it unwraps — that would defeat at-rest encryption). This means:
+
+- **Encrypted key backup + KEK must be restored *together operationally*, but
+  are *never stored together* by default.** Back up the encrypted key via the
+  normal `--backup` flow; provision the KEK out-of-band (the `CULVERT_KEK`
+  secret, or a separately-stored copy of the local `*.kek` file). Restoring the
+  archive alone is not sufficient to bring an encrypted install back up — the
+  KEK must be supplied through its normal env/secret path.
+- **If the KEK is lost, the encrypted private keys are unrecoverable by
+  design.** For the cluster CA this means generating a new cluster CA and
+  **re-enrolling** DP nodes; for a DP node or CDR instance it means
+  re-enrolling that node/instance. Store the KEK in a separate secret system
+  (password manager / KMS / sealed secret) **before** enabling encryption.
+- **Restore dry-run validates an encrypted key on its cert alone.** Because the
+  validator has no KEK, it confirms the `PSCA` envelope is recognized and the
+  paired public cert parses; it does **not** decrypt the key. Plaintext keys
+  still get full cert/key cross-validation. (Full KEK-based decrypt during
+  restore is intentionally deferred.)
+
 ---
 
 ## 10. Runtime vs offline matrix
@@ -396,8 +432,14 @@ shown in § 2.
   is no supported workflow for restoring from a filesystem-level
   `tar`.
 - **Don't off-host copy unencrypted backups.** They contain ui_users
-  hashes, TOTP secrets, the cluster CA private key, and session HMAC.
-  Use `--encrypt` for anything that leaves the host.
+  hashes, TOTP secrets, the cluster CA private key (plaintext unless CA-3
+  encryption is enabled — see § 9.4), and session HMAC. Use `--encrypt` for
+  anything that leaves the host.
+- **Don't store a CA-3 KEK in the same place as the backup.** The KEK
+  (`CULVERT_KEK` or a local `*.kek` file) unwraps the encrypted private keys;
+  keeping it beside the archive defeats at-rest encryption. The backup format
+  already excludes `*.kek` files (§ 9.4) — provision the KEK out-of-band, and
+  remember that losing it makes encrypted keys unrecoverable.
 - **Don't mount `/var/run/docker.sock` into `cli`.** The `cli` service
   is intentionally socket-free. Maintenance ops that need the socket
   belong to the future D1.6 Maintenance Agent.
