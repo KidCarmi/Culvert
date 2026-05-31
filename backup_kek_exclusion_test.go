@@ -115,6 +115,34 @@ func TestIsKEKArtifactPath(t *testing.T) {
 	}
 }
 
+// TestBackup_DPAndCDRKeysNotInAllowlist pins the DR-doc claim (§ 9.4): only the
+// cluster CA key is in the backup allowlist. dp-node.key (CWD-relative) and CDR
+// client keys (under /data/integrations/sluice) are NOT archived by --backup, so
+// the doc must not tell operators to "back them up". If a future change adds
+// either to defaultBackupArtifacts, this test fails and the doc must be updated.
+func TestBackup_DPAndCDRKeysNotInAllowlist(t *testing.T) {
+	arts := defaultBackupArtifacts("/data")
+	for _, a := range arts {
+		base := filepath.Base(a.SrcPath)
+		if base == "dp-node.key" {
+			t.Error("dp-node.key must not be in defaultBackupArtifacts (DR doc § 9.4 says it is re-enrolled, not backed up)")
+		}
+		if base == "client.key" || filepath.Dir(a.SrcPath) == "/data/integrations/sluice" {
+			t.Errorf("CDR client key path %q must not be in defaultBackupArtifacts", a.SrcPath)
+		}
+	}
+	// Sanity: the cluster CA key IS in the allowlist (the one key that is).
+	var hasClusterCAKey bool
+	for _, a := range arts {
+		if filepath.Base(a.SrcPath) == "cluster-ca.key" {
+			hasClusterCAKey = true
+		}
+	}
+	if !hasClusterCAKey {
+		t.Error("cluster-ca.key should be in defaultBackupArtifacts")
+	}
+}
+
 // TestRestore_ValidatesEncryptedClusterCAKey: restore validation accepts an
 // encrypted (PSCA) cluster-ca.key by validating the cert alone (no PEM key
 // parse, no KEK needed), and still rejects a malformed/non-PSCA non-PEM key.

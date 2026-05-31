@@ -357,17 +357,28 @@ strict named allowlist, and the packer additionally refuses any `*.kek` file
 as defense-in-depth (so a KEK can never share an archive with the encrypted
 key it unwraps — that would defeat at-rest encryption). This means:
 
-- **Encrypted key backup + KEK must be restored *together operationally*, but
-  are *never stored together* by default.** Back up the encrypted key via the
-  normal `--backup` flow; provision the KEK out-of-band (the `CULVERT_KEK`
-  secret, or a separately-stored copy of the local `*.kek` file). Restoring the
-  archive alone is not sufficient to bring an encrypted install back up — the
-  KEK must be supplied through its normal env/secret path.
-- **If the KEK is lost, the encrypted private keys are unrecoverable by
-  design.** For the cluster CA this means generating a new cluster CA and
-  **re-enrolling** DP nodes; for a DP node or CDR instance it means
-  re-enrolling that node/instance. Store the KEK in a separate secret system
-  (password manager / KMS / sealed secret) **before** enabling encryption.
+- **Which keys `--backup` actually captures.** The backup allowlist includes
+  the **cluster CA key only** (`data/cluster-ca.key`, encrypted or plaintext).
+  The **DP node key** (`dp-node.key`, written relative to the node's working
+  dir) and **CDR/Sluice client keys** (under `/data/integrations/sluice/…`)
+  are **not** in `defaultBackupArtifacts` and are therefore **not archived by
+  `--backup`** — encrypting them does not change that. Those identities are
+  designed to be **re-issued by re-enrollment**, not restored from a Culvert
+  backup, so there is no DP/CDR key to "back up together with its KEK."
+- **Encrypted cluster CA key backup + its KEK must be restored *together
+  operationally*, but are *never stored together* by default.** Back up the
+  encrypted `cluster-ca.key` via the normal `--backup` flow; provision its KEK
+  out-of-band (the `CULVERT_KEK` secret, or a separately-stored copy of the
+  local `cluster-ca.kek`). Restoring the archive alone is not sufficient to
+  bring an encrypted cluster CA back up — the KEK must be supplied through its
+  normal env/secret path.
+- **If a KEK is lost, the keys it wraps are unrecoverable by design.** For the
+  **cluster CA** (the one key that *is* in the backup) this means generating a
+  new cluster CA and **re-enrolling** DP nodes. For a **DP node or CDR
+  instance** key — which is not backed up at all — recovery is likewise
+  **re-enrollment** of that node/instance. Store each KEK in a separate secret
+  system (password manager / KMS / sealed secret) **before** enabling
+  encryption.
 - **Restore dry-run validates an encrypted key on its cert alone.** Because the
   validator has no KEK, it confirms the `PSCA` envelope is recognized and the
   paired public cert parses; it does **not** decrypt the key. Plaintext keys
