@@ -51,6 +51,52 @@ func TestSAMLExchangeAssertionAcceptsSignedResponse(t *testing.T) {
 	}
 }
 
+func TestSAMLExchangeAssertionAcceptsPersistentNameIDResponse(t *testing.T) {
+	fixture := newSignedSAMLFixtureWithSession(t, signedSAMLFixtureOptions{
+		session: &saml.Session{
+			NameID:         "persistent-user-123",
+			NameIDFormat:   string(saml.PersistentNameIDFormat),
+			UserEmail:      "alice@example.com",
+			UserCommonName: "Alice Example",
+			Groups:         []string{"engineering", "admins"},
+		},
+	})
+
+	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	if err != nil {
+		t.Fatalf("ExchangeAssertion failed: %v", err)
+	}
+	if relayURL != fixture.relayURL {
+		t.Fatalf("relayURL = %q, want %q", relayURL, fixture.relayURL)
+	}
+	if id.Sub != "persistent-user-123" {
+		t.Fatalf("Sub = %q, want persistent-user-123", id.Sub)
+	}
+	if id.Email != "alice@example.com" {
+		t.Fatalf("Email = %q, want alice@example.com", id.Email)
+	}
+}
+
+func TestSAMLExchangeAssertionRejectsTransientOnlyNameIDResponse(t *testing.T) {
+	fixture := newSignedSAMLFixtureWithSession(t, signedSAMLFixtureOptions{
+		session: &saml.Session{
+			NameID:       "session-only-id",
+			NameIDFormat: string(saml.TransientNameIDFormat),
+		},
+	})
+
+	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	if err == nil {
+		t.Fatal("expected transient-only response to fail")
+	}
+	if id != nil || relayURL != "" {
+		t.Fatalf("got id=%+v relay=%q, want no identity or relay on failure", id, relayURL)
+	}
+	if !strings.Contains(err.Error(), "missing stable identity") {
+		t.Fatalf("error %q missing stable identity detail", err)
+	}
+}
+
 func TestSAMLExchangeAssertionRejectsWrongRequestID(t *testing.T) {
 	fixture := newSignedSAMLFixture(t, nil)
 	globalSAMLStateStore.set(fixture.state, &samlStateEntry{
@@ -72,6 +118,22 @@ func TestSAMLExchangeAssertionRejectsWrongRequestID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "InResponseTo") {
 		t.Fatalf("error %q missing request correlation detail", err)
+	}
+}
+
+func TestSAMLExchangeAssertionRejectsUnsignedResponse(t *testing.T) {
+	fixture := newSignedSAMLFixture(t, nil)
+	fixture.samlResponse = stripSAMLResponseSignatures(t, fixture.samlResponse)
+
+	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	if err == nil {
+		t.Fatal("expected unsigned response to fail")
+	}
+	if id != nil || relayURL != "" {
+		t.Fatalf("got id=%+v relay=%q, want no identity or relay on failure", id, relayURL)
+	}
+	if !strings.Contains(err.Error(), "saml response validation:") {
+		t.Fatalf("error %q missing validation context", err)
 	}
 }
 
@@ -109,7 +171,18 @@ func (f signedSAMLFixture) callbackRequest(t *testing.T) *http.Request {
 	return r
 }
 
+type signedSAMLFixtureOptions struct {
+	mutateSPMetadata func(*saml.EntityDescriptor)
+	session          *saml.Session
+}
+
 func newSignedSAMLFixture(t *testing.T, mutateSPMetadata func(*saml.EntityDescriptor)) signedSAMLFixture {
+	return newSignedSAMLFixtureWithSession(t, signedSAMLFixtureOptions{
+		mutateSPMetadata: mutateSPMetadata,
+	})
+}
+
+func newSignedSAMLFixtureWithSession(t *testing.T, opts signedSAMLFixtureOptions) signedSAMLFixture {
 	t.Helper()
 	resetSAMLStateStore(t)
 
@@ -121,8 +194,8 @@ func newSignedSAMLFixture(t *testing.T, mutateSPMetadata func(*saml.EntityDescri
 	idpMetadataURL := mustParseSAMLTestURL(t, "https://idp.example/metadata")
 	idpSSOURL := mustParseSAMLTestURL(t, "https://idp.example/sso")
 	spMetadata := provider.sp.Metadata()
-	if mutateSPMetadata != nil {
-		mutateSPMetadata(spMetadata)
+	if opts.mutateSPMetadata != nil {
+		opts.mutateSPMetadata(spMetadata)
 	}
 	idp := &saml.IdentityProvider{
 		Key:                     idpKey,
@@ -154,13 +227,17 @@ func newSignedSAMLFixture(t *testing.T, mutateSPMetadata func(*saml.EntityDescri
 	if err := authnRequest.Validate(); err != nil {
 		t.Fatalf("IdP authn request validate: %v", err)
 	}
-	if err := (saml.DefaultAssertionMaker{}).MakeAssertion(authnRequest, &saml.Session{
-		NameID:         "alice@example.com",
-		NameIDFormat:   string(saml.EmailAddressNameIDFormat),
-		UserEmail:      "alice@example.com",
-		UserCommonName: "Alice Example",
-		Groups:         []string{"engineering", "admins"},
-	}); err != nil {
+	session := opts.session
+	if session == nil {
+		session = &saml.Session{
+			NameID:         "alice@example.com",
+			NameIDFormat:   string(saml.EmailAddressNameIDFormat),
+			UserEmail:      "alice@example.com",
+			UserCommonName: "Alice Example",
+			Groups:         []string{"engineering", "admins"},
+		}
+	}
+	if err := (saml.DefaultAssertionMaker{}).MakeAssertion(authnRequest, session); err != nil {
 		t.Fatalf("make assertion: %v", err)
 	}
 	if err := authnRequest.MakeResponse(); err != nil {
@@ -179,6 +256,40 @@ func newSignedSAMLFixture(t *testing.T, mutateSPMetadata func(*saml.EntityDescri
 		state:        state,
 		samlResponse: base64.StdEncoding.EncodeToString(responseXML),
 	}
+}
+
+func stripSAMLResponseSignatures(t *testing.T, encodedResponse string) string {
+	t.Helper()
+	responseXML, err := base64.StdEncoding.DecodeString(encodedResponse)
+	if err != nil {
+		t.Fatalf("decode SAMLResponse: %v", err)
+	}
+	doc := etree.NewDocument()
+	if err := doc.ReadFromBytes(responseXML); err != nil {
+		t.Fatalf("parse SAMLResponse XML: %v", err)
+	}
+	removed := removeElementsByLocalName(doc.Root(), "Signature")
+	if removed == 0 {
+		t.Fatal("test fixture did not contain a Signature element to remove")
+	}
+	strippedXML, err := doc.WriteToBytes()
+	if err != nil {
+		t.Fatalf("serialize stripped SAMLResponse: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(strippedXML)
+}
+
+func removeElementsByLocalName(parent *etree.Element, localName string) int {
+	removed := 0
+	for _, child := range parent.ChildElements() {
+		if child.Tag == localName {
+			parent.RemoveChild(child)
+			removed++
+			continue
+		}
+		removed += removeElementsByLocalName(child, localName)
+	}
+	return removed
 }
 
 func mustParseSAMLTestURL(t *testing.T, raw string) *url.URL {
