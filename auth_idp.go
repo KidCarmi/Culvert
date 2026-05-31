@@ -165,28 +165,11 @@ func (r *IdPRegistry) save() error {
 // compile initialises a live IdentityProvider from a profile.
 // Calling under r.mu.Lock is the caller's responsibility.
 func (r *IdPRegistry) compile(p *IdPProfile) error {
-	switch p.Type {
-	case IdPTypeOIDC:
-		if p.OIDC == nil {
-			return fmt.Errorf("oidc profile missing oidc config")
-		}
-		prov, err := NewOIDCFlowProvider(p)
-		if err != nil {
-			return err
-		}
-		r.live[p.ID] = prov
-	case IdPTypeSAML:
-		if p.SAML == nil {
-			return fmt.Errorf("saml profile missing saml config")
-		}
-		prov, err := NewSAMLProvider(p)
-		if err != nil {
-			return err
-		}
-		r.live[p.ID] = prov
-	default:
-		return fmt.Errorf("unknown IdP type %q", p.Type)
+	prov, err := compileIdPProfile(p)
+	if err != nil {
+		return err
 	}
+	r.live[p.ID] = prov
 	return nil
 }
 
@@ -210,19 +193,23 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 			return fmt.Errorf("idp oidc issuer: %w", err)
 		}
 	}
-	if p.Type == IdPTypeSAML && p.SAML != nil {
-		if err := validateSAMLNameIDFormat(p.SAML.NameIDFormat); err != nil {
-			return fmt.Errorf("idp saml name_id_format: %w", err)
-		}
-		if p.SAML.MetadataURL != "" {
-			if err := validateExternalURL(p.SAML.MetadataURL); err != nil {
-				return fmt.Errorf("idp saml metadata_url: %w", err)
-			}
+	if p.Type == IdPTypeSAML {
+		if err := validateSAMLProfileConfig(p.SAML); err != nil {
+			return fmt.Errorf("idp saml: %w", err)
 		}
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	var compiled IdentityProvider
+	if p.Enabled {
+		prov, err := compileIdPProfile(p)
+		if err != nil {
+			return fmt.Errorf("idp compile error: %w", err)
+		}
+		compiled = prov
+	}
 
 	// Replace or append.
 	found := false
@@ -239,14 +226,47 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 
 	// Recompile live provider if enabled.
 	if p.Enabled {
-		if err := r.compile(p); err != nil {
-			return fmt.Errorf("idp compile error: %w", err)
-		}
+		r.live[p.ID] = compiled
 	} else {
 		delete(r.live, p.ID)
 	}
 
 	return r.save()
+}
+
+func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("config is required")
+	}
+	if (cfg.MetadataURL == "") == (cfg.MetadataXML == "") {
+		return fmt.Errorf("exactly one of metadata_url or metadata_xml is required")
+	}
+	if err := validateSAMLNameIDFormat(cfg.NameIDFormat); err != nil {
+		return fmt.Errorf("name_id_format: %w", err)
+	}
+	if cfg.MetadataURL != "" {
+		if err := validateExternalURL(cfg.MetadataURL); err != nil {
+			return fmt.Errorf("metadata_url: %w", err)
+		}
+	}
+	return nil
+}
+
+func compileIdPProfile(p *IdPProfile) (IdentityProvider, error) {
+	switch p.Type {
+	case IdPTypeOIDC:
+		if p.OIDC == nil {
+			return nil, fmt.Errorf("oidc profile missing oidc config")
+		}
+		return NewOIDCFlowProvider(p)
+	case IdPTypeSAML:
+		if p.SAML == nil {
+			return nil, fmt.Errorf("saml profile missing saml config")
+		}
+		return NewSAMLProvider(p)
+	default:
+		return nil, fmt.Errorf("unknown IdP type %q", p.Type)
+	}
 }
 
 // Delete removes a profile by ID.
