@@ -184,7 +184,7 @@ func TestAPIIdPItemPut_MutatesOIDCClientSecretWhenProvided(t *testing.T) {
 	}
 }
 
-func TestStaticIdPModal_ClearsOIDCSecretOnlyWhenExplicitlyChecked(t *testing.T) {
+func TestStaticIdPModal_ClearsWriteOnlyFieldsOnlyWhenExplicitlyChecked(t *testing.T) {
 	data, err := os.ReadFile("static/index.html")
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
@@ -198,6 +198,13 @@ func TestStaticIdPModal_ClearsOIDCSecretOnlyWhenExplicitlyChecked(t *testing.T) 
 		`const clearClientSecret = document.getElementById('idp-clear-secret').checked`,
 		`if (clearClientSecret) body.oidc.clientSecret = '';`,
 		`else if (clientSecret) body.oidc.clientSecret = clientSecret;`,
+		`id="idp-clear-metadata-xml"`,
+		`id="idp-clear-metadata-xml-wrap"`,
+		`document.getElementById('idp-clear-metadata-xml').checked = false`,
+		`(p && p.type === 'saml') ? 'flex' : 'none'`,
+		`const clearMetadataXml = document.getElementById('idp-clear-metadata-xml').checked`,
+		`if (clearMetadataXml) body.saml.metadataXml = '';`,
+		`else if (metadataXml) body.saml.metadataXml = metadataXml;`,
 	}
 	for _, want := range required {
 		if !strings.Contains(html, want) {

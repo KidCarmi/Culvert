@@ -1327,6 +1327,10 @@ tr.dragging  { opacity: .4; }
             </div>
             <div class="form-group">
               <label class="form-label">Or upload / paste Metadata XML</label>
+              <label id="idp-clear-metadata-xml-wrap" style="display:none;align-items:center;gap:6px;margin-bottom:8px;font-size:.78rem;color:var(--muted);cursor:pointer">
+                <input type="checkbox" id="idp-clear-metadata-xml" style="width:auto">
+                <span>Clear saved metadata XML</span>
+              </label>
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
                 <label style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0;transition:border-color .15s" data-hover="border-accent">
                   Upload XML
@@ -8086,6 +8090,8 @@ function openIdPModal(p) {
   document.getElementById('idp-context-banner').style.display = 'none';
   document.getElementById('idp-clear-secret').checked = false;
   document.getElementById('idp-clear-secret-wrap').style.display = (p && p.type === 'oidc') ? 'flex' : 'none';
+  document.getElementById('idp-clear-metadata-xml').checked = false;
+  document.getElementById('idp-clear-metadata-xml-wrap').style.display = (p && p.type === 'saml') ? 'flex' : 'none';
 
   if (p) {
     // Edit mode — skip step 1, go straight to form
@@ -8197,12 +8203,15 @@ async function saveIdP() {
     if (clearClientSecret) body.oidc.clientSecret = '';
     else if (clientSecret) body.oidc.clientSecret = clientSecret;
   } else {
+    const metadataXml = document.getElementById('idp-meta-xml').value.trim();
+    const clearMetadataXml = document.getElementById('idp-clear-metadata-xml').checked;
     body.saml = {
       metadataUrl:     document.getElementById('idp-meta-url').value.trim(),
-      metadataXml:     document.getElementById('idp-meta-xml').value.trim(),
       groupsAttribute: document.getElementById('idp-saml-groups').value.trim(),
       emailAttribute:  document.getElementById('idp-saml-email').value.trim(),
     };
+    if (clearMetadataXml) body.saml.metadataXml = '';
+    else if (metadataXml) body.saml.metadataXml = metadataXml;
   }
   const method = id ? 'PUT' : 'POST';
   const url    = id ? `/api/idp/${id}` : '/api/idp';
