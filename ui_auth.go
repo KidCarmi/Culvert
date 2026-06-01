@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"html"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -451,13 +454,20 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		before := idpRegistry.Get(id)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
 		var p IdPProfile
-		if err := decodeJSON(r, &p); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&p); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
 		p.ID = id
-		preserveWriteOnlyIdPFields(before, &p)
+		preserveWriteOnlyIdPFields(before, &p, oidcClientSecretPresent(body))
 		if err := idpRegistry.Upsert(&p); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -482,19 +492,47 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 	}
 }
 
-func preserveWriteOnlyIdPFields(before, next *IdPProfile) {
+func preserveWriteOnlyIdPFields(before, next *IdPProfile, oidcClientSecretProvided bool) {
 	if before == nil || next == nil {
 		return
 	}
-	if before.Type == IdPTypeSAML &&
-		next.Type == IdPTypeSAML &&
-		before.SAML != nil &&
-		next.SAML != nil &&
-		before.SAML.MetadataXML != "" &&
-		next.SAML.MetadataURL == "" &&
-		next.SAML.MetadataXML == "" {
+	preserveOIDCClientSecret(before, next, oidcClientSecretProvided)
+	preserveSAMLMetadataXML(before, next)
+}
+
+func preserveOIDCClientSecret(before, next *IdPProfile, clientSecretProvided bool) {
+	if before.Type != IdPTypeOIDC || next.Type != IdPTypeOIDC || before.OIDC == nil || next.OIDC == nil {
+		return
+	}
+	if before.OIDC.ClientSecret != "" && !clientSecretProvided && next.OIDC.ClientSecret == "" {
+		next.OIDC.ClientSecret = before.OIDC.ClientSecret
+	}
+}
+
+func preserveSAMLMetadataXML(before, next *IdPProfile) {
+	if before.Type != IdPTypeSAML || next.Type != IdPTypeSAML || before.SAML == nil || next.SAML == nil {
+		return
+	}
+	if before.SAML.MetadataXML != "" && next.SAML.MetadataURL == "" && next.SAML.MetadataXML == "" {
 		next.SAML.MetadataXML = before.SAML.MetadataXML
 	}
+}
+
+func oidcClientSecretPresent(body []byte) bool {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(body, &root); err != nil {
+		return false
+	}
+	rawOIDC, ok := root["oidc"]
+	if !ok {
+		return false
+	}
+	var oidc map[string]json.RawMessage
+	if err := json.Unmarshal(rawOIDC, &oidc); err != nil {
+		return false
+	}
+	_, ok = oidc["clientSecret"]
+	return ok
 }
 
 // GET /api/idp/{id}/groups — returns the known-groups list for the profile.
