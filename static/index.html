@@ -8180,13 +8180,14 @@ async function saveIdP() {
   };
   if (type === 'oidc') {
     const scopeStr = document.getElementById('idp-scopes').value.trim();
+    const clientSecret = document.getElementById('idp-client-secret').value;
     body.oidc = {
       issuer:       document.getElementById('idp-issuer').value.trim(),
       clientId:     document.getElementById('idp-client-id').value.trim(),
-      clientSecret: document.getElementById('idp-client-secret').value,
       scopes:       scopeStr ? scopeStr.split(/\s+/) : [],
       groupsClaim:  document.getElementById('idp-groups-claim').value.trim(),
     };
+    if (clientSecret) body.oidc.clientSecret = clientSecret;
   } else {
     body.saml = {
       metadataUrl:     document.getElementById('idp-meta-url').value.trim(),

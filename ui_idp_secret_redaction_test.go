@@ -68,6 +68,121 @@ func TestAPIIdPItemGet_RedactsClientSecret(t *testing.T) {
 	}
 }
 
+func TestAPIIdPItemPut_PreservesOIDCClientSecretWhenRedactedFromForm(t *testing.T) {
+	p := &IdPProfile{
+		ID:           "oidc-preserve-id",
+		Name:         "OIDC Preserve",
+		Type:         IdPTypeOIDC,
+		Enabled:      false,
+		KnownGroups:  []string{"Engineering"},
+		EmailDomains: []string{"example.com"},
+		OIDC: &OIDCProfileConfig{
+			Issuer:       "https://example.com",
+			ClientID:     "client",
+			ClientSecret: "existing-secret",
+			Scopes:       []string{"openid", "email"},
+			GroupsClaim:  "groups",
+		},
+	}
+	orig := idpRegistry
+	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+	t.Cleanup(func() { idpRegistry = orig })
+
+	w := httptest.NewRecorder()
+	r := jsonReq(http.MethodPut, "/api/idp/oidc-preserve-id", map[string]any{
+		"name":         "Renamed OIDC Preserve",
+		"type":         "oidc",
+		"enabled":      false,
+		"knownGroups":  []string{"Security"},
+		"emailDomains": []string{"example.org"},
+		"oidc": map[string]any{
+			"issuer":      "https://example.com",
+			"clientId":    "client",
+			"scopes":      []string{"openid", "profile"},
+			"groupsClaim": "roles",
+		},
+	})
+
+	apiIdPItem(w, r, p.ID)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	assertNoOIDCSecretLeak(t, w.Body.String())
+	got := idpRegistry.Get(p.ID)
+	if got == nil || got.OIDC == nil {
+		t.Fatal("profile missing after update")
+	}
+	if got.Name != "Renamed OIDC Preserve" {
+		t.Fatalf("profile name = %q, want update applied", got.Name)
+	}
+	if got.OIDC.ClientSecret != "existing-secret" {
+		t.Fatalf("stored clientSecret = %q, want preserved existing secret", got.OIDC.ClientSecret)
+	}
+	if got.OIDC.GroupsClaim != "roles" || len(got.OIDC.Scopes) != 2 || got.OIDC.Scopes[1] != "profile" {
+		t.Fatalf("OIDC non-secret settings = %+v, want update applied", got.OIDC)
+	}
+	if len(got.KnownGroups) != 1 || got.KnownGroups[0] != "Security" {
+		t.Fatalf("known groups = %#v, want update applied", got.KnownGroups)
+	}
+}
+
+func TestAPIIdPItemPut_MutatesOIDCClientSecretWhenProvided(t *testing.T) {
+	tests := []struct {
+		name       string
+		id         string
+		submitted  string
+		wantSecret string
+	}{
+		{name: "clear", id: "oidc-clear-id", submitted: "", wantSecret: ""},
+		{name: "replace", id: "oidc-replace-id", submitted: "new-secret", wantSecret: "new-secret"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &IdPProfile{
+				ID:      tt.id,
+				Name:    "OIDC " + tt.name,
+				Type:    IdPTypeOIDC,
+				Enabled: false,
+				OIDC: &OIDCProfileConfig{
+					Issuer:       "https://example.com",
+					ClientID:     "client",
+					ClientSecret: "old-secret",
+				},
+			}
+			orig := idpRegistry
+			idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+			t.Cleanup(func() { idpRegistry = orig })
+
+			w := httptest.NewRecorder()
+			r := jsonReq(http.MethodPut, "/api/idp/"+tt.id, map[string]any{
+				"name":    p.Name,
+				"type":    "oidc",
+				"enabled": false,
+				"oidc": map[string]any{
+					"issuer":       "https://example.com",
+					"clientId":     "client",
+					"clientSecret": tt.submitted,
+				},
+			})
+
+			apiIdPItem(w, r, p.ID)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("PUT status = %d, want 200; body=%s", w.Code, w.Body.String())
+			}
+			assertNoOIDCSecretLeak(t, w.Body.String())
+			got := idpRegistry.Get(p.ID)
+			if got == nil || got.OIDC == nil {
+				t.Fatal("profile missing after update")
+			}
+			if got.OIDC.ClientSecret != tt.wantSecret {
+				t.Fatalf("stored clientSecret = %q, want %q", got.OIDC.ClientSecret, tt.wantSecret)
+			}
+		})
+	}
+}
+
 func TestPublicIdPProfile_RedactsSAMLMetadataXML(t *testing.T) {
 	p := &IdPProfile{
 		ID:           "saml-redact-id",
@@ -105,6 +220,15 @@ func TestPublicIdPProfile_RedactsSAMLMetadataXML(t *testing.T) {
 	}
 	if len(got.KnownGroups) != 2 || got.KnownGroups[0] != "Engineering" || got.KnownGroups[1] != "Security" {
 		t.Fatalf("known groups = %#v, want preserved", got.KnownGroups)
+	}
+}
+
+func assertNoOIDCSecretLeak(t *testing.T, body string) {
+	t.Helper()
+	if strings.Contains(body, "existing-secret") ||
+		strings.Contains(body, "old-secret") ||
+		strings.Contains(body, "new-secret") {
+		t.Fatalf("response leaked OIDC client secret: %s", body)
 	}
 }
 
