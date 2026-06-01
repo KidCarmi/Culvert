@@ -304,8 +304,9 @@ func (r *IdPRegistry) All() []*IdPProfile {
 	return out
 }
 
-// publicIdPProfile returns a response-safe copy. Client secrets are write-only
-// API inputs and must not be exposed through viewer/admin read responses.
+// publicIdPProfile returns a response-safe copy. Client secrets and uploaded
+// SAML metadata XML are write-only API inputs and must not be exposed through
+// viewer/admin read responses.
 func publicIdPProfile(p *IdPProfile) *IdPProfile {
 	if p == nil {
 		return nil
@@ -321,6 +322,7 @@ func publicIdPProfile(p *IdPProfile) *IdPProfile {
 	}
 	if p.SAML != nil {
 		saml := *p.SAML
+		saml.MetadataXML = ""
 		cp.SAML = &saml
 	}
 	return &cp
