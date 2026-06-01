@@ -1323,22 +1323,22 @@ tr.dragging  { opacity: .4; }
             </div>
             <div class="form-group">
               <label class="form-label">Metadata URL <span style="color:var(--muted);font-weight:400">(recommended — fetched at login time)</span></label>
-              <input id="idp-meta-url" class="input" placeholder="https://your-idp.com/metadata.xml" style="width:100%">
+              <input id="idp-meta-url" class="input" placeholder="https://your-idp.com/metadata.xml" style="width:100%" data-input="syncSAMLMetadataSourceChoice">
             </div>
             <div class="form-group">
               <label class="form-label">Or upload / paste Metadata XML</label>
               <label id="idp-clear-metadata-xml-wrap" style="display:none;align-items:center;gap:6px;margin-bottom:8px;font-size:.78rem;color:var(--muted);cursor:pointer">
-                <input type="checkbox" id="idp-clear-metadata-xml" style="width:auto">
+                <input type="checkbox" id="idp-clear-metadata-xml" style="width:auto" data-change="syncSAMLMetadataSourceChoice">
                 <span>Clear saved metadata XML</span>
               </label>
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-                <label style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0;transition:border-color .15s" data-hover="border-accent">
+                <label id="idp-meta-xml-upload-label" style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.82rem;flex-shrink:0;transition:border-color .15s" data-hover="border-accent">
                   Upload XML
                   <input type="file" id="idp-meta-xml-file" accept=".xml,text/xml,application/xml" style="display:none" data-change="loadXMLFile">
                 </label>
                 <span style="font-size:.75rem;color:var(--muted)" id="idp-xml-filename">No file chosen</span>
               </div>
-              <textarea id="idp-meta-xml" class="input" rows="4" placeholder="&lt;EntityDescriptor xmlns=&quot;urn:oasis:names:tc:SAML:2.0:metadata&quot; ...&gt;" style="width:100%;font-family:monospace;font-size:.78rem;resize:vertical"></textarea>
+              <textarea id="idp-meta-xml" class="input" rows="4" placeholder="&lt;EntityDescriptor xmlns=&quot;urn:oasis:names:tc:SAML:2.0:metadata&quot; ...&gt;" style="width:100%;font-family:monospace;font-size:.78rem;resize:vertical" data-input="syncSAMLMetadataSourceChoice"></textarea>
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
               <div class="form-group" style="margin-bottom:0">
@@ -3731,6 +3731,7 @@ document.addEventListener('change', e => {
     case 'applyLogFilter':    applyLogFilter(); break;
     case 'importBlocklist':   importBlocklist(el); break;
     case 'loadXMLFile':       loadXMLFile(e); break;
+    case 'syncSAMLMetadataSourceChoice': syncSAMLMetadataSourceChoice(); break;
     case 'setLogLevel':       setLogLevel(el.value); break;
     case 'importConfig':      importConfig(el); break;
     case 'toggleOCSP':        toggleOCSP(el.checked); break;
@@ -3748,6 +3749,7 @@ document.addEventListener('input', e => {
   switch (el.dataset.input) {
     case 'applyLogFilter':       applyLogFilter(); break;
     case 'onGroupSearchInput':   onGroupSearchInput(el.value); break;
+    case 'syncSAMLMetadataSourceChoice': syncSAMLMetadataSourceChoice(); break;
     case 'fpSyncTitle':          document.getElementById('fp-editor-title').textContent = el.value || 'Profile'; break;
     case 'fpSyncNewTitle':       document.getElementById('fp-editor-title').textContent = el.value || 'New Profile'; break;
     default: console.warn('CSP delegation: unknown input action:', el.dataset.input);
@@ -8136,6 +8138,7 @@ function openIdPModal(p) {
     ['idp-name','idp-domains','idp-issuer','idp-client-id','idp-client-secret','idp-scopes','idp-groups-claim','idp-meta-url','idp-meta-xml','idp-saml-groups','idp-saml-email'].forEach(id => document.getElementById(id).value = '');
     document.querySelectorAll('.idp-provider-card').forEach(c => c.classList.remove('selected'));
   }
+  syncSAMLMetadataSourceChoice();
   document.getElementById('idp-modal').style.display = 'block';
 }
 
@@ -8151,6 +8154,36 @@ function toggleIdPTypeFields() {
   const t = document.getElementById('idp-type').value;
   document.getElementById('idp-oidc-fields').style.display = t === 'oidc' ? '' : 'none';
   document.getElementById('idp-saml-fields').style.display = t === 'saml' ? '' : 'none';
+  syncSAMLMetadataSourceChoice();
+}
+
+function syncSAMLMetadataSourceChoice() {
+  const url = document.getElementById('idp-meta-url');
+  const xml = document.getElementById('idp-meta-xml');
+  const xmlFile = document.getElementById('idp-meta-xml-file');
+  const uploadLabel = document.getElementById('idp-meta-xml-upload-label');
+  const clearXML = document.getElementById('idp-clear-metadata-xml');
+  if (!url || !xml || !xmlFile || !uploadLabel || !clearXML) return;
+
+  const hasURL = !!url.value.trim();
+  const hasXML = !!xml.value.trim();
+  if (hasURL) {
+    xml.value = '';
+    xmlFile.value = '';
+    clearXML.checked = false;
+    document.getElementById('idp-xml-filename').textContent = 'No file chosen';
+  } else if (hasXML) {
+    url.value = '';
+  }
+
+  const xmlDisabled = hasURL;
+  const urlDisabled = !hasURL && hasXML;
+  xml.disabled = xmlDisabled;
+  xmlFile.disabled = xmlDisabled;
+  clearXML.disabled = xmlDisabled;
+  url.disabled = urlDisabled;
+  uploadLabel.style.opacity = xmlDisabled ? '.55' : '';
+  uploadLabel.style.cursor = xmlDisabled ? 'not-allowed' : 'pointer';
 }
 
 async function discoverOIDC() {
@@ -8205,13 +8238,16 @@ async function saveIdP() {
   } else {
     const metadataXml = document.getElementById('idp-meta-xml').value.trim();
     const clearMetadataXml = document.getElementById('idp-clear-metadata-xml').checked;
+    const metadataUrl = document.getElementById('idp-meta-url').value.trim();
     body.saml = {
-      metadataUrl:     document.getElementById('idp-meta-url').value.trim(),
+      metadataUrl,
       groupsAttribute: document.getElementById('idp-saml-groups').value.trim(),
       emailAttribute:  document.getElementById('idp-saml-email').value.trim(),
     };
-    if (clearMetadataXml) body.saml.metadataXml = '';
-    else if (metadataXml) body.saml.metadataXml = metadataXml;
+    if (!metadataUrl) {
+      if (clearMetadataXml) body.saml.metadataXml = '';
+      else if (metadataXml) body.saml.metadataXml = metadataXml;
+    }
   }
   const method = id ? 'PUT' : 'POST';
   const url    = id ? `/api/idp/${id}` : '/api/idp';
@@ -8237,7 +8273,10 @@ function loadXMLFile(event) {
   if (!file) return;
   document.getElementById('idp-xml-filename').textContent = file.name;
   const reader = new FileReader();
-  reader.onload = e => { document.getElementById('idp-meta-xml').value = e.target.result; };
+  reader.onload = e => {
+    document.getElementById('idp-meta-xml').value = e.target.result;
+    syncSAMLMetadataSourceChoice();
+  };
   reader.readAsText(file);
 }
 
