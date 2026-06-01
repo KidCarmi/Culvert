@@ -86,6 +86,16 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 	}
 }
 
+// isKEKArtifactPath reports whether a tarball path refers to a CA-3 local KEK
+// file. KEK files are named after the key they wrap with a ".kek" suffix
+// (cluster-ca.kek, dp-node.kek, <cdr-client-key>.kek) — see kek.go,
+// cluster_ca_keyatrest.go, dp_node_keyatrest.go, cdr_client_keyatrest.go.
+// They must never be packed into a backup archive (ADR §9). The check is on
+// the base name so it works for both top-level and walked (dir) entries.
+func isKEKArtifactPath(tarOrSrcPath string) bool {
+	return strings.HasSuffix(filepath.Base(filepath.ToSlash(tarOrSrcPath)), ".kek")
+}
+
 // runBackup is the CLI entrypoint. Packs the default Tier-1+2 artifact
 // list rooted at dataDir into outPath, atomically (writes to outPath+".tmp"
 // then renames). Unencrypted (D1.3a).
@@ -227,6 +237,16 @@ func collectArtifacts(artifacts []backupArtifact) (
 }
 
 func packOne(srcPath, tarPath string, info os.FileInfo, required bool, manifestFiles *[]backupManifestFile, packed *[]packedFile) error {
+	// CA-3 (PR4): never pack a local KEK file. KEKs wrap the encrypted
+	// private keys (cluster-ca.key, dp-node.key, CDR client keys); storing a
+	// KEK in the same archive as the key it unwraps would defeat at-rest
+	// encryption (ADR §9). The named artifact list never includes a .kek, so
+	// this is defense-in-depth for the config_versions/ walk and any future
+	// dataDir glob. Skip silently (a KEK here is never an error, just excluded).
+	if isKEKArtifactPath(tarPath) {
+		fmt.Fprintf(os.Stderr, "Backup: excluding KEK file %q (must not share an archive with encrypted keys)\n", tarPath)
+		return nil
+	}
 	// Path-traversal guard: refuse any tarPath whose path components include
 	// ".." — defense in depth against pathological filenames in walked
 	// directories. Component-level check (won't reject legitimate filenames
