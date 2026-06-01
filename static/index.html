@@ -1297,6 +1297,10 @@ tr.dragging  { opacity: .4; }
               </div>
               <div class="form-group" style="margin-bottom:0">
                 <label class="form-label">Client Secret</label>
+                <label id="idp-clear-secret-wrap" style="display:none;align-items:center;gap:6px;margin-bottom:7px;font-size:.78rem;color:var(--muted);cursor:pointer">
+                  <input type="checkbox" id="idp-clear-secret" style="width:auto">
+                  <span>Clear saved secret</span>
+                </label>
                 <input id="idp-client-secret" class="input" type="password" placeholder="••••••••" style="width:100%">
               </div>
             </div>
@@ -8080,6 +8084,8 @@ function openIdPModal(p) {
   document.getElementById('idp-xml-filename').textContent = 'No file chosen';
   document.getElementById('idp-discover-result').style.display = 'none';
   document.getElementById('idp-context-banner').style.display = 'none';
+  document.getElementById('idp-clear-secret').checked = false;
+  document.getElementById('idp-clear-secret-wrap').style.display = (p && p.type === 'oidc') ? 'flex' : 'none';
 
   if (p) {
     // Edit mode — skip step 1, go straight to form
@@ -8181,13 +8187,15 @@ async function saveIdP() {
   if (type === 'oidc') {
     const scopeStr = document.getElementById('idp-scopes').value.trim();
     const clientSecret = document.getElementById('idp-client-secret').value;
+    const clearClientSecret = document.getElementById('idp-clear-secret').checked;
     body.oidc = {
       issuer:       document.getElementById('idp-issuer').value.trim(),
       clientId:     document.getElementById('idp-client-id').value.trim(),
       scopes:       scopeStr ? scopeStr.split(/\s+/) : [],
       groupsClaim:  document.getElementById('idp-groups-claim').value.trim(),
     };
-    if (clientSecret) body.oidc.clientSecret = clientSecret;
+    if (clearClientSecret) body.oidc.clientSecret = '';
+    else if (clientSecret) body.oidc.clientSecret = clientSecret;
   } else {
     body.saml = {
       metadataUrl:     document.getElementById('idp-meta-url').value.trim(),
