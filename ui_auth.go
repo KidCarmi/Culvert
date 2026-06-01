@@ -467,7 +467,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		p.ID = id
-		preserveWriteOnlyIdPFields(before, &p, oidcClientSecretPresent(body))
+		preserveWriteOnlyIdPFields(before, &p, oidcClientSecretPresent(body), samlMetadataXMLPresent(body))
 		if err := idpRegistry.Upsert(&p); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -492,12 +492,12 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 	}
 }
 
-func preserveWriteOnlyIdPFields(before, next *IdPProfile, oidcClientSecretProvided bool) {
+func preserveWriteOnlyIdPFields(before, next *IdPProfile, oidcClientSecretProvided, samlMetadataXMLProvided bool) {
 	if before == nil || next == nil {
 		return
 	}
 	preserveOIDCClientSecret(before, next, oidcClientSecretProvided)
-	preserveSAMLMetadataXML(before, next)
+	preserveSAMLMetadataXML(before, next, samlMetadataXMLProvided)
 }
 
 func preserveOIDCClientSecret(before, next *IdPProfile, clientSecretProvided bool) {
@@ -509,29 +509,37 @@ func preserveOIDCClientSecret(before, next *IdPProfile, clientSecretProvided boo
 	}
 }
 
-func preserveSAMLMetadataXML(before, next *IdPProfile) {
+func preserveSAMLMetadataXML(before, next *IdPProfile, metadataXMLProvided bool) {
 	if before.Type != IdPTypeSAML || next.Type != IdPTypeSAML || before.SAML == nil || next.SAML == nil {
 		return
 	}
-	if before.SAML.MetadataXML != "" && next.SAML.MetadataURL == "" && next.SAML.MetadataXML == "" {
+	if before.SAML.MetadataXML != "" && !metadataXMLProvided && next.SAML.MetadataURL == "" && next.SAML.MetadataXML == "" {
 		next.SAML.MetadataXML = before.SAML.MetadataXML
 	}
 }
 
 func oidcClientSecretPresent(body []byte) bool {
+	return nestedJSONFieldPresent(body, "oidc", "clientSecret")
+}
+
+func samlMetadataXMLPresent(body []byte) bool {
+	return nestedJSONFieldPresent(body, "saml", "metadataXml")
+}
+
+func nestedJSONFieldPresent(body []byte, section, field string) bool {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil {
 		return false
 	}
-	rawOIDC, ok := root["oidc"]
+	rawSection, ok := root[section]
 	if !ok {
 		return false
 	}
-	var oidc map[string]json.RawMessage
-	if err := json.Unmarshal(rawOIDC, &oidc); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rawSection, &fields); err != nil {
 		return false
 	}
-	_, ok = oidc["clientSecret"]
+	_, ok = fields[field]
 	return ok
 }
 
