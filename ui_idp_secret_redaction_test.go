@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -180,6 +181,28 @@ func TestAPIIdPItemPut_MutatesOIDCClientSecretWhenProvided(t *testing.T) {
 				t.Fatalf("stored clientSecret = %q, want %q", got.OIDC.ClientSecret, tt.wantSecret)
 			}
 		})
+	}
+}
+
+func TestStaticIdPModal_ClearsOIDCSecretOnlyWhenExplicitlyChecked(t *testing.T) {
+	data, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read static/index.html: %v", err)
+	}
+	html := string(data)
+	required := []string{
+		`id="idp-clear-secret"`,
+		`id="idp-clear-secret-wrap"`,
+		`document.getElementById('idp-clear-secret').checked = false`,
+		`(p && p.type === 'oidc') ? 'flex' : 'none'`,
+		`const clearClientSecret = document.getElementById('idp-clear-secret').checked`,
+		`if (clearClientSecret) body.oidc.clientSecret = '';`,
+		`else if (clientSecret) body.oidc.clientSecret = clientSecret;`,
+	}
+	for _, want := range required {
+		if !strings.Contains(html, want) {
+			t.Fatalf("static/index.html missing %q", want)
+		}
 	}
 }
 
