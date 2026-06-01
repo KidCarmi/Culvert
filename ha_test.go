@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -438,9 +439,10 @@ func TestHASync_EncryptsCAKey(t *testing.T) {
 	if err := json.Unmarshal(raw, &bundle); err != nil {
 		t.Fatalf("parse bundle: %v", err)
 	}
-	// CAKeyPEM should be empty (no longer sent in plaintext).
-	if bundle.CAKeyPEM != "" {
-		t.Error("CAKeyPEM should be empty in new format (1.6 fix)")
+	// CA-3 PR5: the plaintext CA key field is removed entirely. Assert the wire
+	// payload carries no ca_key_pem field at all (stronger than "empty").
+	if bytes.Contains(raw, []byte("ca_key_pem")) {
+		t.Error("HA bundle wire payload must not contain a ca_key_pem field (plaintext fallback removed)")
 	}
 }
 

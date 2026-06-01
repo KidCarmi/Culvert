@@ -838,13 +838,16 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 // Contains everything the standby needs to promote to leader if needed.
 // The CA private key is encrypted with AES-256-GCM using the HA token as
 // passphrase (1.6 fix: never transmit CA key in plaintext).
+//
+// CA-3 PR5: the deprecated plaintext CAKeyPEM field has been removed. The CA
+// key is carried ONLY as CAKeyEncrypted (HA-token-wrapped, in transit); the
+// standby fails closed if it is missing/invalid rather than accepting plaintext.
 type HAStateBundle struct {
-	ClusterState    json.RawMessage `json:"cluster_state"`
-	CACertPEM       string          `json:"ca_cert_pem"`
-	CAKeyPEM        string          `json:"ca_key_pem,omitempty"`         // deprecated: plaintext CA key (removed)
-	CAKeyEncrypted  string          `json:"ca_key_encrypted,omitempty"`   // base64(salt + nonce + ciphertext)
-	Config          ConfigSnapshot  `json:"config"`
-	Version         int64           `json:"version"`
+	ClusterState   json.RawMessage `json:"cluster_state"`
+	CACertPEM      string          `json:"ca_cert_pem"`
+	CAKeyEncrypted string          `json:"ca_key_encrypted,omitempty"` // base64(salt + nonce + ciphertext)
+	Config         ConfigSnapshot  `json:"config"`
+	Version        int64           `json:"version"`
 }
 
 // haEncryptKey encrypts data with AES-256-GCM using a key derived from the

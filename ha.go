@@ -219,18 +219,14 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	}
 
 	// Apply CA cert + key.
-	// 1.6 fix: CA key is now encrypted; decrypt with the HA token.
-	if bundle.CACertPEM != "" && bundle.CAKeyEncrypted != "" {
-		keyPEM, decErr := haDecryptKey(bundle.CAKeyEncrypted, token)
-		if decErr != nil {
-			logger.Printf("HA: decrypt CA key error: %v", decErr)
-		} else if err := globalClusterCA.ImportCASilent([]byte(bundle.CACertPEM), keyPEM); err != nil {
-			logger.Printf("HA: import CA error: %v", err)
-		}
-	} else if bundle.CACertPEM != "" && bundle.CAKeyPEM != "" {
-		// Backward compat: accept plaintext key from older leaders during upgrade.
-		if err := globalClusterCA.ImportCASilent([]byte(bundle.CACertPEM), []byte(bundle.CAKeyPEM)); err != nil {
-			logger.Printf("HA: import CA error (legacy plaintext): %v", err)
+	// CA-3 PR5: the CA key is carried ONLY as CAKeyEncrypted (HA-token-wrapped
+	// in transit). There is no plaintext fallback — if a cert is present, a
+	// valid encrypted key MUST decrypt and import, otherwise the sync fails
+	// closed (no silent acceptance of an un-keyed or plaintext CA).
+	if bundle.CACertPEM != "" {
+		if err := applyReplicatedCA([]byte(bundle.CACertPEM), bundle.CAKeyEncrypted, token); err != nil {
+			logger.Printf("HA: apply replicated CA failed: %v", err)
+			return false
 		}
 	}
 
@@ -238,6 +234,30 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	applyConfigSnapshot(bundle.Config)
 
 	return true
+}
+
+// applyReplicatedCA decrypts the HA-token-wrapped cluster CA key, imports the
+// cert+key into the running clusterCA (memory), and persists it at rest through
+// the CA-3 cluster-CA write path (encrypted iff CULVERT_CLUSTER_CA_ENCRYPT is
+// enabled locally — per-node KEK, no shared at-rest KEK required). Fails closed
+// on a missing/invalid encrypted key; no key bytes are logged.
+func applyReplicatedCA(certPEM []byte, caKeyEncrypted, token string) error {
+	if caKeyEncrypted == "" {
+		return fmt.Errorf("encrypted CA key missing from HA bundle (plaintext fallback removed)")
+	}
+	keyPEM, decErr := haDecryptKey(caKeyEncrypted, token)
+	if decErr != nil {
+		return fmt.Errorf("decrypt CA key: %w", decErr)
+	}
+	if err := globalClusterCA.ImportCASilent(certPEM, keyPEM); err != nil {
+		return fmt.Errorf("import CA: %w", err)
+	}
+	// Persist at rest on the standby via the CA-3 write path (#319). Honors the
+	// standby's local CULVERT_CLUSTER_CA_ENCRYPT independently of the leader.
+	if err := globalClusterCA.persistReplicatedKey(keyPEM); err != nil {
+		return fmt.Errorf("persist replicated CA key: %w", err)
+	}
+	return nil
 }
 
 // promote switches this standby to leader mode.
@@ -472,4 +492,36 @@ func (ca *clusterCA) ImportCASilent(certPEM, keyPEM []byte) error {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 	return ca.loadFromPEM(certPEM, keyPEM)
+}
+
+// persistReplicatedKey writes the (already in-memory) cluster CA cert + key to
+// disk on an HA standby. The cert is written plaintext; the key goes through the
+// CA-3 cluster-CA write path (writeClusterCAKey), so it is encrypted at rest iff
+// CULVERT_CLUSTER_CA_ENCRYPT is enabled on THIS node — a per-node decision that
+// does not require the leader's KEK. keyPEM is the decrypted plaintext key PEM;
+// it is never logged.
+//
+// No-op (not an error) when the CA has no persistence dir configured — some
+// deployments run the cluster CA in-memory only.
+func (ca *clusterCA) persistReplicatedKey(keyPEM []byte) error {
+	ca.mu.RLock()
+	dir := ca.dir
+	certPEM := ca.certPEM
+	ca.mu.RUnlock()
+	if dir == "" {
+		return nil
+	}
+	certPath, err := safeCAPath(dir, "cluster-ca.crt")
+	if err != nil {
+		return err
+	}
+	keyPath, err := safeCAPath(dir, "cluster-ca.key")
+	if err != nil {
+		return err
+	}
+	if err := atomicWriteFile(certPath, certPEM, 0o600); err != nil {
+		return fmt.Errorf("write cluster CA cert: %w", err)
+	}
+	// CA-3 (#319): encrypted at rest when enabled on this node, plaintext otherwise.
+	return writeClusterCAKey(dir, keyPath, keyPEM)
 }
