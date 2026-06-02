@@ -183,6 +183,46 @@ func TestAPIIdPItem_PutURLMetadataClearsInlineSAMLMetadataWhenXMLIsOmitted(t *te
 	}
 }
 
+func TestAPIIdPItem_PutRejectsClearingInlineSAMLMetadataWithoutReplacementSource(t *testing.T) {
+	withTestIdPRegistry(t)
+	original := samlProfile("api-inline-clear-id", "Inline Metadata Profile")
+	original.SAML.MetadataXML = "<EntityDescriptor>keep-inline-metadata</EntityDescriptor>"
+	if err := idpRegistry.Upsert(original); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := jsonReq(http.MethodPut, "/api/idp/api-inline-clear-id", map[string]any{
+		"name":    "Broken Metadata Profile",
+		"type":    "saml",
+		"enabled": false,
+		"saml": map[string]any{
+			"metadataUrl": "",
+			"metadataXml": "",
+		},
+	})
+
+	apiIdPItem(w, r, "api-inline-clear-id")
+
+	assertStatus(t, w, http.StatusBadRequest)
+	if !strings.Contains(w.Body.String(), "exactly one") {
+		t.Fatalf("response = %q, want exactly-one metadata validation", w.Body.String())
+	}
+	got := idpRegistry.Get("api-inline-clear-id")
+	if got == nil || got.SAML == nil {
+		t.Fatal("original profile missing after rejected update")
+	}
+	if got.Name != "Inline Metadata Profile" {
+		t.Fatalf("profile name = %q, want original profile unchanged", got.Name)
+	}
+	if got.SAML.MetadataXML != "<EntityDescriptor>keep-inline-metadata</EntityDescriptor>" {
+		t.Fatalf("stored metadataXml = %q, want original inline metadata preserved", got.SAML.MetadataXML)
+	}
+	if got.SAML.MetadataURL != "" {
+		t.Fatalf("stored metadataUrl = %q, want original empty URL", got.SAML.MetadataURL)
+	}
+}
+
 func withTestIdPRegistry(t *testing.T) {
 	t.Helper()
 	orig := idpRegistry
