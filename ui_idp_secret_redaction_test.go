@@ -407,7 +407,13 @@ func TestAPIIdPGetAndList_RedactSAMLMetadataXML(t *testing.T) {
 
 func assertNoSAMLMetadataLeak(t *testing.T, body string) {
 	t.Helper()
-	if strings.Contains(body, "uploaded-secret-metadata") || strings.Contains(body, "metadataXml") {
+	if strings.Contains(body, "uploaded-secret-metadata") ||
+		strings.Contains(body, "preserve-inline-metadata") ||
+		strings.Contains(body, "old-inline-metadata") ||
+		strings.Contains(body, "keep-inline-metadata") ||
+		strings.Contains(body, "new-inline-metadata") ||
+		strings.Contains(body, "inline-metadata") ||
+		strings.Contains(body, "metadataXml") {
 		t.Fatalf("response leaked SAML metadata XML: %s", body)
 	}
 }
