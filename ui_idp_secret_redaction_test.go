@@ -69,6 +69,51 @@ func TestAPIIdPItemGet_RedactsClientSecret(t *testing.T) {
 	}
 }
 
+func TestAPIIdPListPost_StoresAndRedactsClientSecret(t *testing.T) {
+	orig := idpRegistry
+	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	t.Cleanup(func() { idpRegistry = orig })
+
+	w := httptest.NewRecorder()
+	r := jsonReq(http.MethodPost, "/api/idp", map[string]any{
+		"name":    "OIDC Create",
+		"type":    "oidc",
+		"enabled": false,
+		"oidc": map[string]any{
+			"issuer":       "https://example.com",
+			"clientId":     "client",
+			"clientSecret": "created-secret",
+		},
+	})
+
+	apiIdPList(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	assertNoOIDCSecretLeak(t, w.Body.String())
+	var got IdPProfile
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.ID == "" {
+		t.Fatal("response ID is empty")
+	}
+	if got.OIDC == nil {
+		t.Fatal("OIDC config missing from response")
+	}
+	if got.OIDC.ClientSecret != "" {
+		t.Fatalf("response clientSecret = %q, want redacted", got.OIDC.ClientSecret)
+	}
+	stored := idpRegistry.Get(got.ID)
+	if stored == nil || stored.OIDC == nil {
+		t.Fatal("stored profile missing after create")
+	}
+	if stored.OIDC.ClientSecret != "created-secret" {
+		t.Fatalf("stored clientSecret = %q, want created secret", stored.OIDC.ClientSecret)
+	}
+}
+
 func TestAPIIdPItemPut_PreservesOIDCClientSecretWhenRedactedFromForm(t *testing.T) {
 	p := &IdPProfile{
 		ID:           "oidc-preserve-id",
