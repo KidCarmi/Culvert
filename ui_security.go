@@ -1077,6 +1077,13 @@ func apiCADownload(w http.ResponseWriter, r *http.Request) {
 	w.Write(pem) //nolint:errcheck
 }
 
+// apiCACacheClear flushes the in-memory leaf-certificate LRU cache.
+//
+// Intentionally OUT of the config-version rollback surface — the leaf cache is
+// ephemeral in-memory runtime state (rebuilt on demand from the Root CA), with
+// no persistent config to version. Classified runtime-only (category E). Do
+// NOT add saveConfigVersion here.
+// See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §3 (category E).
 func apiCACacheClear(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
