@@ -613,7 +613,7 @@ centers on the cluster CA and DP node keys, and the DP key's divergent path
 | **PR3** | **DP node key encryption / load / migration** | Encrypt `dp-node.key` (`persistEnrollCerts`, `main.go`); handle the CWD-relative path; migrate on DP start; **also** decide DP-key backup ownership (currently un-backed). |
 | **PR3b** | **CDR/Sluice client key encryption (secondary)** | Encrypt `ClientKeyPath` (`cdr_health.go runRenewFor` / `cdr_pool.go loadCDRCertBundle`); migrate; also upgrade its plain tmp+rename write to the hardened `atomicWriteFile`. Independent of the cluster path; ship after PR1. |
 | **PR4** ✅ | **Backup / DR rules + KEK exclusion** | **Shipped (#322).** `backup.go` excludes any `*.kek` (defense-in-depth on the named allowlist + the `config_versions/` walk); restore validation accepts an encrypted `PSCA` cluster-CA key on its cert alone (added in PR2 #319); operator KEK/break-glass notes in `docs/operator/docker-compose-backup-restore.md` § 9.4 / § 12. Full KEK-based decrypt during restore intentionally deferred. |
-| **PR5** | **HA composition + CA-4 co-requisite** | Ensure on-disk encryption composes with the in-transit `HAStateBundle.CAKeyEncrypted` path (HA-token decrypt → per-node at-rest re-encrypt; **no shared at-rest KEK required**, §8); flag/coordinate removal of the deprecated plaintext `CAKeyPEM` (finding CA-4). |
+| **PR5** ✅ | **HA composition + CA-4 co-requisite** | **Shipped (#326).** Removed the deprecated plaintext `HAStateBundle.CAKeyPEM` field (finding CA-4); the standby now imports the CA from `CAKeyEncrypted` only and **fails closed** on a missing/invalid encrypted key (no plaintext fallback, sync returns false). The standby persists the replicated CA via the #319 cluster-CA write path (`persistReplicatedKey` → `writeClusterCAKey`), so it is encrypted at rest iff `CULVERT_CLUSTER_CA_ENCRYPT` is set **on the standby** — per-node KEK, no shared at-rest KEK, no double-wrap of the in-transit path. |
 | **PR6** | **Audit / logging / diagnostics + UI status** | Wire the §10 events; add read-only unlock-status surface (locked/unlocked, source) to the admin UI per the GUI-parity rule; no secret accepted over the web. |
 | **PR7** | **Operator guide + docs** | `docs/operator/` how-to: KEK provisioning per deployment (Docker/K8s/systemd), migration runbook, DR/break-glass; cross-link this ADR. |
 
@@ -630,8 +630,8 @@ Recorded so the implementation PRs stay tight and do not absorb adjacent work:
 - **Rollback classification** of CA/cluster handlers — closed by
   `CA-CLUSTER-ROLLBACK-CLASSIFICATION.md` (#281). CA-3 only *preserves* the
   "no keys on the rollback surface" rule.
-- **CA-4** (deprecated HA plaintext `CAKeyPEM` fallback) — its own HA-protocol
-  PR; referenced as a co-requisite in §8/§12-PR5, not implemented here.
+- **CA-4** (deprecated HA plaintext `CAKeyPEM` fallback) — **resolved in PR5
+  (#326)**: the field is removed and the standby is encrypted-only + fail-closed.
 - **CA-7** (`cpTLSConfig.ClientCAs` race test) — unrelated concurrency item.
 - **CA-8** (passphrase in process memory) — out-of-scope per threat model N2.
 - **CA-9** (`apiCertsUpload target=ui` persist/apply gap) — UI cert UX item.
