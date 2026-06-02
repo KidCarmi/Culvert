@@ -47,7 +47,7 @@ func TestHA_PR5_ApplyReplicatedCA_PersistsEncryptedWhenEnabled(t *testing.T) {
 	dir := t.TempDir()
 	certPEM, keyPEM := withClusterCAForHA(t, dir)
 
-	const token = "ha-token-pr5-enabled"
+	const token = "ha-token-pr5-enabled" // #nosec G101 -- synthetic test fixture; never leaves this test
 	enc, err := haEncryptKey(keyPEM, token)
 	if err != nil {
 		t.Fatalf("haEncryptKey: %v", err)
@@ -81,7 +81,7 @@ func TestHA_PR5_ApplyReplicatedCA_PersistsPlaintextWhenDisabled(t *testing.T) {
 	dir := t.TempDir()
 	certPEM, keyPEM := withClusterCAForHA(t, dir)
 
-	const token = "ha-token-pr5-disabled"
+	const token = "ha-token-pr5-disabled" // #nosec G101 -- synthetic test fixture; never leaves this test
 	enc, err := haEncryptKey(keyPEM, token)
 	if err != nil {
 		t.Fatalf("haEncryptKey: %v", err)

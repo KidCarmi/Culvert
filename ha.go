@@ -281,7 +281,12 @@ func applyReplicatedCA(certPEM []byte, caKeyEncrypted, token string) error {
 	return nil
 }
 
-// promote switches this standby to leader mode.
+// promote switches this standby to leader mode. The grpcAddr/certFile/keyFile/
+// caFile params are threaded from Start → standbyLoop → promote for call-site
+// symmetry with the reconnect path and kept for a future promote impl; they are
+// pre-existing and not introduced by CA-3.
+//
+//nolint:unparam // see note above — params kept for signature symmetry / future use
 func (h *HAState) promote(grpcAddr, certFile, keyFile, caFile string, onPromote func() error) {
 	logger.Printf("HA: leader unreachable — promoting to leader")
 
