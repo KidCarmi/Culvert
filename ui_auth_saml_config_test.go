@@ -147,6 +147,42 @@ func TestAPIIdPItem_PutClearsInlineSAMLMetadataWhenExplicitlyEmptyWithURL(t *tes
 	}
 }
 
+func TestAPIIdPItem_PutURLMetadataClearsInlineSAMLMetadataWhenXMLIsOmitted(t *testing.T) {
+	withTestIdPRegistry(t)
+	original := samlProfile("api-inline-url-omitted-id", "Inline Metadata Profile")
+	original.SAML.MetadataXML = "<EntityDescriptor>old-inline-metadata</EntityDescriptor>"
+	if err := idpRegistry.Upsert(original); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := jsonReq(http.MethodPut, "/api/idp/api-inline-url-omitted-id", map[string]any{
+		"name":    "URL Metadata Profile",
+		"type":    "saml",
+		"enabled": false,
+		"saml": map[string]any{
+			"metadataUrl": "https://example.com/metadata.xml",
+		},
+	})
+
+	apiIdPItem(w, r, "api-inline-url-omitted-id")
+
+	assertStatus(t, w, http.StatusOK)
+	if strings.Contains(w.Body.String(), "old-inline-metadata") || strings.Contains(w.Body.String(), "metadataXml") {
+		t.Fatalf("response leaked cleared metadata XML: %q", w.Body.String())
+	}
+	got := idpRegistry.Get("api-inline-url-omitted-id")
+	if got == nil || got.SAML == nil {
+		t.Fatal("profile missing after update")
+	}
+	if got.SAML.MetadataXML != "" {
+		t.Fatalf("stored metadataXml = %q, want cleared inline metadata", got.SAML.MetadataXML)
+	}
+	if got.SAML.MetadataURL != "https://example.com/metadata.xml" {
+		t.Fatalf("stored metadataUrl = %q, want URL metadata source", got.SAML.MetadataURL)
+	}
+}
+
 func withTestIdPRegistry(t *testing.T) {
 	t.Helper()
 	orig := idpRegistry
