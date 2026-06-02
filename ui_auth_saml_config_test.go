@@ -7,25 +7,46 @@ import (
 	"testing"
 )
 
-func TestAPIIdPList_PostRejectsInvalidSAMLConfig(t *testing.T) {
-	withTestIdPRegistry(t)
-
-	w := httptest.NewRecorder()
-	r := jsonReq(http.MethodPost, "/api/idp", map[string]any{
-		"name":    "bad-saml",
-		"type":    "saml",
-		"enabled": false,
-		"saml":    map[string]any{},
-	})
-
-	apiIdPList(w, r)
-
-	assertStatus(t, w, http.StatusBadRequest)
-	if !strings.Contains(w.Body.String(), "exactly one") {
-		t.Fatalf("response = %q, want exactly-one metadata validation", w.Body.String())
+func TestAPIIdPList_PostRejectsInvalidSAMLMetadataSources(t *testing.T) {
+	tests := []struct {
+		name string
+		saml map[string]any
+	}{
+		{
+			name: "no metadata source",
+			saml: map[string]any{},
+		},
+		{
+			name: "both metadata sources",
+			saml: map[string]any{
+				"metadataUrl": "https://example.com/metadata.xml",
+				"metadataXml": "<EntityDescriptor>inline-metadata</EntityDescriptor>",
+			},
+		},
 	}
-	if got := idpRegistry.All(); len(got) != 0 {
-		t.Fatalf("registry has %d profiles after rejected create, want 0", len(got))
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withTestIdPRegistry(t)
+
+			w := httptest.NewRecorder()
+			r := jsonReq(http.MethodPost, "/api/idp", map[string]any{
+				"name":    "bad-saml",
+				"type":    "saml",
+				"enabled": false,
+				"saml":    tt.saml,
+			})
+
+			apiIdPList(w, r)
+
+			assertStatus(t, w, http.StatusBadRequest)
+			if !strings.Contains(w.Body.String(), "exactly one") {
+				t.Fatalf("response = %q, want exactly-one metadata validation", w.Body.String())
+			}
+			if got := idpRegistry.All(); len(got) != 0 {
+				t.Fatalf("registry has %d profiles after rejected create, want 0", len(got))
+			}
+		})
 	}
 }
 
