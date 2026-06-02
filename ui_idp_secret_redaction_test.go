@@ -345,7 +345,9 @@ func TestPublicIdPProfile_RedactsSAMLMetadataXML(t *testing.T) {
 
 func assertNoOIDCSecretLeak(t *testing.T, body string) {
 	t.Helper()
-	if strings.Contains(body, "existing-secret") ||
+	if strings.Contains(body, "super-secret") ||
+		strings.Contains(body, "created-secret") ||
+		strings.Contains(body, "existing-secret") ||
 		strings.Contains(body, "old-secret") ||
 		strings.Contains(body, "new-secret") {
 		t.Fatalf("response leaked OIDC client secret: %s", body)
