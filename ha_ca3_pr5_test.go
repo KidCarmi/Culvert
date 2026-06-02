@@ -136,6 +136,92 @@ func TestHA_PR5_ApplyReplicatedCA_WrongTokenFailsClosed(t *testing.T) {
 	}
 }
 
+// TestHA_PR5_PartialApply_CAFailureDoesNotImportState: a bundle with a cert but
+// missing CAKeyEncrypted must fail closed BEFORE any unrelated replicated state
+// (cluster state / config snapshot) is applied.
+func TestHA_PR5_PartialApply_CAFailureDoesNotImportState(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, _ := withClusterCAForHA(t, dir)
+
+	// Fresh cluster store + config store; record the pre-apply state so we can
+	// prove nothing was imported.
+	origStore := globalClusterStore
+	origConfig := globalConfigStore
+	t.Cleanup(func() {
+		globalClusterStore = origStore
+		globalConfigStore = origConfig
+	})
+	globalClusterStore = newTestClusterStore(t)
+	globalConfigStore = &ConfigStore{}
+	beforeVersion := globalConfigStore.Get().Version
+
+	// A bundle carrying real cluster state + config, but NO encrypted CA key.
+	bundle := &HAStateBundle{
+		ClusterState:   buildHANonEmptyClusterState(t),
+		CACertPEM:      string(certPEM),
+		CAKeyEncrypted: "", // missing → must fail closed
+		Config:         ConfigSnapshot{RateLimitRPM: 4242},
+		Version:        99,
+	}
+
+	if applyHABundle(bundle, "any-token") {
+		t.Fatal("applyHABundle should return false when the CA key is missing")
+	}
+	// Cluster state must NOT have been imported.
+	if n := len(globalClusterStore.ListNodes()); n != 0 {
+		t.Fatalf("cluster state was partially applied on a failed CA sync (%d nodes)", n)
+	}
+	// Config snapshot must NOT have been applied (version unchanged, marker absent).
+	if globalConfigStore.Get().Version != beforeVersion {
+		t.Fatal("config snapshot was applied on a failed CA sync")
+	}
+	// Live CA must be unchanged (the throwaway probe validated, never mutated it).
+	if globalClusterCA.Ready() {
+		t.Fatal("live cluster CA was mutated on a failed sync")
+	}
+}
+
+// TestHA_PR5_PersistFailureLeavesLiveCAUnchanged: if persistReplicatedKey fails,
+// applyReplicatedCA must NOT have mutated the live globalClusterCA in memory.
+func TestHA_PR5_PersistFailureLeavesLiveCAUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := withClusterCAForHA(t, dir)
+
+	// Force the persist to fail: point the live CA's dir at a regular FILE, so
+	// the cert write (os.CreateTemp in that "dir") fails. The live CA starts
+	// empty (not Ready) and must stay that way.
+	notADir := filepath.Join(t.TempDir(), "iam-a-file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	globalClusterCA = &clusterCA{dir: notADir}
+
+	const token = "persist-fail-token"
+	enc, err := haEncryptKey(keyPEM, token)
+	if err != nil {
+		t.Fatalf("haEncryptKey: %v", err)
+	}
+	if err := applyReplicatedCA(certPEM, enc, token); err == nil {
+		t.Fatal("expected persist failure to surface as an error")
+	}
+	if globalClusterCA.Ready() {
+		t.Fatal("live cluster CA must not be Ready() after a persist failure")
+	}
+}
+
+// buildHANonEmptyClusterState marshals a ClusterState with one node so the
+// import is observably non-empty.
+func buildHANonEmptyClusterState(t *testing.T) []byte {
+	t.Helper()
+	cs := newTestClusterStore(t)
+	cs.RegisterNode(&EnrolledNode{NodeID: "replicated-node", Status: "connected"})
+	raw, err := cs.ExportState()
+	if err != nil {
+		t.Fatalf("export state: %v", err)
+	}
+	return raw
+}
+
 // TestHA_PR5_BundleHasNoPlaintextKeyField: the wire payload of an HA bundle
 // carries ca_key_encrypted and never ca_key_pem.
 func TestHA_PR5_BundleHasNoPlaintextKeyField(t *testing.T) {

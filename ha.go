@@ -211,23 +211,29 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: parse state bundle error: %v", err)
 		return false
 	}
+	return applyHABundle(&bundle, token)
+}
 
-	// Apply cluster state.
+// applyHABundle applies a decoded HA state bundle on the standby, fail-closed
+// and ordered for atomicity. Split out from syncFromLeader so the apply phase is
+// testable without a live gRPC client.
+//
+// CA-3 PR5: the replicated CA is applied FIRST — it is the failure-prone step
+// (decrypt + validate + persist) and has no plaintext fallback. Importing the
+// cluster state and config snapshot only after the CA succeeds guarantees a CA
+// failure does not leave unrelated replicated state partially applied.
+func applyHABundle(bundle *HAStateBundle, token string) bool {
+	if bundle.CACertPEM != "" {
+		if err := applyReplicatedCA([]byte(bundle.CACertPEM), bundle.CAKeyEncrypted, token); err != nil {
+			logger.Printf("HA: apply replicated CA failed (no state imported): %v", err)
+			return false
+		}
+	}
+
+	// Apply cluster state (only after the CA has been validated + applied).
 	if err := globalClusterStore.ImportFullState(bundle.ClusterState); err != nil {
 		logger.Printf("HA: import cluster state error: %v", err)
 		return false
-	}
-
-	// Apply CA cert + key.
-	// CA-3 PR5: the CA key is carried ONLY as CAKeyEncrypted (HA-token-wrapped
-	// in transit). There is no plaintext fallback — if a cert is present, a
-	// valid encrypted key MUST decrypt and import, otherwise the sync fails
-	// closed (no silent acceptance of an un-keyed or plaintext CA).
-	if bundle.CACertPEM != "" {
-		if err := applyReplicatedCA([]byte(bundle.CACertPEM), bundle.CAKeyEncrypted, token); err != nil {
-			logger.Printf("HA: apply replicated CA failed: %v", err)
-			return false
-		}
 	}
 
 	// Apply config snapshot.
@@ -236,11 +242,19 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	return true
 }
 
-// applyReplicatedCA decrypts the HA-token-wrapped cluster CA key, imports the
-// cert+key into the running clusterCA (memory), and persists it at rest through
-// the CA-3 cluster-CA write path (encrypted iff CULVERT_CLUSTER_CA_ENCRYPT is
-// enabled locally — per-node KEK, no shared at-rest KEK required). Fails closed
-// on a missing/invalid encrypted key; no key bytes are logged.
+// applyReplicatedCA decrypts the HA-token-wrapped cluster CA key and installs it
+// on the standby, fail-closed and without partial mutation:
+//
+//  1. require + decrypt the encrypted key (no plaintext fallback);
+//  2. validate the cert+key pair into a throwaway clusterCA — the live
+//     globalClusterCA is NOT touched if the pair is bad;
+//  3. persist at rest via the CA-3 write path (#319) — encrypted iff
+//     CULVERT_CLUSTER_CA_ENCRYPT is set on THIS node (per-node KEK, no shared
+//     at-rest KEK, no double-wrap of the in-transit blob);
+//  4. only after persistence succeeds, mutate the live CA in memory.
+//
+// So a decrypt, validation, or persist failure leaves globalClusterCA unchanged.
+// No key bytes are logged.
 func applyReplicatedCA(certPEM []byte, caKeyEncrypted, token string) error {
 	if caKeyEncrypted == "" {
 		return fmt.Errorf("encrypted CA key missing from HA bundle (plaintext fallback removed)")
@@ -249,13 +263,20 @@ func applyReplicatedCA(certPEM []byte, caKeyEncrypted, token string) error {
 	if decErr != nil {
 		return fmt.Errorf("decrypt CA key: %w", decErr)
 	}
+	// (2) Validate the pair WITHOUT mutating the live CA.
+	probe := &clusterCA{}
+	if err := probe.loadFromPEM(certPEM, keyPEM); err != nil {
+		return fmt.Errorf("validate replicated CA: %w", err)
+	}
+	// (3) Persist before mutating memory. Pass certPEM explicitly so the new
+	// cert is written (the live CA still holds the old cert at this point).
+	if err := globalClusterCA.persistReplicatedKey(certPEM, keyPEM); err != nil {
+		return fmt.Errorf("persist replicated CA key: %w", err)
+	}
+	// (4) Memory mutation last. loadFromPEM re-validates; we already proved the
+	// pair parses, so this is the lowest-risk step.
 	if err := globalClusterCA.ImportCASilent(certPEM, keyPEM); err != nil {
 		return fmt.Errorf("import CA: %w", err)
-	}
-	// Persist at rest on the standby via the CA-3 write path (#319). Honors the
-	// standby's local CULVERT_CLUSTER_CA_ENCRYPT independently of the leader.
-	if err := globalClusterCA.persistReplicatedKey(keyPEM); err != nil {
-		return fmt.Errorf("persist replicated CA key: %w", err)
 	}
 	return nil
 }
@@ -494,19 +515,19 @@ func (ca *clusterCA) ImportCASilent(certPEM, keyPEM []byte) error {
 	return ca.loadFromPEM(certPEM, keyPEM)
 }
 
-// persistReplicatedKey writes the (already in-memory) cluster CA cert + key to
-// disk on an HA standby. The cert is written plaintext; the key goes through the
-// CA-3 cluster-CA write path (writeClusterCAKey), so it is encrypted at rest iff
+// persistReplicatedKey writes the replicated cluster CA cert + key to disk on an
+// HA standby. The cert is written plaintext; the key goes through the CA-3
+// cluster-CA write path (writeClusterCAKey), so it is encrypted at rest iff
 // CULVERT_CLUSTER_CA_ENCRYPT is enabled on THIS node — a per-node decision that
 // does not require the leader's KEK. keyPEM is the decrypted plaintext key PEM;
-// it is never logged.
+// it is never logged. certPEM is passed explicitly (not read from ca.certPEM)
+// so this can persist the new pair BEFORE the live CA is mutated in memory.
 //
 // No-op (not an error) when the CA has no persistence dir configured — some
 // deployments run the cluster CA in-memory only.
-func (ca *clusterCA) persistReplicatedKey(keyPEM []byte) error {
+func (ca *clusterCA) persistReplicatedKey(certPEM, keyPEM []byte) error {
 	ca.mu.RLock()
 	dir := ca.dir
-	certPEM := ca.certPEM
 	ca.mu.RUnlock()
 	if dir == "" {
 		return nil
