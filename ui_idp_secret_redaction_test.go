@@ -69,6 +69,44 @@ func TestAPIIdPItemGet_RedactsClientSecret(t *testing.T) {
 	}
 }
 
+func TestAPIIdPListGet_RedactsClientSecret(t *testing.T) {
+	p := &IdPProfile{
+		ID:      "redact-list-id",
+		Name:    "Redact LIST",
+		Type:    IdPTypeOIDC,
+		Enabled: false,
+		OIDC: &OIDCProfileConfig{
+			Issuer:       "https://idp.example.com",
+			ClientID:     "client",
+			ClientSecret: "super-secret",
+		},
+	}
+	orig := idpRegistry
+	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+	t.Cleanup(func() { idpRegistry = orig })
+
+	w := httptest.NewRecorder()
+	r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/idp", http.NoBody))
+	apiIdPList(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	assertNoOIDCSecretLeak(t, w.Body.String())
+	var got []IdPProfile
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("list length = %d, want 1", len(got))
+	}
+	if got[0].OIDC == nil {
+		t.Fatal("OIDC config missing from response")
+	}
+	if got[0].OIDC.ClientSecret != "" {
+		t.Fatalf("response leaked clientSecret %q", got[0].OIDC.ClientSecret)
+	}
+}
+
 func TestAPIIdPListPost_StoresAndRedactsClientSecret(t *testing.T) {
 	orig := idpRegistry
 	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
