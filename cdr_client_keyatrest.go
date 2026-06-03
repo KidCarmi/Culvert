@@ -83,6 +83,7 @@ func decryptCDRClientKey(keyPath string, rawKey []byte) (plainPEM []byte, wasEnc
 	plain, derr := decryptWithKEK(rawKey, cdrClientKEKProvider(keyPath))
 	if derr != nil {
 		// Deliberately generic: no key material, no KEK detail.
+		auditKeyAtRest(auditKeyAtRestUnlockFailed, keyAtRestObjCDRClient)
 		return nil, true, fmt.Errorf("cdr client key: cannot decrypt at-rest key (KEK missing/wrong or file corrupt)")
 	}
 	return plain, true, nil
@@ -133,7 +134,15 @@ func maybeMigrateCDRClientKey(keyPath string) error {
 //  4. on any failure, restore keyPath from the .bak.
 //
 // A readable key always exists at either keyPath or the .bak throughout.
-func migrateCDRClientKeyToEncrypted(keyPath string, plainKeyPEM []byte) error {
+func migrateCDRClientKeyToEncrypted(keyPath string, plainKeyPEM []byte) (err error) {
+	// CA-3 PR6 §10 audit: one completed/failed event per migration attempt.
+	defer func() {
+		if err != nil {
+			auditKeyAtRest(auditKeyAtRestMigrateFailed, keyAtRestObjCDRClient)
+		} else {
+			auditKeyAtRest(auditKeyAtRestMigrateCompleted, keyAtRestObjCDRClient)
+		}
+	}()
 	p := cdrClientKEKProvider(keyPath)
 	bakPath := keyPath + ".plaintext.bak"
 
