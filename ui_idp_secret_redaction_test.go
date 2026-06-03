@@ -375,6 +375,20 @@ func TestStaticIdPModal_ClearsWriteOnlyFieldsOnlyWhenExplicitlyChecked(t *testin
 	}
 }
 
+func TestStaticIdPList_UsesRedactedSafeSAMLInlineMetadataIndicator(t *testing.T) {
+	data, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read static/index.html: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, `p.type === 'saml' && p.saml && !p.saml.metadataUrl`) {
+		t.Fatal("SAML inline metadata indicator must not depend on redacted metadataXml")
+	}
+	if strings.Contains(html, `p.type === 'saml' && p.saml && p.saml.metadataXml`) {
+		t.Fatal("SAML inline metadata indicator still depends on redacted metadataXml")
+	}
+}
+
 func TestPublicIdPProfile_RedactsSAMLMetadataXML(t *testing.T) {
 	p := &IdPProfile{
 		ID:           "saml-redact-id",

@@ -7883,7 +7883,7 @@ async function loadIdPList() {
       ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(p.oidc.issuer)}">Issuer: <span style="color:var(--text)">${escHtml(p.oidc.issuer)}</span></div>`
       : p.type === 'saml' && p.saml && p.saml.metadataUrl
         ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Metadata URL configured</div>`
-        : p.type === 'saml' && p.saml && p.saml.metadataXml
+        : p.type === 'saml' && p.saml && !p.saml.metadataUrl
           ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px">Metadata: <span style="color:#22c55e">inline XML</span></div>`
           : '';
     const domainsLine = p.emailDomains && p.emailDomains.length
