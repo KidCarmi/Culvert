@@ -360,6 +360,8 @@ func TestStaticIdPModal_ClearsWriteOnlyFieldsOnlyWhenExplicitlyChecked(t *testin
 		`data-change="syncSAMLMetadataSourceChoice"`,
 		`document.getElementById('idp-clear-metadata-xml').checked = false`,
 		`(p && p.type === 'saml') ? 'flex' : 'none'`,
+		`Saved inline XML configured`,
+		`p.type === 'saml' && !saml.metadataUrl`,
 		`syncSAMLMetadataSourceChoice();`,
 		`function syncSAMLMetadataSourceChoice()`,
 		`const metadataUrl = document.getElementById('idp-meta-url').value.trim();`,
