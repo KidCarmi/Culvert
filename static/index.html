@@ -8263,8 +8263,11 @@ async function saveIdP() {
       nameAttribute:   document.getElementById('idp-saml-name-attr').value.trim(),
     };
     if (!metadataUrl) {
-      if (clearMetadataXml) body.saml.metadataXml = '';
-      else if (metadataXml) body.saml.metadataXml = metadataXml;
+      if (metadataXml) body.saml.metadataXml = metadataXml;
+      else if (clearMetadataXml) {
+        toast('Provide a metadata URL or upload/paste new metadata XML before clearing saved inline XML', 'error');
+        return;
+      }
     }
   }
   const method = id ? 'PUT' : 'POST';

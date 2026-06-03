@@ -465,8 +465,9 @@ func TestStaticIdPModal_ClearsWriteOnlyFieldsOnlyWhenExplicitlyChecked(t *testin
 		`const metadataUrl = document.getElementById('idp-meta-url').value.trim();`,
 		`if (!metadataUrl) {`,
 		`const clearMetadataXml = document.getElementById('idp-clear-metadata-xml').checked`,
-		`if (clearMetadataXml) body.saml.metadataXml = '';`,
-		`else if (metadataXml) body.saml.metadataXml = metadataXml;`,
+		`if (metadataXml) body.saml.metadataXml = metadataXml;`,
+		`else if (clearMetadataXml) {`,
+		`Provide a metadata URL or upload/paste new metadata XML before clearing saved inline XML`,
 	}
 	for _, want := range required {
 		if !strings.Contains(html, want) {
