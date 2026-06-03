@@ -8115,6 +8115,9 @@ function openIdPModal(p) {
     const saml = p.saml || {};
     document.getElementById('idp-meta-url').value    = saml.metadataUrl    || '';
     document.getElementById('idp-meta-xml').value    = saml.metadataXml    || '';
+    if (p.type === 'saml' && !saml.metadataUrl) {
+      document.getElementById('idp-xml-filename').textContent = 'Saved inline XML configured';
+    }
     document.getElementById('idp-saml-groups').value = saml.groupsAttribute|| '';
     document.getElementById('idp-saml-email').value  = saml.emailAttribute || '';
     // Show SP info for SAML
