@@ -497,6 +497,7 @@ func preserveWriteOnlyIdPFields(before, next *IdPProfile, oidcClientSecretProvid
 		return
 	}
 	preserveOIDCClientSecret(before, next, oidcClientSecretProvided)
+	preserveOIDCDiscoveryEndpoints(before, next)
 	preserveSAMLMetadataXML(before, next, samlMetadataXMLProvided)
 }
 
@@ -510,6 +511,30 @@ func preserveOIDCClientSecret(before, next *IdPProfile, clientSecretProvided boo
 	}
 	if before.OIDC.ClientSecret != "" && !clientSecretProvided && next.OIDC.ClientSecret == "" {
 		next.OIDC.ClientSecret = before.OIDC.ClientSecret
+	}
+}
+
+func preserveOIDCDiscoveryEndpoints(before, next *IdPProfile) {
+	if before.Type != IdPTypeOIDC || next.Type != IdPTypeOIDC || before.OIDC == nil || next.OIDC == nil {
+		return
+	}
+	if before.OIDC.Issuer != next.OIDC.Issuer {
+		return
+	}
+	if next.OIDC.AuthorizationEndpoint == "" {
+		next.OIDC.AuthorizationEndpoint = before.OIDC.AuthorizationEndpoint
+	}
+	if next.OIDC.TokenEndpoint == "" {
+		next.OIDC.TokenEndpoint = before.OIDC.TokenEndpoint
+	}
+	if next.OIDC.IntrospectionEndpoint == "" {
+		next.OIDC.IntrospectionEndpoint = before.OIDC.IntrospectionEndpoint
+	}
+	if next.OIDC.UserinfoEndpoint == "" {
+		next.OIDC.UserinfoEndpoint = before.OIDC.UserinfoEndpoint
+	}
+	if next.OIDC.JWKsURI == "" {
+		next.OIDC.JWKsURI = before.OIDC.JWKsURI
 	}
 }
 
