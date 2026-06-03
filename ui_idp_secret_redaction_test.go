@@ -283,6 +283,50 @@ func TestAPIIdPItemPut_PreservesOIDCClientSecretWhenRedactedFromForm(t *testing.
 	}
 }
 
+func TestAPIIdPItemPut_PreservesOIDCDiscoveryEndpointsWhenIssuerUnchanged(t *testing.T) {
+	p := oidcDiscoveryCacheProfile()
+	orig := idpRegistry
+	idpRegistry = &IdPRegistry{profiles: []*IdPProfile{p}, live: make(map[string]IdentityProvider)}
+	t.Cleanup(func() { idpRegistry = orig })
+
+	w := httptest.NewRecorder()
+	r := jsonReq(http.MethodPut, "/api/idp/"+p.ID, map[string]any{
+		"name":    p.Name,
+		"type":    "oidc",
+		"enabled": false,
+		"oidc": map[string]any{
+			"issuer":   "https://example.com",
+			"clientId": "client",
+		},
+	})
+
+	apiIdPItem(w, r, p.ID)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	got := idpRegistry.Get(p.ID)
+	if got == nil || got.OIDC == nil {
+		t.Fatal("profile missing after update")
+	}
+	assertOIDCDiscoveryEndpoints(t, got.OIDC)
+}
+
+func TestPreserveOIDCDiscoveryEndpoints_SkipsWhenIssuerChanges(t *testing.T) {
+	before := oidcDiscoveryCacheProfile()
+	next := &IdPProfile{
+		Type: IdPTypeOIDC,
+		OIDC: &OIDCProfileConfig{
+			Issuer:   "https://other.example.com",
+			ClientID: "client",
+		},
+	}
+
+	preserveOIDCDiscoveryEndpoints(before, next)
+
+	assertNoOIDCDiscoveryEndpoints(t, next.OIDC)
+}
+
 func TestAPIIdPItemPut_MutatesOIDCClientSecretWhenProvided(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -336,6 +380,43 @@ func TestAPIIdPItemPut_MutatesOIDCClientSecretWhenProvided(t *testing.T) {
 				t.Fatalf("stored clientSecret = %q, want %q", got.OIDC.ClientSecret, tt.wantSecret)
 			}
 		})
+	}
+}
+
+func assertOIDCDiscoveryEndpoints(t *testing.T, got *OIDCProfileConfig) {
+	t.Helper()
+	if got.AuthorizationEndpoint != "https://example.com/auth" ||
+		got.TokenEndpoint != "https://example.com/token" ||
+		got.IntrospectionEndpoint != "https://example.com/introspect" ||
+		got.UserinfoEndpoint != "https://example.com/userinfo" ||
+		got.JWKsURI != "https://example.com/jwks" {
+		t.Fatalf("discovery endpoints = %+v, want preserved", got)
+	}
+}
+
+func assertNoOIDCDiscoveryEndpoints(t *testing.T, got *OIDCProfileConfig) {
+	t.Helper()
+	if got.AuthorizationEndpoint != "" || got.TokenEndpoint != "" ||
+		got.IntrospectionEndpoint != "" || got.UserinfoEndpoint != "" || got.JWKsURI != "" {
+		t.Fatalf("discovery endpoints = %+v, want empty", got)
+	}
+}
+
+func oidcDiscoveryCacheProfile() *IdPProfile {
+	return &IdPProfile{
+		ID:      "oidc-discovery-cache-id",
+		Name:    "OIDC Discovery Cache",
+		Type:    IdPTypeOIDC,
+		Enabled: false,
+		OIDC: &OIDCProfileConfig{
+			Issuer:                "https://example.com",
+			ClientID:              "client",
+			AuthorizationEndpoint: "https://example.com/auth",
+			TokenEndpoint:         "https://example.com/token",
+			IntrospectionEndpoint: "https://example.com/introspect",
+			UserinfoEndpoint:      "https://example.com/userinfo",
+			JWKsURI:               "https://example.com/jwks",
+		},
 	}
 }
 
