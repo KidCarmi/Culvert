@@ -1318,6 +1318,8 @@ tr.dragging  { opacity: .4; }
 
           <!-- SAML fields -->
           <div id="idp-saml-fields" style="display:none">
+            <input type="hidden" id="idp-saml-nameid-format">
+            <input type="hidden" id="idp-saml-name-attr">
             <div style="border-top:1px solid var(--border);margin:18px 0 16px;position:relative">
               <span style="position:absolute;top:-9px;left:0;font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;background:var(--surface1);padding-right:8px">SAML Configuration</span>
             </div>
@@ -8120,6 +8122,8 @@ function openIdPModal(p) {
     }
     document.getElementById('idp-saml-groups').value = saml.groupsAttribute|| '';
     document.getElementById('idp-saml-email').value  = saml.emailAttribute || '';
+    document.getElementById('idp-saml-nameid-format').value = saml.nameIdFormat || '';
+    document.getElementById('idp-saml-name-attr').value = saml.nameAttribute || '';
     // Show SP info for SAML
     if (p.type === 'saml') {
       document.getElementById('idp-sp-info-body').innerHTML = _idpSPInfoHTML();
@@ -8138,7 +8142,7 @@ function openIdPModal(p) {
     document.getElementById('idp-modal-title').textContent = 'Add Identity Provider';
     document.getElementById('idp-sp-info').style.display = 'none';
     // Reset form
-    ['idp-name','idp-domains','idp-issuer','idp-client-id','idp-client-secret','idp-scopes','idp-groups-claim','idp-meta-url','idp-meta-xml','idp-saml-groups','idp-saml-email'].forEach(id => document.getElementById(id).value = '');
+    ['idp-name','idp-domains','idp-issuer','idp-client-id','idp-client-secret','idp-scopes','idp-groups-claim','idp-meta-url','idp-meta-xml','idp-saml-groups','idp-saml-email','idp-saml-nameid-format','idp-saml-name-attr'].forEach(id => document.getElementById(id).value = '');
     document.querySelectorAll('.idp-provider-card').forEach(c => c.classList.remove('selected'));
   }
   syncSAMLMetadataSourceChoice();
@@ -8246,6 +8250,8 @@ async function saveIdP() {
       metadataUrl,
       groupsAttribute: document.getElementById('idp-saml-groups').value.trim(),
       emailAttribute:  document.getElementById('idp-saml-email').value.trim(),
+      nameIdFormat:    document.getElementById('idp-saml-nameid-format').value.trim(),
+      nameAttribute:   document.getElementById('idp-saml-name-attr').value.trim(),
     };
     if (!metadataUrl) {
       if (clearMetadataXml) body.saml.metadataXml = '';
