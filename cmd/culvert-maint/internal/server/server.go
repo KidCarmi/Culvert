@@ -239,12 +239,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /v1/audit", s.withAuth(s.handleAudit))
 	mux.HandleFunc("GET /v1/operations/", s.withAuth(s.handleOperationsRouter))
 
-	// D1.6b operation endpoints.
+	// Backup / restore / cleanup operation endpoints.
 	mux.HandleFunc("POST /v1/backups", s.withAuth(s.handleBackupCreate))
 	mux.HandleFunc("GET /v1/backups", s.withAuth(s.handleBackupList))
 	mux.HandleFunc("POST /v1/restores/dryrun", s.withAuth(s.handleRestoreDryRun))
 	mux.HandleFunc("POST /v1/restores/commit", s.withAuth(s.handleRestoreCommit))
 	mux.HandleFunc("POST /v1/cleanups", s.withAuth(s.handleCleanup))
+
+	// Upgrade check (read-only).
+	mux.HandleFunc("POST /v1/upgrades/check", s.withAuth(s.handleUpgradeCheck))
 
 	// Future endpoints — explicit 404, authenticated so an
 	// unauthorised peer gets 403 consistently.
@@ -252,7 +255,6 @@ func (s *Server) routes() http.Handler {
 		s.notImplemented(w, r)
 	})
 	for _, p := range []string{
-		"/v1/upgrades/check",
 		"/v1/upgrades/apply",
 		"/v1/rollbacks",
 	} {

@@ -21,9 +21,10 @@
 # D1.6a scope: minimal `docker compose ps` entry for /v1/status.
 # D1.6b scope: backup (encrypted/unencrypted/list), restore
 #   (dryrun/commit, fully enumerated), compose down, compose up -d,
-#   cleanup leftovers (dryrun/commit). NO upgrade, rollback,
-#   manifest-inspect, pull yet.
-# D1.6c will add pull proxy and manifest inspect <allowed-image>.
+#   cleanup leftovers (dryrun/commit).
+# Upgrade check scope: read-only image inspect + manifest inspect for
+#   the upgrade-availability check. NO pull, upgrade apply, or rollback
+#   yet — those land with their own handlers + entries.
 #
 # Operator install steps:
 #   The recommended path is to run packaging/culvert-maint/install.sh,
@@ -55,6 +56,12 @@
 #   - --older-than * --keep-last *
 #                — agent enforces time.ParseDuration shape with bounds
 #                  (1h to 1y) and integer keep_last in 0..100.
+#   - image inspect * / manifest inspect --verbose *
+#                — agent enforces the operator's image_allowlist regex
+#                  (policy) AND a bounded argv-safety shape
+#                  (^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,511}$, no leading
+#                  dash) before sudo is invoked. Both commands are
+#                  read-only — they do not mutate the host or the stack.
 # Restore-flag combinations (mode + --accept-dp-reenrollment +
 # --allow-counter-rollback) are fully ENUMERATED rather than wildcarded:
 # 3 modes × 4 flag combinations × 2 templates (dryrun, commit) = 24
@@ -115,3 +122,10 @@ culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} up 
 # ─── compose.cli.cleanup.* (D1.6b) ──────────────────────────────────
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --cleanup-restore-leftovers --older-than * --keep-last *
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --cleanup-restore-leftovers --older-than * --keep-last * --confirm
+
+# ─── image / manifest inspect (upgrade check, read-only) ────────────
+# Single bounded `*` = the image_ref token, validated against
+# image_allowlist + an argv-safety shape before sudo is invoked. These
+# are global (non-compose) docker reads; they cannot mutate the stack.
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker image inspect *
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker manifest inspect --verbose *
