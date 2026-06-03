@@ -49,6 +49,10 @@ type upgradeRig struct {
 	// stdoutFor maps an argv substring → canned stdout for any command
 	// whose argv contains that substring.
 	stdoutFor map[string][]byte
+	// stderrFor maps an argv substring → canned stderr for any command
+	// whose argv contains that substring (lets a test reproduce docker's
+	// "No such image" not-found signature vs. a bare failure).
+	stderrFor map[string][]byte
 	// failFor is the set of argv substrings whose command should exit
 	// non-zero.
 	failFor []string
@@ -81,6 +85,19 @@ func (r *upgradeRig) cannedStdout(argv []string) []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for sub, out := range r.stdoutFor {
+		for _, a := range argv {
+			if strings.Contains(a, sub) {
+				return out
+			}
+		}
+	}
+	return nil
+}
+
+func (r *upgradeRig) cannedStderr(argv []string) []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for sub, out := range r.stderrFor {
 		for _, a := range argv {
 			if strings.Contains(a, sub) {
 				return out
@@ -133,6 +150,7 @@ func startUpgradeRig(t *testing.T) *upgradeRig {
 		stateDir:  tmp,
 		auditPath: auditPath,
 		stdoutFor: map[string][]byte{},
+		stderrFor: map[string][]byte{},
 	}
 
 	r.SetExecHooksForTest(
@@ -142,6 +160,9 @@ func startUpgradeRig(t *testing.T) *upgradeRig {
 			rig.mu.Unlock()
 			if out := rig.cannedStdout(cmd.Args); out != nil {
 				_, _ = cmd.Stdout.Write(out)
+			}
+			if errOut := rig.cannedStderr(cmd.Args); errOut != nil {
+				_, _ = cmd.Stderr.Write(errOut)
 			}
 			return nil
 		},
@@ -250,8 +271,13 @@ func TestUpgradeCheck_HappyPath_UpToDate(t *testing.T) {
 	}
 
 	logStr := rig.opLog(t, opID)
-	if !strings.Contains(logStr, "up_to_date=true") {
-		t.Errorf("op-log must report up_to_date=true:\n%s", logStr)
+	if !strings.Contains(logStr, "local_cache_up_to_date=true") {
+		t.Errorf("op-log must report local_cache_up_to_date=true:\n%s", logStr)
+	}
+	// The verdict must be scoped to the local cache, never the bare
+	// up_to_date claim about the running stack.
+	if strings.Contains(logStr, " up_to_date=") {
+		t.Errorf("op-log must NOT use the unscoped up_to_date verdict:\n%s", logStr)
 	}
 
 	// The image_ref must reach exec as a single argv token, with no
@@ -295,19 +321,23 @@ func TestUpgradeCheck_UpgradeAvailable(t *testing.T) {
 		t.Errorf("op state: got %v want succeeded", op["state"])
 	}
 	logStr := rig.opLog(t, ack["op_id"].(string))
-	if !strings.Contains(logStr, "up_to_date=false") {
-		t.Errorf("op-log must report up_to_date=false:\n%s", logStr)
+	if !strings.Contains(logStr, "local_cache_up_to_date=false") {
+		t.Errorf("op-log must report local_cache_up_to_date=false:\n%s", logStr)
 	}
 }
 
-// A locally-absent image (image inspect exits non-zero) is a normal
-// check outcome, not an op failure.
+// A locally-absent image — `docker image inspect` exits non-zero with
+// the "No such image" signature — is a normal check outcome, not an op
+// failure.
 func TestUpgradeCheck_LocalImageAbsent_StillSucceeds(t *testing.T) {
 	rig := startUpgradeRig(t)
 	defer rig.stop()
 
 	rig.stdoutFor["manifest"] = []byte(`{"Descriptor":{"digest":"` + digestA + `"}}`)
 	rig.failFor = []string{"image"} // only `docker image inspect` carries the bare "image" token
+	// Reproduce docker's real not-found stderr so the handler can tell
+	// "absent" apart from an environment failure.
+	rig.stderrFor["image"] = []byte("Error: No such image: ghcr.io/kidcarmi/culvert:v1\n")
 
 	status, body := rig.post(t, map[string]interface{}{"image_ref": "ghcr.io/kidcarmi/culvert:v1"})
 	if status != http.StatusAccepted {
@@ -322,6 +352,44 @@ func TestUpgradeCheck_LocalImageAbsent_StillSucceeds(t *testing.T) {
 	logStr := rig.opLog(t, ack["op_id"].(string))
 	if !strings.Contains(logStr, "local_present=false") {
 		t.Errorf("op-log must report local_present=false:\n%s", logStr)
+	}
+}
+
+// A local inspect that fails for an environment reason (Docker daemon
+// down, sudoers broken, permission denied, timeout) is NOT proof the
+// image is absent. Unlike a clean "No such image", it must FAIL the op
+// rather than silently report local_present=false and feed a misleading
+// upgrade verdict.
+func TestUpgradeCheck_LocalInspectEnvFailure_FailsOp(t *testing.T) {
+	rig := startUpgradeRig(t)
+	defer rig.stop()
+
+	rig.stdoutFor["manifest"] = []byte(`{"Descriptor":{"digest":"` + digestA + `"}}`)
+	rig.failFor = []string{"image"}
+	// An environment failure — NOT the "No such image" signature.
+	rig.stderrFor["image"] = []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n")
+
+	status, body := rig.post(t, map[string]interface{}{"image_ref": "ghcr.io/kidcarmi/culvert:v1"})
+	if status != http.StatusAccepted {
+		t.Fatalf("status: got %d body=%s", status, body)
+	}
+	var ack map[string]interface{}
+	_ = json.Unmarshal(body, &ack)
+	op := rig.waitOp(t, ack["op_id"].(string))
+	if op["state"] != "failed" {
+		t.Errorf("local env failure must fail the op; got state=%v op=%+v", op["state"], op)
+	}
+	if op["failure_reason"] != "command_error" {
+		t.Errorf("failure_reason: got %v want command_error", op["failure_reason"])
+	}
+	// The compare stage still runs (ContinueOnError) and the verdict is
+	// reported as unknown — never a confident up-to-date answer.
+	logStr := rig.opLog(t, ack["op_id"].(string))
+	if !strings.Contains(logStr, "local_cache_up_to_date=unknown") {
+		t.Errorf("op-log must report local_cache_up_to_date=unknown on env failure:\n%s", logStr)
+	}
+	if strings.Contains(logStr, "local_present=false") {
+		t.Errorf("env failure must NOT be reported as local_present=false:\n%s", logStr)
 	}
 }
 

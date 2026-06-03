@@ -8,18 +8,37 @@
 //	remote_inspect → docker manifest inspect --verbose <image_ref>
 //	                 → parse registry-side digest(s)
 //	local_inspect  → docker image inspect <image_ref>
-//	                 → parse locally-present digest(s); ABSENCE IS NORMAL
+//	                 → parse locally-present digest(s). ABSENCE IS NORMAL
 //	                   (a not-yet-pulled image is a valid check outcome,
-//	                   never a failure)
-//	compare        → up_to_date = the local and remote digest sets
-//	                 intersect. Multi-arch note: a multi-arch ref's
+//	                   never a failure) — but ONLY a clean docker
+//	                   "no such image" stderr counts as absent. Any other
+//	                   failure (Docker daemon down, sudoers/permission,
+//	                   timeout, runner misconfig) is NOT proof of absence
+//	                   and FAILS the op clearly rather than being reported
+//	                   as local_present=false.
+//	compare        → local_cache_up_to_date = the local and remote digest
+//	                 sets intersect. Multi-arch note: a multi-arch ref's
 //	                 local RepoDigest is the manifest-LIST digest while
 //	                 `manifest inspect --verbose` reports per-platform
 //	                 descriptor digests, so they will not intersect and
-//	                 up_to_date is conservatively false (worst case the
-//	                 operator is advised to pull when already current —
-//	                 harmless for a read-only check). Authoritative
-//	                 list-digest comparison is refined in the apply slice.
+//	                 local_cache_up_to_date is conservatively false (worst
+//	                 case the operator is advised to pull when already
+//	                 current — harmless for a read-only check).
+//
+// SCOPE / SEMANTICS (deliberately narrow — read-only slice):
+// The verdict is local_cache_up_to_date, NOT up_to_date. It compares the
+// requested ref against the LOCAL IMAGE CACHE only — it does NOT inspect
+// the image the running Compose stack is actually executing. A stack
+// that has pulled the new image but not yet been restarted still reports
+// local_cache_up_to_date=true. This is NOT proof the running service is
+// upgraded.
+//
+// TODO(apply-slice, D1.6 plan § 3.5.1): the upgrade-apply slice must
+// capture the RUNNING service image digest (status-derived ref, a new
+// sudoers/validation surface not constrained by image_allowlist) before
+// upgrading — both to give an authoritative running-vs-remote verdict
+// and to pin the pre-upgrade digest for rollback. Until then, treat
+// local_cache_up_to_date as a cache hint, not a deployment guarantee.
 //
 // Validation of image_ref is two-layered: this handler enforces the
 // operator's image_allowlist (policy); the runner enforces
@@ -31,9 +50,9 @@
 // `docker manifest inspect --verbose` JSON. That JSON can carry image
 // metadata beyond digests (Config.Env, labels, build info), so a
 // badly built image must not be able to leak it through the op log;
-// only content digests and the up_to_date/local_present summary are
-// recorded. Each inspect stage's stderr is preserved so a genuine
-// failure (network/auth/permission) stays diagnosable. The op
+// only content digests and the local_cache_up_to_date/local_present
+// summary are recorded. Each inspect stage's stderr is preserved so a
+// genuine failure (network/auth/permission) stays diagnosable. The op
 // record's structured `result` is intentionally left to a follow-up
 // slice; this slice adds no ops/orchestrator surface.
 package server
@@ -132,34 +151,62 @@ func (s *Server) buildUpgradeCheckStages(imageRef string) []ops.FlowStage {
 			},
 		},
 		{
-			// Local image lookup. ContinueOnError so a remote failure
-			// still lets us record the local view, AND the closure
-			// itself swallows the runner error: a not-present image
-			// exits non-zero, which is a legitimate "absent" answer,
-			// not an operation failure.
+			// Local image lookup. ContinueOnError so the compare stage
+			// still runs (and emits the summary) regardless of how this
+			// stage ends. Three outcomes are distinguished:
+			//
+			//   1. exit 0                  → image present locally.
+			//   2. clean "no such image"   → image absent locally; a
+			//                                 valid check outcome, op
+			//                                 succeeds (local_present=false).
+			//   3. any other failure       → Docker unavailable, sudoers
+			//      (daemon down, permission,  broken, timeout, runner
+			//       timeout, runner misconf)  misconfig — NOT proof the
+			//                                 image is absent. We must NOT
+			//                                 silently report local_present
+			//                                 =false (that would feed a
+			//                                 misleading up-to-date result);
+			//                                 instead surface the error so
+			//                                 the op fails clearly.
 			Name:            "local_inspect",
 			ContinueOnError: true,
 			FailureReason:   ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
 				res, rerr := s.opts.Runner.ComposeImageInspect(ctx, imageRef)
-				if res == nil {
-					// Genuine runner misconfiguration (e.g. template
-					// missing) — surface as a note, not a hard fail,
-					// so the check still reports the remote digest.
-					acc.localPresent = false
-					return []byte("local_inspect: " + errString(rerr)), nil, nil
+				if rerr == nil && res != nil {
+					// (1) Exit 0 → image is present locally. Record only
+					// the parsed digest set, never the raw inspect JSON
+					// (image metadata leak hazard).
+					acc.localDigests = extractDigests(res.Stdout)
+					acc.localPresent = true
+					line := fmt.Sprintf("local_inspect: local_digests=%s local_present=true",
+						joinDigests(acc.localDigests))
+					return []byte(line), res.Stderr, nil
 				}
-				// A non-zero exit (rerr != nil) means the image is not
-				// present locally — a valid "absent" answer, not a
-				// failure. We record only the parsed digest set and
-				// presence flag, never the raw inspect JSON (image
-				// metadata leak hazard); stderr is preserved for
-				// diagnosis. We never propagate an error from this stage.
-				acc.localDigests = extractDigests(res.Stdout)
-				acc.localPresent = len(acc.localDigests) > 0
-				line := []byte(fmt.Sprintf("local_inspect: local_digests=%s local_present=%v",
-					joinDigests(acc.localDigests), acc.localPresent))
-				return line, res.Stderr, nil
+				// (2) A clean "no such image" on stderr is the only
+				// failure that means "absent locally". Key off the
+				// stderr signature, not the exit code, so a daemon /
+				// permission / timeout failure (which does NOT carry
+				// this signature) cannot be misread as absent.
+				if res != nil && imageNotFoundRE.Match(res.Stderr) {
+					acc.localPresent = false
+					return []byte("local_inspect: local_digests=none local_present=false (image not present locally)"),
+						res.Stderr, nil
+				}
+				// (3) Environment / permission / timeout / runner
+				// failure — surface it. ContinueOnError keeps the
+				// compare stage running for the summary, but the non-nil
+				// error marks the op failed (ReasonCommandError) so the
+				// operator is never handed an upgrade verdict derived
+				// from an unverified local view.
+				acc.localCheckFailed = true
+				acc.localCheckErr = errString(rerr)
+				var stderr []byte
+				if res != nil {
+					stderr = res.Stderr
+				}
+				line := "local_inspect: local check FAILED (not a clean not-found): " + acc.localCheckErr
+				return []byte(line), stderr, rerr
 			},
 		},
 		{
@@ -176,16 +223,37 @@ func (s *Server) buildUpgradeCheckStages(imageRef string) []ops.FlowStage {
 	}
 }
 
+// imageNotFoundRE recognises docker's "image absent locally" signature
+// on the stderr of `docker image inspect <ref>`. A not-yet-pulled image
+// exits non-zero with "Error: No such image: <ref>" (older daemons may
+// say "no such object"). This is the ONLY failure that legitimately
+// means "absent"; every other failure (daemon down, sudoers/permission,
+// timeout, runner misconfig) lacks this signature and must surface
+// rather than be reported as absent.
+var imageNotFoundRE = regexp.MustCompile(`(?i)no such (image|object)`)
+
 // upgradeCheckAccumulator collects the parsed digests across the two
 // inspect stages so the compare stage can render a single summary.
+// localCheckFailed records an environment/permission/timeout failure of
+// the local inspect (distinct from a clean "absent"); when set, the
+// upgrade verdict is unknown rather than a confident up-to-date answer.
 type upgradeCheckAccumulator struct {
-	remoteDigests []string
-	localDigests  []string
-	localPresent  bool
+	remoteDigests    []string
+	localDigests     []string
+	localPresent     bool
+	localCheckFailed bool
+	localCheckErr    string
 }
 
-// upToDate reports whether the local and remote digest sets intersect.
-func (a *upgradeCheckAccumulator) upToDate() bool {
+// localCacheUpToDate reports whether the local image cache and the
+// remote registry digest sets intersect. It is deliberately NOT named
+// upToDate: it speaks only to the local image cache, not to the image
+// the running Compose stack is actually executing (see summary's note).
+// A failed local check yields false (the verdict is unknown).
+func (a *upgradeCheckAccumulator) localCacheUpToDate() bool {
+	if a.localCheckFailed {
+		return false
+	}
 	if len(a.remoteDigests) == 0 || len(a.localDigests) == 0 {
 		return false
 	}
@@ -203,10 +271,25 @@ func (a *upgradeCheckAccumulator) upToDate() bool {
 
 // summary renders the operator-facing compare line for the op log. It
 // never includes anything secret — only image refs and content digests.
+//
+// The verdict is reported as local_cache_up_to_date, NOT up_to_date: it
+// compares the requested ref against the LOCAL IMAGE CACHE only. A
+// pulled-but-not-restarted stack still reports true, so this is NOT
+// proof the running Compose stack has been upgraded. Authoritative
+// running-image comparison (and digest pinning for rollback) lands with
+// the upgrade-apply slice (D1.6 plan § 3.5.1).
 func (a *upgradeCheckAccumulator) summary(imageRef string) string {
+	if a.localCheckFailed {
+		return fmt.Sprintf(
+			"upgrade_check image_ref=%q local_cache_up_to_date=unknown local_check=failed local_check_err=%q remote_digests=%s\n"+
+				"note: the local image check FAILED (not a clean not-found) — upgrade status is UNKNOWN; this is NOT proof the running stack is or is not on the latest image.",
+			imageRef, a.localCheckErr, joinDigests(a.remoteDigests),
+		)
+	}
 	return fmt.Sprintf(
-		"upgrade_check image_ref=%q up_to_date=%v local_present=%v remote_digests=%s local_digests=%s",
-		imageRef, a.upToDate(), a.localPresent,
+		"upgrade_check image_ref=%q local_cache_up_to_date=%v local_present=%v remote_digests=%s local_digests=%s\n"+
+			"note: local_cache_up_to_date reflects the LOCAL IMAGE CACHE only — it is NOT proof the running Compose stack has been restarted onto this digest (a pulled-but-not-restarted stack still reports true). Running-image comparison + digest pinning land with the upgrade-apply slice.",
+		imageRef, a.localCacheUpToDate(), a.localPresent,
 		joinDigests(a.remoteDigests), joinDigests(a.localDigests),
 	)
 }
