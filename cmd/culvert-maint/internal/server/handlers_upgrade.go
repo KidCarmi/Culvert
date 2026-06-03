@@ -25,11 +25,17 @@
 // operator's image_allowlist (policy); the runner enforces
 // validateImageRefShape (argv safety) as defense-in-depth.
 //
-// Operation details (both inspects' raw JSON, plus a compare summary
-// line carrying up_to_date and the digest sets) are written to the
-// per-op log and surfaced verbatim via GET /v1/operations/{id}/logs.
-// The op record's structured `result` is intentionally left to a
-// follow-up slice; this slice adds no ops/orchestrator surface.
+// Operation details written to the per-op log (and surfaced via
+// GET /v1/operations/{id}/logs) are the PARSED digest sets plus the
+// compare summary line — never the raw `docker image inspect` /
+// `docker manifest inspect --verbose` JSON. That JSON can carry image
+// metadata beyond digests (Config.Env, labels, build info), so a
+// badly built image must not be able to leak it through the op log;
+// only content digests and the up_to_date/local_present summary are
+// recorded. Each inspect stage's stderr is preserved so a genuine
+// failure (network/auth/permission) stays diagnosable. The op
+// record's structured `result` is intentionally left to a follow-up
+// slice; this slice adds no ops/orchestrator surface.
 package server
 
 import (
@@ -118,7 +124,11 @@ func (s *Server) buildUpgradeCheckStages(imageRef string) []ops.FlowStage {
 					return nil, nil, rerr
 				}
 				acc.remoteDigests = extractDigests(res.Stdout)
-				return res.Stdout, res.Stderr, rerr
+				// Record only the parsed digest set, never the raw
+				// inspect JSON (image metadata leak hazard). stderr is
+				// preserved so a remote failure stays diagnosable.
+				line := []byte("remote_inspect: remote_digests=" + joinDigests(acc.remoteDigests))
+				return line, res.Stderr, rerr
 			},
 		},
 		{
@@ -141,11 +151,15 @@ func (s *Server) buildUpgradeCheckStages(imageRef string) []ops.FlowStage {
 				}
 				// A non-zero exit (rerr != nil) means the image is not
 				// present locally — a valid "absent" answer, not a
-				// failure. Either way we capture the output for the op
-				// log and never propagate an error from this stage.
+				// failure. We record only the parsed digest set and
+				// presence flag, never the raw inspect JSON (image
+				// metadata leak hazard); stderr is preserved for
+				// diagnosis. We never propagate an error from this stage.
 				acc.localDigests = extractDigests(res.Stdout)
 				acc.localPresent = len(acc.localDigests) > 0
-				return res.Stdout, res.Stderr, nil
+				line := []byte(fmt.Sprintf("local_inspect: local_digests=%s local_present=%v",
+					joinDigests(acc.localDigests), acc.localPresent))
+				return line, res.Stderr, nil
 			},
 		},
 		{
