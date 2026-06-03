@@ -73,15 +73,29 @@ func TestKeyAtRest_Audit_UnlockFailed(t *testing.T) {
 }
 
 // TestKeyAtRest_Audit_NoEventWhenPlaintextDecrypt: a plaintext key (passthrough)
-// must NOT emit any key-at-rest audit event.
+// must NOT emit any key-at-rest audit event. The audit ring is a process-global
+// shared by every test, so we cannot scan it for "any keyAtRest event since T"
+// without false positives from concurrent/earlier tests. Instead we isolate the
+// ring for this test (swap+restore) and assert that THIS call added no keyAtRest
+// entry — the unlock-failed audit is only on the decrypt-error branch, which a
+// plaintext passthrough never reaches.
 func TestKeyAtRest_Audit_NoEventWhenPlaintextDecrypt(t *testing.T) {
+	auditMu.Lock()
+	saved := auditLog
+	auditLog = nil
+	auditMu.Unlock()
+	t.Cleanup(func() {
+		auditMu.Lock()
+		auditLog = saved
+		auditMu.Unlock()
+	})
+
 	dir := t.TempDir()
-	baseTS := time.Now().UnixMilli()
 	if _, wasEnc, err := decryptClusterCAKey(dir, dpTestKeyPEM(t)); err != nil || wasEnc {
 		t.Fatalf("plaintext passthrough: err=%v wasEnc=%v", err, wasEnc)
 	}
 	for _, e := range auditGet() {
-		if e.Actor == keyAtRestActor && e.TS >= baseTS {
+		if e.Actor == keyAtRestActor {
 			t.Fatalf("unexpected key-at-rest audit event on plaintext passthrough: %s", e.Action)
 		}
 	}
@@ -128,6 +142,46 @@ func TestCheckKeyAtRest_EnabledListsSubsystemsAndSource(t *testing.T) {
 	// The KEK bytes / hex must never appear in operator-facing output.
 	if strings.Contains(c.Message, "00112233") {
 		t.Fatal("KEK bytes leaked into diagnostics message")
+	}
+}
+
+// TestCheckKeyAtRest_EnabledWithInvalidEnvKEKFails: a subsystem enabled while
+// CULVERT_KEK is set to a malformed value must report FAIL (key unlock/migration
+// will fail closed), not a false-healthy "file" fallback (Codex P2). The bad KEK
+// value must not leak into the message.
+func TestCheckKeyAtRest_EnabledWithInvalidEnvKEKFails(t *testing.T) {
+	t.Setenv(clusterCAEncryptEnvVar, "1")
+	t.Setenv(dpNodeKeyEncryptEnvVar, "")
+	t.Setenv(cdrClientKeyEncryptEnvVar, "")
+	t.Setenv(envKEKName, "not-valid-hex-kek") // set but malformed
+
+	c := checkKeyAtRest()
+	if c.Status != diagFail {
+		t.Fatalf("status = %q, want fail for invalid CULVERT_KEK while enabled", c.Status)
+	}
+	if strings.Contains(c.Message, "KEK source: file") {
+		t.Fatalf("must not report a healthy file fallback for an invalid env KEK: %q", c.Message)
+	}
+	if strings.Contains(c.Message, "not-valid-hex-kek") {
+		t.Fatal("invalid KEK value leaked into diagnostics message")
+	}
+	if c.OperatorAction == "" {
+		t.Fatal("expected an operator action for the invalid-KEK failure")
+	}
+}
+
+// TestCheckKeyAtRest_DisabledWithInvalidEnvKEKWarns: an invalid CULVERT_KEK with
+// all subsystems disabled is a latent misconfiguration → warn (it will break on
+// enable), not a silent OK.
+func TestCheckKeyAtRest_DisabledWithInvalidEnvKEKWarns(t *testing.T) {
+	t.Setenv(clusterCAEncryptEnvVar, "")
+	t.Setenv(dpNodeKeyEncryptEnvVar, "")
+	t.Setenv(cdrClientKeyEncryptEnvVar, "")
+	t.Setenv(envKEKName, "not-valid-hex-kek")
+
+	c := checkKeyAtRest()
+	if c.Status != diagWarn {
+		t.Fatalf("status = %q, want warn for invalid CULVERT_KEK while disabled", c.Status)
 	}
 }
 

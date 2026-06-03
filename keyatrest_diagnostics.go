@@ -23,6 +23,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -62,22 +63,30 @@ func auditKeyAtRest(action, object string) {
 	})
 }
 
-// processKEKSource reports the process-level KEK source as a non-secret enum.
-// CULVERT_KEK (env, model C) is global and takes precedence everywhere when set
-// to a usable value; otherwise subsystems fall back to their own local model-B
-// KEK file ("file"). It never exposes key bytes — the env value is only probed
-// for validity, and the decoded bytes are discarded.
-func processKEKSource() string {
-	if _, err := newEnvKEKProvider(envKEKName).KEK(); err == nil {
-		return "env"
+// processKEKSource reports the process-level KEK source and whether it is
+// usable, as non-secret enums. It MIRRORS resolveKEKProvider's selection logic:
+// CULVERT_KEK (env, model C) is selected whenever the variable is non-empty —
+// independent of whether the value is valid — otherwise subsystems fall back to
+// their own local model-B KEK file ("file"). The returned envUsable reports
+// whether a selected env KEK actually decodes; a malformed env value still
+// selects "env" (so key operations fail closed) and must NOT be reported as a
+// healthy "file" fallback (Codex P2). It never exposes key bytes — the env
+// value is only probed for validity and the decoded bytes are discarded.
+func processKEKSource() (source string, envUsable bool) {
+	if v, ok := os.LookupEnv(envKEKName); ok && v != "" {
+		_, err := newEnvKEKProvider(envKEKName).KEK()
+		return "env", err == nil
 	}
-	return "file"
+	// File model-B KEK: auto-generated on first use, always usable here.
+	return "file", true
 }
 
 // checkKeyAtRest reports the CA-3 key-at-rest posture for the operator contract.
 // It is read-only and exposes only enums (mode on/off, KEK source), never key
-// material. When no subsystem has encryption enabled it returns an informational
-// OK (the feature is opt-in).
+// material. Disabled → informational OK (opt-in). Enabled with a usable KEK →
+// OK with the subsystem list + KEK source. Enabled with a set-but-invalid
+// CULVERT_KEK → fail (key unlock/migration would fail closed); the same
+// misconfiguration with everything disabled → warn (it will break on enable).
 func checkKeyAtRest() OperatorContractCheck {
 	enabled := make([]string, 0, 3)
 	if clusterCAKeyEncryptionEnabled() {
@@ -90,7 +99,20 @@ func checkKeyAtRest() OperatorContractCheck {
 		enabled = append(enabled, keyAtRestObjCDRClient)
 	}
 
+	source, envUsable := processKEKSource()
+
 	if len(enabled) == 0 {
+		// Even with all subsystems disabled, a set-but-malformed CULVERT_KEK is
+		// an operator misconfiguration worth surfacing (it will break the moment
+		// any subsystem is enabled). Keep it informational at this severity.
+		if source == "env" && !envUsable {
+			return OperatorContractCheck{
+				Code:           "key_at_rest",
+				Status:         diagWarn,
+				Message:        "key-at-rest encryption disabled, but CULVERT_KEK is set to an invalid value",
+				OperatorAction: "Set CULVERT_KEK to a valid 32-byte hex key, or unset it to use a local file KEK, before enabling key-at-rest encryption.",
+			}
+		}
 		return OperatorContractCheck{
 			Code:    "key_at_rest",
 			Status:  diagOK,
@@ -98,10 +120,22 @@ func checkKeyAtRest() OperatorContractCheck {
 		}
 	}
 
+	// A subsystem is enabled but the selected env KEK is malformed: key unlock /
+	// migration will fail closed. Report a failure with a non-secret message
+	// (Codex P2) rather than a false-healthy "file" fallback.
+	if source == "env" && !envUsable {
+		return OperatorContractCheck{
+			Code:           "key_at_rest",
+			Status:         diagFail,
+			Message:        fmt.Sprintf("key-at-rest encryption enabled for: %s, but CULVERT_KEK is set to an invalid value — key unlock/migration will fail closed", strings.Join(enabled, ", ")),
+			OperatorAction: "Set CULVERT_KEK to a valid 32-byte hex key (or unset it to use a local file KEK) and restart, then re-check diagnostics.",
+		}
+	}
+
 	return OperatorContractCheck{
 		Code:   "key_at_rest",
 		Status: diagOK,
 		Message: fmt.Sprintf("key-at-rest encryption enabled for: %s; KEK source: %s",
-			strings.Join(enabled, ", "), processKEKSource()),
+			strings.Join(enabled, ", "), source),
 	}
 }
