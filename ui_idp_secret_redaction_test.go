@@ -152,6 +152,78 @@ func TestAPIIdPListPost_StoresAndRedactsClientSecret(t *testing.T) {
 	}
 }
 
+func TestAPIIdPAudit_RedactsWriteOnlyFields(t *testing.T) {
+	origRegistry := idpRegistry
+	auditMu.Lock()
+	origAudit := append([]AuditEntry(nil), auditLog...)
+	auditMu.Unlock()
+	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	resetAuditLog()
+	t.Cleanup(func() {
+		idpRegistry = origRegistry
+		auditMu.Lock()
+		auditLog = origAudit
+		auditMu.Unlock()
+	})
+
+	createW := httptest.NewRecorder()
+	createR := jsonReq(http.MethodPost, "/api/idp", map[string]any{
+		"name":    "OIDC Audit Create",
+		"type":    "oidc",
+		"enabled": false,
+		"oidc": map[string]any{
+			"issuer":       "https://example.com",
+			"clientId":     "client",
+			"clientSecret": "created-secret",
+		},
+	})
+	apiIdPList(createW, createR)
+	if createW.Code != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200; body=%s", createW.Code, createW.Body.String())
+	}
+	assertAuditNoWriteOnlyIdPFields(t, latestAuditEntry(t, "idp.create"))
+
+	oidc := idpRegistry.Get(decodeIdPResponseID(t, createW.Body.Bytes()))
+	if oidc == nil || oidc.OIDC == nil {
+		t.Fatal("created OIDC profile missing")
+	}
+	updateW := httptest.NewRecorder()
+	updateR := jsonReq(http.MethodPut, "/api/idp/"+oidc.ID, map[string]any{
+		"name":    "OIDC Audit Update",
+		"type":    "oidc",
+		"enabled": false,
+		"oidc": map[string]any{
+			"issuer":       "https://example.com",
+			"clientId":     "client",
+			"clientSecret": "new-secret",
+		},
+	})
+	apiIdPItem(updateW, updateR, oidc.ID)
+	if updateW.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200; body=%s", updateW.Code, updateW.Body.String())
+	}
+	assertAuditNoWriteOnlyIdPFields(t, latestAuditEntry(t, "idp.update"))
+
+	saml := &IdPProfile{
+		ID:      "saml-audit-delete-id",
+		Name:    "SAML Audit Delete",
+		Type:    IdPTypeSAML,
+		Enabled: false,
+		SAML: &SAMLProfileConfig{
+			MetadataXML:  "<EntityDescriptor>inline-metadata</EntityDescriptor>",
+			NameIDFormat: "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+		},
+	}
+	idpRegistry.profiles = append(idpRegistry.profiles, saml)
+	deleteW := httptest.NewRecorder()
+	deleteR := adminCtx(httptest.NewRequest(http.MethodDelete, "/api/idp/"+saml.ID, http.NoBody))
+	apiIdPItem(deleteW, deleteR, saml.ID)
+	if deleteW.Code != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d, want 204; body=%s", deleteW.Code, deleteW.Body.String())
+	}
+	assertAuditNoWriteOnlyIdPFields(t, latestAuditEntry(t, "idp.delete"))
+}
+
 func TestAPIIdPItemPut_PreservesOIDCClientSecretWhenRedactedFromForm(t *testing.T) {
 	p := &IdPProfile{
 		ID:           "oidc-preserve-id",
@@ -351,6 +423,40 @@ func assertNoOIDCSecretLeak(t *testing.T, body string) {
 		strings.Contains(body, "old-secret") ||
 		strings.Contains(body, "new-secret") {
 		t.Fatalf("response leaked OIDC client secret: %s", body)
+	}
+}
+
+func decodeIdPResponseID(t *testing.T, body []byte) string {
+	t.Helper()
+	var got IdPProfile
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode IdP response: %v", err)
+	}
+	if got.ID == "" {
+		t.Fatal("IdP response ID is empty")
+	}
+	return got.ID
+}
+
+func latestAuditEntry(t *testing.T, action string) AuditEntry {
+	t.Helper()
+	for _, entry := range auditGet() {
+		if entry.Action == action {
+			return entry
+		}
+	}
+	t.Fatalf("audit entry %q not found", action)
+	return AuditEntry{}
+}
+
+func assertAuditNoWriteOnlyIdPFields(t *testing.T, entry AuditEntry) {
+	t.Helper()
+	body := entry.Before + entry.After
+	if strings.Contains(body, "created-secret") ||
+		strings.Contains(body, "new-secret") ||
+		strings.Contains(body, "inline-metadata") ||
+		strings.Contains(body, "metadataXml") {
+		t.Fatalf("audit entry leaked write-only IdP field: %+v", entry)
 	}
 }
 

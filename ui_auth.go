@@ -411,7 +411,7 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		auditEventDiff(r, "idp.create", p.ID, p.Name, nil, &p)
+		auditEventDiff(r, "idp.create", p.ID, p.Name, nil, auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile created id=%q name=%q type=%q", sanitizeLog(p.ID), sanitizeLog(p.Name), sanitizeLog(string(p.Type)))
 		jsonOK(w, publicIdPProfile(&p))
 	default:
@@ -472,7 +472,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		auditEventDiff(r, "idp.update", id, p.Name, before, &p)
+		auditEventDiff(r, "idp.update", id, p.Name, auditIdPProfile(before), auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile updated id=%q name=%q", sanitizeLog(id), sanitizeLog(p.Name))
 		jsonOK(w, publicIdPProfile(&p))
 	case http.MethodDelete:
@@ -484,7 +484,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		auditEventDiff(r, "idp.delete", id, "", p, nil)
+		auditEventDiff(r, "idp.delete", id, "", auditIdPProfile(p), nil)
 		logger.Printf("UI: IdP profile deleted id=%q", sanitizeLog(id))
 		w.WriteHeader(http.StatusNoContent)
 	default:
@@ -498,6 +498,10 @@ func preserveWriteOnlyIdPFields(before, next *IdPProfile, oidcClientSecretProvid
 	}
 	preserveOIDCClientSecret(before, next, oidcClientSecretProvided)
 	preserveSAMLMetadataXML(before, next, samlMetadataXMLProvided)
+}
+
+func auditIdPProfile(p *IdPProfile) *IdPProfile {
+	return publicIdPProfile(p)
 }
 
 func preserveOIDCClientSecret(before, next *IdPProfile, clientSecretProvided bool) {
