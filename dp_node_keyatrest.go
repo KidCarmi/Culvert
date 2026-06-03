@@ -85,6 +85,7 @@ func decryptDPNodeKey(keyPath string, rawKey []byte) (plainPEM []byte, wasEncryp
 	plain, derr := decryptWithKEK(rawKey, dpNodeKEKProvider(keyPath))
 	if derr != nil {
 		// Deliberately generic: no key material, no KEK detail.
+		auditKeyAtRest(auditKeyAtRestUnlockFailed, keyAtRestObjDPNode)
 		return nil, true, fmt.Errorf("DP node key: cannot decrypt at-rest key (KEK missing/wrong or file corrupt)")
 	}
 	return plain, true, nil
@@ -163,7 +164,15 @@ func maybeMigrateDPNodeKey(keyPath string) error {
 //  4. on any failure, restore keyPath from the .bak.
 //
 // A readable key always exists at either keyPath or the .bak throughout.
-func migrateDPNodeKeyToEncrypted(keyPath string, plainKeyPEM []byte) error {
+func migrateDPNodeKeyToEncrypted(keyPath string, plainKeyPEM []byte) (err error) {
+	// CA-3 PR6 §10 audit: one completed/failed event per migration attempt.
+	defer func() {
+		if err != nil {
+			auditKeyAtRest(auditKeyAtRestMigrateFailed, keyAtRestObjDPNode)
+		} else {
+			auditKeyAtRest(auditKeyAtRestMigrateCompleted, keyAtRestObjDPNode)
+		}
+	}()
 	p := dpNodeKEKProvider(keyPath)
 	bakPath := keyPath + ".plaintext.bak"
 

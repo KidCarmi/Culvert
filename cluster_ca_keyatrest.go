@@ -97,6 +97,7 @@ func decryptClusterCAKey(dir string, rawKey []byte) (plainPEM []byte, wasEncrypt
 	plain, derr := decryptWithKEK(rawKey, clusterCAKEKProvider(dir))
 	if derr != nil {
 		// Deliberately generic: no key material, no KEK detail.
+		auditKeyAtRest(auditKeyAtRestUnlockFailed, keyAtRestObjClusterCA)
 		return nil, true, fmt.Errorf("cluster CA key: cannot decrypt at-rest key (KEK missing/wrong or file corrupt)")
 	}
 	return plain, true, nil
@@ -125,7 +126,16 @@ func writeClusterCAKey(dir, keyPath string, plainKeyPEM []byte) error {
 // Idempotent: callers only invoke it when the on-disk key was plaintext, so a
 // re-run after success (file now a PSCA envelope) is never reached. plainKeyPEM
 // is the already-validated plaintext loaded by the caller.
-func migrateClusterCAKeyToEncrypted(dir, keyPath string, plainKeyPEM []byte) error {
+func migrateClusterCAKeyToEncrypted(dir, keyPath string, plainKeyPEM []byte) (err error) {
+	// CA-3 PR6 §10 audit: one completed/failed event per migration attempt.
+	// Object is the logical subsystem name only — no path or key material.
+	defer func() {
+		if err != nil {
+			auditKeyAtRest(auditKeyAtRestMigrateFailed, keyAtRestObjClusterCA)
+		} else {
+			auditKeyAtRest(auditKeyAtRestMigrateCompleted, keyAtRestObjClusterCA)
+		}
+	}()
 	p := clusterCAKEKProvider(dir)
 	bakPath := keyPath + ".plaintext.bak"
 

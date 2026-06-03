@@ -150,6 +150,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigVersionsPresent(cv),
 		checkConfigVersionsReadable(cv),
 		checkConfigRollbackValidation(cv),
+		checkKeyAtRest(),
 	}
 	return OperatorContract{
 		Verdict:     rollUpVerdict(checks),
