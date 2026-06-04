@@ -105,6 +105,12 @@ func run(configPath string) error {
 		// inactive, and under sudoers it still needs env-preservation,
 		// see the const doc / plan § 2.3.1).
 		EnvAllow: []string{runner.EnvCulvertBackupPassphrase, runner.EnvCulvertProxyImage},
+		// CULVERT_PROXY_IMAGE is overlay-only: it must enter solely via
+		// the future pull/up overlay, NEVER from the agent's ambient env.
+		// Without this, an operator-set value would ride along on every
+		// other compose call (e.g. a restore's `up -d` recreating the
+		// proxy from an unintended pinned image).
+		EnvOverlayOnly: []string{runner.EnvCulvertProxyImage},
 	})
 	if err != nil {
 		return fmt.Errorf("runner: %w", err)

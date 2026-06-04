@@ -68,6 +68,12 @@ const (
 // path can forward it. NOTHING forwards it yet — /v1/upgrades/apply stays
 // inactive, and no read-only path sets it.
 //
+// It is registered as an OVERLAY-ONLY env var (Options.EnvOverlayOnly), so
+// it can ONLY enter a child process through an explicit per-call overlay —
+// never from the agent's ambient process environment. That stops an
+// operator-set value from leaking onto unrelated compose calls (e.g. a
+// restore's `up -d`); the future pull/up overlay is the sole entry point.
+//
 // IMPORTANT (see D1.6c plan § 2.3.1): under privilege_mode=sudoers the
 // override must ALSO be preserved across `sudo` (env_keep / --preserve-env)
 // for it to reach `docker compose`. That privilege-boundary change is

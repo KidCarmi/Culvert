@@ -160,8 +160,14 @@ type Runner struct {
 	composeFile       string
 	useSudo           bool
 	envAllow          []string
-	captureMax        int
-	stageTimeout      time.Duration
+	// envOverlayOnly is the subset of envAllow that may ONLY be sourced
+	// from an explicit per-call overlay — never from the agent's own
+	// process environment. This prevents an ambient value (e.g. an
+	// operator-set CULVERT_PROXY_IMAGE) from silently riding along on a
+	// command that did not intend to honor it.
+	envOverlayOnly map[string]struct{}
+	captureMax     int
+	stageTimeout   time.Duration
 
 	// dockerBinary is overridable in tests. Default "docker".
 	dockerBinary string
@@ -189,6 +195,15 @@ type Options struct {
 	// child process gets ONLY these (plus the runner-supplied PATH /
 	// HOME / LANG / TZ defaults). os.Environ() is NOT inherited.
 	EnvAllow []string
+
+	// EnvOverlayOnly is the subset of EnvAllow that must NEVER be sourced
+	// from the agent's own process environment — only from an explicit
+	// per-call overlay. Use this for forward references like
+	// CULVERT_PROXY_IMAGE that exactly one code path is meant to set:
+	// allowlisting alone would let an ambient value leak onto every other
+	// command via the os.LookupEnv fallback. Every name here MUST also be
+	// in EnvAllow.
+	EnvOverlayOnly []string
 
 	// DockerBinary defaults to "docker". Tests override.
 	DockerBinary string
@@ -250,11 +265,23 @@ func New(opts Options) (*Runner, error) {
 		}
 		envAllow = append(envAllow, name)
 	}
+	allowSet := make(map[string]struct{}, len(envAllow))
+	for _, n := range envAllow {
+		allowSet[n] = struct{}{}
+	}
+	envOverlayOnly := make(map[string]struct{}, len(opts.EnvOverlayOnly))
+	for _, name := range opts.EnvOverlayOnly {
+		if _, ok := allowSet[name]; !ok {
+			return nil, fmt.Errorf("runner: EnvOverlayOnly name %q must also be in EnvAllow", name)
+		}
+		envOverlayOnly[name] = struct{}{}
+	}
 	return &Runner{
 		composeProjectDir: filepath.Clean(opts.ComposeProjectDir),
 		composeFile:       opts.ComposeFile,
 		useSudo:           opts.UseSudo,
 		envAllow:          envAllow,
+		envOverlayOnly:    envOverlayOnly,
 		captureMax:        captureMax,
 		stageTimeout:      opts.StageTimeout,
 		dockerBinary:      docker,
@@ -409,7 +436,10 @@ func (r *Runner) buildEnv() []string {
 // EnvAllow name, the overlay (if present) takes precedence: a non-empty
 // overlay value is used verbatim; an empty overlay value suppresses the
 // variable for this call (no fallback to os.Getenv). Names absent from
-// the overlay fall back to os.Getenv.
+// the overlay fall back to os.Getenv — UNLESS the name is overlay-only
+// (EnvOverlayOnly), in which case it is skipped entirely: an overlay-only
+// var can only ever enter through an explicit overlay value, never from
+// the agent's ambient process environment.
 //
 // The overlay's keys MUST already be validated as members of EnvAllow
 // — runWithEnv enforces that invariant before invoking buildEnvWithOverlay.
@@ -429,6 +459,11 @@ func (r *Runner) buildEnvWithOverlay(envOverlay map[string]string) []string {
 				continue
 			}
 			env = append(env, name+"="+v)
+			continue
+		}
+		if _, overlayOnly := r.envOverlayOnly[name]; overlayOnly {
+			// Never sourced from the ambient process env — the overlay is
+			// the only way in, and this call did not provide one.
 			continue
 		}
 		v, ok := lookupEnv(name)

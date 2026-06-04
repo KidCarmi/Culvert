@@ -14,15 +14,23 @@ import (
 // allowlist — it never leaks to a child process by default, and the
 // read-only paths do not carry it.
 
-// proxyEnvRunner builds a Runner with the given EnvAllow and a fake exec
-// layer that captures the child argv + env.
+// proxyEnvRunner builds a Runner that allowlists CULVERT_PROXY_IMAGE as
+// overlay-only (mirroring main's wiring) plus a fake exec layer that
+// captures the child argv + env.
 func proxyEnvRunner(t *testing.T, capE *capturedExec, envAllow []string) *Runner {
 	t.Helper()
+	overlayOnly := []string(nil)
+	for _, n := range envAllow {
+		if n == EnvCulvertProxyImage {
+			overlayOnly = []string{EnvCulvertProxyImage}
+		}
+	}
 	r, err := New(Options{
 		ComposeProjectDir: "/srv/culvert",
 		ComposeFile:       "docker-compose.yml",
 		StageTimeout:      5 * time.Second,
 		EnvAllow:          envAllow,
+		EnvOverlayOnly:    overlayOnly,
 		DockerBinary:      "/usr/bin/docker",
 	})
 	if err != nil {
@@ -87,6 +95,56 @@ func TestEnvCulvertProxyImage_NotForwardedWithoutOverlay(t *testing.T) {
 	}
 	if capE.HasEnvName(EnvCulvertProxyImage) {
 		t.Errorf("must not forward %s when neither overlay nor process env sets it; env=%v", EnvCulvertProxyImage, capE.Env)
+	}
+}
+
+// Overlay-only is the real safety property: even when the var IS set in
+// the agent's OWN process environment, a call with no overlay (e.g. a
+// restore's `up -d`, status, inspect) must NOT forward it. This is the
+// gap a plain allowlist entry would have left open.
+func TestEnvCulvertProxyImage_AmbientValueNeverLeaks(t *testing.T) {
+	t.Setenv(EnvCulvertProxyImage, "ghcr.io/kidcarmi/culvert@sha256:"+strings.Repeat("e", 64))
+	capE := &capturedExec{}
+	r := proxyEnvRunner(t, capE, []string{EnvCulvertProxyImage})
+	if _, err := r.runWithEnv(context.Background(),
+		[]string{"/usr/bin/docker", "compose", "up", "-d"}, nil); err != nil {
+		t.Fatalf("runWithEnv: %v", err)
+	}
+	if capE.HasEnvName(EnvCulvertProxyImage) {
+		t.Errorf("overlay-only var must NEVER be sourced from the agent's ambient env; child env=%v", capE.Env)
+	}
+}
+
+// Contrast: a NORMAL (non-overlay-only) allowlisted var still falls back
+// to the ambient env — proving overlay-only is what suppresses the leak,
+// not a blanket change to env forwarding.
+func TestEnvOverlayOnly_NormalVarStillFallsBackToAmbient(t *testing.T) {
+	t.Setenv(EnvCulvertBackupPassphrase, "ambient-value")
+	capE := &capturedExec{}
+	// Passphrase is allowlisted but NOT overlay-only.
+	r := proxyEnvRunner(t, capE, []string{EnvCulvertBackupPassphrase})
+	if _, err := r.runWithEnv(context.Background(),
+		[]string{"/usr/bin/docker", "compose", "ps"}, nil); err != nil {
+		t.Fatalf("runWithEnv: %v", err)
+	}
+	if !capE.HasEnv(EnvCulvertBackupPassphrase, "ambient-value") {
+		t.Errorf("a non-overlay-only allowlisted var should still fall back to ambient; env=%v", capE.Env)
+	}
+}
+
+// EnvOverlayOnly names must be a subset of EnvAllow — New rejects a
+// stray overlay-only name.
+func TestEnvOverlayOnly_MustBeSubsetOfEnvAllow(t *testing.T) {
+	_, err := New(Options{
+		ComposeProjectDir: "/srv/culvert",
+		ComposeFile:       "docker-compose.yml",
+		StageTimeout:      5 * time.Second,
+		EnvAllow:          []string{EnvCulvertBackupPassphrase},
+		EnvOverlayOnly:    []string{EnvCulvertProxyImage}, // not in EnvAllow
+		DockerBinary:      "/usr/bin/docker",
+	})
+	if err == nil {
+		t.Fatal("New must reject an EnvOverlayOnly name that is not in EnvAllow")
 	}
 }
 
