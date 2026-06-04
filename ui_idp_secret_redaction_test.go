@@ -452,7 +452,7 @@ func TestStaticIdPModal_ClearsWriteOnlyFieldsOnlyWhenExplicitlyChecked(t *testin
 		`data-input="syncSAMLMetadataSourceChoice"`,
 		`data-change="syncSAMLMetadataSourceChoice"`,
 		`document.getElementById('idp-clear-metadata-xml').checked = false`,
-		`(p && p.type === 'saml') ? 'flex' : 'none'`,
+		`(p && p.type === 'saml' && p.saml && !p.saml.metadataUrl) ? 'flex' : 'none'`,
 		`Saved inline XML configured`,
 		`p.type === 'saml' && !saml.metadataUrl`,
 		`document.getElementById('idp-saml-nameid-format').value = saml.nameIdFormat || '';`,
@@ -487,6 +487,9 @@ func TestStaticIdPList_UsesRedactedSafeSAMLInlineMetadataIndicator(t *testing.T)
 	}
 	if strings.Contains(html, `p.type === 'saml' && p.saml && p.saml.metadataXml`) {
 		t.Fatal("SAML inline metadata indicator still depends on redacted metadataXml")
+	}
+	if strings.Contains(html, `(p && p.type === 'saml') ? 'flex' : 'none'`) {
+		t.Fatal("SAML metadata clear control is shown for non-inline SAML profiles")
 	}
 }
 
