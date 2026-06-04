@@ -234,9 +234,11 @@ func TestValidateContainerID_ExportedWrapper(t *testing.T) {
 	}
 }
 
-// The container-inspect template must be read-only with exactly one
-// sudoers line — and that line must double-quote the format token.
-func TestContainerInspectTemplate_ReadOnlyQuotedFormat(t *testing.T) {
+// The container-inspect template must be read-only and enumerate one
+// fixed-length hex pattern per legal id length (12–64) — never a single
+// trailing `*` (which sudo would let match whitespace + extra args). It
+// must also keep the format token double-quoted.
+func TestContainerInspectTemplate_EnumeratedNoTrailingWildcard(t *testing.T) {
 	tmpl := templateByID(TemplateComposeContainerInspect)
 	if tmpl == nil {
 		t.Fatal("TemplateComposeContainerInspect missing from registry")
@@ -244,10 +246,25 @@ func TestContainerInspectTemplate_ReadOnlyQuotedFormat(t *testing.T) {
 	if tmpl.StateChanging {
 		t.Error("container inspect template must be read-only")
 	}
-	if len(tmpl.SudoersLines) != 1 {
-		t.Fatalf("container inspect must have exactly one sudoers line; got %d", len(tmpl.SudoersLines))
+	wantN := containerIDMaxLen - containerIDMinLen + 1
+	if len(tmpl.SudoersLines) != wantN {
+		t.Fatalf("container inspect must enumerate %d sudoers lines (lengths %d–%d); got %d",
+			wantN, containerIDMinLen, containerIDMaxLen, len(tmpl.SudoersLines))
 	}
-	if !strings.Contains(tmpl.SudoersLines[0], `"{{json .Image}}"`) {
-		t.Errorf("sudoers line must double-quote the format token so sudo matches the single-token argv; got %q", tmpl.SudoersLines[0])
+	for _, line := range tmpl.SudoersLines {
+		if strings.Contains(line, "*") {
+			t.Errorf("sudoers line must NOT contain a trailing wildcard (sudo `*` matches whitespace): %q", line)
+		}
+		if !strings.Contains(line, `"{{json .Image}}"`) {
+			t.Errorf("sudoers line must double-quote the format token: %q", line)
+		}
+	}
+	// Shortest and longest patterns must carry exactly min/max hex classes.
+	first, last := tmpl.SudoersLines[0], tmpl.SudoersLines[wantN-1]
+	if got := strings.Count(first, "[0-9a-f]"); got != containerIDMinLen {
+		t.Errorf("shortest line: got %d hex classes, want %d", got, containerIDMinLen)
+	}
+	if got := strings.Count(last, "[0-9a-f]"); got != containerIDMaxLen {
+		t.Errorf("longest line: got %d hex classes, want %d", got, containerIDMaxLen)
 	}
 }

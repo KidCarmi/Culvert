@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 const (
@@ -91,6 +92,16 @@ func validateImageRefShape(ref string) error {
 	return nil
 }
 
+// containerIDMinLen / containerIDMaxLen bound a docker container id: a
+// short id (12 hex) through a full id (64 hex). These are the SINGLE
+// SOURCE OF TRUTH for both the argv-shape validator and the enumerated
+// sudoers allowlist (containerInspectSudoersLines), so the two can never
+// drift.
+const (
+	containerIDMinLen = 12
+	containerIDMaxLen = 64
+)
+
 // containerIDShapeRE bounds the argv shape of a docker container id: a
 // run of 12–64 lowercase hex characters (short id through full id).
 // This is the ONLY variable argv position of the container-inspect
@@ -99,7 +110,7 @@ func validateImageRefShape(ref string) error {
 // character. The id is sourced from `docker compose ps` output (not an
 // operator request), but it is validated all the same: the runner never
 // forwards an unvalidated token to sudo/docker.
-var containerIDShapeRE = regexp.MustCompile(`^[a-f0-9]{12,64}$`)
+var containerIDShapeRE = regexp.MustCompile(fmt.Sprintf(`^[a-f0-9]{%d,%d}$`, containerIDMinLen, containerIDMaxLen))
 
 // ValidateContainerID is the exported argv-safety validator for a docker
 // container id. Exported for symmetry with ValidateImageRef so a future
@@ -146,20 +157,39 @@ func imageInspectTemplates() []Template {
 		},
 		{
 			// `docker inspect` is a DIFFERENT binary surface from
-			// `docker compose` — its sudoers entry is exact-match on the
-			// format string with a single bounded `*` for the container
-			// id. The `--format` value `{{json .Image}}` is ONE argv
-			// token that contains a space, so the sudoers line MUST
-			// double-quote it; otherwise sudo would parse it as two args
-			// and never match the agent's single-token argv.
-			ID:       TemplateComposeContainerInspect,
-			BaseArgv: []string{"docker", "inspect", "--format", "{{json .Image}}"},
-			SudoersLines: []string{
-				`/usr/bin/docker inspect --format "{{json .Image}}" *`,
-			},
+			// `docker compose`. Its sudoers entries are ENUMERATED, not
+			// wildcarded: one fixed-length [0-9a-f] pattern per legal
+			// container-id length (12–64). There is NO trailing `*`, so
+			// sudo (whose `*` matches whitespace — and could otherwise
+			// admit a second `--format` to dump arbitrary Config.Env at
+			// root) cannot accept any extra argument after the validated
+			// id, and the `--format` value stays locked to
+			// `{{json .Image}}`. This mirrors the file's restore-flag
+			// enumeration: the privilege boundary is never broadened for
+			// readability. The `--format` value is double-quoted because
+			// `{{json .Image}}` is ONE argv token containing a space.
+			ID:            TemplateComposeContainerInspect,
+			BaseArgv:      []string{"docker", "inspect", "--format", "{{json .Image}}"},
+			SudoersLines:  containerInspectSudoersLines(),
 			StateChanging: false,
 		},
 	}
+}
+
+// containerInspectSudoersLines enumerates one sudoers allowlist line per
+// legal container-id length (containerIDMinLen..containerIDMaxLen), each
+// a fixed-length run of [0-9a-f] character classes with NO trailing
+// wildcard. This bounds the privilege boundary to exactly one hex id of
+// an allowed length and nothing more — see the template comment for why
+// a single trailing `*` is unsafe here. The set MUST stay in lock-step
+// with packaging/sudoers/culvert-maint (the parity test enforces it).
+func containerInspectSudoersLines() []string {
+	const prefix = `/usr/bin/docker inspect --format "{{json .Image}}" `
+	lines := make([]string, 0, containerIDMaxLen-containerIDMinLen+1)
+	for n := containerIDMinLen; n <= containerIDMaxLen; n++ {
+		lines = append(lines, prefix+strings.Repeat("[0-9a-f]", n))
+	}
+	return lines
 }
 
 // ComposeContainerInspect runs
@@ -169,7 +199,11 @@ func imageInspectTemplates() []Template {
 // explicitly suppressed — the inspect subprocess has no use for it.
 //
 // The container_id is validated by validateContainerIDShape before any
-// argv is built, so sudo is never invoked with a malformed token.
+// argv is built, so sudo is never invoked with a malformed token. The
+// sudoers boundary is independently tightened: it enumerates a
+// fixed-length hex pattern per legal id length with no trailing
+// wildcard (containerInspectSudoersLines), so even a direct sudo call
+// from a compromised agent cannot append extra arguments.
 func (r *Runner) ComposeContainerInspect(ctx context.Context, containerID string) (*Result, error) {
 	if err := validateContainerIDShape(containerID); err != nil {
 		return nil, err
