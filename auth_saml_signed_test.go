@@ -121,6 +121,29 @@ func TestSAMLExchangeAssertionRejectsWrongRequestID(t *testing.T) {
 	}
 }
 
+func TestSAMLExchangeAssertionRejectsReplayedSignedResponse(t *testing.T) {
+	fixture := newSignedSAMLFixture(t, nil)
+
+	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	if err != nil {
+		t.Fatalf("first ExchangeAssertion failed: %v", err)
+	}
+	if id == nil || relayURL != fixture.relayURL {
+		t.Fatalf("first ExchangeAssertion got id=%+v relay=%q, want identity and relay %q", id, relayURL, fixture.relayURL)
+	}
+
+	id, relayURL, err = fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	if err == nil {
+		t.Fatal("expected replayed signed response to fail")
+	}
+	if id != nil || relayURL != "" {
+		t.Fatalf("got id=%+v relay=%q, want no identity or relay on replay", id, relayURL)
+	}
+	if !strings.Contains(err.Error(), "invalid or expired state") {
+		t.Fatalf("error %q missing replay state failure detail", err)
+	}
+}
+
 func TestSAMLExchangeAssertionRejectsUnsignedResponse(t *testing.T) {
 	fixture := newSignedSAMLFixture(t, nil)
 	fixture.samlResponse = stripSAMLResponseSignatures(t, fixture.samlResponse)
