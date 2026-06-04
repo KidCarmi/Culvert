@@ -99,8 +99,12 @@ func run(configPath string) error {
 		// D1.6b adds CULVERT_BACKUP_PASSPHRASE so encrypted-backup
 		// and restore-with-encrypted-archive operations can forward
 		// the resolved value into the cli container via env overlay.
-		// All other secrets enter D1.6c/d as needed.
-		EnvAllow: []string{runner.EnvCulvertBackupPassphrase},
+		// D1.6c adds CULVERT_PROXY_IMAGE so the future upgrade-apply
+		// pull/up path can forward a pinned image digest into compose
+		// (precondition only — nothing forwards it yet; apply stays
+		// inactive, and under sudoers it still needs env-preservation,
+		// see the const doc / plan § 2.3.1).
+		EnvAllow: []string{runner.EnvCulvertBackupPassphrase, runner.EnvCulvertProxyImage},
 	})
 	if err != nil {
 		return fmt.Errorf("runner: %w", err)

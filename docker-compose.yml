@@ -75,7 +75,10 @@ services:
 
   # ── Culvert proxy + admin UI ────────────────────────────────────────────
   proxy:
-    image: ghcr.io/kidcarmi/culvert:latest
+    # CULVERT_PROXY_IMAGE lets the maintenance agent pin an exact image
+    # digest for a future upgrade-apply (D1.6c) without editing this file;
+    # unset, it resolves to the published :latest tag (current behaviour).
+    image: ${CULVERT_PROXY_IMAGE:-ghcr.io/kidcarmi/culvert:latest}
     # Uncomment to build locally:
     # build: .
     container_name: culvert
@@ -152,11 +155,14 @@ services:
   # See docs/operator/docker-compose-backup-restore.md for the full surface.
   #
   # Same image as `proxy` so the CLI and the daemon never version-skew.
-  # Mounts /data rw and /backup rw. Does NOT mount /var/run/docker.sock
-  # and does NOT expose any ports. Restore commit is offline-only — stop
-  # the daemon first (`docker compose down`) before running --confirm.
+  # It therefore shares the SAME ${CULVERT_PROXY_IMAGE} override as proxy:
+  # a pinned-digest upgrade keeps the cli (backup/restore) in lockstep with
+  # the running daemon. Mounts /data rw and /backup rw. Does NOT mount
+  # /var/run/docker.sock and does NOT expose any ports. Restore commit is
+  # offline-only — stop the daemon first (`docker compose down`) before
+  # running --confirm.
   cli:
-    image: ghcr.io/kidcarmi/culvert:latest
+    image: ${CULVERT_PROXY_IMAGE:-ghcr.io/kidcarmi/culvert:latest}
     # Uncomment to build locally (mirrors the proxy service):
     # build: .
     profiles: ["cli"]
