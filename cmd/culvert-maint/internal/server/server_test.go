@@ -302,17 +302,16 @@ func TestOperationsLogsEndpoint_404WhenMissing(t *testing.T) {
 }
 
 // TestFutureEndpointsReturn404 — every path NOT YET WIRED must still
-// 404. Backup/restore/cleanup and the read-only /v1/upgrades/check are
-// active; the remaining "future" endpoints are upgrade apply and
-// rollback. Tests for the active endpoints live alongside their
-// handlers.
+// 404. Backup/restore/cleanup, the read-only /v1/upgrades/check, and the
+// destructive /v1/upgrades/apply are active; the remaining "future"
+// endpoint is rollback. Tests for the active endpoints live alongside
+// their handlers.
 func TestFutureEndpointsReturn404(t *testing.T) {
 	sock, stop := startTestServer(t, &fakeStatus{}, nil, "")
 	defer stop()
 
 	cli := udsClient(sock)
 	for _, path := range []string{
-		"/v1/upgrades/apply",
 		"/v1/rollbacks",
 	} {
 		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://unix"+path, strings.NewReader(`{}`))

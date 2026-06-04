@@ -86,6 +86,7 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 		TemplateComposeImageInspect:         {},
 		TemplateComposeManifestInspect:      {},
 		TemplateComposeContainerInspect:     {},
+		TemplateComposePull:                 {},
 	}
 	gotIDs := map[TemplateID]struct{}{}
 	for _, tmpl := range Registry() {
@@ -115,6 +116,27 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 		}
 		if got := len(tmpl.SudoersLines); got != 12 {
 			t.Errorf("template %q must enumerate exactly 12 sudoers lines (3 modes × 4 flag combos); got %d", id, got)
+		}
+	}
+}
+
+// TestSudoers_EnvKeepPreservesOverlayVars asserts the env-preservation
+// Defaults block is present. Under privilege_mode=sudoers the agent
+// forwards CULVERT_PROXY_IMAGE (upgrade pin) and CULVERT_BACKUP_PASSPHRASE
+// (encrypted backup) by overlay; sudo's env_reset would strip both before
+// `docker compose` saw them without these env_keep lines.
+func TestSudoers_EnvKeepPreservesOverlayVars(t *testing.T) {
+	data, err := os.ReadFile(findSudoersFile(t)) //nolint:gosec // test reads packaging file by computed path
+	if err != nil {
+		t.Fatalf("read sudoers: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		`Defaults:culvert-maint env_keep += "CULVERT_PROXY_IMAGE"`,
+		`Defaults:culvert-maint env_keep += "CULVERT_BACKUP_PASSPHRASE"`,
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("sudoers missing env-preservation line:\n  %s", want)
 		}
 	}
 }
@@ -166,6 +188,13 @@ func parseSudoersTemplates(t *testing.T, path string) map[string]struct{} {
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// `Defaults` directives (e.g. env_keep preservation) are policy,
+		// not command allowlist entries — they have no NOPASSWD command
+		// to match against a template, so skip them here. Their presence
+		// is asserted separately (TestSudoers_EnvKeepPreservesOverlayVars).
+		if strings.HasPrefix(line, "Defaults") {
 			continue
 		}
 		// Expect:  <user> ALL=(root) NOPASSWD: <command line>

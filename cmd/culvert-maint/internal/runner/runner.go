@@ -129,6 +129,7 @@ func Registry() []Template {
 	}
 	templates = append(templates, d16bTemplates()...)
 	templates = append(templates, imageInspectTemplates()...)
+	templates = append(templates, composeApplyTemplates()...)
 	return templates
 }
 

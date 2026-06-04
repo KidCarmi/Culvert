@@ -73,6 +73,25 @@
 # of every Template.SudoersLines exactly matches the entries below: no
 # missing, no dead surface.
 
+# ─── env preservation (D1.6c) ───────────────────────────────────────
+# sudo's default env_reset clears the child environment before exec'ing
+# the allowed command. The agent builds the child env from scratch and
+# passes per-call values via an overlay (it never inherits os.Environ),
+# but those values still have to SURVIVE sudo to reach `docker compose`.
+# env_keep retains exactly the two vars the agent forwards by overlay:
+#   - CULVERT_PROXY_IMAGE      — pins the proxy image for upgrade apply
+#                                (compose `image: ${CULVERT_PROXY_IMAGE:-…}`).
+#   - CULVERT_BACKUP_PASSPHRASE — reaches the cli container via `-e` for
+#                                encrypted backup/restore (and pre-upgrade
+#                                backup). Without this, encrypted backup
+#                                under privilege_mode=sudoers gets no
+#                                passphrase.
+# Both are bounded: the agent only ever sets these via an explicit
+# overlay, and CULVERT_PROXY_IMAGE is overlay-only (never sourced from the
+# agent's ambient env). No other variable is preserved.
+Defaults:culvert-maint env_keep += "CULVERT_PROXY_IMAGE"
+Defaults:culvert-maint env_keep += "CULVERT_BACKUP_PASSPHRASE"
+
 # ─── compose.status (D1.6a) ─────────────────────────────────────────
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} ps --format json
 
@@ -204,3 +223,9 @@ culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format "{{json .Ima
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format "{{json .Image}}" [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format "{{json .Image}}" [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format "{{json .Image}}" [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
+
+# ─── compose.pull (upgrade apply, D1.6c) ────────────────────────────
+# Pulls ONLY the proxy service (fixed literal — no wildcard), pinned via
+# the CULVERT_PROXY_IMAGE overlay (preserved through sudo by the env_keep
+# Defaults above). State-changing: it mutates the local image store.
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} pull proxy

@@ -82,6 +82,13 @@ const (
 	// is available. Read-only — it does NOT acquire the maintenance lock
 	// and is intentionally absent from stateChangingKinds.
 	KindUpgradeCheck = "upgrades.check"
+
+	// KindUpgradeApply is the D1.6c destructive upgrade apply
+	// (POST /v1/upgrades/apply): optional pre-backup, pull the pinned
+	// proxy image, recreate the stack, health-gate, and verify the
+	// running digest. State-changing and exclusive (acquires the
+	// maintenance lock).
+	KindUpgradeApply = "upgrades.apply"
 )
 
 // stateChangingKinds is the production allowlist of operation kinds
@@ -93,6 +100,7 @@ var stateChangingKinds = map[string]struct{}{
 	KindBackupCreate:  {},
 	KindRestoreCommit: {},
 	KindCleanupCommit: {},
+	KindUpgradeApply:  {},
 }
 
 // SyntheticStateChangingKind is exported for tests that need to
