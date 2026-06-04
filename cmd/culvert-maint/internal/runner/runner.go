@@ -160,8 +160,14 @@ type Runner struct {
 	composeFile       string
 	useSudo           bool
 	envAllow          []string
-	captureMax        int
-	stageTimeout      time.Duration
+	// envOverlayOnly is the subset of envAllow that may ONLY be sourced
+	// from an explicit per-call overlay — never from the agent's own
+	// process environment. This prevents an ambient value (e.g. an
+	// operator-set CULVERT_PROXY_IMAGE) from silently riding along on a
+	// command that did not intend to honor it.
+	envOverlayOnly map[string]struct{}
+	captureMax     int
+	stageTimeout   time.Duration
 
 	// dockerBinary is overridable in tests. Default "docker".
 	dockerBinary string
@@ -190,6 +196,15 @@ type Options struct {
 	// HOME / LANG / TZ defaults). os.Environ() is NOT inherited.
 	EnvAllow []string
 
+	// EnvOverlayOnly is the subset of EnvAllow that must NEVER be sourced
+	// from the agent's own process environment — only from an explicit
+	// per-call overlay. Use this for forward references like
+	// CULVERT_PROXY_IMAGE that exactly one code path is meant to set:
+	// allowlisting alone would let an ambient value leak onto every other
+	// command via the os.LookupEnv fallback. Every name here MUST also be
+	// in EnvAllow.
+	EnvOverlayOnly []string
+
 	// DockerBinary defaults to "docker". Tests override.
 	DockerBinary string
 	// SudoBinary defaults to "sudo". Tests override.
@@ -206,6 +221,29 @@ const (
 // underscore. The runner refuses to forward names outside this set so
 // a config bug cannot inject `=`-laden or newline-laden tokens.
 var envNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+// resolveEnvSets validates EnvAllow (each a well-formed env name) and
+// EnvOverlayOnly (each a subset of EnvAllow), returning the allow slice
+// and the overlay-only set. Kept out of New to bound New's complexity.
+func resolveEnvSets(allow, overlayOnly []string) (envAllow []string, overlayOnlySet map[string]struct{}, err error) {
+	envAllow = make([]string, 0, len(allow))
+	allowSet := make(map[string]struct{}, len(allow))
+	for _, name := range allow {
+		if !envNameRE.MatchString(name) {
+			return nil, nil, fmt.Errorf("runner: EnvAllow name %q is not a valid env-var name", name)
+		}
+		envAllow = append(envAllow, name)
+		allowSet[name] = struct{}{}
+	}
+	overlayOnlySet = make(map[string]struct{}, len(overlayOnly))
+	for _, name := range overlayOnly {
+		if _, ok := allowSet[name]; !ok {
+			return nil, nil, fmt.Errorf("runner: EnvOverlayOnly name %q must also be in EnvAllow", name)
+		}
+		overlayOnlySet[name] = struct{}{}
+	}
+	return envAllow, overlayOnlySet, nil
+}
 
 // New constructs a Runner. ComposeProjectDir must be absolute and
 // already cleaned. ComposeFile must be a bare filename (no path
@@ -243,18 +281,16 @@ func New(opts Options) (*Runner, error) {
 	if sudo == "" {
 		sudo = "sudo"
 	}
-	envAllow := make([]string, 0, len(opts.EnvAllow))
-	for _, name := range opts.EnvAllow {
-		if !envNameRE.MatchString(name) {
-			return nil, fmt.Errorf("runner: EnvAllow name %q is not a valid env-var name", name)
-		}
-		envAllow = append(envAllow, name)
+	envAllow, envOverlayOnly, err := resolveEnvSets(opts.EnvAllow, opts.EnvOverlayOnly)
+	if err != nil {
+		return nil, err
 	}
 	return &Runner{
 		composeProjectDir: filepath.Clean(opts.ComposeProjectDir),
 		composeFile:       opts.ComposeFile,
 		useSudo:           opts.UseSudo,
 		envAllow:          envAllow,
+		envOverlayOnly:    envOverlayOnly,
 		captureMax:        captureMax,
 		stageTimeout:      opts.StageTimeout,
 		dockerBinary:      docker,
@@ -409,7 +445,10 @@ func (r *Runner) buildEnv() []string {
 // EnvAllow name, the overlay (if present) takes precedence: a non-empty
 // overlay value is used verbatim; an empty overlay value suppresses the
 // variable for this call (no fallback to os.Getenv). Names absent from
-// the overlay fall back to os.Getenv.
+// the overlay fall back to os.Getenv — UNLESS the name is overlay-only
+// (EnvOverlayOnly), in which case it is skipped entirely: an overlay-only
+// var can only ever enter through an explicit overlay value, never from
+// the agent's ambient process environment.
 //
 // The overlay's keys MUST already be validated as members of EnvAllow
 // — runWithEnv enforces that invariant before invoking buildEnvWithOverlay.
@@ -429,6 +468,11 @@ func (r *Runner) buildEnvWithOverlay(envOverlay map[string]string) []string {
 				continue
 			}
 			env = append(env, name+"="+v)
+			continue
+		}
+		if _, overlayOnly := r.envOverlayOnly[name]; overlayOnly {
+			// Never sourced from the ambient process env — the overlay is
+			// the only way in, and this call did not provide one.
 			continue
 		}
 		v, ok := lookupEnv(name)

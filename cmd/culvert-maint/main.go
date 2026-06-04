@@ -49,6 +49,24 @@ func main() {
 	}
 }
 
+// newRunner builds the command runner from config.
+//
+// EnvAllow: CULVERT_BACKUP_PASSPHRASE is the encrypted backup/restore
+// overlay. CULVERT_PROXY_IMAGE (D1.6c) is the precondition for the future
+// upgrade-apply pull/up to forward a pinned digest — nothing forwards it
+// yet (see the const doc / plan § 2.3.1). It is overlay-only so an
+// ambient value never leaks onto an unrelated compose call.
+func newRunner(cfg *config.Config) (*runner.Runner, error) {
+	return runner.New(runner.Options{
+		ComposeProjectDir: cfg.ComposeProjectDir,
+		ComposeFile:       cfg.ComposeFile,
+		UseSudo:           cfg.PrivilegeMode == config.PrivilegeSudoers,
+		StageTimeout:      cfg.StageTimeout,
+		EnvAllow:          []string{runner.EnvCulvertBackupPassphrase, runner.EnvCulvertProxyImage},
+		EnvOverlayOnly:    []string{runner.EnvCulvertProxyImage},
+	})
+}
+
 func run(configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -91,17 +109,7 @@ func run(configPath string) error {
 	// D1.6a: nothing on disk to scan, but the contract is in place for D1.6b/c.
 	mgr.MarkAllInterrupted()
 
-	r, err := runner.New(runner.Options{
-		ComposeProjectDir: cfg.ComposeProjectDir,
-		ComposeFile:       cfg.ComposeFile,
-		UseSudo:           cfg.PrivilegeMode == config.PrivilegeSudoers,
-		StageTimeout:      cfg.StageTimeout,
-		// D1.6b adds CULVERT_BACKUP_PASSPHRASE so encrypted-backup
-		// and restore-with-encrypted-archive operations can forward
-		// the resolved value into the cli container via env overlay.
-		// All other secrets enter D1.6c/d as needed.
-		EnvAllow: []string{runner.EnvCulvertBackupPassphrase},
-	})
+	r, err := newRunner(cfg)
 	if err != nil {
 		return fmt.Errorf("runner: %w", err)
 	}

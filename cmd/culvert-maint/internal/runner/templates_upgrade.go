@@ -56,6 +56,32 @@ const (
 	TemplateComposeContainerInspect TemplateID = "compose.container.inspect"
 )
 
+// EnvCulvertProxyImage is the env-var name that overrides the proxy (and
+// the same-image cli) service's image in docker-compose.yml:
+//
+//	image: ${CULVERT_PROXY_IMAGE:-ghcr.io/kidcarmi/culvert:latest}
+//
+// The future upgrade-apply slice will forward the pinned digest reference
+// (`repo@sha256:…`) into `docker compose pull` / `up` via an env overlay,
+// so a pin survives without editing the compose file. It is NOT a secret;
+// it is admitted to the runner env allowlist purely so that future pull/up
+// path can forward it. NOTHING forwards it yet — /v1/upgrades/apply stays
+// inactive, and no read-only path sets it.
+//
+// It is registered as an OVERLAY-ONLY env var (Options.EnvOverlayOnly), so
+// it can ONLY enter a child process through an explicit per-call overlay —
+// never from the agent's ambient process environment. That stops an
+// operator-set value from leaking onto unrelated compose calls (e.g. a
+// restore's `up -d`); the future pull/up overlay is the sole entry point.
+//
+// IMPORTANT (see D1.6c plan § 2.3.1): under privilege_mode=sudoers the
+// override must ALSO be preserved across `sudo` (env_keep / --preserve-env)
+// for it to reach `docker compose`. That privilege-boundary change is
+// intentionally NOT made here — it belongs with the pull/up sudoers
+// entries (the apply slice), where the env_keep-vs-preserve-env choice is
+// wired alongside the commands that actually use it.
+const EnvCulvertProxyImage = "CULVERT_PROXY_IMAGE"
+
 // imageRefShapeRE bounds the argv shape of an image reference,
 // INDEPENDENT of the operator-configured image_allowlist. It is the
 // belt-and-braces barrier: even if an operator writes a sloppy
