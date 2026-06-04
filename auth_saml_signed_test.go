@@ -121,6 +121,21 @@ func TestSAMLExchangeAssertionRejectsWrongRequestID(t *testing.T) {
 	}
 }
 
+func TestSAMLExchangeAssertionRejectsSignedResponseWithoutRelayState(t *testing.T) {
+	fixture := newSignedSAMLFixture(t, nil)
+
+	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequestWithoutRelayState(t))
+	if err == nil {
+		t.Fatal("expected signed response without RelayState to fail")
+	}
+	if id != nil || relayURL != "" {
+		t.Fatalf("got id=%+v relay=%q, want no identity or relay without RelayState", id, relayURL)
+	}
+	if !strings.Contains(err.Error(), "invalid or expired state") {
+		t.Fatalf("error %q missing state failure detail", err)
+	}
+}
+
 func TestSAMLExchangeAssertionRejectsReplayedSignedResponse(t *testing.T) {
 	fixture := newSignedSAMLFixture(t, nil)
 
@@ -208,6 +223,15 @@ func (f signedSAMLFixture) callbackRequest(t *testing.T) *http.Request {
 	t.Helper()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
 		"RelayState":   {f.state},
+		"SAMLResponse": {f.samlResponse},
+	}.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return r
+}
+
+func (f signedSAMLFixture) callbackRequestWithoutRelayState(t *testing.T) *http.Request {
+	t.Helper()
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
 		"SAMLResponse": {f.samlResponse},
 	}.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
