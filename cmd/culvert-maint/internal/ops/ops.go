@@ -75,6 +75,13 @@ const (
 	KindRestoreCommit = "restore.commit"
 	KindCleanupDryRun = "cleanup.dryrun"
 	KindCleanupCommit = "cleanup.commit"
+
+	// KindUpgradeCheck is the D1.6c read-only upgrade check
+	// (POST /v1/upgrades/check). It inspects the local and remote image
+	// digests for a requested image_ref and reports whether an upgrade
+	// is available. Read-only — it does NOT acquire the maintenance lock
+	// and is intentionally absent from stateChangingKinds.
+	KindUpgradeCheck = "upgrades.check"
 )
 
 // stateChangingKinds is the production allowlist of operation kinds

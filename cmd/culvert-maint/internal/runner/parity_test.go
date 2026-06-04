@@ -83,6 +83,8 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 		TemplateComposeUp:                   {},
 		TemplateComposeCLICleanupDryRun:     {},
 		TemplateComposeCLICleanupCommit:     {},
+		TemplateComposeImageInspect:         {},
+		TemplateComposeManifestInspect:      {},
 	}
 	gotIDs := map[TemplateID]struct{}{}
 	for _, tmpl := range Registry() {
@@ -98,7 +100,7 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 	}
 	for id := range gotIDs {
 		if _, ok := wantIDs[id]; !ok {
-			t.Errorf("registry has unexpected template %q (D1.6b scope is closed)", id)
+			t.Errorf("registry has unexpected template %q (registry scope is closed)", id)
 		}
 	}
 	// Restore templates MUST have exactly 12 lines each (3 modes ×
