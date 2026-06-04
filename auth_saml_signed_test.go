@@ -154,6 +154,26 @@ func TestSAMLExchangeAssertionRejectsAudienceMismatch(t *testing.T) {
 	}
 }
 
+func TestSAMLExchangeAssertionRejectsExpiredSignedAssertion(t *testing.T) {
+	fixture := newSignedSAMLFixtureWithSession(t, signedSAMLFixtureOptions{
+		assertionMaker: expiredSAMLAssertionMaker{},
+	})
+
+	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	if err == nil {
+		t.Fatal("expected expired signed assertion to fail")
+	}
+	if id != nil || relayURL != "" {
+		t.Fatalf("got id=%+v relay=%q, want no identity or relay on failure", id, relayURL)
+	}
+	if !strings.Contains(err.Error(), "saml response validation:") {
+		t.Fatalf("error %q missing validation context", err)
+	}
+	if !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("error %q missing expired assertion detail", err)
+	}
+}
+
 type signedSAMLFixture struct {
 	provider     *SAMLProvider
 	relayURL     string
@@ -174,6 +194,7 @@ func (f signedSAMLFixture) callbackRequest(t *testing.T) *http.Request {
 type signedSAMLFixtureOptions struct {
 	mutateSPMetadata func(*saml.EntityDescriptor)
 	session          *saml.Session
+	assertionMaker   saml.AssertionMaker
 }
 
 func newSignedSAMLFixture(t *testing.T, mutateSPMetadata func(*saml.EntityDescriptor)) signedSAMLFixture {
@@ -203,6 +224,7 @@ func newSignedSAMLFixtureWithSession(t *testing.T, opts signedSAMLFixtureOptions
 		MetadataURL:             *idpMetadataURL,
 		SSOURL:                  *idpSSOURL,
 		ServiceProviderProvider: testSAMLServiceProviderProvider{metadata: spMetadata},
+		AssertionMaker:          opts.assertionMaker,
 	}
 	provider.sp.IDPMetadata = idp.Metadata()
 
@@ -237,7 +259,11 @@ func newSignedSAMLFixtureWithSession(t *testing.T, opts signedSAMLFixtureOptions
 			Groups:         []string{"engineering", "admins"},
 		}
 	}
-	if err := (saml.DefaultAssertionMaker{}).MakeAssertion(authnRequest, session); err != nil {
+	assertionMaker := opts.assertionMaker
+	if assertionMaker == nil {
+		assertionMaker = saml.DefaultAssertionMaker{}
+	}
+	if err := assertionMaker.MakeAssertion(authnRequest, session); err != nil {
 		t.Fatalf("make assertion: %v", err)
 	}
 	if err := authnRequest.MakeResponse(); err != nil {
@@ -256,6 +282,24 @@ func newSignedSAMLFixtureWithSession(t *testing.T, opts signedSAMLFixtureOptions
 		state:        state,
 		samlResponse: base64.StdEncoding.EncodeToString(responseXML),
 	}
+}
+
+type expiredSAMLAssertionMaker struct{}
+
+func (expiredSAMLAssertionMaker) MakeAssertion(req *saml.IdpAuthnRequest, session *saml.Session) error {
+	if err := (saml.DefaultAssertionMaker{}).MakeAssertion(req, session); err != nil {
+		return err
+	}
+	expiredAt := time.Now().Add(-2 * saml.MaxClockSkew)
+	validFrom := expiredAt.Add(-time.Minute)
+	req.Assertion.Conditions.NotBefore = validFrom
+	req.Assertion.Conditions.NotOnOrAfter = expiredAt
+	for _, confirmation := range req.Assertion.Subject.SubjectConfirmations {
+		if confirmation.SubjectConfirmationData != nil {
+			confirmation.SubjectConfirmationData.NotOnOrAfter = expiredAt
+		}
+	}
+	return nil
 }
 
 func stripSAMLResponseSignatures(t *testing.T, encodedResponse string) string {
