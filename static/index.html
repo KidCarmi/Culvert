@@ -8098,7 +8098,7 @@ function openIdPModal(p) {
   document.getElementById('idp-clear-secret').checked = false;
   document.getElementById('idp-clear-secret-wrap').style.display = (p && p.type === 'oidc') ? 'flex' : 'none';
   document.getElementById('idp-clear-metadata-xml').checked = false;
-  document.getElementById('idp-clear-metadata-xml-wrap').style.display = (p && p.type === 'saml') ? 'flex' : 'none';
+  document.getElementById('idp-clear-metadata-xml-wrap').style.display = (p && p.type === 'saml' && p.saml && !p.saml.metadataUrl) ? 'flex' : 'none';
 
   if (p) {
     // Edit mode — skip step 1, go straight to form
