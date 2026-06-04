@@ -129,3 +129,14 @@ culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --p
 # are global (non-compose) docker reads; they cannot mutate the stack.
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker image inspect *
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker manifest inspect --verbose *
+
+# ─── container inspect (upgrade-apply capture primitive, read-only) ──
+# Reads the running proxy container's image config digest so the apply
+# slice can capture what is ACTUALLY running (not what a tag resolves to
+# locally). Read-only: it cannot pull, restart, or mutate the stack, and
+# /v1/upgrades/apply is NOT activated by the slice that adds this line.
+# The single bounded `*` = the container id (validated 12–64 hex before
+# sudo). The `--format` value is double-quoted because `{{json .Image}}`
+# is ONE argv token containing a space; without the quotes sudo would
+# parse it as two arguments and never match the agent's single-token argv.
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format "{{json .Image}}" *

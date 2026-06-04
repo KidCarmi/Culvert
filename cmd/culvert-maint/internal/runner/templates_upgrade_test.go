@@ -146,3 +146,108 @@ func TestImageInspectTemplates_ReadOnlySingleLine(t *testing.T) {
 		}
 	}
 }
+
+// ─── container inspect (D1.6c capture primitive) ────────────────────
+
+func TestComposeContainerInspect_Argv(t *testing.T) {
+	r, capE := d16bRunner(t)
+	const cid = "abcdef012345"
+	if _, err := r.ComposeContainerInspect(context.Background(), cid); err != nil {
+		t.Fatalf("ComposeContainerInspect: %v", err)
+	}
+	want := []string{
+		"/usr/bin/docker", "inspect", "--format", "{{json .Image}}", cid,
+	}
+	if !reflect.DeepEqual(capE.Argv, want) {
+		t.Errorf("argv mismatch.\n  got:  %v\n  want: %v", capE.Argv, want)
+	}
+	// The format spec must be ONE argv token (with its space intact), not
+	// split — that is exactly why the sudoers line double-quotes it.
+	if capE.Argv[3] != "{{json .Image}}" {
+		t.Errorf("--format value must be a single argv token %q; got %q", "{{json .Image}}", capE.Argv[3])
+	}
+	if capE.HasEnvName(EnvCulvertBackupPassphrase) {
+		t.Errorf("container inspect must not forward the backup passphrase; child env=%v", capE.Env)
+	}
+}
+
+// A malformed container id must be rejected before any argv is built, so
+// sudo/docker is never invoked with a dangerous token.
+func TestComposeContainerInspect_RejectsMalformedIDBeforeExec(t *testing.T) {
+	r, capE := d16bRunner(t)
+	bad := []string{
+		"",
+		"abc",                     // too short (<12)
+		"ABCDEF012345",            // uppercase
+		"abcdef01234g",            // non-hex
+		"abcdef 012345",           // space
+		"-abcdef012345",           // leading dash
+		"abcdef012345;rm",         // shell meta
+		strings.Repeat("a", 65),   // too long (>64)
+		"sha256:abcdef012345",     // not a bare hex id
+	}
+	for _, id := range bad {
+		if _, err := r.ComposeContainerInspect(context.Background(), id); err == nil {
+			t.Errorf("ComposeContainerInspect(%q) should have errored", id)
+		}
+	}
+	if len(capE.Argv) != 0 {
+		t.Errorf("a rejected id must NOT reach exec; captured argv=%v", capE.Argv)
+	}
+}
+
+func TestValidateContainerIDShape(t *testing.T) {
+	good := []string{
+		strings.Repeat("a", 12), // short id
+		strings.Repeat("0", 64), // full id
+		"abcdef0123456789",
+		"0123456789ab",
+	}
+	for _, id := range good {
+		if err := validateContainerIDShape(id); err != nil {
+			t.Errorf("validateContainerIDShape(%q): want nil, got %v", id, err)
+		}
+	}
+	bad := []string{
+		"",
+		strings.Repeat("a", 11), // 11 < 12
+		strings.Repeat("a", 65), // 65 > 64
+		"ABCDEF012345",          // uppercase not allowed
+		"abcdefg01234",          // 'g' non-hex
+		"abc def01234",          // space
+		"abcdef01234-",          // dash
+	}
+	for _, id := range bad {
+		if err := validateContainerIDShape(id); err == nil {
+			t.Errorf("validateContainerIDShape(%q) should have errored", id)
+		}
+	}
+}
+
+// The exported wrapper must behave identically to the internal validator.
+func TestValidateContainerID_ExportedWrapper(t *testing.T) {
+	if err := ValidateContainerID(strings.Repeat("a", 12)); err != nil {
+		t.Errorf("ValidateContainerID on a valid id: %v", err)
+	}
+	if err := ValidateContainerID("nope"); err == nil {
+		t.Error("ValidateContainerID must reject a malformed id")
+	}
+}
+
+// The container-inspect template must be read-only with exactly one
+// sudoers line — and that line must double-quote the format token.
+func TestContainerInspectTemplate_ReadOnlyQuotedFormat(t *testing.T) {
+	tmpl := templateByID(TemplateComposeContainerInspect)
+	if tmpl == nil {
+		t.Fatal("TemplateComposeContainerInspect missing from registry")
+	}
+	if tmpl.StateChanging {
+		t.Error("container inspect template must be read-only")
+	}
+	if len(tmpl.SudoersLines) != 1 {
+		t.Fatalf("container inspect must have exactly one sudoers line; got %d", len(tmpl.SudoersLines))
+	}
+	if !strings.Contains(tmpl.SudoersLines[0], `"{{json .Image}}"`) {
+		t.Errorf("sudoers line must double-quote the format token so sudo matches the single-token argv; got %q", tmpl.SudoersLines[0])
+	}
+}

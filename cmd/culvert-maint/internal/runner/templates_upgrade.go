@@ -44,6 +44,15 @@ const (
 	// /v1/upgrades/check to learn the registry-side digest for the
 	// requested image_ref.
 	TemplateComposeManifestInspect TemplateID = "compose.manifest.inspect"
+	// TemplateComposeContainerInspect runs
+	// `docker inspect --format '{{json .Image}}' <container_id>` and
+	// emits the running container's image config digest (`sha256:…`) on
+	// stdout. Read-only; used by the upgrade-apply capture step to learn
+	// which image the running proxy container is actually executing —
+	// NOT what a tag currently resolves to in the local cache (#351).
+	// The endpoint that consumes it (/v1/upgrades/apply) is NOT activated
+	// by this slice; only the read-only primitive lands.
+	TemplateComposeContainerInspect TemplateID = "compose.container.inspect"
 )
 
 // imageRefShapeRE bounds the argv shape of an image reference,
@@ -82,6 +91,33 @@ func validateImageRefShape(ref string) error {
 	return nil
 }
 
+// containerIDShapeRE bounds the argv shape of a docker container id: a
+// run of 12–64 lowercase hex characters (short id through full id).
+// This is the ONLY variable argv position of the container-inspect
+// template, so the bound is deliberately tight — a container id can
+// never contain a separator, a dash, whitespace, or a flag-like leading
+// character. The id is sourced from `docker compose ps` output (not an
+// operator request), but it is validated all the same: the runner never
+// forwards an unvalidated token to sudo/docker.
+var containerIDShapeRE = regexp.MustCompile(`^[a-f0-9]{12,64}$`)
+
+// ValidateContainerID is the exported argv-safety validator for a docker
+// container id. Exported for symmetry with ValidateImageRef so a future
+// handler can fail fast before invoking the runner.
+func ValidateContainerID(id string) error { return validateContainerIDShape(id) }
+
+// validateContainerIDShape returns an error unless id is 12–64 lowercase
+// hex characters.
+func validateContainerIDShape(id string) error {
+	if id == "" {
+		return errors.New("container_id: empty")
+	}
+	if !containerIDShapeRE.MatchString(id) {
+		return fmt.Errorf("container_id: must be 12–64 lowercase hex characters (docker container id), got %q", id)
+	}
+	return nil
+}
+
 // d16cTemplates returns the closed list of D1.6c templates. Appended to
 // Registry() after the D1.6b set.
 //
@@ -108,7 +144,44 @@ func imageInspectTemplates() []Template {
 			},
 			StateChanging: false,
 		},
+		{
+			// `docker inspect` is a DIFFERENT binary surface from
+			// `docker compose` — its sudoers entry is exact-match on the
+			// format string with a single bounded `*` for the container
+			// id. The `--format` value `{{json .Image}}` is ONE argv
+			// token that contains a space, so the sudoers line MUST
+			// double-quote it; otherwise sudo would parse it as two args
+			// and never match the agent's single-token argv.
+			ID:       TemplateComposeContainerInspect,
+			BaseArgv: []string{"docker", "inspect", "--format", "{{json .Image}}"},
+			SudoersLines: []string{
+				`/usr/bin/docker inspect --format "{{json .Image}}" *`,
+			},
+			StateChanging: false,
+		},
 	}
+}
+
+// ComposeContainerInspect runs
+// `docker inspect --format '{{json .Image}}' <container_id>`. Read-only;
+// emits the running container's image config digest (`sha256:…`) on
+// stdout as a JSON-quoted string. CULVERT_BACKUP_PASSPHRASE is
+// explicitly suppressed — the inspect subprocess has no use for it.
+//
+// The container_id is validated by validateContainerIDShape before any
+// argv is built, so sudo is never invoked with a malformed token.
+func (r *Runner) ComposeContainerInspect(ctx context.Context, containerID string) (*Result, error) {
+	if err := validateContainerIDShape(containerID); err != nil {
+		return nil, err
+	}
+	tmpl := templateByID(TemplateComposeContainerInspect)
+	if tmpl == nil {
+		return nil, errors.New("runner: TemplateComposeContainerInspect not registered")
+	}
+	argv := r.buildArgv(tmpl)
+	argv = append(argv, containerID)
+	overlay := map[string]string{EnvCulvertBackupPassphrase: ""} // explicit unset
+	return r.runWithEnv(ctx, argv, overlay)
 }
 
 // ComposeImageInspect runs `docker image inspect <image_ref>`. Read-only.
