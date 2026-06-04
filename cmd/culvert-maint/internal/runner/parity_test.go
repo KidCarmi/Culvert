@@ -85,6 +85,7 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 		TemplateComposeCLICleanupCommit:     {},
 		TemplateComposeImageInspect:         {},
 		TemplateComposeManifestInspect:      {},
+		TemplateComposeContainerInspect:     {},
 	}
 	gotIDs := map[TemplateID]struct{}{}
 	for _, tmpl := range Registry() {
