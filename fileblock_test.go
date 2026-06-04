@@ -144,7 +144,7 @@ func TestProxy_FileBlockURL(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(handleRequest))
 	defer ts.Close()
 
-	req := makeRequest("GET", "http://example.com/setup.exe", nil)
+	req := makeRequest("http://example.com/setup.exe", nil)
 	rec := httptest.NewRecorder()
 	handleRequest(rec, req)
 
@@ -215,7 +215,7 @@ func TestProxy_FileBlockPolicyProfile(t *testing.T) {
 		policyStore.mu.Unlock()
 	})
 
-	req := makeRequest("GET", "http://example.com/tools/script.ps1", nil)
+	req := makeRequest("http://example.com/tools/script.ps1", nil)
 	rec := httptest.NewRecorder()
 	handleRequest(rec, req)
 
@@ -275,7 +275,7 @@ func TestProxy_FileBlockPolicyProfile_AllowsClean(t *testing.T) {
 	// 127.0.0.1 (the Host header carries host+port but matchFQDN strips
 	// the port before comparing).  A .txt path must NOT trip the
 	// Executables profile (.ps1 / .exe only).
-	req := makeRequest("GET", upstream.URL+"/readme.txt", nil)
+	req := makeRequest(upstream.URL+"/readme.txt", nil)
 	rec := httptest.NewRecorder()
 	handleRequest(rec, req)
 

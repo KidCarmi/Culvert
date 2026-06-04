@@ -13,6 +13,26 @@ import (
 	"time"
 )
 
+type testProxyIdentityProvider struct {
+	idByToken map[string]*Identity
+}
+
+func (p *testProxyIdentityProvider) Verify(username, token string) bool {
+	id, ok := p.ResolveIdentity(username, token)
+	return ok && id != nil
+}
+
+func (p *testProxyIdentityProvider) ResolveIdentity(_, token string) (*Identity, bool) {
+	id, ok := p.idByToken[token]
+	return id, ok
+}
+
+func (p *testProxyIdentityProvider) CaptiveLoginURL(relayURL string, _ *http.Request) string {
+	return "/auth/test-idp?relay=" + url.QueryEscape(relayURL)
+}
+
+func (p *testProxyIdentityProvider) Name() string { return "test-idp" }
+
 // setupProxyTest resets all global state for a clean test run.
 func setupProxyTest(t *testing.T) {
 	t.Helper()
@@ -32,10 +52,75 @@ func setupProxyTest(t *testing.T) {
 	setDefaultPolicyAction("deny")
 }
 
+func setupProxyIdentityE2E(t *testing.T, provider IdentityProvider) *httptest.Server {
+	t.Helper()
+	setupProxyTest(t)
+
+	origRegistry := idpRegistry
+	idpRegistry = &IdPRegistry{
+		profiles: []*IdPProfile{{
+			ID:           "test-idp",
+			Name:         "Test IdP",
+			Type:         IdPTypeOIDC,
+			Enabled:      true,
+			EmailDomains: []string{"example.com"},
+		}},
+		live: map[string]IdentityProvider{"test-idp": provider},
+	}
+	t.Cleanup(func() { idpRegistry = origRegistry })
+
+	policyStore.rules = nil
+	policyStore.Add(PolicyRule{
+		Priority:    1,
+		Name:        "engineering-allow",
+		DestFQDN:    "*",
+		SourceGroup: "engineering",
+		Action:      ActionAllow,
+	})
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-User-Identity"); got != "" {
+			t.Fatalf("backend received X-User-Identity = %q, want scrubbed", got)
+		}
+		if _, err := w.Write([]byte("ok")); err != nil {
+			t.Fatalf("write backend response: %v", err)
+		}
+	}))
+	t.Cleanup(backend.Close)
+	return backend
+}
+
+func sessionCookieForIdentity(t *testing.T, id *Identity) *http.Cookie {
+	t.Helper()
+	if len(sessionSecret) == 0 {
+		initSessionSecret()
+	}
+	value, err := encodeSession(&Session{
+		Sub:      id.Sub,
+		Email:    id.Email,
+		Name:     id.Name,
+		Groups:   id.Groups,
+		Provider: id.Provider,
+		Exp:      time.Now().Add(time.Hour).Unix(),
+		Jti:      newSessionJti(),
+	})
+	if err != nil {
+		t.Fatalf("encode session: %v", err)
+	}
+	return &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    value,
+		Path:     "/",
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
 // makeRequest builds a request that looks like a browser→proxy HTTP request.
-func makeRequest(method, targetURL string, headers map[string]string) *http.Request {
+func makeRequest(targetURL string, headers map[string]string) *http.Request {
 	u, _ := url.Parse(targetURL)
-	r := httptest.NewRequest(method, targetURL, nil)
+	r := httptest.NewRequest(http.MethodGet, targetURL, nil)
 	r.Host = u.Host
 	r.URL = u
 	r.RemoteAddr = "127.0.0.1:12345"
@@ -54,7 +139,7 @@ func TestHandleRequest_AuthRequired(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	r := makeRequest("GET", "http://example.com/", nil)
+	r := makeRequest("http://example.com/", nil)
 	handleRequest(w, r)
 
 	if w.Code != http.StatusProxyAuthRequired {
@@ -70,7 +155,7 @@ func TestHandleRequest_AuthWrongPassword(t *testing.T) {
 
 	creds := base64.StdEncoding.EncodeToString([]byte("alice:wrong"))
 	w := httptest.NewRecorder()
-	r := makeRequest("GET", "http://example.com/", map[string]string{
+	r := makeRequest("http://example.com/", map[string]string{
 		"Proxy-Authorization": "Basic " + creds,
 	})
 	handleRequest(w, r)
@@ -87,7 +172,7 @@ func TestHandleRequest_BlockedHost(t *testing.T) {
 	bl.Add("blocked.com")
 
 	w := httptest.NewRecorder()
-	r := makeRequest("GET", "http://blocked.com/", nil)
+	r := makeRequest("http://blocked.com/", nil)
 	handleRequest(w, r)
 
 	if w.Code != http.StatusForbidden {
@@ -100,7 +185,7 @@ func TestHandleRequest_BlockedHostWildcard(t *testing.T) {
 	bl.Add("*.evil.com")
 
 	w := httptest.NewRecorder()
-	r := makeRequest("GET", "http://deep.sub.evil.com/", nil)
+	r := makeRequest("http://deep.sub.evil.com/", nil)
 	handleRequest(w, r)
 
 	if w.Code != http.StatusForbidden {
@@ -116,7 +201,7 @@ func TestHandleRequest_IPBlocked(t *testing.T) {
 	ipf.Add("127.0.0.1") //nolint:errcheck
 
 	w := httptest.NewRecorder()
-	r := makeRequest("GET", "http://example.com/", nil)
+	r := makeRequest("http://example.com/", nil)
 	handleRequest(w, r)
 
 	if w.Code != http.StatusForbidden {
@@ -140,7 +225,7 @@ func TestHandleRequest_RateLimited(t *testing.T) {
 	allowed := 0
 	for i := 0; i < 5; i++ {
 		w := httptest.NewRecorder()
-		r := makeRequest("GET", backend.URL+"/", nil)
+		r := makeRequest(backend.URL+"/", nil)
 		handleRequest(w, r)
 		if w.Code != http.StatusTooManyRequests {
 			allowed++
@@ -158,7 +243,7 @@ func TestHandleRequest_PluginBlocks(t *testing.T) {
 	plugins = []Middleware{&testPlugin{name: "block-all", decision: DecisionBlock}}
 
 	w := httptest.NewRecorder()
-	r := makeRequest("GET", "http://example.com/", nil)
+	r := makeRequest("http://example.com/", nil)
 	handleRequest(w, r)
 
 	if w.Code != http.StatusForbidden {
@@ -317,7 +402,7 @@ func TestHandleRequest_DefaultDeny_NoRules(t *testing.T) {
 	setupProxyTest(t)
 	// policyStore starts empty after setupProxyTest; no rules → default deny.
 	w := httptest.NewRecorder()
-	r := makeRequest("GET", "http://example.com/", nil)
+	r := makeRequest("http://example.com/", nil)
 	handleRequest(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("default deny: expected 403, got %d", w.Code)
@@ -341,7 +426,7 @@ func TestHandleRequest_AllowedByRule(t *testing.T) {
 
 	// With a matching Allow rule, the request reaches the backend (200), not policy-deny (403).
 	w := httptest.NewRecorder()
-	r := makeRequest("GET", backend.URL+"/", nil)
+	r := makeRequest(backend.URL+"/", nil)
 	handleRequest(w, r)
 	if w.Code == http.StatusForbidden {
 		t.Errorf("allowed rule: expected not-403, got 403")
@@ -349,6 +434,76 @@ func TestHandleRequest_AllowedByRule(t *testing.T) {
 }
 
 // ── SSLBypassMatcher tests ────────────────────────────────────────────────────
+
+func TestProxyAuthPolicyE2E_SessionAndTokenProviderGroups(t *testing.T) {
+	engineeringID := &Identity{
+		Sub:      "alice",
+		Email:    "alice@example.com",
+		Name:     "Alice",
+		Groups:   []string{"engineering"},
+		Provider: "test-idp",
+	}
+	financeID := &Identity{
+		Sub:      "bob",
+		Email:    "bob@example.com",
+		Name:     "Bob",
+		Groups:   []string{"finance"},
+		Provider: "test-idp",
+	}
+	backend := setupProxyIdentityE2E(t, &testProxyIdentityProvider{
+		idByToken: map[string]*Identity{
+			"engineering-token": engineeringID,
+			"finance-token":     financeID,
+		},
+	})
+
+	t.Run("browser session group allow", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := makeRequest(backend.URL+"/", map[string]string{
+			"X-User-Identity": "injected-client-value",
+		})
+		r.AddCookie(sessionCookieForIdentity(t, engineeringID))
+
+		handleRequest(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("session request status = %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		if w.Body.String() != "ok" {
+			t.Fatalf("session request body = %q, want ok", w.Body.String())
+		}
+	})
+
+	t.Run("token provider group allow", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := makeRequest(backend.URL+"/", map[string]string{
+			"Proxy-Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("alice:engineering-token")),
+			"X-User-Identity":     "injected-client-value",
+		})
+
+		handleRequest(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("token request status = %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		if w.Body.String() != "ok" {
+			t.Fatalf("token request body = %q, want ok", w.Body.String())
+		}
+	})
+
+	t.Run("wrong group default deny", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := makeRequest(backend.URL+"/", map[string]string{
+			"Proxy-Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("bob:finance-token")),
+		})
+
+		handleRequest(w, r)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("wrong-group request status = %d, want 403", w.Code)
+		}
+	})
+}
 
 func TestSSLBypassMatcher_GlobSuffix(t *testing.T) {
 	m := &SSLBypassMatcher{}
@@ -360,7 +515,7 @@ func TestSSLBypassMatcher_GlobSuffix(t *testing.T) {
 		want bool
 	}{
 		{"www.ynet.co.il", true},
-		{"co.il", true},          // bare domain also matches
+		{"co.il", true},           // bare domain also matches
 		{"evil.co.il.com", false}, // suffix must be exact
 		{"example.com", false},
 	}
@@ -449,8 +604,8 @@ func TestSSLBypassMatcher_LoadSave(t *testing.T) {
 		t.Fatalf("Load missing file: %v", err)
 	}
 	// Add patterns and save.
-	m.Add("*.co.il")      //nolint:errcheck
-	m.Add("example.com")  //nolint:errcheck
+	m.Add("*.co.il")     //nolint:errcheck
+	m.Add("example.com") //nolint:errcheck
 	m.Save()
 
 	// Load into a fresh matcher and verify.
@@ -482,8 +637,12 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 	}
 	for _, c := range cases {
 		r := httptest.NewRequest("GET", "/", nil)
-		if c.upgrade != "" { r.Header.Set("Upgrade", c.upgrade) }
-		if c.connection != "" { r.Header.Set("Connection", c.connection) }
+		if c.upgrade != "" {
+			r.Header.Set("Upgrade", c.upgrade)
+		}
+		if c.connection != "" {
+			r.Header.Set("Connection", c.connection)
+		}
 		if got := isWebSocketUpgrade(r); got != c.want {
 			t.Errorf("isWebSocketUpgrade(Upgrade=%q Connection=%q) = %v, want %v",
 				c.upgrade, c.connection, got, c.want)
