@@ -177,14 +177,14 @@ func TestComposeContainerInspect_RejectsMalformedIDBeforeExec(t *testing.T) {
 	r, capE := d16bRunner(t)
 	bad := []string{
 		"",
-		"abc",                     // too short (<12)
-		"ABCDEF012345",            // uppercase
-		"abcdef01234g",            // non-hex
-		"abcdef 012345",           // space
-		"-abcdef012345",           // leading dash
-		"abcdef012345;rm",         // shell meta
-		strings.Repeat("a", 65),   // too long (>64)
-		"sha256:abcdef012345",     // not a bare hex id
+		"abc",                   // too short (<12)
+		"ABCDEF012345",          // uppercase
+		"abcdef01234g",          // non-hex
+		"abcdef 012345",         // space
+		"-abcdef012345",         // leading dash
+		"abcdef012345;rm",       // shell meta
+		strings.Repeat("a", 65), // too long (>64)
+		"sha256:abcdef012345",   // not a bare hex id
 	}
 	for _, id := range bad {
 		if _, err := r.ComposeContainerInspect(context.Background(), id); err == nil {
