@@ -222,6 +222,29 @@ const (
 // a config bug cannot inject `=`-laden or newline-laden tokens.
 var envNameRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
+// resolveEnvSets validates EnvAllow (each a well-formed env name) and
+// EnvOverlayOnly (each a subset of EnvAllow), returning the allow slice
+// and the overlay-only set. Kept out of New to bound New's complexity.
+func resolveEnvSets(allow, overlayOnly []string) (envAllow []string, overlayOnlySet map[string]struct{}, err error) {
+	envAllow = make([]string, 0, len(allow))
+	allowSet := make(map[string]struct{}, len(allow))
+	for _, name := range allow {
+		if !envNameRE.MatchString(name) {
+			return nil, nil, fmt.Errorf("runner: EnvAllow name %q is not a valid env-var name", name)
+		}
+		envAllow = append(envAllow, name)
+		allowSet[name] = struct{}{}
+	}
+	overlayOnlySet = make(map[string]struct{}, len(overlayOnly))
+	for _, name := range overlayOnly {
+		if _, ok := allowSet[name]; !ok {
+			return nil, nil, fmt.Errorf("runner: EnvOverlayOnly name %q must also be in EnvAllow", name)
+		}
+		overlayOnlySet[name] = struct{}{}
+	}
+	return envAllow, overlayOnlySet, nil
+}
+
 // New constructs a Runner. ComposeProjectDir must be absolute and
 // already cleaned. ComposeFile must be a bare filename (no path
 // separator, no traversal). EnvAllow names are validated against
@@ -258,23 +281,9 @@ func New(opts Options) (*Runner, error) {
 	if sudo == "" {
 		sudo = "sudo"
 	}
-	envAllow := make([]string, 0, len(opts.EnvAllow))
-	for _, name := range opts.EnvAllow {
-		if !envNameRE.MatchString(name) {
-			return nil, fmt.Errorf("runner: EnvAllow name %q is not a valid env-var name", name)
-		}
-		envAllow = append(envAllow, name)
-	}
-	allowSet := make(map[string]struct{}, len(envAllow))
-	for _, n := range envAllow {
-		allowSet[n] = struct{}{}
-	}
-	envOverlayOnly := make(map[string]struct{}, len(opts.EnvOverlayOnly))
-	for _, name := range opts.EnvOverlayOnly {
-		if _, ok := allowSet[name]; !ok {
-			return nil, fmt.Errorf("runner: EnvOverlayOnly name %q must also be in EnvAllow", name)
-		}
-		envOverlayOnly[name] = struct{}{}
+	envAllow, envOverlayOnly, err := resolveEnvSets(opts.EnvAllow, opts.EnvOverlayOnly)
+	if err != nil {
+		return nil, err
 	}
 	return &Runner{
 		composeProjectDir: filepath.Clean(opts.ComposeProjectDir),
