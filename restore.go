@@ -786,6 +786,13 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 // recovery-message code path. Set via t.Cleanup back to nil.
 var commitInjectBetweenRenames func() error
 
+// restoreNow is the clock used to derive the staging/.bak suffix. It is
+// a package var so tests can pin it: the suffix has 1-second resolution,
+// and a test that pre-creates a `.bak.<ts>` dir to force a collision must
+// derive the SAME instant the code uses, otherwise a second-boundary race
+// between the two time reads makes the test flaky.
+var restoreNow = time.Now
+
 // runRestoreCommit performs a destructive restore: validate, analyze,
 // enforce guards, stage, swap. Caller must stop the proxy first
 // (offline restore only). On success, current /data has been replaced
@@ -836,7 +843,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	//   - same-second retries from different processes don't collide
 	//   - the operator can copy-paste the printed paths verbatim
 	//   - staging and bak share a correlated suffix
-	suffix := fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405Z"), os.Getpid())
+	suffix := fmt.Sprintf("%s-%d", restoreNow().UTC().Format("20060102T150405Z"), os.Getpid())
 	stagingDir := dataDir + ".staging." + suffix
 	bakPath := dataDir + ".bak." + suffix
 
