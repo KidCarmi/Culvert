@@ -120,25 +120,87 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 	}
 }
 
-// TestSudoers_EnvKeepPreservesOverlayVars asserts the env-preservation
-// Defaults block is present. Under privilege_mode=sudoers the agent
-// forwards CULVERT_PROXY_IMAGE (upgrade pin) and CULVERT_BACKUP_PASSPHRASE
-// (encrypted backup) by overlay; sudo's env_reset would strip both before
-// `docker compose` saw them without these env_keep lines.
-func TestSudoers_EnvKeepPreservesOverlayVars(t *testing.T) {
+// TestSudoers_EnvKeepIsCommandScoped asserts env preservation is
+// COMMAND-SCOPED (D1.6c privilege hardening), not a blanket per-user
+// default. Each var must be preserved via Defaults!<alias> bound to the
+// commands that consume it, and the old blanket
+// `Defaults:culvert-maint env_keep` lines must be GONE — so neither var
+// rides along on an unrelated allowed command across the sudo boundary.
+func TestSudoers_EnvKeepIsCommandScoped(t *testing.T) {
 	data, err := os.ReadFile(findSudoersFile(t)) //nolint:gosec // test reads packaging file by computed path
 	if err != nil {
 		t.Fatalf("read sudoers: %v", err)
 	}
 	content := string(data)
+
+	// The command-scoped preservation must be present.
 	for _, want := range []string{
+		`Cmnd_Alias CULVERT_MAINT_PROXY_IMAGE_CMNDS =`,
+		`Cmnd_Alias CULVERT_MAINT_PASSPHRASE_CMNDS =`,
+		`Defaults!CULVERT_MAINT_PROXY_IMAGE_CMNDS env_keep += "CULVERT_PROXY_IMAGE"`,
+		`Defaults!CULVERT_MAINT_PASSPHRASE_CMNDS env_keep += "CULVERT_BACKUP_PASSPHRASE"`,
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("sudoers missing command-scoped env-preservation:\n  %s", want)
+		}
+	}
+
+	// The blanket per-user env_keep must NOT exist — that is exactly the
+	// privilege-boundary issue this hardening closes.
+	for _, banned := range []string{
 		`Defaults:culvert-maint env_keep += "CULVERT_PROXY_IMAGE"`,
 		`Defaults:culvert-maint env_keep += "CULVERT_BACKUP_PASSPHRASE"`,
 	} {
-		if !strings.Contains(content, want) {
-			t.Errorf("sudoers missing env-preservation line:\n  %s", want)
+		if strings.Contains(content, banned) {
+			t.Errorf("sudoers must NOT keep a blanket per-user env_keep (it rides along on every command):\n  %s", banned)
 		}
 	}
+
+	// The proxy-image alias must scope to pull/up only — never the cli
+	// (passphrase) or read-only inspect commands.
+	proxyAlias := aliasBody(content, "CULVERT_MAINT_PROXY_IMAGE_CMNDS")
+	if !strings.Contains(proxyAlias, "pull proxy") || !strings.Contains(proxyAlias, "up -d") {
+		t.Errorf("proxy-image alias must cover pull proxy + up -d; got:\n%s", proxyAlias)
+	}
+	if strings.Contains(proxyAlias, "--restore") || strings.Contains(proxyAlias, "inspect") {
+		t.Errorf("proxy-image alias must NOT cover restore/inspect commands:\n%s", proxyAlias)
+	}
+	// The passphrase alias must scope to the cli encrypt/restore commands
+	// only — never pull/up.
+	passAlias := aliasBody(content, "CULVERT_MAINT_PASSPHRASE_CMNDS")
+	if !strings.Contains(passAlias, "--encrypt") || !strings.Contains(passAlias, "--restore") {
+		t.Errorf("passphrase alias must cover --encrypt + --restore; got:\n%s", passAlias)
+	}
+	if strings.Contains(passAlias, "pull proxy") {
+		t.Errorf("passphrase alias must NOT cover the pull/up commands:\n%s", passAlias)
+	}
+}
+
+// aliasBody returns the text of a `Cmnd_Alias <name> = …` definition,
+// following `\` line continuations, up to the first non-continued line.
+func aliasBody(content, name string) string {
+	lines := strings.Split(content, "\n")
+	var body strings.Builder
+	collecting := false
+	for _, ln := range lines {
+		if !collecting {
+			if strings.HasPrefix(ln, "Cmnd_Alias "+name+" ") || strings.HasPrefix(ln, "Cmnd_Alias "+name+"=") {
+				collecting = true
+				body.WriteString(ln)
+				body.WriteString("\n")
+				if !strings.HasSuffix(strings.TrimRight(ln, " \t"), `\`) {
+					break
+				}
+			}
+			continue
+		}
+		body.WriteString(ln)
+		body.WriteString("\n")
+		if !strings.HasSuffix(strings.TrimRight(ln, " \t"), `\`) {
+			break
+		}
+	}
+	return body.String()
 }
 
 // findSudoersFile walks up from this file's directory looking for
@@ -190,11 +252,20 @@ func parseSudoersTemplates(t *testing.T, path string) map[string]struct{} {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// `Defaults` directives (e.g. env_keep preservation) are policy,
-		// not command allowlist entries — they have no NOPASSWD command
-		// to match against a template, so skip them here. Their presence
-		// is asserted separately (TestSudoers_EnvKeepPreservesOverlayVars).
-		if strings.HasPrefix(line, "Defaults") {
+		// `Defaults` directives (e.g. command-scoped env_keep) and
+		// `Cmnd_Alias` definitions (which group commands for those
+		// Defaults) are policy, not command allowlist entries — they have
+		// no NOPASSWD command to match against a template, so skip them
+		// here. Their presence is asserted separately
+		// (TestSudoers_EnvKeepPreservesOverlayVars). Alias-continuation
+		// lines (leading whitespace, trailing `\`) are folded into the
+		// Cmnd_Alias they belong to and likewise carry no NOPASSWD.
+		if strings.HasPrefix(line, "Defaults") || strings.HasPrefix(line, "Cmnd_Alias") {
+			continue
+		}
+		if !strings.Contains(line, "NOPASSWD:") && (strings.HasSuffix(line, `\`) || strings.HasPrefix(line, "/usr/bin/docker")) {
+			// Cmnd_Alias continuation line (the alias body, comma/`\`
+			// separated). No NOPASSWD grant.
 			continue
 		}
 		// Expect:  <user> ALL=(root) NOPASSWD: <command line>
