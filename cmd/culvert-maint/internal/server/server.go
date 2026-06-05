@@ -246,20 +246,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/restores/commit", s.withAuth(s.handleRestoreCommit))
 	mux.HandleFunc("POST /v1/cleanups", s.withAuth(s.handleCleanup))
 
-	// Upgrade check (read-only) + apply (destructive, D1.6c).
+	// Upgrade check (read-only) + apply (destructive) + image rollback (D1.6c).
 	mux.HandleFunc("POST /v1/upgrades/check", s.withAuth(s.handleUpgradeCheck))
 	mux.HandleFunc("POST /v1/upgrades/apply", s.withAuth(s.handleUpgradeApply))
-
-	// Future endpoints — explicit 404, authenticated so an
-	// unauthorised peer gets 403 consistently.
-	notImpl := s.withAuth(func(w http.ResponseWriter, r *http.Request, _ auth.PeerInfo) {
-		s.notImplemented(w, r)
-	})
-	for _, p := range []string{
-		"/v1/rollbacks",
-	} {
-		mux.HandleFunc(p, notImpl)
-	}
+	mux.HandleFunc("POST /v1/rollbacks", s.withAuth(s.handleRollback))
 
 	// Authenticated catch-all under /v1/* so unknown /v1 paths get a
 	// peer-rejection rather than leaking that the path doesn't exist.
@@ -390,12 +380,6 @@ func (s *Server) handleOperationLogs(w http.ResponseWriter, _ *http.Request, opI
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = copyStream(w, f)
-}
-
-// notImplemented is the explicit handler for endpoints scoped to
-// D1.6b/c/d but not yet implemented in this slice.
-func (s *Server) notImplemented(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, fmt.Sprintf(`{"error":"not_implemented","path":%q}`, r.URL.Path), http.StatusNotFound)
 }
 
 // notFound is the catch-all for unknown paths.

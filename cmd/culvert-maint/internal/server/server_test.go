@@ -301,30 +301,10 @@ func TestOperationsLogsEndpoint_404WhenMissing(t *testing.T) {
 	}
 }
 
-// TestFutureEndpointsReturn404 — every path NOT YET WIRED must still
-// 404. Backup/restore/cleanup, the read-only /v1/upgrades/check, and the
-// destructive /v1/upgrades/apply are active; the remaining "future"
-// endpoint is rollback. Tests for the active endpoints live alongside
-// their handlers.
-func TestFutureEndpointsReturn404(t *testing.T) {
-	sock, stop := startTestServer(t, &fakeStatus{}, nil, "")
-	defer stop()
-
-	cli := udsClient(sock)
-	for _, path := range []string{
-		"/v1/rollbacks",
-	} {
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://unix"+path, strings.NewReader(`{}`))
-		resp, err := cli.Do(req)
-		if err != nil {
-			t.Fatalf("POST %s: %v", path, err)
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != 404 {
-			t.Errorf("POST %s: got %d want 404", path, resp.StatusCode)
-		}
-	}
-}
+// All D1.6 v1 endpoints are now wired (backup/restore/cleanup,
+// upgrades.check/apply, rollbacks). Unknown paths are covered by
+// TestUnknownPathReturns404; per-endpoint behavior lives alongside each
+// handler.
 
 func TestUnknownPathReturns404(t *testing.T) {
 	sock, stop := startTestServer(t, &fakeStatus{}, nil, "")

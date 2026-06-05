@@ -89,6 +89,12 @@ const (
 	// running digest. State-changing and exclusive (acquires the
 	// maintenance lock).
 	KindUpgradeApply = "upgrades.apply"
+
+	// KindRollbackCreate is the D1.6c image-mode rollback
+	// (POST /v1/rollbacks, mode=image): pull a prior pinned digest,
+	// recreate the proxy, health-gate, and verify. State-changing and
+	// exclusive (acquires the maintenance lock).
+	KindRollbackCreate = "rollbacks.create"
 )
 
 // stateChangingKinds is the production allowlist of operation kinds
@@ -97,10 +103,11 @@ const (
 // § 4.6 contract — handler + template + sudoers + tests — is
 // satisfied for each entry by the matching D1.6b PR.
 var stateChangingKinds = map[string]struct{}{
-	KindBackupCreate:  {},
-	KindRestoreCommit: {},
-	KindCleanupCommit: {},
-	KindUpgradeApply:  {},
+	KindBackupCreate:   {},
+	KindRestoreCommit:  {},
+	KindCleanupCommit:  {},
+	KindUpgradeApply:   {},
+	KindRollbackCreate: {},
 }
 
 // SyntheticStateChangingKind is exported for tests that need to
