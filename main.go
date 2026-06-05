@@ -1024,7 +1024,7 @@ func initCDR(s *startupState) {
 		if err := initCDRClient(cdrCfg); err != nil {
 			// Non-fatal: CDR is opt-in.  If the dial fails we log + continue;
 			// handleTunnelInspect (Phase 2b) will fail-open/closed per policy.
-			logger.Printf("CDR: initial client dial failed, CDR effectively disabled: %v", err)
+			logger.Printf("CDR: initial client dial failed, CDR effectively disabled: %v", sanitizeLog(err.Error()))
 		}
 
 		// Phase 2c: background Health poller — updates cached snapshot

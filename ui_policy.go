@@ -744,7 +744,8 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		added := rewriter.Add(rule)
-		logger.Printf("UI: rewrite rule added id=%d host=%q", added.ID, sanitizeLog(added.Host))
+		logID := strings.ReplaceAll(fmt.Sprintf("%d", added.ID), "\n", "_")
+		logger.Printf("UI: rewrite rule added id=%s host=%q", logID, sanitizeLog(added.Host))
 		auditEvent(r, "rewrite.add", fmt.Sprintf("id=%d host=%s", added.ID, added.Host), "")
   adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "rewrite.add")
@@ -764,7 +765,8 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
 		}
-		logger.Printf("UI: rewrite rule removed id=%d", id)
+		logID := strings.ReplaceAll(fmt.Sprintf("%d", id), "\n", "_")
+		logger.Printf("UI: rewrite rule removed id=%s", logID)
 		auditEvent(r, "rewrite.remove", fmt.Sprintf("id=%d", id), "")
   adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "rewrite.remove")
@@ -851,7 +853,8 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		policyStore.Save()
-		logger.Printf("UI: policy rule updated priority=%d name=%q", priority, sanitizeLog(rule.Name))
+		logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
+		logger.Printf("UI: policy rule updated priority=%s name=%q", logPriority, sanitizeLog(rule.Name))
 		auditEventDiff(r, "policy.update", rule.Name,
 			fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
 		saveConfigVersion(sessionAdmin(r), "policy.update")
@@ -907,7 +910,8 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		if beforeRule != nil {
 			name = beforeRule.Name
 		}
-		logger.Printf("UI: policy rule deleted priority=%d", priority)
+		logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
+		logger.Printf("UI: policy rule deleted priority=%s", logPriority)
 		auditEventDiff(r, "policy.delete", name, "", beforeRule, nil)
 		saveConfigVersion(sessionAdmin(r), "policy.delete")
 		w.WriteHeader(http.StatusNoContent)

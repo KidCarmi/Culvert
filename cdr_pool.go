@@ -308,7 +308,7 @@ func buildCDRPoolFromRegistry(cfg CDRConfig, oldPool []*cdrPooledClient) (pool [
 		}
 		pc, err := dialEnrolledInstance(inst, cfg, oldPool)
 		if err != nil {
-			logger.Printf("CDR: pool: skipping %q: %v", sanitizeLog(inst.Name), err)
+			logger.Printf("CDR: pool: skipping %q: %v", sanitizeLog(inst.Name), sanitizeLog(err.Error()))
 			if firstErr == nil {
 				firstErr = fmt.Errorf("instance %q: %w", inst.Name, err)
 			}
