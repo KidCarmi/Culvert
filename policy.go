@@ -801,8 +801,9 @@ func stripIdPPrefix(source string) string {
 
 // containsGroupCI reports whether groups contains name (case-insensitive).
 func containsGroupCI(groups []string, name string) bool {
+	name = strings.TrimSpace(name)
 	for _, g := range groups {
-		if strings.EqualFold(g, name) {
+		if strings.EqualFold(strings.TrimSpace(g), name) {
 			return true
 		}
 	}

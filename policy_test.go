@@ -437,6 +437,20 @@ func TestPolicyStore_Evaluate_Groups(t *testing.T) {
 	}
 }
 
+func TestPolicyStore_Evaluate_GroupsTrimSpace(t *testing.T) {
+	ps := newTestPolicyStore()
+	ps.Add(PolicyRule{
+		Priority:    1,
+		SourceGroup: " admins ",
+		Action:      ActionAllow,
+	})
+
+	m := ps.Evaluate("", "", "saml:corp", "any.com", []string{" users ", " admins\t"})
+	if m == nil || m.Action != ActionAllow {
+		t.Error("expected match for group member with surrounding whitespace")
+	}
+}
+
 func TestPolicyStore_Evaluate_AuthSourceLegacyIdPAlias(t *testing.T) {
 	tests := []struct {
 		name       string

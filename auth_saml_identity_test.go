@@ -227,7 +227,7 @@ func TestExtractSAMLIdentity_NilConfigUsesDefaults(t *testing.T) {
 
 func TestExtractSAMLIdentity_GroupsFeedPolicy(t *testing.T) {
 	id := extractSAMLIdentity(samlTestAssertion("alice@example.com",
-		samlTestAttr("memberOf", "Finance"),
+		samlTestAttr("memberOf", " Finance "),
 	), &SAMLProfileConfig{GroupsAttribute: "memberOf"}, "saml-profile")
 
 	ps := newTestPolicyStore()
