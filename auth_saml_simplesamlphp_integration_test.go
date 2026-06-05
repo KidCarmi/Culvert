@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"io"
 	"net"
+	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"strings"
 	"testing"
@@ -56,5 +60,38 @@ func TestSimpleSAMLphpInterop_CompilesProviderFromMetadataURL(t *testing.T) {
 	}
 	if !strings.Contains(loginURL, "SAMLRequest=") || !strings.Contains(loginURL, "RelayState=") {
 		t.Fatalf("login URL does not look like an SP-initiated SAML redirect: %q", loginURL)
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create SimpleSAMLphp cookie jar: %v", err)
+	}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Jar:     jar,
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, loginURL, nil)
+	if err != nil {
+		t.Fatalf("build SimpleSAMLphp login request: %v", err)
+	}
+	// #nosec G107 -- integration test intentionally follows the IdP login URL from trusted CI fixture metadata.
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET SimpleSAMLphp login URL: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		t.Fatalf("read SimpleSAMLphp login response: %v", err)
+	}
+	bodyText := string(body)
+	if resp.StatusCode == http.StatusNotFound {
+		t.Fatalf("SimpleSAMLphp rejected SP-initiated login URL with 404; body=%q", bodyText)
+	}
+	if resp.StatusCode >= 500 {
+		t.Fatalf("SimpleSAMLphp login URL returned HTTP %d; body=%q", resp.StatusCode, bodyText)
+	}
+	if strings.Contains(bodyText, "SimpleSAML\\Error") {
+		t.Fatalf("SimpleSAMLphp login URL returned an error page; status=%d body=%q", resp.StatusCode, bodyText)
 	}
 }
