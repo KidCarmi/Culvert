@@ -167,7 +167,7 @@ type upgradeApplyAccumulator struct {
 	actor                    string
 	priorRef                 string // full repo@sha256:<digest> rollback target (before)
 	priorCaptureReason       string // "" if priorRef valid, else no_prior_digest / ambiguous_prior_digest
-	upgradeFailedPostRestart bool   // set by health_gate / verify on failure (the rollback trigger)
+	upgradeFailedPostRestart bool   // set by restart(on error)/health_gate/verify — the running image is now new/indeterminate, so rollback may fire
 	rollbackAttempted        bool
 	rollbackRestarted        bool // rollback_restart succeeded (new image is the prior one)
 	rollbackSucceeded        bool
@@ -280,6 +280,15 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			FailureReason: ops.ReasonCommandError,
 			Run: skipIfCurrent(acc, "restart", func(ctx context.Context) ([]byte, []byte, error) {
 				res, rerr := s.opts.Runner.ComposeUpWithImage(ctx, acc.pinnedRef)
+				if rerr != nil {
+					// `docker compose up -d` failure is INDETERMINATE: the
+					// container may have been (partially) recreated on the
+					// new image before failing. Treat it as post-restart so
+					// inline rollback fires — re-pinning the prior digest is
+					// safe whether the old image is still up (harmless
+					// re-apply) or the new one came up broken (real recovery).
+					acc.upgradeFailedPostRestart = true
+				}
 				if res == nil {
 					return nil, nil, rerr
 				}
@@ -287,8 +296,8 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			}),
 		},
 		{
-			// Health gate. On failure the op fails (health_failed); there
-			// is NO rollback in this slice.
+			// Health gate. On a post-restart failure the op is marked
+			// health_failed AND inline rollback is triggered.
 			Name:          "health_gate",
 			FailureReason: ops.ReasonHealthFailed,
 			Run: skipIfCurrent(acc, "health_gate", func(ctx context.Context) ([]byte, []byte, error) {
@@ -320,20 +329,8 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 	}
 
 	// Inline auto-rollback: the SHARED image-rollback core, decorated as
-	// recovery stages (ContinueOnError + rollback_failed promotion + the
-	// skip guard). They run after the apply stages but only DO work when
-	// the upgrade failed its post-restart health/verify gate AND a valid
-	// prior target exists AND rollback_on_failure is set (#375 §2/§8).
-	core := s.imageRollbackStages(func() string { return acc.priorRef }, racc)
-	for i := range core {
-		step := core[i]
-		inner := step.Run
-		step.ContinueOnError = true
-		step.PromoteReasonOnFailure = true // a failed rollback step → rollback_failed
-		step.FailureReason = ops.ReasonRollbackFailed
-		step.Run = s.guardInlineRollback(acc, racc, rollbackOnFailure, step.Name, inner)
-		stages = append(stages, step)
-	}
+	// recovery stages (see inlineRollbackStages).
+	stages = append(stages, s.inlineRollbackStages(acc, racc, rollbackOnFailure)...)
 
 	// Always emit the operator-facing summary, even after a failure, so
 	// the op log records both the upgrade and rollback outcome.

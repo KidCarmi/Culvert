@@ -211,6 +211,39 @@ func TestUpgradeApply_InlineRollback_HealthFails_OverridesReason(t *testing.T) {
 	}
 }
 
+// upgrade RESTART failure is indeterminate (the new image may already be
+// running) → inline rollback MUST fire and can restore service. The op
+// keeps the upgrade's own failure_reason (command_error) while the result
+// shows rollback_succeeded=true (service restored).
+func TestUpgradeApply_InlineRollback_UpgradeRestartFails_TriggersRollback(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+	rig.unhealthyDigests = map[string]bool{digNew: true}
+	// Fail only the UPGRADE restart (pins the new digest); the rollback
+	// restart pins the prior digest and is left to succeed.
+	rig.failFn = func(argv, env []string) bool { return argvHas(argv, "up") && envContains(env, digNew) }
+
+	ref := repo + "@sha256:" + digNew
+	op, _ := rig.acceptAndWait(t, map[string]interface{}{"image_ref": ref})
+
+	if op["state"] != "failed" {
+		t.Fatalf("state: got %v want failed", op["state"])
+	}
+	if op["failure_reason"] != "command_error" {
+		t.Errorf("failure_reason: got %v want command_error (the upgrade's restart failure)", op["failure_reason"])
+	}
+	res := resultMap(t, op)
+	if res["rollback_attempted"] != true || res["rollback_succeeded"] != true {
+		t.Errorf("a restart failure must trigger rollback and restore service; got %v", res)
+	}
+	if !rig.pinnedFor("up", digOld) {
+		t.Error("rollback must restart pinned to the prior digest")
+	}
+	if got := rig.rollbackAuditOutcomes(t); len(got) != 2 || got[1] != "succeeded" {
+		t.Errorf("rollback audit: got %v want [started succeeded]", got)
+	}
+}
+
 // missing prior digest → no rollback attempted; reason stays health_failed.
 func TestUpgradeApply_InlineRollback_MissingPriorDigest(t *testing.T) {
 	rig := startApplyRig(t)

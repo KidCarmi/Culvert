@@ -62,6 +62,27 @@ func (acc *upgradeApplyAccumulator) rollbackDecision(rollbackOnFailure bool) (at
 	return true, ""
 }
 
+// inlineRollbackStages returns the SHARED image-rollback core decorated as
+// recovery stages for apply: ContinueOnError so they run after the upgrade
+// failed, PromoteReasonOnFailure so a failed rollback step promotes the op
+// reason to rollback_failed, and each wrapped with the skip guard so they
+// only DO work on a post-restart failure with a valid target and
+// rollback_on_failure set (#375 §2/§8).
+func (s *Server) inlineRollbackStages(acc *upgradeApplyAccumulator, racc *rollbackAccumulator, rollbackOnFailure bool) []ops.FlowStage {
+	core := s.imageRollbackStages(func() string { return acc.priorRef }, racc)
+	out := make([]ops.FlowStage, 0, len(core))
+	for i := range core {
+		step := core[i]
+		inner := step.Run
+		step.ContinueOnError = true
+		step.PromoteReasonOnFailure = true // a failed rollback step → rollback_failed
+		step.FailureReason = ops.ReasonRollbackFailed
+		step.Run = s.guardInlineRollback(acc, racc, rollbackOnFailure, step.Name, inner)
+		out = append(out, step)
+	}
+	return out
+}
+
 // guardInlineRollback wraps a shared rollback step so it only runs when a
 // rollback should be attempted, short-circuits once a rollback step has
 // failed, and emits the upgrades.apply:rollback audit lifecycle.
