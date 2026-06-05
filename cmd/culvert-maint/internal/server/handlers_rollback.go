@@ -22,7 +22,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -99,23 +98,15 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request, peer aut
 	writeOpResponse(w, op, deduped)
 }
 
-// rollbackAccumulator carries parsed digests + the health summary across
-// the rollback stages. Parsed identifiers only — never raw inspect JSON.
-type rollbackAccumulator struct {
-	priorDigests        []string
-	runningAfterDigests []string
-	healthSummary       string
-}
-
-// buildImageRollbackStages constructs the image-mode rollback flow,
-// pinned to targetRef (a strict repo@sha256:<digest>).
-//
-//nolint:funlen // single-pass orchestration; splitting hides the capture→pull→restart→health→verify ordering
+// buildImageRollbackStages constructs the standalone image-mode rollback
+// flow, pinned to targetRef (a strict repo@sha256:<digest>): a
+// capture_before + the SHARED imageRollbackStages core (pull → restart →
+// health → verify) + a report. The core is shared verbatim with apply's
+// inline auto-rollback so the two cannot drift (#375 §8).
 func (s *Server) buildImageRollbackStages(targetRef string) []ops.FlowStage {
 	acc := &rollbackAccumulator{}
-	targetDigest := digestRE.FindString(targetRef) // sha256:<hex>
 
-	return []ops.FlowStage{
+	stages := []ops.FlowStage{
 		{
 			// Record what is running before the rollback. A capture
 			// failure (stack down) is not fatal — the target is fixed.
@@ -130,77 +121,19 @@ func (s *Server) buildImageRollbackStages(targetRef string) []ops.FlowStage {
 				return []byte("capture_before: prior_digests=" + joinDigests(acc.priorDigests)), nil, nil
 			},
 		},
-		{
-			Name:          "pull",
-			FailureReason: ops.ReasonCommandError,
-			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposePull(ctx, targetRef)
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
-			},
-		},
-		{
-			Name:          "restart",
-			FailureReason: ops.ReasonCommandError,
-			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeUpWithImage(ctx, targetRef)
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
-			},
-		},
-		{
-			// Health gate. On failure the op fails (health_failed); there
-			// is no rollback-of-the-rollback in this MVP.
-			Name:          "health_gate",
-			FailureReason: ops.ReasonHealthFailed,
-			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				hr, herr := s.opts.HealthProbeFactory().Run(ctx)
-				if herr != nil {
-					return nil, nil, herr
-				}
-				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
-					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
-				if hr.Failed() {
-					return []byte(acc.healthSummary), nil, errors.New(hr.ReadyDetail)
-				}
-				return []byte(acc.healthSummary), nil, nil
-			},
-		},
-		{
-			// Post-rollback verification: the running image's RepoDigest
-			// must include the target digest.
-			Name:          "verify",
-			FailureReason: ops.ReasonHealthFailed,
-			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
-				if err != nil {
-					return []byte("verify: post-rollback capture failed"), nil,
-						fmt.Errorf("post-rollback capture failed: %w", err)
-				}
-				acc.runningAfterDigests = bareDigests(ri.RepoDigests)
-				if targetDigest != "" && !containsString(acc.runningAfterDigests, targetDigest) {
-					return []byte(fmt.Sprintf("verify: running digests=%s do NOT include target %s",
-							joinDigests(acc.runningAfterDigests), targetDigest)), nil,
-						fmt.Errorf("post-rollback running image does not match target digest %s", targetDigest)
-				}
-				return []byte("verify: running_digests=" + joinDigests(acc.runningAfterDigests)), nil, nil
-			},
-		},
-		{
-			Name:            "report",
-			ContinueOnError: true,
-			FailureReason:   ops.ReasonCommandError,
-			Run: func(_ context.Context) ([]byte, []byte, error) {
-				summary := fmt.Sprintf(
-					"rollback mode=image target_ref=%q prior_digests=%s running_after=%s health=[%s]",
-					targetRef, joinDigests(acc.priorDigests), joinDigests(acc.runningAfterDigests), acc.healthSummary,
-				)
-				return []byte(summary), nil, nil
-			},
-		},
 	}
+	stages = append(stages, s.imageRollbackStages(func() string { return targetRef }, acc)...)
+	stages = append(stages, ops.FlowStage{
+		Name:            "report",
+		ContinueOnError: true,
+		FailureReason:   ops.ReasonCommandError,
+		Run: func(_ context.Context) ([]byte, []byte, error) {
+			summary := fmt.Sprintf(
+				"rollback mode=image target_ref=%q prior_digests=%s running_after=%s health=[%s]",
+				targetRef, joinDigests(acc.priorDigests), joinDigests(acc.runningAfterDigests), acc.healthSummary,
+			)
+			return []byte(summary), nil, nil
+		},
+	})
+	return stages
 }

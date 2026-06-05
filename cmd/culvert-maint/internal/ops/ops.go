@@ -142,6 +142,12 @@ const (
 	ReasonCommandError            FailureReason = "command_error"
 	ReasonConcurrencyConflict     FailureReason = "concurrency_conflict"
 	ReasonAgentRestartInterrupted FailureReason = "agent_restart_interrupted"
+	// ReasonRollbackFailed marks an op that failed AND whose recovery
+	// (inline auto-)rollback also failed to restore service. It is
+	// surfaced via the narrow final-reason override (a recovery stage
+	// flagged FlowStage.PromoteReasonOnFailure), not a generic
+	// "last failure wins" rule. See D1.6c inline-auto-rollback plan §3/§10.
+	ReasonRollbackFailed FailureReason = "rollback_failed"
 )
 
 // NewID generates a fresh ULID for an op_id. Time-prefixed and

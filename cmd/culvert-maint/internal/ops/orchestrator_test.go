@@ -101,6 +101,7 @@ func TestRun_AllStagesSucceed(t *testing.T) {
 			okStage("run", "wrote /backup/x.tar.gz"),
 			okStage("verify", "size=1234"),
 		},
+		nil,
 	)
 
 	op := rig.mgr.Get(rig.opID)
@@ -146,6 +147,7 @@ func TestRun_FailingStageAbortsRest(t *testing.T) {
 			failStage("b", "boom", ReasonCLIError),
 			okStage("c", "should-be-skipped"),
 		},
+		nil,
 	)
 
 	op := rig.mgr.Get(rig.opID)
@@ -186,6 +188,7 @@ func TestRun_ContinueOnErrorRunsAfterFailure(t *testing.T) {
 				},
 			},
 		},
+		nil,
 	)
 
 	op := rig.mgr.Get(rig.opID)
@@ -213,6 +216,7 @@ func TestRun_PropagatesStageFailureReason(t *testing.T) {
 			okStage("ok", "ok"),
 			failStage("health", "ready timed out", ReasonHealthFailed),
 		},
+		nil,
 	)
 	op := rig.mgr.Get(rig.opID)
 	if op.FailureReason != string(ReasonHealthFailed) {
@@ -233,6 +237,7 @@ func TestRun_ReleasesLockOnTerminal(t *testing.T) {
 	}
 	Run(context.Background(), rig.deps, rig.opID, KindBackupCreate, "uid=1", nil, "",
 		[]FlowStage{failStage("x", "boom", ReasonCLIError)},
+		nil,
 	)
 	if rig.mgr.Holder() != nil {
 		t.Errorf("lock must be released on terminal state; holder=%+v", rig.mgr.Holder())
@@ -244,6 +249,7 @@ func TestRun_PropagatesIdempotencyKeyToAudit(t *testing.T) {
 	rig := newOrchTestRig(t)
 	Run(context.Background(), rig.deps, rig.opID, KindBackupCreate, "uid=1", nil, "key-XYZ",
 		[]FlowStage{okStage("a", "")},
+		nil,
 	)
 	body := rig.auditContent(t)
 	if !strings.Contains(body, `"idempotency_key":"key-XYZ"`) {
@@ -268,6 +274,7 @@ func TestRun_RecoveryNoteOnContinueOnErrorAfterFailure(t *testing.T) {
 				},
 			},
 		},
+		nil,
 	)
 	body := rig.opLogContent(t)
 	if !strings.Contains(body, "best_effort\tNOTE\trecovery: running after earlier failure at stage=first") {
@@ -284,6 +291,7 @@ func TestRun_RecoveryNoteOnContinueOnErrorAfterFailure(t *testing.T) {
 				Run:             func(_ context.Context) ([]byte, []byte, error) { return nil, nil, nil },
 			},
 		},
+		nil,
 	)
 	body2 := rig2.opLogContent(t)
 	if strings.Contains(body2, "recovery: running after earlier failure") {
@@ -308,7 +316,7 @@ func TestRun_TimeoutSurfaceInOpResult(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	Run(ctx, rig.deps, rig.opID, KindBackupCreate, "uid=1", nil, "",
-		[]FlowStage{blockingStage},
+		[]FlowStage{blockingStage}, nil,
 	)
 	op := rig.mgr.Get(rig.opID)
 	if op.State != StateFailed {
@@ -355,7 +363,7 @@ func TestRun_OperationTimeoutMarksReasonTimeout(t *testing.T) {
 	defer cancel()
 
 	Run(ctx, rig.deps, rig.opID, KindBackupCreate, "uid=1", nil, "",
-		[]FlowStage{blockingStage},
+		[]FlowStage{blockingStage}, nil,
 	)
 
 	op := rig.mgr.Get(rig.opID)
@@ -383,7 +391,7 @@ func TestRun_ConfigErrorMarksOpFailed(t *testing.T) {
 		t.Fatalf("Begin: %v", err)
 	}
 	deps := OrchestratorDeps{Manager: mgr} // missing Audit + OpLog
-	Run(context.Background(), deps, op.ID, KindBackupCreate, "uid=1", nil, "", nil)
+	Run(context.Background(), deps, op.ID, KindBackupCreate, "uid=1", nil, "", nil, nil)
 	got := mgr.Get(op.ID)
 	if got.State != StateFailed {
 		t.Errorf("misconfig must mark op failed; got %s", got.State)
