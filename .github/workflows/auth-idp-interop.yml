@@ -103,6 +103,7 @@ jobs:
             -e SSP_ADMIN_PASSWORD=admin-password \
             -e SSP_SECRET_SALT=culvert-interop-salt \
             -e SSP_ENABLE_IDP=true \
+            -e SSP_ENABLED_MODULES="exampleauth saml" \
             -e SSP_APACHE_ALIAS=simplesaml/ \
             cirrusid/simplesamlphp:v2.5.0
 
@@ -129,8 +130,8 @@ jobs:
           echo "::group::Generated config.php (tail)"
           docker exec culvert-simplesamlphp sh -c 'tail -n 60 /var/simplesamlphp/config/config.php' || true
           echo "::endgroup::"
-          echo "::group::Effective enable.saml20-idp + module.enable"
-          docker exec culvert-simplesamlphp sh -c 'cd /var/simplesamlphp && php -r "\$config=[]; require \"config/config.php\"; var_export([\"enable.saml20-idp\"=>\$config[\"enable.saml20-idp\"]??null, \"module.enable\"=>\$config[\"module.enable\"]??null, \"baseurlpath\"=>\$config[\"baseurlpath\"]??null]);"' || true
+          echo "::group::config dir + override files"
+          docker exec culvert-simplesamlphp sh -c 'ls -la /var/simplesamlphp/config/; echo "== config-override-base.php =="; cat /var/simplesamlphp/config/config-override-base.php; echo "== config-override.php =="; cat /var/simplesamlphp/config/config-override.php 2>/dev/null' || true
           echo "::endgroup::"
           echo "::group::metadata dir + SSP log"
           docker exec culvert-simplesamlphp sh -c 'ls -la /var/simplesamlphp/metadata; echo ---; tail -n 80 /var/simplesamlphp/log/simplesamlphp.log 2>/dev/null' || true
