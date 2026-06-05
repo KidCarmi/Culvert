@@ -55,9 +55,26 @@ type applyRig struct {
 	digBefore string
 	digAfter  string
 
+	// runningDigest models the ACTUAL running image. It starts at
+	// digBefore and is updated to the digest pinned via CULVERT_PROXY_IMAGE
+	// on every `pull` — so a rollback that re-pins the prior digest flips
+	// the running view back. Guarded by mu. (image inspect / health read it.)
+	runningDigest string
+	// unhealthyDigests: a running image whose bare digest is in this set
+	// makes the fake health probe fail. Models "the new image is broken,
+	// the prior one is fine." nil/empty → all healthy (unless healthFail).
+	unhealthyDigests map[string]bool
+	// noPriorDigest makes capture_before (before any pull) report an empty
+	// RepoDigests list → no valid rollback target.
+	noPriorDigest bool
+
 	pulled     atomic.Bool
 	healthFail atomic.Bool
 	failFor    []string
+	// failFn, when set, fails any command for which it returns true,
+	// given (argv, env). Lets a test fail ONLY the rollback pull/restart
+	// (discriminated by the pinned digest in env).
+	failFn func(argv, env []string) bool
 
 	stop func()
 }
@@ -134,11 +151,10 @@ func (r *applyRig) canned(argv []string) []byte {
 		}
 		return false
 	}
+	running := r.currentRunning()
 	cfg := cfgOld
-	dig := r.digBefore
-	if r.pulled.Load() {
+	if running != r.digBefore {
 		cfg = cfgNew
-		dig = r.digAfter
 	}
 	switch {
 	case has("ps"):
@@ -148,9 +164,53 @@ func (r *applyRig) canned(argv []string) []byte {
 	case has("manifest"):
 		return []byte(`{"Descriptor":{"digest":"sha256:` + r.targetDigest + `"}}`)
 	case has("image") && has("inspect"):
-		return []byte(`[{"RepoDigests":["` + repo + `@sha256:` + dig + `"]}]`)
+		if r.noPriorDigest && !r.pulled.Load() {
+			return []byte(`[{"RepoDigests":[]}]`) // no rollback target available
+		}
+		return []byte(`[{"RepoDigests":["` + repo + `@sha256:` + running + `"]}]`)
 	}
 	return nil
+}
+
+// currentRunning returns the digest the fake stack is currently running.
+func (r *applyRig) currentRunning() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.runningDigest == "" {
+		return r.digBefore
+	}
+	return r.runningDigest
+}
+
+// setRunning records the digest pinned via CULVERT_PROXY_IMAGE in env as
+// the new running image (called on each `pull`).
+func (r *applyRig) setRunning(env []string) {
+	for _, e := range env {
+		if !strings.HasPrefix(e, runner.EnvCulvertProxyImage+"=") {
+			continue
+		}
+		if d := digestRE.FindString(e); d != "" {
+			r.mu.Lock()
+			r.runningDigest = strings.TrimPrefix(d, "sha256:")
+			r.mu.Unlock()
+		}
+	}
+}
+
+// countCommand counts captured commands whose argv contains token.
+//
+//nolint:unparam // generic test helper; current callers happen to pass "pull"
+func (r *applyRig) countCommand(token string) int {
+	n := 0
+	for _, argv := range r.snapshot() {
+		for _, a := range argv {
+			if a == token {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 //nolint:funlen // test rig setup; splitting hides the wiring sequence
@@ -209,15 +269,21 @@ func startApplyRig(t *testing.T) *applyRig {
 			if out := rig.canned(cmd.Args); out != nil {
 				_, _ = cmd.Stdout.Write(out)
 			}
-			// A pull flips the "running image" view for later captures.
+			// A pull re-pins the "running image" view from
+			// CULVERT_PROXY_IMAGE, so a rollback that re-pins the prior
+			// digest flips the running view back for later captures.
 			for _, a := range cmd.Args {
 				if a == "pull" {
 					rig.pulled.Store(true)
+					rig.setRunning(cmd.Env)
 				}
 			}
 			return nil
 		},
 		func(cmd *exec.Cmd) error {
+			if rig.failFn != nil && rig.failFn(cmd.Args, cmd.Env) {
+				return errors.New("simulated non-zero exit (failFn)")
+			}
 			if rig.shouldFail(cmd.Args) {
 				return errors.New("simulated non-zero exit")
 			}
@@ -271,7 +337,7 @@ func applyHealthClient(rig *applyRig) *http.Client {
 	return &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			status := 200
-			if rig.healthFail.Load() {
+			if rig.healthFail.Load() || rig.unhealthyDigests[rig.currentRunning()] {
 				status = 503
 			}
 			return &http.Response{
@@ -454,24 +520,35 @@ func TestUpgradeApply_PreBackupFailure_Aborts(t *testing.T) {
 	}
 }
 
-// A health-gate failure fails the op (no rollback in this MVP).
-func TestUpgradeApply_HealthFail_NoRollback(t *testing.T) {
+// rollback_on_failure=false: a health-gate failure fails the op with NO
+// rollback attempted, even though a valid prior target exists.
+func TestUpgradeApply_HealthFail_RollbackDisabled(t *testing.T) {
 	rig := startApplyRig(t)
 	defer rig.stop()
 	rig.healthFail.Store(true)
 
 	ref := repo + "@sha256:" + digNew
-	op, _ := rig.acceptAndWait(t, map[string]interface{}{"image_ref": ref})
+	op, opID := rig.acceptAndWait(t, map[string]interface{}{
+		"image_ref":           ref,
+		"rollback_on_failure": false,
+	})
 	if op["state"] != "failed" {
 		t.Fatalf("state: got %v want failed", op["state"])
 	}
 	if op["failure_reason"] != "health_failed" {
 		t.Errorf("failure_reason: got %v want health_failed", op["failure_reason"])
 	}
-	// No rollback: the stack is NOT brought down/back; the only `up` is
-	// the upgrade restart, and there is no `down`.
-	if rig.sawCommand("down") {
-		t.Error("MVP apply must not run any rollback (no `down`)")
+	res, _ := op["result"].(map[string]interface{})
+	if res == nil || res["rollback_attempted"] != false || res["rollback_skipped_reason"] != "disabled" {
+		t.Errorf("disabled rollback must record rollback_attempted=false skipped_reason=disabled; result=%v", res)
+	}
+	// Only the upgrade pulled; no second (rollback) pull.
+	if n := rig.countCommand("pull"); n != 1 {
+		t.Errorf("disabled rollback must not pull again; pull count=%d", n)
+	}
+	logStr := rig.opLog(t, opID)
+	if !strings.Contains(logStr, "rollback_pull: skipped (disabled)") {
+		t.Errorf("op-log should record the disabled-rollback skip:\n%s", logStr)
 	}
 }
 

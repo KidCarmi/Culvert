@@ -37,7 +37,24 @@ type FlowStage struct {
 	Run             func(ctx context.Context) (stdout, stderr []byte, err error)
 	FailureReason   FailureReason
 	ContinueOnError bool
+
+	// PromoteReasonOnFailure, when true, makes this stage's
+	// FailureReason OVERRIDE the op's final failure_reason if this stage
+	// returns an error — even though an earlier stage already set the
+	// first reason. This is the NARROW final-reason override the inline
+	// auto-rollback plan (#375 §10) requires: a failed recovery-rollback
+	// stage promotes the reason to rollback_failed so the worst case is
+	// visible, WITHOUT introducing a generic "last failure wins" rule.
+	// Only stages explicitly flagged here promote; operation timeout
+	// still wins over a promoted reason.
+	PromoteReasonOnFailure bool
 }
+
+// ResultFn computes the structured op result at terminal time, given the
+// final state and (post-promotion) failure reason. Optional per flow;
+// when set, its map is merged into the op result the orchestrator writes
+// via Manager.Finish (timeout metadata, if any, is overlaid on top).
+type ResultFn func(finalState State, finalReason FailureReason) map[string]interface{}
 
 // OrchestratorDeps bundles the dependencies the orchestrator goroutine
 // needs to run a flow to completion. All fields are required.
@@ -81,7 +98,7 @@ func (d OrchestratorDeps) Validate() error {
 // regardless of success / failure / panic.
 //
 //nolint:cyclop,funlen,gocognit // single-pass orchestration; splitting hides the start→stages→finish ordering
-func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, params map[string]interface{}, idempotencyKey string, stages []FlowStage) {
+func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, params map[string]interface{}, idempotencyKey string, stages []FlowStage, resultFn ResultFn) {
 	if err := deps.Validate(); err != nil {
 		// Configuration error — should be unreachable in production
 		// (handlers validate at construction time). Best-effort:
@@ -114,7 +131,33 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		firstErr      error
 		firstErrStage string
 		firstReason   FailureReason
+		// promotedReason is set by the FIRST stage flagged
+		// PromoteReasonOnFailure that returns an error; it overrides
+		// firstReason for the terminal failure_reason (narrow override).
+		promotedReason FailureReason
 	)
+	// recordFailure folds a stage error into the first-failure and the
+	// (narrow) promoted-reason tracking. Extracted so the stage loop stays
+	// flat.
+	recordFailure := func(st FlowStage, runErr error) {
+		if firstErr == nil {
+			firstErr = runErr
+			firstErrStage = st.Name
+			firstReason = st.FailureReason
+			if firstReason == "" {
+				firstReason = ReasonCLIError
+			}
+		}
+		// A recovery stage explicitly flagged PromoteReasonOnFailure
+		// promotes the terminal reason (e.g. a failed inline rollback →
+		// rollback_failed), even though firstReason was already set.
+		if st.PromoteReasonOnFailure && promotedReason == "" {
+			promotedReason = st.FailureReason
+			if promotedReason == "" {
+				promotedReason = ReasonCLIError
+			}
+		}
+	}
 	for i := range stages {
 		s := stages[i]
 		// Skip if a non-recoverable failure already occurred AND this
@@ -152,14 +195,7 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		if runErr != nil {
 			_ = deps.OpLog.StageEnd(s.Name, StateFailed, runErr.Error())
 			_ = deps.Manager.AddStage(opID, Stage{Name: s.Name, State: StateFailed, Started: started, Ended: ended, Output: runErr.Error()})
-			if firstErr == nil {
-				firstErr = runErr
-				firstErrStage = s.Name
-				firstReason = s.FailureReason
-				if firstReason == "" {
-					firstReason = ReasonCLIError
-				}
-			}
+			recordFailure(s, runErr)
 		} else {
 			_ = deps.OpLog.StageEnd(s.Name, StateSucceeded, "")
 			_ = deps.Manager.AddStage(opID, Stage{Name: s.Name, State: StateSucceeded, Started: started, Ended: ended})
@@ -176,6 +212,12 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 	timedOut := false
 	if finalState == StateFailed {
 		finalReason = firstReason
+		// Narrow override: a promoted recovery-stage reason (rollback_failed)
+		// wins over the original first reason. Timeout still wins over this
+		// (handled below).
+		if promotedReason != "" {
+			finalReason = promotedReason
+		}
 		// Operation-level timeout overrides any stage-level
 		// failure reason. cfg.OperationTimeout is enforced by the
 		// caller via context.WithTimeout(ctx, cfg.OperationTimeout);
@@ -191,17 +233,21 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		}
 	}
 
-	// Result map: surface timeout-ness explicitly so an operator
-	// inspecting `/v1/operations/{id}` sees the timeout flag without
-	// having to cross-reference the audit trail. Any future
-	// orchestrator-level metadata can be added here.
+	// Result map: the per-flow ResultFn (if any) computes the structured
+	// payload from the final state/reason, and timeout metadata is
+	// overlaid on top so an operator inspecting `/v1/operations/{id}`
+	// sees the timeout flag without cross-referencing the audit trail.
 	var result map[string]interface{}
+	if resultFn != nil {
+		result = resultFn(finalState, finalReason)
+	}
 	if timedOut {
-		result = map[string]interface{}{
-			"timed_out":               true,
-			"timed_out_at_stage":      firstErrStage,
-			"original_failure_reason": string(firstReason),
+		if result == nil {
+			result = map[string]interface{}{}
 		}
+		result["timed_out"] = true
+		result["timed_out_at_stage"] = firstErrStage
+		result["original_failure_reason"] = string(firstReason)
 	}
 
 	_ = deps.Manager.Finish(opID, finalState, finalReason, result)

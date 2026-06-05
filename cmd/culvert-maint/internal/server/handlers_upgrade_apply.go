@@ -1,21 +1,28 @@
 // D1.6c API handler: POST /v1/upgrades/apply (destructive upgrade apply).
 //
-// The smallest safe destructive flow (no rollback in this MVP):
+// Flow (with inline auto-rollback, #375):
 //
 //	capture_before → CaptureRunningProxyImage (#357); best-effort — a
 //	                 stack that is down is a valid state, not a failure.
+//	                 Also derives the inline-rollback target (priorRef).
 //	resolve_target → docker manifest inspect <image_ref> → target digest
 //	                 set; compute already_current (running ∩ target).
 //	pre_backup     → if requested AND not already_current: encrypted
 //	                 backup; a failure ABORTS before any pull/restart.
 //	pull           → docker compose pull proxy, CULVERT_PROXY_IMAGE pinned.
 //	restart        → docker compose up -d, CULVERT_PROXY_IMAGE pinned.
-//	health_gate    → internal/health probe; failure FAILS the op
-//	                 (health_failed). No rollback in this slice.
-//	verify         → re-capture the running image. An exact @sha256: ref
-//	                 is HARD-verified against the pin; a tag ref is soft
-//	                 (records the landed digest — multi-arch list-vs-
-//	                 platform digests are conservatively non-comparable).
+//	health_gate    → internal/health probe; a post-restart failure marks
+//	                 the op health_failed AND triggers inline rollback.
+//	verify         → re-capture the running image; the pinned digest is
+//	                 HARD-verified. A failure also triggers inline rollback.
+//	recovery:rollback_* → when the upgrade failed POST-RESTART and a valid
+//	                 prior target exists and rollback_on_failure is set, the
+//	                 SHARED image-rollback core (pull→restart→health→verify)
+//	                 re-pins the prior digest, inside this op + lock. A
+//	                 failed rollback promotes failure_reason to
+//	                 rollback_failed (narrow override); a successful one
+//	                 leaves health_failed (service restored). See
+//	                 inline_rollback.go + rollback_stages.go.
 //	report         → operator-facing summary line (always emitted).
 //
 // already_current is a runtime decision (it depends on what is actually
@@ -43,10 +50,14 @@ import (
 
 // upgradeApplyRequest is the POST /v1/upgrades/apply body.
 type upgradeApplyRequest struct {
-	ImageRef       string `json:"image_ref"`
-	PreBackup      bool   `json:"pre_backup"`
-	PassphraseRef  string `json:"passphrase_ref,omitempty"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	ImageRef      string `json:"image_ref"`
+	PreBackup     bool   `json:"pre_backup"`
+	PassphraseRef string `json:"passphrase_ref,omitempty"`
+	// RollbackOnFailure enables inline auto-rollback when the upgrade
+	// fails its post-restart health/verify gate. A pointer so omitted
+	// (nil) DEFAULTS TO TRUE (opt-out); pass false to disable (#375 §1).
+	RollbackOnFailure *bool  `json:"rollback_on_failure,omitempty"`
+	IdempotencyKey    string `json:"idempotency_key,omitempty"`
 }
 
 func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo) {
@@ -91,27 +102,42 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		return
 	}
 
+	// Inline auto-rollback is opt-out: nil (omitted) → true (#375 §1).
+	rollbackOnFailure := req.RollbackOnFailure == nil || *req.RollbackOnFailure
+
 	params := map[string]interface{}{
-		"image_ref":      req.ImageRef,
-		"pre_backup":     req.PreBackup,
-		"passphrase_ref": req.PassphraseRef,
+		"image_ref":           req.ImageRef,
+		"pre_backup":          req.PreBackup,
+		"passphrase_ref":      req.PassphraseRef,
+		"rollback_on_failure": rollbackOnFailure,
 	}
 
 	imageRef := req.ImageRef
 	preBackup := req.PreBackup
 	passRef := req.PassphraseRef
 
-	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindUpgradeApply, req.IdempotencyKey, params, func() ([]ops.FlowStage, *opError) {
-		var resolved string
-		if preBackup {
-			rp, rerr := readPassphraseFromEnv(passRef)
-			if rerr != nil {
-				return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
+	// acc/racc are shared between the stage closures and the result
+	// computer; acc.actor/opID feed the upgrades.apply:rollback audit.
+	acc := &upgradeApplyAccumulator{actor: peer.String()}
+	racc := &rollbackAccumulator{}
+
+	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindUpgradeApply, req.IdempotencyKey, params,
+		func() ([]ops.FlowStage, *opError) {
+			var resolved string
+			if preBackup {
+				rp, rerr := readPassphraseFromEnv(passRef)
+				if rerr != nil {
+					return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
+				}
+				resolved = rp
 			}
-			resolved = rp
-		}
-		return s.buildUpgradeApplyStages(imageRef, preBackup, resolved), nil
-	})
+			return s.buildUpgradeApplyStages(acc, racc, imageRef, preBackup, resolved, rollbackOnFailure), nil
+		},
+		withOpIDHook(func(id string) { acc.opID = id }),
+		withResultFn(func(state ops.State, _ ops.FailureReason) map[string]interface{} {
+			return s.upgradeApplyResult(acc, racc, state)
+		}),
+	)
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
 		return
@@ -134,6 +160,19 @@ type upgradeApplyAccumulator struct {
 	runningAfterID      string
 	runningAfterDigests []string
 	healthSummary       string
+
+	// Inline auto-rollback state (#375). Set/read across stages + the
+	// result computer; acc.opID/actor feed the rollback audit sub-action.
+	opID                     string
+	actor                    string
+	priorRef                 string // full repo@sha256:<digest> rollback target (before)
+	priorCaptureReason       string // "" if priorRef valid, else no_prior_digest / ambiguous_prior_digest
+	upgradeFailedPostRestart bool   // set by health_gate / verify on failure (the rollback trigger)
+	rollbackAttempted        bool
+	rollbackRestarted        bool // rollback_restart succeeded (new image is the prior one)
+	rollbackSucceeded        bool
+	rollbackFailed           bool   // a rollback stage errored
+	rollbackSkipReason       string // post-restart skip: disabled / no_prior_digest / ambiguous_prior_digest
 }
 
 // buildUpgradeApplyStages constructs the destructive apply flow.
@@ -142,26 +181,28 @@ type upgradeApplyAccumulator struct {
 // and pulls/restarts/verifies against THAT, never the raw tag.
 //
 //nolint:funlen // single-pass orchestration; splitting hides the capture→resolve→backup→pull→restart→health→verify ordering
-func (s *Server) buildUpgradeApplyStages(requestedRef string, preBackup bool, resolvedPassphrase string) []ops.FlowStage {
-	acc := &upgradeApplyAccumulator{}
+func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rollbackAccumulator, requestedRef string, preBackup bool, resolvedPassphrase string, rollbackOnFailure bool) []ops.FlowStage {
 	preBackupFilename := "pre-upgrade-" + time.Now().UTC().Format("20060102T150405Z") + ".tar.gz.enc"
 
-	return []ops.FlowStage{
+	stages := []ops.FlowStage{
 		{
 			// Capture what is ACTUALLY running before we touch anything.
 			// A capture failure (stack down / fresh deploy) is a valid
-			// state, not an op failure — we proceed without a prior.
+			// state, not an op failure — we proceed without a prior. Also
+			// derive the inline-rollback target (priorRef) here.
 			Name:          "capture_before",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
 				ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
 				if err != nil {
+					acc.priorCaptureReason = "no_prior_digest"
 					return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
 				}
 				acc.priorImageID = ri.RunningImageID
 				acc.priorDigests = bareDigests(ri.RepoDigests)
-				return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s",
-					ri.RunningImageID, joinDigests(acc.priorDigests))), nil, nil
+				s.deriveRollbackTarget(acc, ri.PriorRef())
+				return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s",
+					ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc))), nil, nil
 			},
 		},
 		{
@@ -253,11 +294,15 @@ func (s *Server) buildUpgradeApplyStages(requestedRef string, preBackup bool, re
 			Run: skipIfCurrent(acc, "health_gate", func(ctx context.Context) ([]byte, []byte, error) {
 				hr, herr := s.opts.HealthProbeFactory().Run(ctx)
 				if herr != nil {
+					acc.upgradeFailedPostRestart = true
 					return nil, nil, herr
 				}
 				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
 					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
 				if hr.Failed() {
+					// Post-restart failure: the new image is running but
+					// unhealthy → this is what triggers inline rollback.
+					acc.upgradeFailedPostRestart = true
 					return []byte(acc.healthSummary), nil, errors.New(hr.ReadyDetail)
 				}
 				return []byte(acc.healthSummary), nil, nil
@@ -272,23 +317,43 @@ func (s *Server) buildUpgradeApplyStages(requestedRef string, preBackup bool, re
 			FailureReason: ops.ReasonHealthFailed,
 			Run:           skipIfCurrent(acc, "verify", s.verifyRunningImage(acc)),
 		},
-		{
-			// Always emit the operator-facing summary, even after a
-			// failure, so the op log records the outcome.
-			Name:            "report",
-			ContinueOnError: true,
-			FailureReason:   ops.ReasonCommandError,
-			Run: func(_ context.Context) ([]byte, []byte, error) {
-				summary := fmt.Sprintf(
-					"upgrade_apply requested_ref=%q pinned_ref=%q already_current=%v pre_backup=%v target_digests=%s prior_digests=%s running_after=%s health=[%s]",
-					requestedRef, acc.pinnedRef, acc.alreadyCurrent, preBackup,
-					joinDigests(acc.targetDigests), joinDigests(acc.priorDigests),
-					joinDigests(acc.runningAfterDigests), acc.healthSummary,
-				)
-				return []byte(summary), nil, nil
-			},
-		},
 	}
+
+	// Inline auto-rollback: the SHARED image-rollback core, decorated as
+	// recovery stages (ContinueOnError + rollback_failed promotion + the
+	// skip guard). They run after the apply stages but only DO work when
+	// the upgrade failed its post-restart health/verify gate AND a valid
+	// prior target exists AND rollback_on_failure is set (#375 §2/§8).
+	core := s.imageRollbackStages(func() string { return acc.priorRef }, racc)
+	for i := range core {
+		step := core[i]
+		inner := step.Run
+		step.ContinueOnError = true
+		step.PromoteReasonOnFailure = true // a failed rollback step → rollback_failed
+		step.FailureReason = ops.ReasonRollbackFailed
+		step.Run = s.guardInlineRollback(acc, racc, rollbackOnFailure, step.Name, inner)
+		stages = append(stages, step)
+	}
+
+	// Always emit the operator-facing summary, even after a failure, so
+	// the op log records both the upgrade and rollback outcome.
+	stages = append(stages, ops.FlowStage{
+		Name:            "report",
+		ContinueOnError: true,
+		FailureReason:   ops.ReasonCommandError,
+		Run: func(_ context.Context) ([]byte, []byte, error) {
+			summary := fmt.Sprintf(
+				"upgrade_apply requested_ref=%q pinned_ref=%q already_current=%v pre_backup=%v target_digests=%s prior_digests=%s running_after=%s health=[%s] | rollback attempted=%v succeeded=%v target=%s final_running=%s",
+				requestedRef, acc.pinnedRef, acc.alreadyCurrent, preBackup,
+				joinDigests(acc.targetDigests), joinDigests(acc.priorDigests),
+				joinDigests(acc.runningAfterDigests), acc.healthSummary,
+				acc.rollbackAttempted, acc.rollbackSucceeded, acc.rollbackTargetDigest(),
+				joinDigests(acc.finalRunningDigests(racc)),
+			)
+			return []byte(summary), nil, nil
+		},
+	})
+	return stages
 }
 
 // skipIfCurrent wraps a stage Run so it no-ops (success) when the running
@@ -312,12 +377,14 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 	return func(ctx context.Context) ([]byte, []byte, error) {
 		ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
 		if err != nil {
+			acc.upgradeFailedPostRestart = true
 			return []byte("verify: post-restart capture failed"), nil,
 				fmt.Errorf("post-restart capture failed: %w", err)
 		}
 		acc.runningAfterID = ri.RunningImageID
 		acc.runningAfterDigests = bareDigests(ri.RepoDigests)
 		if acc.pinnedDigest != "" && !containsString(acc.runningAfterDigests, acc.pinnedDigest) {
+			acc.upgradeFailedPostRestart = true
 			return []byte(fmt.Sprintf("verify: running digests=%s do NOT include pinned %s",
 					joinDigests(acc.runningAfterDigests), acc.pinnedDigest)), nil,
 				fmt.Errorf("post-restart running image does not match pinned digest %s", acc.pinnedDigest)

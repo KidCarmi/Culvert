@@ -175,7 +175,11 @@ func decodeJSONBody(r *http.Request, dst interface{}) error {
 // 500) for admission-time failures.
 //
 //nolint:cyclop // single-pass admission flow; splitting hides the dedup→build→spawn ordering
-func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempotencyKey string, paramsForAudit map[string]interface{}, buildStages func() ([]ops.FlowStage, *opError)) (*ops.Op, bool, *opError) {
+func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempotencyKey string, paramsForAudit map[string]interface{}, buildStages func() ([]ops.FlowStage, *opError), opts ...startOpt) (*ops.Op, bool, *opError) {
+	var cfg startCfg
+	for _, o := range opts {
+		o(&cfg)
+	}
 	op, deduped, err := s.opts.Ops.BeginIdempotent(kind, peer.String(), idempotencyKey, paramsForAudit)
 	if err != nil {
 		if ops.IsConflict(err) {
@@ -196,7 +200,12 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		// vars, files) are no longer present.
 		return op, true, nil
 	}
-	// Newly admitted op — late-bound stage construction happens here.
+	// Newly admitted op — deliver the op_id to the caller (so late-bound
+	// stage closures can stamp it onto sub-action audit events) BEFORE
+	// building stages, then late-bound stage construction.
+	if cfg.onOpID != nil {
+		cfg.onOpID(op.ID)
+	}
 	stages, herr := buildStages()
 	if herr != nil {
 		s.recordAdmissionFailure(op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, "build_stages_failed")
@@ -212,7 +221,7 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.opts.Cfg.OperationTimeout)
 		defer cancel()
-		ops.Run(ctx, deps, op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, stages)
+		ops.Run(ctx, deps, op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, stages, cfg.resultFn)
 	}()
 	return op, false, nil
 }
@@ -290,6 +299,29 @@ type opError struct {
 	Status int
 	Body   interface{}
 }
+
+// startCfg holds optional startAsyncOp behavior set via startOpt. Both
+// fields are nil by default — the existing backup/restore/cleanup/check/
+// rollback callers pass no options and are unaffected.
+type startCfg struct {
+	// resultFn, when set, is forwarded to the orchestrator to compute the
+	// structured op result at terminal time (used by upgrades.apply for
+	// the inline auto-rollback result payload).
+	resultFn ops.ResultFn
+	// onOpID, when set, is invoked with the admitted op_id BEFORE stages
+	// are built/run, so stage closures can stamp it onto sub-action audit
+	// events (used by upgrades.apply for the upgrades.apply:rollback
+	// audit entries).
+	onOpID func(opID string)
+}
+
+type startOpt func(*startCfg)
+
+// withResultFn attaches a structured-result computer to the op.
+func withResultFn(fn ops.ResultFn) startOpt { return func(c *startCfg) { c.resultFn = fn } }
+
+// withOpIDHook delivers the admitted op_id to the caller before stages run.
+func withOpIDHook(fn func(opID string)) startOpt { return func(c *startCfg) { c.onOpID = fn } }
 
 // writeOpResponse formats the response body for a 202-ish op
 // acknowledgement. Status is 202 unless the op was deduped (in which
