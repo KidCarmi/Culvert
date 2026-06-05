@@ -4,6 +4,11 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 3 * * 2"
+  # TEMPORARY: verify the post-merge tree in CI (workflow_dispatch is blocked
+  # for the integration token). Remove before merge.
+  push:
+    branches:
+      - claude/awesome-tesla-4ta5p
 
 concurrency:
   group: auth-idp-interop-${{ github.ref }}
