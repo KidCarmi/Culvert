@@ -100,6 +100,7 @@ jobs:
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/config-override.php",target=/var/simplesamlphp/config/config-override.php,readonly \
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-idp-hosted.php",target=/var/simplesamlphp/metadata/saml20-idp-hosted.php,readonly \
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-sp-remote.php",target=/var/simplesamlphp/metadata/saml20-sp-remote.php,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/ssp-http.conf",target=/etc/apache2/conf-enabled/ssp-http.conf,readonly \
             -e SSP_ADMIN_PASSWORD=admin-password \
             -e SSP_SECRET_SALT=culvert-interop-salt \
             -e SSP_ENABLE_IDP=true \
