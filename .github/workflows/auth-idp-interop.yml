@@ -122,6 +122,7 @@ jobs:
           echo "::group::Last metadata response"
           curl -isS "http://127.0.0.1:8082/simplesaml/module.php/saml/idp/metadata" || true
           echo "::endgroup::"
+          docker exec culvert-simplesamlphp sh -lc 'ls -la /var/simplesamlphp/config /var/simplesamlphp/metadata /var/simplesamlphp/cert || true'
           docker logs culvert-simplesamlphp
           exit 1
 
