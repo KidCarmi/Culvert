@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -77,7 +78,7 @@ func (h *HAState) IsLeader() bool {
 func (h *HAState) VerifyToken(token string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.token != "" && h.token == token
+	return h.token != "" && subtle.ConstantTimeCompare([]byte(h.token), []byte(token)) == 1
 }
 
 // ── Leader Mode ─────────────────────────────────────────────────────────────
