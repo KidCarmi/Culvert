@@ -45,8 +45,9 @@ type applyRig struct {
 	stateDir  string
 	auditPath string
 
-	mu       sync.Mutex
-	captured [][]string
+	mu          sync.Mutex
+	captured    [][]string
+	capturedEnv [][]string
 
 	// targetDigest is what manifest inspect reports (the upgrade target).
 	targetDigest string
@@ -75,6 +76,30 @@ func (r *applyRig) sawCommand(token string) bool {
 			if a == token {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// envFor returns the captured child env for the first command whose argv
+// contains token (e.g. "pull", "up").
+func (r *applyRig) envFor(token string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, argv := range r.captured {
+		for _, a := range argv {
+			if a == token {
+				return r.capturedEnv[i]
+			}
+		}
+	}
+	return nil
+}
+
+func envHas(env []string, kv string) bool {
+	for _, e := range env {
+		if e == kv {
+			return true
 		}
 	}
 	return false
@@ -179,6 +204,7 @@ func startApplyRig(t *testing.T) *applyRig {
 		func(cmd *exec.Cmd) error {
 			rig.mu.Lock()
 			rig.captured = append(rig.captured, append([]string(nil), cmd.Args...))
+			rig.capturedEnv = append(rig.capturedEnv, append([]string(nil), cmd.Env...))
 			rig.mu.Unlock()
 			if out := rig.canned(cmd.Args); out != nil {
 				_, _ = cmd.Stdout.Write(out)
@@ -332,6 +358,37 @@ func TestUpgradeApply_Success_DigestRef(t *testing.T) {
 		if !strings.Contains(logStr, want) {
 			t.Errorf("op-log missing %q:\n%s", want, logStr)
 		}
+	}
+}
+
+// Regression: a TAG request must be resolved to a digest and the PIN
+// (repo@sha256:<resolved>) — not the raw tag — must be what pull/up
+// forward via CULVERT_PROXY_IMAGE.
+func TestUpgradeApply_TagResolvedToDigest_PinsDigest(t *testing.T) {
+	rig := startApplyRig(t)
+	defer rig.stop()
+
+	tag := repo + ":v1.2.4"
+	op, opID := rig.acceptAndWait(t, map[string]interface{}{"image_ref": tag})
+	if op["state"] != "succeeded" {
+		t.Fatalf("state: got %v want succeeded; op=%+v", op["state"], op)
+	}
+	pinned := repo + "@sha256:" + digNew // manifest resolved the tag to digNew
+	for _, cmd := range []string{"pull", "up"} {
+		env := rig.envFor(cmd)
+		if !envHas(env, "CULVERT_PROXY_IMAGE="+pinned) {
+			t.Errorf("%s must pin CULVERT_PROXY_IMAGE=%s; env=%v", cmd, pinned, env)
+		}
+		if envHas(env, "CULVERT_PROXY_IMAGE="+tag) {
+			t.Errorf("%s must NOT forward the raw tag as the pin", cmd)
+		}
+	}
+	logStr := rig.opLog(t, opID)
+	if !strings.Contains(logStr, `pinned_ref="`+pinned+`"`) {
+		t.Errorf("op-log must record the resolved pinned_ref %q:\n%s", pinned, logStr)
+	}
+	if !strings.Contains(logStr, `requested_ref="`+tag+`"`) {
+		t.Errorf("op-log must preserve the original requested_ref %q:\n%s", tag, logStr)
 	}
 }
 

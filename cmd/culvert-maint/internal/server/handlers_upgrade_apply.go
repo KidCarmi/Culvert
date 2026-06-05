@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"culvert-maint/internal/auth"
@@ -125,6 +126,8 @@ type stageRun = func(context.Context) ([]byte, []byte, error)
 // apply stages. It holds ONLY parsed identifiers — never raw inspect JSON.
 type upgradeApplyAccumulator struct {
 	targetDigests       []string // bare sha256, from manifest inspect
+	pinnedRef           string   // repo@sha256:<digest> actually pulled/restarted
+	pinnedDigest        string   // bare sha256 of pinnedRef
 	priorImageID        string   // running image config digest (before)
 	priorDigests        []string // bare sha256 of the running RepoDigests (before)
 	alreadyCurrent      bool
@@ -133,14 +136,14 @@ type upgradeApplyAccumulator struct {
 	healthSummary       string
 }
 
-// buildUpgradeApplyStages constructs the destructive apply flow. exactDigest
-// is non-empty only for an `@sha256:` image_ref, which enables hard
-// post-restart verification; a tag ref verifies softly.
+// buildUpgradeApplyStages constructs the destructive apply flow.
+// requestedRef is the operator's original image_ref (tag or digest); the
+// flow resolves it to a concrete repo@sha256:<digest> pin (acc.pinnedRef)
+// and pulls/restarts/verifies against THAT, never the raw tag.
 //
 //nolint:funlen // single-pass orchestration; splitting hides the capture→resolve→backup→pull→restart→health→verify ordering
-func (s *Server) buildUpgradeApplyStages(imageRef string, preBackup bool, resolvedPassphrase string) []ops.FlowStage {
+func (s *Server) buildUpgradeApplyStages(requestedRef string, preBackup bool, resolvedPassphrase string) []ops.FlowStage {
 	acc := &upgradeApplyAccumulator{}
-	exactDigest := digestRE.FindString(imageRef) // "" for a tag ref
 	preBackupFilename := "pre-upgrade-" + time.Now().UTC().Format("20060102T150405Z") + ".tar.gz.enc"
 
 	return []ops.FlowStage{
@@ -162,12 +165,14 @@ func (s *Server) buildUpgradeApplyStages(imageRef string, preBackup bool, resolv
 			},
 		},
 		{
-			// Remote registry lookup → target digest set. A failure here
-			// fails the op: we cannot determine what we are upgrading to.
+			// Remote registry lookup → target digest set, then PIN a
+			// concrete repo@sha256:<digest>. A digest request is used
+			// as-is; a tag is resolved to a digest. A failure here fails
+			// the op: we cannot determine (or pin) what to upgrade to.
 			Name:          "resolve_target",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeManifestInspect(ctx, imageRef)
+				res, rerr := s.opts.Runner.ComposeManifestInspect(ctx, requestedRef)
 				if res == nil {
 					return nil, nil, rerr
 				}
@@ -175,11 +180,28 @@ func (s *Server) buildUpgradeApplyStages(imageRef string, preBackup bool, resolv
 				if rerr != nil {
 					return []byte("resolve_target: remote inspect failed"), res.Stderr, rerr
 				}
+				if d := digestRE.FindString(requestedRef); d != "" {
+					// Already a digest ref — pin it verbatim.
+					acc.pinnedRef = requestedRef
+					acc.pinnedDigest = d
+				} else {
+					// Tag ref — resolve to a digest and build the pin.
+					// (Multi-arch caveat: manifest inspect --verbose reports
+					// per-platform descriptors, so this resolves to one of
+					// them; CP/GUI will send list digests — see D1.6c plan.)
+					if len(acc.targetDigests) == 0 {
+						return []byte("resolve_target: no digest resolved for tag " + requestedRef), res.Stderr,
+							errors.New("resolve_target: could not resolve a digest for tag " + requestedRef)
+					}
+					// targetDigests already carry the `sha256:` prefix.
+					acc.pinnedDigest = acc.targetDigests[0]
+					acc.pinnedRef = imageRepo(requestedRef) + "@" + acc.pinnedDigest
+				}
 				if digestSetsIntersect(acc.priorDigests, acc.targetDigests) {
 					acc.alreadyCurrent = true
 				}
-				return []byte(fmt.Sprintf("resolve_target: target_digests=%s already_current=%v",
-					joinDigests(acc.targetDigests), acc.alreadyCurrent)), res.Stderr, nil
+				return []byte(fmt.Sprintf("resolve_target: requested_ref=%q pinned_ref=%q target_digests=%s already_current=%v",
+					requestedRef, acc.pinnedRef, joinDigests(acc.targetDigests), acc.alreadyCurrent)), res.Stderr, nil
 			},
 		},
 		{
@@ -205,7 +227,7 @@ func (s *Server) buildUpgradeApplyStages(imageRef string, preBackup bool, resolv
 			Name:          "pull",
 			FailureReason: ops.ReasonCommandError,
 			Run: skipIfCurrent(acc, "pull", func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposePull(ctx, imageRef)
+				res, rerr := s.opts.Runner.ComposePull(ctx, acc.pinnedRef)
 				if res == nil {
 					return nil, nil, rerr
 				}
@@ -216,7 +238,7 @@ func (s *Server) buildUpgradeApplyStages(imageRef string, preBackup bool, resolv
 			Name:          "restart",
 			FailureReason: ops.ReasonCommandError,
 			Run: skipIfCurrent(acc, "restart", func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeUpWithImage(ctx, imageRef)
+				res, rerr := s.opts.Runner.ComposeUpWithImage(ctx, acc.pinnedRef)
 				if res == nil {
 					return nil, nil, rerr
 				}
@@ -242,11 +264,13 @@ func (s *Server) buildUpgradeApplyStages(imageRef string, preBackup bool, resolv
 			}),
 		},
 		{
-			// Post-restart verification (the #351 output-side guarantee).
-			// Exact digest refs are HARD-verified; tag refs are soft.
+			// Post-restart verification (the #351 output-side guarantee):
+			// the running image's RepoDigest must include the pinned
+			// digest. The pin is always a concrete digest, so this is a
+			// hard check for both tag and digest requests.
 			Name:          "verify",
 			FailureReason: ops.ReasonHealthFailed,
-			Run:           skipIfCurrent(acc, "verify", s.verifyRunningImage(acc, exactDigest)),
+			Run:           skipIfCurrent(acc, "verify", s.verifyRunningImage(acc)),
 		},
 		{
 			// Always emit the operator-facing summary, even after a
@@ -256,8 +280,8 @@ func (s *Server) buildUpgradeApplyStages(imageRef string, preBackup bool, resolv
 			FailureReason:   ops.ReasonCommandError,
 			Run: func(_ context.Context) ([]byte, []byte, error) {
 				summary := fmt.Sprintf(
-					"upgrade_apply image_ref=%q already_current=%v pre_backup=%v target_digests=%s prior_digests=%s running_after=%s health=[%s]",
-					imageRef, acc.alreadyCurrent, preBackup,
+					"upgrade_apply requested_ref=%q pinned_ref=%q already_current=%v pre_backup=%v target_digests=%s prior_digests=%s running_after=%s health=[%s]",
+					requestedRef, acc.pinnedRef, acc.alreadyCurrent, preBackup,
 					joinDigests(acc.targetDigests), joinDigests(acc.priorDigests),
 					joinDigests(acc.runningAfterDigests), acc.healthSummary,
 				)
@@ -280,11 +304,11 @@ func skipIfCurrent(acc *upgradeApplyAccumulator, label string, run stageRun) sta
 	}
 }
 
-// verifyRunningImage re-captures the running proxy image after the restart.
-// An exact `@sha256:` pin (exactDigest != "") is HARD-verified; a tag ref
-// is soft (records the landed digest — multi-arch list-vs-platform digests
-// are not directly comparable, and health already gated).
-func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator, exactDigest string) stageRun {
+// verifyRunningImage re-captures the running proxy image after the restart
+// and HARD-verifies that its RepoDigest includes the pinned digest. The
+// pin is always concrete (resolve_target turns a tag into a digest), so
+// this is a hard check for both tag and digest requests.
+func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 	return func(ctx context.Context) ([]byte, []byte, error) {
 		ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
 		if err != nil {
@@ -293,14 +317,29 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator, exactDigest st
 		}
 		acc.runningAfterID = ri.RunningImageID
 		acc.runningAfterDigests = bareDigests(ri.RepoDigests)
-		if exactDigest != "" && !containsString(acc.runningAfterDigests, exactDigest) {
+		if acc.pinnedDigest != "" && !containsString(acc.runningAfterDigests, acc.pinnedDigest) {
 			return []byte(fmt.Sprintf("verify: running digests=%s do NOT include pinned %s",
-					joinDigests(acc.runningAfterDigests), exactDigest)), nil,
-				fmt.Errorf("post-restart running image does not match pinned digest %s", exactDigest)
+					joinDigests(acc.runningAfterDigests), acc.pinnedDigest)), nil,
+				fmt.Errorf("post-restart running image does not match pinned digest %s", acc.pinnedDigest)
 		}
 		return []byte(fmt.Sprintf("verify: running_image_id=%s running_digests=%s",
 			ri.RunningImageID, joinDigests(acc.runningAfterDigests))), nil, nil
 	}
+}
+
+// imageRepo returns the repository portion of an image reference,
+// dropping any `@digest` or `:tag`. The tag is the `:` that follows the
+// last `/` (so a registry host:port is preserved). For
+// `ghcr.io/kidcarmi/culvert:v1` → `ghcr.io/kidcarmi/culvert`.
+func imageRepo(ref string) string {
+	if i := strings.IndexByte(ref, '@'); i >= 0 {
+		return ref[:i]
+	}
+	slash := strings.LastIndexByte(ref, '/')
+	if colon := strings.LastIndexByte(ref, ':'); colon > slash {
+		return ref[:colon]
+	}
+	return ref
 }
 
 // bareDigests extracts the bare sha256 token from each full
