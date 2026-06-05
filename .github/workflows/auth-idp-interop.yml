@@ -88,7 +88,7 @@ jobs:
       - name: Start SimpleSAMLphp
         run: |
           docker run -d --name culvert-simplesamlphp \
-            -p 127.0.0.1:8082:443 \
+            -p 127.0.0.1:8082:80 \
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/cert",target=/var/simplesamlphp/cert,readonly \
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/authsources.php",target=/var/simplesamlphp/config/authsources.php,readonly \
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/config-override.php",target=/var/simplesamlphp/config/config-override.php,readonly \
@@ -104,8 +104,8 @@ jobs:
             for path in \
               /simplesaml/saml2/idp/metadata.php \
               /simplesaml/module.php/saml/idp/metadata; do
-              url="https://127.0.0.1:8082$path"
-              if curl -kfsS "$url" | grep -q 'EntityDescriptor'; then
+              url="http://127.0.0.1:8082$path"
+              if curl -fsS "$url" | grep -q 'EntityDescriptor'; then
                 echo "CULVERT_SIMPLESAML_METADATA_URL=$url" >> "$GITHUB_ENV"
                 echo "SimpleSAMLphp metadata is ready at $url"
                 exit 0
