@@ -254,7 +254,7 @@ func startApplyRig(t *testing.T) *applyRig {
 		ComposeFile:       "docker-compose.yml",
 		StageTimeout:      5 * time.Second,
 		EnvAllow:          []string{runner.EnvCulvertBackupPassphrase, runner.EnvCulvertProxyImage},
-		EnvOverlayOnly:    []string{runner.EnvCulvertProxyImage},
+		EnvOverlayOnly:    []string{runner.EnvCulvertProxyImage, runner.EnvCulvertBackupPassphrase},
 		DockerBinary:      "/usr/bin/docker",
 	})
 	if err != nil {

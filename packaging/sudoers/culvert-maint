@@ -73,24 +73,46 @@
 # of every Template.SudoersLines exactly matches the entries below: no
 # missing, no dead surface.
 
-# ─── env preservation (D1.6c) ───────────────────────────────────────
+# ─── env preservation (D1.6c — COMMAND-SCOPED, privilege hardening) ──
 # sudo's default env_reset clears the child environment before exec'ing
 # the allowed command. The agent builds the child env from scratch and
 # passes per-call values via an overlay (it never inherits os.Environ),
 # but those values still have to SURVIVE sudo to reach `docker compose`.
-# env_keep retains exactly the two vars the agent forwards by overlay:
-#   - CULVERT_PROXY_IMAGE      — pins the proxy image for upgrade apply
-#                                (compose `image: ${CULVERT_PROXY_IMAGE:-…}`).
+#
+# These vars are preserved with COMMAND-SCOPED `Defaults!<alias>` rather
+# than a blanket `Defaults:culvert-maint env_keep` — least privilege: each
+# var crosses the sudo boundary ONLY for the commands that consume it, and
+# is stripped for every other allowed command (ps, image/manifest/container
+# inspect, down, cleanup, …). This prevents either var from riding along on
+# an unrelated allowed command via a direct/ambient-env sudo path:
+#   - CULVERT_PROXY_IMAGE      — pins the proxy image for upgrade apply /
+#                                rollback. Preserved ONLY for `pull proxy`
+#                                and `up -d` (compose
+#                                `image: ${CULVERT_PROXY_IMAGE:-…}`).
 #   - CULVERT_BACKUP_PASSPHRASE — reaches the cli container via `-e` for
-#                                encrypted backup/restore (and pre-upgrade
-#                                backup). Without this, encrypted backup
-#                                under privilege_mode=sudoers gets no
-#                                passphrase.
-# Both are bounded: the agent only ever sets these via an explicit
-# overlay, and CULVERT_PROXY_IMAGE is overlay-only (never sourced from the
-# agent's ambient env). No other variable is preserved.
-Defaults:culvert-maint env_keep += "CULVERT_PROXY_IMAGE"
-Defaults:culvert-maint env_keep += "CULVERT_BACKUP_PASSPHRASE"
+#                                encrypted backup/restore. Preserved ONLY
+#                                for the cli `--encrypt --backup` /
+#                                `--restore` commands.
+# The agent only ever sets these via an explicit overlay, and BOTH are
+# overlay-only on the agent side (never sourced from the agent's ambient
+# env). The alias patterns below scope env preservation only; they do NOT
+# grant execution — a command must still match a NOPASSWD entry to run, so
+# a slightly broad alias pattern cannot widen what executes.
+#
+# Residual (out of scope here): env_keep cannot bind the *value* of
+# CULVERT_PROXY_IMAGE on the pull/up path — a direct sudo of those
+# commands can still choose the image. The agent's image_allowlist gates
+# this upstream (same trust model as the /backup/* and image-inspect
+# wildcards). Fully binding the value at the boundary needs a root-owned
+# compose override / argv pin (a refactor); see D1.6c §13.2.
+Cmnd_Alias CULVERT_MAINT_PROXY_IMAGE_CMNDS = \
+    /usr/bin/docker compose -f {compose_path} pull proxy, \
+    /usr/bin/docker compose -f {compose_path} up -d
+Cmnd_Alias CULVERT_MAINT_PASSPHRASE_CMNDS = \
+    /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --encrypt --backup /backup/*, \
+    /usr/bin/docker compose -f {compose_path} --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE cli --restore /backup/* *
+Defaults!CULVERT_MAINT_PROXY_IMAGE_CMNDS env_keep += "CULVERT_PROXY_IMAGE"
+Defaults!CULVERT_MAINT_PASSPHRASE_CMNDS env_keep += "CULVERT_BACKUP_PASSPHRASE"
 
 # ─── compose.status (D1.6a) ─────────────────────────────────────────
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} ps --format json
