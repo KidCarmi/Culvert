@@ -93,6 +93,7 @@ jobs:
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/authsources.php",target=/var/simplesamlphp/config/authsources.php,readonly \
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/config-override.php",target=/var/simplesamlphp/config/config-override.php,readonly \
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-idp-hosted.php",target=/var/simplesamlphp/metadata/saml20-idp-hosted.php,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-sp-remote.php",target=/var/simplesamlphp/metadata/saml20-sp-remote.php,readonly \
             -e SSP_ADMIN_PASSWORD=admin-password \
             -e SSP_SECRET_SALT=culvert-interop-salt \
             -e SSP_ENABLE_IDP=true \
@@ -116,6 +117,18 @@ jobs:
             sleep 2
           done
           echo "SimpleSAMLphp metadata did not become ready in time."
+          echo "::group::Last metadata response (saml 2.x route)"
+          curl -isS "http://127.0.0.1:8082/simplesaml/module.php/saml/idp/metadata" || true
+          echo "::endgroup::"
+          echo "::group::Generated config.php (tail)"
+          docker exec culvert-simplesamlphp sh -c 'tail -n 60 /var/simplesamlphp/config/config.php' || true
+          echo "::endgroup::"
+          echo "::group::Effective enable.saml20-idp + module.enable"
+          docker exec culvert-simplesamlphp sh -c 'cd /var/simplesamlphp && php -r "\$config=[]; require \"config/config.php\"; var_export([\"enable.saml20-idp\"=>\$config[\"enable.saml20-idp\"]??null, \"module.enable\"=>\$config[\"module.enable\"]??null, \"baseurlpath\"=>\$config[\"baseurlpath\"]??null]);"' || true
+          echo "::endgroup::"
+          echo "::group::metadata dir + SSP log"
+          docker exec culvert-simplesamlphp sh -c 'ls -la /var/simplesamlphp/metadata; echo ---; tail -n 80 /var/simplesamlphp/log/simplesamlphp.log 2>/dev/null' || true
+          echo "::endgroup::"
           docker logs culvert-simplesamlphp
           exit 1
 
