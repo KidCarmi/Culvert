@@ -62,3 +62,64 @@ jobs:
       - name: Keycloak logs
         if: failure()
         run: docker logs culvert-keycloak
+
+  simplesamlphp-saml:
+    name: SimpleSAMLphp SAML
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Generate SimpleSAMLphp IdP certificate
+        run: |
+          mkdir -p .github/idp/simplesamlphp/cert
+          openssl req -newkey rsa:3072 -new -x509 -days 2 -nodes \
+            -subj "/CN=simplesamlphp.culvert.test" \
+            -out .github/idp/simplesamlphp/cert/idp.crt \
+            -keyout .github/idp/simplesamlphp/cert/idp.pem
+
+      - name: Start SimpleSAMLphp
+        run: |
+          docker run -d --name culvert-simplesamlphp \
+            -p 127.0.0.1:8082:443 \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/cert",target=/var/simplesamlphp/cert,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/authsources.php",target=/var/simplesamlphp/config/authsources.php,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/config-override.php",target=/var/simplesamlphp/config/config-override.php,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-idp-hosted.php",target=/var/simplesamlphp/metadata/saml20-idp-hosted.php,readonly \
+            -e SSP_ADMIN_PASSWORD=admin-password \
+            -e SSP_SECRET_SALT=culvert-interop-salt \
+            -e SSP_APACHE_ALIAS=simplesaml/ \
+            cirrusid/simplesamlphp:v2.5.0
+
+      - name: Discover SimpleSAMLphp metadata URL
+        run: |
+          for i in $(seq 1 60); do
+            for path in \
+              /simplesaml/saml2/idp/metadata.php \
+              /simplesaml/module.php/saml/idp/metadata; do
+              url="https://127.0.0.1:8082$path"
+              if curl -kfsS "$url" | grep -q 'EntityDescriptor'; then
+                echo "CULVERT_SIMPLESAML_METADATA_URL=$url" >> "$GITHUB_ENV"
+                echo "SimpleSAMLphp metadata is ready at $url"
+                exit 0
+              fi
+            done
+            sleep 2
+          done
+          echo "SimpleSAMLphp metadata did not become ready in time."
+          docker logs culvert-simplesamlphp
+          exit 1
+
+      - name: Run SimpleSAMLphp SAML interop test
+        run: go test -run TestSimpleSAMLphpInterop_CompilesProviderFromMetadataURL -count=1 -timeout=5m .
+
+      - name: SimpleSAMLphp logs
+        if: failure()
+        run: docker logs culvert-simplesamlphp
