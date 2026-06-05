@@ -4,6 +4,12 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 3 * * 2"
+  # TEMPORARY: run on push to the dev branch so the SimpleSAMLphp IdP fix can
+  # be verified in CI (workflow_dispatch is blocked for the integration token).
+  # Remove this push trigger before merge.
+  push:
+    branches:
+      - claude/awesome-tesla-4ta5p
 
 concurrency:
   group: auth-idp-interop-${{ github.ref }}
