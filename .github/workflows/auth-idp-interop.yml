@@ -93,9 +93,11 @@ jobs:
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/authsources.php",target=/var/simplesamlphp/config/authsources.php,readonly \
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/config-override.php",target=/var/simplesamlphp/config/config-override.php,readonly \
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-idp-hosted.php",target=/var/simplesamlphp/metadata/saml20-idp-hosted.php,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-sp-remote.php",target=/var/simplesamlphp/metadata/saml20-sp-remote.php,readonly \
             -e SSP_ADMIN_PASSWORD=admin-password \
             -e SSP_SECRET_SALT=culvert-interop-salt \
             -e SSP_ENABLE_IDP=true \
+            -e SSP_ENABLED_MODULES=exampleauth \
             -e SSP_APACHE_ALIAS=simplesaml/ \
             cirrusid/simplesamlphp:v2.5.0
 
@@ -116,6 +118,7 @@ jobs:
             sleep 2
           done
           echo "SimpleSAMLphp metadata did not become ready in time."
+          docker exec culvert-simplesamlphp sh -lc 'ls -la /var/simplesamlphp/config /var/simplesamlphp/metadata /var/simplesamlphp/cert || true'
           docker logs culvert-simplesamlphp
           exit 1
 
