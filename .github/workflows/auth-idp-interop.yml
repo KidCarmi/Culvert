@@ -1,0 +1,64 @@
+name: Auth IdP Interop
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 2"
+
+concurrency:
+  group: auth-idp-interop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CULVERT_KEYCLOAK_BASE_URL: http://127.0.0.1:8081
+  CULVERT_KEYCLOAK_REALM: culvert
+  CULVERT_KEYCLOAK_CLIENT_ID: culvert-proxy
+  CULVERT_KEYCLOAK_CLIENT_SECRET: culvert-secret
+  CULVERT_KEYCLOAK_USERNAME: alice
+  CULVERT_KEYCLOAK_PASSWORD: alice-password
+
+jobs:
+  keycloak-oidc:
+    name: Keycloak OIDC
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Start Keycloak
+        run: |
+          docker run -d --name culvert-keycloak \
+            -p 127.0.0.1:8081:8080 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+            -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+            -v "$PWD/.github/idp/keycloak:/opt/keycloak/data/import:ro" \
+            quay.io/keycloak/keycloak:26.6.1 \
+            start-dev --import-realm
+
+      - name: Wait for Keycloak realm
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS "$CULVERT_KEYCLOAK_BASE_URL/realms/$CULVERT_KEYCLOAK_REALM/.well-known/openid-configuration" >/dev/null; then
+              echo "Keycloak is ready."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Keycloak did not become ready in time."
+          docker logs culvert-keycloak
+          exit 1
+
+      - name: Run Keycloak OIDC interop test
+        run: go test -run TestKeycloakOIDCInterop_ResolveIdentity -count=1 -timeout=5m .
+
+      - name: Keycloak logs
+        if: failure()
+        run: docker logs culvert-keycloak
