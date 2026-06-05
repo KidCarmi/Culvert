@@ -38,20 +38,11 @@ func TestIsStateChanging_ProductionAndFutureKinds(t *testing.T) {
 		t.Errorf("%q (synthetic, test-only) should be state-changing", SyntheticStateChangingKind)
 	}
 
-	// State-changing production kinds (D1.6b + D1.6c upgrade apply).
-	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit, KindUpgradeApply} {
+	// State-changing production kinds (D1.6b + D1.6c upgrade apply +
+	// image rollback).
+	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit, KindUpgradeApply, KindRollbackCreate} {
 		if !IsStateChanging(k) {
 			t.Errorf("production kind %q must be state-changing", k)
-		}
-	}
-
-	// Remaining future kinds are NOT yet wired; they must NOT be
-	// reported as state-changing until the slice that adds them lands.
-	for _, k := range []string{
-		"rollbacks.create",
-	} {
-		if IsStateChanging(k) {
-			t.Errorf("future kind %q must not be state-changing yet", k)
 		}
 	}
 

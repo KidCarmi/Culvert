@@ -1,7 +1,7 @@
 // D1.6c API handler: POST /v1/upgrades/check (read-only upgrade check).
 //
-// This is the first D1.6c slice. /v1/upgrades/apply and /v1/rollbacks
-// remain 404 (see server.go's notImpl list) until their slices land.
+// This is the first D1.6c slice; /v1/upgrades/apply and /v1/rollbacks
+// (mode=image) are now also active in later slices.
 //
 // Flow (read-only — no maintenance lock, mirrors plan § 3.5):
 //
