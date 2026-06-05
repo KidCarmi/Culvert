@@ -1,5 +1,5 @@
 <?php
-$metadata['http://127.0.0.1:8082/simplesaml/saml2/idp/metadata.php'] = [
+$metadata['http://127.0.0.1:8082/simplesaml/module.php/saml/idp/metadata'] = [
     'host' => '__DEFAULT__',
     'privatekey' => 'idp.pem',
     'certificate' => 'idp.crt',
