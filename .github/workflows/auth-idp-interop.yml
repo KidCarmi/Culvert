@@ -89,12 +89,13 @@ jobs:
         run: |
           docker run -d --name culvert-simplesamlphp \
             -p 127.0.0.1:8082:80 \
-            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/cert",target=/var/simplesamlphp/cert,readonly \
-            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/authsources.php",target=/var/simplesamlphp/config/authsources.php,readonly \
-            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/config-override.php",target=/var/simplesamlphp/config/config-override.php,readonly \
-            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-idp-hosted.php",target=/var/simplesamlphp/metadata/saml20-idp-hosted.php,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/cert",target=/var/www/simplesamlphp/cert,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/authsources.php",target=/var/www/simplesamlphp/config/authsources.php,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/config-override.php",target=/var/www/simplesamlphp/config/config-override.php,readonly \
+            --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-idp-hosted.php",target=/var/www/simplesamlphp/metadata/saml20-idp-hosted.php,readonly \
             -e SSP_ADMIN_PASSWORD=admin-password \
             -e SSP_SECRET_SALT=culvert-interop-salt \
+            -e SSP_ENABLE_IDP=true \
             -e SSP_APACHE_ALIAS=simplesaml/ \
             cirrusid/simplesamlphp:v2.5.0
 
@@ -103,7 +104,8 @@ jobs:
           for i in $(seq 1 60); do
             for path in \
               /simplesaml/saml2/idp/metadata.php \
-              /simplesaml/module.php/saml/idp/metadata; do
+              /simplesaml/module.php/saml/idp/metadata \
+              /simplesaml/module.php/saml/idp/metadata.php; do
               url="http://127.0.0.1:8082$path"
               if curl -fsS "$url" | grep -q 'EntityDescriptor'; then
                 echo "CULVERT_SIMPLESAML_METADATA_URL=$url" >> "$GITHUB_ENV"
@@ -114,6 +116,7 @@ jobs:
             sleep 2
           done
           echo "SimpleSAMLphp metadata did not become ready in time."
+          docker exec culvert-simplesamlphp sh -lc 'ls -la /var/www/simplesamlphp/config /var/www/simplesamlphp/metadata /var/www/simplesamlphp/cert || true'
           docker logs culvert-simplesamlphp
           exit 1
 
