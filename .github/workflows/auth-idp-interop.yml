@@ -125,17 +125,8 @@ jobs:
             sleep 2
           done
           echo "SimpleSAMLphp metadata did not become ready in time."
-          echo "::group::Last metadata response (saml 2.x route)"
+          echo "::group::Last metadata response"
           curl -isS "http://127.0.0.1:8082/simplesaml/module.php/saml/idp/metadata" || true
-          echo "::endgroup::"
-          echo "::group::Generated config.php (tail)"
-          docker exec culvert-simplesamlphp sh -c 'tail -n 60 /var/simplesamlphp/config/config.php' || true
-          echo "::endgroup::"
-          echo "::group::config dir + override files"
-          docker exec culvert-simplesamlphp sh -c 'ls -la /var/simplesamlphp/config/; echo "== config-override-base.php =="; cat /var/simplesamlphp/config/config-override-base.php; echo "== config-override.php =="; cat /var/simplesamlphp/config/config-override.php 2>/dev/null' || true
-          echo "::endgroup::"
-          echo "::group::metadata dir + SSP log"
-          docker exec culvert-simplesamlphp sh -c 'ls -la /var/simplesamlphp/metadata; echo ---; tail -n 80 /var/simplesamlphp/log/simplesamlphp.log 2>/dev/null' || true
           echo "::endgroup::"
           docker logs culvert-simplesamlphp
           exit 1
