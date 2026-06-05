@@ -54,6 +54,12 @@ const (
 	// The endpoint that consumes it (/v1/upgrades/apply) is NOT activated
 	// by this slice; only the read-only primitive lands.
 	TemplateComposeContainerInspect TemplateID = "compose.container.inspect"
+	// TemplateComposePull runs `docker compose -f <p> pull proxy`,
+	// forwarding the pinned image reference via the CULVERT_PROXY_IMAGE
+	// overlay. State-changing (mutates the local image store). Used by
+	// POST /v1/upgrades/apply. `proxy` is a fixed service literal, not an
+	// operator argument, so the sudoers line needs no wildcard there.
+	TemplateComposePull TemplateID = "compose.pull"
 )
 
 // EnvCulvertProxyImage is the env-var name that overrides the proxy (and
@@ -61,25 +67,22 @@ const (
 //
 //	image: ${CULVERT_PROXY_IMAGE:-ghcr.io/kidcarmi/culvert:latest}
 //
-// The future upgrade-apply slice will forward the pinned digest reference
-// (`repo@sha256:…`) into `docker compose pull` / `up` via an env overlay,
-// so a pin survives without editing the compose file. It is NOT a secret;
-// it is admitted to the runner env allowlist purely so that future pull/up
-// path can forward it. NOTHING forwards it yet — /v1/upgrades/apply stays
-// inactive, and no read-only path sets it.
+// The upgrade-apply flow forwards the pinned image reference
+// (`repo@sha256:…` or a tag) into `docker compose pull` / `up` via the
+// CULVERT_PROXY_IMAGE overlay (ComposePull / ComposeUpWithImage), so a pin
+// survives without editing the compose file. It is NOT a secret.
 //
 // It is registered as an OVERLAY-ONLY env var (Options.EnvOverlayOnly), so
 // it can ONLY enter a child process through an explicit per-call overlay —
 // never from the agent's ambient process environment. That stops an
 // operator-set value from leaking onto unrelated compose calls (e.g. a
-// restore's `up -d`); the future pull/up overlay is the sole entry point.
+// restore's `up -d`); the apply pull/up overlay is the sole entry point.
 //
-// IMPORTANT (see D1.6c plan § 2.3.1): under privilege_mode=sudoers the
-// override must ALSO be preserved across `sudo` (env_keep / --preserve-env)
-// for it to reach `docker compose`. That privilege-boundary change is
-// intentionally NOT made here — it belongs with the pull/up sudoers
-// entries (the apply slice), where the env_keep-vs-preserve-env choice is
-// wired alongside the commands that actually use it.
+// Under privilege_mode=sudoers the override must ALSO survive `sudo`'s
+// env_reset. The install ships a matching `Defaults:culvert-maint env_keep
+// += "CULVERT_PROXY_IMAGE"` line (see packaging/sudoers/culvert-maint and
+// D1.6c plan § 2.3.1); without it the overlay would be stripped before
+// `docker compose` saw it.
 const EnvCulvertProxyImage = "CULVERT_PROXY_IMAGE"
 
 // imageRefShapeRE bounds the argv shape of an image reference,
@@ -216,6 +219,55 @@ func containerInspectSudoersLines() []string {
 		lines = append(lines, prefix+strings.Repeat("[0-9a-f]", n))
 	}
 	return lines
+}
+
+// composeApplyTemplates returns the D1.6c upgrade-apply templates. The
+// pull is service-scoped (`proxy` is a fixed literal, no wildcard) and
+// path-bound to the compose file. The matching env-preservation
+// (env_keep) for CULVERT_PROXY_IMAGE lives in the sudoers Defaults block.
+func composeApplyTemplates() []Template {
+	return []Template{
+		{
+			ID:            TemplateComposePull,
+			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "pull", "proxy"},
+			SudoersLines:  []string{"/usr/bin/docker compose -f {compose_path} pull proxy"},
+			StateChanging: true,
+		},
+	}
+}
+
+// ComposePull runs `docker compose -f <p> pull proxy`, pinning the image
+// via the CULVERT_PROXY_IMAGE overlay (the compose file resolves
+// `image: ${CULVERT_PROXY_IMAGE:-…}`). State-changing. The imageRef is
+// validated for argv-safety (defense-in-depth; the handler already
+// enforced image_allowlist).
+func (r *Runner) ComposePull(ctx context.Context, imageRef string) (*Result, error) {
+	if err := validateImageRefShape(imageRef); err != nil {
+		return nil, err
+	}
+	tmpl := templateByID(TemplateComposePull)
+	if tmpl == nil {
+		return nil, errors.New("runner: TemplateComposePull not registered")
+	}
+	overlay := map[string]string{EnvCulvertProxyImage: imageRef}
+	return r.runWithEnv(ctx, r.buildArgv(tmpl), overlay)
+}
+
+// ComposeUpWithImage runs `docker compose -f <p> up -d` with the
+// CULVERT_PROXY_IMAGE overlay so the recreated proxy uses the pinned
+// image. State-changing. Distinct from ComposeUp (which passes no
+// overlay and is used by restore) so the override is explicit and never
+// rides along on an unrelated up.
+func (r *Runner) ComposeUpWithImage(ctx context.Context, imageRef string) (*Result, error) {
+	if err := validateImageRefShape(imageRef); err != nil {
+		return nil, err
+	}
+	tmpl := templateByID(TemplateComposeUp)
+	if tmpl == nil {
+		return nil, errors.New("runner: TemplateComposeUp not registered")
+	}
+	overlay := map[string]string{EnvCulvertProxyImage: imageRef}
+	return r.runWithEnv(ctx, r.buildArgv(tmpl), overlay)
 }
 
 // ComposeContainerInspect runs

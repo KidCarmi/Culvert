@@ -246,8 +246,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/restores/commit", s.withAuth(s.handleRestoreCommit))
 	mux.HandleFunc("POST /v1/cleanups", s.withAuth(s.handleCleanup))
 
-	// Upgrade check (read-only).
+	// Upgrade check (read-only) + apply (destructive, D1.6c).
 	mux.HandleFunc("POST /v1/upgrades/check", s.withAuth(s.handleUpgradeCheck))
+	mux.HandleFunc("POST /v1/upgrades/apply", s.withAuth(s.handleUpgradeApply))
 
 	// Future endpoints — explicit 404, authenticated so an
 	// unauthorised peer gets 403 consistently.
@@ -255,7 +256,6 @@ func (s *Server) routes() http.Handler {
 		s.notImplemented(w, r)
 	})
 	for _, p := range []string{
-		"/v1/upgrades/apply",
 		"/v1/rollbacks",
 	} {
 		mux.HandleFunc(p, notImpl)

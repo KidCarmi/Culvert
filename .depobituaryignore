@@ -4,3 +4,12 @@ github.com/mattermost/xml-roundtrip-validator
 github.com/cespare/xxhash/v2
 # ASN.1 BER codec, transitive of go-ldap/ldap — active pseudoversion, low score is heuristic noise
 github.com/go-asn1-ber/asn1-ber
+# SAML 2.0 SP library — direct dep (auth_saml.go); core auth provider with
+# no maintained drop-in replacement. Stable upstream; low score is heuristic.
+github.com/crewjam/saml
+# XML document model, transitive of crewjam/saml — mature, stable API.
+github.com/beevik/etree
+# Clock abstraction, transitive of crewjam/saml → goxmldsig — tiny, stable.
+github.com/jonboulle/clockwork
+# Human-readable sizes/durations, transitive of dgraph-io/badger — mature, stable.
+github.com/dustin/go-humanize
