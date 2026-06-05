@@ -1406,9 +1406,17 @@ func TestRestoreCommit_PreExistingStagingDir_AbortsBeforeDataTouched(t *testing.
 func TestRestoreCommit_PreExistingBakDir_AbortsBeforeDataTouched(t *testing.T) {
 	src, currentDir, _, _ := makeCommitFixture(t, 0)
 
+	// Pin the clock so the bak path the test pre-creates matches the one
+	// runRestoreCommit derives — otherwise a second-boundary race between
+	// the two independent time reads makes this test flaky.
+	fixedNow := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	origNow := restoreNow
+	restoreNow = func() time.Time { return fixedNow }
+	t.Cleanup(func() { restoreNow = origNow })
+
 	// Pre-create the bak dir at the path runRestoreCommit will derive.
 	suffix := fmt.Sprintf("%s-%d",
-		time.Now().UTC().Format("20060102T150405Z"), os.Getpid())
+		fixedNow.UTC().Format("20060102T150405Z"), os.Getpid())
 	bakPath := currentDir + ".bak." + suffix
 	if err := os.Mkdir(bakPath, 0o700); err != nil {
 		t.Fatalf("pre-create bak: %v", err)
