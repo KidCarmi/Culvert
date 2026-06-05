@@ -95,6 +95,7 @@ jobs:
             --mount type=bind,source="$PWD/.github/idp/simplesamlphp/saml20-idp-hosted.php",target=/var/simplesamlphp/metadata/saml20-idp-hosted.php,readonly \
             -e SSP_ADMIN_PASSWORD=admin-password \
             -e SSP_SECRET_SALT=culvert-interop-salt \
+            -e SSP_ENABLE_IDP=true \
             -e SSP_APACHE_ALIAS=simplesaml/ \
             cirrusid/simplesamlphp:v2.5.0
 
@@ -103,7 +104,8 @@ jobs:
           for i in $(seq 1 60); do
             for path in \
               /simplesaml/saml2/idp/metadata.php \
-              /simplesaml/module.php/saml/idp/metadata; do
+              /simplesaml/module.php/saml/idp/metadata \
+              /simplesaml/module.php/saml/idp/metadata.php; do
               url="http://127.0.0.1:8082$path"
               if curl -fsS "$url" | grep -q 'EntityDescriptor'; then
                 echo "CULVERT_SIMPLESAML_METADATA_URL=$url" >> "$GITHUB_ENV"
