@@ -54,6 +54,17 @@ func setupProxyTest(t *testing.T) {
 
 func setupProxyIdentityE2E(t *testing.T, provider IdentityProvider) *httptest.Server {
 	t.Helper()
+	return setupProxyIdentityE2EWithRules(t, provider, []PolicyRule{{
+		Priority:    1,
+		Name:        "engineering-allow",
+		DestFQDN:    "*",
+		SourceGroup: "engineering",
+		Action:      ActionAllow,
+	}})
+}
+
+func setupProxyIdentityE2EWithRules(t *testing.T, provider IdentityProvider, rules []PolicyRule) *httptest.Server {
+	t.Helper()
 	setupProxyTest(t)
 
 	origRegistry := idpRegistry
@@ -70,13 +81,9 @@ func setupProxyIdentityE2E(t *testing.T, provider IdentityProvider) *httptest.Se
 	t.Cleanup(func() { idpRegistry = origRegistry })
 
 	policyStore.rules = nil
-	policyStore.Add(PolicyRule{
-		Priority:    1,
-		Name:        "engineering-allow",
-		DestFQDN:    "*",
-		SourceGroup: "engineering",
-		Action:      ActionAllow,
-	})
+	for _, rule := range rules {
+		policyStore.Add(rule)
+	}
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-User-Identity"); got != "" {
@@ -513,6 +520,51 @@ func TestProxyAuthPolicyE2E_SessionAndTokenProviderGroups(t *testing.T) {
 
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("wrong-group request status = %d, want 403", w.Code)
+		}
+	})
+}
+
+func TestProxyAuthPolicyE2E_SessionAndTokenProviderAuthSourceAlias(t *testing.T) {
+	testID := &Identity{
+		Sub:      "alice",
+		Email:    "alice@example.com",
+		Name:     "Alice",
+		Provider: "test-idp",
+	}
+	backend := setupProxyIdentityE2EWithRules(t, &testProxyIdentityProvider{
+		idByToken: map[string]*Identity{
+			"token": testID,
+		},
+	}, []PolicyRule{{
+		Priority:   1,
+		Name:       "idp-source-allow",
+		DestFQDN:   "*",
+		AuthSource: "oidc:test-idp",
+		Action:     ActionAllow,
+	}})
+
+	t.Run("browser session auth source alias allow", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := makeRequest(backend.URL+"/", nil)
+		r.AddCookie(sessionCookieForIdentity(t, testID))
+
+		handleRequest(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("session request status = %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("token provider auth source alias allow", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := makeRequest(backend.URL+"/", map[string]string{
+			"Proxy-Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("alice:token")),
+		})
+
+		handleRequest(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("token request status = %d, want 200; body=%s", w.Code, w.Body.String())
 		}
 	})
 }
