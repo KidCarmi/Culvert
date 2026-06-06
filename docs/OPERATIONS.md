@@ -163,12 +163,20 @@ Run these once when bringing up a new node, in order:
    than the in-cluster sidecar, list the URL in
    `--updater-url-allowlist` (or `update.url_allowlist` in YAML). The
    admin API alone cannot widen this list.
-6. **First admin user.** Visit the UI, complete the setup wizard, and
+6. **External auth callback URL.** Before enabling production OIDC or
+   SAML profiles, set `proxy.base_url` to the externally reachable UI URL
+   (for example `https://proxy.example.com` or
+   `https://proxy.example.com/culvert`). For SAML, this exact value is the
+   SP Entity ID / Audience, and the ACS URL is
+   `proxy.base_url + /auth/saml/callback`. `trust_forwarded_headers` helps
+   request-derived URLs, but it does not replace `proxy.base_url` for SAML
+   SP metadata built at startup.
+7. **First admin user.** Visit the UI, complete the setup wizard, and
    create the first admin account.
-7. **Open the Diagnostics page** (Infrastructure → Diagnostics). Resolve
+8. **Open the Diagnostics page** (Infrastructure → Diagnostics). Resolve
    any `fail` entries before exposing the proxy to clients. Decide
    consciously about each `warn`.
-8. **SAML behind a load balancer.** If SAML IdPs are enabled in a clustered
+9. **SAML behind a load balancer.** If SAML IdPs are enabled in a clustered
    or load-balanced deployment, configure affinity for the browser SSO path,
    especially `/auth/saml/callback`. Culvert keeps SAML AuthnRequest state
    in memory for one-time replay protection, so the IdP response must return
