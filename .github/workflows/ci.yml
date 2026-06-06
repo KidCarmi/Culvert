@@ -32,6 +32,12 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      # Repo-wide gofmt gate. Hard-fails on any unformatted file. Unlike the
+      # diff-scoped reviewdog lint in code-review.yml, this checks every file
+      # and runs on pushes too, so accumulated formatting drift can't slip in.
+      - name: gofmt check
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
       - name: Vet
         run: go vet ./...
 
