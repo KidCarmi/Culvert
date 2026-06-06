@@ -1,23 +1,18 @@
-// D1.6c API handler: POST /v1/rollbacks (mode=image only — MVP).
+// D1.6c API handler: POST /v1/rollbacks (mode=image | mode=data).
 //
-// Image rollback re-pins the proxy to a PRIOR pinned digest (the one a
-// completed upgrades.apply recorded; the CP recalls it and supplies it
-// here) and recreates the stack:
+// mode=image re-pins the proxy to a PRIOR pinned digest and recreates the
+// stack (capture → pull → restart → health → verify); it composes the
+// apply primitives with NO new runner template or sudoers entry.
 //
-//	capture_before → record what is running now (best-effort, summary only)
-//	pull           → docker compose pull proxy, CULVERT_PROXY_IMAGE=<target>
-//	restart        → docker compose up -d,    CULVERT_PROXY_IMAGE=<target>
-//	health_gate    → internal/health probe; failure → health_failed
-//	verify         → re-capture; HARD-verify running RepoDigest ⊇ target
-//	report         → operator-facing summary (always emitted)
+// mode=data rolls /data back by restoring a backup. It is a WRAP of the
+// existing restore.commit primitive — same validation, same
+// buildRestoreStages(commit=true,…), same ComposeRestoreCommit, same
+// WouldBlock safety gates, same stop→restore→up→health flow — run under
+// the rollbacks.create op kind. It is NOT a second restore implementation
+// (see data_rollback.go) and is STANDALONE-ONLY (never auto-invoked).
 //
-// This composes the apply primitives (ComposePull + ComposeUpWithImage +
-// CaptureRunningProxyImage) — NO new runner template or sudoers entry.
-// The target MUST be a strict `repo@sha256:<digest>` (a rollback target
-// is never a tag). No backup is taken (rollback IS the recovery action),
-// there is no inline auto-rollback, and data-mode is not implemented yet.
-//
-// Hygiene (#351/#357): only parsed digests reach the op log.
+// Hygiene (#351/#357): only parsed digests reach the op log; the
+// passphrase value never does.
 package server
 
 import (
@@ -36,10 +31,20 @@ import (
 // `image_allowlist` would otherwise accept) is never a valid target.
 var rollbackDigestRefRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
 
-// rollbackRequest is the POST /v1/rollbacks body.
+// rollbackRequest is the POST /v1/rollbacks body. ImageRef is used for
+// mode=image; the Filename/RestoreMode/PassphraseRef/safety-flag fields
+// for mode=data (they map 1:1 to restore.commit).
 type rollbackRequest struct {
-	Mode           string `json:"mode"`
-	ImageRef       string `json:"image_ref"`
+	Mode     string `json:"mode"`
+	ImageRef string `json:"image_ref"`
+
+	// mode=data fields (see data_rollback.go).
+	Filename             string `json:"filename"`
+	RestoreMode          string `json:"restore_mode,omitempty"`
+	PassphraseRef        string `json:"passphrase_ref,omitempty"`
+	AcceptDPReenrollment bool   `json:"accept_dp_reenrollment,omitempty"`
+	AllowCounterRollback bool   `json:"allow_counter_rollback,omitempty"`
+
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
@@ -57,12 +62,20 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request, peer aut
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decode: " + err.Error()})
 		return
 	}
-	if req.Mode != "image" {
+	switch req.Mode {
+	case "image":
+		s.rollbackImage(w, r, peer, req)
+	case "data":
+		s.rollbackData(w, r, peer, req)
+	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "mode must be \"image\" (data-mode rollback is not yet implemented)",
+			"error": `mode must be "image" or "data"`,
 		})
-		return
 	}
+}
+
+// rollbackImage handles mode=image: re-pin to a prior digest.
+func (s *Server) rollbackImage(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo, req rollbackRequest) {
 	// Argv-safety, then strict digest-ref shape, then the operator's
 	// image_allowlist. All three pass before any runner method runs.
 	if err := runner.ValidateImageRef(req.ImageRef); err != nil {
