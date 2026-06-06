@@ -119,6 +119,17 @@ type LogEntry struct {
 	BytesSent   int64  `json:"bytesSent,omitempty"` // bytes sent to upstream (request body)
 	BytesRecv   int64  `json:"bytesRecv,omitempty"` // bytes received from upstream (response body)
 	SSLAction   string `json:"sslAction,omitempty"` // "inspect", "bypass", or empty (non-CONNECT)
+
+	// Normalized authentication-policy SIEM fields (Phase 0 seam, §1.8).
+	// Declared as the durable SIEM contract but NOT populated in Phase 0 —
+	// all are omitempty so wire output stays byte-identical until Phase 1
+	// wires authSource into recordRequest.
+	SchemaVersion      int      `json:"schema_version,omitempty"`        // event schema version
+	AuthSource         string   `json:"auth_source,omitempty"`           // categorical: idp|local|oidc:x|saml:x|exempt|unauth
+	AuthPolicyRuleID   string   `json:"auth_policy_rule_id,omitempty"`   // ULID of matched Stage-1 rule
+	AuthPolicyRuleName string   `json:"auth_policy_rule_name,omitempty"` // display name of matched Stage-1 rule
+	AccessRuleID       string   `json:"access_rule_id,omitempty"`        // ULID of matched Stage-2 rule
+	SubjectMatchTypes  []string `json:"subject_match_types,omitempty"`   // which selector dimensions matched
 }
 
 func levelForStatus(status string) string {

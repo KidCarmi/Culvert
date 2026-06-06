@@ -125,6 +125,11 @@ func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriorit
 			return fmt.Errorf("invalid schedule timezone: %s", strings.ReplaceAll(rule.Schedule.Timezone, "\n", ""))
 		}
 	}
+	// Validate the typed subject selector if present. A nil selector (every
+	// existing rule) is valid; an unknown predicate type fails closed.
+	if err := validateSubjectMatch(rule.SubjectMatch); err != nil {
+		return err
+	}
 	return nil
 }
 
