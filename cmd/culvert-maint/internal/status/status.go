@@ -103,7 +103,36 @@ func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 			break
 		}
 	}
+
+	// P1.1: best-effort running-image digest capture. Only attempted when
+	// the proxy is actually running — there is nothing to capture
+	// otherwise, and the guard keeps the common down-stack path free of
+	// extra docker calls. Reuses the already-allowlisted, read-only
+	// CaptureRunningProxyImage (#357): no new privileged command, no
+	// sudoers change, digest-only, no release/channel/version awareness.
+	// Any failure is swallowed — the digest is an optional enrichment, so
+	// it must never set compose_error or change the 200 response.
+	if st.ComposeStackUp {
+		st.RunningImage = p.captureRunningImage(ctx)
+	}
 	return st, nil
+}
+
+// captureRunningImage returns the digest-only identity of the running
+// proxy image, or nil on ANY failure (best-effort — P1.1). The runner
+// already bounds each underlying docker command with its own per-command
+// timeout (SIGTERM→SIGKILL), so a hung inspect cannot stall status
+// indefinitely; a failure here simply yields no digest. Only content
+// digests are surfaced — never the container id or any image metadata.
+func (p *Provider) captureRunningImage(ctx context.Context) *server.RunningImage {
+	ri, err := p.runner.CaptureRunningProxyImage(ctx)
+	if err != nil || ri == nil {
+		return nil
+	}
+	return &server.RunningImage{
+		ImageID:     ri.RunningImageID,
+		RepoDigests: ri.RepoDigests,
+	}
 }
 
 // parseComposePS parses `docker compose ps --format json` output.

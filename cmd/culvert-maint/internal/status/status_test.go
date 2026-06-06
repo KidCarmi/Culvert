@@ -276,6 +276,228 @@ func TestSnapshot_MixedValidAndJunkIsTolerated(t *testing.T) {
 	}
 }
 
+// ─── P1.1: best-effort running-image digest capture ─────────────────
+
+const (
+	testProxyPS = `{"Service":"clamav","State":"running","ID":"111111111111"}` + "\n" +
+		`{"Service":"proxy","State":"running","ID":"abcdef012345"}`
+	testProxyImageID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	testProxyRepoRef = "ghcr.io/kidcarmi/culvert@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
+
+// captureFakeBin builds an argv-aware fake docker: the three-step
+// CaptureRunningProxyImage chain (compose ps → container inspect →
+// image inspect) each gets its own canned stdout, supplied via env
+// (PS_OUT / CONTAINER_OUT / IMAGE_OUT). FAIL_CONTAINS makes any command
+// whose argv contains the substring exit non-zero; SLEEP_MS sleeps on the
+// container-inspect step to exercise the per-command timeout.
+func captureFakeBin(t *testing.T) string {
+	t.Helper()
+	src := `package main
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+func main() {
+	joined := strings.Join(os.Args, " ")
+	if fc := os.Getenv("FAIL_CONTAINS"); fc != "" && strings.Contains(joined, fc) {
+		fmt.Fprint(os.Stderr, "simulated failure")
+		os.Exit(1)
+	}
+	if ms := os.Getenv("SLEEP_MS"); ms != "" && strings.Contains(joined, "{{json .Image}}") {
+		if n, err := strconv.Atoi(ms); err == nil {
+			time.Sleep(time.Duration(n) * time.Millisecond)
+		}
+	}
+	switch {
+	case strings.Contains(joined, "{{json .Image}}"):
+		fmt.Print(os.Getenv("CONTAINER_OUT"))
+	case strings.Contains(joined, "image") && strings.Contains(joined, "inspect"):
+		fmt.Print(os.Getenv("IMAGE_OUT"))
+	case strings.Contains(joined, "ps"):
+		fmt.Print(os.Getenv("PS_OUT"))
+	}
+}
+`
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0o600); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	bin := filepath.Join(dir, "fakedocker")
+	out, err := exec.CommandContext(t.Context(), "go", "build", "-o", bin, srcPath).CombinedOutput() //nolint:gosec // test helper build
+	if err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// newCaptureProvider wires a Provider whose runner forwards the
+// capture-fake env vars and uses the given per-command StageTimeout.
+func newCaptureProvider(t *testing.T, bin string, stage time.Duration) *Provider {
+	t.Helper()
+	cfg := &config.Config{
+		ComposeProjectDir: t.TempDir(),
+		ComposeFile:       "docker-compose.yml",
+		PrivilegeMode:     config.PrivilegeSudoers,
+	}
+	r, err := runner.New(runner.Options{
+		ComposeProjectDir: cfg.ComposeProjectDir,
+		ComposeFile:       cfg.ComposeFile,
+		StageTimeout:      stage,
+		// The container/image inspect templates pass an explicit
+		// CULVERT_BACKUP_PASSPHRASE="" overlay (suppress); its name must be
+		// allowlisted or runWithEnv rejects the call.
+		EnvAllow: []string{
+			"PS_OUT", "CONTAINER_OUT", "IMAGE_OUT", "FAIL_CONTAINS", "SLEEP_MS",
+			runner.EnvCulvertBackupPassphrase,
+		},
+		DockerBinary: bin,
+		SudoBinary:   bin,
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	p, err := New(cfg, ops.NewManager(nil), r)
+	if err != nil {
+		t.Fatalf("status.New: %v", err)
+	}
+	return p
+}
+
+// Happy path: proxy running + a clean capture chain → running_image is
+// populated with the config digest and the registry repo digest.
+func TestSnapshot_RunningImageCapturedWhenProxyUp(t *testing.T) {
+	bin := captureFakeBin(t)
+	t.Setenv("PS_OUT", testProxyPS)
+	t.Setenv("CONTAINER_OUT", `"`+testProxyImageID+`"`+"\n")
+	t.Setenv("IMAGE_OUT", `[{"Id":"`+testProxyImageID+`","RepoDigests":["`+testProxyRepoRef+`"]}]`)
+	p := newCaptureProvider(t, bin, 5*time.Second)
+
+	st, err := p.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !st.ComposeStackUp {
+		t.Fatalf("precondition: compose_stack_up should be true")
+	}
+	if st.RunningImage == nil {
+		t.Fatalf("running_image should be populated when proxy is up and capture succeeds")
+	}
+	if st.RunningImage.ImageID != testProxyImageID {
+		t.Errorf("image_id: got %q want %q", st.RunningImage.ImageID, testProxyImageID)
+	}
+	if len(st.RunningImage.RepoDigests) != 1 || st.RunningImage.RepoDigests[0] != testProxyRepoRef {
+		t.Errorf("repo_digests: got %v want [%s]", st.RunningImage.RepoDigests, testProxyRepoRef)
+	}
+}
+
+// Best-effort: proxy is up but the capture chain fails (container inspect
+// errors). running_image must be absent, the response must still succeed,
+// and the failure must NOT bleed into compose_error or compose_stack_up.
+func TestSnapshot_RunningImageAbsentOnCaptureFailure(t *testing.T) {
+	bin := captureFakeBin(t)
+	t.Setenv("PS_OUT", testProxyPS)
+	t.Setenv("FAIL_CONTAINS", "{{json .Image}}") // container inspect exits non-zero
+	p := newCaptureProvider(t, bin, 5*time.Second)
+
+	st, err := p.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot must not error on capture failure (best-effort): %v", err)
+	}
+	if !st.ComposeStackUp {
+		t.Errorf("compose_stack_up should remain true — capture failure must not affect it")
+	}
+	if st.ComposeError != "" {
+		t.Errorf("capture failure must not set compose_error; got %q", st.ComposeError)
+	}
+	if st.RunningImage != nil {
+		t.Errorf("running_image must be nil when capture fails; got %+v", st.RunningImage)
+	}
+}
+
+// Stack down: the proxy is not running, so capture is skipped entirely
+// (no running_image, no extra docker work needed for correctness).
+func TestSnapshot_RunningImageSkippedWhenStackDown(t *testing.T) {
+	bin := captureFakeBin(t)
+	t.Setenv("PS_OUT", `{"Service":"proxy","State":"exited","ID":"abcdef012345"}`)
+	// CONTAINER_OUT / IMAGE_OUT deliberately unset — they must never be
+	// consulted when the stack is down.
+	p := newCaptureProvider(t, bin, 5*time.Second)
+
+	st, err := p.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if st.ComposeStackUp {
+		t.Fatalf("precondition: compose_stack_up should be false")
+	}
+	if st.RunningImage != nil {
+		t.Errorf("running_image must be nil when the stack is down; got %+v", st.RunningImage)
+	}
+}
+
+// A locally-built image with no RepoDigests is a legitimate state: the
+// capture succeeds, so running_image is present (config digest set) with
+// an empty/omitted repo_digests set. The CP reads this as Current=custom.
+func TestSnapshot_RunningImageEmptyRepoDigests(t *testing.T) {
+	bin := captureFakeBin(t)
+	t.Setenv("PS_OUT", testProxyPS)
+	t.Setenv("CONTAINER_OUT", `"`+testProxyImageID+`"`+"\n")
+	t.Setenv("IMAGE_OUT", `[{"Id":"`+testProxyImageID+`","RepoDigests":[]}]`)
+	p := newCaptureProvider(t, bin, 5*time.Second)
+
+	st, err := p.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if st.RunningImage == nil {
+		t.Fatalf("running_image should be present even with no repo digests")
+	}
+	if st.RunningImage.ImageID != testProxyImageID {
+		t.Errorf("image_id: got %q want %q", st.RunningImage.ImageID, testProxyImageID)
+	}
+	if len(st.RunningImage.RepoDigests) != 0 {
+		t.Errorf("repo_digests should be empty for a locally-built image; got %v", st.RunningImage.RepoDigests)
+	}
+}
+
+// Best-effort timeout: a hung inspect is bounded by the runner's
+// per-command StageTimeout, so capture fails and status still returns
+// promptly with running_image absent (and no compose_error).
+func TestSnapshot_RunningImageTimeoutDoesNotStallStatus(t *testing.T) {
+	bin := captureFakeBin(t)
+	t.Setenv("PS_OUT", testProxyPS)
+	t.Setenv("CONTAINER_OUT", `"`+testProxyImageID+`"`+"\n")
+	t.Setenv("IMAGE_OUT", `[{"Id":"`+testProxyImageID+`","RepoDigests":["`+testProxyRepoRef+`"]}]`)
+	t.Setenv("SLEEP_MS", "2000") // container inspect sleeps well past StageTimeout
+	p := newCaptureProvider(t, bin, 150*time.Millisecond)
+
+	done := make(chan server.Status, 1)
+	go func() {
+		st, err := p.Snapshot(context.Background())
+		if err != nil {
+			t.Errorf("Snapshot must not error on capture timeout: %v", err)
+		}
+		done <- st
+	}()
+
+	select {
+	case st := <-done:
+		if st.ComposeError != "" {
+			t.Errorf("capture timeout must not set compose_error; got %q", st.ComposeError)
+		}
+		if st.RunningImage != nil {
+			t.Errorf("running_image must be nil when capture times out; got %+v", st.RunningImage)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Snapshot did not return promptly — best-effort capture must not stall status")
+	}
+}
+
 func TestNew_FailsClosedOnNilDeps(t *testing.T) {
 	if _, err := New(nil, nil, nil); err == nil {
 		t.Error("expected error on nil deps")
