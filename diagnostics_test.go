@@ -303,6 +303,29 @@ func TestSAMLBaseURLPostureOKForExternalHTTPS(t *testing.T) {
 	}
 }
 
+func TestSAMLBaseURLPostureFailsOnNonBaseComponents(t *testing.T) {
+	withEnabledSAMLDiagnosticProfile(t)
+
+	cases := map[string]string{
+		"query":    "https://proxy.example.com?x=1",
+		"fragment": "https://proxy.example.com#frag",
+		"userinfo": "https://user:pass@proxy.example.com",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			SetProxyBaseURL(raw)
+
+			found := checkSAMLBaseURLPosture()
+			if found.Status != diagFail {
+				t.Fatalf("saml_base_url status = %q for %q, want fail", found.Status, raw)
+			}
+			if !strings.Contains(found.Message, "query, fragment, or userinfo") {
+				t.Fatalf("message = %q, want non-base component guidance", found.Message)
+			}
+		})
+	}
+}
+
 func TestApiDiagnostics_RoleGated(t *testing.T) {
 	// Insufficient role → 403.
 	r := noRoleCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))

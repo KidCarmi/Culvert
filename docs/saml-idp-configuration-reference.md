@@ -76,7 +76,7 @@ The Diagnostics page (`/api/diagnostics`, or **Infrastructure -> Diagnostics**) 
 
 | Check | Meaning |
 |---|---|
-| `saml_base_url` | Warns when an enabled SAML IdP has no explicit `proxy.base_url`, uses localhost, or uses non-HTTPS; fails when the configured value is not an absolute URL |
+| `saml_base_url` | Warns when an enabled SAML IdP has no explicit `proxy.base_url`, uses localhost, or uses non-HTTPS; fails when the configured value is not an absolute URL or carries a query, fragment, or userinfo component |
 | `saml_state_posture` | Warns when SAML is enabled on a clustered/load-balanced node because RelayState is node-local |
 
 Reverse proxy checklist:

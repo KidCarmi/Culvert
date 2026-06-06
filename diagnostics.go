@@ -390,6 +390,19 @@ func checkSAMLBaseURLPosture() OperatorContractCheck {
 			OperatorAction: "Set proxy.base_url to a full external URL such as https://proxy.example.com or https://proxy.example.com/culvert, then update the IdP Entity ID and ACS URL to match.",
 		}
 	}
+	// proxy.base_url must be a clean base origin (+optional path prefix) only.
+	// OIDC callbacks are built by string concatenation and SAML metadata/ACS
+	// construction drops RawQuery/Fragment, so a query, fragment, or userinfo
+	// component would silently produce wrong/inconsistent Entity ID and ACS
+	// values. Reject them as malformed rather than reporting a clean bill.
+	if hasNonBaseURLComponents(u) {
+		return OperatorContractCheck{
+			Code:           "saml_base_url",
+			Status:         diagFail,
+			Message:        "SAML IdP enabled but proxy.base_url contains query, fragment, or userinfo components",
+			OperatorAction: "Set proxy.base_url to a bare external origin (optionally with a path prefix) such as https://proxy.example.com or https://proxy.example.com/culvert. Remove any \"?query\", \"#fragment\", or \"user:pass@\" parts, then update the IdP Entity ID and ACS URL to match.",
+		}
+	}
 	if isLocalhostBaseURL(u) {
 		return OperatorContractCheck{
 			Code:           "saml_base_url",
@@ -428,6 +441,14 @@ func hasEnabledSAMLProfile() bool {
 func isLocalhostBaseURL(u *url.URL) bool {
 	host := strings.ToLower(u.Hostname())
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// hasNonBaseURLComponents reports whether u carries any component that a usable
+// SAML/OIDC base URL must not have: a query string, a fragment, or userinfo.
+// These are dropped or string-concatenated downstream, so their presence makes
+// the registered callback/EntityID values wrong or inconsistent.
+func hasNonBaseURLComponents(u *url.URL) bool {
+	return u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil
 }
 
 // checkUnauthMode is a visible WARN when the proxy is in unauthenticated
