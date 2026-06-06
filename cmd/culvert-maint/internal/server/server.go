@@ -56,6 +56,7 @@ type Status struct {
 	ComposeStackUp     bool                   `json:"compose_stack_up"`
 	ComposeServices    []ServiceStatus        `json:"compose_services"`
 	ComposeError       string                 `json:"compose_error,omitempty"`
+	RunningImage       *RunningImage          `json:"running_image,omitempty"`
 	LockHeldBy         *ops.Op                `json:"lock_held_by,omitempty"`
 	LastOperationKind  string                 `json:"last_operation_kind,omitempty"`
 	LastOperationOpID  string                 `json:"last_operation_op_id,omitempty"`
@@ -68,6 +69,33 @@ type ServiceStatus struct {
 	Name  string `json:"name"`
 	State string `json:"state"`
 	Image string `json:"image,omitempty"`
+}
+
+// RunningImage is the digest-only identity of the image the `proxy`
+// container is ACTUALLY running, captured best-effort for GET /v1/status
+// (P1.1). It is OPTIONAL: absent (the field is nil/omitted) whenever the
+// stack is down or the best-effort capture did not complete. Its absence
+// is never an error and never changes the status response code — the
+// digest is an enrichment, never a status precondition.
+//
+// Digest-only and release-agnostic by design: it carries content digests
+// only, never tags, release ids, versions, or any image metadata
+// (Config.Env, labels). The Control Plane uses RepoDigests to derive
+// "Current"/"already current" by reverse-mapping the running digest to a
+// release; the agent itself stays release-unaware (D1.6d §3.1).
+type RunningImage struct {
+	// ImageID is the running container's image *config* digest
+	// (sha256:<64hex>) — bound to the running container, immune to a
+	// moving tag. Authoritative for "what is actually running" locally,
+	// but NOT directly comparable to a registry/manifest-list digest.
+	ImageID string `json:"image_id,omitempty"`
+	// RepoDigests are the running image's registry references
+	// (repo@sha256:<64hex>). May be empty for a locally-built image that
+	// was never pushed/pulled — a legitimate state, not a failure. This
+	// is the field the CP reverse-maps to a release; note a single-arch
+	// repo digest can differ from a multi-arch manifest-LIST digest, a
+	// reconciliation the CP owns.
+	RepoDigests []string `json:"repo_digests,omitempty"`
 }
 
 // Options configures Server.
