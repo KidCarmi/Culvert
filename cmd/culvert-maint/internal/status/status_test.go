@@ -355,8 +355,8 @@ func newCaptureProvider(t *testing.T, bin string, stage time.Duration) *Provider
 			"PS_OUT", "CONTAINER_OUT", "IMAGE_OUT", "FAIL_CONTAINS", "SLEEP_MS",
 			runner.EnvCulvertBackupPassphrase,
 		},
-		DockerBinary:      bin,
-		SudoBinary:        bin,
+		DockerBinary: bin,
+		SudoBinary:   bin,
 	})
 	if err != nil {
 		t.Fatalf("runner: %v", err)
