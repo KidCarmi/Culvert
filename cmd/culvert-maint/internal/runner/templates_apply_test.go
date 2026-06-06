@@ -110,15 +110,17 @@ func TestPinTemplates_Shape(t *testing.T) {
 		if strings.Contains(line, "*") {
 			t.Errorf("template %q sudoers line must contain NO wildcard (repo is a literal, digest is enumerated): %q", id, line)
 		}
-		if !strings.Contains(line, "{proxy_repo}@sha256:") {
-			t.Errorf("template %q sudoers line must bind the {proxy_repo} literal + @sha256: digest: %q", id, line)
+		// Colons are escaped (`\:`) for sudoers grammar; the repo literal +
+		// digest are bound.
+		if !strings.Contains(line, `{proxy_repo}@sha256\:`) {
+			t.Errorf("template %q sudoers line must bind the {proxy_repo} literal + escaped @sha256\\: digest: %q", id, line)
 		}
 		if n := strings.Count(line, "[0-9a-f]"); n != pinnedDigestHexLen {
 			t.Errorf("template %q digest must be exactly %d [0-9a-f] classes; got %d", id, pinnedDigestHexLen, n)
 		}
 	}
 	tag := templateByID(TemplateImageTagPinned)
-	if !strings.HasSuffix(tag.SudoersLines[0], " culvert/proxy:pinned") {
-		t.Errorf("tag sudoers line must end with the fixed destination culvert/proxy:pinned: %q", tag.SudoersLines[0])
+	if !strings.HasSuffix(tag.SudoersLines[0], ` culvert/proxy\:pinned`) {
+		t.Errorf("tag sudoers line must end with the fixed (colon-escaped) destination culvert/proxy\\:pinned: %q", tag.SudoersLines[0])
 	}
 }

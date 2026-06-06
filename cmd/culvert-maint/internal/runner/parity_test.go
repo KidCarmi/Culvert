@@ -185,9 +185,10 @@ func TestSudoers_ImagePullTagAreRepoBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sudoers: %v", err)
 	}
-	digest := "{proxy_repo}@sha256:" + strings.Repeat("[0-9a-f]", 64)
+	// Colons are escaped (`\:`) for sudoers grammar.
+	digest := `{proxy_repo}@sha256\:` + strings.Repeat("[0-9a-f]", 64)
 	wantPull := "/usr/bin/docker pull " + digest
-	wantTag := "/usr/bin/docker tag " + digest + " culvert/proxy:pinned"
+	wantTag := "/usr/bin/docker tag " + digest + ` culvert/proxy\:pinned`
 	content := normalize(string(data))
 	if !strings.Contains(content, normalize(wantPull)) {
 		t.Errorf("sudoers missing repo-bound pull entry:\n  %s", wantPull)

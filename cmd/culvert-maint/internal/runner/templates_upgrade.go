@@ -238,18 +238,25 @@ func containerInspectSudoersLines() []string {
 // boundary itself bounds the image to "<proxy_repo> @ some sha256 digest",
 // retagged only to the fixed `culvert/proxy:pinned` destination.
 func composeApplyTemplates() []Template {
-	digest := "{proxy_repo}@sha256:" + strings.Repeat("[0-9a-f]", pinnedDigestHexLen)
+	// Sudoers requires a literal colon in a command spec to be escaped
+	// (`\:`); an unescaped `:` is a syntax error to visudo. The escaping
+	// lives ONLY in this documentation-of-record (and the rendered file the
+	// parity test matches) — the runtime argv uses the plain colon (the real
+	// `repo@sha256:<hex>` ref and pinnedProxyTag), which sudo matches against
+	// the escaped pattern.
+	sudoersDigest := "{proxy_repo}@sha256\\:" + strings.Repeat("[0-9a-f]", pinnedDigestHexLen)
+	sudoersPinnedTag := strings.Replace(pinnedProxyTag, ":", "\\:", 1) // culvert/proxy\:pinned
 	return []Template{
 		{
 			ID:            TemplateImagePullDigest,
 			BaseArgv:      []string{"docker", "pull"},
-			SudoersLines:  []string{"/usr/bin/docker pull " + digest},
+			SudoersLines:  []string{"/usr/bin/docker pull " + sudoersDigest},
 			StateChanging: true,
 		},
 		{
 			ID:            TemplateImageTagPinned,
 			BaseArgv:      []string{"docker", "tag"},
-			SudoersLines:  []string{"/usr/bin/docker tag " + digest + " " + pinnedProxyTag},
+			SudoersLines:  []string{"/usr/bin/docker tag " + sudoersDigest + " " + sudoersPinnedTag},
 			StateChanging: true,
 		},
 	}
