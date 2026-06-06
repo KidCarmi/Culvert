@@ -491,6 +491,18 @@ func TestProxyAuthPolicyE2E_SessionAndTokenProviderGroups(t *testing.T) {
 		}
 	})
 
+	t.Run("browser session wrong group default deny", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := makeRequest(backend.URL+"/", nil)
+		r.AddCookie(sessionCookieForIdentity(t, financeID))
+
+		handleRequest(w, r)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("wrong-group session request status = %d, want 403", w.Code)
+		}
+	})
+
 	t.Run("wrong group default deny", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := makeRequest(backend.URL+"/", map[string]string{
