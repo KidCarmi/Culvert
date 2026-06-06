@@ -143,6 +143,7 @@ func buildOperatorContract() OperatorContract {
 		checkSessionSecret(),
 		checkCDR(),
 		checkClusterPosture(),
+		checkDPLastGoodConfigSnapshot(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
 		checkUnauthMode(),
@@ -158,6 +159,54 @@ func buildOperatorContract() OperatorContract {
 		Verdict:     rollUpVerdict(checks),
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Checks:      checks,
+	}
+}
+
+func checkDPLastGoodConfigSnapshot() OperatorContractCheck {
+	if !clusterRoleIsDP.Load() {
+		return OperatorContractCheck{
+			Code:    "dp_last_known_good_config",
+			Status:  diagOK,
+			Message: "not running as a data plane",
+		}
+	}
+	if activeDPClient.Load() == nil {
+		return OperatorContractCheck{
+			Code:           "dp_last_known_good_config",
+			Status:         diagWarn,
+			Message:        "data plane client is not active",
+			OperatorAction: "Check data plane startup logs and enrollment configuration.",
+		}
+	}
+	st, _ := dpLastGoodConfigSnapshotState.Load().(dpLastGoodConfigSnapshotStatus)
+	if !dpControlPlanePollFailing.Load() {
+		if st.SaveError != "" {
+			return OperatorContractCheck{
+				Code:           "dp_last_known_good_config",
+				Status:         diagWarn,
+				Message:        "control plane reachable, but last-known-good snapshot persistence failed",
+				OperatorAction: "Fix data directory permissions so this DP can preserve its last successfully applied config for CP outages.",
+			}
+		}
+		return OperatorContractCheck{
+			Code:    "dp_last_known_good_config",
+			Status:  diagOK,
+			Message: "control plane polling healthy",
+		}
+	}
+	if st.Loaded || st.SavedVersion > 0 {
+		return OperatorContractCheck{
+			Code:           "dp_last_known_good_config",
+			Status:         diagWarn,
+			Message:        "control plane unreachable; serving last-known-good local config",
+			OperatorAction: "Restore control plane connectivity. This DP can continue serving with its cached config, but new policy/auth changes will not arrive until CP polling recovers.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:           "dp_last_known_good_config",
+		Status:         diagFail,
+		Message:        "control plane unreachable and no last-known-good local config is available",
+		OperatorAction: "Restore control plane connectivity or re-enroll/restart this DP after it has successfully received a config snapshot.",
 	}
 }
 

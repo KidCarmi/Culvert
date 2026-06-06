@@ -211,6 +211,18 @@ type ConfigStore struct {
 
 var globalConfigStore = &ConfigStore{}
 
+const dpLastGoodConfigSnapshotFile = "dp_last_config_snapshot.json"
+
+type dpLastGoodConfigSnapshotStatus struct {
+	Loaded       bool
+	LoadError    string
+	SavedVersion int64
+	SaveError    string
+}
+
+var dpLastGoodConfigSnapshotState atomic.Value // dpLastGoodConfigSnapshotStatus
+var dpControlPlanePollFailing atomic.Bool
+
 // Update atomically replaces the snapshot and notifies all subscribers.
 func (s *ConfigStore) Update(snap ConfigSnapshot) {
 	s.mu.Lock()
@@ -1226,6 +1238,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		dpPollHist.Observe(time.Since(pollStart).Seconds())
 	}
 	if err != nil {
+		dpControlPlanePollFailing.Store(true)
 		c.failCount++
 		logger.Printf("DataPlane: GetConfig error: %v", err)
 		// Only attempt failover after 3 consecutive failures with a peer to
@@ -1242,12 +1255,14 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		// Retry immediately on the new connection; on success fall through to apply.
 		raw, err = c.call(ctx, methodGetConfig, json.RawMessage("{}"))
 		if err != nil {
+			dpControlPlanePollFailing.Store(true)
 			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
 			c.backoff(ctx)
 			return
 		}
 	}
 	c.resetBackoff()
+	dpControlPlanePollFailing.Store(false)
 	var snap ConfigSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		logger.Printf("DataPlane: parse config error: %v", err)
@@ -1265,6 +1280,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	if snap.Version <= c.lastVersion {
 		return // nothing changed
 	}
+	snapForDisk := snap
 	applyExternalAuthSnapshotSettings(snap)
 	if err := syncSnapshotIdPProfiles(snap); err != nil {
 		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
@@ -1272,6 +1288,8 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	}
 	snap.IdPProfiles = nil
 	applyConfigSnapshot(snap)
+	persistDPLastGoodConfigSnapshot(snapForDisk)
+	dpControlPlanePollFailing.Store(false)
 	c.lastVersion = snap.Version
 }
 
@@ -1694,6 +1712,82 @@ func syncSnapshotIdPProfiles(snap ConfigSnapshot) error {
 	}
 	logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
 	return nil
+}
+
+func dpLastGoodConfigSnapshotPath() string {
+	return filepath.Join(dataDir, dpLastGoodConfigSnapshotFile)
+}
+
+func loadDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
+	path := dpLastGoodConfigSnapshotPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{LoadError: err.Error()})
+		return ConfigSnapshot{}, err
+	}
+	var snap ConfigSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{LoadError: err.Error()})
+		return ConfigSnapshot{}, err
+	}
+	if err := validateConfigSnapshot(snap); err != nil {
+		dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{LoadError: err.Error()})
+		return ConfigSnapshot{}, err
+	}
+	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
+	return snap, nil
+}
+
+func applyDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
+	snap, err := loadDPLastGoodConfigSnapshot()
+	if err != nil {
+		return ConfigSnapshot{}, err
+	}
+	applyConfigSnapshot(snap)
+	logger.Printf("DataPlane: applied last-known-good config snapshot v%d from %s", snap.Version, dpLastGoodConfigSnapshotPath())
+	return snap, nil
+}
+
+func mergeCPAddresses(primary string, peers []string) string {
+	addrs := make([]string, 0, 1+len(peers))
+	seen := make(map[string]bool, 1+len(peers))
+	for _, addr := range append([]string{primary}, peers...) {
+		addr = strings.TrimSpace(addr)
+		if addr == "" || seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		addrs = append(addrs, addr)
+	}
+	return strings.Join(addrs, ",")
+}
+
+func persistDPLastGoodConfigSnapshot(snap ConfigSnapshot) {
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		setDPLastGoodConfigSnapshotSaveError(snap.Version, err)
+		logger.Printf("DataPlane: last-known-good config marshal failed: %v", err)
+		return
+	}
+	path := dpLastGoodConfigSnapshotPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		setDPLastGoodConfigSnapshotSaveError(snap.Version, err)
+		logger.Printf("DataPlane: last-known-good config mkdir failed: %v", err)
+		return
+	}
+	if err := atomicWriteFile(path, data, 0o600); err != nil {
+		setDPLastGoodConfigSnapshotSaveError(snap.Version, err)
+		logger.Printf("DataPlane: last-known-good config persist failed: %v", err)
+		return
+	}
+	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
+}
+
+func setDPLastGoodConfigSnapshotSaveError(version int64, err error) {
+	st, _ := dpLastGoodConfigSnapshotState.Load().(dpLastGoodConfigSnapshotStatus)
+	st.SavedVersion = version
+	st.SaveError = err.Error()
+	dpLastGoodConfigSnapshotState.Store(st)
 }
 
 // CurrentConfigSnapshot builds a ConfigSnapshot from the current live state.
