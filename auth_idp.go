@@ -299,8 +299,86 @@ func (r *IdPRegistry) Get(id string) *IdPProfile {
 func (r *IdPRegistry) All() []*IdPProfile {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]*IdPProfile, len(r.profiles))
-	copy(out, r.profiles)
+	return cloneIdPProfiles(r.profiles)
+}
+
+// ReplaceAll atomically swaps the registry to match profiles. Enabled
+// providers are compiled before the swap so callers never observe a
+// half-applied IdP snapshot.
+func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
+	nextProfiles := cloneIdPProfiles(profiles)
+	nextLive := make(map[string]IdentityProvider)
+	for _, p := range nextProfiles {
+		if err := validateIdPProfile(p); err != nil {
+			return err
+		}
+		if !p.Enabled {
+			continue
+		}
+		prov, err := compileIdPProfile(p)
+		if err != nil {
+			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
+		}
+		nextLive[p.ID] = prov
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.profiles = nextProfiles
+	r.live = nextLive
+	return r.save()
+}
+
+func validateIdPProfile(p *IdPProfile) error {
+	if p == nil {
+		return fmt.Errorf("idp: profile is required")
+	}
+	if p.ID == "" {
+		return fmt.Errorf("idp: id is required")
+	}
+	if p.Name == "" {
+		return fmt.Errorf("idp: name is required")
+	}
+	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML {
+		return fmt.Errorf("idp: type must be 'oidc' or 'saml'")
+	}
+	if p.Type == IdPTypeOIDC {
+		if p.OIDC == nil {
+			return fmt.Errorf("idp: oidc config is required")
+		}
+		if err := validateExternalURL(p.OIDC.Issuer); err != nil {
+			return fmt.Errorf("idp oidc issuer: %w", err)
+		}
+	}
+	if p.Type == IdPTypeSAML {
+		if err := validateSAMLProfileConfig(p.SAML); err != nil {
+			return fmt.Errorf("idp saml: %w", err)
+		}
+	}
+	return nil
+}
+
+func cloneIdPProfiles(profiles []*IdPProfile) []*IdPProfile {
+	out := make([]*IdPProfile, 0, len(profiles))
+	for _, p := range profiles {
+		if p == nil {
+			out = append(out, nil)
+			continue
+		}
+		cp := *p
+		cp.EmailDomains = append([]string(nil), p.EmailDomains...)
+		cp.KnownGroups = append([]string(nil), p.KnownGroups...)
+		if p.OIDC != nil {
+			oidc := *p.OIDC
+			oidc.Scopes = append([]string(nil), p.OIDC.Scopes...)
+			cp.OIDC = &oidc
+		}
+		if p.SAML != nil {
+			saml := *p.SAML
+			cp.SAML = &saml
+		}
+		out = append(out, &cp)
+	}
 	return out
 }
 
