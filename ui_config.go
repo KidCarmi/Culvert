@@ -15,7 +15,6 @@ import (
 	"time"
 )
 
-
 // GET /api/audit — return configuration-change audit entries (newest first).
 // Supports pagination via ?offset=N&limit=M (default: offset=0, limit=500).
 // Supports date filtering via ?from=UNIX_MS&to=UNIX_MS.
@@ -570,7 +569,7 @@ func apiSessionSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		sessionSecret = key
 		auditEvent(r, "settings.session_secret", "rotated", "shared session key updated via GUI")
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -602,7 +601,7 @@ func apiSessionTimeout(w http.ResponseWriter, r *http.Request) {
 		}
 		SetSessionTTL(time.Duration(body.Hours) * time.Hour)
 		auditEvent(r, "settings.session_timeout", fmt.Sprintf("%dh", body.Hours), "")
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "hours": body.Hours})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -637,7 +636,7 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		auditEvent(r, "settings.ui_allow_ips", fmt.Sprintf("%d entries", len(body.IPs)), strings.Join(body.IPs, ", "))
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "ips": ListUIAllowedCIDRs()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -689,7 +688,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			syslogConfigured = ""
 			auditEvent(r, "settings.syslog", "disabled", "")
-   adminSettingsSave()
+			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
 			return
 		}
@@ -699,7 +698,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		syslogConfigured = body.Addr
 		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -785,11 +784,11 @@ func apiUnauthMode(w http.ResponseWriter, r *http.Request) {
 	cfg.SetUnauthMode(body.Enabled)
 	if body.Enabled {
 		auditEvent(r, "settings.update", "unauthMode", "enabled — proxy accepts unauthenticated traffic; policy rules govern access")
-  adminSettingsSave()
+		adminSettingsSave()
 		logger.Printf("UI: unauth mode enabled — proxy accepts traffic without credentials")
 	} else {
 		auditEvent(r, "settings.update", "unauthMode", "disabled — proxy requires credentials")
-  adminSettingsSave()
+		adminSettingsSave()
 		logger.Printf("UI: unauth mode disabled — proxy requires credentials")
 	}
 	jsonOK(w, map[string]any{"ok": true, "unauthMode": body.Enabled})
@@ -822,7 +821,7 @@ func apiLogLevel(w http.ResponseWriter, r *http.Request) {
 		SetLogLevel(ParseLogLevel(upper))
 		logger.Printf("UI: log level changed to %s", strings.ReplaceAll(upper, "\n", ""))
 		auditEvent(r, "settings.log_level", upper, "")
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]string{"level": upper})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -837,18 +836,18 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"base_url":                  proxyExternalBaseURL,
-			"ui_sans":                   uiExtraSANs,
-			"trust_forwarded_headers":   trustForwardedHeaders,
+			"base_url":                proxyExternalBaseURL,
+			"ui_sans":                 uiExtraSANs,
+			"trust_forwarded_headers": trustForwardedHeaders,
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		var body struct {
-			BaseURL              string   `json:"base_url"`
-			UISANs               []string `json:"ui_sans"`
-			TrustForwardedHeaders bool    `json:"trust_forwarded_headers"`
+			BaseURL               string   `json:"base_url"`
+			UISANs                []string `json:"ui_sans"`
+			TrustForwardedHeaders bool     `json:"trust_forwarded_headers"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -867,12 +866,10 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		auditEvent(r, "settings.network", "updated", fmt.Sprintf("base_url=%s trust_fwd=%s sans=%v",
 			strings.ReplaceAll(body.BaseURL, "\n", ""), safeTrustFwd, safeSANs))
 		adminSettingsSave()
-		// Intentionally NOT calling saveConfigVersion: network settings
-		// are operational, per-node, and not HA-replicated
-		// (proxyExternalBaseURL / uiExtraSANs / trustForwardedHeaders
-		// are not in ConfigSnapshot, captureConfigBackup, or
-		// applyConfigBackup). Automatic rollback would be genuinely
-		// dangerous in ways the rollback API doesn't communicate:
+		// Intentionally NOT calling saveConfigVersion: these operational
+		// settings are not in the rollback capture/apply surface.
+		// Automatic rollback would be genuinely dangerous in ways the
+		// rollback API doesn't communicate:
 		//   - trustForwardedHeaders flip-back can re-enable a
 		//     previously-disabled header-spoofing attack vector;
 		//   - uiExtraSANs changes trigger UI cert regeneration —
@@ -886,6 +883,8 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		// re-POST with the old values. Category D' (direction A)
 		// finding from roadmap/CONFIG-VERSIONING-TRIAGE.md +
 		// roadmap/CATEGORY-D-PRIME-DIRECTION.md §4.
+		// Keep connected DPs aligned for SAML/OIDC callback generation.
+		publishCurrentConfigSnapshot()
 		jsonOK(w, map[string]string{"status": "ok"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -936,7 +935,7 @@ func apiMetricsConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		metricsToken = body.Token
 		auditEvent(r, "settings.metrics_token", "updated", "")
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -976,7 +975,7 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 			connLimiter.Enable(body.MaxPerIP)
 		}
 		auditEvent(r, "connlimit.update", fmt.Sprintf("enabled=%v max=%d", connLimiter.enabled.Load(), connLimiter.MaxPerIP()), "")
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "enabled": connLimiter.enabled.Load(), "maxPerIP": connLimiter.MaxPerIP()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1014,7 +1013,7 @@ func apiBlockPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		auditEvent(r, "blockpage.update", "block_page_template", "")
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1133,7 +1132,7 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			globalOTLP.Stop()
 			globalOTLPTraces.Stop()
 			auditEvent(r, "settings.otlp", "disabled", "")
-   adminSettingsSave()
+			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "enabled": false})
 			return
 		}
@@ -1151,7 +1150,7 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 		globalOTLP.Configure(body.Endpoint, headers)
 		globalOTLPTraces.Configure(body.Endpoint, headers)
 		auditEvent(r, "settings.otlp", sanitizeLog(body.Endpoint), "OTLP export enabled (metrics + traces)")
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "enabled": true, "endpoint": body.Endpoint})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

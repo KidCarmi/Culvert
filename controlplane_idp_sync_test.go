@@ -67,7 +67,7 @@ func TestApplyConfigSnapshot_BadIdPProfileDoesNotReplaceWorkingRegistry(t *testi
 		t.Fatalf("seed registry: %v", err)
 	}
 
-	applyConfigSnapshot(ConfigSnapshot{
+	if err := syncSnapshotIdPProfiles(ConfigSnapshot{
 		Version: 2,
 		IdPProfiles: []*IdPProfile{{
 			ID:      "bad-enabled-saml",
@@ -76,12 +76,49 @@ func TestApplyConfigSnapshot_BadIdPProfileDoesNotReplaceWorkingRegistry(t *testi
 			Enabled: true,
 			SAML:    nil,
 		}},
-	})
+	}); err == nil {
+		t.Fatal("syncSnapshotIdPProfiles accepted bad enabled IdP profile")
+	}
 
 	if idpRegistry.Get("bad-enabled-saml") != nil {
 		t.Fatal("bad IdP snapshot replaced registry")
 	}
 	if idpRegistry.Get("working") == nil {
 		t.Fatal("working IdP profile was lost after rejected snapshot")
+	}
+}
+
+func TestPublishCurrentConfigSnapshotIncludesIdPAndAuthBaseURL(t *testing.T) {
+	withIdPSyncGlobals(t)
+	origStore := globalConfigStore
+	globalConfigStore = &ConfigStore{}
+	t.Cleanup(func() {
+		globalConfigStore = origStore
+	})
+
+	SetProxyBaseURL("https://cluster.example.com/proxy/")
+	trustForwardedHeaders = true
+	if err := idpRegistry.Upsert(&IdPProfile{
+		ID:      "cluster-saml",
+		Name:    "Cluster SAML",
+		Type:    IdPTypeSAML,
+		Enabled: false,
+		SAML: &SAMLProfileConfig{
+			MetadataXML: "<EntityDescriptor/>",
+		},
+	}); err != nil {
+		t.Fatalf("seed IdP profile: %v", err)
+	}
+
+	publishCurrentConfigSnapshot()
+	snap := globalConfigStore.Get()
+	if snap.ProxyBaseURL != "https://cluster.example.com/proxy" {
+		t.Fatalf("snapshot ProxyBaseURL = %q, want published external URL", snap.ProxyBaseURL)
+	}
+	if !snap.TrustForwardedHeaders {
+		t.Fatal("snapshot TrustForwardedHeaders = false, want true")
+	}
+	if len(snap.IdPProfiles) != 1 || snap.IdPProfiles[0].ID != "cluster-saml" {
+		t.Fatalf("snapshot IdPProfiles = %+v, want cluster-saml", snap.IdPProfiles)
 	}
 }

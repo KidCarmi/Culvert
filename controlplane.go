@@ -230,6 +230,10 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) {
 	logger.Printf("ControlPlane: config v%d published", snap.Version)
 }
 
+func publishCurrentConfigSnapshot() {
+	globalConfigStore.Update(CurrentConfigSnapshot())
+}
+
 // Get returns the current snapshot.
 func (s *ConfigStore) Get() ConfigSnapshot {
 	s.mu.RLock()
@@ -1261,8 +1265,14 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	if snap.Version <= c.lastVersion {
 		return // nothing changed
 	}
-	c.lastVersion = snap.Version
+	applyExternalAuthSnapshotSettings(snap)
+	if err := syncSnapshotIdPProfiles(snap); err != nil {
+		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
+		return
+	}
+	snap.IdPProfiles = nil
 	applyConfigSnapshot(snap)
+	c.lastVersion = snap.Version
 }
 
 func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duration) {
@@ -1506,11 +1516,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		rl.Configure(snap.RateLimitRPM, time.Minute)
 	}
 
-	// External auth callback/base URL settings. These must be applied before
-	// IdP profiles compile so SAML SP metadata and OIDC redirect URIs use the
-	// same public origin on every DP.
-	SetProxyBaseURL(snap.ProxyBaseURL)
-	trustForwardedHeaders = snap.TrustForwardedHeaders
+	applyExternalAuthSnapshotSettings(snap)
 
 	// Default policy action.
 	if snap.DefaultAction != "" {
@@ -1625,12 +1631,9 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// IdP profiles. ReplaceAll compiles every enabled provider before swapping
 	// the live registry, so a bad CP-side IdP update does not break the DP's
 	// currently working SAML/OIDC providers.
-	if snap.IdPProfiles != nil {
-		if err := idpRegistry.ReplaceAll(snap.IdPProfiles); err != nil {
-			logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
-		} else {
-			logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
-		}
+	if err := syncSnapshotIdPProfiles(snap); err != nil {
+		logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
+		return
 	}
 
 	// Bandwidth / QoS policies.
@@ -1673,6 +1676,24 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
+}
+
+func applyExternalAuthSnapshotSettings(snap ConfigSnapshot) {
+	// These must be applied before IdP profiles compile so SAML SP metadata
+	// and OIDC redirect URIs use the same public origin on every DP.
+	SetProxyBaseURL(snap.ProxyBaseURL)
+	trustForwardedHeaders = snap.TrustForwardedHeaders
+}
+
+func syncSnapshotIdPProfiles(snap ConfigSnapshot) error {
+	if snap.IdPProfiles == nil {
+		return nil
+	}
+	if err := idpRegistry.ReplaceAll(snap.IdPProfiles); err != nil {
+		return fmt.Errorf("idp profile sync: %w", err)
+	}
+	logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
+	return nil
 }
 
 // CurrentConfigSnapshot builds a ConfigSnapshot from the current live state.
