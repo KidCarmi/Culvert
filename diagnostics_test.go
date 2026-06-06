@@ -309,7 +309,7 @@ func TestSAMLBaseURLPostureFailsOnNonBaseComponents(t *testing.T) {
 	cases := map[string]string{
 		"query":    "https://proxy.example.com?x=1",
 		"fragment": "https://proxy.example.com#frag",
-		"userinfo": "https://user:pass@proxy.example.com",
+		"userinfo": "https://operator@proxy.example.com",
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
