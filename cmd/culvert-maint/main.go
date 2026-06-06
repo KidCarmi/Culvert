@@ -52,23 +52,27 @@ func main() {
 // newRunner builds the command runner from config.
 //
 // EnvAllow: CULVERT_BACKUP_PASSPHRASE is the encrypted backup/restore
-// overlay; CULVERT_PROXY_IMAGE pins the upgrade-apply/rollback pull/up.
-// BOTH are overlay-only (D1.6c privilege hardening): the agent only ever
-// sets them via an explicit per-call overlay (the passphrase value read
-// from the request's passphrase_ref; the pinned image from the validated
-// apply/rollback target), NEVER from the agent's ambient process env. So
-// an ambient CULVERT_PROXY_IMAGE / CULVERT_BACKUP_PASSPHRASE can never
-// leak onto a compose call that did not explicitly forward it. The sudo
-// boundary is independently scoped per-command (env_keep via
-// Defaults!<alias> in packaging/sudoers/culvert-maint).
+// overlay. It is overlay-only (D1.6c privilege hardening): the agent only
+// ever sets it via an explicit per-call overlay (the passphrase value read
+// from the request's passphrase_ref), NEVER from the agent's ambient
+// process env — so an ambient value can never leak onto a compose call
+// that did not explicitly forward it. The sudo boundary is independently
+// scoped per-command (env_keep via Defaults!<alias> in
+// packaging/sudoers/culvert-maint).
+//
+// P1.4: the proxy image is NO LONGER selected by an env var. Image
+// selection is bound at the sudo boundary via a repo-bound `docker pull
+// <ProxyRepo>@sha256:<digest>` + retag to the fixed `culvert/proxy:pinned`
+// tag, so CULVERT_PROXY_IMAGE and its env_keep are gone.
 func newRunner(cfg *config.Config) (*runner.Runner, error) {
 	return runner.New(runner.Options{
 		ComposeProjectDir: cfg.ComposeProjectDir,
 		ComposeFile:       cfg.ComposeFile,
 		UseSudo:           cfg.PrivilegeMode == config.PrivilegeSudoers,
 		StageTimeout:      cfg.StageTimeout,
-		EnvAllow:          []string{runner.EnvCulvertBackupPassphrase, runner.EnvCulvertProxyImage},
-		EnvOverlayOnly:    []string{runner.EnvCulvertProxyImage, runner.EnvCulvertBackupPassphrase},
+		ProxyRepo:         cfg.ProxyRepo,
+		EnvAllow:          []string{runner.EnvCulvertBackupPassphrase},
+		EnvOverlayOnly:    []string{runner.EnvCulvertBackupPassphrase},
 	})
 }
 

@@ -86,7 +86,8 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 		TemplateComposeImageInspect:         {},
 		TemplateComposeManifestInspect:      {},
 		TemplateComposeContainerInspect:     {},
-		TemplateComposePull:                 {},
+		TemplateImagePullDigest:             {},
+		TemplateImageTagPinned:              {},
 	}
 	gotIDs := map[TemplateID]struct{}{}
 	for _, tmpl := range Registry() {
@@ -122,10 +123,9 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 
 // TestSudoers_EnvKeepIsCommandScoped asserts env preservation is
 // COMMAND-SCOPED (D1.6c privilege hardening), not a blanket per-user
-// default. Each var must be preserved via Defaults!<alias> bound to the
-// commands that consume it, and the old blanket
-// `Defaults:culvert-maint env_keep` lines must be GONE — so neither var
-// rides along on an unrelated allowed command across the sudo boundary.
+// default. After P1.4 the ONLY preserved var is CULVERT_BACKUP_PASSPHRASE
+// (backup/restore); CULVERT_PROXY_IMAGE and its env_keep are GONE — the
+// proxy image is now bound at the sudo boundary by the pull/tag entries.
 func TestSudoers_EnvKeepIsCommandScoped(t *testing.T) {
 	data, err := os.ReadFile(findSudoersFile(t)) //nolint:gosec // test reads packaging file by computed path
 	if err != nil {
@@ -133,11 +133,9 @@ func TestSudoers_EnvKeepIsCommandScoped(t *testing.T) {
 	}
 	content := string(data)
 
-	// The command-scoped preservation must be present.
+	// The remaining command-scoped preservation (passphrase) must be present.
 	for _, want := range []string{
-		`Cmnd_Alias CULVERT_MAINT_PROXY_IMAGE_CMNDS =`,
 		`Cmnd_Alias CULVERT_MAINT_PASSPHRASE_CMNDS =`,
-		`Defaults!CULVERT_MAINT_PROXY_IMAGE_CMNDS env_keep += "CULVERT_PROXY_IMAGE"`,
 		`Defaults!CULVERT_MAINT_PASSPHRASE_CMNDS env_keep += "CULVERT_BACKUP_PASSPHRASE"`,
 	} {
 		if !strings.Contains(content, want) {
@@ -145,34 +143,61 @@ func TestSudoers_EnvKeepIsCommandScoped(t *testing.T) {
 		}
 	}
 
-	// The blanket per-user env_keep must NOT exist — that is exactly the
-	// privilege-boundary issue this hardening closes.
+	// P1.4: CULVERT_PROXY_IMAGE must NOT appear in any executable directive.
+	// (It may only be MENTIONED in an explanatory comment.) No alias, no
+	// env_keep, no NOPASSWD command — the image is no longer env-selected.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue // comments may reference the var by name
+		}
+		if strings.Contains(trimmed, "CULVERT_PROXY_IMAGE") {
+			t.Errorf("P1.4: no executable sudoers directive may reference CULVERT_PROXY_IMAGE:\n  %s", trimmed)
+		}
+	}
+
+	// The blanket per-user env_keep must NOT exist.
 	for _, banned := range []string{
 		`Defaults:culvert-maint env_keep += "CULVERT_PROXY_IMAGE"`,
 		`Defaults:culvert-maint env_keep += "CULVERT_BACKUP_PASSPHRASE"`,
 	} {
 		if strings.Contains(content, banned) {
-			t.Errorf("sudoers must NOT keep a blanket per-user env_keep (it rides along on every command):\n  %s", banned)
+			t.Errorf("sudoers must NOT keep a blanket per-user env_keep:\n  %s", banned)
 		}
 	}
 
-	// The proxy-image alias must scope to pull/up only — never the cli
-	// (passphrase) or read-only inspect commands.
-	proxyAlias := aliasBody(content, "CULVERT_MAINT_PROXY_IMAGE_CMNDS")
-	if !strings.Contains(proxyAlias, "pull proxy") || !strings.Contains(proxyAlias, "up -d") {
-		t.Errorf("proxy-image alias must cover pull proxy + up -d; got:\n%s", proxyAlias)
-	}
-	if strings.Contains(proxyAlias, "--restore") || strings.Contains(proxyAlias, "inspect") {
-		t.Errorf("proxy-image alias must NOT cover restore/inspect commands:\n%s", proxyAlias)
-	}
 	// The passphrase alias must scope to the cli encrypt/restore commands
-	// only — never pull/up.
+	// only — never the pull/tag/up image-selection commands.
 	passAlias := aliasBody(content, "CULVERT_MAINT_PASSPHRASE_CMNDS")
 	if !strings.Contains(passAlias, "--encrypt") || !strings.Contains(passAlias, "--restore") {
 		t.Errorf("passphrase alias must cover --encrypt + --restore; got:\n%s", passAlias)
 	}
-	if strings.Contains(passAlias, "pull proxy") {
-		t.Errorf("passphrase alias must NOT cover the pull/up commands:\n%s", passAlias)
+	if strings.Contains(passAlias, "docker pull") || strings.Contains(passAlias, "docker tag") || strings.Contains(passAlias, "up -d") {
+		t.Errorf("passphrase alias must NOT cover the image pull/tag/up commands:\n%s", passAlias)
+	}
+}
+
+// TestSudoers_ImagePullTagAreRepoBound asserts the P1.4 boundary: the pull
+// and tag entries bind a repo LITERAL ({proxy_repo}, no wildcard) + an exact
+// 64-class hex digest, and the tag destination is the fixed pinned tag.
+func TestSudoers_ImagePullTagAreRepoBound(t *testing.T) {
+	data, err := os.ReadFile(findSudoersFile(t)) //nolint:gosec // test reads packaging file by computed path
+	if err != nil {
+		t.Fatalf("read sudoers: %v", err)
+	}
+	digest := "{proxy_repo}@sha256:" + strings.Repeat("[0-9a-f]", 64)
+	wantPull := "/usr/bin/docker pull " + digest
+	wantTag := "/usr/bin/docker tag " + digest + " culvert/proxy:pinned"
+	content := normalize(string(data))
+	if !strings.Contains(content, normalize(wantPull)) {
+		t.Errorf("sudoers missing repo-bound pull entry:\n  %s", wantPull)
+	}
+	if !strings.Contains(content, normalize(wantTag)) {
+		t.Errorf("sudoers missing repo-bound tag→pinned entry:\n  %s", wantTag)
+	}
+	// No `docker compose pull proxy` (the old env-selected path) may remain.
+	if strings.Contains(content, "compose -f {compose_path} pull proxy") {
+		t.Errorf("the old `docker compose pull proxy` entry must be removed (P1.4)")
 	}
 }
 

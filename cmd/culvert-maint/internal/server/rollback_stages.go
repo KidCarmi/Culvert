@@ -32,6 +32,30 @@ type rollbackAccumulator struct {
 	healthSummary       string
 }
 
+// pullAndTagPinned runs the P1.4 image-selection pair: `docker pull
+// <ref>` (a repo-bound pinned digest), then `docker tag <ref>
+// culvert/proxy:pinned`. A pull failure returns BEFORE the retag so the
+// fixed tag never advances to an image that did not pull. Shared by apply's
+// `pull` stage and the rollback core's `rollback_pull` stage so the two
+// image-selection paths can never diverge.
+func (s *Server) pullAndTagPinned(ctx context.Context, ref string) ([]byte, []byte, error) {
+	pres, perr := s.opts.Runner.ComposePullDigest(ctx, ref)
+	if perr != nil {
+		if pres != nil {
+			return pres.Stdout, pres.Stderr, perr
+		}
+		return nil, nil, perr
+	}
+	out := append([]byte(nil), pres.Stdout...)
+	stderr := append([]byte(nil), pres.Stderr...)
+	tres, terr := s.opts.Runner.ComposeTagPinned(ctx, ref)
+	if tres != nil {
+		out = append(out, tres.Stdout...)
+		stderr = append(stderr, tres.Stderr...)
+	}
+	return out, stderr, terr
+}
+
 // imageRollbackStages builds the four core image-rollback steps pinned to
 // targetRefFn() (resolved at run time). Stage names are the bare step
 // names ("rollback_pull" … "rollback_verify"); ordering is fixed and is
@@ -39,21 +63,19 @@ type rollbackAccumulator struct {
 func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAccumulator) []ops.FlowStage {
 	return []ops.FlowStage{
 		{
+			// P1.4: pull the repo-bound prior digest, then retag it to the
+			// fixed culvert/proxy:pinned tag (shared with apply's `pull`).
 			Name:          "rollback_pull",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposePull(ctx, targetRefFn())
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
+				return s.pullAndTagPinned(ctx, targetRefFn())
 			},
 		},
 		{
 			Name:          "rollback_restart",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeUpWithImage(ctx, targetRefFn())
+				res, rerr := s.opts.Runner.ComposeUp(ctx)
 				if res == nil {
 					return nil, nil, rerr
 				}

@@ -45,9 +45,8 @@ type applyRig struct {
 	stateDir  string
 	auditPath string
 
-	mu          sync.Mutex
-	captured    [][]string
-	capturedEnv [][]string
+	mu       sync.Mutex
+	captured [][]string
 
 	// targetDigest is what manifest inspect reports (the upgrade target).
 	targetDigest string
@@ -93,30 +92,6 @@ func (r *applyRig) sawCommand(token string) bool {
 			if a == token {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-// envFor returns the captured child env for the first command whose argv
-// contains token (e.g. "pull", "up").
-func (r *applyRig) envFor(token string) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i, argv := range r.captured {
-		for _, a := range argv {
-			if a == token {
-				return r.capturedEnv[i]
-			}
-		}
-	}
-	return nil
-}
-
-func envHas(env []string, kv string) bool {
-	for _, e := range env {
-		if e == kv {
-			return true
 		}
 	}
 	return false
@@ -182,17 +157,16 @@ func (r *applyRig) currentRunning() string {
 	return r.runningDigest
 }
 
-// setRunning records the digest pinned via CULVERT_PROXY_IMAGE in env as
-// the new running image (called on each `pull`).
-func (r *applyRig) setRunning(env []string) {
-	for _, e := range env {
-		if !strings.HasPrefix(e, runner.EnvCulvertProxyImage+"=") {
-			continue
-		}
-		if d := digestRE.FindString(e); d != "" {
+// setRunning records the digest carried in a `docker pull <repo@sha256:…>`
+// argv as the new running image (called on each `pull`). P1.4: the pin is in
+// the argv (the pulled ref), not an env var.
+func (r *applyRig) setRunning(argv []string) {
+	for _, a := range argv {
+		if d := digestRE.FindString(a); d != "" {
 			r.mu.Lock()
 			r.runningDigest = strings.TrimPrefix(d, "sha256:")
 			r.mu.Unlock()
+			return
 		}
 	}
 }
@@ -253,8 +227,9 @@ func startApplyRig(t *testing.T) *applyRig {
 		ComposeProjectDir: tmp,
 		ComposeFile:       "docker-compose.yml",
 		StageTimeout:      5 * time.Second,
-		EnvAllow:          []string{runner.EnvCulvertBackupPassphrase, runner.EnvCulvertProxyImage},
-		EnvOverlayOnly:    []string{runner.EnvCulvertProxyImage, runner.EnvCulvertBackupPassphrase},
+		ProxyRepo:         repo, // ghcr.io/kidcarmi/culvert (matches test refs)
+		EnvAllow:          []string{runner.EnvCulvertBackupPassphrase},
+		EnvOverlayOnly:    []string{runner.EnvCulvertBackupPassphrase},
 		DockerBinary:      "/usr/bin/docker",
 	})
 	if err != nil {
@@ -264,18 +239,18 @@ func startApplyRig(t *testing.T) *applyRig {
 		func(cmd *exec.Cmd) error {
 			rig.mu.Lock()
 			rig.captured = append(rig.captured, append([]string(nil), cmd.Args...))
-			rig.capturedEnv = append(rig.capturedEnv, append([]string(nil), cmd.Env...))
 			rig.mu.Unlock()
 			if out := rig.canned(cmd.Args); out != nil {
 				_, _ = cmd.Stdout.Write(out)
 			}
-			// A pull re-pins the "running image" view from
-			// CULVERT_PROXY_IMAGE, so a rollback that re-pins the prior
-			// digest flips the running view back for later captures.
+			// A `docker pull <repo@sha256:…>` re-pins the "running image"
+			// view from the pulled ref (P1.4: the digest is in the argv,
+			// not an env var), so a rollback that pulls the prior digest
+			// flips the running view back for later captures.
 			for _, a := range cmd.Args {
 				if a == "pull" {
 					rig.pulled.Store(true)
-					rig.setRunning(cmd.Env)
+					rig.setRunning(cmd.Args)
 				}
 			}
 			return nil
@@ -440,14 +415,20 @@ func TestUpgradeApply_TagResolvedToDigest_PinsDigest(t *testing.T) {
 		t.Fatalf("state: got %v want succeeded; op=%+v", op["state"], op)
 	}
 	pinned := repo + "@sha256:" + digNew // manifest resolved the tag to digNew
-	for _, cmd := range []string{"pull", "up"} {
-		env := rig.envFor(cmd)
-		if !envHas(env, "CULVERT_PROXY_IMAGE="+pinned) {
-			t.Errorf("%s must pin CULVERT_PROXY_IMAGE=%s; env=%v", cmd, pinned, env)
+	// P1.4: the resolved digest (not the raw tag) is what pull + tag carry
+	// in their argv; `up` is plain (no digest, resolves culvert/proxy:pinned).
+	if !rig.pinnedFor("pull", digNew) || !rig.pinnedFor("tag", digNew) {
+		t.Errorf("pull + tag must carry the resolved digest %s in argv", digNew)
+	}
+	// The raw tag may appear ONLY in the read-only `manifest inspect`
+	// (resolve step) — never in the state-changing pull/tag image ops.
+	for _, argv := range rig.snapshot() {
+		if (argvHas(argv, "pull") || argvHas(argv, "tag")) && envContains(argv, tag) {
+			t.Errorf("pull/tag must carry the resolved digest, never the raw tag %q; argv=%v", tag, argv)
 		}
-		if envHas(env, "CULVERT_PROXY_IMAGE="+tag) {
-			t.Errorf("%s must NOT forward the raw tag as the pin", cmd)
-		}
+	}
+	if rig.pinnedFor("up", digNew) {
+		t.Errorf("up must be plain compose up -d (no digest in argv)")
 	}
 	logStr := rig.opLog(t, opID)
 	if !strings.Contains(logStr, `pinned_ref="`+pinned+`"`) {

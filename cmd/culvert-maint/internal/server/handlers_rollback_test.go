@@ -62,11 +62,13 @@ func TestRollback_Image_Success(t *testing.T) {
 	if !rig.sawCommand("pull") || !rig.sawCommand("up") {
 		t.Error("rollback must pull and restart")
 	}
-	// pull + up must be pinned to the target digest, never a tag.
-	for _, cmd := range []string{"pull", "up"} {
-		if !envHas(rig.envFor(cmd), "CULVERT_PROXY_IMAGE="+target) {
-			t.Errorf("%s must pin CULVERT_PROXY_IMAGE=%s; env=%v", cmd, target, rig.envFor(cmd))
-		}
+	// P1.4: pull + tag carry the target digest in argv; up is plain
+	// (resolves the fixed culvert/proxy:pinned tag).
+	if !rig.pinnedFor("pull", digNew) || !rig.pinnedFor("tag", digNew) {
+		t.Errorf("rollback pull + tag must carry the target digest %s in argv", digNew)
+	}
+	if rig.pinnedFor("up", digNew) {
+		t.Error("rollback up must be plain compose up -d (no digest in argv)")
 	}
 	logStr := rig.opLog(t, opID)
 	for _, want := range []string{"rollback mode=image", `target_ref="` + target + `"`, "verify: running_digests="} {

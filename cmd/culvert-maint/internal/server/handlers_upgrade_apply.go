@@ -9,8 +9,9 @@
 //	                 set; compute already_current (running ∩ target).
 //	pre_backup     → if requested AND not already_current: encrypted
 //	                 backup; a failure ABORTS before any pull/restart.
-//	pull           → docker compose pull proxy, CULVERT_PROXY_IMAGE pinned.
-//	restart        → docker compose up -d, CULVERT_PROXY_IMAGE pinned.
+//	pull           → docker pull <pinned repo@sha256> + docker tag … to the
+//	                 fixed culvert/proxy:pinned tag (P1.4; sudo-boundary bound).
+//	restart        → docker compose up -d (resolves culvert/proxy:pinned).
 //	health_gate    → internal/health probe; a post-restart failure marks
 //	                 the op health_failed AND triggers inline rollback.
 //	verify         → re-capture the running image; the pinned digest is
@@ -265,21 +266,21 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			},
 		},
 		{
+			// P1.4: pull the repo-bound pinned digest, then retag it to the
+			// fixed local `culvert/proxy:pinned` tag the compose file
+			// resolves. The image is selected by these argv (sudo-boundary
+			// pattern-matched), not by an env var.
 			Name:          "pull",
 			FailureReason: ops.ReasonCommandError,
 			Run: skipIfCurrent(acc, "pull", func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposePull(ctx, acc.pinnedRef)
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
+				return s.pullAndTagPinned(ctx, acc.pinnedRef)
 			}),
 		},
 		{
 			Name:          "restart",
 			FailureReason: ops.ReasonCommandError,
 			Run: skipIfCurrent(acc, "restart", func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeUpWithImage(ctx, acc.pinnedRef)
+				res, rerr := s.opts.Runner.ComposeUp(ctx)
 				if rerr != nil {
 					// `docker compose up -d` failure is INDETERMINATE: the
 					// container may have been (partially) recreated on the

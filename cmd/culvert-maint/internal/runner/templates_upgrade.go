@@ -54,36 +54,45 @@ const (
 	// The endpoint that consumes it (/v1/upgrades/apply) is NOT activated
 	// by this slice; only the read-only primitive lands.
 	TemplateComposeContainerInspect TemplateID = "compose.container.inspect"
-	// TemplateComposePull runs `docker compose -f <p> pull proxy`,
-	// forwarding the pinned image reference via the CULVERT_PROXY_IMAGE
-	// overlay. State-changing (mutates the local image store). Used by
-	// POST /v1/upgrades/apply. `proxy` is a fixed service literal, not an
-	// operator argument, so the sudoers line needs no wildcard there.
-	TemplateComposePull TemplateID = "compose.pull"
+	// TemplateImagePullDigest runs `docker pull <proxy_repo>@sha256:<digest>`
+	// — a RAW docker pull of a repo-bound, digest-pinned reference (P1.4).
+	// State-changing (mutates the local image store). The repo is a sudoers
+	// rendered literal ({proxy_repo}) and the digest is 64 enumerated hex
+	// classes, so the privilege boundary itself bounds what may be pulled.
+	TemplateImagePullDigest TemplateID = "image.pull.digest"
+	// TemplateImageTagPinned runs
+	// `docker tag <proxy_repo>@sha256:<digest> culvert/proxy:pinned` —
+	// retagging the just-pulled digest to the FIXED local tag the compose
+	// file resolves. Source is repo+digest bound; the destination is the
+	// fixed literal `culvert/proxy:pinned` (P1.4). State-changing.
+	TemplateImageTagPinned TemplateID = "image.tag.pinned"
 )
 
-// EnvCulvertProxyImage is the env-var name that overrides the proxy (and
-// the same-image cli) service's image in docker-compose.yml:
-//
-//	image: ${CULVERT_PROXY_IMAGE:-ghcr.io/kidcarmi/culvert:latest}
-//
-// The upgrade-apply flow forwards the pinned image reference
-// (`repo@sha256:…` or a tag) into `docker compose pull` / `up` via the
-// CULVERT_PROXY_IMAGE overlay (ComposePull / ComposeUpWithImage), so a pin
-// survives without editing the compose file. It is NOT a secret.
-//
-// It is registered as an OVERLAY-ONLY env var (Options.EnvOverlayOnly), so
-// it can ONLY enter a child process through an explicit per-call overlay —
-// never from the agent's ambient process environment. That stops an
-// operator-set value from leaking onto unrelated compose calls (e.g. a
-// restore's `up -d`); the apply pull/up overlay is the sole entry point.
-//
-// Under privilege_mode=sudoers the override must ALSO survive `sudo`'s
-// env_reset. The install ships a matching `Defaults:culvert-maint env_keep
-// += "CULVERT_PROXY_IMAGE"` line (see packaging/sudoers/culvert-maint and
-// D1.6c plan § 2.3.1); without it the overlay would be stripped before
-// `docker compose` saw it.
-const EnvCulvertProxyImage = "CULVERT_PROXY_IMAGE"
+// pinnedProxyTag is the FIXED local image tag the compose file resolves for
+// the proxy (and same-image cli) service. It has no registry host and is
+// never pushed — it exists only as a local alias created by ComposeTagPinned
+// (or seeded at install). Nothing a caller supplies can change what
+// `docker compose up` resolves it to; the only writer is the repo-bound,
+// digest-pattern-matched `docker tag` command. This replaces the old
+// `${CULVERT_PROXY_IMAGE:-…}` interpolation as the image-selection mechanism
+// (P1.4 / D1.6c-pin-value-binding-plan.md).
+const pinnedProxyTag = "culvert/proxy:pinned"
+
+// defaultProxyRepo is the repository the pinned-digest pull/tag are bound to
+// when Options.ProxyRepo is unset. It mirrors the config `proxy_repo` default
+// and the canonical `image_allowlist` repo. The two MUST describe the same
+// repository (see the plan's §3.1 config invariant).
+const defaultProxyRepo = "ghcr.io/kidcarmi/culvert"
+
+// pinnedDigestHexLen is the exact length of a sha256 hex digest (and the
+// number of [0-9a-f] classes the sudoers pattern enumerates).
+const pinnedDigestHexLen = 64
+
+// pinnedDigestSuffixRE matches the `@sha256:<64 lowercase hex>` suffix of a
+// repo-bound pinned reference. The repo prefix is checked separately against
+// the runner's configured proxyRepo (a literal compare, not a regex, so a
+// repo containing `.`/`/` needs no escaping).
+var pinnedDigestSuffixRE = regexp.MustCompile(`^@sha256:[0-9a-f]{64}$`)
 
 // imageRefShapeRE bounds the argv shape of an image reference,
 // INDEPENDENT of the operator-configured image_allowlist. It is the
@@ -221,53 +230,83 @@ func containerInspectSudoersLines() []string {
 	return lines
 }
 
-// composeApplyTemplates returns the D1.6c upgrade-apply templates. The
-// pull is service-scoped (`proxy` is a fixed literal, no wildcard) and
-// path-bound to the compose file. The matching env-preservation
-// (env_keep) for CULVERT_PROXY_IMAGE lives in the sudoers Defaults block.
+// composeApplyTemplates returns the D1.6c upgrade-apply image-selection
+// templates (P1.4). Both are RAW docker (not `docker compose`): a digest
+// pull and a retag to the fixed local tag. Their sudoers lines carry the
+// `{proxy_repo}` placeholder (rendered to a literal at install) plus a
+// 64-class hex digest pattern with NO trailing wildcard — so the privilege
+// boundary itself bounds the image to "<proxy_repo> @ some sha256 digest",
+// retagged only to the fixed `culvert/proxy:pinned` destination.
 func composeApplyTemplates() []Template {
+	digest := "{proxy_repo}@sha256:" + strings.Repeat("[0-9a-f]", pinnedDigestHexLen)
 	return []Template{
 		{
-			ID:            TemplateComposePull,
-			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "pull", "proxy"},
-			SudoersLines:  []string{"/usr/bin/docker compose -f {compose_path} pull proxy"},
+			ID:            TemplateImagePullDigest,
+			BaseArgv:      []string{"docker", "pull"},
+			SudoersLines:  []string{"/usr/bin/docker pull " + digest},
+			StateChanging: true,
+		},
+		{
+			ID:            TemplateImageTagPinned,
+			BaseArgv:      []string{"docker", "tag"},
+			SudoersLines:  []string{"/usr/bin/docker tag " + digest + " " + pinnedProxyTag},
 			StateChanging: true,
 		},
 	}
 }
 
-// ComposePull runs `docker compose -f <p> pull proxy`, pinning the image
-// via the CULVERT_PROXY_IMAGE overlay (the compose file resolves
-// `image: ${CULVERT_PROXY_IMAGE:-…}`). State-changing. The imageRef is
-// validated for argv-safety (defense-in-depth; the handler already
-// enforced image_allowlist).
-func (r *Runner) ComposePull(ctx context.Context, imageRef string) (*Result, error) {
-	if err := validateImageRefShape(imageRef); err != nil {
-		return nil, err
+// validatePinnedDigestRef enforces that ref is a repo-bound, exact-digest
+// reference: `<proxyRepo>@sha256:<64 lowercase hex>`. This is the runner-side
+// mirror of the sudoers pattern (defense-in-depth) AND the §3.1
+// repo-consistency gate: a ref whose repo differs from the configured
+// proxyRepo, or whose digest is not exactly 64 hex, is rejected before any
+// argv is built — so a foreign-repo or tag pin can never reach docker.
+func validatePinnedDigestRef(ref, proxyRepo string) error {
+	if err := validateImageRefShape(ref); err != nil { // argv-safety belt first
+		return err
 	}
-	tmpl := templateByID(TemplateComposePull)
-	if tmpl == nil {
-		return nil, errors.New("runner: TemplateComposePull not registered")
+	prefix := proxyRepo + "@"
+	if !strings.HasPrefix(ref, prefix) {
+		return fmt.Errorf("pinned ref %q must be repo-bound to %q (got a different or missing repo)", ref, proxyRepo)
 	}
-	overlay := map[string]string{EnvCulvertProxyImage: imageRef}
-	return r.runWithEnv(ctx, r.buildArgv(tmpl), overlay)
+	if !pinnedDigestSuffixRE.MatchString(ref[len(proxyRepo):]) {
+		return fmt.Errorf("pinned ref %q must end with @sha256:<64 lowercase hex> (a tag is not a valid pin)", ref)
+	}
+	return nil
 }
 
-// ComposeUpWithImage runs `docker compose -f <p> up -d` with the
-// CULVERT_PROXY_IMAGE overlay so the recreated proxy uses the pinned
-// image. State-changing. Distinct from ComposeUp (which passes no
-// overlay and is used by restore) so the override is explicit and never
-// rides along on an unrelated up.
-func (r *Runner) ComposeUpWithImage(ctx context.Context, imageRef string) (*Result, error) {
-	if err := validateImageRefShape(imageRef); err != nil {
+// ComposePullDigest runs `docker pull <proxy_repo>@sha256:<digest>`. The ref
+// is validated as a repo-bound exact-digest pin (validatePinnedDigestRef)
+// before any argv is built. State-changing; no env overlay — the image is
+// selected by the argv the sudo boundary pattern-matches, not by an env var.
+func (r *Runner) ComposePullDigest(ctx context.Context, ref string) (*Result, error) {
+	if err := validatePinnedDigestRef(ref, r.proxyRepo); err != nil {
 		return nil, err
 	}
-	tmpl := templateByID(TemplateComposeUp)
+	tmpl := templateByID(TemplateImagePullDigest)
 	if tmpl == nil {
-		return nil, errors.New("runner: TemplateComposeUp not registered")
+		return nil, errors.New("runner: TemplateImagePullDigest not registered")
 	}
-	overlay := map[string]string{EnvCulvertProxyImage: imageRef}
-	return r.runWithEnv(ctx, r.buildArgv(tmpl), overlay)
+	argv := append(r.buildArgv(tmpl), ref)
+	return r.runWithEnv(ctx, argv, nil)
+}
+
+// ComposeTagPinned runs
+// `docker tag <proxy_repo>@sha256:<digest> culvert/proxy:pinned`, retagging
+// the just-pulled digest to the FIXED local tag the compose file resolves.
+// The source ref is repo+digest validated; the destination is the fixed
+// literal pinnedProxyTag (never operator-supplied). State-changing; no env
+// overlay.
+func (r *Runner) ComposeTagPinned(ctx context.Context, ref string) (*Result, error) {
+	if err := validatePinnedDigestRef(ref, r.proxyRepo); err != nil {
+		return nil, err
+	}
+	tmpl := templateByID(TemplateImageTagPinned)
+	if tmpl == nil {
+		return nil, errors.New("runner: TemplateImageTagPinned not registered")
+	}
+	argv := append(r.buildArgv(tmpl), ref, pinnedProxyTag)
+	return r.runWithEnv(ctx, argv, nil)
 }
 
 // ComposeContainerInspect runs

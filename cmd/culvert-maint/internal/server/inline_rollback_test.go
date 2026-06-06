@@ -40,33 +40,21 @@ func (r *applyRig) rollbackAuditOutcomes(t *testing.T) []string {
 }
 
 // pinnedFor reports whether any captured command whose argv contains token
-// pinned CULVERT_PROXY_IMAGE to a ref containing digest.
+// also carries the digest in its argv. P1.4: the image is selected by the
+// `docker pull <repo@sha256:…>` / `docker tag <repo@sha256:…> …` argv, so the
+// digest appears for "pull" and "tag" but NEVER for a plain "up".
 //
 //nolint:unparam // generic test helper; current callers happen to pass digOld
 func (r *applyRig) pinnedFor(token, digest string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for i, argv := range r.captured {
-		hasTok := false
-		for _, a := range argv {
-			if a == token {
-				hasTok = true
-				break
-			}
-		}
-		if !hasTok {
-			continue
-		}
-		for _, e := range r.capturedEnv[i] {
-			if strings.HasPrefix(e, runnerEnvProxyImage) && strings.Contains(e, digest) {
-				return true
-			}
+	for _, argv := range r.captured {
+		if argvHas(argv, token) && envContains(argv, digest) {
+			return true
 		}
 	}
 	return false
 }
-
-const runnerEnvProxyImage = "CULVERT_PROXY_IMAGE="
 
 func argvHas(argv []string, tok string) bool {
 	for _, a := range argv {
@@ -126,8 +114,8 @@ func TestUpgradeApply_InlineRollback_Success(t *testing.T) {
 	if rig.countCommand("pull") != 2 {
 		t.Errorf("expected an upgrade pull + a rollback pull; got %d", rig.countCommand("pull"))
 	}
-	if !rig.pinnedFor("pull", digOld) || !rig.pinnedFor("up", digOld) {
-		t.Error("rollback pull+up must pin CULVERT_PROXY_IMAGE to the prior digest")
+	if !rig.pinnedFor("pull", digOld) || !rig.pinnedFor("tag", digOld) {
+		t.Error("rollback pull+tag must carry the prior digest (P1.4: the retag re-pins culvert/proxy:pinned)")
 	}
 	if got := rig.rollbackAuditOutcomes(t); len(got) != 2 || got[0] != "started" || got[1] != "succeeded" {
 		t.Errorf("rollback audit: got %v want [started succeeded]", got)
@@ -146,7 +134,7 @@ func TestUpgradeApply_InlineRollback_PullFails(t *testing.T) {
 	defer rig.stop()
 	rig.unhealthyDigests = map[string]bool{digNew: true}
 	// Fail only the rollback pull (the one pinning the prior digest).
-	rig.failFn = func(argv, env []string) bool { return argvHas(argv, "pull") && envContains(env, digOld) }
+	rig.failFn = func(argv, _ []string) bool { return argvHas(argv, "pull") && envContains(argv, digOld) }
 
 	ref := repo + "@sha256:" + digNew
 	op, _ := rig.acceptAndWait(t, map[string]interface{}{"image_ref": ref})
@@ -158,8 +146,8 @@ func TestUpgradeApply_InlineRollback_PullFails(t *testing.T) {
 	if res["rollback_attempted"] != true || res["rollback_succeeded"] != false {
 		t.Errorf("want attempted=true succeeded=false; got %v", res)
 	}
-	if rig.pinnedFor("up", digOld) {
-		t.Error("a failed rollback pull must NOT proceed to restart")
+	if rig.pinnedFor("tag", digOld) {
+		t.Error("a failed rollback pull must NOT proceed to retag/restart")
 	}
 	if got := rig.rollbackAuditOutcomes(t); len(got) != 2 || got[0] != "started" || got[1] != "failed" {
 		t.Errorf("rollback audit: got %v want [started failed]", got)
@@ -171,7 +159,9 @@ func TestUpgradeApply_InlineRollback_RestartFails(t *testing.T) {
 	rig := startApplyRig(t)
 	defer rig.stop()
 	rig.unhealthyDigests = map[string]bool{digNew: true}
-	rig.failFn = func(argv, env []string) bool { return argvHas(argv, "up") && envContains(env, digOld) }
+	// P1.4: `up` no longer carries the digest, so target the rollback
+	// restart by the running view it brings up (set by the preceding pull).
+	rig.failFn = func(argv, _ []string) bool { return argvHas(argv, "up") && rig.currentRunning() == digOld }
 
 	ref := repo + "@sha256:" + digNew
 	op, _ := rig.acceptAndWait(t, map[string]interface{}{"image_ref": ref})
@@ -219,9 +209,9 @@ func TestUpgradeApply_InlineRollback_UpgradeRestartFails_TriggersRollback(t *tes
 	rig := startApplyRig(t)
 	defer rig.stop()
 	rig.unhealthyDigests = map[string]bool{digNew: true}
-	// Fail only the UPGRADE restart (pins the new digest); the rollback
-	// restart pins the prior digest and is left to succeed.
-	rig.failFn = func(argv, env []string) bool { return argvHas(argv, "up") && envContains(env, digNew) }
+	// Fail only the UPGRADE restart (the one bringing up the new digest);
+	// the rollback restart brings up the prior digest and is left to succeed.
+	rig.failFn = func(argv, _ []string) bool { return argvHas(argv, "up") && rig.currentRunning() == digNew }
 
 	ref := repo + "@sha256:" + digNew
 	op, _ := rig.acceptAndWait(t, map[string]interface{}{"image_ref": ref})
@@ -236,8 +226,8 @@ func TestUpgradeApply_InlineRollback_UpgradeRestartFails_TriggersRollback(t *tes
 	if res["rollback_attempted"] != true || res["rollback_succeeded"] != true {
 		t.Errorf("a restart failure must trigger rollback and restore service; got %v", res)
 	}
-	if !rig.pinnedFor("up", digOld) {
-		t.Error("rollback must restart pinned to the prior digest")
+	if !rig.pinnedFor("tag", digOld) {
+		t.Error("rollback must retag the prior digest before restart")
 	}
 	if got := rig.rollbackAuditOutcomes(t); len(got) != 2 || got[1] != "succeeded" {
 		t.Errorf("rollback audit: got %v want [started succeeded]", got)

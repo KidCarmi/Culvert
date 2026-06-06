@@ -79,3 +79,11 @@ allowed_backup_dir = "/backup"
 # allowlist cannot be bypassed. Use a TOML literal string (single
 # quotes) so backslashes are NOT interpreted as escapes.
 image_allowlist = '^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$'
+
+# P1.4 — the repository the maintenance agent binds image selection to at
+# the sudo boundary. The agent pulls `<proxy_repo>@sha256:<digest>` and
+# retags it to the fixed local `culvert/proxy:pinned` tag the compose file
+# resolves; CULVERT_PROXY_IMAGE no longer exists. This MUST describe the
+# same repository as image_allowlist (install.sh refuses a mismatch).
+# Default: ghcr.io/kidcarmi/culvert.
+proxy_repo = "ghcr.io/kidcarmi/culvert"
