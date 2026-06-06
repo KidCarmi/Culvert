@@ -11,11 +11,13 @@
 //     which forwards the accept_dp_reenrollment / allow_counter_rollback
 //     safety flags to the CLI and inherits its WouldBlock fail-closed
 //     guards;
-//   - the only additions are light outcome OBSERVATION (not changed
-//     behavior) for the result and a report summary stage. Backup
-//     existence is validated by the CLI inside the container (allowed
-//     backup dir is the CONTAINER path; the host cannot stat it), exactly
-//     as restore.commit does.
+//   - additions: a container-backed existence PREFLIGHT (the backup-list
+//     command — the /backup volume lives in the cli container, not on the
+//     agent host, so a host os.Stat is wrong), so a typoed/absent backup
+//     fails 404 BEFORE the stack is stopped; light outcome OBSERVATION
+//     (not changed behavior) for the result; and a report summary stage.
+//     The preflight degrades to restore.commit behavior if the list is
+//     unavailable, so it is never worse than restore.commit.
 //
 // Standalone-only: there is no inline/auto data rollback. The apply
 // inline-rollback path (#378) is image-only and must never reach here.
@@ -23,6 +25,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -71,6 +74,17 @@ func (s *Server) rollbackData(w http.ResponseWriter, r *http.Request, peer auth.
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// Container-backed existence preflight: ask the cli to list /backup
+	// (the volume lives in the cli container, not on the agent host) and
+	// confirm the named backup is present BEFORE admitting the op. A typo
+	// fails 404 here — the stack is never stopped. If the list itself is
+	// unavailable we DEGRADE to restore.commit behavior (proceed; the CLI
+	// validates at restore time) so data rollback is never worse than
+	// restore.commit. Read-only + online (the proxy stays up).
+	if herr := s.preflightBackupExists(r.Context(), req.Filename); herr != nil {
+		writeJSON(w, herr.Status, herr.Body)
+		return
+	}
 
 	params := map[string]interface{}{
 		"mode":                   "data",
@@ -113,6 +127,32 @@ func (s *Server) rollbackData(w http.ResponseWriter, r *http.Request, peer auth.
 		return
 	}
 	writeOpResponse(w, op, deduped)
+}
+
+// preflightBackupExists confirms the named backup is present in the cli
+// container's /backup volume, using the existing backup-list command (no
+// new sudoers/template). Returns a 404 opError if the list is available
+// and the backup is NOT in it (the typo case — caught before stop_stack).
+// If the list cannot be obtained/parsed it returns nil (DEGRADE: proceed,
+// and let the restore CLI validate existence at restore time, exactly as
+// restore.commit does — so a flaky list never blocks a valid rollback).
+func (s *Server) preflightBackupExists(ctx context.Context, filename string) *opError {
+	res, err := s.opts.Runner.ComposeBackupList(ctx)
+	if err != nil || res == nil {
+		return nil // can't verify → degrade to restore.commit behavior
+	}
+	var entries []backupListEntry
+	if json.Unmarshal(res.Stdout, &entries) != nil {
+		return nil // unparseable list → degrade
+	}
+	for i := range entries {
+		if entries[i].Filename == filename {
+			return nil // exists
+		}
+	}
+	return &opError{Status: http.StatusNotFound, Body: map[string]string{
+		"error": fmt.Sprintf("backup %q not found in the backup store", filename),
+	}}
 }
 
 // buildDataRollbackStages returns the SHARED restore.commit stages

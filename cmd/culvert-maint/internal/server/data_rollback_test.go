@@ -92,7 +92,7 @@ func envHasD16b(env []string, kv string) bool {
 // Success: mode=data wraps restore.commit — stop→restore(--confirm)→up→
 // health, op succeeded, kind rollbacks.create, result + audit correct.
 func TestDataRollback_Success_WrapsRestoreCommit(t *testing.T) {
-	fn := "pre-upgrade-20260101T000000Z.tar.gz.enc"
+	fn := "a.tar.gz" // the rig's canned backup-list returns this entry
 	rig := dataRollbackRig(t)
 	defer rig.stop()
 
@@ -173,10 +173,33 @@ func TestDataRollback_RejectsInvalidInput(t *testing.T) {
 	}
 }
 
+// A typoed/absent backup is caught by the container-backed preflight
+// (backup-list) and fails 404 — the stack is NEVER stopped (no `down`).
+func TestDataRollback_NonexistentBackup_404_NoStop(t *testing.T) {
+	rig := dataRollbackRig(t)
+	defer rig.stop()
+	// The rig's canned backup-list contains only "a.tar.gz"; this name is
+	// absent → preflight 404.
+	status, rb := rig.postRollback(t, map[string]interface{}{
+		"mode": "data", "filename": "ghost.tar.gz.enc",
+	})
+	if status != http.StatusNotFound {
+		t.Fatalf("absent backup: got %d want 404; body=%s", status, rb)
+	}
+	time.Sleep(50 * time.Millisecond)
+	// The preflight list runs, but the stack must NOT be stopped.
+	if _, ok := argvWith(rig.captured.snapshot(), "down"); ok {
+		t.Error("a missing backup must NOT stop the stack (no `down`)")
+	}
+	if _, ok := argvWith(rig.captured.snapshot(), "--restore"); ok {
+		t.Error("a missing backup must NOT reach the restore command")
+	}
+}
+
 // passphrase_ref: a valid ref is forwarded to the cli restore command env;
 // a malformed ref is rejected at 400.
 func TestDataRollback_PassphraseRefForwardedAndValidated(t *testing.T) {
-	fn := "pre-upgrade-enc.tar.gz.enc"
+	fn := "a.tar.gz"
 	rig := dataRollbackRig(t)
 	defer rig.stop()
 
@@ -207,7 +230,7 @@ func TestDataRollback_PassphraseRefForwardedAndValidated(t *testing.T) {
 // restore.commit forwards them, and a CLI refusal (the WouldBlock guard)
 // fails the op closed.
 func TestDataRollback_SafetyFlagsForwardedAndFailClosed(t *testing.T) {
-	fn := "pre-upgrade-flags.tar.gz.enc"
+	fn := "a.tar.gz"
 
 	// Default (no acks): neither flag is in the restore argv.
 	rig := dataRollbackRig(t)
@@ -255,7 +278,7 @@ func TestDataRollback_SafetyFlagsForwardedAndFailClosed(t *testing.T) {
 
 // Idempotent replay: same key → same op_id, 200, no second restore.
 func TestDataRollback_IdempotentReplay(t *testing.T) {
-	fn := "pre-upgrade-idem.tar.gz.enc"
+	fn := "a.tar.gz"
 	rig := dataRollbackRig(t)
 	defer rig.stop()
 
