@@ -350,6 +350,16 @@ SAML RelayState and OIDC PKCE state are node-local replay protections, so
 `/auth/saml/callback` and `/auth/oidc/callback` should return to the DP that
 started that login.
 
+Each DP also persists the last successfully applied control-plane
+`ConfigSnapshot` to its data directory as `dp_last_config_snapshot.json`
+with `0600` permissions. On restart, the DP applies that snapshot before
+its first CP poll. If the CP is temporarily down, the DP can continue
+serving with the last-known-good local policy/auth configuration. Existing
+browser sessions continue to validate as long as the cached snapshot
+contains the shared session HMAC. New OIDC/SAML logins still require the
+external IdP to be reachable, and in-flight callbacks still need load
+balancer affinity to the DP that initiated the login.
+
 ### Load Balancer Setup
 
 Place a TCP/HTTP load balancer in front of the Data Plane nodes.

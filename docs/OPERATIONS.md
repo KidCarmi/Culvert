@@ -181,6 +181,13 @@ Run these once when bringing up a new node, in order:
    especially `/auth/saml/callback`. Culvert keeps SAML AuthnRequest state
    in memory for one-time replay protection, so the IdP response must return
    to the node that initiated the login.
+10. **Data Plane CP outage behavior.** After the first successful CP poll,
+    each DP writes `/data/dp_last_config_snapshot.json`. If the CP is later
+    unreachable, the DP can restart and serve that last-known-good local
+    policy/auth snapshot. Diagnostics reports this as
+    `dp_last_known_good_config`: `warn` means the DP is serving cached config
+    while CP polling is failing; `fail` means CP polling is failing and no
+    local snapshot is available.
 
 ---
 

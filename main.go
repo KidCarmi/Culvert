@@ -158,8 +158,8 @@ type startupState struct {
 	rlCleanupCancel context.CancelFunc
 	feedSyncer      *FeedSyncer
 	scanSvc         *ScanService
-	adminUISrv      *http.Server   // P1.1 / S4.AdminUI: graceful shutdown handle
-	socks5Srv       *socks5Server  // P1.5 / S4.SOCKS5: listener-close shutdown handle
+	adminUISrv      *http.Server  // P1.1 / S4.AdminUI: graceful shutdown handle
+	socks5Srv       *socks5Server // P1.5 / S4.SOCKS5: listener-close shutdown handle
 }
 
 func main() {
@@ -2041,6 +2041,16 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 		if err := maybeMigrateDPNodeKey(keyFile); err != nil {
 			logger.Fatalf("DataPlane: DP node key at-rest: %v", err)
 		}
+	}
+	if snap, err := applyDPLastGoodConfigSnapshot(); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logger.Printf("DataPlane: last-known-good config unavailable: %v", err)
+		} else {
+			logger.Printf("DataPlane: no last-known-good config at %s", dpLastGoodConfigSnapshotPath())
+		}
+	} else if mergedAddr := mergeCPAddresses(addr, snap.CPAddresses); mergedAddr != addr {
+		logger.Printf("DataPlane: seeded CP failover addresses from last-known-good config: %s", sanitizeLog(mergedAddr))
+		addr = mergedAddr
 	}
 	dpClient, err := NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile)
 	if err != nil {
