@@ -15,6 +15,7 @@ type testPlugin struct {
 func (p *testPlugin) Name() string                      { return p.name }
 func (p *testPlugin) OnRequest(_, _, _ string) Decision { return p.decision }
 func (p *testPlugin) OnResponse(resp *http.Response) {
+	//nolint:bodyclose // test sink retains responses for assertion; bodies are never read
 	p.responses = append(p.responses, resp)
 }
 
