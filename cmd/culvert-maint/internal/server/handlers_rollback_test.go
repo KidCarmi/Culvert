@@ -81,7 +81,7 @@ func TestRollback_RejectsInvalidTarget(t *testing.T) {
 	rig := startApplyRig(t)
 	defer rig.stop()
 	cases := []map[string]interface{}{
-		{"mode": "data", "image_ref": repo + "@sha256:" + digNew}, // data not supported
+		{"mode": "data"},  // data mode requires a filename → 400 (missing filename)
 		{"mode": "image"}, // missing image_ref
 		{"mode": "image", "image_ref": repo + ":v1.2.4"},                        // tag, not a digest
 		{"mode": "image", "image_ref": "ghcr.io/evil/culvert@sha256:" + digNew}, // not allowlisted
