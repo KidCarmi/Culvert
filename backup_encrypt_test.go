@@ -198,7 +198,7 @@ func TestBackupEncrypt_TamperedMagic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	body[0] ^= 0xFF // break the magic
+	body[0] ^= 0xFF                                        // break the magic
 	if err := os.WriteFile(out, body, 0o600); err != nil { // #nosec G304 G703 -- test temp path under t.TempDir()
 		t.Fatalf("write: %v", err)
 	}

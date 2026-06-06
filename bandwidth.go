@@ -19,7 +19,7 @@ import (
 // BandwidthPolicy defines rate limits for a node group or label match.
 type BandwidthPolicy struct {
 	Name           string            `json:"name"`
-	LabelSelector  map[string]string `json:"label_selector"`   // matches nodes by labels
+	LabelSelector  map[string]string `json:"label_selector"`    // matches nodes by labels
 	MaxBytesPerSec int64             `json:"max_bytes_per_sec"` // 0 = unlimited
 	Priority       int               `json:"priority"`          // higher = more important (for QoS ordering)
 	CreatedAt      string            `json:"created_at"`

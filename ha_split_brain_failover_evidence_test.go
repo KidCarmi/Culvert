@@ -281,12 +281,12 @@ func TestCL5_HAStateBundle_OmitsClusterUpdateState(t *testing.T) {
 	// been fixed (the bundle now carries update state) and this test
 	// must be updated.
 	const (
-		markerActive       = `"active"`        // ClusterUpdateState.Active json tag
-		markerTargetTag    = `"target_tag"`    // ClusterUpdateState.TargetTag json tag
-		markerUpdatingDPs  = "updating_dps"    // canonical Phase string
-		markerCanarySoak   = "canary_soak"     // canonical Phase string
-		markerNodesUpd     = `"nodes":`        // ClusterUpdateState.Nodes json tag
-		markerErrorBudget  = `"error_budget"`  // ClusterUpdateState.ErrorBudget json tag
+		markerActive      = `"active"`       // ClusterUpdateState.Active json tag
+		markerTargetTag   = `"target_tag"`   // ClusterUpdateState.TargetTag json tag
+		markerUpdatingDPs = "updating_dps"   // canonical Phase string
+		markerCanarySoak  = "canary_soak"    // canonical Phase string
+		markerNodesUpd    = `"nodes":`       // ClusterUpdateState.Nodes json tag
+		markerErrorBudget = `"error_budget"` // ClusterUpdateState.ErrorBudget json tag
 	)
 	wireStr := string(wire)
 	for _, m := range []string{markerActive, markerTargetTag, markerUpdatingDPs, markerCanarySoak, markerNodesUpd, markerErrorBudget} {

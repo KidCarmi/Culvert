@@ -20,7 +20,7 @@ func TestBlocklist_AddAndIsBlocked(t *testing.T) {
 		blocked bool
 	}{
 		{"evil.com", true},
-		{"EVIL.COM", true},       // case-insensitive
+		{"EVIL.COM", true}, // case-insensitive
 		{"ads.tracker.net", true},
 		{"good.com", false},
 		{"evil.com.fakeout", false},

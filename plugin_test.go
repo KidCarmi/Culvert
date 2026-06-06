@@ -12,7 +12,7 @@ type testPlugin struct {
 	responses []*http.Response
 }
 
-func (p *testPlugin) Name() string { return p.name }
+func (p *testPlugin) Name() string                      { return p.name }
 func (p *testPlugin) OnRequest(_, _, _ string) Decision { return p.decision }
 func (p *testPlugin) OnResponse(resp *http.Response) {
 	p.responses = append(p.responses, resp)
@@ -37,7 +37,7 @@ func TestPluginDecision_AllAllow(t *testing.T) {
 
 func TestPluginDecision_FirstBlocks(t *testing.T) {
 	p1 := &testPlugin{name: "blocker", decision: DecisionBlock}
-	p2 := &testPlugin{name: "after",   decision: DecisionAllow}
+	p2 := &testPlugin{name: "after", decision: DecisionAllow}
 	withPlugins([]Middleware{p1, p2}, func() {
 		if got := pluginDecision("1.1.1.1", "GET", "evil.com"); got != DecisionBlock {
 			t.Errorf("expected Block, got %v", got)
@@ -46,7 +46,7 @@ func TestPluginDecision_FirstBlocks(t *testing.T) {
 }
 
 func TestPluginDecision_SecondBlocks(t *testing.T) {
-	p1 := &testPlugin{name: "ok",      decision: DecisionAllow}
+	p1 := &testPlugin{name: "ok", decision: DecisionAllow}
 	p2 := &testPlugin{name: "blocker", decision: DecisionBlock}
 	withPlugins([]Middleware{p1, p2}, func() {
 		if got := pluginDecision("1.1.1.1", "GET", "evil.com"); got != DecisionBlock {

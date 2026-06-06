@@ -156,11 +156,11 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"ipFilterMode":       ipf.Mode(),
-			"ipList":             ipf.List(),
-			"rateLimitRPM":       rl.Limit(),
-			"rateLimitOn":        rl.Enabled(),
-			"rateLimitExempt":    rl.ListExemptions(),
+			"ipFilterMode":    ipf.Mode(),
+			"ipList":          ipf.List(),
+			"rateLimitRPM":    rl.Limit(),
+			"rateLimitOn":     rl.Enabled(),
+			"rateLimitExempt": rl.ListExemptions(),
 		})
 
 	case http.MethodPost:
@@ -263,7 +263,7 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // enforce 1 MB limit before parsing
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)        // enforce 1 MB limit before parsing
 	if err := r.ParseMultipartForm(1 << 20); err != nil { // #nosec G120 -- body already bounded by MaxBytesReader(1 MiB) on the line above
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
@@ -626,11 +626,11 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 
 // apiSecYARARules handles list + CRUD for YARA rule files:
 //
-//   GET    /api/security-scan/yara/rules           — list rule files + contained rule names
-//   GET    /api/security-scan/yara/rules/{name}    — read one rule file source (name = file stem)
-//   POST   /api/security-scan/yara/rules           — create rule file (JSON body)
-//   PUT    /api/security-scan/yara/rules/{name}    — update rule file (JSON body)
-//   DELETE /api/security-scan/yara/rules/{name}    — remove rule file
+//	GET    /api/security-scan/yara/rules           — list rule files + contained rule names
+//	GET    /api/security-scan/yara/rules/{name}    — read one rule file source (name = file stem)
+//	POST   /api/security-scan/yara/rules           — create rule file (JSON body)
+//	PUT    /api/security-scan/yara/rules/{name}    — update rule file (JSON body)
+//	DELETE /api/security-scan/yara/rules/{name}    — remove rule file
 //
 // yaraSettingsMap returns the current YARA engine runtime config as a map
 // suitable for JSON serialisation.
@@ -873,8 +873,8 @@ func apiSecYARAValidate(w http.ResponseWriter, r *http.Request) {
 
 // apiSecScanExclusions exposes the admin-managed ScanExclusionStore.
 //
-//   GET /api/security-scan/exclusions        — return current lists
-//   PUT /api/security-scan/exclusions        — replace lists ({hashes, hosts})
+//	GET /api/security-scan/exclusions        — return current lists
+//	PUT /api/security-scan/exclusions        — replace lists ({hashes, hosts})
 //
 // Tier 3.3.
 func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
@@ -924,8 +924,8 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 
 // apiContentScanBypass exposes the DPI per-host bypass list.
 //
-//   GET /api/content-scan/bypass             — return current bypass hosts
-//   PUT /api/content-scan/bypass             — replace bypass hosts ({hosts})
+//	GET /api/content-scan/bypass             — return current bypass hosts
+//	PUT /api/content-scan/bypass             — replace bypass hosts ({hosts})
 //
 // Tier 3.4.
 func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {

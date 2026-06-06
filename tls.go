@@ -108,10 +108,10 @@ func selfSignedTLS() (*tls.Config, error) {
 	}
 
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "Culvert UI"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Culvert UI"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		IsCA:                  false,
@@ -359,4 +359,3 @@ func queryMetadataEndpoint(client *http.Client, ep cloudMetadataEndpoint) net.IP
 	}
 	return ip
 }
-

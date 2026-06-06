@@ -189,14 +189,14 @@ func (fb *FileBlocker) CheckExt(ext string) string {
 var blockedMIMETypes = map[string]string{
 	"application/x-msdownload":                      ".exe",
 	"application/x-msdos-program":                   ".exe",
-	"application/x-dosexec":                          ".exe",
-	"application/x-executable":                       ".exe",
-	"application/vnd.microsoft.portable-executable":  ".exe",
-	"application/x-msi":                              ".msi",
-	"application/x-ms-installer":                     ".msi",
-	"application/x-bat":                              ".bat",
-	"application/x-powershell":                       ".ps1",
-	"application/x-vbs":                              ".vbs",
+	"application/x-dosexec":                         ".exe",
+	"application/x-executable":                      ".exe",
+	"application/vnd.microsoft.portable-executable": ".exe",
+	"application/x-msi":                             ".msi",
+	"application/x-ms-installer":                    ".msi",
+	"application/x-bat":                             ".bat",
+	"application/x-powershell":                      ".ps1",
+	"application/x-vbs":                             ".vbs",
 }
 
 // CheckContentType returns the blocked extension if the response Content-Type

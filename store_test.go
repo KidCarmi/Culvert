@@ -122,7 +122,9 @@ func TestUptime_Format(t *testing.T) {
 	// Should contain 'm' and 's'.
 	hasM := false
 	for _, c := range u {
-		if c == 'm' { hasM = true }
+		if c == 'm' {
+			hasM = true
+		}
 	}
 	if !hasM {
 		t.Errorf("uptime() format unexpected: %q", u)

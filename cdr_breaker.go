@@ -182,11 +182,11 @@ func (b *cdrCircuitBreaker) Reset() {
 
 // Stats returns a snapshot suitable for /api/cdr/instances exposure.
 type cdrBreakerStats struct {
-	State        string `json:"state"`         // "closed" | "open" | "half_open"
-	ConsecFails  int64  `json:"consecFails"`
-	TotalOpens   int64  `json:"totalOpens"`    // total transitions into open
-	TotalTrips   int64  `json:"totalTrips"`    // Allow() denials while open
-	OpenedAt     int64  `json:"openedAt"`      // UnixNano; 0 if never opened
+	State       string `json:"state"` // "closed" | "open" | "half_open"
+	ConsecFails int64  `json:"consecFails"`
+	TotalOpens  int64  `json:"totalOpens"` // total transitions into open
+	TotalTrips  int64  `json:"totalTrips"` // Allow() denials while open
+	OpenedAt    int64  `json:"openedAt"`   // UnixNano; 0 if never opened
 }
 
 // Stats returns a lock-free snapshot of current breaker state.

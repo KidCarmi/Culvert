@@ -573,8 +573,8 @@ func TestMergeRevocations(t *testing.T) {
 
 	entries := []RevocationEntry{
 		{Token: "new-token", Expiry: time.Now().Add(1 * time.Hour).Unix()},
-		{Token: "existing", Expiry: time.Now().Add(2 * time.Hour).Unix()},  // duplicate
-		{Token: "expired", Expiry: time.Now().Add(-1 * time.Hour).Unix()},  // expired
+		{Token: "existing", Expiry: time.Now().Add(2 * time.Hour).Unix()}, // duplicate
+		{Token: "expired", Expiry: time.Now().Add(-1 * time.Hour).Unix()}, // expired
 	}
 	added := rl.MergeRevocations(entries)
 	if added != 1 {

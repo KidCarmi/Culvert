@@ -55,12 +55,12 @@ func (h *sseHub) ClientCount() int {
 
 // DashboardPayload is sent to SSE clients every second.
 type DashboardPayload struct {
-	ActiveConns   int64          `json:"activeConns"`
-	TotalRequests int64          `json:"totalRequests"`
-	Blocked       int64          `json:"blocked"`
-	AuthFail      int64          `json:"authFail"`
-	RPS           float64        `json:"rps"`         // requests per second (1-min avg)
-	TopCountries  []CountryCount `json:"topCountries"`
+	ActiveConns       int64          `json:"activeConns"`
+	TotalRequests     int64          `json:"totalRequests"`
+	Blocked           int64          `json:"blocked"`
+	AuthFail          int64          `json:"authFail"`
+	RPS               float64        `json:"rps"` // requests per second (1-min avg)
+	TopCountries      []CountryCount `json:"topCountries"`
 	UptimeSec         int64          `json:"uptimeSec"`
 	ClamBlocked       int64          `json:"clamBlocked"`
 	YARABlocked       int64          `json:"yaraBlocked"`

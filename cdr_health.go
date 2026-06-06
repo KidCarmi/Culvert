@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	cdrHealthInterval      = 15 * time.Second
-	cdrHealthProbeDeadline = 5 * time.Second
+	cdrHealthInterval       = 15 * time.Second
+	cdrHealthProbeDeadline  = 5 * time.Second
 	cdrHealthFailStaleAfter = 3 // clear cache after N consecutive failures
 )
 

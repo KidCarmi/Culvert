@@ -96,10 +96,10 @@ func NewOIDCAuth(cfg OIDCConfig) (*OIDCAuth, error) {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
 	}
 	return &OIDCAuth{
-		cfg:   cfg,
-		ttl:   ttl,
+		cfg:    cfg,
+		ttl:    ttl,
 		client: &http.Client{Timeout: 10 * time.Second, Transport: transport},
-		cache: map[string]*oidcCacheEntry{},
+		cache:  map[string]*oidcCacheEntry{},
 	}, nil
 }
 

@@ -409,4 +409,3 @@ func TestUpstreamTransport_OCSPToggleViaAdminAPIUnderTraffic(t *testing.T) {
 
 	g.Wait()
 }
-

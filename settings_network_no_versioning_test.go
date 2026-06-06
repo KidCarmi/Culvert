@@ -114,9 +114,9 @@ func TestAPINetworkSettings_DoesNotCreateConfigVersion(t *testing.T) {
 	const wantTrust = true
 
 	bodyBytes, _ := json.Marshal(map[string]any{
-		"base_url":                  wantBaseURL,
-		"ui_sans":                   wantSANs,
-		"trust_forwarded_headers":   wantTrust,
+		"base_url":                wantBaseURL,
+		"ui_sans":                 wantSANs,
+		"trust_forwarded_headers": wantTrust,
 	})
 
 	w := httptest.NewRecorder()

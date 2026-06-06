@@ -447,13 +447,13 @@ type fakeSluiceCallError struct{ err error }
 
 func TestCDRFilenameFromURL(t *testing.T) {
 	cases := map[string]string{
-		"/downloads/invoice.docx":                 "invoice.docx",
-		"/file%20with%20spaces.pdf":               "file with spaces.pdf",
-		"/a/b/c/readme":                           "readme",
-		"":                                        "",
-		"/":                                       "/",
-		"/path?download=true&v=2":                 "path",
-		"/deep/path/file.pdf#page=1":              "file.pdf",
+		"/downloads/invoice.docx":    "invoice.docx",
+		"/file%20with%20spaces.pdf":  "file with spaces.pdf",
+		"/a/b/c/readme":              "readme",
+		"":                           "",
+		"/":                          "/",
+		"/path?download=true&v=2":    "path",
+		"/deep/path/file.pdf#page=1": "file.pdf",
 	}
 	for in, want := range cases {
 		if got := cdrFilenameFromURL(in); got != want {

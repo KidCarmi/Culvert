@@ -643,7 +643,7 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 		created, err := cli.ContainerCreate(ctx, newConfig, info.HostConfig, netConfig, nil, req.Container)
 		if err != nil {
 			// Rollback: restore original.
-			cli.ContainerRename(ctx, info.ID, req.Container) //nolint:errcheck
+			cli.ContainerRename(ctx, info.ID, req.Container)           //nolint:errcheck
 			cli.ContainerStart(ctx, info.ID, container.StartOptions{}) //nolint:errcheck
 			sendEvent("error", "Create failed: "+err.Error(), 0)
 			return
@@ -713,7 +713,7 @@ func handleApply(cli *client.Client) http.HandlerFunc {
 			// Capture logs before removing.
 			captureFailureLogs(ctx, cli, created.ID, req.TargetTag)
 
-			cli.ContainerStop(ctx, created.ID, container.StopOptions{}) //nolint:errcheck
+			cli.ContainerStop(ctx, created.ID, container.StopOptions{})                //nolint:errcheck
 			cli.ContainerRemove(ctx, created.ID, container.RemoveOptions{Force: true}) //nolint:errcheck
 			cli.ContainerRename(ctx, info.ID, req.Container)                           //nolint:errcheck
 			cli.ContainerStart(ctx, info.ID, container.StartOptions{})                 //nolint:errcheck

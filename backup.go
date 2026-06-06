@@ -169,10 +169,11 @@ func runBackupWith(outPath string, artifacts []backupArtifact, passphrase string
 	return writeBackupTarball(outPath, manifestBytes, packed)
 }
 
-//nolint:gocognit,nestif // Per-artifact branch (file vs dir, present vs missing,
 // required vs optional, first-run-optional vs strict) is intentionally unrolled
 // so each case is grep-able in error messages. Splitting further would
 // scatter the missing-required accounting that callers depend on.
+//
+//nolint:gocognit,nestif // Per-artifact branch (file vs dir, present vs missing,
 func collectArtifacts(artifacts []backupArtifact) (
 	manifestFiles []backupManifestFile,
 	packed []packedFile,
@@ -289,10 +290,11 @@ func packOne(srcPath, tarPath string, info os.FileInfo, required bool, manifestF
 	return nil
 }
 
-//nolint:funlen // Cleanup-on-error is repeated per close site (tw, gz, out) by
 // design — defer-stacks would re-order Close calls and obscure the failure
 // path. Splitting into smaller helpers would push the gz/tw/out lifetimes
 // across function boundaries, complicating reasoning about partial state.
+//
+//nolint:funlen // Cleanup-on-error is repeated per close site (tw, gz, out) by
 func writeBackupTarball(outPath string, manifestBytes []byte, packed []packedFile) error {
 	tmpPath := outPath + ".tmp"
 	out, err := os.Create(tmpPath) // #nosec G304 -- operator-controlled path

@@ -215,4 +215,3 @@ func TestLoadInspectionRules_InMemoryOnly(t *testing.T) {
 		t.Errorf("dpiScanner in-memory seeding failed: %v", list)
 	}
 }
-

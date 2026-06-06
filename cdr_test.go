@@ -714,11 +714,11 @@ func TestBuildCDRTLSConfig_SecondaryExpiredIgnored(t *testing.T) {
 // TestNormalisePinHex — covers colon stripping, prefix stripping, case.
 func TestNormalisePinHex(t *testing.T) {
 	cases := map[string]string{
-		"":                           "",
-		"  aB:cD  ":                  "abcd",
-		"sha256:aB:cD":               "abcd",
-		"SHA256:ABCD":                "abcd",
-		"abcd":                       "abcd",
+		"":             "",
+		"  aB:cD  ":    "abcd",
+		"sha256:aB:cD": "abcd",
+		"SHA256:ABCD":  "abcd",
+		"abcd":         "abcd",
 	}
 	for in, want := range cases {
 		if got := normalisePinHex(in); got != want {

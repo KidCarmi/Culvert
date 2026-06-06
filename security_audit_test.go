@@ -446,7 +446,7 @@ func TestIsSafeRedirectURL_RejectsDangerous(t *testing.T) {
 		"data:text/html,<h1>hi</h1>",
 		"",
 		"ftp://example.com/file",
-		"/relative/path",       // not absolute
+		"/relative/path",        // not absolute
 		"://missing-scheme.com", // invalid URL
 	}
 	for _, u := range unsafe {

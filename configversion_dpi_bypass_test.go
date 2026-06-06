@@ -263,7 +263,6 @@ func TestConfigVersion_DPIBypassHosts_DiffReportsChanges(t *testing.T) {
 	}
 }
 
-
 // TestConfigVersion_DPIBypassHosts_SingleEnvelopeAfterApply verifies
 // the spec §8 single-Save contract: after a combined apply, the
 // on-disk content_scan.json contains BOTH the restored patterns and

@@ -42,28 +42,28 @@ type fileMagicSig struct {
 // Order matters: first match wins.
 var knownMagicSigs = []fileMagicSig{
 	// Executables
-	{0, []byte("MZ"), "PE", ".exe", false},                               // DOS/PE executable
-	{0, []byte{0x7f, 'E', 'L', 'F'}, "ELF", ".elf", false},              // Linux ELF
-	{0, []byte{0xfe, 0xed, 0xfa, 0xce}, "MachO32", ".macho", false},      // macOS Mach-O 32
-	{0, []byte{0xfe, 0xed, 0xfa, 0xcf}, "MachO64", ".macho", false},      // macOS Mach-O 64
-	{0, []byte{0xcf, 0xfa, 0xed, 0xfe}, "MachO64r", ".macho", false},     // macOS Mach-O 64 reversed
+	{0, []byte("MZ"), "PE", ".exe", false},                           // DOS/PE executable
+	{0, []byte{0x7f, 'E', 'L', 'F'}, "ELF", ".elf", false},           // Linux ELF
+	{0, []byte{0xfe, 0xed, 0xfa, 0xce}, "MachO32", ".macho", false},  // macOS Mach-O 32
+	{0, []byte{0xfe, 0xed, 0xfa, 0xcf}, "MachO64", ".macho", false},  // macOS Mach-O 64
+	{0, []byte{0xcf, 0xfa, 0xed, 0xfe}, "MachO64r", ".macho", false}, // macOS Mach-O 64 reversed
 
 	// Archives (F4)
-	{0, []byte("PK\x03\x04"), "ZIP", ".zip", true},                       // ZIP / DOCX / XLSX / JAR
-	{0, []byte("PK\x05\x06"), "ZIP-empty", ".zip", true},                 // Empty ZIP
-	{0, []byte{0x1f, 0x8b}, "GZIP", ".gz", true},                         // gzip
-	{0, []byte("Rar!\x1a\x07"), "RAR", ".rar", true},                     // RAR v4+
-	{0, []byte{0xfd, '7', 'z', 'X', 'Z', 0x00}, "XZ", ".xz", true},      // XZ
-	{0, []byte("7z\xbc\xaf\x27\x1c"), "7Z", ".7z", true},                 // 7-Zip
-	{0, []byte("BZh"), "BZIP2", ".bz2", true},                            // bzip2
-	{0, []byte{0x1f, 0x9d}, "Z-LZW", ".Z", true},                        // compress (LZW)
-	{0, []byte{0x28, 0xb5, 0x2f, 0xfd}, "ZSTD", ".zst", true},           // Zstandard
+	{0, []byte("PK\x03\x04"), "ZIP", ".zip", true},                 // ZIP / DOCX / XLSX / JAR
+	{0, []byte("PK\x05\x06"), "ZIP-empty", ".zip", true},           // Empty ZIP
+	{0, []byte{0x1f, 0x8b}, "GZIP", ".gz", true},                   // gzip
+	{0, []byte("Rar!\x1a\x07"), "RAR", ".rar", true},               // RAR v4+
+	{0, []byte{0xfd, '7', 'z', 'X', 'Z', 0x00}, "XZ", ".xz", true}, // XZ
+	{0, []byte("7z\xbc\xaf\x27\x1c"), "7Z", ".7z", true},           // 7-Zip
+	{0, []byte("BZh"), "BZIP2", ".bz2", true},                      // bzip2
+	{0, []byte{0x1f, 0x9d}, "Z-LZW", ".Z", true},                   // compress (LZW)
+	{0, []byte{0x28, 0xb5, 0x2f, 0xfd}, "ZSTD", ".zst", true},      // Zstandard
 
 	// ISO / disk images
-	{0x8001, []byte("CD001"), "ISO9660", ".iso", true},                    // ISO at sector 16
+	{0x8001, []byte("CD001"), "ISO9660", ".iso", true}, // ISO at sector 16
 
 	// Scripts/macros
-	{0, []byte("#!"), "Script", ".sh", false},                             // shell script
+	{0, []byte("#!"), "Script", ".sh", false}, // shell script
 }
 
 // DetectMagic examines the first bytes of data and returns the detected file type.

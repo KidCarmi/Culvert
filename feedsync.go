@@ -51,14 +51,14 @@ const (
 // Only directories listed here are ingested; all others are ignored.
 var ut1CategoryMap = map[string]string{
 	// Security threats
-	"adult":           "Adult",
-	"agressif":        "Malicious",
-	"malware":         "Malicious",
-	"phishing":        "Malicious",
-	"redirector":      "Malicious",
-	"warez":           "Malicious",
-	"hacking":         "Hacking",
-	"cryptojacking":   "Malicious",
+	"adult":         "Adult",
+	"agressif":      "Malicious",
+	"malware":       "Malicious",
+	"phishing":      "Malicious",
+	"redirector":    "Malicious",
+	"warez":         "Malicious",
+	"hacking":       "Hacking",
+	"cryptojacking": "Malicious",
 
 	// Content categories
 	"dating":          "Dating",
@@ -75,35 +75,35 @@ var ut1CategoryMap = map[string]string{
 	"audio-video":     "Media",
 
 	// Commerce & finance
-	"shopping":        "Shopping",
-	"bank":            "Finance",
-	"bitcoin":         "Cryptocurrency",
-	"financial":       "Finance",
+	"shopping":  "Shopping",
+	"bank":      "Finance",
+	"bitcoin":   "Cryptocurrency",
+	"financial": "Finance",
 
 	// Education & government
-	"education":       "Education",
-	"government":      "Government",
-	"associations":    "Non-Profit",
-	"religious":       "Religion",
-	"science":         "Education",
+	"education":    "Education",
+	"government":   "Government",
+	"associations": "Non-Profit",
+	"religious":    "Religion",
+	"science":      "Education",
 
 	// Technology
-	"filehosting":     "File Hosting",
-	"download":        "Downloads",
-	"ddos":            "Malicious",
-	"vpn":             "VPN/Proxy",
-	"remote-control":  "Remote Access",
+	"filehosting":    "File Hosting",
+	"download":       "Downloads",
+	"ddos":           "Malicious",
+	"vpn":            "VPN/Proxy",
+	"remote-control": "Remote Access",
 
 	// Ads & tracking
-	"ads":             "Advertising",
-	"tracker":         "Tracking",
-	"marketingware":   "Tracking",
+	"ads":           "Advertising",
+	"tracker":       "Tracking",
+	"marketingware": "Tracking",
 
 	// Misc
-	"jobsearch":       "Job Search",
-	"reaffected":      "Parked Domains",
-	"mixed_adult":     "Adult",
-	"lingerie":        "Adult",
+	"jobsearch":   "Job Search",
+	"reaffected":  "Parked Domains",
+	"mixed_adult": "Adult",
+	"lingerie":    "Adult",
 }
 
 // FeedSyncer manages periodic synchronisation of UT1 data into CommunityDB.

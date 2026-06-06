@@ -28,20 +28,20 @@ import (
 
 // ClusterUpdateState tracks a rolling update across the cluster.
 type ClusterUpdateState struct {
-	mu          sync.Mutex
-	Active      bool                          `json:"active"`
-	TargetTag   string                        `json:"target_tag"`
-	PreviousTag string                        `json:"previous_tag"`
-	Initiator   string                        `json:"initiator"`
-	StartedAt   time.Time                     `json:"started_at"`
-	CompletedAt time.Time                     `json:"completed_at,omitempty"`
-	Nodes       map[string]*NodeUpdateStatus  `json:"nodes"`
-	Phase       string                        `json:"phase"` // "canary", "canary_soak", "updating_dps", "updating_cp", "complete", "failed", "halted", "cp_rolled_back", "auto_rollback"
-	ErrorBudget ErrorBudgetConfig             `json:"error_budget"`
-	Failures    int                           `json:"failures"`
-	ConsecFails int                           `json:"consec_fails"`
-	CanaryCount int                           `json:"canary_count,omitempty"` // F6: number of canary nodes (0 = skip canary)
-	CanarySoak  int                           `json:"canary_soak_s,omitempty"` // F6: soak period seconds after canary phase
+	mu           sync.Mutex
+	Active       bool                         `json:"active"`
+	TargetTag    string                       `json:"target_tag"`
+	PreviousTag  string                       `json:"previous_tag"`
+	Initiator    string                       `json:"initiator"`
+	StartedAt    time.Time                    `json:"started_at"`
+	CompletedAt  time.Time                    `json:"completed_at,omitempty"`
+	Nodes        map[string]*NodeUpdateStatus `json:"nodes"`
+	Phase        string                       `json:"phase"` // "canary", "canary_soak", "updating_dps", "updating_cp", "complete", "failed", "halted", "cp_rolled_back", "auto_rollback"
+	ErrorBudget  ErrorBudgetConfig            `json:"error_budget"`
+	Failures     int                          `json:"failures"`
+	ConsecFails  int                          `json:"consec_fails"`
+	CanaryCount  int                          `json:"canary_count,omitempty"`  // F6: number of canary nodes (0 = skip canary)
+	CanarySoak   int                          `json:"canary_soak_s,omitempty"` // F6: soak period seconds after canary phase
 	AutoRollback bool                         `json:"auto_rollback,omitempty"` // F8: auto-rollback on health breach
 }
 
@@ -1083,9 +1083,9 @@ func apiClusterUpdate(w http.ResponseWriter, r *http.Request) {
 		TargetTag      string `json:"target_tag"`
 		MaxConsecutive int    `json:"max_consecutive"`
 		MaxPercent     int    `json:"max_percent"`
-		CanaryCount    int    `json:"canary_count"`     // F6: number of canary nodes (0 = skip)
-		CanarySoakSec  int    `json:"canary_soak_s"`    // F6: soak period in seconds (min 30)
-		AutoRollback   bool   `json:"auto_rollback"`    // F8: auto-rollback on health breach
+		CanaryCount    int    `json:"canary_count"`  // F6: number of canary nodes (0 = skip)
+		CanarySoakSec  int    `json:"canary_soak_s"` // F6: soak period in seconds (min 30)
+		AutoRollback   bool   `json:"auto_rollback"` // F8: auto-rollback on health breach
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)

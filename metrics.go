@@ -218,7 +218,7 @@ func (h *latencyHistogram) Observe(seconds float64) {
 	// Atomic float64 add via CAS loop — bit reinterpretation, not numeric conversion.
 	for {
 		old := atomic.LoadInt64(&h.sumBits)
-		newVal := math.Float64frombits(uint64(old)) + seconds                              // #nosec G115 -- bit reinterpret, not numeric conversion
+		newVal := math.Float64frombits(uint64(old)) + seconds                             // #nosec G115 -- bit reinterpret, not numeric conversion
 		if atomic.CompareAndSwapInt64(&h.sumBits, old, int64(math.Float64bits(newVal))) { // #nosec G115 -- bit reinterpret, not numeric conversion
 			break
 		}
@@ -267,9 +267,9 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) { //nolint:errcheck /
 			return
 		}
 	}
-	total       := atomic.LoadInt64(&statTotal)
-	blocked     := atomic.LoadInt64(&statBlocked)
-	authFail    := atomic.LoadInt64(&statAuthFail)
+	total := atomic.LoadInt64(&statTotal)
+	blocked := atomic.LoadInt64(&statBlocked)
+	authFail := atomic.LoadInt64(&statAuthFail)
 	fileBlocked := atomic.LoadInt64(&statFileBlocked)
 	allowed := total - blocked - authFail
 	if allowed < 0 {
@@ -282,12 +282,12 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) { //nolint:errcheck /
 		rlEnabled = 1
 	}
 
-	clamBlocked    := atomic.LoadInt64(&statClamBlocked)
-	yaraBlocked    := atomic.LoadInt64(&statYARABlocked)
-	feedBlocked    := atomic.LoadInt64(&statThreatFeedBlocked)
-	dpiBlocked     := atomic.LoadInt64(&statDPIBlocked)
-	bytesSent      := atomic.LoadInt64(&statBytesSent)
-	bytesRecv      := atomic.LoadInt64(&statBytesRecv)
+	clamBlocked := atomic.LoadInt64(&statClamBlocked)
+	yaraBlocked := atomic.LoadInt64(&statYARABlocked)
+	feedBlocked := atomic.LoadInt64(&statThreatFeedBlocked)
+	dpiBlocked := atomic.LoadInt64(&statDPIBlocked)
+	bytesSent := atomic.LoadInt64(&statBytesSent)
+	bytesRecv := atomic.LoadInt64(&statBytesRecv)
 	feedEntries, _, _ := globalThreatFeed.Stats()
 	cacheHits, cacheMisses, cacheSize := globalSecScanner.cache.Stats()
 

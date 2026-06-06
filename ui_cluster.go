@@ -10,7 +10,6 @@ import (
 	"time"
 )
 
-
 func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -20,13 +19,13 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := map[string]any{
-		"role":           clusterRole.role,
-		"nodeID":         clusterRole.nodeID,
-		"grpcAddr":       clusterRole.grpcAddr,
-		"uptime":         time.Since(startTime).Round(time.Second).String(),
-		"enrollEnabled":  globalClusterCA.Ready(),
-		"caFingerprint":  globalClusterCA.CACertFingerprint(),
-		"ha":             globalHA.Status(),
+		"role":          clusterRole.role,
+		"nodeID":        clusterRole.nodeID,
+		"grpcAddr":      clusterRole.grpcAddr,
+		"uptime":        time.Since(startTime).Round(time.Second).String(),
+		"enrollEnabled": globalClusterCA.Ready(),
+		"caFingerprint": globalClusterCA.CACertFingerprint(),
+		"ha":            globalHA.Status(),
 	}
 	if clusterRole.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()
@@ -395,8 +394,8 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"local_revoked":  sessionRevoked.Count(),
-		"cluster_mode":   clusterRoleIsDP.Load() || clusterRole.role == "control-plane",
+		"local_revoked": sessionRevoked.Count(),
+		"cluster_mode":  clusterRoleIsDP.Load() || clusterRole.role == "control-plane",
 	})
 }
 

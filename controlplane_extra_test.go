@@ -198,7 +198,7 @@ func TestVerifyNode_EmptyNodeID(t *testing.T) {
 	defer func() { globalClusterStore = origStore }()
 	globalClusterStore = newTestClusterStore(t)
 
-	err := verifyNode(testBGCtx(), "", )
+	err := verifyNode(testBGCtx(), "")
 	if err == nil {
 		t.Fatal("expected error for empty node ID")
 	}

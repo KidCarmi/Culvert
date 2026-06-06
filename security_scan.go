@@ -96,7 +96,7 @@ const clamStatusTTL = 30 * time.Second
 // globalSecScanner is the process-wide scanner, initialised in main.go.
 var globalSecScanner = &SecurityScanner{
 	cache:    newHashCache(10_000, 0), // TTL overridden in Init
-	maxBytes: 5 << 20,                // 5 MiB default
+	maxBytes: 5 << 20,                 // 5 MiB default
 }
 
 // ── ScanExclusionStore (Tier 3.3) ─────────────────────────────────────────────
@@ -677,9 +677,9 @@ func secScanStatusMap() map[string]interface{} {
 		"scan_svc_mode":         "local",
 		"clamav_status":         globalSecScanner.ClamAVStatus(),
 		"yara_rules":            globalYARA.Count(),
-		"yara_warnings":         len(globalYARA.Warnings()),       // Tier 2.1
-		"yara_inflight":         yaraInflight.Load(),              // Tier 1.3
-		"yara_inflight_max":     yaraGetMaxInflight(),             // Tier 1.3
+		"yara_warnings":         len(globalYARA.Warnings()), // Tier 2.1
+		"yara_inflight":         yaraInflight.Load(),        // Tier 1.3
+		"yara_inflight_max":     yaraGetMaxInflight(),       // Tier 1.3
 		"yara_enabled":          yaraGetEnabled(),
 		"yara_timeout_secs":     yaraGetTimeoutSecs(),
 		"yara_on_timeout":       yaraGetOnTimeout(),
@@ -694,8 +694,8 @@ func secScanStatusMap() map[string]interface{} {
 		"stat_clam_blocked":     atomic.LoadInt64(&statClamBlocked),
 		"stat_yara_blocked":     atomic.LoadInt64(&statYARABlocked),
 		"stat_feed_blocked":     atomic.LoadInt64(&statThreatFeedBlocked),
-		"stat_scan_timeout":     atomic.LoadInt64(&statScanTimeout),     // Tier 1.2
-		"stat_scan_skipped":     atomic.LoadInt64(&statScanSkipped),     // Tier 1.2
-		"stat_remote_scan_fail": atomic.LoadInt64(&statRemoteScanFail),  // Tier 2.2
+		"stat_scan_timeout":     atomic.LoadInt64(&statScanTimeout),    // Tier 1.2
+		"stat_scan_skipped":     atomic.LoadInt64(&statScanSkipped),    // Tier 1.2
+		"stat_remote_scan_fail": atomic.LoadInt64(&statRemoteScanFail), // Tier 2.2
 	}
 }

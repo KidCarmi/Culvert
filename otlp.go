@@ -223,8 +223,8 @@ type otlpHistDataPoint struct {
 }
 
 type otlpKeyValue struct {
-	Key   string        `json:"key"`
-	Value otlpAnyValue  `json:"value"`
+	Key   string       `json:"key"`
+	Value otlpAnyValue `json:"value"`
 }
 
 type otlpAnyValue struct {

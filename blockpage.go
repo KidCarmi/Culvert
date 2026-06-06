@@ -68,9 +68,9 @@ type blockPageData struct {
 
 // blockPageState holds the current block page template (mutable at runtime).
 var blockPageState = struct {
-	mu       sync.RWMutex
-	tmpl     *template.Template
-	htmlSrc  string // raw HTML for GET /api/blockpage
+	mu      sync.RWMutex
+	tmpl    *template.Template
+	htmlSrc string // raw HTML for GET /api/blockpage
 }{
 	tmpl:    template.Must(template.New("block").Parse(blockPageHTML)),
 	htmlSrc: blockPageHTML,

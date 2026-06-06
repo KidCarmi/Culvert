@@ -154,9 +154,9 @@ func TestClusterTokenCreate_NodePrefixValidation(t *testing.T) {
 
 func TestClusterMode_GRPCAddrValidation(t *testing.T) {
 	tests := []struct {
-		name    string
-		addr    string
-		wantOK  bool
+		name   string
+		addr   string
+		wantOK bool
 	}{
 		{"valid_port_only", ":50051", true},
 		{"valid_host_port", "0.0.0.0:50051", true},

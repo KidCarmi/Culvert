@@ -421,4 +421,3 @@ func enrollmentCPAddr(r *http.Request, grpcListenAddr string) string {
 	// net.JoinHostPort adds brackets for IPv6 automatically.
 	return net.JoinHostPort(host, grpcPort)
 }
-

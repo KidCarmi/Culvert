@@ -391,7 +391,9 @@ func TestInitAuditLog_ValidPath(t *testing.T) {
 	if auditLogFile == nil {
 		t.Error("InitAuditLog should set auditLogFile")
 	}
-	if auditCloser != nil { auditCloser.Close() }
+	if auditCloser != nil {
+		auditCloser.Close()
+	}
 	auditLogFile = nil
 }
 

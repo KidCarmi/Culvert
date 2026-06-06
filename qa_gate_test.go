@@ -184,26 +184,26 @@ func TestIsPrivateIP_ExpandedCoverage(t *testing.T) {
 	// Every entry below is explicitly required to be private after the
 	// coverage expansion that accompanied the SSRF hardening.
 	private := []string{
-		"0.0.0.0",           // "this host"
-		"0.1.2.3",           // 0.0.0.0/8
-		"10.0.0.1",          // RFC 1918
-		"100.64.0.1",        // RFC 6598 CGN
-		"100.127.255.254",   // CGN end
-		"127.0.0.1",         // loopback
-		"169.254.169.254",   // AWS/GCE/Azure metadata
-		"172.16.0.1",        // RFC 1918
-		"172.31.255.254",    // RFC 1918 end
-		"192.168.1.1",       // RFC 1918
-		"198.18.0.1",        // benchmark
-		"198.19.255.254",    // benchmark end
-		"224.0.0.1",         // multicast
-		"239.255.255.255",   // multicast end
-		"240.0.0.1",         // reserved
-		"255.255.255.255",   // broadcast
-		"::1",               // IPv6 loopback
-		"fc00::1",           // ULA
-		"fe80::1",           // IPv6 link-local
-		"ff02::1",           // IPv6 multicast
+		"0.0.0.0",         // "this host"
+		"0.1.2.3",         // 0.0.0.0/8
+		"10.0.0.1",        // RFC 1918
+		"100.64.0.1",      // RFC 6598 CGN
+		"100.127.255.254", // CGN end
+		"127.0.0.1",       // loopback
+		"169.254.169.254", // AWS/GCE/Azure metadata
+		"172.16.0.1",      // RFC 1918
+		"172.31.255.254",  // RFC 1918 end
+		"192.168.1.1",     // RFC 1918
+		"198.18.0.1",      // benchmark
+		"198.19.255.254",  // benchmark end
+		"224.0.0.1",       // multicast
+		"239.255.255.255", // multicast end
+		"240.0.0.1",       // reserved
+		"255.255.255.255", // broadcast
+		"::1",             // IPv6 loopback
+		"fc00::1",         // ULA
+		"fe80::1",         // IPv6 link-local
+		"ff02::1",         // IPv6 multicast
 	}
 	for _, addr := range private {
 		ip := net.ParseIP(addr)
@@ -240,9 +240,9 @@ func TestIsPrivateIP_KnownPublicStaysPublic(t *testing.T) {
 	// A handful of public IPs used as proxy destinations in other tests.
 	// If this fails the expanded list is over-blocking (regression).
 	publics := []string{
-		"8.8.8.8",     // Google DNS
-		"1.1.1.1",     // Cloudflare DNS
-		"203.0.113.1", // TEST-NET-3 (used as "public" in CONNECT tests)
+		"8.8.8.8",              // Google DNS
+		"1.1.1.1",              // Cloudflare DNS
+		"203.0.113.1",          // TEST-NET-3 (used as "public" in CONNECT tests)
 		"2606:4700:4700::1111", // Cloudflare DNS (v6)
 	}
 	for _, addr := range publics {

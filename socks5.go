@@ -277,7 +277,7 @@ func handleSOCKS5(conn net.Conn) {
 	}
 	defer destConn.Close()
 
-	socks5Reply(conn, 0x00) // success
+	socks5Reply(conn, 0x00)       // success
 	conn.SetDeadline(time.Time{}) //nolint:errcheck // remove deadline for streaming
 
 	atomic.AddInt64(&statTotal, 1)

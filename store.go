@@ -91,12 +91,12 @@ func tsRecordResult(isAllowed bool) {
 func tsGet() (total, allowed, blocked []int64) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	total   = make([]int64, 60)
+	total = make([]int64, 60)
 	allowed = make([]int64, 60)
 	blocked = make([]int64, 60)
 	for i := 0; i < 60; i++ {
-		idx        := (ts.cur - i + 60) % 60
-		total[59-i]   = ts.buckets[idx]
+		idx := (ts.cur - i + 60) % 60
+		total[59-i] = ts.buckets[idx]
 		allowed[59-i] = ts.allowed[idx]
 		blocked[59-i] = ts.blocked[idx]
 	}
@@ -112,13 +112,13 @@ type LogEntry struct {
 	Identity    string `json:"identity,omitempty"` // authenticated username/email, empty if unauthenticated
 	Method      string `json:"method"`
 	Host        string `json:"host"`
-	Status      string `json:"status"`      // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
-	Level       string `json:"level"`       // INFO | WARN | ERROR
-	RuleMatched string `json:"ruleMatched"` // policy rule name that matched, if any
-	ActionTaken string `json:"actionTaken"` // policy action taken, if any
-	BytesSent   int64  `json:"bytesSent,omitempty"`   // bytes sent to upstream (request body)
-	BytesRecv   int64  `json:"bytesRecv,omitempty"`   // bytes received from upstream (response body)
-	SSLAction   string `json:"sslAction,omitempty"`   // "inspect", "bypass", or empty (non-CONNECT)
+	Status      string `json:"status"`              // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
+	Level       string `json:"level"`               // INFO | WARN | ERROR
+	RuleMatched string `json:"ruleMatched"`         // policy rule name that matched, if any
+	ActionTaken string `json:"actionTaken"`         // policy action taken, if any
+	BytesSent   int64  `json:"bytesSent,omitempty"` // bytes sent to upstream (request body)
+	BytesRecv   int64  `json:"bytesRecv,omitempty"` // bytes received from upstream (response body)
+	SSLAction   string `json:"sslAction,omitempty"` // "inspect", "bypass", or empty (non-CONNECT)
 }
 
 func levelForStatus(status string) string {
@@ -273,12 +273,12 @@ func logGet() []LogEntry {
 // Action follows a "resource.verb" naming scheme (e.g. "policy.add").
 
 type AuditEntry struct {
-	TS     int64  `json:"ts"`     // Unix milliseconds
-	Time   string `json:"time"`   // human-readable "2006-01-02 15:04:05"
-	Actor  string `json:"actor"`  // client IP (or authenticated username)
-	Action string `json:"action"` // "policy.add" | "blocklist.remove" | …
-	Object string `json:"object"` // the specific item that changed
-	Detail string `json:"detail"` // extra context (never contains credentials)
+	TS     int64  `json:"ts"`               // Unix milliseconds
+	Time   string `json:"time"`             // human-readable "2006-01-02 15:04:05"
+	Actor  string `json:"actor"`            // client IP (or authenticated username)
+	Action string `json:"action"`           // "policy.add" | "blocklist.remove" | …
+	Object string `json:"object"`           // the specific item that changed
+	Detail string `json:"detail"`           // extra context (never contains credentials)
 	Before string `json:"before,omitempty"` // JSON snapshot before the change
 	After  string `json:"after,omitempty"`  // JSON snapshot after the change
 }
@@ -688,7 +688,7 @@ func (b *Blocklist) isExcepted(host string) bool {
 	if b.exceptions[host] {
 		return true
 	}
-		// Check if a wildcard exception covers this exact host
+	// Check if a wildcard exception covers this exact host
 	// e.g. "*.raw.githubusercontent.com" should match "raw.githubusercontent.com"
 	if b.exceptions["*."+host] {
 		return true
@@ -1437,18 +1437,18 @@ func (c *Config) SetUIUsersFile(path string) {
 // uiUserRecord is the on-disk representation of a UI admin user.
 type uiUserRecord struct {
 	Username        string   `json:"username"`
-	PassHash        string   `json:"pass_hash"`                    // hex-encoded bcrypt hash
+	PassHash        string   `json:"pass_hash"` // hex-encoded bcrypt hash
 	Role            UIRole   `json:"role"`
-	TOTPSecret      string   `json:"totp_secret,omitempty"`        // base32 TOTP secret
-	BackupCodes     []string `json:"backup_codes,omitempty"`       // bcrypt-hashed one-time codes
-	TOTPLastCounter int64    `json:"totp_last_counter,omitempty"`  // last successfully-used TOTP step (replay protection)
+	TOTPSecret      string   `json:"totp_secret,omitempty"`       // base32 TOTP secret
+	BackupCodes     []string `json:"backup_codes,omitempty"`      // bcrypt-hashed one-time codes
+	TOTPLastCounter int64    `json:"totp_last_counter,omitempty"` // last successfully-used TOTP step (replay protection)
 }
 
 // uiUsersFileEnvelope is the on-disk JSON structure that wraps the user
 // roster along with global settings that must survive restarts.
 type uiUsersFileEnvelope struct {
-	UnauthMode bool             `json:"unauth_mode,omitempty"`
-	Users      []uiUserRecord   `json:"users"`
+	UnauthMode bool           `json:"unauth_mode,omitempty"`
+	Users      []uiUserRecord `json:"users"`
 }
 
 // LoadUIUsersFile reads persisted UI users from disk and populates the roster.

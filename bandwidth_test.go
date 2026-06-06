@@ -382,10 +382,10 @@ func TestApiBandwidthPolicies_POST(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/cluster/bandwidth", map[string]any{
-		"name":             "new-pol",
-		"label_selector":   map[string]string{"region": "eu"},
+		"name":              "new-pol",
+		"label_selector":    map[string]string{"region": "eu"},
 		"max_bytes_per_sec": 2048,
-		"priority":         3,
+		"priority":          3,
 	})
 
 	apiBandwidthPolicies(w, r)

@@ -63,7 +63,6 @@ func TestDecodeSession_Tampered(t *testing.T) {
 	}
 }
 
-
 func TestDecodeSession_Invalid(t *testing.T) {
 	initSessionSecret()
 	_, err := decodeSession("not.a.valid.token")

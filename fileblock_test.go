@@ -15,7 +15,7 @@ func freshFB() *FileBlocker {
 func TestFileBlocker_AddRemoveCount(t *testing.T) {
 	fb := freshFB()
 	fb.Add(".exe")
-	fb.Add("dll") // without leading dot — should normalise to ".dll"
+	fb.Add("dll")  // without leading dot — should normalise to ".dll"
 	fb.Add(".EXE") // duplicate, case-insensitive — should not increase count
 
 	if fb.Count() != 2 {
@@ -43,8 +43,8 @@ func TestFileBlocker_CheckPath(t *testing.T) {
 		{"/download/malware.exe", true},
 		{"/scripts/run.ps1", true},
 		{"/docs/report.pdf", false},
-		{"/page/", false},       // no extension
-		{"/file.EXE", true},    // case-insensitive
+		{"/page/", false},        // no extension
+		{"/file.EXE", true},      // case-insensitive
 		{"/file.exe.txt", false}, // extension is .txt, not .exe
 	}
 	for _, c := range cases {
@@ -65,9 +65,9 @@ func TestFileBlocker_CheckContentDisposition(t *testing.T) {
 	}{
 		{`attachment; filename="setup.exe"`, true},
 		{`attachment; filename="report.pdf"`, false},
-		{`attachment; filename="SETUP.EXE"`, true},  // case-insensitive
-		{`inline`, false},                            // no filename param
-		{``, false},                                  // empty header
+		{`attachment; filename="SETUP.EXE"`, true}, // case-insensitive
+		{`inline`, false}, // no filename param
+		{``, false},       // empty header
 		{`attachment; filename="archive.tar.gz"`, false}, // .gz not blocked
 	}
 	for _, c := range cases {
