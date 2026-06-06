@@ -18,7 +18,7 @@ proxy:
   ca_path: "/data/ca.bundle"      # Persistent Root CA bundle (mount /data as Docker volume)
   metrics_token: ""   # Bearer token for /metrics endpoint (empty = open access)
   policy_file: ""     # JSON file for PBAC policy rules
-  base_url: ""        # External base URL for OIDC/SAML callbacks (e.g. "https://proxy.corp.com:9090")
+  base_url: ""        # Full external UI URL for OIDC/SAML callbacks and SAML SP metadata (e.g. "https://proxy.corp.com:9090" or "https://proxy.corp.com/culvert")
   geoip_db: "/app/GeoLite2-Country.mmdb"  # GeoIP database (db-ip.com CC BY 4.0)
   idp_profiles_file: "" # JSON file for generic IdP profiles
   url_categories_file: "" # JSON file for dynamic URL categories

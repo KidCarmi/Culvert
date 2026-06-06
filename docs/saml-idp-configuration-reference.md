@@ -13,20 +13,80 @@ in the SAML assertion, so those values can be mapped to the `SAMLProfileConfig` 
 ## Common SP Values (What You Provide to Every IdP)
 
 Before configuring any IdP, collect these values from your running Culvert instance. They are
-derived from the `base_url` in `config.yaml`. If `base_url` includes a path prefix, keep that
-prefix in both the SP Entity ID and ACS URL.
+derived from `proxy.base_url` in `config.yaml`. `proxy.base_url` is the full external URL,
+including scheme, host, optional port, and optional path prefix. If `proxy.base_url` includes
+a path prefix, keep that prefix in the SP Entity ID, metadata URL, and ACS URL.
 
 | Field | Value Pattern | Description |
 |---|---|---|
-| **SP Entity ID** | `https://<base_url>` | Unique identifier for this SP |
-| **ACS URL** | `https://<base_url>/auth/saml/callback` | Where the IdP POSTs the SAML response |
-| **SP Metadata URL** | `https://<base_url>/auth/saml/metadata` | Optional import URL for IdPs that support SP metadata |
+| **SP Entity ID** | `<base_url>` | Unique identifier for this SP |
+| **ACS URL** | `<base_url>/auth/saml/callback` | Where the IdP POSTs the SAML response |
+| **SP Metadata URL** | `<base_url>/auth/saml/metadata` | Optional import URL for IdPs that support SP metadata |
 | **SP Signing Certificate** | Not required by default | Only needed if you enable signed AuthnRequests in a future build |
 
-All ACS URLs **must** use HTTPS. HTTP is rejected by the SP and most IdPs.
+Use HTTPS for production SAML. Culvert can build URLs from an HTTP `proxy.base_url` for
+local development, but most IdPs reject HTTP ACS URLs and browser SSO cookies are safest
+behind TLS.
+
+Example:
+
+```yaml
+proxy:
+  base_url: "https://proxy.example.com/culvert"
+  trust_forwarded_headers: true
+```
+
+With that configuration, use:
+
+| Field | Exact value |
+|---|---|
+| **SP Entity ID / Audience** | `https://proxy.example.com/culvert` |
+| **ACS / Reply URL** | `https://proxy.example.com/culvert/auth/saml/callback` |
+| **SP Metadata URL** | `https://proxy.example.com/culvert/auth/saml/metadata` |
 
 The crewjam/saml library used by Culvert enforces SP-initiated SSO only
 (`AllowIDPInitiated: false`), so IdP-initiated flows are not supported.
+
+---
+
+## Base URL, Reverse Proxies, and Diagnostics
+
+SAML is stricter than ordinary web login redirects: the Entity ID and ACS URL in the IdP
+must match the URLs Culvert publishes in SP metadata and validates at callback time.
+
+Set `proxy.base_url` before enabling a production SAML profile. When it is unset, Culvert's
+startup SAML provider and SP metadata path use the no-request fallback
+`https://localhost:9090`. That is only useful for single-node local development. Behind a
+reverse proxy or load balancer, an unset base URL usually produces one of these symptoms:
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| IdP rejects the request with `invalid audience`, `audience mismatch`, or `unknown SP` | IdP Entity ID / Audience does not equal `proxy.base_url` exactly | Set the IdP Entity ID / Audience to the exact `proxy.base_url`, including scheme, port, and path prefix |
+| IdP rejects or posts to the wrong Reply URL / ACS URL | ACS URL in the IdP does not equal `<base_url>/auth/saml/callback` | Update the IdP Reply URL / ACS URL and re-import Culvert SP metadata if your IdP supports it |
+| Browser is redirected to `localhost` or an internal hostname | `proxy.base_url` is unset or set to an internal URL | Set `proxy.base_url` to the public URL users and the IdP can reach |
+| Culvert callback fails with invalid or expired SAML state | Response hit a different node, the login is stale, or the IdP started the flow without Culvert's RelayState | Use SP-initiated login, leave default RelayState blank, retry with a fresh login, and configure load-balancer affinity for `/auth/saml/callback` |
+| Works directly but fails through a reverse proxy path prefix | `proxy.base_url` and reverse-proxy rewrite rules disagree about the prefix | Keep the same prefix in `proxy.base_url`, SP Entity ID, metadata URL, ACS URL, and proxy forwarding rules |
+
+`trust_forwarded_headers` is useful only when you intentionally allow Culvert to derive a
+request URL from `X-Forwarded-Host` and `X-Forwarded-Proto`. It is not a replacement for
+`proxy.base_url` for SAML, because SAML providers and SP metadata are built at startup
+without a request.
+
+The Diagnostics page (`/api/diagnostics`, or **Infrastructure -> Diagnostics**) includes:
+
+| Check | Meaning |
+|---|---|
+| `saml_base_url` | Warns when an enabled SAML IdP has no explicit `proxy.base_url`, uses localhost, or uses non-HTTPS; fails when the configured value is not an absolute URL or carries a query, fragment, or userinfo component |
+| `saml_state_posture` | Warns when SAML is enabled on a clustered/load-balanced node because RelayState is node-local |
+
+Reverse proxy checklist:
+
+1. Forward the admin UI origin that matches `proxy.base_url`.
+2. Preserve the path prefix, if one exists.
+3. Allow HTTP-POST to `/auth/saml/callback`.
+4. Expose `/auth/saml/metadata` if your IdP imports SP metadata by URL.
+5. Configure sticky sessions for `/auth/saml/*` in multi-node deployments.
+6. Do not set an IdP default RelayState.
 
 ---
 
@@ -58,8 +118,8 @@ Any standards-compliant IdP requires at minimum:
 
 | Field | Value | Notes |
 |---|---|---|
-| **SP Entity ID** | `https://<base_url>` | Must be globally unique |
-| **ACS URL** | `https://<base_url>/auth/saml/callback` | HTTP-POST binding required |
+| **SP Entity ID** | `<base_url>` | Must be globally unique |
+| **ACS URL** | `<base_url>/auth/saml/callback` | HTTP-POST binding required |
 | **NameID Format** | `emailAddress` or `persistent` | Must match `nameIdFormat` config |
 | **SP Certificate** | Not required by default | Only needed if you enable signed AuthnRequests in a future build |
 | **Relay State** | Leave blank | Culvert supplies an opaque RelayState for each SP-initiated login |
@@ -106,8 +166,8 @@ Path: **Applications → Applications → Create App Integration → SAML 2.0**
 
 | Okta Field | Value |
 |---|---|
-| **Single Sign-On URL** (ACS URL) | `https://<base_url>/auth/saml/callback` |
-| **Audience URI (SP Entity ID)** | `https://<base_url>` |
+| **Single Sign-On URL** (ACS URL) | `<base_url>/auth/saml/callback` |
+| **Audience URI (SP Entity ID)** | `<base_url>` |
 | **Name ID format** | `EmailAddress` (recommended) |
 | **Application username** | `Email` |
 | **Default RelayState** | Leave blank |
@@ -184,10 +244,10 @@ Then: **Single sign-on → SAML → Basic SAML Configuration**
 
 | Entra Field | Value | Required |
 |---|---|---|
-| **Identifier (Entity ID)** | `https://<base_url>` | Yes |
-| **Reply URL (ACS URL)** | `https://<base_url>/auth/saml/callback` | Yes |
-| **Sign on URL** | `https://<base_url>/` | Optional (SP-initiated) |
-| **Logout URL** | `https://<base_url>/logout` | Optional |
+| **Identifier (Entity ID)** | `<base_url>` | Yes |
+| **Reply URL (ACS URL)** | `<base_url>/auth/saml/callback` | Yes |
+| **Sign on URL** | `<base_url>/` | Optional (SP-initiated) |
+| **Logout URL** | `<base_url>/logout` | Optional |
 
 Under **SAML Certificates**, download the **Federation Metadata XML** or copy the
 **App Federation Metadata URL** — use this as `metadataUrl`.
@@ -278,8 +338,8 @@ Super administrator privileges required.
 | Step | Field | Value |
 |---|---|---|
 | App details | App name | Any descriptive name |
-| Service Provider details | **ACS URL** | `https://<base_url>/auth/saml/callback` |
-| Service Provider details | **Entity ID** | `https://<base_url>` |
+| Service Provider details | **ACS URL** | `<base_url>/auth/saml/callback` |
+| Service Provider details | **Entity ID** | `<base_url>` |
 | Service Provider details | **Start URL** | Optional; leave blank for SP-initiated only |
 | Service Provider details | **Signed response** | Check if SP requires the full response to be signed (default: assertion only) |
 | Service Provider details | **Name ID format** | `EMAIL` |
@@ -358,8 +418,8 @@ Path: **AD FS Management → Relying Party Trusts → Add Relying Party Trust**
 | Screen | Field | Value |
 |---|---|---|
 | Configure URL | Enable SAML 2.0 WebSSO protocol | Checked |
-| Configure URL | Relying party SAML 2.0 SSO service URL | `https://<base_url>/auth/saml/callback` |
-| Configure Identifiers | Relying party trust identifier | `https://<base_url>` |
+| Configure URL | Relying party SAML 2.0 SSO service URL | `<base_url>/auth/saml/callback` |
+| Configure Identifiers | Relying party trust identifier | `<base_url>` |
 | Configure Certificate | Service Provider certificate | Not required by default |
 
 **Note:** ADFS requires HTTPS. HTTP ACS URLs will be rejected at configuration time.
@@ -475,16 +535,16 @@ Path: **Admin Console → Realm → Clients → Create client**
 | Field | Value | Notes |
 |---|---|---|
 | **Client type** | SAML | Select on creation screen |
-| **Client ID** | `https://<base_url>` | This becomes the SP Entity ID |
+| **Client ID** | `<base_url>` | This becomes the SP Entity ID |
 | **Name** | Any descriptive label | |
 
 After saving, configure the **Settings** tab:
 
 | Setting | Value |
 |---|---|
-| **Valid redirect URIs** | `https://<base_url>/auth/saml/callback` |
-| **Master SAML Processing URL** | `https://<base_url>/auth/saml/callback` |
-| **Assertion Consumer Service POST Binding URL** | `https://<base_url>/auth/saml/callback` |
+| **Valid redirect URIs** | `<base_url>/auth/saml/callback` |
+| **Master SAML Processing URL** | `<base_url>/auth/saml/callback` |
+| **Assertion Consumer Service POST Binding URL** | `<base_url>/auth/saml/callback` |
 | **Sign documents** | ON |
 | **Sign assertions** | ON (recommended) |
 | **Force Name ID Format** | ON |

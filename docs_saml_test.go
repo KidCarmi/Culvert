@@ -77,16 +77,20 @@ func TestSAMLDocsUseRegisteredCallbackURL(t *testing.T) {
 	}
 	doc := string(data)
 
-	if !strings.Contains(doc, "https://<base_url>/auth/saml/callback") {
+	if !strings.Contains(doc, "<base_url>/auth/saml/callback") {
 		t.Fatal("SAML docs should tell operators to use the registered callback URL")
 	}
-	if !strings.Contains(doc, "| **SP Entity ID** | `https://<base_url>` |") {
+	if !strings.Contains(doc, "| **SP Entity ID** | `<base_url>` |") {
 		t.Fatal("SAML docs should match the runtime SP EntityID")
 	}
-	if !strings.Contains(doc, "| **SP Metadata URL** | `https://<base_url>/auth/saml/metadata` |") {
+	if !strings.Contains(doc, "| **SP Metadata URL** | `<base_url>/auth/saml/metadata` |") {
 		t.Fatal("SAML docs should publish the runtime SP metadata URL")
 	}
+	if !strings.Contains(doc, "`saml_base_url`") {
+		t.Fatal("SAML docs should mention the diagnostics check for callback base URL posture")
+	}
 	forbidden := []string{
+		"https://<base_url>",
 		"https://<base_url>/saml/acs",
 		"https://<base_url>/saml/metadata",
 		"SP Metadata URL** | `https://<base_url>`",

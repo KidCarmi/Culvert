@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -143,6 +144,7 @@ func buildOperatorContract() OperatorContract {
 		checkCDR(),
 		checkClusterPosture(),
 		checkSAMLStatePosture(),
+		checkSAMLBaseURLPosture(),
 		checkUnauthMode(),
 		checkYARAEnginePosture(),
 		checkUpdaterURL(),
@@ -357,6 +359,96 @@ func hasLiveSAMLProvider() bool {
 		}
 	}
 	return false
+}
+
+func checkSAMLBaseURLPosture() OperatorContractCheck {
+	if !hasEnabledSAMLProfile() {
+		return OperatorContractCheck{
+			Code:    "saml_base_url",
+			Status:  diagOK,
+			Message: "no enabled SAML IdP requires SP callback base URL validation",
+		}
+	}
+	baseURL := ""
+	if cfg != nil {
+		baseURL = strings.TrimSpace(cfg.ProxyBaseURL())
+	}
+	if baseURL == "" {
+		return OperatorContractCheck{
+			Code:           "saml_base_url",
+			Status:         diagWarn,
+			Message:        "SAML IdP enabled but proxy.base_url is unset",
+			OperatorAction: "Set proxy.base_url to the externally reachable UI origin, configure the IdP SP Entity ID to that exact value, and configure ACS as proxy.base_url + /auth/saml/callback. trust_forwarded_headers is not a substitute for SAML SP metadata built at startup.",
+		}
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return OperatorContractCheck{
+			Code:           "saml_base_url",
+			Status:         diagFail,
+			Message:        "SAML IdP enabled but proxy.base_url is not a valid absolute URL",
+			OperatorAction: "Set proxy.base_url to a full external URL such as https://proxy.example.com or https://proxy.example.com/culvert, then update the IdP Entity ID and ACS URL to match.",
+		}
+	}
+	// proxy.base_url must be a clean base origin (+optional path prefix) only.
+	// OIDC callbacks are built by string concatenation and SAML metadata/ACS
+	// construction drops RawQuery/Fragment, so a query, fragment, or userinfo
+	// component would silently produce wrong/inconsistent Entity ID and ACS
+	// values. Reject them as malformed rather than reporting a clean bill.
+	if hasNonBaseURLComponents(u) {
+		return OperatorContractCheck{
+			Code:           "saml_base_url",
+			Status:         diagFail,
+			Message:        "SAML IdP enabled but proxy.base_url contains query, fragment, or userinfo components",
+			OperatorAction: "Set proxy.base_url to a bare external origin (optionally with a path prefix) such as https://proxy.example.com or https://proxy.example.com/culvert. Remove any \"?query\", \"#fragment\", or \"user:pass@\" parts, then update the IdP Entity ID and ACS URL to match.",
+		}
+	}
+	if isLocalhostBaseURL(u) {
+		return OperatorContractCheck{
+			Code:           "saml_base_url",
+			Status:         diagWarn,
+			Message:        "SAML IdP enabled but proxy.base_url points at localhost",
+			OperatorAction: "Use the externally reachable DNS name that browsers and the IdP can reach. Localhost is only safe for single-node local development.",
+		}
+	}
+	if u.Scheme != "https" {
+		return OperatorContractCheck{
+			Code:           "saml_base_url",
+			Status:         diagWarn,
+			Message:        "SAML IdP enabled but proxy.base_url is not HTTPS",
+			OperatorAction: "Use an HTTPS external URL for production SAML. Most IdPs require HTTPS ACS URLs, and browser SSO cookies are safest behind TLS.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "saml_base_url",
+		Status:  diagOK,
+		Message: "SAML SP Entity ID, metadata URL, and ACS URL have an explicit external base URL",
+	}
+}
+
+func hasEnabledSAMLProfile() bool {
+	if idpRegistry == nil {
+		return false
+	}
+	for _, p := range idpRegistry.All() {
+		if p != nil && p.Enabled && p.Type == IdPTypeSAML {
+			return true
+		}
+	}
+	return false
+}
+
+func isLocalhostBaseURL(u *url.URL) bool {
+	host := strings.ToLower(u.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// hasNonBaseURLComponents reports whether u carries any component that a usable
+// SAML/OIDC base URL must not have: a query string, a fragment, or userinfo.
+// These are dropped or string-concatenated downstream, so their presence makes
+// the registered callback/EntityID values wrong or inconsistent.
+func hasNonBaseURLComponents(u *url.URL) bool {
+	return u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil
 }
 
 // checkUnauthMode is a visible WARN when the proxy is in unauthenticated

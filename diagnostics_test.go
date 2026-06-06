@@ -128,12 +128,15 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"cdr":                        false,
 		"cluster_posture":            false,
 		"saml_state_posture":         false,
+		"saml_base_url":              false,
 		"unauth_mode":                false,
+		"yara_engine_posture":        false,
 		"updater_url":                false,
 		"config_snapshot_validator":  false,
 		"config_versions_present":    false,
 		"config_versions_readable":   false,
 		"config_rollback_validation": false,
+		"key_at_rest":                false,
 	}
 	for i := range c.Checks {
 		assertCheckShape(t, i, c.Checks[i])
@@ -244,6 +247,82 @@ func TestApiDiagnostics_WarnsOnClusteredSAMLState(t *testing.T) {
 	}
 	if c.Verdict == diagFail {
 		t.Fatal("clustered SAML state warning must not escalate diagnostics verdict to fail")
+	}
+}
+
+func withEnabledSAMLDiagnosticProfile(t *testing.T) {
+	t.Helper()
+	prevRegistry := idpRegistry
+	prevBaseURL := cfg.ProxyBaseURL()
+	idpRegistry = &IdPRegistry{
+		profiles: []*IdPProfile{{ID: "saml-diag", Name: "SAML", Type: IdPTypeSAML, Enabled: true}},
+		live:     map[string]IdentityProvider{},
+	}
+	t.Cleanup(func() {
+		idpRegistry = prevRegistry
+		SetProxyBaseURL(prevBaseURL)
+	})
+}
+
+func TestSAMLBaseURLPostureWarnsWhenUnset(t *testing.T) {
+	withEnabledSAMLDiagnosticProfile(t)
+	SetProxyBaseURL("")
+
+	found := checkSAMLBaseURLPosture()
+	if found.Status != diagWarn {
+		t.Fatalf("saml_base_url status = %q, want warn", found.Status)
+	}
+	if !strings.Contains(found.Message, "proxy.base_url is unset") {
+		t.Fatalf("message = %q, want unset base_url guidance", found.Message)
+	}
+	if !strings.Contains(found.OperatorAction, "/auth/saml/callback") {
+		t.Fatalf("operator_action = %q, want ACS callback guidance", found.OperatorAction)
+	}
+}
+
+func TestSAMLBaseURLPostureWarnsOnLocalhost(t *testing.T) {
+	withEnabledSAMLDiagnosticProfile(t)
+	SetProxyBaseURL("https://localhost:9090")
+
+	found := checkSAMLBaseURLPosture()
+	if found.Status != diagWarn {
+		t.Fatalf("saml_base_url status = %q, want warn", found.Status)
+	}
+	if !strings.Contains(found.Message, "localhost") {
+		t.Fatalf("message = %q, want localhost guidance", found.Message)
+	}
+}
+
+func TestSAMLBaseURLPostureOKForExternalHTTPS(t *testing.T) {
+	withEnabledSAMLDiagnosticProfile(t)
+	SetProxyBaseURL("https://proxy.example.com/culvert")
+
+	found := checkSAMLBaseURLPosture()
+	if found.Status != diagOK {
+		t.Fatalf("saml_base_url status = %q, want ok; action=%q", found.Status, found.OperatorAction)
+	}
+}
+
+func TestSAMLBaseURLPostureFailsOnNonBaseComponents(t *testing.T) {
+	withEnabledSAMLDiagnosticProfile(t)
+
+	cases := map[string]string{
+		"query":    "https://proxy.example.com?x=1",
+		"fragment": "https://proxy.example.com#frag",
+		"userinfo": "https://operator@proxy.example.com",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			SetProxyBaseURL(raw)
+
+			found := checkSAMLBaseURLPosture()
+			if found.Status != diagFail {
+				t.Fatalf("saml_base_url status = %q for %q, want fail", found.Status, raw)
+			}
+			if !strings.Contains(found.Message, "query, fragment, or userinfo") {
+				t.Fatalf("message = %q, want non-base component guidance", found.Message)
+			}
+		})
 	}
 }
 
