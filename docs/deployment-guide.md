@@ -337,7 +337,18 @@ docker compose -f docker-compose.multi.yml up -d
 | IP filter list + mode | Session cookies |
 | Rate limit config (RPM) | Connection counters |
 | Auth enabled / unauth mode | Leaf cert cache |
+| OIDC/SAML IdP profiles | SAML AuthnRequest RelayState |
+| External auth base URL | OIDC PKCE login state |
+| Session HMAC signing key | Browser cookies (client-held) |
 | Policy version | Scan result cache |
+
+Browser sessions are designed to survive DP load balancing: once a DP
+successfully completes OIDC or SAML login, the browser stores a signed
+session cookie and any DP can verify it with the synced Session HMAC key.
+The login callback itself still needs affinity while it is in flight:
+SAML RelayState and OIDC PKCE state are node-local replay protections, so
+`/auth/saml/callback` and `/auth/oidc/callback` should return to the DP that
+started that login.
 
 ### Load Balancer Setup
 
@@ -361,7 +372,8 @@ backend proxy_nodes
 ```
 
 > **Tip:** Use sticky sessions (source IP affinity) for best performance,
-> since each node maintains its own rate limit counters and cert cache.
+> since each node maintains its own rate limit counters, cert cache, and
+> short-lived IdP login state.
 
 ---
 

@@ -83,7 +83,13 @@ func resetCPSecurityTestGlobals(t *testing.T) {
 // with SessionHMAC scrubbed.
 func TestGetConfig_RedactsSessionHMAC_ForUnauthenticatedCaller(t *testing.T) {
 	resetCPSecurityTestGlobals(t)
-	globalConfigStore.Update(ConfigSnapshot{SessionHMAC: "deadbeef"})
+	globalConfigStore.Update(ConfigSnapshot{
+		SessionHMAC: "deadbeef",
+		IdPProfiles: []*IdPProfile{{
+			ID: "oidc-secret", Name: "OIDC", Type: IdPTypeOIDC, Enabled: false,
+			OIDC: &OIDCProfileConfig{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret"},
+		}},
+	})
 
 	s := &controlPlaneServer{}
 	raw, err := s.GetConfig(context.Background(), nil)
@@ -96,6 +102,9 @@ func TestGetConfig_RedactsSessionHMAC_ForUnauthenticatedCaller(t *testing.T) {
 	}
 	if got.SessionHMAC != "" {
 		t.Errorf("SessionHMAC leaked to unauthenticated caller: %q", got.SessionHMAC)
+	}
+	if len(got.IdPProfiles) != 0 {
+		t.Fatalf("IdPProfiles leaked to unauthenticated caller: %d profile(s)", len(got.IdPProfiles))
 	}
 }
 
@@ -128,7 +137,13 @@ func TestGetConfig_RedactsSessionHMAC_ForUnenrolledPeer(t *testing.T) {
 // SessionHMAC so cluster session continuity continues to work.
 func TestGetConfig_IncludesSessionHMAC_ForEnrolledPeer(t *testing.T) {
 	resetCPSecurityTestGlobals(t)
-	globalConfigStore.Update(ConfigSnapshot{SessionHMAC: "deadbeef"})
+	globalConfigStore.Update(ConfigSnapshot{
+		SessionHMAC: "deadbeef",
+		IdPProfiles: []*IdPProfile{{
+			ID: "oidc-secret", Name: "OIDC", Type: IdPTypeOIDC, Enabled: false,
+			OIDC: &OIDCProfileConfig{Issuer: "https://idp.example", ClientID: "client", ClientSecret: "secret"},
+		}},
+	})
 
 	serial := big.NewInt(42)
 	cert := makeTestLeafCert(t, serial)
@@ -149,6 +164,12 @@ func TestGetConfig_IncludesSessionHMAC_ForEnrolledPeer(t *testing.T) {
 	}
 	if got.SessionHMAC != "deadbeef" {
 		t.Errorf("enrolled peer should receive SessionHMAC; got %q", got.SessionHMAC)
+	}
+	if len(got.IdPProfiles) != 1 {
+		t.Fatalf("enrolled peer should receive IdPProfiles; got %d", len(got.IdPProfiles))
+	}
+	if got.IdPProfiles[0].OIDC == nil || got.IdPProfiles[0].OIDC.ClientSecret != "secret" {
+		t.Fatalf("enrolled peer IdP secret lost: %+v", got.IdPProfiles[0].OIDC)
 	}
 }
 

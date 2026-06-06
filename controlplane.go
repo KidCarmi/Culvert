@@ -68,20 +68,22 @@ import (
 // ConfigSnapshot is the canonical, immutable view of proxy configuration that
 // the Control Plane distributes to Data Plane nodes.
 type ConfigSnapshot struct {
-	Version       int64    `json:"version"`
-	BlockedHosts  []string `json:"blocked_hosts"`
-	IPFilterMode  string   `json:"ip_filter_mode"`
-	IPList        []string `json:"ip_list"`
-	RateLimitRPM  int      `json:"rate_limit_rpm"`
-	AuthEnabled   bool     `json:"auth_enabled"`
-	UnauthMode    bool     `json:"unauth_mode"`
-	UpdatedAt     string   `json:"updated_at"`
-	CAFingerprint string   `json:"ca_fingerprint,omitempty"` // cluster CA SHA-256 fingerprint; DP triggers renewal when this changes
+	Version               int64    `json:"version"`
+	BlockedHosts          []string `json:"blocked_hosts"`
+	IPFilterMode          string   `json:"ip_filter_mode"`
+	IPList                []string `json:"ip_list"`
+	RateLimitRPM          int      `json:"rate_limit_rpm"`
+	AuthEnabled           bool     `json:"auth_enabled"`
+	UnauthMode            bool     `json:"unauth_mode"`
+	ProxyBaseURL          string   `json:"proxy_base_url,omitempty"`
+	TrustForwardedHeaders bool     `json:"trust_forwarded_headers,omitempty"`
+	UpdatedAt             string   `json:"updated_at"`
+	CAFingerprint         string   `json:"ca_fingerprint,omitempty"` // cluster CA SHA-256 fingerprint; DP triggers renewal when this changes
 
 	// Full policy sync — all policy state pushed from CP to DP.
-	DefaultAction     string           `json:"default_action"`               // "allow" or "deny"
-	PolicyRules       []PolicyRule     `json:"policy_rules,omitempty"`       // ordered policy rules
-	PolicyVersion     int64            `json:"policy_version"`               // monotonic policy version
+	DefaultAction     string           `json:"default_action"`         // "allow" or "deny"
+	PolicyRules       []PolicyRule     `json:"policy_rules,omitempty"` // ordered policy rules
+	PolicyVersion     int64            `json:"policy_version"`         // monotonic policy version
 	SSLBypassPatterns []string         `json:"ssl_bypass_patterns,omitempty"`
 	URLCategories     []CategoryEntry  `json:"url_categories,omitempty"`
 	FileProfiles      []FileExtProfile `json:"file_profiles,omitempty"`
@@ -99,12 +101,16 @@ type ConfigSnapshot struct {
 	PACExclusions []string `json:"pac_exclusions,omitempty"`
 
 	// Threat feed sync: include feed data so DPs don't fetch independently.
-	ThreatFeedURLs    map[string]int64 `json:"threat_feed_urls,omitempty"`
-	ThreatFeedDomains map[string]int64 `json:"threat_feed_domains,omitempty"`
-	ThreatDomainAllowlist []string     `json:"threat_domain_allowlist,omitempty"`
+	ThreatFeedURLs        map[string]int64 `json:"threat_feed_urls,omitempty"`
+	ThreatFeedDomains     map[string]int64 `json:"threat_feed_domains,omitempty"`
+	ThreatDomainAllowlist []string         `json:"threat_domain_allowlist,omitempty"`
 
 	// Session secret sync: shared HMAC key so sessions are valid across nodes.
 	SessionHMAC string `json:"session_hmac,omitempty"`
+
+	// IdP profile sync: full OIDC/SAML provider config for DP-local auth.
+	// Redacted from unauthenticated GetConfig callers alongside SessionHMAC.
+	IdPProfiles []*IdPProfile `json:"idp_profiles,omitempty"`
 
 	// Bandwidth / QoS policies synced from CP to DP.
 	BandwidthPolicies []BandwidthPolicy `json:"bandwidth_policies,omitempty"`
@@ -152,6 +158,7 @@ const (
 	maxSnapBandwidthPolicies   = 1_000
 	maxSnapNodeGroups          = 1_000
 	maxSnapCategoryGroups      = 1_000
+	maxSnapIdPProfiles         = 1_000
 )
 
 // validateConfigSnapshot enforces the per-slice caps above. Returns an
@@ -181,6 +188,7 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 		{"bandwidth_policies", len(snap.BandwidthPolicies), maxSnapBandwidthPolicies},
 		{"node_groups", len(snap.NodeGroups), maxSnapNodeGroups},
 		{"category_groups", len(snap.CategoryGroups), maxSnapCategoryGroups},
+		{"idp_profiles", len(snap.IdPProfiles), maxSnapIdPProfiles},
 	}
 	for _, c := range checks {
 		if c.size > c.limit {
@@ -248,14 +256,14 @@ const configServiceName = "culvert.ConfigService"
 
 // methodGetConfig, methodPushMetrics, and methodEnroll are the RPC method descriptors.
 var (
-	methodGetConfig          = fmt.Sprintf("/%s/GetConfig", configServiceName)
-	methodPushMetrics        = fmt.Sprintf("/%s/PushMetrics", configServiceName)
-	methodEnroll             = fmt.Sprintf("/%s/Enroll", configServiceName)
-	methodSyncRateLimits     = fmt.Sprintf("/%s/SyncRateLimits", configServiceName)
-	methodSyncRevocations    = fmt.Sprintf("/%s/SyncRevocations", configServiceName)
-	methodPushAuditEvents    = fmt.Sprintf("/%s/PushAuditEvents", configServiceName)
-	methodRenewCert          = fmt.Sprintf("/%s/RenewCert", configServiceName)
-	methodHASync             = fmt.Sprintf("/%s/HASync", configServiceName)
+	methodGetConfig       = fmt.Sprintf("/%s/GetConfig", configServiceName)
+	methodPushMetrics     = fmt.Sprintf("/%s/PushMetrics", configServiceName)
+	methodEnroll          = fmt.Sprintf("/%s/Enroll", configServiceName)
+	methodSyncRateLimits  = fmt.Sprintf("/%s/SyncRateLimits", configServiceName)
+	methodSyncRevocations = fmt.Sprintf("/%s/SyncRevocations", configServiceName)
+	methodPushAuditEvents = fmt.Sprintf("/%s/PushAuditEvents", configServiceName)
+	methodRenewCert       = fmt.Sprintf("/%s/RenewCert", configServiceName)
+	methodHASync          = fmt.Sprintf("/%s/HASync", configServiceName)
 )
 
 // MetricsReport is sent by Data Plane nodes to the Control Plane.
@@ -462,7 +470,7 @@ var (
 // enrollRateLimit tracks per-IP enrollment attempt timestamps for rate limiting.
 // Limits to 5 attempts per minute per IP to prevent brute-force token guessing.
 var enrollRateLimit struct {
-	mu      sync.Mutex
+	mu       sync.Mutex
 	attempts map[string][]time.Time
 }
 
@@ -580,6 +588,7 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, _ json.RawMessage) (
 	}
 	if !callerIsEnrolledNode(ctx) {
 		snap.SessionHMAC = ""
+		snap.IdPProfiles = nil
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {
@@ -1497,6 +1506,12 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		rl.Configure(snap.RateLimitRPM, time.Minute)
 	}
 
+	// External auth callback/base URL settings. These must be applied before
+	// IdP profiles compile so SAML SP metadata and OIDC redirect URIs use the
+	// same public origin on every DP.
+	SetProxyBaseURL(snap.ProxyBaseURL)
+	trustForwardedHeaders = snap.TrustForwardedHeaders
+
 	// Default policy action.
 	if snap.DefaultAction != "" {
 		setDefaultPolicyAction(snap.DefaultAction)
@@ -1607,6 +1622,17 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		}
 	}
 
+	// IdP profiles. ReplaceAll compiles every enabled provider before swapping
+	// the live registry, so a bad CP-side IdP update does not break the DP's
+	// currently working SAML/OIDC providers.
+	if snap.IdPProfiles != nil {
+		if err := idpRegistry.ReplaceAll(snap.IdPProfiles); err != nil {
+			logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
+		} else {
+			logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
+		}
+	}
+
 	// Bandwidth / QoS policies.
 	if snap.BandwidthPolicies != nil && globalBandwidth != nil {
 		globalBandwidth.ReplaceAll(snap.BandwidthPolicies)
@@ -1653,12 +1679,14 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 // Used by the Control Plane to serve the initial configuration.
 func CurrentConfigSnapshot() ConfigSnapshot {
 	snap := ConfigSnapshot{
-		BlockedHosts: bl.List(),
-		IPFilterMode: ipf.Mode(),
-		IPList:       ipf.List(),
-		RateLimitRPM: rl.Limit(),
-		AuthEnabled:  cfg.AuthEnabled(),
-		UnauthMode:   cfg.UnauthMode(),
+		BlockedHosts:          bl.List(),
+		IPFilterMode:          ipf.Mode(),
+		IPList:                ipf.List(),
+		RateLimitRPM:          rl.Limit(),
+		AuthEnabled:           cfg.AuthEnabled(),
+		UnauthMode:            cfg.UnauthMode(),
+		ProxyBaseURL:          cfg.ProxyBaseURL(),
+		TrustForwardedHeaders: trustForwardedHeaders,
 	}
 	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
 		snap.CAFingerprint = fp
@@ -1700,6 +1728,7 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	if len(sessionSecret) > 0 {
 		snap.SessionHMAC = hex.EncodeToString(sessionSecret)
 	}
+	snap.IdPProfiles = idpRegistry.All()
 
 	// Bandwidth / QoS policies.
 	if globalBandwidth != nil {
