@@ -32,28 +32,35 @@ type rollbackAccumulator struct {
 	healthSummary       string
 }
 
-// pullAndTagPinned runs the P1.4 image-selection pair: `docker pull
-// <ref>` (a repo-bound pinned digest), then `docker tag <ref>
-// culvert/proxy:pinned`. A pull failure returns BEFORE the retag so the
-// fixed tag never advances to an image that did not pull. Shared by apply's
-// `pull` stage and the rollback core's `rollback_pull` stage so the two
-// image-selection paths can never diverge.
-func (s *Server) pullAndTagPinned(ctx context.Context, ref string) (stdout, stderr []byte, err error) {
-	pres, perr := s.opts.Runner.ComposePullDigest(ctx, ref)
-	if perr != nil {
-		if pres != nil {
-			return pres.Stdout, pres.Stderr, perr
-		}
-		return nil, nil, perr
-	}
-	out := append([]byte(nil), pres.Stdout...)
-	errOut := append([]byte(nil), pres.Stderr...)
+// tagAndUp runs the P1.4 retag-then-restart pair: `docker tag <ref>
+// culvert/proxy:pinned`, then `docker compose up -d`. Keeping the retag
+// ADJACENT to `up` (one stage) means the fixed tag is advanced only when the
+// restart it belongs to is actually running — a timeout between pull and
+// restart can never strand the tag ahead of the daemon. A tag failure aborts
+// BEFORE `up` (nothing recreated, tag unchanged → safe, NOT post-restart); an
+// `up` failure is indeterminate and sets *failedPostRestart (when non-nil) so
+// the caller's inline rollback fires. Shared by apply's `restart` stage and
+// the rollback core's `rollback_restart` stage (which passes a nil flag — a
+// rollback IS the recovery, never its own trigger).
+func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bool) (stdout, stderr []byte, err error) {
 	tres, terr := s.opts.Runner.ComposeTagPinned(ctx, ref)
-	if tres != nil {
-		out = append(out, tres.Stdout...)
-		errOut = append(errOut, tres.Stderr...)
+	if terr != nil {
+		if tres != nil {
+			return tres.Stdout, tres.Stderr, terr
+		}
+		return nil, nil, terr
 	}
-	return out, errOut, terr
+	out := append([]byte(nil), tres.Stdout...)
+	errOut := append([]byte(nil), tres.Stderr...)
+	ures, uerr := s.opts.Runner.ComposeUp(ctx)
+	if uerr != nil && failedPostRestart != nil {
+		*failedPostRestart = true
+	}
+	if ures != nil {
+		out = append(out, ures.Stdout...)
+		errOut = append(errOut, ures.Stderr...)
+	}
+	return out, errOut, uerr
 }
 
 // imageRollbackStages builds the four core image-rollback steps pinned to
@@ -63,23 +70,27 @@ func (s *Server) pullAndTagPinned(ctx context.Context, ref string) (stdout, stde
 func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAccumulator) []ops.FlowStage {
 	return []ops.FlowStage{
 		{
-			// P1.4: pull the repo-bound prior digest, then retag it to the
-			// fixed culvert/proxy:pinned tag (shared with apply's `pull`).
+			// P1.4: pull the repo-bound prior digest. The retag is deferred
+			// to rollback_restart (adjacent to `up`) so a timeout between the
+			// two never advances the fixed tag ahead of the daemon.
 			Name:          "rollback_pull",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				return s.pullAndTagPinned(ctx, targetRefFn())
-			},
-		},
-		{
-			Name:          "rollback_restart",
-			FailureReason: ops.ReasonCommandError,
-			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeUp(ctx)
+				res, rerr := s.opts.Runner.ComposePullDigest(ctx, targetRefFn())
 				if res == nil {
 					return nil, nil, rerr
 				}
 				return res.Stdout, res.Stderr, rerr
+			},
+		},
+		{
+			// P1.4: retag the prior digest to culvert/proxy:pinned and
+			// recreate the stack in one stage (nil flag — a rollback never
+			// triggers itself).
+			Name:          "rollback_restart",
+			FailureReason: ops.ReasonCommandError,
+			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				return s.tagAndUp(ctx, targetRefFn(), nil)
 			},
 		},
 		{

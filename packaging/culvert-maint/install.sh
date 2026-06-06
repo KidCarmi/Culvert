@@ -312,7 +312,7 @@ Next steps:
      - proxy_repo            (MUST match image_allowlist's repository)
      - allow_peers           (the CP UID or username allowlist)
      - privilege_mode        (sudoers is the production default)
-     Ensure docker-compose.yml uses `image: culvert/proxy:pinned` for the
+     Ensure docker-compose.yml uses 'image: culvert/proxy:pinned' for the
      proxy and cli services (P1.4); this install seeded that local tag.
   2. Confirm the user(s) in allow_peers exist on the host — the agent
      will fail to start otherwise.

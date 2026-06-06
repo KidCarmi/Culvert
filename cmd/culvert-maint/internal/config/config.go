@@ -353,7 +353,15 @@ func validate(raw *rawConfig) (*Config, error) {
 		pr = defaultProxyRepo
 	}
 	if strings.ContainsAny(pr, "@") || strings.Contains(pr, "sha256:") {
-		return nil, fmt.Errorf("config: proxy_repo must be a bare repository (no @digest/tag), got %q", pr)
+		return nil, fmt.Errorf("config: proxy_repo must be a bare repository (no @digest), got %q", pr)
+	}
+	// Reject a TAG (a ':' after the final '/'). A registry host:port colon
+	// (which appears BEFORE the path's first '/') is still allowed. A tagged
+	// proxy_repo would make every apply/rollback fail repo-bound validation:
+	// resolve_target builds the pin as `<repo-without-tag>@sha256:…`, which
+	// could never match a `<repo>:<tag>`-bound runner/sudoers pattern.
+	if i := strings.LastIndexByte(pr, '/'); strings.IndexByte(pr[i+1:], ':') >= 0 {
+		return nil, fmt.Errorf("config: proxy_repo must not include a tag (no ':' after the final '/'); registry host:port before the path is allowed, got %q", pr)
 	}
 	if !proxyRepoShapeRE.MatchString(pr) {
 		return nil, fmt.Errorf("config: proxy_repo has an invalid repository shape: %q", pr)
