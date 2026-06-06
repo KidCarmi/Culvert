@@ -101,16 +101,8 @@ func (r *d16bTestRig) shouldFail(argv []string) bool {
 	return false
 }
 
-func startD16bRig(t *testing.T) *d16bTestRig {
-	return startD16bRigBackupDir(t, "/backup")
-}
-
-// startD16bRigBackupDir is startD16bRig with a configurable
-// AllowedBackupDir — data-rollback tests point it at a real tmp dir so the
-// pre-stage existence check (which Stats the backup) can be exercised.
-//
 //nolint:funlen // test rig setup; splitting hides the wiring sequence
-func startD16bRigBackupDir(t *testing.T, backupDir string) *d16bTestRig {
+func startD16bRig(t *testing.T) *d16bTestRig {
 	t.Helper()
 	tmp := t.TempDir()
 	sockPath := filepath.Join(tmp, "agent.sock")
@@ -130,7 +122,7 @@ func startD16bRigBackupDir(t *testing.T, backupDir string) *d16bTestRig {
 		SocketPath:        sockPath,
 		StateDir:          tmp,
 		PrivilegeMode:     config.PrivilegeSudoers,
-		AllowedBackupDir:  backupDir,
+		AllowedBackupDir:  "/backup",
 		StageTimeout:      5 * time.Second,
 		// OperationTimeout must be > test runtime; tests that
 		// specifically exercise op-timeout behavior should set

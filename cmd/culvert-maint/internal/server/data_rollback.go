@@ -11,10 +11,11 @@
 //     which forwards the accept_dp_reenrollment / allow_counter_rollback
 //     safety flags to the CLI and inherits its WouldBlock fail-closed
 //     guards;
-//   - the only additions are an explicit pre-stage existence check (so a
-//     typoed filename fails 400 BEFORE the stack is stopped — strictly
-//     safer than restore.commit), light outcome OBSERVATION (not changed
-//     behavior) for the result, and a report summary stage.
+//   - the only additions are light outcome OBSERVATION (not changed
+//     behavior) for the result and a report summary stage. Backup
+//     existence is validated by the CLI inside the container (allowed
+//     backup dir is the CONTAINER path; the host cannot stat it), exactly
+//     as restore.commit does.
 //
 // Standalone-only: there is no inline/auto data rollback. The apply
 // inline-rollback path (#378) is image-only and must never reach here.
@@ -24,8 +25,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/ops"
@@ -44,24 +43,16 @@ type dataRollbackAccumulator struct {
 func (s *Server) rollbackData(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo, req rollbackRequest) {
 	// Filename-specific resolution (the rollback contract sends a bare
 	// basename, not a /backup/… path — see D1.6c data-rollback plan §1).
+	// ValidateBackupFilename guarantees a separator-free basename, so it
+	// cannot escape AllowedBackupDir — the same containment guarantee
+	// resolveBackupPath gives restore.commit. We do NOT host-stat the
+	// backup: allowed_backup_dir is the path as seen by the `cli`
+	// CONTAINER (the `culvert-backups` volume is mounted only in `cli`,
+	// not on the agent host), so a host os.Stat would reject every valid
+	// rollback. Existence is validated by the CLI inside the container at
+	// restore time — exactly like restore.commit.
 	if err := runner.ValidateBackupFilename(req.Filename); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	joined := filepath.Join(s.opts.Cfg.AllowedBackupDir, req.Filename)
-	if !s.opts.Cfg.IsAllowedBackupPath(joined) { // defense-in-depth containment
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("filename %q resolves outside allowed_backup_dir %q", req.Filename, s.opts.Cfg.AllowedBackupDir),
-		})
-		return
-	}
-	// Explicit existence check BEFORE any stage — a typoed/absent backup
-	// must fail 400 with the stack untouched, never stop_stack then
-	// cli_error (data-rollback plan §4; stricter than restore.commit).
-	if _, err := os.Stat(joined); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("backup %q not found in %s", req.Filename, s.opts.Cfg.AllowedBackupDir),
-		})
 		return
 	}
 

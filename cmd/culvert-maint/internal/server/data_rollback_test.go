@@ -1,6 +1,7 @@
 // Integration tests for POST /v1/rollbacks mode=data — the wrap of
-// restore.commit. Reuses the d16b restore rig (faked exec + fake health),
-// pointed at a real tmp backup dir so the pre-stage existence check runs.
+// restore.commit. Reuses the d16b restore rig (faked exec + fake health).
+// Backups are NOT host-statted (allowed_backup_dir is the cli-container
+// path), so tests don't create on-disk backup files.
 package server
 
 import (
@@ -8,21 +9,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// dataRollbackRig builds a d16b rig whose AllowedBackupDir is a real tmp
-// dir, and creates the named backup inside it. Returns the rig + filename.
-func dataRollbackRig(t *testing.T, filename string) *d16bTestRig {
+// dataRollbackRig builds the standard d16b rig. The backup need not exist
+// on the agent host: allowed_backup_dir is the CONTAINER path (the
+// `culvert-backups` volume is mounted only in `cli`), so existence is
+// validated by the CLI at restore time, exactly as restore.commit does —
+// the agent must NOT host-stat it.
+func dataRollbackRig(t *testing.T) *d16bTestRig {
 	t.Helper()
-	backupDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(backupDir, filename), []byte("fake-backup"), 0o600); err != nil {
-		t.Fatalf("write backup: %v", err)
-	}
-	return startD16bRigBackupDir(t, backupDir)
+	return startD16bRig(t)
 }
 
 func (r *d16bTestRig) postRollback(t *testing.T, body interface{}) (status int, respBody []byte) {
@@ -94,7 +93,7 @@ func envHasD16b(env []string, kv string) bool {
 // health, op succeeded, kind rollbacks.create, result + audit correct.
 func TestDataRollback_Success_WrapsRestoreCommit(t *testing.T) {
 	fn := "pre-upgrade-20260101T000000Z.tar.gz.enc"
-	rig := dataRollbackRig(t, fn)
+	rig := dataRollbackRig(t)
 	defer rig.stop()
 
 	opID := rig.rollbackOpID(t, map[string]interface{}{
@@ -147,17 +146,20 @@ func TestDataRollback_Success_WrapsRestoreCommit(t *testing.T) {
 	}
 }
 
-// Invalid/missing backup is rejected BEFORE the runner — and a nonexistent
-// filename never takes the stack offline.
-func TestDataRollback_RejectsInvalidBackup(t *testing.T) {
-	rig := startD16bRigBackupDir(t, t.TempDir()) // empty backup dir
+// Missing/malformed inputs are rejected BEFORE the runner (no docker).
+// Backup EXISTENCE is NOT checked on the host — allowed_backup_dir is the
+// cli-container path, so existence is validated by the CLI at restore time
+// (parity with restore.commit), not pre-flight.
+func TestDataRollback_RejectsInvalidInput(t *testing.T) {
+	rig := dataRollbackRig(t)
 	defer rig.stop()
 
 	cases := []map[string]interface{}{
 		{"mode": "data"}, // missing filename
-		{"mode": "data", "filename": "../etc/passwd"},                   // traversal/shape
-		{"mode": "data", "filename": "nonexistent.tar.gz.enc"},          // absent
-		{"mode": "data", "filename": "ok.enc", "restore_mode": "bogus"}, // bad mode (file also absent)
+		{"mode": "data", "filename": "../etc/passwd"},                          // traversal/separator → ValidateBackupFilename
+		{"mode": "data", "filename": "has/slash.enc"},                          // separator → ValidateBackupFilename
+		{"mode": "data", "filename": "ok.tar.gz.enc", "restore_mode": "bogus"}, // bad restore_mode
+		{"mode": "data", "filename": "ok.tar.gz.enc", "passphrase_ref": "bad"}, // bad passphrase_ref shape
 	}
 	for _, body := range cases {
 		status, rb := rig.postRollback(t, body)
@@ -167,7 +169,7 @@ func TestDataRollback_RejectsInvalidBackup(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 	if cmds := rig.captured.snapshot(); len(cmds) != 0 {
-		t.Errorf("a rejected data rollback must NOT reach the runner (no down); cmds=%v", cmds)
+		t.Errorf("an input rejected at validation must NOT reach the runner; cmds=%v", cmds)
 	}
 }
 
@@ -175,7 +177,7 @@ func TestDataRollback_RejectsInvalidBackup(t *testing.T) {
 // a malformed ref is rejected at 400.
 func TestDataRollback_PassphraseRefForwardedAndValidated(t *testing.T) {
 	fn := "pre-upgrade-enc.tar.gz.enc"
-	rig := dataRollbackRig(t, fn)
+	rig := dataRollbackRig(t)
 	defer rig.stop()
 
 	// Malformed ref → 400 before runner.
@@ -208,7 +210,7 @@ func TestDataRollback_SafetyFlagsForwardedAndFailClosed(t *testing.T) {
 	fn := "pre-upgrade-flags.tar.gz.enc"
 
 	// Default (no acks): neither flag is in the restore argv.
-	rig := dataRollbackRig(t, fn)
+	rig := dataRollbackRig(t)
 	defer rig.stop()
 	rig.waitForOpFinished(t, rig.rollbackOpID(t, map[string]interface{}{"mode": "data", "filename": fn}))
 	restoreCmd, _ := argvWith(rig.captured.snapshot(), "--restore")
@@ -221,7 +223,7 @@ func TestDataRollback_SafetyFlagsForwardedAndFailClosed(t *testing.T) {
 	}
 
 	// With both acks: both flags forwarded.
-	rig2 := dataRollbackRig(t, fn)
+	rig2 := dataRollbackRig(t)
 	defer rig2.stop()
 	rig2.waitForOpFinished(t, rig2.rollbackOpID(t, map[string]interface{}{
 		"mode": "data", "filename": fn,
@@ -242,7 +244,7 @@ func TestDataRollback_SafetyFlagsForwardedAndFailClosed(t *testing.T) {
 
 	// CLI refusal (models the WouldBlock fail-closed guard): the op fails
 	// cli_error.
-	rig3 := dataRollbackRig(t, fn)
+	rig3 := dataRollbackRig(t)
 	defer rig3.stop()
 	rig3.addFailMatch("--restore")
 	op := rig3.waitForOpFinished(t, rig3.rollbackOpID(t, map[string]interface{}{"mode": "data", "filename": fn}))
@@ -254,7 +256,7 @@ func TestDataRollback_SafetyFlagsForwardedAndFailClosed(t *testing.T) {
 // Idempotent replay: same key → same op_id, 200, no second restore.
 func TestDataRollback_IdempotentReplay(t *testing.T) {
 	fn := "pre-upgrade-idem.tar.gz.enc"
-	rig := dataRollbackRig(t, fn)
+	rig := dataRollbackRig(t)
 	defer rig.stop()
 
 	body := map[string]interface{}{"mode": "data", "filename": fn, "idempotency_key": "data-rb-1"}
