@@ -38,7 +38,7 @@ type rollbackAccumulator struct {
 // fixed tag never advances to an image that did not pull. Shared by apply's
 // `pull` stage and the rollback core's `rollback_pull` stage so the two
 // image-selection paths can never diverge.
-func (s *Server) pullAndTagPinned(ctx context.Context, ref string) ([]byte, []byte, error) {
+func (s *Server) pullAndTagPinned(ctx context.Context, ref string) (stdout, stderr []byte, err error) {
 	pres, perr := s.opts.Runner.ComposePullDigest(ctx, ref)
 	if perr != nil {
 		if pres != nil {
@@ -47,13 +47,13 @@ func (s *Server) pullAndTagPinned(ctx context.Context, ref string) ([]byte, []by
 		return nil, nil, perr
 	}
 	out := append([]byte(nil), pres.Stdout...)
-	stderr := append([]byte(nil), pres.Stderr...)
+	errOut := append([]byte(nil), pres.Stderr...)
 	tres, terr := s.opts.Runner.ComposeTagPinned(ctx, ref)
 	if tres != nil {
 		out = append(out, tres.Stdout...)
-		stderr = append(stderr, tres.Stderr...)
+		errOut = append(errOut, tres.Stderr...)
 	}
-	return out, stderr, terr
+	return out, errOut, terr
 }
 
 // imageRollbackStages builds the four core image-rollback steps pinned to
