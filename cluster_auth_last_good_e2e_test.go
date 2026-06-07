@@ -1,16 +1,81 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 
 	"github.com/crewjam/saml"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 )
+
+func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
+	fixture := newClusterAuthLiveSyncFixture(t)
+	setupProxyTest(t)
+	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+	sessionSecret = nil
+
+	client := &DataPlaneClient{
+		nodeID:      fixture.nodeID,
+		callForTest: fixture.call,
+	}
+	client.fetchAndApply(t.Context())
+
+	if client.lastVersion != 1 {
+		t.Fatalf("lastVersion = %d, want 1 after first CP sync", client.lastVersion)
+	}
+	if cfg.ProxyBaseURL() != "https://proxy.example.test/culvert" || !trustForwardedHeaders {
+		t.Fatalf("DP auth settings = base %q trust %v, want CP-published values", cfg.ProxyBaseURL(), trustForwardedHeaders)
+	}
+	if !sameBytes(sessionSecret, fixture.sessionSecret) {
+		t.Fatal("DP session HMAC did not sync from CP")
+	}
+	if providers := idpRegistry.EnabledProviders(); len(providers) != 1 || providers[0].Name() != "saml:corp-saml" {
+		t.Fatalf("DP enabled providers = %+v, want synced SAML provider", providers)
+	}
+
+	backend := clusterAuthBackend(t)
+	assertClusterAuthRequest(t, backend.URL, sessionCookieForIdentity(t, &Identity{
+		Sub:      "alice@example.test",
+		Email:    "alice@example.test",
+		Groups:   []string{"engineering"},
+		Provider: "corp-saml",
+	}), http.StatusOK)
+	assertClusterAuthRequest(t, backend.URL, sessionCookieForIdentity(t, &Identity{
+		Sub:      "mallory@example.test",
+		Email:    "mallory@example.test",
+		Groups:   []string{"sales"},
+		Provider: "corp-saml",
+	}), http.StatusForbidden)
+
+	updated := fixture.snapshot("https://proxy2.example.test/edge", []string{"engineering", "platform"})
+	fixture.store.Update(updated)
+	client.fetchAndApply(t.Context())
+
+	if client.lastVersion != 2 {
+		t.Fatalf("lastVersion = %d, want 2 after CP IdP update", client.lastVersion)
+	}
+	if cfg.ProxyBaseURL() != "https://proxy2.example.test/edge" {
+		t.Fatalf("DP ProxyBaseURL = %q, want updated CP value", cfg.ProxyBaseURL())
+	}
+	got := idpRegistry.Get("corp-saml")
+	if got == nil {
+		t.Fatal("synced IdP profile missing after CP update")
+	}
+	if len(got.KnownGroups) != 2 || got.KnownGroups[1] != "platform" {
+		t.Fatalf("synced KnownGroups = %v, want CP-updated groups", got.KnownGroups)
+	}
+}
 
 func TestClusterAuth_LastGoodSnapshotKeepsSAMLSessionPolicyLocal(t *testing.T) {
 	withClusterAuthLastGoodGlobals(t)
@@ -96,6 +161,8 @@ func TestClusterAuth_LastGoodSnapshotKeepsSAMLSessionPolicyLocal(t *testing.T) {
 func withClusterAuthLastGoodGlobals(t *testing.T) {
 	t.Helper()
 	origRegistry := idpRegistry
+	origStore := globalConfigStore
+	origClusterStore := globalClusterStore
 	origSecret := append([]byte(nil), sessionSecret...)
 	origBaseURL := cfg.ProxyBaseURL()
 	origTrustForwarded := trustForwardedHeaders
@@ -106,6 +173,8 @@ func withClusterAuthLastGoodGlobals(t *testing.T) {
 	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
 	t.Cleanup(func() {
 		idpRegistry = origRegistry
+		globalConfigStore = origStore
+		globalClusterStore = origClusterStore
 		sessionSecret = origSecret
 		SetProxyBaseURL(origBaseURL)
 		trustForwardedHeaders = origTrustForwarded
@@ -113,6 +182,82 @@ func withClusterAuthLastGoodGlobals(t *testing.T) {
 		activeDPClient.Store(origClient)
 		dpControlPlanePollFailing.Store(origPollFailing)
 	})
+}
+
+type clusterAuthLiveSyncFixture struct {
+	nodeID        string
+	peerCert      *x509.Certificate
+	sessionSecret []byte
+	store         *ConfigStore
+	samlMetadata  string
+}
+
+func newClusterAuthLiveSyncFixture(t *testing.T) *clusterAuthLiveSyncFixture {
+	t.Helper()
+	withClusterAuthLastGoodGlobals(t)
+	globalConfigStore = &ConfigStore{}
+	globalClusterStore = newTestClusterStore(t)
+	_, cert := newSAMLTestKeyPair(t, "cluster-auth-live-dp")
+	nodeID := "dp-live-auth"
+	globalClusterStore.RegisterNode(&EnrolledNode{
+		NodeID:     nodeID,
+		Status:     "connected",
+		CertSerial: cert.SerialNumber.Text(16),
+	})
+	fixture := &clusterAuthLiveSyncFixture{
+		nodeID:        nodeID,
+		peerCert:      cert,
+		sessionSecret: []byte("0123456789abcdef0123456789abcdef"),
+		store:         globalConfigStore,
+		samlMetadata:  clusterAuthSAMLMetadataXML(t),
+	}
+	fixture.store.Update(fixture.snapshot("https://proxy.example.test/culvert", []string{"engineering"}))
+	return fixture
+}
+
+func (f *clusterAuthLiveSyncFixture) snapshot(baseURL string, knownGroups []string) ConfigSnapshot {
+	return ConfigSnapshot{
+		ProxyBaseURL:          baseURL,
+		TrustForwardedHeaders: true,
+		DefaultAction:         "deny",
+		PolicyRules: []PolicyRule{{
+			Priority:    1,
+			Name:        "engineering-can-reach-apps",
+			SourceGroup: "engineering",
+			DestFQDN:    "*",
+			Action:      ActionAllow,
+		}},
+		SessionHMAC: hex.EncodeToString(f.sessionSecret),
+		IdPProfiles: []*IdPProfile{{
+			ID:           "corp-saml",
+			Name:         "Corp SAML",
+			Type:         IdPTypeSAML,
+			Enabled:      true,
+			EmailDomains: []string{"example.test"},
+			KnownGroups:  knownGroups,
+			SAML: &SAMLProfileConfig{
+				MetadataXML:     f.samlMetadata,
+				NameIDFormat:    string(saml.EmailAddressNameIDFormat),
+				GroupsAttribute: "groups",
+				EmailAttribute:  "email",
+				NameAttribute:   "displayName",
+			},
+		}},
+	}
+}
+
+func (f *clusterAuthLiveSyncFixture) call(ctx context.Context, method string, req json.RawMessage) (json.RawMessage, error) {
+	if method != methodGetConfig {
+		return nil, fmt.Errorf("unexpected method %s", method)
+	}
+	ctx = peer.NewContext(ctx, &peer.Peer{
+		AuthInfo: credentials.TLSInfo{
+			State: tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{f.peerCert},
+			},
+		},
+	})
+	return (&controlPlaneServer{}).GetConfig(ctx, req)
 }
 
 func applyLiveClusterSnapshot(t *testing.T, snap ConfigSnapshot) {
