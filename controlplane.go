@@ -1105,6 +1105,7 @@ type DataPlaneClient struct {
 	mu          sync.Mutex
 	lastVersion int64
 	failCount   int // consecutive fetch failures for exponential backoff
+	callForTest func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
 // backoff sleeps for an exponentially increasing duration after consecutive
@@ -1445,6 +1446,9 @@ func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Durat
 // error. CL-11: the snapshot prevents the unsynchronized field read
 // that `go test -race` flagged at this line.
 func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawMessage) (json.RawMessage, error) {
+	if c.callForTest != nil {
+		return c.callForTest(ctx, method, req)
+	}
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	c.mu.Lock()
