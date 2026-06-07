@@ -1743,7 +1743,13 @@ func applyDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 	if err != nil {
 		return ConfigSnapshot{}, err
 	}
-	applyConfigSnapshot(snap)
+	applyExternalAuthSnapshotSettings(snap)
+	if err := syncSnapshotIdPProfiles(snap); err != nil {
+		return ConfigSnapshot{}, err
+	}
+	snapForApply := snap
+	snapForApply.IdPProfiles = nil
+	applyConfigSnapshot(snapForApply)
 	logger.Printf("DataPlane: applied last-known-good config snapshot v%d from %s", snap.Version, dpLastGoodConfigSnapshotPath())
 	return snap, nil
 }
