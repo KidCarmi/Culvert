@@ -326,3 +326,33 @@ func TestPolicyRuleJSON_RollbackTolerated(t *testing.T) {
 		t.Errorf("rollback unmarshal lost known fields: %+v", r)
 	}
 }
+
+// ─── Phase-0 fail-closed gate: a non-nil SubjectMatch must be rejected ───────
+
+// validatePolicyRule must REJECT any rule that sets a SubjectMatch in Phase 0,
+// because Stage-2 evaluation (matchSource) does not yet consult it — accepting
+// it would fail OPEN (a CIDR-scoped rule would match every client). This holds
+// even for a well-formed CIDR selector that validateSubjectMatch would accept.
+func TestValidatePolicyRule_RejectsSubjectMatch_Phase0(t *testing.T) {
+	scoped := PolicyRule{
+		Name:   "scoped",
+		Action: ActionAllow,
+		SubjectMatch: &SubjectMatch{
+			SchemaVersion: 1,
+			All:           []SubjectPredicate{{Type: subjectPredicateCIDR, Values: []string{"10.0.0.0/8"}}},
+		},
+	}
+	err := validatePolicyRule(scoped, nil, -1)
+	if err == nil {
+		t.Fatal("a non-nil SubjectMatch must be rejected until the matcher is wired (fail-closed)")
+	}
+	if !strings.Contains(err.Error(), "subjectMatch") {
+		t.Errorf("error should name subjectMatch; got %v", err)
+	}
+
+	// A rule WITHOUT a SubjectMatch (every existing rule) still validates.
+	plain := PolicyRule{Name: "plain", Action: ActionAllow}
+	if err := validatePolicyRule(plain, nil, -1); err != nil {
+		t.Fatalf("a rule without SubjectMatch must still validate: %v", err)
+	}
+}

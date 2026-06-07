@@ -78,6 +78,12 @@ type SubjectPredicate struct {
 // field is unused). Unknown predicate types are rejected (fail-closed). In
 // Phase 0 only the "cidr" predicate is accepted, and each of its values must be
 // a valid IP or CIDR.
+//
+// NOTE (Phase 0): this is the SHAPE validator, retained for the phase that
+// wires the matcher. The rule-acceptance path (validatePolicyRule) currently
+// REJECTS any non-nil SubjectMatch up front — because Stage-2 evaluation does
+// not yet consult it, storing one would fail open — so in practice only a nil
+// selector reaches this function today.
 func validateSubjectMatch(sm *SubjectMatch) error {
 	if sm == nil {
 		return nil
