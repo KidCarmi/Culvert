@@ -330,9 +330,12 @@ type PolicyRule struct {
 	FileProfile       FileProfileName `json:"fileProfile"`        // named file-extension block profile
 	TLSSkipVerify     bool            `json:"tlsSkipVerify"`      // skip upstream cert verification (use with caution)
 	Action            PolicyAction    `json:"action"`
-	RedirectURL       string          `json:"redirectURL"`       // used when Action == Redirect
-	Enabled           *bool           `json:"enabled,omitempty"` // nil or true = active; false = skipped during evaluation
-	HitCount          int64           `json:"hitCount"`          // runtime counter, not persisted
+	RedirectURL       string          `json:"redirectURL"`            // used when Action == Redirect
+	Enabled           *bool           `json:"enabled,omitempty"`      // nil or true = active; false = skipped during evaluation
+	ID                string          `json:"id,omitempty"`           // stable ULID; backfilled on load (Phase 0 seam)
+	RuleType          string          `json:"ruleType,omitempty"`     // "" or "access" = Stage-2 access rule; "auth" = Stage-1 (reserved)
+	SubjectMatch      *SubjectMatch   `json:"subjectMatch,omitempty"` // typed subject selector (reserved; nil = unused)
+	HitCount          int64           `json:"hitCount"`               // runtime counter, not persisted
 }
 
 // ruleIsEnabled returns whether a rule is active. A nil Enabled pointer
@@ -391,11 +394,33 @@ func (ps *PolicyStore) Load(path string) error {
 	}
 	ps.mu.Lock()
 	ps.rules = rules
+	migrated := ps.backfillIDsLocked()
 	ps.sortLocked()
 	ps.mu.Unlock()
 	// Restore persisted version from sidecar .meta file.
 	ps.loadMeta()
+	// One-time idempotent ID migration: persist newly-assigned stable IDs so
+	// they survive restarts. This is a data migration, NOT a semantic policy
+	// change — it deliberately does not bump the policy version. A second load
+	// finds all IDs present and writes nothing.
+	if migrated > 0 {
+		ps.Save()
+		logger.Printf("Policy: assigned stable ULID IDs to %d rule(s) missing them (one-time migration)", migrated)
+	}
 	return nil
+}
+
+// backfillIDsLocked assigns a stable ULID to every rule missing an ID and
+// returns the number assigned. Must be called with ps.mu held.
+func (ps *PolicyStore) backfillIDsLocked() int {
+	n := 0
+	for _, r := range ps.rules {
+		if r.ID == "" {
+			r.ID = newRuleID()
+			n++
+		}
+	}
+	return n
 }
 
 // policyMeta is persisted alongside the policy file so version survives restart.
@@ -485,6 +510,12 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 		if r.FileProfile != "" && r.FileProfile != FileProfileNone {
 			r.FileFiltering = true
 		}
+		// Backfill a stable ID if missing. Cross-node ID consistency (CP/DP
+		// agreeing on the same ID) is deferred to Phase 3, when ConfigSnapshot
+		// carries rule IDs; until then nodes assign IDs independently.
+		if r.ID == "" {
+			r.ID = newRuleID()
+		}
 		ps.rules[i] = &r
 	}
 	ps.sortLocked()
@@ -504,6 +535,9 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	if nr.Enabled == nil {
 		t := true
 		nr.Enabled = &t
+	}
+	if nr.ID == "" {
+		nr.ID = newRuleID()
 	}
 	if nr.Priority <= 0 {
 		// Auto-assign priority: one higher than the current max.
@@ -538,6 +572,12 @@ func (ps *PolicyStore) Update(priority int, r PolicyRule) bool {
 	for i, rule := range ps.rules {
 		if rule.Priority == priority {
 			r.HitCount = atomic.LoadInt64(&rule.HitCount) // B7: atomic read of concurrently-written counter
+			// Preserve the existing stable ID when the incoming body omits it
+			// (PUT bodies from older clients carry no "id"). Never let an edit
+			// wipe a rule's durable identifier.
+			if r.ID == "" {
+				r.ID = rule.ID
+			}
 			ps.rules[i] = &r
 			ps.sortLocked()
 			ps.bumpVersion()
@@ -664,6 +704,12 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	for i := range rules {
 		rule := rules[i]
 		if !ruleIsEnabled(rule) {
+			continue
+		}
+		// Stage-2 evaluates access rules only. Authentication rules (Stage-1)
+		// are inert here; an empty RuleType defaults to access for backward
+		// compatibility, so all pre-existing rules are matched exactly as before.
+		if ruleTypeOf(rule) != ruleTypeAccess {
 			continue
 		}
 		if !matchSource(rule, clientIP, identity, authSource, groups) {

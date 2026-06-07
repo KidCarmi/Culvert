@@ -13,6 +13,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.18.6
+	github.com/oklog/ulid/v2 v2.1.1
 	github.com/oschwald/geoip2-golang v1.13.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/net v0.55.0
