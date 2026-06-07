@@ -170,6 +170,11 @@ type Runner struct {
 	captureMax     int
 	stageTimeout   time.Duration
 
+	// proxyRepo is the repository the pinned-digest pull/tag are bound to
+	// (P1.4). A pinned ref must be `<proxyRepo>@sha256:<64hex>`; anything
+	// else is rejected before exec. Defaults to defaultProxyRepo.
+	proxyRepo string
+
 	// dockerBinary is overridable in tests. Default "docker".
 	dockerBinary string
 	// sudoBinary is overridable in tests. Default "sudo".
@@ -205,6 +210,11 @@ type Options struct {
 	// command via the os.LookupEnv fallback. Every name here MUST also be
 	// in EnvAllow.
 	EnvOverlayOnly []string
+
+	// ProxyRepo is the repository the pinned-digest pull/tag are bound to
+	// (P1.4). Defaults to defaultProxyRepo ("ghcr.io/kidcarmi/culvert").
+	// MUST describe the same repository as the operator's image_allowlist.
+	ProxyRepo string
 
 	// DockerBinary defaults to "docker". Tests override.
 	DockerBinary string
@@ -282,6 +292,10 @@ func New(opts Options) (*Runner, error) {
 	if sudo == "" {
 		sudo = "sudo"
 	}
+	proxyRepo := opts.ProxyRepo
+	if proxyRepo == "" {
+		proxyRepo = defaultProxyRepo
+	}
 	envAllow, envOverlayOnly, err := resolveEnvSets(opts.EnvAllow, opts.EnvOverlayOnly)
 	if err != nil {
 		return nil, err
@@ -294,6 +308,7 @@ func New(opts Options) (*Runner, error) {
 		envOverlayOnly:    envOverlayOnly,
 		captureMax:        captureMax,
 		stageTimeout:      opts.StageTimeout,
+		proxyRepo:         proxyRepo,
 		dockerBinary:      docker,
 		sudoBinary:        sudo,
 	}, nil

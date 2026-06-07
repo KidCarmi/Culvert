@@ -26,6 +26,47 @@ func writeConfig(t *testing.T, body string) string {
 const minimalValid = `compose_project_dir = "/srv/culvert"
 allow_peers = ["culvert-cp"]`
 
+// proxy_repo (P1.4): default applied; bare repos and registry host:port
+// accepted; @digest and TAGGED values rejected (a tag would break repo-bound
+// pin validation).
+func TestLoad_ProxyRepo(t *testing.T) {
+	cfg, err := Load(writeConfig(t, minimalValid))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ProxyRepo != "ghcr.io/kidcarmi/culvert" {
+		t.Errorf("proxy_repo default: got %q", cfg.ProxyRepo)
+	}
+	accepted := []string{
+		"ghcr.io/kidcarmi/culvert",
+		"localhost:5000/culvert",          // registry host:port before the path
+		"registry.example.com:5000/x/y/z", // host:port + nested path
+		"docker.io/library/culvert",
+	}
+	for _, pr := range accepted {
+		body := minimalValid + "\nproxy_repo = \"" + pr + "\""
+		if _, err := Load(writeConfig(t, body)); err != nil {
+			t.Errorf("proxy_repo %q should be accepted: %v", pr, err)
+		}
+	}
+	rejected := []string{
+		"ghcr.io/kidcarmi/culvert:latest",                            // tag after path
+		"ghcr.io/kidcarmi/culvert:v1.2.3",                            // tag after path
+		"culvert:latest",                                             // tag, no registry
+		"localhost:5000/culvert:latest",                              // host:port AND tag → reject (the tag)
+		"ghcr.io/kidcarmi/culvert@sha256:" + strings.Repeat("a", 64), // @digest
+		"ghcr.io/kidcarmi/culvert@sha256:abc",                        // sha256: substring
+		"has space",
+		"bad|pipe",
+	}
+	for _, pr := range rejected {
+		body := minimalValid + "\nproxy_repo = \"" + pr + "\""
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Errorf("proxy_repo %q should be rejected", pr)
+		}
+	}
+}
+
 // TestLoad_DefaultsApplied exercises one branch per config key.
 // Splitting would obscure which keys are checked against which defaults.
 //

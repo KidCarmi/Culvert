@@ -82,6 +82,12 @@ type Config struct {
 	// Default upgrade-target image-ref allowlist (compiled regex).
 	ImageAllowlist *regexp.Regexp
 
+	// ProxyRepo is the repository the pinned-digest pull/tag are bound to
+	// at the sudo boundary (P1.4). A pinned upgrade/rollback ref must be
+	// `<ProxyRepo>@sha256:<64hex>`. Default "ghcr.io/kidcarmi/culvert".
+	// MUST describe the same repository as ImageAllowlist.
+	ProxyRepo string
+
 	// AllowPeers is the closed list of UID-or-username tokens permitted
 	// to connect to the agent's UDS. The agent refuses to start with
 	// an empty list. The CLI flag --allow-peers is now removed; this
@@ -126,6 +132,7 @@ type rawConfig struct {
 	LogRetentionDays  *int     `toml:"log_retention_days"`
 	AllowedBackupDir  string   `toml:"allowed_backup_dir"`
 	ImageAllowlist    string   `toml:"image_allowlist"`
+	ProxyRepo         string   `toml:"proxy_repo"`
 	AllowPeers        []string `toml:"allow_peers"`
 }
 
@@ -142,7 +149,15 @@ const (
 	defaultLogRetention     = 30
 	defaultAllowedBackupDir = "/backup"
 	defaultImageAllowlist   = `^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$`
+	defaultProxyRepo        = "ghcr.io/kidcarmi/culvert"
 )
+
+// proxyRepoShapeRE bounds a repository reference: it must look like a
+// docker repo (optional registry host[:port], path segments), with no
+// whitespace, `@`, or tag — a bare repo only. This is the literal the
+// sudoers pull/tag pattern binds to, so a malformed value must never
+// reach the rendered allowlist.
+var proxyRepoShapeRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:-]{0,254}$`)
 
 // Load reads, parses, and validates the config at path. Returns the
 // Config on success, or an error describing exactly which key failed.
@@ -328,6 +343,30 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, fmt.Errorf("config: image_allowlist is not a valid regex: %w", err)
 	}
 	cfg.ImageAllowlist = rx
+
+	// proxy_repo — default ghcr.io/kidcarmi/culvert. Bare repo shape only
+	// (no tag, no @digest, no whitespace); it is the literal the sudoers
+	// pull/tag pattern binds to (P1.4). Operators MUST keep it consistent
+	// with image_allowlist; install.sh surfaces a mismatch.
+	pr := strings.TrimSpace(raw.ProxyRepo)
+	if pr == "" {
+		pr = defaultProxyRepo
+	}
+	if strings.ContainsAny(pr, "@") || strings.Contains(pr, "sha256:") {
+		return nil, fmt.Errorf("config: proxy_repo must be a bare repository (no @digest), got %q", pr)
+	}
+	// Reject a TAG (a ':' after the final '/'). A registry host:port colon
+	// (which appears BEFORE the path's first '/') is still allowed. A tagged
+	// proxy_repo would make every apply/rollback fail repo-bound validation:
+	// resolve_target builds the pin as `<repo-without-tag>@sha256:…`, which
+	// could never match a `<repo>:<tag>`-bound runner/sudoers pattern.
+	if i := strings.LastIndexByte(pr, '/'); strings.IndexByte(pr[i+1:], ':') >= 0 {
+		return nil, fmt.Errorf("config: proxy_repo must not include a tag (no ':' after the final '/'); registry host:port before the path is allowed, got %q", pr)
+	}
+	if !proxyRepoShapeRE.MatchString(pr) {
+		return nil, fmt.Errorf("config: proxy_repo has an invalid repository shape: %q", pr)
+	}
+	cfg.ProxyRepo = pr
 
 	// allow_peers — required, no default. Validated only as non-empty
 	// shape here; the resolution to a concrete UID set happens in

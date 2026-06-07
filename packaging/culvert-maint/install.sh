@@ -120,6 +120,47 @@ PROJECT_DIR=$(extract_toml_string compose_project_dir || true)
 COMPOSE_FILE=$(extract_toml_string compose_file || true)
 [ -z "$COMPOSE_FILE" ] && COMPOSE_FILE=docker-compose.yml
 
+# proxy_repo (P1.4): the repository the sudoers `docker pull`/`docker tag`
+# entries bind to. Rendered into {proxy_repo} below, exactly like
+# {compose_path}. Default mirrors the Go config default + the canonical
+# image_allowlist repo.
+PROXY_REPO=$(extract_toml_string proxy_repo || true)
+[ -z "$PROXY_REPO" ] && PROXY_REPO=ghcr.io/kidcarmi/culvert
+IMAGE_ALLOWLIST=$(extract_toml_string image_allowlist || true)
+
+# --- Validate proxy_repo ------------------------------------------------
+# Bare repository only: no @digest, no whitespace/quotes/control chars. It
+# is substituted into the sudoers allowlist pattern, so a malformed value
+# must never reach the rendered file.
+case "$PROXY_REPO" in
+    *@* | *'sha256:'* )
+        echo "install.sh: ERROR — proxy_repo must be a bare repository (no @digest/tag), got '$PROXY_REPO'" >&2
+        exit 1
+        ;;
+esac
+case "$PROXY_REPO" in
+    *[[:cntrl:]]* | *' '* | *'	'* | *'"'* | *"'"* | *'|'* )
+        echo "install.sh: ERROR — proxy_repo contains whitespace/quotes/control chars: '$PROXY_REPO'" >&2
+        exit 1
+        ;;
+esac
+# Consistency with image_allowlist (P1.4 §3.1): proxy_repo and the allowlist
+# MUST describe the same repository. Heuristic: the allowlist regex (with its
+# backslash escapes stripped) must contain the proxy_repo literal. Only
+# enforced when image_allowlist is explicitly set; an empty value means the
+# Go default is used, which already matches the proxy_repo default.
+if [ -n "$IMAGE_ALLOWLIST" ]; then
+    AL_NORM=$(printf '%s' "$IMAGE_ALLOWLIST" | sed 's/\\//g')
+    case "$AL_NORM" in
+        *"$PROXY_REPO"*) : ;;
+        *)
+            echo "install.sh: ERROR — proxy_repo '$PROXY_REPO' is not referenced by image_allowlist." >&2
+            echo "install.sh: they MUST describe the same repository (P1.4). Reconcile config.toml and re-run." >&2
+            exit 1
+            ;;
+    esac
+fi
+
 # --- Validate compose_project_dir ---------------------------------------
 # The Go side (internal/config) already enforces these on agent start;
 # we re-validate here because the sudoers entry is rendered BEFORE the
@@ -168,6 +209,38 @@ case "$COMPOSE_FILE" in
         ;;
 esac
 
+# --- Seed the fixed pinned image tag (P1.4) — BEFORE flipping the boundary --
+# The compose file resolves `image: culvert/proxy:pinned` (no env var). That
+# LOCAL tag must exist before the next `docker compose up`, or the stack
+# fails with "no such image". We seed it FIRST — before the new sudoers
+# (which drops the old `pull proxy`/CULVERT_PROXY_IMAGE env_keep path) is
+# installed — so a seed failure aborts the install with the OLD, working
+# sudo path still in place (the reviewer's "keep the old path until the swap
+# succeeds"). An existing install MUST seed from the CURRENTLY-RUNNING digest
+# (so the pinned tag matches the live daemon) via CULVERT_PROXY_SEED_REF; see
+# roadmap/D1.6c-pin-value-binding-plan.md §8 for the full ordering.
+PINNED_TAG="culvert/proxy:pinned"
+if docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
+    echo "install.sh: $PINNED_TAG already present; not reseeding"
+else
+    # Seed source precedence:
+    #   1. CULVERT_PROXY_SEED_REF — operator-supplied (e.g. the running
+    #      digest captured during an existing-install migration).
+    #   2. ${PROXY_REPO}:latest    — fresh-install bootstrap.
+    SEED_REF="${CULVERT_PROXY_SEED_REF:-$PROXY_REPO:latest}"
+    echo "install.sh: seeding $PINNED_TAG from $SEED_REF ..."
+    if docker pull "$SEED_REF" && docker tag "$SEED_REF" "$PINNED_TAG"; then
+        echo "install.sh: seeded $PINNED_TAG"
+    else
+        echo "install.sh: ERROR — could not seed $PINNED_TAG from $SEED_REF." >&2
+        echo "install.sh: aborting BEFORE installing the new sudoers, so the existing" >&2
+        echo "install.sh: image apply/rollback path keeps working. Seed it, then re-run:" >&2
+        echo "install.sh:   docker tag <repo>@sha256:<running-digest> $PINNED_TAG   # existing install" >&2
+        echo "install.sh: or set CULVERT_PROXY_SEED_REF and re-run. See the migration plan §8." >&2
+        exit 1
+    fi
+fi
+
 COMPOSE_PATH="$PROJECT_DIR/$COMPOSE_FILE"
 RENDERED_SUDOERS=$(mktemp)
 trap 'rm -f "$RENDERED_SUDOERS"' EXIT
@@ -181,15 +254,19 @@ trap 'rm -f "$RENDERED_SUDOERS"' EXIT
 # the delimiter is `|`, not `/`.
 ESCAPED_PATH=$(printf '%s' "$COMPOSE_PATH" \
     | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g')
+ESCAPED_REPO=$(printf '%s' "$PROXY_REPO" \
+    | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g')
 
-# Substitute {compose_path} with the resolved absolute path.
-# `sed` with a non-/ delimiter accommodates path slashes.
-sed "s|{compose_path}|$ESCAPED_PATH|g" "$SUDOERS_TEMPLATE" > "$RENDERED_SUDOERS"
+# Substitute {compose_path} and {proxy_repo}. `sed` with a non-/ delimiter
+# accommodates path/registry slashes.
+sed -e "s|{compose_path}|$ESCAPED_PATH|g" \
+    -e "s|{proxy_repo}|$ESCAPED_REPO|g" \
+    "$SUDOERS_TEMPLATE" > "$RENDERED_SUDOERS"
 
 # Refuse to install a sudoers file with leftover placeholders.
-if grep -q '{compose_path}\|{compose_file}\|{compose_project_dir}' "$RENDERED_SUDOERS"; then
+if grep -q '{compose_path}\|{compose_file}\|{compose_project_dir}\|{proxy_repo}' "$RENDERED_SUDOERS"; then
     echo "install.sh: ERROR — rendered sudoers file still contains placeholders:" >&2
-    grep -n '{compose_' "$RENDERED_SUDOERS" >&2
+    grep -nE '\{compose_|\{proxy_repo\}' "$RENDERED_SUDOERS" >&2
     exit 1
 fi
 
@@ -225,13 +302,18 @@ install.sh: install complete.
 
 Compose path bound in sudoers allowlist:
   $COMPOSE_PATH
+Proxy repo bound in sudoers pull/tag allowlist (P1.4):
+  $PROXY_REPO   →  retagged locally as culvert/proxy:pinned
 
 Next steps:
   1. Review /etc/culvert-maint/config.toml — particularly:
      - compose_project_dir
      - compose_file
+     - proxy_repo            (MUST match image_allowlist's repository)
      - allow_peers           (the CP UID or username allowlist)
      - privilege_mode        (sudoers is the production default)
+     Ensure docker-compose.yml uses 'image: culvert/proxy:pinned' for the
+     proxy and cli services (P1.4); this install seeded that local tag.
   2. Confirm the user(s) in allow_peers exist on the host — the agent
      will fail to start otherwise.
   3. Start the agent:                systemctl start culvert-maint

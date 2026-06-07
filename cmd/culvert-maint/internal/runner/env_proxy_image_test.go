@@ -3,28 +3,20 @@ package runner
 import (
 	"context"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 )
 
-// CULVERT_PROXY_IMAGE is the compose image-override precondition (D1.6c).
-// These tests prove it is forwardable ONLY through an explicit env overlay
-// (the path the future pull/up will use) and is gated by the closed env
-// allowlist — it never leaks to a child process by default, and the
-// read-only paths do not carry it.
+// P1.4 removed CULVERT_PROXY_IMAGE: the proxy image is no longer selected by
+// an env var (it is bound at the sudo boundary via a repo-bound docker
+// pull + retag, see templates_apply_test.go). The tests that remain here
+// cover the still-live overlay-only env mechanism via the one remaining
+// overlay-only var, CULVERT_BACKUP_PASSPHRASE (encrypted backup/restore).
 
-// proxyEnvRunner builds a Runner that allowlists CULVERT_PROXY_IMAGE as
-// overlay-only (mirroring main's wiring) plus a fake exec layer that
-// captures the child argv + env.
-func proxyEnvRunner(t *testing.T, capE *capturedExec, envAllow []string) *Runner {
+// captureRunner builds a Runner with a fake exec layer that records the
+// child argv + env, wired with the given EnvAllow / EnvOverlayOnly sets.
+func captureRunner(t *testing.T, capE *capturedExec, envAllow, overlayOnly []string) *Runner {
 	t.Helper()
-	overlayOnly := []string(nil)
-	for _, n := range envAllow {
-		if n == EnvCulvertProxyImage {
-			overlayOnly = []string{EnvCulvertProxyImage}
-		}
-	}
 	r, err := New(Options{
 		ComposeProjectDir: "/srv/culvert",
 		ComposeFile:       "docker-compose.yml",
@@ -45,139 +37,30 @@ func proxyEnvRunner(t *testing.T, capE *capturedExec, envAllow []string) *Runner
 	return r
 }
 
-func TestEnvCulvertProxyImage_IsValidEnvName(t *testing.T) {
-	if !envNameRE.MatchString(EnvCulvertProxyImage) {
-		t.Fatalf("EnvCulvertProxyImage %q must be a valid env-var name", EnvCulvertProxyImage)
-	}
-}
-
-// Intended path: an explicit overlay (what the future pull/up will pass)
-// forwards the pinned ref to the child process.
-func TestEnvCulvertProxyImage_ForwardedViaOverlay(t *testing.T) {
-	capE := &capturedExec{}
-	r := proxyEnvRunner(t, capE, []string{EnvCulvertProxyImage})
-	ref := "ghcr.io/kidcarmi/culvert@sha256:" + strings.Repeat("a", 64)
-	if _, err := r.runWithEnv(context.Background(),
-		[]string{"/usr/bin/docker", "compose", "up", "-d"},
-		map[string]string{EnvCulvertProxyImage: ref}); err != nil {
-		t.Fatalf("runWithEnv: %v", err)
-	}
-	if !capE.HasEnv(EnvCulvertProxyImage, ref) {
-		t.Errorf("intended overlay path must forward %s=%s; child env=%v", EnvCulvertProxyImage, ref, capE.Env)
-	}
-}
-
-// Closed-allowlist gate: an overlay carrying the var is REJECTED before
-// exec when the var is not in EnvAllow.
-func TestEnvCulvertProxyImage_RejectedWhenNotAllowlisted(t *testing.T) {
-	capE := &capturedExec{}
-	// Only the passphrase is allowed; the proxy-image var is not.
-	r := proxyEnvRunner(t, capE, []string{EnvCulvertBackupPassphrase})
-	_, err := r.runWithEnv(context.Background(),
-		[]string{"/usr/bin/docker", "compose", "up", "-d"},
-		map[string]string{EnvCulvertProxyImage: "ghcr.io/kidcarmi/culvert@sha256:" + strings.Repeat("a", 64)})
-	if err == nil {
-		t.Fatal("an overlay name outside EnvAllow must be rejected (closed allowlist)")
-	}
-	if len(capE.Argv) != 0 {
-		t.Errorf("a rejected overlay must not reach exec; argv=%v", capE.Argv)
-	}
-}
-
-// No ambient leak: with the var allowlisted but neither an overlay value
-// nor a value in the agent's own process env, it must NOT reach a child.
-func TestEnvCulvertProxyImage_NotForwardedWithoutOverlay(t *testing.T) {
-	capE := &capturedExec{}
-	r := proxyEnvRunner(t, capE, []string{EnvCulvertProxyImage})
-	if _, err := r.runWithEnv(context.Background(),
-		[]string{"/usr/bin/docker", "compose", "ps"}, nil); err != nil {
-		t.Fatalf("runWithEnv: %v", err)
-	}
-	if capE.HasEnvName(EnvCulvertProxyImage) {
-		t.Errorf("must not forward %s when neither overlay nor process env sets it; env=%v", EnvCulvertProxyImage, capE.Env)
-	}
-}
-
-// Overlay-only is the real safety property: even when the var IS set in
-// the agent's OWN process environment, a call with no overlay (e.g. a
-// restore's `up -d`, status, inspect) must NOT forward it. This is the
-// gap a plain allowlist entry would have left open.
-func TestEnvCulvertProxyImage_AmbientValueNeverLeaks(t *testing.T) {
-	t.Setenv(EnvCulvertProxyImage, "ghcr.io/kidcarmi/culvert@sha256:"+strings.Repeat("e", 64))
-	capE := &capturedExec{}
-	r := proxyEnvRunner(t, capE, []string{EnvCulvertProxyImage})
-	if _, err := r.runWithEnv(context.Background(),
-		[]string{"/usr/bin/docker", "compose", "up", "-d"}, nil); err != nil {
-		t.Fatalf("runWithEnv: %v", err)
-	}
-	if capE.HasEnvName(EnvCulvertProxyImage) {
-		t.Errorf("overlay-only var must NEVER be sourced from the agent's ambient env; child env=%v", capE.Env)
-	}
-}
-
-// Contrast: a NORMAL (non-overlay-only) allowlisted var still falls back
-// to the ambient env — proving overlay-only is what suppresses the leak,
-// not a blanket change to env forwarding.
-func TestEnvOverlayOnly_NormalVarStillFallsBackToAmbient(t *testing.T) {
-	t.Setenv(EnvCulvertBackupPassphrase, "ambient-value")
-	capE := &capturedExec{}
-	// Passphrase is allowlisted but NOT overlay-only.
-	r := proxyEnvRunner(t, capE, []string{EnvCulvertBackupPassphrase})
-	if _, err := r.runWithEnv(context.Background(),
-		[]string{"/usr/bin/docker", "compose", "ps"}, nil); err != nil {
-		t.Fatalf("runWithEnv: %v", err)
-	}
-	if !capE.HasEnv(EnvCulvertBackupPassphrase, "ambient-value") {
-		t.Errorf("a non-overlay-only allowlisted var should still fall back to ambient; env=%v", capE.Env)
-	}
-}
-
-// prodEnvRunner mirrors main's wiring after the D1.6c privilege
-// hardening: BOTH CULVERT_PROXY_IMAGE and CULVERT_BACKUP_PASSPHRASE are
-// allowlisted AND overlay-only.
+// prodEnvRunner mirrors main's wiring after P1.4: CULVERT_BACKUP_PASSPHRASE
+// is the only allowlisted env var, and it is overlay-only.
 func prodEnvRunner(t *testing.T, capE *capturedExec) *Runner {
-	t.Helper()
-	r, err := New(Options{
-		ComposeProjectDir: "/srv/culvert",
-		ComposeFile:       "docker-compose.yml",
-		StageTimeout:      5 * time.Second,
-		EnvAllow:          []string{EnvCulvertBackupPassphrase, EnvCulvertProxyImage},
-		EnvOverlayOnly:    []string{EnvCulvertProxyImage, EnvCulvertBackupPassphrase},
-		DockerBinary:      "/usr/bin/docker",
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	r.execStartFn = func(cmd *exec.Cmd) error {
-		capE.Argv = append([]string(nil), cmd.Args...)
-		capE.Env = append([]string(nil), cmd.Env...)
-		return nil
-	}
-	r.execWaitFn = func(_ *exec.Cmd) error { return nil }
-	return r
+	return captureRunner(t, capE,
+		[]string{EnvCulvertBackupPassphrase},
+		[]string{EnvCulvertBackupPassphrase})
 }
 
-// Overlay-only (production wiring): an ambient CULVERT_BACKUP_PASSPHRASE
-// in the AGENT's own process env must NEVER leak onto a compose call that
-// did not explicitly overlay it (e.g. pull/up/ps/inspect). This is the
+// Overlay-only (production wiring): an ambient CULVERT_BACKUP_PASSPHRASE in
+// the AGENT's own process env must NEVER leak onto a command that did not
+// explicitly overlay it (e.g. pull/tag/up/ps/inspect). This is the
 // runner-side complement to the command-scoped sudoers env_keep.
 func TestEnvCulvertBackupPassphrase_AmbientValueNeverLeaks_WhenOverlayOnly(t *testing.T) {
 	t.Setenv(EnvCulvertBackupPassphrase, "super-secret-ambient")
 	capE := &capturedExec{}
 	r := prodEnvRunner(t, capE)
-	// A pull (the upgrade path) carries the image overlay but NOT the
-	// passphrase — the ambient passphrase must not ride along.
-	ref := "ghcr.io/kidcarmi/culvert@sha256:" + strings.Repeat("a", 64)
+	// A plain compose `up -d` (the apply/rollback restart) carries NO
+	// overlay — the ambient passphrase must not ride along.
 	if _, err := r.runWithEnv(context.Background(),
-		[]string{"/usr/bin/docker", "compose", "pull", "proxy"},
-		map[string]string{EnvCulvertProxyImage: ref}); err != nil {
+		[]string{"/usr/bin/docker", "compose", "up", "-d"}, nil); err != nil {
 		t.Fatalf("runWithEnv: %v", err)
 	}
 	if capE.HasEnvName(EnvCulvertBackupPassphrase) {
 		t.Errorf("overlay-only passphrase must NEVER be sourced from the agent's ambient env; child env=%v", capE.Env)
-	}
-	if !capE.HasEnv(EnvCulvertProxyImage, ref) {
-		t.Errorf("the image overlay must still be forwarded; env=%v", capE.Env)
 	}
 }
 
@@ -197,15 +80,15 @@ func TestEnvCulvertBackupPassphrase_ForwardedViaOverlay_WhenOverlayOnly(t *testi
 	}
 }
 
-// EnvOverlayOnly names must be a subset of EnvAllow — New rejects a
-// stray overlay-only name.
+// EnvOverlayOnly names must be a subset of EnvAllow — New rejects a stray
+// overlay-only name.
 func TestEnvOverlayOnly_MustBeSubsetOfEnvAllow(t *testing.T) {
 	_, err := New(Options{
 		ComposeProjectDir: "/srv/culvert",
 		ComposeFile:       "docker-compose.yml",
 		StageTimeout:      5 * time.Second,
 		EnvAllow:          []string{EnvCulvertBackupPassphrase},
-		EnvOverlayOnly:    []string{EnvCulvertProxyImage}, // not in EnvAllow
+		EnvOverlayOnly:    []string{"CULVERT_UNLISTED_VAR"}, // not in EnvAllow
 		DockerBinary:      "/usr/bin/docker",
 	})
 	if err == nil {
@@ -213,15 +96,33 @@ func TestEnvOverlayOnly_MustBeSubsetOfEnvAllow(t *testing.T) {
 	}
 }
 
-// A read-only inspect path must not carry the proxy-image override even
-// when the var is allowlisted — only the future pull/up overlay should.
-func TestEnvCulvertProxyImage_ReadOnlyPathsDoNotForward(t *testing.T) {
+// Contrast: a NORMAL (non-overlay-only) allowlisted var still falls back to
+// the ambient env — proving overlay-only is what suppresses the leak, not a
+// blanket change to env forwarding.
+func TestEnvOverlayOnly_NormalVarStillFallsBackToAmbient(t *testing.T) {
+	t.Setenv(EnvCulvertBackupPassphrase, "ambient-value")
 	capE := &capturedExec{}
-	r := proxyEnvRunner(t, capE, []string{EnvCulvertProxyImage, EnvCulvertBackupPassphrase})
+	// Passphrase allowlisted but NOT overlay-only.
+	r := captureRunner(t, capE, []string{EnvCulvertBackupPassphrase}, nil)
+	if _, err := r.runWithEnv(context.Background(),
+		[]string{"/usr/bin/docker", "compose", "ps"}, nil); err != nil {
+		t.Fatalf("runWithEnv: %v", err)
+	}
+	if !capE.HasEnv(EnvCulvertBackupPassphrase, "ambient-value") {
+		t.Errorf("a non-overlay-only allowlisted var should still fall back to ambient; env=%v", capE.Env)
+	}
+}
+
+// Read-only inspect paths suppress the passphrase (no use for it) even
+// though the var is allowlisted.
+func TestEnvCulvertBackupPassphrase_ReadOnlyInspectSuppressed(t *testing.T) {
+	t.Setenv(EnvCulvertBackupPassphrase, "ambient")
+	capE := &capturedExec{}
+	r := prodEnvRunner(t, capE)
 	if _, err := r.ComposeImageInspect(context.Background(), "ghcr.io/kidcarmi/culvert:v1"); err != nil {
 		t.Fatalf("ComposeImageInspect: %v", err)
 	}
-	if capE.HasEnvName(EnvCulvertProxyImage) {
-		t.Errorf("read-only image inspect must not forward %s; env=%v", EnvCulvertProxyImage, capE.Env)
+	if capE.HasEnvName(EnvCulvertBackupPassphrase) {
+		t.Errorf("read-only image inspect must suppress %s; env=%v", EnvCulvertBackupPassphrase, capE.Env)
 	}
 }
