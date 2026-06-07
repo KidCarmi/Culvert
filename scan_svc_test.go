@@ -94,7 +94,7 @@ func TestScanService_ScanDPIBlock(t *testing.T) {
 	// Set up a DPI pattern that matches.
 	oldRaw := dpiScanner.List()
 	defer func() { dpiScanner.Set(oldRaw) }() //nolint:errcheck
-	dpiScanner.Set([]string{"EVIL_PATTERN"})   //nolint:errcheck
+	dpiScanner.Set([]string{"EVIL_PATTERN"})  //nolint:errcheck
 
 	svc := NewScanService(":0")
 	if err := svc.Listen(); err != nil {
@@ -185,7 +185,7 @@ func TestScanService_Status(t *testing.T) {
 func TestRemoteScanner_ScanBody_Clean(t *testing.T) {
 	// Start a mock scan service.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body) //nolint:errcheck
+		io.ReadAll(r.Body)                                   //nolint:errcheck
 		json.NewEncoder(w).Encode(ScanResponse{Clean: true}) //nolint:errcheck
 	})
 	ts := httptest.NewServer(handler)
@@ -202,7 +202,7 @@ func TestRemoteScanner_ScanBody_Clean(t *testing.T) {
 
 func TestRemoteScanner_ScanBody_Blocked(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body) //nolint:errcheck
+		io.ReadAll(r.Body)                      //nolint:errcheck
 		json.NewEncoder(w).Encode(ScanResponse{ //nolint:errcheck
 			Clean:   false,
 			Blocked: true,
@@ -281,8 +281,8 @@ func TestRemoteScanner_Health_Unreachable(t *testing.T) {
 func TestRemoteScanner_Status(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
-			"enabled":     true,
-			"yara_rules":  5,
+			"enabled":    true,
+			"yara_rules": 5,
 		})
 	})
 	ts := httptest.NewServer(handler)
@@ -304,7 +304,7 @@ func TestRemoteScanner_ContentTypeHeader(t *testing.T) {
 	var gotCT string
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotCT = r.Header.Get("X-Content-Type")
-		io.ReadAll(r.Body) //nolint:errcheck
+		io.ReadAll(r.Body)                                   //nolint:errcheck
 		json.NewEncoder(w).Encode(ScanResponse{Clean: true}) //nolint:errcheck
 	})
 	ts := httptest.NewServer(handler)

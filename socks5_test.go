@@ -92,7 +92,7 @@ func TestSOCKS5_Connect_SSRF_Blocks_Loopback(t *testing.T) {
 	// CONNECT to 127.0.0.1 — should be blocked by SSRF guard.
 	tHost, tPort := targetHostPort(t, target.URL)
 	portBuf := make([]byte, 2)
-	binary.BigEndian.PutUint16(portBuf, uint16(tPort)) // #nosec G115 -- test port always < 65535
+	binary.BigEndian.PutUint16(portBuf, uint16(tPort))      // #nosec G115 -- test port always < 65535
 	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(tHost))} // #nosec G115 -- test host always short
 	req = append(req, []byte(tHost)...)
 	req = append(req, portBuf...)
@@ -100,8 +100,8 @@ func TestSOCKS5_Connect_SSRF_Blocks_Loopback(t *testing.T) {
 
 	reply := make([]byte, 10)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	io.ReadFull(conn, reply)                               //nolint:errcheck
-	if reply[1] != 0x02 { // 0x02 = connection not allowed (SSRF block)
+	io.ReadFull(conn, reply)                              //nolint:errcheck
+	if reply[1] != 0x02 {                                 // 0x02 = connection not allowed (SSRF block)
 		t.Errorf("expected SOCKS5 reply 0x02 (SSRF blocked), got 0x%02x", reply[1])
 	}
 }
@@ -153,7 +153,7 @@ func TestSOCKS5_UnsupportedCommand(t *testing.T) {
 
 	reply := make([]byte, 10)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	io.ReadFull(conn, reply)                               //nolint:errcheck
+	io.ReadFull(conn, reply)                              //nolint:errcheck
 	if reply[1] != 0x07 {
 		t.Errorf("expected SOCKS5 reply 0x07 (command not supported), got 0x%02x", reply[1])
 	}
@@ -186,8 +186,8 @@ func TestSOCKS5_Blocked_Host(t *testing.T) {
 
 	reply := make([]byte, 10)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	io.ReadFull(conn, reply)                               //nolint:errcheck
-	if reply[1] != 0x02 { // 0x02 = connection not allowed
+	io.ReadFull(conn, reply)                              //nolint:errcheck
+	if reply[1] != 0x02 {                                 // 0x02 = connection not allowed
 		t.Errorf("expected SOCKS5 reply 0x02 (blocked), got 0x%02x", reply[1])
 	}
 }
@@ -262,7 +262,7 @@ func TestSOCKS5_IPv6_ATYP04(t *testing.T) {
 
 	reply := make([]byte, 10)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	io.ReadFull(conn, reply)                               //nolint:errcheck
+	io.ReadFull(conn, reply)                              //nolint:errcheck
 	// 0x02 = connection not allowed (SSRF blocks loopback IPv6)
 	if reply[1] != 0x02 {
 		t.Errorf("expected SOCKS5 reply 0x02 (SSRF blocked IPv6 loopback), got 0x%02x", reply[1])
@@ -294,7 +294,7 @@ func TestSOCKS5_UnsupportedAddressType(t *testing.T) {
 
 			reply := make([]byte, 10)
 			conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-			io.ReadFull(conn, reply)                               //nolint:errcheck
+			io.ReadFull(conn, reply)                              //nolint:errcheck
 			if reply[1] != 0x08 {
 				t.Errorf("expected SOCKS5 reply 0x08 (address type not supported), got 0x%02x", reply[1])
 			}
@@ -354,7 +354,7 @@ func TestSOCKS5_BindCommand_Rejected(t *testing.T) {
 
 	reply := make([]byte, 10)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	io.ReadFull(conn, reply)                               //nolint:errcheck
+	io.ReadFull(conn, reply)                              //nolint:errcheck
 	if reply[1] != 0x07 {
 		t.Errorf("expected SOCKS5 reply 0x07 (command not supported), got 0x%02x", reply[1])
 	}

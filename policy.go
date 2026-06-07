@@ -86,6 +86,7 @@ func (cs *CategoryStore) rebuildIndex() {
 }
 
 // defaultCategoryEntries returns the built-in category seed list.
+//
 //go:embed default_categories.json
 var defaultCategoriesJSON []byte
 

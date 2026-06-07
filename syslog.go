@@ -31,8 +31,8 @@ type syslogWriter struct {
 	conn          net.Conn
 	host          string
 	tag           string
-	format        string // "rfc3164" (default) or "rfc5424"
-	pid           string // cached PID string for RFC 5424 PROCID
+	format        string    // "rfc3164" (default) or "rfc5424"
+	pid           string    // cached PID string for RFC 5424 PROCID
 	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
 }
 

@@ -112,10 +112,10 @@ func snapshotClusterUpdateState(t *testing.T) {
 // guard for the CL-3 fix. With a context cancelled BEFORE the
 // orchestrator runs, runClusterUpdate must:
 //
-//   1. Return within a tight bounded time (the boundary-1 check fires
-//      before any node work happens).
-//   2. Persist Phase="halted" and Active=false to disk via the defer.
-//   3. Not attempt any updater-sidecar / gRPC / health-check work.
+//  1. Return within a tight bounded time (the boundary-1 check fires
+//     before any node work happens).
+//  2. Persist Phase="halted" and Active=false to disk via the defer.
+//  3. Not attempt any updater-sidecar / gRPC / health-check work.
 //
 // Without the CL-3 ctx parameter the orchestrator would have ignored
 // the cancelled context, called updateCPDirect, and tried to reach the

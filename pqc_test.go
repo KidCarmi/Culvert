@@ -61,9 +61,9 @@ func TestPQC_MLKEM768_KeyExchange(t *testing.T) {
 
 	// Server: ONLY accept ML-KEM-768. No X25519/P-256 fallback.
 	serverCfg := &tls.Config{
-		Certificates:   []tls.Certificate{cert},
+		Certificates:     []tls.Certificate{cert},
 		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-		MinVersion:     tls.VersionTLS13,
+		MinVersion:       tls.VersionTLS13,
 	}
 
 	// Client: ONLY offer ML-KEM-768. No classical fallback.
@@ -130,9 +130,9 @@ func TestPQC_ClassicalFallback_Rejected(t *testing.T) {
 
 	// Server: PQC only.
 	serverCfg := &tls.Config{
-		Certificates:   []tls.Certificate{cert},
+		Certificates:     []tls.Certificate{cert},
 		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-		MinVersion:     tls.VersionTLS13,
+		MinVersion:       tls.VersionTLS13,
 	}
 
 	// Client: classical only — NO ML-KEM.

@@ -118,12 +118,12 @@ func LockoutMsg(seconds int) string {
 // ---------------------------------------------------------------------------
 
 const (
-	apiRateBurst  = 60               // max API mutations per window
-	apiRateWindow = 1 * time.Minute  // sliding window width
+	apiRateBurst  = 60              // max API mutations per window
+	apiRateWindow = 1 * time.Minute // sliding window width
 )
 
 type apiRateEntry struct {
-	count     int
+	count       int
 	windowStart time.Time
 }
 

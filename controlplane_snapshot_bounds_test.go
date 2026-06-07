@@ -154,4 +154,3 @@ func resetSnapshotBoundsTestGlobals(t *testing.T) {
 		atomic.StoreInt32(&defaultPolicyActionAllow, origAction)
 	})
 }
-

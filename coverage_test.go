@@ -153,8 +153,8 @@ func TestBodyNeedsBuffering_Disabled(t *testing.T) {
 		globalRemoteScanner = origRemote
 		globalSecScanner = origSec
 	})
-	dpiScanner = &ContentScanner{}                        // no patterns → Enabled() == false
-	globalRemoteScanner = &RemoteScanner{}                // zero value → Enabled() == false
+	dpiScanner = &ContentScanner{}         // no patterns → Enabled() == false
+	globalRemoteScanner = &RemoteScanner{} // zero value → Enabled() == false
 	globalSecScanner = &SecurityScanner{}
 
 	if bodyNeedsBuffering("text/html") {
@@ -358,11 +358,11 @@ func TestHandleMetrics_ScanCacheHitsMisses(t *testing.T) {
 
 	cache := newHashCache(10, time.Hour)
 	cache.Set("present", ScanCacheResult{Clean: true, Source: "clean"})
-	cache.Get("present")               // hit 1
-	cache.Get("present")               // hit 2
-	cache.Get("absent-1")              // miss 1
-	cache.Get("absent-2")              // miss 2
-	cache.Get("absent-3")              // miss 3
+	cache.Get("present")  // hit 1
+	cache.Get("present")  // hit 2
+	cache.Get("absent-1") // miss 1
+	cache.Get("absent-2") // miss 2
+	cache.Get("absent-3") // miss 3
 	globalSecScanner = &SecurityScanner{cache: cache}
 
 	w := httptest.NewRecorder()

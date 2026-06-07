@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-
 func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -261,7 +260,7 @@ func apiBlocklistFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		blFeedSyncer.SetFeed(body.URL, interval)
 		auditEvent(r, "blocklist.feed.set", body.URL, "")
-  adminSettingsSave()
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "url": body.URL, "interval": interval.String()})
 
 	default:
@@ -747,7 +746,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		logID := strings.ReplaceAll(fmt.Sprintf("%d", added.ID), "\n", "_")
 		logger.Printf("UI: rewrite rule added id=%s host=%q", logID, sanitizeLog(added.Host))
 		auditEvent(r, "rewrite.add", fmt.Sprintf("id=%d host=%s", added.ID, added.Host), "")
-  adminSettingsSave()
+		adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "rewrite.add")
 		jsonOK(w, added)
 
@@ -768,7 +767,7 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 		logID := strings.ReplaceAll(fmt.Sprintf("%d", id), "\n", "_")
 		logger.Printf("UI: rewrite rule removed id=%s", logID)
 		auditEvent(r, "rewrite.remove", fmt.Sprintf("id=%d", id), "")
-  adminSettingsSave()
+		adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "rewrite.remove")
 		w.WriteHeader(http.StatusNoContent)
 

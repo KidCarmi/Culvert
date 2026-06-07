@@ -849,9 +849,10 @@ func isSafeRedirectURL(raw string) bool {
 
 // isSafeCaptiveRedirect validates a captive-portal redirect target produced
 // by resolveCaptivePortalURL. Two shapes are accepted:
-//   1. A same-origin path beginning with "/" (but not "//", which would be a
-//      protocol-relative URL pointing at an attacker host).
-//   2. An absolute http(s) URL — admin-configured via the IdP registry.
+//  1. A same-origin path beginning with "/" (but not "//", which would be a
+//     protocol-relative URL pointing at an attacker host).
+//  2. An absolute http(s) URL — admin-configured via the IdP registry.
+//
 // Anything else is rejected. This duplicates a small amount of logic so the
 // shape check is visible to static analysis at the http.Redirect call site.
 func isSafeCaptiveRedirect(raw string) bool {
@@ -1097,11 +1098,12 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 // tlsSkipVerify disables upstream certificate validation for specific policy
 // rules (e.g. internal sites with self-signed certs); use with caution.
 //
-//nolint:gocognit,gocyclo,cyclop,funlen // handleTunnelInspect is the SSL-inspection orchestrator —
 // pre-existing complexity predating the CDR integration (was gocognit 128 before CDR;
 // dropped to 112 after Phase 2b extracted runCDRStage out of here).  Further splitting
 // would change the keep-alive loop semantics and is out of scope for CDR work —
 // tracked as a day-2 refactor item in roadmap/roadmap-day2.md.
+//
+//nolint:gocognit,gocyclo,cyclop,funlen // handleTunnelInspect is the SSL-inspection orchestrator —
 func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
 	targetHost := r.Host
 	if _, _, err := net.SplitHostPort(targetHost); err != nil {

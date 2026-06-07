@@ -155,7 +155,7 @@ func TestColdStart_CABundle_EncryptedTruncated(t *testing.T) {
 	if len(full) < 32 {
 		t.Fatalf("encrypted bundle unexpectedly short: %d bytes", len(full))
 	}
-	truncated := full[:16] // keeps magic header + a sliver
+	truncated := full[:16]                                       // keeps magic header + a sliver
 	if err := os.WriteFile(path, truncated, 0o600); err != nil { // #nosec G703 -- test fixture path from t.TempDir()
 		t.Fatalf("write truncated: %v", err)
 	}

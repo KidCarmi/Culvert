@@ -18,9 +18,10 @@ import (
 	"testing"
 )
 
-//nolint:funlen,dupl // See companion comment in coldstart_bandwidth_test.go.
 // Table-driven case list is intentionally long; structural symmetry with
 // bandwidth tests is a regression-guard property, not duplication to fix.
+//
+//nolint:funlen,dupl // See companion comment in coldstart_bandwidth_test.go.
 func TestColdStart_NodeGroups_Cases(t *testing.T) {
 	cases := []struct {
 		name       string

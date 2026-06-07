@@ -175,17 +175,17 @@ func TestBlocklist_AddManualBulk_EmptyIsNoOp(t *testing.T) {
 
 // TestBlocklist_AddManualBulk_DuplicateNoCorruption pins the within-batch
 // dedupe contract on three axes simultaneously:
-//   1. Return count is 1 — "added" reflects unique normalized entries
-//      ACTUALLY stored by this call (b.manual flipped false→true), not
-//      raw non-empty input count. Caller surfaces this as the API
-//      response's "added" field and the audit "N host(s)" detail, so
-//      inflating it on within-batch duplicates would mislead operators.
-//   2. Disk has exactly one line — map keys dedupe; saveManual + Save
-//      write each key once regardless of how many times it appeared in
-//      input.
-//   3. The entry survives reload via IsBlocked — the line that DID land
-//      on disk is the right one, in the right map, and is honored after
-//      a fresh Blocklist.Load.
+//  1. Return count is 1 — "added" reflects unique normalized entries
+//     ACTUALLY stored by this call (b.manual flipped false→true), not
+//     raw non-empty input count. Caller surfaces this as the API
+//     response's "added" field and the audit "N host(s)" detail, so
+//     inflating it on within-batch duplicates would mislead operators.
+//  2. Disk has exactly one line — map keys dedupe; saveManual + Save
+//     write each key once regardless of how many times it appeared in
+//     input.
+//  3. The entry survives reload via IsBlocked — the line that DID land
+//     on disk is the right one, in the right map, and is honored after
+//     a fresh Blocklist.Load.
 func TestBlocklist_AddManualBulk_DuplicateNoCorruption(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocklist.txt")

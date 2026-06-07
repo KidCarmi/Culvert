@@ -46,7 +46,7 @@ import (
 // ClusterState holds all enrollment-related state persisted to cluster.json.
 type ClusterState struct {
 	Nodes      map[string]*EnrolledNode `json:"nodes"`
-	Tokens     map[string]*EnrollToken  `json:"tokens"`  // key = SHA-256(token)
+	Tokens     map[string]*EnrollToken  `json:"tokens"` // key = SHA-256(token)
 	Revoked    []RevokedCert            `json:"revoked"`
 	Version    int64                    `json:"version"` // monotonic config version
 	CARotation *CARotationState         `json:"ca_rotation,omitempty"`
@@ -56,12 +56,12 @@ type ClusterState struct {
 // Created when a new CA is imported during dual-CA overlap, cleared when
 // all nodes have renewed or the overlap period ends.
 type CARotationState struct {
-	StartedAt       time.Time         `json:"started_at"`
-	NewFingerprint  string            `json:"new_fingerprint"`  // SHA-256 of new CA cert
-	OldFingerprint  string            `json:"old_fingerprint"`  // SHA-256 of old (secondary) CA cert
-	OldExpires      time.Time         `json:"old_expires"`      // when secondary CA expires
-	RenewedNodes    map[string]string `json:"renewed_nodes"`    // nodeID → timestamp of renewal
-	TotalNodes      int               `json:"total_nodes"`      // snapshot of enrolled (non-revoked) count at start
+	StartedAt      time.Time         `json:"started_at"`
+	NewFingerprint string            `json:"new_fingerprint"` // SHA-256 of new CA cert
+	OldFingerprint string            `json:"old_fingerprint"` // SHA-256 of old (secondary) CA cert
+	OldExpires     time.Time         `json:"old_expires"`     // when secondary CA expires
+	RenewedNodes   map[string]string `json:"renewed_nodes"`   // nodeID → timestamp of renewal
+	TotalNodes     int               `json:"total_nodes"`     // snapshot of enrolled (non-revoked) count at start
 }
 
 // EnrolledNode represents a registered Data Plane node.
@@ -74,7 +74,7 @@ type EnrolledNode struct {
 	LastSeen   time.Time         `json:"last_seen"`
 	Status     string            `json:"status"` // "connected", "disconnected", "revoked", "draining"
 	IPAddress  string            `json:"ip_address"`
-	Version    string            `json:"version"` // culvert version on node
+	Version    string            `json:"version"`          // culvert version on node
 	Labels     map[string]string `json:"labels,omitempty"` // admin-assigned labels (e.g. "region":"us-east", "tier":"dmz")
 }
 
@@ -292,7 +292,6 @@ func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP stri
 	cs.mu.Unlock()
 	return info, nil
 }
-
 
 // ListTokens returns all tokens (active and consumed).
 func (cs *ClusterStore) ListTokens() []EnrollToken {
@@ -1277,7 +1276,7 @@ func (ca *clusterCA) Info() map[string]any {
 // EnrollRequest is sent by a DP node during enrollment.
 type EnrollRequest struct {
 	Token  string `json:"token"`
-	CSR    string `json:"csr"`     // PEM-encoded CSR
+	CSR    string `json:"csr"` // PEM-encoded CSR
 	NodeID string `json:"node_id"`
 }
 
@@ -1288,4 +1287,3 @@ type EnrollResponse struct {
 	NodeID  string `json:"node_id"`
 	CPAddr  string `json:"cp_addr"` // control plane gRPC address for reconnect
 }
-

@@ -48,7 +48,7 @@ var globalHA = &HAState{}
 // HAStatus returns a snapshot of the current HA state for API/UI consumption.
 type HAStatus struct {
 	Enabled  bool   `json:"enabled"`
-	Role     string `json:"role"`               // "leader", "standby", or ""
+	Role     string `json:"role"`                // "leader", "standby", or ""
 	Since    string `json:"since,omitempty"`     // RFC3339
 	PeerAddr string `json:"peer_addr,omitempty"` // other CP address
 }
@@ -466,10 +466,10 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 
 	deployCmd := haDeployCommand()
 	jsonOK(w, map[string]any{
-		"ok":         true,
-		"role":       "leader",
+		"ok":          true,
+		"role":        "leader",
 		"leader_addr": req.LeaderAddr,
-		"deploy_cmd": deployCmd,
+		"deploy_cmd":  deployCmd,
 	})
 
 	auditAdd(AuditEntry{

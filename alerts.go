@@ -43,9 +43,9 @@ var webhookSem = make(chan struct{}, 10)
 // alertDedup prevents duplicate webhook deliveries for the same event+detail
 // within a short window (Q17). Key = "event:detail", value = last fire time.
 var (
-	alertDedupMu   sync.Mutex
-	alertDedupMap  = map[string]time.Time{}
-	alertDedupTTL  = 30 * time.Second
+	alertDedupMu  sync.Mutex
+	alertDedupMap = map[string]time.Time{}
+	alertDedupTTL = 30 * time.Second
 )
 
 // validateWebhookURL checks that a webhook URL is well-formed (http/https with
@@ -76,7 +76,7 @@ type AlertWebhook struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	URL     string   `json:"url"`
-	Events  []string `json:"events"`  // e.g. ["threat_detected","policy_block"]
+	Events  []string `json:"events"` // e.g. ["threat_detected","policy_block"]
 	Enabled bool     `json:"enabled"`
 	Secret  string   `json:"secret,omitempty"` // HMAC-SHA256 signing secret (never returned in list)
 }
@@ -85,7 +85,7 @@ type AlertWebhook struct {
 type AlertPayload struct {
 	Event     string `json:"event"`
 	Timestamp string `json:"timestamp"`
-	Actor     string `json:"actor"`  // client IP or username
+	Actor     string `json:"actor"` // client IP or username
 	Host      string `json:"host"`
 	Detail    string `json:"detail"` // virus name / rule name / pattern
 	Source    string `json:"source"` // "clamav","yara","threatfeed","policy","auth"

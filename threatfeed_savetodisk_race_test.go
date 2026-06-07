@@ -121,9 +121,9 @@ func TestThreatFeed_SaveToDisk_ConcurrentMutators_Race(t *testing.T) {
 	tf.SetDomainAllowlist([]string{"seed-allow-1.example", "seed-allow-2.example"})
 
 	const (
-		saveGoroutines     = 4
-		mutatorGoroutines  = 4
-		savesPerGoroutine  = 50
+		saveGoroutines       = 4
+		mutatorGoroutines    = 4
+		savesPerGoroutine    = 50
 		mutatorsPerGoroutine = 50
 	)
 

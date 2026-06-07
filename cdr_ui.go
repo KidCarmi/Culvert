@@ -824,13 +824,13 @@ func apiCDRTest(w http.ResponseWriter, r *http.Request) {
 		nil, nil)
 
 	jsonOK(w, map[string]any{
-		"status":         res.Status.String(),
-		"originalType":   res.OriginalType,
-		"originalSize":   res.OriginalSize,
-		"sanitizedSize":  res.SanitizedSize,
-		"durationMs":     res.DurationMs,
-		"threats":        res.Threats,
-		"errorMessage":   res.ErrorMessage,
+		"status":          res.Status.String(),
+		"originalType":    res.OriginalType,
+		"originalSize":    res.OriginalSize,
+		"sanitizedSize":   res.SanitizedSize,
+		"durationMs":      res.DurationMs,
+		"threats":         res.Threats,
+		"errorMessage":    res.ErrorMessage,
 		"sanitizedSha256": res.SanitizedSHA256,
 	})
 }

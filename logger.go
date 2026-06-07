@@ -276,5 +276,3 @@ func setupLogger(logPath string, maxMB int, format string) (*log.Logger, io.Clos
 	l := log.New(io.MultiWriter(writers...), "[Culvert] ", log.LstdFlags)
 	return l, closer, nil
 }
-
-

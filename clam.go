@@ -16,18 +16,18 @@ import (
 //
 // Protocol: CLAMD INSTREAM command
 //
-//	1. Send "zINSTREAM\0" (null-terminated command prefix)
-//	2. Stream data as length-prefixed chunks (4-byte big-endian uint32 + bytes)
-//	3. Terminate with a zero-length chunk ({0,0,0,0})
-//	4. Read null-terminated response:
-//	     "stream: OK\0"                    → clean
-//	     "stream: <VirusName> FOUND\0"     → malicious
-//	     "stream: ... ERROR\0"             → scan error
+//  1. Send "zINSTREAM\0" (null-terminated command prefix)
+//  2. Stream data as length-prefixed chunks (4-byte big-endian uint32 + bytes)
+//  3. Terminate with a zero-length chunk ({0,0,0,0})
+//  4. Read null-terminated response:
+//     "stream: OK\0"                    → clean
+//     "stream: <VirusName> FOUND\0"     → malicious
+//     "stream: ... ERROR\0"             → scan error
 //
 // Reference: https://linux.die.net/man/8/clamd
 type ClamAV struct {
-	network string        // "unix" or "tcp"
-	addr    string        // socket path or host:port
+	network string // "unix" or "tcp"
+	addr    string // socket path or host:port
 	timeout time.Duration
 }
 

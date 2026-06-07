@@ -15,16 +15,16 @@ import (
 )
 
 const (
-	blFeedHTTPTimeout    = 30 * time.Second
+	blFeedHTTPTimeout     = 30 * time.Second
 	blFeedDefaultInterval = 24 * time.Hour
 )
 
 // BlocklistSyncer downloads and merges a remote domain feed into a Blocklist.
 type BlocklistSyncer struct {
-	bl           *Blocklist
-	feedURL      atomic.Value // string
-	interval     atomic.Value // time.Duration
-	lastSync     atomic.Value // time.Time
+	bl            *Blocklist
+	feedURL       atomic.Value // string
+	interval      atomic.Value // time.Duration
+	lastSync      atomic.Value // time.Time
 	importedCount atomic.Int64
 }
 
@@ -111,9 +111,9 @@ func (bs *BlocklistSyncer) SetFeed(url string, interval time.Duration) {
 
 // Stats returns current feed configuration and sync status.
 func (bs *BlocklistSyncer) Stats() (url string, lastSync time.Time, count int64, interval time.Duration) {
-	url      = bs.feedURL.Load().(string)
+	url = bs.feedURL.Load().(string)
 	lastSync = bs.lastSync.Load().(time.Time)
-	count    = bs.importedCount.Load()
+	count = bs.importedCount.Load()
 	interval = bs.interval.Load().(time.Duration)
 	return
 }

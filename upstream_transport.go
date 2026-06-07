@@ -71,20 +71,20 @@ func getUpstreamTransport() *http.Transport {
 
 // swapUpstreamTransport is the only approved mutation API.
 //
-// 1. Takes the writer mutex (serializing writers).
-// 2. Loads the current transport.
-// 3. Invokes update(old) for a NEW *http.Transport. The closure
-//    may also update upstreamOpTLSCfg under the held lock.
-// 4. If newT is nil or equal to old, returns without swapping.
-// 5. If newT.TLSClientConfig is nil and upstreamOpTLSCfg is non-nil,
-//    attaches a Clone of upstreamOpTLSCfg to newT.TLSClientConfig.
-//    This is the race-safety contract: stdlib's lazy h2 setup
-//    mutates the CLONE, not the operator's template.
-// 6. Stores the new transport.
-// 7. Synchronously calls old.CloseIdleConnections() to release the
-//    previous transport's idle keepalive connections. In-flight
-//    requests holding the old transport via their per-request
-//    http.Client are NOT interrupted.
+//  1. Takes the writer mutex (serializing writers).
+//  2. Loads the current transport.
+//  3. Invokes update(old) for a NEW *http.Transport. The closure
+//     may also update upstreamOpTLSCfg under the held lock.
+//  4. If newT is nil or equal to old, returns without swapping.
+//  5. If newT.TLSClientConfig is nil and upstreamOpTLSCfg is non-nil,
+//     attaches a Clone of upstreamOpTLSCfg to newT.TLSClientConfig.
+//     This is the race-safety contract: stdlib's lazy h2 setup
+//     mutates the CLONE, not the operator's template.
+//  6. Stores the new transport.
+//  7. Synchronously calls old.CloseIdleConnections() to release the
+//     previous transport's idle keepalive connections. In-flight
+//     requests holding the old transport via their per-request
+//     http.Client are NOT interrupted.
 func swapUpstreamTransport(update func(old *http.Transport) *http.Transport) {
 	upstreamTransportWriteMu.Lock()
 	defer upstreamTransportWriteMu.Unlock()

@@ -80,12 +80,12 @@ func TestCPBaseURL_PlainHTTP(t *testing.T) {
 
 func TestEnrollmentCPAddr(t *testing.T) {
 	tests := []struct {
-		name      string
-		host      string
-		grpcAddr  string
-		fwdHost   string
-		trustFwd  bool
-		want      string
+		name     string
+		host     string
+		grpcAddr string
+		fwdHost  string
+		trustFwd bool
+		want     string
 	}{
 		{"IPv4 host", "10.0.0.5:9090", ":50051", "", false, "10.0.0.5:50051"},
 		{"hostname", "cp.example.com:9090", ":50051", "", false, "cp.example.com:50051"},

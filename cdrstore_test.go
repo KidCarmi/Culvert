@@ -110,13 +110,13 @@ func TestCDRInstanceRegistry_GetAndFirstEnabled(t *testing.T) {
 
 func TestNormaliseFingerprint(t *testing.T) {
 	cases := map[string]string{
-		"":                              "",
-		"sha256:ABCDEF":                 "abcdef",
-		"SHA256:AB:CD:EF":               "abcdef",
-		"ab:cd:ef":                      "abcdef",
-		"   SHA256:aB:cD:eF  ":          "abcdef",
-		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": // 64-char pass-through
-			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"":                     "",
+		"sha256:ABCDEF":        "abcdef",
+		"SHA256:AB:CD:EF":      "abcdef",
+		"ab:cd:ef":             "abcdef",
+		"   SHA256:aB:cD:eF  ": "abcdef",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef":// 64-char pass-through
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
 	for in, want := range cases {
 		if got := normaliseFingerprint(in); got != want {

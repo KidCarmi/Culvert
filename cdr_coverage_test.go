@@ -267,5 +267,5 @@ func TestPersistCDREnrollment_WritesBundleAndRegisters(t *testing.T) {
 
 // ─── atomic helpers (aliases for readability) ───────────────────────────────
 
-func atomicLoad(p *int64) int64   { return atomic.LoadInt64(p) }
+func atomicLoad(p *int64) int64     { return atomic.LoadInt64(p) }
 func atomicStore(p *int64, v int64) { atomic.StoreInt64(p, v) }

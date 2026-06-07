@@ -294,13 +294,13 @@ func TestValidateUpdaterURL(t *testing.T) {
 		url     string
 		wantErr bool
 	}{
-		{"http://culvert-updater:7123", false},     // default URL — always accepted
-		{"https://updater.internal:7123", true},    // H4: non-default, not in allowlist → rejected
-		{"http://127.0.0.1:7123", false},           // loopback allowed
-		{"ftp://updater:21", true},                 // bad scheme
-		{"://bad", true},                           // unparseable
-		{"http://169.254.169.254/latest", true},    // metadata endpoint
-		{"http://", true},                          // empty host
+		{"http://culvert-updater:7123", false},  // default URL — always accepted
+		{"https://updater.internal:7123", true}, // H4: non-default, not in allowlist → rejected
+		{"http://127.0.0.1:7123", false},        // loopback allowed
+		{"ftp://updater:21", true},              // bad scheme
+		{"://bad", true},                        // unparseable
+		{"http://169.254.169.254/latest", true}, // metadata endpoint
+		{"http://", true},                       // empty host
 	}
 	for _, tc := range tests {
 		err := validateUpdaterURL(tc.url)

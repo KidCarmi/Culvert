@@ -231,18 +231,18 @@ type otlpScopeSpan struct {
 }
 
 type otlpSpan struct {
-	TraceID            string         `json:"traceId"`
-	SpanID             string         `json:"spanId"`
-	Name               string         `json:"name"`
-	Kind               int            `json:"kind"`                  // 2 = SPAN_KIND_SERVER
-	StartTimeUnixNano  string         `json:"startTimeUnixNano"`
-	EndTimeUnixNano    string         `json:"endTimeUnixNano"`
-	Attributes         []otlpKeyValue `json:"attributes,omitempty"`
-	Status             otlpSpanStatus `json:"status"`
+	TraceID           string         `json:"traceId"`
+	SpanID            string         `json:"spanId"`
+	Name              string         `json:"name"`
+	Kind              int            `json:"kind"` // 2 = SPAN_KIND_SERVER
+	StartTimeUnixNano string         `json:"startTimeUnixNano"`
+	EndTimeUnixNano   string         `json:"endTimeUnixNano"`
+	Attributes        []otlpKeyValue `json:"attributes,omitempty"`
+	Status            otlpSpanStatus `json:"status"`
 }
 
 type otlpSpanStatus struct {
-	Code    int    `json:"code"`              // 0=unset, 1=ok, 2=error
+	Code    int    `json:"code"` // 0=unset, 1=ok, 2=error
 	Message string `json:"message,omitempty"`
 }
 

@@ -24,8 +24,8 @@ func TestIPFilter_ModeOff(t *testing.T) {
 func TestIPFilter_AllowMode(t *testing.T) {
 	f := freshIPF()
 	f.SetMode("allow")
-	f.Add("192.168.1.5")    //nolint:errcheck
-	f.Add("10.0.0.0/24")   //nolint:errcheck
+	f.Add("192.168.1.5") //nolint:errcheck
+	f.Add("10.0.0.0/24") //nolint:errcheck
 
 	allowed := []string{"192.168.1.5", "10.0.0.1", "10.0.0.254"}
 	for _, ip := range allowed {
@@ -45,8 +45,8 @@ func TestIPFilter_AllowMode(t *testing.T) {
 func TestIPFilter_BlockMode(t *testing.T) {
 	f := freshIPF()
 	f.SetMode("block")
-	f.Add("1.2.3.4")         //nolint:errcheck
-	f.Add("10.10.0.0/16")   //nolint:errcheck
+	f.Add("1.2.3.4")      //nolint:errcheck
+	f.Add("10.10.0.0/16") //nolint:errcheck
 
 	blocked := []string{"1.2.3.4", "10.10.1.1", "10.10.255.254"}
 	for _, ip := range blocked {
@@ -82,8 +82,8 @@ func TestIPFilter_Remove(t *testing.T) {
 
 func TestIPFilter_List(t *testing.T) {
 	f := freshIPF()
-	f.Add("5.5.5.5")       //nolint:errcheck
-	f.Add("10.0.0.0/8")   //nolint:errcheck
+	f.Add("5.5.5.5")    //nolint:errcheck
+	f.Add("10.0.0.0/8") //nolint:errcheck
 	list := f.List()
 	if len(list) != 2 {
 		t.Errorf("expected 2 entries, got %d", len(list))
@@ -126,14 +126,26 @@ func TestRateLimiter_DifferentIPs(t *testing.T) {
 	r := freshRL()
 	r.Configure(2, time.Minute)
 
-	if !r.Allow("1.1.1.1") { t.Error("ip1 req1 should be allowed") }
-	if !r.Allow("1.1.1.1") { t.Error("ip1 req2 should be allowed") }
-	if r.Allow("1.1.1.1")  { t.Error("ip1 req3 should be denied") }
+	if !r.Allow("1.1.1.1") {
+		t.Error("ip1 req1 should be allowed")
+	}
+	if !r.Allow("1.1.1.1") {
+		t.Error("ip1 req2 should be allowed")
+	}
+	if r.Allow("1.1.1.1") {
+		t.Error("ip1 req3 should be denied")
+	}
 
 	// Different IP has its own bucket.
-	if !r.Allow("2.2.2.2") { t.Error("ip2 req1 should be allowed") }
-	if !r.Allow("2.2.2.2") { t.Error("ip2 req2 should be allowed") }
-	if r.Allow("2.2.2.2")  { t.Error("ip2 req3 should be denied") }
+	if !r.Allow("2.2.2.2") {
+		t.Error("ip2 req1 should be allowed")
+	}
+	if !r.Allow("2.2.2.2") {
+		t.Error("ip2 req2 should be allowed")
+	}
+	if r.Allow("2.2.2.2") {
+		t.Error("ip2 req3 should be denied")
+	}
 }
 
 func TestRateLimiter_Reconfigure(t *testing.T) {

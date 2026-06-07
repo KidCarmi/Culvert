@@ -460,8 +460,8 @@ func cdrErrorOutcome(reason, profile, mode string, ms int64, cfg CDRConfig) *cdr
 	if cfg.CDRFailOpen() {
 		atomic.AddInt64(&statCDRFailOpen, 1)
 		return &cdrRunResult{
-			Outcome:    cdrPass,
-			Status:     "ERROR",
+			Outcome:     cdrPass,
+			Status:      "ERROR",
 			ProfileName: profile,
 			Mode:        mode,
 			BlockReason: reason, // surfaced for the audit event only

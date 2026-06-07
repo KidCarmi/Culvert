@@ -239,4 +239,3 @@ func (s *countryTrafficStore) Top(n int) []CountryCount {
 	}
 	return out
 }
-

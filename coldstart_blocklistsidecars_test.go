@@ -65,9 +65,10 @@ func equalSlices(a, b []string) bool {
 	return true
 }
 
-//nolint:funlen // Table-driven cases across three sidecars (.mode, .manual,
 // .exceptions) — splitting into per-sidecar tests would lose the visual
 // grouping of all 16 cases under one matrix.
+//
+//nolint:funlen // Table-driven cases across three sidecars (.mode, .manual,
 func TestColdStart_BlocklistSidecars(t *testing.T) {
 	cases := []struct {
 		name       string
