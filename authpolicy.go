@@ -80,12 +80,13 @@ type SubjectPredicate struct {
 // Phase 0 only the "cidr" predicate is accepted, and each of its values must be
 // a valid IP or CIDR.
 //
-// NOTE (Phase 1 Slice 2): this is the SHAPE validator. It is reached only via
-// validateAuthRule (the auth-rule validator, exercised directly by tests).
-// validatePolicyRule does not yet ACCEPT auth rules — it gates ruleType="auth"
-// until the persistence/runtime layers are auth-aware — and access rules reject
-// any non-nil SubjectMatch in validateAccessRule (Stage-2 Evaluate does not
-// consult it, so allowing it there would fail open).
+// NOTE (Phase 1 Slice 3): this is the SHAPE validator, reached via
+// validateAuthRule. Auth (Stage-1) rules with a valid CIDR SubjectMatch are now
+// ACCEPTED by validatePolicyRule and PERSISTED (Load / ReplaceAll keep valid
+// auth rules, drop invalid ones fail-closed) — but they remain INERT at runtime
+// (resolveAuthOutcome still returns Default; the Stage-1 matcher is not wired).
+// Access (Stage-2) rules still reject any non-nil SubjectMatch in
+// validateAccessRule (Evaluate does not consult it, so allowing it would fail open).
 func validateSubjectMatch(sm *SubjectMatch) error {
 	if sm == nil {
 		return nil
@@ -457,6 +458,53 @@ func rejectIdentityPredicates(sm *SubjectMatch) error {
 		}
 	}
 	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Policy — Phase 1 Slice 3: auth-aware PERSISTENCE gate.
+//
+// Slice 3 lets VALID auth/exempt rules be persisted and round-trip through every
+// bulk path (Load, ReplaceAll, import-replace, rollback, cluster sync) WITHOUT
+// activating them at runtime — resolveAuthOutcome still returns Default for every
+// request, and proxy.go / socks5.go are untouched. The store-level fail-closed
+// gate below is the single decision point shared by PolicyStore.Load and
+// PolicyStore.ReplaceAll.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// policyRulePersistable reports whether a rule may enter the live PolicyStore,
+// returning a human-readable reason when it must be dropped. It is the
+// store-level fail-closed gate shared by PolicyStore.Load and
+// PolicyStore.ReplaceAll (the bulk paths that bypass validatePolicyRule):
+//
+//   - Auth (Stage-1) rules are KEPT only when validateAuthRule passes. An invalid
+//     auth rule is dropped fail-closed rather than activated. A valid one is kept
+//     so it survives restart / import-replace / rollback / cluster sync — it is
+//     still inert at runtime (the Stage-1 matcher is not wired; resolveAuthOutcome
+//     returns Default), so keeping it changes no traffic decision.
+//   - Access (Stage-2) rules carrying a non-nil SubjectMatch are DROPPED:
+//     Evaluate does not consult SubjectMatch on access rules, so a scoped rule
+//     would match every client (fail-open). An Auth spec on a non-auth rule is
+//     likewise malformed and dropped fail-closed.
+//
+// The function is pure: it neither mutates the rule nor has runtime side effects.
+func policyRulePersistable(r *PolicyRule) (ok bool, reason string) {
+	if r == nil {
+		return false, "nil rule"
+	}
+	if ruleTypeOf(r) == ruleTypeAuth {
+		if _, err := validateAuthRule(*r); err != nil {
+			return false, fmt.Sprintf("invalid auth rule: %v", err)
+		}
+		return true, ""
+	}
+	// Access rule (RuleType "access" or empty/load-default).
+	if r.SubjectMatch != nil {
+		return false, "subjectMatch is reserved and not yet enforced on access rules"
+	}
+	if r.Auth != nil {
+		return false, "auth spec is only valid on auth rules"
+	}
+	return true, ""
 }
 
 // broadSubjectWarnings flags overly broad source CIDRs (least-privilege nudges).

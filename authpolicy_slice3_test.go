@@ -1,0 +1,224 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// Phase 1 Slice 3 — auth-aware PERSISTENCE tests.
+//
+// VALID auth/exempt rules must round-trip through every bulk path (Load,
+// ReplaceAll, import replace/merge, rollback, cluster snapshot) WITHOUT being
+// activated at runtime. INVALID auth rules and access rules carrying a
+// SubjectMatch must be dropped fail-closed. The companion Slice-2 file asserts
+// the accept-path (validatePolicyRule) behavior; the Phase-0 persistence file
+// asserts the access-rule-with-SubjectMatch drops still hold.
+
+// invalidAuthRule is a ruleType="auth" rule with no Auth spec — validateAuthRule
+// rejects it, so policyRulePersistable must drop it fail-closed on every path.
+func invalidAuthRule(name string) PolicyRule {
+	return PolicyRule{Priority: 7, Name: name, RuleType: ruleTypeAuth}
+}
+
+// findRule returns the rule with the given name, or nil.
+func findRule(rules []PolicyRule, name string) *PolicyRule {
+	for i := range rules {
+		if rules[i].Name == name {
+			return &rules[i]
+		}
+	}
+	return nil
+}
+
+// assertAuthRulePreserved fails unless the canonical valid exempt rule
+// ("legacy-printer", from validExemptRule) survived intact: it is still an auth
+// rule and retains its SubjectMatch + Auth spec.
+func assertAuthRulePreserved(t *testing.T, rules []PolicyRule) {
+	t.Helper()
+	const name = "legacy-printer"
+	got := findRule(rules, name)
+	if got == nil {
+		t.Fatalf("valid auth rule %q was not preserved", name)
+	}
+	if ruleTypeOf(got) != ruleTypeAuth {
+		t.Errorf("rule %q lost its ruleType=auth (got %q)", name, ruleTypeOf(got))
+	}
+	if got.SubjectMatch == nil {
+		t.Errorf("rule %q lost its SubjectMatch", name)
+	}
+	if got.Auth == nil {
+		t.Errorf("rule %q lost its Auth spec", name)
+	}
+}
+
+// ── Load ────────────────────────────────────────────────────────────────────
+
+func TestPolicyStore_Load_PreservesValidAuthRule(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	data, err := json.MarshalIndent([]PolicyRule{
+		validExemptRule(),
+		{Priority: 2, Name: "plain-allow", Action: ActionAllow},
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+	ps := &PolicyStore{}
+	if err := ps.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := ps.List()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 rules to survive load, got %d: %+v", len(got), got)
+	}
+	assertAuthRulePreserved(t, got)
+}
+
+func TestPolicyStore_Load_DropsInvalidAuthRuleFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	data, err := json.MarshalIndent([]PolicyRule{
+		invalidAuthRule("bad-auth-should-drop"),
+		{Priority: 2, Name: "plain-allow", Action: ActionAllow},
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+	ps := &PolicyStore{}
+	if err := ps.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := ps.List()
+	if len(got) != 1 {
+		t.Fatalf("expected only the valid rule to survive (invalid auth dropped), got %d: %+v", len(got), got)
+	}
+	if got[0].Name != "plain-allow" {
+		t.Errorf("wrong rule survived load: %q", got[0].Name)
+	}
+	if findRule(got, "bad-auth-should-drop") != nil {
+		t.Error("invalid auth rule was persisted on load (must fail-closed)")
+	}
+}
+
+// ── ReplaceAll ───────────────────────────────────────────────────────────────
+
+func TestPolicyStore_ReplaceAll_PreservesValidAuthRule(t *testing.T) {
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{
+		validExemptRule(),
+		{Priority: 2, Name: "plain-allow", Action: ActionAllow},
+	})
+	got := ps.List()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 rules to survive ReplaceAll, got %d: %+v", len(got), got)
+	}
+	assertAuthRulePreserved(t, got)
+}
+
+func TestPolicyStore_ReplaceAll_DropsInvalidAuthAndSubjectMatchAccess(t *testing.T) {
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{
+		invalidAuthRule("bad-auth-should-drop"),       // invalid auth → drop
+		subjectMatchRule("scoped-access-should-drop"), // access w/ SubjectMatch → drop
+		{Priority: 3, Name: "plain-allow", Action: ActionAllow},
+	})
+	got := ps.List()
+	if len(got) != 1 {
+		t.Fatalf("expected only the plain rule to survive, got %d: %+v", len(got), got)
+	}
+	if got[0].Name != "plain-allow" {
+		t.Errorf("wrong rule survived: %q", got[0].Name)
+	}
+	if findRule(got, "bad-auth-should-drop") != nil {
+		t.Error("invalid auth rule survived ReplaceAll (must fail-closed)")
+	}
+	if findRule(got, "scoped-access-should-drop") != nil {
+		t.Error("access rule with SubjectMatch survived ReplaceAll (fail-open hazard)")
+	}
+}
+
+// ── Config import (replace + merge) ──────────────────────────────────────────
+
+func TestConfigImport_ReplaceMode_PreservesValidAuthRule(t *testing.T) {
+	withFreshPolicyStore(t)
+	body, err := json.Marshal(configBackup{
+		Version: 1,
+		PolicyRules: []PolicyRule{
+			validExemptRule(),
+			{Priority: 2, Name: "import-plain", Action: ActionAllow},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal backup: %v", err)
+	}
+	r := adminRequest("POST", "/api/config/import?mode=replace", string(body))
+	w := httptest.NewRecorder()
+	apiConfigImport(w, r)
+	if w.Code != 200 {
+		t.Fatalf("import returned %d: %s", w.Code, w.Body.String())
+	}
+	assertAuthRulePreserved(t, policyStore.List())
+}
+
+func TestConfigImport_MergeMode_PreservesValidAuthRule(t *testing.T) {
+	withFreshPolicyStore(t)
+	body, err := json.Marshal(configBackup{
+		Version: 1,
+		PolicyRules: []PolicyRule{
+			validExemptRule(),
+			{Priority: 2, Name: "merge-plain", Action: ActionAllow},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal backup: %v", err)
+	}
+	r := adminRequest("POST", "/api/config/import", string(body)) // no mode=replace → merge
+	w := httptest.NewRecorder()
+	apiConfigImport(w, r)
+	if w.Code != 200 {
+		t.Fatalf("import returned %d: %s", w.Code, w.Body.String())
+	}
+	assertAuthRulePreserved(t, policyStore.List())
+}
+
+// ── Config rollback ──────────────────────────────────────────────────────────
+
+func TestApplyConfigBackup_RoundTripsValidAuthRule(t *testing.T) {
+	withFreshPolicyStore(t)
+	applyConfigBackup(&configBackup{
+		Version: 1,
+		PolicyRules: []PolicyRule{
+			validExemptRule(),
+			{Priority: 2, Name: "rollback-plain", Action: ActionAllow},
+		},
+	})
+	assertAuthRulePreserved(t, policyStore.List())
+}
+
+// ── Cluster ConfigSnapshot ───────────────────────────────────────────────────
+
+func TestApplyConfigSnapshot_RoundTripsValidAuthRule(t *testing.T) {
+	withFreshPolicyStore(t)
+	applyConfigSnapshot(ConfigSnapshot{
+		PolicyRules: []PolicyRule{
+			validExemptRule(),
+			{Priority: 2, Name: "cluster-plain", Action: ActionAllow},
+		},
+	})
+	assertAuthRulePreserved(t, policyStore.List())
+	// Inert at runtime: the snapshot path must not activate the rule. Evaluate
+	// skips non-access rules, so a request from the auth rule's source must NOT
+	// be matched by it (no Stage-1 wiring in Slice 3).
+	if d := resolveAuthOutcome(RequestContext{ClientIP: "10.0.5.10", Host: "updates.example.com"}); d.Outcome != OutcomeDefault {
+		t.Errorf("Slice 3 must not activate auth rules: outcome = %q, want Default", d.Outcome)
+	}
+}

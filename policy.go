@@ -393,17 +393,23 @@ func (ps *PolicyStore) Load(path string) error {
 	if err := json.Unmarshal(data, &rules); err != nil {
 		return err
 	}
-	// Drop any rule carrying a non-nil SubjectMatch on load — the same Phase-0
-	// invariant ReplaceAll enforces. Evaluate does not consult SubjectMatch yet,
-	// so a rule loaded from a hand-edited or newer-version policy.json would fail
-	// OPEN (a source-scoped rule matching every client). This closes the startup
-	// load path in addition to the bulk-replace path. In-memory only; the file is
-	// not rewritten here, so the offending line is inert and re-warned each load
-	// until removed.
+	// Auth-aware fail-closed load gate (Phase 1 Slice 3, shared with ReplaceAll via
+	// policyRulePersistable): VALID auth rules are kept (inert at runtime until the
+	// matcher slice); invalid auth rules and access rules carrying a non-nil
+	// SubjectMatch are dropped. Dropping the latter prevents a hand-edited or
+	// newer-version policy.json from failing OPEN (a source-scoped access rule
+	// matching every client, since Evaluate does not consult SubjectMatch). This
+	// closes the startup load path in addition to the bulk-replace path. In-memory
+	// only; the file is not rewritten here, so an offending line is inert and
+	// re-warned each load until removed.
 	kept := rules[:0]
 	for _, r := range rules {
-		if r != nil && r.SubjectMatch != nil {
-			logWarnf("Policy: dropping rule %q on load — subjectMatch is reserved and not yet enforced (Phase 0)", sanitizeLog(r.Name))
+		if ok, reason := policyRulePersistable(r); !ok {
+			name := ""
+			if r != nil {
+				name = r.Name
+			}
+			logWarnf("Policy: dropping rule %q on load — %s", sanitizeLog(name), sanitizeLog(reason))
 			continue
 		}
 		kept = append(kept, r)
@@ -519,22 +525,24 @@ func (ps *PolicyStore) List() []PolicyRule {
 // ReplaceAll atomically replaces all rules (used by cluster config sync,
 // config import in replace mode, and config-version rollback).
 //
-// Phase-0 invariant: a rule carrying a non-nil SubjectMatch is DROPPED here
-// (with a warning), never activated. SubjectMatch is a reserved schema seam that
-// PolicyStore.Evaluate does not yet consult, so persisting one would let a rule
-// meant to be scoped match every request (fail-open). validatePolicyRule blocks
-// it at the per-rule API/import-merge paths; this store-level guard closes the
-// bulk paths that bypass that validator (cluster sync, import-replace, and any
-// other direct ReplaceAll caller). The phase that wires the matcher removes
-// this guard.
+// Auth-aware fail-closed gate (Phase 1 Slice 3, shared with Load via
+// policyRulePersistable): VALID auth (Stage-1) rules are KEPT — they round-trip
+// through cluster sync / import-replace / rollback but stay inert at runtime
+// (Evaluate skips non-access rules; resolveAuthOutcome returns Default). Invalid
+// auth rules are DROPPED fail-closed, as are access rules carrying a non-nil
+// SubjectMatch (Evaluate does not consult it, so persisting one would let a
+// scoped rule match every request — fail-open). validatePolicyRule guards the
+// per-rule API/import-merge paths; this store-level gate closes the bulk paths
+// that bypass that validator (cluster sync, import-replace, and any other direct
+// ReplaceAll caller). The phase that wires the matcher activates these rules.
 func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	ps.mu.Lock()
 	out := make([]*PolicyRule, 0, len(rules))
 	for i := range rules {
 		r := rules[i]
-		// Drop any rule that sets the reserved, not-yet-enforced SubjectMatch.
-		if r.SubjectMatch != nil {
-			logWarnf("Policy: dropping rule %q on bulk replace — subjectMatch is reserved and not yet enforced (Phase 0)", sanitizeLog(r.Name))
+		// Fail-closed: drop invalid auth rules and SubjectMatch-bearing access rules.
+		if ok, reason := policyRulePersistable(&r); !ok {
+			logWarnf("Policy: dropping rule %q on bulk replace — %s", sanitizeLog(r.Name), sanitizeLog(reason))
 			continue
 		}
 		r.HitCount = 0
