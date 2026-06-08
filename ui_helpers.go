@@ -125,8 +125,21 @@ func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriorit
 			return fmt.Errorf("invalid schedule timezone: %s", strings.ReplaceAll(rule.Schedule.Timezone, "\n", ""))
 		}
 	}
-	// Validate the typed subject selector if present. A nil selector (every
-	// existing rule) is valid; an unknown predicate type fails closed.
+	// SubjectMatch (§1.6) is a reserved schema seam in Phase 0: Stage-2
+	// evaluation (matchSource) does NOT yet consult it. Accepting a non-nil
+	// selector here would fail OPEN — a rule meant to be scoped to a CIDR
+	// would match every client because the source predicate is silently
+	// ignored, and there is no action-agnostic "inert" state (skipping the
+	// rule under-denies a Drop/Block rule, which is also fail-open). So reject
+	// any rule that SETS it until the matcher is wired (a later phase). Every
+	// persistence path — admin POST/PUT (ui_policy.go), config import
+	// (ui_config.go), and config-version restore (configversion.go) — funnels
+	// through this function, so this single gate closes them all.
+	if rule.SubjectMatch != nil {
+		return fmt.Errorf("subjectMatch is reserved and not yet enforced; it cannot be set until the matcher lands in a later phase")
+	}
+	// Shape validator retained for the phase that wires the matcher (only a
+	// nil selector reaches it today).
 	if err := validateSubjectMatch(rule.SubjectMatch); err != nil {
 		return err
 	}
