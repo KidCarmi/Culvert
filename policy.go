@@ -500,12 +500,27 @@ func (ps *PolicyStore) List() []PolicyRule {
 	return out
 }
 
-// ReplaceAll atomically replaces all rules (used by cluster config sync).
+// ReplaceAll atomically replaces all rules (used by cluster config sync,
+// config import in replace mode, and config-version rollback).
+//
+// Phase-0 invariant: a rule carrying a non-nil SubjectMatch is DROPPED here
+// (with a warning), never activated. SubjectMatch is a reserved schema seam that
+// PolicyStore.Evaluate does not yet consult, so persisting one would let a rule
+// meant to be scoped match every request (fail-open). validatePolicyRule blocks
+// it at the per-rule API/import-merge paths; this store-level guard closes the
+// bulk paths that bypass that validator (cluster sync, import-replace, and any
+// other direct ReplaceAll caller). The phase that wires the matcher removes
+// this guard.
 func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	ps.mu.Lock()
-	ps.rules = make([]*PolicyRule, len(rules))
+	out := make([]*PolicyRule, 0, len(rules))
 	for i := range rules {
 		r := rules[i]
+		// Drop any rule that sets the reserved, not-yet-enforced SubjectMatch.
+		if r.SubjectMatch != nil {
+			logWarnf("Policy: dropping rule %q on bulk replace — subjectMatch is reserved and not yet enforced (Phase 0)", sanitizeLog(r.Name))
+			continue
+		}
 		r.HitCount = 0
 		// Auto-enable FileFiltering when a profile is selected.
 		if r.FileProfile != "" && r.FileProfile != FileProfileNone {
@@ -517,8 +532,9 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 		if r.ID == "" {
 			r.ID = newRuleID()
 		}
-		ps.rules[i] = &r
+		out = append(out, &r)
 	}
+	ps.rules = out
 	ps.sortLocked()
 	ps.bumpVersion()
 	ps.mu.Unlock()
