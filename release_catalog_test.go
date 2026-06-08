@@ -266,6 +266,17 @@ func TestForwardCompat_UnknownSeverityRetained(t *testing.T) {
 	}
 }
 
+// A MISSING (empty) severity is a missing required field → fail closed. This is
+// distinct from a non-empty UNKNOWN value, which loads as SeverityUnknown
+// (above). An omitted severity must NOT be silently treated as "unknown".
+func TestFailClosed_MissingSeverity(t *testing.T) {
+	raw := `{"schema_version":1,"release_id":"rel_a","version_id":"1.0.0",` +
+		`"created_at":"2026-04-18T00:00:00Z","image":{"repo":"` + repo + `","list_digest":"` + digA + `"}}`
+	src := buildCatalogSource(map[string]string{"recommended": "rel_a"}, 1, "2026-04-18T00:00:00Z",
+		[]relSpec{{ref: "a.json", releaseID: "rel_a", versionID: "1.0.0", raw: raw}})
+	mustReject(t, src, "missing severity")
+}
+
 func TestForwardCompat_AdditiveFieldTolerated(t *testing.T) {
 	raw := `{"schema_version":1,"release_id":"rel_a","version_id":"1.0.0","severity":"normal",` +
 		`"created_at":"2026-04-18T00:00:00Z","image":{"repo":"` + repo + `","list_digest":"` + digA + `"},` +

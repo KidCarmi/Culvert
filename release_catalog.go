@@ -301,6 +301,12 @@ func catalogBuildRelease(e catalogIndexEntry, man catalogManifestFile) (Release,
 	if !catalogListDigestRE.MatchString(man.Image.ListDigest) {
 		return Release{}, fmt.Errorf("release catalog: release %q: image.list_digest must be sha256:<64 lowercase hex>", e.ReleaseID)
 	}
+	// severity is REQUIRED: an empty value is a missing required field (fail
+	// closed), distinct from a non-empty UNKNOWN value (forward-compat →
+	// SeverityUnknown). catalogParseSeverity must never see "".
+	if man.Severity == "" {
+		return Release{}, fmt.Errorf("release catalog: release %q: severity is required", e.ReleaseID)
+	}
 	if man.CreatedAt == "" {
 		return Release{}, fmt.Errorf("release catalog: release %q: created_at is required", e.ReleaseID)
 	}
