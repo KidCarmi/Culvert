@@ -182,6 +182,29 @@ func TestTrustStore_EmptyRing(t *testing.T) {
 	}
 }
 
+// The trust ring must own its key material — mutating the caller's slice after
+// construction must not affect verification (defensive copy).
+func TestTrustStore_CopiesKeyMaterial(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callerBuf := append(ed25519.PublicKey(nil), pub...) // a caller-owned buffer
+	ts, err := NewTrustStore([]TrustKey{{KeyID: "k1", Alg: catalogSigAlg, PublicKey: callerBuf}}, VerifyEnforce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range callerBuf { // corrupt the caller's buffer AFTER construction
+		callerBuf[i] ^= 0xff
+	}
+	base := validSource()
+	sig := ed25519.Sign(priv, base.index)
+	src := &memSignedSource{index: base.index, manifests: base.manifests, sig: sigEnvelopeBytes(t, catalogSigAlg, "k1", sig)}
+	if _, err := LoadVerifiedCatalog(src, ts); err != nil {
+		t.Fatalf("ring aliased caller memory: verification broke after the caller mutated its buffer: %v", err)
+	}
+}
+
 func TestTrustStore_RejectsBadAlg(t *testing.T) {
 	pub, _, err := ed25519.GenerateKey(nil)
 	if err != nil {

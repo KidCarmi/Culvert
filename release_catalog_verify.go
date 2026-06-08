@@ -128,7 +128,13 @@ func NewTrustStore(keys []TrustKey, mode VerifyMode) (TrustStore, error) {
 		if _, dup := ring[k.KeyID]; dup {
 			return TrustStore{}, fmt.Errorf("release catalog: duplicate trust key_id %q", k.KeyID)
 		}
-		ring[k.KeyID] = k.PublicKey
+		// Defensive copy: keep the ring immutable and unaliased from caller
+		// memory. A future key-file loader may decode many keys through a
+		// reusable buffer; storing the slice directly would let a later in-place
+		// mutation silently swap which key verifies, bypassing the checks above.
+		pub := make(ed25519.PublicKey, len(k.PublicKey))
+		copy(pub, k.PublicKey)
+		ring[k.KeyID] = pub
 	}
 	if mode == VerifyEnforce && len(ring) == 0 {
 		return TrustStore{}, errors.New("release catalog: trust ring is empty in enforce mode (an empty allowlist trusts nothing)")
