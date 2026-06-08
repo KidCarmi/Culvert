@@ -12,16 +12,17 @@ import (
 // is present — so proxy.go behavior is unchanged.
 
 func TestAuthOutcome_FrozenValues(t *testing.T) {
-	cases := map[AuthOutcome]string{
-		OutcomeDefault:            "Default",
-		OutcomeExempt:             "Exempt",
-		OutcomeCredentialRequired: "CredentialRequired",
-		OutcomeSSORequired:        "SSORequired",
+	if string(OutcomeDefault) != "Default" {
+		t.Errorf("OutcomeDefault = %q, want Default", OutcomeDefault)
 	}
-	for got, want := range cases {
-		if string(got) != want {
-			t.Errorf("AuthOutcome value = %q, want %q", string(got), want)
-		}
+	if string(OutcomeExempt) != "Exempt" {
+		t.Errorf("OutcomeExempt = %q, want Exempt", OutcomeExempt)
+	}
+	if string(OutcomeCredentialRequired) != "CredentialRequired" { // #nosec G101 -- enum value, not a credential
+		t.Errorf("OutcomeCredentialRequired = %q, want CredentialRequired", OutcomeCredentialRequired)
+	}
+	if string(OutcomeSSORequired) != "SSORequired" {
+		t.Errorf("OutcomeSSORequired = %q, want SSORequired", OutcomeSSORequired)
 	}
 }
 

@@ -237,7 +237,7 @@ const (
 	// OutcomeCredentialRequired requires a non-interactive credential challenge.
 	// Mechanism-neutral (Basic/bearer/token/mTLS/agent-cert/future). NOT
 	// implemented in Phase 1 (Plan Freeze #2/#7).
-	OutcomeCredentialRequired AuthOutcome = "CredentialRequired"
+	OutcomeCredentialRequired AuthOutcome = "CredentialRequired" // #nosec G101 -- enum value (name contains "Cred"); not a credential
 	// OutcomeSSORequired requires browser SSO (portal / OIDC code flow / SAML).
 	// NOT implemented in Phase 1 (Plan Freeze #2/#7).
 	OutcomeSSORequired AuthOutcome = "SSORequired"
