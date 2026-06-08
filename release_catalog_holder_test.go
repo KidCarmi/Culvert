@@ -98,7 +98,8 @@ func TestHolder_FailedReloadKeepsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	writeSignedCatalogDir(t, dir, priv, validSource())
+	ms := validSource()
+	writeSignedCatalogDir(t, dir, priv, ms)
 	h := NewCatalogHolder(dir, holderTrust(t, pub))
 	if err := h.Reload(); err != nil {
 		t.Fatal(err)
@@ -108,13 +109,10 @@ func TestHolder_FailedReloadKeepsCurrent(t *testing.T) {
 		t.Fatal("precondition: a catalog must be published")
 	}
 
-	// Corrupt the index on disk so its signature no longer matches.
-	idxPath := filepath.Join(dir, "index.json")
-	b, err := os.ReadFile(idxPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(idxPath, append(b, ' '), 0o600); err != nil {
+	// Corrupt the index on disk so its signature no longer matches. Append a
+	// byte to the KNOWN index bytes (no read of the file needed) and overwrite.
+	tampered := append(append([]byte(nil), ms.index...), ' ')
+	if err := os.WriteFile(filepath.Join(dir, "index.json"), tampered, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
