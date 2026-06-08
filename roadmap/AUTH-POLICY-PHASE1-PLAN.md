@@ -24,7 +24,7 @@ The same policy engine resolves an **AuthOutcome** for every request:
 | Deployment | Primarily uses |
 |---|---|
 | Home Lab | `Exempt` (default outcome = Exempt) |
-| SMB | `BasicRequired` |
+| SMB | `CredentialRequired` |
 | Enterprise | `SSORequired` |
 | ZTNA / SWG (future) | `+ mTLSRequired`, `StepUpRequired`, device/posture |
 
@@ -46,14 +46,27 @@ architecture.
 
 2. **The AuthOutcome enum is frozen:**
    ```
-   Default        // no auth rule matched → fall through to the global-config-derived default
-   Exempt         // skip end-user authentication (no identity created)
-   BasicRequired  // require Proxy-Authorization / Basic / token
-   SSORequired    // require browser SSO (portal / OIDC code flow / SAML)
+   Default             // no auth rule matched → fall through to the global-config-derived default
+   Exempt              // skip end-user authentication (no identity created)
+   CredentialRequired  // require a non-interactive credential challenge
+   SSORequired         // require browser SSO (portal / OIDC code flow / SAML)
    ```
    Reserved (future, additive only): `mTLSRequired`, `StepUpRequired`,
-   `DeviceRequired`. `BasicRequired` and `SSORequired` are **distinct** — never
-   collapsed into one `idp_required`.
+   `DeviceRequired`. `CredentialRequired` and `SSORequired` are **distinct** —
+   never collapsed into one `idp_required`.
+
+   **`CredentialRequired` is intentionally mechanism-neutral.** It covers HTTP
+   Basic today and, additively in later phases, Bearer / API tokens / mTLS /
+   agent certificates / future credential mechanisms — the specific mechanism is
+   a sub-detail, not a separate outcome. (Renamed from the earlier
+   `BasicRequired`, which was too mechanism-bound and would have forced a future
+   enum migration.)
+
+   **`IdPRef` is reserved now (documented, not implemented).** When `SSORequired`
+   ships (Phase 3), a rule must be able to target a specific IdP in multi-IdP
+   deployments. `AuthRuleSpec.IdPRef` (an IdP profile id; empty = email-domain
+   routing / global default) is reserved as a forward-compatible field so Phase 3
+   is purely additive. Phase 1 neither reads nor writes it.
 
 3. **Global auth configuration remains infrastructure only.**
    IdP/provider connection configs and secrets (OIDC/SAML/LDAP endpoints), the
@@ -64,7 +77,7 @@ architecture.
 4. **Authentication decisions become policy-driven.**
    *Whether / which* auth a request needs is the resolver's output. Global config
    maps to the **default outcome** (`UnauthMode` → default `Exempt`; configured
-   creds/IdP → default `BasicRequired`/`SSORequired`). The globals are routed
+   creds/IdP → default `CredentialRequired`/`SSORequired`). The globals are routed
    THROUGH the resolver, not around it.
 
 5. **Portal eligibility must not depend on User-Agent heuristics.**
@@ -88,8 +101,26 @@ architecture.
    The resolver returns `Exempt` (when a matching, valid exempt rule applies) or
    `Default`. `Default` runs the EXISTING auth gate verbatim. The only `proxy.go`
    change is a single outcome-seam insertion that is byte-identical when no exempt
-   rule matches. `BasicRequired`/`SSORequired` are NOT implemented in Phase 1.
+   rule matches. `CredentialRequired`/`SSORequired` are NOT implemented in Phase 1.
    SOCKS5 is NOT touched.
+
+8. **The AuthOutcome engine governs END-USER authentication ONLY.**
+   It resolves authentication for proxied end-user traffic. It must **never**
+   become responsible for Admin UI authentication, admin RBAC, or admin session
+   management. Those remain a **separate, independent plane** (admin sessions,
+   `requireRole`, the C2 metadata-enforcement middleware). No AuthOutcome ever
+   gates an admin-UI route, and no admin-plane decision is expressed as an
+   AuthOutcome. A future "unify all auth" impulse must NOT merge these planes.
+
+9. **`Default` is a Phase-1 COMPATIBILITY outcome, not a permanent destination.**
+   In Phase 1 `Default` delegates to today's boolean gate verbatim, purely for
+   backward compatibility. This is a bridge, not the end state. **Phase 2 and
+   Phase 3 MUST progressively decompose `Default`** into explicit, policy-driven
+   outcomes (`CredentialRequired` in Phase 2, `SSORequired` in Phase 3), so the
+   global booleans collapse into an explicit default-outcome rule. The "one
+   engine for Home Lab → SMB → Enterprise" promise is only *realized* once
+   `Default` is decomposed; Phase 1 merely makes that reachable without a rewrite.
+   Leaving `Default` as a permanent black box is a frozen-design violation.
 
 ---
 
@@ -104,13 +135,13 @@ architecture.
                          │
    ┌─────────────────────┼───────────────────────────────────────────┐
    ▼                     ▼                     ▼                       ▼
- Exempt            BasicRequired          SSORequired              Default
+ Exempt          CredentialRequired       SSORequired              Default
  (Phase 1)         (Phase 2)              (Phase 3)                (today's gate)
    │                     │                     │                       │
- authSource=          407 Basic        portal? 302 : 407        run existing
- "exempt",            challenge        (policy + Accept,         session/Basic/
- no identity,                          NOT User-Agent)           SSO logic verbatim
- → Stage-2 policy
+ authSource=          407 credential   portal? 302 : 407        run existing
+ "exempt",            challenge        (policy + Accept,         session/cred/
+ no identity,         (Basic/bearer/   NOT User-Agent)           SSO logic verbatim
+ → Stage-2 policy     token/mTLS)
 ```
 
 - **Resolution order inside the gate** (frozen precedence):
@@ -137,7 +168,7 @@ architecture.
 ### 2.3 Why this avoids a future migration
 
 Because the gate already returns an *outcome with a default*, adding
-`BasicRequired` (Phase 2) and `SSORequired` (Phase 3) means decomposing the
+`CredentialRequired` (Phase 2) and `SSORequired` (Phase 3) means decomposing the
 `Default` branch into explicit outcomes — purely additive. The Home Lab→SMB→
 Enterprise progression is a change of **default outcome + rules**, never an engine
 rewrite.
@@ -161,13 +192,15 @@ PolicyRule{
 }
 
 AuthRuleSpec{
-  Outcome        "Exempt"   // P1 only; enum frozen (Default/Exempt/BasicRequired/SSORequired)
+  Outcome        "Exempt"   // P1 only; enum frozen (Default/Exempt/CredentialRequired/SSORequired)
   Protocol       "http"|"connect"|""   // "" = any; "socks5" REJECTED in P1
   Method         string     // optional HTTP method; "" = any
   Owner          string     // REQUIRED
   Reason         string     // REQUIRED
   ExpiresAt      string     // RFC3339 UTC; "" = no expiry (breadth-warned)
   BroadExemption bool       // explicit ack for destination=any; warned + audited
+  IdPRef         string     // RESERVED (Phase 3): target IdP profile id for SSORequired;
+                            //   empty = email-domain routing / global default. Not read/written in P1.
   // State reserved for the Phase-2 approval workflow
 }
 ```
@@ -352,7 +385,9 @@ the go/no-go gate.
 |---|---|---|---|
 | Fail-open (rule too broad) | Med | **Critical** | Mandatory source+dest scoping; fail-closed defaults; default-deny backstop; breadth warnings; simulator |
 | Boolean spine creeps back in | Low | **Critical** | Freeze #1/#7: resolver returns outcome+default; reviewed at slice 7 |
-| Basic/SSO conflated later | Low | High | Freeze #2: enum distinct |
+| Credential/SSO conflated later | Low | High | Freeze #2: enum distinct; `CredentialRequired` mechanism-neutral |
+| `Default` left as permanent black box | Med | High | Freeze #9: Phase 2/3 must decompose `Default` |
+| AuthOutcome bleeds into admin-UI plane | Low | High | Freeze #8: end-user auth only; two planes |
 | UA heuristic re-entrenched | Low | High | Freeze #5: no new UA dependence; quarantined in Default |
 | `ReplaceAll` relaxation re-opens access footgun | Low | High | Guard split + dedicated tests |
 | `recordRequest` signature churn | Med | Med | Wrapper + default-empty; omitempty fields |
