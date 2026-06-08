@@ -335,6 +335,7 @@ type PolicyRule struct {
 	ID                string          `json:"id,omitempty"`           // stable ULID; backfilled on load (Phase 0 seam)
 	RuleType          string          `json:"ruleType,omitempty"`     // "" or "access" = Stage-2 access rule; "auth" = Stage-1 (reserved)
 	SubjectMatch      *SubjectMatch   `json:"subjectMatch,omitempty"` // typed subject selector (reserved; nil = unused)
+	Auth              *AuthRuleSpec   `json:"auth,omitempty"`         // Stage-1 auth-rule spec; non-nil only for ruleType="auth" (Phase 1 seam)
 	HitCount          int64           `json:"hitCount"`               // runtime counter, not persisted
 }
 

@@ -202,3 +202,85 @@ func authBypassDisabled() bool {
 	})
 	return authBypassDisableVal
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Policy — Phase 1 Slice 1: AuthOutcome resolver CONTRACT.
+//
+// This slice introduces the architectural spine from
+// roadmap/AUTH-POLICY-PHASE1-PLAN.md as a PURE contract only:
+//
+//   - AuthOutcome enum (frozen)
+//   - AuthRuleSpec (the auth/exempt rule spec; modeled, not yet validated)
+//   - AuthDecision (resolver result)
+//   - resolveAuthOutcome(ctx) — returns Default for every request today
+//
+// NOT wired into proxy.go. The Stage-1 evaluator (subject/destination matching)
+// lands in later slices; until then every request resolves to Default, which the
+// proxy treats as "run today's gate verbatim" — byte-identical to current
+// behavior (Plan Freezes #7 and #9). No runtime behavior changes in this slice.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// AuthOutcome is the result of the end-user authentication decision. It is the
+// architectural spine (Plan Freeze #1): the auth gate resolves an outcome rather
+// than a boolean. The enum is FROZEN (Plan Freeze #2).
+type AuthOutcome string
+
+const (
+	// OutcomeDefault means no auth rule matched; the proxy falls through to the
+	// existing global-config-derived gate. In Phase 1 this is byte-identical to
+	// today's behavior — a compatibility outcome that Phase 2/3 progressively
+	// decompose (Plan Freeze #9).
+	OutcomeDefault AuthOutcome = "Default"
+	// OutcomeExempt skips end-user authentication without creating an identity.
+	// Modeled in Phase 1; the only outcome Phase 1 will eventually implement.
+	OutcomeExempt AuthOutcome = "Exempt"
+	// OutcomeCredentialRequired requires a non-interactive credential challenge.
+	// Mechanism-neutral (Basic/bearer/token/mTLS/agent-cert/future). NOT
+	// implemented in Phase 1 (Plan Freeze #2/#7).
+	OutcomeCredentialRequired AuthOutcome = "CredentialRequired" // #nosec G101 -- enum value (name contains "Cred"); not a credential
+	// OutcomeSSORequired requires browser SSO (portal / OIDC code flow / SAML).
+	// NOT implemented in Phase 1 (Plan Freeze #2/#7).
+	OutcomeSSORequired AuthOutcome = "SSORequired"
+)
+
+// AuthRuleSpec is the auth-only portion of a policy rule (non-nil only for
+// ruleType="auth"). Modeled in this slice; field-level validation and the
+// matcher land in later slices. See AUTH-POLICY-PHASE1-PLAN.md §3.
+type AuthRuleSpec struct {
+	Outcome        AuthOutcome `json:"outcome"`                  // Phase 1: "Exempt" only
+	Protocol       string      `json:"protocol,omitempty"`       // "http" | "connect" | "" (any); "socks5" rejected in P1
+	Method         string      `json:"method,omitempty"`         // optional HTTP method; "" = any
+	Owner          string      `json:"owner,omitempty"`          // required (validated in a later slice)
+	Reason         string      `json:"reason,omitempty"`         // required (validated in a later slice)
+	ExpiresAt      string      `json:"expiresAt,omitempty"`      // RFC3339 UTC; "" = no expiry (breadth-warned)
+	BroadExemption bool        `json:"broadExemption,omitempty"` // explicit ack for destination=any
+	// IdPRef is RESERVED for Phase 3 (multi-IdP SSORequired targeting): an IdP
+	// profile id; empty = email-domain routing / global default. Neither read nor
+	// written by Phase 1 (Plan Freeze #2).
+	IdPRef string `json:"idpRef,omitempty"`
+}
+
+// AuthDecision is the result of resolveAuthOutcome: the chosen outcome and, when
+// an auth rule matched, a pointer to it (nil for Default).
+type AuthDecision struct {
+	Outcome AuthOutcome
+	Rule    *PolicyRule // matched auth rule; nil for Default
+}
+
+// resolveAuthOutcome resolves the end-user authentication outcome for a request.
+// It is the Phase 1 spine, but in Slice 1 it is a pure contract that returns
+// Default for every request — the Stage-1 auth-rule evaluator is added in later
+// slices. It is intentionally NOT called from proxy.go in this slice.
+func resolveAuthOutcome(ctx RequestContext) AuthDecision {
+	return resolveAuthOutcomeFrom(policyStore.List(), ctx)
+}
+
+// resolveAuthOutcomeFrom is the pure core of the resolver, taking an explicit
+// ruleset so it is testable without global state. Slice 1 returns Default
+// unconditionally (matching is deferred to later slices); the signature is
+// stable so wiring the matcher is purely additive.
+func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision {
+	_ = rules // auth-rule evaluation (matchSubject + dest/protocol/method) lands in later slices
+	_ = ctx
+	return AuthDecision{Outcome: OutcomeDefault}
+}
