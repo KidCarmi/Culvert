@@ -13,3 +13,7 @@ github.com/beevik/etree
 github.com/jonboulle/clockwork
 # Human-readable sizes/durations, transitive of dgraph-io/badger — mature, stable.
 github.com/dustin/go-humanize
+# ULID generation — direct dep (authpolicy.go stable rule IDs; also the
+# maintenance agent). Mature, widely-used, stable API; low score is heuristic
+# and hovers at the threshold (no maintained reason to drop or replace it).
+github.com/oklog/ulid/v2
