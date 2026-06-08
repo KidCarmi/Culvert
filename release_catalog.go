@@ -194,6 +194,18 @@ func LoadCatalog(src CatalogSource) (*Catalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("release catalog: read index: %w", err)
 	}
+	// Single-read contract (P1.3 §5.0): read the index exactly once, then hand
+	// the bytes to the shared builder. The verifying loader (LoadVerifiedCatalog)
+	// reads once, verifies those bytes, then calls this same builder with the
+	// SAME buffer — so the verified buffer is the parsed buffer (no re-read).
+	return loadCatalogFromIndexBytes(idxBytes, src)
+}
+
+// loadCatalogFromIndexBytes builds a Catalog from already-read index bytes,
+// performing NO index read of its own (the caller owns the single read). Both
+// the bare LoadCatalog and the P1.3 verifying LoadVerifiedCatalog feed it the
+// exact buffer they read (and, for the verified path, the buffer they verified).
+func loadCatalogFromIndexBytes(idxBytes []byte, src CatalogSource) (*Catalog, error) {
 	var idx catalogIndexFile
 	if err := json.Unmarshal(idxBytes, &idx); err != nil {
 		return nil, fmt.Errorf("release catalog: parse index: %w", err)
