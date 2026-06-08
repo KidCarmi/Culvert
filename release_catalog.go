@@ -55,7 +55,13 @@ var (
 	catalogListDigestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	catalogSHA256HexRE  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	catalogRepoRE       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:-]*$`)
-	catalogSemverRE     = regexp.MustCompile(`^\d+\.\d+\.\d+(?:[-+].*)?$`)
+	// catalogSemverRE is the canonical SemVer 2.0.0 matcher (semver.org). The
+	// loose `\d+\.\d+\.\d+([-+].*)?` form accepted malformed suffixes like
+	// `1.0.0-` / `1.0.0+` and leading zeros, which would then order as if they
+	// were a final release — so version_id MUST parse strictly to fail closed.
+	catalogSemverRE = regexp.MustCompile(`^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)` +
+		`(?:-(?:(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?` +
+		`(?:\+(?:[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`)
 )
 
 // Channel is a curated release-catalog pointer. The set is closed; unknown
@@ -180,12 +186,9 @@ type catalogManifestFile struct {
 // extra fields, unknown channel keys, unknown severity): any required-field or
 // shape failure, hash mismatch, duplicate identity, dangling required
 // reference, or unsupported major returns a nil catalog and a non-nil error
-// (never a partial catalog).
-//
-// The body is a single linear validation pipeline; splitting it would scatter
-// the fail-closed ordering the contract pins.
-//
-//nolint:gocyclo,cyclop // single-pass fail-closed validation pipeline
+// (never a partial catalog). Per-release validation is delegated to
+// catalogLoadRelease; this function owns the index-level checks and the
+// identity-uniqueness maps.
 func LoadCatalog(src CatalogSource) (*Catalog, error) {
 	idxBytes, err := src.ReadIndex()
 	if err != nil {
@@ -214,36 +217,12 @@ func LoadCatalog(src CatalogSource) (*Catalog, error) {
 	}
 
 	for i := range idx.Releases {
-		e := idx.Releases[i]
-		if err := catalogValidateID("release_id", e.ReleaseID); err != nil {
-			return nil, err
-		}
-		if e.VersionID == "" {
-			return nil, fmt.Errorf("release catalog: release %q: empty version_id", e.ReleaseID)
-		}
-		if !catalogSHA256HexRE.MatchString(e.ManifestSHA256) {
-			return nil, fmt.Errorf("release catalog: release %q: manifest_sha256 must be 64 lowercase hex", e.ReleaseID)
-		}
-		if _, dup := cat.byReleaseID[e.ReleaseID]; dup {
-			return nil, fmt.Errorf("release catalog: duplicate release_id %q", e.ReleaseID)
-		}
-
-		manBytes, err := src.ReadManifest(e.ManifestRef)
-		if err != nil {
-			return nil, fmt.Errorf("release catalog: release %q: read manifest: %w", e.ReleaseID, err)
-		}
-		// Hash binding over the RAW bytes as read — never re-marshaled JSON.
-		sum := sha256.Sum256(manBytes)
-		if hex.EncodeToString(sum[:]) != e.ManifestSHA256 {
-			return nil, fmt.Errorf("release catalog: release %q: manifest_sha256 mismatch (corruption or drift)", e.ReleaseID)
-		}
-		var man catalogManifestFile
-		if err := json.Unmarshal(manBytes, &man); err != nil {
-			return nil, fmt.Errorf("release catalog: release %q: parse manifest: %w", e.ReleaseID, err)
-		}
-		rel, err := catalogBuildRelease(e, man)
+		rel, err := catalogLoadRelease(src, idx.Releases[i])
 		if err != nil {
 			return nil, err
+		}
+		if _, dup := cat.byReleaseID[rel.ReleaseID]; dup {
+			return nil, fmt.Errorf("release catalog: duplicate release_id %q", rel.ReleaseID)
 		}
 		if _, dup := cat.byPinnedRef[rel.PinnedRef]; dup {
 			return nil, fmt.Errorf("release catalog: duplicate pinned ref %q (one digest must map to one release)", rel.PinnedRef)
@@ -265,6 +244,41 @@ func LoadCatalog(src CatalogSource) (*Catalog, error) {
 	}
 
 	return cat, nil
+}
+
+// catalogLoadRelease validates one index entry, reads + hash-binds + parses its
+// manifest, and returns the derived Release (or a fail-closed error). Identity
+// uniqueness is checked by the caller (it owns the maps).
+func catalogLoadRelease(src CatalogSource, e catalogIndexEntry) (Release, error) {
+	if err := catalogValidateID("release_id", e.ReleaseID); err != nil {
+		return Release{}, err
+	}
+	if e.VersionID == "" {
+		return Release{}, fmt.Errorf("release catalog: release %q: empty version_id", e.ReleaseID)
+	}
+	if !catalogSHA256HexRE.MatchString(e.ManifestSHA256) {
+		return Release{}, fmt.Errorf("release catalog: release %q: manifest_sha256 must be 64 lowercase hex", e.ReleaseID)
+	}
+	// The bare-name/traversal contract (§4.5) is enforced HERE so it holds for
+	// EVERY CatalogSource — the dir source's own check is then defense-in-depth,
+	// and a future bundle/registry/in-memory source cannot bypass it.
+	if err := catalogValidateManifestRef(e.ManifestRef); err != nil {
+		return Release{}, fmt.Errorf("release catalog: release %q: %w", e.ReleaseID, err)
+	}
+	manBytes, err := src.ReadManifest(e.ManifestRef)
+	if err != nil {
+		return Release{}, fmt.Errorf("release catalog: release %q: read manifest: %w", e.ReleaseID, err)
+	}
+	// Hash binding over the RAW bytes as read — never re-marshaled JSON.
+	sum := sha256.Sum256(manBytes)
+	if hex.EncodeToString(sum[:]) != e.ManifestSHA256 {
+		return Release{}, fmt.Errorf("release catalog: release %q: manifest_sha256 mismatch (corruption or drift)", e.ReleaseID)
+	}
+	var man catalogManifestFile
+	if err := json.Unmarshal(manBytes, &man); err != nil {
+		return Release{}, fmt.Errorf("release catalog: release %q: parse manifest: %w", e.ReleaseID, err)
+	}
+	return catalogBuildRelease(e, man)
 }
 
 // catalogBuildRelease validates a single manifest against its index entry and

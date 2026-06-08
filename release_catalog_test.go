@@ -371,6 +371,37 @@ func TestFailClosed_BadShapes(t *testing.T) {
 	}
 }
 
+// The bare-name/traversal contract holds for ANY source, not just the dir
+// source — LoadCatalog validates manifest_ref before calling ReadManifest.
+func TestFailClosed_ManifestRefTraversal_AnySource(t *testing.T) {
+	src := buildCatalogSource(map[string]string{"recommended": "rel_a"}, 1, "2026-04-18T00:00:00Z",
+		[]relSpec{{ref: "../evil.json", releaseID: "rel_a", versionID: "1.0.0", raw: manifestJSON("rel_a", "1.0.0", "normal", repo, digA)}})
+	mustReject(t, src, "traversal manifest_ref (source-independent)")
+}
+
+// Malformed SemVer (empty prerelease/build suffix, leading zeros, empty
+// identifiers, non-numeric) must fail closed — not order as a final release.
+func TestFailClosed_MalformedSemver(t *testing.T) {
+	for _, ver := range []string{"1.0.0-", "1.0.0+", "1.02.0", "1.0.0-alpha..1", "1.0.0-+x", "v1.0.0", "1.0.0.0"} {
+		src := buildCatalogSource(map[string]string{"recommended": "rel_a"}, 1, "2026-04-18T00:00:00Z",
+			[]relSpec{{ref: "a.json", releaseID: "rel_a", versionID: ver, raw: manifestJSON("rel_a", ver, "normal", repo, digA)}})
+		mustReject(t, src, fmt.Sprintf("malformed semver %q", ver))
+	}
+}
+
+func TestList_PrereleaseOrdersBelowRelease(t *testing.T) {
+	src := buildCatalogSource(map[string]string{"recommended": "rel_rel"}, 1, "2026-04-18T00:00:00Z",
+		[]relSpec{
+			{ref: "rc.json", releaseID: "rel_rc", versionID: "1.0.0-rc.1", raw: manifestJSON("rel_rc", "1.0.0-rc.1", "normal", repo, digA)},
+			{ref: "rel.json", releaseID: "rel_rel", versionID: "1.0.0", raw: manifestJSON("rel_rel", "1.0.0", "normal", repo, digB)},
+		})
+	c := mustLoad(t, src)
+	views := c.List()
+	if views[0].VersionID != "1.0.0" || views[1].VersionID != "1.0.0-rc.1" {
+		t.Errorf("prerelease ordering = [%s, %s]; want [1.0.0, 1.0.0-rc.1] (release > prerelease)", views[0].VersionID, views[1].VersionID)
+	}
+}
+
 func TestFailClosed_BadReleaseID(t *testing.T) {
 	// Control char and over-length release_ids are rejected (§4.7).
 	for _, id := range []string{"rel\na", "rel a", "rel\x00a", strings.Repeat("x", 129)} {
