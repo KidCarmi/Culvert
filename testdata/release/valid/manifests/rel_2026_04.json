@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "release_id": "rel_2026_04_v1",
+  "version_id": "1.10.0",
+  "severity": "critical",
+  "created_at": "2026-04-18T00:00:00Z",
+  "image": {
+    "repo": "ghcr.io/kidcarmi/culvert",
+    "list_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "platforms": ["linux/amd64", "linux/arm64"]
+  },
+  "min_upgrade_from": "1.2.0",
+  "changelog_url": "https://example.invalid/changelog/1.10.0",
+  "notes": "April release."
+}
