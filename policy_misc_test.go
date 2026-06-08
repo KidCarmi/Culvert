@@ -63,13 +63,24 @@ func TestMatchSchedule_TimeRange_OutOfRange(_ *testing.T) {
 }
 
 func TestMatchSchedule_Timezone(t *testing.T) {
+	// Intent: a valid IANA timezone is accepted and an all-day window matches,
+	// regardless of the wall-clock minute, the UTC offset, or DST.
+	//
+	// matchSchedule's time-of-day check is end-EXCLUSIVE (cur >= TimeStart &&
+	// cur < TimeEnd). A "00:00"–"23:59" window therefore has a one-minute hole
+	// at exactly 23:59 local, which made this test flake when CI ran during the
+	// 23:59 minute in the configured zone. "00:00"–"24:00" closes the hole:
+	// start is inclusive (00:00 always matches) and "24:00" is the exclusive
+	// sentinel that still covers 23:59 — so EVERY minute of the day matches,
+	// making the outcome independent of when the test runs. (Test-only; no
+	// schedule semantics change.)
 	s := &PolicySchedule{
 		Timezone:  "America/New_York",
 		TimeStart: "00:00",
-		TimeEnd:   "23:59",
+		TimeEnd:   "24:00",
 	}
 	if !matchSchedule(s) {
-		t.Error("matchSchedule with valid timezone and wide range should match")
+		t.Error("matchSchedule with valid timezone and all-day window should match")
 	}
 }
 
