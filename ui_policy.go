@@ -1105,11 +1105,17 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	for _, rule := range rules {
 		r2 := rule // copy
 		skip := ""
-		if !matchSource(&r2, body.SourceIP, body.Identity, body.AuthSource, body.Groups) {
+		switch {
+		case ruleTypeOf(&r2) != ruleTypeAccess:
+			// Mirror Evaluate: Stage-1 auth rules are inert for access decisions.
+			// They may appear in List() once persisted, but real traffic skips
+			// them, so the test endpoint must not report one as the match.
+			skip = "non-access rule (auth)"
+		case !matchSource(&r2, body.SourceIP, body.Identity, body.AuthSource, body.Groups):
 			skip = "source mismatch"
-		} else if !matchSchedule(r2.Schedule) {
+		case !matchSchedule(r2.Schedule):
 			skip = "schedule inactive"
-		} else if !matchDest(&r2, body.Host) {
+		case !matchDest(&r2, body.Host):
 			skip = "destination mismatch"
 		}
 		trace = append(trace, ruleTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})

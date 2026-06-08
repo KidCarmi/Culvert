@@ -204,6 +204,53 @@ func TestApplyConfigBackup_RoundTripsValidAuthRule(t *testing.T) {
 	assertAuthRulePreserved(t, policyStore.List())
 }
 
+// ── Policy test endpoint (diagnostic must mirror Evaluate) ───────────────────
+
+// A persisted auth rule appears in policyStore.List(), but /api/policy/test must
+// skip it exactly as Evaluate does — otherwise the diagnostic would report an
+// inert auth rule (with an empty access action) as the match instead of the
+// access rule / default that real traffic uses.
+func TestPolicyTest_SkipsAcceptedAuthRule(t *testing.T) {
+	withFreshPolicyStore(t)
+	policyStore.ReplaceAll([]PolicyRule{validExemptRule()})
+	if findRule(policyStore.List(), "legacy-printer") == nil {
+		t.Fatal("auth rule should be persisted in Slice 3")
+	}
+	w := httptest.NewRecorder()
+	apiPolicyTest(w, jsonReq("POST", "/api/policy/test", map[string]any{
+		"sourceIP": "10.0.5.10",           // inside the rule's 10.0.5.0/24 source
+		"host":     "updates.example.com", // the rule's destFQDN
+	}))
+	if w.Code != 200 {
+		t.Fatalf("policy test returned %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Matched bool `json:"matched"`
+		Trace   []struct {
+			Name       string `json:"name"`
+			SkipReason string `json:"skipReason"`
+		} `json:"trace"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Matched {
+		t.Error("policy test must not match an inert auth rule (must mirror Evaluate)")
+	}
+	var found bool
+	for _, tr := range resp.Trace {
+		if tr.Name == "legacy-printer" {
+			found = true
+			if tr.SkipReason == "" {
+				t.Error("auth rule must be marked skipped in the policy-test trace")
+			}
+		}
+	}
+	if !found {
+		t.Error("auth rule should appear in the policy-test trace")
+	}
+}
+
 // ── Cluster ConfigSnapshot ───────────────────────────────────────────────────
 
 func TestApplyConfigSnapshot_RoundTripsValidAuthRule(t *testing.T) {
