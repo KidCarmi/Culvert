@@ -80,10 +80,12 @@ type SubjectPredicate struct {
 // Phase 0 only the "cidr" predicate is accepted, and each of its values must be
 // a valid IP or CIDR.
 //
-// NOTE (Phase 1 Slice 2): this is the SHAPE validator. It is now reached for
-// ruleType="auth" rules (which require a CIDR SubjectMatch) via validateAuthRule.
-// Access rules still reject any non-nil SubjectMatch in validateAccessRule —
-// Stage-2 Evaluate does not consult it, so allowing it there would fail open.
+// NOTE (Phase 1 Slice 2): this is the SHAPE validator. It is reached only via
+// validateAuthRule (the auth-rule validator, exercised directly by tests).
+// validatePolicyRule does not yet ACCEPT auth rules — it gates ruleType="auth"
+// until the persistence/runtime layers are auth-aware — and access rules reject
+// any non-nil SubjectMatch in validateAccessRule (Stage-2 Evaluate does not
+// consult it, so allowing it there would fail open).
 func validateSubjectMatch(sm *SubjectMatch) error {
 	if sm == nil {
 		return nil

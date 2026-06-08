@@ -112,18 +112,14 @@ func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriorit
 		}
 	}
 
-	// ── Auth (Stage-1) rules validate via the auth-rule rules and skip the
-	// access-specific action/redirect checks (their decision is auth.outcome,
-	// not a PolicyAction). Pure validation; no runtime wiring (Slice 2).
+	// ── Auth (Stage-1) rules are NOT yet accepted through this path. Their
+	// validation logic lives in validateAuthRule (exercised directly by tests),
+	// but acceptance is gated: the persistence guards (PolicyStore.Load /
+	// ReplaceAll) and the runtime resolver are not auth-aware yet, so an accepted
+	// auth rule would be silently dropped on restart / replace-import / rollback /
+	// cluster sync. Gate acceptance until those layers land (a later slice).
 	if ruleTypeOf(&rule) == ruleTypeAuth {
-		warnings, err := validateAuthRule(rule)
-		if err != nil {
-			return err
-		}
-		for _, w := range warnings {
-			logWarnf("Policy: auth rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(w, "\n", " "))
-		}
-		return nil
+		return fmt.Errorf(`ruleType "auth" is not yet accepted (authentication-policy rules land in a later slice)`)
 	}
 	return validateAccessRule(rule)
 }

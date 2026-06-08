@@ -40,9 +40,31 @@ func TestValidateAuthRule_ValidExemptPasses(t *testing.T) {
 	if len(warnings) != 0 {
 		t.Errorf("valid scoped /24 rule should warn nothing, got: %v", warnings)
 	}
-	// And it passes the top-level validator too.
-	if err := validatePolicyRule(validExemptRule(), nil, -1); err != nil {
-		t.Errorf("validatePolicyRule rejected a valid exempt rule: %v", err)
+}
+
+// validatePolicyRule GATES auth rules in Slice 2: even a fully-valid exempt rule
+// is rejected at the accept path, because the persistence guards (Load/ReplaceAll)
+// and the runtime resolver are not auth-aware yet (accepted auth rules would be
+// silently dropped). The validation logic itself is exercised via validateAuthRule.
+func TestValidatePolicyRule_GatesAuthRules(t *testing.T) {
+	// A valid exempt rule still passes the dedicated validator...
+	if _, err := validateAuthRule(validExemptRule()); err != nil {
+		t.Fatalf("validateAuthRule should accept a valid exempt rule: %v", err)
+	}
+	// ...but validatePolicyRule must reject it (gated, not yet accepted).
+	err := validatePolicyRule(validExemptRule(), nil, -1)
+	if err == nil {
+		t.Fatal("validatePolicyRule must gate (reject) auth rules in Slice 2")
+	}
+	if !strings.Contains(err.Error(), "not yet accepted") {
+		t.Errorf("gate error should explain auth rules are not yet accepted, got: %v", err)
+	}
+	// The gate is independent of rule validity: an INVALID auth rule is also
+	// rejected here (without needing a spec), proving acceptance is gated wholesale.
+	r := validExemptRule()
+	r.Auth = nil
+	if err := validatePolicyRule(r, nil, -1); err == nil {
+		t.Fatal("validatePolicyRule must reject auth rules regardless of validity")
 	}
 }
 
@@ -51,9 +73,6 @@ func TestValidateAuthRule_MissingSpecRejected(t *testing.T) {
 	r.Auth = nil
 	if _, err := validateAuthRule(r); err == nil {
 		t.Fatal("auth rule without an AuthRuleSpec must be rejected")
-	}
-	if err := validatePolicyRule(r, nil, -1); err == nil {
-		t.Fatal("validatePolicyRule must reject an auth rule without a spec")
 	}
 }
 
