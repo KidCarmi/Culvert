@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-04-18T00:00:00Z",
+  "channels": {
+    "recommended": "rel_2026_04_v1",
+    "lts": "rel_2026_01_v3",
+    "critical": "rel_2026_04_v1",
+    "beta": "rel_2026_04_v1"
+  },
+  "releases": [
+    { "release_id": "rel_2026_04_v1", "version_id": "1.10.0", "manifest_ref": "rel_2026_04.json", "manifest_sha256": "275dcddf7ccbe9bc782e9913f657236818a948bdf488f1dc20be9638abc82230" },
+    { "release_id": "rel_2026_01_v3", "version_id": "1.9.0", "manifest_ref": "rel_2026_01.json", "manifest_sha256": "7d3e960eb7c5375dd23bcaa77a531a68520b5d094cc9d39eec6be9f202e6b844" }
+  ]
+}
