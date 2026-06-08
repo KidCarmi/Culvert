@@ -105,6 +105,36 @@ func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriorit
 			return fmt.Errorf("rule name already exists")
 		}
 	}
+	// Schedule timezone is validated for both rule types.
+	if rule.Schedule != nil && rule.Schedule.Timezone != "" {
+		if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
+			return fmt.Errorf("invalid schedule timezone: %s", strings.ReplaceAll(rule.Schedule.Timezone, "\n", ""))
+		}
+	}
+
+	// ── Auth (Stage-1) rules are NOT yet accepted through this path. Their
+	// validation logic lives in validateAuthRule (exercised directly by tests),
+	// but acceptance is gated: the persistence guards (PolicyStore.Load /
+	// ReplaceAll) and the runtime resolver are not auth-aware yet, so an accepted
+	// auth rule would be silently dropped on restart / replace-import / rollback /
+	// cluster sync. Gate acceptance until those layers land (a later slice).
+	if ruleTypeOf(&rule) == ruleTypeAuth {
+		return fmt.Errorf(`ruleType "auth" is not yet accepted (authentication-policy rules land in a later slice)`)
+	}
+	return validateAccessRule(rule)
+}
+
+// validateAccessRule validates a Stage-2 access rule. SubjectMatch and Auth
+// specs are rejected here: SubjectMatch is not yet enforced by Evaluate (so it
+// would fail open on an access rule), and an auth spec only belongs on auth
+// rules.
+func validateAccessRule(rule PolicyRule) error {
+	if rule.Auth != nil {
+		return fmt.Errorf(`auth spec is only valid on ruleType "auth" rules`)
+	}
+	if rule.SubjectMatch != nil {
+		return fmt.Errorf("subjectMatch is not yet enforced on access rules and cannot be set until the access matcher lands")
+	}
 	validActions := map[PolicyAction]bool{
 		ActionAllow: true, ActionDrop: true,
 		ActionBlockPage: true, ActionRedirect: true,
@@ -119,29 +149,6 @@ func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriorit
 		if !isSafeRedirectURL(rule.RedirectURL) {
 			return fmt.Errorf("redirectURL must be an absolute http/https URL")
 		}
-	}
-	if rule.Schedule != nil && rule.Schedule.Timezone != "" {
-		if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
-			return fmt.Errorf("invalid schedule timezone: %s", strings.ReplaceAll(rule.Schedule.Timezone, "\n", ""))
-		}
-	}
-	// SubjectMatch (§1.6) is a reserved schema seam in Phase 0: Stage-2
-	// evaluation (matchSource) does NOT yet consult it. Accepting a non-nil
-	// selector here would fail OPEN — a rule meant to be scoped to a CIDR
-	// would match every client because the source predicate is silently
-	// ignored, and there is no action-agnostic "inert" state (skipping the
-	// rule under-denies a Drop/Block rule, which is also fail-open). So reject
-	// any rule that SETS it until the matcher is wired (a later phase). Every
-	// persistence path — admin POST/PUT (ui_policy.go), config import
-	// (ui_config.go), and config-version restore (configversion.go) — funnels
-	// through this function, so this single gate closes them all.
-	if rule.SubjectMatch != nil {
-		return fmt.Errorf("subjectMatch is reserved and not yet enforced; it cannot be set until the matcher lands in a later phase")
-	}
-	// Shape validator retained for the phase that wires the matcher (only a
-	// nil selector reaches it today).
-	if err := validateSubjectMatch(rule.SubjectMatch); err != nil {
-		return err
 	}
 	return nil
 }

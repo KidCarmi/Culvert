@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 )
@@ -79,11 +80,12 @@ type SubjectPredicate struct {
 // Phase 0 only the "cidr" predicate is accepted, and each of its values must be
 // a valid IP or CIDR.
 //
-// NOTE (Phase 0): this is the SHAPE validator, retained for the phase that
-// wires the matcher. The rule-acceptance path (validatePolicyRule) currently
-// REJECTS any non-nil SubjectMatch up front — because Stage-2 evaluation does
-// not yet consult it, storing one would fail open — so in practice only a nil
-// selector reaches this function today.
+// NOTE (Phase 1 Slice 2): this is the SHAPE validator. It is reached only via
+// validateAuthRule (the auth-rule validator, exercised directly by tests).
+// validatePolicyRule does not yet ACCEPT auth rules — it gates ruleType="auth"
+// until the persistence/runtime layers are auth-aware — and access rules reject
+// any non-nil SubjectMatch in validateAccessRule (Stage-2 Evaluate does not
+// consult it, so allowing it there would fail open).
 func validateSubjectMatch(sm *SubjectMatch) error {
 	if sm == nil {
 		return nil
@@ -289,4 +291,195 @@ func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision
 	_ = rules // auth-rule evaluation (matchSubject + dest/protocol/method) lands in later slices
 	_ = ctx
 	return AuthDecision{Outcome: OutcomeDefault}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Policy — Phase 1 Slice 2: auth (Exempt) rule VALIDATION.
+//
+// Pure validation only. NOT wired into the runtime auth gate (resolveAuthOutcome
+// still returns Default for every request). No proxy.go / socks5.go change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// identityPredicateTypes are subject-predicate types that depend on an
+// authenticated identity. They are INVALID on auth (Stage-1) rules because no
+// identity exists yet when authentication is being decided. They belong on
+// access (Stage-2) rules. Rejected explicitly so the invariant holds even after
+// later phases teach validateSubjectMatch to understand these types for access
+// rules (Plan: "auth rules carry no identity-dependent predicates").
+var identityPredicateTypes = map[string]bool{
+	"directory_group": true,
+	"directory_attr":  true,
+	"identity":        true,
+	"group":           true,
+	"user":            true,
+	"email":           true,
+	"sub":             true,
+}
+
+// validateAuthRule validates a ruleType="auth" rule for Phase 1 (Outcome=Exempt
+// only). It returns any non-fatal warnings (broad scope, broad exemption,
+// expired, ignored method) alongside a fatal error. It does NOT mutate the rule
+// and has no runtime side effects. See roadmap/AUTH-POLICY-PHASE1-PLAN.md §3/§5.
+func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
+	spec := rule.Auth
+	if spec == nil {
+		return nil, fmt.Errorf(`ruleType "auth" requires an auth spec`)
+	}
+	if err := validateAuthOutcomeAndIdP(spec); err != nil {
+		return nil, err
+	}
+	if err := validateAuthOwnership(spec); err != nil {
+		return nil, err
+	}
+	if err := validateAuthSource(rule); err != nil {
+		return nil, err
+	}
+	for _, step := range []func(PolicyRule) ([]string, error){
+		validateAuthProtocol, validateAuthExpiry, validateAuthDestination,
+	} {
+		w, err := step(rule)
+		if err != nil {
+			return nil, err
+		}
+		warnings = append(warnings, w...)
+	}
+	warnings = append(warnings, broadSubjectWarnings(rule.SubjectMatch)...)
+	return warnings, nil
+}
+
+// validateAuthOutcomeAndIdP enforces the Slice-2 outcome (Exempt only) and the
+// reserved-IdPRef invariant.
+func validateAuthOutcomeAndIdP(spec *AuthRuleSpec) error {
+	switch spec.Outcome {
+	case OutcomeExempt:
+		// supported
+	case OutcomeCredentialRequired, OutcomeSSORequired:
+		return fmt.Errorf("auth outcome %q is reserved and not yet implemented (only Exempt is supported)", spec.Outcome)
+	default:
+		return fmt.Errorf("auth outcome must be Exempt")
+	}
+	if spec.IdPRef != "" {
+		return fmt.Errorf("idpRef is reserved for a later phase and cannot be set")
+	}
+	return nil
+}
+
+// validateAuthOwnership enforces mandatory owner + reason.
+func validateAuthOwnership(spec *AuthRuleSpec) error {
+	if strings.TrimSpace(spec.Owner) == "" {
+		return fmt.Errorf("auth rule requires an owner")
+	}
+	if strings.TrimSpace(spec.Reason) == "" {
+		return fmt.Errorf("auth rule requires a reason")
+	}
+	return nil
+}
+
+// validateAuthSource enforces the mandatory, CIDR-only, identity-free source
+// scope.
+func validateAuthSource(rule PolicyRule) error {
+	if rule.SubjectMatch == nil {
+		return fmt.Errorf("auth (exempt) rule requires a subjectMatch source scope")
+	}
+	if err := rejectIdentityPredicates(rule.SubjectMatch); err != nil {
+		return err
+	}
+	return validateSubjectMatch(rule.SubjectMatch)
+}
+
+// validateAuthProtocol enforces the allowed protocol set ("", http, connect;
+// socks5 rejected) and flags an ignored method on CONNECT.
+func validateAuthProtocol(rule PolicyRule) ([]string, error) {
+	spec := rule.Auth
+	switch spec.Protocol {
+	case "", "http", "connect":
+		// supported
+	case "socks5":
+		return nil, fmt.Errorf(`protocol "socks5" is not supported for auth rules in Phase 1`)
+	default:
+		return nil, fmt.Errorf(`protocol must be "", "http", or "connect"`)
+	}
+	if spec.Method != "" && spec.Protocol == "connect" {
+		return []string{"method is ignored for the connect protocol"}, nil
+	}
+	return nil, nil
+}
+
+// validateAuthExpiry enforces RFC3339 expiry. Expired rules are valid to store
+// (they simply will not match later) but are flagged.
+func validateAuthExpiry(rule PolicyRule) ([]string, error) {
+	if rule.Auth.ExpiresAt == "" {
+		return nil, nil
+	}
+	exp, perr := time.Parse(time.RFC3339, rule.Auth.ExpiresAt)
+	if perr != nil {
+		return nil, fmt.Errorf("expiresAt must be an RFC3339 timestamp")
+	}
+	if exp.Before(time.Now()) {
+		return []string{"rule is already expired and will not match any request"}, nil
+	}
+	return nil, nil
+}
+
+// validateAuthDestination enforces the destination decision: a selector, or an
+// explicit acknowledged broadExemption.
+func validateAuthDestination(rule PolicyRule) ([]string, error) {
+	if !authRuleHasDestination(rule) && !rule.Auth.BroadExemption {
+		return nil, fmt.Errorf("exempt rule requires a destination (destFQDN, destCategory, or destCategoryGroup), or broadExemption=true")
+	}
+	if rule.Auth.BroadExemption {
+		return []string{"broadExemption=true: authentication is waived for ALL destinations from the matched source — least privilege is bypassed; scope a destination if possible"}, nil
+	}
+	return nil, nil
+}
+
+// authRuleHasDestination reports whether the rule carries any destination
+// selector (FQDN, a concrete category, or a category group).
+func authRuleHasDestination(rule PolicyRule) bool {
+	if rule.DestFQDN != "" {
+		return true
+	}
+	if rule.DestCategory != "" && rule.DestCategory != CategoryAny {
+		return true
+	}
+	return rule.DestCategoryGroup != ""
+}
+
+// rejectIdentityPredicates returns an error if any predicate is identity-
+// dependent (invalid on auth rules — no identity exists at Stage 1).
+func rejectIdentityPredicates(sm *SubjectMatch) error {
+	if sm == nil {
+		return nil
+	}
+	for i := range sm.All {
+		if identityPredicateTypes[strings.ToLower(strings.TrimSpace(sm.All[i].Type))] {
+			return fmt.Errorf("subjectMatch predicate %q is identity-dependent and not allowed on auth rules (no identity exists when authentication is decided)", sm.All[i].Type)
+		}
+	}
+	return nil
+}
+
+// broadSubjectWarnings flags overly broad source CIDRs (least-privilege nudges).
+func broadSubjectWarnings(sm *SubjectMatch) []string {
+	if sm == nil {
+		return nil
+	}
+	var w []string
+	for i := range sm.All {
+		if sm.All[i].Type != subjectPredicateCIDR {
+			continue
+		}
+		for _, v := range sm.All[i].Values {
+			if v == "0.0.0.0/0" || v == "::/0" {
+				w = append(w, fmt.Sprintf("source %q matches all addresses — extremely broad", v))
+				continue
+			}
+			if _, ipnet, perr := net.ParseCIDR(v); perr == nil {
+				if ones, bits := ipnet.Mask.Size(); bits == 32 && ones < 24 {
+					w = append(w, fmt.Sprintf("source %q is broader than /24", v))
+				}
+			}
+		}
+	}
+	return w
 }
