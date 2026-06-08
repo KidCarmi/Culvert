@@ -393,6 +393,22 @@ func (ps *PolicyStore) Load(path string) error {
 	if err := json.Unmarshal(data, &rules); err != nil {
 		return err
 	}
+	// Drop any rule carrying a non-nil SubjectMatch on load — the same Phase-0
+	// invariant ReplaceAll enforces. Evaluate does not consult SubjectMatch yet,
+	// so a rule loaded from a hand-edited or newer-version policy.json would fail
+	// OPEN (a source-scoped rule matching every client). This closes the startup
+	// load path in addition to the bulk-replace path. In-memory only; the file is
+	// not rewritten here, so the offending line is inert and re-warned each load
+	// until removed.
+	kept := rules[:0]
+	for _, r := range rules {
+		if r != nil && r.SubjectMatch != nil {
+			logWarnf("Policy: dropping rule %q on load — subjectMatch is reserved and not yet enforced (Phase 0)", sanitizeLog(r.Name))
+			continue
+		}
+		kept = append(kept, r)
+	}
+	rules = kept
 	ps.mu.Lock()
 	ps.rules = rules
 	migrated := ps.backfillIDsLocked()

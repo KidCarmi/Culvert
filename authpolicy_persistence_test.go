@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -154,6 +156,39 @@ func TestConfigImport_MergeMode_RejectsSubjectMatch(t *testing.T) {
 		}
 		if rule.Name == "merge-scoped-should-skip" {
 			t.Errorf("import (merge) persisted the scoped rule %q", rule.Name)
+		}
+	}
+}
+
+// Path 6 — PolicyStore.Load (startup) reads policy.json directly into ps.rules,
+// bypassing ReplaceAll. A subjectMatch rule from a hand-edited or newer-version
+// file must be dropped on load, not activated (it would fail open since Evaluate
+// ignores the selector).
+func TestPolicyStore_Load_DropsSubjectMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	body := `[
+		{"priority":1,"name":"scoped-should-drop","action":"Allow",
+		 "subjectMatch":{"schemaVersion":1,"all":[{"type":"cidr","values":["10.0.0.0/8"]}]}},
+		{"priority":2,"name":"plain-allow","action":"Allow"}
+	]`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+	ps := &PolicyStore{}
+	if err := ps.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := ps.List()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 rule to survive load (subjectMatch dropped), got %d: %+v", len(got), got)
+	}
+	if got[0].Name != "plain-allow" {
+		t.Errorf("wrong rule survived load: %q", got[0].Name)
+	}
+	for _, r := range got {
+		if r.SubjectMatch != nil {
+			t.Errorf("rule %q retained a SubjectMatch after Load", r.Name)
 		}
 	}
 }
