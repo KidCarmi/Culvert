@@ -42,29 +42,24 @@ func TestValidateAuthRule_ValidExemptPasses(t *testing.T) {
 	}
 }
 
-// validatePolicyRule GATES auth rules in Slice 2: even a fully-valid exempt rule
-// is rejected at the accept path, because the persistence guards (Load/ReplaceAll)
-// and the runtime resolver are not auth-aware yet (accepted auth rules would be
-// silently dropped). The validation logic itself is exercised via validateAuthRule.
-func TestValidatePolicyRule_GatesAuthRules(t *testing.T) {
-	// A valid exempt rule still passes the dedicated validator...
-	if _, err := validateAuthRule(validExemptRule()); err != nil {
-		t.Fatalf("validateAuthRule should accept a valid exempt rule: %v", err)
+// Slice 3: validatePolicyRule now ACCEPTS a valid auth/exempt rule (the gate is
+// lifted) but still REJECTS invalid auth rules fail-closed. Runtime stays inert —
+// resolveAuthOutcome returns Default (asserted in the slice-1/runtime tests).
+func TestValidatePolicyRule_AcceptsValidAuthRule(t *testing.T) {
+	if err := validatePolicyRule(validExemptRule(), nil, -1); err != nil {
+		t.Fatalf("validatePolicyRule must accept a valid exempt rule in Slice 3: %v", err)
 	}
-	// ...but validatePolicyRule must reject it (gated, not yet accepted).
-	err := validatePolicyRule(validExemptRule(), nil, -1)
-	if err == nil {
-		t.Fatal("validatePolicyRule must gate (reject) auth rules in Slice 2")
-	}
-	if !strings.Contains(err.Error(), "not yet accepted") {
-		t.Errorf("gate error should explain auth rules are not yet accepted, got: %v", err)
-	}
-	// The gate is independent of rule validity: an INVALID auth rule is also
-	// rejected here (without needing a spec), proving acceptance is gated wholesale.
+	// An invalid auth rule (no spec) is still rejected at the accept path.
 	r := validExemptRule()
 	r.Auth = nil
 	if err := validatePolicyRule(r, nil, -1); err == nil {
-		t.Fatal("validatePolicyRule must reject auth rules regardless of validity")
+		t.Fatal("validatePolicyRule must reject an invalid auth rule (missing spec)")
+	}
+	// And one with a reserved outcome is rejected, surfacing the validateAuthRule reason.
+	r = validExemptRule()
+	r.Auth.Outcome = OutcomeSSORequired
+	if err := validatePolicyRule(r, nil, -1); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("validatePolicyRule must reject a reserved-outcome auth rule, got: %v", err)
 	}
 }
 
