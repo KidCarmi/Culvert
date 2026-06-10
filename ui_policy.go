@@ -56,10 +56,15 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered = filtered[offset:]
 
-		// Apply limit (default: all, for backward-compat with export/import).
-		limit := total
+		// Apply limit (default: all remaining after offset, for backward-compat
+		// with export/import). The ceiling MUST be len(filtered) after the
+		// offset reslice — defaulting to `total` would make filtered[:limit]
+		// read past the reslice (garbage zero-value entries, or a slice-bounds
+		// panic when the backing array cap is tight) for any offset > 0. A
+		// viewer-role GET ?offset=N could otherwise crash the proxy.
+		limit := len(filtered)
 		if limitStr != "" {
-			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v < limit {
+			if v, err := strconv.Atoi(limitStr); err == nil && v >= 0 && v < limit {
 				limit = v
 			}
 		}
