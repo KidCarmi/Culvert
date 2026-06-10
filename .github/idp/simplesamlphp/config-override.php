@@ -10,3 +10,7 @@ $config['module.enable']['saml'] = true;
 // base path so generated metadata endpoint URLs resolve correctly.
 $config['baseurlpath'] = 'simplesaml/';
 $config['secretsalt'] = getenv('SSP_SECRET_SALT') ?: 'culvert-interop-salt';
+// CI serves SSP over plain HTTP, but SSP 2.x defaults session.cookie.secure
+// to true; clients (incl. Go's cookiejar) drop Secure cookies on http://, so
+// the login flow dead-ends on the nocookie error page. Relax it for CI.
+$config['session.cookie.secure'] = false;
