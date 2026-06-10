@@ -118,7 +118,10 @@ func newRotatingFile(path string, maxMB int) (*rotatingFile, error) {
 		sz = info.Size()
 	}
 	maxBytes := int64(maxMB) * 1024 * 1024
-	if maxBytes == 0 {
+	if maxBytes <= 0 {
+		// Zero or negative (e.g. a stray -log-max-mb -1) would make the
+		// Write-time rotation check size+len > maxBytes always true, rotating
+		// on every write and thrashing the disk. Fall back to the default.
 		maxBytes = 50 * 1024 * 1024 // 50 MB default
 	}
 	return &rotatingFile{path: path, maxBytes: maxBytes, file: f, size: sz}, nil
