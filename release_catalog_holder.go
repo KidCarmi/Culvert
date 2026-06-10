@@ -43,6 +43,12 @@ func (h *CatalogHolder) GetCatalog() *Catalog { return h.cur.Load() }
 // no-catalog state).
 func (h *CatalogHolder) HasCatalog() bool { return h.cur.Load() != nil }
 
+// store atomically publishes an already-verified, immutable *Catalog. It is the
+// single publish primitive: every caller (Reload here, the Refresher in P1.5b)
+// MUST have run the bytes through LoadVerifiedCatalog first. Kept unexported so
+// no external caller can publish an unverified catalog (the trust boundary).
+func (h *CatalogHolder) store(cat *Catalog) { h.cur.Store(cat) }
+
 // Reload builds and VERIFIES a catalog from the holder's local dir via
 // LoadVerifiedCatalog (the P1.3 trust boundary) and, on success, atomically
 // publishes it. On ANY failure (read/parse/verify) it returns the error and
@@ -60,6 +66,6 @@ func (h *CatalogHolder) Reload() error {
 	if err != nil {
 		return err // keep the current catalog (which may be nil)
 	}
-	h.cur.Store(cat)
+	h.store(cat)
 	return nil
 }
