@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -362,6 +363,59 @@ func authRuleMatchesExempt(rule *PolicyRule, ctx RequestContext) bool {
 		return false
 	}
 	return matchAuthProtocolMethod(spec, ctx)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Policy — Phase 1 Slice 5: AuthOutcome OBSERVABILITY (no wiring).
+//
+// Pure builders that translate an AuthDecision into the low-cardinality SIEM
+// fields (AuthLogFields) and a metric counter. NOT called from proxy.go — the
+// auth gate is still unwired; these exist so a later slice can emit observability
+// without changing request-handling behavior.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// authLogFieldsFor builds the low-cardinality observability fields for an auth
+// decision. It carries NO identity: an Exempt decision is described by outcome +
+// rule id/name (+ low-cardinality subject predicate type names and the matched
+// rule's subject schema version) only. A non-Exempt / Default decision yields the
+// zero value, so logging stays byte-identical for un-exempted requests. Pure.
+func authLogFieldsFor(d AuthDecision) AuthLogFields {
+	if d.Outcome != OutcomeExempt || d.Rule == nil {
+		return AuthLogFields{}
+	}
+	f := AuthLogFields{
+		Outcome:        d.Outcome,
+		PolicyRuleID:   d.Rule.ID,
+		PolicyRuleName: d.Rule.Name,
+	}
+	if d.Rule.SubjectMatch != nil {
+		f.SchemaVersion = d.Rule.SubjectMatch.SchemaVersion
+		f.SubjectMatchTypes = subjectPredicateTypeNames(d.Rule.SubjectMatch)
+	}
+	return f
+}
+
+// subjectPredicateTypeNames returns the predicate TYPE names of a SubjectMatch
+// (e.g. ["cidr"]). Only the bounded, low-cardinality type identifiers are
+// returned — never the predicate VALUES (which would be high-cardinality, e.g.
+// client CIDRs) — so these are safe as log/metric dimensions.
+func subjectPredicateTypeNames(sm *SubjectMatch) []string {
+	if sm == nil || len(sm.All) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(sm.All))
+	for i := range sm.All {
+		out = append(out, sm.All[i].Type)
+	}
+	return out
+}
+
+// incAuthExempt increments the Stage-1 Exempt-decision counter exposed as
+// culvert_auth_exempt_decisions_total. Defined in Slice 5 but intentionally NOT
+// called from proxy.go / the request path yet (the metric stays at zero until the
+// auth gate is wired in a later slice).
+func incAuthExempt() {
+	atomic.AddInt64(&statAuthExempt, 1)
 }
 
 // matchSubject reports whether clientIP satisfies a typed SubjectMatch. Predicate
