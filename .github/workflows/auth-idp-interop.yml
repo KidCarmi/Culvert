@@ -84,6 +84,9 @@ jobs:
             -subj "/CN=simplesamlphp.culvert.test" \
             -out .github/idp/simplesamlphp/cert/idp.crt \
             -keyout .github/idp/simplesamlphp/cert/idp.pem
+          # openssl writes the key 0600 owned by the runner user; www-data in
+          # the container must be able to read it to sign assertions.
+          chmod 644 .github/idp/simplesamlphp/cert/idp.pem
 
       - name: Start SimpleSAMLphp
         run: |
