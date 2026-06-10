@@ -73,6 +73,7 @@ type ConfigSnapshot struct {
 	IPFilterMode          string   `json:"ip_filter_mode"`
 	IPList                []string `json:"ip_list"`
 	RateLimitRPM          int      `json:"rate_limit_rpm"`
+	RateLimitExempt       []string `json:"rate_limit_exempt,omitempty"` // IP/CIDR rate-limit whitelist; nil→skip, []→clear on DP
 	AuthEnabled           bool     `json:"auth_enabled"`
 	UnauthMode            bool     `json:"unauth_mode"`
 	ProxyBaseURL          string   `json:"proxy_base_url,omitempty"`
@@ -152,6 +153,7 @@ const (
 	maxSnapDPIPatterns         = 5_000
 	maxSnapCPAddresses         = 100
 	maxSnapPACExclusions       = 10_000
+	maxSnapRateLimitExempt     = 10_000
 	maxSnapThreatFeedURLs      = 500_000
 	maxSnapThreatFeedDomains   = 500_000
 	maxSnapDomainAllowlist     = 10_000
@@ -182,6 +184,7 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 		{"dpi_patterns", len(snap.DPIPatterns), maxSnapDPIPatterns},
 		{"cp_addresses", len(snap.CPAddresses), maxSnapCPAddresses},
 		{"pac_exclusions", len(snap.PACExclusions), maxSnapPACExclusions},
+		{"rate_limit_exempt", len(snap.RateLimitExempt), maxSnapRateLimitExempt},
 		{"threat_feed_urls", len(snap.ThreatFeedURLs), maxSnapThreatFeedURLs},
 		{"threat_feed_domains", len(snap.ThreatFeedDomains), maxSnapThreatFeedDomains},
 		{"threat_domain_allowlist", len(snap.ThreatDomainAllowlist), maxSnapDomainAllowlist},
@@ -1537,6 +1540,15 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	if snap.RateLimitRPM != rl.Limit() {
 		rl.Configure(snap.RateLimitRPM, time.Minute)
 	}
+	// Rate-limit exemptions. nil→skip (older CP / field absent), []→clear,
+	// populated→replace — mirrors the config-version rollback surface
+	// (configversion.go applyConfigBackup). CurrentConfigSnapshot always
+	// sends a non-nil slice, so a steady-state CP push keeps DP exemptions in
+	// lock-step with the CP whitelist instead of silently leaving DP nodes
+	// enforcing rate limits the operator exempted on the CP.
+	if snap.RateLimitExempt != nil {
+		rl.ReplaceExemptions(snap.RateLimitExempt)
+	}
 
 	applyExternalAuthSnapshotSettings(snap)
 
@@ -1841,6 +1853,7 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	// PAC exclusions.
 	pacCfg := pacStore.Get()
 	snap.PACExclusions = pacCfg.Exclusions
+	snap.RateLimitExempt = rl.ListExemptions()
 
 	// Threat feed data.
 	if globalThreatFeed.Enabled() {
