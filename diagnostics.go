@@ -773,6 +773,112 @@ func checkConfigRollbackValidation(s configVersionSummary) OperatorContractCheck
 	}
 }
 
+// ── Auth Exempt risk diagnostics (Phase 1 Slice 6) ──────────────────────────
+//
+// authExemptDiagnostics inspects auth/exempt (Stage-1) rules for risky postures
+// and returns WARN checks. It NEVER mutates, enables, or disables a rule — it
+// only reports. Pure over an explicit ruleset + default action, so it is testable
+// without globals.
+//
+// Backend-only in this slice: defined and tested, but intentionally NOT wired
+// into buildOperatorContract (no served API/UI surface yet). A later slice
+// appends these to the operator contract and adds a panel.
+func authExemptDiagnostics(rules []PolicyRule, defaultAction PolicyAction) []OperatorContractCheck {
+	var exempt []*PolicyRule
+	for i := range rules {
+		r := &rules[i]
+		if ruleTypeOf(r) == ruleTypeAuth && r.Auth != nil && r.Auth.Outcome == OutcomeExempt {
+			exempt = append(exempt, r)
+		}
+	}
+	if len(exempt) == 0 {
+		return nil
+	}
+
+	b := classifyExemptRisks(exempt)
+
+	var checks []OperatorContractCheck
+	warn := func(code, msg, action string, names []string) {
+		if len(names) == 0 {
+			return
+		}
+		checks = append(checks, OperatorContractCheck{
+			Code:           code,
+			Status:         diagWarn,
+			Message:        msg + ": " + strings.Join(names, ", "),
+			OperatorAction: action,
+		})
+	}
+	warn("auth_exempt_broad_exemption",
+		"exempt rules waive authentication for ALL destinations (broadExemption=true)",
+		"Scope each rule to a destination (destFQDN/category/group) unless a blanket waiver is truly required.",
+		b.broadExempt)
+	warn("auth_exempt_any_source",
+		"exempt rules match ALL source addresses (0.0.0.0/0 or ::/0)",
+		"Restrict subjectMatch to the specific client CIDRs that need the exemption.",
+		b.anySource)
+	warn("auth_exempt_wide_source",
+		"exempt rules use a source prefix broader than /24",
+		"Tighten the subjectMatch CIDR to the smallest range that covers the exempt clients.",
+		b.wideSource)
+	warn("auth_exempt_no_expiry",
+		"exempt rules have no expiry and will never auto-retire",
+		"Set an expiresAt (RFC3339) so each exemption is reviewed and removed on schedule.",
+		b.noExpiry)
+	warn("auth_exempt_broad_destination",
+		"exempt rules match all destinations (no destFQDN/category/group, or destCategory=Any)",
+		"Add a destination selector so the exemption is least-privilege.",
+		b.broadDest)
+	warn("auth_exempt_expired",
+		"exempt rules are already expired (they will not match, but remain configured)",
+		"Remove the expired exempt rules to keep the ruleset clean.",
+		b.expired)
+
+	if defaultAction == ActionAllow {
+		checks = append(checks, OperatorContractCheck{
+			Code:           "auth_exempt_default_allow",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("default policy action is Allow while %d exempt rule(s) exist — exemptions add little over an allow-all default", len(exempt)),
+			OperatorAction: "Set the default policy action to deny (Zero Trust) so exempt rules are meaningful and unmatched traffic is not allowed by default.",
+		})
+	}
+	return checks
+}
+
+// exemptRiskBuckets collects offending exempt-rule names per risk category.
+type exemptRiskBuckets struct {
+	broadExempt, anySource, wideSource, noExpiry, broadDest, expired []string
+}
+
+// classifyExemptRisks buckets each exempt rule into the risk categories it
+// triggers. Pure; never mutates the rules.
+func classifyExemptRisks(exempt []*PolicyRule) exemptRiskBuckets {
+	var b exemptRiskBuckets
+	for _, r := range exempt {
+		if r.Auth.BroadExemption {
+			b.broadExempt = append(b.broadExempt, r.Name)
+		}
+		if anySrc, wide := subjectSourceBreadth(r.SubjectMatch); anySrc || wide {
+			if anySrc {
+				b.anySource = append(b.anySource, r.Name)
+			}
+			if wide {
+				b.wideSource = append(b.wideSource, r.Name)
+			}
+		}
+		if r.Auth.ExpiresAt == "" {
+			b.noExpiry = append(b.noExpiry, r.Name)
+		}
+		if !authRuleHasDestination(*r) {
+			b.broadDest = append(b.broadDest, r.Name)
+		}
+		if authExemptExpired(r.Auth) {
+			b.expired = append(b.expired, r.Name)
+		}
+	}
+	return b
+}
+
 // apiDiagnostics serves the operator contract as JSON.
 //
 // Auth: viewer role is sufficient — the report intentionally omits secrets,
