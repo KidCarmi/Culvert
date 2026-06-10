@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -285,13 +286,137 @@ func resolveAuthOutcome(ctx RequestContext) AuthDecision {
 }
 
 // resolveAuthOutcomeFrom is the pure core of the resolver, taking an explicit
-// ruleset so it is testable without global state. Slice 1 returns Default
-// unconditionally (matching is deferred to later slices); the signature is
-// stable so wiring the matcher is purely additive.
+// ruleset so it is testable without global state. It evaluates Stage-1 auth
+// rules in priority order (lowest Priority value first, mirroring
+// PolicyStore.sortLocked / Evaluate) and returns Exempt with the matched rule
+// when an enabled, non-expired, in-schedule auth/exempt rule matches the
+// request's source / destination / protocol / method. Otherwise it returns
+// Default (Plan Freeze #9). It has no side effects and is NOT called from
+// proxy.go — wiring it onto the hot path is a later slice.
+//
+// Only Outcome=Exempt is implemented; CredentialRequired/SSORequired are
+// reserved and inert (they never match, so a request with only such rules
+// resolves to Default). Access (Stage-2) rules are ignored entirely.
 func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision {
-	_ = rules // auth-rule evaluation (matchSubject + dest/protocol/method) lands in later slices
-	_ = ctx
+	// Evaluate in priority order. Sort a copy so the decision is deterministic
+	// regardless of the caller's slice ordering (policyStore.List() is already
+	// sorted, but the contract must not depend on that).
+	ordered := make([]PolicyRule, len(rules))
+	copy(ordered, rules)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Priority < ordered[j].Priority
+	})
+	for i := range ordered {
+		rule := &ordered[i]
+		if authRuleMatchesExempt(rule, ctx) {
+			return AuthDecision{Outcome: OutcomeExempt, Rule: rule}
+		}
+	}
 	return AuthDecision{Outcome: OutcomeDefault}
+}
+
+// authRuleMatchesExempt reports whether a single rule is an enabled, currently
+// effective auth/exempt rule that matches the request. Every check fails closed:
+// a non-auth rule, a disabled rule, a missing/reserved outcome, an unscoped or
+// malformed subject, an unmet destination, an out-of-schedule or expired rule,
+// or a protocol/method mismatch all yield false.
+func authRuleMatchesExempt(rule *PolicyRule, ctx RequestContext) bool {
+	if ruleTypeOf(rule) != ruleTypeAuth { // Stage-1 only; access rules are ignored
+		return false
+	}
+	if !ruleIsEnabled(rule) {
+		return false
+	}
+	spec := rule.Auth
+	if spec == nil { // malformed auth rule
+		return false
+	}
+	if spec.Outcome != OutcomeExempt { // only Exempt is implemented; others inert
+		return false
+	}
+	// Source scope: typed CIDR SubjectMatch. nil / unknown predicate / bad IP all
+	// fail closed.
+	if !matchSubject(rule.SubjectMatch, ctx.ClientIP) {
+		return false
+	}
+	// Destination: an explicit selector, or an acknowledged broad exemption.
+	if !authRuleHasDestination(*rule) && !spec.BroadExemption {
+		return false
+	}
+	if !matchDest(rule, ctx.Host) {
+		return false
+	}
+	if !matchSchedule(rule.Schedule) {
+		return false
+	}
+	if !authRuleNotExpired(spec) {
+		return false
+	}
+	return matchAuthProtocolMethod(spec, ctx)
+}
+
+// matchSubject reports whether clientIP satisfies a typed SubjectMatch. Predicate
+// types are AND'd; values within a type are OR'd (mirroring validateSubjectMatch).
+// In Phase 1 only the "cidr" predicate is understood; any other type — including
+// the identity-dependent predicates that belong on access rules — fails closed,
+// as does a nil/empty selector or an unparseable client IP.
+func matchSubject(sm *SubjectMatch, clientIP string) bool {
+	if sm == nil || sm.SchemaVersion < 1 || len(sm.All) == 0 {
+		return false
+	}
+	if net.ParseIP(clientIP) == nil {
+		return false
+	}
+	for i := range sm.All {
+		p := sm.All[i]
+		switch p.Type {
+		case subjectPredicateCIDR:
+			if !cidrPredicateMatches(p.Values, clientIP) {
+				return false
+			}
+		default:
+			return false // unknown/unsupported predicate → fail closed
+		}
+	}
+	return true
+}
+
+// cidrPredicateMatches reports whether clientIP is contained by ANY of values
+// (each a CIDR or bare IP). An empty value list fails closed.
+func cidrPredicateMatches(values []string, clientIP string) bool {
+	for _, v := range values {
+		if matchIPOrCIDR(v, clientIP) {
+			return true
+		}
+	}
+	return false
+}
+
+// authRuleNotExpired reports whether the rule has not expired. An empty
+// ExpiresAt never expires; an unparseable timestamp fails closed (never matches).
+func authRuleNotExpired(spec *AuthRuleSpec) bool {
+	if spec.ExpiresAt == "" {
+		return true
+	}
+	exp, err := time.Parse(time.RFC3339, spec.ExpiresAt)
+	if err != nil {
+		return false
+	}
+	return time.Now().Before(exp)
+}
+
+// matchAuthProtocolMethod enforces the rule's protocol and method scope. An empty
+// protocol matches any; an empty method matches any. Method is ignored when the
+// rule targets the "connect" protocol (CONNECT carries no HTTP method), matching
+// validateAuthProtocol's "method is ignored for connect" semantics.
+func matchAuthProtocolMethod(spec *AuthRuleSpec, ctx RequestContext) bool {
+	if spec.Protocol != "" && !strings.EqualFold(spec.Protocol, ctx.Protocol) {
+		return false
+	}
+	if spec.Method != "" && spec.Protocol != "connect" && !strings.EqualFold(spec.Method, ctx.Method) {
+		return false
+	}
+	return true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

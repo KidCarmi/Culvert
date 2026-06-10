@@ -262,10 +262,10 @@ func TestApplyConfigSnapshot_RoundTripsValidAuthRule(t *testing.T) {
 		},
 	})
 	assertAuthRulePreserved(t, policyStore.List())
-	// Inert at runtime: the snapshot path must not activate the rule. Evaluate
-	// skips non-access rules, so a request from the auth rule's source must NOT
-	// be matched by it (no Stage-1 wiring in Slice 3).
-	if d := resolveAuthOutcome(RequestContext{ClientIP: "10.0.5.10", Host: "updates.example.com"}); d.Outcome != OutcomeDefault {
-		t.Errorf("Slice 3 must not activate auth rules: outcome = %q, want Default", d.Outcome)
+	// Stage-2 access evaluation still ignores the round-tripped auth rule
+	// (Evaluate skips non-access rules), so traffic decisions are unchanged: any
+	// match it returns must be an access rule, never the exempt auth rule.
+	if m := policyStore.Evaluate("10.0.5.10", "", "unauth", "updates.example.com", nil); m != nil && ruleTypeOf(m.Rule) != ruleTypeAccess {
+		t.Errorf("Stage-2 Evaluate matched a non-access rule: %+v", m.Rule)
 	}
 }

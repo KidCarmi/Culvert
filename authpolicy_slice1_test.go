@@ -47,10 +47,11 @@ func TestResolveAuthOutcomeFrom_AccessRulesOnly_Default(t *testing.T) {
 	}
 }
 
-// Even a fully-formed, enabled auth/exempt rule must NOT change the outcome in
-// Slice 1: the matcher is not wired yet, so the request still resolves to
-// Default (Exempt is modeled, not active).
-func TestResolveAuthOutcomeFrom_AuthExemptRulePresent_StillDefault(t *testing.T) {
+// Slice 4 activates the matcher: a fully-formed, enabled auth/exempt rule whose
+// source + destination match the request now resolves to Exempt with the matched
+// rule attached. (The pure resolver is still NOT wired into proxy.go — that is a
+// later slice.) The Slice-1 "still Default" expectation is superseded here.
+func TestResolveAuthOutcomeFrom_AuthExemptRuleMatches_Exempt(t *testing.T) {
 	enabled := true
 	rules := []PolicyRule{
 		{
@@ -70,10 +71,12 @@ func TestResolveAuthOutcomeFrom_AuthExemptRulePresent_StillDefault(t *testing.T)
 			},
 		},
 	}
-	// A request that WOULD match this rule once the matcher lands.
 	d := resolveAuthOutcomeFrom(rules, RequestContext{ClientIP: "10.0.5.50", Host: "updates.example.com", Protocol: "http"})
-	if d.Outcome != OutcomeDefault {
-		t.Fatalf("Slice 1 must not activate Exempt: outcome = %q, want Default", d.Outcome)
+	if d.Outcome != OutcomeExempt {
+		t.Fatalf("matching exempt rule: outcome = %q, want Exempt", d.Outcome)
+	}
+	if d.Rule == nil || d.Rule.Name != "legacy-printer" {
+		t.Fatalf("Exempt decision must carry the matched rule, got %+v", d.Rule)
 	}
 }
 
