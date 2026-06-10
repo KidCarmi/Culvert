@@ -20,14 +20,27 @@ import (
 
 // ── Existing logs unchanged when auth fields are empty ───────────────────────
 
-func TestSlice5_RecordRequest_NoAuthFields(t *testing.T) {
-	before := len(logGet())
-	recordRequest("1.2.3.4", "GET", "example.com", "OK", "", "", "", "")
-	logs := logGet()
-	if len(logs) <= before {
-		t.Fatalf("recordRequest did not add a log entry")
+// findLogByHost scans the (newest-first) request log for an entry with the given
+// host. It avoids len()-delta assertions, which are fragile under the determinism
+// gate: the request-log ring is bounded at maxLogs and evicts the oldest entry
+// once full, so a cumulative shuffled suite makes len() stop growing. A unique
+// host per test is a stable discriminator the recent-entry scan can always find.
+func findLogByHost(t *testing.T, host string) LogEntry {
+	t.Helper()
+	entries := logGet()
+	for i := range entries { // index-based: LogEntry is large (avoids rangeValCopy)
+		if entries[i].Host == host {
+			return entries[i]
+		}
 	}
-	e := logs[0] // newest-first
+	t.Fatalf("no request-log entry found for host %q", host)
+	return LogEntry{}
+}
+
+func TestSlice5_RecordRequest_NoAuthFields(t *testing.T) {
+	const host = "slice5-noauth.example.test"
+	recordRequest("198.51.100.7", "GET", host, "OK", "", "", "", "")
+	e := findLogByHost(t, host)
 	// Serialize and confirm none of the auth_* keys appear (byte-identical wire).
 	b, err := json.Marshal(e)
 	if err != nil {
@@ -102,9 +115,10 @@ func TestSlice5_PopulatedAuthFieldsSerialize(t *testing.T) {
 // ── recordRequestBytesAuth populates the entry ───────────────────────────────
 
 func TestSlice5_RecordRequestBytesAuth_PopulatesEntry(t *testing.T) {
-	recordRequestBytesAuth("10.0.5.9", "GET", "updates.example.com", "OK", "", "", "", 0, 0, "",
+	const host = "slice5-auth.example.test"
+	recordRequestBytesAuth("10.0.5.9", "GET", host, "OK", "", "", "", 0, 0, "",
 		AuthLogFields{Outcome: OutcomeExempt, PolicyRuleID: "RID", PolicyRuleName: "exempt-printer", SubjectMatchTypes: []string{"cidr"}, SchemaVersion: 1})
-	e := logGet()[0]
+	e := findLogByHost(t, host)
 	if e.AuthOutcome != "Exempt" || e.AuthPolicyRuleID != "RID" || e.AuthPolicyRuleName != "exempt-printer" {
 		t.Errorf("auth fields not attached: %+v", e)
 	}
