@@ -207,6 +207,48 @@ func TestHTTPProvider_TimeoutFailsAndCleans(t *testing.T) {
 	}
 }
 
+// The SSRF guard is enforced at DIAL time on the resolved address (closing the
+// DNS-rebind window), not as a racy preflight host check.
+func TestHTTPProvider_DialGuardRejectsPrivate(t *testing.T) {
+	ts, err := NewTrustStore(nil, VerifyDisabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewHTTPCatalogProvider("https://releases.example.com/catalog/", ts) // production guard wired
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.safeDialContext(context.Background(), "tcp", "127.0.0.1:9"); err == nil {
+		t.Fatal("safeDialContext must refuse a private/loopback address")
+	}
+}
+
+// Redirects are re-guarded (private target refused) and capped.
+func TestHTTPProvider_RedirectGuard(t *testing.T) {
+	ts, err := NewTrustStore(nil, VerifyDisabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewHTTPCatalogProvider("https://releases.example.com/catalog/", ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1/evil", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.checkRedirect(priv, nil); err == nil {
+		t.Fatal("checkRedirect must refuse a redirect to a private host")
+	}
+	pub, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://cdn.example.com/x", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.checkRedirect(pub, make([]*http.Request, 5)); err == nil {
+		t.Fatal("checkRedirect must cap the redirect chain")
+	}
+}
+
 func TestHTTPProvider_UnchangedCatalog304(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {

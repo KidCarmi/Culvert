@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -81,13 +82,79 @@ func NewHTTPCatalogProvider(baseURL string, trust TrustStore) (*HTTPCatalogProvi
 	if u.Host == "" {
 		return nil, errors.New("release catalog: base URL has no host")
 	}
-	return &HTTPCatalogProvider{
+	p := &HTTPCatalogProvider{
 		base:     u,
-		client:   &http.Client{Timeout: httpCatalogDefaultTimeout},
 		trust:    trust,
 		maxBytes: catalogMaxReadBytes,
-		guard:    isPrivateHost, // defense-in-depth SSRF guard
-	}, nil
+		guard:    isPrivateHost, // defense-in-depth SSRF guard (dial-time + redirects)
+	}
+	// The SSRF guard is enforced at DIAL time (on the actually-resolved address,
+	// closing the DNS-rebind gap) and on every redirect hop — not as a racy
+	// preflight host check. p.guard==nil (tests) makes both no-ops for loopback.
+	p.client = &http.Client{
+		Timeout:       httpCatalogDefaultTimeout,
+		CheckRedirect: p.checkRedirect,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           p.safeDialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		},
+	}
+	return p, nil
+}
+
+// safeDialContext resolves the host and dials a PUBLIC resolved IP directly, so
+// the address checked is the address dialed (no TOCTOU / DNS-rebind window). It
+// rejects any private/internal address. With p.guard==nil it dials normally
+// (tests/loopback).
+func (p *HTTPCatalogProvider) safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if p.guard == nil {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("release catalog: resolve %s: %w", host, err)
+	}
+	var lastErr error
+	for i := range ips {
+		ip := ips[i].IP
+		if isPrivateIP(ip) {
+			lastErr = fmt.Errorf("release catalog: SSRF: %s resolves to private address %s", host, ip)
+			continue
+		}
+		conn, derr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if derr == nil {
+			return conn, nil
+		}
+		lastErr = derr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("release catalog: no public address for %s", host)
+	}
+	return nil, lastErr
+}
+
+// checkRedirect re-applies the SSRF guard to each redirect target host (the
+// redirected dial is ALSO guarded by safeDialContext) and caps the hop count.
+func (p *HTTPCatalogProvider) checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("release catalog: too many redirects")
+	}
+	if p.guard != nil {
+		if err := p.guard(req.URL.Host); err != nil {
+			return fmt.Errorf("release catalog: SSRF guard (redirect to %s): %w", req.URL.Host, err)
+		}
+	}
+	return nil
 }
 
 // SetRetry configures the minimal retry/backoff hook. retries is the number of
@@ -253,11 +320,8 @@ func (p *HTTPCatalogProvider) fetch(ctx context.Context, rel string) ([]byte, er
 func (p *HTTPCatalogProvider) doGet(ctx context.Context, rel string, decorate func(*http.Request)) (*http.Response, error) {
 	u := *p.base
 	u.Path = path.Join("/", u.Path, rel) // anchor at "/" so a path-less base URL still yields /rel
-	if p.guard != nil {
-		if err := p.guard(u.Host); err != nil {
-			return nil, fmt.Errorf("release catalog: SSRF guard: %w", err)
-		}
-	}
+	// SSRF is enforced at dial time (safeDialContext) and on redirects
+	// (checkRedirect), not as a racy preflight host check.
 	target := u.String()
 
 	var lastErr error
