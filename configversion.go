@@ -202,7 +202,7 @@ func listConfigVersions(w http.ResponseWriter) {
 		return
 	}
 
-	var versions []ConfigVersion
+	versions := make([]ConfigVersion, 0)
 	for _, e := range entries {
 		if !strings.HasPrefix(e.Name(), "v") || !strings.HasSuffix(e.Name(), ".json") {
 			continue
