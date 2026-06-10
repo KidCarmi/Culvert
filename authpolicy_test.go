@@ -297,11 +297,12 @@ func TestLogEntry_AdditiveFieldsOmitWhenEmpty(t *testing.T) {
 	}
 	out := string(b)
 	for _, key := range []string{
-		"schema_version", "auth_source", "auth_policy_rule_id",
-		"auth_policy_rule_name", "access_rule_id", "subject_match_types",
+		"schema_version", "auth_source", "auth_outcome", "auth_policy_rule_id",
+		"auth_policy_rule_name", "access_rule_id", "auth_subject_match_types",
+		"auth_schema_version",
 	} {
 		if strings.Contains(out, key) {
-			t.Errorf("unpopulated Phase-0 field %q leaked into wire output: %s", key, out)
+			t.Errorf("unpopulated auth/SIEM field %q leaked into wire output: %s", key, out)
 		}
 	}
 }
