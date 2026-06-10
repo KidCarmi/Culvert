@@ -465,10 +465,12 @@ jobs:
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
       - name: gosec (agent module)
+        # G703 excluded for parity with security-release-gate.yml (taint-mode
+        # variant of the already-excluded G304; see the comment there).
         working-directory: cmd/culvert-maint
         run: |
           $(go env GOPATH)/bin/gosec \
-            -exclude=G104,G302,G304,G401,G402,G704 \
+            -exclude=G104,G302,G304,G401,G402,G703,G704 \
             -fmt=text \
             ./...
 
