@@ -56,7 +56,12 @@ func (cl *ConnLimiter) Enable(maxPerIP int) {
 	if maxPerIP <= 0 {
 		maxPerIP = defaultMaxConnsPerIP
 	}
+	// Enable is called at runtime (admin API, config import, CP snapshot
+	// sync) while Acquire reads maxPerIP on the proxy hot path — the write
+	// must happen under the same lock.
+	cl.mu.Lock()
 	cl.maxPerIP = maxPerIP
+	cl.mu.Unlock()
 	cl.enabled.Store(true)
 }
 
@@ -92,9 +97,11 @@ func (cl *ConnLimiter) Acquire(ip string) bool {
 	}
 	// Hold lock through the increment to prevent TOCTOU race with Release().
 	n := atomic.AddInt64(ctr, 1)
+	// Snapshot the limit under the lock — Enable() may rewrite it at runtime.
+	limit := int64(cl.maxPerIP)
 	cl.mu.Unlock()
 
-	if n > int64(cl.maxPerIP) {
+	if n > limit {
 		cl.mu.Lock()
 		// Re-check that the counter still exists in the map before decrementing.
 		if cur, exists := cl.conns[ip]; exists && cur == ctr {
