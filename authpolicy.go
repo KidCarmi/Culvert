@@ -214,6 +214,30 @@ func authBypassDisabled() bool {
 	return authBypassDisableVal
 }
 
+// ─── Auth Exempt kill switch (Phase 1 Slice 6) ──────────────────────────────
+
+// authExemptDisabledRuntime is the runtime/global kill-switch toggle for Auth
+// Exempt decisions. It augments the read-once env kill switch
+// (CULVERT_AUTHBYPASS_DISABLE) with an operator-settable runtime control so an
+// admin can fail all exemptions closed without a restart. Backend-only in this
+// slice — no API/UI is wired to it yet.
+var authExemptDisabledRuntime atomic.Bool
+
+// setAuthExemptDisabled engages (true) or releases (false) the runtime kill
+// switch. Defined for a future admin/runtime toggle; not exposed via API/UI yet.
+func setAuthExemptDisabled(v bool) { authExemptDisabledRuntime.Store(v) }
+
+// authExemptDisabledRuntimeState reports the runtime toggle state only (excludes
+// the env kill switch). Used by diagnostics/observability, not the gate decision.
+func authExemptDisabledRuntimeState() bool { return authExemptDisabledRuntime.Load() }
+
+// authExemptKillSwitchEngaged reports whether Auth Exempt resolution must fail
+// closed to Default (auth-required). It is engaged when EITHER the read-once env
+// kill switch (CULVERT_AUTHBYPASS_DISABLE) is set OR the runtime toggle is on.
+func authExemptKillSwitchEngaged() bool {
+	return authBypassDisabled() || authExemptDisabledRuntime.Load()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Authentication Policy — Phase 1 Slice 1: AuthOutcome resolver CONTRACT.
 //
@@ -298,7 +322,16 @@ func resolveAuthOutcome(ctx RequestContext) AuthDecision {
 // Only Outcome=Exempt is implemented; CredentialRequired/SSORequired are
 // reserved and inert (they never match, so a request with only such rules
 // resolves to Default). Access (Stage-2) rules are ignored entirely.
+//
+// Break-glass: when the kill switch is engaged (env CULVERT_AUTHBYPASS_DISABLE or
+// the runtime toggle), this returns Default for EVERY request — all exemptions
+// fail closed to auth-required. The kill-switch read is the one piece of global
+// state this otherwise-pure core consults.
 func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision {
+	// Fail closed to Default when the break-glass kill switch is engaged.
+	if authExemptKillSwitchEngaged() {
+		return AuthDecision{Outcome: OutcomeDefault}
+	}
 	// Evaluate in priority order. Sort a copy so the decision is deterministic
 	// regardless of the caller's slice ordering (policyStore.List() is already
 	// sorted, but the contract must not depend on that).
@@ -706,6 +739,42 @@ func policyRulePersistable(r *PolicyRule) (ok bool, reason string) {
 		return false, "auth spec is only valid on auth rules"
 	}
 	return true, ""
+}
+
+// subjectSourceBreadth classifies the source breadth of a SubjectMatch for
+// operator diagnostics (Phase 1 Slice 6). anySource is true if any CIDR value is
+// 0.0.0.0/0 or ::/0; wide is true if any IPv4 prefix is broader than /24. Pure;
+// mirrors the breadth logic of broadSubjectWarnings without producing strings.
+func subjectSourceBreadth(sm *SubjectMatch) (anySource, wide bool) {
+	if sm == nil {
+		return false, false
+	}
+	for i := range sm.All {
+		if sm.All[i].Type != subjectPredicateCIDR {
+			continue
+		}
+		for _, v := range sm.All[i].Values {
+			if v == "0.0.0.0/0" || v == "::/0" {
+				anySource = true
+				continue
+			}
+			if _, ipnet, err := net.ParseCIDR(v); err == nil {
+				if ones, bits := ipnet.Mask.Size(); bits == 32 && ones < 24 {
+					wide = true
+				}
+			}
+		}
+	}
+	return anySource, wide
+}
+
+// authExemptExpired reports whether an exempt rule's expiry has passed. A blank
+// ExpiresAt is NOT expired (that "no expiry" risk is a separate diagnostic); an
+// unparseable timestamp is treated as expired (consistent with the matcher's
+// fail-closed expiry handling). Reuses authRuleNotExpired so the parse logic is
+// shared with the resolver.
+func authExemptExpired(spec *AuthRuleSpec) bool {
+	return spec != nil && spec.ExpiresAt != "" && !authRuleNotExpired(spec)
 }
 
 // broadSubjectWarnings flags overly broad source CIDRs (least-privilege nudges).
