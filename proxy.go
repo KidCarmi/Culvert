@@ -900,7 +900,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	destConn, err := (&net.Dialer{Timeout: 10 * time.Second, Control: ssrfControl}).DialContext(r.Context(), "tcp", host)
+	// ssrfSafeDialContext applies ssrfControl on every resolved address,
+	// matching every other outbound dial in the codebase (the previous inline
+	// dialer used the same Control hook). isPrivateHost above is the DNS-layer
+	// guard; this is the connect-layer guard — defense in depth.
+	destConn, err := ssrfSafeDialContext(r.Context(), "tcp", host)
 	if err != nil {
 		logger.Printf("WS dial error %q: %v", sanitizeLog(host), err)
 		if isDNSError(err) {
@@ -928,6 +932,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// Only a 101 Switching Protocols actually upgrades the connection. If the
+	// upstream declined the upgrade (any other status), relay the response
+	// through the normal ResponseWriter and return WITHOUT hijacking. Entering
+	// raw-tunnel mode on a connection that never switched protocols would let a
+	// client pipeline arbitrary bytes to the target over a keep-alive HTTP
+	// connection, bypassing the HTTP-level policy and scanning that plain
+	// requests are subject to. The SSL-inspected path already gates on this.
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		logger.Printf("WS: upstream declined upgrade for %q (status %d)", sanitizeLog(host), resp.StatusCode)
+		copyHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body) //nolint:errcheck
+		return
+	}
 
 	// Hijack the client connection and replay the 101 response.
 	hijacker, ok := w.(http.Hijacker)
