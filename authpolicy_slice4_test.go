@@ -273,6 +273,20 @@ func TestSlice4_ScheduleHitAndMiss(t *testing.T) {
 	assertDefault(t, resolveAuthOutcomeFrom([]PolicyRule{miss}, matchingCtx()))
 }
 
+// A malformed schedule timezone must fail closed (require auth), not silently
+// fall back to UTC and grant Exempt. Bulk persistence paths (Load/ReplaceAll)
+// skip validatePolicyRule's timezone check, so the matcher must enforce it.
+func TestSlice4_MalformedScheduleTimezoneFailsClosed(t *testing.T) {
+	r := authRule()
+	r.Schedule = &PolicySchedule{Timezone: "Not/AZone"}
+	assertDefault(t, resolveAuthOutcomeFrom([]PolicyRule{r}, matchingCtx()))
+
+	// A valid timezone with an all-day (no day/time restriction) schedule matches.
+	r2 := authRule()
+	r2.Schedule = &PolicySchedule{Timezone: "UTC"}
+	assertExempt(t, resolveAuthOutcomeFrom([]PolicyRule{r2}, matchingCtx()), "exempt-printer")
+}
+
 // ── broadExemption ───────────────────────────────────────────────────────────
 
 func TestSlice4_BroadExemptionMatchesAnyDestination(t *testing.T) {

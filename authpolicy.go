@@ -346,6 +346,15 @@ func authRuleMatchesExempt(rule *PolicyRule, ctx RequestContext) bool {
 	if !matchDest(rule, ctx.Host) {
 		return false
 	}
+	// Schedule: a malformed timezone must fail closed (require auth), NOT silently
+	// fall back to UTC. matchSchedule is shared with Stage-2 access evaluation and
+	// stays lenient (changing it would alter traffic behavior); the auth gate adds
+	// its own strict pre-check. Bulk persistence paths (Load/ReplaceAll) do not run
+	// validatePolicyRule's timezone check, so a hand-edited or cluster-synced auth
+	// rule can carry an invalid timezone — that must not grant Exempt.
+	if !authScheduleParseable(rule.Schedule) {
+		return false
+	}
 	if !matchSchedule(rule.Schedule) {
 		return false
 	}
@@ -390,6 +399,19 @@ func cidrPredicateMatches(values []string, clientIP string) bool {
 		}
 	}
 	return false
+}
+
+// authScheduleParseable reports whether the rule's schedule is well-formed enough
+// for the auth gate to trust it. A nil schedule or empty timezone is fine; a
+// non-empty but unparseable IANA timezone fails closed (the Stage-1 gate must not
+// waive authentication based on a schedule it cannot evaluate, and unlike
+// validatePolicyRule the bulk persistence paths never reject such a timezone).
+func authScheduleParseable(s *PolicySchedule) bool {
+	if s == nil || s.Timezone == "" {
+		return true
+	}
+	_, err := time.LoadLocation(s.Timezone)
+	return err == nil
 }
 
 // authRuleNotExpired reports whether the rule has not expired. An empty
