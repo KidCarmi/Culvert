@@ -180,7 +180,7 @@ func TestSlice5_AuthExemptMetric_DefinedNotIncrementedByRuntime(t *testing.T) {
 
 	// The metric is defined in the exposition.
 	w := httptest.NewRecorder()
-	handleMetrics(w, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+	handleMetrics(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
 	if w.Code != http.StatusOK {
 		t.Fatalf("metrics status = %d", w.Code)
 	}
