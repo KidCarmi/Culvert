@@ -159,7 +159,10 @@ func (r *IdPRegistry) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(r.path, data, 0o600)
+	// Atomic temp+rename: IdP profiles hold client secrets and SAML certs —
+	// a crash mid-write must not leave a truncated, unparseable file that
+	// silently drops all external auth on the next restart.
+	return atomicWriteFile(r.path, data, 0o600)
 }
 
 // compile initialises a live IdentityProvider from a profile.
