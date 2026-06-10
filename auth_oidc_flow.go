@@ -504,13 +504,20 @@ func (p *OIDCFlowProvider) validateIDToken(rawToken, expectedNonce string) (*Ide
 		return nil, fmt.Errorf("oidc: jwks key %q: %w", kidStr, err)
 	}
 
-	// Full validation with signature check.
-	token, err := jwtv5.NewParser(
+	// Full validation with signature check. The issuer claim is pinned to
+	// the discovery document's issuer (OIDC Core §3.1.3.7 step 2): without
+	// it, a token minted by a different issuer that shares the same JWKS —
+	// e.g. another tenant of a multi-tenant IdP — would be accepted.
+	opts := []jwtv5.ParserOption{
 		jwtv5.WithIssuedAt(),
 		jwtv5.WithAudience(p.cfg.ClientID),
 		jwtv5.WithExpirationRequired(),
-		jwtv5.WithLeeway(60*time.Second), // tolerate clock skew between IdP and proxy
-	).Parse(rawToken, func(t *jwtv5.Token) (interface{}, error) {
+		jwtv5.WithLeeway(60 * time.Second), // tolerate clock skew between IdP and proxy
+	}
+	if p.disc.Issuer != "" {
+		opts = append(opts, jwtv5.WithIssuer(p.disc.Issuer))
+	}
+	token, err := jwtv5.NewParser(opts...).Parse(rawToken, func(t *jwtv5.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwtv5.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
