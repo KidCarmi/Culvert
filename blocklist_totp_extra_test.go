@@ -28,7 +28,7 @@ func TestBlocklist_MergeFromLines_Basic(t *testing.T) {
 		"example.com", // duplicate — should not count twice
 	}
 
-	added := b.MergeFromLines(lines)
+	added := b.MergeFromLines(lines, "")
 	// Expect: example.com, *.wildcard.org, spaces.net, stripped.com, also-stripped.net, uppercase.com = 6
 	if added != 6 {
 		t.Errorf("expected 6 new entries, got %d", added)
@@ -56,7 +56,7 @@ func TestBlocklist_MergeFromLines_Basic(t *testing.T) {
 	}
 
 	// Merge again — all duplicates, added should be 0.
-	added2 := b.MergeFromLines([]string{"example.com", "*.wildcard.org"})
+	added2 := b.MergeFromLines([]string{"example.com", "*.wildcard.org"}, "")
 	if added2 != 0 {
 		t.Errorf("re-merging existing entries should add 0, got %d", added2)
 	}
@@ -64,11 +64,11 @@ func TestBlocklist_MergeFromLines_Basic(t *testing.T) {
 
 func TestBlocklist_MergeFromLines_Empty(t *testing.T) {
 	b := newBlocklist()
-	added := b.MergeFromLines(nil)
+	added := b.MergeFromLines(nil, "")
 	if added != 0 {
 		t.Errorf("nil input should add 0 entries, got %d", added)
 	}
-	added = b.MergeFromLines([]string{"", "#comment", "   "})
+	added = b.MergeFromLines([]string{"", "#comment", "   "}, "")
 	if added != 0 {
 		t.Errorf("blank/comment-only input should add 0 entries, got %d", added)
 	}
@@ -77,7 +77,7 @@ func TestBlocklist_MergeFromLines_Empty(t *testing.T) {
 func TestBlocklist_MergeFromLines_SchemeOnlyStripsToEmpty(t *testing.T) {
 	b := newBlocklist()
 	// "https://" alone — after stripping scheme gets "", should be skipped.
-	added := b.MergeFromLines([]string{"https://", "http://"})
+	added := b.MergeFromLines([]string{"https://", "http://"}, "")
 	if added != 0 {
 		t.Errorf("scheme-only lines should be skipped, got %d added", added)
 	}
@@ -108,7 +108,7 @@ func TestBlocklist_ModeSetGet(t *testing.T) {
 
 func TestBlocklist_IsBlockedAndAllowlist(t *testing.T) {
 	b := newBlocklist()
-	b.MergeFromLines([]string{"evil.com", "*.bad.org"})
+	b.MergeFromLines([]string{"evil.com", "*.bad.org"}, "")
 
 	// Block mode (default): listed host → blocked.
 	if !b.IsBlocked("evil.com") {

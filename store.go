@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"sort"
 	"strings"
@@ -563,15 +564,17 @@ func auditGetMemory(offset, limit int, fromTS, toTS int64) ([]AuditEntry, int) {
 // BlocklistEntry is a single blocklist host with its origin.
 type BlocklistEntry struct {
 	Host   string `json:"host"`
-	Source string `json:"source"` // "manual" or "feed"
+	Source string `json:"source"`         // "manual" or "feed"
+	Feed   string `json:"feed,omitempty"` // feed URL that imported this entry, when known
 }
 
 type Blocklist struct {
 	mu         sync.RWMutex
-	exact      map[string]bool // exact hostnames
-	wildcards  map[string]bool // dot-prefixes: ".example.com"
-	manual     map[string]bool // subset added by an admin (not the feed)
-	exceptions map[string]bool // hosts that are NEVER blocked, even if listed
+	exact      map[string]bool   // exact hostnames
+	wildcards  map[string]bool   // dot-prefixes: ".example.com"
+	manual     map[string]bool   // subset added by an admin (not the feed)
+	exceptions map[string]bool   // hosts that are NEVER blocked, even if listed
+	feedSrc    map[string]string // host → feed URL attribution (lazily initialized)
 	path       string
 	mode       string // "block" (default) or "allow"
 }
@@ -610,6 +613,79 @@ func (b *Blocklist) saveMode() {
 	_ = atomicWriteFile(b.path+".mode", []byte(b.mode), 0o600)
 }
 
+// loadHostSidecar reads a one-host-per-line sidecar (".manual" /
+// ".exceptions"), warning on lines that don't look like hostnames
+// (D1.2-flag-F4) but accepting them anyway. lower controls whether
+// lines are lowercased (exceptions yes, manual no — preserving the
+// pre-extraction byte-for-byte behavior of each loop).
+func loadHostSidecar(path, kind string, lower bool) map[string]bool {
+	out := map[string]bool{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if lower {
+			line = strings.ToLower(line)
+		}
+		if line == "" {
+			continue
+		}
+		if !looksLikeHostname(line) {
+			logger.Printf("Loader: blocklist.%s: line %d at %q does not look like a hostname: %q — accepting anyway (D1.2-flag-F4)", kind, i+1, sanitizeLog(path), sanitizeLog(line))
+		}
+		out[line] = true
+	}
+	return out
+}
+
+// loadFeedSources reads the ".sources" attribution sidecar (host → feed URL).
+func loadFeedSources(path string) map[string]string {
+	feedSrc := map[string]string{}
+	if data, err := os.ReadFile(path); err == nil {
+		if jerr := json.Unmarshal(data, &feedSrc); jerr != nil {
+			logger.Printf("Loader: blocklist.sources: unparseable %q: %v — attribution reset", sanitizeLog(path), jerr)
+			feedSrc = map[string]string{}
+		}
+	}
+	return feedSrc
+}
+
+// scanBlocklistEntries reads the main blocklist file, normalizing every line
+// (see normalizeBlocklistLine). Entries stored verbatim by pre-normalization
+// feed imports ("0.0.0.0 ads.example") are repaired into blockable hostnames;
+// unblockable junk rows are dropped, with one summary log line.
+func scanBlocklistEntries(f io.Reader, path string) (exact, wildcards map[string]bool, err error) {
+	exact = map[string]bool{}
+	wildcards = map[string]bool{}
+	repaired := 0
+	dropped := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		raw := sc.Text()
+		line, ok := normalizeBlocklistLine(raw)
+		if !ok {
+			if t := strings.TrimSpace(raw); t != "" && !strings.HasPrefix(t, "#") {
+				dropped++ // junk entry from a pre-normalization feed import
+			}
+			continue
+		}
+		if line != strings.ToLower(strings.TrimSpace(raw)) {
+			repaired++ // e.g. "0.0.0.0 ads.example" stored verbatim by old imports
+		}
+		if strings.HasPrefix(line, "*.") {
+			wildcards[line[1:]] = true
+		} else {
+			exact[line] = true
+		}
+	}
+	if repaired > 0 || dropped > 0 {
+		logger.Printf("Blocklist: normalized %d hosts-format entries and dropped %d unblockable entries from %q (pre-normalization feed import); file rewritten on next save", repaired, dropped, sanitizeLog(path))
+	}
+	return exact, wildcards, sc.Err()
+}
+
 func (b *Blocklist) Load(path string) error {
 	b.path = path
 	// Load mode sidecar.
@@ -625,62 +701,26 @@ func (b *Blocklist) Load(path string) error {
 			logger.Printf("Loader: blocklist.mode: unrecognized value %q at %q, mode left at default (D1.2-flag-F3)", sanitizeLog(m), sanitizeLog(path+".mode"))
 		}
 	}
-	// Load manual sidecar — tracks which hosts were added by an admin.
-	manual := map[string]bool{}
-	if data, err := os.ReadFile(path + ".manual"); err == nil {
-		for i, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			if !looksLikeHostname(line) {
-				logger.Printf("Loader: blocklist.manual: line %d at %q does not look like a hostname: %q — accepting anyway (D1.2-flag-F4)", i+1, sanitizeLog(path+".manual"), sanitizeLog(line))
-			}
-			manual[line] = true
-		}
-	}
-	// Load exceptions sidecar — hosts that are never blocked regardless of the list.
-	exceptions := map[string]bool{}
-	if data, err := os.ReadFile(path + ".exceptions"); err == nil {
-		for i, line := range strings.Split(string(data), "\n") {
-			line = strings.ToLower(strings.TrimSpace(line))
-			if line == "" {
-				continue
-			}
-			if !looksLikeHostname(line) {
-				logger.Printf("Loader: blocklist.exceptions: line %d at %q does not look like a hostname: %q — accepting anyway (D1.2-flag-F4)", i+1, sanitizeLog(path+".exceptions"), sanitizeLog(line))
-			}
-			exceptions[line] = true
-		}
-	}
+	// Sidecars: admin attribution, never-block exceptions, feed attribution.
+	manual := loadHostSidecar(path+".manual", "manual", false)
+	exceptions := loadHostSidecar(path+".exceptions", "exceptions", true)
+	feedSrc := loadFeedSources(path + ".sources")
+
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	exact, wildcards, scanErr := scanBlocklistEntries(f, path)
 
-	exact := map[string]bool{}
-	wildcards := map[string]bool{}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.ToLower(line)
-		if strings.HasPrefix(line, "*.") {
-			wildcards[line[1:]] = true
-		} else {
-			exact[line] = true
-		}
-	}
 	b.mu.Lock()
 	b.exact = exact
 	b.wildcards = wildcards
 	b.manual = manual
 	b.exceptions = exceptions
+	b.feedSrc = feedSrc
 	b.mu.Unlock()
-	return sc.Err()
+	return scanErr
 }
 
 func (b *Blocklist) Save() {
@@ -699,6 +739,22 @@ func (b *Blocklist) Save() {
 		buf.WriteString(suffix)
 		buf.WriteByte('\n')
 	}
+	// Feed-source attribution sidecar, pruned to currently-listed,
+	// non-manual entries so removed hosts don't accumulate stale rows.
+	sources := map[string]string{}
+	for h, src := range b.feedSrc {
+		if b.manual[h] {
+			continue
+		}
+		if strings.HasPrefix(h, "*.") {
+			if !b.wildcards[h[1:]] {
+				continue
+			}
+		} else if !b.exact[h] {
+			continue
+		}
+		sources[h] = src
+	}
 	path := b.path
 	b.mu.RUnlock()
 	// CL-1 / Bucket-4 durability hardening: atomicWriteFile gives
@@ -706,6 +762,9 @@ func (b *Blocklist) Save() {
 	// fsync(parent dir) — replaces the previous os.OpenFile+os.Rename
 	// path which was atomic-via-rename but NOT fsynced.
 	_ = atomicWriteFile(path, []byte(buf.String()), 0o600)
+	if data, err := json.Marshal(sources); err == nil {
+		_ = atomicWriteFile(path+".sources", data, 0o600)
+	}
 }
 
 // isListed reports whether host matches any entry in the list (mode-agnostic).
@@ -1027,6 +1086,7 @@ func (b *Blocklist) Remove(host string) {
 		delete(b.exact, host)
 	}
 	delete(b.manual, host)
+	delete(b.feedSrc, host)
 	b.mu.Unlock()
 	b.saveManual()
 }
@@ -1051,19 +1111,19 @@ func (b *Blocklist) ListWithSource() []BlocklistEntry {
 	defer b.mu.RUnlock()
 	out := make([]BlocklistEntry, 0, len(b.exact)+len(b.wildcards))
 	for h := range b.exact {
-		src := "feed"
+		src, feed := "feed", b.feedSrc[h]
 		if b.manual[h] {
-			src = "manual"
+			src, feed = "manual", ""
 		}
-		out = append(out, BlocklistEntry{Host: h, Source: src})
+		out = append(out, BlocklistEntry{Host: h, Source: src, Feed: feed})
 	}
 	for suffix := range b.wildcards {
 		h := "*" + suffix
-		src := "feed"
+		src, feed := "feed", b.feedSrc[h]
 		if b.manual[h] {
-			src = "manual"
+			src, feed = "manual", ""
 		}
-		out = append(out, BlocklistEntry{Host: h, Source: src})
+		out = append(out, BlocklistEntry{Host: h, Source: src, Feed: feed})
 	}
 	return out
 }
@@ -1083,29 +1143,78 @@ func (b *Blocklist) ClearAll() {
 	b.exact = map[string]bool{}
 	b.wildcards = map[string]bool{}
 	b.manual = map[string]bool{}
+	b.feedSrc = map[string]string{}
 	b.mu.Unlock()
 }
 
-// Lines starting with '#' or empty are skipped.
+// hostsFileBoilerplate lists names that appear in the standard header of
+// /etc/hosts-format feeds (e.g. StevenBlack). They are never legitimately
+// blockable upstream hosts, so hosts-format lines naming them are skipped.
+var hostsFileBoilerplate = map[string]bool{
+	"localhost": true, "localhost.localdomain": true, "local": true,
+	"broadcasthost": true, "ip6-localhost": true, "ip6-loopback": true,
+	"ip6-localnet": true, "ip6-mcastprefix": true, "ip6-allnodes": true,
+	"ip6-allrouters": true, "ip6-allhosts": true,
+}
+
+// normalizeBlocklistLine extracts the blockable host from one feed or
+// blocklist-file line. It handles plain domain lists, /etc/hosts format
+// ("0.0.0.0 domain" / "127.0.0.1 domain"), inline comments, accidental
+// schemes, and trailing paths/ports. Returns ok=false for lines that carry
+// no blockable host (comments, hosts-file boilerplate, unspecified/loopback
+// IPs). Wildcard entries ("*.example.com") pass through untouched.
+func normalizeBlocklistLine(raw string) (string, bool) {
+	line := strings.TrimSpace(raw)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", false
+	}
+	// Inline comment: "0.0.0.0 ads.example # comment".
+	if i := strings.Index(line, "#"); i >= 0 {
+		line = strings.TrimSpace(line[:i])
+	}
+	// /etc/hosts format: "<ip> <host> [aliases…]" — take the first host.
+	hostsFormat := false
+	if fields := strings.Fields(line); len(fields) == 0 {
+		return "", false
+	} else if len(fields) >= 2 && net.ParseIP(fields[0]) != nil {
+		line = fields[1]
+		hostsFormat = true
+	} else {
+		line = fields[0]
+	}
+	// Strip scheme if someone accidentally includes it.
+	if i := strings.Index(line, "://"); i >= 0 {
+		line = line[i+3:]
+	}
+	// Strip path/query/port.
+	if i := strings.IndexAny(line, "/:?"); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.ToLower(line)
+	if line == "" {
+		return "", false
+	}
+	// "0.0.0.0 0.0.0.0" and friends: an unspecified/loopback IP is not a
+	// blockable upstream host.
+	if ip := net.ParseIP(line); ip != nil && (ip.IsUnspecified() || ip.IsLoopback()) {
+		return "", false
+	}
+	if hostsFormat && hostsFileBoilerplate[line] {
+		return "", false
+	}
+	return line, true
+}
+
+// Lines starting with '#' or empty are skipped; /etc/hosts-format lines are
+// normalized to their hostname (see normalizeBlocklistLine).
+// source is the feed URL recorded as per-entry attribution ("" = none).
 // Returns the number of newly-added entries.
-func (b *Blocklist) MergeFromLines(lines []string) int {
+func (b *Blocklist) MergeFromLines(lines []string, source string) int {
 	added := 0
 	b.mu.Lock()
 	for _, raw := range lines {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		// Strip scheme if someone accidentally includes it.
-		if i := strings.Index(line, "://"); i >= 0 {
-			line = line[i+3:]
-		}
-		// Strip path/query/port.
-		if i := strings.IndexAny(line, "/:?"); i >= 0 {
-			line = line[:i]
-		}
-		line = strings.ToLower(line)
-		if line == "" {
+		line, ok := normalizeBlocklistLine(raw)
+		if !ok {
 			continue
 		}
 		if strings.HasPrefix(line, "*.") {
@@ -1119,6 +1228,16 @@ func (b *Blocklist) MergeFromLines(lines []string) int {
 				b.exact[line] = true
 				added++
 			}
+		}
+		// Stamp attribution on feed-owned entries (also retroactively on
+		// re-sync, so pre-attribution entries converge). Admin-added
+		// entries keep their "manual" badge — ListWithSource checks
+		// b.manual first.
+		if source != "" && !b.manual[line] {
+			if b.feedSrc == nil {
+				b.feedSrc = map[string]string{}
+			}
+			b.feedSrc[line] = source
 		}
 	}
 	b.mu.Unlock()

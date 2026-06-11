@@ -192,7 +192,7 @@ func (bs *BlocklistSyncer) SyncFeed(feedURL string) (int, error) {
 	}
 	bs.mu.Unlock()
 
-	added := bs.bl.MergeFromLines(lines)
+	added := bs.bl.MergeFromLines(lines, feedURL)
 
 	bs.mu.Lock()
 	if st, ok := bs.feeds[feedURL]; ok {
@@ -243,7 +243,7 @@ func (bs *BlocklistSyncer) fetchFeedLines(feedURL string) ([]string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), blFeedHTTPTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request for %s: %w", feedURL, err)
 	}
