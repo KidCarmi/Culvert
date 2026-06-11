@@ -237,6 +237,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	var authenticatedIdentity string
 	var authenticatedGroups []string
 	authenticatedSource := "unauth" // default: no credentials presented
+	var authLog AuthLogFields       // Stage-1 auth observability; zero unless an exempt rule matched
 
 	authRequired := !cfg.UnauthMode() && (cfg.AuthEnabled() || cfg.ProviderEnabled() || len(idpRegistry.EnabledProviders()) > 0)
 
@@ -281,6 +282,26 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					authenticatedIdentity = u
 					authenticatedSource = "local"
 				}
+			} else if d := resolveAuthOutcome(authRequestContext(r, clientIP)); d.Outcome == OutcomeExempt {
+				// ── 3a. No credentials — Stage-1 auth-policy exemption ───────
+				// An explicitly matched auth/exempt rule waives the challenge
+				// for this request ONLY. No identity is created:
+				// authenticatedIdentity stays empty, so X-User-Identity is
+				// never set and groups stay nil. authenticatedSource becomes
+				// "exempt" (NOT "unauth") so Stage-2 policy, request logs, and
+				// SIEM can distinguish explicit exemptions from plain
+				// unauthenticated traffic. Execution falls through to the same
+				// blocklist/threat/policy pipeline as every other request —
+				// default-deny still applies. Note: a stale/expired session
+				// cookie with no Proxy-Authorization lands here too and is
+				// treated as "no credentials" (exempt-eligible); presented-but-
+				// invalid credentials never reach this branch — they 407 in
+				// arm 2 above.
+				authLog = authLogFieldsFor(d)
+				authenticatedSource = authSourceExempt
+				incAuthExempt()
+				logger.Printf("AUTH_EXEMPT rule=%q id=%q %s -> %q {req_id=%s}",
+					sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
 			} else {
 				// ── 3. No credentials ────────────────────────────────────────
 				isBrowser := strings.Contains(r.Header.Get("User-Agent"), "Mozilla")
@@ -329,7 +350,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity, "")
+		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity, "", authLog)
 		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
 		return
 	}
@@ -340,7 +361,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		// Domain-level check (applies to CONNECT and plain HTTP).
 		if result := globalSecScanner.CheckDomain(host); result != nil {
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, "")
+			recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, "", authLog)
 			logger.Printf("THREAT_BLOCKED domain %s -> %q (%q)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
 			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
 			return
@@ -349,7 +370,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
 			if result := globalSecScanner.CheckURL(r.URL.String()); result != nil {
 				atomic.AddInt64(&statBlocked, 1)
-				recordRequest(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, "")
+				recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, "", authLog)
 				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
 				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
 				return
@@ -361,7 +382,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	if pluginDecision(clientIP, r.Method, host) == DecisionBlock {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by plugin", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity, "")
+		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity, "", authLog)
 		return
 	}
 
@@ -372,7 +393,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		if ext := fileBlocker.CheckPath(r.URL.Path); ext != "" {
 			atomic.AddInt64(&statFileBlocked, 1)
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, "")
+			recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, "", authLog)
 			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 			return
@@ -391,7 +412,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		switch match.Action {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "")
+			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "", authLog)
 			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
@@ -402,14 +423,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "")
+			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "", authLog)
 			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return
 
 		case ActionRedirect:
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity, "")
+			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity, "", authLog)
 			if !isSafeRedirectURL(match.Rule.RedirectURL) {
 				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
 				http.Error(w, "Forbidden", http.StatusForbidden)
@@ -429,13 +450,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				if match.Rule != nil && match.Rule.FileProfileBlocked(r.URL.Path) {
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
-					recordRequest(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "")
+					recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", authLog)
 					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
 					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
 					return
 				}
 			}
-			recordRequest(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, "")
+			recordRequestAuth(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, "", authLog)
 			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Fall through to normal handling below.
 		}
@@ -443,12 +464,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		// No rule matched — apply the configured default action.
 		if defaultPolicyAction() == "allow" {
 			// Passthrough mode: allow all unmatched traffic (initial setup).
-			recordRequest(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow", authenticatedIdentity, "")
+			recordRequestAuth(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow", authenticatedIdentity, "", authLog)
 		} else {
 			// Zero Trust: deny by default. Serve the custom HTML block page so
 			// end-users see a clear, branded explanation.
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, "")
+			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, "", authLog)
 			logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
 			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
 			return
