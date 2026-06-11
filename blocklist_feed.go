@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -28,6 +29,8 @@ const (
 	blFeedTickInterval    = 60 * time.Second
 	blFeedMaxRedirects    = 5
 )
+
+var blFeedURLPattern = regexp.MustCompile(`^https?://[^/?#\s]+(?:[/?#][^\s]*)?$`)
 
 // BlocklistFeed is a point-in-time status snapshot of one configured feed,
 // returned by Feeds() for the admin API and settings persistence.
@@ -224,6 +227,9 @@ func (bs *BlocklistSyncer) SyncAll() (int, error) {
 // re-checked, closing the gap where a feed host starts resolving to a
 // private address after it was saved.
 func (bs *BlocklistSyncer) fetchFeedLines(feedURL string) ([]string, error) {
+	if !blFeedURLPattern.MatchString(feedURL) {
+		return nil, fmt.Errorf("feed URL must be an absolute http(s) URL")
+	}
 	u, err := url.Parse(feedURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid feed URL: %w", err)
