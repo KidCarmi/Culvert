@@ -873,13 +873,18 @@ func TestBlocklistSyncer_Sync_BadURL(t *testing.T) {
 		exact: map[string]bool{}, wildcards: map[string]bool{},
 		manual: map[string]bool{}, exceptions: map[string]bool{},
 	}
-	bs := newBlocklistSyncer(testBL, "http://127.0.0.1:1/nonexistent", 24*time.Hour)
-	count, err := bs.Sync()
+	bs := newBlocklistSyncer(testBL)
+	bs.SetFeed("http://127.0.0.1:1/nonexistent", 24*time.Hour)
+	count, err := bs.SyncAll()
 	if err == nil {
 		t.Error("expected error for bad URL")
 	}
 	if count != 0 {
 		t.Errorf("count = %d, want 0", count)
+	}
+	feeds := bs.Feeds()
+	if len(feeds) != 1 || feeds[0].LastError == "" {
+		t.Errorf("feed should record LastError; got %+v", feeds)
 	}
 }
 

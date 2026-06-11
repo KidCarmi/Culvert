@@ -131,33 +131,22 @@ func TestLoadBlocklist_EmptyConfigStillAssignsSyncer(t *testing.T) {
 	if blFeedSyncer == nil {
 		t.Fatal("loadBlocklist with empty cfg must still assign blFeedSyncer (UI handlers depend on it)")
 	}
-	url, _, _, interval := blFeedSyncer.Stats()
-	if url != "" {
-		t.Errorf("Stats URL = %q; want empty", url)
-	}
-	if interval != blFeedDefaultInterval {
-		t.Errorf("Stats interval = %v; want default %v", interval, blFeedDefaultInterval)
+	if feeds := blFeedSyncer.Feeds(); len(feeds) != 0 {
+		t.Errorf("Feeds() = %v; want empty (no feed URL configured)", feeds)
 	}
 }
 
-// TestLoadBlocklist_EmptyURLPinsDefaultInterval guards the
-// behaviour-preservation invariant that the empty-URL branch always
-// constructs blFeedSyncer with blFeedDefaultInterval, regardless of
-// cfg.FeedInterval. The pre-extraction body hard-coded
-// blFeedDefaultInterval in this branch; if a future refactor passes
-// cfg.FeedInterval through instead, the admin API's first read of
-// blFeedSyncer.Stats() would expose a user-set
-// blocklist_feed_interval value even though auto-sync was disabled
-// at startup.
-func TestLoadBlocklist_EmptyURLPinsDefaultInterval(t *testing.T) {
+// TestLoadBlocklist_EmptyURLAddsNoFeed guards the multi-feed loader
+// contract: an empty cfg.FeedURL must not register any feed, even
+// when cfg.FeedInterval carries a user-set value — a user-set
+// blocklist_feed_interval is dormant until a feed URL is configured.
+func TestLoadBlocklist_EmptyURLAddsNoFeed(t *testing.T) {
 	ensureBlocklistStartupTestLogger(t)
 	snapshotBlocklistGlobals(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	// cfg.FeedInterval is non-default but cfg.FeedURL is empty — the
-	// loader MUST pin the syncer to blFeedDefaultInterval.
 	loadBlocklist(blocklistStartupConfig{
 		FeedURL:      "",
 		FeedInterval: 30 * time.Minute,
@@ -166,10 +155,8 @@ func TestLoadBlocklist_EmptyURLPinsDefaultInterval(t *testing.T) {
 	if blFeedSyncer == nil {
 		t.Fatal("blFeedSyncer must be non-nil")
 	}
-	_, _, _, interval := blFeedSyncer.Stats()
-	if interval != blFeedDefaultInterval {
-		t.Errorf("empty-URL branch must pin to default; got interval = %v, want %v",
-			interval, blFeedDefaultInterval)
+	if feeds := blFeedSyncer.Feeds(); len(feeds) != 0 {
+		t.Errorf("Feeds() = %v; want empty (interval alone must not create a feed)", feeds)
 	}
 }
 
@@ -239,11 +226,14 @@ func TestLoadBlocklist_FeedURLStartsSyncer(t *testing.T) {
 	if blFeedSyncer == nil {
 		t.Fatal("blFeedSyncer must be non-nil after a FeedURL load")
 	}
-	url, _, _, interval := blFeedSyncer.Stats()
-	if url != wantURL {
-		t.Errorf("Stats URL = %q; want %q", url, wantURL)
+	feeds := blFeedSyncer.Feeds()
+	if len(feeds) != 1 {
+		t.Fatalf("Feeds() len = %d; want 1", len(feeds))
 	}
-	if interval != 30*time.Minute {
-		t.Errorf("Stats interval = %v; want 30m", interval)
+	if feeds[0].URL != wantURL {
+		t.Errorf("feed URL = %q; want %q", feeds[0].URL, wantURL)
+	}
+	if feeds[0].Interval != 30*time.Minute {
+		t.Errorf("feed interval = %v; want 30m", feeds[0].Interval)
 	}
 }

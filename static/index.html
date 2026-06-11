@@ -823,10 +823,11 @@ tr.dragging  { opacity: .4; }
               </select>
             </div>
             <div style="display:flex;gap:6px">
-              <button class="btn" data-click="saveBlocklistFeed">Save</button>
-              <button class="btn ghost" data-click="syncBlocklistFeed">Sync Now</button>
+              <button class="btn" data-click="saveBlocklistFeed">Add / Update Feed</button>
+              <button class="btn ghost" data-click="syncBlocklistFeed">Sync All Now</button>
             </div>
           </div>
+          <div id="s-bl-feed-list" style="margin-bottom:8px"></div>
           <div id="s-bl-feed-status" style="font-size:.8rem;color:var(--muted)"></div>
         </div>
       </div>
@@ -3520,7 +3521,9 @@ document.addEventListener('click', e => {
     case 'removeHost':        removeHost(arg); break;
     case 'removeException':   removeException(arg); break;
     case 'saveBlocklistFeed': saveBlocklistFeed(); break;
-    case 'syncBlocklistFeed': syncBlocklistFeed(); break;
+    case 'syncBlocklistFeed': syncBlocklistFeed(arg); break;
+    case 'editBlocklistFeed': editBlocklistFeed(arg, arg2); break;
+    case 'deleteBlocklistFeed': deleteBlocklistFeed(arg); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
 
     // ── Security / IP filter ──
@@ -6508,25 +6511,53 @@ async function loadDeliveryHistory() {
   } catch(e) { console.error(e); }
 }
 
+// fmtFeedInterval renders a Go duration string ("24h0m0s", "0s") for display.
+function fmtFeedInterval(s) {
+  if (!s || s === '0s') return 'Disabled';
+  return s.replace(/(\d+h)0m0s$/, '$1').replace(/(\d+m)0s$/, '$1');
+}
+
 async function fetchBlocklistFeed() {
+  const list = document.getElementById('s-bl-feed-list');
+  const st = document.getElementById('s-bl-feed-status');
   try {
     const d = await api('/api/blocklist/feed');
-    document.getElementById('s-bl-feed-url').value = d.url || '';
-    const sel = document.getElementById('s-bl-feed-interval');
-    sel.value = d.interval && d.interval !== '0s' ? d.interval : 'off';
-    const st = document.getElementById('s-bl-feed-status');
-    if (d.last_sync) {
-      st.textContent = `Last synced: ${new Date(d.last_sync).toLocaleString()} — ${d.imported_count} entries imported`;
-    } else {
-      st.textContent = d.url ? 'Not yet synced' : 'No feed configured';
+    const feeds = d.feeds || [];
+    if (!feeds.length) {
+      list.innerHTML = '';
+      st.textContent = 'No feeds configured';
+      return;
     }
+    st.textContent = '';
+    let html = '<table class="table" style="font-size:.8rem"><thead><tr><th>Feed URL</th><th>Interval</th><th>Last Sync</th><th>Imported</th><th></th></tr></thead><tbody>';
+    feeds.forEach(f => {
+      const last = f.last_sync
+        ? new Date(f.last_sync).toLocaleString()
+        : (f.last_error ? '' : 'Not yet synced');
+      const err = f.last_error
+        ? `<span style="color:var(--red)" title="${escHtml(f.last_error)}">sync failed</span>` : '';
+      html += `<tr>
+        <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(f.url)}">${escHtml(f.url)}</td>
+        <td>${escHtml(fmtFeedInterval(f.interval))}</td>
+        <td>${escHtml(last)} ${err}</td>
+        <td>${f.imported_count || 0}</td>
+        <td class="text-right" style="white-space:nowrap">
+          <button class="btn ghost sm" style="font-size:.72rem" data-click="syncBlocklistFeed" data-arg="${escHtml(f.url)}">Sync</button>
+          <button class="btn ghost sm" style="font-size:.72rem" data-click="editBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${escHtml(f.interval)}">Edit</button>
+          <button class="btn ghost sm" style="font-size:.72rem;color:var(--red)" data-click="deleteBlocklistFeed" data-arg="${escHtml(f.url)}">Delete</button>
+        </td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    list.innerHTML = html;
   } catch(e) { console.error(e); }
 }
 
 async function saveBlocklistFeed() {
   const url      = document.getElementById('s-bl-feed-url').value.trim();
   const interval = document.getElementById('s-bl-feed-interval').value;
-  if (url && !url.startsWith('https://') && !url.startsWith('http://')) {
+  if (!url) { toast('Feed URL is required', 'error'); return; }
+  if (!url.startsWith('https://') && !url.startsWith('http://')) {
     toast('Feed URL must start with http:// or https://', 'error'); return;
   }
   try {
@@ -6535,15 +6566,38 @@ async function saveBlocklistFeed() {
       body: JSON.stringify({url, interval})
     });
     toast('Blocklist feed saved', 'success');
+    document.getElementById('s-bl-feed-url').value = '';
     fetchBlocklistFeed();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
-async function syncBlocklistFeed() {
+// editBlocklistFeed pre-fills the form with an existing feed so saving
+// updates it (feeds are keyed by URL).
+function editBlocklistFeed(url, interval) {
+  document.getElementById('s-bl-feed-url').value = url;
+  const sel = document.getElementById('s-bl-feed-interval');
+  const norm = fmtFeedInterval(interval);
+  sel.value = norm === 'Disabled' ? 'off' : norm;
+  if (sel.value !== (norm === 'Disabled' ? 'off' : norm)) sel.value = '24h'; // non-preset interval
+  document.getElementById('s-bl-feed-url').focus();
+}
+
+async function deleteBlocklistFeed(url) {
+  if (!await confirmAction('Remove Feed', `Remove feed "${url}"? Domains already imported stay on the blocklist.`, 'Remove')) return;
   try {
-    await api('/api/blocklist/feed/sync', {method: 'POST'});
-    toast('Feed sync triggered', 'success');
-    setTimeout(fetchBlocklistFeed, 2000);
+    await api('/api/blocklist/feed?url=' + encodeURIComponent(url), {method: 'DELETE'});
+    toast('Feed removed', 'success');
+    fetchBlocklistFeed();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function syncBlocklistFeed(url) {
+  try {
+    const qs = url ? '?url=' + encodeURIComponent(url) : '';
+    const d = await api('/api/blocklist/feed/sync' + qs, {method: 'POST'});
+    toast(`Sync complete — ${d.domains_synced} new domains imported`, 'success');
+    fetchBlocklistFeed();
+    fetchBlocklist();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
