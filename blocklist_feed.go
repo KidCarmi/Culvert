@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -63,8 +64,8 @@ func newBlocklistSyncer(bl *Blocklist) *BlocklistSyncer {
 // SetFeed adds or updates a feed. interval 0 disables auto-sync for that
 // feed (it can still be synced manually). Existing sync statistics are
 // preserved on update.
-func (bs *BlocklistSyncer) SetFeed(url string, interval time.Duration) {
-	if url == "" {
+func (bs *BlocklistSyncer) SetFeed(feedURL string, interval time.Duration) {
+	if feedURL == "" {
 		return
 	}
 	if interval < 0 {
@@ -75,11 +76,11 @@ func (bs *BlocklistSyncer) SetFeed(url string, interval time.Duration) {
 	if bs.feeds == nil {
 		bs.feeds = map[string]*blFeedState{}
 	}
-	if st, ok := bs.feeds[url]; ok {
+	if st, ok := bs.feeds[feedURL]; ok {
 		st.interval = interval
 		return
 	}
-	bs.feeds[url] = &blFeedState{interval: interval}
+	bs.feeds[feedURL] = &blFeedState{interval: interval}
 }
 
 // ClearFeeds removes every configured feed. Used when restoring persisted
@@ -94,13 +95,13 @@ func (bs *BlocklistSyncer) ClearFeeds() {
 // RemoveFeed deletes a feed by URL. Returns false when no such feed exists.
 // Domains already merged into the blocklist are NOT removed (feed imports
 // are merge-only by design).
-func (bs *BlocklistSyncer) RemoveFeed(url string) bool {
+func (bs *BlocklistSyncer) RemoveFeed(feedURL string) bool {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
-	if _, ok := bs.feeds[url]; !ok {
+	if _, ok := bs.feeds[feedURL]; !ok {
 		return false
 	}
-	delete(bs.feeds, url)
+	delete(bs.feeds, feedURL)
 	return true
 }
 
@@ -110,9 +111,9 @@ func (bs *BlocklistSyncer) Feeds() []BlocklistFeed {
 	bs.mu.RLock()
 	defer bs.mu.RUnlock()
 	out := make([]BlocklistFeed, 0, len(bs.feeds))
-	for url, st := range bs.feeds {
+	for feedURL, st := range bs.feeds {
 		out = append(out, BlocklistFeed{
-			URL:           url,
+			URL:           feedURL,
 			Interval:      st.interval,
 			LastSync:      st.lastSync,
 			LastError:     st.lastError,
@@ -146,35 +147,35 @@ func (bs *BlocklistSyncer) syncDue() {
 	now := time.Now()
 	bs.mu.RLock()
 	var due []string
-	for url, st := range bs.feeds {
+	for feedURL, st := range bs.feeds {
 		if st.interval <= 0 {
 			continue
 		}
 		if st.lastAttempt.IsZero() || now.Sub(st.lastAttempt) >= st.interval {
-			due = append(due, url)
+			due = append(due, feedURL)
 		}
 	}
 	bs.mu.RUnlock()
-	for _, url := range due {
-		_, _ = bs.SyncFeed(url)
+	for _, feedURL := range due {
+		_, _ = bs.SyncFeed(feedURL)
 	}
 }
 
 // SyncFeed fetches one feed by URL and merges new domains into the blocklist.
 // Returns the number of new domains added and any error encountered. The
 // feed's status fields are updated either way.
-func (bs *BlocklistSyncer) SyncFeed(url string) (int, error) {
+func (bs *BlocklistSyncer) SyncFeed(feedURL string) (int, error) {
 	bs.mu.RLock()
-	_, known := bs.feeds[url]
+	_, known := bs.feeds[feedURL]
 	bs.mu.RUnlock()
 	if !known {
-		return 0, fmt.Errorf("feed not configured: %s", url)
+		return 0, fmt.Errorf("feed not configured: %s", feedURL)
 	}
 
-	lines, err := bs.fetchFeedLines(url)
+	lines, err := bs.fetchFeedLines(feedURL)
 
 	bs.mu.Lock()
-	st, still := bs.feeds[url]
+	st, still := bs.feeds[feedURL]
 	if !still { // removed while the fetch was in flight
 		bs.mu.Unlock()
 		return 0, nil
@@ -190,14 +191,14 @@ func (bs *BlocklistSyncer) SyncFeed(url string) (int, error) {
 	added := bs.bl.MergeFromLines(lines)
 
 	bs.mu.Lock()
-	if st, ok := bs.feeds[url]; ok {
+	if st, ok := bs.feeds[feedURL]; ok {
 		st.lastSync = time.Now()
 		st.lastError = ""
 		st.importedCount += int64(added)
 	}
 	bs.mu.Unlock()
 
-	logger.Printf("BlocklistFeed: synced %q — added %d new entries", sanitizeLog(url), added)
+	logger.Printf("BlocklistFeed: synced %q — added %d new entries", sanitizeLog(feedURL), added)
 	return added, nil
 }
 
@@ -217,18 +218,33 @@ func (bs *BlocklistSyncer) SyncAll() (int, error) {
 }
 
 // fetchFeedLines downloads the feed body and returns its non-empty lines.
-func (bs *BlocklistSyncer) fetchFeedLines(url string) ([]string, error) {
+// The SSRF guard runs inline at this call site (not only at admin-API save
+// time) so every sync — scheduler, manual, or settings-restored feed — is
+// re-checked, closing the gap where a feed host starts resolving to a
+// private address after it was saved.
+func (bs *BlocklistSyncer) fetchFeedLines(feedURL string) ([]string, error) {
+	u, err := url.Parse(feedURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid feed URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("feed URL scheme %q must be http or https", u.Scheme)
+	}
+	if err := isPrivateHost(u.Hostname()); err != nil {
+		return nil, fmt.Errorf("feed URL blocked by SSRF guard: %w", err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), blFeedHTTPTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request for %s: %w", url, err)
+		return nil, fmt.Errorf("build request for %s: %w", feedURL, err)
 	}
 	client := &http.Client{Timeout: blFeedHTTPTimeout}
-	resp, err := client.Do(req) // #nosec G107 -- URL is operator-configured
+	resp, err := client.Do(req) // #nosec G107 -- operator-configured URL; scheme + isPrivateHost guard above
 	if err != nil {
-		logger.Printf("BlocklistFeed: fetch %q failed: %v", sanitizeLog(url), err)
-		return nil, fmt.Errorf("fetch %s: %w", url, err)
+		logger.Printf("BlocklistFeed: fetch %q failed: %v", sanitizeLog(feedURL), err)
+		return nil, fmt.Errorf("fetch %s: %w", feedURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -241,8 +257,8 @@ func (bs *BlocklistSyncer) fetchFeedLines(url string) ([]string, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		logger.Printf("BlocklistFeed: read error from %q: %v", sanitizeLog(url), err)
-		return nil, fmt.Errorf("read %s: %w", url, err)
+		logger.Printf("BlocklistFeed: read error from %q: %v", sanitizeLog(feedURL), err)
+		return nil, fmt.Errorf("read %s: %w", feedURL, err)
 	}
 	return lines, nil
 }

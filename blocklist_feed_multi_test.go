@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -106,8 +107,24 @@ func TestBlocklistSyncer_ZeroValueSafe(t *testing.T) {
 	}
 }
 
+// allowLoopbackSSRF seeds the SSRF DNS cache so isPrivateHost treats
+// 127.0.0.1 (the httptest server) as public for the duration of the test,
+// letting the inline sync-time guard pass. The entry is deleted on cleanup
+// so other tests see pristine fail-closed behaviour. Tests in this package
+// run sequentially (no t.Parallel), so the window cannot leak.
+func allowLoopbackSSRF(t *testing.T) {
+	t.Helper()
+	ssrfDNSCache.Store("127.0.0.1", false)
+	t.Cleanup(func() {
+		ssrfDNSCache.mu.Lock()
+		delete(ssrfDNSCache.entries, "127.0.0.1")
+		ssrfDNSCache.mu.Unlock()
+	})
+}
+
 func TestBlocklistSyncer_SyncFeed_MergesAndCounts(t *testing.T) {
 	bs := newTestBlocklistSyncer(t)
+	allowLoopbackSSRF(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("# comment\nmulti-feed-a.invalid\nmulti-feed-b.invalid\n"))
 	}))
@@ -139,6 +156,23 @@ func TestBlocklistSyncer_SyncFeed_MergesAndCounts(t *testing.T) {
 	added, err = bs.SyncFeed(srv.URL)
 	if err != nil || added != 0 {
 		t.Errorf("re-sync: added = %d, err = %v; want 0, nil", added, err)
+	}
+}
+
+// TestBlocklistSyncer_SyncFeed_BlocksPrivateHost pins the inline sync-time
+// SSRF guard: even a feed that somehow entered the store (e.g. a tampered
+// settings file bypassing the admin-API guard) must be refused at fetch
+// time when its host resolves to a private address.
+func TestBlocklistSyncer_SyncFeed_BlocksPrivateHost(t *testing.T) {
+	bs := newTestBlocklistSyncer(t)
+	bs.SetFeed("http://127.0.0.1:9/feed.txt", 0)
+	_, err := bs.SyncFeed("http://127.0.0.1:9/feed.txt")
+	if err == nil || !strings.Contains(err.Error(), "SSRF") {
+		t.Errorf("SyncFeed to loopback: err = %v; want SSRF-guard rejection", err)
+	}
+	feeds := bs.Feeds()
+	if len(feeds) != 1 || feeds[0].LastError == "" {
+		t.Errorf("feed should record the guard rejection in LastError; got %+v", feeds)
 	}
 }
 
