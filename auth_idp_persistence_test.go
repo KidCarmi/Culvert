@@ -22,7 +22,11 @@ func testOktaProfile() *IdPProfile {
 		Type:    IdPTypeOIDC,
 		Enabled: false,
 		OIDC: &OIDCProfileConfig{
-			Issuer:       "https://example.okta.com",
+			// example.com: IANA-reserved, resolves to a public address, so it
+			// passes validateExternalURL's fail-closed DNS check without
+			// depending on a third party's DNS config (same convention as
+			// TestAPIIdPListPost_StoresAndRedactsClientSecret).
+			Issuer:       "https://example.com",
 			ClientID:     "client",
 			ClientSecret: "super-secret",
 		},
