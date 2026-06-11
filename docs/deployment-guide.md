@@ -30,6 +30,7 @@ services:
       -socks5-port 1080
       -ca-path /data/ca.bundle
       -ui-users-file /data/ui_users.json
+      -idp-profiles-file /data/idp_profiles.json
       -policy /data/policy.json
       -blocklist /data/blocklist.txt
       -audit-log /data/audit.jsonl
@@ -58,6 +59,7 @@ export CULVERT_CA_PASSPHRASE="your-strong-passphrase"
   -socks5-port 1080 \
   -ca-path /data/ca.bundle \
   -ui-users-file /data/ui_users.json \
+  -idp-profiles-file /data/idp_profiles.json \
   -policy /data/policy.json \
   -audit-log /data/audit.jsonl \
   -threat-feed-db /data/threatfeeds.json
@@ -154,6 +156,7 @@ export CULVERT_CA_PASSPHRASE="your-strong-passphrase"
   -cp-grpc-ca /certs/ca.crt \
   -ca-path /data/ca.bundle \
   -ui-users-file /data/ui_users.json \
+  -idp-profiles-file /data/idp_profiles.json \
   -policy /data/policy.json \
   -audit-log /data/audit.jsonl \
   -threat-feed-db /data/threatfeeds.json
@@ -262,6 +265,7 @@ services:
       -cp-grpc-ca /certs/ca.crt
       -ca-path /data/ca.bundle
       -ui-users-file /data/ui_users.json
+      -idp-profiles-file /data/idp_profiles.json
       -policy /data/policy.json
       -audit-log /data/audit.jsonl
       -threat-feed-db /data/threatfeeds.json

@@ -16,8 +16,9 @@ type uiAccessPolicyStartupConfig struct {
 	// BaseURL is fc.Proxy.BaseURL, the externally-visible URL used for
 	// OIDC/SAML callback construction.
 	BaseURL string
-	// IdPProfilesFile is fc.Proxy.IdPProfilesFile, the generic-IdP
-	// registry JSON path. Empty ⇒ registry disabled.
+	// IdPProfilesFile is the generic-IdP registry JSON path: the
+	// -idp-profiles-file CLI value when set, else fc.Proxy.IdPProfilesFile.
+	// Empty ⇒ registry is in-memory only (profiles lost on restart).
 	IdPProfilesFile string
 	// HasOIDCOrSAML is true when any OIDC/SAML configuration is present
 	// (legacy introspection URL OR generic IdP registry file). Used
@@ -28,15 +29,21 @@ type uiAccessPolicyStartupConfig struct {
 // resolveUIAccessPolicyStartupConfig is the single startup-time reader of
 // fc.UIAllowIPs and fc.Proxy.BaseURL + fc.Proxy.IdPProfilesFile for the
 // UI access-policy slice. uiAllowIPCLI is the dereferenced --ui-allow-ip
-// CLI value. The resolver ALSO observes fc.OIDC.IntrospectionURL and
-// fc.Proxy.IdPProfilesFile to precompute HasOIDCOrSAML, but those fields
-// remain primarily owned by legacy-auth-providers / UI-access (respectively).
-func resolveUIAccessPolicyStartupConfig(fc *FileConfig, uiAllowIPCLI string) uiAccessPolicyStartupConfig {
+// CLI value; idpProfilesFileCLI is the dereferenced -idp-profiles-file CLI
+// value and takes precedence over fc.Proxy.IdPProfilesFile when non-empty.
+// The resolver ALSO observes fc.OIDC.IntrospectionURL and the resolved IdP
+// path to precompute HasOIDCOrSAML, but those fields remain primarily owned
+// by legacy-auth-providers / UI-access (respectively).
+func resolveUIAccessPolicyStartupConfig(fc *FileConfig, uiAllowIPCLI, idpProfilesFileCLI string) uiAccessPolicyStartupConfig {
+	idpFile := fc.Proxy.IdPProfilesFile
+	if idpProfilesFileCLI != "" {
+		idpFile = idpProfilesFileCLI
+	}
 	return uiAccessPolicyStartupConfig{
 		AllowIPCLI:      uiAllowIPCLI,
 		AllowList:       fc.UIAllowIPs,
 		BaseURL:         fc.Proxy.BaseURL,
-		IdPProfilesFile: fc.Proxy.IdPProfilesFile,
-		HasOIDCOrSAML:   fc.OIDC.IntrospectionURL != "" || fc.Proxy.IdPProfilesFile != "",
+		IdPProfilesFile: idpFile,
+		HasOIDCOrSAML:   fc.OIDC.IntrospectionURL != "" || idpFile != "",
 	}
 }

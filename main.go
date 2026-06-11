@@ -99,6 +99,7 @@ type startupState struct {
 	threatFeedDB            *string
 	uiUsersFile             *string
 	fileProfilesFile        *string
+	idpProfilesFile         *string
 	uiNoTLS                 *bool
 	catFeedDB               *string
 	catFeedURL              *string
@@ -249,6 +250,7 @@ func parseFlags(s *startupState) {
 	s.threatFeedDB = flag.String("threat-feed-db", "", "Path for persisted threat feed JSON database")
 	s.uiUsersFile = flag.String("ui-users-file", "", "Path to persist admin UI users across restarts (e.g. /data/ui_users.json)")
 	s.fileProfilesFile = flag.String("fileprofiles-file", "", "Path to persist file extension profiles (e.g. /data/fileprofiles.json)")
+	s.idpProfilesFile = flag.String("idp-profiles-file", "", "Path to persist IdP profiles (OIDC/SAML SSO) across restarts (e.g. /data/idp_profiles.json); overrides proxy.idp_profiles_file")
 	s.uiNoTLS = flag.Bool("ui-no-tls", false, "Disable auto self-signed TLS; serve admin UI over plain HTTP")
 	s.catFeedDB = flag.String("cat-feed-db", "", "Directory for BadgerDB URL category community feed (empty=disabled)")
 	s.catFeedURL = flag.String("cat-feed-url", "", "Override URL for the UT1 category tarball (default: UT1 Capestat)")
@@ -563,7 +565,7 @@ func initGeoIP(s *startupState) {
 // initUIAccessPolicy is the PR3 expansion shim: resolve the UI access
 // policy slice (IP allowlist + base URL + IdP registry) and apply it.
 func initUIAccessPolicy(s *startupState) {
-	cfg := resolveUIAccessPolicyStartupConfig(s.fc, *s.uiAllowIP)
+	cfg := resolveUIAccessPolicyStartupConfig(s.fc, *s.uiAllowIP, *s.idpProfilesFile)
 	if err := loadUIAccessPolicy(cfg); err != nil {
 		log.Fatalf("%v", err)
 	}

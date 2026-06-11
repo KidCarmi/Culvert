@@ -110,6 +110,7 @@ services:
           -cat-feed-db /data/catfeeddb
           -ui-users-file /data/ui_users.json
           -fileprofiles-file /data/fileprofiles.json
+          -idp-profiles-file /data/idp_profiles.json
           -cluster-db /data/cluster.json"
 
         if [ -n "$$CP_CERT" ]; then
@@ -186,7 +187,8 @@ services:
           -yara-rules-dir /data/yara
           -threat-feed-db /data/threatfeeds.json
           -cat-feed-db /data/catfeeddb
-          -fileprofiles-file /data/fileprofiles.json"
+          -fileprofiles-file /data/fileprofiles.json
+          -idp-profiles-file /data/idp_profiles.json"
 
         if [ -n "$$ENROLL_URL" ]; then
           ARGS="$$ARGS --enroll $$ENROLL_URL"

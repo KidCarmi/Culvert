@@ -20,7 +20,7 @@ proxy:
   policy_file: ""     # JSON file for PBAC policy rules
   base_url: ""        # Full external UI URL for OIDC/SAML callbacks and SAML SP metadata (e.g. "https://proxy.corp.com:9090" or "https://proxy.corp.com/culvert")
   geoip_db: "/app/GeoLite2-Country.mmdb"  # GeoIP database (db-ip.com CC BY 4.0)
-  idp_profiles_file: "" # JSON file for generic IdP profiles
+  idp_profiles_file: "/data/idp_profiles.json" # JSON file persisting IdP profiles (OIDC/SAML SSO). Empty = in-memory only — profiles are LOST on restart. CLI -idp-profiles-file overrides.
   url_categories_file: "" # JSON file for dynamic URL categories
   fileprofiles_file: ""   # JSON file for file extension profiles
 
