@@ -10,7 +10,10 @@ package main
 // pattern in blocklist_startup_test.go and admin_settings_nilfeed_test.go.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -108,14 +111,18 @@ func TestBlocklistSyncer_ZeroValueSafe(t *testing.T) {
 }
 
 // allowLoopbackSSRF seeds the SSRF DNS cache so isPrivateHost treats
-// 127.0.0.1 (the httptest server) as public for the duration of the test,
-// letting the inline sync-time guard pass. The entry is deleted on cleanup
-// so other tests see pristine fail-closed behaviour. Tests in this package
-// run sequentially (no t.Parallel), so the window cannot leak.
+// 127.0.0.1 (the httptest server) as public and swaps in a plain dialer for
+// the duration of the test, letting the sync-time and dial-time guards pass.
+// Cleanup restores pristine fail-closed behaviour. Tests in this package run
+// sequentially (no t.Parallel), so the window cannot leak.
 func allowLoopbackSSRF(t *testing.T) {
 	t.Helper()
+	origDial := ssrfSafeDialContext
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	ssrfSafeDialContext = dialer.DialContext
 	ssrfDNSCache.Store("127.0.0.1", false)
 	t.Cleanup(func() {
+		ssrfSafeDialContext = origDial
 		ssrfDNSCache.mu.Lock()
 		delete(ssrfDNSCache.entries, "127.0.0.1")
 		ssrfDNSCache.mu.Unlock()
@@ -173,6 +180,53 @@ func TestBlocklistSyncer_SyncFeed_BlocksPrivateHost(t *testing.T) {
 	feeds := bs.Feeds()
 	if len(feeds) != 1 || feeds[0].LastError == "" {
 		t.Errorf("feed should record the guard rejection in LastError; got %+v", feeds)
+	}
+}
+
+func TestBlocklistSyncer_SyncFeed_UsesSSRFSafeDialContext(t *testing.T) {
+	bs := newTestBlocklistSyncer(t)
+	const feedURL = "http://feeds.example/feed.txt"
+	const sentinel = "dial guard sentinel"
+	ssrfDNSCache.Store("feeds.example", false)
+	t.Cleanup(func() {
+		ssrfDNSCache.mu.Lock()
+		delete(ssrfDNSCache.entries, "feeds.example")
+		ssrfDNSCache.mu.Unlock()
+	})
+
+	origDial := ssrfSafeDialContext
+	called := false
+	ssrfSafeDialContext = func(_ context.Context, _ string, addr string) (net.Conn, error) {
+		called = true
+		if addr != "feeds.example:80" {
+			t.Errorf("dial addr = %q; want feeds.example:80", addr)
+		}
+		return nil, errors.New(sentinel)
+	}
+	t.Cleanup(func() { ssrfSafeDialContext = origDial })
+
+	bs.SetFeed(feedURL, 0)
+	_, err := bs.SyncFeed(feedURL)
+	if !called {
+		t.Fatal("SyncFeed did not use ssrfSafeDialContext")
+	}
+	if err == nil || !strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("SyncFeed err = %v; want sentinel from ssrfSafeDialContext", err)
+	}
+}
+
+func TestBlocklistSyncer_SyncFeed_BlocksPrivateRedirect(t *testing.T) {
+	bs := newTestBlocklistSyncer(t)
+	allowLoopbackSSRF(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.2:9/feed.txt", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	bs.SetFeed(srv.URL, 0)
+	_, err := bs.SyncFeed(srv.URL)
+	if err == nil || !strings.Contains(err.Error(), "redirect blocked by SSRF guard") {
+		t.Fatalf("SyncFeed redirect err = %v; want redirect SSRF guard rejection", err)
 	}
 }
 

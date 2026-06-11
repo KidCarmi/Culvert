@@ -26,6 +26,7 @@ const (
 	blFeedHTTPTimeout     = 30 * time.Second
 	blFeedDefaultInterval = 24 * time.Hour
 	blFeedTickInterval    = 60 * time.Second
+	blFeedMaxRedirects    = 5
 )
 
 // BlocklistFeed is a point-in-time status snapshot of one configured feed,
@@ -240,7 +241,7 @@ func (bs *BlocklistSyncer) fetchFeedLines(feedURL string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build request for %s: %w", feedURL, err)
 	}
-	client := &http.Client{Timeout: blFeedHTTPTimeout}
+	client := blocklistFeedHTTPClient()
 	resp, err := client.Do(req) // #nosec G107 -- operator-configured URL; scheme + isPrivateHost guard above
 	if err != nil {
 		logger.Printf("BlocklistFeed: fetch %q failed: %v", sanitizeLog(feedURL), err)
@@ -261,4 +262,32 @@ func (bs *BlocklistSyncer) fetchFeedLines(feedURL string) ([]string, error) {
 		return nil, fmt.Errorf("read %s: %w", feedURL, err)
 	}
 	return lines, nil
+}
+
+func blocklistFeedHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:       blFeedHTTPTimeout,
+		CheckRedirect: blocklistFeedCheckRedirect,
+		Transport: &http.Transport{
+			DialContext:           ssrfSafeDialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		},
+	}
+}
+
+func blocklistFeedCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= blFeedMaxRedirects {
+		return fmt.Errorf("too many redirects")
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return fmt.Errorf("redirect URL scheme %q must be http or https", req.URL.Scheme)
+	}
+	if err := isPrivateHost(req.URL.Host); err != nil {
+		return fmt.Errorf("redirect blocked by SSRF guard: %w", err)
+	}
+	return nil
 }
