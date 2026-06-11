@@ -53,9 +53,13 @@ type AdminSettings struct {
 	UISANs                []string `json:"ui_sans,omitempty"`
 	TrustForwardedHeaders bool     `json:"trust_forwarded_headers"`
 
-	// Blocklist feeds (multi-feed). The legacy single-feed fields below are
-	// still read on load for migration from pre-multi-feed settings files,
-	// but are no longer written.
+	// Blocklist feeds (multi-feed). BlocklistFeedsSaved is a sentinel
+	// (mirroring YARASettingsSaved): when true the persisted feed list is
+	// authoritative and REPLACES the YAML/CLI-seeded feed — including the
+	// empty list, so deleting every feed in the GUI survives a restart.
+	// When false (pre-multi-feed settings files), the legacy single-feed
+	// fields below are read for migration; they are no longer written.
+	BlocklistFeedsSaved   bool                   `json:"blocklist_feeds_saved"`
 	BlocklistFeeds        []BlocklistFeedSetting `json:"blocklist_feeds,omitempty"`
 	BlocklistFeedURL      string                 `json:"blocklist_feed_url,omitempty"`
 	BlocklistFeedInterval string                 `json:"blocklist_feed_interval,omitempty"` // e.g. "24h"
@@ -171,11 +175,19 @@ type BlocklistFeedSetting struct {
 // applyBlocklistFeeds restores blocklist feeds into blFeedSyncer. Settings
 // files written before the multi-feed rework carry a single
 // blocklist_feed_url/interval pair — migrate it when no feed list exists.
+// The persisted list is authoritative: it replaces any YAML/CLI-seeded
+// feed, so feeds deleted or edited in the GUI stay that way across
+// restarts. Files with no feed opinion at all (sentinel unset, no legacy
+// URL) leave the startup seed untouched.
 func applyBlocklistFeeds(s *AdminSettings) {
 	feeds := s.BlocklistFeeds
 	if len(feeds) == 0 && s.BlocklistFeedURL != "" {
 		feeds = []BlocklistFeedSetting{{URL: s.BlocklistFeedURL, Interval: s.BlocklistFeedInterval}}
 	}
+	if !s.BlocklistFeedsSaved && len(feeds) == 0 {
+		return // pre-feature settings file with no feed config — keep startup seed
+	}
+	blFeedSyncer.ClearFeeds()
 	for i := range feeds {
 		if feeds[i].URL == "" {
 			continue
@@ -232,6 +244,26 @@ func applyAdminYARA(s *AdminSettings) {
 	yaraSetAlertDegraded(s.YARAAlertDegraded)
 }
 
+// snapshotBlocklistFeeds copies the live feed set into s. blFeedSyncer is
+// nil until main() runs loadBlocklist, and SaveAdminSettings can run from a
+// detached goroutine (adminSettingsSave) that outlives the caller — so guard
+// against nil rather than deref it, mirroring the globalSyslog guard. The
+// legacy single-feed fields are intentionally not written anymore (read-only
+// migration path). BlocklistFeedsSaved stays false on a nil syncer so the
+// snapshot's (necessarily empty) list is not treated as authoritative on load.
+func snapshotBlocklistFeeds(s *AdminSettings) {
+	if blFeedSyncer == nil {
+		return
+	}
+	s.BlocklistFeedsSaved = true
+	for _, f := range blFeedSyncer.Feeds() {
+		s.BlocklistFeeds = append(s.BlocklistFeeds, BlocklistFeedSetting{
+			URL:      f.URL,
+			Interval: f.Interval.String(),
+		})
+	}
+}
+
 // SaveAdminSettings snapshots all current runtime values and writes them
 // atomically to the settings file. Called after every API mutation.
 func SaveAdminSettings() {
@@ -285,19 +317,7 @@ func SaveAdminSettings() {
 	// Rewrite rules
 	s.RewriteRules = rewriter.List()
 
-	// Blocklist feeds. blFeedSyncer is nil until main() runs loadBlocklist,
-	// and SaveAdminSettings can run from a detached goroutine (adminSettingsSave)
-	// that outlives the caller — so guard against nil rather than deref it,
-	// mirroring the globalSyslog guard above. The legacy single-feed fields
-	// are intentionally not written anymore (read-only migration path).
-	if blFeedSyncer != nil {
-		for _, f := range blFeedSyncer.Feeds() {
-			s.BlocklistFeeds = append(s.BlocklistFeeds, BlocklistFeedSetting{
-				URL:      f.URL,
-				Interval: f.Interval.String(),
-			})
-		}
-	}
+	snapshotBlocklistFeeds(&s)
 
 	// SaaS feed
 	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {

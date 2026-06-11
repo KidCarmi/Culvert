@@ -82,6 +82,15 @@ func (bs *BlocklistSyncer) SetFeed(url string, interval time.Duration) {
 	bs.feeds[url] = &blFeedState{interval: interval}
 }
 
+// ClearFeeds removes every configured feed. Used when restoring persisted
+// settings, which are authoritative over the YAML/CLI startup seed.
+// Domains already merged into the blocklist are NOT removed.
+func (bs *BlocklistSyncer) ClearFeeds() {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	bs.feeds = map[string]*blFeedState{}
+}
+
 // RemoveFeed deletes a feed by URL. Returns false when no such feed exists.
 // Domains already merged into the blocklist are NOT removed (feed imports
 // are merge-only by design).
@@ -188,7 +197,7 @@ func (bs *BlocklistSyncer) SyncFeed(url string) (int, error) {
 	}
 	bs.mu.Unlock()
 
-	logger.Printf("BlocklistFeed: synced %s — added %d new entries", url, added)
+	logger.Printf("BlocklistFeed: synced %q — added %d new entries", sanitizeLog(url), added)
 	return added, nil
 }
 
@@ -209,10 +218,16 @@ func (bs *BlocklistSyncer) SyncAll() (int, error) {
 
 // fetchFeedLines downloads the feed body and returns its non-empty lines.
 func (bs *BlocklistSyncer) fetchFeedLines(url string) ([]string, error) {
-	client := &http.Client{Timeout: blFeedHTTPTimeout}
-	resp, err := client.Get(url) // #nosec G107 -- URL is operator-configured
+	ctx, cancel := context.WithTimeout(context.Background(), blFeedHTTPTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		logger.Printf("BlocklistFeed: fetch %s failed: %v", url, err)
+		return nil, fmt.Errorf("build request for %s: %w", url, err)
+	}
+	client := &http.Client{Timeout: blFeedHTTPTimeout}
+	resp, err := client.Do(req) // #nosec G107 -- URL is operator-configured
+	if err != nil {
+		logger.Printf("BlocklistFeed: fetch %q failed: %v", sanitizeLog(url), err)
 		return nil, fmt.Errorf("fetch %s: %w", url, err)
 	}
 	defer resp.Body.Close()
@@ -226,7 +241,7 @@ func (bs *BlocklistSyncer) fetchFeedLines(url string) ([]string, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		logger.Printf("BlocklistFeed: read error from %s: %v", url, err)
+		logger.Printf("BlocklistFeed: read error from %q: %v", sanitizeLog(url), err)
 		return nil, fmt.Errorf("read %s: %w", url, err)
 	}
 	return lines, nil

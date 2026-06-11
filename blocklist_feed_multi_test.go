@@ -265,6 +265,9 @@ func TestAdminSettings_BlocklistFeedsRoundTrip(t *testing.T) {
 	if len(s.BlocklistFeeds) != 2 {
 		t.Fatalf("persisted feeds = %d; want 2 (%s)", len(s.BlocklistFeeds), data)
 	}
+	if !s.BlocklistFeedsSaved {
+		t.Error("blocklist_feeds_saved = false; want true (sentinel must be set on save)")
+	}
 	if s.BlocklistFeedURL != "" {
 		t.Errorf("legacy blocklist_feed_url = %q; want empty (no longer written)", s.BlocklistFeedURL)
 	}
@@ -302,6 +305,52 @@ func TestAdminSettings_LegacySingleFeedMigration(t *testing.T) {
 	}
 	if feeds[0].Interval != 48*time.Hour {
 		t.Errorf("migrated interval = %v; want 48h", feeds[0].Interval)
+	}
+}
+
+// TestAdminSettings_FeedsReplaceStartupSeed guards the restore contract:
+// the persisted feed list is authoritative over the YAML/CLI-seeded feed,
+// so a config-seeded feed that was deleted or replaced in the GUI does not
+// resurrect on restart.
+func TestAdminSettings_FeedsReplaceStartupSeed(t *testing.T) {
+	swapFeedSyncer(t, newTestBlocklistSyncer(t))
+	blFeedSyncer.SetFeed("https://feeds.example/from-yaml.txt", blFeedDefaultInterval)
+
+	s := AdminSettings{
+		BlocklistFeedsSaved: true,
+		BlocklistFeeds:      []BlocklistFeedSetting{{URL: "https://feeds.example/from-gui.txt", Interval: "12h"}},
+	}
+	applyBlocklistFeeds(&s)
+	feeds := blFeedSyncer.Feeds()
+	if len(feeds) != 1 || feeds[0].URL != "https://feeds.example/from-gui.txt" {
+		t.Errorf("restored feeds = %+v; want exactly the persisted from-gui.txt (yaml seed replaced)", feeds)
+	}
+}
+
+// TestAdminSettings_DeleteAllFeedsSurvivesRestart: a settings file saved
+// after the admin removed every feed (sentinel set, empty list) must clear
+// the YAML/CLI-seeded feed too.
+func TestAdminSettings_DeleteAllFeedsSurvivesRestart(t *testing.T) {
+	swapFeedSyncer(t, newTestBlocklistSyncer(t))
+	blFeedSyncer.SetFeed("https://feeds.example/from-yaml.txt", blFeedDefaultInterval)
+
+	s := AdminSettings{BlocklistFeedsSaved: true}
+	applyBlocklistFeeds(&s)
+	if feeds := blFeedSyncer.Feeds(); len(feeds) != 0 {
+		t.Errorf("feeds = %+v; want empty (GUI delete-all is durable)", feeds)
+	}
+}
+
+// TestAdminSettings_NoFeedOpinionKeepsStartupSeed: a pre-feature settings
+// file (sentinel unset, no legacy URL) must leave the startup seed alone.
+func TestAdminSettings_NoFeedOpinionKeepsStartupSeed(t *testing.T) {
+	swapFeedSyncer(t, newTestBlocklistSyncer(t))
+	blFeedSyncer.SetFeed("https://feeds.example/from-yaml.txt", blFeedDefaultInterval)
+
+	applyBlocklistFeeds(&AdminSettings{})
+	feeds := blFeedSyncer.Feeds()
+	if len(feeds) != 1 || feeds[0].URL != "https://feeds.example/from-yaml.txt" {
+		t.Errorf("feeds = %+v; want the yaml seed untouched", feeds)
 	}
 }
 
