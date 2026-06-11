@@ -6,6 +6,7 @@ package main
 // Persisted() signal surfaced to the admin UI via GET /api/idp.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,36 @@ func testOktaProfile() *IdPProfile {
 	}
 }
 
+// assertNoIdPTmpLeftovers fails if atomicWriteFile left *.tmp.* siblings
+// behind in dir.
+func assertNoIdPTmpLeftovers(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file %q after save", e.Name())
+		}
+	}
+}
+
+// readOnDiskIdPProfiles parses the registry JSON at path, failing the test
+// on read or parse errors (a torn write would surface here).
+func readOnDiskIdPProfiles(t *testing.T, path string) []*IdPProfile {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var onDisk []*IdPProfile
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatalf("on-disk JSON corrupt: %v", err)
+	}
+	return onDisk
+}
+
 func TestIdPRegistry_UpsertPersistsAtomically(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "idp_profiles.json")
@@ -47,26 +78,10 @@ func TestIdPRegistry_UpsertPersistsAtomically(t *testing.T) {
 		t.Errorf("file mode = %o, want 0600 (file holds client secrets)", perm)
 	}
 
-	// atomicWriteFile must not leave *.tmp.* siblings behind.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
-	}
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") {
-			t.Errorf("leftover temp file %q after save", e.Name())
-		}
-	}
+	assertNoIdPTmpLeftovers(t, dir)
 
 	// On-disk JSON parses and keeps the secret (restart durability).
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	var onDisk []*IdPProfile
-	if err := json.Unmarshal(data, &onDisk); err != nil {
-		t.Fatalf("on-disk JSON corrupt: %v", err)
-	}
+	onDisk := readOnDiskIdPProfiles(t, path)
 	if len(onDisk) != 1 || onDisk[0].OIDC == nil || onDisk[0].OIDC.ClientSecret != "super-secret" {
 		t.Fatalf("on-disk profiles = %+v, want 1 Okta profile with secret", onDisk)
 	}
@@ -96,14 +111,7 @@ func TestIdPRegistry_DeletePersists(t *testing.T) {
 	if err := r.Delete(p.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	var onDisk []*IdPProfile
-	if err := json.Unmarshal(data, &onDisk); err != nil {
-		t.Fatalf("on-disk JSON corrupt: %v", err)
-	}
+	onDisk := readOnDiskIdPProfiles(t, path)
 	if len(onDisk) != 0 {
 		t.Fatalf("on-disk profiles after delete = %+v, want empty", onDisk)
 	}
@@ -133,7 +141,7 @@ func TestAPIIdPListGet_ReportsPersistedTrue(t *testing.T) {
 	t.Cleanup(func() { idpRegistry = orig })
 
 	w := httptest.NewRecorder()
-	req := adminCtx(httptest.NewRequest(http.MethodGet, "/api/idp", http.NoBody))
+	req := adminCtx(httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/idp", http.NoBody))
 	apiIdPList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
