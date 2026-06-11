@@ -30,7 +30,7 @@ const (
 	blFeedMaxRedirects    = 5
 )
 
-var blFeedURLPattern = regexp.MustCompile(`^https?://[^/?#\s]+(?:[/?#][^\s]*)?$`)
+var blFeedURLPattern = regexp.MustCompile(`^https?://[^/?#\s]+(?:[/?#]\S*)?$`)
 
 // BlocklistFeed is a point-in-time status snapshot of one configured feed,
 // returned by Feeds() for the admin API and settings persistence.
