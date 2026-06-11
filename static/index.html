@@ -4493,10 +4493,10 @@ async function deleteURLCategory(name) {
   if (!await confirmAction('Delete Category', `Delete category "${name}"? Policy rules referencing it will no longer match.`)) return;
   try {
     await api('/api/urlcat?name=' + encodeURIComponent(name), {method: 'DELETE'});
-    showToast(`Category "${name}" deleted`, 'success');
+    toast(`Category "${name}" deleted`, 'success');
     loadURLCategories();
   } catch (err) {
-    showToast('Delete failed: ' + err.message, 'error');
+    toast('Delete failed: ' + err.message, 'error');
   }
 }
 
@@ -4507,20 +4507,20 @@ async function addURLCatHost(catName) {
   try {
     await api('/api/urlcat/host', {method: 'POST', body: {category: catName, host}});
     input.value = '';
-    showToast(`Added "${host}" to ${catName}`, 'success');
+    toast(`Added "${host}" to ${catName}`, 'success');
     loadURLCategories();
   } catch (err) {
-    showToast('Failed: ' + err.message, 'error');
+    toast('Failed: ' + err.message, 'error');
   }
 }
 
 async function removeURLCatHost(catName, host) {
   try {
     await api('/api/urlcat/host?category=' + encodeURIComponent(catName) + '&host=' + encodeURIComponent(host), {method: 'DELETE'});
-    showToast(`Removed "${host}" from ${catName}`, 'success');
+    toast(`Removed "${host}" from ${catName}`, 'success');
     loadURLCategories();
   } catch (err) {
-    showToast('Failed: ' + err.message, 'error');
+    toast('Failed: ' + err.message, 'error');
   }
 }
 
@@ -4529,10 +4529,10 @@ function openNewCategoryModal() {
   if (!name || !name.trim()) return;
   api('/api/urlcat', {method: 'POST', body: {name: name.trim(), hosts: []}})
     .then(() => {
-      showToast(`Category "${name.trim()}" created`, 'success');
+      toast(`Category "${name.trim()}" created`, 'success');
       loadURLCategories();
     })
-    .catch(err => showToast('Failed: ' + err.message, 'error'));
+    .catch(err => toast('Failed: ' + err.message, 'error'));
 }
 
 // Populate the policy form's URL category dropdown from the live category list.
@@ -4663,12 +4663,12 @@ async function loadConfigVersions() {
       const prev = i < versions.length - 1 ? versions[i + 1].version : null;
       const diffBtn = prev ? `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px" data-click="diffConfigVersions" data-arg="${prev}" data-arg2="${v.version}">Diff</button>` : '';
       const rollbackBtn = `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px;color:var(--yellow)" data-click="rollbackConfigVersion" data-arg="${v.version}">Rollback</button>`;
-      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${esc(v.action)}</td><td>${esc(v.actor)}</td><td class="text-right">${diffBtn} ${rollbackBtn}</td></tr>`;
+      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${escHtml(v.action)}</td><td>${escHtml(v.actor)}</td><td class="text-right">${diffBtn} ${rollbackBtn}</td></tr>`;
     });
     html += '</tbody></table>';
     el.innerHTML = html;
   } catch (err) {
-    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed to load versions: ${esc(err.message)}</em>`;
+    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed to load versions: ${escHtml(err.message)}</em>`;
   }
 }
 
@@ -4684,12 +4684,12 @@ async function diffConfigVersions(from, to) {
     }
     let html = `<div style="padding:10px;background:var(--surface);border-radius:6px"><strong style="font-size:.85rem">Diff: v${from} → v${to}</strong><table class="table" style="font-size:.8rem;margin-top:8px"><thead><tr><th>Field</th><th>From</th><th>To</th></tr></thead><tbody>`;
     data.changes.forEach(c => {
-      html += `<tr><td>${esc(c.field)}</td><td style="color:var(--red)">${esc(String(c.from))}</td><td style="color:var(--green)">${esc(String(c.to))}</td></tr>`;
+      html += `<tr><td>${escHtml(c.field)}</td><td style="color:var(--red)">${escHtml(String(c.from))}</td><td style="color:var(--green)">${escHtml(String(c.to))}</td></tr>`;
     });
     html += '</tbody></table></div>';
     el.innerHTML = html;
   } catch (err) {
-    el.innerHTML = `<em style="color:var(--red)">Diff failed: ${esc(err.message)}</em>`;
+    el.innerHTML = `<em style="color:var(--red)">Diff failed: ${escHtml(err.message)}</em>`;
   }
 }
 
@@ -9231,20 +9231,20 @@ async function loadNodeGroups(show) {
     }
     let html = '<table class="table" style="font-size:.82rem"><thead><tr><th>Name</th><th>Labels</th><th>Priority</th><th>Nodes</th><th></th></tr></thead><tbody>';
     groups.forEach(g => {
-      const labels = Object.entries(g.label_selector || {}).map(([k,v]) => `${esc(k)}=${esc(v)}`).join(', ');
-      const nodeIds = (g.node_ids || []).map(id => esc(id)).join(', ') || '—';
+      const labels = Object.entries(g.label_selector || {}).map(([k,v]) => `${escHtml(k)}=${escHtml(v)}`).join(', ');
+      const nodeIds = (g.node_ids || []).map(id => escHtml(id)).join(', ') || '—';
       html += `<tr>
-        <td><strong>${esc(g.name)}</strong>${g.description ? '<br><span style="color:var(--muted);font-size:.75rem">' + esc(g.description) + '</span>' : ''}</td>
+        <td><strong>${escHtml(g.name)}</strong>${g.description ? '<br><span style="color:var(--muted);font-size:.75rem">' + escHtml(g.description) + '</span>' : ''}</td>
         <td><code style="font-size:.75rem">${labels || '—'}</code></td>
         <td>${g.priority || 0}</td>
         <td title="${nodeIds}">${g.node_count || 0}</td>
-        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" data-click="deleteNodeGroup" data-arg="${esc(g.name)}">Delete</button></td>
+        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" data-click="deleteNodeGroup" data-arg="${escHtml(g.name)}">Delete</button></td>
       </tr>`;
     });
     html += '</tbody></table>';
     el.innerHTML = html;
   } catch(e) {
-    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed: ${esc(e.message)}</em>`;
+    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed: ${escHtml(e.message)}</em>`;
   }
 }
 
@@ -9303,19 +9303,19 @@ async function loadBandwidthPolicies(show) {
     }
     let html = '<table class="table" style="font-size:.82rem"><thead><tr><th>Name</th><th>Labels</th><th>Bandwidth</th><th>Priority</th><th></th></tr></thead><tbody>';
     policies.forEach(p => {
-      const labels = Object.entries(p.label_selector || {}).map(([k,v]) => `${esc(k)}=${esc(v)}`).join(', ');
+      const labels = Object.entries(p.label_selector || {}).map(([k,v]) => `${escHtml(k)}=${escHtml(v)}`).join(', ');
       html += `<tr>
-        <td><strong>${esc(p.name)}</strong></td>
+        <td><strong>${escHtml(p.name)}</strong></td>
         <td><code style="font-size:.75rem">${labels || '—'}</code></td>
-        <td>${esc(p.human_rate || 'unlimited')}</td>
+        <td>${escHtml(p.human_rate || 'unlimited')}</td>
         <td>${p.priority || 0}</td>
-        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" data-click="deleteBandwidthPolicy" data-arg="${esc(p.name)}">Delete</button></td>
+        <td><button class="btn ghost sm" style="color:var(--red);font-size:.7rem" data-click="deleteBandwidthPolicy" data-arg="${escHtml(p.name)}">Delete</button></td>
       </tr>`;
     });
     html += '</tbody></table>';
     el.innerHTML = html;
   } catch(e) {
-    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed: ${esc(e.message)}</em>`;
+    el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed: ${escHtml(e.message)}</em>`;
   }
 }
 
