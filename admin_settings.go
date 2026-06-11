@@ -53,9 +53,12 @@ type AdminSettings struct {
 	UISANs                []string `json:"ui_sans,omitempty"`
 	TrustForwardedHeaders bool     `json:"trust_forwarded_headers"`
 
-	// Blocklist feed
-	BlocklistFeedURL      string `json:"blocklist_feed_url,omitempty"`
-	BlocklistFeedInterval string `json:"blocklist_feed_interval,omitempty"` // e.g. "24h"
+	// Blocklist feeds (multi-feed). The legacy single-feed fields below are
+	// still read on load for migration from pre-multi-feed settings files,
+	// but are no longer written.
+	BlocklistFeeds        []BlocklistFeedSetting `json:"blocklist_feeds,omitempty"`
+	BlocklistFeedURL      string                 `json:"blocklist_feed_url,omitempty"`
+	BlocklistFeedInterval string                 `json:"blocklist_feed_interval,omitempty"` // e.g. "24h"
 
 	// SaaS category feed
 	SaaSFeedURL string `json:"saas_feed_url,omitempty"`
@@ -153,15 +156,40 @@ func applyAdminServices(s *AdminSettings) {
 	if s.SessionTimeoutHours > 0 {
 		SetSessionTTL(time.Duration(s.SessionTimeoutHours) * time.Hour)
 	}
-	if s.BlocklistFeedURL != "" {
-		interval := 24 * time.Hour
-		if d, err := time.ParseDuration(s.BlocklistFeedInterval); err == nil && d > 0 {
-			interval = d
-		}
-		blFeedSyncer.SetFeed(s.BlocklistFeedURL, interval)
-	}
+	applyBlocklistFeeds(s)
 	if s.SaaSFeedURL != "" {
 		globalSaaSFeed.Configure(s.SaaSFeedURL, 24*time.Hour)
+	}
+}
+
+// BlocklistFeedSetting is the persisted form of one blocklist feed.
+type BlocklistFeedSetting struct {
+	URL      string `json:"url"`
+	Interval string `json:"interval,omitempty"` // Go duration; "0s" = auto-sync disabled
+}
+
+// applyBlocklistFeeds restores blocklist feeds into blFeedSyncer. Settings
+// files written before the multi-feed rework carry a single
+// blocklist_feed_url/interval pair — migrate it when no feed list exists.
+func applyBlocklistFeeds(s *AdminSettings) {
+	feeds := s.BlocklistFeeds
+	if len(feeds) == 0 && s.BlocklistFeedURL != "" {
+		feeds = []BlocklistFeedSetting{{URL: s.BlocklistFeedURL, Interval: s.BlocklistFeedInterval}}
+	}
+	for i := range feeds {
+		if feeds[i].URL == "" {
+			continue
+		}
+		interval := blFeedDefaultInterval
+		if feeds[i].Interval != "" {
+			if d, err := time.ParseDuration(feeds[i].Interval); err == nil {
+				if d < 0 {
+					d = 0
+				}
+				interval = d
+			}
+		}
+		blFeedSyncer.SetFeed(feeds[i].URL, interval)
 	}
 }
 
@@ -257,23 +285,23 @@ func SaveAdminSettings() {
 	// Rewrite rules
 	s.RewriteRules = rewriter.List()
 
-	// Blocklist feed. blFeedSyncer is nil until main() runs loadBlocklistFeed,
+	// Blocklist feeds. blFeedSyncer is nil until main() runs loadBlocklist,
 	// and SaveAdminSettings can run from a detached goroutine (adminSettingsSave)
 	// that outlives the caller — so guard against nil rather than deref it,
-	// mirroring the globalSyslog guard above.
-	var feedInterval time.Duration
+	// mirroring the globalSyslog guard above. The legacy single-feed fields
+	// are intentionally not written anymore (read-only migration path).
 	if blFeedSyncer != nil {
-		feedURL, _, _, fi := blFeedSyncer.Stats()
-		feedInterval = fi
-		if feedURL != "" {
-			s.BlocklistFeedURL = feedURL
+		for _, f := range blFeedSyncer.Feeds() {
+			s.BlocklistFeeds = append(s.BlocklistFeeds, BlocklistFeedSetting{
+				URL:      f.URL,
+				Interval: f.Interval.String(),
+			})
 		}
 	}
 
 	// SaaS feed
 	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {
 		s.SaaSFeedURL = saasURL
-		s.BlocklistFeedInterval = feedInterval.String()
 	}
 
 	// YARA engine settings
