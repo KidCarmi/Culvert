@@ -92,10 +92,17 @@ func TestAPIIdPListGet_RedactsClientSecret(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	assertNoOIDCSecretLeak(t, w.Body.String())
-	var got []IdPProfile
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+	var env struct {
+		Persisted bool         `json:"persisted"`
+		Profiles  []IdPProfile `json:"profiles"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
+	if env.Persisted {
+		t.Fatal("persisted = true, want false for path-less registry")
+	}
+	got := env.Profiles
 	if len(got) != 1 {
 		t.Fatalf("list length = %d, want 1", len(got))
 	}
@@ -619,14 +626,16 @@ func TestAPIIdPGetAndList_RedactSAMLMetadataXML(t *testing.T) {
 		t.Fatalf("LIST status = %d, want 200; body=%s", listW.Code, listW.Body.String())
 	}
 	assertNoSAMLMetadataLeak(t, listW.Body.String())
-	var list []IdPProfile
-	if err := json.Unmarshal(listW.Body.Bytes(), &list); err != nil {
+	var listEnv struct {
+		Profiles []IdPProfile `json:"profiles"`
+	}
+	if err := json.Unmarshal(listW.Body.Bytes(), &listEnv); err != nil {
 		t.Fatalf("decode LIST response: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("list length = %d, want 1", len(list))
+	if len(listEnv.Profiles) != 1 {
+		t.Fatalf("list length = %d, want 1", len(listEnv.Profiles))
 	}
-	assertPublicSAMLProfile(t, list[0])
+	assertPublicSAMLProfile(t, listEnv.Profiles[0])
 }
 
 func assertNoSAMLMetadataLeak(t *testing.T, body string) {

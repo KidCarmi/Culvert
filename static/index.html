@@ -1151,6 +1151,9 @@ tr.dragging  { opacity: .4; }
       <p style="color:var(--muted);font-size:.82rem;margin:0 0 20px;line-height:1.6">
         Connect OIDC or SAML 2.0 providers for single sign-on. Group memberships from the IdP are available as conditions in policy rules.
       </p>
+      <div id="idp-persist-warning" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#f87171;border-radius:8px;padding:10px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.5">
+        ⚠️ <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
+      </div>
       <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
     </div>
 
@@ -7855,7 +7858,10 @@ function idpProviderMeta(p) {
 async function loadIdPList() {
   const res = await apiFetch('/api/idp');
   if (!res.ok) return;
-  const list = await res.json();
+  const data = await res.json();
+  const list = Array.isArray(data) ? data : (data.profiles || []);
+  const persistWarn = document.getElementById('idp-persist-warning');
+  if (persistWarn) persistWarn.style.display = (data && data.persisted === false) ? '' : 'none';
   const el = document.getElementById('idp-list');
   // Update count badge
   const badge = document.getElementById('idp-count-badge');
@@ -8387,8 +8393,8 @@ let _selectedCountries = [];
 
 async function loadPolicyProviderOptions() {
   try {
-    const list = await api('/api/idp');
-    _policyIdPList = list || [];
+    const idpData = await api('/api/idp');
+    _policyIdPList = Array.isArray(idpData) ? idpData : ((idpData && idpData.profiles) || []);
     // Provider dropdown
     const provSel = document.getElementById('pol-src-provider');
     const curProv = provSel.value;
