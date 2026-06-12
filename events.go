@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,10 +20,28 @@ type sseHub struct {
 
 var hub = &sseHub{clients: make(map[chan []byte]struct{})}
 
-func (h *sseHub) register(ch chan []byte) {
+// sseMaxClients caps concurrent SSE connections per hub. Each connection
+// holds a goroutine and an HTTP stream with no write deadline, so without a
+// cap any viewer credential could exhaust goroutines/FDs by opening streams.
+// 0 disables the cap. Variable (not const) so tests can lower it.
+var sseMaxClients = 256
+
+// Live-feed observability counters (exposed via /metrics).
+var (
+	statSSEEvicted  int64 // slow SSE clients evicted by broadcast
+	statSSERejected int64 // SSE connections rejected at the sseMaxClients cap
+)
+
+// register adds the client channel to the hub. It reports false — without
+// registering — when the hub is already at the sseMaxClients cap.
+func (h *sseHub) register(ch chan []byte) bool {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	if sseMaxClients > 0 && len(h.clients) >= sseMaxClients {
+		return false
+	}
 	h.clients[ch] = struct{}{}
-	h.mu.Unlock()
+	return true
 }
 
 func (h *sseHub) unregister(ch chan []byte) {
@@ -41,6 +60,7 @@ func (h *sseHub) broadcast(msg []byte) {
 			// This prevents stale connections from accumulating and missing state updates.
 			close(ch)
 			delete(h.clients, ch)
+			atomic.AddInt64(&statSSEEvicted, 1)
 		}
 	}
 	h.mu.Unlock()
@@ -160,6 +180,36 @@ func startSSEBroadcaster(ctx context.Context) *sseBroadcaster {
 	return b
 }
 
+// sseRevalidateEvery is the number of received broadcast messages (~seconds at
+// the 1 s production tick) between mid-stream auth re-checks in apiEvents.
+const sseRevalidateEvery = 60
+
+// sseAuthStillValid re-checks the caller's credentials mid-stream. An SSE
+// connection outlives the connect-time requireRole check, so a revoked or
+// expired session (or a deleted user) must terminate the stream instead of
+// receiving live telemetry until it disconnects on its own.
+func sseAuthStillValid(r *http.Request) bool {
+	if !cfg.AuthEnabled() {
+		return true
+	}
+	sess, err := readUISessionCookie(r)
+	if err != nil {
+		return false // revoked, expired, or tampered session
+	}
+	if sess != nil {
+		if sess.Provider == "local" && !cfg.UIUserExists(sess.Sub) {
+			return false
+		}
+		return true
+	}
+	// No session cookie — the connection was authenticated via HTTP Basic Auth.
+	if user, pass, ok := r.BasicAuth(); ok {
+		_, valid := cfg.VerifyUIUser(user, pass)
+		return valid
+	}
+	return false
+}
+
 // apiEvents is the SSE endpoint. Clients connect and receive live dashboard data.
 func apiEvents(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
@@ -171,29 +221,63 @@ func apiEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ch := make(chan []byte, 4)
+	if !hub.register(ch) {
+		atomic.AddInt64(&statSSERejected, 1)
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "too many live dashboard connections", http.StatusServiceUnavailable)
+		return
+	}
+	defer hub.unregister(ch)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	// Restrict SSE to same-origin requests only (no CORS wildcard).
 	// The dashboard is served from the same origin, so no CORS header is needed.
 
-	ch := make(chan []byte, 4)
-	hub.register(ch)
-	defer hub.unregister(ch)
-
 	// Send an initial ping so the client knows we're connected.
 	fmt.Fprintf(w, "event: connected\ndata: {}\n\n")
 	flusher.Flush()
 
+	msgs := 0
 	for {
 		select {
-		case msg := <-ch:
+		case msg, open := <-ch:
+			if !open {
+				// Evicted by the hub as a slow client. End the stream so the
+				// browser reconnects — receiving from the closed channel would
+				// otherwise busy-spin and flood the peer with empty frames.
+				return
+			}
 			fmt.Fprintf(w, "data: %s\n\n", msg)
 			flusher.Flush()
+			msgs++
+			if msgs >= sseRevalidateEvery {
+				msgs = 0
+				if !sseAuthStillValid(r) {
+					return
+				}
+			}
 		case <-r.Context().Done():
 			return
 		}
 	}
+}
+
+// liveFeedWritePrometheus appends live-feed observability metrics (SSE hub +
+// persistent request log) to the /metrics exposition.
+func liveFeedWritePrometheus(w *strings.Builder) {
+	fmt.Fprintf(w, "\n# HELP culvert_sse_clients Currently connected SSE dashboard clients\n")
+	fmt.Fprintf(w, "# TYPE culvert_sse_clients gauge\nculvert_sse_clients %d\n", hub.ClientCount())
+	fmt.Fprintf(w, "\n# HELP culvert_sse_evictions_total SSE clients evicted for falling behind the broadcast\n")
+	fmt.Fprintf(w, "# TYPE culvert_sse_evictions_total counter\nculvert_sse_evictions_total %d\n", atomic.LoadInt64(&statSSEEvicted))
+	fmt.Fprintf(w, "\n# HELP culvert_sse_rejected_total SSE connections rejected at the client cap\n")
+	fmt.Fprintf(w, "# TYPE culvert_sse_rejected_total counter\nculvert_sse_rejected_total %d\n", atomic.LoadInt64(&statSSERejected))
+	fmt.Fprintf(w, "\n# HELP culvert_reqlog_write_errors_total Persistent request-log write or marshal failures (e.g. disk full)\n")
+	fmt.Fprintf(w, "# TYPE culvert_reqlog_write_errors_total counter\nculvert_reqlog_write_errors_total %d\n", atomic.LoadInt64(&statReqLogWriteErrors))
+	fmt.Fprintf(w, "\n# HELP culvert_reqlog_skipped_lines_total Corrupt JSONL lines skipped while reading the persistent request log\n")
+	fmt.Fprintf(w, "# TYPE culvert_reqlog_skipped_lines_total counter\nculvert_reqlog_skipped_lines_total %d\n", atomic.LoadInt64(&statReqLogSkippedLines))
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.

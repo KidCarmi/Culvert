@@ -72,6 +72,9 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		"uiPort":      cfg.UIPort,
 		"authEnabled": cfg.AuthEnabled(),
 		"serverTime":  time.Now().Format("2006-01-02 15:04:05"),
+		// Persistent request-log health: non-zero means writes are failing
+		// (e.g. disk full) and the on-disk history is incomplete.
+		"logWriteErrors": atomic.LoadInt64(&statReqLogWriteErrors),
 	})
 }
 
@@ -191,12 +194,18 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pagination parameters (Finding 6.1).
+	// Pagination parameters (Finding 6.1). The limit is clamped so one query
+	// cannot demand an unbounded response (CWE-770); offset pagination still
+	// reaches every entry.
+	const apiLogsMaxLimit = 5000
 	limitVal := 1000
 	if lq := r.URL.Query().Get("limit"); lq != "" {
 		if v, err := strconv.Atoi(lq); err == nil && v > 0 {
 			limitVal = v
 		}
+	}
+	if limitVal > apiLogsMaxLimit {
+		limitVal = apiLogsMaxLimit
 	}
 	offsetVal := 0
 	if oq := r.URL.Query().Get("offset"); oq != "" {

@@ -406,5 +406,6 @@ culvert_auth_exempt_decisions_total %d
 	certSignHist.WritePrometheus(&ruleMetBuf)
 	clusterWritePrometheus(&ruleMetBuf)
 	cdrWritePrometheus(&ruleMetBuf)
+	liveFeedWritePrometheus(&ruleMetBuf)
 	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
 }

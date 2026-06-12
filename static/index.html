@@ -142,6 +142,8 @@ nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
 }
 .pill.live { background: rgba(34,197,94,.12); color: var(--green);
              border: 1px solid rgba(34,197,94,.3); }
+.pill.stale { background: rgba(239,68,68,.12); color: var(--red);
+              border: 1px solid rgba(239,68,68,.3); }
 .content { padding: 24px 28px; flex: 1; }
 @media(max-width:640px) { .content { padding: 16px 14px; } }
 /* ─── Views ─────────────────────────────────────────────────────────────── */
@@ -458,7 +460,7 @@ tr.dragging  { opacity: .4; }
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <span class="topbar-meta" id="server-time"></span>
-      <span class="pill live">● LIVE</span>
+      <span class="pill live" id="live-pill">● LIVE</span>
       <span id="topbar-user-info" style="display:none;align-items:center;gap:6px;font-size:.8rem">
         <span id="topbar-username" style="color:var(--muted)"></span>
         <span id="topbar-role-badge" style="padding:2px 8px;border-radius:99px;font-size:.7rem;font-weight:700;text-transform:uppercase"></span>
@@ -3884,13 +3886,6 @@ document.addEventListener('focusout', e => {
     setTimeout(() => closeGroupDropdown(), 200);
   }
 });
-
-// ── Flag image onerror (programmatic — CSP allows JS-set handlers) ──────
-document.addEventListener('error', e => {
-  if (e.target.tagName === 'IMG' && e.target.src && e.target.src.includes('flagcdn.com')) {
-    e.target.style.display = 'none';
-  }
-}, true); // capture phase to catch img errors
 
 // ── data-hover: replaces onmouseover/onmouseout ─────────────────────────
 document.addEventListener('mouseover', e => {
@@ -7565,6 +7560,15 @@ const SSE_MAX_RETRIES = 30;       // stop after 30 failures (~5 min with backoff
 const SSE_BASE_DELAY = 2000;      // 2s initial
 const SSE_MAX_DELAY  = 30000;     // cap at 30s
 
+// setLivePill flips the topbar status pill between LIVE (green) and STALE
+// (red) so a frozen dashboard is never silently presented as live data.
+function setLivePill(connected) {
+  const pill = document.getElementById('live-pill');
+  if (!pill) return;
+  pill.className = 'pill ' + (connected ? 'live' : 'stale');
+  pill.textContent = connected ? '● LIVE' : '● STALE';
+}
+
 function connectSSE() {
   if (typeof EventSource === 'undefined') return;
 
@@ -7576,13 +7580,14 @@ function connectSSE() {
 
   if (_sseRetries >= SSE_MAX_RETRIES) {
     console.warn('SSE: max reconnect attempts reached, stopping. Reload page to resume.');
+    setLivePill(false);
     return;
   }
 
   const es = new EventSource('/api/events');
   _sseInstance = es;
 
-  es.addEventListener('connected', () => { sseConnected = true; _sseRetries = 0; startTick(); });
+  es.addEventListener('connected', () => { sseConnected = true; _sseRetries = 0; setLivePill(true); startTick(); });
   es.onmessage = e => {
     try {
       _sseRetries = 0; // successful message resets retry counter
@@ -7608,18 +7613,25 @@ function connectSSE() {
   };
   es.onerror = () => {
     sseConnected = false;
+    setLivePill(false);
     es.close();          // explicitly close the failed connection
     _sseInstance = null;
     _sseRetries++;
-    const delay = Math.min(SSE_BASE_DELAY * Math.pow(1.5, _sseRetries), SSE_MAX_DELAY);
+    // ±25% jitter so a fleet of dashboards doesn't reconnect in synchronized
+    // waves (thundering herd) after a server restart.
+    const delay = Math.min(SSE_BASE_DELAY * Math.pow(1.5, _sseRetries), SSE_MAX_DELAY)
+                  * (0.75 + Math.random() * 0.5);
     setTimeout(connectSSE, delay);
   };
 }
 
-const FLAG_BASE = 'https://flagcdn.com/16x12/';
+// Emoji flag from an ISO 3166-1 alpha-2 code (regional-indicator pair).
+// No third-party CDN: works offline/air-gapped and leaks nothing to a CDN.
+// Platforms without flag glyphs (e.g. Windows) render the two letters instead.
 function countryFlag(code) {
-  if (!code) return '';
-  return `<img src="${FLAG_BASE}${code.toLowerCase()}.png" width="16" height="12" style="vertical-align:middle;margin-right:4px;border-radius:2px">`;
+  if (!code || !/^[A-Za-z]{2}$/.test(code)) return '';
+  const cc = code.toUpperCase();
+  return String.fromCodePoint(0x1F1A5 + cc.charCodeAt(0), 0x1F1A5 + cc.charCodeAt(1)) + ' ';
 }
 
 function renderCountryChart(countries) {
@@ -7978,6 +7990,7 @@ async function tick() {
     if (_tickErrors >= TICK_MAX_ERRORS && _tickInterval) {
       clearInterval(_tickInterval);
       _tickInterval = null;
+      setLivePill(false);
       console.warn('Tick: server unreachable, pausing poll. Will resume when SSE reconnects.');
     }
     return; // skip view-specific fetches when server is down
