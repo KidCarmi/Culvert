@@ -203,6 +203,34 @@ func TestSlice7_FailedCredentials_Still407_NeverExempt(t *testing.T) {
 	}
 }
 
+// A PRESENT but malformed Proxy-Authorization header (bad base64, unsupported
+// scheme, missing colon) makes parseProxyAuth return ok=false — but it is still
+// presented credentials and must take the 407 path, never an exemption. This is
+// the regression test for the resolveNoCredAuthOutcome header-presence guard.
+func TestSlice7_MalformedCredentials_Still407_NeverExempt(t *testing.T) {
+	setupAuthGateTest(t)
+	const host = "slice7-malformed.example.test"
+	policyStore.Add(slice7ExemptRule(host))
+
+	for name, header := range map[string]string{
+		"bad base64":         "Basic not-base64!!!",
+		"unsupported scheme": "Bearer some-opaque-token",
+		"missing colon":      "Basic " + base64.StdEncoding.EncodeToString([]byte("no-colon-here")),
+	} {
+		before := exemptCount()
+		w := httptest.NewRecorder()
+		handleRequest(w, makeRequest("http://"+host+"/", map[string]string{
+			"Proxy-Authorization": header,
+		}))
+		if w.Code != http.StatusProxyAuthRequired {
+			t.Errorf("%s: malformed Proxy-Authorization must 407 even with a matching exempt rule, got %d", name, w.Code)
+		}
+		if got := exemptCount(); got != before {
+			t.Errorf("%s: malformed credentials must never increment the exempt metric: %d → %d", name, before, got)
+		}
+	}
+}
+
 func TestSlice7_ValidCredentialsWin(t *testing.T) {
 	setupAuthGateTest(t)
 	const host = "slice7-goodcreds.example.test"
@@ -275,7 +303,10 @@ func TestSlice7_StaleSessionCookie_ExemptEligible(t *testing.T) {
 	before := exemptCount()
 	w := httptest.NewRecorder()
 	r := makeRequest("http://"+host+"/", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: value, Path: "/"})
+	r.AddCookie(&http.Cookie{
+		Name: sessionCookieName, Value: value, Path: "/",
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
 	handleRequest(w, r)
 
 	if w.Code == http.StatusProxyAuthRequired {

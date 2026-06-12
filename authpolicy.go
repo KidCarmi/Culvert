@@ -211,6 +211,20 @@ func authRequestContext(r *http.Request, clientIP string) RequestContext {
 	return RequestContext{ClientIP: clientIP, Host: host, Protocol: proto, Method: r.Method}
 }
 
+// resolveNoCredAuthOutcome evaluates the Stage-1 exemption for a request at the
+// proxy auth gate, but ONLY when no Proxy-Authorization header is present at
+// all. parseProxyAuth returns ok=false both for an absent header AND for a
+// present-but-malformed one (unsupported scheme, bad base64, missing colon,
+// overlong username) — the latter is PRESENTED credentials and must take the
+// existing 407 path, never an exemption. This guard pins the contract that
+// credential failures of any kind are never exempted.
+func resolveNoCredAuthOutcome(r *http.Request, clientIP string) AuthDecision {
+	if r.Header.Get("Proxy-Authorization") != "" {
+		return AuthDecision{Outcome: OutcomeDefault}
+	}
+	return resolveAuthOutcome(authRequestContext(r, clientIP))
+}
+
 // ─── Kill switch (§1.11) — read-once accessor only ──────────────────────────
 
 // envAuthBypassDisable is the break-glass environment variable that will, in a

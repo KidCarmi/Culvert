@@ -1761,9 +1761,12 @@ func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, iden
 // recordRequestAuth records a request log entry carrying the Stage-1 auth
 // observability block. A zero AuthLogFields adds nothing to the wire output, so
 // call sites converted from recordRequest stay byte-identical for requests with
-// no auth decision (every non-exempt request).
-func recordRequestAuth(ip, method, host, status, ruleMatched, actionTaken, identity, sslAction string, auth AuthLogFields) {
-	recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, sslAction, auth)
+// no auth decision (every non-exempt request). All current call sites are the
+// pre-tunnel stage of handleRequest, where sslAction is not yet determined —
+// hence no sslAction parameter; use recordRequestBytesAuth directly if a future
+// inspect-stage call site needs one.
+func recordRequestAuth(ip, method, host, status, ruleMatched, actionTaken, identity string, auth AuthLogFields) {
+	recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, "", auth)
 }
 
 // recordRequestBytesAuth is the core recorder; it attaches the Stage-1 auth
