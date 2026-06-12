@@ -110,6 +110,39 @@ func TestConnLimiter_Concurrent(t *testing.T) {
 	}
 }
 
+// Enable is called at runtime (admin API, config import, CP snapshot sync)
+// while Acquire runs on the proxy hot path; the race detector must not flag
+// the maxPerIP read/write.
+func TestConnLimiter_ConcurrentEnableReconfigure(t *testing.T) {
+	cl := &ConnLimiter{conns: make(map[string]*int64)}
+	cl.Enable(100)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				if cl.Acquire("reconf-ip") {
+					cl.Release("reconf-ip")
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 100; j++ {
+			cl.Enable(50 + j%2)
+		}
+	}()
+	wg.Wait()
+
+	if cl.ActiveConns("reconf-ip") != 0 {
+		t.Fatalf("all conns released but active = %d", cl.ActiveConns("reconf-ip"))
+	}
+}
+
 func TestLatencyHistogram_Observe(t *testing.T) {
 	h := newLatencyHistogram()
 	h.Observe(0.001) // 1ms → 5ms bucket

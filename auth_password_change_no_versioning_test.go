@@ -110,9 +110,9 @@ func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
 		t.Fatalf("seed test user: %v", err)
 	}
 
-	// Mint a session cookie for the test user — apiAuthChangePassword
-	// reads sessionAdmin(r) (which reads the session cookie) and
-	// rejects username=="unknown".
+	// Mint an admin UI session cookie for the test user —
+	// apiAuthChangePassword reads sessionAdmin(r) (which reads the
+	// ps_ui_session cookie) and rejects username=="unknown".
 	cookieValue, err := encodeSession(&Session{
 		Sub:      testUser,
 		Provider: "local",
@@ -136,7 +136,7 @@ func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
 	// value regardless. Setting Secure/HttpOnly/SameSite satisfies
 	// gosec G124 without a //nolint suppression.
 	r.AddCookie(&http.Cookie{
-		Name:     sessionCookieName,
+		Name:     uiSessionCookieName,
 		Value:    cookieValue,
 		Secure:   true,
 		HttpOnly: true,

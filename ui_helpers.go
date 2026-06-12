@@ -31,9 +31,11 @@ func auditEventDiff(r *http.Request, action, object, detail string, before, afte
 	if actor == "" {
 		actor = r.RemoteAddr
 	}
-	// Enrich actor with authenticated admin identity from session cookie.
+	// Enrich actor with authenticated admin identity from the admin UI
+	// session cookie (ps_ui_session) — not the proxy-user ps_session, which
+	// belongs to a different identity and must not attribute admin actions.
 	// The IP is always kept for accountability; the username adds readability.
-	if sess, err := readSessionCookie(r); err == nil && sess != nil {
+	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
 		name := sess.Sub
 		if name == "" {
 			name = sess.Email

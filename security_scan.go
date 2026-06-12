@@ -148,7 +148,7 @@ func (s *ScanExclusionStore) Load(path string) error {
 	}
 	s.hosts = make(map[string]bool, len(f.Hosts))
 	for _, h := range f.Hosts {
-		s.hosts[strings.ToLower(h)] = true
+		s.hosts[stripHostPort(strings.ToLower(h))] = true
 	}
 	s.mu.Unlock()
 	return nil
@@ -195,7 +195,7 @@ func (s *ScanExclusionStore) Replace(hashes, hosts []string) {
 	}
 	hostMap := make(map[string]bool, len(hosts))
 	for _, h := range hosts {
-		h = strings.TrimSpace(strings.ToLower(h))
+		h = stripHostPort(strings.TrimSpace(strings.ToLower(h)))
 		if h != "" {
 			hostMap[h] = true
 		}
@@ -223,10 +223,8 @@ func (s *ScanExclusionStore) IsHostExcluded(host string) bool {
 	if s == nil || host == "" {
 		return false
 	}
-	// Strip port suffix (host:port) if present.
-	if idx := strings.LastIndex(host, ":"); idx > 0 && !strings.Contains(host[idx:], "]") {
-		host = host[:idx]
-	}
+	// Strip port suffix and IPv6 brackets if present.
+	host = stripHostPort(host)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.hosts[strings.ToLower(host)]
