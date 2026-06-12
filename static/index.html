@@ -5002,9 +5002,13 @@ function _blRenderPage(append) {
     const h = escHtml(e.host);
     const jh = JSON.stringify(e.host).replace(/"/g, '&quot;');
     const wild = e.host.startsWith('*.');
+    let feedLabel = 'Feed';
+    if (e.feed) {
+      try { feedLabel = 'Feed · ' + new URL(e.feed).hostname; } catch(_) {}
+    }
     const srcBadge = e.source === 'manual'
       ? '<span class="badge" style="background:rgba(20,184,166,.12);color:#2dd4bf;border:1px solid rgba(20,184,166,.25);font-size:10px">Admin</span>'
-      : '<span class="badge" style="background:var(--surface2);color:var(--muted);font-size:10px">Feed</span>';
+      : `<span class="badge" style="background:var(--surface2);color:var(--muted);font-size:10px" title="${escHtml(e.feed || 'Imported by a feed before per-feed attribution existed')}">${escHtml(feedLabel)}</span>`;
     return `<tr>
       <td><input type="checkbox" class="bl-check" value="${jh}" data-change="blUpdateBulk"></td>
       <td class="host-td">${h}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>

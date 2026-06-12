@@ -289,8 +289,8 @@ func TestAPIBlocklistFeed_MultiFeedLifecycle(t *testing.T) {
 
 	// DELETE removes one; deleting again is a 404.
 	del := func() *httptest.ResponseRecorder {
-		r := adminCtx(httptest.NewRequest(http.MethodDelete,
-			"/api/blocklist/feed?url=https%3A%2F%2Ffeeds.example%2Ftwo.txt", nil))
+		r := adminCtx(httptest.NewRequestWithContext(context.Background(), http.MethodDelete,
+			"/api/blocklist/feed?url=https%3A%2F%2Ffeeds.example%2Ftwo.txt", http.NoBody))
 		w := httptest.NewRecorder()
 		apiBlocklistFeed(w, r)
 		return w
@@ -323,7 +323,7 @@ func TestAPIBlocklistFeed_DeleteRequiresURL(t *testing.T) {
 	swapFeedSyncer(t, newTestBlocklistSyncer(t))
 	swapAdminSettingsPath(t, "")
 
-	r := adminCtx(httptest.NewRequest(http.MethodDelete, "/api/blocklist/feed", nil))
+	r := adminCtx(httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/api/blocklist/feed", http.NoBody))
 	w := httptest.NewRecorder()
 	apiBlocklistFeed(w, r)
 	if w.Code != http.StatusBadRequest {
