@@ -750,6 +750,9 @@ tr.dragging  { opacity: .4; }
               <button class="btn sm active" id="bl-src-all"   data-click="setBlSource" data-arg=""      >All</button>
               <button class="btn sm ghost" id="bl-src-manual" data-click="setBlSource" data-arg="manual" >Admin only</button>
               <button class="btn sm ghost" id="bl-src-feed"   data-click="setBlSource" data-arg="feed"   >Feed only</button>
+              <button class="btn sm ghost" id="bl-cleanup-btn" data-click="blCleanupUnattributed"
+                style="display:none;color:var(--yellow)"
+                title="Remove legacy feed entries that no configured feed currently carries (imported before per-feed attribution existed)"></button>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:10px;margin:8px 0 10px">
@@ -3523,7 +3526,8 @@ document.addEventListener('click', e => {
     case 'saveBlocklistFeed': saveBlocklistFeed(); break;
     case 'syncBlocklistFeed': syncBlocklistFeed(arg); break;
     case 'editBlocklistFeed': editBlocklistFeed(arg, arg2); break;
-    case 'deleteBlocklistFeed': deleteBlocklistFeed(arg); break;
+    case 'deleteBlocklistFeed': deleteBlocklistFeed(arg, arg2); break;
+    case 'blCleanupUnattributed': blCleanupUnattributed(); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
 
     // ── Security / IP filter ──
@@ -5002,6 +5006,11 @@ function renderBlocklist(preserve) {
     (!q || e.host.includes(q)) &&
     (!blSourceFilter || e.source === blSourceFilter)
   );
+  // Legacy-cleanup button: visible only while unattributed feed entries exist.
+  const orphans = blEntries.filter(e => e.source === 'feed' && !e.feed).length;
+  const cleanupBtn = document.getElementById('bl-cleanup-btn');
+  cleanupBtn.style.display = orphans > 0 ? '' : 'none';
+  if (orphans > 0) cleanupBtn.textContent = `Clean up ${orphans} legacy entries`;
   const tbody = document.getElementById('bl-table');
   if (blVisible.length === 0) {
     blOffset = 0;
@@ -6562,7 +6571,7 @@ async function fetchBlocklistFeed() {
       return;
     }
     st.textContent = '';
-    let html = '<table class="table" style="font-size:.8rem"><thead><tr><th>Feed URL</th><th>Interval</th><th>Last Sync</th><th>Imported</th><th></th></tr></thead><tbody>';
+    let html = '<table class="table" style="font-size:.8rem"><thead><tr><th>Feed URL</th><th>Interval</th><th>Last Sync</th><th>Imported</th><th title="Blocklist entries currently attributed to this feed">Entries</th><th></th></tr></thead><tbody>';
     feeds.forEach(f => {
       const last = f.last_sync
         ? new Date(f.last_sync).toLocaleString()
@@ -6574,10 +6583,11 @@ async function fetchBlocklistFeed() {
         <td>${escHtml(fmtFeedInterval(f.interval))}</td>
         <td>${escHtml(last)} ${err}</td>
         <td>${f.imported_count || 0}</td>
+        <td>${f.attributed_count || 0}</td>
         <td class="text-right" style="white-space:nowrap">
           <button class="btn ghost sm" style="font-size:.72rem" data-click="syncBlocklistFeed" data-arg="${escHtml(f.url)}">Sync</button>
           <button class="btn ghost sm" style="font-size:.72rem" data-click="editBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${escHtml(f.interval)}">Edit</button>
-          <button class="btn ghost sm" style="font-size:.72rem;color:var(--red)" data-click="deleteBlocklistFeed" data-arg="${escHtml(f.url)}">Delete</button>
+          <button class="btn ghost sm" style="font-size:.72rem;color:var(--red)" data-click="deleteBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${f.attributed_count || 0}">Delete</button>
         </td>
       </tr>`;
     });
@@ -6615,12 +6625,38 @@ function editBlocklistFeed(url, interval) {
   document.getElementById('s-bl-feed-url').focus();
 }
 
-async function deleteBlocklistFeed(url) {
-  if (!await confirmAction('Remove Feed', `Remove feed "${url}"? Domains already imported stay on the blocklist.`, 'Remove')) return;
+async function deleteBlocklistFeed(url, attributedCount) {
+  const n = parseInt(attributedCount, 10) || 0;
+  if (!await confirmAction('Remove Feed', `Remove feed "${url}"? Auto-sync for it stops immediately.`, 'Remove')) return;
+  let purge = false;
+  if (n > 0) {
+    purge = await confirmAction('Also Remove Its Entries?',
+      `This feed has ${n} blocklist entries attributed to it. Remove them too? ` +
+      `Choosing "Keep Entries" leaves them on the blocklist (admin-added entries are never touched either way).`,
+      `Remove ${n} Entries`);
+  }
   try {
-    await api('/api/blocklist/feed?url=' + encodeURIComponent(url), {method: 'DELETE'});
-    toast('Feed removed', 'success');
+    const qs = '?url=' + encodeURIComponent(url) + (purge ? '&purge=entries' : '');
+    const d = await api('/api/blocklist/feed' + qs, {method: 'DELETE'});
+    toast(purge ? `Feed removed — ${d.purged} entries purged` : 'Feed removed (entries kept)', 'success');
     fetchBlocklistFeed();
+    fetchBlocklist();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// blCleanupUnattributed removes legacy feed entries that carry no source
+// attribution — imported before per-feed tracking existed and absent from
+// every current feed (anything still in a feed is re-stamped on sync).
+async function blCleanupUnattributed() {
+  const n = blEntries.filter(e => e.source === 'feed' && !e.feed).length;
+  if (!n) { toast('No unattributed feed entries to clean up', 'success'); return; }
+  if (!await confirmAction('Clean Up Legacy Feed Entries',
+    `Remove ${n} feed entries that have no source attribution? These were imported before per-feed tracking existed and are no longer present in any configured feed. Admin-added entries are not affected. Any host still carried by a feed will be re-imported (with attribution) on its next sync.`,
+    `Remove ${n} Entries`)) return;
+  try {
+    const d = await api('/api/blocklist?scope=unattributed', {method: 'DELETE'});
+    toast(`Removed ${d.removed} legacy feed entries`, 'success');
+    fetchBlocklist();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 

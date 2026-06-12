@@ -270,3 +270,72 @@ func TestBlocklistSources_PersistRoundTrip(t *testing.T) {
 		t.Errorf("entry = %+v; want keep.persist.invalid attributed to %s", entries[0], feed)
 	}
 }
+
+// ─── Cascade delete + legacy cleanup (PR: feed-source management) ────
+
+func newAttributedBlocklist(t *testing.T) *Blocklist {
+	t.Helper()
+	ensureBlocklistStartupTestLogger(t)
+	b := &Blocklist{
+		exact: map[string]bool{}, wildcards: map[string]bool{},
+		manual: map[string]bool{}, exceptions: map[string]bool{},
+	}
+	b.MergeFromLines([]string{"a.feed-one.invalid", "*.w.feed-one.invalid"}, "https://feeds.example/one.txt")
+	b.MergeFromLines([]string{"b.feed-two.invalid"}, "https://feeds.example/two.txt")
+	b.MergeFromLines([]string{"legacy.orphan.invalid"}, "") // pre-attribution import
+	b.AddManual("keep.manual.invalid")
+	return b
+}
+
+func TestRemoveByFeedSource_CascadeDeletesOnlyThatFeed(t *testing.T) {
+	b := newAttributedBlocklist(t)
+
+	if got := b.CountByFeedSource("https://feeds.example/one.txt"); got != 2 {
+		t.Errorf("CountByFeedSource(one) = %d; want 2", got)
+	}
+	removed := b.RemoveByFeedSource("https://feeds.example/one.txt")
+	if removed != 2 {
+		t.Errorf("RemoveByFeedSource(one) = %d; want 2", removed)
+	}
+	if b.isListed("a.feed-one.invalid") || b.isListed("x.w.feed-one.invalid") {
+		t.Error("feed-one entries must be gone after cascade delete")
+	}
+	if !b.isListed("b.feed-two.invalid") {
+		t.Error("feed-two entry must survive a feed-one cascade delete")
+	}
+	if !b.isListed("legacy.orphan.invalid") || !b.isListed("keep.manual.invalid") {
+		t.Error("orphan and manual entries must survive a cascade delete")
+	}
+	if got := b.CountByFeedSource("https://feeds.example/one.txt"); got != 0 {
+		t.Errorf("CountByFeedSource(one) after delete = %d; want 0", got)
+	}
+}
+
+func TestRemoveByFeedSource_ManualOverlapSurvives(t *testing.T) {
+	b := newAttributedBlocklist(t)
+	// Host both admin-added AND present in feed-one content: manual wins.
+	b.AddManual("a.feed-one.invalid")
+	if removed := b.RemoveByFeedSource("https://feeds.example/one.txt"); removed != 1 {
+		t.Errorf("removed = %d; want 1 (only the wildcard; manual-overlap host kept)", removed)
+	}
+	if !b.isListed("a.feed-one.invalid") {
+		t.Error("admin-added host must survive cascade delete of its feed")
+	}
+}
+
+func TestRemoveUnattributedFeedEntries_OnlyOrphans(t *testing.T) {
+	b := newAttributedBlocklist(t)
+	removed := b.RemoveUnattributedFeedEntries()
+	if removed != 1 {
+		t.Errorf("removed = %d; want 1 (only legacy.orphan.invalid)", removed)
+	}
+	if b.isListed("legacy.orphan.invalid") {
+		t.Error("orphan must be removed")
+	}
+	if !b.isListed("a.feed-one.invalid") || !b.isListed("b.feed-two.invalid") {
+		t.Error("attributed entries must survive orphan cleanup")
+	}
+	if !b.isListed("keep.manual.invalid") {
+		t.Error("manual entries must survive orphan cleanup")
+	}
+}

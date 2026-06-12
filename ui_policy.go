@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+// blocklistCleanupUnattributed handles DELETE /api/blocklist?scope=unattributed:
+// removes legacy feed entries with no per-feed attribution (imported before
+// the .sources sidecar existed and absent from every current feed's content).
+func blocklistCleanupUnattributed(w http.ResponseWriter, r *http.Request) {
+	removed := bl.RemoveUnattributedFeedEntries()
+	logger.Printf("UI: removed %d unattributed legacy feed entries", removed)
+	auditEvent(r, "blocklist.cleanup.unattributed", fmt.Sprintf("%d host(s)", removed), "")
+	saveConfigVersion(sessionAdmin(r), "blocklist.cleanup.unattributed")
+	jsonOK(w, map[string]any{"removed": removed})
+}
+
 func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -122,6 +133,10 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		if r.URL.Query().Get("scope") == "unattributed" {
+			blocklistCleanupUnattributed(w, r)
 			return
 		}
 		host := strings.TrimSpace(r.URL.Query().Get("host"))
@@ -238,11 +253,12 @@ func blocklistFeedList(w http.ResponseWriter) {
 			lastSyncStr = feeds[i].LastSync.UTC().Format(time.RFC3339)
 		}
 		out = append(out, map[string]any{
-			"url":            feeds[i].URL,
-			"interval":       feeds[i].Interval.String(),
-			"last_sync":      lastSyncStr,
-			"last_error":     feeds[i].LastError,
-			"imported_count": feeds[i].ImportedCount,
+			"url":              feeds[i].URL,
+			"interval":         feeds[i].Interval.String(),
+			"last_sync":        lastSyncStr,
+			"last_error":       feeds[i].LastError,
+			"imported_count":   feeds[i].ImportedCount,
+			"attributed_count": bl.CountByFeedSource(feeds[i].URL),
 		})
 	}
 	jsonOK(w, map[string]any{"feeds": out})
@@ -290,6 +306,8 @@ func blocklistFeedUpsert(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": true, "url": body.URL, "interval": interval.String()})
 }
 
+// DELETE /api/blocklist/feed?url=X                 → remove feed config only
+// DELETE /api/blocklist/feed?url=X&purge=entries   → also remove the entries it imported
 func blocklistFeedDelete(w http.ResponseWriter, r *http.Request) {
 	feedURL := r.URL.Query().Get("url")
 	if feedURL == "" {
@@ -300,9 +318,14 @@ func blocklistFeedDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "feed not found", http.StatusNotFound)
 		return
 	}
-	auditEvent(r, "blocklist.feed.delete", feedURL, "")
+	purged := 0
+	if r.URL.Query().Get("purge") == "entries" {
+		purged = bl.RemoveByFeedSource(feedURL)
+		logger.Printf("UI: feed %q deleted, purged %d attributed entries", sanitizeLog(feedURL), purged)
+	}
+	auditEvent(r, "blocklist.feed.delete", feedURL, fmt.Sprintf("purged %d attributed entries", purged))
 	adminSettingsSave()
-	jsonOK(w, map[string]any{"ok": true})
+	jsonOK(w, map[string]any{"ok": true, "purged": purged})
 }
 
 // POST /api/blocklist/feed/sync        → sync all feeds now (synchronous)
