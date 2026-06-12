@@ -854,6 +854,12 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
+		// Auth (Stage-1) rules are admin-managed via /api/authpolicy only —
+		// this operator-level endpoint must not create authentication waivers.
+		if ruleTypeOf(&rule) == ruleTypeAuth {
+			http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+			return
+		}
 		if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -888,9 +894,18 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
+		// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
+		if beforeRule != nil && ruleTypeOf(beforeRule) == ruleTypeAuth {
+			http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+			return
+		}
 		var rule PolicyRule
 		if err := decodeJSON(r, &rule); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if ruleTypeOf(&rule) == ruleTypeAuth {
+			http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 			return
 		}
 		if err := validatePolicyRule(rule, policyStore.List(), priority); err != nil {
@@ -920,6 +935,14 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 				Priorities []int `json:"priorities"`
 			}
 			if err := decodeJSON(r, &body); err == nil && len(body.Priorities) > 0 {
+				// Auth rules are admin-managed via /api/authpolicy only — reject
+				// the whole batch rather than silently skipping (explicit > silent).
+				for _, p := range body.Priorities {
+					if isAuthRulePriority(p) {
+						http.Error(w, fmt.Sprintf("priority %d is an auth rule — managed via /api/authpolicy (admin only)", p), http.StatusBadRequest)
+						return
+					}
+				}
 				deleted := 0
 				for _, p := range body.Priorities {
 					if policyStore.Delete(p) {
@@ -949,6 +972,11 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 				beforeRule = &r2
 				break
 			}
+		}
+		// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
+		if beforeRule != nil && ruleTypeOf(beforeRule) == ruleTypeAuth {
+			http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+			return
 		}
 		if !policyStore.Delete(priority) {
 			http.Error(w, "rule not found", http.StatusNotFound)
@@ -1111,10 +1139,48 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": true})
 }
 
+// policyTestTrace is one row of the simulator's rule-evaluation trace.
+type policyTestTrace struct {
+	Priority   int    `json:"priority"`
+	Name       string `json:"name"`
+	SkipReason string `json:"skipReason,omitempty"` // why this rule was skipped
+}
+
+// walkPolicyTestRules dry-runs Stage-2 access evaluation for the simulator (no
+// hit counts), returning the per-rule trace and the first match (nil = none).
+// Mirrors Evaluate: Stage-1 auth rules are inert for access decisions, so they
+// appear in the trace as skipped, never as the match.
+func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, host string, groups []string) ([]policyTestTrace, *PolicyRule) {
+	var trace []policyTestTrace
+	var matched *PolicyRule
+	for _, rule := range rules {
+		r2 := rule // copy
+		skip := ""
+		switch {
+		case ruleTypeOf(&r2) != ruleTypeAccess:
+			skip = "non-access rule (auth)"
+		case !matchSource(&r2, sourceIP, identity, authSource, groups):
+			skip = "source mismatch"
+		case !matchSchedule(r2.Schedule):
+			skip = "schedule inactive"
+		case !matchDest(&r2, host):
+			skip = "destination mismatch"
+		}
+		trace = append(trace, policyTestTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})
+		if skip == "" {
+			matched = &r2
+			break
+		}
+	}
+	return trace, matched
+}
+
 // POST /api/policy/test — evaluate policy rules against hypothetical inputs.
 // Useful for debugging: returns the first matching rule (or no-match) without
 // side-effects (hit counts are NOT incremented).
-// Body: {"sourceIP":"…","identity":"…","authSource":"…","groups":["…"],"host":"…"}
+// Body: {"sourceIP":"…","identity":"…","authSource":"…","groups":["…"],"host":"…",
+// "protocol":"http|connect","method":"GET"} — protocol/method feed the Stage-1
+// auth simulation only.
 func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1129,6 +1195,8 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		AuthSource string   `json:"authSource"`
 		Groups     []string `json:"groups"`
 		Host       string   `json:"host"`
+		Protocol   string   `json:"protocol"` // "http" (default) | "connect" — Stage-1 simulation only
+		Method     string   `json:"method"`   // optional HTTP method — Stage-1 simulation only
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -1138,42 +1206,18 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "host is required", http.StatusBadRequest)
 		return
 	}
-	if body.AuthSource == "" {
-		body.AuthSource = "unauth"
-	}
+
+	rules := policyStore.List()
+
+	// Stage-1 simulation (Slice 8): resolve the auth outcome for this request
+	// and mirror Slice 7's runtime wiring — a no-credentials Exempt match makes
+	// Stage-2 see authSource="exempt". Dry-run: no counters, no hit counts.
+	stage2AuthSource, authBlock := simulateAuthOutcome(rules,
+		body.SourceIP, body.Host, body.Protocol, body.Method, body.Identity, body.AuthSource)
+	body.AuthSource = stage2AuthSource
 
 	// Walk rules manually without incrementing hit counts.
-	rules := policyStore.List()
-	type ruleTrace struct {
-		Priority   int    `json:"priority"`
-		Name       string `json:"name"`
-		SkipReason string `json:"skipReason,omitempty"` // why this rule was skipped
-	}
-	var trace []ruleTrace
-	var matched *PolicyRule
-
-	for _, rule := range rules {
-		r2 := rule // copy
-		skip := ""
-		switch {
-		case ruleTypeOf(&r2) != ruleTypeAccess:
-			// Mirror Evaluate: Stage-1 auth rules are inert for access decisions.
-			// They may appear in List() once persisted, but real traffic skips
-			// them, so the test endpoint must not report one as the match.
-			skip = "non-access rule (auth)"
-		case !matchSource(&r2, body.SourceIP, body.Identity, body.AuthSource, body.Groups):
-			skip = "source mismatch"
-		case !matchSchedule(r2.Schedule):
-			skip = "schedule inactive"
-		case !matchDest(&r2, body.Host):
-			skip = "destination mismatch"
-		}
-		trace = append(trace, ruleTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})
-		if skip == "" {
-			matched = &r2
-			break
-		}
-	}
+	trace, matched := walkPolicyTestRules(rules, body.SourceIP, body.Identity, body.AuthSource, body.Host, body.Groups)
 
 	// Enrich with category lookup so the admin can see how the host was categorised.
 	catName, catTier, catMatchedBy := lookupHostCategory(body.Host)
@@ -1190,6 +1234,7 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 			"defaultAction": defAction,
 			"trace":         trace,
 			"hostCategory":  hostCategory,
+			"auth":          authBlock,
 		})
 		return
 	}
@@ -1199,6 +1244,7 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		"action":       matched.Action,
 		"trace":        trace,
 		"hostCategory": hostCategory,
+		"auth":         authBlock,
 	})
 }
 
@@ -1365,6 +1411,10 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
 	mux.HandleFunc("/api/policy/move", apiPolicyMove)
 	mux.HandleFunc("/api/policy/test", apiPolicyTest)
+
+	// Stage-1 authentication-policy (auth/exempt) rules — admin-only writes.
+	mux.HandleFunc("/api/authpolicy", apiAuthPolicy)                // GET list / POST add / PUT update / DELETE remove
+	mux.HandleFunc("/api/authpolicy/reorder", apiAuthPolicyReorder) // POST reorder auth rules among themselves
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
 
 	// Blocklist mode + feed sync.

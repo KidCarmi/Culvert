@@ -199,6 +199,15 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true}}},
 	{Path: "/api/policy/test", Handler: "apiPolicyTest", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "POST is read-only in spirit (dry-run policy match), no audit"}}},
+	{Path: "/api/authpolicy", Handler: "apiAuthPolicy", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/authpolicy/reorder", Handler: "apiAuthPolicyReorder", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
 	{Path: "/api/default-action", Handler: "apiDefaultAction", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},

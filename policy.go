@@ -667,6 +667,47 @@ func (ps *PolicyStore) Reorder(orderedPriorities []int) bool {
 	return true
 }
 
+// PermutePriorities reassigns the priorities of a SUBSET of rules among
+// themselves. orderedPriorities lists existing priorities in the desired new
+// order; the same priority VALUES are redistributed across those rules (the
+// sorted slot values are assigned in the requested order), so the priority
+// multiset — and therefore the ordering of every rule OUTSIDE the subset — is
+// unchanged. Used by the auth-policy reorder endpoint (Slice 8), which must
+// never disturb access-rule ordering. Returns false on an empty list, a
+// duplicate, or a priority that matches no rule.
+func (ps *PolicyStore) PermutePriorities(orderedPriorities []int) bool {
+	if len(orderedPriorities) == 0 {
+		return false
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	seen := make(map[int]bool, len(orderedPriorities))
+	for _, p := range orderedPriorities {
+		if seen[p] {
+			return false
+		}
+		seen[p] = true
+	}
+	byOldPri := make(map[int]*PolicyRule, len(orderedPriorities))
+	for _, r := range ps.rules {
+		if seen[r.Priority] {
+			byOldPri[r.Priority] = r
+		}
+	}
+	if len(byOldPri) != len(orderedPriorities) {
+		return false // a listed priority matches no rule
+	}
+	slots := make([]int, len(orderedPriorities))
+	copy(slots, orderedPriorities)
+	sort.Ints(slots)
+	for i, oldPri := range orderedPriorities {
+		byOldPri[oldPri].Priority = slots[i]
+	}
+	ps.sortLocked()
+	ps.bumpVersion()
+	return true
+}
+
 // DetectConflicts checks for rules at the same priority with overlapping
 // conditions but different actions. Returns human-readable warnings.
 func (ps *PolicyStore) DetectConflicts() []string {

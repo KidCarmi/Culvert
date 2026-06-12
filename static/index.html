@@ -359,6 +359,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="policy" data-min-role="operator">
       <span class="icon">📋</span> Policy
     </div>
+    <div class="nav-item" data-view="authpolicy">
+      <span class="icon">🪪</span> Auth Exempt
+    </div>
     <div class="nav-item" data-view="urlcat" data-min-role="operator">
       <span class="icon">🏷️</span> URL Categories
     </div>
@@ -2296,6 +2299,66 @@ Firefox (all platforms):
 
     </div><!-- /view-policy -->
 
+    <!-- ── AUTH EXEMPT RULES (Stage-1 authentication policy) ─────────────── -->
+    <div class="view" id="view-authpolicy">
+      <div class="panel" style="margin-bottom:14px">
+        <div class="panel-body" style="font-size:.85rem;color:var(--muted)">
+          ⚠️ <strong style="color:var(--text)">Exempt ≠ Allow.</strong>
+          An exemption skips <em>end-user authentication only</em>, and only when the client presents
+          <em>no credentials</em>. Stage-2 policy still decides access — default-deny still applies.
+          No identity is ever created for exempt traffic. Creating, editing, deleting and reordering
+          exempt rules requires the <strong>admin</strong> role.
+          <div id="ap-default-allow-warn" style="display:none;margin-top:8px;color:#fbbf24">
+            ⚠ The default policy action is <strong>Allow</strong> while exempt rules exist — exemptions add
+            little over an allow-all default. Set the default action to deny (Zero Trust).
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-bottom:14px">
+        <div class="panel-header">
+          <span class="panel-title">Auth Exempt Rules</span>
+          <button class="btn sm" data-click="apShowAdd">+ Add Exempt Rule</button>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Name</th><th>On</th><th>Owner</th><th>Reason</th><th>Source CIDRs</th><th>Destination</th><th>Expiry</th><th>Warnings</th><th></th></tr></thead>
+            <tbody id="ap-rules"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel" id="ap-form-panel" style="display:none">
+        <div class="panel-header"><span class="panel-title" id="ap-form-title">Add Exempt Rule</span></div>
+        <div class="panel-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+          <div><label class="label">Name *</label><input type="text" class="input" id="ap-name" style="width:100%"></div>
+          <div><label class="label">Owner *</label><input type="text" class="input" id="ap-owner" placeholder="ops-team" style="width:100%"></div>
+          <div><label class="label">Reason *</label><input type="text" class="input" id="ap-reason" placeholder="legacy device cannot authenticate" style="width:100%"></div>
+          <div><label class="label">Source CIDRs * (comma-separated)</label><input type="text" class="input" id="ap-cidrs" placeholder="10.0.5.0/24" style="width:100%"></div>
+          <div><label class="label">Destination FQDN</label><input type="text" class="input" id="ap-destfqdn" placeholder="updates.example.com" style="width:100%"></div>
+          <div><label class="label">Destination Category Group</label><input type="text" class="input" id="ap-destgroup" style="width:100%"></div>
+          <div><label class="label">Expiry (RFC3339, recommended)</label><input type="text" class="input" id="ap-expires" placeholder="2027-01-01T00:00:00Z" style="width:100%"></div>
+          <div><label class="label">Protocol</label>
+            <select class="input" id="ap-protocol" style="width:100%">
+              <option value="">any</option><option value="http">http</option><option value="connect">connect</option>
+            </select></div>
+          <div><label class="label">HTTP Method (optional)</label><input type="text" class="input" id="ap-method" placeholder="GET" style="width:100%"></div>
+          <div style="display:flex;align-items:end;gap:16px">
+            <label style="font-size:.85rem"><input type="checkbox" id="ap-enabled" checked> Enabled</label>
+            <label style="font-size:.85rem" title="Waives authentication for ALL destinations from the matched source — least privilege is bypassed">
+              <input type="checkbox" id="ap-broad"> Broad exemption (all destinations)</label>
+          </div>
+        </div>
+        <div class="panel-body" style="display:flex;gap:10px;border-top:1px solid var(--border)">
+          <button class="btn" data-click="apSave">💾 Save</button>
+          <button class="btn ghost" data-click="apCancel">Cancel</button>
+          <span style="font-size:.78rem;color:var(--muted);align-self:center">
+            A destination (FQDN or category group) is required unless “Broad exemption” is explicitly checked.
+          </span>
+        </div>
+      </div>
+    </div><!-- /view-authpolicy -->
+
     <!-- ── URL CATEGORIES ──────────────────────────────────────────────── -->
     <div class="view" id="view-urlcat">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
@@ -3618,6 +3681,14 @@ document.addEventListener('click', e => {
     case 'addRewriteRule':    addRewriteRule(); break;
     case 'removeRewriteRule': removeRewriteRule(+arg); break;
 
+    // ── Auth Exempt rules ──
+    case 'apShowAdd':    apShowAdd(); break;
+    case 'apCancel':     apCancel(); break;
+    case 'apSave':       apSave(); break;
+    case 'apEditRule':   apEditRule(+arg); break;
+    case 'apDeleteRule': apDeleteRule(+arg); break;
+    case 'apMoveRule':   apMoveRule(+arg, arg2); break;
+
     // ── Policy ──
     case 'submitPolicyRule':  submitPolicyRule(); break;
     case 'cancelPolicyEdit':  cancelPolicyEdit(); break;
@@ -3927,6 +3998,7 @@ const viewMeta = {
   diagnostics:  { title: 'Diagnostics',   meta: 'Operator contract — readiness, security posture, and risky-mode warnings' },
   users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
+  authpolicy:     { title: 'Auth Exempt Rules', meta: 'Stage-1 authentication exemptions — Exempt skips authentication only; Stage-2 policy still applies' },
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
 };
 
@@ -3948,6 +4020,7 @@ function switchView(name) {
   if (name === 'blocklist')      fetchBlocklistFeed();
   if (name === 'settings')       loadSettings();
   if (name === 'policy')         { fetchPolicy(); loadFileProfileDropdown(); fetchCatGroups(); }
+  if (name === 'authpolicy')     loadAuthPolicy();
   if (name === 'urlcat')         loadURLCategories();
   if (name === 'catgroups')      fetchCatGroups();
   if (name === 'fileblock')      fetchFileBlock();
@@ -8636,9 +8709,27 @@ async function runPolicyTest() {
     catBadge = `<div class="pt-sub" style="margin-top:6px;color:var(--text-muted);font-size:.78rem">Category: <em>uncategorised</em></div>`;
   }
 
+  // Stage-1 authentication block — rendered SEPARATELY from the Stage-2 access
+  // result below so it is impossible to read Exempt as Allow.
+  let authHtml = '';
+  if (data.auth) {
+    const a = data.auth;
+    const exempt = a.outcome === 'Exempt';
+    const badge = exempt
+      ? '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🪪 Exempt</span>'
+      : `<span style="color:var(--muted)">${escHtml(a.outcome)} (today's auth gate applies)</span>`;
+    authHtml = `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px">
+      <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-1 Authentication: ${badge}</div>
+      ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''}</div>` : ''}
+      ${exempt ? `<div class="pt-sub" style="color:#fbbf24;margin-top:4px">Exempt skips authentication only — it does NOT allow traffic. The Stage-2 access decision below still applies (Stage-2 sees authSource="${escHtml(a.stage2AuthSource)}").</div>` : ''}
+      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — all exemptions are forced to Default (auth required).</div>' : ''}
+    </div>`;
+  }
+
   if (data.matched) {
     const r = data.rule;
-    rb.innerHTML = `<div class="pt-match">
+    rb.innerHTML = authHtml + `<div class="pt-match">
+      <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-2 Access Decision:</div>
       <div class="pt-action">✅ ${escHtml(String(r.action))}</div>
       <div class="pt-sub">Matched rule <strong>#${r.priority} — ${escHtml(r.name)}</strong></div>
       ${r.sslAction ? `<div class="pt-sub" style="margin-top:4px">SSL: ${escHtml(r.sslAction)}</div>` : ''}
@@ -8646,7 +8737,8 @@ async function runPolicyTest() {
       ${catBadge}
     </div>`;
   } else {
-    rb.innerHTML = `<div class="pt-nomatch">
+    rb.innerHTML = authHtml + `<div class="pt-nomatch">
+      <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-2 Access Decision:</div>
       <div class="pt-action">⛔ No rule matched</div>
       <div class="pt-sub">Default action: <strong>${escHtml(data.defaultAction)}</strong></div>
       ${catBadge}
@@ -8671,6 +8763,165 @@ async function runPolicyTest() {
       <td>${badge}</td>
     </tr>`;
   }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Auth Exempt Rules (Stage-1 authentication policy — Exempt ≠ Allow)
+// ═══════════════════════════════════════════════════════════════════════════
+let apRules = [];
+let apEditPriority = null; // null = add mode
+
+async function loadAuthPolicy() {
+  try {
+    const d = await api('/api/authpolicy');
+    apRules = d.rules || [];
+    document.getElementById('ap-default-allow-warn').style.display =
+      (d.defaultAction === 'allow' && apRules.length) ? 'block' : 'none';
+    renderAuthPolicy();
+  } catch(e) { console.error(e); }
+}
+
+function apDestSummary(r) {
+  if (r.auth && r.auth.broadExemption) return '<span style="color:#fbbf24">ALL (broad)</span>';
+  const parts = [];
+  if (r.destFQDN) parts.push(escHtml(r.destFQDN));
+  if (r.destCategory && r.destCategory !== 'Any') parts.push('cat: ' + escHtml(r.destCategory));
+  if (r.destCategoryGroup) parts.push('grp: ' + escHtml(r.destCategoryGroup));
+  return parts.join(', ') || '<span style="color:var(--muted)">—</span>';
+}
+
+function apSourceSummary(r) {
+  const cidrs = [];
+  (r.subjectMatch && r.subjectMatch.all || []).forEach(p => {
+    if (p.type === 'cidr') cidrs.push(...(p.values || []));
+  });
+  return cidrs.length ? escHtml(cidrs.join(', ')) : '<span style="color:var(--muted)">—</span>';
+}
+
+function renderAuthPolicy() {
+  const tbody = document.getElementById('ap-rules');
+  if (!apRules.length) {
+    tbody.innerHTML = '<tr><td colspan="10"><div class="empty-state"><div class="empty-icon">🪪</div>No exempt rules — all clients authenticate</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = apRules.map((r, i) => {
+    const enabled = r.enabled === undefined || r.enabled === null || r.enabled;
+    const warn = (r.warnings || []).length
+      ? `<span title="${escHtml((r.warnings||[]).join('\n'))}" style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.72rem">⚠ ${r.warnings.length}</span>`
+      : '<span style="color:var(--muted)">—</span>';
+    return `<tr style="${enabled ? '' : 'opacity:.45'}">
+      <td>${r.priority}</td>
+      <td>${escHtml(r.name)}</td>
+      <td>${enabled ? '✓' : '✗'}</td>
+      <td>${escHtml(r.auth && r.auth.owner || '')}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml(r.auth && r.auth.reason || '')}">${escHtml(r.auth && r.auth.reason || '')}</td>
+      <td style="font-family:monospace;font-size:.78rem">${apSourceSummary(r)}</td>
+      <td style="font-size:.8rem">${apDestSummary(r)}</td>
+      <td style="font-size:.78rem">${r.auth && r.auth.expiresAt ? escHtml(r.auth.expiresAt) : '<span style="color:#fbbf24">never</span>'}</td>
+      <td>${warn}</td>
+      <td class="text-right" style="white-space:nowrap">
+        <button class="btn ghost sm" data-click="apMoveRule" data-arg="${r.priority}" data-arg2="up" ${i === 0 ? 'disabled' : ''}>↑</button>
+        <button class="btn ghost sm" data-click="apMoveRule" data-arg="${r.priority}" data-arg2="down" ${i === apRules.length - 1 ? 'disabled' : ''}>↓</button>
+        <button class="btn ghost sm" data-click="apEditRule" data-arg="${r.priority}">Edit</button>
+        <button class="btn danger sm" data-click="apDeleteRule" data-arg="${r.priority}">Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function apShowAdd() {
+  apEditPriority = null;
+  document.getElementById('ap-form-title').textContent = 'Add Exempt Rule';
+  ['ap-name','ap-owner','ap-reason','ap-cidrs','ap-destfqdn','ap-destgroup','ap-expires','ap-method'].forEach(id =>
+    document.getElementById(id).value = '');
+  document.getElementById('ap-protocol').value = '';
+  document.getElementById('ap-enabled').checked = true;
+  document.getElementById('ap-broad').checked = false;
+  document.getElementById('ap-form-panel').style.display = 'block';
+}
+
+function apEditRule(priority) {
+  const r = apRules.find(x => x.priority === priority);
+  if (!r) return;
+  apEditPriority = priority;
+  document.getElementById('ap-form-title').textContent = `Edit Exempt Rule #${priority}`;
+  document.getElementById('ap-name').value = r.name || '';
+  document.getElementById('ap-owner').value = r.auth && r.auth.owner || '';
+  document.getElementById('ap-reason').value = r.auth && r.auth.reason || '';
+  const cidrs = [];
+  (r.subjectMatch && r.subjectMatch.all || []).forEach(p => { if (p.type === 'cidr') cidrs.push(...(p.values || [])); });
+  document.getElementById('ap-cidrs').value = cidrs.join(', ');
+  document.getElementById('ap-destfqdn').value = r.destFQDN || '';
+  document.getElementById('ap-destgroup').value = r.destCategoryGroup || '';
+  document.getElementById('ap-expires').value = r.auth && r.auth.expiresAt || '';
+  document.getElementById('ap-protocol').value = r.auth && r.auth.protocol || '';
+  document.getElementById('ap-method').value = r.auth && r.auth.method || '';
+  document.getElementById('ap-enabled').checked = r.enabled === undefined || r.enabled === null || r.enabled;
+  document.getElementById('ap-broad').checked = !!(r.auth && r.auth.broadExemption);
+  document.getElementById('ap-form-panel').style.display = 'block';
+}
+
+function apCancel() {
+  apEditPriority = null;
+  document.getElementById('ap-form-panel').style.display = 'none';
+}
+
+async function apSave() {
+  const cidrs = document.getElementById('ap-cidrs').value.split(',').map(s => s.trim()).filter(Boolean);
+  const rule = {
+    name:     document.getElementById('ap-name').value.trim(),
+    ruleType: 'auth',
+    enabled:  document.getElementById('ap-enabled').checked,
+    subjectMatch: { schemaVersion: 1, all: [{ type: 'cidr', values: cidrs }] },
+    destFQDN:          document.getElementById('ap-destfqdn').value.trim(),
+    destCategoryGroup: document.getElementById('ap-destgroup').value.trim(),
+    auth: {
+      outcome:        'Exempt',
+      owner:          document.getElementById('ap-owner').value.trim(),
+      reason:         document.getElementById('ap-reason').value.trim(),
+      expiresAt:      document.getElementById('ap-expires').value.trim(),
+      protocol:       document.getElementById('ap-protocol').value,
+      method:         document.getElementById('ap-method').value.trim(),
+      broadExemption: document.getElementById('ap-broad').checked,
+    },
+  };
+  if (apEditPriority !== null) rule.priority = apEditPriority;
+  const url = apEditPriority !== null ? `/api/authpolicy?priority=${apEditPriority}` : '/api/authpolicy';
+  try {
+    await api(url, {
+      method: apEditPriority !== null ? 'PUT' : 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(rule),
+    });
+    toast(apEditPriority !== null ? 'Exempt rule updated' : 'Exempt rule added', 'success');
+    apCancel();
+    loadAuthPolicy();
+  } catch(err) { toast('Save failed: ' + err.message, 'error'); }
+}
+
+async function apDeleteRule(priority) {
+  if (!await confirmDialog('Delete this exempt rule? Clients it covered will be challenged for authentication again.')) return;
+  try {
+    await api(`/api/authpolicy?priority=${priority}`, { method: 'DELETE' });
+    toast('Exempt rule deleted', 'success');
+    loadAuthPolicy();
+  } catch(err) { toast('Delete failed: ' + err.message, 'error'); }
+}
+
+async function apMoveRule(priority, dir) {
+  const order = apRules.map(r => r.priority);
+  const idx = order.indexOf(priority);
+  const swap = dir === 'up' ? idx - 1 : idx + 1;
+  if (idx < 0 || swap < 0 || swap >= order.length) return;
+  [order[idx], order[swap]] = [order[swap], order[idx]];
+  try {
+    await api('/api/authpolicy/reorder', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ priorities: order }),
+    });
+    loadAuthPolicy();
+  } catch(err) { toast('Reorder failed: ' + err.message, 'error'); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
