@@ -6,7 +6,10 @@ package main
 // ("0.0.0.0 ads.example" rows that could never match a request host).
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -337,5 +340,71 @@ func TestRemoveUnattributedFeedEntries_OnlyOrphans(t *testing.T) {
 	}
 	if !b.isListed("keep.manual.invalid") {
 		t.Error("manual entries must survive orphan cleanup")
+	}
+}
+
+// TestRestoreFeedSources_SurvivesRebuild pins the Codex P1 (PR #447) fix:
+// a config-rollback-style rebuild (Remove all + Add) must not strand feed
+// entries as unattributed — attribution is snapshotted and re-stamped for
+// hosts that survive the rebuild.
+func TestRestoreFeedSources_SurvivesRebuild(t *testing.T) {
+	b := newAttributedBlocklist(t)
+
+	snap := b.SnapshotFeedSources()
+	for _, h := range b.List() {
+		b.Remove(h)
+	}
+	// Re-add a subset, the way applyConfigBackup does (plain Add).
+	b.Add("a.feed-one.invalid")
+	b.Add("b.feed-two.invalid")
+	b.RestoreFeedSources(snap)
+
+	byHost := map[string]BlocklistEntry{}
+	for _, e := range b.ListWithSource() {
+		byHost[e.Host] = e
+	}
+	if e := byHost["a.feed-one.invalid"]; e.Feed != "https://feeds.example/one.txt" {
+		t.Errorf("a.feed-one.invalid attribution after rebuild = %+v; want feed-one", e)
+	}
+	if e := byHost["b.feed-two.invalid"]; e.Feed != "https://feeds.example/two.txt" {
+		t.Errorf("b.feed-two.invalid attribution after rebuild = %+v; want feed-two", e)
+	}
+	// Hosts NOT re-added must not be resurrected into feedSrc.
+	if got := b.CountByFeedSource("https://feeds.example/one.txt"); got != 1 {
+		t.Errorf("CountByFeedSource(one) = %d; want 1 (wildcard not re-added)", got)
+	}
+}
+
+// TestCleanupUnattributed_RefusedWithoutFeeds pins the server-side gate:
+// with zero configured feeds, unattributed entries are likely static-file
+// or config-restored operator data, so the purge must be refused.
+func TestCleanupUnattributed_RefusedWithoutFeeds(t *testing.T) {
+	swapFeedSyncer(t, newTestBlocklistSyncer(t)) // zero feeds
+	origBL := bl
+	bl = newAttributedBlocklist(t)
+	t.Cleanup(func() { bl = origBL })
+
+	r := adminCtx(httptest.NewRequestWithContext(context.Background(),
+		http.MethodDelete, "/api/blocklist?scope=unattributed", http.NoBody))
+	w := httptest.NewRecorder()
+	apiBlocklist(w, r)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("cleanup without feeds: status = %d; want 409 (%s)", w.Code, w.Body.String())
+	}
+	if !bl.isListed("legacy.orphan.invalid") {
+		t.Error("orphan must NOT be removed when the gate refuses")
+	}
+
+	// With a feed configured the same call succeeds.
+	blFeedSyncer.SetFeed("https://feeds.example/gate.txt", 0)
+	w = httptest.NewRecorder()
+	r = adminCtx(httptest.NewRequestWithContext(context.Background(),
+		http.MethodDelete, "/api/blocklist?scope=unattributed", http.NoBody))
+	apiBlocklist(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("cleanup with feeds: status = %d; want 200 (%s)", w.Code, w.Body.String())
+	}
+	if bl.isListed("legacy.orphan.invalid") {
+		t.Error("orphan should be removed once the gate passes")
 	}
 }

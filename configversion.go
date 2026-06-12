@@ -350,13 +350,17 @@ var configRollbackMu sync.Mutex
 func applyConfigBackup(b *configBackup) {
 	configRollbackMu.Lock()
 	defer configRollbackMu.Unlock()
-	// Blocklist: remove all, then add snapshot entries.
+	// Blocklist: remove all, then add snapshot entries. Feed attribution
+	// is carried across the rebuild — Remove/Add would otherwise strand
+	// every feed entry as unattributed (Codex P1, PR #447).
+	feedSrcSnap := bl.SnapshotFeedSources()
 	for _, h := range bl.List() {
 		bl.Remove(h)
 	}
 	for _, h := range b.Blocklist {
 		bl.Add(h)
 	}
+	bl.RestoreFeedSources(feedSrcSnap)
 	bl.Save()
 	if b.BlocklistMode == "allow" || b.BlocklistMode == "block" {
 		bl.SetMode(b.BlocklistMode)

@@ -1196,6 +1196,48 @@ func (b *Blocklist) CountByFeedSource(feedURL string) int {
 	return n
 }
 
+// SnapshotFeedSources returns a copy of the per-entry feed attribution map.
+// Taken before a wholesale rebuild (config rollback / import-replace) so
+// RestoreFeedSources can re-stamp surviving entries afterwards.
+func (b *Blocklist) SnapshotFeedSources() map[string]string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	snap := make(map[string]string, len(b.feedSrc))
+	for h, src := range b.feedSrc {
+		snap[h] = src
+	}
+	return snap
+}
+
+// RestoreFeedSources re-stamps feed attribution onto currently-listed,
+// non-manual entries after a wholesale rebuild. Config rollback and
+// import-replace go through Remove/ClearAll + Add, which would otherwise
+// strand every feed entry as "unknown origin" — making them prey for the
+// unattributed-cleanup operation (Codex P1, PR #447). Attribution already
+// present (e.g. re-stamped by a sync mid-rebuild) is not overwritten.
+func (b *Blocklist) RestoreFeedSources(snap map[string]string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.feedSrc == nil {
+		b.feedSrc = map[string]string{}
+	}
+	for h, src := range snap {
+		if b.manual[h] {
+			continue
+		}
+		if strings.HasPrefix(h, "*.") {
+			if !b.wildcards[h[1:]] {
+				continue
+			}
+		} else if !b.exact[h] {
+			continue
+		}
+		if _, exists := b.feedSrc[h]; !exists {
+			b.feedSrc[h] = src
+		}
+	}
+}
+
 // RemoveUnattributedFeedEntries removes every feed-owned entry with no
 // recorded source — the legacy cohort imported before per-feed attribution
 // existed and no longer present in any current feed (a host still carried

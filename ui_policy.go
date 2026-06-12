@@ -13,11 +13,19 @@ import (
 )
 
 // blocklistCleanupUnattributed handles DELETE /api/blocklist?scope=unattributed:
-// removes legacy feed entries with no per-feed attribution (imported before
-// the .sources sidecar existed and absent from every current feed's content).
+// removes entries of UNKNOWN origin — no admin attribution and no per-feed
+// attribution. In feed-driven deployments these are legacy imports from
+// before the .sources sidecar existed; in deployments that load a static
+// blocklist file or restored an old config snapshot they may be operator
+// data (Codex P1, PR #447), so this is refused unless at least one feed is
+// configured, and the UI warns accordingly. Admin-asserted destructive op.
 func blocklistCleanupUnattributed(w http.ResponseWriter, r *http.Request) {
+	if len(blFeedSyncer.Feeds()) == 0 {
+		http.Error(w, "no blocklist feeds configured — refusing to purge unattributed entries (they may be static-file or imported operator data)", http.StatusConflict)
+		return
+	}
 	removed := bl.RemoveUnattributedFeedEntries()
-	logger.Printf("UI: removed %d unattributed legacy feed entries", removed)
+	logger.Printf("UI: removed %d unattributed blocklist entries", removed)
 	auditEvent(r, "blocklist.cleanup.unattributed", fmt.Sprintf("%d host(s)", removed), "")
 	saveConfigVersion(sessionAdmin(r), "blocklist.cleanup.unattributed")
 	jsonOK(w, map[string]any{"removed": removed})
@@ -29,152 +37,167 @@ func apiBlocklist(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		entries := bl.ListWithSource()
-		// Sort by host for stable output.
-		sort.Slice(entries, func(i, j int) bool { return entries[i].Host < entries[j].Host })
-
-		// Optional filters: ?q=keyword&source=manual|feed&limit=N&offset=N
-		q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-		sourceFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
-		limitStr := r.URL.Query().Get("limit")
-		offsetStr := r.URL.Query().Get("offset")
-
-		// Apply filters.
-		filtered := entries
-		if q != "" || sourceFilter != "" {
-			filtered = make([]BlocklistEntry, 0, 64)
-			for _, e := range entries {
-				if q != "" && !strings.Contains(e.Host, q) {
-					continue
-				}
-				if sourceFilter != "" && e.Source != sourceFilter {
-					continue
-				}
-				filtered = append(filtered, e)
-			}
-		}
-		total := len(filtered)
-
-		// Apply offset.
-		offset := 0
-		if offsetStr != "" {
-			if v, err := strconv.Atoi(offsetStr); err == nil && v > 0 {
-				offset = v
-			}
-		}
-		if offset > total {
-			offset = total
-		}
-		filtered = filtered[offset:]
-
-		// Apply limit (default: all, for backward-compat with export/import).
-		limit := total
-		if limitStr != "" {
-			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v < limit {
-				limit = v
-			}
-		}
-
-		jsonOK(w, map[string]any{
-			"entries": filtered[:limit],
-			"count":   total,
-			"offset":  offset,
-			"limit":   limit,
-		})
+		blocklistList(w, r)
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
-		var body struct {
-			Hosts []string `json:"hosts"` // support bulk add
-			Host  string   `json:"host"`  // single add
-		}
-		if err := decodeJSON(r, &body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		added := 0
-		if body.Host != "" {
-			body.Hosts = append(body.Hosts, body.Host)
-		}
-		// Validate-first: collect normalized valid hosts; bail with 400
-		// on the first invalid wildcard so a bad entry mid-list never
-		// causes a partial mutation. Once all hosts validate, AddManualBulk
-		// does ONE save+sidecar write for the whole batch instead of N
-		// (Codex P2 on PR #283: per-host Save() turned bulk into
-		// O(hosts × blocklist-size) disk work on feed-backed blocklists).
-		valid := make([]string, 0, len(body.Hosts))
-		for _, h := range body.Hosts {
-			h = strings.TrimSpace(h)
-			if h == "" {
-				continue
-			}
-			if len(h) > 253 {
-				logger.Printf("UI: blocklist entry too long, skipped: %q…", sanitizeLog(h[:50]))
-				continue
-			}
-			// Validate wildcard patterns (Finding 1.3).
-			if strings.Contains(h, "*") {
-				if !isValidBlocklistWildcard(h) {
-					http.Error(w, fmt.Sprintf("invalid wildcard pattern %q: only *.example.com format is allowed", sanitizeLog(h)), http.StatusBadRequest)
-					return
-				}
-			}
-			valid = append(valid, h)
-		}
-		added = bl.AddManualBulk(valid)
-		for _, h := range valid {
-			logger.Printf("UI: blocked %q", sanitizeLog(h))
-		}
-		auditEvent(r, "blocklist.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
-		saveConfigVersion(sessionAdmin(r), "blocklist.add")
-		jsonOK(w, map[string]any{"added": added})
+		blocklistAdd(w, r)
 
 	case http.MethodDelete:
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
-		if r.URL.Query().Get("scope") == "unattributed" {
-			blocklistCleanupUnattributed(w, r)
-			return
-		}
-		host := strings.TrimSpace(r.URL.Query().Get("host"))
-		// F19: support bulk delete via JSON body with hosts array.
-		if host == "" {
-			var body struct {
-				Hosts []string `json:"hosts"`
-			}
-			if err := decodeJSON(r, &body); err == nil && len(body.Hosts) > 0 {
-				removed := 0
-				for _, h := range body.Hosts {
-					h = strings.TrimSpace(h)
-					if h == "" {
-						continue
-					}
-					bl.Remove(h)
-					removed++
-				}
-				bl.Save()
-				logger.Printf("UI: bulk unblocked %d host(s)", removed)
-				auditEvent(r, "blocklist.bulk_remove", fmt.Sprintf("%d host(s)", removed), "")
-				saveConfigVersion(sessionAdmin(r), "blocklist.bulk_remove")
-				jsonOK(w, map[string]any{"removed": removed})
-				return
-			}
-			http.Error(w, "missing host param or hosts body", http.StatusBadRequest)
-			return
-		}
-		bl.Remove(host)
-		bl.Save()
-		logger.Printf("UI: unblocked %q", sanitizeLog(host))
-		auditEvent(r, "blocklist.remove", host, "")
-		saveConfigVersion(sessionAdmin(r), "blocklist.remove")
-		w.WriteHeader(http.StatusNoContent)
+		blocklistDelete(w, r)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func blocklistList(w http.ResponseWriter, r *http.Request) {
+	entries := bl.ListWithSource()
+	// Sort by host for stable output.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Host < entries[j].Host })
+
+	// Optional filters: ?q=keyword&source=manual|feed&limit=N&offset=N
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	sourceFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+
+	// Apply filters.
+	filtered := entries
+	if q != "" || sourceFilter != "" {
+		filtered = make([]BlocklistEntry, 0, 64)
+		for _, e := range entries {
+			if q != "" && !strings.Contains(e.Host, q) {
+				continue
+			}
+			if sourceFilter != "" && e.Source != sourceFilter {
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+	}
+	total := len(filtered)
+	offset, limit := parseListWindow(offsetStr, limitStr, total)
+	filtered = filtered[offset:]
+
+	jsonOK(w, map[string]any{
+		"entries": filtered[:limit],
+		"count":   total,
+		"offset":  offset,
+		"limit":   limit,
+	})
+}
+
+// parseListWindow parses pagination query values against total entries:
+// offset is clamped to [0, total]; limit defaults to all remaining rows
+// (backward-compat with export/import callers that read the full list).
+func parseListWindow(offsetStr, limitStr string, total int) (offset, limit int) {
+	if offsetStr != "" {
+		if v, err := strconv.Atoi(offsetStr); err == nil && v > 0 {
+			offset = v
+		}
+	}
+	if offset > total {
+		offset = total
+	}
+	limit = total - offset
+	if limitStr != "" {
+		if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v < limit {
+			limit = v
+		}
+	}
+	return offset, limit
+}
+
+func blocklistAdd(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Hosts []string `json:"hosts"` // support bulk add
+		Host  string   `json:"host"`  // single add
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	added := 0
+	if body.Host != "" {
+		body.Hosts = append(body.Hosts, body.Host)
+	}
+	// Validate-first: collect normalized valid hosts; bail with 400
+	// on the first invalid wildcard so a bad entry mid-list never
+	// causes a partial mutation. Once all hosts validate, AddManualBulk
+	// does ONE save+sidecar write for the whole batch instead of N
+	// (Codex P2 on PR #283: per-host Save() turned bulk into
+	// O(hosts × blocklist-size) disk work on feed-backed blocklists).
+	valid := make([]string, 0, len(body.Hosts))
+	for _, h := range body.Hosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if len(h) > 253 {
+			logger.Printf("UI: blocklist entry too long, skipped: %q…", sanitizeLog(h[:50]))
+			continue
+		}
+		// Validate wildcard patterns (Finding 1.3).
+		if strings.Contains(h, "*") {
+			if !isValidBlocklistWildcard(h) {
+				http.Error(w, fmt.Sprintf("invalid wildcard pattern %q: only *.example.com format is allowed", sanitizeLog(h)), http.StatusBadRequest)
+				return
+			}
+		}
+		valid = append(valid, h)
+	}
+	added = bl.AddManualBulk(valid)
+	for _, h := range valid {
+		logger.Printf("UI: blocked %q", sanitizeLog(h))
+	}
+	auditEvent(r, "blocklist.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
+	saveConfigVersion(sessionAdmin(r), "blocklist.add")
+	jsonOK(w, map[string]any{"added": added})
+}
+
+func blocklistDelete(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("scope") == "unattributed" {
+		blocklistCleanupUnattributed(w, r)
+		return
+	}
+	host := strings.TrimSpace(r.URL.Query().Get("host"))
+	// F19: support bulk delete via JSON body with hosts array.
+	if host == "" {
+		var body struct {
+			Hosts []string `json:"hosts"`
+		}
+		if err := decodeJSON(r, &body); err == nil && len(body.Hosts) > 0 {
+			removed := 0
+			for _, h := range body.Hosts {
+				h = strings.TrimSpace(h)
+				if h == "" {
+					continue
+				}
+				bl.Remove(h)
+				removed++
+			}
+			bl.Save()
+			logger.Printf("UI: bulk unblocked %d host(s)", removed)
+			auditEvent(r, "blocklist.bulk_remove", fmt.Sprintf("%d host(s)", removed), "")
+			saveConfigVersion(sessionAdmin(r), "blocklist.bulk_remove")
+			jsonOK(w, map[string]any{"removed": removed})
+			return
+		}
+		http.Error(w, "missing host param or hosts body", http.StatusBadRequest)
+		return
+	}
+	bl.Remove(host)
+	bl.Save()
+	logger.Printf("UI: unblocked %q", sanitizeLog(host))
+	auditEvent(r, "blocklist.remove", host, "")
+	saveConfigVersion(sessionAdmin(r), "blocklist.remove")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // GET/POST /api/blocklist/mode — switch between "block" and "allow" modes.
