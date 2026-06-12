@@ -261,6 +261,126 @@ func TestDispatch_ApplyFlags(t *testing.T) {
 	}
 }
 
+// ─── P1.6a.1: already-current unified with Current ──────────────────────────
+
+// Current.Known on the TARGET release ⇒ already-current (no apply).
+func TestDispatch_CurrentKnownTargetIsAlreadyCurrent(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+
+	plan := d.Plan(DispatchTarget{ReleaseID: "rel_a"}, []string{dispatchRepo + "@" + digA}, DefaultDispatchOptions())
+	if plan.Outcome != OutcomeAlreadyCurrent || !plan.AlreadyCurrent {
+		t.Fatalf("outcome = %s; want already_current", plan.Outcome)
+	}
+	if plan.Apply.ImageRef != "" {
+		t.Fatal("already-current must not build an apply request")
+	}
+}
+
+// Current.Known on a DIFFERENT release ⇒ NOT already-current; dispatch is planned.
+func TestDispatch_CurrentKnownDifferentReleaseStillPlans(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+
+	// Target rel_a (1.10.0) while the node runs rel_b's digest (1.9.0).
+	plan := d.Plan(DispatchTarget{ReleaseID: "rel_a"}, []string{dispatchRepo + "@" + digB}, DefaultDispatchOptions())
+	if !plan.Current.Known || plan.Current.ReleaseID != "rel_b" {
+		t.Fatalf("Current = %+v; want Known rel_b", plan.Current)
+	}
+	if plan.AlreadyCurrent {
+		t.Fatal("running a DIFFERENT release must not be already-current")
+	}
+	if plan.Outcome != OutcomePlan || plan.Apply.ImageRef != dispatchRepo+"@"+digA {
+		t.Fatalf("outcome=%s apply=%q; want a planned dispatch to rel_a", plan.Outcome, plan.Apply.ImageRef)
+	}
+}
+
+// Air-gap edge: a node that reports the CATALOG repo (not the mirror) while
+// running the target release is still recognized as already-current — the
+// unified logic derives this from Current (release identity), not a repo-bound
+// string compare.
+func TestDispatch_AirgapCatalogRepoRunningRefIsAlreadyCurrent(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	cfg := DispatchConfig{ProxyRepo: mirrorRepo, RepoRewrite: &RepoRewrite{From: dispatchRepo, To: mirrorRepo}}
+	d, _ := newDispatcher(t, cat, cfg)
+
+	// running reports the CATALOG repo digest, not the mirror repo.
+	plan := d.Plan(DispatchTarget{ReleaseID: "rel_a"}, []string{dispatchRepo + "@" + digA}, DefaultDispatchOptions())
+	if !plan.Current.Known || plan.Current.ReleaseID != "rel_a" {
+		t.Fatalf("Current = %+v; want Known rel_a", plan.Current)
+	}
+	if !plan.AlreadyCurrent || plan.Outcome != OutcomeAlreadyCurrent {
+		t.Fatalf("catalog-repo running ref of the target must be already-current; got outcome=%s already=%v", plan.Outcome, plan.AlreadyCurrent)
+	}
+	if plan.Apply.ImageRef != "" {
+		t.Fatal("already-current must not build an apply request")
+	}
+}
+
+// ─── P1.6a.1: rollback opt-out ──────────────────────────────────────────────
+
+func TestDispatch_RollbackOptOut(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+
+	plan := d.Plan(DispatchTarget{ReleaseID: "rel_a"}, nil, DispatchOptions{NoRollback: true})
+	if plan.Apply.RollbackOnFailure {
+		t.Fatal("NoRollback:true must produce rollback_on_failure=false")
+	}
+	b, err := json.Marshal(plan.Apply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"rollback_on_failure":false`) {
+		t.Fatalf("rollback_on_failure must be serialized explicitly as false: %s", b)
+	}
+}
+
+// ─── P1.6a.1: refusal taxonomy ──────────────────────────────────────────────
+
+func TestDispatch_RefusalKinds(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+	dMismatch, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: "ghcr.io/someone/else"})
+
+	cases := []struct {
+		name string
+		plan *DispatchPlan
+		want RefusedKind
+	}{
+		{"no catalog", (&Dispatcher{provider: &fakeCatProvider{cat: nil}, cfg: DispatchConfig{ProxyRepo: dispatchRepo}}).Plan(DispatchTarget{Channel: ChannelRecommended}, nil, DefaultDispatchOptions()), RefusedNoCatalog},
+		{"no target", d.Plan(DispatchTarget{}, nil, DefaultDispatchOptions()), RefusedNoTarget},
+		{"ambiguous", d.Plan(DispatchTarget{ReleaseID: "rel_a", Channel: ChannelLTS}, nil, DefaultDispatchOptions()), RefusedAmbiguousTarget},
+		{"unknown release_id", d.Plan(DispatchTarget{ReleaseID: "rel_nope"}, nil, DefaultDispatchOptions()), RefusedUnknownTarget},
+		{"unknown channel", d.Plan(DispatchTarget{Channel: Channel("beta")}, nil, DefaultDispatchOptions()), RefusedUnknownTarget},
+		{"repo mismatch", dMismatch.Plan(DispatchTarget{ReleaseID: "rel_a"}, nil, DefaultDispatchOptions()), RefusedRepoMismatch},
+	}
+	for _, c := range cases {
+		if !c.plan.Refused() {
+			t.Errorf("%s: expected a refusal", c.name)
+			continue
+		}
+		if c.plan.Kind != c.want {
+			t.Errorf("%s: Kind = %q; want %q", c.name, c.plan.Kind, c.want)
+		}
+		// The classification is also reachable from the Reason error.
+		if RefusalKind(c.plan.Reason) != c.want {
+			t.Errorf("%s: RefusalKind(Reason) = %q; want %q", c.name, RefusalKind(c.plan.Reason), c.want)
+		}
+	}
+}
+
+// Construction-time refusals are classified too.
+func TestDispatch_NewDispatcherRefusalKinds(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	if _, err := NewDispatcher(&fakeCatProvider{cat: cat}, DispatchConfig{ProxyRepo: "bad repo!"}); RefusalKind(err) != RefusedInvalidConfig {
+		t.Fatalf("bad proxy_repo: RefusalKind = %q; want invalid_config", RefusalKind(err))
+	}
+	if _, err := NewDispatcher(&fakeCatProvider{cat: cat}, DispatchConfig{ProxyRepo: mirrorRepo, RepoRewrite: &RepoRewrite{From: dispatchRepo, To: "ghcr.io/other/repo"}}); RefusalKind(err) != RefusedInvalidRewriteMapping {
+		t.Fatalf("bad rewrite: RefusalKind = %q; want invalid_rewrite_mapping", RefusalKind(err))
+	}
+}
+
 // ─── pinning ─────────────────────────────────────────────────────────────────
 
 // The catalog snapshot is read exactly once per Plan (pinned for the op; no I/O).

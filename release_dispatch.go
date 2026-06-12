@@ -30,10 +30,53 @@ var (
 	errDispatchNoCatalog       = errors.New("dispatch: no catalog published")
 	errDispatchNoTarget        = errors.New("dispatch: no target (release_id or channel) given")
 	errDispatchAmbiguousTarget = errors.New("dispatch: both release_id and channel given")
-	errDispatchUnknownTarget   = errors.New("dispatch: unknown release_id")
+	errDispatchUnknownTarget   = errors.New("dispatch: unknown release_id or channel")
 	errDispatchRepoMismatch    = errors.New("dispatch: catalog repo does not match deployment proxy_repo")
 	errDispatchMalformedRef    = errors.New("dispatch: malformed pinned ref")
 )
+
+// RefusedKind is the machine-readable classification of a refusal. Consumers
+// (audit, GUI, P1.6b orchestration) switch on this — they MUST NOT parse the
+// human-readable Reason/Error() string.
+type RefusedKind string
+
+const (
+	RefusedNone                  RefusedKind = ""                        // not refused
+	RefusedNoCatalog             RefusedKind = "no_catalog"              // no catalog published
+	RefusedNoTarget              RefusedKind = "no_target"               // neither release_id nor channel
+	RefusedAmbiguousTarget       RefusedKind = "ambiguous_target"        // both release_id and channel
+	RefusedUnknownTarget         RefusedKind = "unknown_target"          // unknown release_id OR unknown channel
+	RefusedRepoMismatch          RefusedKind = "repo_mismatch"           // catalog repo != proxy_repo (no rewrite)
+	RefusedMalformedRef          RefusedKind = "malformed_ref"           // derived ref is not repo@digest
+	RefusedInvalidConfig         RefusedKind = "invalid_config"          // bad proxy_repo (construction time)
+	RefusedInvalidRewriteMapping RefusedKind = "invalid_rewrite_mapping" // bad repo_rewrite (construction time)
+)
+
+// DispatchRefusal is a classified, human-readable refusal. It wraps the
+// underlying sentinel (so errors.Is still works) and carries a RefusedKind for
+// uniform classification. Build it via the dispatch refusal paths; consumers
+// read Kind (or RefusalKind(err)), never the string.
+type DispatchRefusal struct {
+	Kind RefusedKind
+	err  error
+}
+
+func (r *DispatchRefusal) Error() string { return r.err.Error() }
+func (r *DispatchRefusal) Unwrap() error { return r.err }
+
+// RefusalKind extracts the RefusedKind from any error in the chain, or
+// RefusedNone if the error is not a classified dispatch refusal.
+func RefusalKind(err error) RefusedKind {
+	var r *DispatchRefusal
+	if errors.As(err, &r) {
+		return r.Kind
+	}
+	return RefusedNone
+}
+
+func newRefusal(kind RefusedKind, err error) *DispatchRefusal {
+	return &DispatchRefusal{Kind: kind, err: err}
+}
 
 // catalogSnapshotProvider yields the currently-published immutable catalog
 // (nil ⇒ no-catalog). Both *CatalogHolder and *Refresher satisfy it.
@@ -45,7 +88,7 @@ type catalogSnapshotProvider interface {
 type DispatchOutcome int
 
 const (
-	// OutcomeRefused — planning refused fail-closed; Reason is set.
+	// OutcomeRefused — planning refused fail-closed; Reason/Kind are set.
 	OutcomeRefused DispatchOutcome = iota
 	// OutcomePlan — a fresh dispatch; Apply is the request to send.
 	OutcomePlan
@@ -83,24 +126,25 @@ type DispatchConfig struct {
 
 func (c DispatchConfig) validate() error {
 	if err := catalogValidateRepo(c.ProxyRepo); err != nil {
-		return fmt.Errorf("dispatch: proxy_repo: %w", err)
+		return newRefusal(RefusedInvalidConfig, fmt.Errorf("dispatch: proxy_repo: %w", err))
 	}
 	if c.RepoRewrite == nil {
 		return nil
 	}
-	if err := catalogValidateRepo(c.RepoRewrite.From); err != nil {
-		return fmt.Errorf("dispatch: repo_rewrite.from: %w", err)
+	rw := c.RepoRewrite
+	if err := catalogValidateRepo(rw.From); err != nil {
+		return newRefusal(RefusedInvalidRewriteMapping, fmt.Errorf("dispatch: repo_rewrite.from: %w", err))
 	}
-	if err := catalogValidateRepo(c.RepoRewrite.To); err != nil {
-		return fmt.Errorf("dispatch: repo_rewrite.to: %w", err)
+	if err := catalogValidateRepo(rw.To); err != nil {
+		return newRefusal(RefusedInvalidRewriteMapping, fmt.Errorf("dispatch: repo_rewrite.to: %w", err))
 	}
-	if c.RepoRewrite.From == c.RepoRewrite.To {
-		return errors.New("dispatch: repo_rewrite.from and .to are identical")
+	if rw.From == rw.To {
+		return newRefusal(RefusedInvalidRewriteMapping, errors.New("dispatch: repo_rewrite.from and .to are identical"))
 	}
 	// The rewrite target IS the deployment repo, so it must equal proxy_repo —
 	// otherwise every dispatch would fail repo-mismatch.
-	if c.RepoRewrite.To != c.ProxyRepo {
-		return fmt.Errorf("dispatch: repo_rewrite.to %q must equal proxy_repo %q", c.RepoRewrite.To, c.ProxyRepo)
+	if rw.To != c.ProxyRepo {
+		return newRefusal(RefusedInvalidRewriteMapping, fmt.Errorf("dispatch: repo_rewrite.to %q must equal proxy_repo %q", rw.To, c.ProxyRepo))
 	}
 	return nil
 }
@@ -176,7 +220,8 @@ type UpgradeApplyRequest struct {
 // DispatchPlan is the structured result of planning one dispatch op.
 type DispatchPlan struct {
 	Outcome DispatchOutcome
-	Reason  error // non-nil iff Outcome == OutcomeRefused
+	Kind    RefusedKind // RefusedNone unless Outcome == OutcomeRefused
+	Reason  error       // non-nil iff Outcome == OutcomeRefused (a *DispatchRefusal)
 
 	ReleaseID string
 	VersionID string
@@ -201,7 +246,8 @@ type Dispatcher struct {
 }
 
 // NewDispatcher validates the deployment binding and returns a planner. An
-// invalid repo-rewrite mapping is rejected here (fail-closed).
+// invalid proxy_repo or repo-rewrite mapping is rejected here fail-closed; the
+// returned error is a classified *DispatchRefusal (RefusalKind(err) to inspect).
 func NewDispatcher(provider catalogSnapshotProvider, cfg DispatchConfig) (*Dispatcher, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -213,16 +259,17 @@ func NewDispatcher(provider catalogSnapshotProvider, cfg DispatchConfig) (*Dispa
 // for the op — the snapshot is immutable, so a concurrent refresh cannot change
 // this plan), reconciles repos, derives Current/already-current from running
 // (the agent's running_image.repo_digests), and builds the apply request.
-// Refusals return a plan with Outcome == OutcomeRefused and a non-nil Reason.
+// Refusals return a plan with Outcome == OutcomeRefused and a classified
+// Kind/Reason.
 func (d *Dispatcher) Plan(target DispatchTarget, running []string, opts DispatchOptions) *DispatchPlan {
 	cat := d.provider.GetCatalog() // single read — pins the snapshot for this op
 	if cat == nil {
-		return refuse(errDispatchNoCatalog)
+		return refuse(RefusedNoCatalog, errDispatchNoCatalog)
 	}
 
-	rel, err := d.resolveTarget(cat, target)
+	rel, kind, err := d.resolveTarget(cat, target)
 	if err != nil {
-		return refuse(err)
+		return refuse(kind, err)
 	}
 
 	// Forward-rewrite the catalog ref to the deployment repo and require repo
@@ -230,20 +277,25 @@ func (d *Dispatcher) Plan(target DispatchTarget, running []string, opts Dispatch
 	imageRef := d.cfg.forward(rel.PinnedRef)
 	repo, _, ok := splitRepoRef(imageRef)
 	if !ok {
-		return refuse(fmt.Errorf("%w %q", errDispatchMalformedRef, rel.PinnedRef))
+		return refuse(RefusedMalformedRef, fmt.Errorf("%w %q", errDispatchMalformedRef, rel.PinnedRef))
 	}
 	if repo != d.cfg.ProxyRepo {
-		return refuse(fmt.Errorf("%w: catalog ref repo %q != proxy_repo %q", errDispatchRepoMismatch, repo, d.cfg.ProxyRepo))
+		return refuse(RefusedRepoMismatch, fmt.Errorf("%w: catalog ref repo %q != proxy_repo %q", errDispatchRepoMismatch, repo, d.cfg.ProxyRepo))
 	}
 
+	// Current and already-current derive from the SAME mechanism (reverse-map +
+	// Lookup → release identity). already-current means "running the target
+	// RELEASE", regardless of which repo the node pulled from — so an air-gap
+	// node that happens to report the catalog repo is still recognized.
+	current := d.detectCurrent(cat, running)
 	plan := &DispatchPlan{
 		ReleaseID:      rel.ReleaseID,
 		VersionID:      rel.VersionID,
 		Severity:       rel.Severity,
 		PinnedRef:      rel.PinnedRef,
 		ImageRef:       imageRef,
-		Current:        d.detectCurrent(cat, running),
-		AlreadyCurrent: containsRef(running, imageRef),
+		Current:        current,
+		AlreadyCurrent: current.Known && current.ReleaseID == rel.ReleaseID,
 	}
 	if plan.AlreadyCurrent {
 		plan.Outcome = OutcomeAlreadyCurrent
@@ -254,24 +306,31 @@ func (d *Dispatcher) Plan(target DispatchTarget, running []string, opts Dispatch
 	return plan
 }
 
-func refuse(err error) *DispatchPlan {
-	return &DispatchPlan{Outcome: OutcomeRefused, Reason: err}
+func refuse(kind RefusedKind, err error) *DispatchPlan {
+	return &DispatchPlan{Outcome: OutcomeRefused, Kind: kind, Reason: newRefusal(kind, err)}
 }
 
-func (d *Dispatcher) resolveTarget(cat *Catalog, t DispatchTarget) (ResolvedRelease, error) {
+// resolveTarget resolves the target to a release, returning a RefusedKind +
+// error on failure. Unknown release_id and unknown channel classify UNIFORMLY
+// as RefusedUnknownTarget.
+func (d *Dispatcher) resolveTarget(cat *Catalog, t DispatchTarget) (ResolvedRelease, RefusedKind, error) {
 	switch {
 	case t.ReleaseID != "" && t.Channel != "":
-		return ResolvedRelease{}, errDispatchAmbiguousTarget
+		return ResolvedRelease{}, RefusedAmbiguousTarget, errDispatchAmbiguousTarget
 	case t.ReleaseID != "":
 		rel, ok := cat.byReleaseID[t.ReleaseID]
 		if !ok {
-			return ResolvedRelease{}, fmt.Errorf("%w %q", errDispatchUnknownTarget, t.ReleaseID)
+			return ResolvedRelease{}, RefusedUnknownTarget, fmt.Errorf("%w (release_id %q)", errDispatchUnknownTarget, t.ReleaseID)
 		}
-		return ResolvedRelease{ReleaseID: rel.ReleaseID, VersionID: rel.VersionID, Severity: rel.Severity, PinnedRef: rel.PinnedRef}, nil
+		return ResolvedRelease{ReleaseID: rel.ReleaseID, VersionID: rel.VersionID, Severity: rel.Severity, PinnedRef: rel.PinnedRef}, RefusedNone, nil
 	case t.Channel != "":
-		return cat.Resolve(t.Channel) // channel-unknown error is descriptive enough
+		rel, err := cat.Resolve(t.Channel)
+		if err != nil {
+			return ResolvedRelease{}, RefusedUnknownTarget, fmt.Errorf("%w (%v)", errDispatchUnknownTarget, err)
+		}
+		return rel, RefusedNone, nil
 	default:
-		return ResolvedRelease{}, errDispatchNoTarget
+		return ResolvedRelease{}, RefusedNoTarget, errDispatchNoTarget
 	}
 }
 
@@ -306,13 +365,4 @@ func buildApplyRequest(imageRef string, opts DispatchOptions) (req UpgradeApplyR
 		backupSkipped = true // requested but no ref ⇒ skipped (audited by the caller)
 	}
 	return req, backupSkipped
-}
-
-func containsRef(refs []string, target string) bool {
-	for _, r := range refs {
-		if r == target {
-			return true
-		}
-	}
-	return false
 }
