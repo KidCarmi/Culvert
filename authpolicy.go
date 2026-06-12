@@ -194,6 +194,35 @@ func Decide(ctx RequestContext) AccessDecision {
 // its own. No identity is ever attached to an exempt request.
 const authSourceExempt = "exempt"
 
+// reservedAuthSourceNames is the RESERVED authSource namespace (pre-Phase-2
+// correction). These values have fixed meaning in Stage-2 policy matching,
+// request logs, and SIEM exports:
+//
+//	exempt — Stage-1 exemption waived authentication (Slice 7)
+//	unauth — no credentials presented / global UnauthMode
+//	local  — local bcrypt account authentication
+//	system — reserved for internal/system-originated traffic (future)
+//
+// IdP profile IDs and names must never collide with these: provider Name()
+// values are "oidc:<ID>"/"saml:<ID>" and matchAuthSource strips those prefixes
+// (stripIdPPrefix), while OIDC/SAML sessions carry the bare profile ID as
+// Identity.Provider — so a profile ID or name equal to a reserved word would
+// make authSource-scoped access rules ambiguous (e.g. a rule targeting
+// authSource="exempt" could match an IdP-authenticated user). Enforced in
+// validateIdPProfile; checked case-insensitively after trimming.
+var reservedAuthSourceNames = map[string]bool{
+	authSourceExempt: true,
+	"unauth":         true,
+	"local":          true,
+	"system":         true,
+}
+
+// isReservedAuthSourceName reports whether s collides with the reserved
+// authSource namespace (case-insensitive, trimmed).
+func isReservedAuthSourceName(s string) bool {
+	return reservedAuthSourceNames[strings.ToLower(strings.TrimSpace(s))]
+}
+
 // authRequestContext builds the Stage-1 RequestContext for an HTTP/CONNECT
 // request at the proxy auth gate. Host is port-stripped (CONNECT targets carry
 // ":443"); Protocol is "connect" for CONNECT and "http" otherwise. SOCKS5 has
@@ -333,10 +362,15 @@ type AuthRuleSpec struct {
 	Reason         string      `json:"reason,omitempty"`         // required (validated in a later slice)
 	ExpiresAt      string      `json:"expiresAt,omitempty"`      // RFC3339 UTC; "" = no expiry (breadth-warned)
 	BroadExemption bool        `json:"broadExemption,omitempty"` // explicit ack for destination=any
-	// IdPRef is RESERVED for Phase 3 (multi-IdP SSORequired targeting): an IdP
-	// profile id; empty = email-domain routing / global default. Neither read nor
-	// written by Phase 1 (Plan Freeze #2).
-	IdPRef string `json:"idpRef,omitempty"`
+	// ProviderRefs is RESERVED (validation-rejected when set; persistence-safe
+	// via omitempty). Phase 3 activates it: for SSORequired it targets an IdP
+	// profile (single ref; empty = email-domain routing / global default), and
+	// for CredentialRequired it names the credential-provider subset that may
+	// satisfy the rule (empty = the global validator chain). Supersedes the
+	// Phase-1 reserved IdPRef field, which was never activatable (validation
+	// rejected any non-empty value), so no stored data can carry it — the
+	// replacement is wire-safe (pre-Phase-2 correction).
+	ProviderRefs []string `json:"providerRefs,omitempty"`
 }
 
 // AuthDecision is the result of resolveAuthOutcome: the chosen outcome and, when
@@ -604,7 +638,7 @@ func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 	if spec == nil {
 		return nil, fmt.Errorf(`ruleType "auth" requires an auth spec`)
 	}
-	if err := validateAuthOutcomeAndIdP(spec); err != nil {
+	if err := validateAuthOutcomeAndProviders(spec); err != nil {
 		return nil, err
 	}
 	if err := validateAuthOwnership(spec); err != nil {
@@ -626,9 +660,9 @@ func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 	return warnings, nil
 }
 
-// validateAuthOutcomeAndIdP enforces the Slice-2 outcome (Exempt only) and the
-// reserved-IdPRef invariant.
-func validateAuthOutcomeAndIdP(spec *AuthRuleSpec) error {
+// validateAuthOutcomeAndProviders enforces the Slice-2 outcome (Exempt only) and the
+// reserved-ProviderRefs invariant.
+func validateAuthOutcomeAndProviders(spec *AuthRuleSpec) error {
 	switch spec.Outcome {
 	case OutcomeExempt:
 		// supported
@@ -637,8 +671,8 @@ func validateAuthOutcomeAndIdP(spec *AuthRuleSpec) error {
 	default:
 		return fmt.Errorf("auth outcome must be Exempt")
 	}
-	if spec.IdPRef != "" {
-		return fmt.Errorf("idpRef is reserved for a later phase and cannot be set")
+	if len(spec.ProviderRefs) != 0 {
+		return fmt.Errorf("providerRefs is reserved for a later phase and cannot be set")
 	}
 	return nil
 }

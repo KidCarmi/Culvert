@@ -354,6 +354,18 @@ func validateIdPProfile(p *IdPProfile) error {
 	if p.Name == "" {
 		return fmt.Errorf("idp: name is required")
 	}
+	// Reserved authSource namespace (pre-Phase-2 correction): profile IDs feed
+	// the authSource value seen by Stage-2 policy ("oidc:<ID>"/"saml:<ID>" with
+	// the prefix stripped during matching, and the bare ID via session
+	// identities), so neither the ID nor the human-readable name may collide
+	// with the reserved words. IDs are normally generated hex, but the update,
+	// cluster-sync, and import paths accept supplied IDs — validate all of them.
+	if isReservedAuthSourceName(p.ID) {
+		return fmt.Errorf("idp: id %q collides with the reserved authSource namespace (exempt, unauth, local, system)", p.ID)
+	}
+	if isReservedAuthSourceName(p.Name) {
+		return fmt.Errorf("idp: name %q collides with the reserved authSource namespace (exempt, unauth, local, system)", p.Name)
+	}
 	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML {
 		return fmt.Errorf("idp: type must be 'oidc' or 'saml'")
 	}
