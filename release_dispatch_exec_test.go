@@ -21,6 +21,7 @@ type fakeAgent struct {
 	waitState   string
 	waitErr     error
 	runningSeq  [][]string // RunningDigests returns these in order (anchor, post, ...)
+	runningErrs []error    // error to return per RunningDigests call (nil ⇒ ok)
 	runningCall int
 }
 
@@ -42,6 +43,11 @@ func (f *fakeAgent) WaitOp(_ context.Context, _ string) (string, error) {
 func (f *fakeAgent) RunningDigests(_ context.Context) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.runningCall < len(f.runningErrs) && f.runningErrs[f.runningCall] != nil {
+		err := f.runningErrs[f.runningCall]
+		f.runningCall++
+		return nil, err
+	}
 	if f.runningCall < len(f.runningSeq) {
 		r := f.runningSeq[f.runningCall]
 		f.runningCall++
@@ -207,6 +213,30 @@ func TestExec_ConcurrentRejected(t *testing.T) {
 	e.release()
 	if _, err := e.Execute(context.Background(), plan); err != nil {
 		t.Fatalf("Execute after release: %v", err)
+	}
+}
+
+// A failed anchor read must refuse BEFORE apply (design §E4): the agent is
+// never contacted and the outcome is failed_needs_attn/anchor_read_failed.
+func TestExec_AnchorReadFailureRefusesBeforeApply(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	agent := &fakeAgent{applyOpID: "op-a", waitState: agentStateSucceeded,
+		runningErrs: []error{errors.New("status unavailable")}} // anchor read fails
+	var events []DispatchAuditEvent
+	res, err := newExec(agent, func(ev DispatchAuditEvent) { events = append(events, ev) }).
+		Execute(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Terminal != TerminalFailedNeedsAttn || !strings.HasPrefix(res.Detail, "anchor_read_failed") {
+		t.Fatalf("terminal=%s detail=%q; want failed_needs_attn/anchor_read_failed", res.Terminal, res.Detail)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("apply must not be called when the anchor read fails; saw %d", len(agent.applyReqs))
+	}
+	if len(events) != 1 || events[0].Phase != "outcome" || events[0].Terminal != TerminalFailedNeedsAttn {
+		t.Fatalf("want a single outcome event; got %+v", events)
 	}
 }
 

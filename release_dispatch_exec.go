@@ -134,8 +134,17 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*Di
 	}
 	defer e.release()
 
-	// Anchor: the pre-dispatch running digests, for rolled-back verification.
-	anchor, _ := e.client.RunningDigests(ctx) // best-effort; nil is acceptable
+	// Anchor: the pre-dispatch running digests, REQUIRED for rolled-back
+	// verification. If the anchor read fails (e.g. /v1/status is briefly down
+	// while /v1/upgrades/apply is reachable) we REFUSE before apply (design §E4)
+	// rather than proceed best-effort: starting a destructive upgrade with no
+	// rollback anchor would leave any later failure unclassifiable.
+	anchor, err := e.client.RunningDigests(ctx)
+	if err != nil {
+		res := &DispatchResult{Terminal: TerminalFailedNeedsAttn, Detail: "anchor_read_failed: " + err.Error()}
+		e.emitOutcome(plan, res)
+		return res, nil
+	}
 
 	// CP idempotency key: rel-<release_id>-<ulid>. Generated ONCE; reused across
 	// Apply retries of THIS execution so the agent deduplicates.
