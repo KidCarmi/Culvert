@@ -753,6 +753,9 @@ tr.dragging  { opacity: .4; }
               <button class="btn sm active" id="bl-src-all"   data-click="setBlSource" data-arg=""      >All</button>
               <button class="btn sm ghost" id="bl-src-manual" data-click="setBlSource" data-arg="manual" >Admin only</button>
               <button class="btn sm ghost" id="bl-src-feed"   data-click="setBlSource" data-arg="feed"   >Feed only</button>
+              <button class="btn sm ghost" id="bl-cleanup-btn" data-click="blCleanupUnattributed"
+                style="display:none;color:var(--yellow)"
+                title="Remove legacy feed entries that no configured feed currently carries (imported before per-feed attribution existed)"></button>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:10px;margin:8px 0 10px">
@@ -3589,7 +3592,8 @@ document.addEventListener('click', e => {
     case 'saveBlocklistFeed': saveBlocklistFeed(); break;
     case 'syncBlocklistFeed': syncBlocklistFeed(arg); break;
     case 'editBlocklistFeed': editBlocklistFeed(arg, arg2); break;
-    case 'deleteBlocklistFeed': deleteBlocklistFeed(arg); break;
+    case 'deleteBlocklistFeed': deleteBlocklistFeed(arg, arg2); break;
+    case 'blCleanupUnattributed': blCleanupUnattributed(); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
 
     // ── Security / IP filter ──
@@ -3966,6 +3970,7 @@ document.addEventListener('keydown', e => {
 });
 let currentView = 'dashboard';
 let blEntries = [];
+let blFeedCount = 0; // configured feeds — gates the unattributed-cleanup button
 let blSourceFilter = '';
 let blVisible = [];
 let blOffset = 0;
@@ -5078,6 +5083,15 @@ function renderBlocklist(preserve) {
     (!q || e.host.includes(q)) &&
     (!blSourceFilter || e.source === blSourceFilter)
   );
+  // Unattributed-cleanup button: visible only while unattributed entries
+  // exist AND at least one feed is configured (the server enforces the
+  // same gate — without feeds, unattributed entries are likely
+  // static-file or config-restored operator data, not feed leftovers).
+  const orphans = blEntries.filter(e => e.source === 'feed' && !e.feed).length;
+  const cleanupBtn = document.getElementById('bl-cleanup-btn');
+  const showCleanup = orphans > 0 && blFeedCount > 0;
+  cleanupBtn.style.display = showCleanup ? '' : 'none';
+  if (showCleanup) cleanupBtn.textContent = `Clean up ${orphans} unattributed entries`;
   const tbody = document.getElementById('bl-table');
   if (blVisible.length === 0) {
     blOffset = 0;
@@ -6632,13 +6646,14 @@ async function fetchBlocklistFeed() {
   try {
     const d = await api('/api/blocklist/feed');
     const feeds = d.feeds || [];
+    blFeedCount = feeds.length;
     if (!feeds.length) {
       list.innerHTML = '';
       st.textContent = 'No feeds configured';
       return;
     }
     st.textContent = '';
-    let html = '<table class="table" style="font-size:.8rem"><thead><tr><th>Feed URL</th><th>Interval</th><th>Last Sync</th><th>Imported</th><th></th></tr></thead><tbody>';
+    let html = '<table class="table" style="font-size:.8rem"><thead><tr><th>Feed URL</th><th>Interval</th><th>Last Sync</th><th>Imported</th><th title="Blocklist entries currently attributed to this feed">Entries</th><th></th></tr></thead><tbody>';
     feeds.forEach(f => {
       const last = f.last_sync
         ? new Date(f.last_sync).toLocaleString()
@@ -6650,10 +6665,11 @@ async function fetchBlocklistFeed() {
         <td>${escHtml(fmtFeedInterval(f.interval))}</td>
         <td>${escHtml(last)} ${err}</td>
         <td>${f.imported_count || 0}</td>
+        <td>${f.attributed_count || 0}</td>
         <td class="text-right" style="white-space:nowrap">
           <button class="btn ghost sm" style="font-size:.72rem" data-click="syncBlocklistFeed" data-arg="${escHtml(f.url)}">Sync</button>
           <button class="btn ghost sm" style="font-size:.72rem" data-click="editBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${escHtml(f.interval)}">Edit</button>
-          <button class="btn ghost sm" style="font-size:.72rem;color:var(--red)" data-click="deleteBlocklistFeed" data-arg="${escHtml(f.url)}">Delete</button>
+          <button class="btn ghost sm" style="font-size:.72rem;color:var(--red)" data-click="deleteBlocklistFeed" data-arg="${escHtml(f.url)}" data-arg2="${f.attributed_count || 0}">Delete</button>
         </td>
       </tr>`;
     });
@@ -6691,12 +6707,42 @@ function editBlocklistFeed(url, interval) {
   document.getElementById('s-bl-feed-url').focus();
 }
 
-async function deleteBlocklistFeed(url) {
-  if (!await confirmAction('Remove Feed', `Remove feed "${url}"? Domains already imported stay on the blocklist.`, 'Remove')) return;
+async function deleteBlocklistFeed(url, attributedCount) {
+  const n = parseInt(attributedCount, 10) || 0;
+  if (!await confirmAction('Remove Feed', `Remove feed "${url}"? Auto-sync for it stops immediately.`, 'Remove')) return;
+  let purge = false;
+  if (n > 0) {
+    purge = await confirmAction('Also Remove Its Entries?',
+      `This feed has ${n} blocklist entries attributed to it. Remove them too? ` +
+      `Choosing "Keep Entries" leaves them on the blocklist (admin-added entries are never touched either way).`,
+      `Remove ${n} Entries`);
+  }
   try {
-    await api('/api/blocklist/feed?url=' + encodeURIComponent(url), {method: 'DELETE'});
-    toast('Feed removed', 'success');
+    const qs = '?url=' + encodeURIComponent(url) + (purge ? '&purge=entries' : '');
+    const d = await api('/api/blocklist/feed' + qs, {method: 'DELETE'});
+    toast(purge ? `Feed removed — ${d.purged} entries purged` : 'Feed removed (entries kept)', 'success');
     fetchBlocklistFeed();
+    fetchBlocklist();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// blCleanupUnattributed removes entries of unknown origin: no admin
+// attribution and no per-feed attribution. In feed-driven deployments
+// these are legacy imports from before per-feed tracking existed; the
+// server refuses the operation when no feeds are configured, because the
+// same state also describes static-file or config-restored operator data.
+async function blCleanupUnattributed() {
+  const n = blEntries.filter(e => e.source === 'feed' && !e.feed).length;
+  if (!n) { toast('No unattributed entries to clean up', 'success'); return; }
+  if (!await confirmAction('Clean Up Unattributed Entries',
+    `Remove ${n} entries whose origin is unknown (not added via this admin UI, not attributed to any configured feed)? ` +
+    `In feed-driven setups these are stale imports from before per-feed tracking existed; any host still carried by a feed returns (with attribution) on its next sync. ` +
+    `⚠ If you maintain blocklist entries OUTSIDE this UI — a static blocklist file or restored config snapshots — do NOT use this: those entries look identical and will be removed too.`,
+    `Remove ${n} Entries`)) return;
+  try {
+    const d = await api('/api/blocklist?scope=unattributed', {method: 'DELETE'});
+    toast(`Removed ${d.removed} unattributed entries`, 'success');
+    fetchBlocklist();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 

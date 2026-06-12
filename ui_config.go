@@ -390,13 +390,17 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// "merge" (default) appends to existing state.
 	replaceMode := r.URL.Query().Get("mode") == "replace"
 
-	// Blocklist.
+	// Blocklist. Feed attribution is carried across a replace-mode
+	// rebuild — ClearAll+Add would otherwise strand every feed entry as
+	// unattributed (Codex P1, PR #447).
+	feedSrcSnap := bl.SnapshotFeedSources()
 	if replaceMode && len(b.Blocklist) > 0 {
 		bl.ClearAll()
 	}
 	for _, h := range b.Blocklist {
 		bl.Add(h)
 	}
+	bl.RestoreFeedSources(feedSrcSnap)
 	bl.Save()
 	if b.BlocklistMode == "allow" || b.BlocklistMode == "block" {
 		bl.SetMode(b.BlocklistMode)

@@ -1147,6 +1147,128 @@ func (b *Blocklist) ClearAll() {
 	b.mu.Unlock()
 }
 
+// RemoveByFeedSource removes every entry attributed to feedURL (cascade
+// delete when the admin removes a feed AND opts to purge its imports).
+// Admin-added (manual) entries always survive. Returns the removed count.
+func (b *Blocklist) RemoveByFeedSource(feedURL string) int {
+	b.mu.Lock()
+	removed := 0
+	for h, src := range b.feedSrc {
+		if src != feedURL || b.manual[h] {
+			continue
+		}
+		if strings.HasPrefix(h, "*.") {
+			if b.wildcards[h[1:]] {
+				delete(b.wildcards, h[1:])
+				removed++
+			}
+		} else if b.exact[h] {
+			delete(b.exact, h)
+			removed++
+		}
+		delete(b.feedSrc, h)
+	}
+	b.mu.Unlock()
+	if removed > 0 {
+		b.Save()
+	}
+	return removed
+}
+
+// CountByFeedSource reports how many currently-listed, non-manual entries
+// are attributed to feedURL (the number a cascade delete would remove).
+func (b *Blocklist) CountByFeedSource(feedURL string) int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	n := 0
+	for h, src := range b.feedSrc {
+		if src != feedURL || b.manual[h] {
+			continue
+		}
+		if strings.HasPrefix(h, "*.") {
+			if b.wildcards[h[1:]] {
+				n++
+			}
+		} else if b.exact[h] {
+			n++
+		}
+	}
+	return n
+}
+
+// SnapshotFeedSources returns a copy of the per-entry feed attribution map.
+// Taken before a wholesale rebuild (config rollback / import-replace) so
+// RestoreFeedSources can re-stamp surviving entries afterwards.
+func (b *Blocklist) SnapshotFeedSources() map[string]string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	snap := make(map[string]string, len(b.feedSrc))
+	for h, src := range b.feedSrc {
+		snap[h] = src
+	}
+	return snap
+}
+
+// RestoreFeedSources re-stamps feed attribution onto currently-listed,
+// non-manual entries after a wholesale rebuild. Config rollback and
+// import-replace go through Remove/ClearAll + Add, which would otherwise
+// strand every feed entry as "unknown origin" — making them prey for the
+// unattributed-cleanup operation (Codex P1, PR #447). Attribution already
+// present (e.g. re-stamped by a sync mid-rebuild) is not overwritten.
+func (b *Blocklist) RestoreFeedSources(snap map[string]string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.feedSrc == nil {
+		b.feedSrc = map[string]string{}
+	}
+	for h, src := range snap {
+		if b.manual[h] {
+			continue
+		}
+		if strings.HasPrefix(h, "*.") {
+			if !b.wildcards[h[1:]] {
+				continue
+			}
+		} else if !b.exact[h] {
+			continue
+		}
+		if _, exists := b.feedSrc[h]; !exists {
+			b.feedSrc[h] = src
+		}
+	}
+}
+
+// RemoveUnattributedFeedEntries removes every feed-owned entry with no
+// recorded source — the legacy cohort imported before per-feed attribution
+// existed and no longer present in any current feed (a host still carried
+// by a configured feed is re-stamped on every sync, so it never stays
+// unattributed for long). Admin-added entries always survive. Returns the
+// removed count.
+func (b *Blocklist) RemoveUnattributedFeedEntries() int {
+	b.mu.Lock()
+	removed := 0
+	for h := range b.exact {
+		if b.manual[h] || b.feedSrc[h] != "" {
+			continue
+		}
+		delete(b.exact, h)
+		removed++
+	}
+	for suffix := range b.wildcards {
+		h := "*" + suffix
+		if b.manual[h] || b.feedSrc[h] != "" {
+			continue
+		}
+		delete(b.wildcards, suffix)
+		removed++
+	}
+	b.mu.Unlock()
+	if removed > 0 {
+		b.Save()
+	}
+	return removed
+}
+
 // hostsFileBoilerplate lists names that appear in the standard header of
 // /etc/hosts-format feeds (e.g. StevenBlack). They are never legitimately
 // blockable upstream hosts, so hosts-format lines naming them are skipped.
