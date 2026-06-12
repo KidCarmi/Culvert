@@ -55,6 +55,49 @@ const (
 
 var errDispatchInFlight = errors.New("dispatch: an execution is already in flight")
 
+// errStaleAlreadyCurrent is returned when a plan's already-current determination
+// (computed from plan-time running digests by P1.6a) no longer holds against a
+// FRESH status read at execute time — the node drifted off the target between
+// planning and execution. The caller MUST re-plan; the executor refuses to
+// silently report success. errors.Is detects it; the DispatchResult carries the
+// audited detail.
+var errStaleAlreadyCurrent = errors.New("dispatch: plan is stale (node no longer on target) — re-plan required")
+
+// dispatchDefaultMaxWatch bounds WaitOp when the caller supplies a ctx without
+// its own deadline, so a never-terminal agent op cannot poll forever (§7 watch
+// timeout contract). A caller-supplied deadline always takes precedence.
+const dispatchDefaultMaxWatch = 30 * time.Minute
+
+// agentHTTPError is a structured non-2xx response from the agent. It lets the
+// orchestration distinguish a deterministic 4xx rejection (e.g. image_allowlist
+// denial — design E5, never retry) from a transient 5xx (retry).
+type agentHTTPError struct {
+	Status int
+	Method string
+	Path   string
+}
+
+func (e *agentHTTPError) Error() string {
+	return fmt.Sprintf("dispatch: agent %s %s: HTTP %d", e.Method, e.Path, e.Status)
+}
+
+// isTransientAgentErr reports whether an agent call error is worth retrying: a
+// transport error (dial/reset/timeout) or an HTTP 5xx. A deterministic HTTP 4xx
+// (agent rejection) and a context error are NOT transient.
+func isTransientAgentErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var he *agentHTTPError
+	if errors.As(err, &he) {
+		return he.Status >= 500
+	}
+	return true // non-HTTP transport error
+}
+
 // AgentClient is the seam over the EXISTING agent /v1 surface. Apply POSTs
 // upgrades.apply and returns the async op id; WaitOp polls the op to a terminal
 // state; RunningDigests reads running_image.repo_digests.
@@ -95,7 +138,8 @@ type DispatchExecutor struct {
 	cfg          DispatchConfig // for verify-by-digest reverse normalization
 	audit        func(DispatchAuditEvent)
 	newOpID      func() string
-	applyRetries int // extra Apply attempts on transport error (same key reused)
+	applyRetries int           // extra Apply attempts on TRANSIENT error (same key reused)
+	maxWatch     time.Duration // WaitOp ceiling when ctx has no deadline (§7)
 
 	mu       sync.Mutex
 	inflight bool
@@ -109,6 +153,7 @@ func NewDispatchExecutor(client AgentClient, cfg DispatchConfig, audit func(Disp
 		audit:        audit,
 		newOpID:      newDispatchOpID,
 		applyRetries: 2,
+		maxWatch:     dispatchDefaultMaxWatch,
 	}
 }
 
@@ -123,9 +168,7 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*Di
 	}
 	switch plan.Outcome {
 	case OutcomeAlreadyCurrent:
-		res := &DispatchResult{Terminal: TerminalAlreadyCurrent, Verified: true}
-		e.emitOutcome(plan, res)
-		return res, nil
+		return e.executeAlreadyCurrent(ctx, plan)
 	case OutcomePlan:
 		// proceed
 	default:
@@ -149,11 +192,17 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*Di
 		return res, nil
 	}
 
-	// CP idempotency key: rel-<release_id>-<ulid>. Generated ONCE; reused across
-	// Apply retries of THIS execution so the agent deduplicates.
-	key := "rel-" + plan.ReleaseID + "-" + e.newOpID()
+	// CP idempotency key. The planner (P1.6a) owns op identity: if it supplied a
+	// key (DispatchOptions.IdempotencyKey, threaded through plan.Apply), HONOR it
+	// verbatim so a re-execution of the SAME op reuses it and the agent dedupes.
+	// Only when none was supplied do we mint rel-<release_id>-<ulid>. The key is
+	// constant for the rest of THIS execution (reused across Apply retries).
 	req := plan.Apply
-	req.IdempotencyKey = key
+	key := req.IdempotencyKey
+	if key == "" {
+		key = "rel-" + plan.ReleaseID + "-" + e.newOpID()
+		req.IdempotencyKey = key
+	}
 	res := &DispatchResult{IdempotencyKey: key}
 
 	opID, err := e.applyWithRetry(ctx, req)
@@ -165,7 +214,12 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*Di
 	res.OpID = opID
 	e.emitDispatch(plan, key, opID)
 
-	state, werr := e.client.WaitOp(ctx, opID)
+	// Bound the watch: a caller deadline always wins; otherwise cap at maxWatch so
+	// a never-terminal op cannot poll forever (§7). The ctx remains the hard stop.
+	watchCtx, cancel := e.watchContext(ctx)
+	defer cancel()
+
+	state, werr := e.client.WaitOp(watchCtx, opID)
 	if werr != nil {
 		// State unobserved (timeout / poll error) — the agent op runs on; the
 		// operator must inspect it. The reused key makes a re-poll safe.
@@ -177,6 +231,39 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*Di
 	e.classifyTerminal(ctx, plan, res, anchor, state)
 	e.emitOutcome(plan, res)
 	return res, nil
+}
+
+// executeAlreadyCurrent re-validates an already-current plan against a FRESH
+// status read before honoring the no-op. The planner's already-current was
+// computed from plan-time digests (possibly stale, design §5.1); the node may
+// have drifted off the target between planning and execution. Re-reading closes
+// that window: still-on-target ⇒ already_current; drifted ⇒ refuse with
+// errStaleAlreadyCurrent so the caller re-plans (NO apply in this slice).
+func (e *DispatchExecutor) executeAlreadyCurrent(ctx context.Context, plan *DispatchPlan) (*DispatchResult, error) {
+	running, err := e.client.RunningDigests(ctx)
+	if err != nil {
+		res := &DispatchResult{Terminal: TerminalFailedNeedsAttn, Detail: "already_current_recheck_read_failed: " + err.Error()}
+		e.emitOutcome(plan, res)
+		return res, nil
+	}
+	if !e.verifyRunning(running, plan.PinnedRef) {
+		res := &DispatchResult{Terminal: TerminalFailedNeedsAttn, Detail: "stale_already_current: node no longer on target — re-plan required"}
+		e.emitOutcome(plan, res)
+		return res, errStaleAlreadyCurrent
+	}
+	res := &DispatchResult{Terminal: TerminalAlreadyCurrent, Verified: true}
+	e.emitOutcome(plan, res)
+	return res, nil
+}
+
+// watchContext derives the context used for WaitOp. A caller-supplied deadline
+// always takes precedence; only a deadline-less ctx is capped at maxWatch. The
+// returned cancel must always be called.
+func (e *DispatchExecutor) watchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok || e.maxWatch <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, e.maxWatch)
 }
 
 // classifyTerminal re-reads the running digests (the verify-by-digest gate) and
@@ -209,11 +296,13 @@ func (e *DispatchExecutor) classifyTerminal(ctx context.Context, plan *DispatchP
 	}
 }
 
-// applyWithRetry re-POSTs the SAME request (same idempotency key) on transport
-// error. This is safe ONLY because the key is reused across attempts and the
-// agent's idempotency contract MUST dedupe a repeated key to the same op — so a
-// retry after a request that actually reached the agent returns that op rather
-// than starting a second upgrade. The key is never regenerated mid-execution.
+// applyWithRetry re-POSTs the SAME request (same idempotency key) on a TRANSIENT
+// error only (transport / HTTP 5xx). A deterministic 4xx agent rejection (e.g.
+// image_allowlist denial — design E5) is returned immediately: retrying it just
+// repeats the same rejection. Reuse is safe ONLY because the key is constant
+// across attempts and the agent's idempotency contract dedupes a repeated key to
+// the same op — so a retry after a request that actually reached the agent
+// returns that op rather than starting a second upgrade.
 func (e *DispatchExecutor) applyWithRetry(ctx context.Context, req UpgradeApplyRequest) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt <= e.applyRetries; attempt++ {
@@ -225,6 +314,9 @@ func (e *DispatchExecutor) applyWithRetry(ctx context.Context, req UpgradeApplyR
 			return opID, nil
 		}
 		lastErr = err
+		if !isTransientAgentErr(err) {
+			return "", err // deterministic rejection — do not retry
+		}
 	}
 	return "", lastErr
 }
@@ -305,6 +397,7 @@ func (e *DispatchExecutor) emitOutcome(plan *DispatchPlan, res *DispatchResult) 
 const (
 	dispatchAgentPollInterval = 2 * time.Second
 	dispatchAgentReadBound    = 1 << 20 // 1 MiB
+	dispatchPollErrorBudget   = 3       // consecutive TRANSIENT poll errors tolerated
 )
 
 // httpAgentClient talks to the agent over its existing /v1 surface. The caller
@@ -313,6 +406,7 @@ type httpAgentClient struct {
 	base         *url.URL
 	client       *http.Client
 	pollInterval time.Duration
+	pollBudget   int // consecutive transient poll errors tolerated before giving up
 }
 
 // NewHTTPAgentClient builds a client for the agent at baseURL.
@@ -327,7 +421,7 @@ func NewHTTPAgentClient(baseURL string, client *http.Client) (*httpAgentClient, 
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &httpAgentClient{base: u, client: client, pollInterval: dispatchAgentPollInterval}, nil
+	return &httpAgentClient{base: u, client: client, pollInterval: dispatchAgentPollInterval, pollBudget: dispatchPollErrorBudget}, nil
 }
 
 func (c *httpAgentClient) RunningDigests(ctx context.Context) ([]string, error) {
@@ -362,19 +456,35 @@ func (c *httpAgentClient) Apply(ctx context.Context, req UpgradeApplyRequest) (s
 	return op.OpID, nil
 }
 
+// WaitOp polls the op to a terminal state. A TRANSIENT poll error (transport /
+// HTTP 5xx) does not abort the watch: up to pollBudget CONSECUTIVE transient
+// errors are tolerated (the counter resets on any successful poll), so a brief
+// blip while the agent op runs on does not produce a spurious failure. A
+// deterministic 4xx (e.g. op-not-found after an agent restart) aborts at once,
+// and the context deadline is always the hard stop.
 func (c *httpAgentClient) WaitOp(ctx context.Context, opID string) (string, error) {
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
+	transient := 0
 	for {
 		var op struct {
 			State string `json:"state"`
 		}
-		if err := c.getJSON(ctx, path.Join("/v1/operations", opID), &op); err != nil {
-			return "", err
-		}
-		switch op.State {
-		case agentStateSucceeded, agentStateFailed, agentStateCancelled:
-			return op.State, nil
+		err := c.getJSON(ctx, path.Join("/v1/operations", opID), &op)
+		switch {
+		case err == nil:
+			transient = 0
+			switch op.State {
+			case agentStateSucceeded, agentStateFailed, agentStateCancelled:
+				return op.State, nil
+			}
+		case !isTransientAgentErr(err):
+			return "", err // deterministic (4xx) or context error — give up now
+		default:
+			transient++
+			if transient > c.pollBudget {
+				return "", fmt.Errorf("dispatch: agent op poll failed %d times: %w", transient, err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -412,7 +522,7 @@ func (c *httpAgentClient) doJSON(ctx context.Context, method, p string, body []b
 		return err
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return fmt.Errorf("dispatch: agent %s %s: HTTP %d", method, p, resp.StatusCode)
+		return &agentHTTPError{Status: resp.StatusCode, Method: method, Path: p}
 	}
 	if out == nil {
 		return nil
