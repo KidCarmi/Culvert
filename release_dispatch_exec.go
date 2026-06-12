@@ -118,6 +118,9 @@ func newDispatchOpID() string { return ulid.MustNew(ulid.Now(), rand.Reader).Str
 // WITHOUT contacting the agent. A refused/non-plan returns an error. A second
 // concurrent Execute returns errDispatchInFlight.
 func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*DispatchResult, error) {
+	if plan == nil {
+		return nil, errors.New("dispatch: nil plan")
+	}
 	switch plan.Outcome {
 	case OutcomeAlreadyCurrent:
 		res := &DispatchResult{Terminal: TerminalAlreadyCurrent, Verified: true}
@@ -171,7 +174,21 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*Di
 		return res, nil
 	}
 
-	post, _ := e.client.RunningDigests(ctx)
+	e.classifyTerminal(ctx, plan, res, anchor, state)
+	e.emitOutcome(plan, res)
+	return res, nil
+}
+
+// classifyTerminal re-reads the running digests (the verify-by-digest gate) and
+// sets res.Terminal/Detail/Verified. A failed re-read is FAILED_NEEDS_ATTN —
+// NOT inferred from nil/empty digests (which would falsely read as a mismatch or
+// an un-rolled-back failure).
+func (e *DispatchExecutor) classifyTerminal(ctx context.Context, plan *DispatchPlan, res *DispatchResult, anchor []string, state string) {
+	post, perr := e.client.RunningDigests(ctx)
+	if perr != nil {
+		res.Terminal, res.Detail = TerminalFailedNeedsAttn, "post_verify_read_failed: "+perr.Error()
+		return
+	}
 	res.Verified = e.verifyRunning(post, plan.PinnedRef)
 
 	switch {
@@ -181,17 +198,22 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*Di
 		// Agent reported success but the running digest is NOT the target.
 		res.Terminal, res.Detail = TerminalFailedNeedsAttn, "verify_mismatch"
 	case digestOverlap(anchor, post):
-		// Op failed/cancelled but the prior image is running again (inline
-		// auto-rollback restored it, or nothing changed) — the safe failure.
-		res.Terminal, res.Detail = TerminalFailedRolledBack, "op_state="+state
+		// Op failed/cancelled and the prior image is running again. This is the
+		// SAFE failure (inline auto-rollback restored it, or nothing changed),
+		// but the re-read cannot prove a rollback actually ran vs. the upgrade
+		// never taking effect — the detail says so explicitly.
+		res.Terminal, res.Detail = TerminalFailedRolledBack, "prior_running_after_failed_op (state="+state+")"
 	default:
 		// Op failed and the prior image is NOT confirmed back — manual attention.
 		res.Terminal, res.Detail = TerminalFailedNeedsAttn, "op_failed_not_rolled_back (state="+state+")"
 	}
-	e.emitOutcome(plan, res)
-	return res, nil
 }
 
+// applyWithRetry re-POSTs the SAME request (same idempotency key) on transport
+// error. This is safe ONLY because the key is reused across attempts and the
+// agent's idempotency contract MUST dedupe a repeated key to the same op — so a
+// retry after a request that actually reached the agent returns that op rather
+// than starting a second upgrade. The key is never regenerated mid-execution.
 func (e *DispatchExecutor) applyWithRetry(ctx context.Context, req UpgradeApplyRequest) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt <= e.applyRetries; attempt++ {

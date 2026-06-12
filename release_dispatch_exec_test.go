@@ -240,6 +240,47 @@ func TestExec_AnchorReadFailureRefusesBeforeApply(t *testing.T) {
 	}
 }
 
+// A failed post-apply re-read is the verify gate failing: classify
+// FAILED_NEEDS_ATTN/post_verify_read_failed regardless of the op state, never
+// inferring mismatch/rolled-back from a missing read.
+func TestExec_PostVerifyReadFailureAfterSucceeded(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	agent := &fakeAgent{applyOpID: "op-pv1", waitState: agentStateSucceeded,
+		runningSeq:  [][]string{nil},                         // anchor (call 0) ok
+		runningErrs: []error{nil, errors.New("status gone")}} // post (call 1) errors
+	res, _ := newExec(agent, nil).Execute(context.Background(), plan)
+	if res.Terminal != TerminalFailedNeedsAttn || !strings.HasPrefix(res.Detail, "post_verify_read_failed") {
+		t.Fatalf("terminal=%s detail=%q; want failed_needs_attn/post_verify_read_failed", res.Terminal, res.Detail)
+	}
+}
+
+func TestExec_PostVerifyReadFailureAfterFailed(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	agent := &fakeAgent{applyOpID: "op-pv2", waitState: agentStateCancelled,
+		runningSeq:  [][]string{{dispatchRepo + "@" + digB}}, // anchor (call 0) ok
+		runningErrs: []error{nil, errors.New("status gone")}} // post (call 1) errors
+	res, _ := newExec(agent, nil).Execute(context.Background(), plan)
+	if res.Terminal != TerminalFailedNeedsAttn || !strings.HasPrefix(res.Detail, "post_verify_read_failed") {
+		t.Fatalf("terminal=%s detail=%q; want failed_needs_attn/post_verify_read_failed", res.Terminal, res.Detail)
+	}
+}
+
+func TestExec_NilPlanReturnsErrorNotPanic(t *testing.T) {
+	agent := &fakeAgent{}
+	res, err := newExec(agent, nil).Execute(context.Background(), nil)
+	if err == nil {
+		t.Fatal("want a clean error for a nil plan")
+	}
+	if res != nil {
+		t.Fatalf("want nil result on error; got %+v", res)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("agent must not be contacted for a nil plan; saw %d applies", len(agent.applyReqs))
+	}
+}
+
 // Audit hook fires a dispatch event (with op_id) and an outcome event.
 func TestExec_AuditHook(t *testing.T) {
 	cat := mustLoad(t, validSource())
