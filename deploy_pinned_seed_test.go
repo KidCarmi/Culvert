@@ -35,7 +35,7 @@ func TestQuickStartInstallerSeedsPinnedTag(t *testing.T) {
 	s := string(install)
 
 	for _, want := range []string{
-		`PINNED_TAG="culvert/proxy:pinned"`, // the tag the compose file resolves
+		`PINNED_TAG="culvert/proxy:pinned"`,  // the tag the compose file resolves
 		`docker image inspect "$PINNED_TAG"`, // idempotence guard (already-seeded hosts untouched)
 		`docker tag`,                         // registry / running-container seed path
 		`docker build -t "$PINNED_TAG"`,      // air-gapped / registry-down fallback
