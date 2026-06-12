@@ -47,6 +47,10 @@ func TestNormalizeBlocklistLine(t *testing.T) {
 		// A public IP entry is a legitimate block target.
 		{"203.0.113.7", "203.0.113.7", true},
 		{"0.0.0.0 203.0.113.7", "203.0.113.7", true},
+		// FQDN trailing dot canonicalized away.
+		{"example.com.", "example.com", true},
+		{"0.0.0.0 ads.example.", "ads.example", true},
+		{".", "", false},
 	}
 	for _, tc := range cases {
 		got, ok := normalizeBlocklistLine(tc.in)

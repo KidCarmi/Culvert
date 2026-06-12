@@ -3759,6 +3759,7 @@ document.addEventListener('input', e => {
   if (!el) return;
   switch (el.dataset.input) {
     case 'applyLogFilter':       applyLogFilter(); break;
+    case 'renderBlocklist':      renderBlocklist(); break;
     case 'onGroupSearchInput':   onGroupSearchInput(el.value); break;
     case 'syncSAMLMetadataSourceChoice': syncSAMLMetadataSourceChoice(); break;
     case 'fpSyncTitle':          document.getElementById('fp-editor-title').textContent = el.value || 'Profile'; break;
@@ -4958,11 +4959,17 @@ function clearFilter() {
 // ═══════════════════════════════════════════════════════════════════════════
 const BL_PAGE = 100;       // rows per page — keeps DOM small
 
-async function fetchBlocklist() {
+let _blLastFetch = 0;
+
+// preserve===true keeps the table's pagination/scroll/checkbox state
+// (used by the background tick); direct user actions omit it so the
+// view resets to a fresh first page.
+async function fetchBlocklist(preserve) {
   try {
     const d = await api('/api/blocklist');
+    _blLastFetch = Date.now();
     blEntries = d.entries || [];
-    renderBlocklist();
+    renderBlocklist(preserve === true);
   } catch(e) { console.error(e); }
   fetchExceptions();
 }
@@ -4976,15 +4983,32 @@ function setBlSource(src) {
   renderBlocklist();
 }
 
-function renderBlocklist() {
+// blFingerprint identifies the currently-rendered slice. The 3s tick
+// refresh compares against it and leaves the DOM alone when nothing
+// changed — otherwise every poll reset pagination to page one, made the
+// table jump after "Load more…", re-rendered rows (looking like
+// duplicates), and wiped in-progress checkbox selections.
+let blFingerprint = '';
+
+function blComputeFP(count) {
+  return blVisible.length + '|' + count + '|' +
+    blVisible.slice(0, count).map(e => e.host + '\x01' + e.source + '\x01' + (e.feed || '')).join('\x00');
+}
+
+// renderBlocklist(preserve): preserve===true (tick refresh) keeps the
+// current pagination depth and skips the re-render when the visible
+// slice is unchanged. Any other call (search input, source tabs, after
+// add/remove) resets to the first page.
+function renderBlocklist(preserve) {
   const q = (document.getElementById('bl-filter').value || '').toLowerCase();
   blVisible = blEntries.filter(e =>
     (!q || e.host.includes(q)) &&
     (!blSourceFilter || e.source === blSourceFilter)
   );
-  blOffset = 0;
   const tbody = document.getElementById('bl-table');
   if (blVisible.length === 0) {
+    blOffset = 0;
+    blFingerprint = '';
     tbody.innerHTML = '<tr><td colspan="4"><div class="empty-state"><div class="empty-icon">✅</div>No blocked hosts</div></td></tr>';
     document.getElementById('bl-load-more').style.display = 'none';
     document.getElementById('bl-count').textContent = '0 hosts';
@@ -4993,12 +5017,21 @@ function renderBlocklist() {
   document.getElementById('bl-count').textContent =
     blVisible.length + ' host' + (blVisible.length !== 1 ? 's' : '') +
     (q || blSourceFilter ? ' (filtered)' : ' total');
-  _blRenderPage(false);
+  const target = preserve === true
+    ? Math.min(Math.max(blOffset, BL_PAGE), blVisible.length)
+    : Math.min(BL_PAGE, blVisible.length);
+  const fp = blComputeFP(target);
+  if (preserve === true && fp === blFingerprint) return; // unchanged — keep DOM (and checkboxes) intact
+  blFingerprint = fp;
+  tbody.innerHTML = blRowsHTML(blVisible.slice(0, target));
+  blOffset = target;
+  document.getElementById('bl-load-more').style.display =
+    blOffset < blVisible.length ? '' : 'none';
+  blUpdateBulk();
 }
 
-function _blRenderPage(append) {
-  const page = blVisible.slice(blOffset, blOffset + BL_PAGE);
-  const html = page.map(e => {
+function blRowsHTML(list) {
+  return list.map(e => {
     const h = escHtml(e.host);
     const jh = JSON.stringify(e.host).replace(/"/g, '&quot;');
     const wild = e.host.startsWith('*.');
@@ -5019,20 +5052,16 @@ function _blRenderPage(append) {
       </td>
     </tr>`;
   }).join('');
-  const tbody = document.getElementById('bl-table');
-  if (append) {
-    tbody.insertAdjacentHTML('beforeend', html);
-  } else {
-    tbody.innerHTML = html;
-  }
-  blOffset += page.length;
-  document.getElementById('bl-load-more').style.display =
-    blOffset < blVisible.length ? '' : 'none';
-  blUpdateBulk();
 }
 
 function blLoadMore() {
-  _blRenderPage(true);
+  const page = blVisible.slice(blOffset, blOffset + BL_PAGE);
+  document.getElementById('bl-table').insertAdjacentHTML('beforeend', blRowsHTML(page));
+  blOffset += page.length;
+  blFingerprint = blComputeFP(blOffset); // keep the tick refresh in sync with the deeper view
+  document.getElementById('bl-load-more').style.display =
+    blOffset < blVisible.length ? '' : 'none';
+  blUpdateBulk();
 }
 
 async function addHost() {
@@ -7840,7 +7869,10 @@ async function tick() {
     fetchDashboardThreats();
     fetchTopRules();
   }
-  if (currentView === 'blocklist') fetchBlocklist();
+  // Blocklist can be six figures of entries — refresh at most every 15s
+  // on the tick (user actions still refetch immediately), preserving
+  // pagination/checkbox state.
+  if (currentView === 'blocklist' && Date.now() - _blLastFetch > 15000) fetchBlocklist(true);
   if (currentView === 'fileblock') fetchFileBlock();
   if (currentView === 'rewrite')   fetchRewrite();
   if (currentView === 'policy')    fetchPolicy();

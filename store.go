@@ -1191,6 +1191,9 @@ func normalizeBlocklistLine(raw string) (string, bool) {
 		line = line[:i]
 	}
 	line = strings.ToLower(line)
+	// Canonicalize FQDN trailing dot ("example.com." ≡ "example.com") so
+	// both spellings can't coexist as near-duplicate entries.
+	line = strings.TrimSuffix(line, ".")
 	if line == "" {
 		return "", false
 	}
