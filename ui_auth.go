@@ -396,7 +396,12 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, publicIdPProfiles(idpRegistry.All()))
+		// Envelope (not a bare array) so the UI can warn when the registry
+		// is in-memory only and profiles would be lost on restart.
+		jsonOK(w, map[string]any{
+			"persisted": idpRegistry.Persisted(),
+			"profiles":  publicIdPProfiles(idpRegistry.All()),
+		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return

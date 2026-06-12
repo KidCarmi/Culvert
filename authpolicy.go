@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -212,6 +214,30 @@ func authBypassDisabled() bool {
 	return authBypassDisableVal
 }
 
+// ─── Auth Exempt kill switch (Phase 1 Slice 6) ──────────────────────────────
+
+// authExemptDisabledRuntime is the runtime/global kill-switch toggle for Auth
+// Exempt decisions. It augments the read-once env kill switch
+// (CULVERT_AUTHBYPASS_DISABLE) with an operator-settable runtime control so an
+// admin can fail all exemptions closed without a restart. Backend-only in this
+// slice — no API/UI is wired to it yet.
+var authExemptDisabledRuntime atomic.Bool
+
+// setAuthExemptDisabled engages (true) or releases (false) the runtime kill
+// switch. Defined for a future admin/runtime toggle; not exposed via API/UI yet.
+func setAuthExemptDisabled(v bool) { authExemptDisabledRuntime.Store(v) }
+
+// authExemptDisabledRuntimeState reports the runtime toggle state only (excludes
+// the env kill switch). Used by diagnostics/observability, not the gate decision.
+func authExemptDisabledRuntimeState() bool { return authExemptDisabledRuntime.Load() }
+
+// authExemptKillSwitchEngaged reports whether Auth Exempt resolution must fail
+// closed to Default (auth-required). It is engaged when EITHER the read-once env
+// kill switch (CULVERT_AUTHBYPASS_DISABLE) is set OR the runtime toggle is on.
+func authExemptKillSwitchEngaged() bool {
+	return authBypassDisabled() || authExemptDisabledRuntime.Load()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Authentication Policy — Phase 1 Slice 1: AuthOutcome resolver CONTRACT.
 //
@@ -285,13 +311,221 @@ func resolveAuthOutcome(ctx RequestContext) AuthDecision {
 }
 
 // resolveAuthOutcomeFrom is the pure core of the resolver, taking an explicit
-// ruleset so it is testable without global state. Slice 1 returns Default
-// unconditionally (matching is deferred to later slices); the signature is
-// stable so wiring the matcher is purely additive.
+// ruleset so it is testable without global state. It evaluates Stage-1 auth
+// rules in priority order (lowest Priority value first, mirroring
+// PolicyStore.sortLocked / Evaluate) and returns Exempt with the matched rule
+// when an enabled, non-expired, in-schedule auth/exempt rule matches the
+// request's source / destination / protocol / method. Otherwise it returns
+// Default (Plan Freeze #9). It has no side effects and is NOT called from
+// proxy.go — wiring it onto the hot path is a later slice.
+//
+// Only Outcome=Exempt is implemented; CredentialRequired/SSORequired are
+// reserved and inert (they never match, so a request with only such rules
+// resolves to Default). Access (Stage-2) rules are ignored entirely.
+//
+// Break-glass: when the kill switch is engaged (env CULVERT_AUTHBYPASS_DISABLE or
+// the runtime toggle), this returns Default for EVERY request — all exemptions
+// fail closed to auth-required. The kill-switch read is the one piece of global
+// state this otherwise-pure core consults.
 func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision {
-	_ = rules // auth-rule evaluation (matchSubject + dest/protocol/method) lands in later slices
-	_ = ctx
+	// Fail closed to Default when the break-glass kill switch is engaged.
+	if authExemptKillSwitchEngaged() {
+		return AuthDecision{Outcome: OutcomeDefault}
+	}
+	// Evaluate in priority order. Sort a copy so the decision is deterministic
+	// regardless of the caller's slice ordering (policyStore.List() is already
+	// sorted, but the contract must not depend on that).
+	ordered := make([]PolicyRule, len(rules))
+	copy(ordered, rules)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Priority < ordered[j].Priority
+	})
+	for i := range ordered {
+		rule := &ordered[i]
+		if authRuleMatchesExempt(rule, ctx) {
+			return AuthDecision{Outcome: OutcomeExempt, Rule: rule}
+		}
+	}
 	return AuthDecision{Outcome: OutcomeDefault}
+}
+
+// authRuleMatchesExempt reports whether a single rule is an enabled, currently
+// effective auth/exempt rule that matches the request. Every check fails closed:
+// a non-auth rule, a disabled rule, a missing/reserved outcome, an unscoped or
+// malformed subject, an unmet destination, an out-of-schedule or expired rule,
+// or a protocol/method mismatch all yield false.
+func authRuleMatchesExempt(rule *PolicyRule, ctx RequestContext) bool {
+	if ruleTypeOf(rule) != ruleTypeAuth { // Stage-1 only; access rules are ignored
+		return false
+	}
+	if !ruleIsEnabled(rule) {
+		return false
+	}
+	spec := rule.Auth
+	if spec == nil { // malformed auth rule
+		return false
+	}
+	if spec.Outcome != OutcomeExempt { // only Exempt is implemented; others inert
+		return false
+	}
+	// Source scope: typed CIDR SubjectMatch. nil / unknown predicate / bad IP all
+	// fail closed.
+	if !matchSubject(rule.SubjectMatch, ctx.ClientIP) {
+		return false
+	}
+	// Destination: an explicit selector, or an acknowledged broad exemption.
+	if !authRuleHasDestination(*rule) && !spec.BroadExemption {
+		return false
+	}
+	if !matchDest(rule, ctx.Host) {
+		return false
+	}
+	// Schedule: a malformed timezone must fail closed (require auth), NOT silently
+	// fall back to UTC. matchSchedule is shared with Stage-2 access evaluation and
+	// stays lenient (changing it would alter traffic behavior); the auth gate adds
+	// its own strict pre-check. Bulk persistence paths (Load/ReplaceAll) do not run
+	// validatePolicyRule's timezone check, so a hand-edited or cluster-synced auth
+	// rule can carry an invalid timezone — that must not grant Exempt.
+	if !authScheduleParseable(rule.Schedule) {
+		return false
+	}
+	if !matchSchedule(rule.Schedule) {
+		return false
+	}
+	if !authRuleNotExpired(spec) {
+		return false
+	}
+	return matchAuthProtocolMethod(spec, ctx)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Policy — Phase 1 Slice 5: AuthOutcome OBSERVABILITY (no wiring).
+//
+// Pure builders that translate an AuthDecision into the low-cardinality SIEM
+// fields (AuthLogFields) and a metric counter. NOT called from proxy.go — the
+// auth gate is still unwired; these exist so a later slice can emit observability
+// without changing request-handling behavior.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// authLogFieldsFor builds the low-cardinality observability fields for an auth
+// decision. It carries NO identity: an Exempt decision is described by outcome +
+// rule id/name (+ low-cardinality subject predicate type names and the matched
+// rule's subject schema version) only. A non-Exempt / Default decision yields the
+// zero value, so logging stays byte-identical for un-exempted requests. Pure.
+func authLogFieldsFor(d AuthDecision) AuthLogFields {
+	if d.Outcome != OutcomeExempt || d.Rule == nil {
+		return AuthLogFields{}
+	}
+	f := AuthLogFields{
+		Outcome:        d.Outcome,
+		PolicyRuleID:   d.Rule.ID,
+		PolicyRuleName: d.Rule.Name,
+	}
+	if d.Rule.SubjectMatch != nil {
+		f.SchemaVersion = d.Rule.SubjectMatch.SchemaVersion
+		f.SubjectMatchTypes = subjectPredicateTypeNames(d.Rule.SubjectMatch)
+	}
+	return f
+}
+
+// subjectPredicateTypeNames returns the predicate TYPE names of a SubjectMatch
+// (e.g. ["cidr"]). Only the bounded, low-cardinality type identifiers are
+// returned — never the predicate VALUES (which would be high-cardinality, e.g.
+// client CIDRs) — so these are safe as log/metric dimensions.
+func subjectPredicateTypeNames(sm *SubjectMatch) []string {
+	if sm == nil || len(sm.All) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(sm.All))
+	for i := range sm.All {
+		out = append(out, sm.All[i].Type)
+	}
+	return out
+}
+
+// incAuthExempt increments the Stage-1 Exempt-decision counter exposed as
+// culvert_auth_exempt_decisions_total. Defined in Slice 5 but intentionally NOT
+// called from proxy.go / the request path yet (the metric stays at zero until the
+// auth gate is wired in a later slice).
+func incAuthExempt() {
+	atomic.AddInt64(&statAuthExempt, 1)
+}
+
+// matchSubject reports whether clientIP satisfies a typed SubjectMatch. Predicate
+// types are AND'd; values within a type are OR'd (mirroring validateSubjectMatch).
+// In Phase 1 only the "cidr" predicate is understood; any other type — including
+// the identity-dependent predicates that belong on access rules — fails closed,
+// as does a nil/empty selector or an unparseable client IP.
+func matchSubject(sm *SubjectMatch, clientIP string) bool {
+	if sm == nil || sm.SchemaVersion < 1 || len(sm.All) == 0 {
+		return false
+	}
+	if net.ParseIP(clientIP) == nil {
+		return false
+	}
+	for i := range sm.All {
+		p := sm.All[i]
+		switch p.Type {
+		case subjectPredicateCIDR:
+			if !cidrPredicateMatches(p.Values, clientIP) {
+				return false
+			}
+		default:
+			return false // unknown/unsupported predicate → fail closed
+		}
+	}
+	return true
+}
+
+// cidrPredicateMatches reports whether clientIP is contained by ANY of values
+// (each a CIDR or bare IP). An empty value list fails closed.
+func cidrPredicateMatches(values []string, clientIP string) bool {
+	for _, v := range values {
+		if matchIPOrCIDR(v, clientIP) {
+			return true
+		}
+	}
+	return false
+}
+
+// authScheduleParseable reports whether the rule's schedule is well-formed enough
+// for the auth gate to trust it. A nil schedule or empty timezone is fine; a
+// non-empty but unparseable IANA timezone fails closed (the Stage-1 gate must not
+// waive authentication based on a schedule it cannot evaluate, and unlike
+// validatePolicyRule the bulk persistence paths never reject such a timezone).
+func authScheduleParseable(s *PolicySchedule) bool {
+	if s == nil || s.Timezone == "" {
+		return true
+	}
+	_, err := time.LoadLocation(s.Timezone)
+	return err == nil
+}
+
+// authRuleNotExpired reports whether the rule has not expired. An empty
+// ExpiresAt never expires; an unparseable timestamp fails closed (never matches).
+func authRuleNotExpired(spec *AuthRuleSpec) bool {
+	if spec.ExpiresAt == "" {
+		return true
+	}
+	exp, err := time.Parse(time.RFC3339, spec.ExpiresAt)
+	if err != nil {
+		return false
+	}
+	return time.Now().Before(exp)
+}
+
+// matchAuthProtocolMethod enforces the rule's protocol and method scope. An empty
+// protocol matches any; an empty method matches any. Method is ignored when the
+// rule targets the "connect" protocol (CONNECT carries no HTTP method), matching
+// validateAuthProtocol's "method is ignored for connect" semantics.
+func matchAuthProtocolMethod(spec *AuthRuleSpec, ctx RequestContext) bool {
+	if spec.Protocol != "" && !strings.EqualFold(spec.Protocol, ctx.Protocol) {
+		return false
+	}
+	if spec.Method != "" && spec.Protocol != "connect" && !strings.EqualFold(spec.Method, ctx.Method) {
+		return false
+	}
+	return true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -505,6 +739,42 @@ func policyRulePersistable(r *PolicyRule) (ok bool, reason string) {
 		return false, "auth spec is only valid on auth rules"
 	}
 	return true, ""
+}
+
+// subjectSourceBreadth classifies the source breadth of a SubjectMatch for
+// operator diagnostics (Phase 1 Slice 6). anySource is true if any CIDR value is
+// 0.0.0.0/0 or ::/0; wide is true if any IPv4 prefix is broader than /24. Pure;
+// mirrors the breadth logic of broadSubjectWarnings without producing strings.
+func subjectSourceBreadth(sm *SubjectMatch) (anySource, wide bool) {
+	if sm == nil {
+		return false, false
+	}
+	for i := range sm.All {
+		if sm.All[i].Type != subjectPredicateCIDR {
+			continue
+		}
+		for _, v := range sm.All[i].Values {
+			if v == "0.0.0.0/0" || v == "::/0" {
+				anySource = true
+				continue
+			}
+			if _, ipnet, err := net.ParseCIDR(v); err == nil {
+				if ones, bits := ipnet.Mask.Size(); bits == 32 && ones < 24 {
+					wide = true
+				}
+			}
+		}
+	}
+	return anySource, wide
+}
+
+// authExemptExpired reports whether an exempt rule's expiry has passed. A blank
+// ExpiresAt is NOT expired (that "no expiry" risk is a separate diagnostic); an
+// unparseable timestamp is treated as expired (consistent with the matcher's
+// fail-closed expiry handling). Reuses authRuleNotExpired so the parse logic is
+// shared with the resolver.
+func authExemptExpired(spec *AuthRuleSpec) bool {
+	return spec != nil && spec.ExpiresAt != "" && !authRuleNotExpired(spec)
 }
 
 // broadSubjectWarnings flags overly broad source CIDRs (least-privilege nudges).

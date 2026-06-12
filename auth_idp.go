@@ -123,7 +123,9 @@ func (r *IdPRegistry) Load(path string) error {
 	if path == "" {
 		return nil
 	}
+	r.mu.Lock()
 	r.path = path
+	r.mu.Unlock()
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil // first run — empty registry
@@ -151,18 +153,28 @@ func (r *IdPRegistry) Load(path string) error {
 }
 
 // save persists current profiles to the JSON file (must be called under lock).
+// The write is atomic (temp file + fsync + rename) so a crash mid-write can
+// never truncate or corrupt the on-disk registry — Load fails startup on
+// corrupt JSON, so a torn write would brick the proxy at next boot.
 func (r *IdPRegistry) save() error {
 	if r.path == "" {
+		logger.Printf("IdP: WARNING — profile change is in-memory only and will be LOST on restart; set -idp-profiles-file (or proxy.idp_profiles_file) to persist")
 		return nil
 	}
 	data, err := json.MarshalIndent(r.profiles, "", "  ")
 	if err != nil {
 		return err
 	}
-	// Atomic temp+rename: IdP profiles hold client secrets and SAML certs —
-	// a crash mid-write must not leave a truncated, unparseable file that
-	// silently drops all external auth on the next restart.
 	return atomicWriteFile(r.path, data, 0o600)
+}
+
+// Persisted reports whether profile changes are written to disk. False means
+// the registry is in-memory only (no -idp-profiles-file / idp_profiles_file
+// configured) and all profiles are lost on restart.
+func (r *IdPRegistry) Persisted() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.path != ""
 }
 
 // compile initialises a live IdentityProvider from a profile.

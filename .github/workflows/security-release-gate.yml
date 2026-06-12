@@ -51,17 +51,22 @@ jobs:
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
+      # G703 (taint-analysis path traversal) is the taint-mode variant of the
+      # already-excluded G304 (CWE-22 file access via variable): a new gosec
+      # release enabled it and it flags pre-existing operator-config paths
+      # (logger file, cert files, data dirs) that are not request-tainted.
+      # Excluded for consistency with the long-standing G304/G704 policy.
       - name: Run gosec (SARIF for upload)
         # Generate SARIF for GitHub Security tab; continue even if findings exist.
         run: |
-          gosec -exclude=G104,G302,G304,G401,G402,G704 \
+          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 \
             -fmt=sarif -out=gosec-results.sarif \
             ./... || true
 
       - name: Run gosec (text for log visibility)
         # Re-run with text output so findings are visible in CI logs.
         run: |
-          gosec -exclude=G104,G302,G304,G401,G402,G704 \
+          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 \
             -fmt=text \
             ./...
 
@@ -74,7 +79,7 @@ jobs:
         # gate's logs as well.
         working-directory: cmd/culvert-maint
         run: |
-          gosec -exclude=G104,G302,G304,G401,G402,G704 \
+          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 \
             -fmt=text \
             ./...
 

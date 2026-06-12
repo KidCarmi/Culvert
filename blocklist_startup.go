@@ -11,15 +11,14 @@ package main
 //   - logger.Fatalf on a non-IsNotExist load error (documented hard-
 //     fatal site; ARCH_DISCOVERY Risk #5, line 181)
 //   - Log strings unchanged so operators see the same startup banner.
-//   - blFeedSyncer is ALWAYS assigned (both branches) — UI handlers
-//     at admin_settings.go:161 and ui_policy.go:245 rely on it being
-//     non-nil after init.
-//   - .Start(ctx) is only invoked when cfg.FeedURL != "". The empty-
-//     URL branch constructs the syncer with blFeedDefaultInterval
-//     (NOT cfg.FeedInterval) to match the pre-extraction behaviour:
-//     a user-set blocklist_feed_interval is dormant until a feed URL
-//     is configured, at which point the admin API's SetFeed() takes
-//     over interval management.
+//   - blFeedSyncer is ALWAYS assigned — UI handlers and
+//     SaveAdminSettings rely on it being non-nil after init.
+//   - .Start(ctx) is ALWAYS invoked: the scheduler must run even with
+//     zero feeds at startup, because feeds added via the admin API
+//     (or restored later by LoadAdminSettings) are picked up on the
+//     next scheduler tick. Before the multi-feed rework the loop only
+//     started when cfg.FeedURL was set, so GUI-configured feeds never
+//     auto-synced.
 
 import (
 	"context"
@@ -27,22 +26,19 @@ import (
 )
 
 // loadBlocklist applies cfg to the package-global bl store and the
-// blFeedSyncer pointer. ctx parents the auto-sync goroutine when
-// cfg.FeedURL is non-empty; production passes appLifecycleCtx so the
-// existing early-phase `app-lifecycle-cancel` shutdown hook stops it
-// at SIGTERM. Tests pass a per-test cancellable ctx.
+// blFeedSyncer pointer. ctx parents the scheduler goroutine;
+// production passes appLifecycleCtx so the existing early-phase
+// `app-lifecycle-cancel` shutdown hook stops it at SIGTERM. Tests
+// pass a per-test cancellable ctx.
 func loadBlocklist(cfg blocklistStartupConfig, ctx context.Context) {
 	tryLoadBlocklistFile(cfg.Path)
 
+	blFeedSyncer = newBlocklistSyncer(bl)
 	if cfg.FeedURL != "" {
-		blFeedSyncer = newBlocklistSyncer(bl, cfg.FeedURL, cfg.FeedInterval)
-		blFeedSyncer.Start(ctx)
+		blFeedSyncer.SetFeed(cfg.FeedURL, cfg.FeedInterval)
 		logger.Printf("BlocklistFeed: syncing from %s every %s", cfg.FeedURL, cfg.FeedInterval)
-	} else {
-		// Empty-URL branch intentionally pins to blFeedDefaultInterval
-		// rather than cfg.FeedInterval — see file-level invariants.
-		blFeedSyncer = newBlocklistSyncer(bl, "", blFeedDefaultInterval)
 	}
+	blFeedSyncer.Start(ctx)
 }
 
 // tryLoadBlocklistFile applies the pre-extraction file-load semantics

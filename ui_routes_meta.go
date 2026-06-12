@@ -213,6 +213,7 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 		}},
 	{Path: "/api/blocklist/feed/sync", Handler: "apiBlocklistFeedSync", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true}}},

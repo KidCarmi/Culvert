@@ -375,6 +375,10 @@ culvert_bytes_sent_total %d
 # HELP culvert_bytes_recv_total Total bytes received from upstream (response bodies)
 # TYPE culvert_bytes_recv_total counter
 culvert_bytes_recv_total %d
+
+# HELP culvert_auth_exempt_decisions_total Total Stage-1 authentication-policy Exempt decisions
+# TYPE culvert_auth_exempt_decisions_total counter
+culvert_auth_exempt_decisions_total %d
 `,
 		total, allowed, blocked, authFail,
 		int64(bl.Count()),
@@ -391,6 +395,7 @@ culvert_bytes_recv_total %d
 		int64(cacheSize),
 		bytesSent,
 		bytesRecv,
+		atomic.LoadInt64(&statAuthExempt),
 	)
 
 	// Append per-rule hit counters, latency histogram, and CDR metrics.

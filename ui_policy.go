@@ -206,74 +206,112 @@ func apiBlocklistMode(w http.ResponseWriter, r *http.Request) {
 
 // ── Blocklist Feed ─────────────────────────────────────────────────────────
 
-// GET  /api/blocklist/feed  → current feed config + status
-// POST /api/blocklist/feed  → update feed URL and interval
+// GET    /api/blocklist/feed         → list all configured feeds + status
+// POST   /api/blocklist/feed         → add or update a feed (URL + interval)
+// DELETE /api/blocklist/feed?url=X   → remove a feed
 func apiBlocklistFeed(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		url, lastSync, count, interval := blFeedSyncer.Stats()
-		lastSyncStr := ""
-		if !lastSync.IsZero() {
-			lastSyncStr = lastSync.UTC().Format(time.RFC3339)
-		}
-		jsonOK(w, map[string]any{
-			"url":            url,
-			"interval":       interval.String(),
-			"last_sync":      lastSyncStr,
-			"imported_count": count,
-		})
+		blocklistFeedList(w)
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
-		var body struct {
-			URL      string `json:"url"`
-			Interval string `json:"interval"` // e.g. "24h"
-		}
-		if err := decodeJSON(r, &body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
+		blocklistFeedUpsert(w, r)
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
 			return
 		}
-		if body.URL != "" && !strings.HasPrefix(body.URL, "http://") && !strings.HasPrefix(body.URL, "https://") {
-			http.Error(w, "feed URL must use http:// or https://", http.StatusBadRequest)
-			return
-		}
-		// SSRF guard: reject URLs pointing at private/loopback addresses.
-		if body.URL != "" {
-			u, err := url.Parse(body.URL)
-			if err != nil {
-				http.Error(w, "invalid feed URL", http.StatusBadRequest)
-				return
-			}
-			host := u.Hostname()
-			if err := isPrivateHost(host); err != nil {
-				http.Error(w, "feed URL must not point to private/loopback addresses", http.StatusBadRequest)
-				return
-			}
-		}
-		var interval time.Duration
-		if body.Interval == "" || body.Interval == "off" {
-			interval = 0 // disabled
-		} else if d, err := time.ParseDuration(body.Interval); err == nil && d > 0 {
-			interval = d
-		} else {
-			interval = blFeedDefaultInterval
-		}
-		blFeedSyncer.SetFeed(body.URL, interval)
-		auditEvent(r, "blocklist.feed.set", body.URL, "")
-		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "url": body.URL, "interval": interval.String()})
+		blocklistFeedDelete(w, r)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-// POST /api/blocklist/feed/sync → trigger immediate sync (synchronous with result)
+func blocklistFeedList(w http.ResponseWriter) {
+	feeds := blFeedSyncer.Feeds()
+	out := make([]map[string]any, 0, len(feeds))
+	for i := range feeds {
+		lastSyncStr := ""
+		if !feeds[i].LastSync.IsZero() {
+			lastSyncStr = feeds[i].LastSync.UTC().Format(time.RFC3339)
+		}
+		out = append(out, map[string]any{
+			"url":            feeds[i].URL,
+			"interval":       feeds[i].Interval.String(),
+			"last_sync":      lastSyncStr,
+			"last_error":     feeds[i].LastError,
+			"imported_count": feeds[i].ImportedCount,
+		})
+	}
+	jsonOK(w, map[string]any{"feeds": out})
+}
+
+func blocklistFeedUpsert(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL      string `json:"url"`
+		Interval string `json:"interval"` // e.g. "24h", "off"
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.URL == "" {
+		http.Error(w, "feed URL is required", http.StatusBadRequest)
+		return
+	}
+	if !strings.HasPrefix(body.URL, "http://") && !strings.HasPrefix(body.URL, "https://") {
+		http.Error(w, "feed URL must use http:// or https://", http.StatusBadRequest)
+		return
+	}
+	// SSRF guard: reject URLs pointing at private/loopback addresses.
+	u, err := url.Parse(body.URL)
+	if err != nil {
+		http.Error(w, "invalid feed URL", http.StatusBadRequest)
+		return
+	}
+	host := u.Hostname()
+	if err := isPrivateHost(host); err != nil {
+		http.Error(w, "feed URL must not point to private/loopback addresses", http.StatusBadRequest)
+		return
+	}
+	var interval time.Duration
+	if body.Interval == "" || body.Interval == "off" {
+		interval = 0 // disabled
+	} else if d, perr := time.ParseDuration(body.Interval); perr == nil && d > 0 {
+		interval = d
+	} else {
+		interval = blFeedDefaultInterval
+	}
+	blFeedSyncer.SetFeed(body.URL, interval)
+	auditEvent(r, "blocklist.feed.set", body.URL, "")
+	adminSettingsSave()
+	jsonOK(w, map[string]any{"ok": true, "url": body.URL, "interval": interval.String()})
+}
+
+func blocklistFeedDelete(w http.ResponseWriter, r *http.Request) {
+	feedURL := r.URL.Query().Get("url")
+	if feedURL == "" {
+		http.Error(w, "url query parameter is required", http.StatusBadRequest)
+		return
+	}
+	if !blFeedSyncer.RemoveFeed(feedURL) {
+		http.Error(w, "feed not found", http.StatusNotFound)
+		return
+	}
+	auditEvent(r, "blocklist.feed.delete", feedURL, "")
+	adminSettingsSave()
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// POST /api/blocklist/feed/sync        → sync all feeds now (synchronous)
+// POST /api/blocklist/feed/sync?url=X  → sync one feed now
 func apiBlocklistFeedSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -282,8 +320,15 @@ func apiBlocklistFeedSync(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
 		return
 	}
-	count, err := blFeedSyncer.Sync()
-	auditEvent(r, "blocklist.feed.sync", "", "")
+	feedURL := r.URL.Query().Get("url")
+	var count int
+	var err error
+	if feedURL != "" {
+		count, err = blFeedSyncer.SyncFeed(feedURL)
+	} else {
+		count, err = blFeedSyncer.SyncAll()
+	}
+	auditEvent(r, "blocklist.feed.sync", feedURL, "")
 	if err != nil {
 		http.Error(w, "sync failed: "+err.Error(), http.StatusBadGateway)
 		return
@@ -1324,8 +1369,8 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 
 	// Blocklist mode + feed sync.
 	mux.HandleFunc("/api/blocklist/mode", apiBlocklistMode)             // GET/POST blocklist mode
-	mux.HandleFunc("/api/blocklist/feed", apiBlocklistFeed)             // GET/POST feed URL+interval
-	mux.HandleFunc("/api/blocklist/feed/sync", apiBlocklistFeedSync)    // POST force-sync
+	mux.HandleFunc("/api/blocklist/feed", apiBlocklistFeed)             // GET list / POST upsert / DELETE remove feed
+	mux.HandleFunc("/api/blocklist/feed/sync", apiBlocklistFeedSync)    // POST force-sync (all or ?url=)
 	mux.HandleFunc("/api/blocklist/exceptions", apiBlocklistExceptions) // GET/POST/DELETE
 
 	// URL Categories (dynamic host-list management).

@@ -34,6 +34,7 @@ var (
 	statFileBlocked int64 // requests blocked by the file-extension profile
 	statBytesSent   int64 // total bytes sent upstream (request bodies)
 	statBytesRecv   int64 // total bytes received from upstream (response bodies)
+	statAuthExempt  int64 // Stage-1 Exempt decisions (Phase 1 Slice 5: defined, NOT incremented from runtime yet)
 )
 
 // ─── Time-series: requests per minute, last 60 minutes ───────────────────────
@@ -120,16 +121,45 @@ type LogEntry struct {
 	BytesRecv   int64  `json:"bytesRecv,omitempty"` // bytes received from upstream (response body)
 	SSLAction   string `json:"sslAction,omitempty"` // "inspect", "bypass", or empty (non-CONNECT)
 
-	// Normalized authentication-policy SIEM fields (Phase 0 seam, §1.8).
-	// Declared as the durable SIEM contract but NOT populated in Phase 0 —
-	// all are omitempty so wire output stays byte-identical until Phase 1
-	// wires authSource into recordRequest.
-	SchemaVersion      int      `json:"schema_version,omitempty"`        // event schema version
-	AuthSource         string   `json:"auth_source,omitempty"`           // categorical: idp|local|oidc:x|saml:x|exempt|unauth
-	AuthPolicyRuleID   string   `json:"auth_policy_rule_id,omitempty"`   // ULID of matched Stage-1 rule
-	AuthPolicyRuleName string   `json:"auth_policy_rule_name,omitempty"` // display name of matched Stage-1 rule
-	AccessRuleID       string   `json:"access_rule_id,omitempty"`        // ULID of matched Stage-2 rule
-	SubjectMatchTypes  []string `json:"subject_match_types,omitempty"`   // which selector dimensions matched
+	// Normalized authentication-policy SIEM fields (Phase 0 seam, §1.8; the
+	// auth_* observability block is finalized in Phase 1 Slice 5). Declared as the
+	// durable SIEM contract but populated only when an auth decision supplies them
+	// — all are omitempty so wire output stays byte-identical for requests with no
+	// auth decision. NO identity is carried in the auth_* block: an Exempt decision
+	// is logged by outcome + rule id/name (+ low-cardinality subject predicate
+	// types and the matched rule's subject schema version) only.
+	SchemaVersion         int      `json:"schema_version,omitempty"`           // event schema version
+	AuthSource            string   `json:"auth_source,omitempty"`              // categorical: idp|local|oidc:x|saml:x|exempt|unauth
+	AuthOutcome           string   `json:"auth_outcome,omitempty"`             // Stage-1 outcome (e.g. "Exempt"); "" = none
+	AuthPolicyRuleID      string   `json:"auth_policy_rule_id,omitempty"`      // ULID of matched Stage-1 rule
+	AuthPolicyRuleName    string   `json:"auth_policy_rule_name,omitempty"`    // display name of matched Stage-1 rule
+	AccessRuleID          string   `json:"access_rule_id,omitempty"`           // ULID of matched Stage-2 rule
+	AuthSubjectMatchTypes []string `json:"auth_subject_match_types,omitempty"` // low-cardinality predicate type names (e.g. ["cidr"])
+	AuthSchemaVersion     int      `json:"auth_schema_version,omitempty"`      // matched rule's SubjectMatch schema version
+}
+
+// AuthLogFields carries the low-cardinality Stage-1 authentication-policy
+// observability fields attached to a request log entry. The zero value adds
+// nothing to the wire output (every target field is omitempty). It deliberately
+// carries NO identity — see the LogEntry auth_* contract above. Populate it only
+// from an actual auth decision (authLogFieldsFor); existing recordRequest call
+// sites pass the zero value implicitly and stay byte-identical.
+type AuthLogFields struct {
+	Outcome           AuthOutcome
+	PolicyRuleID      string
+	PolicyRuleName    string
+	SubjectMatchTypes []string
+	SchemaVersion     int
+}
+
+// applyTo copies the auth observability fields onto a log entry. It never touches
+// Identity (Exempt is logged by outcome + rule id/name only).
+func (a AuthLogFields) applyTo(e *LogEntry) {
+	e.AuthOutcome = string(a.Outcome)
+	e.AuthPolicyRuleID = a.PolicyRuleID
+	e.AuthPolicyRuleName = a.PolicyRuleName
+	e.AuthSubjectMatchTypes = a.SubjectMatchTypes
+	e.AuthSchemaVersion = a.SchemaVersion
 }
 
 func levelForStatus(status string) string {
@@ -1725,6 +1755,16 @@ func recordRequest(ip, method, host, status, ruleMatched, actionTaken, identity,
 }
 
 func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction string) {
+	recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, AuthLogFields{})
+}
+
+// recordRequestBytesAuth is the core recorder; it attaches the Stage-1 auth
+// observability block (AuthLogFields) to the log entry. recordRequest /
+// recordRequestBytes delegate here with a zero AuthLogFields, so their wire
+// output is unchanged. NOT called from proxy.go in Phase 1 Slice 5 (the auth gate
+// is not wired); it exists so a later slice can log auth decisions without
+// touching every existing call site.
+func recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction string, auth AuthLogFields) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
 	tsRecordResult(isAllowed)
@@ -1757,6 +1797,7 @@ func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, iden
 		BytesRecv:   bytesRecv,
 		SSLAction:   sslAction,
 	}
+	auth.applyTo(&entry)
 	logAdd(entry)
 	// Forward request log entry to syslog/SIEM if configured (Finding 17.2).
 	if globalSyslog != nil {
