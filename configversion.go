@@ -346,13 +346,11 @@ func validateConfigBackup(b *configBackup) []string {
 // rollback requests cannot interleave store mutations and leave partial state.
 var configRollbackMu sync.Mutex
 
-// applyConfigBackup restores all config stores from a backup snapshot.
-func applyConfigBackup(b *configBackup) {
-	configRollbackMu.Lock()
-	defer configRollbackMu.Unlock()
-	// Blocklist: remove all, then add snapshot entries. Feed attribution
-	// is carried across the rebuild — Remove/Add would otherwise strand
-	// every feed entry as unattributed (Codex P1, PR #447).
+// restoreBlocklistFromBackup rebuilds the blocklist from a snapshot.
+// Feed attribution is carried across the rebuild — the Remove/Add loops
+// would otherwise strand every feed entry as unattributed, making it
+// prey for the unattributed-cleanup operation (Codex P1, PR #447).
+func restoreBlocklistFromBackup(b *configBackup) {
 	feedSrcSnap := bl.SnapshotFeedSources()
 	for _, h := range bl.List() {
 		bl.Remove(h)
@@ -365,6 +363,13 @@ func applyConfigBackup(b *configBackup) {
 	if b.BlocklistMode == "allow" || b.BlocklistMode == "block" {
 		bl.SetMode(b.BlocklistMode)
 	}
+}
+
+// applyConfigBackup restores all config stores from a backup snapshot.
+func applyConfigBackup(b *configBackup) {
+	configRollbackMu.Lock()
+	defer configRollbackMu.Unlock()
+	restoreBlocklistFromBackup(b)
 
 	// URLCategories MUST be applied before CategoryGroups (which may
 	// reference categories by name) and before PolicyRules (which may
