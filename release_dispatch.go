@@ -287,7 +287,7 @@ func (d *Dispatcher) Plan(target DispatchTarget, running []string, opts Dispatch
 	// Lookup → release identity). already-current means "running the target
 	// RELEASE", regardless of which repo the node pulled from — so an air-gap
 	// node that happens to report the catalog repo is still recognized.
-	current := d.detectCurrent(cat, running)
+	current, alreadyCurrent := d.detectCurrent(cat, running, rel.ReleaseID)
 	plan := &DispatchPlan{
 		ReleaseID:      rel.ReleaseID,
 		VersionID:      rel.VersionID,
@@ -295,7 +295,7 @@ func (d *Dispatcher) Plan(target DispatchTarget, running []string, opts Dispatch
 		PinnedRef:      rel.PinnedRef,
 		ImageRef:       imageRef,
 		Current:        current,
-		AlreadyCurrent: current.Known && current.ReleaseID == rel.ReleaseID,
+		AlreadyCurrent: alreadyCurrent,
 	}
 	if plan.AlreadyCurrent {
 		plan.Outcome = OutcomeAlreadyCurrent
@@ -334,18 +334,33 @@ func (d *Dispatcher) resolveTarget(cat *Catalog, t DispatchTarget) (ResolvedRele
 	}
 }
 
-// detectCurrent reverse-rewrites each running repo_digest and looks it up in the
-// catalog, returning the first match. It iterates ALL entries (the array may
-// hold list + per-arch digests; the deployment path records the list digest —
-// B1; the agent itself only reads RepoDigests[0]). Absent/unmatched/tag-shaped
-// ⇒ Unknown (a normal state, design §3.1).
-func (d *Dispatcher) detectCurrent(cat *Catalog, running []string) CurrentView {
+// detectCurrent scans ALL running repo_digests (reverse-rewritten, then exact
+// catalog Lookup) and answers two questions at once:
+//   - alreadyCurrent: does ANY entry map to the TARGET release? A target match
+//     anywhere in the array wins — a different known release appearing earlier
+//     must NOT mask a later target entry (the agent itself only reads
+//     RepoDigests[0], so the CP must scan the whole array).
+//   - current: the release the node is on, for display. If the target is found
+//     it is the target; otherwise the FIRST known release; otherwise Unknown.
+//
+// The array may hold the list + per-arch digests of one image (B1). Absent /
+// unmatched / tag-shaped entries are skipped; an all-unmatched array ⇒ Unknown
+// (a normal state, design §3.1).
+func (d *Dispatcher) detectCurrent(cat *Catalog, running []string, targetReleaseID string) (current CurrentView, alreadyCurrent bool) {
+	var firstKnown CurrentView
 	for _, ref := range running {
-		if v := cat.Current(d.cfg.reverse(ref)); v.Known {
-			return v
+		v := cat.Current(d.cfg.reverse(ref))
+		if !v.Known {
+			continue
+		}
+		if v.ReleaseID == targetReleaseID {
+			return v, true // target found ⇒ already-current, regardless of position
+		}
+		if !firstKnown.Known {
+			firstKnown = v // remember the first known (different) release for display
 		}
 	}
-	return CurrentView{Known: false}
+	return firstKnown, false
 }
 
 func buildApplyRequest(imageRef string, opts DispatchOptions) (req UpgradeApplyRequest, backupSkipped bool) {

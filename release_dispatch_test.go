@@ -295,6 +295,26 @@ func TestDispatch_CurrentKnownDifferentReleaseStillPlans(t *testing.T) {
 	}
 }
 
+// The target digest later in repo_digests must NOT be masked by a different
+// known release appearing earlier — scan the WHOLE array for the target.
+func TestDispatch_TargetAfterDifferentKnownReleaseIsAlreadyCurrent(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	d, _ := newDispatcher(t, cat, DispatchConfig{ProxyRepo: dispatchRepo})
+
+	// repo_digests = [rel_b's digest (a DIFFERENT known release), rel_a's digest (the target)].
+	running := []string{dispatchRepo + "@" + digB, dispatchRepo + "@" + digA}
+	plan := d.Plan(DispatchTarget{ReleaseID: "rel_a"}, running, DefaultDispatchOptions())
+	if !plan.AlreadyCurrent || plan.Outcome != OutcomeAlreadyCurrent {
+		t.Fatalf("a later target entry must win: outcome=%s already=%v", plan.Outcome, plan.AlreadyCurrent)
+	}
+	if !plan.Current.Known || plan.Current.ReleaseID != "rel_a" {
+		t.Fatalf("Current must reflect the matched target: %+v", plan.Current)
+	}
+	if plan.Apply.ImageRef != "" {
+		t.Fatal("already-current must not build an apply request")
+	}
+}
+
 // Air-gap edge: a node that reports the CATALOG repo (not the mirror) while
 // running the target release is still recognized as already-current — the
 // unified logic derives this from Current (release identity), not a repo-bound
