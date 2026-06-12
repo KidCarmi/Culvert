@@ -137,6 +137,20 @@ func (r *IdPRegistry) Load(path string) error {
 	if err := json.Unmarshal(data, &profiles); err != nil {
 		return fmt.Errorf("idp registry: parse %s: %w", path, err)
 	}
+	// Drop profiles whose ID/name collides with the reserved authSource
+	// namespace, fail-closed (hand-edited or pre-guard files only — Upsert and
+	// ReplaceAll reject them on write). Keeping one would let an IdP authenticate
+	// under a reserved authSource and make Stage-2 rules ambiguous. Mirrors the
+	// policy store's drop-invalid-on-load behavior; the file is not rewritten here.
+	kept := profiles[:0]
+	for _, p := range profiles {
+		if err := validateReservedIdPNaming(p); err != nil {
+			logWarnf("IdP: dropping profile on load — %v", err)
+			continue
+		}
+		kept = append(kept, p)
+	}
+	profiles = kept
 	r.mu.Lock()
 	r.profiles = profiles
 	r.mu.Unlock()
@@ -189,15 +203,20 @@ func (r *IdPRegistry) compile(p *IdPProfile) error {
 }
 
 // Upsert adds or replaces a profile and saves to disk.
-func (r *IdPRegistry) Upsert(p *IdPProfile) error {
-	if p.ID == "" {
-		b := make([]byte, 6)
-		rand.Read(b) //nolint:errcheck
-		p.ID = hex.EncodeToString(b)
-	}
-	// Validate.
+// validateUpsertProfile validates an admin-supplied profile on the Upsert path.
+// Kept separate from validateIdPProfile (the ReplaceAll/Load path) to preserve
+// Upsert's exact, slightly-looser semantics (it does not require an OIDC config
+// block to be present), while sharing the reserved-name guard so no IdP entry
+// point can bypass it.
+func validateUpsertProfile(p *IdPProfile) error {
 	if p.Name == "" {
 		return fmt.Errorf("idp: name is required")
+	}
+	// Reserved authSource namespace (shared with validateIdPProfile / Load): the
+	// admin create/update path runs through Upsert, not validateIdPProfile, so
+	// the reserved-name guard must be enforced here too.
+	if err := validateReservedIdPNaming(p); err != nil {
+		return err
 	}
 	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML {
 		return fmt.Errorf("idp: type must be 'oidc' or 'saml'")
@@ -212,6 +231,18 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		if err := validateSAMLProfileConfig(p.SAML); err != nil {
 			return fmt.Errorf("idp saml: %w", err)
 		}
+	}
+	return nil
+}
+
+func (r *IdPRegistry) Upsert(p *IdPProfile) error {
+	if p.ID == "" {
+		b := make([]byte, 6)
+		rand.Read(b) //nolint:errcheck // crypto/rand.Read never returns an error on supported platforms
+		p.ID = hex.EncodeToString(b)
+	}
+	if err := validateUpsertProfile(p); err != nil {
+		return err
 	}
 
 	r.mu.Lock()
@@ -344,6 +375,27 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	return r.save()
 }
 
+// validateReservedIdPNaming rejects IdP profile IDs and names that collide with
+// the reserved authSource namespace {exempt, unauth, local, system}. Profile IDs
+// feed the authSource value seen by Stage-2 policy ("oidc:<ID>"/"saml:<ID>" with
+// the prefix stripped during matching, and the bare ID via session identities),
+// so a colliding ID/name would make authSource-scoped access rules ambiguous.
+// Generated hex IDs never collide; supplied IDs (admin Upsert, cluster ReplaceAll,
+// startup Load, import) are the vectors. Shared by every IdP entry point so the
+// guard cannot be bypassed (pre-Phase-2 correction).
+func validateReservedIdPNaming(p *IdPProfile) error {
+	if p == nil {
+		return nil
+	}
+	if isReservedAuthSourceName(p.ID) {
+		return fmt.Errorf("idp: id %q collides with the reserved authSource namespace (exempt, unauth, local, system)", p.ID)
+	}
+	if isReservedAuthSourceName(p.Name) {
+		return fmt.Errorf("idp: name %q collides with the reserved authSource namespace (exempt, unauth, local, system)", p.Name)
+	}
+	return nil
+}
+
 func validateIdPProfile(p *IdPProfile) error {
 	if p == nil {
 		return fmt.Errorf("idp: profile is required")
@@ -354,17 +406,8 @@ func validateIdPProfile(p *IdPProfile) error {
 	if p.Name == "" {
 		return fmt.Errorf("idp: name is required")
 	}
-	// Reserved authSource namespace (pre-Phase-2 correction): profile IDs feed
-	// the authSource value seen by Stage-2 policy ("oidc:<ID>"/"saml:<ID>" with
-	// the prefix stripped during matching, and the bare ID via session
-	// identities), so neither the ID nor the human-readable name may collide
-	// with the reserved words. IDs are normally generated hex, but the update,
-	// cluster-sync, and import paths accept supplied IDs — validate all of them.
-	if isReservedAuthSourceName(p.ID) {
-		return fmt.Errorf("idp: id %q collides with the reserved authSource namespace (exempt, unauth, local, system)", p.ID)
-	}
-	if isReservedAuthSourceName(p.Name) {
-		return fmt.Errorf("idp: name %q collides with the reserved authSource namespace (exempt, unauth, local, system)", p.Name)
+	if err := validateReservedIdPNaming(p); err != nil {
+		return err
 	}
 	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML {
 		return fmt.Errorf("idp: type must be 'oidc' or 'saml'")

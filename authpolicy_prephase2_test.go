@@ -55,6 +55,56 @@ func TestPrePhase2_ReservedAuthSourceNames_IdPProfileRejected(t *testing.T) {
 	}
 }
 
+// Every IdP entry point must enforce the reserved-name guard, not just
+// validateIdPProfile (PR #448 review): the admin create/update path runs through
+// IdPRegistry.Upsert, and startup runs through IdPRegistry.Load.
+func TestPrePhase2_ReservedAuthSourceNames_UpsertRejected(t *testing.T) {
+	reg := &IdPRegistry{}
+	for _, reserved := range []string{"exempt", "Local", "UNAUTH", "system"} {
+		p := validTestIdPProfile()
+		p.ID = "" // force generation; the collision must come from Name
+		p.Name = reserved
+		if err := reg.Upsert(p); err == nil || !strings.Contains(err.Error(), "reserved authSource namespace") {
+			t.Errorf("Upsert name %q must be rejected as reserved, got: %v", reserved, err)
+		}
+		// Supplied reserved ID must also be rejected.
+		p = validTestIdPProfile()
+		p.ID = reserved
+		if err := reg.Upsert(p); err == nil || !strings.Contains(err.Error(), "reserved authSource namespace") {
+			t.Errorf("Upsert id %q must be rejected as reserved, got: %v", reserved, err)
+		}
+	}
+	if got := len(reg.All()); got != 0 {
+		t.Errorf("no reserved-name profile may be stored, got %d", got)
+	}
+}
+
+func TestPrePhase2_ReservedAuthSourceNames_LoadDropsFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "idp.json")
+	good := validTestIdPProfile()
+	good.ID = "abc123def456"
+	good.Name = "Corp Okta"
+	bad := validTestIdPProfile()
+	bad.ID = "exempt" // reserved
+	bad.Name = "Sneaky"
+	data, err := json.Marshal([]*IdPProfile{good, bad})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	reg := &IdPRegistry{}
+	if err := reg.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := reg.All()
+	if len(got) != 1 || got[0].ID != "abc123def456" {
+		t.Fatalf("reserved-ID profile must be dropped fail-closed on load, got: %+v", got)
+	}
+}
+
 func TestPrePhase2_IsReservedAuthSourceName(t *testing.T) {
 	for _, s := range []string{"exempt", "unauth", "local", "system", "EXEMPT", "  system\t"} {
 		if !isReservedAuthSourceName(s) {
