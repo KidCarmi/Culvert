@@ -277,11 +277,12 @@ type simResp struct {
 		Name string `json:"name"`
 	} `json:"rule"`
 	Auth struct {
-		Outcome          string `json:"outcome"`
-		KillSwitch       bool   `json:"killSwitch"`
-		Stage2AuthSource string `json:"stage2AuthSource"`
-		Note             string `json:"note"`
-		Rule             *struct {
+		Outcome              string `json:"outcome"`
+		KillSwitch           bool   `json:"killSwitch"`
+		CredentialsPresented bool   `json:"credentialsPresented"`
+		Stage2AuthSource     string `json:"stage2AuthSource"`
+		Note                 string `json:"note"`
+		Rule                 *struct {
 			Name string `json:"name"`
 		} `json:"rule"`
 	} `json:"auth"`
@@ -361,6 +362,75 @@ func TestSlice8_Simulator_KillSwitchVisible(t *testing.T) {
 	resp := runSim(t, map[string]any{"sourceIP": "10.0.5.7", "host": "updates.example.com"})
 	if resp.Auth.Outcome != "Default" || !resp.Auth.KillSwitch {
 		t.Errorf("kill switch must force Default and be visible: %+v", resp.Auth)
+	}
+}
+
+// Credentials win in the simulator exactly as at runtime: a simulated request
+// carrying an identity or an authenticated authSource is never exempt.
+func TestSlice8_Simulator_CredentialsPresentedNeverExempt(t *testing.T) {
+	withFreshPolicyStore(t)
+	policyStore.Add(validExemptRule()) // would match the no-credentials case
+	for name, body := range map[string]map[string]any{
+		"identity":   {"sourceIP": "10.0.5.7", "host": "updates.example.com", "identity": "alice"},
+		"authSource": {"sourceIP": "10.0.5.7", "host": "updates.example.com", "authSource": "okta"},
+	} {
+		resp := runSim(t, body)
+		if resp.Auth.Outcome != "Default" {
+			t.Errorf("%s: outcome = %q, want Default (credentials always win)", name, resp.Auth.Outcome)
+		}
+		if !resp.Auth.CredentialsPresented {
+			t.Errorf("%s: credentialsPresented must be true", name)
+		}
+		if resp.Auth.Stage2AuthSource == "exempt" {
+			t.Errorf("%s: stage2AuthSource must not be exempt for credentialed requests", name)
+		}
+	}
+}
+
+// Operator-level /api/policy/reorder and /api/policy/move must not reposition
+// Stage-1 auth rules; access-only reorders stay operator-level.
+func TestSlice8_OperatorReorderMoveCannotShiftAuthRules(t *testing.T) {
+	withFreshPolicyStore(t)
+	a := validExemptRule()
+	a.Priority = 1
+	policyStore.Add(a)
+	policyStore.Add(PolicyRule{Priority: 2, Name: "acc-1", Action: ActionAllow})
+	policyStore.Add(PolicyRule{Priority: 3, Name: "acc-2", Action: ActionAllow})
+
+	// Access-only reorder (auth rule keeps priority 1) → operator OK.
+	w := httptest.NewRecorder()
+	apiPolicyReorder(w, roleReq(RoleOperator, "POST", "/api/policy/reorder", map[string]any{"priorities": []int{1, 3, 2}}))
+	if w.Code != 200 {
+		t.Fatalf("operator access-only reorder = %d: %s", w.Code, w.Body.String())
+	}
+
+	// Reorder that moves the auth rule off priority 1 → operator 403, admin OK.
+	w = httptest.NewRecorder()
+	apiPolicyReorder(w, roleReq(RoleOperator, "POST", "/api/policy/reorder", map[string]any{"priorities": []int{2, 1, 3}}))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("operator reorder shifting auth rule = %d, want 403", w.Code)
+	}
+	w = httptest.NewRecorder()
+	apiPolicyReorder(w, roleReq(RoleAdmin, "POST", "/api/policy/reorder", map[string]any{"priorities": []int{2, 1, 3}}))
+	if w.Code != 200 {
+		t.Fatalf("admin reorder shifting auth rule = %d: %s", w.Code, w.Body.String())
+	}
+
+	// Reset, then /api/policy/move: operator moving the auth rule → 403; admin OK.
+	withFreshPolicyStore(t)
+	a2 := validExemptRule()
+	a2.Priority = 1
+	policyStore.Add(a2)
+	policyStore.Add(PolicyRule{Priority: 2, Name: "acc-3", Action: ActionAllow})
+	w = httptest.NewRecorder()
+	apiPolicyMove(w, roleReq(RoleOperator, "POST", "/api/policy/move", map[string]any{"priority": 1, "position": "last"}))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("operator move of auth rule = %d, want 403", w.Code)
+	}
+	w = httptest.NewRecorder()
+	apiPolicyMove(w, roleReq(RoleAdmin, "POST", "/api/policy/move", map[string]any{"priority": 1, "position": "last"}))
+	if w.Code != 200 {
+		t.Fatalf("admin move of auth rule = %d: %s", w.Code, w.Body.String())
 	}
 }
 

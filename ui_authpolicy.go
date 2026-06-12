@@ -277,28 +277,42 @@ func isAuthRulePriority(priority int) bool {
 // counters or hit-counts, and the exempt metric is NOT incremented. The kill
 // switch is consulted (the simulator reflects real runtime behavior).
 //
+// Credentials win, exactly as at runtime: resolveNoCredAuthOutcome only runs
+// for requests with no Proxy-Authorization, so a simulated request that carries
+// an identity or an authenticated authSource is NEVER exempt — the resolver is
+// skipped and the outcome is Default.
+//
 // stage2AuthSource mirrors Slice 7's runtime wiring: when the simulated request
-// presents no identity and no explicit authSource and an exempt rule matches,
-// Stage-2 evaluates with authSource="exempt".
+// presents no credentials and an exempt rule matches, Stage-2 evaluates with
+// authSource="exempt".
 func simulateAuthOutcome(rules []PolicyRule, sourceIP, host, protocol, method, identity, rawAuthSource string) (stage2AuthSource string, block map[string]any) {
 	if protocol == "" {
 		protocol = "http"
 	}
-	d := resolveAuthOutcomeFrom(rules, RequestContext{
-		ClientIP: sourceIP, Host: host, Protocol: protocol, Method: method,
-	})
+	hasCreds := identity != "" || (rawAuthSource != "" && rawAuthSource != "unauth")
+	d := AuthDecision{Outcome: OutcomeDefault}
+	note := authExemptNote
+	if hasCreds {
+		note = "Credentials presented — at runtime, valid credentials and sessions always win and exemptions are " +
+			"never evaluated; failed credentials get 407 and are never exempted. Stage-1 outcome is Default."
+	} else {
+		d = resolveAuthOutcomeFrom(rules, RequestContext{
+			ClientIP: sourceIP, Host: host, Protocol: protocol, Method: method,
+		})
+	}
 	stage2AuthSource = rawAuthSource
 	if stage2AuthSource == "" {
 		stage2AuthSource = "unauth"
 	}
-	if d.Outcome == OutcomeExempt && identity == "" && (rawAuthSource == "" || rawAuthSource == "unauth") {
+	if d.Outcome == OutcomeExempt {
 		stage2AuthSource = authSourceExempt
 	}
 	block = map[string]any{
-		"outcome":          string(d.Outcome),
-		"killSwitch":       authExemptKillSwitchEngaged(),
-		"stage2AuthSource": stage2AuthSource,
-		"note":             authExemptNote,
+		"outcome":              string(d.Outcome),
+		"killSwitch":           authExemptKillSwitchEngaged(),
+		"credentialsPresented": hasCreds,
+		"stage2AuthSource":     stage2AuthSource,
+		"note":                 note,
 	}
 	if d.Rule != nil {
 		block["rule"] = map[string]any{
@@ -308,4 +322,30 @@ func simulateAuthOutcome(rules []PolicyRule, sourceIP, host, protocol, method, i
 		}
 	}
 	return stage2AuthSource, block
+}
+
+// authPrioritiesWouldChange reports whether applying PolicyStore.Reorder with
+// orderedPriorities would assign any Stage-1 auth rule a different priority
+// (Reorder assigns newPriority = index+1). Used by the operator-level
+// /api/policy/reorder and /api/policy/move handlers: pure access-rule
+// reorders that leave every auth rule at its current priority stay operator-
+// level, while any repositioning of an auth rule is an admin-only mutation
+// (consistent with /api/authpolicy).
+func authPrioritiesWouldChange(orderedPriorities []int) bool {
+	rules := policyStore.List()
+	authPri := make(map[int]bool)
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) == ruleTypeAuth {
+			authPri[rules[i].Priority] = true
+		}
+	}
+	if len(authPri) == 0 {
+		return false
+	}
+	for idx, p := range orderedPriorities {
+		if authPri[p] && idx+1 != p {
+			return true
+		}
+	}
+	return false
 }

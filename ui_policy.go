@@ -931,32 +931,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
 		// F19: support bulk delete via JSON body with priorities array.
 		if priorityStr == "" {
-			var body struct {
-				Priorities []int `json:"priorities"`
-			}
-			if err := decodeJSON(r, &body); err == nil && len(body.Priorities) > 0 {
-				// Auth rules are admin-managed via /api/authpolicy only — reject
-				// the whole batch rather than silently skipping (explicit > silent).
-				for _, p := range body.Priorities {
-					if isAuthRulePriority(p) {
-						http.Error(w, fmt.Sprintf("priority %d is an auth rule — managed via /api/authpolicy (admin only)", p), http.StatusBadRequest)
-						return
-					}
-				}
-				deleted := 0
-				for _, p := range body.Priorities {
-					if policyStore.Delete(p) {
-						deleted++
-					}
-				}
-				policyStore.Save()
-				logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
-				auditEvent(r, "policy.bulk_delete", fmt.Sprintf("%d rule(s)", deleted), "")
-				saveConfigVersion(sessionAdmin(r), "policy.bulk_delete")
-				jsonOK(w, map[string]any{"deleted": deleted})
-				return
-			}
-			http.Error(w, "missing priority param or priorities body", http.StatusBadRequest)
+			apiPolicyBulkDelete(w, r)
 			return
 		}
 		var priority int
@@ -998,6 +973,48 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// validateMoveBody checks the /api/policy/move position/targetName combination.
+func validateMoveBody(position, targetName string) error {
+	if position != "first" && position != "last" && position != "before" && position != "after" {
+		return fmt.Errorf("position must be first, last, before, or after")
+	}
+	if (position == "before" || position == "after") && targetName == "" {
+		return fmt.Errorf("targetName is required for before/after")
+	}
+	return nil
+}
+
+// apiPolicyBulkDelete handles DELETE /api/policy with a {"priorities":[...]}
+// body (F19 bulk delete). RBAC was already checked by the caller.
+func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Priorities []int `json:"priorities"`
+	}
+	if err := decodeJSON(r, &body); err != nil || len(body.Priorities) == 0 {
+		http.Error(w, "missing priority param or priorities body", http.StatusBadRequest)
+		return
+	}
+	// Auth rules are admin-managed via /api/authpolicy only — reject the
+	// whole batch rather than silently skipping (explicit > silent).
+	for _, p := range body.Priorities {
+		if isAuthRulePriority(p) {
+			http.Error(w, fmt.Sprintf("priority %d is an auth rule — managed via /api/authpolicy (admin only)", p), http.StatusBadRequest)
+			return
+		}
+	}
+	deleted := 0
+	for _, p := range body.Priorities {
+		if policyStore.Delete(p) {
+			deleted++
+		}
+	}
+	policyStore.Save()
+	logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
+	auditEvent(r, "policy.bulk_delete", fmt.Sprintf("%d rule(s)", deleted), "")
+	saveConfigVersion(sessionAdmin(r), "policy.bulk_delete")
+	jsonOK(w, map[string]any{"deleted": deleted})
+}
+
 // POST /api/policy/reorder — drag-and-drop priority reordering
 // Body: {"priorities": [3,1,2]} — ordered list of old priorities (new order)
 func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
@@ -1013,6 +1030,13 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	// Repositioning a Stage-1 auth rule is an admin-only mutation (the
+	// /api/authpolicy contract). Pure access-rule reorders that leave every
+	// auth rule at its current priority remain operator-level. Documented
+	// dynamic role escalation — see the uiRoutes Note and C4 observability.
+	if authPrioritiesWouldChange(body.Priorities) && !requireRole(w, r, RoleAdmin) {
 		return
 	}
 	if !policyStore.Reorder(body.Priorities) {
@@ -1107,13 +1131,8 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if body.Position != "first" && body.Position != "last" &&
-		body.Position != "before" && body.Position != "after" {
-		http.Error(w, "position must be first, last, before, or after", http.StatusBadRequest)
-		return
-	}
-	if (body.Position == "before" || body.Position == "after") && body.TargetName == "" {
-		http.Error(w, "targetName is required for before/after", http.StatusBadRequest)
+	if err := validateMoveBody(body.Position, body.TargetName); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	rules := policyStore.List()
@@ -1124,6 +1143,13 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 	priorities, err := buildMovedPriorities(rules, body.Priority, body.Position, body.TargetName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Repositioning a Stage-1 auth rule is an admin-only mutation (the
+	// /api/authpolicy contract): this covers both moving an auth rule itself
+	// and moving an access rule across one (which shifts its priority).
+	// Documented dynamic role escalation — see the uiRoutes Note and C4.
+	if authPrioritiesWouldChange(priorities) && !requireRole(w, r, RoleAdmin) {
 		return
 	}
 	if !policyStore.Reorder(priorities) {
