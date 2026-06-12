@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -179,6 +180,49 @@ func Decide(ctx RequestContext) AccessDecision {
 		AuthSource: ctx.AuthSource,
 		Match:      policyStore.Evaluate(ctx.ClientIP, ctx.Identity, ctx.AuthSource, ctx.Host, ctx.Groups),
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Policy — Phase 1 Slice 7: runtime wiring (no-credentials path).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// authSourceExempt is the categorical auth source recorded for requests whose
+// authentication challenge was waived by a Stage-1 exempt rule. Distinct from
+// "unauth" (global UnauthMode / pre-gate default) so Stage-2 policy, request
+// logs, and SIEM can target explicit exemptions separately — e.g. allow
+// authSource=exempt only to specific destinations, or report exempt traffic on
+// its own. No identity is ever attached to an exempt request.
+const authSourceExempt = "exempt"
+
+// authRequestContext builds the Stage-1 RequestContext for an HTTP/CONNECT
+// request at the proxy auth gate. Host is port-stripped (CONNECT targets carry
+// ":443"); Protocol is "connect" for CONNECT and "http" otherwise. SOCKS5 has
+// its own handler and never reaches this gate (socks5 rules are rejected at
+// validation in Phase 1).
+func authRequestContext(r *http.Request, clientIP string) RequestContext {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	proto := "http"
+	if r.Method == http.MethodConnect {
+		proto = "connect"
+	}
+	return RequestContext{ClientIP: clientIP, Host: host, Protocol: proto, Method: r.Method}
+}
+
+// resolveNoCredAuthOutcome evaluates the Stage-1 exemption for a request at the
+// proxy auth gate, but ONLY when no Proxy-Authorization header is present at
+// all. parseProxyAuth returns ok=false both for an absent header AND for a
+// present-but-malformed one (unsupported scheme, bad base64, missing colon,
+// overlong username) — the latter is PRESENTED credentials and must take the
+// existing 407 path, never an exemption. This guard pins the contract that
+// credential failures of any kind are never exempted.
+func resolveNoCredAuthOutcome(r *http.Request, clientIP string) AuthDecision {
+	if r.Header.Get("Proxy-Authorization") != "" {
+		return AuthDecision{Outcome: OutcomeDefault}
+	}
+	return resolveAuthOutcome(authRequestContext(r, clientIP))
 }
 
 // ─── Kill switch (§1.11) — read-once accessor only ──────────────────────────

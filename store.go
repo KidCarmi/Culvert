@@ -1758,12 +1758,22 @@ func recordRequestBytes(ip, method, host, status, ruleMatched, actionTaken, iden
 	recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, AuthLogFields{})
 }
 
+// recordRequestAuth records a request log entry carrying the Stage-1 auth
+// observability block. A zero AuthLogFields adds nothing to the wire output, so
+// call sites converted from recordRequest stay byte-identical for requests with
+// no auth decision (every non-exempt request). All current call sites are the
+// pre-tunnel stage of handleRequest, where sslAction is not yet determined —
+// hence no sslAction parameter; use recordRequestBytesAuth directly if a future
+// inspect-stage call site needs one.
+func recordRequestAuth(ip, method, host, status, ruleMatched, actionTaken, identity string, auth AuthLogFields) {
+	recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, "", auth)
+}
+
 // recordRequestBytesAuth is the core recorder; it attaches the Stage-1 auth
 // observability block (AuthLogFields) to the log entry. recordRequest /
 // recordRequestBytes delegate here with a zero AuthLogFields, so their wire
-// output is unchanged. NOT called from proxy.go in Phase 1 Slice 5 (the auth gate
-// is not wired); it exists so a later slice can log auth decisions without
-// touching every existing call site.
+// output is unchanged. Reached from proxy.go (Slice 7) via recordRequestAuth at
+// the post-auth-gate call sites in handleRequest.
 func recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction string, auth AuthLogFields) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
