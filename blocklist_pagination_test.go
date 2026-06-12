@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -31,7 +32,7 @@ func TestAPIBlocklist_OffsetDoesNotPanicOrLeak(t *testing.T) {
 	offset := total - 2 // leaves only 2 entries after the reslice
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet,
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
 		"/api/blocklist?offset="+strconv.Itoa(offset), http.NoBody)
 	r.RemoteAddr = "198.51.100.9:5555"
 	apiBlocklist(w, adminCtx(r)) // must not panic

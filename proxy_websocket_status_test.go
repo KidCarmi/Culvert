@@ -26,14 +26,14 @@ func TestHandleWebSocket_Non101NotTunneled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck // test cleanup
 
 	go func() {
 		conn, aerr := ln.Accept()
 		if aerr != nil {
 			return
 		}
-		defer conn.Close()
+		defer conn.Close() //nolint:errcheck // test cleanup
 		// Drain the forwarded request up to the end of headers.
 		br := bufio.NewReader(conn)
 		for {
@@ -65,7 +65,7 @@ func TestHandleWebSocket_Non101NotTunneled(t *testing.T) {
 		ssrfDNSCache.mu.Unlock()
 	})
 
-	r := httptest.NewRequest(http.MethodGet, "http://"+hostport+"/ws", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+hostport+"/ws", http.NoBody)
 	r.Host = hostport
 	r.Header.Set("Upgrade", "websocket")
 	r.Header.Set("Connection", "Upgrade")

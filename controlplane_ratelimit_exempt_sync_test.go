@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"sort"
 	"testing"
 )
@@ -77,5 +79,40 @@ func TestValidateConfigSnapshot_RejectsRateLimitExemptOverflow(t *testing.T) {
 	snap := ConfigSnapshot{RateLimitExempt: make([]string, maxSnapRateLimitExempt+1)}
 	if err := validateConfigSnapshot(snap); err == nil {
 		t.Fatal("validateConfigSnapshot accepted an over-cap RateLimitExempt")
+	}
+}
+
+// The CP→DP snapshot travels as JSON. An empty exemption list (operator
+// removed the last exemption) must survive the round-trip as a non-nil []
+// so the DP CLEARS its stale whitelist — not get dropped by `omitempty` and
+// silently treated as nil→skip, leaving the IP exempt until restart.
+func TestConfigSnapshot_EmptyRateLimitExemptSurvivesJSONAndClearsDP(t *testing.T) {
+	snapshotRLExemptions(t)
+
+	// CP side: operator has removed every exemption, then we capture + marshal.
+	rl.ReplaceExemptions(nil)
+	data, err := json.Marshal(CurrentConfigSnapshot())
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if !bytes.Contains(data, []byte("rate_limit_exempt")) {
+		t.Fatal("empty RateLimitExempt was omitted from snapshot JSON — DP cannot tell clear from skip")
+	}
+
+	var onWire ConfigSnapshot
+	if err := json.Unmarshal(data, &onWire); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if onWire.RateLimitExempt == nil {
+		t.Fatal("RateLimitExempt decoded as nil — empty list did not survive the wire")
+	}
+
+	// DP side: it still carries a stale exemption from an earlier snapshot.
+	if err := rl.AddExemption("203.0.113.30"); err != nil {
+		t.Fatalf("AddExemption: %v", err)
+	}
+	applyConfigSnapshot(onWire)
+	if rl.IsExempt("203.0.113.30") {
+		t.Error("stale exemption not cleared — empty snapshot was treated as skip, not clear")
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -25,7 +26,9 @@ func uiSessionCookieForTest(t *testing.T, sub string) *http.Cookie {
 	if err != nil {
 		t.Fatalf("encodeSession: %v", err)
 	}
-	return &http.Cookie{Name: uiSessionCookieName, Value: tok}
+	// Attributes are inert on a request cookie (handler just reads Value) but
+	// satisfy gosec G124 without a //nolint suppression.
+	return &http.Cookie{Name: uiSessionCookieName, Value: tok, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode}
 }
 
 func proxySessionCookieForTest(t *testing.T, sub string) *http.Cookie {
@@ -39,11 +42,11 @@ func proxySessionCookieForTest(t *testing.T, sub string) *http.Cookie {
 	if err != nil {
 		t.Fatalf("encodeSession: %v", err)
 	}
-	return &http.Cookie{Name: sessionCookieName, Value: tok}
+	return &http.Cookie{Name: sessionCookieName, Value: tok, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode}
 }
 
 func TestSessionAdmin_ReadsUISessionCookie(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/api/policy", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/policy", nil)
 	r.AddCookie(uiSessionCookieForTest(t, "alice-admin"))
 
 	if got := sessionAdmin(r); got != "alice-admin" {
@@ -52,7 +55,7 @@ func TestSessionAdmin_ReadsUISessionCookie(t *testing.T) {
 }
 
 func TestSessionAdmin_IgnoresProxyUserCookie(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/api/policy", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/policy", nil)
 	r.AddCookie(proxySessionCookieForTest(t, "browsing-user"))
 
 	if got := sessionAdmin(r); got != "unknown" {
@@ -62,7 +65,7 @@ func TestSessionAdmin_IgnoresProxyUserCookie(t *testing.T) {
 
 func TestAuditEvent_ActorEnrichedFromUISession(t *testing.T) {
 	// Both cookies present: the admin identity must win, not the proxy user.
-	r := httptest.NewRequest(http.MethodPost, "/api/policy", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/policy", nil)
 	r.RemoteAddr = "198.51.100.77:4242" // TEST-NET-2 discriminator
 	r.AddCookie(uiSessionCookieForTest(t, "carol-admin"))
 	r.AddCookie(proxySessionCookieForTest(t, "browsing-user"))

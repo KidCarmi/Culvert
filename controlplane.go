@@ -73,7 +73,7 @@ type ConfigSnapshot struct {
 	IPFilterMode          string   `json:"ip_filter_mode"`
 	IPList                []string `json:"ip_list"`
 	RateLimitRPM          int      `json:"rate_limit_rpm"`
-	RateLimitExempt       []string `json:"rate_limit_exempt,omitempty"` // IP/CIDR rate-limit whitelist; nil→skip, []→clear on DP
+	RateLimitExempt       []string `json:"rate_limit_exempt"` // IP/CIDR rate-limit whitelist; nil→skip, []→clear on DP. NO omitempty: an empty list must serialize as [] so removing the last exemption propagates as a clear, not a skip.
 	AuthEnabled           bool     `json:"auth_enabled"`
 	UnauthMode            bool     `json:"unauth_mode"`
 	ProxyBaseURL          string   `json:"proxy_base_url,omitempty"`
