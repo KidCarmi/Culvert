@@ -16,8 +16,12 @@ func uiRole(r *http.Request) UIRole {
 
 // sessionAdmin returns the authenticated admin username from the session cookie.
 // Falls back to "unknown" if no session is found.
+// Reads the admin UI cookie (ps_ui_session), NOT the proxy-user cookie
+// (ps_session) — cookies are host-scoped, so a browser holding a
+// captive-portal session would otherwise attribute admin actions to the
+// proxy-user identity.
 func sessionAdmin(r *http.Request) string {
-	sess, err := readSessionCookie(r)
+	sess, err := readUISessionCookie(r)
 	if err != nil || sess == nil {
 		return "unknown"
 	}

@@ -71,13 +71,18 @@ func TestRotatingFile_DefaultMaxMB(t *testing.T) {
 	f.Close()
 	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
 
-	rf, err := newRotatingFile(f.Name(), 0) // 0 = use default 50MB
-	if err != nil {
-		t.Fatalf("newRotatingFile with 0 maxMB: %v", err)
-	}
-	defer rf.Close() //nolint:errcheck // test cleanup
-	if rf.maxBytes != 50*1024*1024 {
-		t.Errorf("default maxBytes = %d, want %d", rf.maxBytes, 50*1024*1024)
+	// 0 and negative both fall back to the 50 MB default. A negative maxMB
+	// (e.g. a stray -log-max-mb -1) used to yield a negative maxBytes, making
+	// the Write-time rotation check always fire and rotate on every write.
+	for _, maxMB := range []int{0, -1, -50} {
+		rf, err := newRotatingFile(f.Name(), maxMB)
+		if err != nil {
+			t.Fatalf("newRotatingFile with maxMB=%d: %v", maxMB, err)
+		}
+		if rf.maxBytes != 50*1024*1024 {
+			t.Errorf("maxMB=%d: maxBytes = %d, want %d (default)", maxMB, rf.maxBytes, 50*1024*1024)
+		}
+		rf.Close() //nolint:errcheck // test cleanup
 	}
 }
 

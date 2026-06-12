@@ -219,6 +219,7 @@ services:
           -threat-feed-db /data/threatfeeds.json
           -cat-feed-db /data/catfeeddb
           -fileprofiles-file /data/fileprofiles.json
+          -idp-profiles-file /data/idp_profiles.json
           -updater-url http://dp-updater:7123"
 
         if [ -n "$$ENROLL_URL" ]; then

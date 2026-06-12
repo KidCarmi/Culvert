@@ -106,7 +106,7 @@ var d0KnownRoutes = func() []string {
 	seen := make(map[string]bool, len(uiRoutes))
 	for _, r := range uiRoutes {
 		if seen[r.Path] {
-			continue // duplicates are flagged by TestC1_RouteMetadata_Locked133
+			continue // duplicates are flagged by TestC1_RouteMetadata_Locked135
 		}
 		seen[r.Path] = true
 		out = append(out, r.Path)
@@ -115,17 +115,18 @@ var d0KnownRoutes = func() []string {
 	return out
 }()
 
-// TestD0_RouteInventory_Locked133 is the D0 regression lock for the
+// TestD0_RouteInventory_Locked135 is the D0 regression lock for the
 // admin-UI route surface. After Phase C1 it enforces two invariants
 // against d0KnownRoutes (now derived from uiRoutes):
 //
-//  1. d0KnownRoutes contains exactly 133 entries (count locked).
+//  1. d0KnownRoutes contains exactly 135 entries (count locked).
 //  2. Every entry resolves through the wired mux to a non-empty pattern.
 //
 // Count history:
 //   - 131 — pre-C3 baseline (Phase C2/C2c).
 //   - 132 — Phase C3 added /api/governance/control-plane.
 //   - 133 — SAML SP metadata endpoint added for IdP import.
+//   - 135 — Slice 8 added /api/authpolicy + /api/authpolicy/reorder.
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -141,8 +142,8 @@ var d0KnownRoutes = func() []string {
 //     forward test AND this D0 test.
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
-func TestD0_RouteInventory_Locked133(t *testing.T) {
-	const want = 133
+func TestD0_RouteInventory_Locked135(t *testing.T) {
+	const want = 135
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

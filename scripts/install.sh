@@ -463,7 +463,77 @@ fi
 cd "$INSTALL_DIR"
 
 ###############################################################################
-# 6. Pull and start
+# 6. Seed the pinned proxy image tag (P1.4)
+###############################################################################
+step "Seeding proxy image"
+
+# docker-compose.yml resolves the FIXED local tag `culvert/proxy:pinned`
+# (P1.4 — the proxy image is selected at the sudo boundary, not via env
+# vars). The tag is LOCAL-ONLY and never published to a registry, so it must
+# exist before `docker compose up`, or compose tries to pull
+# docker.io/culvert/proxy:pinned and fails with "pull access denied".
+# See roadmap/D1.6c-pin-value-binding-plan.md §8 (migration strategy).
+PINNED_TAG="culvert/proxy:pinned"
+PROXY_REPO="${CULVERT_PROXY_REPO:-ghcr.io/kidcarmi/culvert}"
+
+seed_pinned_tag() {
+  if sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
+    info "$PINNED_TAG already present; not reseeding"
+    return 0
+  fi
+
+  # Seed source precedence (mirrors packaging/culvert-maint/install.sh):
+  #   1. CULVERT_PROXY_SEED_REF — operator-supplied (existing-install
+  #      migration: the currently-running repo@sha256 digest).
+  #   2. The image of an already-running `culvert` container (auto-captured,
+  #      keeps the pinned tag identical to the live daemon — §8.2).
+  #   3. ${PROXY_REPO}:latest — fresh-install bootstrap.
+  #   4. Local build from this checkout — air-gapped / registry-down fallback.
+  if [[ -n "${CULVERT_PROXY_SEED_REF:-}" ]]; then
+    info "Seeding $PINNED_TAG from CULVERT_PROXY_SEED_REF=$CULVERT_PROXY_SEED_REF ..."
+    if sudo docker pull "$CULVERT_PROXY_SEED_REF" && sudo docker tag "$CULVERT_PROXY_SEED_REF" "$PINNED_TAG"; then
+      info "Seeded $PINNED_TAG"
+      return 0
+    fi
+    warn "Could not seed from CULVERT_PROXY_SEED_REF — trying the next source..."
+  fi
+
+  local running_image
+  running_image=$(sudo docker inspect culvert --format '{{.Image}}' 2>/dev/null || true)
+  if [[ -n "$running_image" ]]; then
+    info "Seeding $PINNED_TAG from the running culvert container ($running_image)..."
+    if sudo docker tag "$running_image" "$PINNED_TAG"; then
+      return 0
+    fi
+    warn "Could not tag the running container's image — trying the next source..."
+  fi
+
+  info "Seeding $PINNED_TAG from $PROXY_REPO:latest ..."
+  if sudo docker pull "$PROXY_REPO:latest" && sudo docker tag "$PROXY_REPO:latest" "$PINNED_TAG"; then
+    info "Seeded $PINNED_TAG"
+    return 0
+  fi
+
+  warn "Registry pull failed. Building $PINNED_TAG locally from this checkout (slower)..."
+  if sudo docker build -t "$PINNED_TAG" .; then
+    info "Built and seeded $PINNED_TAG locally"
+    return 0
+  fi
+
+  return 1
+}
+
+if ! seed_pinned_tag; then
+  error "Could not seed $PINNED_TAG from any source (seed ref, running container, $PROXY_REPO:latest, local build).
+
+  Seed it manually, then re-run this script:
+    docker pull $PROXY_REPO:latest && docker tag $PROXY_REPO:latest $PINNED_TAG
+  or build from source:
+    docker build -t $PINNED_TAG ."
+fi
+
+###############################################################################
+# 7. Pull and start
 ###############################################################################
 step "Starting Culvert"
 

@@ -283,10 +283,17 @@ The script handles all Docker installation quirks (snap removal, compose v2, dis
 ```bash
 git clone https://github.com/KidCarmi/Culvert
 cd Culvert
+docker build -t culvert/proxy:pinned .   # seed the local-only image tag the compose file resolves
 docker compose up -d
 ```
 
 No configuration required - the setup wizard creates your admin account on first visit.
+
+> **`pull access denied for culvert/proxy`?** The compose file resolves the
+> local-only tag `culvert/proxy:pinned` (a security measure — the proxy image
+> is pinned at the sudo boundary, never pulled by name from a registry). Seed
+> it with the `docker build` line above, or:
+> `docker pull ghcr.io/kidcarmi/culvert:latest && docker tag ghcr.io/kidcarmi/culvert:latest culvert/proxy:pinned`
 
 | Endpoint | URL | Notes |
 |----------|-----|-------|

@@ -38,6 +38,18 @@ func normalizeHost(host string) string {
 	return strings.ToLower(ascii)
 }
 
+// stripHostPort removes a trailing :port and IPv6 brackets from a host value,
+// accepting all shapes that reach scan/bypass lookups: "host:port",
+// "[v6]:port", "[v6]", bare "v6", and bare "host". A naive
+// LastIndex(host, ":") cut corrupts bare IPv6 literals (already de-bracketed
+// by net.SplitHostPort upstream) — "2001:db8::1" would become "2001:db8:".
+func stripHostPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.Trim(host, "[]")
+}
+
 // ─── SSRF-safe dialer ────────────────────────────────────────────────────────
 
 // ssrfControl rejects a connection when the resolved peer address falls into

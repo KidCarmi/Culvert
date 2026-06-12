@@ -155,6 +155,9 @@ func buildOperatorContract() OperatorContract {
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 	}
+	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
+	// exemption postures. Contributes nothing when no exempt rules exist.
+	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
 	return OperatorContract{
 		Verdict:     rollUpVerdict(checks),
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -773,16 +776,23 @@ func checkConfigRollbackValidation(s configVersionSummary) OperatorContractCheck
 	}
 }
 
-// ── Auth Exempt risk diagnostics (Phase 1 Slice 6) ──────────────────────────
+// ── Auth Exempt risk diagnostics (Phase 1 Slice 6; wired in Slice 8) ─────────
 //
 // authExemptDiagnostics inspects auth/exempt (Stage-1) rules for risky postures
 // and returns WARN checks. It NEVER mutates, enables, or disables a rule — it
 // only reports. Pure over an explicit ruleset + default action, so it is testable
-// without globals.
-//
-// Backend-only in this slice: defined and tested, but intentionally NOT wired
-// into buildOperatorContract (no served API/UI surface yet). A later slice
-// appends these to the operator contract and adds a panel.
+// without globals. Served via the operator contract (buildOperatorContract →
+// /api/diagnostics) since Slice 8.
+
+// policyActionFromDefault maps the runtime default policy action string
+// ("allow"/"deny") to a PolicyAction for the auth-exempt diagnostics; only
+// Allow is significant there.
+func policyActionFromDefault() PolicyAction {
+	if defaultPolicyAction() == "allow" {
+		return ActionAllow
+	}
+	return ActionDrop
+}
 func authExemptDiagnostics(rules []PolicyRule, defaultAction PolicyAction) []OperatorContractCheck {
 	var exempt []*PolicyRule
 	for i := range rules {
