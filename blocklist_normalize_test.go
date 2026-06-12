@@ -6,6 +6,7 @@ package main
 // ("0.0.0.0 ads.example" rows that could never match a request host).
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -169,6 +170,62 @@ func containsLine(data, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestMergeFromLines_AttributionOnlySyncPersists: a re-sync that adds no
+// new hosts but stamps attribution on already-listed entries (repaired by
+// Load, or imported before the .sources sidecar existed) must still write
+// the sidecar — attribution may not be memory-only (Codex P2, PR #438).
+// The follow-up no-change sync must NOT rewrite the files.
+func TestMergeFromLines_AttributionOnlySyncPersists(t *testing.T) {
+	ensureBlocklistStartupTestLogger(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blocklist.list")
+	// Pre-existing entry with no attribution (pre-sidecar import).
+	if err := os.WriteFile(path, []byte("preexisting.attr.invalid\n"), 0o600); err != nil {
+		t.Fatalf("seed blocklist: %v", err)
+	}
+
+	const feed = "https://feeds.example/retro.txt"
+	b := &Blocklist{
+		exact: map[string]bool{}, wildcards: map[string]bool{},
+		manual: map[string]bool{}, exceptions: map[string]bool{},
+	}
+	if err := b.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Re-sync: same host, nothing new — only attribution changes.
+	if added := b.MergeFromLines([]string{"preexisting.attr.invalid"}, feed); added != 0 {
+		t.Fatalf("added = %d; want 0 (host already listed)", added)
+	}
+	data, err := os.ReadFile(path + ".sources")
+	if err != nil {
+		t.Fatalf(".sources not written on attribution-only sync: %v", err)
+	}
+	var sources map[string]string
+	if err := json.Unmarshal(data, &sources); err != nil {
+		t.Fatalf("unmarshal .sources: %v", err)
+	}
+	if sources["preexisting.attr.invalid"] != feed {
+		t.Errorf(".sources = %v; want preexisting.attr.invalid → %s", sources, feed)
+	}
+
+	// Steady state: re-sync with identical content must not rewrite.
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat main file: %v", err)
+	}
+	if added := b.MergeFromLines([]string{"preexisting.attr.invalid"}, feed); added != 0 {
+		t.Fatalf("steady-state added = %d; want 0", added)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("re-stat main file: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Error("steady-state re-sync rewrote the main file; expected no save when nothing changed")
+	}
 }
 
 // TestBlocklistSources_PersistRoundTrip: feed attribution survives a

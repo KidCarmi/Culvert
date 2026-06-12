@@ -1211,6 +1211,7 @@ func normalizeBlocklistLine(raw string) (string, bool) {
 // Returns the number of newly-added entries.
 func (b *Blocklist) MergeFromLines(lines []string, source string) int {
 	added := 0
+	attributed := false
 	b.mu.Lock()
 	for _, raw := range lines {
 		line, ok := normalizeBlocklistLine(raw)
@@ -1232,16 +1233,26 @@ func (b *Blocklist) MergeFromLines(lines []string, source string) int {
 		// Stamp attribution on feed-owned entries (also retroactively on
 		// re-sync, so pre-attribution entries converge). Admin-added
 		// entries keep their "manual" badge — ListWithSource checks
-		// b.manual first.
+		// b.manual first. attributed only flips on an actual change so
+		// steady-state re-syncs (already attributed, nothing new) don't
+		// trigger a full-file rewrite.
 		if source != "" && !b.manual[line] {
 			if b.feedSrc == nil {
 				b.feedSrc = map[string]string{}
 			}
-			b.feedSrc[line] = source
+			if b.feedSrc[line] != source {
+				b.feedSrc[line] = source
+				attributed = true
+			}
 		}
 	}
 	b.mu.Unlock()
-	if added > 0 {
+	// attributed alone must also save: a re-sync that only stamps
+	// attribution on already-listed hosts (e.g. entries repaired by Load
+	// or imported before the .sources sidecar existed) would otherwise
+	// hold the attribution in memory only and lose it on restart
+	// (Codex P2, PR #438).
+	if added > 0 || attributed {
 		b.Save()
 	}
 	return added
