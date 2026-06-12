@@ -80,8 +80,12 @@ services:
     # The maintenance agent selects the proxy image by pulling a repo-bound
     # pinned digest and retagging it to culvert/proxy:pinned AT THE SUDO
     # BOUNDARY — not via an env var. There is deliberately no
-    # ${CULVERT_PROXY_IMAGE} interpolation here. This tag must be SEEDED
-    # before the first `up` (install.sh seeds it; see the migration plan §8).
+    # ${CULVERT_PROXY_IMAGE} interpolation here. The tag is LOCAL-ONLY and
+    # must be SEEDED before the first `up` — both installers do this
+    # (scripts/install.sh for quick-start hosts, packaging/culvert-maint/
+    # install.sh for maintenance-agent hosts; see the migration plan §8).
+    # Seeding it by hand (e.g. plain `git clone` + `docker compose up`):
+    #   docker build -t culvert/proxy:pinned .
     image: culvert/proxy:pinned
     # Uncomment to build locally:
     # build: .
