@@ -192,6 +192,11 @@ func scrubForwardedHeaders(r *http.Request) {
 // query); when it is empty (e.g. a CONNECT tunnel with no decrypted request)
 // only the host is returned.
 func policyLogURI(host, path string) string {
+	// Defensive: guarantee no query is ever stored even if a crafted Host
+	// header smuggled a '?' (path is already query-free).
+	if i := strings.IndexByte(host, '?'); i >= 0 {
+		host = host[:i]
+	}
 	if path == "" {
 		return host
 	}
@@ -1558,7 +1563,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		// rule's LogFullURI flag — off by default, so inspected traffic for
 		// other rules still produces only the single CONNECT-open entry.
 		if match != nil && match.Rule != nil && match.Rule.LogFullURI && ruleLogsTraffic(match.Rule) {
-			recordRequestAuthURI(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{})
+			// Log-only: the enclosing CONNECT was already counted by the allow
+			// path, so this per-URL entry must not re-increment request stats.
+			recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{})
 		}
 		if closeAfter {
 			break

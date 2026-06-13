@@ -169,10 +169,11 @@ func levelForStatus(status string) string {
 	case "OK", "POLICY_ALLOW":
 		return "INFO"
 	case "BLOCKED", "THREAT_BLOCKED", "FILE_BLOCKED", "SCAN_BLOCKED",
+		"DPI_BLOCKED", "POLYGLOT_BLOCKED", "CDR_BLOCKED", "CDR_SANITIZED",
 		"RATE_LIMITED", "IP_BLOCKED",
-		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT":
+		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT", "POLICY_DEFAULT_DENY":
 		return "WARN"
-	default: // AUTH_FAIL and anything unexpected
+	default: // AUTH_FAIL, CDR_ERROR, and anything unexpected
 		return "ERROR"
 	}
 }
@@ -2129,6 +2130,22 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 // captured request URL (host+path, no query) or "" when not logged.
 func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
 	recordStats(ip, host, status, ruleMatched, actionTaken)
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, uri, auth)
+}
+
+// recordRequestLogOnly writes a request-log entry WITHOUT the stats/alert/
+// top-host side effects. It is used for SSL-inspected inner requests (per-URL
+// "log full URL" entries): the enclosing CONNECT was already counted by the
+// allow path, so counting each inner request again would inflate statTotal
+// (a CONNECT carrying N requests would count as 1+N).
+func recordRequestLogOnly(ip, method, host, status, ruleMatched, actionTaken, identity, sslAction, uri string, auth AuthLogFields) {
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, sslAction, uri, auth)
+}
+
+// persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,
+// history store, and syslog — the logging half shared by recordRequestFull and
+// recordRequestLogOnly.
+func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
 	entry := LogEntry{
 		TS:          time.Now().UnixMilli(),
 		Time:        time.Now().Format("15:04:05"),

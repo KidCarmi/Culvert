@@ -671,7 +671,7 @@ tr.dragging  { opacity: .4; }
         <button class="btn sm log-tab active" data-click="setLogTab" data-arg="">All</button>
         <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="INFO">Allowed</button>
         <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="WARN">Blocked / Threats</button>
-        <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="ERROR">Auth Failures</button>
+        <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="ERROR">Auth &amp; Errors</button>
       </div>
       <div class="filter-bar">
         <input type="text" class="input wide" id="log-filter" placeholder="Filter by host or IP…" data-input="applyLogFilter">
@@ -5167,18 +5167,24 @@ function renderLogs() {
   if (document.getElementById('auto-scroll').checked) sc.scrollTop = 0;
 }
 
+// syncLogTabs highlights the tab button matching the given level so the tab
+// row, the level dropdown, and clear-filter all stay visually consistent.
+function syncLogTabs(level) {
+  document.querySelectorAll('.log-tab').forEach(b => {
+    const on = (b.dataset.arg || '') === (level || '');
+    b.classList.toggle('active', on);
+    b.classList.toggle('ghost', !on);
+  });
+}
+
 // setLogTab is the PAN-OS-style log-type quick filter. Tabs map to the request
-// LEVEL (INFO=allowed, WARN=blocked/threats, ERROR=auth failures), which the
+// LEVEL (INFO=allowed, WARN=blocked/threats, ERROR=auth/errors), which the
 // /api/logs filter supports for the live, file, and history sources alike.
 function setLogTab(level) {
   logLevelFilter = level;
   const sel = document.getElementById('log-level');
   if (sel) sel.value = level;
-  document.querySelectorAll('.log-tab').forEach(b => {
-    const on = (b.dataset.arg || '') === level;
-    b.classList.toggle('active', on);
-    b.classList.toggle('ghost', !on);
-  });
+  syncLogTabs(level);
   logHistOffset = 0;
   fetchLogs();
 }
@@ -5189,6 +5195,7 @@ function applyLogFilter() {
   logStatusFilter   = document.getElementById('log-status').value;
   logLevelFilter    = document.getElementById('log-level').value;
   logMethodFilter   = document.getElementById('log-method').value;
+  syncLogTabs(logLevelFilter); // keep tabs in sync if the level dropdown was used
   fetchLogs();
 }
 
@@ -5199,6 +5206,7 @@ function clearFilter() {
   document.getElementById('log-level').value    = '';
   document.getElementById('log-method').value   = '';
   logFilter = ''; logIdentityFilter = ''; logStatusFilter = ''; logLevelFilter = ''; logMethodFilter = '';
+  syncLogTabs(''); // reset the tab row to "All"
   fetchLogs();
 }
 

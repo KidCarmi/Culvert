@@ -42,6 +42,43 @@ func TestRecordStats_NoLogEntry(t *testing.T) {
 	}
 }
 
+// TestRecordRequestLogOnly_NoStatIncrement locks the inner-request double-count
+// fix: the log-only recorder writes an entry but does NOT touch statTotal (the
+// enclosing CONNECT already counted).
+func TestRecordRequestLogOnly_NoStatIncrement(t *testing.T) {
+	isolateLogRing(t)
+	oldLS := globalLogStore
+	globalLogStore = nil
+	t.Cleanup(func() { globalLogStore = oldLS })
+
+	before := atomic.LoadInt64(&statTotal)
+	recordRequestLogOnly("1.2.3.4", "GET", "h.example.com", "OK", "rule", "Allow",
+		"alice", "inspect", "h.example.com/p", AuthLogFields{})
+	if got := atomic.LoadInt64(&statTotal); got != before {
+		t.Errorf("recordRequestLogOnly changed statTotal by %d, want 0", got-before)
+	}
+	entries := logGet()
+	if len(entries) != 1 || entries[0].URI != "h.example.com/p" {
+		t.Fatalf("expected 1 logged entry with URI, got %d", len(entries))
+	}
+}
+
+// TestLevelForStatus_BlockedTab verifies block/threat statuses land in the
+// WARN ("Blocked & Threats") tab, not ERROR ("Auth & Errors").
+func TestLevelForStatus_BlockedTab(t *testing.T) {
+	for _, s := range []string{"DPI_BLOCKED", "POLYGLOT_BLOCKED", "CDR_BLOCKED", "CDR_SANITIZED", "POLICY_DEFAULT_DENY"} {
+		if got := levelForStatus(s); got != "WARN" {
+			t.Errorf("levelForStatus(%q) = %q, want WARN", s, got)
+		}
+	}
+	if got := levelForStatus("AUTH_FAIL"); got != "ERROR" {
+		t.Errorf("levelForStatus(AUTH_FAIL) = %q, want ERROR", got)
+	}
+	if got := levelForStatus("OK"); got != "INFO" {
+		t.Errorf("levelForStatus(OK) = %q, want INFO", got)
+	}
+}
+
 func TestPolicyRule_LogTrafficRoundTrip(t *testing.T) {
 	fa := false
 	b, err := json.Marshal(PolicyRule{Name: "r", LogTraffic: &fa})
