@@ -124,8 +124,18 @@ func openLogStoreTTL(dir string, ttl time.Duration, maxBytes int64) (*logStore, 
 	return s, nil
 }
 
+// itemLogicalSize is the bytesUsed contribution of one stored entry: key bytes
+// plus value bytes. It MUST match the flush-time accounting (len(key)+len(val))
+// so reconcile-on-open, flush increments, and prune decrements all use the same
+// measure — otherwise the size cap drifts. ValueSize reads the entry meta, not
+// the value log, so it is cheap with PrefetchValues=false.
+func itemLogicalSize(item *badger.Item) int64 {
+	return int64(len(item.Key())) + item.ValueSize()
+}
+
 // scanLogicalBytes sums the key+value bytes of stored entries (bounded by the
-// scan cap) using the table-level size estimate — no value fetch required.
+// scan cap) — no value fetch required. Called once at open before the store is
+// published, so it needs no close guard.
 func (s *logStore) scanLogicalBytes() int64 {
 	var total int64
 	_ = s.db.View(func(txn *badger.Txn) error {
@@ -135,7 +145,7 @@ func (s *logStore) scanLogicalBytes() int64 {
 		defer it.Close()
 		n := 0
 		for it.Rewind(); it.Valid(); it.Next() {
-			total += it.Item().EstimatedSize()
+			total += itemLogicalSize(it.Item())
 			if n++; n >= logStoreScanCap {
 				break
 			}
@@ -260,6 +270,13 @@ func (s *logStore) Query(fromMs, toMs int64, offset, limit int, filter func(*Log
 	if s == nil {
 		return nil, 0, nil
 	}
+	// Read lock for the whole transaction so Close can't close the DB mid-query
+	// (use-after-close guard).
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed {
+		return nil, 0, nil
+	}
 	if toMs <= 0 {
 		toMs = math.MaxInt64
 	}
@@ -318,6 +335,12 @@ func (s *logStore) Stats() logStoreStats {
 	if s == nil {
 		return st
 	}
+	// Read lock so Close can't close the DB mid-scan (use-after-close guard).
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed {
+		return st
+	}
 	st.Bytes = atomic.LoadInt64(&s.bytesUsed)
 	_ = s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
@@ -370,7 +393,7 @@ func (s *logStore) RunRetention() {
 		for it.Rewind(); it.Valid() && len(keys) < logStorePruneBatch; it.Next() {
 			item := it.Item()
 			keys = append(keys, item.KeyCopy(nil))
-			freed += item.EstimatedSize()
+			freed += itemLogicalSize(item)
 		}
 		return nil
 	})
@@ -479,8 +502,8 @@ func logStoreRetentionView() map[string]any {
 // startLogStoreRetention runs the size janitor every interval until ctx is
 // cancelled (graceful shutdown).
 func startLogStoreRetention(ctx context.Context, s *logStore, interval time.Duration) {
-	if s == nil {
-		return
+	if s == nil || ctx == nil {
+		return // nil ctx would panic on <-ctx.Done(); guard defensively
 	}
 	go func() {
 		t := time.NewTicker(interval)

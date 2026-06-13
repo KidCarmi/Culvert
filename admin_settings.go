@@ -168,8 +168,12 @@ func applyAdminServices(s *AdminSettings) {
 	if s.SessionTimeoutHours > 0 {
 		SetSessionTTL(time.Duration(s.SessionTimeoutHours) * time.Hour)
 	}
-	if s.LogRetentionSaved && globalLogStore != nil {
-		globalLogStore.SetRetention(s.LogRetentionDays, s.LogRetentionMaxGB)
+	if s.LogRetentionSaved {
+		if globalLogStore != nil {
+			globalLogStore.SetRetention(s.LogRetentionDays, s.LogRetentionMaxGB)
+		} else {
+			logger.Printf("WARN AdminSettings: saved log retention not applied — history store disabled (set log_store_path)")
+		}
 	}
 	applyBlocklistFeeds(s)
 	if s.SaaSFeedURL != "" {
