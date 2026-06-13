@@ -23,8 +23,15 @@ var hub = &sseHub{clients: make(map[chan []byte]struct{})}
 // sseMaxClients caps concurrent SSE connections per hub. Each connection
 // holds a goroutine and an HTTP stream with no write deadline, so without a
 // cap any viewer credential could exhaust goroutines/FDs by opening streams.
-// 0 disables the cap. Variable (not const) so tests can lower it.
-var sseMaxClients = 256
+// 0 disables the cap. Accessed atomically: tests adjust it, and it is the
+// seam for the planned admin-configurable connection limit.
+var sseMaxClients int64 = 256
+
+// sseWriteTimeout bounds each SSE frame write. The dashboard ticks every 1 s,
+// so a healthy client drains well within this window; a half-open TCP peer
+// (client gone, no RST — and SSE runs with WriteTimeout 0) would otherwise
+// block the handler goroutine forever on a full socket buffer.
+const sseWriteTimeout = 10 * time.Second
 
 // Live-feed observability counters (exposed via /metrics).
 var (
@@ -37,7 +44,7 @@ var (
 func (h *sseHub) register(ch chan []byte) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if sseMaxClients > 0 && len(h.clients) >= sseMaxClients {
+	if max := atomic.LoadInt64(&sseMaxClients); max > 0 && int64(len(h.clients)) >= max {
 		return false
 	}
 	h.clients[ch] = struct{}{}
@@ -233,12 +240,31 @@ func apiEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Disable proxy buffering (nginx et al.) so frames stream in real time
+	// instead of being held back until an upstream buffer fills.
+	w.Header().Set("X-Accel-Buffering", "no")
 	// Restrict SSE to same-origin requests only (no CORS wildcard).
 	// The dashboard is served from the same origin, so no CORS header is needed.
 
+	// writeFrame writes one SSE frame under a per-write deadline and reports
+	// whether the client is still healthy. A failed/timed-out write means the
+	// peer is gone, so the caller returns and the deferred unregister runs.
+	// SetWriteDeadline is best-effort: writers that don't support it (e.g. the
+	// httptest recorder) return an error we intentionally ignore.
+	rc := http.NewResponseController(w)
+	writeFrame := func(s string) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+		if _, err := w.Write([]byte(s)); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
 	// Send an initial ping so the client knows we're connected.
-	fmt.Fprintf(w, "event: connected\ndata: {}\n\n")
-	flusher.Flush()
+	if !writeFrame("event: connected\ndata: {}\n\n") {
+		return
+	}
 
 	msgs := 0
 	for {
@@ -250,8 +276,9 @@ func apiEvents(w http.ResponseWriter, r *http.Request) {
 				// otherwise busy-spin and flood the peer with empty frames.
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", msg)
-			flusher.Flush()
+			if !writeFrame("data: " + string(msg) + "\n\n") {
+				return
+			}
 			msgs++
 			if msgs >= sseRevalidateEvery {
 				msgs = 0

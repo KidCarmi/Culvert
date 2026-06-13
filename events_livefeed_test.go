@@ -94,6 +94,40 @@ func TestApiEvents_EvictedClientEndsStream(t *testing.T) {
 	}
 }
 
+// failingFlushWriter is an http.ResponseWriter+Flusher whose Write always
+// fails, simulating a dead/half-open client connection.
+type failingFlushWriter struct{ header http.Header }
+
+func (f *failingFlushWriter) Header() http.Header {
+	if f.header == nil {
+		f.header = make(http.Header)
+	}
+	return f.header
+}
+func (f *failingFlushWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+func (f *failingFlushWriter) WriteHeader(int)           {}
+func (f *failingFlushWriter) Flush()                    {}
+
+func TestApiEvents_WriteErrorEndsStream(t *testing.T) {
+	// Plain (non-deadline) context: the only thing that should end the stream
+	// is the failed write. If the handler ignored write errors it would block
+	// in its select loop forever and the assertion below would fire.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() { apiEvents(&failingFlushWriter{}, req); close(done) }()
+
+	select {
+	case <-done:
+		// Failed connected-frame write → handler returned instead of looping
+		// forever on a half-open connection.
+	case <-time.After(2 * time.Second):
+		t.Fatal("apiEvents did not return after a failed write (half-open connection leak regression)")
+	}
+}
+
 func TestApiEvents_ClientCapRejects(t *testing.T) {
 	// Occupy one slot so the cap (set to current occupancy) is already full.
 	dummy := make(chan []byte, 1)
@@ -102,9 +136,9 @@ func TestApiEvents_ClientCapRejects(t *testing.T) {
 	}
 	t.Cleanup(func() { hub.unregister(dummy) })
 
-	oldMax := sseMaxClients
-	sseMaxClients = hub.ClientCount()
-	t.Cleanup(func() { sseMaxClients = oldMax })
+	oldMax := atomic.LoadInt64(&sseMaxClients)
+	atomic.StoreInt64(&sseMaxClients, int64(hub.ClientCount()))
+	t.Cleanup(func() { atomic.StoreInt64(&sseMaxClients, oldMax) })
 
 	// Bounded context: if the cap fails to reject, the handler streams until
 	// the deadline instead of hanging the test forever.
@@ -254,6 +288,12 @@ func TestRequestLogReadPersistent_CachedWithinTTL(t *testing.T) {
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first read: entries=%d err=%v, want 1 entry", len(first), err)
 	}
+
+	// Pin the cache expiry far into the future so the "cached" assertion below
+	// can't flake if a slow CI host lets the 2 s TTL lapse between statements.
+	reqLogReadCache.mu.Lock()
+	reqLogReadCache.expires = time.Now().Add(time.Hour)
+	reqLogReadCache.mu.Unlock()
 
 	// A write inside the TTL window is intentionally not visible yet.
 	logAdd(LogEntry{TS: 2, Host: "b.example.com", Status: "OK"})
