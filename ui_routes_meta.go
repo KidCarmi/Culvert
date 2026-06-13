@@ -156,6 +156,10 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
+	{Path: "/api/logs/purge", Handler: "apiLogsPurge", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/top-hosts", Handler: "apiTopHosts", Domain: "dashboard", Public: false,
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
 	{Path: "/api/audit", Handler: "apiAudit", Domain: "dashboard", Public: false,

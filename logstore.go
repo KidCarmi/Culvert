@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -55,13 +56,76 @@ const logStoreMaxQueryLimit = 10000
 // depends on user input; append grows it as needed.
 const logStoreQueryAllocHint = 256
 
-// globalLogStore is the process-wide history store; nil when disabled.
-var globalLogStore *logStore
+// globalLogStore is the process-wide history store; nil-pointer when disabled.
+// It is an atomic pointer so the request hot path reads it lock-free and the
+// admin can enable/disable log saving at runtime by swapping the store safely.
+var globalLogStore atomic.Pointer[logStore]
+
+// logStoreDir is the on-disk location used when the admin enables log saving
+// from the GUI (no path argument needed). Set once at startup from the data dir.
+var logStoreDir string
+
+// logStoreLastDays/GB remember the admin's chosen retention even while saving is
+// OFF, so the UI and a later re-enable restore it. Guarded by logStoreCfgMu.
+var (
+	logStoreCfgMu    sync.Mutex
+	logStoreLastDays int
+	logStoreLastGB   float64
+)
+
+func setLogStoreDesired(days int, gb float64) {
+	logStoreCfgMu.Lock()
+	logStoreLastDays, logStoreLastGB = days, gb
+	logStoreCfgMu.Unlock()
+}
+
+func getLogStoreDesired() (days int, gb float64) {
+	logStoreCfgMu.Lock()
+	defer logStoreCfgMu.Unlock()
+	return logStoreLastDays, logStoreLastGB
+}
 
 var (
 	statLogStoreDropped int64 // entries dropped because the async queue was full
 	statLogStorePruned  int64 // entries deleted by the size-cap janitor
 )
+
+// enableLogStore opens (or re-uses) the history store and publishes it as the
+// global store, starting the size janitor under a per-store context so it stops
+// when the store is disabled. If already enabled it just updates retention, so
+// it is safe to call repeatedly (startup, admin settings load, API).
+func enableLogStore(ctx context.Context, dir string, days int, gb float64) error {
+	setLogStoreDesired(days, gb)
+	if ls := globalLogStore.Load(); ls != nil {
+		ls.SetRetention(days, gb)
+		return nil
+	}
+	if dir == "" {
+		return fmt.Errorf("log store path not configured")
+	}
+	ls, err := openLogStore(dir, days, gb)
+	if err != nil {
+		return err
+	}
+	jctx, cancel := context.WithCancel(ctx)
+	ls.cancelJanitor = cancel
+	startLogStoreRetention(jctx, ls, 5*time.Minute)
+	globalLogStore.Store(ls)
+	return nil
+}
+
+// disableLogStore closes and unpublishes the store, KEEPING data on disk so a
+// later re-enable resumes the same history. No-op when already disabled.
+func disableLogStore() {
+	if old := globalLogStore.Swap(nil); old != nil {
+		_ = old.Close()
+	}
+}
+
+// purgeLogStore deletes all stored history while keeping the store enabled.
+func purgeLogStore() error {
+	return globalLogStore.Load().purgeAll()
+}
 
 type logStore struct {
 	db *badger.DB
@@ -83,6 +147,10 @@ type logStore struct {
 	seq uint32 // atomic; disambiguates same-millisecond entries
 	ch  chan LogEntry
 	wg  sync.WaitGroup
+
+	// cancelJanitor stops this store's retention janitor goroutine; called by
+	// Close so a disable/enable cycle doesn't leak janitor goroutines.
+	cancelJanitor context.CancelFunc
 
 	// closeMu guards the closed flag and the send/close of ch. Add and
 	// RunRetention take it for reading (they may run concurrently); Close takes
@@ -264,11 +332,33 @@ func (s *logStore) Close() error {
 	s.closed = true
 	close(s.ch)
 	s.closeMu.Unlock()
+	if s.cancelJanitor != nil {
+		s.cancelJanitor() // stop the retention janitor (no leak on disable)
+	}
 	// Wait outside the lock: writeLoop coordinates via the channel close + wg
 	// (it never takes closeMu), and any in-flight Add/RunRetention released
 	// their read lock before Close acquired the write lock.
 	s.wg.Wait()
 	return s.db.Close()
+}
+
+// purgeAll deletes all stored history (Badger DropAll) and resets the byte
+// counter. The store stays open and usable. Held under the read lock so Close
+// cannot close the DB mid-purge.
+func (s *logStore) purgeAll() error {
+	if s == nil {
+		return nil
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed {
+		return nil
+	}
+	if err := s.db.DropAll(); err != nil {
+		return err
+	}
+	atomic.StoreInt64(&s.bytesUsed, 0)
+	return nil
 }
 
 // Query returns up to limit entries newest-first within [fromMs, toMs],
@@ -488,12 +578,13 @@ func (s *logStore) RetentionMaxGB() float64 {
 // logStoreUsage (called on demand by the retention panel) so an open dashboard
 // doesn't trigger a large DB scan every tick.
 func logStoreHealth() map[string]any {
-	if globalLogStore == nil {
+	ls := globalLogStore.Load()
+	if ls == nil {
 		return map[string]any{"enabled": false}
 	}
 	return map[string]any{
 		"enabled": true,
-		"bytes":   atomic.LoadInt64(&globalLogStore.bytesUsed),
+		"bytes":   atomic.LoadInt64(&ls.bytesUsed),
 		"dropped": atomic.LoadInt64(&statLogStoreDropped),
 		"pruned":  atomic.LoadInt64(&statLogStorePruned),
 	}
@@ -503,32 +594,87 @@ func logStoreHealth() map[string]any {
 // fields plus the count/oldest scan from Stats. Not for high-frequency polling.
 func logStoreUsage() map[string]any {
 	u := logStoreHealth()
-	if globalLogStore == nil {
+	ls := globalLogStore.Load()
+	if ls == nil {
 		return u
 	}
-	st := globalLogStore.Stats()
+	st := ls.Stats()
 	u["count"] = st.Count
 	u["capped"] = st.Capped
 	u["oldestMs"] = st.OldestMs
 	return u
 }
 
+// logStoreDiskEstimate projects how fast the history store would grow at the
+// current traffic rate, so the admin can choose retention with eyes open. It is
+// independent of whether saving is enabled (computed from the in-memory ring +
+// per-minute request series), so it works on the "enable" screen too.
+// bytesPerDay assumes every request is logged; rules with "Log traffic" off
+// make it a conservative upper bound.
+func logStoreDiskEstimate() map[string]any {
+	avg := avgLogEntryBytes()
+	series, _, _ := tsGet()
+	var lastHour int64
+	for _, v := range series {
+		lastHour += v
+	}
+	perMin := float64(lastHour) / 60.0
+	perDay := perMin * 60 * 24 * float64(avg)
+	return map[string]any{
+		"avgEntryBytes": avg,
+		"reqPerMin":     perMin,
+		"bytesPerDay":   int64(perDay),
+		"bytesPerWeek":  int64(perDay * 7),
+		"bytesPerMonth": int64(perDay * 30),
+	}
+}
+
+// avgLogEntryBytes samples the in-memory ring to estimate the serialized size of
+// one log entry. Falls back to a typical size when the ring is empty.
+func avgLogEntryBytes() int64 {
+	const fallback = 350
+	entries := logGet()
+	if len(entries) == 0 {
+		return fallback
+	}
+	n := len(entries)
+	if n > 50 {
+		n = 50
+	}
+	var total int64
+	for i := 0; i < n; i++ {
+		if b, err := json.Marshal(entries[i]); err == nil {
+			total += int64(len(b)) + 1 // +1 for the newline JSONL adds
+		}
+	}
+	if total == 0 {
+		return fallback
+	}
+	return total / int64(n)
+}
+
 // logStoreRetentionView is the GET /api/logs/retention payload: the current
 // retention policy plus full (on-demand) usage stats.
 func logStoreRetentionView() map[string]any {
-	if globalLogStore == nil {
+	ls := globalLogStore.Load()
+	if ls == nil {
+		days, gb := getLogStoreDesired() // remembered across disable/restart
 		return map[string]any{
 			"enabled":        false,
-			"retentionDays":  0,
-			"retentionMaxGB": 0,
+			"configurable":   logStoreDir != "", // can it be enabled from the GUI?
+			"retentionDays":  days,
+			"retentionMaxGB": gb,
 			"usage":          logStoreUsage(),
+			"estimate":       logStoreDiskEstimate(),
 		}
 	}
 	return map[string]any{
 		"enabled":        true,
-		"retentionDays":  globalLogStore.RetentionDays(),
-		"retentionMaxGB": globalLogStore.RetentionMaxGB(),
+		"configurable":   true,
+		"retentionDays":  ls.RetentionDays(),
+		"retentionMaxGB": ls.RetentionMaxGB(),
 		"usage":          logStoreUsage(),
+		"estimate":       logStoreDiskEstimate(),
 	}
 }
 

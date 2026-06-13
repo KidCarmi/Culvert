@@ -28,9 +28,9 @@ func TestRuleLogsTraffic(t *testing.T) {
 // counted but no request-log entry is written.
 func TestRecordStats_NoLogEntry(t *testing.T) {
 	isolateLogRing(t)
-	oldLS := globalLogStore
-	globalLogStore = nil
-	t.Cleanup(func() { globalLogStore = oldLS })
+	oldLS := globalLogStore.Load()
+	globalLogStore.Store(nil)
+	t.Cleanup(func() { globalLogStore.Store(oldLS) })
 
 	before := atomic.LoadInt64(&statTotal)
 	recordStats("1.2.3.4", "h.example.com", "OK", "rule", "Allow")
@@ -47,9 +47,9 @@ func TestRecordStats_NoLogEntry(t *testing.T) {
 // enclosing CONNECT already counted).
 func TestRecordRequestLogOnly_NoStatIncrement(t *testing.T) {
 	isolateLogRing(t)
-	oldLS := globalLogStore
-	globalLogStore = nil
-	t.Cleanup(func() { globalLogStore = oldLS })
+	oldLS := globalLogStore.Load()
+	globalLogStore.Store(nil)
+	t.Cleanup(func() { globalLogStore.Store(oldLS) })
 
 	before := atomic.LoadInt64(&statTotal)
 	recordRequestLogOnly("1.2.3.4", "GET", "h.example.com", "OK", "rule", "Allow",
@@ -84,9 +84,9 @@ func TestLevelForStatus_BlockedTab(t *testing.T) {
 // otherwise — and that blocks are logged regardless.
 func TestRecordInspectBlock_URIGatedOnLogFullURI(t *testing.T) {
 	isolateLogRing(t)
-	oldLS := globalLogStore
-	globalLogStore = nil
-	t.Cleanup(func() { globalLogStore = oldLS })
+	oldLS := globalLogStore.Load()
+	globalLogStore.Store(nil)
+	t.Cleanup(func() { globalLogStore.Store(oldLS) })
 
 	recordInspectBlock("1.2.3.4", "FILE_BLOCKED", "exe", "", "h.example.com", "/d/app.exe",
 		&PolicyMatch{Rule: &PolicyRule{Name: "r", LogFullURI: true}})

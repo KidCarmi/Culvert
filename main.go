@@ -815,21 +815,27 @@ func initURLCategories(s *startupState) {
 // retention janitor parented to appLifecycleCtx. Disabled (no-op) when no path
 // is set — the in-memory ring and optional JSONL writer still operate.
 func initLogStore(s *startupState) {
-	path := s.fc.LogStorePath
-	if path == "" {
-		logger.Printf("LogStore: disabled (set log_store_path for queryable history + retention)")
+	// logStoreDir is where the store lives when the admin enables saving from
+	// the GUI (no YAML needed). Default under the data dir; a configured
+	// log_store_path overrides it.
+	logStoreDir = s.fc.LogStorePath
+	if logStoreDir == "" {
+		logStoreDir = filepath.Join(dataDir, "logstore")
+	}
+	// Seed-enable only when log_store_path is set in config (back-compat).
+	// Otherwise the store stays off until the admin enables it from the UI;
+	// LoadAdminSettings (later in startup) restores the GUI-saved enabled state.
+	if s.fc.LogStorePath == "" {
+		logger.Printf("LogStore: off (enable from the admin UI, or set log_store_path)")
 		return
 	}
-	ls, err := openLogStore(path, s.fc.LogRetentionDays, s.fc.LogRetentionMaxGB)
-	if err != nil {
+	if err := enableLogStore(appLifecycleCtx, logStoreDir, s.fc.LogRetentionDays, s.fc.LogRetentionMaxGB); err != nil {
 		// Non-fatal: history is an enhancement over the in-memory ring, so a
 		// store open failure must not stop the proxy from serving traffic.
-		logger.Printf("LogStore: cannot open at %s: %v — history disabled", path, err)
+		logger.Printf("LogStore: cannot open at %s: %v — history disabled", logStoreDir, err)
 		return
 	}
-	globalLogStore = ls
-	startLogStoreRetention(appLifecycleCtx, ls, 5*time.Minute)
-	logger.Printf("LogStore: history at %s (retention: %d days, %.2f GB)", path, s.fc.LogRetentionDays, s.fc.LogRetentionMaxGB)
+	logger.Printf("LogStore: history at %s (retention: %d days, %.2f GB)", logStoreDir, s.fc.LogRetentionDays, s.fc.LogRetentionMaxGB)
 }
 
 // initFileBlocking sets up the file-extension blocker and named file-type profiles.
@@ -1527,8 +1533,8 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 		return nil
 	})
 	reg.Register("log-store-close", shutdownOrderLogStoreClose, func(context.Context) error {
-		if globalLogStore != nil {
-			if err := globalLogStore.Close(); err != nil {
+		if ls := globalLogStore.Load(); ls != nil {
+			if err := ls.Close(); err != nil {
 				logger.Printf("LogStore: close error: %v", err)
 			}
 		}

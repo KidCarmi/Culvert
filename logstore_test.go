@@ -46,6 +46,77 @@ func drainLogStore(t *testing.T, s *logStore, want int) []LogEntry {
 	}
 }
 
+func TestEnableDisablePurgeLogStore(t *testing.T) {
+	isolateLogRing(t)
+	old := globalLogStore.Swap(nil)
+	oldDir := logStoreDir
+	t.Cleanup(func() { disableLogStore(); globalLogStore.Store(old); logStoreDir = oldDir })
+
+	dir := t.TempDir()
+	logStoreDir = dir
+	if err := enableLogStore(context.Background(), dir, 0, 0); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if globalLogStore.Load() == nil {
+		t.Fatal("store should be enabled")
+	}
+	logAdd(LogEntry{TS: time.Now().UnixMilli(), Host: "h.example.com", Status: "OK"})
+	drainLogStore(t, globalLogStore.Load(), 1)
+
+	if err := purgeLogStore(); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if _, total, _ := globalLogStore.Load().Query(0, 0, 0, 100, nil); total != 0 {
+		t.Errorf("after purge total = %d, want 0", total)
+	}
+
+	disableLogStore()
+	if globalLogStore.Load() != nil {
+		t.Error("store should be disabled after disableLogStore")
+	}
+}
+
+func TestApiLogsRetention_EnableDisable(t *testing.T) {
+	old := globalLogStore.Swap(nil)
+	oldDir := logStoreDir
+	logStoreDir = t.TempDir()
+	t.Cleanup(func() { disableLogStore(); globalLogStore.Store(old); logStoreDir = oldDir })
+
+	rec := httptest.NewRecorder()
+	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"enabled":true,"retentionDays":7,"retentionMaxGB":2}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable PUT %d: %s", rec.Code, rec.Body.String())
+	}
+	ls := globalLogStore.Load()
+	if ls == nil {
+		t.Fatal("store should be enabled after PUT enabled:true")
+	}
+	if ls.RetentionDays() != 7 {
+		t.Errorf("RetentionDays = %d, want 7", ls.RetentionDays())
+	}
+
+	rec = httptest.NewRecorder()
+	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"enabled":false}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable PUT %d", rec.Code)
+	}
+	if globalLogStore.Load() != nil {
+		t.Error("store should be disabled after PUT enabled:false")
+	}
+}
+
+func TestLogStoreDiskEstimate(t *testing.T) {
+	est := logStoreDiskEstimate()
+	if v, _ := est["avgEntryBytes"].(int64); v <= 0 {
+		t.Errorf("avgEntryBytes = %v, want > 0", est["avgEntryBytes"])
+	}
+	for _, k := range []string{"bytesPerDay", "bytesPerWeek", "bytesPerMonth", "reqPerMin"} {
+		if _, ok := est[k]; !ok {
+			t.Errorf("estimate missing key %q", k)
+		}
+	}
+}
+
 func TestLogStore_WriteQueryNewestFirst(t *testing.T) {
 	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
 	if err != nil {
@@ -220,9 +291,9 @@ func TestApiLogs_SourceStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	old := globalLogStore
-	globalLogStore = s
-	t.Cleanup(func() { globalLogStore = old; _ = s.Close() })
+	old := globalLogStore.Load()
+	globalLogStore.Store(s)
+	t.Cleanup(func() { globalLogStore.Store(old); _ = s.Close() })
 
 	base := time.Now().UnixMilli()
 	for i := 0; i < 20; i++ {
@@ -262,9 +333,9 @@ func TestApiLogs_SourceStore(t *testing.T) {
 }
 
 func TestApiLogs_SourceStore_Disabled(t *testing.T) {
-	old := globalLogStore
-	globalLogStore = nil
-	t.Cleanup(func() { globalLogStore = old })
+	old := globalLogStore.Load()
+	globalLogStore.Store(nil)
+	t.Cleanup(func() { globalLogStore.Store(old) })
 
 	req := httptest.NewRequest(http.MethodGet, "/api/logs?source=store", http.NoBody)
 	rec := httptest.NewRecorder()
@@ -289,9 +360,9 @@ func TestApiLogsRetention_GetPut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	old := globalLogStore
-	globalLogStore = s
-	t.Cleanup(func() { globalLogStore = old; _ = s.Close() })
+	old := globalLogStore.Load()
+	globalLogStore.Store(s)
+	t.Cleanup(func() { globalLogStore.Store(old); _ = s.Close() })
 
 	// GET reports the current policy.
 	rec := httptest.NewRecorder()
@@ -336,9 +407,9 @@ func TestApiLogsRetention_GetPut(t *testing.T) {
 // before comparing. Without the fix the range filter matched nothing/everything.
 func TestApiLogs_TimeRangeMemory(t *testing.T) {
 	isolateLogRing(t)
-	oldLS := globalLogStore
-	globalLogStore = nil
-	t.Cleanup(func() { globalLogStore = oldLS })
+	oldLS := globalLogStore.Load()
+	globalLogStore.Store(nil)
+	t.Cleanup(func() { globalLogStore.Store(oldLS) })
 
 	mid := time.Now().Unix()
 	add := func(sec int64, host string) {
@@ -374,9 +445,9 @@ func TestApiLogsRetention_ViewerForbidden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	old := globalLogStore
-	globalLogStore = s
-	t.Cleanup(func() { globalLogStore = old; _ = s.Close() })
+	old := globalLogStore.Load()
+	globalLogStore.Store(s)
+	t.Cleanup(func() { globalLogStore.Store(old); _ = s.Close() })
 
 	// No admin role on the context → uiRole defaults to viewer → PUT must 403.
 	rec := httptest.NewRecorder()
@@ -412,9 +483,9 @@ func TestLogStore_AddCloseRace(t *testing.T) {
 }
 
 func TestApiLogsRetention_DisabledConflict(t *testing.T) {
-	old := globalLogStore
-	globalLogStore = nil
-	t.Cleanup(func() { globalLogStore = old })
+	old := globalLogStore.Load()
+	globalLogStore.Store(nil)
+	t.Cleanup(func() { globalLogStore.Store(old) })
 
 	rec := httptest.NewRecorder()
 	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"retentionDays":30}`))

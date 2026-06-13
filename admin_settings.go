@@ -52,6 +52,13 @@ type AdminSettings struct {
 	LogRetentionDays  int     `json:"log_retention_days,omitempty"`
 	LogRetentionMaxGB float64 `json:"log_retention_max_gb,omitempty"`
 
+	// LogStoreEnabledSaved is a separate sentinel: when true the admin has set
+	// the enable state from the GUI and it is authoritative (so a saved "off"
+	// disables even a YAML-seeded store). When false (settings files predating
+	// the GUI toggle) the YAML seed + retention path is honored unchanged.
+	LogStoreEnabledSaved bool `json:"log_store_enabled_saved"`
+	LogStoreEnabled      bool `json:"log_store_enabled"`
+
 	// Session
 	SessionTimeoutHours int `json:"session_timeout_hours,omitempty"`
 
@@ -168,12 +175,22 @@ func applyAdminServices(s *AdminSettings) {
 	if s.SessionTimeoutHours > 0 {
 		SetSessionTTL(time.Duration(s.SessionTimeoutHours) * time.Hour)
 	}
-	if s.LogRetentionSaved {
-		if globalLogStore != nil {
-			globalLogStore.SetRetention(s.LogRetentionDays, s.LogRetentionMaxGB)
+	switch {
+	case s.LogStoreEnabledSaved:
+		// GUI-controlled enable state is authoritative.
+		setLogStoreDesired(s.LogRetentionDays, s.LogRetentionMaxGB)
+		if s.LogStoreEnabled {
+			if err := enableLogStore(resolveLifecycleCtx(), logStoreDir, s.LogRetentionDays, s.LogRetentionMaxGB); err != nil {
+				logger.Printf("WARN AdminSettings: cannot enable history store: %v", err)
+			}
 		} else {
-			logger.Printf("WARN AdminSettings: saved log retention not applied — history store disabled (set log_store_path)")
+			disableLogStore()
 		}
+	case s.LogRetentionSaved && globalLogStore.Load() != nil:
+		// Legacy settings (pre-GUI-toggle): store enabled via YAML, apply saved
+		// retention only — never force-disable.
+		globalLogStore.Load().SetRetention(s.LogRetentionDays, s.LogRetentionMaxGB)
+		setLogStoreDesired(s.LogRetentionDays, s.LogRetentionMaxGB)
 	}
 	applyBlocklistFeeds(s)
 	if s.SaaSFeedURL != "" {
@@ -339,12 +356,11 @@ func SaveAdminSettings() {
 		s.SaaSFeedURL = saasURL
 	}
 
-	// History-store retention
-	if globalLogStore != nil {
-		s.LogRetentionSaved = true
-		s.LogRetentionDays = globalLogStore.RetentionDays()
-		s.LogRetentionMaxGB = globalLogStore.RetentionMaxGB()
-	}
+	// History-store enable state + retention (retention remembered even when off)
+	s.LogStoreEnabledSaved = true
+	s.LogStoreEnabled = globalLogStore.Load() != nil
+	s.LogRetentionSaved = true
+	s.LogRetentionDays, s.LogRetentionMaxGB = getLogStoreDesired()
 
 	// YARA engine settings
 	s.YARASettingsSaved = true
