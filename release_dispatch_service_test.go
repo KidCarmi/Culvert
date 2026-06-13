@@ -1,0 +1,358 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+)
+
+// ─── capture sinks ───────────────────────────────────────────────────────────
+
+type capturedAudit struct {
+	mu      sync.Mutex
+	entries []AuditEntry
+}
+
+func (c *capturedAudit) add(e AuditEntry) {
+	c.mu.Lock()
+	c.entries = append(c.entries, e)
+	c.mu.Unlock()
+}
+
+func (c *capturedAudit) byAction(action string) []AuditEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []AuditEntry
+	for _, e := range c.entries {
+		if e.Action == action {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+type capturedAlerts struct {
+	mu       sync.Mutex
+	events   []string
+	payloads []AlertPayload
+}
+
+func (c *capturedAlerts) fire(event string, p AlertPayload) {
+	c.mu.Lock()
+	c.events = append(c.events, event)
+	c.payloads = append(c.payloads, p)
+	c.mu.Unlock()
+}
+
+func (c *capturedAlerts) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.events)
+}
+
+// newService builds a DispatchService whose transport, audit, alert, and op-id
+// are injected (one shared fake agent for every endpoint key).
+func newService(t *testing.T, cat *Catalog, agent AgentClient) (*DispatchService, *capturedAudit, *capturedAlerts) {
+	t.Helper()
+	svc, err := NewDispatchService(&fakeCatProvider{cat: cat}, DispatchConfig{ProxyRepo: dispatchRepo})
+	if err != nil {
+		t.Fatalf("NewDispatchService: %v", err)
+	}
+	au, al := &capturedAudit{}, &capturedAlerts{}
+	svc.newClient = func(AgentEndpoint) (AgentClient, error) { return agent, nil }
+	svc.newOpID = func() string { return "OP01" }
+	svc.auditSink = au.add
+	svc.alert = al.fire
+	return svc, au, al
+}
+
+var testEP = AgentEndpoint{Key: "agent-1", BaseURL: "http://agent.invalid"}
+
+// ─── single-flight registry: duplicate dispatch rejection ───────────────────
+
+func TestService_DuplicateDispatchRejected(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	// Pre-plan read returns a DIFFERENT known release ⇒ a real OutcomePlan.
+	agent := &fakeAgent{applyOpID: "op-1", waitState: agentStateSucceeded,
+		runningSeq: [][]string{{dispatchRepo + "@" + digB}, {dispatchRepo + "@" + digA}}}
+	svc, au, _ := newService(t, cat, agent)
+
+	// Hold the agent's single-flight (as if a dispatch were mid-op).
+	reg, err := svc.registryFor(testEP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reg.exec.acquire() {
+		t.Fatal("precondition: acquire should succeed")
+	}
+	defer reg.exec.release()
+
+	rep, err := svc.Dispatch(context.Background(), "admin@10.0.0.1", testEP,
+		DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+	if !errors.Is(err, errDispatchInFlight) {
+		t.Fatalf("err = %v; want errDispatchInFlight", err)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("a rejected dispatch must not apply; saw %d", len(agent.applyReqs))
+	}
+	// The rejection is audited as a release.dispatch decision, with no outcome.
+	disp := au.byAction("release.dispatch")
+	if len(disp) != 1 || !strings.Contains(disp[0].Detail, "dispatch_in_flight") {
+		t.Fatalf("want one release.dispatch with dispatch_in_flight; got %+v", disp)
+	}
+	if got := au.byAction("release.dispatch.outcome"); len(got) != 0 {
+		t.Fatalf("rejected dispatch must emit no outcome; got %+v", got)
+	}
+	_ = rep
+}
+
+// ─── resume / re-poll by existing op_id (no fresh apply) ────────────────────
+
+func TestService_ResumeSucceedsWithoutApply(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{waitState: agentStateSucceeded,
+		runningSeq: [][]string{{dispatchRepo + "@" + digA}}} // post-read verifies the target
+	svc, au, _ := newService(t, cat, agent)
+
+	h := ResumeHandle{OpID: "op-prior", ReleaseID: "rel_a", PinnedRef: dispatchRepo + "@" + digA,
+		ImageRef: dispatchRepo + "@" + digA, IdempotencyKey: "rel-rel_a-OP01"}
+	rep, err := svc.Resume(context.Background(), "admin@10.0.0.2", testEP, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Terminal != TerminalSucceeded || !rep.Verified {
+		t.Fatalf("terminal=%s verified=%v; want succeeded/true", rep.Terminal, rep.Verified)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("resume must NOT apply; saw %d", len(agent.applyReqs))
+	}
+	out := au.byAction("release.dispatch.outcome")
+	if len(out) != 1 || !strings.Contains(out[0].Detail, "op_id=op-prior") {
+		t.Fatalf("want one outcome audit carrying op_id=op-prior; got %+v", out)
+	}
+}
+
+func TestService_ResumeVerifyMismatchAlerts(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	// Op succeeded but the running digest is NOT the target ⇒ needs attention.
+	agent := &fakeAgent{waitState: agentStateSucceeded,
+		runningSeq: [][]string{{dispatchRepo + "@" + digB}}}
+	svc, _, al := newService(t, cat, agent)
+
+	h := ResumeHandle{OpID: "op-x", ReleaseID: "rel_a", PinnedRef: dispatchRepo + "@" + digA}
+	rep, _ := svc.Resume(context.Background(), "admin@10.0.0.3", testEP, h)
+	if rep.Terminal != TerminalFailedNeedsAttn {
+		t.Fatalf("terminal=%s; want failed_needs_attn", rep.Terminal)
+	}
+	if al.count() != 1 || al.events[0] != "release_dispatch_attention" {
+		t.Fatalf("want one release_dispatch_attention alert; got %v", al.events)
+	}
+}
+
+func TestService_ResumeRejectedWhenInFlight(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{waitState: agentStateSucceeded, runningSeq: [][]string{{dispatchRepo + "@" + digA}}}
+	svc, _, _ := newService(t, cat, agent)
+	reg, _ := svc.registryFor(testEP)
+	if !reg.exec.acquire() {
+		t.Fatal("acquire should succeed")
+	}
+	defer reg.exec.release()
+
+	_, err := svc.Resume(context.Background(), "admin@10.0.0.4", testEP,
+		ResumeHandle{OpID: "op-y", ReleaseID: "rel_a", PinnedRef: dispatchRepo + "@" + digA})
+	if !errors.Is(err, errDispatchInFlight) {
+		t.Fatalf("err = %v; want errDispatchInFlight", err)
+	}
+}
+
+func TestService_ResumeNeedsOpID(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	svc, _, _ := newService(t, cat, &fakeAgent{})
+	if _, err := svc.Resume(context.Background(), "a", testEP, ResumeHandle{ReleaseID: "rel_a"}); err == nil {
+		t.Fatal("want an error when op_id is empty")
+	}
+}
+
+// ─── refusals audited ───────────────────────────────────────────────────────
+
+func TestService_RefusalAudited(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{runningSeq: [][]string{nil}} // pre-read OK; target is the problem
+	svc, au, _ := newService(t, cat, agent)
+
+	rep, err := svc.Dispatch(context.Background(), "admin@10.0.0.5", testEP,
+		DispatchTarget{ReleaseID: "does-not-exist"}, DefaultDispatchOptions())
+	if err == nil {
+		t.Fatal("want a refusal error")
+	}
+	if rep.Outcome != OutcomeRefused || rep.RefusedKind != RefusedUnknownTarget {
+		t.Fatalf("outcome=%s kind=%s; want refused/unknown_target", rep.Outcome, rep.RefusedKind)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("a refused dispatch must not apply; saw %d", len(agent.applyReqs))
+	}
+	disp := au.byAction("release.dispatch")
+	if len(disp) != 1 || !strings.Contains(disp[0].Detail, "refused=unknown_target") {
+		t.Fatalf("want one release.dispatch carrying refused=unknown_target; got %+v", disp)
+	}
+	if got := au.byAction("release.dispatch.outcome"); len(got) != 0 {
+		t.Fatalf("a pure refusal emits no outcome; got %+v", got)
+	}
+}
+
+func TestService_PreflightReadFailureRefuses(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{runningErrs: []error{errors.New("status down")}}
+	svc, au, al := newService(t, cat, agent)
+
+	_, err := svc.Dispatch(context.Background(), "admin@10.0.0.6", testEP,
+		DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+	if err == nil {
+		t.Fatal("want an error when the preflight read fails")
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("must not apply; saw %d", len(agent.applyReqs))
+	}
+	if d := au.byAction("release.dispatch"); len(d) != 1 || !strings.Contains(d[0].Detail, "preflight_read_failed") {
+		t.Fatalf("want one release.dispatch with preflight_read_failed; got %+v", d)
+	}
+	if al.count() != 0 {
+		t.Fatal("a retryable preflight read failure must not alert")
+	}
+}
+
+// ─── already-current audited ────────────────────────────────────────────────
+
+func TestService_AlreadyCurrentAudited(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	// Pre-read (plan) and the executor's fresh re-check both show the target.
+	agent := &fakeAgent{runningSeq: [][]string{{dispatchRepo + "@" + digA}, {dispatchRepo + "@" + digA}}}
+	svc, au, al := newService(t, cat, agent)
+
+	rep, err := svc.Dispatch(context.Background(), "admin@10.0.0.7", testEP,
+		DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Terminal != TerminalAlreadyCurrent {
+		t.Fatalf("terminal=%s; want already_current", rep.Terminal)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("already-current must not apply; saw %d", len(agent.applyReqs))
+	}
+	if len(au.byAction("release.dispatch")) != 1 || len(au.byAction("release.dispatch.outcome")) != 1 {
+		t.Fatalf("want a dispatch + outcome pair; got %+v", au.entries)
+	}
+	if al.count() != 0 {
+		t.Fatal("already-current must not alert")
+	}
+}
+
+// ─── terminal alert + idempotency ───────────────────────────────────────────
+
+func TestService_NeedsAttnAlertsAndAudits(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	// Op fails and the node is NOT back on the prior image ⇒ failed_needs_attn.
+	// Reads in order: pre-plan, executor anchor (prior digB), post (foreign).
+	agent := &fakeAgent{applyOpID: "op-7", waitState: agentStateFailed,
+		runningSeq: [][]string{
+			{dispatchRepo + "@" + digB},
+			{dispatchRepo + "@" + digB},
+			{dispatchRepo + "@sha256:" + repeat64('d')},
+		}}
+	svc, au, al := newService(t, cat, agent)
+
+	rep, err := svc.Dispatch(context.Background(), "admin@10.0.0.8", testEP,
+		DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Terminal != TerminalFailedNeedsAttn {
+		t.Fatalf("terminal=%s; want failed_needs_attn", rep.Terminal)
+	}
+	if al.count() != 1 || al.events[0] != "release_dispatch_attention" {
+		t.Fatalf("want one release_dispatch_attention alert; got %v", al.events)
+	}
+	if len(au.byAction("release.dispatch.outcome")) != 1 {
+		t.Fatalf("want one outcome audit; got %+v", au.entries)
+	}
+}
+
+func TestService_IdempotencyKeyStableAndHonored(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{applyOpID: "op-k", waitState: agentStateSucceeded,
+		runningSeq: [][]string{{dispatchRepo + "@" + digB}, {dispatchRepo + "@" + digA}}}
+	svc, _, _ := newService(t, cat, agent) // newOpID pinned → OP01
+
+	rep, err := svc.Dispatch(context.Background(), "admin@10.0.0.9", testEP,
+		DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.applyReqs[0].IdempotencyKey != "rel-rel_a-OP01" {
+		t.Fatalf("apply key = %q; want service-generated rel-rel_a-OP01", agent.applyReqs[0].IdempotencyKey)
+	}
+	if rep.IdempotencyKey != "rel-rel_a-OP01" {
+		t.Fatalf("report key = %q; want rel-rel_a-OP01", rep.IdempotencyKey)
+	}
+	if h := rep.ResumeHandle(); h.OpID != "op-k" || h.PinnedRef != dispatchRepo+"@"+digA {
+		t.Fatalf("ResumeHandle = %+v; want op-k + target pinned ref", h)
+	}
+}
+
+// ─── real transport wiring (default httpAgentClient, end-to-end) ─────────────
+
+func TestService_RealTransportEndToEnd(t *testing.T) {
+	var applied atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/upgrades/apply":
+			applied.Store(true)
+			_, _ = w.Write([]byte(`{"op_id":"op-real"}`))
+		case r.URL.Path == "/v1/operations/op-real":
+			_, _ = w.Write([]byte(`{"state":"succeeded"}`))
+		case r.URL.Path == "/v1/status":
+			dg := dispatchRepo + "@" + digB // prior, until the upgrade applies
+			if applied.Load() {
+				dg = dispatchRepo + "@" + digA // now on target ⇒ verify passes
+			}
+			_, _ = w.Write([]byte(`{"running_image":{"repo_digests":["` + dg + `"]}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	cat := mustLoad(t, validSource())
+	svc, err := NewDispatchService(&fakeCatProvider{cat: cat}, DispatchConfig{ProxyRepo: dispatchRepo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.newOpID = func() string { return "OP01" }
+	svc.auditSink = func(AuditEntry) {}       // isolate from the global ring
+	svc.alert = func(string, AlertPayload) {} // isolate from global webhooks
+	// newClient is NOT overridden ⇒ exercises the real httpAgentClient transport.
+
+	ep := AgentEndpoint{Key: "agent-real", BaseURL: ts.URL, Client: ts.Client()}
+	rep, err := svc.Dispatch(context.Background(), "admin@127.0.0.1", ep,
+		DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Terminal != TerminalSucceeded || !rep.Verified {
+		t.Fatalf("terminal=%s verified=%v; want succeeded/true (real transport)", rep.Terminal, rep.Verified)
+	}
+	if rep.OpID != "op-real" {
+		t.Fatalf("op_id = %q; want op-real", rep.OpID)
+	}
+}
+
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+func repeat64(b byte) string { return strings.Repeat(string(b), 64) }

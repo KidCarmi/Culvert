@@ -266,6 +266,56 @@ func (e *DispatchExecutor) watchContext(ctx context.Context) (context.Context, c
 	return context.WithTimeout(ctx, e.maxWatch)
 }
 
+// Resume re-polls an EXISTING agent op to a terminal state and classifies it by
+// verify-by-digest — WITHOUT a fresh apply. It recovers a dispatch whose CP-side
+// watch was interrupted (CP restart / watch timeout): the agent op kept running,
+// so re-polling the same op_id is safe and never starts a second upgrade. It is
+// single-flight per agent (shares the executor mutex), so a resume cannot race a
+// live dispatch on the same agent.
+//
+// Resume does NOT have the pre-dispatch anchor (a fresh CP process may not hold
+// it), so it never asserts FAILED_ROLLED_BACK: anything other than a verified
+// success is FAILED_NEEDS_ATTN (the safe, manual-attention classification). plan
+// carries the target identity — only PinnedRef is needed for verify-by-digest.
+func (e *DispatchExecutor) Resume(ctx context.Context, plan *DispatchPlan, opID string) (*DispatchResult, error) {
+	if plan == nil {
+		return nil, errors.New("dispatch: nil plan")
+	}
+	if opID == "" {
+		return nil, errors.New("dispatch: resume needs an op_id")
+	}
+	if !e.acquire() {
+		return nil, errDispatchInFlight
+	}
+	defer e.release()
+
+	res := &DispatchResult{OpID: opID, IdempotencyKey: plan.Apply.IdempotencyKey}
+
+	watchCtx, cancel := e.watchContext(ctx)
+	defer cancel()
+	state, werr := e.client.WaitOp(watchCtx, opID)
+	if werr != nil {
+		res.Terminal, res.Detail = TerminalFailedNeedsAttn, "watch_timeout: "+werr.Error()
+		e.emitOutcome(plan, res)
+		return res, nil
+	}
+
+	post, perr := e.client.RunningDigests(ctx)
+	if perr != nil {
+		res.Terminal, res.Detail = TerminalFailedNeedsAttn, "post_verify_read_failed: "+perr.Error()
+		e.emitOutcome(plan, res)
+		return res, nil
+	}
+	res.Verified = e.verifyRunning(post, plan.PinnedRef)
+	if state == agentStateSucceeded && res.Verified {
+		res.Terminal = TerminalSucceeded
+	} else {
+		res.Terminal, res.Detail = TerminalFailedNeedsAttn, "resume_unverified (state="+state+")"
+	}
+	e.emitOutcome(plan, res)
+	return res, nil
+}
+
 // classifyTerminal re-reads the running digests (the verify-by-digest gate) and
 // sets res.Terminal/Detail/Verified. A failed re-read is FAILED_NEEDS_ATTN —
 // NOT inferred from nil/empty digests (which would falsely read as a mismatch or
