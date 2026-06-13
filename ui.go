@@ -82,6 +82,7 @@ func newAdminUIServer(port int) *http.Server { //nolint:funlen // route registra
 	registerCDRRoutes(mux)           // cdr_ui.go         —  7 routes
 	registerObservabilityRoutes(mux) // diagnostics.go    —  2 routes (incl. /healthz)
 	registerGovernanceRoutes(mux)    // ui_governance.go  —  1 route  (C3, admin-only)
+	registerReleaseRoutes(mux)       // release_api.go    —  5 routes (P1.6d-0, no GUI)
 
 	return &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
