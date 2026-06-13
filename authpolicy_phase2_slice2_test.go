@@ -243,6 +243,41 @@ func TestP2S2_RuntimeInert_NoCredsCRStill407(t *testing.T) {
 	}
 }
 
+// A higher-priority CR rule must NOT shadow a lower-priority Exempt rule on the
+// runtime no-credentials path (PR #453 P1). Before CR resolution existed, the
+// Exempt@2 rule waived the challenge; that must stay true until CR is wired in
+// Slice 3. resolveExemptOnlyOutcome (consumed by resolveNoCredAuthOutcome →
+// proxy.go) skips CR and keeps scanning.
+func TestP2S2_RuntimeInert_CRDoesNotShadowExempt(t *testing.T) {
+	setupAuthGateTest(t)
+	const host = "p2s2-shadow.example.test"
+	cidr := []string{"127.0.0.0/8"}
+	cr := validCRRule()
+	cr.Name, cr.Priority, cr.DestFQDN = "cr-1", 1, host
+	cr.SubjectMatch = &SubjectMatch{SchemaVersion: 1, All: []SubjectPredicate{{Type: subjectPredicateCIDR, Values: cidr}}}
+	ex := validExemptRule()
+	ex.Name, ex.Priority, ex.DestFQDN = "exempt-2", 2, host
+	ex.SubjectMatch = &SubjectMatch{SchemaVersion: 1, All: []SubjectPredicate{{Type: subjectPredicateCIDR, Values: cidr}}}
+	policyStore.Add(cr)
+	policyStore.Add(ex)
+
+	// Generalized resolver stops at CR@1 (correct for simulator/diagnostics).
+	if d := resolveAuthOutcomeFrom(policyStore.List(), RequestContext{ClientIP: "127.0.0.1", Host: host, Protocol: "http"}); d.Outcome != OutcomeCredentialRequired {
+		t.Fatalf("generalized resolver should stop at CR@1, got %q", d.Outcome)
+	}
+	// Runtime (Exempt-only) view skips CR@1 and resolves the Exempt@2 waiver.
+	if d := resolveExemptOnlyOutcome(policyStore.List(), RequestContext{ClientIP: "127.0.0.1", Host: host, Protocol: "http"}); d.Outcome != OutcomeExempt || d.Rule.Name != "exempt-2" {
+		t.Fatalf("runtime path must still resolve the Exempt@2 waiver (no CR shadowing), got %q/%v", d.Outcome, d.Rule)
+	}
+	// End-to-end: the no-creds request is WAIVED (proceeds to Stage-2), not 407 —
+	// byte-identical to pre-Slice-2 behavior. Default-deny then applies.
+	w := httptest.NewRecorder()
+	handleRequest(w, makeRequest("http://"+host+"/", nil))
+	if w.Code == http.StatusProxyAuthRequired {
+		t.Fatal("CR must not shadow the Exempt rule — the request must be waived, not 407'd")
+	}
+}
+
 // ── Simulator: CR shown as a Stage-1 challenge, separate from Stage-2 ─────────
 
 func TestP2S2_Simulator_ShowsCredentialRequired(t *testing.T) {

@@ -251,7 +251,17 @@ func resolveNoCredAuthOutcome(r *http.Request, clientIP string) AuthDecision {
 	if r.Header.Get("Proxy-Authorization") != "" {
 		return AuthDecision{Outcome: OutcomeDefault}
 	}
-	return resolveAuthOutcome(authRequestContext(r, clientIP))
+	// RUNTIME PATH — Exempt-only until CredentialRequired is wired onto the hot
+	// path (Phase 2 Slice 3). proxy.go acts only on OutcomeExempt, so if the
+	// generalized resolver stopped at a higher-priority CR rule it would (a)
+	// never grant the CR exemption proxy.go doesn't understand and (b) SHADOW a
+	// lower-priority Exempt rule that would otherwise have waived the challenge —
+	// a runtime behavior change. The Exempt-only resolution skips CR rules and
+	// keeps scanning, so a CR rule can neither grant nor suppress an exemption;
+	// runtime behavior is byte-identical to before CR resolution existed. The
+	// generalized resolveAuthOutcome(From) (which returns CR) is consumed only by
+	// the simulator/diagnostics, never by proxy.go in this slice.
+	return resolveExemptOnlyOutcome(policyStore.List(), authRequestContext(r, clientIP))
 }
 
 // ─── Kill switch (§1.11) — read-once accessor only ──────────────────────────
@@ -408,6 +418,25 @@ func resolveAuthOutcome(ctx RequestContext) AuthDecision {
 // authentication. The kill-switch read is the one piece of global state this
 // otherwise-pure core consults.
 func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision {
+	return resolveAuthOutcomeCore(rules, ctx, false /* exemptOnly */)
+}
+
+// resolveExemptOnlyOutcome is the RUNTIME resolution consumed (via
+// resolveNoCredAuthOutcome) by proxy.go. It considers only Exempt outcomes:
+// CredentialRequired (and any future outcome) is skipped so the scan continues
+// to lower-priority Exempt rules. This keeps the no-credentials hot path
+// byte-identical to before CR resolution existed — a persisted CR rule can
+// neither grant an exemption nor shadow one. CR is wired onto the hot path in
+// Slice 3; until then proxy.go remains Exempt-only.
+func resolveExemptOnlyOutcome(rules []PolicyRule, ctx RequestContext) AuthDecision {
+	return resolveAuthOutcomeCore(rules, ctx, true /* exemptOnly */)
+}
+
+// resolveAuthOutcomeCore is the shared resolution loop. When exemptOnly is true,
+// non-Exempt outcomes are skipped (the scan continues) rather than returned, so
+// a higher-priority CR rule does not stop the scan or shadow a lower-priority
+// Exempt rule. The kill switch always disables Exempt only.
+func resolveAuthOutcomeCore(rules []PolicyRule, ctx RequestContext, exemptOnly bool) AuthDecision {
 	// Evaluate in priority order. Sort a copy so the decision is deterministic
 	// regardless of the caller's slice ordering (policyStore.List() is already
 	// sorted, but the contract must not depend on that).
@@ -420,6 +449,11 @@ func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision
 		rule := &ordered[i]
 		outcome, ok := authRuleMatches(rule, ctx)
 		if !ok {
+			continue
+		}
+		// Runtime (Exempt-only) view skips CR/other outcomes and keeps scanning
+		// so they cannot shadow a lower-priority Exempt rule.
+		if exemptOnly && outcome != OutcomeExempt {
 			continue
 		}
 		// Kill switch disables Exempt only: suppress a matching Exempt rule and
