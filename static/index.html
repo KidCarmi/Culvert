@@ -667,6 +667,12 @@ tr.dragging  { opacity: .4; }
 
     <!-- ── LIVE FEED ──────────────────────────────────────────────────────── -->
     <div class="view" id="view-livefeed">
+      <div class="filter-bar" style="gap:6px">
+        <button class="btn sm log-tab active" data-click="setLogTab" data-arg="">All</button>
+        <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="INFO">Allowed</button>
+        <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="WARN">Blocked / Threats</button>
+        <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="ERROR">Auth &amp; Errors</button>
+      </div>
       <div class="filter-bar">
         <input type="text" class="input wide" id="log-filter" placeholder="Filter by host or IP…" data-input="applyLogFilter">
         <input type="text" class="input" style="width:160px" id="log-identity" placeholder="Filter by user…" data-input="applyLogFilter">
@@ -697,14 +703,53 @@ tr.dragging  { opacity: .4; }
           <option value="DELETE">DELETE</option>
         </select>
         <button class="btn ghost sm" data-click="clearFilter">Clear</button>
-        <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer"
-               title="Query the persistent JSONL request log on disk (newest 20 000 entries) instead of the in-memory ring buffer.">
-          <input type="checkbox" id="log-source-file" data-change="applyLogFilter"> Persistent log
-        </label>
+        <select class="select" id="log-source" data-change="onLogSourceChange"
+                title="Live = in-memory tail (last 5 000). Persistent file = JSONL on disk. History = retention store: deep pagination, survives restart.">
+          <option value="live">Live (tail)</option>
+          <option value="file">Persistent file</option>
+          <option value="store">History (retention)</option>
+        </select>
         <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer;margin-left:auto">
           <input type="checkbox" id="auto-scroll" checked> Auto-scroll
         </label>
       </div>
+
+      <!-- History controls — time range + pagination (shown only for History source) -->
+      <div class="filter-bar" id="log-history-controls" style="display:none">
+        <label style="font-size:.78rem;color:var(--muted)">From
+          <input type="datetime-local" class="input" id="log-from" style="width:200px">
+        </label>
+        <label style="font-size:.78rem;color:var(--muted)">To
+          <input type="datetime-local" class="input" id="log-to" style="width:200px">
+        </label>
+        <button class="btn sm" data-click="historyApply">Apply range</button>
+        <div style="display:flex;align-items:center;gap:8px;margin-left:auto">
+          <button class="btn ghost sm" id="log-prev" data-click="historyPage" data-arg="prev">‹ Newer</button>
+          <span class="topbar-meta" id="log-page-label">—</span>
+          <button class="btn ghost sm" id="log-next" data-click="historyPage" data-arg="next">Older ›</button>
+        </div>
+      </div>
+
+      <!-- Retention &amp; usage panel (history store) -->
+      <details class="panel" id="log-retention-panel" style="display:none;margin-bottom:14px">
+        <summary style="cursor:pointer;font-size:.9rem;font-weight:600;padding:12px 16px">🗄 History Retention &amp; Usage</summary>
+        <div style="padding:0 16px 16px">
+          <div id="log-retention-usage" style="font-size:.82rem;color:var(--muted);margin-bottom:12px">Loading…</div>
+          <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end">
+            <div>
+              <label class="form-label">Keep for (days) <span style="color:var(--muted);font-weight:400">0 = no age limit</span></label>
+              <input type="number" min="0" max="3650" class="input" id="ret-days" style="width:130px">
+            </div>
+            <div>
+              <label class="form-label">Max size (GB) <span style="color:var(--muted);font-weight:400">0 = no size limit</span></label>
+              <input type="number" min="0" max="10000" step="0.1" class="input" id="ret-gb" style="width:130px">
+            </div>
+            <button class="btn" data-click="saveRetention">Save Retention</button>
+          </div>
+          <div style="font-size:.72rem;color:var(--muted);margin-top:8px">Age changes apply to newly logged requests; the size cap prunes oldest entries on the next sweep.</div>
+        </div>
+      </details>
+
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">Live Request Log</span>
@@ -2195,6 +2240,12 @@ Firefox (all platforms):
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Skip upstream TLS certificate verification for this rule. Use only for internal sites with self-signed certs.">
                 <input type="checkbox" id="pol-tls-skip"> <span>Skip TLS Verify <span style="color:#f59e0b;font-weight:700">⚠</span></span>
               </label>
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Log the full request URL (path only, no query string) for traffic matching this rule. For HTTPS the path is only visible when SSL Action is Inspect — otherwise only the host is logged.">
+                <input type="checkbox" id="pol-log-uri"> <span>Log full URL</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Write a log entry for allowed traffic matching this rule. Turn off for high-volume trusted rules to cut log volume — the request is still counted in stats/dashboards. Blocks and threats are always logged.">
+                <input type="checkbox" id="pol-log-traffic" checked> <span>Log traffic</span>
+              </label>
             </div>
           </div>
 
@@ -3580,6 +3631,10 @@ document.addEventListener('click', e => {
     case 'clearFilter':       clearFilter(); break;
     case 'exportLogs':        exportLogs(arg); break;
     case 'applyLogFilter':    applyLogFilter(); break;
+    case 'historyApply':      historyApply(); break;
+    case 'historyPage':       historyPage(arg); break;
+    case 'saveRetention':     saveRetention(); break;
+    case 'setLogTab':         setLogTab(arg || ''); break;
 
     // ── Blocklist ──
     case 'exportBlocklist':   exportBlocklist(); break;
@@ -3817,6 +3872,7 @@ document.addEventListener('change', e => {
   if (!el) return;
   switch (el.dataset.change) {
     case 'applyLogFilter':    applyLogFilter(); break;
+    case 'onLogSourceChange': onLogSourceChange(); break;
     case 'importBlocklist':   importBlocklist(el); break;
     case 'loadXMLFile':       loadXMLFile(e); break;
     case 'syncSAMLMetadataSourceChoice': syncSAMLMetadataSourceChoice(); break;
@@ -4968,29 +5024,132 @@ function rowHTML(e) {
     <td style="font-family:monospace">${escHtml(e.ip)}</td>
     ${identityCell}
     <td><code style="font-size:.78rem">${escHtml(e.method)}</code></td>
-    <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}</td>
+    <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}${e.uri ? `<div style="font-size:.7rem;color:var(--accent2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px" title="${escHtml(e.uri)}">${escHtml(e.uri)}</div>` : ''}</td>
     <td>${badgeHTML(e.status)}</td>
     <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}">${escHtml(e.ruleMatched||'')}</td>
     <td>${levelBadge(e.level)}</td>
   </tr>`;
 }
 
+// Log source: 'live' (in-memory ring), 'file' (JSONL), 'store' (history).
+let logSource = 'live';
+const LOG_HIST_LIMIT = 200;     // page size for deep history paging
+let logHistOffset = 0;          // current page offset into the history store
+let logHistTotal  = 0;          // total matches in the active window
+
+function logFilterParams() {
+  const params = [];
+  if (logFilter)         params.push('filter='   + encodeURIComponent(logFilter));
+  if (logIdentityFilter) params.push('identity=' + encodeURIComponent(logIdentityFilter));
+  if (logStatusFilter)   params.push('status='   + logStatusFilter);
+  if (logLevelFilter)    params.push('level='    + logLevelFilter);
+  if (logMethodFilter)   params.push('method='   + logMethodFilter);
+  return params;
+}
+
+// dtToUnix converts a datetime-local input value (local time) to Unix seconds.
+function dtToUnix(id) {
+  const v = document.getElementById(id).value;
+  if (!v) return 0;
+  const t = new Date(v).getTime();
+  return isNaN(t) ? 0 : Math.floor(t / 1000);
+}
+
 async function fetchLogs() {
   try {
+    if (logSource === 'store') { await fetchHistory(); return; }
     let url = '/api/logs';
-    const params = [];
-    if (logFilter)         params.push('filter='   + encodeURIComponent(logFilter));
-    if (logIdentityFilter) params.push('identity=' + encodeURIComponent(logIdentityFilter));
-    if (logStatusFilter)   params.push('status='   + logStatusFilter);
-    if (logLevelFilter)    params.push('level='    + logLevelFilter);
-    if (logMethodFilter)   params.push('method='   + logMethodFilter);
-    const srcEl = document.getElementById('log-source-file');
-    if (srcEl && srcEl.checked) params.push('source=file');
+    const params = logFilterParams();
+    if (logSource === 'file') params.push('source=file');
     if (params.length) url += '?' + params.join('&');
     const d = await api(url);
     logEntries = d.logs || [];
     renderLogs();
   } catch(e) { console.error(e); }
+}
+
+// fetchHistory queries the retention store with the active time window +
+// offset/limit so the admin can page deep into history (survives restart).
+async function fetchHistory() {
+  const params = logFilterParams();
+  params.push('source=store');
+  params.push('limit=' + LOG_HIST_LIMIT);
+  params.push('offset=' + logHistOffset);
+  const from = dtToUnix('log-from'), to = dtToUnix('log-to');
+  if (from) params.push('from=' + from);
+  if (to)   params.push('to='   + to);
+  try {
+    const d = await api('/api/logs?' + params.join('&'));
+    logEntries = d.logs || [];
+    logHistTotal = d.total || 0;
+    renderLogs();
+    updateHistoryPager();
+  } catch(e) { console.error(e); }
+}
+
+function updateHistoryPager() {
+  const label = document.getElementById('log-page-label');
+  if (!label) return;
+  const start = logHistTotal === 0 ? 0 : logHistOffset + 1;
+  const end   = Math.min(logHistOffset + LOG_HIST_LIMIT, logHistTotal);
+  label.textContent = `${start}–${end} of ${logHistTotal}`;
+  document.getElementById('log-prev').disabled = logHistOffset === 0;
+  document.getElementById('log-next').disabled = end >= logHistTotal;
+}
+
+function onLogSourceChange() {
+  logSource = document.getElementById('log-source').value;
+  logHistOffset = 0;
+  const isStore = logSource === 'store';
+  document.getElementById('log-history-controls').style.display = isStore ? '' : 'none';
+  document.getElementById('log-retention-panel').style.display  = isStore ? '' : 'none';
+  if (isStore) loadRetention();
+  fetchLogs();
+}
+
+function historyApply() { logHistOffset = 0; fetchHistory(); }
+
+function historyPage(dir) {
+  if (dir === 'next') {
+    if (logHistOffset + LOG_HIST_LIMIT >= logHistTotal) return; // already on last page
+    logHistOffset += LOG_HIST_LIMIT;
+  } else {
+    logHistOffset = Math.max(0, logHistOffset - LOG_HIST_LIMIT);
+  }
+  fetchHistory();
+}
+
+async function loadRetention() {
+  try {
+    const d = await api('/api/logs/retention');
+    const u = d.usage || {};
+    const usageEl = document.getElementById('log-retention-usage');
+    if (!d.enabled) {
+      usageEl.innerHTML = '⚠ History store disabled. Set <code>log_store_path</code> to enable persistent history + retention.';
+    } else {
+      const mb = ((u.bytes || 0) / (1024*1024)).toFixed(1);
+      const oldest = u.oldestMs ? new Date(u.oldestMs).toLocaleString() : '—';
+      usageEl.innerHTML = `Stored: <b>${fmt(u.count || 0)}</b>${u.capped ? '+' : ''} entries · <b>${mb} MB</b> · oldest: ${oldest}` +
+        (u.dropped ? ` · <span class="text-red">${fmt(u.dropped)} dropped</span>` : '') +
+        (u.pruned ? ` · ${fmt(u.pruned)} pruned` : '');
+    }
+    document.getElementById('ret-days').value = d.retentionDays || 0;
+    document.getElementById('ret-gb').value   = d.retentionMaxGB || 0;
+  } catch(e) { console.error(e); }
+}
+
+async function saveRetention() {
+  const days = parseInt(document.getElementById('ret-days').value, 10) || 0;
+  const gb   = parseFloat(document.getElementById('ret-gb').value) || 0;
+  try {
+    await api('/api/logs/retention', {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({retentionDays: days, retentionMaxGB: gb}),
+    });
+    toast('Retention updated', 'success');
+    loadRetention();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
 function renderLogs() {
@@ -5008,12 +5167,35 @@ function renderLogs() {
   if (document.getElementById('auto-scroll').checked) sc.scrollTop = 0;
 }
 
+// syncLogTabs highlights the tab button matching the given level so the tab
+// row, the level dropdown, and clear-filter all stay visually consistent.
+function syncLogTabs(level) {
+  document.querySelectorAll('.log-tab').forEach(b => {
+    const on = (b.dataset.arg || '') === (level || '');
+    b.classList.toggle('active', on);
+    b.classList.toggle('ghost', !on);
+  });
+}
+
+// setLogTab is the PAN-OS-style log-type quick filter. Tabs map to the request
+// LEVEL (INFO=allowed, WARN=blocked/threats, ERROR=auth/errors), which the
+// /api/logs filter supports for the live, file, and history sources alike.
+function setLogTab(level) {
+  logLevelFilter = level;
+  const sel = document.getElementById('log-level');
+  if (sel) sel.value = level;
+  syncLogTabs(level);
+  logHistOffset = 0;
+  fetchLogs();
+}
+
 function applyLogFilter() {
   logFilter         = document.getElementById('log-filter').value;
   logIdentityFilter = document.getElementById('log-identity').value;
   logStatusFilter   = document.getElementById('log-status').value;
   logLevelFilter    = document.getElementById('log-level').value;
   logMethodFilter   = document.getElementById('log-method').value;
+  syncLogTabs(logLevelFilter); // keep tabs in sync if the level dropdown was used
   fetchLogs();
 }
 
@@ -5024,6 +5206,7 @@ function clearFilter() {
   document.getElementById('log-level').value    = '';
   document.getElementById('log-method').value   = '';
   logFilter = ''; logIdentityFilter = ''; logStatusFilter = ''; logLevelFilter = ''; logMethodFilter = '';
+  syncLogTabs(''); // reset the tab row to "All"
   fetchLogs();
 }
 
@@ -6131,6 +6314,8 @@ function clonePolicy(pri) {
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
+  document.getElementById('pol-log-uri').checked = !!r.logFullUri;
+  document.getElementById('pol-log-traffic').checked = r.logTraffic !== false;
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
   loadPolicyProviderOptions().then(() => {
@@ -7680,6 +7865,8 @@ function editPolicy(priority) {
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
+  document.getElementById('pol-log-uri').checked = !!r.logFullUri;
+  document.getElementById('pol-log-traffic').checked = r.logTraffic !== false;
   // Group chip picker
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
@@ -7713,6 +7900,8 @@ function clearPolicyForm() {
   document.getElementById('pol-file-filter').checked = false;
   document.getElementById('pol-file-profile').value  = '';
   document.getElementById('pol-tls-skip').checked    = false;
+  document.getElementById('pol-log-uri').checked     = false;
+  document.getElementById('pol-log-traffic').checked = true;
   document.getElementById('pol-src-auth').value      = '';
   clearGroupSelection();
   _selectedCountries = [];
@@ -7758,6 +7947,8 @@ async function submitPolicyRule() {
     fileFiltering:  document.getElementById('pol-file-filter').checked || (document.getElementById('pol-file-profile').value !== ''),
     fileProfile:    document.getElementById('pol-file-profile').value || '',
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
+    logFullUri:     document.getElementById('pol-log-uri').checked,
+    logTraffic:     document.getElementById('pol-log-traffic').checked,
     schedule:       getScheduleFromForm(),
   };
   try {

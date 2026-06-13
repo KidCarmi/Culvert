@@ -178,6 +178,7 @@ func main() {
 	initAuth(s)
 	initSession(s)
 	initObservability(s)
+	initLogStore(s)
 	initGeoIP(s)
 	initUIAccessPolicy(s)
 	initPAC(s)
@@ -809,6 +810,28 @@ func initURLCategories(s *startupState) {
 	}
 }
 
+// initLogStore opens the Badger-backed request-log history store when a path is
+// configured, wires it as the process-wide globalLogStore, and starts the size
+// retention janitor parented to appLifecycleCtx. Disabled (no-op) when no path
+// is set — the in-memory ring and optional JSONL writer still operate.
+func initLogStore(s *startupState) {
+	path := s.fc.LogStorePath
+	if path == "" {
+		logger.Printf("LogStore: disabled (set log_store_path for queryable history + retention)")
+		return
+	}
+	ls, err := openLogStore(path, s.fc.LogRetentionDays, s.fc.LogRetentionMaxGB)
+	if err != nil {
+		// Non-fatal: history is an enhancement over the in-memory ring, so a
+		// store open failure must not stop the proxy from serving traffic.
+		logger.Printf("LogStore: cannot open at %s: %v — history disabled", path, err)
+		return
+	}
+	globalLogStore = ls
+	startLogStoreRetention(appLifecycleCtx, ls, 5*time.Minute)
+	logger.Printf("LogStore: history at %s (retention: %d days, %.2f GB)", path, s.fc.LogRetentionDays, s.fc.LogRetentionMaxGB)
+}
+
 // initFileBlocking sets up the file-extension blocker and named file-type profiles.
 // initFileBlocking is the PR3 follow-up pilot shim: resolve the
 // file-blocking slice of FileConfig and hand it to the domain loader.
@@ -1352,6 +1375,7 @@ const (
 	shutdownOrderTunnelDrain         = 100
 	shutdownOrderSyslogClose         = 110
 	shutdownOrderCommunityDBClose    = 120
+	shutdownOrderLogStoreClose       = 125
 	shutdownOrderRequestLogClose     = 130
 	shutdownOrderAuditLogClose       = 135
 	shutdownOrderLogCloser           = 140
@@ -1498,6 +1522,14 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 		if communityDB != nil {
 			if err := communityDB.Close(); err != nil {
 				logger.Printf("CatFeedDB: close error: %v", err)
+			}
+		}
+		return nil
+	})
+	reg.Register("log-store-close", shutdownOrderLogStoreClose, func(context.Context) error {
+		if globalLogStore != nil {
+			if err := globalLogStore.Close(); err != nil {
+				logger.Printf("LogStore: close error: %v", err)
 			}
 		}
 		return nil

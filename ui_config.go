@@ -92,6 +92,7 @@ func apiDashboardHealth(w http.ResponseWriter, r *http.Request) {
 		"numGC":         mem.NumGC,
 		"sseClients":    hub.ClientCount(),
 		"blocklistSize": bl.Count(),
+		"logStore":      logStoreHealth(),
 	})
 }
 
@@ -172,73 +173,42 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
+	// source=store queries the Badger-backed history store (deep pagination
+	// over retained history that survives restart). Handled separately because
+	// it pushes the time range + offset/limit down into the store rather than
+	// loading every entry into memory.
+	if r.URL.Query().Get("source") == "store" {
+		apiLogsServeStore(w, r)
+		return
+	}
 	all, ok := apiLogsSource(w, r)
 	if !ok {
 		return
 	}
-	filterHost := strings.ToLower(r.URL.Query().Get("filter"))
-	filterStatus := strings.ToUpper(r.URL.Query().Get("status"))
-	filterLevel := strings.ToUpper(r.URL.Query().Get("level"))
-	filterMethod := strings.ToUpper(r.URL.Query().Get("method"))
-	filterIdentity := strings.ToLower(r.URL.Query().Get("identity"))
-
-	// Date range filtering (Finding 6.3).
-	fromTS, fromErr := parseTimestampParam(r.URL.Query().Get("from"))
-	toTS, toErr := parseTimestampParam(r.URL.Query().Get("to"))
-	if fromErr != nil {
-		http.Error(w, "invalid 'from' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
+	q := r.URL.Query()
+	fromMs, toMs, offsetVal, limitVal, errMsg := parseLogQueryWindow(q)
+	if errMsg != "" {
+		http.Error(w, errMsg, http.StatusBadRequest)
 		return
 	}
-	if toErr != nil {
-		http.Error(w, "invalid 'to' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
-		return
-	}
+	pred := buildLogFilterPredicate(q)
 
-	// Pagination parameters (Finding 6.1). The limit is clamped so one query
-	// cannot demand an unbounded response (CWE-770); offset pagination still
-	// reaches every entry.
-	const apiLogsMaxLimit = 5000
-	limitVal := 1000
-	if lq := r.URL.Query().Get("limit"); lq != "" {
-		if v, err := strconv.Atoi(lq); err == nil && v > 0 {
-			limitVal = v
-		}
-	}
-	if limitVal > apiLogsMaxLimit {
-		limitVal = apiLogsMaxLimit
-	}
-	offsetVal := 0
-	if oq := r.URL.Query().Get("offset"); oq != "" {
-		if v, err := strconv.Atoi(oq); err == nil && v >= 0 {
-			offsetVal = v
-		}
-	}
-
+	// Index-based range + pointer to avoid copying each LogEntry (~320 bytes)
+	// per iteration. all[:0:0] has cap 0 so the first append reallocates — the
+	// shared (cached) backing array is never mutated.
 	filtered := all[:0:0]
-	for _, e := range all {
-		if fromTS != 0 && e.TS < fromTS {
+	for i := range all {
+		e := &all[i]
+		if fromMs != 0 && e.TS < fromMs {
 			continue
 		}
-		if toTS != 0 && e.TS > toTS {
+		if toMs != 0 && e.TS > toMs {
 			continue
 		}
-		if filterHost != "" && !strings.Contains(strings.ToLower(e.Host), filterHost) &&
-			!strings.Contains(strings.ToLower(e.IP), filterHost) {
+		if !pred(e) {
 			continue
 		}
-		if filterStatus != "" && e.Status != filterStatus {
-			continue
-		}
-		if filterLevel != "" && e.Level != filterLevel {
-			continue
-		}
-		if filterMethod != "" && e.Method != filterMethod {
-			continue
-		}
-		if filterIdentity != "" && !strings.Contains(strings.ToLower(e.Identity), filterIdentity) {
-			continue
-		}
-		filtered = append(filtered, e)
+		filtered = append(filtered, *e)
 	}
 	total := len(filtered)
 	// Apply offset/limit pagination.
@@ -252,6 +222,159 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		filtered = filtered[offsetVal:end]
 	}
 	jsonOK(w, map[string]any{"logs": filtered, "total": total})
+}
+
+// apiLogsMaxLimit clamps a single /api/logs page so one query cannot demand an
+// unbounded response (CWE-770); offset pagination still reaches every entry.
+const apiLogsMaxLimit = 5000
+
+// buildLogFilterPredicate returns a predicate matching the host/IP, status,
+// level, method, and identity query params. Shared by the in-memory and history
+// query paths so the filter semantics stay identical.
+func buildLogFilterPredicate(q url.Values) func(*LogEntry) bool {
+	filterHost := strings.ToLower(q.Get("filter"))
+	filterStatus := strings.ToUpper(q.Get("status"))
+	filterLevel := strings.ToUpper(q.Get("level"))
+	filterMethod := strings.ToUpper(q.Get("method"))
+	filterIdentity := strings.ToLower(q.Get("identity"))
+	return func(e *LogEntry) bool {
+		if filterHost != "" && !strings.Contains(strings.ToLower(e.Host), filterHost) &&
+			!strings.Contains(strings.ToLower(e.IP), filterHost) {
+			return false
+		}
+		if filterStatus != "" && e.Status != filterStatus {
+			return false
+		}
+		if filterLevel != "" && e.Level != filterLevel {
+			return false
+		}
+		if filterMethod != "" && e.Method != filterMethod {
+			return false
+		}
+		if filterIdentity != "" && !strings.Contains(strings.ToLower(e.Identity), filterIdentity) {
+			return false
+		}
+		return true
+	}
+}
+
+// parseLogQueryWindow parses from/to (Unix seconds → millis, per
+// parseTimestampParam; LogEntry.TS is millis), offset, and a clamped limit.
+// Returns a non-empty errMsg (for a 400) when from/to are malformed.
+func parseLogQueryWindow(q url.Values) (fromMs, toMs int64, offset, limit int, errMsg string) {
+	fromTS, fromErr := parseTimestampParam(q.Get("from"))
+	if fromErr != nil {
+		return 0, 0, 0, 0, "invalid 'from' parameter: use Unix timestamp or ISO 8601"
+	}
+	toTS, toErr := parseTimestampParam(q.Get("to"))
+	if toErr != nil {
+		return 0, 0, 0, 0, "invalid 'to' parameter: use Unix timestamp or ISO 8601"
+	}
+	if fromTS != 0 {
+		fromMs = fromTS * 1000
+	}
+	if toTS != 0 {
+		toMs = toTS*1000 + 999 // include the whole second
+	}
+	limit = 1000
+	if lq := q.Get("limit"); lq != "" {
+		if v, err := strconv.Atoi(lq); err == nil && v > 0 {
+			limit = v
+		}
+	}
+	if limit > apiLogsMaxLimit {
+		limit = apiLogsMaxLimit
+	}
+	if oq := q.Get("offset"); oq != "" {
+		if v, err := strconv.Atoi(oq); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+	return fromMs, toMs, offset, limit, ""
+}
+
+// apiLogsServeStore answers GET /api/logs?source=store by querying the
+// Badger-backed history store. Time range (from/to), filters, and offset/limit
+// are pushed down so deep pages ("page 20 = yesterday") are served without
+// loading the whole history into memory. Returns an empty result when the
+// history store is disabled. from/to are Unix seconds (parseTimestampParam),
+// converted to the store's millisecond keys here.
+func apiLogsServeStore(w http.ResponseWriter, r *http.Request) {
+	if globalLogStore == nil {
+		jsonOK(w, map[string]any{"logs": []LogEntry{}, "total": 0, "history": false})
+		return
+	}
+	q := r.URL.Query()
+	fromMs, toMs, offsetVal, limitVal, errMsg := parseLogQueryWindow(q)
+	if errMsg != "" {
+		http.Error(w, errMsg, http.StatusBadRequest)
+		return
+	}
+	logs, total, err := globalLogStore.Query(fromMs, toMs, offsetVal, limitVal, buildLogFilterPredicate(q))
+	if err != nil {
+		logger.Printf("WARN apiLogs: history store query: %v", err)
+		http.Error(w, "history query error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"logs": logs, "total": total, "history": true})
+}
+
+// apiLogsRetention serves the history-store retention policy + usage.
+//
+//	GET (viewer): current retention days / max GB and live usage stats.
+//	PUT (admin):  update retention days / max GB; applies to the live store
+//	              (new TTL affects newly written entries) and persists.
+func apiLogsRetention(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, logStoreRetentionView())
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		if globalLogStore == nil {
+			http.Error(w, "history store disabled (set log_store_path)", http.StatusConflict)
+			return
+		}
+		var body struct {
+			RetentionDays  *int     `json:"retentionDays"`
+			RetentionMaxGB *float64 `json:"retentionMaxGB"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		days := globalLogStore.RetentionDays()
+		gb := globalLogStore.RetentionMaxGB()
+		if body.RetentionDays != nil {
+			days = *body.RetentionDays
+		}
+		if body.RetentionMaxGB != nil {
+			gb = *body.RetentionMaxGB
+		}
+		if days < 0 || days > 3650 {
+			http.Error(w, "retentionDays must be between 0 and 3650", http.StatusBadRequest)
+			return
+		}
+		if gb < 0 || gb > 10000 {
+			http.Error(w, "retentionMaxGB must be between 0 and 10000", http.StatusBadRequest)
+			return
+		}
+		globalLogStore.SetRetention(days, gb)
+		// Enforce a lowered size cap promptly instead of waiting for the next
+		// janitor tick; runs in the background so the response isn't blocked.
+		go globalLogStore.RunRetention()
+		auditEvent(r, "logstore.retention", "history", fmt.Sprintf("days=%d maxGB=%g", days, gb))
+		adminSettingsSave()
+		jsonOK(w, logStoreRetentionView())
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // parseTimestampParam parses a timestamp string that is either a Unix timestamp
@@ -1180,6 +1303,7 @@ func registerDashboardRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/dashboard/top-rules", apiDashboardTopRules)
 	mux.HandleFunc("/api/timeseries", apiTimeseries)
 	mux.HandleFunc("/api/logs", apiLogs)
+	mux.HandleFunc("/api/logs/retention", apiLogsRetention)
 	mux.HandleFunc("/api/top-hosts", apiTopHosts)
 	mux.HandleFunc("/api/audit", apiAudit)
 	mux.HandleFunc("/api/events", apiEvents) // SSE live dashboard

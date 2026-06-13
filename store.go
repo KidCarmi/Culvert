@@ -114,6 +114,7 @@ type LogEntry struct {
 	Identity    string `json:"identity,omitempty"` // authenticated username/email, empty if unauthenticated
 	Method      string `json:"method"`
 	Host        string `json:"host"`
+	URI         string `json:"uri,omitempty"`       // full request URL (host+path, no query); only set when the matched rule has LogFullURI
 	Status      string `json:"status"`              // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
 	Level       string `json:"level"`               // INFO | WARN | ERROR
 	RuleMatched string `json:"ruleMatched"`         // policy rule name that matched, if any
@@ -168,10 +169,11 @@ func levelForStatus(status string) string {
 	case "OK", "POLICY_ALLOW":
 		return "INFO"
 	case "BLOCKED", "THREAT_BLOCKED", "FILE_BLOCKED", "SCAN_BLOCKED",
+		"DPI_BLOCKED", "POLYGLOT_BLOCKED", "CDR_BLOCKED", "CDR_SANITIZED",
 		"RATE_LIMITED", "IP_BLOCKED",
-		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT":
+		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT", "POLICY_DEFAULT_DENY":
 		return "WARN"
-	default: // AUTH_FAIL and anything unexpected
+	default: // AUTH_FAIL, CDR_ERROR, and anything unexpected
 		return "ERROR"
 	}
 }
@@ -346,6 +348,9 @@ func logAdd(e LogEntry) {
 			}
 		}
 	}
+
+	// Persist to the queryable history store (async, non-blocking, nil-safe).
+	globalLogStore.Add(e)
 }
 
 func logGet() []LogEntry {
@@ -2078,12 +2083,30 @@ func recordRequestAuth(ip, method, host, status, ruleMatched, actionTaken, ident
 	recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, "", auth)
 }
 
+// recordRequestAuthURI is recordRequestAuth plus a captured request URI
+// (host+path, no query) for the per-rule "log full URL" option. It is the only
+// recorder that populates LogEntry.URI; every other path leaves it empty so the
+// field is omitted from the wire output (omitempty), keeping behavior unchanged
+// for rules without LogFullURI set.
+func recordRequestAuthURI(ip, method, host, status, ruleMatched, actionTaken, identity, sslAction, uri string, auth AuthLogFields) {
+	recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, sslAction, uri, auth)
+}
+
 // recordRequestBytesAuth is the core recorder; it attaches the Stage-1 auth
 // observability block (AuthLogFields) to the log entry. recordRequest /
 // recordRequestBytes delegate here with a zero AuthLogFields, so their wire
 // output is unchanged. Reached from proxy.go (Slice 7) via recordRequestAuth at
 // the post-auth-gate call sites in handleRequest.
 func recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction string, auth AuthLogFields) {
+	recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, "", auth)
+}
+
+// recordStats records the metric/time-series/alert/top-host side effects of a
+// request WITHOUT writing a request-log entry. It is the shared core of
+// recordRequestFull and the path used when a policy rule has traffic logging
+// disabled ("Log traffic" off): the request still counts toward stats and
+// dashboards, it just produces no feed/history/syslog entry.
+func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
 	tsRecordResult(isAllowed)
@@ -2101,6 +2124,28 @@ func recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, 
 	if status == "OK" || status == "POLICY_ALLOW" {
 		topHosts.Record(host)
 	}
+}
+
+// recordRequestFull is the implementation behind every recorder. uri is the
+// captured request URL (host+path, no query) or "" when not logged.
+func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
+	recordStats(ip, host, status, ruleMatched, actionTaken)
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, uri, auth)
+}
+
+// recordRequestLogOnly writes a request-log entry WITHOUT the stats/alert/
+// top-host side effects. It is used for SSL-inspected inner requests (per-URL
+// "log full URL" entries): the enclosing CONNECT was already counted by the
+// allow path, so counting each inner request again would inflate statTotal
+// (a CONNECT carrying N requests would count as 1+N).
+func recordRequestLogOnly(ip, method, host, status, ruleMatched, actionTaken, identity, sslAction, uri string, auth AuthLogFields) {
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, sslAction, uri, auth)
+}
+
+// persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,
+// history store, and syslog — the logging half shared by recordRequestFull and
+// recordRequestLogOnly.
+func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
 	entry := LogEntry{
 		TS:          time.Now().UnixMilli(),
 		Time:        time.Now().Format("15:04:05"),
@@ -2108,6 +2153,7 @@ func recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, 
 		Identity:    identity,
 		Method:      method,
 		Host:        host,
+		URI:         uri,
 		Status:      status,
 		Level:       levelForStatus(status),
 		RuleMatched: ruleMatched,

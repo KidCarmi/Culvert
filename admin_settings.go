@@ -44,6 +44,14 @@ type AdminSettings struct {
 	MetricsToken string            `json:"metrics_token,omitempty"`
 	LogLevel     string            `json:"log_level,omitempty"`
 
+	// History-store retention. LogRetentionSaved is a sentinel (like
+	// YARASettingsSaved): when false the values below are not applied on load,
+	// so a zero value can't override the YAML/CLI-seeded retention on settings
+	// files that predate this feature.
+	LogRetentionSaved bool    `json:"log_retention_saved"`
+	LogRetentionDays  int     `json:"log_retention_days,omitempty"`
+	LogRetentionMaxGB float64 `json:"log_retention_max_gb,omitempty"`
+
 	// Session
 	SessionTimeoutHours int `json:"session_timeout_hours,omitempty"`
 
@@ -159,6 +167,13 @@ func applyAdminServices(s *AdminSettings) {
 	}
 	if s.SessionTimeoutHours > 0 {
 		SetSessionTTL(time.Duration(s.SessionTimeoutHours) * time.Hour)
+	}
+	if s.LogRetentionSaved {
+		if globalLogStore != nil {
+			globalLogStore.SetRetention(s.LogRetentionDays, s.LogRetentionMaxGB)
+		} else {
+			logger.Printf("WARN AdminSettings: saved log retention not applied — history store disabled (set log_store_path)")
+		}
 	}
 	applyBlocklistFeeds(s)
 	if s.SaaSFeedURL != "" {
@@ -322,6 +337,13 @@ func SaveAdminSettings() {
 	// SaaS feed
 	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {
 		s.SaaSFeedURL = saasURL
+	}
+
+	// History-store retention
+	if globalLogStore != nil {
+		s.LogRetentionSaved = true
+		s.LogRetentionDays = globalLogStore.RetentionDays()
+		s.LogRetentionMaxGB = globalLogStore.RetentionMaxGB()
 	}
 
 	// YARA engine settings
