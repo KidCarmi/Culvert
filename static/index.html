@@ -5220,7 +5220,12 @@ function renderLogs() {
   const tbody = document.getElementById('live-log');
   const dash  = document.getElementById('dash-log');
   if (logEntries.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
+    // Source-aware hint so an empty table explains itself.
+    let msg = 'No requests yet';
+    if (logSource === 'store')      msg = 'No saved logs in this range. Turn on “Save logs to disk” above, or widen the time range.';
+    else if (logSource === 'file')  msg = 'No persistent JSON log file found (set <code>request_log_file</code>), or it’s empty.';
+    const empty = `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div>${msg}</div></td></tr>`;
+    tbody.innerHTML = empty;
     dash.innerHTML  = '<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
   } else {
     tbody.innerHTML = logEntries.map(rowHTML).join('');

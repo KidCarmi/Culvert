@@ -76,6 +76,32 @@ func TestEnableDisablePurgeLogStore(t *testing.T) {
 	}
 }
 
+// TestEnableLogStore_ConcurrentSafe exercises the lifecycle mutex: many
+// concurrent enables must publish exactly one store (no double-open, no orphan,
+// no panic) — verified under -race.
+func TestEnableLogStore_ConcurrentSafe(t *testing.T) {
+	old := globalLogStore.Swap(nil)
+	oldDir := logStoreDir
+	dir := t.TempDir()
+	logStoreDir = dir
+	t.Cleanup(func() { disableLogStore(); globalLogStore.Store(old); logStoreDir = oldDir })
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = enableLogStore(context.Background(), dir, 7, 1) }()
+	}
+	wg.Wait()
+
+	ls := globalLogStore.Load()
+	if ls == nil {
+		t.Fatal("store should be enabled after concurrent enables")
+	}
+	if ls.RetentionDays() != 7 {
+		t.Errorf("RetentionDays = %d, want 7", ls.RetentionDays())
+	}
+}
+
 func TestApiLogsRetention_EnableDisable(t *testing.T) {
 	old := globalLogStore.Swap(nil)
 	oldDir := logStoreDir

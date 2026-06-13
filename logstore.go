@@ -90,14 +90,22 @@ var (
 	statLogStorePruned  int64 // entries deleted by the size-cap janitor
 )
 
+// logStoreEnableMu serialises enable/disable lifecycle transitions so two
+// concurrent admin requests can't race to open/close the store (e.g. a
+// double-clicked toggle). Reads of globalLogStore stay lock-free (atomic).
+var logStoreEnableMu sync.Mutex
+
 // enableLogStore opens (or re-uses) the history store and publishes it as the
 // global store, starting the size janitor under a per-store context so it stops
 // when the store is disabled. If already enabled it just updates retention, so
-// it is safe to call repeatedly (startup, admin settings load, API).
+// it is safe to call repeatedly (startup, admin settings load, API). The
+// desired retention is recorded only after the operation succeeds.
 func enableLogStore(ctx context.Context, dir string, days int, gb float64) error {
-	setLogStoreDesired(days, gb)
+	logStoreEnableMu.Lock()
+	defer logStoreEnableMu.Unlock()
 	if ls := globalLogStore.Load(); ls != nil {
 		ls.SetRetention(days, gb)
+		setLogStoreDesired(days, gb)
 		return nil
 	}
 	if dir == "" {
@@ -111,12 +119,15 @@ func enableLogStore(ctx context.Context, dir string, days int, gb float64) error
 	ls.cancelJanitor = cancel
 	startLogStoreRetention(jctx, ls, 5*time.Minute)
 	globalLogStore.Store(ls)
+	setLogStoreDesired(days, gb)
 	return nil
 }
 
 // disableLogStore closes and unpublishes the store, KEEPING data on disk so a
 // later re-enable resumes the same history. No-op when already disabled.
 func disableLogStore() {
+	logStoreEnableMu.Lock()
+	defer logStoreEnableMu.Unlock()
 	if old := globalLogStore.Swap(nil); old != nil {
 		_ = old.Close()
 	}
@@ -124,7 +135,11 @@ func disableLogStore() {
 
 // purgeLogStore deletes all stored history while keeping the store enabled.
 func purgeLogStore() error {
-	return globalLogStore.Load().purgeAll()
+	ls := globalLogStore.Load()
+	if ls == nil {
+		return nil
+	}
+	return ls.purgeAll()
 }
 
 type logStore struct {

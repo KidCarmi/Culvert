@@ -367,15 +367,19 @@ func apiLogsRetention(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "retentionMaxGB must be between 0 and 10000", http.StatusBadRequest)
 			return
 		}
-		setLogStoreDesired(days, gb) // remember across disable/restart
 
 		switch {
 		case body.Enabled != nil && !*body.Enabled:
+			setLogStoreDesired(days, gb) // remember retention across the disable
 			disableLogStore()
 			auditEvent(r, "logstore.disable", "history", "")
 		case body.Enabled != nil && *body.Enabled:
 			if err := enableLogStore(resolveLifecycleCtx(), logStoreDir, days, gb); err != nil {
-				http.Error(w, "cannot enable history store: "+err.Error(), http.StatusInternalServerError)
+				// Log the detail; return a generic message so a filesystem path
+				// can't leak in the HTTP response. enableLogStore records the
+				// desired retention only on success, so a failure leaves it intact.
+				logger.Printf("WARN apiLogsRetention: enable failed: %v", err)
+				http.Error(w, "cannot enable history store", http.StatusInternalServerError)
 				return
 			}
 			auditEvent(r, "logstore.enable", "history", fmt.Sprintf("days=%d maxGB=%g", days, gb))
@@ -387,6 +391,7 @@ func apiLogsRetention(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			ls.SetRetention(days, gb)
+			setLogStoreDesired(days, gb)
 			auditEvent(r, "logstore.retention", "history", fmt.Sprintf("days=%d maxGB=%g", days, gb))
 		}
 		// Enforce a (possibly lowered) size cap promptly in the background.
