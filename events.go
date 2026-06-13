@@ -44,7 +44,7 @@ var (
 func (h *sseHub) register(ch chan []byte) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if max := atomic.LoadInt64(&sseMaxClients); max > 0 && int64(len(h.clients)) >= max {
+	if limit := atomic.LoadInt64(&sseMaxClients); limit > 0 && int64(len(h.clients)) >= limit {
 		return false
 	}
 	h.clients[ch] = struct{}{}
