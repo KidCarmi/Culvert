@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -100,7 +101,7 @@ func TestAuthRuleSpec_JSONRoundTrip(t *testing.T) {
 		Reason:         "legacy",
 		ExpiresAt:      "2027-01-01T00:00:00Z",
 		BroadExemption: true,
-		IdPRef:         "okta-prod",
+		ProviderRefs:   []string{"okta-prod"},
 	}
 	b, err := json.Marshal(in)
 	if err != nil {
@@ -110,12 +111,13 @@ func TestAuthRuleSpec_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out != in {
+	if !reflect.DeepEqual(out, in) {
 		t.Errorf("round-trip mismatch:\n got %+v\nwant %+v", out, in)
 	}
-	// IdPRef is reserved but must survive serialization for forward-compat.
-	if !strings.Contains(string(b), `"idpRef":"okta-prod"`) {
-		t.Errorf("IdPRef not serialized: %s", b)
+	// ProviderRefs is reserved but must survive serialization for forward-compat
+	// (persistence-safe: a future-version rule carrying it round-trips intact).
+	if !strings.Contains(string(b), `"providerRefs":["okta-prod"]`) {
+		t.Errorf("ProviderRefs not serialized: %s", b)
 	}
 }
 

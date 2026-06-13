@@ -93,11 +93,11 @@ func TestValidateAuthRule_ReservedOutcomesRejected(t *testing.T) {
 	}
 }
 
-func TestValidateAuthRule_IdPRefReserved(t *testing.T) {
+func TestValidateAuthRule_ProviderRefsReserved(t *testing.T) {
 	r := validExemptRule()
-	r.Auth.IdPRef = "okta-prod"
+	r.Auth.ProviderRefs = []string{"okta-prod"}
 	if _, err := validateAuthRule(r); err == nil {
-		t.Fatal("idpRef is reserved and must be rejected when set")
+		t.Fatal("providerRefs is reserved and must be rejected when set")
 	}
 }
 
