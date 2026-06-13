@@ -79,6 +79,39 @@ func TestLevelForStatus_BlockedTab(t *testing.T) {
 	}
 }
 
+// TestRecordInspectBlock_URIGatedOnLogFullURI verifies inspected blocks carry
+// the decrypted URL when the rule has LogFullURI (Codex review fix), and not
+// otherwise — and that blocks are logged regardless.
+func TestRecordInspectBlock_URIGatedOnLogFullURI(t *testing.T) {
+	isolateLogRing(t)
+	oldLS := globalLogStore
+	globalLogStore = nil
+	t.Cleanup(func() { globalLogStore = oldLS })
+
+	recordInspectBlock("1.2.3.4", "FILE_BLOCKED", "exe", "", "h.example.com", "/d/app.exe",
+		&PolicyMatch{Rule: &PolicyRule{Name: "r", LogFullURI: true}})
+	recordInspectBlock("1.2.3.4", "SCAN_BLOCKED", "clam", "eicar", "h2.example.com", "/x",
+		&PolicyMatch{Rule: &PolicyRule{Name: "r2"}}) // LogFullURI off
+
+	entries := logGet()
+	var fileURI, scanURI string
+	var sawFile, sawScan bool
+	for i := range entries {
+		switch entries[i].Status {
+		case "FILE_BLOCKED":
+			fileURI, sawFile = entries[i].URI, true
+		case "SCAN_BLOCKED":
+			scanURI, sawScan = entries[i].URI, true
+		}
+	}
+	if !sawFile || fileURI != "h.example.com/d/app.exe" {
+		t.Errorf("FILE_BLOCKED URI = %q (seen=%v), want h.example.com/d/app.exe", fileURI, sawFile)
+	}
+	if !sawScan || scanURI != "" {
+		t.Errorf("SCAN_BLOCKED URI should be empty when LogFullURI off, got %q (seen=%v)", scanURI, sawScan)
+	}
+}
+
 func TestPolicyRule_LogTrafficRoundTrip(t *testing.T) {
 	fa := false
 	b, err := json.Marshal(PolicyRule{Name: "r", LogTraffic: &fa})

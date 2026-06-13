@@ -18,7 +18,7 @@ import (
 func adminReq(method, target, body string) *http.Request {
 	var r *http.Request
 	if body == "" {
-		r = httptest.NewRequest(method, target, nil)
+		r = httptest.NewRequest(method, target, http.NoBody)
 	} else {
 		r = httptest.NewRequest(method, target, strings.NewReader(body))
 	}
@@ -28,11 +28,11 @@ func adminReq(method, target, body string) *http.Request {
 // drainLogStore waits until the async writer has persisted at least want
 // entries (via a query), or fails after a short deadline. The store batches
 // writes on a 500ms timer, so tests must not assume synchronous persistence.
-func drainLogStore(t *testing.T, s *logStore, fromMs, toMs int64, want int) []LogEntry {
+func drainLogStore(t *testing.T, s *logStore, want int) []LogEntry {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		got, total, err := s.Query(fromMs, toMs, 0, 100000, nil)
+		got, total, err := s.Query(0, 0, 0, 100000, nil)
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -51,13 +51,13 @@ func TestLogStore_WriteQueryNewestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	base := time.Now().UnixMilli()
 	for i := 0; i < 50; i++ {
 		s.Add(LogEntry{TS: base + int64(i), Host: "h.example.com", Status: "OK"})
 	}
-	got := drainLogStore(t, s, 0, 0, 50)
+	got := drainLogStore(t, s, 50)
 	if len(got) < 50 {
 		t.Fatalf("got %d entries, want >=50", len(got))
 	}
@@ -77,13 +77,13 @@ func TestLogStore_OffsetPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	base := time.Now().UnixMilli()
 	for i := 0; i < 100; i++ {
 		s.Add(LogEntry{TS: base + int64(i), Host: "h", Status: "OK"})
 	}
-	drainLogStore(t, s, 0, 0, 100)
+	drainLogStore(t, s, 100)
 
 	// Two non-overlapping pages of 10 over a frozen window.
 	page1, total, _ := s.Query(0, 0, 0, 10, nil)
@@ -108,7 +108,7 @@ func TestLogStore_FilterAndTimeRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	base := time.Now().UnixMilli()
 	for i := 0; i < 30; i++ {
@@ -118,7 +118,7 @@ func TestLogStore_FilterAndTimeRange(t *testing.T) {
 		}
 		s.Add(LogEntry{TS: base + int64(i), Host: host, Status: "OK"})
 	}
-	drainLogStore(t, s, 0, 0, 30)
+	drainLogStore(t, s, 30)
 
 	// Host filter.
 	_, total, _ := s.Query(0, 0, 0, 1000, func(e *LogEntry) bool { return e.Host == "bad.example.com" })
@@ -139,13 +139,13 @@ func TestLogStore_AgeRetentionTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	base := time.Now().UnixMilli()
 	for i := 0; i < 20; i++ {
 		s.Add(LogEntry{TS: base + int64(i), Host: "h", Status: "OK"})
 	}
-	drainLogStore(t, s, 0, 0, 20)
+	drainLogStore(t, s, 20)
 
 	time.Sleep(1500 * time.Millisecond)
 	_, total, err := s.Query(0, 0, 0, 1000, nil)
@@ -168,13 +168,13 @@ func TestLogStore_SizeRetentionPrunesOldest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	base := time.Now().UnixMilli()
 	for i := 0; i < 50; i++ {
 		s.Add(LogEntry{TS: base + int64(i), Host: "h", Status: "OK"})
 	}
-	drainLogStore(t, s, 0, 0, 50)
+	drainLogStore(t, s, 50)
 
 	before := atomic.LoadInt64(&statLogStorePruned)
 	s.RunRetention()
@@ -197,13 +197,13 @@ func TestLogStore_Stats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	base := time.Now().UnixMilli()
 	for i := 0; i < 25; i++ {
 		s.Add(LogEntry{TS: base + int64(i), Host: "h", Status: "OK"})
 	}
-	drainLogStore(t, s, 0, 0, 25)
+	drainLogStore(t, s, 25)
 
 	st := s.Stats()
 	if st.Count != 25 {
@@ -222,7 +222,7 @@ func TestApiLogs_SourceStore(t *testing.T) {
 	}
 	old := globalLogStore
 	globalLogStore = s
-	t.Cleanup(func() { globalLogStore = old; s.Close() })
+	t.Cleanup(func() { globalLogStore = old; _ = s.Close() })
 
 	base := time.Now().UnixMilli()
 	for i := 0; i < 20; i++ {
@@ -232,9 +232,9 @@ func TestApiLogs_SourceStore(t *testing.T) {
 		}
 		logAdd(LogEntry{TS: base + int64(i), IP: "10.0.0.1", Method: "GET", Host: host, Status: status, Level: "INFO"})
 	}
-	drainLogStore(t, s, 0, 0, 20)
+	drainLogStore(t, s, 20)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/logs?source=store&filter=bad.example.com", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?source=store&filter=bad.example.com", http.NoBody)
 	rec := httptest.NewRecorder()
 	apiLogs(rec, req)
 	if rec.Code != http.StatusOK {
@@ -266,7 +266,7 @@ func TestApiLogs_SourceStore_Disabled(t *testing.T) {
 	globalLogStore = nil
 	t.Cleanup(func() { globalLogStore = old })
 
-	req := httptest.NewRequest(http.MethodGet, "/api/logs?source=store", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/logs?source=store", http.NoBody)
 	rec := httptest.NewRecorder()
 	apiLogs(rec, req)
 	if rec.Code != http.StatusOK {
@@ -291,11 +291,11 @@ func TestApiLogsRetention_GetPut(t *testing.T) {
 	}
 	old := globalLogStore
 	globalLogStore = s
-	t.Cleanup(func() { globalLogStore = old; s.Close() })
+	t.Cleanup(func() { globalLogStore = old; _ = s.Close() })
 
 	// GET reports the current policy.
 	rec := httptest.NewRecorder()
-	apiLogsRetention(rec, httptest.NewRequest(http.MethodGet, "/api/logs/retention", nil))
+	apiLogsRetention(rec, httptest.NewRequest(http.MethodGet, "/api/logs/retention", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -350,7 +350,7 @@ func TestApiLogs_TimeRangeMemory(t *testing.T) {
 
 	url := fmt.Sprintf("/api/logs?from=%d&to=%d", mid-1, mid+1)
 	rec := httptest.NewRecorder()
-	apiLogs(rec, httptest.NewRequest(http.MethodGet, url, nil))
+	apiLogs(rec, httptest.NewRequest(http.MethodGet, url, http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -376,7 +376,7 @@ func TestApiLogsRetention_ViewerForbidden(t *testing.T) {
 	}
 	old := globalLogStore
 	globalLogStore = s
-	t.Cleanup(func() { globalLogStore = old; s.Close() })
+	t.Cleanup(func() { globalLogStore = old; _ = s.Close() })
 
 	// No admin role on the context → uiRole defaults to viewer → PUT must 403.
 	rec := httptest.NewRecorder()

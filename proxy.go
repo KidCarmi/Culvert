@@ -203,6 +203,19 @@ func policyLogURI(host, path string) string {
 	return host + path
 }
 
+// recordInspectBlock logs a block decision from the SSL-inspect inner loop,
+// attaching the decrypted host+path as the URI when the matched rule has
+// LogFullURI — so a blocked download keeps its full URL, the events that matter
+// most for investigation. Blocks are always logged (no LogTraffic gate); only
+// the URI is conditional. Counting matches the prior recordRequest path.
+func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, path string, match *PolicyMatch) {
+	uri := ""
+	if match != nil && match.Rule != nil && match.Rule.LogFullURI {
+		uri = policyLogURI(hostOnly, path)
+	}
+	recordRequestAuthURI(clientIP, "CONNECT", hostOnly, status, ruleMatched, actionTaken, "", "inspect", uri, AuthLogFields{})
+}
+
 func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
 	start := time.Now()
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -1381,7 +1394,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		if ext := fileBlocker.CheckPath(req.URL.Path); ext != "" {
 			atomic.AddInt64(&statFileBlocked, 1)
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", ext, "", "", "inspect")
+			recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
 			resp.Body.Close()
 			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "global ext")
 			break
@@ -1391,7 +1404,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		if match != nil && match.Rule != nil && match.Rule.FileProfileBlocked(req.URL.Path) {
 			atomic.AddInt64(&statFileBlocked, 1)
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, "", "inspect")
+			recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
 			resp.Body.Close()
 			fileBlockConn(clientTLS, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
 			break
@@ -1402,7 +1415,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			if ext := fileBlocker.CheckContentDisposition(cd); ext != "" {
 				atomic.AddInt64(&statFileBlocked, 1)
 				atomic.AddInt64(&statBlocked, 1)
-				recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", ext, "", "", "inspect")
+				recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
 				resp.Body.Close()
 				fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
 				break
@@ -1414,7 +1427,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					if match.Rule.FileProfileBlocked(fn) {
 						atomic.AddInt64(&statFileBlocked, 1)
 						atomic.AddInt64(&statBlocked, 1)
-						recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, "", "inspect")
+						recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
 						resp.Body.Close()
 						fileBlockConn(clientTLS, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
 						break
@@ -1427,7 +1440,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
 			atomic.AddInt64(&statFileBlocked, 1)
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", ext, "", "", "inspect")
+			recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
 			resp.Body.Close()
 			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-type")
 			break
@@ -1483,7 +1496,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					origBody.Close()
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
-					recordRequest(clientIP, "CONNECT", hostOnly, "FILE_BLOCKED", "magic:"+archType, "", "", "inspect")
+					recordInspectBlock(clientIP, "FILE_BLOCKED", "magic:"+archType, "", hostOnly, req.URL.Path, match)
 					fileBlockConn(clientTLS, hostOnly, req.URL.Path, "magic:"+archType, "magic bytes")
 					break
 				}
@@ -1493,7 +1506,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					origBody.Close()
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
-					recordRequest(clientIP, "CONNECT", hostOnly, "POLYGLOT_BLOCKED", reason, "", "", "inspect")
+					recordInspectBlock(clientIP, "POLYGLOT_BLOCKED", reason, "", hostOnly, req.URL.Path, match)
 					fileBlockConn(clientTLS, hostOnly, req.URL.Path, reason, "polyglot")
 					break
 				}
@@ -1519,7 +1532,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 						}
 						origBody.Close()
 						atomic.AddInt64(&statBlocked, 1)
-						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "", "inspect")
+						recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match)
 						scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
 						break
 					}
@@ -1529,7 +1542,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					if !dpiBypassed && dpiScanner.Enabled() && isTextContentType(ct) {
 						if pattern, matched := safeDPIScan(scanBody); matched {
 							origBody.Close()
-							recordRequest(clientIP, "CONNECT", hostOnly, "DPI_BLOCKED", "", pattern, "", "inspect")
+							recordInspectBlock(clientIP, "DPI_BLOCKED", "", pattern, hostOnly, req.URL.Path, match)
 							dpiBlock(clientTLS, hostOnly, pattern)
 							break
 						}
@@ -1541,7 +1554,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 						}
 						origBody.Close()
 						atomic.AddInt64(&statBlocked, 1)
-						recordRequest(clientIP, "CONNECT", hostOnly, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, "", "inspect")
+						recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match)
 						scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
 						break
 					}

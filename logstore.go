@@ -46,6 +46,10 @@ const logStoreScanCap = 500000
 // per pass. A package var (not const) so tests can lower it.
 var logStorePruneBatch = 10000
 
+// logStoreMaxQueryLimit caps a single Query's page size so a caller-supplied
+// limit cannot drive an excessive slice allocation.
+const logStoreMaxQueryLimit = 10000
+
 // globalLogStore is the process-wide history store; nil when disabled.
 var globalLogStore *logStore
 
@@ -146,7 +150,8 @@ func (s *logStore) scanLogicalBytes() int64 {
 		n := 0
 		for it.Rewind(); it.Valid(); it.Next() {
 			total += itemLogicalSize(it.Item())
-			if n++; n >= logStoreScanCap {
+			n++
+			if n >= logStoreScanCap {
 				break
 			}
 		}
@@ -212,7 +217,7 @@ func (s *logStore) writeLoop() {
 			if ttl := time.Duration(atomic.LoadInt64(&s.ttlNanos)); ttl > 0 {
 				ent = ent.WithTTL(ttl)
 			}
-			_ = wb.SetEntry(ent) //nolint:errcheck -- flush surfaces the error
+			_ = wb.SetEntry(ent)
 			added += int64(len(key) + len(b))
 		}
 		if err := wb.Flush(); err != nil {
@@ -283,6 +288,12 @@ func (s *logStore) Query(fromMs, toMs int64, offset, limit int, filter func(*Log
 	if limit <= 0 {
 		limit = 1000
 	}
+	// Bound limit at the store layer so the allocation below can't be driven to
+	// an excessive size by a caller-supplied value (CodeQL CWE-789 / defense in
+	// depth; the API also clamps).
+	if limit > logStoreMaxQueryLimit {
+		limit = logStoreMaxQueryLimit
+	}
 	out := make([]LogEntry, 0, limit)
 	total := 0
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -298,7 +309,8 @@ func (s *logStore) Query(fromMs, toMs int64, offset, limit int, filter func(*Log
 			if logStoreKeyTS(item.Key()) < fromMs {
 				break
 			}
-			if scanned++; scanned > logStoreScanCap {
+			scanned++
+			if scanned > logStoreScanCap {
 				break
 			}
 			var e LogEntry
@@ -353,7 +365,8 @@ func (s *logStore) Stats() logStoreStats {
 				st.OldestMs = logStoreKeyTS(it.Item().KeyCopy(nil))
 				first = false
 			}
-			if st.Count++; st.Count >= logStoreScanCap {
+			st.Count++
+			if st.Count >= logStoreScanCap {
 				st.Capped = true
 				break
 			}
@@ -402,7 +415,7 @@ func (s *logStore) RunRetention() {
 	}
 	wb := s.db.NewWriteBatch()
 	for _, k := range keys {
-		_ = wb.Delete(k) //nolint:errcheck -- flush surfaces the error
+		_ = wb.Delete(k)
 	}
 	if err := wb.Flush(); err != nil {
 		logger.Printf("WARN logstore: retention delete: %v", err)
@@ -462,40 +475,53 @@ func (s *logStore) RetentionMaxGB() float64 {
 	return float64(atomic.LoadInt64(&s.maxBytes)) / (1 << 30)
 }
 
-// logStoreHealth reports history-store usage for the dashboard/admin panels.
-// enabled=false (and zeroed fields) when the history store is disabled.
+// logStoreHealth reports CHEAP history-store usage for the frequently-polled
+// dashboard health endpoint: only the atomic byte counter and drop/prune
+// counters — NO Badger scan. The full count/oldest scan lives in
+// logStoreUsage (called on demand by the retention panel) so an open dashboard
+// doesn't trigger a large DB scan every tick.
 func logStoreHealth() map[string]any {
 	if globalLogStore == nil {
 		return map[string]any{"enabled": false}
 	}
-	st := globalLogStore.Stats()
 	return map[string]any{
-		"enabled":  true,
-		"bytes":    st.Bytes,
-		"count":    st.Count,
-		"capped":   st.Capped,
-		"oldestMs": st.OldestMs,
-		"dropped":  atomic.LoadInt64(&statLogStoreDropped),
-		"pruned":   atomic.LoadInt64(&statLogStorePruned),
+		"enabled": true,
+		"bytes":   atomic.LoadInt64(&globalLogStore.bytesUsed),
+		"dropped": atomic.LoadInt64(&statLogStoreDropped),
+		"pruned":  atomic.LoadInt64(&statLogStorePruned),
 	}
 }
 
+// logStoreUsage is the on-demand (retention panel) usage view: the cheap health
+// fields plus the count/oldest scan from Stats. Not for high-frequency polling.
+func logStoreUsage() map[string]any {
+	u := logStoreHealth()
+	if globalLogStore == nil {
+		return u
+	}
+	st := globalLogStore.Stats()
+	u["count"] = st.Count
+	u["capped"] = st.Capped
+	u["oldestMs"] = st.OldestMs
+	return u
+}
+
 // logStoreRetentionView is the GET /api/logs/retention payload: the current
-// retention policy plus live usage stats.
+// retention policy plus full (on-demand) usage stats.
 func logStoreRetentionView() map[string]any {
 	if globalLogStore == nil {
 		return map[string]any{
 			"enabled":        false,
 			"retentionDays":  0,
 			"retentionMaxGB": 0,
-			"usage":          logStoreHealth(),
+			"usage":          logStoreUsage(),
 		}
 	}
 	return map[string]any{
 		"enabled":        true,
 		"retentionDays":  globalLogStore.RetentionDays(),
 		"retentionMaxGB": globalLogStore.RetentionMaxGB(),
-		"usage":          logStoreHealth(),
+		"usage":          logStoreUsage(),
 	}
 }
 

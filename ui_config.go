@@ -185,79 +185,30 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	filterHost := strings.ToLower(r.URL.Query().Get("filter"))
-	filterStatus := strings.ToUpper(r.URL.Query().Get("status"))
-	filterLevel := strings.ToUpper(r.URL.Query().Get("level"))
-	filterMethod := strings.ToUpper(r.URL.Query().Get("method"))
-	filterIdentity := strings.ToLower(r.URL.Query().Get("identity"))
-
-	// Date range filtering (Finding 6.3).
-	fromTS, fromErr := parseTimestampParam(r.URL.Query().Get("from"))
-	toTS, toErr := parseTimestampParam(r.URL.Query().Get("to"))
-	if fromErr != nil {
-		http.Error(w, "invalid 'from' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
+	q := r.URL.Query()
+	fromMs, toMs, offsetVal, limitVal, errMsg := parseLogQueryWindow(q)
+	if errMsg != "" {
+		http.Error(w, errMsg, http.StatusBadRequest)
 		return
 	}
-	if toErr != nil {
-		http.Error(w, "invalid 'to' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
-		return
-	}
-	// parseTimestampParam returns Unix SECONDS, but LogEntry.TS is Unix MILLIS.
-	// Convert so the range comparison below uses consistent units (without this
-	// the seconds-vs-millis mismatch made from/to filtering ineffective).
-	var fromMs, toMs int64
-	if fromTS != 0 {
-		fromMs = fromTS * 1000
-	}
-	if toTS != 0 {
-		toMs = toTS*1000 + 999 // include the whole second
-	}
+	pred := buildLogFilterPredicate(q)
 
-	// Pagination parameters (Finding 6.1). The limit is clamped so one query
-	// cannot demand an unbounded response (CWE-770); offset pagination still
-	// reaches every entry.
-	const apiLogsMaxLimit = 5000
-	limitVal := 1000
-	if lq := r.URL.Query().Get("limit"); lq != "" {
-		if v, err := strconv.Atoi(lq); err == nil && v > 0 {
-			limitVal = v
-		}
-	}
-	if limitVal > apiLogsMaxLimit {
-		limitVal = apiLogsMaxLimit
-	}
-	offsetVal := 0
-	if oq := r.URL.Query().Get("offset"); oq != "" {
-		if v, err := strconv.Atoi(oq); err == nil && v >= 0 {
-			offsetVal = v
-		}
-	}
-
+	// Index-based range + pointer to avoid copying each LogEntry (~320 bytes)
+	// per iteration. all[:0:0] has cap 0 so the first append reallocates — the
+	// shared (cached) backing array is never mutated.
 	filtered := all[:0:0]
-	for _, e := range all {
+	for i := range all {
+		e := &all[i]
 		if fromMs != 0 && e.TS < fromMs {
 			continue
 		}
 		if toMs != 0 && e.TS > toMs {
 			continue
 		}
-		if filterHost != "" && !strings.Contains(strings.ToLower(e.Host), filterHost) &&
-			!strings.Contains(strings.ToLower(e.IP), filterHost) {
+		if !pred(e) {
 			continue
 		}
-		if filterStatus != "" && e.Status != filterStatus {
-			continue
-		}
-		if filterLevel != "" && e.Level != filterLevel {
-			continue
-		}
-		if filterMethod != "" && e.Method != filterMethod {
-			continue
-		}
-		if filterIdentity != "" && !strings.Contains(strings.ToLower(e.Identity), filterIdentity) {
-			continue
-		}
-		filtered = append(filtered, e)
+		filtered = append(filtered, *e)
 	}
 	total := len(filtered)
 	// Apply offset/limit pagination.
@@ -273,59 +224,20 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"logs": filtered, "total": total})
 }
 
-// apiLogsServeStore answers GET /api/logs?source=store by querying the
-// Badger-backed history store. Time range (from/to), filters, and offset/limit
-// are pushed down so deep pages ("page 20 = yesterday") are served without
-// loading the whole history into memory. Returns an empty result when the
-// history store is disabled. from/to are Unix seconds (parseTimestampParam),
-// converted to the store's millisecond keys here.
-func apiLogsServeStore(w http.ResponseWriter, r *http.Request) {
-	if globalLogStore == nil {
-		jsonOK(w, map[string]any{"logs": []LogEntry{}, "total": 0, "history": false})
-		return
-	}
-	q := r.URL.Query()
+// apiLogsMaxLimit clamps a single /api/logs page so one query cannot demand an
+// unbounded response (CWE-770); offset pagination still reaches every entry.
+const apiLogsMaxLimit = 5000
+
+// buildLogFilterPredicate returns a predicate matching the host/IP, status,
+// level, method, and identity query params. Shared by the in-memory and history
+// query paths so the filter semantics stay identical.
+func buildLogFilterPredicate(q url.Values) func(*LogEntry) bool {
 	filterHost := strings.ToLower(q.Get("filter"))
 	filterStatus := strings.ToUpper(q.Get("status"))
 	filterLevel := strings.ToUpper(q.Get("level"))
 	filterMethod := strings.ToUpper(q.Get("method"))
 	filterIdentity := strings.ToLower(q.Get("identity"))
-
-	fromTS, fromErr := parseTimestampParam(q.Get("from"))
-	toTS, toErr := parseTimestampParam(q.Get("to"))
-	if fromErr != nil {
-		http.Error(w, "invalid 'from' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
-		return
-	}
-	if toErr != nil {
-		http.Error(w, "invalid 'to' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
-		return
-	}
-	var fromMs, toMs int64
-	if fromTS != 0 {
-		fromMs = fromTS * 1000
-	}
-	if toTS != 0 {
-		toMs = toTS*1000 + 999 // include the whole second
-	}
-
-	limitVal := 1000
-	if lq := q.Get("limit"); lq != "" {
-		if v, err := strconv.Atoi(lq); err == nil && v > 0 {
-			limitVal = v
-		}
-	}
-	if limitVal > 5000 { // mirror the in-memory path's clamp (CWE-770)
-		limitVal = 5000
-	}
-	offsetVal := 0
-	if oq := q.Get("offset"); oq != "" {
-		if v, err := strconv.Atoi(oq); err == nil && v >= 0 {
-			offsetVal = v
-		}
-	}
-
-	pred := func(e *LogEntry) bool {
+	return func(e *LogEntry) bool {
 		if filterHost != "" && !strings.Contains(strings.ToLower(e.Host), filterHost) &&
 			!strings.Contains(strings.ToLower(e.IP), filterHost) {
 			return false
@@ -344,8 +256,61 @@ func apiLogsServeStore(w http.ResponseWriter, r *http.Request) {
 		}
 		return true
 	}
+}
 
-	logs, total, err := globalLogStore.Query(fromMs, toMs, offsetVal, limitVal, pred)
+// parseLogQueryWindow parses from/to (Unix seconds → millis, per
+// parseTimestampParam; LogEntry.TS is millis), offset, and a clamped limit.
+// Returns a non-empty errMsg (for a 400) when from/to are malformed.
+func parseLogQueryWindow(q url.Values) (fromMs, toMs int64, offset, limit int, errMsg string) {
+	fromTS, fromErr := parseTimestampParam(q.Get("from"))
+	if fromErr != nil {
+		return 0, 0, 0, 0, "invalid 'from' parameter: use Unix timestamp or ISO 8601"
+	}
+	toTS, toErr := parseTimestampParam(q.Get("to"))
+	if toErr != nil {
+		return 0, 0, 0, 0, "invalid 'to' parameter: use Unix timestamp or ISO 8601"
+	}
+	if fromTS != 0 {
+		fromMs = fromTS * 1000
+	}
+	if toTS != 0 {
+		toMs = toTS*1000 + 999 // include the whole second
+	}
+	limit = 1000
+	if lq := q.Get("limit"); lq != "" {
+		if v, err := strconv.Atoi(lq); err == nil && v > 0 {
+			limit = v
+		}
+	}
+	if limit > apiLogsMaxLimit {
+		limit = apiLogsMaxLimit
+	}
+	if oq := q.Get("offset"); oq != "" {
+		if v, err := strconv.Atoi(oq); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+	return fromMs, toMs, offset, limit, ""
+}
+
+// apiLogsServeStore answers GET /api/logs?source=store by querying the
+// Badger-backed history store. Time range (from/to), filters, and offset/limit
+// are pushed down so deep pages ("page 20 = yesterday") are served without
+// loading the whole history into memory. Returns an empty result when the
+// history store is disabled. from/to are Unix seconds (parseTimestampParam),
+// converted to the store's millisecond keys here.
+func apiLogsServeStore(w http.ResponseWriter, r *http.Request) {
+	if globalLogStore == nil {
+		jsonOK(w, map[string]any{"logs": []LogEntry{}, "total": 0, "history": false})
+		return
+	}
+	q := r.URL.Query()
+	fromMs, toMs, offsetVal, limitVal, errMsg := parseLogQueryWindow(q)
+	if errMsg != "" {
+		http.Error(w, errMsg, http.StatusBadRequest)
+		return
+	}
+	logs, total, err := globalLogStore.Query(fromMs, toMs, offsetVal, limitVal, buildLogFilterPredicate(q))
 	if err != nil {
 		logger.Printf("WARN apiLogs: history store query: %v", err)
 		http.Error(w, "history query error", http.StatusInternalServerError)
