@@ -196,6 +196,29 @@ var (
 // the on-disk rotation size. Roughly one day of traffic at ~100 req/s.
 const requestLogMaxPersistentReturn = 20000
 
+// Persistent request-log failure counters. A full disk or corrupt file must
+// not silently destroy the request history — both are counted, surfaced via
+// /metrics, /api/stats, and /healthz, and logged once (not per occurrence).
+var (
+	statReqLogWriteErrors  int64 // failed JSONL marshals/writes in logAdd
+	statReqLogSkippedLines int64 // corrupt JSONL lines skipped on read
+)
+
+// reqLogReadCache memoises the parsed persistent log for a short TTL so N
+// concurrent dashboard pollers share one file parse instead of each re-reading
+// up to requestLogMaxPersistentReturn JSON lines per request. Keyed by path so
+// a re-init (config change, tests) never serves entries from the old file.
+// Cached entries are shared read-only between callers — never mutate them.
+var reqLogReadCache struct {
+	mu      sync.Mutex
+	path    string
+	expires time.Time
+	entries []LogEntry
+}
+
+// requestLogReadCacheTTL bounds staleness; the dashboard polls every 3 s.
+const requestLogReadCacheTTL = 2 * time.Second
+
 // initRequestLog opens a rotating JSONL file for persistent request logging.
 // Each LogEntry is appended as a single JSON line. The file rotates at maxMB.
 // If path is empty this is a no-op (backwards-compatible).
@@ -213,6 +236,12 @@ func initRequestLog(path string, maxMB int) error {
 	requestLogWriter = rf
 	requestLogCloser = rf
 	requestLogFilePath = path
+
+	// Drop any cached parse from a previous file.
+	reqLogReadCache.mu.Lock()
+	reqLogReadCache.path = ""
+	reqLogReadCache.entries = nil
+	reqLogReadCache.mu.Unlock()
 	return nil
 }
 
@@ -228,10 +257,19 @@ func initRequestLog(path string, maxMB int) error {
 // file is consulted; the rotated ".1" archive is intentionally skipped to
 // keep each query bounded to one rotation window.
 func requestLogReadPersistent() ([]LogEntry, error) {
-	if requestLogFilePath == "" {
+	path := requestLogFilePath
+	if path == "" {
 		return nil, nil
 	}
-	f, err := os.Open(requestLogFilePath)
+	// Serialise readers through the cache lock: the first poller parses the
+	// file, concurrent pollers wait and then reuse the fresh cached result.
+	reqLogReadCache.mu.Lock()
+	defer reqLogReadCache.mu.Unlock()
+	if reqLogReadCache.path == path && time.Now().Before(reqLogReadCache.expires) {
+		return reqLogReadCache.entries, nil
+	}
+
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -256,6 +294,11 @@ func requestLogReadPersistent() ([]LogEntry, error) {
 		}
 		var e LogEntry
 		if err := json.Unmarshal(line, &e); err != nil {
+			// Count corrupt lines instead of dropping them invisibly; log only
+			// the first so a damaged file cannot flood the logger.
+			if atomic.AddInt64(&statReqLogSkippedLines, 1) == 1 {
+				logger.Printf("WARN request log: skipping corrupt JSONL line (further occurrences counted silently): %v", err)
+			}
 			continue
 		}
 		buf = append(buf, e)
@@ -274,6 +317,9 @@ func requestLogReadPersistent() ([]LogEntry, error) {
 	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
 		buf[i], buf[j] = buf[j], buf[i]
 	}
+	reqLogReadCache.path = path
+	reqLogReadCache.expires = time.Now().Add(requestLogReadCacheTTL)
+	reqLogReadCache.entries = buf
 	return buf, nil
 }
 
@@ -287,9 +333,17 @@ func logAdd(e LogEntry) {
 
 	// Persist to JSONL file (outside the lock to avoid blocking callers).
 	if w := requestLogWriter; w != nil {
-		if b, err := json.Marshal(e); err == nil {
+		b, err := json.Marshal(e)
+		if err == nil {
 			b = append(b, '\n')
-			w.Write(b) //nolint:errcheck -- best-effort file write
+			_, err = w.Write(b)
+		}
+		if err != nil {
+			// A full disk must not silently destroy the request history:
+			// count every failure, log only the first to avoid flooding.
+			if atomic.AddInt64(&statReqLogWriteErrors, 1) == 1 {
+				logger.Printf("ERROR request log: persistent write failed (further failures counted silently): %v", err)
+			}
 		}
 	}
 }

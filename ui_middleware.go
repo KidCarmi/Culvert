@@ -151,7 +151,7 @@ func securityMiddleware(next http.Handler) http.Handler {
 		nonce := cspNonce()
 		r = r.WithContext(context.WithValue(r.Context(), cspNonceKey{}, nonce))
 		w.Header().Set("Content-Security-Policy",
-			fmt.Sprintf("default-src 'self'; frame-ancestors 'none'; script-src 'self' 'nonce-%s' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://flagcdn.com; connect-src 'self'", nonce))
+			fmt.Sprintf("default-src 'self'; frame-ancestors 'none'; script-src 'self' 'nonce-%s' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'", nonce))
 
 		// ── CORS: allow same-origin requests (reflect the origin back) ───────
 		origin := r.Header.Get("Origin")

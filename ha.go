@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -373,6 +374,17 @@ func generateHAToken() string {
 
 // ── Health Endpoint ─────────────────────────────────────────────────────────
 
+// addRequestLogHealth annotates a healthy /healthz response when persistent
+// request-log writes are failing (e.g. disk full). The field is added only
+// when non-zero so existing health-probe consumers see an unchanged body in
+// the normal case; the node stays "ok" — degraded logging must not pull it
+// out of the load balancer.
+func addRequestLogHealth(resp map[string]any) {
+	if n := atomic.LoadInt64(&statReqLogWriteErrors); n > 0 {
+		resp["requestLogWriteErrors"] = n
+	}
+}
+
 // apiHealthz is an unauthenticated health-check endpoint for load balancers.
 // Returns 200 if this CP is the leader (or if HA is disabled), 503 otherwise.
 // Load balancers should route DP traffic only to the 200-returning CP.
@@ -384,11 +396,15 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	status := globalHA.Status()
 	// If HA is not enabled, this node is standalone — always healthy.
 	if !status.Enabled {
-		jsonOK(w, map[string]any{"status": "ok", "role": "standalone", "leader": true})
+		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true}
+		addRequestLogHealth(resp)
+		jsonOK(w, resp)
 		return
 	}
 	if status.Role == "leader" {
-		jsonOK(w, map[string]any{"status": "ok", "role": "leader", "leader": true, "since": status.Since})
+		resp := map[string]any{"status": "ok", "role": "leader", "leader": true, "since": status.Since}
+		addRequestLogHealth(resp)
+		jsonOK(w, resp)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
