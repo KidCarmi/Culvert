@@ -629,10 +629,13 @@ var identityPredicateTypes = map[string]bool{
 	"sub":             true,
 }
 
-// validateAuthRule validates a ruleType="auth" rule for Phase 1 (Outcome=Exempt
-// only). It returns any non-fatal warnings (broad scope, broad exemption,
-// expired, ignored method) alongside a fatal error. It does NOT mutate the rule
-// and has no runtime side effects. See roadmap/AUTH-POLICY-PHASE1-PLAN.md §3/§5.
+// validateAuthRule validates a ruleType="auth" rule. Supported outcomes are
+// Exempt (Phase 1) and CredentialRequired (Phase 2 Slice 1 — validated and
+// persisted, but runtime-inert: the resolver returns Default for it until a
+// later slice wires it). It returns any non-fatal warnings (broad scope, broad
+// exemption, expired, ignored method) alongside a fatal error. It does NOT
+// mutate the rule and has no runtime side effects. See
+// roadmap/AUTH-POLICY-PHASE1-PLAN.md §3/§5 and roadmap/AUTH-POLICY-PHASE2-PLAN.md.
 func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 	spec := rule.Auth
 	if spec == nil {
@@ -660,16 +663,18 @@ func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 	return warnings, nil
 }
 
-// validateAuthOutcomeAndProviders enforces the Slice-2 outcome (Exempt only) and the
-// reserved-ProviderRefs invariant.
+// validateAuthOutcomeAndProviders enforces the supported outcomes
+// (Exempt and CredentialRequired) and the reserved-ProviderRefs invariant.
+// SSORequired stays reserved. CredentialRequired is mechanism-neutral: no
+// mechanism field is read or required (Phase 2 Slice 1).
 func validateAuthOutcomeAndProviders(spec *AuthRuleSpec) error {
 	switch spec.Outcome {
-	case OutcomeExempt:
+	case OutcomeExempt, OutcomeCredentialRequired:
 		// supported
-	case OutcomeCredentialRequired, OutcomeSSORequired:
-		return fmt.Errorf("auth outcome %q is reserved and not yet implemented (only Exempt is supported)", spec.Outcome)
+	case OutcomeSSORequired:
+		return fmt.Errorf("auth outcome %q is reserved and not yet implemented (Exempt and CredentialRequired are supported)", spec.Outcome)
 	default:
-		return fmt.Errorf("auth outcome must be Exempt")
+		return fmt.Errorf("auth outcome must be Exempt or CredentialRequired")
 	}
 	if len(spec.ProviderRefs) != 0 {
 		return fmt.Errorf("providerRefs is reserved for a later phase and cannot be set")
@@ -689,10 +694,10 @@ func validateAuthOwnership(spec *AuthRuleSpec) error {
 }
 
 // validateAuthSource enforces the mandatory, CIDR-only, identity-free source
-// scope.
+// scope (applies to every auth outcome).
 func validateAuthSource(rule PolicyRule) error {
 	if rule.SubjectMatch == nil {
-		return fmt.Errorf("auth (exempt) rule requires a subjectMatch source scope")
+		return fmt.Errorf("auth rule requires a subjectMatch source scope")
 	}
 	if err := rejectIdentityPredicates(rule.SubjectMatch); err != nil {
 		return err
@@ -734,9 +739,27 @@ func validateAuthExpiry(rule PolicyRule) ([]string, error) {
 	return nil, nil
 }
 
-// validateAuthDestination enforces the destination decision: a selector, or an
-// explicit acknowledged broadExemption.
+// validateAuthDestination enforces the destination decision, which is
+// outcome-aware:
+//
+//   - CredentialRequired requires a concrete destination selector. broadExemption
+//     is an Exempt-only acknowledgement (it waives auth for all destinations) and
+//     is the opposite of CredentialRequired's hardening intent, so it is rejected
+//     here. A "require credentials for ALL destinations" mode, if ever wanted,
+//     gets its own correctly-named acknowledgement in a later slice — it is NOT a
+//     broadExemption overload. Starting strict keeps any future relaxation a
+//     non-breaking loosening.
+//   - Exempt requires a destination selector OR an explicit broadExemption ack.
 func validateAuthDestination(rule PolicyRule) ([]string, error) {
+	if rule.Auth.Outcome == OutcomeCredentialRequired {
+		if rule.Auth.BroadExemption {
+			return nil, fmt.Errorf("broadExemption is an Exempt-only acknowledgement and is not valid on CredentialRequired rules")
+		}
+		if !authRuleHasDestination(rule) {
+			return nil, fmt.Errorf("CredentialRequired rule requires a destination (destFQDN, destCategory, or destCategoryGroup)")
+		}
+		return nil, nil
+	}
 	if !authRuleHasDestination(rule) && !rule.Auth.BroadExemption {
 		return nil, fmt.Errorf("exempt rule requires a destination (destFQDN, destCategory, or destCategoryGroup), or broadExemption=true")
 	}

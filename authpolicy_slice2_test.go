@@ -80,12 +80,13 @@ func TestValidateAuthRule_UnsupportedOutcomeRejected(t *testing.T) {
 }
 
 func TestValidateAuthRule_ReservedOutcomesRejected(t *testing.T) {
-	for _, oc := range []AuthOutcome{OutcomeCredentialRequired, OutcomeSSORequired} {
+	// Phase 2 Slice 1 accepted CredentialRequired; only SSORequired stays reserved.
+	for _, oc := range []AuthOutcome{OutcomeSSORequired} {
 		r := validExemptRule()
 		r.Auth.Outcome = oc
 		_, err := validateAuthRule(r)
 		if err == nil {
-			t.Errorf("outcome %q must be rejected as reserved in Slice 2", oc)
+			t.Errorf("outcome %q must be rejected as reserved", oc)
 		}
 		if err != nil && !strings.Contains(err.Error(), "reserved") {
 			t.Errorf("outcome %q should be rejected as reserved, got: %v", oc, err)
