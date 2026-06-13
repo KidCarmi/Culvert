@@ -75,7 +75,7 @@ func waitTerminal(t *testing.T, rm *releaseManager, agent string) dispatchRecord
 	waitFor(t, func() bool {
 		r, ok := rm.store.get(agent)
 		rec = r
-		return ok && (r.Phase == phaseTerminal || r.Phase == phaseRefused)
+		return ok && r.Phase == phaseTerminal
 	}, "terminal status for "+agent)
 	return rec
 }
@@ -330,6 +330,70 @@ func TestReleaseAPI_Status(t *testing.T) {
 	}
 	if got := decodeBody(t, rec)["terminal"]; got != string(TerminalSucceeded) {
 		t.Fatalf("status terminal = %v; want succeeded", got)
+	}
+}
+
+// A rejected duplicate (in-flight) must NOT clobber the running op's status
+// record (P2: status-clobber).
+func TestReleaseAPI_DuplicateDoesNotClobberStatus(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{applyOpID: "op-A", waitState: agentStateSucceeded, runningSeq: freshDispatchSeq()}
+	rm, _, _ := newReleaseFixture(t, cat, map[string]*fakeAgent{"A": agent})
+
+	// Seed agent A's slot as a running op, then hold its single-flight so a
+	// second dispatch is rejected in-flight.
+	idA := rm.newID()
+	rm.store.markDispatched("A", idA, DispatchResumeContext{
+		AgentID: "A", OpID: "op-A", ReleaseID: "rel_a", TargetPinnedRef: dispatchRepo + "@" + digA,
+	})
+	reg, err := rm.svc.registryFor(AgentEndpoint{Key: "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reg.exec.acquire() {
+		t.Fatal("acquire should succeed")
+	}
+	defer reg.exec.release()
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate dispatch = %d; want 409", rec.Code)
+	}
+	// The in-flight op's record must be intact.
+	st, ok := rm.store.get("A")
+	if !ok || st.OpID != "op-A" || st.Phase != phaseDispatched {
+		t.Fatalf("in-flight op status was clobbered: %+v", st)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("rejected dispatch must not apply; saw %d", len(agent.applyReqs))
+	}
+}
+
+// An apply failure BEFORE an op_id (agent rejection / retries exhausted) must
+// surface as an error, not 200 "ok" (P2: false success).
+func TestReleaseAPI_ApplyFailureBeforeOpIsError(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	// pre-plan + anchor reads OK; Apply returns a deterministic 4xx (not retried).
+	agent := &fakeAgent{
+		applyErrs:  []error{&agentHTTPError{Status: 400, Method: "POST", Path: "/v1/upgrades/apply"}},
+		runningSeq: [][]string{{dispatchRepo + "@" + digB}, {dispatchRepo + "@" + digB}},
+	}
+	newReleaseFixture(t, cat, map[string]*fakeAgent{"A": agent})
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("apply-failure dispatch = %d; want 502 (%s)", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	if body["status"] != "failed" {
+		t.Fatalf("status = %v; want failed", body["status"])
+	}
+	if len(agent.applyReqs) != 1 {
+		t.Fatalf("a deterministic 4xx must not be retried; saw %d applies", len(agent.applyReqs))
 	}
 }
 

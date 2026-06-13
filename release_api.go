@@ -68,11 +68,8 @@ func currentReleaseManager() *releaseManager {
 type dispatchPhase string
 
 const (
-	phasePlanning   dispatchPhase = "planning"
-	phaseDispatched dispatchPhase = "dispatched"
-	phaseResuming   dispatchPhase = "resuming"
-	phaseTerminal   dispatchPhase = "terminal"
-	phaseRefused    dispatchPhase = "refused"
+	phaseDispatched dispatchPhase = "dispatched" // op accepted, watch in progress
+	phaseTerminal   dispatchPhase = "terminal"   // op reached a terminal state
 )
 
 // dispatchRecord is the LATEST dispatch state for one agent. The store keeps at
@@ -122,10 +119,6 @@ func (st *dispatchStore) update(agent, dispatchID string, mut func(*dispatchReco
 	cur.UpdatedAt = st.now()
 }
 
-func (st *dispatchStore) begin(agent, dispatchID string, phase dispatchPhase) {
-	st.update(agent, dispatchID, func(rec *dispatchRecord) { rec.Phase = phase })
-}
-
 func (st *dispatchStore) markDispatched(agent, dispatchID string, rc DispatchResumeContext) {
 	st.update(agent, dispatchID, func(rec *dispatchRecord) {
 		rec.Phase = phaseDispatched
@@ -135,13 +128,9 @@ func (st *dispatchStore) markDispatched(agent, dispatchID string, rc DispatchRes
 	})
 }
 
-func (st *dispatchStore) markTerminal(agent, dispatchID string, rep *DispatchReport, refused bool) {
+func (st *dispatchStore) markTerminal(agent, dispatchID string, rep *DispatchReport) {
 	st.update(agent, dispatchID, func(rec *dispatchRecord) {
-		if refused {
-			rec.Phase = phaseRefused
-		} else {
-			rec.Phase = phaseTerminal
-		}
+		rec.Phase = phaseTerminal
 		if rep != nil {
 			rec.Terminal = rep.Terminal
 			rec.Verified = rep.Verified
@@ -361,7 +350,6 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: body.IdempotencyKey, // honored when set; else the service mints a stable key
 	}
 	dispatchID := rm.newID()
-	rm.store.begin(ep.Key, dispatchID, phasePlanning)
 
 	applied := make(chan struct{}, 1)
 	done := make(chan struct{})
@@ -381,7 +369,13 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 				default:
 				}
 			})
-		rm.store.markTerminal(ep.Key, dispatchID, rep, rep != nil && rep.Outcome == OutcomeRefused)
+		// Only claim the per-agent status slot if THIS dispatch actually owned the
+		// agent (acquired single-flight): an in-flight rejection or a planner
+		// refusal never ran an op, so it must NOT overwrite the record of the op
+		// that is actually running (P2: status-clobber).
+		if ownedAgent(rep, derr) {
+			rm.store.markTerminal(ep.Key, dispatchID, rep)
+		}
 	}()
 
 	// Return 202 as soon as the op is durably recorded (applied), even if the
@@ -420,18 +414,38 @@ func (rm *releaseManager) respondPreApply(w http.ResponseWriter, rep *DispatchRe
 	case errors.Is(err, errStaleAlreadyCurrent):
 		// Re-plan signal, NOT a critical incident.
 		writeJSONStatus(w, http.StatusConflict, map[string]any{"status": "stale_replan_required", "detail": detailOf(rep)})
-	case rep != nil && rep.Outcome == OutcomeRefused:
+	case rep != nil && rep.RefusedKind != RefusedNone:
+		// Planner refusal (unknown target, repo mismatch, …).
 		writeJSONStatus(w, refusalHTTPStatus(rep.RefusedKind), map[string]any{
 			"status": "refused", "kind": string(rep.RefusedKind), "detail": detailOf(rep),
 		})
 	case err != nil:
-		// Preflight read failure (agent unreachable) — retryable.
+		// Preflight read failure (agent unreachable / no op started) — retryable.
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "detail": err.Error()})
 	case rep != nil && rep.Terminal == TerminalAlreadyCurrent:
 		writeJSONStatus(w, http.StatusOK, map[string]any{"status": "already_current", "release_id": rep.ReleaseID})
+	case rep != nil && rep.Terminal == TerminalFailedNeedsAttn:
+		// Apply was rejected / failed BEFORE an op_id was returned (no op created).
+		// Surface it as an upstream-agent failure — never a 200 "ok".
+		writeJSONStatus(w, http.StatusBadGateway, map[string]any{
+			"status": "failed", "terminal": string(rep.Terminal), "detail": detailOf(rep),
+		})
 	default:
 		writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
 	}
+}
+
+// ownedAgent reports whether a dispatch outcome actually claimed the agent
+// (acquired single-flight). An in-flight rejection and a planner/preflight
+// refusal never ran an op, so they must NOT write the per-agent status slot.
+func ownedAgent(rep *DispatchReport, err error) bool {
+	if errors.Is(err, errDispatchInFlight) {
+		return false
+	}
+	if rep != nil && rep.Outcome == OutcomeRefused {
+		return false
+	}
+	return true
 }
 
 func detailOf(rep *DispatchReport) string {
@@ -499,13 +513,16 @@ func apiReleaseDispatchResume(w http.ResponseWriter, r *http.Request) {
 
 	actor := auditActor(r)
 	dispatchID := rm.newID()
-	rm.store.begin(ep.Key, dispatchID, phaseResuming)
-	rm.store.markDispatched(ep.Key, dispatchID, rc) // record the op being resumed
 
 	go func() {
-		// Re-poll the EXISTING op to terminal; never calls Apply.
-		rep, _ := rm.svc.Resume(context.Background(), actor, ep, rc)
-		rm.store.markTerminal(ep.Key, dispatchID, rep, false)
+		// Re-poll the EXISTING op to terminal; never calls Apply. Only claim the
+		// per-agent status slot if the resume actually acquired single-flight — an
+		// in-flight rejection must not clobber the running op's record (P2).
+		rep, rerr := rm.svc.Resume(context.Background(), actor, ep, rc)
+		if !errors.Is(rerr, errDispatchInFlight) {
+			rm.store.markDispatched(ep.Key, dispatchID, rc) // record the op being resumed
+			rm.store.markTerminal(ep.Key, dispatchID, rep)
+		}
 	}()
 
 	w.Header().Set("Location", "/api/releases/dispatch/status?agent="+url.QueryEscape(ep.Key))
