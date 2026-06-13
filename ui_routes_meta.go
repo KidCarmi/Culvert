@@ -151,6 +151,11 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
 	{Path: "/api/logs", Handler: "apiLogs", Domain: "dashboard", Public: false,
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
+	{Path: "/api/logs/retention", Handler: "apiLogsRetention", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/top-hosts", Handler: "apiTopHosts", Domain: "dashboard", Public: false,
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer}}},
 	{Path: "/api/audit", Handler: "apiAudit", Domain: "dashboard", Public: false,

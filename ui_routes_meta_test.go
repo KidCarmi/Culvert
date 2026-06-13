@@ -34,7 +34,7 @@ import (
 //   - 132 — Phase C3 added /api/governance/control-plane.
 //   - 133 — SAML SP metadata endpoint added for IdP import.
 func TestC1_RouteMetadata_Locked135(t *testing.T) {
-	const want = 135
+	const want = 136
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

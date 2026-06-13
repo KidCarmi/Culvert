@@ -1,13 +1,28 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// adminReq returns a request whose context carries the admin role, so handlers
+// gated by requireRole(RoleAdmin) pass without the full middleware chain.
+func adminReq(method, target, body string) *http.Request {
+	var r *http.Request
+	if body == "" {
+		r = httptest.NewRequest(method, target, nil)
+	} else {
+		r = httptest.NewRequest(method, target, strings.NewReader(body))
+	}
+	return r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
+}
 
 // drainLogStore waits until the async writer has persisted at least want
 // entries (via a query), or fails after a short deadline. The store batches
@@ -265,6 +280,103 @@ func TestApiLogs_SourceStore_Disabled(t *testing.T) {
 	}
 	if resp.History || resp.Total != 0 {
 		t.Errorf("disabled store should return history:false total:0, got %+v", resp)
+	}
+}
+
+func TestApiLogsRetention_GetPut(t *testing.T) {
+	s, err := openLogStoreTTL(t.TempDir(), 7*24*time.Hour, 2<<30) // 7 days, 2 GB
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	old := globalLogStore
+	globalLogStore = s
+	t.Cleanup(func() { globalLogStore = old; s.Close() })
+
+	// GET reports the current policy.
+	rec := httptest.NewRecorder()
+	apiLogsRetention(rec, httptest.NewRequest(http.MethodGet, "/api/logs/retention", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status %d: %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["enabled"] != true {
+		t.Errorf("enabled = %v, want true", got["enabled"])
+	}
+	if d, _ := got["retentionDays"].(float64); d != 7 {
+		t.Errorf("retentionDays = %v, want 7", got["retentionDays"])
+	}
+
+	// PUT updates the live store (admin role required).
+	rec = httptest.NewRecorder()
+	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"retentionDays":30,"retentionMaxGB":5}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status %d: %s", rec.Code, rec.Body.String())
+	}
+	if s.RetentionDays() != 30 {
+		t.Errorf("after PUT RetentionDays = %d, want 30", s.RetentionDays())
+	}
+	if s.RetentionMaxGB() != 5 {
+		t.Errorf("after PUT RetentionMaxGB = %v, want 5", s.RetentionMaxGB())
+	}
+
+	// Out-of-range value is rejected.
+	rec = httptest.NewRecorder()
+	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"retentionDays":99999}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("out-of-range PUT status %d, want 400", rec.Code)
+	}
+}
+
+// TestApiLogs_TimeRangeMemory locks the from/to units fix: parseTimestampParam
+// returns Unix seconds while LogEntry.TS is millis, so apiLogs must convert
+// before comparing. Without the fix the range filter matched nothing/everything.
+func TestApiLogs_TimeRangeMemory(t *testing.T) {
+	isolateLogRing(t)
+	oldLS := globalLogStore
+	globalLogStore = nil
+	t.Cleanup(func() { globalLogStore = oldLS })
+
+	mid := time.Now().Unix()
+	add := func(sec int64, host string) {
+		logAdd(LogEntry{TS: sec * 1000, IP: "1.1.1.1", Method: "GET", Host: host, Status: "OK", Level: "INFO"})
+	}
+	add(mid-3600, "old.example.com")
+	add(mid, "mid.example.com")
+	add(mid+3600, "new.example.com")
+
+	url := fmt.Sprintf("/api/logs?from=%d&to=%d", mid-1, mid+1)
+	rec := httptest.NewRecorder()
+	apiLogs(rec, httptest.NewRequest(http.MethodGet, url, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Logs  []LogEntry `json:"logs"`
+		Total int        `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("time-range total = %d, want 1 (only the mid entry)", resp.Total)
+	}
+	if resp.Logs[0].Host != "mid.example.com" {
+		t.Errorf("matched host = %q, want mid.example.com", resp.Logs[0].Host)
+	}
+}
+
+func TestApiLogsRetention_DisabledConflict(t *testing.T) {
+	old := globalLogStore
+	globalLogStore = nil
+	t.Cleanup(func() { globalLogStore = old })
+
+	rec := httptest.NewRecorder()
+	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"retentionDays":30}`))
+	if rec.Code != http.StatusConflict {
+		t.Errorf("disabled PUT status %d, want 409", rec.Code)
 	}
 }
 

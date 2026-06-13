@@ -202,6 +202,16 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid 'to' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
 		return
 	}
+	// parseTimestampParam returns Unix SECONDS, but LogEntry.TS is Unix MILLIS.
+	// Convert so the range comparison below uses consistent units (without this
+	// the seconds-vs-millis mismatch made from/to filtering ineffective).
+	var fromMs, toMs int64
+	if fromTS != 0 {
+		fromMs = fromTS * 1000
+	}
+	if toTS != 0 {
+		toMs = toTS*1000 + 999 // include the whole second
+	}
 
 	// Pagination parameters (Finding 6.1). The limit is clamped so one query
 	// cannot demand an unbounded response (CWE-770); offset pagination still
@@ -225,10 +235,10 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 
 	filtered := all[:0:0]
 	for _, e := range all {
-		if fromTS != 0 && e.TS < fromTS {
+		if fromMs != 0 && e.TS < fromMs {
 			continue
 		}
-		if toTS != 0 && e.TS > toTS {
+		if toMs != 0 && e.TS > toMs {
 			continue
 		}
 		if filterHost != "" && !strings.Contains(strings.ToLower(e.Host), filterHost) &&
@@ -342,6 +352,61 @@ func apiLogsServeStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{"logs": logs, "total": total, "history": true})
+}
+
+// apiLogsRetention serves the history-store retention policy + usage.
+//
+//	GET (viewer): current retention days / max GB and live usage stats.
+//	PUT (admin):  update retention days / max GB; applies to the live store
+//	              (new TTL affects newly written entries) and persists.
+func apiLogsRetention(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, logStoreRetentionView())
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		if globalLogStore == nil {
+			http.Error(w, "history store disabled (set log_store_path)", http.StatusConflict)
+			return
+		}
+		var body struct {
+			RetentionDays  *int     `json:"retentionDays"`
+			RetentionMaxGB *float64 `json:"retentionMaxGB"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		days := globalLogStore.RetentionDays()
+		gb := globalLogStore.RetentionMaxGB()
+		if body.RetentionDays != nil {
+			days = *body.RetentionDays
+		}
+		if body.RetentionMaxGB != nil {
+			gb = *body.RetentionMaxGB
+		}
+		if days < 0 || days > 3650 {
+			http.Error(w, "retentionDays must be between 0 and 3650", http.StatusBadRequest)
+			return
+		}
+		if gb < 0 || gb > 10000 {
+			http.Error(w, "retentionMaxGB must be between 0 and 10000", http.StatusBadRequest)
+			return
+		}
+		globalLogStore.SetRetention(days, gb)
+		auditEvent(r, "logstore.retention", "history", fmt.Sprintf("days=%d maxGB=%g", days, gb))
+		adminSettingsSave()
+		jsonOK(w, logStoreRetentionView())
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // parseTimestampParam parses a timestamp string that is either a Unix timestamp
@@ -1270,6 +1335,7 @@ func registerDashboardRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/dashboard/top-rules", apiDashboardTopRules)
 	mux.HandleFunc("/api/timeseries", apiTimeseries)
 	mux.HandleFunc("/api/logs", apiLogs)
+	mux.HandleFunc("/api/logs/retention", apiLogsRetention)
 	mux.HandleFunc("/api/top-hosts", apiTopHosts)
 	mux.HandleFunc("/api/audit", apiAudit)
 	mux.HandleFunc("/api/events", apiEvents) // SSE live dashboard

@@ -55,9 +55,12 @@ var (
 )
 
 type logStore struct {
-	db       *badger.DB
-	ttl      time.Duration // 0 = no age expiry
-	maxBytes int64         // 0 = no size cap
+	db *badger.DB
+
+	// ttlNanos (age limit) and maxBytes (size cap) are runtime-adjustable from
+	// the admin UI, so they are accessed atomically. 0 disables that dimension.
+	ttlNanos int64 // atomic
+	maxBytes int64 // atomic
 
 	// bytesUsed is the tracked logical size (key+value bytes) used by the size
 	// cap. It is reconciled from disk on open, incremented on write, and
@@ -99,11 +102,13 @@ func openLogStoreTTL(dir string, ttl time.Duration, maxBytes int64) (*logStore, 
 		return nil, err
 	}
 	s := &logStore{
-		db:       db,
-		ttl:      ttl,
-		maxBytes: maxBytes,
-		ch:       make(chan LogEntry, 4096),
+		db: db,
+		ch: make(chan LogEntry, 4096),
 	}
+	if ttl > 0 {
+		s.ttlNanos = int64(ttl)
+	}
+	s.maxBytes = maxBytes
 	// Reconcile the logical byte counter from any data already on disk so the
 	// size cap is correct immediately after a restart (bounded by the scan cap).
 	s.bytesUsed = s.scanLogicalBytes()
@@ -182,8 +187,8 @@ func (s *logStore) writeLoop() {
 			}
 			key := logStoreKey(batch[i].TS, atomic.AddUint32(&s.seq, 1))
 			ent := badger.NewEntry(key, b)
-			if s.ttl > 0 {
-				ent = ent.WithTTL(s.ttl)
+			if ttl := time.Duration(atomic.LoadInt64(&s.ttlNanos)); ttl > 0 {
+				ent = ent.WithTTL(ttl)
 			}
 			_ = wb.SetEntry(ent) //nolint:errcheck -- flush surfaces the error
 			added += int64(len(key) + len(b))
@@ -322,10 +327,11 @@ func (s *logStore) Stats() logStoreStats {
 // One bounded pass per call; the janitor calls it on a timer so the cap
 // converges across passes despite lazy LSM size accounting.
 func (s *logStore) RunRetention() {
-	if s == nil || s.maxBytes <= 0 {
+	if s == nil {
 		return
 	}
-	if atomic.LoadInt64(&s.bytesUsed) <= s.maxBytes {
+	maxBytes := atomic.LoadInt64(&s.maxBytes)
+	if maxBytes <= 0 || atomic.LoadInt64(&s.bytesUsed) <= maxBytes {
 		return
 	}
 	keys := make([][]byte, 0, logStorePruneBatch)
@@ -362,6 +368,42 @@ func (s *logStore) RunRetention() {
 	_ = s.db.RunValueLogGC(0.5) // reclaim disk; ErrNoRewrite is expected and ignored
 }
 
+// SetRetention updates the retention policy at runtime. The new TTL applies to
+// newly written entries only (Badger TTL is fixed per key at write time); the
+// size cap takes effect on the next janitor pass. days<=0 disables age expiry;
+// gb<=0 disables the size cap.
+func (s *logStore) SetRetention(days int, gb float64) {
+	if s == nil {
+		return
+	}
+	var ttlNanos int64
+	if days > 0 {
+		ttlNanos = int64(time.Duration(days) * 24 * time.Hour)
+	}
+	var maxBytes int64
+	if gb > 0 {
+		maxBytes = int64(gb * (1 << 30))
+	}
+	atomic.StoreInt64(&s.ttlNanos, ttlNanos)
+	atomic.StoreInt64(&s.maxBytes, maxBytes)
+}
+
+// RetentionDays returns the current age limit in whole days (0 = no limit).
+func (s *logStore) RetentionDays() int {
+	if s == nil {
+		return 0
+	}
+	return int(time.Duration(atomic.LoadInt64(&s.ttlNanos)) / (24 * time.Hour))
+}
+
+// RetentionMaxGB returns the current size cap in GB (0 = no limit).
+func (s *logStore) RetentionMaxGB() float64 {
+	if s == nil {
+		return 0
+	}
+	return float64(atomic.LoadInt64(&s.maxBytes)) / (1 << 30)
+}
+
 // logStoreHealth reports history-store usage for the dashboard/admin panels.
 // enabled=false (and zeroed fields) when the history store is disabled.
 func logStoreHealth() map[string]any {
@@ -377,6 +419,25 @@ func logStoreHealth() map[string]any {
 		"oldestMs": st.OldestMs,
 		"dropped":  atomic.LoadInt64(&statLogStoreDropped),
 		"pruned":   atomic.LoadInt64(&statLogStorePruned),
+	}
+}
+
+// logStoreRetentionView is the GET /api/logs/retention payload: the current
+// retention policy plus live usage stats.
+func logStoreRetentionView() map[string]any {
+	if globalLogStore == nil {
+		return map[string]any{
+			"enabled":        false,
+			"retentionDays":  0,
+			"retentionMaxGB": 0,
+			"usage":          logStoreHealth(),
+		}
+	}
+	return map[string]any{
+		"enabled":        true,
+		"retentionDays":  globalLogStore.RetentionDays(),
+		"retentionMaxGB": globalLogStore.RetentionMaxGB(),
+		"usage":          logStoreHealth(),
 	}
 }
 
