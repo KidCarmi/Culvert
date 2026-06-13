@@ -316,20 +316,21 @@ var fileProfileExts = map[FileProfileName][]string{
 type PolicyRule struct {
 	Priority          int             `json:"priority"`
 	Name              string          `json:"name"`
-	SourceIP          string          `json:"sourceIP"`           // single IP or CIDR; empty = any
-	SourceIdentity    string          `json:"sourceIdentity"`     // authenticated username; empty = any
-	SourceGroup       string          `json:"sourceGroup"`        // IdP group/role membership; empty = any
-	AuthSource        string          `json:"authSource"`         // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
-	DestFQDN          string          `json:"destFQDN"`           // exact or wildcard FQDN; empty = any
-	DestCategory      URLCategory     `json:"destCategory"`       // URL category; empty = any
-	DestCategoryGroup string          `json:"destCategoryGroup"`  // category group name; empty = any
-	DestCountry       []string        `json:"destCountry"`        // ISO 3166-1 alpha-2 country codes; empty = any
-	Schedule          *PolicySchedule `json:"schedule,omitempty"` // nil = always active
-	SSLAction         SSLAction       `json:"sslAction"`          // Inspect | Bypass
-	FileFiltering     bool            `json:"fileFiltering"`      // enable file-type scanning
-	FileProfile       FileProfileName `json:"fileProfile"`        // named file-extension block profile
-	LogFullURI        bool            `json:"logFullUri"`         // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
-	TLSSkipVerify     bool            `json:"tlsSkipVerify"`      // skip upstream cert verification (use with caution)
+	SourceIP          string          `json:"sourceIP"`             // single IP or CIDR; empty = any
+	SourceIdentity    string          `json:"sourceIdentity"`       // authenticated username; empty = any
+	SourceGroup       string          `json:"sourceGroup"`          // IdP group/role membership; empty = any
+	AuthSource        string          `json:"authSource"`           // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
+	DestFQDN          string          `json:"destFQDN"`             // exact or wildcard FQDN; empty = any
+	DestCategory      URLCategory     `json:"destCategory"`         // URL category; empty = any
+	DestCategoryGroup string          `json:"destCategoryGroup"`    // category group name; empty = any
+	DestCountry       []string        `json:"destCountry"`          // ISO 3166-1 alpha-2 country codes; empty = any
+	Schedule          *PolicySchedule `json:"schedule,omitempty"`   // nil = always active
+	SSLAction         SSLAction       `json:"sslAction"`            // Inspect | Bypass
+	FileFiltering     bool            `json:"fileFiltering"`        // enable file-type scanning
+	FileProfile       FileProfileName `json:"fileProfile"`          // named file-extension block profile
+	LogFullURI        bool            `json:"logFullUri"`           // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
+	LogTraffic        *bool           `json:"logTraffic,omitempty"` // log allowed traffic matching this rule (nil/true = log; false = count stats only, no feed entry). Blocks/threats are always logged.
+	TLSSkipVerify     bool            `json:"tlsSkipVerify"`        // skip upstream cert verification (use with caution)
 	Action            PolicyAction    `json:"action"`
 	RedirectURL       string          `json:"redirectURL"`            // used when Action == Redirect
 	Enabled           *bool           `json:"enabled,omitempty"`      // nil or true = active; false = skipped during evaluation
@@ -345,6 +346,15 @@ type PolicyRule struct {
 // is treated as true so that all pre-existing rules remain active.
 func ruleIsEnabled(r *PolicyRule) bool {
 	return r.Enabled == nil || *r.Enabled
+}
+
+// ruleLogsTraffic reports whether allowed traffic matching this rule should
+// produce a request-log entry. A nil LogTraffic pointer (the zero value for
+// rules loaded from JSON without the field) means "log" so existing rules are
+// unchanged. Only the allow path consults this — blocks and threats are always
+// logged as security events.
+func ruleLogsTraffic(r *PolicyRule) bool {
+	return r.LogTraffic == nil || *r.LogTraffic
 }
 
 // PolicySchedule restricts a rule to specific days/times.

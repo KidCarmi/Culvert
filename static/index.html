@@ -667,6 +667,12 @@ tr.dragging  { opacity: .4; }
 
     <!-- ── LIVE FEED ──────────────────────────────────────────────────────── -->
     <div class="view" id="view-livefeed">
+      <div class="filter-bar" style="gap:6px">
+        <button class="btn sm log-tab active" data-click="setLogTab" data-arg="">All</button>
+        <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="INFO">Allowed</button>
+        <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="WARN">Blocked / Threats</button>
+        <button class="btn sm ghost log-tab" data-click="setLogTab" data-arg="ERROR">Auth Failures</button>
+      </div>
       <div class="filter-bar">
         <input type="text" class="input wide" id="log-filter" placeholder="Filter by host or IP…" data-input="applyLogFilter">
         <input type="text" class="input" style="width:160px" id="log-identity" placeholder="Filter by user…" data-input="applyLogFilter">
@@ -2237,6 +2243,9 @@ Firefox (all platforms):
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Log the full request URL (path only, no query string) for traffic matching this rule. For HTTPS the path is only visible when SSL Action is Inspect — otherwise only the host is logged.">
                 <input type="checkbox" id="pol-log-uri"> <span>Log full URL</span>
               </label>
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Write a log entry for allowed traffic matching this rule. Turn off for high-volume trusted rules to cut log volume — the request is still counted in stats/dashboards. Blocks and threats are always logged.">
+                <input type="checkbox" id="pol-log-traffic" checked> <span>Log traffic</span>
+              </label>
             </div>
           </div>
 
@@ -3625,6 +3634,7 @@ document.addEventListener('click', e => {
     case 'historyApply':      historyApply(); break;
     case 'historyPage':       historyPage(arg); break;
     case 'saveRetention':     saveRetention(); break;
+    case 'setLogTab':         setLogTab(arg || ''); break;
 
     // ── Blocklist ──
     case 'exportBlocklist':   exportBlocklist(); break;
@@ -5157,6 +5167,22 @@ function renderLogs() {
   if (document.getElementById('auto-scroll').checked) sc.scrollTop = 0;
 }
 
+// setLogTab is the PAN-OS-style log-type quick filter. Tabs map to the request
+// LEVEL (INFO=allowed, WARN=blocked/threats, ERROR=auth failures), which the
+// /api/logs filter supports for the live, file, and history sources alike.
+function setLogTab(level) {
+  logLevelFilter = level;
+  const sel = document.getElementById('log-level');
+  if (sel) sel.value = level;
+  document.querySelectorAll('.log-tab').forEach(b => {
+    const on = (b.dataset.arg || '') === level;
+    b.classList.toggle('active', on);
+    b.classList.toggle('ghost', !on);
+  });
+  logHistOffset = 0;
+  fetchLogs();
+}
+
 function applyLogFilter() {
   logFilter         = document.getElementById('log-filter').value;
   logIdentityFilter = document.getElementById('log-identity').value;
@@ -6281,6 +6307,7 @@ function clonePolicy(pri) {
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
   document.getElementById('pol-log-uri').checked = !!r.logFullUri;
+  document.getElementById('pol-log-traffic').checked = r.logTraffic !== false;
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
   loadPolicyProviderOptions().then(() => {
@@ -7831,6 +7858,7 @@ function editPolicy(priority) {
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
   document.getElementById('pol-log-uri').checked = !!r.logFullUri;
+  document.getElementById('pol-log-traffic').checked = r.logTraffic !== false;
   // Group chip picker
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
@@ -7865,6 +7893,7 @@ function clearPolicyForm() {
   document.getElementById('pol-file-profile').value  = '';
   document.getElementById('pol-tls-skip').checked    = false;
   document.getElementById('pol-log-uri').checked     = false;
+  document.getElementById('pol-log-traffic').checked = true;
   document.getElementById('pol-src-auth').value      = '';
   clearGroupSelection();
   _selectedCountries = [];
@@ -7911,6 +7940,7 @@ async function submitPolicyRule() {
     fileProfile:    document.getElementById('pol-file-profile').value || '',
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
     logFullUri:     document.getElementById('pol-log-uri').checked,
+    logTraffic:     document.getElementById('pol-log-traffic').checked,
     schedule:       getScheduleFromForm(),
   };
   try {

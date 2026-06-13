@@ -7,8 +7,63 @@ package main
 import (
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+func TestRuleLogsTraffic(t *testing.T) {
+	if !ruleLogsTraffic(&PolicyRule{}) {
+		t.Error("nil LogTraffic should log by default")
+	}
+	tr, fa := true, false
+	if !ruleLogsTraffic(&PolicyRule{LogTraffic: &tr}) {
+		t.Error("LogTraffic=true should log")
+	}
+	if ruleLogsTraffic(&PolicyRule{LogTraffic: &fa}) {
+		t.Error("LogTraffic=false should NOT log")
+	}
+}
+
+// TestRecordStats_NoLogEntry proves the "Log traffic off" path: stats are
+// counted but no request-log entry is written.
+func TestRecordStats_NoLogEntry(t *testing.T) {
+	isolateLogRing(t)
+	oldLS := globalLogStore
+	globalLogStore = nil
+	t.Cleanup(func() { globalLogStore = oldLS })
+
+	before := atomic.LoadInt64(&statTotal)
+	recordStats("1.2.3.4", "h.example.com", "OK", "rule", "Allow")
+	if got := atomic.LoadInt64(&statTotal); got != before+1 {
+		t.Errorf("statTotal delta = %d, want 1 (request still counted)", got-before)
+	}
+	if n := len(logGet()); n != 0 {
+		t.Errorf("recordStats wrote %d log entries, want 0", n)
+	}
+}
+
+func TestPolicyRule_LogTrafficRoundTrip(t *testing.T) {
+	fa := false
+	b, err := json.Marshal(PolicyRule{Name: "r", LogTraffic: &fa})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"logTraffic":false`) {
+		t.Errorf("marshaled rule missing logTraffic:false — %s", b)
+	}
+	// nil pointer is omitted (existing rules unchanged on the wire).
+	b2, _ := json.Marshal(PolicyRule{Name: "r"})
+	if strings.Contains(string(b2), "logTraffic") {
+		t.Errorf("nil LogTraffic should be omitted — %s", b2)
+	}
+	var back PolicyRule
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.LogTraffic == nil || *back.LogTraffic != false {
+		t.Error("LogTraffic=false did not round-trip")
+	}
+}
 
 func TestPolicyLogURI(t *testing.T) {
 	cases := []struct {

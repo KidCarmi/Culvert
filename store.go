@@ -2100,9 +2100,12 @@ func recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, 
 	recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, "", auth)
 }
 
-// recordRequestFull is the implementation behind every recorder. uri is the
-// captured request URL (host+path, no query) or "" when not logged.
-func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
+// recordStats records the metric/time-series/alert/top-host side effects of a
+// request WITHOUT writing a request-log entry. It is the shared core of
+// recordRequestFull and the path used when a policy rule has traffic logging
+// disabled ("Log traffic" off): the request still counts toward stats and
+// dashboards, it just produces no feed/history/syslog entry.
+func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
 	tsRecordResult(isAllowed)
@@ -2120,6 +2123,12 @@ func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, ident
 	if status == "OK" || status == "POLICY_ALLOW" {
 		topHosts.Record(host)
 	}
+}
+
+// recordRequestFull is the implementation behind every recorder. uri is the
+// captured request URL (host+path, no query) or "" when not logged.
+func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
+	recordStats(ip, host, status, ruleMatched, actionTaken)
 	entry := LogEntry{
 		TS:          time.Now().UnixMilli(),
 		Time:        time.Now().Format("15:04:05"),

@@ -481,7 +481,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					return
 				}
 			}
-			recordRequestAuthURI(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, "", ruleURI, authLog)
+			if ruleLogsTraffic(match.Rule) {
+				recordRequestAuthURI(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, "", ruleURI, authLog)
+			} else {
+				// "Log traffic" off: count the request for stats/dashboards but
+				// write no feed/history entry (volume control).
+				recordStats(clientIP, r.Host, "OK", match.Rule.Name, string(ActionAllow))
+			}
 			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Fall through to normal handling below.
 		}
@@ -1551,7 +1557,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		// carrying the decrypted host+path (no query). Opt-in via the matched
 		// rule's LogFullURI flag — off by default, so inspected traffic for
 		// other rules still produces only the single CONNECT-open entry.
-		if match != nil && match.Rule != nil && match.Rule.LogFullURI {
+		if match != nil && match.Rule != nil && match.Rule.LogFullURI && ruleLogsTraffic(match.Rule) {
 			recordRequestAuthURI(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{})
 		}
 		if closeAfter {
