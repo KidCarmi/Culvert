@@ -25,6 +25,8 @@ type fakeAgent struct {
 	runningSeq  [][]string // RunningDigests returns these in order (anchor, post, ...)
 	runningErrs []error    // error to return per RunningDigests call (nil ⇒ ok)
 	runningCall int
+
+	waitGate chan struct{} // if non-nil, WaitOp blocks on it before returning
 }
 
 func (f *fakeAgent) Apply(_ context.Context, req UpgradeApplyRequest) (string, error) {
@@ -38,7 +40,14 @@ func (f *fakeAgent) Apply(_ context.Context, req UpgradeApplyRequest) (string, e
 	return f.applyOpID, nil
 }
 
-func (f *fakeAgent) WaitOp(_ context.Context, _ string) (string, error) {
+func (f *fakeAgent) WaitOp(ctx context.Context, _ string) (string, error) {
+	if f.waitGate != nil {
+		select {
+		case <-f.waitGate:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
 	return f.waitState, f.waitErr
 }
 
@@ -221,6 +230,60 @@ func TestExec_ConcurrentRejected(t *testing.T) {
 	e.release()
 	if _, err := e.Execute(context.Background(), plan); err != nil {
 		t.Fatalf("Execute after release: %v", err)
+	}
+}
+
+// An already-current plan is single-flighted too: while an op is in flight on
+// the agent, a concurrent already-current request is rejected rather than
+// answered from a racing status read.
+func TestExec_AlreadyCurrentRejectedWhenInFlight(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, []string{dispatchRepo + "@" + digA})
+	if plan.Outcome != OutcomeAlreadyCurrent {
+		t.Fatalf("precondition: want already_current; got %s", plan.Outcome)
+	}
+	agent := &fakeAgent{runningSeq: [][]string{{dispatchRepo + "@" + digA}}}
+	e := newExec(agent, nil)
+	if !e.acquire() {
+		t.Fatal("acquire should succeed")
+	}
+	defer e.release()
+	if _, err := e.Execute(context.Background(), plan); !errors.Is(err, errDispatchInFlight) {
+		t.Fatalf("already-current during in-flight op: err = %v; want errDispatchInFlight", err)
+	}
+	if agent.runningCall != 0 {
+		t.Fatal("a rejected already-current must not read status")
+	}
+}
+
+// The onApplied hook fires exactly once with the op_id, before the watch.
+func TestExec_OnAppliedFiresWithOpID(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	agent := &fakeAgent{applyOpID: "op-cb", waitState: agentStateSucceeded,
+		runningSeq: [][]string{nil, {dispatchRepo + "@" + digA}}}
+	var ops []string
+	res, err := newExec(agent, nil).Execute(context.Background(), plan, func(opID string) { ops = append(ops, opID) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || ops[0] != "op-cb" {
+		t.Fatalf("onApplied fired %v; want exactly [op-cb]", ops)
+	}
+	if res.Terminal != TerminalSucceeded {
+		t.Fatalf("terminal=%s; want succeeded", res.Terminal)
+	}
+}
+
+// onApplied must NOT fire when no apply happens (already-current).
+func TestExec_OnAppliedSilentOnAlreadyCurrent(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, []string{dispatchRepo + "@" + digA})
+	agent := &fakeAgent{runningSeq: [][]string{{dispatchRepo + "@" + digA}}}
+	fired := false
+	_, _ = newExec(agent, nil).Execute(context.Background(), plan, func(string) { fired = true })
+	if fired {
+		t.Fatal("onApplied must not fire for an already-current plan (no apply)")
 	}
 }
 

@@ -159,10 +159,13 @@ func NewDispatchExecutor(client AgentClient, cfg DispatchConfig, audit func(Disp
 
 func newDispatchOpID() string { return ulid.MustNew(ulid.Now(), rand.Reader).String() }
 
-// Execute runs a frozen plan. An already-current plan returns immediately
-// WITHOUT contacting the agent. A refused/non-plan returns an error. A second
-// concurrent Execute returns errDispatchInFlight.
-func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*DispatchResult, error) {
+// Execute runs a frozen plan. A refused/non-plan returns an error; a second
+// concurrent Execute on the same agent returns errDispatchInFlight (the
+// already-current path is single-flighted too). The optional onApplied hooks
+// fire EXACTLY ONCE, right after the agent accepts the apply and returns an
+// op_id — BEFORE the (potentially long) WaitOp — so a caller can durably record
+// the op_id/key for crash recovery before blocking on the terminal state.
+func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan, onApplied ...func(opID string)) (*DispatchResult, error) {
 	if plan == nil {
 		return nil, errors.New("dispatch: nil plan")
 	}
@@ -213,6 +216,9 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*Di
 	}
 	res.OpID = opID
 	e.emitDispatch(plan, key, opID)
+	for _, h := range onApplied {
+		h(opID) // durable correlation point — BEFORE the blocking watch
+	}
 
 	// Bound the watch: a caller deadline always wins; otherwise cap at maxWatch so
 	// a never-terminal op cannot poll forever (§7). The ctx remains the hard stop.
@@ -239,7 +245,17 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan) (*Di
 // have drifted off the target between planning and execution. Re-reading closes
 // that window: still-on-target ⇒ already_current; drifted ⇒ refuse with
 // errStaleAlreadyCurrent so the caller re-plans (NO apply in this slice).
+//
+// It takes the SAME single-flight as a real dispatch: while an op is in flight on
+// the agent the running image is in flux, so a confident already_current no-op is
+// unsafe — a concurrent already-current request is rejected with
+// errDispatchInFlight, not answered from a racing status read.
 func (e *DispatchExecutor) executeAlreadyCurrent(ctx context.Context, plan *DispatchPlan) (*DispatchResult, error) {
+	if !e.acquire() {
+		return nil, errDispatchInFlight
+	}
+	defer e.release()
+
 	running, err := e.client.RunningDigests(ctx)
 	if err != nil {
 		res := &DispatchResult{Terminal: TerminalFailedNeedsAttn, Detail: "already_current_recheck_read_failed: " + err.Error()}

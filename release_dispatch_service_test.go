@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ─── capture sinks ───────────────────────────────────────────────────────────
@@ -306,6 +307,45 @@ func TestService_IdempotencyKeyStableAndHonored(t *testing.T) {
 	}
 }
 
+// The release.dispatch audit (carrying op_id) is persisted BEFORE the blocking
+// watch resolves — so a CP crash mid-watch still leaves a durable correlation
+// handle for the resume path.
+func TestService_DispatchAuditedBeforeTerminal(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	gate := make(chan struct{})
+	agent := &fakeAgent{applyOpID: "op-dur", waitState: agentStateSucceeded,
+		runningSeq: [][]string{
+			{dispatchRepo + "@" + digB}, // pre-plan ⇒ OutcomePlan
+			{dispatchRepo + "@" + digB}, // anchor
+			{dispatchRepo + "@" + digA}, // post (verifies)
+		},
+		waitGate: gate}
+	svc, au, _ := newService(t, cat, agent)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = svc.Dispatch(context.Background(), "admin@10.0.0.10", testEP,
+			DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+		close(done)
+	}()
+
+	// The dispatch audit (with op_id) lands while WaitOp is still gated.
+	waitFor(t, func() bool {
+		d := au.byAction("release.dispatch")
+		return len(d) == 1 && strings.Contains(d[0].Detail, "op_id=op-dur")
+	}, "release.dispatch with op_id=op-dur before terminal")
+
+	if got := au.byAction("release.dispatch.outcome"); len(got) != 0 {
+		t.Fatalf("outcome must not be recorded while the watch is still blocked; got %+v", got)
+	}
+
+	close(gate) // let WaitOp return
+	<-done
+	if got := au.byAction("release.dispatch.outcome"); len(got) != 1 {
+		t.Fatalf("want one outcome audit after terminal; got %+v", got)
+	}
+}
+
 // ─── real transport wiring (default httpAgentClient, end-to-end) ─────────────
 
 func TestService_RealTransportEndToEnd(t *testing.T) {
@@ -356,3 +396,16 @@ func TestService_RealTransportEndToEnd(t *testing.T) {
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 func repeat64(b byte) string { return strings.Repeat(string(b), 64) }
+
+// waitFor polls cond up to ~2s, failing the test if it never holds.
+func waitFor(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}

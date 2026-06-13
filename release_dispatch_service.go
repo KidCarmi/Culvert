@@ -202,13 +202,26 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 		return rep, plan.Reason
 	}
 
-	res, eerr := reg.exec.Execute(ctx, plan)
+	// The release.dispatch audit is written from the onApplied hook — as soon as
+	// the agent returns an op_id and BEFORE the blocking watch — so a CP crash
+	// mid-watch still leaves a durable op_id/key record for the resume path.
+	applied := false
+	res, eerr := reg.exec.Execute(ctx, plan, func(opID string) {
+		applied = true
+		early := reportFromPlan(plan)
+		early.OpID = opID
+		s.auditDispatch(actor, ep, target, early)
+	})
 	rep := reportFromResult(plan, res)
-	s.auditDispatch(actor, ep, target, rep)
 	if errors.Is(eerr, errDispatchInFlight) {
-		// Concurrent dispatch on the same agent — rejected before apply, no
-		// terminal outcome to report.
+		// Concurrent dispatch on the same agent — rejected before any apply.
+		s.auditDispatch(actor, ep, target, rep)
 		return rep, eerr
+	}
+	if !applied {
+		// already_current / stale: no apply happened, so the onApplied hook did
+		// not fire — record the dispatch decision here.
+		s.auditDispatch(actor, ep, target, rep)
 	}
 	s.auditOutcome(actor, ep, target, rep)
 	s.maybeAlert(actor, ep, rep)
@@ -257,8 +270,10 @@ func reportFromRefusal(plan *DispatchPlan) *DispatchReport {
 	}
 }
 
-func reportFromResult(plan *DispatchPlan, res *DispatchResult) *DispatchReport {
-	rep := &DispatchReport{
+// reportFromPlan builds the plan-derived report (identity + apply flags) with no
+// terminal/op_id yet — the shape used for the early release.dispatch audit.
+func reportFromPlan(plan *DispatchPlan) *DispatchReport {
+	return &DispatchReport{
 		Outcome:           plan.Outcome,
 		ReleaseID:         plan.ReleaseID,
 		VersionID:         plan.VersionID,
@@ -269,6 +284,10 @@ func reportFromResult(plan *DispatchPlan, res *DispatchResult) *DispatchReport {
 		PreBackup:         plan.Apply.PreBackup,
 		RollbackOnFailure: plan.Apply.RollbackOnFailure,
 	}
+}
+
+func reportFromResult(plan *DispatchPlan, res *DispatchResult) *DispatchReport {
+	rep := reportFromPlan(plan)
 	if res == nil {
 		rep.Detail = "dispatch_in_flight"
 		return rep
