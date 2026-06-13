@@ -230,39 +230,20 @@ func TestP2S1_Persistence_RollbackAndClusterSnapshot(t *testing.T) {
 	}
 }
 
-// ── Inertness: CR resolves to Default (no runtime activation) ────────────────
+// ── Persistence acceptance is independent of resolver activation ─────────────
+//
+// Slice 1 asserted these resolved to Default; Phase 2 Slice 2 generalizes the
+// pure resolver to return CredentialRequired (still runtime-inert — proxy.go
+// consumes only Exempt). The CR resolver contract is owned by the Slice 2 suite;
+// here we only confirm persistence + that Stage-2 Evaluate still ignores it.
 
-func TestP2S1_CR_ResolverReturnsDefault(t *testing.T) {
-	// A fully-valid, fully-matching CR rule must still resolve to Default in
-	// Slice 1 — proving persistence acceptance did NOT activate it at runtime.
-	ctx := RequestContext{ClientIP: "10.0.5.50", Host: "updates.example.com", Protocol: "http", Method: "GET"}
-	d := resolveAuthOutcomeFrom([]PolicyRule{validCRRule()}, ctx)
-	if d.Outcome != OutcomeDefault {
-		t.Fatalf("CR must be runtime-inert in Slice 1: outcome = %q, want Default", d.Outcome)
-	}
-	if d.Rule != nil {
-		t.Errorf("inert CR decision must carry no rule, got %+v", d.Rule)
-	}
-	// Mixed store: a matching CR rule alongside no exempt rule still → Default.
-	d = resolveAuthOutcomeFrom([]PolicyRule{validCRRule(), {Priority: 5, Name: "acc", Action: ActionAllow}}, ctx)
-	if d.Outcome != OutcomeDefault {
-		t.Errorf("CR alongside access rule must still resolve Default, got %q", d.Outcome)
-	}
-}
-
-// ── Persisted-then-resolved end to end (inert) ───────────────────────────────
-
-func TestP2S1_CR_PersistedThenInert(t *testing.T) {
+func TestP2S1_CR_PersistedThenStage2Ignores(t *testing.T) {
 	withFreshPolicyStore(t)
 	policyStore.Add(validCRRule())
 	if cr := findRule(policyStore.List(), "require-creds-vendor"); cr == nil {
 		t.Fatal("CR rule must persist into the live store")
 	}
-	// Stage-1 resolver over the live store stays Default.
-	if d := resolveAuthOutcome(RequestContext{ClientIP: "10.0.5.50", Host: "updates.example.com", Protocol: "http"}); d.Outcome != OutcomeDefault {
-		t.Errorf("live-store CR must resolve Default, got %q", d.Outcome)
-	}
-	// Stage-2 Evaluate ignores the auth rule entirely (unchanged).
+	// Stage-2 Evaluate ignores the auth rule entirely (unchanged by Slice 2).
 	if m := policyStore.Evaluate("10.0.5.50", "", "unauth", "updates.example.com", nil); m != nil && ruleTypeOf(m.Rule) != ruleTypeAccess {
 		t.Errorf("Stage-2 Evaluate must ignore the CR auth rule, matched: %+v", m.Rule)
 	}
