@@ -120,9 +120,9 @@ func TestService_ResumeSucceedsWithoutApply(t *testing.T) {
 		runningSeq: [][]string{{dispatchRepo + "@" + digA}}} // post-read verifies the target
 	svc, au, _ := newService(t, cat, agent)
 
-	h := ResumeHandle{OpID: "op-prior", ReleaseID: "rel_a", PinnedRef: dispatchRepo + "@" + digA,
-		ImageRef: dispatchRepo + "@" + digA, IdempotencyKey: "rel-rel_a-OP01"}
-	rep, err := svc.Resume(context.Background(), "admin@10.0.0.2", testEP, h)
+	rc := DispatchResumeContext{AgentID: testEP.Key, OpID: "op-prior", ReleaseID: "rel_a",
+		TargetPinnedRef: dispatchRepo + "@" + digA, ImageRef: dispatchRepo + "@" + digA, IdempotencyKey: "rel-rel_a-OP01"}
+	rep, err := svc.Resume(context.Background(), "admin@10.0.0.2", testEP, rc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +138,37 @@ func TestService_ResumeSucceedsWithoutApply(t *testing.T) {
 	}
 }
 
+// Resume works from a freshly-built context (simulating a CP restart with only
+// the persisted record): op_id + target pinned ref are enough — NO in-memory
+// plan and NO idempotency key required.
+func TestService_ResumeFromContextWithoutPlanOrKey(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{waitState: agentStateSucceeded,
+		runningSeq: [][]string{{dispatchRepo + "@" + digA}}}
+	svc, _, _ := newService(t, cat, agent)
+
+	rc := DispatchResumeContext{
+		AgentID:         testEP.Key,
+		OpID:            "op-restart",
+		ReleaseID:       "rel_a",
+		TargetPinnedRef: dispatchRepo + "@" + digA,
+		// ImageRef + IdempotencyKey intentionally empty — not needed to resume.
+	}
+	rep, err := svc.Resume(context.Background(), "admin@10.0.0.20", testEP, rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Terminal != TerminalSucceeded || !rep.Verified {
+		t.Fatalf("terminal=%s verified=%v; want succeeded/true from op_id+target alone", rep.Terminal, rep.Verified)
+	}
+	if rep.OpID != "op-restart" {
+		t.Fatalf("op_id = %q; want op-restart", rep.OpID)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("resume must NOT apply; saw %d", len(agent.applyReqs))
+	}
+}
+
 func TestService_ResumeVerifyMismatchAlerts(t *testing.T) {
 	cat := mustLoad(t, validSource())
 	// Op succeeded but the running digest is NOT the target ⇒ needs attention.
@@ -145,8 +176,8 @@ func TestService_ResumeVerifyMismatchAlerts(t *testing.T) {
 		runningSeq: [][]string{{dispatchRepo + "@" + digB}}}
 	svc, _, al := newService(t, cat, agent)
 
-	h := ResumeHandle{OpID: "op-x", ReleaseID: "rel_a", PinnedRef: dispatchRepo + "@" + digA}
-	rep, _ := svc.Resume(context.Background(), "admin@10.0.0.3", testEP, h)
+	rc := DispatchResumeContext{OpID: "op-x", ReleaseID: "rel_a", TargetPinnedRef: dispatchRepo + "@" + digA}
+	rep, _ := svc.Resume(context.Background(), "admin@10.0.0.3", testEP, rc)
 	if rep.Terminal != TerminalFailedNeedsAttn {
 		t.Fatalf("terminal=%s; want failed_needs_attn", rep.Terminal)
 	}
@@ -166,7 +197,7 @@ func TestService_ResumeRejectedWhenInFlight(t *testing.T) {
 	defer reg.exec.release()
 
 	_, err := svc.Resume(context.Background(), "admin@10.0.0.4", testEP,
-		ResumeHandle{OpID: "op-y", ReleaseID: "rel_a", PinnedRef: dispatchRepo + "@" + digA})
+		DispatchResumeContext{OpID: "op-y", ReleaseID: "rel_a", TargetPinnedRef: dispatchRepo + "@" + digA})
 	if !errors.Is(err, errDispatchInFlight) {
 		t.Fatalf("err = %v; want errDispatchInFlight", err)
 	}
@@ -175,7 +206,7 @@ func TestService_ResumeRejectedWhenInFlight(t *testing.T) {
 func TestService_ResumeNeedsOpID(t *testing.T) {
 	cat := mustLoad(t, validSource())
 	svc, _, _ := newService(t, cat, &fakeAgent{})
-	if _, err := svc.Resume(context.Background(), "a", testEP, ResumeHandle{ReleaseID: "rel_a"}); err == nil {
+	if _, err := svc.Resume(context.Background(), "a", testEP, DispatchResumeContext{ReleaseID: "rel_a"}); err == nil {
 		t.Fatal("want an error when op_id is empty")
 	}
 }
@@ -302,8 +333,8 @@ func TestService_IdempotencyKeyStableAndHonored(t *testing.T) {
 	if rep.IdempotencyKey != "rel-rel_a-OP01" {
 		t.Fatalf("report key = %q; want rel-rel_a-OP01", rep.IdempotencyKey)
 	}
-	if h := rep.ResumeHandle(); h.OpID != "op-k" || h.PinnedRef != dispatchRepo+"@"+digA {
-		t.Fatalf("ResumeHandle = %+v; want op-k + target pinned ref", h)
+	if rc := rep.ResumeContext(testEP.Key); rc.OpID != "op-k" || rc.TargetPinnedRef != dispatchRepo+"@"+digA || rc.AgentID != testEP.Key {
+		t.Fatalf("ResumeContext = %+v; want op-k + target pinned ref + agent id", rc)
 	}
 }
 

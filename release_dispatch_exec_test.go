@@ -26,7 +26,8 @@ type fakeAgent struct {
 	runningErrs []error    // error to return per RunningDigests call (nil ⇒ ok)
 	runningCall int
 
-	waitGate chan struct{} // if non-nil, WaitOp blocks on it before returning
+	waitGate  chan struct{} // if non-nil, WaitOp blocks on it before returning
+	waitCalls atomic.Int32  // number of WaitOp invocations
 }
 
 func (f *fakeAgent) Apply(_ context.Context, req UpgradeApplyRequest) (string, error) {
@@ -41,6 +42,7 @@ func (f *fakeAgent) Apply(_ context.Context, req UpgradeApplyRequest) (string, e
 }
 
 func (f *fakeAgent) WaitOp(ctx context.Context, _ string) (string, error) {
+	f.waitCalls.Add(1)
 	if f.waitGate != nil {
 		select {
 		case <-f.waitGate:
@@ -263,7 +265,7 @@ func TestExec_OnAppliedFiresWithOpID(t *testing.T) {
 	agent := &fakeAgent{applyOpID: "op-cb", waitState: agentStateSucceeded,
 		runningSeq: [][]string{nil, {dispatchRepo + "@" + digA}}}
 	var ops []string
-	res, err := newExec(agent, nil).Execute(context.Background(), plan, func(opID string) { ops = append(ops, opID) })
+	res, err := newExec(agent, nil).Execute(context.Background(), plan, func(opID string) error { ops = append(ops, opID); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,9 +283,32 @@ func TestExec_OnAppliedSilentOnAlreadyCurrent(t *testing.T) {
 	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, []string{dispatchRepo + "@" + digA})
 	agent := &fakeAgent{runningSeq: [][]string{{dispatchRepo + "@" + digA}}}
 	fired := false
-	_, _ = newExec(agent, nil).Execute(context.Background(), plan, func(string) { fired = true })
+	_, _ = newExec(agent, nil).Execute(context.Background(), plan, func(string) error { fired = true; return nil })
 	if fired {
 		t.Fatal("onApplied must not fire for an already-current plan (no apply)")
+	}
+}
+
+// A failing onApplied (durable record did not land) fails closed with
+// FAILED_NEEDS_ATTN/durable_record_failed and does NOT enter WaitOp.
+func TestExec_OnAppliedFailureNeedsAttn(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	agent := &fakeAgent{applyOpID: "op-df", waitState: agentStateSucceeded,
+		runningSeq: [][]string{nil, {dispatchRepo + "@" + digA}}}
+	res, err := newExec(agent, nil).Execute(context.Background(), plan,
+		func(string) error { return errors.New("store unavailable") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Terminal != TerminalFailedNeedsAttn || !strings.HasPrefix(res.Detail, "durable_record_failed") {
+		t.Fatalf("terminal=%s detail=%q; want failed_needs_attn/durable_record_failed", res.Terminal, res.Detail)
+	}
+	if res.OpID != "op-df" {
+		t.Fatalf("op_id = %q; want op-df preserved for recovery", res.OpID)
+	}
+	if n := agent.waitCalls.Load(); n != 0 {
+		t.Fatalf("WaitOp was called %d times; must not poll after a durable-record failure", n)
 	}
 }
 

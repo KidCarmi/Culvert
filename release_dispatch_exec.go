@@ -164,8 +164,12 @@ func newDispatchOpID() string { return ulid.MustNew(ulid.Now(), rand.Reader).Str
 // already-current path is single-flighted too). The optional onApplied hooks
 // fire EXACTLY ONCE, right after the agent accepts the apply and returns an
 // op_id — BEFORE the (potentially long) WaitOp — so a caller can durably record
-// the op_id/key for crash recovery before blocking on the terminal state.
-func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan, onApplied ...func(opID string)) (*DispatchResult, error) {
+// the op_id/key for crash recovery before blocking on the terminal state. If an
+// onApplied hook returns an error the durable record did NOT land, so Execute
+// fails closed with FAILED_NEEDS_ATTN/durable_record_failed rather than block in
+// WaitOp with an unrecorded op_id; the reused idempotency key keeps a later
+// retry from starting a second upgrade.
+func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan, onApplied ...func(opID string) error) (*DispatchResult, error) {
 	if plan == nil {
 		return nil, errors.New("dispatch: nil plan")
 	}
@@ -217,7 +221,13 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan, onAp
 	res.OpID = opID
 	e.emitDispatch(plan, key, opID)
 	for _, h := range onApplied {
-		h(opID) // durable correlation point — BEFORE the blocking watch
+		// Durable correlation point — BEFORE the blocking watch. A failure here
+		// means the op_id was not recorded, so we cannot safely watch/resume it.
+		if rerr := h(opID); rerr != nil {
+			res.Terminal, res.Detail = TerminalFailedNeedsAttn, "durable_record_failed: "+rerr.Error()
+			e.emitOutcome(plan, res)
+			return res, nil
+		}
 	}
 
 	// Bound the watch: a caller deadline always wins; otherwise cap at maxWatch so
@@ -289,27 +299,31 @@ func (e *DispatchExecutor) watchContext(ctx context.Context) (context.Context, c
 // single-flight per agent (shares the executor mutex), so a resume cannot race a
 // live dispatch on the same agent.
 //
-// Resume does NOT have the pre-dispatch anchor (a fresh CP process may not hold
-// it), so it never asserts FAILED_ROLLED_BACK: anything other than a verified
-// success is FAILED_NEEDS_ATTN (the safe, manual-attention classification). plan
-// carries the target identity — only PinnedRef is needed for verify-by-digest.
-func (e *DispatchExecutor) Resume(ctx context.Context, plan *DispatchPlan, opID string) (*DispatchResult, error) {
-	if plan == nil {
-		return nil, errors.New("dispatch: nil plan")
-	}
-	if opID == "" {
+// Resume is op_id-driven: rc.OpID is the re-poll AUTHORITY and rc.TargetPinnedRef
+// is the verify-by-digest target. rc.IdempotencyKey is ONLY correlation metadata
+// (it is never used to decide what to resume). Because a fresh CP process has no
+// pre-dispatch anchor, Resume never asserts FAILED_ROLLED_BACK: anything other
+// than a verified success is FAILED_NEEDS_ATTN (the safe classification).
+func (e *DispatchExecutor) Resume(ctx context.Context, rc DispatchResumeContext) (*DispatchResult, error) {
+	if rc.OpID == "" {
 		return nil, errors.New("dispatch: resume needs an op_id")
+	}
+	if rc.TargetPinnedRef == "" {
+		return nil, errors.New("dispatch: resume needs a target pinned ref to verify")
 	}
 	if !e.acquire() {
 		return nil, errDispatchInFlight
 	}
 	defer e.release()
 
-	res := &DispatchResult{OpID: opID, IdempotencyKey: plan.Apply.IdempotencyKey}
+	res := &DispatchResult{OpID: rc.OpID, IdempotencyKey: rc.IdempotencyKey}
+	// auditPlan carries identity ONLY for the audit hook; it is never the resume
+	// authority (that is rc.OpID) nor the verify target (that is rc.TargetPinnedRef).
+	plan := rc.auditPlan()
 
 	watchCtx, cancel := e.watchContext(ctx)
 	defer cancel()
-	state, werr := e.client.WaitOp(watchCtx, opID)
+	state, werr := e.client.WaitOp(watchCtx, rc.OpID)
 	if werr != nil {
 		res.Terminal, res.Detail = TerminalFailedNeedsAttn, "watch_timeout: "+werr.Error()
 		e.emitOutcome(plan, res)
@@ -322,7 +336,7 @@ func (e *DispatchExecutor) Resume(ctx context.Context, plan *DispatchPlan, opID 
 		e.emitOutcome(plan, res)
 		return res, nil
 	}
-	res.Verified = e.verifyRunning(post, plan.PinnedRef)
+	res.Verified = e.verifyRunning(post, rc.TargetPinnedRef)
 	if state == agentStateSucceeded && res.Verified {
 		res.Terminal = TerminalSucceeded
 	} else {

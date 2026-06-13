@@ -40,29 +40,35 @@ type AgentEndpoint struct {
 	Client  *http.Client
 }
 
-// ResumeHandle is everything needed to re-poll an in-flight dispatch op without a
-// fresh apply: the agent op_id plus the target identity (PinnedRef drives the
-// verify-by-digest gate; the rest is for audit correlation). The caller persists
-// it from a DispatchReport (DispatchReport.ResumeHandle()).
-type ResumeHandle struct {
-	OpID           string
-	ReleaseID      string
-	VersionID      string
-	Severity       Severity
-	ImageRef       string
-	PinnedRef      string
-	IdempotencyKey string
+// DispatchResumeContext is the explicit, persistable record needed to re-poll an
+// in-flight dispatch op after a CP restart — independent of any in-memory plan.
+// OpID is the resume AUTHORITY; TargetPinnedRef is the verify-by-digest target;
+// IdempotencyKey is ONLY apply-time dedupe / audit-correlation metadata and is
+// never used to decide what to resume. The caller persists it from a
+// DispatchReport via DispatchReport.ResumeContext(agentID).
+type DispatchResumeContext struct {
+	AgentID         string
+	OpID            string
+	ReleaseID       string
+	VersionID       string
+	Severity        Severity
+	TargetPinnedRef string
+	ImageRef        string
+	IdempotencyKey  string
 }
 
-func (h ResumeHandle) toPlan() *DispatchPlan {
+// auditPlan builds the identity-only plan used to feed the executor's audit hook
+// during a resume. It is NEVER the resume authority (rc.OpID) or the verify
+// target (rc.TargetPinnedRef) — only a carrier for the audit event's fields.
+func (rc DispatchResumeContext) auditPlan() *DispatchPlan {
 	return &DispatchPlan{
 		Outcome:   OutcomePlan,
-		ReleaseID: h.ReleaseID,
-		VersionID: h.VersionID,
-		Severity:  h.Severity,
-		PinnedRef: h.PinnedRef,
-		ImageRef:  h.ImageRef,
-		Apply:     UpgradeApplyRequest{ImageRef: h.ImageRef, IdempotencyKey: h.IdempotencyKey},
+		ReleaseID: rc.ReleaseID,
+		VersionID: rc.VersionID,
+		Severity:  rc.Severity,
+		PinnedRef: rc.TargetPinnedRef,
+		ImageRef:  rc.ImageRef,
+		Apply:     UpgradeApplyRequest{ImageRef: rc.ImageRef, IdempotencyKey: rc.IdempotencyKey},
 	}
 }
 
@@ -87,16 +93,18 @@ type DispatchReport struct {
 	RollbackOnFailure bool
 }
 
-// ResumeHandle extracts the handle needed to re-poll this op later.
-func (r *DispatchReport) ResumeHandle() ResumeHandle {
-	return ResumeHandle{
-		OpID:           r.OpID,
-		ReleaseID:      r.ReleaseID,
-		VersionID:      r.VersionID,
-		Severity:       r.Severity,
-		ImageRef:       r.ImageRef,
-		PinnedRef:      r.PinnedRef,
-		IdempotencyKey: r.IdempotencyKey,
+// ResumeContext extracts the persistable record needed to re-poll this op later
+// against the given agent identity.
+func (r *DispatchReport) ResumeContext(agentID string) DispatchResumeContext {
+	return DispatchResumeContext{
+		AgentID:         agentID,
+		OpID:            r.OpID,
+		ReleaseID:       r.ReleaseID,
+		VersionID:       r.VersionID,
+		Severity:        r.Severity,
+		TargetPinnedRef: r.PinnedRef,
+		ImageRef:        r.ImageRef,
+		IdempotencyKey:  r.IdempotencyKey,
 	}
 }
 
@@ -206,11 +214,15 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 	// the agent returns an op_id and BEFORE the blocking watch — so a CP crash
 	// mid-watch still leaves a durable op_id/key record for the resume path.
 	applied := false
-	res, eerr := reg.exec.Execute(ctx, plan, func(opID string) {
+	res, eerr := reg.exec.Execute(ctx, plan, func(opID string) error {
 		applied = true
 		early := reportFromPlan(plan)
 		early.OpID = opID
+		// auditAdd is in-memory + best-effort file persistence, so this does not
+		// fail today; the error return honors the executor's durable-record
+		// contract for a future persistent recorder.
 		s.auditDispatch(actor, ep, target, early)
+		return nil
 	})
 	rep := reportFromResult(plan, res)
 	if errors.Is(eerr, errDispatchInFlight) {
@@ -232,8 +244,8 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 // interrupted) to a terminal state WITHOUT a fresh apply, under the same
 // per-agent single-flight. Verify-by-digest stays the success gate; the outcome
 // is audited and a FAILED_NEEDS_ATTN terminal alerts.
-func (s *DispatchService) Resume(ctx context.Context, actor string, ep AgentEndpoint, h ResumeHandle) (*DispatchReport, error) {
-	if h.OpID == "" {
+func (s *DispatchService) Resume(ctx context.Context, actor string, ep AgentEndpoint, rc DispatchResumeContext) (*DispatchReport, error) {
+	if rc.OpID == "" {
 		return nil, errors.New("dispatch: resume needs an op_id")
 	}
 	reg, err := s.registryFor(ep)
@@ -241,11 +253,9 @@ func (s *DispatchService) Resume(ctx context.Context, actor string, ep AgentEndp
 		return nil, fmt.Errorf("dispatch: agent %q: %w", ep.Key, err)
 	}
 
-	plan := h.toPlan()
-	res, eerr := reg.exec.Resume(ctx, plan, h.OpID)
-	rep := reportFromResult(plan, res)
-	rep.OpID = h.OpID
-	target := DispatchTarget{ReleaseID: h.ReleaseID}
+	res, eerr := reg.exec.Resume(ctx, rc)
+	rep := reportFromResume(rc, res)
+	target := DispatchTarget{ReleaseID: rc.ReleaseID}
 	if errors.Is(eerr, errDispatchInFlight) {
 		s.auditDispatch(actor, ep, target, rep)
 		return rep, eerr
@@ -256,6 +266,29 @@ func (s *DispatchService) Resume(ctx context.Context, actor string, ep AgentEndp
 }
 
 // ─── report builders ─────────────────────────────────────────────────────────
+
+// reportFromResume builds a report from the resume context + executor result.
+// Identity comes from rc (op_id-driven), terminal/verified from res.
+func reportFromResume(rc DispatchResumeContext, res *DispatchResult) *DispatchReport {
+	rep := &DispatchReport{
+		Outcome:        OutcomePlan,
+		OpID:           rc.OpID,
+		ReleaseID:      rc.ReleaseID,
+		VersionID:      rc.VersionID,
+		Severity:       rc.Severity,
+		ImageRef:       rc.ImageRef,
+		PinnedRef:      rc.TargetPinnedRef,
+		IdempotencyKey: rc.IdempotencyKey,
+	}
+	if res == nil {
+		rep.Detail = "dispatch_in_flight"
+		return rep
+	}
+	rep.Terminal = res.Terminal
+	rep.Verified = res.Verified
+	rep.Detail = res.Detail
+	return rep
+}
 
 func reportFromRefusal(plan *DispatchPlan) *DispatchReport {
 	detail := string(plan.Kind)
