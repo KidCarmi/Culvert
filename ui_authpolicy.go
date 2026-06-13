@@ -299,6 +299,14 @@ func simulateAuthOutcome(rules []PolicyRule, sourceIP, host, protocol, method, i
 		d = resolveAuthOutcomeFrom(rules, RequestContext{
 			ClientIP: sourceIP, Host: host, Protocol: protocol, Method: method,
 		})
+		if d.Outcome == OutcomeCredentialRequired {
+			// CredentialRequired is a CHALLENGE class, not an access decision. It
+			// is NOT Allow or Block: the client must authenticate first, then the
+			// Stage-2 decision below applies. (Runtime-inert until Slice 3; the
+			// simulator surfaces the resolver's decision.)
+			note = "CredentialRequired — a non-interactive credential challenge (407) would be required before this " +
+				"request proceeds. This is NOT Allow or Block; the Stage-2 decision below applies only after the client authenticates."
+		}
 	}
 	stage2AuthSource = rawAuthSource
 	if stage2AuthSource == "" {

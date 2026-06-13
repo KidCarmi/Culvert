@@ -313,8 +313,10 @@ func TestSlice4_NoDestinationWithoutBroadFailsClosed(t *testing.T) {
 
 // ── Reserved outcomes remain inert ───────────────────────────────────────────
 
+// Phase 2 Slice 2 made CredentialRequired resolve; only SSORequired stays
+// reserved/inert in the pure resolver.
 func TestSlice4_ReservedOutcomesInert(t *testing.T) {
-	for _, oc := range []AuthOutcome{OutcomeCredentialRequired, OutcomeSSORequired} {
+	for _, oc := range []AuthOutcome{OutcomeSSORequired} {
 		r := authRule()
 		r.Auth.Outcome = oc
 		if d := resolveAuthOutcomeFrom([]PolicyRule{r}, matchingCtx()); d.Outcome != OutcomeDefault {
