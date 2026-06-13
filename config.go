@@ -95,6 +95,21 @@ type FileConfig struct {
 	// Default: 100 MB.
 	RequestLogMaxMB int `yaml:"request_log_max_mb"`
 
+	// LogStorePath enables the Badger-backed request-log HISTORY store at the
+	// given directory. It survives restart and powers deep pagination and
+	// retention in the admin Monitor view. Empty = history store disabled
+	// (in-memory ring + optional JSONL only).
+	LogStorePath string `yaml:"log_store_path"`
+
+	// LogRetentionDays bounds history by age via a per-entry TTL. 0 = no age
+	// limit (size cap and/or manual purge only). Runtime-adjustable from the
+	// admin UI; changes apply to newly written entries.
+	LogRetentionDays int `yaml:"log_retention_days"`
+
+	// LogRetentionMaxGB bounds the history store's total logical size. When
+	// exceeded, the oldest entries are purged. 0 = no size limit.
+	LogRetentionMaxGB float64 `yaml:"log_retention_max_gb"`
+
 	// SyslogAddr enables forwarding of all log lines and audit events to a
 	// remote syslog server. Format: "udp://host:514" or "tcp://host:601".
 	SyslogAddr string `yaml:"syslog_addr"`

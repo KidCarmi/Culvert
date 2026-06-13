@@ -347,6 +347,9 @@ func logAdd(e LogEntry) {
 			}
 		}
 	}
+
+	// Persist to the queryable history store (async, non-blocking, nil-safe).
+	globalLogStore.Add(e)
 }
 
 func logGet() []LogEntry {

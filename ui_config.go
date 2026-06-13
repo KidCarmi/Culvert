@@ -92,6 +92,7 @@ func apiDashboardHealth(w http.ResponseWriter, r *http.Request) {
 		"numGC":         mem.NumGC,
 		"sseClients":    hub.ClientCount(),
 		"blocklistSize": bl.Count(),
+		"logStore":      logStoreHealth(),
 	})
 }
 
@@ -170,6 +171,14 @@ func apiLogsSource(w http.ResponseWriter, r *http.Request) (entries []LogEntry, 
 // the in-memory ring buffer.
 func apiLogs(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	// source=store queries the Badger-backed history store (deep pagination
+	// over retained history that survives restart). Handled separately because
+	// it pushes the time range + offset/limit down into the store rather than
+	// loading every entry into memory.
+	if r.URL.Query().Get("source") == "store" {
+		apiLogsServeStore(w, r)
 		return
 	}
 	all, ok := apiLogsSource(w, r)
@@ -252,6 +261,87 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		filtered = filtered[offsetVal:end]
 	}
 	jsonOK(w, map[string]any{"logs": filtered, "total": total})
+}
+
+// apiLogsServeStore answers GET /api/logs?source=store by querying the
+// Badger-backed history store. Time range (from/to), filters, and offset/limit
+// are pushed down so deep pages ("page 20 = yesterday") are served without
+// loading the whole history into memory. Returns an empty result when the
+// history store is disabled. from/to are Unix seconds (parseTimestampParam),
+// converted to the store's millisecond keys here.
+func apiLogsServeStore(w http.ResponseWriter, r *http.Request) {
+	if globalLogStore == nil {
+		jsonOK(w, map[string]any{"logs": []LogEntry{}, "total": 0, "history": false})
+		return
+	}
+	q := r.URL.Query()
+	filterHost := strings.ToLower(q.Get("filter"))
+	filterStatus := strings.ToUpper(q.Get("status"))
+	filterLevel := strings.ToUpper(q.Get("level"))
+	filterMethod := strings.ToUpper(q.Get("method"))
+	filterIdentity := strings.ToLower(q.Get("identity"))
+
+	fromTS, fromErr := parseTimestampParam(q.Get("from"))
+	toTS, toErr := parseTimestampParam(q.Get("to"))
+	if fromErr != nil {
+		http.Error(w, "invalid 'from' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
+		return
+	}
+	if toErr != nil {
+		http.Error(w, "invalid 'to' parameter: use Unix timestamp or ISO 8601", http.StatusBadRequest)
+		return
+	}
+	var fromMs, toMs int64
+	if fromTS != 0 {
+		fromMs = fromTS * 1000
+	}
+	if toTS != 0 {
+		toMs = toTS*1000 + 999 // include the whole second
+	}
+
+	limitVal := 1000
+	if lq := q.Get("limit"); lq != "" {
+		if v, err := strconv.Atoi(lq); err == nil && v > 0 {
+			limitVal = v
+		}
+	}
+	if limitVal > 5000 { // mirror the in-memory path's clamp (CWE-770)
+		limitVal = 5000
+	}
+	offsetVal := 0
+	if oq := q.Get("offset"); oq != "" {
+		if v, err := strconv.Atoi(oq); err == nil && v >= 0 {
+			offsetVal = v
+		}
+	}
+
+	pred := func(e *LogEntry) bool {
+		if filterHost != "" && !strings.Contains(strings.ToLower(e.Host), filterHost) &&
+			!strings.Contains(strings.ToLower(e.IP), filterHost) {
+			return false
+		}
+		if filterStatus != "" && e.Status != filterStatus {
+			return false
+		}
+		if filterLevel != "" && e.Level != filterLevel {
+			return false
+		}
+		if filterMethod != "" && e.Method != filterMethod {
+			return false
+		}
+		if filterIdentity != "" && !strings.Contains(strings.ToLower(e.Identity), filterIdentity) {
+			return false
+		}
+		return true
+	}
+
+	logs, total, err := globalLogStore.Query(fromMs, toMs, offsetVal, limitVal, pred)
+	if err != nil {
+		logger.Printf("WARN apiLogs: history store query: %v", err)
+		http.Error(w, "history query error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"logs": logs, "total": total, "history": true})
 }
 
 // parseTimestampParam parses a timestamp string that is either a Unix timestamp
