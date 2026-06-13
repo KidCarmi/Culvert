@@ -185,6 +185,19 @@ func scrubForwardedHeaders(r *http.Request) {
 	r.Header.Del("X-User-Identity")
 }
 
+// policyLogURI builds the URL stored in LogEntry.URI for the per-rule "log full
+// URL" option: host + path only. The query string is intentionally dropped —
+// it routinely carries auth tokens, session IDs, and PII (admin chose path-only
+// capture). path is already query-free (r.URL.Path / req.URL.Path exclude the
+// query); when it is empty (e.g. a CONNECT tunnel with no decrypted request)
+// only the host is returned.
+func policyLogURI(host, path string) string {
+	if path == "" {
+		return host
+	}
+	return host + path
+}
+
 func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
 	start := time.Now()
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -413,10 +426,18 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 
 	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
 		ruleMet.RecordHit(match.Rule.Name)
+		// Per-rule "log full URL": capture host+path (no query) when the matched
+		// rule opts in. For a CONNECT tunnel the inner path is encrypted, so this
+		// yields host:port here; the decrypted inner URLs are logged separately in
+		// handleTunnelInspect when SSL inspection is on.
+		ruleURI := ""
+		if match.Rule.LogFullURI {
+			ruleURI = policyLogURI(r.Host, r.URL.Path)
+		}
 		switch match.Action {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, authLog)
+			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "", ruleURI, authLog)
 			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
@@ -427,14 +448,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, authLog)
+			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "", ruleURI, authLog)
 			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
 			return
 
 		case ActionRedirect:
 			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity, authLog)
+			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity, "", ruleURI, authLog)
 			if !isSafeRedirectURL(match.Rule.RedirectURL) {
 				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
 				http.Error(w, "Forbidden", http.StatusForbidden)
@@ -454,13 +475,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				if match.Rule != nil && match.Rule.FileProfileBlocked(r.URL.Path) {
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
-					recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, authLog)
+					recordRequestAuthURI(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", ruleURI, authLog)
 					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
 					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
 					return
 				}
 			}
-			recordRequestAuth(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, authLog)
+			recordRequestAuthURI(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, "", ruleURI, authLog)
 			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Fall through to normal handling below.
 		}
@@ -1526,6 +1547,13 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			break
 		}
 		resp.Body.Close()
+		// Per-rule "log full URL": one log entry per delivered inner request,
+		// carrying the decrypted host+path (no query). Opt-in via the matched
+		// rule's LogFullURI flag — off by default, so inspected traffic for
+		// other rules still produces only the single CONNECT-open entry.
+		if match != nil && match.Rule != nil && match.Rule.LogFullURI {
+			recordRequestAuthURI(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{})
+		}
 		if closeAfter {
 			break
 		}

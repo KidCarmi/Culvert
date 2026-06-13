@@ -328,6 +328,7 @@ type PolicyRule struct {
 	SSLAction         SSLAction       `json:"sslAction"`          // Inspect | Bypass
 	FileFiltering     bool            `json:"fileFiltering"`      // enable file-type scanning
 	FileProfile       FileProfileName `json:"fileProfile"`        // named file-extension block profile
+	LogFullURI        bool            `json:"logFullUri"`         // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
 	TLSSkipVerify     bool            `json:"tlsSkipVerify"`      // skip upstream cert verification (use with caution)
 	Action            PolicyAction    `json:"action"`
 	RedirectURL       string          `json:"redirectURL"`            // used when Action == Redirect

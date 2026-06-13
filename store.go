@@ -114,6 +114,7 @@ type LogEntry struct {
 	Identity    string `json:"identity,omitempty"` // authenticated username/email, empty if unauthenticated
 	Method      string `json:"method"`
 	Host        string `json:"host"`
+	URI         string `json:"uri,omitempty"`       // full request URL (host+path, no query); only set when the matched rule has LogFullURI
 	Status      string `json:"status"`              // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
 	Level       string `json:"level"`               // INFO | WARN | ERROR
 	RuleMatched string `json:"ruleMatched"`         // policy rule name that matched, if any
@@ -2078,12 +2079,27 @@ func recordRequestAuth(ip, method, host, status, ruleMatched, actionTaken, ident
 	recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, "", auth)
 }
 
+// recordRequestAuthURI is recordRequestAuth plus a captured request URI
+// (host+path, no query) for the per-rule "log full URL" option. It is the only
+// recorder that populates LogEntry.URI; every other path leaves it empty so the
+// field is omitted from the wire output (omitempty), keeping behavior unchanged
+// for rules without LogFullURI set.
+func recordRequestAuthURI(ip, method, host, status, ruleMatched, actionTaken, identity, sslAction, uri string, auth AuthLogFields) {
+	recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, sslAction, uri, auth)
+}
+
 // recordRequestBytesAuth is the core recorder; it attaches the Stage-1 auth
 // observability block (AuthLogFields) to the log entry. recordRequest /
 // recordRequestBytes delegate here with a zero AuthLogFields, so their wire
 // output is unchanged. Reached from proxy.go (Slice 7) via recordRequestAuth at
 // the post-auth-gate call sites in handleRequest.
 func recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction string, auth AuthLogFields) {
+	recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, "", auth)
+}
+
+// recordRequestFull is the implementation behind every recorder. uri is the
+// captured request URL (host+path, no query) or "" when not logged.
+func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
 	tsRecordResult(isAllowed)
@@ -2108,6 +2124,7 @@ func recordRequestBytesAuth(ip, method, host, status, ruleMatched, actionTaken, 
 		Identity:    identity,
 		Method:      method,
 		Host:        host,
+		URI:         uri,
 		Status:      status,
 		Level:       levelForStatus(status),
 		RuleMatched: ruleMatched,

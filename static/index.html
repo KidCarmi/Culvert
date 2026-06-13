@@ -2195,6 +2195,9 @@ Firefox (all platforms):
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Skip upstream TLS certificate verification for this rule. Use only for internal sites with self-signed certs.">
                 <input type="checkbox" id="pol-tls-skip"> <span>Skip TLS Verify <span style="color:#f59e0b;font-weight:700">⚠</span></span>
               </label>
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Log the full request URL (path only, no query string) for traffic matching this rule. For HTTPS the path is only visible when SSL Action is Inspect — otherwise only the host is logged.">
+                <input type="checkbox" id="pol-log-uri"> <span>Log full URL</span>
+              </label>
             </div>
           </div>
 
@@ -4968,7 +4971,7 @@ function rowHTML(e) {
     <td style="font-family:monospace">${escHtml(e.ip)}</td>
     ${identityCell}
     <td><code style="font-size:.78rem">${escHtml(e.method)}</code></td>
-    <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}</td>
+    <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}${e.uri ? `<div style="font-size:.7rem;color:var(--accent2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px" title="${escHtml(e.uri)}">${escHtml(e.uri)}</div>` : ''}</td>
     <td>${badgeHTML(e.status)}</td>
     <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}">${escHtml(e.ruleMatched||'')}</td>
     <td>${levelBadge(e.level)}</td>
@@ -6131,6 +6134,7 @@ function clonePolicy(pri) {
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
+  document.getElementById('pol-log-uri').checked = !!r.logFullUri;
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
   loadPolicyProviderOptions().then(() => {
@@ -7680,6 +7684,7 @@ function editPolicy(priority) {
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
+  document.getElementById('pol-log-uri').checked = !!r.logFullUri;
   // Group chip picker
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
@@ -7713,6 +7718,7 @@ function clearPolicyForm() {
   document.getElementById('pol-file-filter').checked = false;
   document.getElementById('pol-file-profile').value  = '';
   document.getElementById('pol-tls-skip').checked    = false;
+  document.getElementById('pol-log-uri').checked     = false;
   document.getElementById('pol-src-auth').value      = '';
   clearGroupSelection();
   _selectedCountries = [];
@@ -7758,6 +7764,7 @@ async function submitPolicyRule() {
     fileFiltering:  document.getElementById('pol-file-filter').checked || (document.getElementById('pol-file-profile').value !== ''),
     fileProfile:    document.getElementById('pol-file-profile').value || '',
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
+    logFullUri:     document.getElementById('pol-log-uri').checked,
     schedule:       getScheduleFromForm(),
   };
   try {
