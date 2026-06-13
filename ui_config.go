@@ -400,6 +400,9 @@ func apiLogsRetention(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalLogStore.SetRetention(days, gb)
+		// Enforce a lowered size cap promptly instead of waiting for the next
+		// janitor tick; runs in the background so the response isn't blocked.
+		go globalLogStore.RunRetention()
 		auditEvent(r, "logstore.retention", "history", fmt.Sprintf("days=%d maxGB=%g", days, gb))
 		adminSettingsSave()
 		jsonOK(w, logStoreRetentionView())

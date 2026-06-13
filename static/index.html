@@ -5100,8 +5100,12 @@ function onLogSourceChange() {
 function historyApply() { logHistOffset = 0; fetchHistory(); }
 
 function historyPage(dir) {
-  if (dir === 'next') logHistOffset += LOG_HIST_LIMIT;
-  else                logHistOffset = Math.max(0, logHistOffset - LOG_HIST_LIMIT);
+  if (dir === 'next') {
+    if (logHistOffset + LOG_HIST_LIMIT >= logHistTotal) return; // already on last page
+    logHistOffset += LOG_HIST_LIMIT;
+  } else {
+    logHistOffset = Math.max(0, logHistOffset - LOG_HIST_LIMIT);
+  }
   fetchHistory();
 }
 

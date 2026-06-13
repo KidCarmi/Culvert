@@ -71,10 +71,17 @@ type logStore struct {
 	// prunes marginally early, the safe direction for a hard ceiling.
 	bytesUsed int64 // atomic
 
-	seq     uint32 // atomic; disambiguates same-millisecond entries
-	ch      chan LogEntry
-	closing atomic.Bool
-	wg      sync.WaitGroup
+	seq uint32 // atomic; disambiguates same-millisecond entries
+	ch  chan LogEntry
+	wg  sync.WaitGroup
+
+	// closeMu guards the closed flag and the send/close of ch. Add and
+	// RunRetention take it for reading (they may run concurrently); Close takes
+	// it for writing so it cannot close the channel — or the *badger.DB — while
+	// an Add send or a retention pass is in flight (prevents a send-on-closed
+	// channel panic and use of a closed DB during shutdown).
+	closeMu sync.RWMutex
+	closed  bool
 }
 
 // openLogStore opens (or creates) the history store, converting the admin's
@@ -156,7 +163,12 @@ func logStoreKeyTS(k []byte) int64 {
 // the caller (the proxy hot path): a full queue drops the entry and bumps a
 // counter rather than stalling request handling.
 func (s *logStore) Add(e LogEntry) {
-	if s == nil || s.closing.Load() {
+	if s == nil {
+		return
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed {
 		return
 	}
 	select {
@@ -224,10 +236,17 @@ func (s *logStore) Close() error {
 	if s == nil {
 		return nil
 	}
-	if s.closing.Swap(true) {
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
 		return nil
 	}
+	s.closed = true
 	close(s.ch)
+	s.closeMu.Unlock()
+	// Wait outside the lock: writeLoop coordinates via the channel close + wg
+	// (it never takes closeMu), and any in-flight Add/RunRetention released
+	// their read lock before Close acquired the write lock.
 	s.wg.Wait()
 	return s.db.Close()
 }
@@ -330,6 +349,13 @@ func (s *logStore) RunRetention() {
 	if s == nil {
 		return
 	}
+	// Hold the read lock for the whole pass so Close cannot close the DB
+	// underneath an in-flight prune (shutdown safety).
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed {
+		return
+	}
 	maxBytes := atomic.LoadInt64(&s.maxBytes)
 	if maxBytes <= 0 || atomic.LoadInt64(&s.bytesUsed) <= maxBytes {
 		return
@@ -360,9 +386,18 @@ func (s *logStore) RunRetention() {
 		return
 	}
 	// Decrement the logical counter, clamping at zero (EstimatedSize is an
-	// estimate and TTL may have already removed some accounted bytes).
-	if newUsed := atomic.AddInt64(&s.bytesUsed, -freed); newUsed < 0 {
-		atomic.StoreInt64(&s.bytesUsed, 0)
+	// estimate and TTL may have already removed some accounted bytes). A CAS
+	// loop keeps the clamp atomic against a concurrent flush increment — a
+	// plain Add-then-Store could wipe a flush that landed in between.
+	for {
+		old := atomic.LoadInt64(&s.bytesUsed)
+		nv := old - freed
+		if nv < 0 {
+			nv = 0
+		}
+		if atomic.CompareAndSwapInt64(&s.bytesUsed, old, nv) {
+			break
+		}
 	}
 	atomic.AddInt64(&statLogStorePruned, int64(len(keys)))
 	_ = s.db.RunValueLogGC(0.5) // reclaim disk; ErrNoRewrite is expected and ignored

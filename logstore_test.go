@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -366,6 +367,48 @@ func TestApiLogs_TimeRangeMemory(t *testing.T) {
 	if resp.Logs[0].Host != "mid.example.com" {
 		t.Errorf("matched host = %q, want mid.example.com", resp.Logs[0].Host)
 	}
+}
+
+func TestApiLogsRetention_ViewerForbidden(t *testing.T) {
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	old := globalLogStore
+	globalLogStore = s
+	t.Cleanup(func() { globalLogStore = old; s.Close() })
+
+	// No admin role on the context → uiRole defaults to viewer → PUT must 403.
+	rec := httptest.NewRecorder()
+	apiLogsRetention(rec, httptest.NewRequest(http.MethodPut, "/api/logs/retention", strings.NewReader(`{"retentionDays":30}`)))
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("viewer PUT status = %d, want 403", rec.Code)
+	}
+}
+
+// TestLogStore_AddCloseRace exercises concurrent Add during Close — under -race
+// this fails if the send/close synchronization regresses (no send on a closed
+// channel, no panic).
+func TestLogStore_AddCloseRace(t *testing.T) {
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				s.Add(LogEntry{TS: int64(i), Host: "h", Status: "OK"})
+			}
+		}()
+	}
+	time.Sleep(2 * time.Millisecond) // let some Adds get in flight
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	wg.Wait() // must complete without a panic
 }
 
 func TestApiLogsRetention_DisabledConflict(t *testing.T) {
