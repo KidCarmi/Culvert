@@ -47,8 +47,13 @@ const logStoreScanCap = 500000
 var logStorePruneBatch = 10000
 
 // logStoreMaxQueryLimit caps a single Query's page size so a caller-supplied
-// limit cannot drive an excessive slice allocation.
+// limit cannot drive an excessive result count.
 const logStoreMaxQueryLimit = 10000
+
+// logStoreQueryAllocHint is the fixed initial capacity for a query result
+// slice. Constant (not the user-supplied limit) so the allocation size never
+// depends on user input; append grows it as needed.
+const logStoreQueryAllocHint = 256
 
 // globalLogStore is the process-wide history store; nil when disabled.
 var globalLogStore *logStore
@@ -288,13 +293,15 @@ func (s *logStore) Query(fromMs, toMs int64, offset, limit int, filter func(*Log
 	if limit <= 0 {
 		limit = 1000
 	}
-	// Bound limit at the store layer so the allocation below can't be driven to
-	// an excessive size by a caller-supplied value (CodeQL CWE-789 / defense in
-	// depth; the API also clamps).
+	// Bound the result count at the store layer (defense in depth; the API also
+	// clamps). The loop below stops at len(out) == limit.
 	if limit > logStoreMaxQueryLimit {
 		limit = logStoreMaxQueryLimit
 	}
-	out := make([]LogEntry, 0, limit)
+	// Fixed initial capacity (not the caller-supplied limit) so the allocation
+	// size never depends on user input — append grows as needed, still bounded
+	// by limit in the loop (CWE-770/789).
+	out := make([]LogEntry, 0, logStoreQueryAllocHint)
 	total := 0
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
