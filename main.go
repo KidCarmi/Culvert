@@ -35,7 +35,8 @@ import (
 // CA private-key encryption passphrase. Using an env var keeps the passphrase
 // out of CLI history and process listings (shift-left: secrets management).
 // This is an env-var name, NOT a credential — the false-positive is suppressed.
-const caPassphraseEnv = "CULVERT_CA_PASSPHRASE" // #nosec G101 -- env-var name, not a credential
+const caPassphraseEnv = "CULVERT_CA_PASSPHRASE"        // #nosec G101 -- env-var name, not a credential
+const logStorePassphraseEnv = "CULVERT_LOG_PASSPHRASE" // #nosec G101 -- env-var name, not a credential
 
 var logger *log.Logger
 
@@ -821,6 +822,13 @@ func initLogStore(s *startupState) {
 	logStoreDir = s.fc.LogStorePath
 	if logStoreDir == "" {
 		logStoreDir = filepath.Join(dataDir, "logstore")
+	}
+	// Encryption-at-rest key source: dedicated CULVERT_LOG_PASSPHRASE, falling
+	// back to the CA passphrase (which is already set when SSL-inspecting — the
+	// case where URL logging is most sensitive). Empty = encryption off.
+	logStorePassphrase = os.Getenv(logStorePassphraseEnv)
+	if logStorePassphrase == "" {
+		logStorePassphrase = os.Getenv(caPassphraseEnv)
 	}
 	// Seed-enable only when log_store_path is set in config (back-compat).
 	// Otherwise the store stays off until the admin enables it from the UI;

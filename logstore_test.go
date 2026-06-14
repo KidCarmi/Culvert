@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -79,6 +81,74 @@ func TestEnableDisablePurgeLogStore(t *testing.T) {
 // TestEnableLogStore_ConcurrentSafe exercises the lifecycle mutex: many
 // concurrent enables must publish exactly one store (no double-open, no orphan,
 // no panic) — verified under -race.
+func TestLogStore_EncryptedRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	key, err := logStoreEncKey(dir, "correct horse battery staple")
+	if err != nil {
+		t.Fatalf("derive key: %v", err)
+	}
+	if len(key) != logStoreEncKeyLen {
+		t.Fatalf("key len = %d, want %d", len(key), logStoreEncKeyLen)
+	}
+	s, err := openLogStoreTTL(dir, 0, 0, key)
+	if err != nil {
+		t.Fatalf("open encrypted: %v", err)
+	}
+	if !s.Encrypted() {
+		t.Error("store should report encrypted")
+	}
+	s.Add(LogEntry{TS: time.Now().UnixMilli(), Host: "secret.example.com", Status: "OK"})
+	got := drainLogStore(t, s, 1)
+	if len(got) != 1 || got[0].Host != "secret.example.com" {
+		t.Fatalf("encrypted read-back failed: %+v", got)
+	}
+	_ = s.Close()
+
+	// Reopening the SAME dir with the SAME passphrase+salt works.
+	key2, _ := logStoreEncKey(dir, "correct horse battery staple")
+	s2, err := openLogStoreTTL(dir, 0, 0, key2)
+	if err != nil {
+		t.Fatalf("reopen encrypted: %v", err)
+	}
+	if _, total, _ := s2.Query(0, 0, 0, 10, nil); total != 1 {
+		t.Errorf("reopen total = %d, want 1", total)
+	}
+	_ = s2.Close()
+
+	// Wrong passphrase → mismatch sentinel.
+	wrong, _ := logStoreEncKey(dir, "wrong passphrase")
+	if _, err := openLogStoreTTL(dir, 0, 0, wrong); !errors.Is(err, errLogStoreEncMismatch) {
+		t.Errorf("wrong key err = %v, want errLogStoreEncMismatch", err)
+	}
+}
+
+func TestPurgeLogStore_OfflineReset(t *testing.T) {
+	old := globalLogStore.Swap(nil)
+	oldDir := logStoreDir
+	dir := t.TempDir()
+	logStoreDir = dir
+	t.Cleanup(func() { disableLogStore(); globalLogStore.Store(old); logStoreDir = oldDir })
+
+	// Create a plaintext store on disk, then disable (data kept).
+	if err := enableLogStore(context.Background(), dir, 0, 0); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	disableLogStore()
+	// Drop a salt sidecar to confirm it's removed too.
+	_ = os.WriteFile(dir+".salt", []byte("x"), 0o600)
+
+	// Purge while OFF resets the on-disk dir (migration path).
+	if err := purgeLogStore(); err != nil {
+		t.Fatalf("offline purge: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("store dir should be removed after offline purge, stat err=%v", err)
+	}
+	if _, err := os.Stat(dir + ".salt"); !os.IsNotExist(err) {
+		t.Error("salt sidecar should be removed after offline purge")
+	}
+}
+
 func TestEnableLogStore_ConcurrentSafe(t *testing.T) {
 	old := globalLogStore.Swap(nil)
 	oldDir := logStoreDir
@@ -144,7 +214,7 @@ func TestLogStoreDiskEstimate(t *testing.T) {
 }
 
 func TestLogStore_WriteQueryNewestFirst(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -170,7 +240,7 @@ func TestLogStore_WriteQueryNewestFirst(t *testing.T) {
 }
 
 func TestLogStore_OffsetPagination(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -201,7 +271,7 @@ func TestLogStore_OffsetPagination(t *testing.T) {
 }
 
 func TestLogStore_FilterAndTimeRange(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -232,7 +302,7 @@ func TestLogStore_FilterAndTimeRange(t *testing.T) {
 
 func TestLogStore_AgeRetentionTTL(t *testing.T) {
 	// 1-second TTL: entries must be gone from reads shortly after expiry.
-	s, err := openLogStoreTTL(t.TempDir(), 1*time.Second, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 1*time.Second, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -261,7 +331,7 @@ func TestLogStore_SizeRetentionPrunesOldest(t *testing.T) {
 	logStorePruneBatch = 10
 	defer func() { logStorePruneBatch = old }()
 
-	s, err := openLogStoreTTL(t.TempDir(), 0, 1)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 1, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -290,7 +360,7 @@ func TestLogStore_SizeRetentionPrunesOldest(t *testing.T) {
 }
 
 func TestLogStore_Stats(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -313,7 +383,7 @@ func TestLogStore_Stats(t *testing.T) {
 
 func TestApiLogs_SourceStore(t *testing.T) {
 	isolateLogRing(t)
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -382,7 +452,7 @@ func TestApiLogs_SourceStore_Disabled(t *testing.T) {
 }
 
 func TestApiLogsRetention_GetPut(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 7*24*time.Hour, 2<<30) // 7 days, 2 GB
+	s, err := openLogStoreTTL(t.TempDir(), 7*24*time.Hour, 2<<30, nil) // 7 days, 2 GB
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -467,7 +537,7 @@ func TestApiLogs_TimeRangeMemory(t *testing.T) {
 }
 
 func TestApiLogsRetention_ViewerForbidden(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -487,7 +557,7 @@ func TestApiLogsRetention_ViewerForbidden(t *testing.T) {
 // this fails if the send/close synchronization regresses (no send on a closed
 // channel, no panic).
 func TestLogStore_AddCloseRace(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

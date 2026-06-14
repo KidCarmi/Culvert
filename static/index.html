@@ -752,6 +752,7 @@ tr.dragging  { opacity: .4; }
               <button class="btn ghost" data-click="purgeHistory" style="color:var(--red)">Purge all</button>
             </div>
             <div id="ret-estimate" style="font-size:.78rem;color:var(--muted);margin-top:12px"></div>
+            <div id="ret-encryption" style="font-size:.8rem;margin-top:8px"></div>
             <div id="log-retention-usage" style="font-size:.82rem;color:var(--muted);margin-top:8px">Loading…</div>
             <div style="font-size:.72rem;color:var(--muted);margin-top:8px">Age changes apply to newly logged requests; the size cap prunes oldest entries on the next sweep. Turning saving off keeps existing data on disk.</div>
           </div>
@@ -5145,6 +5146,19 @@ async function loadRetention() {
     document.getElementById('ret-controls').style.opacity = d.enabled ? '1' : '0.6';
     document.getElementById('ret-days').value = d.retentionDays || 0;
     document.getElementById('ret-gb').value   = d.retentionMaxGB || 0;
+
+    // Encryption-at-rest status.
+    const encEl = document.getElementById('ret-encryption');
+    if (d.encrypted) {
+      encEl.innerHTML = '🔒 <b>Encrypted at rest</b> (AES-256)';
+      encEl.style.color = 'var(--green)';
+    } else if (d.encryptionAvailable) {
+      encEl.innerHTML = '🔓 Not encrypted. A passphrase is set — encryption applies to a fresh store; <b>Purge all</b> to switch.';
+      encEl.style.color = d.enabled ? 'var(--red)' : 'var(--muted)';
+    } else {
+      encEl.innerHTML = '🔓 Not encrypted — set <code>CULVERT_LOG_PASSPHRASE</code> (or reuse <code>CULVERT_CA_PASSPHRASE</code>) to encrypt saved logs.';
+      encEl.style.color = d.enabled ? 'var(--red)' : 'var(--muted)';
+    }
 
     // Disk estimate (computed from live traffic; shown even when saving is off).
     const perDay = est.bytesPerDay || 0;

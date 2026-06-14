@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -375,9 +376,14 @@ func apiLogsRetention(w http.ResponseWriter, r *http.Request) {
 			auditEvent(r, "logstore.disable", "history", "")
 		case body.Enabled != nil && *body.Enabled:
 			if err := enableLogStore(resolveLifecycleCtx(), logStoreDir, days, gb); err != nil {
+				// enableLogStore records the desired retention only on success,
+				// so a failure leaves it intact.
+				if errors.Is(err, errLogStoreEncMismatch) {
+					http.Error(w, "saved logs use a different encryption key — purge saved logs, then enable again", http.StatusConflict)
+					return
+				}
 				// Log the detail; return a generic message so a filesystem path
-				// can't leak in the HTTP response. enableLogStore records the
-				// desired retention only on success, so a failure leaves it intact.
+				// can't leak in the HTTP response.
 				logger.Printf("WARN apiLogsRetention: enable failed: %v", err)
 				http.Error(w, "cannot enable history store", http.StatusInternalServerError)
 				return
@@ -406,17 +412,15 @@ func apiLogsRetention(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// apiLogsPurge deletes all stored history (admin only). Keeps saving enabled.
+// apiLogsPurge deletes all stored history (admin only). Works whether saving is
+// on (drops the live store) or off (resets the on-disk store — the migration
+// path when switching encryption on/off).
 func apiLogsPurge(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !requireRole(w, r, RoleAdmin) {
-		return
-	}
-	if globalLogStore.Load() == nil {
-		http.Error(w, "history store is off", http.StatusConflict)
 		return
 	}
 	if err := purgeLogStore(); err != nil {

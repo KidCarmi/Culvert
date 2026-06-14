@@ -26,15 +26,21 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 const logStoreKeyLen = 12 // 8-byte ts(ms) + 4-byte seq
@@ -64,6 +70,49 @@ var globalLogStore atomic.Pointer[logStore]
 // logStoreDir is the on-disk location used when the admin enables log saving
 // from the GUI (no path argument needed). Set once at startup from the data dir.
 var logStoreDir string
+
+// History-store encryption-at-rest (Badger AES). The key is derived from a
+// passphrase via PBKDF2-SHA256 (mirroring the CA bundle, ca.go) and a random
+// per-store salt persisted in a sidecar file so the key is stable across
+// restarts. logStorePassphrase is set once at startup from the environment;
+// empty = encryption off (saving still allowed, opt-in, with a UI warning).
+const (
+	logStoreEncIters   = 600_000 // matches ca.go pbkdf2Iter (NIST SP 800-132)
+	logStoreEncSaltLen = 32
+	logStoreEncKeyLen  = 32 // AES-256
+)
+
+var logStorePassphrase string
+
+// errLogStoreEncMismatch is returned when an existing store can't be opened with
+// the configured key (passphrase added/changed, or store was plaintext). The
+// remediation is to purge the on-disk store and re-enable.
+var errLogStoreEncMismatch = errors.New("saved logs use a different encryption key")
+
+// logStoreEncKey derives the AES key from the configured passphrase plus a
+// persistent random salt (sidecar file dir+".salt"). Returns (nil, nil) when no
+// passphrase is configured (encryption disabled).
+func logStoreEncKey(dir, passphrase string) ([]byte, error) {
+	if passphrase == "" {
+		return nil, nil
+	}
+	saltPath := dir + ".salt"
+	salt, err := os.ReadFile(saltPath) //nolint:gosec // path is server-configured
+	if err != nil || len(salt) != logStoreEncSaltLen {
+		salt = make([]byte, logStoreEncSaltLen)
+		if _, e := rand.Read(salt); e != nil {
+			return nil, fmt.Errorf("logstore salt: %w", e)
+		}
+		if e := os.WriteFile(saltPath, salt, 0o600); e != nil {
+			return nil, fmt.Errorf("write logstore salt: %w", e)
+		}
+	}
+	return pbkdf2.Key([]byte(passphrase), salt, logStoreEncIters, logStoreEncKeyLen, sha256.New), nil
+}
+
+// logStoreEncryptionAvailable reports whether a passphrase is configured (so a
+// newly created store would be encrypted).
+func logStoreEncryptionAvailable() bool { return logStorePassphrase != "" }
 
 // logStoreLastDays/GB remember the admin's chosen retention even while saving is
 // OFF, so the UI and a later re-enable restore it. Guarded by logStoreCfgMu.
@@ -133,13 +182,24 @@ func disableLogStore() {
 	}
 }
 
-// purgeLogStore deletes all stored history while keeping the store enabled.
+// purgeLogStore deletes all stored history. When saving is ON it drops the live
+// store's keys; when OFF it removes the on-disk store + salt sidecar (so a
+// changed encryption passphrase can take effect — the migration path). Held
+// under the lifecycle mutex so it can't race enable/disable.
 func purgeLogStore() error {
-	ls := globalLogStore.Load()
-	if ls == nil {
+	logStoreEnableMu.Lock()
+	defer logStoreEnableMu.Unlock()
+	if ls := globalLogStore.Load(); ls != nil {
+		return ls.purgeAll()
+	}
+	if logStoreDir == "" {
 		return nil
 	}
-	return ls.purgeAll()
+	if err := os.RemoveAll(logStoreDir); err != nil {
+		return err
+	}
+	_ = os.Remove(logStoreDir + ".salt") // regenerated on next enable
+	return nil
 }
 
 type logStore struct {
@@ -174,7 +234,12 @@ type logStore struct {
 	// channel panic and use of a closed DB during shutdown).
 	closeMu sync.RWMutex
 	closed  bool
+
+	encrypted bool // AES-at-rest enabled (immutable after open)
 }
+
+// Encrypted reports whether this store is encrypted at rest. Nil-safe.
+func (s *logStore) Encrypted() bool { return s != nil && s.encrypted }
 
 // openLogStore opens (or creates) the history store, converting the admin's
 // retention settings (days, GB) into the internal TTL/byte limits.
@@ -187,22 +252,38 @@ func openLogStore(dir string, retentionDays int, maxGB float64) (*logStore, erro
 	if maxGB > 0 {
 		maxBytes = int64(maxGB * (1 << 30))
 	}
-	return openLogStoreTTL(dir, ttl, maxBytes)
-}
-
-// openLogStoreTTL is the low-level constructor used directly by tests so they
-// can pass sub-day TTLs and tiny byte caps.
-func openLogStoreTTL(dir string, ttl time.Duration, maxBytes int64) (*logStore, error) {
-	opts := badger.DefaultOptions(dir).
-		WithValueLogFileSize(128 << 20). // bound peak mmap inside containers
-		WithLogger(nil)                  // proxy's own logger handles output
-	db, err := badger.Open(opts)
+	encKey, err := logStoreEncKey(dir, logStorePassphrase)
 	if err != nil {
 		return nil, err
 	}
+	return openLogStoreTTL(dir, ttl, maxBytes, encKey)
+}
+
+// openLogStoreTTL is the low-level constructor used directly by tests so they
+// can pass sub-day TTLs, tiny byte caps, and an optional encryption key (nil =
+// unencrypted).
+func openLogStoreTTL(dir string, ttl time.Duration, maxBytes int64, encKey []byte) (*logStore, error) {
+	opts := badger.DefaultOptions(dir).
+		WithValueLogFileSize(128 << 20). // bound peak mmap inside containers
+		WithLogger(nil)                  // proxy's own logger handles output
+	if len(encKey) > 0 {
+		// Badger requires an index cache when encryption is enabled.
+		opts = opts.WithEncryptionKey(encKey).WithIndexCacheSize(16 << 20)
+	}
+	db, err := badger.Open(opts)
+	if err != nil {
+		// A key/plaintext mismatch (passphrase added or changed) surfaces here;
+		// map it to a clear, actionable sentinel so the handler can guide the
+		// admin to purge rather than echo a raw Badger error.
+		if strings.Contains(strings.ToLower(err.Error()), "encrypt") {
+			return nil, errLogStoreEncMismatch
+		}
+		return nil, err
+	}
 	s := &logStore{
-		db: db,
-		ch: make(chan LogEntry, 4096),
+		db:        db,
+		ch:        make(chan LogEntry, 4096),
+		encrypted: len(encKey) > 0,
 	}
 	if ttl > 0 {
 		s.ttlNanos = int64(ttl)
@@ -675,21 +756,25 @@ func logStoreRetentionView() map[string]any {
 	if ls == nil {
 		days, gb := getLogStoreDesired() // remembered across disable/restart
 		return map[string]any{
-			"enabled":        false,
-			"configurable":   logStoreDir != "", // can it be enabled from the GUI?
-			"retentionDays":  days,
-			"retentionMaxGB": gb,
-			"usage":          logStoreUsage(),
-			"estimate":       logStoreDiskEstimate(),
+			"enabled":             false,
+			"configurable":        logStoreDir != "", // can it be enabled from the GUI?
+			"retentionDays":       days,
+			"retentionMaxGB":      gb,
+			"encrypted":           false,
+			"encryptionAvailable": logStoreEncryptionAvailable(),
+			"usage":               logStoreUsage(),
+			"estimate":            logStoreDiskEstimate(),
 		}
 	}
 	return map[string]any{
-		"enabled":        true,
-		"configurable":   true,
-		"retentionDays":  ls.RetentionDays(),
-		"retentionMaxGB": ls.RetentionMaxGB(),
-		"usage":          logStoreUsage(),
-		"estimate":       logStoreDiskEstimate(),
+		"enabled":             true,
+		"configurable":        true,
+		"retentionDays":       ls.RetentionDays(),
+		"retentionMaxGB":      ls.RetentionMaxGB(),
+		"encrypted":           ls.Encrypted(),
+		"encryptionAvailable": logStoreEncryptionAvailable(),
+		"usage":               logStoreUsage(),
+		"estimate":            logStoreDiskEstimate(),
 	}
 }
 
