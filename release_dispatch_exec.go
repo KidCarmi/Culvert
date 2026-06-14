@@ -55,6 +55,12 @@ const (
 
 var errDispatchInFlight = errors.New("dispatch: an execution is already in flight")
 
+// detailAnchorReadFailed prefixes the DispatchResult.Detail when the pre-apply
+// anchor read of /v1/status fails. The API layer matches this prefix to map the
+// outcome to 503 (agent status unavailable / retryable), consistent with a
+// preflight read failure — see respondPreApply.
+const detailAnchorReadFailed = "anchor_read_failed"
+
 // errStaleAlreadyCurrent is returned when a plan's already-current determination
 // (computed from plan-time running digests by P1.6a) no longer holds against a
 // FRESH status read at execute time — the node drifted off the target between
@@ -194,7 +200,7 @@ func (e *DispatchExecutor) Execute(ctx context.Context, plan *DispatchPlan, onAp
 	// rollback anchor would leave any later failure unclassifiable.
 	anchor, err := e.client.RunningDigests(ctx)
 	if err != nil {
-		res := &DispatchResult{Terminal: TerminalFailedNeedsAttn, Detail: "anchor_read_failed: " + err.Error()}
+		res := &DispatchResult{Terminal: TerminalFailedNeedsAttn, Detail: detailAnchorReadFailed + ": " + err.Error()}
 		e.emitOutcome(plan, res)
 		return res, nil
 	}

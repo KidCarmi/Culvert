@@ -200,6 +200,7 @@ func main() {
 	initBackgroundServices(s)
 	initSOCKS5(s)
 	initPersistentAdminState(s)
+	loadReleaseManagement(resolveReleaseStartupConfig())
 	startAdminUI(s)
 
 	proxySrv := buildAndStartProxyServer(s)

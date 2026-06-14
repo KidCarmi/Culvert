@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -429,10 +430,15 @@ func (rm *releaseManager) respondPreApply(w http.ResponseWriter, rep *DispatchRe
 			"status": "refused", "kind": string(rep.RefusedKind), "detail": detailOf(rep),
 		})
 	case err != nil:
-		// Preflight read failure (agent unreachable / no op started) — retryable.
+		// Preflight read failure (agent /v1/status unreachable / no op started) — retryable.
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "detail": err.Error()})
 	case rep != nil && rep.Terminal == TerminalAlreadyCurrent:
 		writeJSONStatus(w, http.StatusOK, map[string]any{"status": "already_current", "release_id": rep.ReleaseID})
+	case rep != nil && rep.Terminal == TerminalFailedNeedsAttn && strings.HasPrefix(rep.Detail, detailAnchorReadFailed):
+		// Anchor read of /v1/status failed before apply — same "agent status
+		// unavailable / retryable" condition as a preflight read failure, so it
+		// maps to the SAME 503 (LOW-2: consistent mapping), not 502.
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "detail": detailOf(rep)})
 	case rep != nil && rep.Terminal == TerminalFailedNeedsAttn:
 		// Apply was rejected / failed BEFORE an op_id was returned (no op created).
 		// Surface it as an upstream-agent failure — never a 200 "ok".
