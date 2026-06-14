@@ -397,6 +397,63 @@ func TestReleaseAPI_ApplyFailureBeforeOpIsError(t *testing.T) {
 	}
 }
 
+// An accepted dispatch must survive client disconnect / request cancellation
+// after the 202: the background work runs on a detached context, not r.Context().
+func TestReleaseAPI_DispatchSurvivesRequestCancel(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	gate := make(chan struct{})
+	agent := &fakeAgent{applyOpID: "op-detach", waitState: agentStateSucceeded,
+		runningSeq: freshDispatchSeq(), waitGate: gate}
+	rm, _, _ := newReleaseFixture(t, cat, map[string]*fakeAgent{"A": agent})
+
+	// Build a request with a cancellable context (simulating the client).
+	ctx, cancel := context.WithCancel(context.Background())
+	b, _ := json.Marshal(dispatchRequest{ReleaseID: "rel_a", Agent: "A"})
+	r := httptest.NewRequest(http.MethodPost, "/api/releases/dispatch", bytes.NewReader(b))
+	r.RemoteAddr = "192.0.2.11:5555"
+	r = r.WithContext(context.WithValue(ctx, uiRoleKey{}, RoleAdmin))
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, r) // returns 202 once the op is recorded; watch is gated
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d; want 202 (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Client disconnects / cancels AFTER the 202 — the accepted op must not abort.
+	cancel()
+	close(gate) // let the (still-running) watch finish
+
+	rrec := waitTerminal(t, rm, "A")
+	if rrec.Terminal != TerminalSucceeded || !rrec.Verified {
+		t.Fatalf("terminal after cancel = %+v; want succeeded/verified (request cancel must not kill the dispatch)", rrec)
+	}
+	if len(agent.applyReqs) != 1 {
+		t.Fatalf("apply must have happened exactly once; saw %d", len(agent.applyReqs))
+	}
+}
+
+// The status store resolves slot ownership by ULID-lexical dispatch_id ordering:
+// a newer (larger) id wins, and a stale update from an older id is ignored.
+func TestDispatchStore_ULIDOrderingOwnsSlot(t *testing.T) {
+	st := newDispatchStore()
+	older, newer := "01AAAAAAAA", "01ZZZZZZZZ" // ULIDs sort lexically by creation time
+	if older >= newer {
+		t.Fatal("precondition: older must sort before newer")
+	}
+	st.markDispatched("A", newer, DispatchResumeContext{OpID: "op-new"})
+	// A late update from the OLDER dispatch must be ignored, not clobber the slot.
+	st.markTerminal("A", older, &DispatchReport{Terminal: TerminalSucceeded})
+	rec, ok := st.get("A")
+	if !ok || rec.DispatchID != newer || rec.OpID != "op-new" {
+		t.Fatalf("older update clobbered the newer slot: %+v", rec)
+	}
+	// The newer dispatch's own terminal update applies.
+	st.markTerminal("A", newer, &DispatchReport{Terminal: TerminalSucceeded, OpID: "op-new"})
+	if rec, _ := st.get("A"); rec.Phase != phaseTerminal {
+		t.Fatalf("newer terminal update did not apply: %+v", rec)
+	}
+}
+
 func TestReleaseAPI_Unconfigured503(t *testing.T) {
 	setReleaseManager(nil)
 	rec := httptest.NewRecorder()

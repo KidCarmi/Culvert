@@ -39,7 +39,10 @@ type releaseManager struct {
 	svc     *DispatchService
 	resolve agentResolver
 	store   *dispatchStore
-	newID   func() string
+	// newID mints a dispatch_id. It MUST be lexicographically time-ordered (a
+	// ULID) — the per-agent status store relies on lexical dispatch_id ordering
+	// to decide which dispatch owns an agent's slot (see dispatchStore.update).
+	newID func() string
 }
 
 func newReleaseManager(svc *DispatchService, resolve agentResolver) *releaseManager {
@@ -98,9 +101,12 @@ func newDispatchStore() *dispatchStore {
 	return &dispatchStore{now: time.Now, byAgent: make(map[string]*dispatchRecord)}
 }
 
-// update mutates the record for (agent, dispatchID). A LATER dispatch (larger
-// ULID dispatch_id) owns the per-agent slot, so a stale late update from an
-// older dispatch is ignored — never clobbering a newer one.
+// update mutates the record for (agent, dispatchID). The per-agent slot is owned
+// by the LATEST dispatch, decided by lexicographic comparison of dispatch_id —
+// which is correct ONLY because dispatch_id is a ULID (lexical order == creation
+// order). A stale late update from an older dispatch (smaller ULID) is ignored,
+// so it can never clobber a newer one. If newID ever stops producing ULIDs this
+// ordering invariant breaks.
 func (st *dispatchStore) update(agent, dispatchID string, mut func(*dispatchRecord)) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -358,8 +364,11 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 	var derr error
 	go func() {
 		defer close(done)
-		// Detached context: the dispatch (and its watch) must outlive this HTTP
-		// request. The executor caps a deadline-less ctx at its maxWatch.
+		// DETACHED context (context.Background, NOT r.Context()): once the agent
+		// has accepted the apply we MUST drive the op to terminal even if the
+		// client disconnects or cancels the request after the 202. Inheriting the
+		// request context would cancel an already-accepted upgrade mid-flight. The
+		// executor caps a deadline-less ctx at its maxWatch so it cannot run forever.
 		rep, derr = rm.svc.Dispatch(context.Background(), actor, ep, target, opts,
 			func(opID string, rc DispatchResumeContext) {
 				rm.store.markDispatched(ep.Key, dispatchID, rc)
