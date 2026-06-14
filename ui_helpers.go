@@ -18,23 +18,18 @@ func auditEvent(r *http.Request, action, object, detail string) {
 	auditEventDiff(r, action, object, detail, nil, nil)
 }
 
-// auditEventDiff records an audit event with optional before/after JSON snapshots.
-func auditEventDiff(r *http.Request, action, object, detail string, before, after any) {
-	// C2c — observability hook. When the request was wrapped by
-	// uiMetadataEnforcement (the admin UI middleware chain), flip the
-	// per-request audit-emission flag to true. Plain non-UI callers
-	// have no flag in context and this is a no-op. See
-	// ui_metadata_enforcement.go for the post-handler check.
-	markAuditEmitted(r)
-
+// auditActor derives the audit actor from a request: the client IP, enriched
+// with the authenticated admin identity from the admin UI session cookie
+// (ps_ui_session) — not the proxy-user ps_session, which belongs to a different
+// identity and must not attribute admin actions. The IP is always kept for
+// accountability; the username adds readability. Callers that drive a backend
+// service (which audits via the headless auditAdd) use this to pass the same
+// actor string the audit ring would record.
+func auditActor(r *http.Request) string {
 	actor, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if actor == "" {
 		actor = r.RemoteAddr
 	}
-	// Enrich actor with authenticated admin identity from the admin UI
-	// session cookie (ps_ui_session) — not the proxy-user ps_session, which
-	// belongs to a different identity and must not attribute admin actions.
-	// The IP is always kept for accountability; the username adds readability.
 	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
 		name := sess.Sub
 		if name == "" {
@@ -44,10 +39,22 @@ func auditEventDiff(r *http.Request, action, object, detail string, before, afte
 			actor = name + "@" + actor
 		}
 	}
+	return actor
+}
+
+// auditEventDiff records an audit event with optional before/after JSON snapshots.
+func auditEventDiff(r *http.Request, action, object, detail string, before, after any) {
+	// C2c — observability hook. When the request was wrapped by
+	// uiMetadataEnforcement (the admin UI middleware chain), flip the
+	// per-request audit-emission flag to true. Plain non-UI callers
+	// have no flag in context and this is a no-op. See
+	// ui_metadata_enforcement.go for the post-handler check.
+	markAuditEmitted(r)
+
 	entry := AuditEntry{
 		TS:     time.Now().UnixMilli(),
 		Time:   time.Now().Format("2006-01-02 15:04:05"),
-		Actor:  actor,
+		Actor:  auditActor(r),
 		Action: action,
 		Object: object,
 		Detail: detail,

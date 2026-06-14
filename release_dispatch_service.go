@@ -109,8 +109,10 @@ func (r *DispatchReport) ResumeContext(agentID string) DispatchResumeContext {
 }
 
 // agentReg is one registry entry: a long-lived executor (the single-flight owner
-// for this agent) plus the client used for the pre-plan running read.
+// for this agent) plus the client used for the pre-plan running read, and the
+// endpoint it was built from (so a rebind can be detected).
 type agentReg struct {
+	ep     AgentEndpoint
 	client AgentClient
 	exec   *DispatchExecutor
 }
@@ -128,7 +130,11 @@ type DispatchService struct {
 	alert     func(event string, p AlertPayload)
 	now       func() time.Time
 
-	mu    sync.Mutex
+	mu sync.Mutex
+	// execs is bounded by the set of CONFIGURED agent keys: the API layer only
+	// ever passes endpoints for known agents (unknown keys are rejected before
+	// reaching the service), so this map cannot grow without bound. Entries are
+	// rebuilt in place on an endpoint rebind, never accumulated per address.
 	execs map[string]*agentReg
 }
 
@@ -156,8 +162,42 @@ func defaultAgentClientFactory(ep AgentEndpoint) (AgentClient, error) {
 	return NewHTTPAgentClient(ep.BaseURL, ep.Client)
 }
 
+// catalog returns the currently-published immutable catalog snapshot (nil ⇒ no
+// catalog), for the read-only API surface.
+func (s *DispatchService) catalog() *Catalog { return s.planner.provider.GetCatalog() }
+
+// Current reads the agent's running_image.repo_digests and maps it through the
+// pinned catalog (reverse repo-rewrite + exact Lookup, the SAME normalization as
+// the planner) to the running release. An unmatched/empty array yields
+// {Known:false} — a normal state, NOT an error. Current detection is derived
+// EXCLUSIVELY from running_image.repo_digests (never upgrades.check).
+func (s *DispatchService) Current(ctx context.Context, ep AgentEndpoint) (CurrentView, error) {
+	cat := s.catalog()
+	if cat == nil {
+		return CurrentView{}, errDispatchNoCatalog
+	}
+	reg, err := s.registryFor(ep)
+	if err != nil {
+		return CurrentView{}, err
+	}
+	running, err := reg.client.RunningDigests(ctx)
+	if err != nil {
+		return CurrentView{}, err
+	}
+	for _, ref := range running {
+		if v := cat.Current(s.cfg.reverse(ref)); v.Known {
+			return v, nil
+		}
+	}
+	return CurrentView{}, nil // Unknown — normal
+}
+
 // registryFor returns the single executor bound to ep.Key, creating it (and its
 // agent client) on first use. ONE executor per agent ⇒ single-flight per agent.
+// If the endpoint's transport changed (rebind — agent re-addressed or re-TLS'd)
+// the client+executor are rebuilt, UNLESS an op is currently in flight: a live
+// op must finish on its original client, so the rebind is deferred until it
+// drains (the next call rebinds).
 func (s *DispatchService) registryFor(ep AgentEndpoint) (*agentReg, error) {
 	if ep.Key == "" {
 		return nil, errors.New("dispatch: agent endpoint needs a key")
@@ -165,13 +205,16 @@ func (s *DispatchService) registryFor(ep AgentEndpoint) (*agentReg, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if reg, ok := s.execs[ep.Key]; ok {
-		return reg, nil
+		if (reg.ep.BaseURL == ep.BaseURL && reg.ep.Client == ep.Client) || reg.exec.inFlight() {
+			return reg, nil // unchanged, or changed-but-busy (rebind after it drains)
+		}
+		// fall through to rebuild for the new endpoint
 	}
 	client, err := s.newClient(ep)
 	if err != nil {
 		return nil, err
 	}
-	reg := &agentReg{client: client, exec: NewDispatchExecutor(client, s.cfg, nil)}
+	reg := &agentReg{ep: ep, client: client, exec: NewDispatchExecutor(client, s.cfg, nil)}
 	s.execs[ep.Key] = reg
 	return reg, nil
 }
@@ -181,7 +224,10 @@ func (s *DispatchService) registryFor(ep AgentEndpoint) (*agentReg, error) {
 // and terminal outcomes are all audited; a FAILED_NEEDS_ATTN terminal fires the
 // alert hook. The returned error mirrors the executor (errDispatchInFlight on a
 // concurrent dispatch, errStaleAlreadyCurrent on a drifted no-op).
-func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEndpoint, target DispatchTarget, opts DispatchOptions) (*DispatchReport, error) {
+// onApplied observers fire once, at the durable-record point (op_id known, before
+// the watch), with the op_id and the resume context — the API layer uses this to
+// record the op and release the 202 response.
+func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEndpoint, target DispatchTarget, opts DispatchOptions, onApplied ...func(opID string, rc DispatchResumeContext)) (*DispatchReport, error) {
 	reg, err := s.registryFor(ep)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: agent %q: %w", ep.Key, err)
@@ -222,6 +268,10 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 		// fail today; the error return honors the executor's durable-record
 		// contract for a future persistent recorder.
 		s.auditDispatch(actor, ep, target, early)
+		rc := resumeContextFor(ep.Key, plan, opID)
+		for _, ob := range onApplied {
+			ob(opID, rc)
+		}
 		return nil
 	})
 	rep := reportFromResult(plan, res)
@@ -236,8 +286,26 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 		s.auditDispatch(actor, ep, target, rep)
 	}
 	s.auditOutcome(actor, ep, target, rep)
-	s.maybeAlert(actor, ep, rep)
+	// Stale already-current is a re-plan signal, not an incident — audit it but
+	// do NOT page. Genuine FAILED_NEEDS_ATTN terminals still alert.
+	if !errors.Is(eerr, errStaleAlreadyCurrent) {
+		s.maybeAlert(actor, ep, rep)
+	}
 	return rep, eerr
+}
+
+// resumeContextFor builds the persistable resume record at apply time.
+func resumeContextFor(agentID string, plan *DispatchPlan, opID string) DispatchResumeContext {
+	return DispatchResumeContext{
+		AgentID:         agentID,
+		OpID:            opID,
+		ReleaseID:       plan.ReleaseID,
+		VersionID:       plan.VersionID,
+		Severity:        plan.Severity,
+		TargetPinnedRef: plan.PinnedRef,
+		ImageRef:        plan.ImageRef,
+		IdempotencyKey:  plan.Apply.IdempotencyKey,
+	}
 }
 
 // Resume re-polls an existing op (from a prior Dispatch whose watch was

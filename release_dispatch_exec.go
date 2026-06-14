@@ -447,6 +447,15 @@ func (e *DispatchExecutor) release() {
 	e.mu.Unlock()
 }
 
+// inFlight reports whether an op currently holds the single-flight. Used by the
+// service registry to decide whether an endpoint can be safely rebound (an
+// in-flight op must finish on its original client before rebinding).
+func (e *DispatchExecutor) inFlight() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.inflight
+}
+
 // ─── audit emission ──────────────────────────────────────────────────────────
 
 func (e *DispatchExecutor) emitDispatch(plan *DispatchPlan, key, opID string) {
