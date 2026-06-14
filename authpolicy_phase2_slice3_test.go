@@ -74,7 +74,9 @@ func TestP2S3_CRChallenge_NoCreds407(t *testing.T) {
 // otherwise ALLOW the request, the response is still 407 (challenge), not 200.
 func TestP2S3_CRDoesNotRunStage2(t *testing.T) {
 	setupAuthGateTest(t)
+	prevAction := defaultPolicyAction()
 	setDefaultPolicyAction("allow") // would allow if Stage-2 ran
+	t.Cleanup(func() { setDefaultPolicyAction(prevAction) })
 	const host = "p2s3-stage2.example.test"
 	policyStore.Add(p2s3CR("cr-1", host))
 	policyStore.Add(PolicyRule{Priority: 5, Name: "allow-all", Action: ActionAllow, DestFQDN: host})
