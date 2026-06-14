@@ -570,10 +570,12 @@ func TestService_RealTransportEndToEnd(t *testing.T) {
 
 func repeat64(b byte) string { return strings.Repeat(string(b), 64) }
 
-// waitFor polls cond up to ~2s, failing the test if it never holds.
+// waitFor polls cond up to ~10s, failing the test if it never holds. The
+// generous ceiling is headroom for slow CI under -race + coverage; a passing
+// cond returns immediately, so it does not slow the happy path.
 func waitFor(t *testing.T, cond func() bool, what string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

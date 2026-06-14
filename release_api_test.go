@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -451,6 +452,142 @@ func TestDispatchStore_ULIDOrderingOwnsSlot(t *testing.T) {
 	st.markTerminal("A", newer, &DispatchReport{Terminal: TerminalSucceeded, OpID: "op-new"})
 	if rec, _ := st.get("A"); rec.Phase != phaseTerminal {
 		t.Fatalf("newer terminal update did not apply: %+v", rec)
+	}
+}
+
+// ─── read endpoints: GET /api/releases ──────────────────────────────────────
+
+func TestReleaseAPI_ReleasesBody(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	newReleaseFixture(t, cat, map[string]*fakeAgent{"A": {}})
+
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/releases = %d; want 200", rec.Code)
+	}
+	body := decodeBody(t, rec)
+	if body["available"] != true {
+		t.Fatalf("available = %v; want true", body["available"])
+	}
+	rels, ok := body["releases"].([]any)
+	if !ok || len(rels) != 2 {
+		t.Fatalf("releases = %v; want 2 entries", body["releases"])
+	}
+	channels, ok := body["channels"].(map[string]any)
+	if !ok {
+		t.Fatalf("channels missing/wrong type: %v", body["channels"])
+	}
+	rec0, ok := channels["recommended"].(map[string]any)
+	if !ok || rec0["release_id"] != "rel_a" {
+		t.Fatalf("recommended pointer = %v; want release_id rel_a", channels["recommended"])
+	}
+	if lts, ok := channels["lts"].(map[string]any); !ok || lts["release_id"] != "rel_b" {
+		t.Fatalf("lts pointer = %v; want release_id rel_b", channels["lts"])
+	}
+}
+
+func TestReleaseAPI_ReleasesNoCatalog(t *testing.T) {
+	newReleaseFixture(t, nil, map[string]*fakeAgent{"A": {}}) // nil catalog provider
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/releases (no catalog) = %d; want 200", rec.Code)
+	}
+	if got := decodeBody(t, rec)["available"]; got != false {
+		t.Fatalf("available = %v; want false when no catalog", got)
+	}
+}
+
+// ─── read endpoints: GET /api/releases/current ──────────────────────────────
+
+func TestReleaseAPI_CurrentKnown(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{runningSeq: [][]string{{dispatchRepo + "@" + digA}}}
+	newReleaseFixture(t, cat, map[string]*fakeAgent{"A": agent})
+
+	rec := httptest.NewRecorder()
+	apiReleaseCurrent(rec, releaseReq(http.MethodGet, "/api/releases/current?agent=A", nil, RoleViewer))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET current = %d; want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	if body["known"] != true || body["release_id"] != "rel_a" || body["version_id"] != "1.10.0" {
+		t.Fatalf("current = %v; want known rel_a/1.10.0", body)
+	}
+}
+
+func TestReleaseAPI_CurrentUnknown(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	// A digest not in the catalog ⇒ Unknown (a normal state, not an error).
+	agent := &fakeAgent{runningSeq: [][]string{{dispatchRepo + "@sha256:" + repeat64('c')}}}
+	newReleaseFixture(t, cat, map[string]*fakeAgent{"A": agent})
+
+	rec := httptest.NewRecorder()
+	apiReleaseCurrent(rec, releaseReq(http.MethodGet, "/api/releases/current?agent=A", nil, RoleViewer))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET current = %d; want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	if body["known"] != false || body["release_id"] != "" {
+		t.Fatalf("current = %v; want known=false / empty release_id", body)
+	}
+}
+
+func TestReleaseAPI_CurrentUnknownAgent404(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	newReleaseFixture(t, cat, map[string]*fakeAgent{"A": {}})
+	rec := httptest.NewRecorder()
+	apiReleaseCurrent(rec, releaseReq(http.MethodGet, "/api/releases/current?agent=ghost", nil, RoleViewer))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown agent current = %d; want 404", rec.Code)
+	}
+}
+
+// ─── channel-target dispatch ────────────────────────────────────────────────
+
+func TestReleaseAPI_ChannelDispatchSucceeds(t *testing.T) {
+	cat := mustLoad(t, validSource()) // recommended → rel_a (digA)
+	agent := &fakeAgent{applyOpID: "op-ch", waitState: agentStateSucceeded, runningSeq: freshDispatchSeq()}
+	rm, _, _ := newReleaseFixture(t, cat, map[string]*fakeAgent{"A": agent})
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{Channel: "recommended", Agent: "A"}, RoleAdmin))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("channel dispatch = %d; want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	rrec := waitTerminal(t, rm, "A")
+	if rrec.Terminal != TerminalSucceeded || rrec.ReleaseID != "rel_a" {
+		t.Fatalf("channel dispatch terminal = %+v; want succeeded rel_a", rrec)
+	}
+	if agent.applyReqs[0].IdempotencyKey != "rel-rel_a-OP01" {
+		t.Fatalf("channel dispatch key = %q; want rel-rel_a-OP01", agent.applyReqs[0].IdempotencyKey)
+	}
+}
+
+// ─── LOW-2: anchor read failure maps to 503 (consistent with preflight) ─────
+
+func TestReleaseAPI_AnchorReadFailedIs503(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	// Pre-plan read OK (OutcomePlan); the executor's ANCHOR read then fails.
+	agent := &fakeAgent{
+		runningSeq:  [][]string{{dispatchRepo + "@" + digB}},
+		runningErrs: []error{nil, errors.New("status unavailable")},
+	}
+	newReleaseFixture(t, cat, map[string]*fakeAgent{"A": agent})
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("anchor_read_failed dispatch = %d; want 503 (%s)", rec.Code, rec.Body.String())
+	}
+	if got := decodeBody(t, rec)["status"]; got != "unavailable" {
+		t.Fatalf("status = %v; want unavailable", got)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("anchor read failure must not apply; saw %d", len(agent.applyReqs))
 	}
 }
 
