@@ -80,9 +80,18 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 		logger.Printf("release management disabled: trust store: %v", err)
 		return
 	}
-	// Empty holder ⇒ GetCatalog() == nil until a refresh slice populates it. The
-	// read routes degrade to {available:false} gracefully (never 503).
+	// Empty holder ⇒ GetCatalog() == nil until populated. Run a BEST-EFFORT
+	// startup load so a catalog already seeded/cached in cfg.catalogDir is usable
+	// immediately (and survives restarts) instead of reporting available:false
+	// until a refresh runs — there is no production refresher yet. A failure (no
+	// catalog present, or a signature we can't verify under permissive trust) is
+	// the normal no-catalog state: reads degrade to {available:false}. Signed
+	// catalogs need a configured trust ring (the deferred authenticity slice).
 	holder := NewCatalogHolder(cfg.catalogDir, trust)
+	if err := holder.Reload(); err != nil {
+		logger.Printf("release management: no catalog loaded from %q (%v); reads report available:false until one is present",
+			sanitizeLog(cfg.catalogDir), err)
+	}
 
 	svc, err := NewDispatchService(holder, DispatchConfig{ProxyRepo: cfg.proxyRepo})
 	if err != nil {

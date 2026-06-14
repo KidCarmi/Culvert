@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -88,6 +90,49 @@ func TestReleaseAgentResolver(t *testing.T) {
 	}
 	if _, ok := resolveNone(localAgentKey); ok {
 		t.Fatal("blank endpoint must resolve no agents")
+	}
+}
+
+// A catalog already seeded on disk (unsigned, loadable under the wiring's
+// permissive trust) is loaded best-effort at startup and immediately usable —
+// it survives restarts instead of reporting available:false forever.
+func TestLoadReleaseManagement_LoadsSeededCatalog(t *testing.T) {
+	t.Cleanup(func() { setReleaseManager(nil) })
+	dir := t.TempDir()
+	writeUnsignedCatalogDir(t, dir, validSource())
+
+	setReleaseManager(nil)
+	loadReleaseManagement(releaseStartupConfig{
+		proxyRepo: defaultReleaseProxyRepo, catalogDir: dir, maintURL: "",
+	})
+	if currentReleaseManager() == nil {
+		t.Fatal("manager not published")
+	}
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	body := decodeBody(t, rec)
+	if body["available"] != true {
+		t.Fatalf("available = %v; want true (seeded catalog must load at startup)", body["available"])
+	}
+	if rels, ok := body["releases"].([]any); !ok || len(rels) != 2 {
+		t.Fatalf("releases = %v; want the 2 seeded releases", body["releases"])
+	}
+}
+
+// writeUnsignedCatalogDir materializes a memSource's index + manifests on disk
+// WITHOUT a signature — loadable under permissive trust (no keys).
+func writeUnsignedCatalogDir(t *testing.T, dir string, ms *memSource) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "manifests"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.json"), ms.index, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for ref, b := range ms.manifests {
+		if err := os.WriteFile(filepath.Join(dir, "manifests", ref), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
