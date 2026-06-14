@@ -209,48 +209,16 @@ func TestP2S2_HasCredentialCapableProvider_SAMLExcluded(t *testing.T) {
 	}
 }
 
-// ── Runtime-inert: proxy.go consumes only Exempt, so CR == Default there ─────
+// (Slice-2's runtime-inertness test was superseded by Phase 2 Slice 3, which
+//  wires CR onto the hot path. The CR runtime challenge is covered exhaustively
+//  in authpolicy_phase2_slice3_test.go.)
 
-func TestP2S2_RuntimeInert_NoCredsCRStill407(t *testing.T) {
-	setupAuthGateTest(t) // auth required, fresh store, kill switch released
-	const host = "p2s2-cr.example.test"
-	cr := validCRRule()
-	cr.DestFQDN = host
-	// Scope to the test client (makeRequest uses RemoteAddr 127.0.0.1).
-	cr.SubjectMatch = &SubjectMatch{SchemaVersion: 1, All: []SubjectPredicate{{Type: subjectPredicateCIDR, Values: []string{"127.0.0.0/8"}}}}
-	policyStore.Add(cr)
-
-	startCR := atomic.LoadInt64(&statAuthCredentialRequired)
-	startExempt := atomic.LoadInt64(&statAuthExempt)
-
-	w := httptest.NewRecorder()
-	handleRequest(w, makeRequest("http://"+host+"/", nil)) // no credentials
-
-	// Sanity: the pure resolver DOES resolve CR for this request.
-	if d := resolveAuthOutcomeFrom(policyStore.List(), RequestContext{ClientIP: "127.0.0.1", Host: host, Protocol: "http"}); d.Outcome != OutcomeCredentialRequired {
-		t.Fatalf("precondition: resolver must return CredentialRequired, got %q", d.Outcome)
-	}
-	// But proxy.go only acts on Exempt → CR is handled exactly like Default → 407.
-	if w.Code != http.StatusProxyAuthRequired {
-		t.Fatalf("CR is runtime-inert: a no-creds CR-matching request must 407 (same as Default), got %d", w.Code)
-	}
-	// No auth metric moved (proxy.go increments neither for a CR decision).
-	if atomic.LoadInt64(&statAuthCredentialRequired) != startCR {
-		t.Error("CR metric must stay 0 — not incremented by the request path")
-	}
-	if atomic.LoadInt64(&statAuthExempt) != startExempt {
-		t.Error("Exempt metric must not move for a CR decision")
-	}
-}
-
-// A higher-priority CR rule must NOT shadow a lower-priority Exempt rule on the
-// runtime no-credentials path (PR #453 P1). Before CR resolution existed, the
-// Exempt@2 rule waived the challenge; that must stay true until CR is wired in
-// Slice 3. resolveExemptOnlyOutcome (consumed by resolveNoCredAuthOutcome →
-// proxy.go) skips CR and keeps scanning.
-func TestP2S2_RuntimeInert_CRDoesNotShadowExempt(t *testing.T) {
+// Priority is now real (Phase 2 Slice 3): a higher-priority CR rule intentionally
+// beats a lower-priority Exempt rule on the runtime no-credentials path. (The
+// Slice-2 Exempt-only stopgap is removed now that proxy.go handles CR.)
+func TestP2S3_RuntimePriority_CRBeatsLowerExempt(t *testing.T) {
 	setupAuthGateTest(t)
-	const host = "p2s2-shadow.example.test"
+	const host = "p2s3-prio.example.test"
 	cidr := []string{"127.0.0.0/8"}
 	cr := validCRRule()
 	cr.Name, cr.Priority, cr.DestFQDN = "cr-1", 1, host
@@ -261,20 +229,26 @@ func TestP2S2_RuntimeInert_CRDoesNotShadowExempt(t *testing.T) {
 	policyStore.Add(cr)
 	policyStore.Add(ex)
 
-	// Generalized resolver stops at CR@1 (correct for simulator/diagnostics).
-	if d := resolveAuthOutcomeFrom(policyStore.List(), RequestContext{ClientIP: "127.0.0.1", Host: host, Protocol: "http"}); d.Outcome != OutcomeCredentialRequired {
-		t.Fatalf("generalized resolver should stop at CR@1, got %q", d.Outcome)
+	// The runtime resolver returns CR@1 (highest priority wins).
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeCredentialRequired {
+		t.Fatalf("runtime resolver: CR@1 must win over Exempt@2, got %q", d.Outcome)
 	}
-	// Runtime (Exempt-only) view skips CR@1 and resolves the Exempt@2 waiver.
-	if d := resolveExemptOnlyOutcome(policyStore.List(), RequestContext{ClientIP: "127.0.0.1", Host: host, Protocol: "http"}); d.Outcome != OutcomeExempt || d.Rule.Name != "exempt-2" {
-		t.Fatalf("runtime path must still resolve the Exempt@2 waiver (no CR shadowing), got %q/%v", d.Outcome, d.Rule)
-	}
-	// End-to-end: the no-creds request is WAIVED (proceeds to Stage-2), not 407 —
-	// byte-identical to pre-Slice-2 behavior. Default-deny then applies.
+	// End-to-end: CR@1 wins → 407 challenge (not waived).
 	w := httptest.NewRecorder()
 	handleRequest(w, makeRequest("http://"+host+"/", nil))
+	if w.Code != http.StatusProxyAuthRequired {
+		t.Fatalf("CR@1 must challenge (407), got %d", w.Code)
+	}
+
+	// Swap priorities: Exempt@1 + CR@2 → Exempt wins → waived (not 407).
+	withFreshPolicyStore(t)
+	ex.Priority, cr.Priority = 1, 2
+	policyStore.Add(ex)
+	policyStore.Add(cr)
+	w = httptest.NewRecorder()
+	handleRequest(w, makeRequest("http://"+host+"/", nil))
 	if w.Code == http.StatusProxyAuthRequired {
-		t.Fatal("CR must not shadow the Exempt rule — the request must be waived, not 407'd")
+		t.Fatal("Exempt@1 must win over CR@2 — request waived, not 407'd")
 	}
 }
 
