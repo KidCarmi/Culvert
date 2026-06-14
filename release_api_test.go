@@ -591,6 +591,28 @@ func TestReleaseAPI_AnchorReadFailedIs503(t *testing.T) {
 	}
 }
 
+// LOW-1: a preflight (service pre-plan) status read failure maps to 503 at the
+// API boundary — the symmetric companion to TestReleaseAPI_AnchorReadFailedIs503.
+func TestReleaseAPI_PreflightReadFailedIs503(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	// The FIRST RunningDigests (the service's pre-plan read) fails ⇒ preflight refusal.
+	agent := &fakeAgent{runningErrs: []error{errors.New("status unavailable")}}
+	newReleaseFixture(t, cat, map[string]*fakeAgent{"A": agent})
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("preflight_read_failed dispatch = %d; want 503 (%s)", rec.Code, rec.Body.String())
+	}
+	if got := decodeBody(t, rec)["status"]; got != "unavailable" {
+		t.Fatalf("status = %v; want unavailable", got)
+	}
+	if len(agent.applyReqs) != 0 {
+		t.Fatalf("preflight failure must not apply; saw %d", len(agent.applyReqs))
+	}
+}
+
 func TestReleaseAPI_Unconfigured503(t *testing.T) {
 	setReleaseManager(nil)
 	rec := httptest.NewRecorder()
