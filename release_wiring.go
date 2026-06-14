@@ -46,11 +46,18 @@ type releaseStartupConfig struct {
 // resolveReleaseStartupConfig reads the static inputs (env + dataDir). No mutable
 // config route, no FileConfig change — env overrides over documented defaults.
 func resolveReleaseStartupConfig() releaseStartupConfig {
-	proxyRepo := os.Getenv(envReleaseProxyRepo)
+	return resolveReleaseStartupConfigFrom(os.Getenv)
+}
+
+// resolveReleaseStartupConfigFrom is the env-injectable core (tests pass a fake
+// getenv so they never mutate process state — avoids t.Setenv data races under
+// -race when other goroutines read the environment).
+func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupConfig {
+	proxyRepo := getenv(envReleaseProxyRepo)
 	if proxyRepo == "" {
 		proxyRepo = defaultReleaseProxyRepo
 	}
-	maintURL := os.Getenv(envMaintAgentURL)
+	maintURL := getenv(envMaintAgentURL)
 	if maintURL == "" {
 		maintURL = defaultMaintAgentSocket
 	}

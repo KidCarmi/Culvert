@@ -7,9 +7,8 @@ import (
 )
 
 func TestResolveReleaseStartupConfig_Defaults(t *testing.T) {
-	t.Setenv(envReleaseProxyRepo, "")
-	t.Setenv(envMaintAgentURL, "")
-	cfg := resolveReleaseStartupConfig()
+	// Empty env (fake getenv) ⇒ documented defaults. No process-env mutation.
+	cfg := resolveReleaseStartupConfigFrom(func(string) string { return "" })
 	if cfg.proxyRepo != defaultReleaseProxyRepo {
 		t.Errorf("proxyRepo = %q; want default %q", cfg.proxyRepo, defaultReleaseProxyRepo)
 	}
@@ -22,9 +21,11 @@ func TestResolveReleaseStartupConfig_Defaults(t *testing.T) {
 }
 
 func TestResolveReleaseStartupConfig_EnvOverride(t *testing.T) {
-	t.Setenv(envReleaseProxyRepo, "registry.local/culvert")
-	t.Setenv(envMaintAgentURL, "http://127.0.0.1:9999")
-	cfg := resolveReleaseStartupConfig()
+	env := map[string]string{
+		envReleaseProxyRepo: "registry.local/culvert",
+		envMaintAgentURL:    "http://127.0.0.1:9999",
+	}
+	cfg := resolveReleaseStartupConfigFrom(func(k string) string { return env[k] })
 	if cfg.proxyRepo != "registry.local/culvert" || cfg.maintURL != "http://127.0.0.1:9999" {
 		t.Fatalf("env override not honored: %+v", cfg)
 	}
