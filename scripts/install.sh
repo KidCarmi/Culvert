@@ -709,6 +709,12 @@ install_maint_agent() {
   # host Go toolchain (fast), else build inside a throwaway golang container —
   # Docker is already up here, so no host Go is required. The module is
   # self-contained (its own go.mod / go.sum).
+  #
+  # CGO_ENABLED=0 is REQUIRED: Go links libc dynamically by default (for
+  # os/user), so a container-built binary would demand the build image's newer
+  # glibc and fail on an older host with "GLIBC_2.xx not found". A static build
+  # has no libc dependency and runs anywhere; the agent's user lookups fall back
+  # to pure-Go /etc/passwd parsing, which is fine for local service accounts.
   local build_dir maint_bin go_image
   go_image="${CULVERT_GO_IMAGE:-golang:1.25}"
   build_dir="$(mktemp -d)" || { warn "mktemp failed — skipping maintenance agent"; return 0; }
@@ -717,18 +723,18 @@ install_maint_agent() {
 
   if command -v go &>/dev/null; then
     info "Building culvert-maint with the host Go toolchain..."
-    ( cd cmd/culvert-maint && go build -o "$maint_bin" . ) \
+    ( cd cmd/culvert-maint && CGO_ENABLED=0 go build -o "$maint_bin" . ) \
       || warn "Host 'go build' failed — falling back to a Go build container..."
   fi
   if [[ ! -x "$maint_bin" ]]; then
     info "Building culvert-maint in a Go container ($go_image; no host Go required)..."
-    if ! sudo docker run --rm \
+    if ! sudo docker run --rm -e CGO_ENABLED=0 \
            -v "$INSTALL_DIR/cmd/culvert-maint":/src:ro,z \
            -v "$build_dir":/out:z \
            -w /src "$go_image" go build -o /out/culvert-maint . ; then
       warn "Could not build culvert-maint (host Go and container build both failed)."
       warn "Culvert is unaffected. Re-run later from $INSTALL_DIR:"
-      warn "  (cd cmd/culvert-maint && go build -o culvert-maint .) \\"
+      warn "  (cd cmd/culvert-maint && CGO_ENABLED=0 go build -o culvert-maint .) \\"
       warn "    && sudo bash $maint_installer cmd/culvert-maint/culvert-maint"
       return 0
     fi
