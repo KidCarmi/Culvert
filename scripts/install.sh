@@ -14,6 +14,9 @@
 #   4. Adds the current user to the docker group
 #   5. Clones Culvert (if not already in the repo)
 #   6. Starts all services with docker compose up -d --build
+#   7. (Optional, best-effort) Builds + installs the host-side maintenance
+#      agent (culvert-maint systemd service) when Go is available. Skip it
+#      entirely with CULVERT_SKIP_MAINT_AGENT=1.
 #
 # Supported distros:
 #   Ubuntu 20.04+, Debian 11+, RHEL/CentOS/Rocky/Alma 8+, Fedora 38+,
@@ -594,6 +597,87 @@ if [[ "$COMPOSE_UP_OK" != "1" ]]; then
     sudo docker compose logs"
 fi
 
+###############################################################################
+# 8. Maintenance agent (optional, best-effort)
+###############################################################################
+step "Maintenance agent (optional)"
+
+# The host-side Maintenance Agent (culvert-maint) is a systemd service that
+# lets the admin UI drive backup / restore / cleanup / upgrade against THIS
+# compose stack over a local Unix socket. It is optional day-2 tooling, so a
+# failure here NEVER fails the Culvert install — we warn and move on. Opt out
+# entirely with CULVERT_SKIP_MAINT_AGENT=1.
+MAINT_AGENT_INSTALLED=0
+
+install_maint_agent() {
+  if [[ -n "${CULVERT_SKIP_MAINT_AGENT:-}" ]]; then
+    info "CULVERT_SKIP_MAINT_AGENT set — skipping maintenance agent"
+    return 0
+  fi
+
+  # Already installed? Leave it untouched (idempotent, never clobber config).
+  if command -v culvert-maint &>/dev/null || [[ -f /etc/systemd/system/culvert-maint.service ]]; then
+    info "Maintenance agent already installed — leaving it unchanged"
+    return 0
+  fi
+
+  local maint_installer="packaging/culvert-maint/install.sh"
+  if [[ ! -f "$maint_installer" ]]; then
+    warn "Maintenance agent installer not found ($maint_installer) — skipping"
+    return 0
+  fi
+
+  # It is a systemd service, and building its binary needs the Go toolchain.
+  # Either missing is a soft skip with copy-paste instructions to do it later.
+  if ! command -v systemctl &>/dev/null; then
+    warn "systemd not detected — the maintenance agent is a systemd service; skipping"
+    return 0
+  fi
+  if ! command -v go &>/dev/null; then
+    warn "Go toolchain not found — cannot build culvert-maint; skipping (Culvert is unaffected)."
+    warn "To add it later: install Go, then run from $INSTALL_DIR:"
+    warn "  (cd cmd/culvert-maint && go build -o culvert-maint .) \\"
+    warn "    && sudo bash $maint_installer cmd/culvert-maint/culvert-maint"
+    return 0
+  fi
+
+  info "Building culvert-maint binary..."
+  local maint_bin="$INSTALL_DIR/cmd/culvert-maint/culvert-maint"
+  if ! ( cd cmd/culvert-maint && go build -o culvert-maint . ); then
+    warn "culvert-maint build failed — skipping (Culvert is unaffected)."
+    return 0
+  fi
+
+  info "Running maintenance agent installer..."
+  if ! sudo bash "$maint_installer" "$maint_bin"; then
+    warn "Maintenance agent install did not complete — Culvert is unaffected."
+    warn "Re-run later with: sudo bash $maint_installer $maint_bin"
+    return 0
+  fi
+
+  # The installer seeds /etc/culvert-maint/config.toml from the example, whose
+  # compose_project_dir default is /srv/culvert. This stack lives at
+  # $INSTALL_DIR, and the sudoers allowlist is path-bound to compose_project_dir
+  # — so if it still holds the example default and we are elsewhere, point it at
+  # this stack and re-run the installer to re-render the sudoers binding. We
+  # only touch the still-default value, never an operator-edited path.
+  if [[ "$INSTALL_DIR" != "/srv/culvert" ]] \
+     && grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
+    info "Pointing maintenance agent at this stack (compose_project_dir=$INSTALL_DIR)..."
+    sudo sed -i "s|^compose_project_dir = .*|compose_project_dir = \"$INSTALL_DIR\"|" /etc/culvert-maint/config.toml
+    if ! sudo bash "$maint_installer" "$maint_bin"; then
+      warn "Re-rendering the sudoers binding for $INSTALL_DIR failed."
+      warn "Fix compose_project_dir in /etc/culvert-maint/config.toml and re-run the installer."
+      return 0
+    fi
+  fi
+
+  MAINT_AGENT_INSTALLED=1
+  info "Maintenance agent installed (not started)."
+}
+
+install_maint_agent || true
+
 echo ""
 echo -e "${GREEN}============================================================${NC}"
 echo -e "${GREEN}  Culvert is running!${NC}"
@@ -620,5 +704,12 @@ echo "    docker compose up -d --build    # rebuild and restart"
 echo ""
 if [[ "$CURRENT_USER" != "root" ]] && ! groups "$CURRENT_USER" | grep -qw docker; then
   echo -e "${YELLOW}  NOTE: Log out and back in to use 'docker' without sudo.${NC}"
+  echo ""
+fi
+if [[ "${MAINT_AGENT_INSTALLED:-0}" == "1" ]]; then
+  echo "  Maintenance agent installed (systemd: culvert-maint), not yet started."
+  echo "  Before starting it, set the allowed caller(s):"
+  echo "    sudo \$EDITOR /etc/culvert-maint/config.toml   # set allow_peers"
+  echo "    sudo systemctl enable --now culvert-maint"
   echo ""
 fi
