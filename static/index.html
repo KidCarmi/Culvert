@@ -410,6 +410,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="updates" data-min-role="admin">
       <span class="icon">&#x2B06;</span> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
     </div>
+    <div class="nav-item" data-view="releases">
+      <span class="icon">🚀</span> Releases
+    </div>
     <div class="nav-item" data-view="diagnostics" data-min-role="admin">
       <span class="icon">🩺</span> Diagnostics
     </div>
@@ -3558,6 +3561,53 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-governance -->
 
+    <!-- ═══ RELEASE MANAGEMENT (P1.6d-1) ═════════════════════════════════ -->
+    <div class="view" id="view-releases">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Release Management</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <label style="font-size:.75rem;color:var(--muted)">Agent
+              <input id="rel-agent" value="local" data-change="releaseAgentChange"
+                style="margin-left:6px;width:120px;padding:4px 6px;font-size:.8rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+            </label>
+            <button class="btn ghost sm" data-click="loadReleases">↺ Refresh</button>
+          </div>
+        </div>
+        <div style="padding:16px;display:grid;gap:12px">
+
+          <!-- Catalog -->
+          <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+            <div style="display:flex;align-items:center;margin-bottom:8px">
+              <div style="font-size:.78rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Release Catalog</div>
+              <span id="rel-catalog-meta" style="margin-left:auto;color:var(--muted);font-size:.72rem"></span>
+            </div>
+            <div id="rel-catalog" style="font-size:.85rem"><div style="color:var(--muted)">Loading…</div></div>
+          </div>
+
+          <!-- Current + Dispatch -->
+          <div style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+            <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+              <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Current Release</div>
+              <div id="rel-current" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">—</span></div>
+            </div>
+
+            <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+              <div style="display:flex;align-items:center;margin-bottom:8px">
+                <div style="font-size:.78rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Dispatch Status</div>
+                <div style="margin-left:auto;display:flex;gap:6px" data-min-role="admin">
+                  <button id="rel-resume-btn" class="btn ghost sm" data-click="releaseResume" style="display:none">⟳ Resume</button>
+                  <button class="btn primary sm" data-click="releaseDispatchOpen">＋ Dispatch</button>
+                </div>
+              </div>
+              <div id="rel-status" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">No dispatch recorded for this agent.</span></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div><!-- /view-releases -->
+
     <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
     <!-- (embedded inside Security panel later, but available as standalone) -->
 
@@ -3587,6 +3637,39 @@ Firefox (all platforms):
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button class="btn ghost" data-click="confirmDialogResolve" data-arg="false">Cancel</button>
       <button class="btn danger" id="confirm-dialog-ok" data-click="confirmDialogResolve" data-arg="true">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Release dispatch modal (P1.6d-1, admin-only) -->
+<div id="release-dispatch-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px 28px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
+    <h3 style="margin:0 0 12px;font-size:1.05rem;font-weight:700">Dispatch Release</h3>
+    <p style="margin:0 0 16px;font-size:.82rem;color:var(--muted);line-height:1.5">Choose a release <b>or</b> a channel (not both). The agent applies the verified pinned digest.</p>
+    <div style="display:grid;gap:12px">
+      <label style="font-size:.78rem;color:var(--muted)">Release
+        <select id="rel-disp-release" data-change="releaseDispSelectRelease" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)"></select>
+      </label>
+      <label style="font-size:.78rem;color:var(--muted)">— or — Channel
+        <select id="rel-disp-channel" data-change="releaseDispSelectChannel" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+          <option value="">(none)</option>
+          <option value="recommended">recommended</option>
+          <option value="lts">lts</option>
+          <option value="critical">critical</option>
+        </select>
+      </label>
+      <label style="font-size:.78rem;color:var(--muted)">Agent
+        <input id="rel-disp-agent" value="local" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+      </label>
+      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-prebackup" data-change="releaseDispToggleBackup"> Pre-restart config backup (pre_backup)</label>
+      <label id="rel-disp-passlabel" style="font-size:.78rem;color:var(--muted);display:none">Backup passphrase reference (required for pre_backup)
+        <input id="rel-disp-passphrase" placeholder="env ref, e.g. CULVERT_BACKUP_PASSPHRASE" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+      </label>
+      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-norollback"> Disable auto-rollback (no_rollback)</label>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px">
+      <button class="btn ghost" data-click="releaseDispatchCancel">Cancel</button>
+      <button class="btn primary" id="rel-disp-submit" data-click="releaseDispatchSubmit">Dispatch</button>
     </div>
   </div>
 </div>
@@ -3861,6 +3944,13 @@ document.addEventListener('click', e => {
     case 'cdrTestPickFile':    cdrTestPickFile(); break;
     case 'cdrAuditFilter':     cdrAuditFilter(arg); break;
 
+    // ── Release management (P1.6d-1) ──
+    case 'loadReleases':           loadReleases(); break;
+    case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
+    case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
+    case 'releaseDispatchSubmit':  releaseDispatchSubmit(); break;
+    case 'releaseResume':          releaseResume(); break;
+
     default:
       console.warn('CSP delegation: unknown click action:', fn);
   }
@@ -3882,6 +3972,10 @@ document.addEventListener('change', e => {
     case 'syncFileFilter':    document.getElementById('pol-file-filter').checked = (el.value !== ''); break;
     case 'addCgCat':          addCgCat(); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
+    case 'releaseAgentChange':      releaseAgentChange(); break;
+    case 'releaseDispSelectRelease': if (el.value) document.getElementById('rel-disp-channel').value = ''; break;
+    case 'releaseDispSelectChannel': if (el.value) document.getElementById('rel-disp-release').value = ''; break;
+    case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
 });
@@ -4057,6 +4151,7 @@ const viewMeta = {
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
   authpolicy:     { title: 'Auth Exempt Rules', meta: 'Stage-1 authentication exemptions — Exempt skips authentication only; Stage-2 policy still applies' },
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
+  releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -4091,6 +4186,8 @@ function switchView(name) {
   if (name === 'cdr')            loadCDRData();
   if (name === 'diagnostics')    loadDiagnostics();
   if (name === 'governance')     loadGovernance();
+  if (name === 'releases')       loadReleases();
+  if (name !== 'releases')       releaseStopStatusPoll(); // stop polling when leaving the panel
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -9219,6 +9316,259 @@ async function loadAuditLog() {
     auditEntries = d.entries || [];
     renderAuditLog();
   } catch(err) { toast('Failed to load audit log: ' + err.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Release Management (P1.6d-1) — consumes existing /api/releases* routes only.
+// No new routes, no backend logic; read for viewers, dispatch/resume for admins.
+// ═══════════════════════════════════════════════════════════════════════════
+let releaseCatalog = null;
+let releaseStatusTimer = null;
+
+function releaseCurrentAgent() {
+  const el = document.getElementById('rel-agent');
+  return (el && el.value.trim()) || 'local';
+}
+function releaseAgentChange() { loadReleaseCurrent(); loadReleaseStatus(); }
+function releaseStopStatusPoll() { if (releaseStatusTimer) { clearTimeout(releaseStatusTimer); releaseStatusTimer = null; } }
+
+async function loadReleases() {
+  await loadReleaseCatalog();
+  await loadReleaseCurrent();
+  await loadReleaseStatus();
+}
+
+async function loadReleaseCatalog() {
+  const box = document.getElementById('rel-catalog');
+  const meta = document.getElementById('rel-catalog-meta');
+  if (box) box.innerHTML = '<div style="color:var(--muted)">Loading…</div>';
+  try {
+    const d = await api('/api/releases');
+    releaseCatalog = d;
+    renderReleaseCatalog(d, box, meta);
+  } catch (err) {
+    if (box) box.innerHTML = '<div style="color:var(--danger)">Failed to load catalog: ' + escHtml(err.message) + '</div>';
+    if (meta) meta.textContent = '';
+  }
+}
+
+function relSeverityBadge(s) {
+  const sev = (s || '').toString();
+  const color = sev === 'critical' ? 'var(--danger)' : 'var(--muted)';
+  return '<span style="font-size:.72rem;color:' + color + '">' + escHtml(sev || 'unknown') + '</span>';
+}
+function relChannelBadge(c) {
+  return '<span style="display:inline-block;padding:2px 7px;border-radius:999px;font-size:.68rem;font-weight:700;background:rgba(20,184,166,.15);color:#2dd4bf;margin-right:4px">' + escHtml(c) + '</span>';
+}
+
+function renderReleaseCatalog(d, box, meta) {
+  box = box || document.getElementById('rel-catalog');
+  meta = meta || document.getElementById('rel-catalog-meta');
+  if (!box) return;
+  if (!d || d.available !== true) {
+    box.innerHTML = '<div style="color:var(--muted)">No catalog loaded (available: false). A seeded or refreshed catalog will appear here.</div>';
+    if (meta) meta.textContent = '';
+    populateReleaseDispatchReleases([]);
+    return;
+  }
+  if (meta) meta.textContent = d.generated_at ? ('generated ' + escHtml(d.generated_at)) : '';
+  const rels = d.releases || [];
+  if (rels.length === 0) {
+    box.innerHTML = '<div style="color:var(--muted)">Catalog is empty.</div>';
+    populateReleaseDispatchReleases([]);
+    return;
+  }
+  let html = '<table style="width:100%;border-collapse:collapse"><thead><tr style="text-align:left;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">'
+    + '<th style="padding:6px 8px">Release</th><th style="padding:6px 8px">Version</th><th style="padding:6px 8px">Severity</th><th style="padding:6px 8px">Channels</th></tr></thead><tbody>';
+  rels.forEach(r => {
+    const chans = (r.Channels || []).map(relChannelBadge).join('');
+    html += '<tr style="border-top:1px solid var(--border)">'
+      + '<td style="padding:6px 8px;font-family:monospace">' + escHtml(r.ReleaseID || '') + '</td>'
+      + '<td style="padding:6px 8px">' + escHtml(r.VersionID || '') + '</td>'
+      + '<td style="padding:6px 8px">' + relSeverityBadge(r.Severity) + '</td>'
+      + '<td style="padding:6px 8px">' + (chans || '<span style="color:var(--muted)">—</span>') + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+  populateReleaseDispatchReleases(rels);
+}
+
+function populateReleaseDispatchReleases(rels) {
+  const sel = document.getElementById('rel-disp-release');
+  if (!sel) return;
+  let opts = '<option value="">(choose a release)</option>';
+  (rels || []).forEach(r => {
+    opts += '<option value="' + escHtml(r.ReleaseID || '') + '">' + escHtml((r.ReleaseID || '') + ' — ' + (r.VersionID || '')) + '</option>';
+  });
+  sel.innerHTML = opts;
+}
+
+async function loadReleaseCurrent() {
+  const box = document.getElementById('rel-current');
+  if (!box) return;
+  const agent = releaseCurrentAgent();
+  try {
+    const r = await apiFetch('/api/releases/current?agent=' + encodeURIComponent(agent));
+    if (r.status === 404) { box.innerHTML = '<span style="color:var(--muted)">Unknown agent: ' + escHtml(agent) + '</span>'; return; }
+    if (r.status === 503) { box.innerHTML = '<span style="color:var(--warn,#f59e0b)">Agent unreachable</span>'; return; }
+    if (!r.ok)            { box.innerHTML = '<span style="color:var(--danger)">Error ' + r.status + '</span>'; return; }
+    const c = await r.json();
+    if (c.known) {
+      box.innerHTML = '<div><b>' + escHtml(c.release_id || '') + '</b> <span style="color:var(--muted)">' + escHtml(c.version_id || '') + '</span></div>'
+        + '<div style="color:var(--muted);font-size:.75rem;margin-top:4px">agent: ' + escHtml(agent) + '</div>';
+    } else {
+      box.innerHTML = '<span style="color:var(--muted)">Custom / unrecognized release on ' + escHtml(agent) + '</span>';
+    }
+  } catch (err) {
+    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>';
+  }
+}
+
+async function loadReleaseStatus(forceMore) {
+  releaseStopStatusPoll();
+  const box = document.getElementById('rel-status');
+  if (!box) return;
+  const agent = releaseCurrentAgent();
+  const more = (forceMore | 0);
+  try {
+    const rec = await api('/api/releases/dispatch/status?agent=' + encodeURIComponent(agent));
+    renderReleaseStatus(rec);
+    // Keep refreshing while a dispatch is in flight, OR for a few forced rounds
+    // after an action (dispatch/resume) whose background store update may lag
+    // the 202 response — otherwise the panel could freeze on a stale record.
+    if ((rec && rec.phase === 'dispatched') || more > 0) {
+      releaseStatusTimer = setTimeout(() => loadReleaseStatus(more > 0 ? more - 1 : 0), 2500);
+    }
+  } catch (err) {
+    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>';
+  }
+}
+
+function renderReleaseStatus(rec) {
+  const box = document.getElementById('rel-status');
+  const resumeBtn = document.getElementById('rel-resume-btn');
+  if (!box) return;
+  if (!rec || !rec.phase || rec.phase === 'none') {
+    box.innerHTML = '<span style="color:var(--muted)">No dispatch recorded for this agent.</span>';
+    if (resumeBtn) resumeBtn.style.display = 'none';
+    return;
+  }
+  const rows = [['phase', rec.phase]];
+  if (rec.op_id)      rows.push(['op_id', rec.op_id]);
+  if (rec.release_id) rows.push(['release', rec.release_id]);
+  if (rec.terminal)   rows.push(['terminal', rec.terminal]);
+  rows.push(['verified', rec.verified ? 'yes' : 'no']);
+  if (rec.detail)     rows.push(['detail', rec.detail]);
+  box.innerHTML = rows.map(kv =>
+    '<div><span style="color:var(--muted);display:inline-block;min-width:72px">' + escHtml(kv[0]) + '</span> <span style="font-family:monospace">' + escHtml(String(kv[1])) + '</span></div>'
+  ).join('');
+  // Resumable: a needs-attention terminal that still carries the op_id of an
+  // interrupted watch. Resume re-polls that op — it NEVER starts a new dispatch.
+  const resumable = rec.terminal === 'failed_needs_attn' && !!rec.op_id && !!rec.dispatch_id;
+  if (resumeBtn) {
+    resumeBtn.style.display = resumable ? '' : 'none';
+    resumeBtn.dataset.dispatchId = rec.dispatch_id || '';
+  }
+}
+
+function releaseDispatchOpen() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  document.getElementById('rel-disp-release').value = '';
+  document.getElementById('rel-disp-channel').value = '';
+  document.getElementById('rel-disp-agent').value = releaseCurrentAgent();
+  document.getElementById('rel-disp-prebackup').checked = false;
+  document.getElementById('rel-disp-norollback').checked = false;
+  document.getElementById('rel-disp-passphrase').value = '';
+  document.getElementById('rel-disp-passlabel').style.display = 'none';
+  document.getElementById('release-dispatch-modal').style.display = 'flex';
+}
+function releaseDispatchCancel() {
+  document.getElementById('release-dispatch-modal').style.display = 'none';
+}
+
+async function releaseDispatchSubmit() {
+  const releaseId = document.getElementById('rel-disp-release').value;
+  const channel   = document.getElementById('rel-disp-channel').value;
+  const agent     = document.getElementById('rel-disp-agent').value.trim() || 'local';
+  if (releaseId && channel) { toast('Choose a release OR a channel, not both', 'error'); return; }
+  if (!releaseId && !channel) { toast('Choose a release or a channel', 'error'); return; }
+  const preBackup = document.getElementById('rel-disp-prebackup').checked;
+  const passphraseRef = document.getElementById('rel-disp-passphrase').value.trim();
+  // pre_backup is honored by the agent ONLY with a passphrase_ref; without one
+  // the planner silently skips the backup. Require it so the checkbox is meaningful.
+  if (preBackup && !passphraseRef) {
+    toast('Pre-backup requires a backup passphrase reference (or uncheck it)', 'error');
+    return;
+  }
+  const body = {
+    agent: agent,
+    pre_backup: preBackup,
+    no_rollback: document.getElementById('rel-disp-norollback').checked,
+  };
+  if (preBackup) body.passphrase_ref = passphraseRef;
+  if (releaseId) body.release_id = releaseId; else body.channel = channel;
+  const btn = document.getElementById('rel-disp-submit');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/releases/dispatch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    let payload = {};
+    try { payload = await r.json(); } catch (_) {}
+    if (r.status === 202) {
+      toast('Dispatch accepted (op ' + (payload.op_id || '?') + ')', 'success');
+      releaseDispatchCancel();
+      if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
+    } else if (r.status === 200) {
+      // No-op success: the agent is already running the target release.
+      toast(payload.status === 'already_current'
+        ? 'Already on the target release — no dispatch needed'
+        : 'Dispatch accepted', 'success');
+      releaseDispatchCancel();
+      if (agent === releaseCurrentAgent()) { loadReleaseCurrent(); loadReleaseStatus(); }
+    } else if (r.status === 409) {
+      toast(payload.status === 'stale_replan_required' ? 'Node drifted — re-plan required' : 'A dispatch is already in flight on this agent', 'error');
+    } else if (r.status === 404) {
+      toast('Unknown agent: ' + agent, 'error');
+    } else if (r.status === 503) {
+      toast('Agent unavailable' + (payload.detail ? ': ' + payload.detail : ''), 'error');
+    } else if (r.status === 502) {
+      toast('Dispatch failed: ' + (payload.detail || 'agent error'), 'error');
+    } else {
+      toast('Refused: ' + (payload.kind || payload.detail || ('HTTP ' + r.status)), 'error');
+    }
+  } catch (err) {
+    toast('Dispatch error: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function releaseResume() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const resumeBtn  = document.getElementById('rel-resume-btn');
+  const dispatchId = resumeBtn ? resumeBtn.dataset.dispatchId : '';
+  const agent      = releaseCurrentAgent();
+  if (!dispatchId) { toast('No resumable operation', 'error'); return; }
+  try {
+    const r = await apiFetch('/api/releases/dispatch/resume', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: agent, dispatch_id: dispatchId }),
+    });
+    let payload = {};
+    try { payload = await r.json(); } catch (_) {}
+    if (r.status === 202) {
+      toast('Resume started (op ' + (payload.op_id || '?') + ')', 'success');
+      // The resume's store update lands AFTER this 202 (background goroutine), so
+      // force several polls to catch the resumed op's new terminal rather than
+      // freezing on the stale failed_needs_attn record.
+      loadReleaseStatus(6);
+    } else {
+      toast('Resume failed: ' + (payload.detail || ('HTTP ' + r.status)), 'error');
+    }
+  } catch (err) {
+    toast('Resume error: ' + err.message, 'error');
+  }
 }
 
 function renderAuditLog() {
