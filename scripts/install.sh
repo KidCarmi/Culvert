@@ -710,11 +710,17 @@ install_maint_agent() {
   # Docker is already up here, so no host Go is required. The module is
   # self-contained (its own go.mod / go.sum).
   #
-  # CGO_ENABLED=0 is REQUIRED: Go links libc dynamically by default (for
-  # os/user), so a container-built binary would demand the build image's newer
-  # glibc and fail on an older host with "GLIBC_2.xx not found". A static build
-  # has no libc dependency and runs anywhere; the agent's user lookups fall back
-  # to pure-Go /etc/passwd parsing, which is fine for local service accounts.
+  # libc / glibc strategy (the two builds differ ON PURPOSE):
+  #  - Host build: default toolchain (cgo on). The binary links the host's own
+  #    libc, so os/user honors NSS (LDAP/SSSD) when resolving allow_peers
+  #    usernames, and there is no glibc-version mismatch — it runs on the very
+  #    host it was built on.
+  #  - Container fallback: CGO_ENABLED=0 (static). A cgo binary from a newer
+  #    build image would demand that image's glibc and crash-loop on an older
+  #    host ("GLIBC_2.xx not found"); a static binary runs anywhere. The
+  #    trade-off is that os/user falls back to pure-Go /etc/passwd parsing, so
+  #    on a host whose allow_peers come from NSS the operator must use numeric
+  #    UIDs (warned below).
   local build_dir maint_bin go_image
   go_image="${CULVERT_GO_IMAGE:-golang:1.25}"
   build_dir="$(mktemp -d)" || { warn "mktemp failed — skipping maintenance agent"; return 0; }
@@ -723,21 +729,23 @@ install_maint_agent() {
 
   if command -v go &>/dev/null; then
     info "Building culvert-maint with the host Go toolchain..."
-    ( cd cmd/culvert-maint && CGO_ENABLED=0 go build -o "$maint_bin" . ) \
+    ( cd cmd/culvert-maint && go build -o "$maint_bin" . ) \
       || warn "Host 'go build' failed — falling back to a Go build container..."
   fi
   if [[ ! -x "$maint_bin" ]]; then
-    info "Building culvert-maint in a Go container ($go_image; no host Go required)..."
+    info "Building culvert-maint in a Go container ($go_image; static, no host Go required)..."
     if ! sudo docker run --rm -e CGO_ENABLED=0 \
            -v "$INSTALL_DIR/cmd/culvert-maint":/src:ro,z \
            -v "$build_dir":/out:z \
            -w /src "$go_image" go build -o /out/culvert-maint . ; then
       warn "Could not build culvert-maint (host Go and container build both failed)."
       warn "Culvert is unaffected. Re-run later from $INSTALL_DIR:"
-      warn "  (cd cmd/culvert-maint && CGO_ENABLED=0 go build -o culvert-maint .) \\"
+      warn "  (cd cmd/culvert-maint && go build -o culvert-maint .) \\"
       warn "    && sudo bash $maint_installer cmd/culvert-maint/culvert-maint"
       return 0
     fi
+    warn "Built a static (CGO_ENABLED=0) binary: allow_peers must be local"
+    warn "/etc/passwd users or numeric UIDs — NSS/LDAP usernames won't resolve."
   fi
   if [[ ! -x "$maint_bin" ]]; then
     warn "culvert-maint binary missing after build — skipping (Culvert is unaffected)."
