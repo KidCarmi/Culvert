@@ -1,4 +1,4 @@
-module proxy
+module github.com/KidCarmi/Culvert
 
 go 1.25.11
 
