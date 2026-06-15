@@ -611,20 +611,24 @@ step "Maintenance agent (optional)"
 MAINT_AGENT_INSTALLED=0
 
 install_maint_agent() {
+  local maint_installer="packaging/culvert-maint/install.sh"
+
   if [[ -n "${CULVERT_SKIP_MAINT_AGENT:-}" ]]; then
     info "CULVERT_SKIP_MAINT_AGENT set — skipping maintenance agent"
     return 0
   fi
 
-  # Already installed? Leave it untouched (idempotent, never clobber config).
-  if command -v culvert-maint &>/dev/null || [[ -f /etc/systemd/system/culvert-maint.service ]]; then
+  # The systemd unit is the canonical "fully installed" marker — the agent
+  # installer writes it last, so its presence means a prior run completed. A
+  # bare binary with no unit is a PARTIAL install: fall through and let the
+  # idempotent installer finish the job rather than skip forever.
+  if [[ -f /etc/systemd/system/culvert-maint.service ]]; then
     info "Maintenance agent already installed — leaving it unchanged"
     return 0
   fi
 
-  local maint_installer="packaging/culvert-maint/install.sh"
-  if [[ ! -f "$maint_installer" ]]; then
-    warn "Maintenance agent installer not found ($maint_installer) — skipping"
+  if [[ ! -f "$maint_installer" || ! -f cmd/culvert-maint/go.mod ]]; then
+    warn "Maintenance agent sources not found in this checkout — skipping"
     return 0
   fi
 
@@ -634,25 +638,41 @@ install_maint_agent() {
     return 0
   fi
 
-  # Build the binary. Prefer the host Go toolchain (fast); otherwise fall back
-  # to a throwaway golang container — Docker is already up at this point, so no
-  # host Go is required. The module is self-contained (its own go.mod).
-  local maint_bin="$INSTALL_DIR/cmd/culvert-maint/culvert-maint"
-  rm -f "$maint_bin"
+  # The agent's sudoers allowlist is path-bound to this stack's directory. A
+  # path with whitespace/quotes/shell-or-sed metacharacters can't be rendered
+  # safely into the sudoers grammar (the agent installer rejects it), so skip
+  # the whole step cleanly rather than leave a half-bound install behind.
+  case "$INSTALL_DIR" in
+    *[[:space:]\"\'\\\&\|\$\`\(\)]*)
+      warn "Install path '$INSTALL_DIR' has characters that can't be bound in the agent's sudoers allowlist."
+      warn "Skipping the maintenance agent. Move the checkout to a plain path and re-run, or install it manually."
+      return 0 ;;
+  esac
+
+  # Build into a throwaway temp dir so we never leave a (possibly root-owned)
+  # binary in the working tree; cleaned up on every return path. Prefer the
+  # host Go toolchain (fast), else build inside a throwaway golang container —
+  # Docker is already up here, so no host Go is required. The module is
+  # self-contained (its own go.mod / go.sum).
+  local build_dir maint_bin go_image
+  go_image="${CULVERT_GO_IMAGE:-golang:1.25}"
+  build_dir="$(mktemp -d)" || { warn "mktemp failed — skipping maintenance agent"; return 0; }
+  trap "rm -rf '$build_dir'" RETURN
+  maint_bin="$build_dir/culvert-maint"
+
   if command -v go &>/dev/null; then
     info "Building culvert-maint with the host Go toolchain..."
-    if ! ( cd cmd/culvert-maint && go build -o culvert-maint . ); then
-      warn "Host 'go build' failed — falling back to a Go build container..."
-      rm -f "$maint_bin"
-    fi
+    ( cd cmd/culvert-maint && go build -o "$maint_bin" . ) \
+      || warn "Host 'go build' failed — falling back to a Go build container..."
   fi
   if [[ ! -x "$maint_bin" ]]; then
-    info "Building culvert-maint in a Go container (no host Go required)..."
+    info "Building culvert-maint in a Go container ($go_image; no host Go required)..."
     if ! sudo docker run --rm \
-           -v "$INSTALL_DIR/cmd/culvert-maint":/src:z -w /src \
-           golang:1.25 go build -o culvert-maint . ; then
+           -v "$INSTALL_DIR/cmd/culvert-maint":/src:ro,z \
+           -v "$build_dir":/out:z \
+           -w /src "$go_image" go build -o /out/culvert-maint . ; then
       warn "Could not build culvert-maint (host Go and container build both failed)."
-      warn "Culvert is unaffected. Re-run later with Go installed:"
+      warn "Culvert is unaffected. Re-run later from $INSTALL_DIR:"
       warn "  (cd cmd/culvert-maint && go build -o culvert-maint .) \\"
       warn "    && sudo bash $maint_installer cmd/culvert-maint/culvert-maint"
       return 0
@@ -666,16 +686,15 @@ install_maint_agent() {
   info "Running maintenance agent installer..."
   if ! sudo bash "$maint_installer" "$maint_bin"; then
     warn "Maintenance agent install did not complete — Culvert is unaffected."
-    warn "Re-run later with: sudo bash $maint_installer $maint_bin"
     return 0
   fi
 
   # The installer seeds /etc/culvert-maint/config.toml from the example, whose
   # compose_project_dir default is /srv/culvert. This stack lives at
-  # $INSTALL_DIR, and the sudoers allowlist is path-bound to compose_project_dir
-  # — so if it still holds the example default and we are elsewhere, point it at
-  # this stack and re-run the installer to re-render the sudoers binding. We
-  # only touch the still-default value, never an operator-edited path.
+  # $INSTALL_DIR and the sudoers allowlist is path-bound to compose_project_dir,
+  # so when the value is still the example default and we are elsewhere, point
+  # it at this stack and re-run to re-render the binding. We only ever rewrite
+  # the untouched default — never an operator-edited path.
   if [[ "$INSTALL_DIR" != "/srv/culvert" ]] \
      && grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
     info "Pointing maintenance agent at this stack (compose_project_dir=$INSTALL_DIR)..."
