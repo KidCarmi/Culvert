@@ -709,6 +709,18 @@ install_maint_agent() {
   # host Go toolchain (fast), else build inside a throwaway golang container —
   # Docker is already up here, so no host Go is required. The module is
   # self-contained (its own go.mod / go.sum).
+  #
+  # libc / glibc strategy (the two builds differ ON PURPOSE):
+  #  - Host build: default toolchain (cgo on). The binary links the host's own
+  #    libc, so os/user honors NSS (LDAP/SSSD) when resolving allow_peers
+  #    usernames, and there is no glibc-version mismatch — it runs on the very
+  #    host it was built on.
+  #  - Container fallback: CGO_ENABLED=0 (static). A cgo binary from a newer
+  #    build image would demand that image's glibc and crash-loop on an older
+  #    host ("GLIBC_2.xx not found"); a static binary runs anywhere. The
+  #    trade-off is that os/user falls back to pure-Go /etc/passwd parsing, so
+  #    on a host whose allow_peers come from NSS the operator must use numeric
+  #    UIDs (warned below).
   local build_dir maint_bin go_image
   go_image="${CULVERT_GO_IMAGE:-golang:1.25}"
   build_dir="$(mktemp -d)" || { warn "mktemp failed — skipping maintenance agent"; return 0; }
@@ -721,8 +733,8 @@ install_maint_agent() {
       || warn "Host 'go build' failed — falling back to a Go build container..."
   fi
   if [[ ! -x "$maint_bin" ]]; then
-    info "Building culvert-maint in a Go container ($go_image; no host Go required)..."
-    if ! sudo docker run --rm \
+    info "Building culvert-maint in a Go container ($go_image; static, no host Go required)..."
+    if ! sudo docker run --rm -e CGO_ENABLED=0 \
            -v "$INSTALL_DIR/cmd/culvert-maint":/src:ro,z \
            -v "$build_dir":/out:z \
            -w /src "$go_image" go build -o /out/culvert-maint . ; then
@@ -732,6 +744,8 @@ install_maint_agent() {
       warn "    && sudo bash $maint_installer cmd/culvert-maint/culvert-maint"
       return 0
     fi
+    warn "Built a static (CGO_ENABLED=0) binary: allow_peers must be local"
+    warn "/etc/passwd users or numeric UIDs — NSS/LDAP usernames won't resolve."
   fi
   if [[ ! -x "$maint_bin" ]]; then
     warn "culvert-maint binary missing after build — skipping (Culvert is unaffected)."
