@@ -3661,7 +3661,10 @@ Firefox (all platforms):
       <label style="font-size:.78rem;color:var(--muted)">Agent
         <input id="rel-disp-agent" value="local" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
       </label>
-      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-prebackup"> Pre-restart config backup (pre_backup)</label>
+      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-prebackup" data-change="releaseDispToggleBackup"> Pre-restart config backup (pre_backup)</label>
+      <label id="rel-disp-passlabel" style="font-size:.78rem;color:var(--muted);display:none">Backup passphrase reference (required for pre_backup)
+        <input id="rel-disp-passphrase" placeholder="env ref, e.g. CULVERT_BACKUP_PASSPHRASE" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+      </label>
       <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-norollback"> Disable auto-rollback (no_rollback)</label>
     </div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px">
@@ -3972,6 +3975,7 @@ document.addEventListener('change', e => {
     case 'releaseAgentChange':      releaseAgentChange(); break;
     case 'releaseDispSelectRelease': if (el.value) document.getElementById('rel-disp-channel').value = ''; break;
     case 'releaseDispSelectChannel': if (el.value) document.getElementById('rel-disp-release').value = ''; break;
+    case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
 });
@@ -9420,16 +9424,20 @@ async function loadReleaseCurrent() {
   }
 }
 
-async function loadReleaseStatus() {
+async function loadReleaseStatus(forceMore) {
   releaseStopStatusPoll();
   const box = document.getElementById('rel-status');
   if (!box) return;
   const agent = releaseCurrentAgent();
+  const more = (forceMore | 0);
   try {
     const rec = await api('/api/releases/dispatch/status?agent=' + encodeURIComponent(agent));
     renderReleaseStatus(rec);
-    if (rec && rec.phase === 'dispatched') {  // live refresh while in flight
-      releaseStatusTimer = setTimeout(loadReleaseStatus, 2500);
+    // Keep refreshing while a dispatch is in flight, OR for a few forced rounds
+    // after an action (dispatch/resume) whose background store update may lag
+    // the 202 response — otherwise the panel could freeze on a stale record.
+    if ((rec && rec.phase === 'dispatched') || more > 0) {
+      releaseStatusTimer = setTimeout(() => loadReleaseStatus(more > 0 ? more - 1 : 0), 2500);
     }
   } catch (err) {
     box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>';
@@ -9470,6 +9478,8 @@ function releaseDispatchOpen() {
   document.getElementById('rel-disp-agent').value = releaseCurrentAgent();
   document.getElementById('rel-disp-prebackup').checked = false;
   document.getElementById('rel-disp-norollback').checked = false;
+  document.getElementById('rel-disp-passphrase').value = '';
+  document.getElementById('rel-disp-passlabel').style.display = 'none';
   document.getElementById('release-dispatch-modal').style.display = 'flex';
 }
 function releaseDispatchCancel() {
@@ -9482,11 +9492,20 @@ async function releaseDispatchSubmit() {
   const agent     = document.getElementById('rel-disp-agent').value.trim() || 'local';
   if (releaseId && channel) { toast('Choose a release OR a channel, not both', 'error'); return; }
   if (!releaseId && !channel) { toast('Choose a release or a channel', 'error'); return; }
+  const preBackup = document.getElementById('rel-disp-prebackup').checked;
+  const passphraseRef = document.getElementById('rel-disp-passphrase').value.trim();
+  // pre_backup is honored by the agent ONLY with a passphrase_ref; without one
+  // the planner silently skips the backup. Require it so the checkbox is meaningful.
+  if (preBackup && !passphraseRef) {
+    toast('Pre-backup requires a backup passphrase reference (or uncheck it)', 'error');
+    return;
+  }
   const body = {
     agent: agent,
-    pre_backup: document.getElementById('rel-disp-prebackup').checked,
+    pre_backup: preBackup,
     no_rollback: document.getElementById('rel-disp-norollback').checked,
   };
+  if (preBackup) body.passphrase_ref = passphraseRef;
   if (releaseId) body.release_id = releaseId; else body.channel = channel;
   const btn = document.getElementById('rel-disp-submit');
   btn.disabled = true;
@@ -9499,7 +9518,14 @@ async function releaseDispatchSubmit() {
     if (r.status === 202) {
       toast('Dispatch accepted (op ' + (payload.op_id || '?') + ')', 'success');
       releaseDispatchCancel();
-      if (agent === releaseCurrentAgent()) loadReleaseStatus();
+      if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
+    } else if (r.status === 200) {
+      // No-op success: the agent is already running the target release.
+      toast(payload.status === 'already_current'
+        ? 'Already on the target release — no dispatch needed'
+        : 'Dispatch accepted', 'success');
+      releaseDispatchCancel();
+      if (agent === releaseCurrentAgent()) { loadReleaseCurrent(); loadReleaseStatus(); }
     } else if (r.status === 409) {
       toast(payload.status === 'stale_replan_required' ? 'Node drifted — re-plan required' : 'A dispatch is already in flight on this agent', 'error');
     } else if (r.status === 404) {
@@ -9533,7 +9559,10 @@ async function releaseResume() {
     try { payload = await r.json(); } catch (_) {}
     if (r.status === 202) {
       toast('Resume started (op ' + (payload.op_id || '?') + ')', 'success');
-      loadReleaseStatus();
+      // The resume's store update lands AFTER this 202 (background goroutine), so
+      // force several polls to catch the resumed op's new terminal rather than
+      // freezing on the stale failed_needs_attn record.
+      loadReleaseStatus(6);
     } else {
       toast('Resume failed: ' + (payload.detail || ('HTTP ' + r.status)), 'error');
     }

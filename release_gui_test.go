@@ -88,8 +88,22 @@ func TestReleaseGUI_AdminCanResume(t *testing.T) {
 	}
 }
 
-// ─── read states surfaced to the panel ──────────────────────────────────────
+// An already-current dispatch is a 200 no-op success (the GUI treats it as
+// success, not the generic error toast).
+func TestReleaseGUI_AlreadyCurrentReturns200(t *testing.T) {
+	fx := newE2EFixture(t)
+	newReleaseFixture(t, mustLoad(t, validSource()),
+		map[string]*fakeAgent{"A": {runningSeq: [][]string{{dispatchRepo + "@" + digA}, {dispatchRepo + "@" + digA}}}})
 
+	admin := fx.loginAs(e2eAdminUser, e2eAdminPass)
+	code, body := postJSON(t, admin, fx.srv.URL+"/api/releases/dispatch",
+		map[string]any{"release_id": "rel_a", "agent": "A"})
+	if code != http.StatusOK || body["status"] != "already_current" {
+		t.Fatalf("already-current dispatch = %d %v; want 200 already_current", code, body["status"])
+	}
+}
+
+// ─── read states surfaced to the panel ──────────────────────────────────────
 func TestReleaseGUI_AvailableFalseEmptyState(t *testing.T) {
 	fx := newE2EFixture(t)
 	newReleaseFixture(t, nil, map[string]*fakeAgent{"A": {}}) // nil catalog ⇒ available:false
