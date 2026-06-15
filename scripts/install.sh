@@ -15,8 +15,9 @@
 #   5. Clones Culvert (if not already in the repo)
 #   6. Starts all services with docker compose up -d --build
 #   7. (Optional, best-effort) Builds + installs the host-side maintenance
-#      agent (culvert-maint systemd service) when Go is available. Skip it
-#      entirely with CULVERT_SKIP_MAINT_AGENT=1.
+#      agent (culvert-maint systemd service). Builds with the host Go
+#      toolchain if present, else in a throwaway golang container (no host
+#      Go required). Skip entirely with CULVERT_SKIP_MAINT_AGENT=1.
 #
 # Supported distros:
 #   Ubuntu 20.04+, Debian 11+, RHEL/CentOS/Rocky/Alma 8+, Fedora 38+,
@@ -627,24 +628,38 @@ install_maint_agent() {
     return 0
   fi
 
-  # It is a systemd service, and building its binary needs the Go toolchain.
-  # Either missing is a soft skip with copy-paste instructions to do it later.
+  # It is a systemd service, so systemd is the one hard requirement.
   if ! command -v systemctl &>/dev/null; then
     warn "systemd not detected — the maintenance agent is a systemd service; skipping"
     return 0
   fi
-  if ! command -v go &>/dev/null; then
-    warn "Go toolchain not found — cannot build culvert-maint; skipping (Culvert is unaffected)."
-    warn "To add it later: install Go, then run from $INSTALL_DIR:"
-    warn "  (cd cmd/culvert-maint && go build -o culvert-maint .) \\"
-    warn "    && sudo bash $maint_installer cmd/culvert-maint/culvert-maint"
-    return 0
-  fi
 
-  info "Building culvert-maint binary..."
+  # Build the binary. Prefer the host Go toolchain (fast); otherwise fall back
+  # to a throwaway golang container — Docker is already up at this point, so no
+  # host Go is required. The module is self-contained (its own go.mod).
   local maint_bin="$INSTALL_DIR/cmd/culvert-maint/culvert-maint"
-  if ! ( cd cmd/culvert-maint && go build -o culvert-maint . ); then
-    warn "culvert-maint build failed — skipping (Culvert is unaffected)."
+  rm -f "$maint_bin"
+  if command -v go &>/dev/null; then
+    info "Building culvert-maint with the host Go toolchain..."
+    if ! ( cd cmd/culvert-maint && go build -o culvert-maint . ); then
+      warn "Host 'go build' failed — falling back to a Go build container..."
+      rm -f "$maint_bin"
+    fi
+  fi
+  if [[ ! -x "$maint_bin" ]]; then
+    info "Building culvert-maint in a Go container (no host Go required)..."
+    if ! sudo docker run --rm \
+           -v "$INSTALL_DIR/cmd/culvert-maint":/src:z -w /src \
+           golang:1.25 go build -o culvert-maint . ; then
+      warn "Could not build culvert-maint (host Go and container build both failed)."
+      warn "Culvert is unaffected. Re-run later with Go installed:"
+      warn "  (cd cmd/culvert-maint && go build -o culvert-maint .) \\"
+      warn "    && sudo bash $maint_installer cmd/culvert-maint/culvert-maint"
+      return 0
+    fi
+  fi
+  if [[ ! -x "$maint_bin" ]]; then
+    warn "culvert-maint binary missing after build — skipping (Culvert is unaffected)."
     return 0
   fi
 
