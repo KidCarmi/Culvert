@@ -1,109 +1,78 @@
 #!/bin/sh
 # Culvert Maintenance Agent — manual install (D1.6a)
 #
-# This is the documented manual install path for D1.6a. Packaging
-# (.deb / .rpm) is deferred until the agent contract has stabilized
-# through D1.6b/c. See roadmap/D1.6-maintenance-agent-implementation-
-# plan.md § 1.1.
+# Documented manual install path for D1.6a. Packaging (.deb / .rpm) is
+# deferred until the agent contract stabilizes through D1.6b/c. See
+# roadmap/D1.6-maintenance-agent-implementation-plan.md § 1.1.
 #
-# Run as root. Idempotent: re-running upgrades the binary and unit
-# in place; will not clobber a hand-edited /etc/culvert-maint/config.toml.
+# Run as root. Idempotent: re-running upgrades the binary, sudoers, and
+# unit in place; a hand-edited /etc/culvert-maint/config.toml is never
+# clobbered.
 #
 # Usage:
 #   sudo ./install.sh /path/to/culvert-maint
 #
-# Where the argument is the path to the freshly-built `culvert-maint`
-# binary. Build it with:
+# The argument is the freshly-built `culvert-maint` binary. Build it with:
 #   (cd cmd/culvert-maint && go build -o culvert-maint .)
 #
-# What this script does (in order):
-#   1. Creates the culvert-maint system user and group (idempotent).
-#   2. Installs the binary at /usr/local/bin/culvert-maint.
-#   3. Installs /etc/culvert-maint/config.toml from the example
-#      (only if not already present — operator edits survive).
-#   4. RENDERS /etc/sudoers.d/culvert-maint with the FULL compose
-#      path resolved from compose_project_dir + compose_file in
-#      config.toml. The shipped template uses a {compose_path}
-#      placeholder; this script substitutes it. Refuses to install
-#      a sudoers file that still contains placeholders.
-#   5. Validates the rendered sudoers with `visudo -c`. Fails the
-#      install if validation fails.
-#   6. Prepares /var/lib/culvert-maint and operations/ subdir.
-#   7. Installs the systemd unit and reloads systemd.
+# Steps, in order:
+#   1. Pre-flight: root check, required commands, docker daemon reachable.
+#   2. Create the culvert-maint system user and group (idempotent).
+#   3. Install the binary at /usr/local/bin/culvert-maint.
+#   4. Install /etc/culvert-maint/config.toml from the example (only if
+#      absent — operator edits survive).
+#   5. Read compose_project_dir / compose_file / proxy_repo from the
+#      config, validate them, and (P1.4) seed the fixed local image tag
+#      culvert/proxy:pinned BEFORE touching sudoers.
+#   6. Render /etc/sudoers.d/culvert-maint from the template, reject any
+#      leftover placeholder, and validate with `visudo -c` before install.
+#   7. Prepare /var/lib/culvert-maint and operations/ subdir.
+#   8. Install the systemd unit and reload systemd.
 #
 # The sudoers file MUST be path-bound to the absolute compose path —
-# sudo's exact-arg matching does not honor cwd. This script enforces
-# that by reading compose_project_dir + compose_file from config.toml
-# at install time and rendering the path into the allowlist line.
+# sudo's exact-arg matching does not honor cwd. This script enforces that
+# by rendering compose_project_dir + compose_file into the allowlist line.
 
 set -eu
 
-if [ "$(id -u)" -ne 0 ]; then
-    echo "install.sh: must be run as root" >&2
-    exit 1
-fi
+# ── Helpers ────────────────────────────────────────────────────────────────
 
-if [ "${1:-}" = "" ]; then
-    echo "usage: $0 /path/to/culvert-maint-binary" >&2
-    exit 1
-fi
+log()  { printf 'install.sh: %s\n' "$*"; }
+warn() { printf 'install.sh: %s\n' "$*" >&2; }
+die()  { printf 'install.sh: ERROR — %s\n' "$*" >&2; exit 1; }
 
-BIN_SRC=$1
-if [ ! -x "$BIN_SRC" ]; then
-    echo "install.sh: binary $BIN_SRC is not executable" >&2
-    exit 1
-fi
+usage() {
+    cat >&2 <<EOF
+usage: sudo $0 /path/to/culvert-maint-binary
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
-SYSTEMD_UNIT="$SCRIPT_DIR/../systemd/culvert-maint.service"
-SUDOERS_TEMPLATE="$SCRIPT_DIR/../sudoers/culvert-maint"
-CONFIG_TEMPLATE="$SCRIPT_DIR/config.example.toml"
-CONFIG_DEST=/etc/culvert-maint/config.toml
-SUDOERS_DEST=/etc/sudoers.d/culvert-maint
+Installs the Culvert Maintenance Agent (binary, config, sudoers, systemd
+unit). Idempotent. Must run as root. Build the binary first with:
+  (cd cmd/culvert-maint && go build -o culvert-maint .)
+EOF
+    exit "${1:-1}"
+}
 
-for f in "$SYSTEMD_UNIT" "$SUDOERS_TEMPLATE" "$CONFIG_TEMPLATE"; do
-    if [ ! -f "$f" ]; then
-        echo "install.sh: missing packaging file: $f" >&2
-        exit 1
-    fi
-done
+# Reject characters that would break sudoers grammar or our sed
+# substitution: control chars (\0..\x1f, \x7f), whitespace, quotes, pipe.
+reject_unsafe() {
+    # $1 = human label, $2 = value
+    case "$2" in
+        *[[:cntrl:]]* | *' '* | *'	'* | *'"'* | *"'"* | *'|'* )
+            die "$1 contains whitespace/quotes/pipe/control chars: '$2'" ;;
+    esac
+}
 
-# 1. Service account.
-if ! getent group culvert-maint >/dev/null; then
-    groupadd --system culvert-maint
-    echo "install.sh: created group culvert-maint"
-fi
-if ! getent passwd culvert-maint >/dev/null; then
-    useradd --system --gid culvert-maint \
-            --home-dir /var/lib/culvert-maint \
-            --shell /sbin/nologin \
-            culvert-maint
-    echo "install.sh: created user culvert-maint"
-fi
+# Escape a value for the REPLACEMENT side of `sed s|…|…|`:
+#   \  literal backslash   &  whole match   |  our delimiter
+# Backslash MUST be escaped first so we don't double-escape what follows.
+sed_escape_replacement() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g'
+}
 
-# 2. Binary.
-install -m 0755 -o root -g root "$BIN_SRC" /usr/local/bin/culvert-maint
-echo "install.sh: installed /usr/local/bin/culvert-maint"
-
-# 3. Config (do not clobber an existing one).
-mkdir -p /etc/culvert-maint
-chown root:culvert-maint /etc/culvert-maint
-chmod 0750 /etc/culvert-maint
-if [ ! -f "$CONFIG_DEST" ]; then
-    install -m 0640 -o root -g culvert-maint "$CONFIG_TEMPLATE" "$CONFIG_DEST"
-    echo "install.sh: installed default $CONFIG_DEST — edit before starting (especially compose_project_dir + allow_peers)"
-else
-    echo "install.sh: $CONFIG_DEST already exists; left unchanged"
-fi
-
-# 4. Resolve compose path from config.toml and render sudoers.
+# Read a TOML basic-string value:  key = "value"  (any leading whitespace,
+# any spacing around =). Ignores commented lines. Prints empty if absent.
 extract_toml_string() {
-    # Reads /etc/culvert-maint/config.toml and prints the value of the
-    # given basic-string key. Strips quotes and surrounding whitespace.
-    # Accepts:    key = "value"      key   =   "value"
-    # Tolerates leading whitespace; ignores commented lines.
-    key=$1
-    awk -v k="$key" '
+    awk -v k="$1" '
         BEGIN { FS="=" }
         /^[[:space:]]*#/ { next }
         $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
@@ -116,186 +85,189 @@ extract_toml_string() {
     ' "$CONFIG_DEST"
 }
 
-PROJECT_DIR=$(extract_toml_string compose_project_dir || true)
-COMPOSE_FILE=$(extract_toml_string compose_file || true)
-[ -z "$COMPOSE_FILE" ] && COMPOSE_FILE=docker-compose.yml
+# ── 1. Pre-flight ────────────────────────────────────────────────────────────
 
-# proxy_repo (P1.4): the repository the sudoers `docker pull`/`docker tag`
-# entries bind to. Rendered into {proxy_repo} below, exactly like
-# {compose_path}. Default mirrors the Go config default + the canonical
-# image_allowlist repo.
-PROXY_REPO=$(extract_toml_string proxy_repo || true)
-[ -z "$PROXY_REPO" ] && PROXY_REPO=ghcr.io/kidcarmi/culvert
-IMAGE_ALLOWLIST=$(extract_toml_string image_allowlist || true)
+case "${1:-}" in
+    -h|--help) usage 0 ;;
+esac
 
-# --- Validate proxy_repo ------------------------------------------------
-# Bare repository only: no @digest, no whitespace/quotes/control chars. It
-# is substituted into the sudoers allowlist pattern, so a malformed value
-# must never reach the rendered file.
+[ "$(id -u)" -eq 0 ] || die "must be run as root"
+[ "${1:-}" != "" ] || usage
+
+BIN_SRC=$1
+[ -f "$BIN_SRC" ] || die "binary not found: $BIN_SRC"
+[ -x "$BIN_SRC" ] || die "binary is not executable: $BIN_SRC"
+
+for c in id install useradd groupadd getent awk sed grep mktemp visudo systemctl docker; do
+    command -v "$c" >/dev/null 2>&1 || die "required command not found: $c"
+done
+
+# The image-tag seed (step 5) and any later docker call need a live daemon.
+docker info >/dev/null 2>&1 || die "docker daemon is not reachable (is it running, and can root use it?)"
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+SYSTEMD_UNIT="$SCRIPT_DIR/../systemd/culvert-maint.service"
+SUDOERS_TEMPLATE="$SCRIPT_DIR/../sudoers/culvert-maint"
+CONFIG_TEMPLATE="$SCRIPT_DIR/config.example.toml"
+CONFIG_DEST=/etc/culvert-maint/config.toml
+SUDOERS_DEST=/etc/sudoers.d/culvert-maint
+
+for f in "$SYSTEMD_UNIT" "$SUDOERS_TEMPLATE" "$CONFIG_TEMPLATE"; do
+    [ -f "$f" ] || die "missing packaging file: $f"
+done
+
+# Temp file for the rendered sudoers; cleaned up on any exit.
+RENDERED_SUDOERS=""
+trap '[ -n "$RENDERED_SUDOERS" ] && rm -f "$RENDERED_SUDOERS"' EXIT
+
+# ── 2. Service account ───────────────────────────────────────────────────────
+
+if ! getent group culvert-maint >/dev/null; then
+    groupadd --system culvert-maint
+    log "created group culvert-maint"
+fi
+if ! getent passwd culvert-maint >/dev/null; then
+    useradd --system --gid culvert-maint \
+            --home-dir /var/lib/culvert-maint \
+            --shell /sbin/nologin \
+            culvert-maint
+    log "created user culvert-maint"
+fi
+
+# ── 3. Binary ────────────────────────────────────────────────────────────────
+
+install -m 0755 -o root -g root "$BIN_SRC" /usr/local/bin/culvert-maint
+log "installed /usr/local/bin/culvert-maint"
+
+# ── 4. Config (never clobber an existing one) ────────────────────────────────
+
+install -m 0750 -o root -g culvert-maint -d /etc/culvert-maint
+if [ ! -f "$CONFIG_DEST" ]; then
+    install -m 0640 -o root -g culvert-maint "$CONFIG_TEMPLATE" "$CONFIG_DEST"
+    log "installed default $CONFIG_DEST — edit before starting (especially compose_project_dir + allow_peers)"
+else
+    log "$CONFIG_DEST already exists; left unchanged"
+fi
+
+# ── 5. Resolve + validate config, then seed the pinned image tag ─────────────
+
+PROJECT_DIR=$(extract_toml_string compose_project_dir)
+COMPOSE_FILE=$(extract_toml_string compose_file)
+[ -n "$COMPOSE_FILE" ] || COMPOSE_FILE=docker-compose.yml
+
+# proxy_repo (P1.4): the repo the sudoers `docker pull`/`docker tag` entries
+# bind to. Rendered into {proxy_repo} below, like {compose_path}.
+PROXY_REPO=$(extract_toml_string proxy_repo)
+[ -n "$PROXY_REPO" ] || PROXY_REPO=ghcr.io/kidcarmi/culvert
+IMAGE_ALLOWLIST=$(extract_toml_string image_allowlist)
+
+# Validate proxy_repo: bare repository only (no @digest/tag), no unsafe chars.
 case "$PROXY_REPO" in
     *@* | *'sha256:'* )
-        echo "install.sh: ERROR — proxy_repo must be a bare repository (no @digest/tag), got '$PROXY_REPO'" >&2
-        exit 1
-        ;;
+        die "proxy_repo must be a bare repository (no @digest/tag), got '$PROXY_REPO'" ;;
 esac
-case "$PROXY_REPO" in
-    *[[:cntrl:]]* | *' '* | *'	'* | *'"'* | *"'"* | *'|'* )
-        echo "install.sh: ERROR — proxy_repo contains whitespace/quotes/control chars: '$PROXY_REPO'" >&2
-        exit 1
-        ;;
-esac
-# Consistency with image_allowlist (P1.4 §3.1): proxy_repo and the allowlist
-# MUST describe the same repository. Heuristic: the allowlist regex (with its
-# backslash escapes stripped) must contain the proxy_repo literal. Only
-# enforced when image_allowlist is explicitly set; an empty value means the
-# Go default is used, which already matches the proxy_repo default.
+reject_unsafe "proxy_repo" "$PROXY_REPO"
+
+# proxy_repo and image_allowlist MUST describe the same repository (P1.4 §3.1).
+# Heuristic: the allowlist regex (backslashes stripped) must contain the
+# proxy_repo literal. Only checked when image_allowlist is explicitly set; an
+# empty value means the Go default is used, which matches the proxy_repo default.
 if [ -n "$IMAGE_ALLOWLIST" ]; then
     AL_NORM=$(printf '%s' "$IMAGE_ALLOWLIST" | sed 's/\\//g')
     case "$AL_NORM" in
         *"$PROXY_REPO"*) : ;;
-        *)
-            echo "install.sh: ERROR — proxy_repo '$PROXY_REPO' is not referenced by image_allowlist." >&2
-            echo "install.sh: they MUST describe the same repository (P1.4). Reconcile config.toml and re-run." >&2
-            exit 1
-            ;;
+        *) die "proxy_repo '$PROXY_REPO' is not referenced by image_allowlist — they MUST describe the same repository (P1.4). Reconcile config.toml and re-run." ;;
     esac
 fi
 
-# --- Validate compose_project_dir ---------------------------------------
-# The Go side (internal/config) already enforces these on agent start;
-# we re-validate here because the sudoers entry is rendered BEFORE the
-# agent runs. A malformed value at this stage would either fail visudo -c
-# or produce an allowlist line that does not match real invocations.
-if [ -z "$PROJECT_DIR" ]; then
-    echo "install.sh: ERROR — compose_project_dir not found in $CONFIG_DEST" >&2
-    echo "install.sh: edit $CONFIG_DEST first, then re-run install.sh" >&2
-    exit 1
-fi
+# Validate compose_project_dir: present, absolute, no unsafe chars.
+[ -n "$PROJECT_DIR" ] || die "compose_project_dir not found in $CONFIG_DEST — edit it first, then re-run"
 case "$PROJECT_DIR" in
     /*) : ;;
-    *)
-        echo "install.sh: ERROR — compose_project_dir must be absolute, got '$PROJECT_DIR'" >&2
-        exit 1
-        ;;
+    *)  die "compose_project_dir must be absolute, got '$PROJECT_DIR'" ;;
 esac
-# Reject control characters / whitespace / quotes that would break sudoers
-# grammar or sed substitution. POSIX [:cntrl:] covers \0..\x1f and \x7f.
-case "$PROJECT_DIR" in
-    *[[:cntrl:]]* | *' '* | *'	'* | *'"'* | *"'"* )
-        echo "install.sh: ERROR — compose_project_dir contains whitespace/quotes/control chars: '$PROJECT_DIR'" >&2
-        exit 1
-        ;;
-esac
+reject_unsafe "compose_project_dir" "$PROJECT_DIR"
 
-# --- Validate compose_file ---------------------------------------------
-# Must be a bare filename (no slashes, no backslash, not "." or "..").
-# This is the same shape the Go config validator enforces; we mirror it
-# here so the rendered sudoers line can never contain a path-traversal
-# component or a directory prefix.
+# Validate compose_file: bare filename, not "." / "..", no unsafe chars.
 case "$COMPOSE_FILE" in
-    "." | ".." )
-        echo "install.sh: ERROR — compose_file must not be '.' or '..', got '$COMPOSE_FILE'" >&2
-        exit 1
-        ;;
-    */* | *\\* )
-        echo "install.sh: ERROR — compose_file must be a bare filename (no slash or backslash), got '$COMPOSE_FILE'" >&2
-        exit 1
-        ;;
+    "." | "..")   die "compose_file must not be '.' or '..', got '$COMPOSE_FILE'" ;;
+    */* | *\\* )  die "compose_file must be a bare filename (no slash or backslash), got '$COMPOSE_FILE'" ;;
 esac
-case "$COMPOSE_FILE" in
-    *[[:cntrl:]]* | *' '* | *'	'* | *'"'* | *"'"* )
-        echo "install.sh: ERROR — compose_file contains whitespace/quotes/control chars: '$COMPOSE_FILE'" >&2
-        exit 1
-        ;;
-esac
+reject_unsafe "compose_file" "$COMPOSE_FILE"
 
-# --- Seed the fixed pinned image tag (P1.4) — BEFORE flipping the boundary --
-# The compose file resolves `image: culvert/proxy:pinned` (no env var). That
-# LOCAL tag must exist before the next `docker compose up`, or the stack
-# fails with "no such image". We seed it FIRST — before the new sudoers
-# (which drops the old `pull proxy`/CULVERT_PROXY_IMAGE env_keep path) is
-# installed — so a seed failure aborts the install with the OLD, working
-# sudo path still in place (the reviewer's "keep the old path until the swap
-# succeeds"). An existing install MUST seed from the CURRENTLY-RUNNING digest
-# (so the pinned tag matches the live daemon) via CULVERT_PROXY_SEED_REF; see
-# roadmap/D1.6c-pin-value-binding-plan.md §8 for the full ordering.
+# Seed the fixed pinned image tag (P1.4) BEFORE flipping the sudo boundary.
+# docker-compose.yml resolves `image: culvert/proxy:pinned` (no env var). That
+# LOCAL tag must exist before the next `docker compose up` or the stack fails
+# with "no such image". Seeding first means a seed failure aborts the install
+# with the OLD, working sudo path still in place. An existing install MUST seed
+# from the CURRENTLY-RUNNING digest via CULVERT_PROXY_SEED_REF so the pinned tag
+# matches the live daemon; see roadmap/D1.6c-pin-value-binding-plan.md §8.
 PINNED_TAG="culvert/proxy:pinned"
 if docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
-    echo "install.sh: $PINNED_TAG already present; not reseeding"
+    log "$PINNED_TAG already present; not reseeding"
 else
     # Seed source precedence:
-    #   1. CULVERT_PROXY_SEED_REF — operator-supplied (e.g. the running
-    #      digest captured during an existing-install migration).
+    #   1. CULVERT_PROXY_SEED_REF — operator-supplied (e.g. the running digest
+    #      captured during an existing-install migration).
     #   2. ${PROXY_REPO}:latest    — fresh-install bootstrap.
     SEED_REF="${CULVERT_PROXY_SEED_REF:-$PROXY_REPO:latest}"
-    echo "install.sh: seeding $PINNED_TAG from $SEED_REF ..."
+    log "seeding $PINNED_TAG from $SEED_REF ..."
     if docker pull "$SEED_REF" && docker tag "$SEED_REF" "$PINNED_TAG"; then
-        echo "install.sh: seeded $PINNED_TAG"
+        log "seeded $PINNED_TAG"
     else
-        echo "install.sh: ERROR — could not seed $PINNED_TAG from $SEED_REF." >&2
-        echo "install.sh: aborting BEFORE installing the new sudoers, so the existing" >&2
-        echo "install.sh: image apply/rollback path keeps working. Seed it, then re-run:" >&2
-        echo "install.sh:   docker tag <repo>@sha256:<running-digest> $PINNED_TAG   # existing install" >&2
-        echo "install.sh: or set CULVERT_PROXY_SEED_REF and re-run. See the migration plan §8." >&2
-        exit 1
+        warn "could not seed $PINNED_TAG from $SEED_REF."
+        warn "aborting BEFORE installing the new sudoers, so the existing image"
+        warn "apply/rollback path keeps working. Seed it, then re-run:"
+        warn "  docker tag <repo>@sha256:<running-digest> $PINNED_TAG   # existing install"
+        die  "or set CULVERT_PROXY_SEED_REF and re-run. See the migration plan §8."
     fi
 fi
 
+# ── 6. Render + validate + install sudoers ───────────────────────────────────
+
 COMPOSE_PATH="$PROJECT_DIR/$COMPOSE_FILE"
 RENDERED_SUDOERS=$(mktemp)
-trap 'rm -f "$RENDERED_SUDOERS"' EXIT
 
-# Escape characters that are special on the REPLACEMENT side of `sed s|…|…|`:
-#   \   — literal backslash
-#   &   — replaced with the entire match
-#   |   — our chosen delimiter
-# Order matters: backslash MUST be escaped first so we don't double-escape
-# the escapes we add for & and |. We deliberately do NOT escape `/` because
-# the delimiter is `|`, not `/`.
-ESCAPED_PATH=$(printf '%s' "$COMPOSE_PATH" \
-    | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g')
-ESCAPED_REPO=$(printf '%s' "$PROXY_REPO" \
-    | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g')
-
-# Substitute {compose_path} and {proxy_repo}. `sed` with a non-/ delimiter
-# accommodates path/registry slashes.
-sed -e "s|{compose_path}|$ESCAPED_PATH|g" \
-    -e "s|{proxy_repo}|$ESCAPED_REPO|g" \
+# Substitute {compose_path} and {proxy_repo}. A non-/ delimiter (|) lets the
+# path/registry slashes pass through unescaped.
+sed -e "s|{compose_path}|$(sed_escape_replacement "$COMPOSE_PATH")|g" \
+    -e "s|{proxy_repo}|$(sed_escape_replacement "$PROXY_REPO")|g" \
     "$SUDOERS_TEMPLATE" > "$RENDERED_SUDOERS"
 
-# Refuse to install a sudoers file with leftover placeholders.
-if grep -q '{compose_path}\|{compose_file}\|{compose_project_dir}\|{proxy_repo}' "$RENDERED_SUDOERS"; then
-    echo "install.sh: ERROR — rendered sudoers file still contains placeholders:" >&2
+# Refuse to install a sudoers file with any leftover placeholder.
+if grep -qE '\{compose_path\}|\{compose_file\}|\{compose_project_dir\}|\{proxy_repo\}' "$RENDERED_SUDOERS"; then
+    warn "rendered sudoers file still contains placeholders:"
     grep -nE '\{compose_|\{proxy_repo\}' "$RENDERED_SUDOERS" >&2
-    exit 1
+    die "refusing to install an unrendered sudoers file"
 fi
 
-# Validate the rendered sudoers grammar BEFORE moving it into /etc.
+# Validate grammar BEFORE moving it into /etc.
 if ! visudo -c -f "$RENDERED_SUDOERS" >/dev/null; then
-    echo "install.sh: ERROR — rendered sudoers failed visudo -c validation" >&2
+    warn "rendered sudoers failed visudo -c validation:"
     cat "$RENDERED_SUDOERS" >&2
-    exit 1
+    die "refusing to install an invalid sudoers file"
 fi
 
 install -m 0440 -o root -g root "$RENDERED_SUDOERS" "$SUDOERS_DEST"
-echo "install.sh: rendered + installed $SUDOERS_DEST (compose_path=$COMPOSE_PATH)"
+log "rendered + installed $SUDOERS_DEST (compose_path=$COMPOSE_PATH)"
 
-# Re-validate the file in its installed location for good measure.
+# Re-validate in place; roll back if the installed copy is somehow invalid.
 if ! visudo -c -f "$SUDOERS_DEST" >/dev/null; then
-    echo "install.sh: ERROR — installed $SUDOERS_DEST failed visudo -c (rolling back)" >&2
     rm -f "$SUDOERS_DEST"
-    exit 1
+    die "installed $SUDOERS_DEST failed visudo -c (rolled back)"
 fi
 
-# 5. State dir.
+# ── 7. State directory ───────────────────────────────────────────────────────
+
 install -m 0750 -o culvert-maint -g culvert-maint -d /var/lib/culvert-maint
 install -m 0750 -o culvert-maint -g culvert-maint -d /var/lib/culvert-maint/operations
-echo "install.sh: prepared /var/lib/culvert-maint"
+log "prepared /var/lib/culvert-maint"
 
-# 6. Systemd unit.
+# ── 8. Systemd unit ──────────────────────────────────────────────────────────
+
 install -m 0644 -o root -g root "$SYSTEMD_UNIT" /etc/systemd/system/culvert-maint.service
 systemctl daemon-reload
-echo "install.sh: installed /etc/systemd/system/culvert-maint.service"
+log "installed /etc/systemd/system/culvert-maint.service"
 
 cat <<EOF
 install.sh: install complete.

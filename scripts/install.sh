@@ -14,6 +14,10 @@
 #   4. Adds the current user to the docker group
 #   5. Clones Culvert (if not already in the repo)
 #   6. Starts all services with docker compose up -d --build
+#   7. (Optional, best-effort) Builds + installs the host-side maintenance
+#      agent (culvert-maint systemd service). Builds with the host Go
+#      toolchain if present, else in a throwaway golang container (no host
+#      Go required). Skip entirely with CULVERT_SKIP_MAINT_AGENT=1.
 #
 # Supported distros:
 #   Ubuntu 20.04+, Debian 11+, RHEL/CentOS/Rocky/Alma 8+, Fedora 38+,
@@ -108,7 +112,18 @@ dump_docker_diagnostics() {
 }
 
 REPO_URL="https://github.com/KidCarmi/Culvert.git"
-INSTALL_DIR="${CULVERT_DIR:-$HOME/Culvert}"
+# Where to clone/run the stack. Honor CULVERT_DIR if set. Otherwise: root (the
+# appliance / first-boot / OVA case) gets the system path /srv/culvert — it is
+# world-traversable, so the unprivileged maintenance-agent service can reach it,
+# and it matches the agent config's compose_project_dir default. Non-root keeps
+# the familiar ~/Culvert.
+if [[ -n "${CULVERT_DIR:-}" ]]; then
+  INSTALL_DIR="$CULVERT_DIR"
+elif [[ "$(id -u)" -eq 0 ]]; then
+  INSTALL_DIR="/srv/culvert"
+else
+  INSTALL_DIR="$HOME/Culvert"
+fi
 
 ###############################################################################
 # Detect distro family
@@ -594,6 +609,164 @@ if [[ "$COMPOSE_UP_OK" != "1" ]]; then
     sudo docker compose logs"
 fi
 
+###############################################################################
+# 8. Maintenance agent (optional, best-effort)
+###############################################################################
+step "Maintenance agent (optional)"
+
+# The host-side Maintenance Agent (culvert-maint) is a systemd service that
+# runs backup / restore / cleanup / Docker-image-update operations against THIS
+# compose stack over a local Unix socket — the host-side half of day-2
+# automation for unattended (e.g. OVA / first-boot) deployments.
+#
+# It is reached on the host via its UDS by a local operator or the control
+# plane. We do NOT mount that socket into the proxy container — doing so would
+# let a compromised proxy drive host-level backup/restore/upgrade, which defeats
+# the agent's isolation. In-container UI integration (a socket mount or
+# CULVERT_MAINT_AGENT_URL) is therefore a deliberate, separate decision and is
+# intentionally out of scope here.
+#
+# Optional + best-effort: a failure NEVER fails the Culvert install — we warn
+# and move on. Opt out entirely with CULVERT_SKIP_MAINT_AGENT=1.
+MAINT_AGENT_INSTALLED=0
+
+# path_world_traversable — true when an unprivileged service user (not the
+# owner, no special group) can traverse every ancestor of $1 and read $1's
+# docker-compose.yml. The agent runs as the unprivileged culvert-maint user and
+# the runner does chdir(compose_project_dir) BEFORE sudo, so a 0700 path such as
+# /root/Culvert makes every operation fail before sudo is even reached. We use
+# the world-execute / world-read bits as a conservative proxy: a system path
+# like /srv/culvert passes; a 0700 home or /root is rejected.
+path_world_traversable() {
+  local p="$1" mode
+  # Every ancestor (and the dir itself) must have the world-execute bit.
+  while :; do
+    [[ -d "$p" ]] || return 1
+    mode="$(stat -c '%a' "$p" 2>/dev/null)" || return 1
+    case "${mode: -1}" in 1|3|5|7) : ;; *) return 1 ;; esac
+    [[ "$p" == "/" ]] && break
+    p="$(dirname "$p")"
+  done
+  # The compose file itself must be world-readable.
+  mode="$(stat -c '%a' "$1/docker-compose.yml" 2>/dev/null)" || return 1
+  case "${mode: -1}" in 4|5|6|7) return 0 ;; *) return 1 ;; esac
+}
+
+install_maint_agent() {
+  local maint_installer="packaging/culvert-maint/install.sh"
+
+  if [[ -n "${CULVERT_SKIP_MAINT_AGENT:-}" ]]; then
+    info "CULVERT_SKIP_MAINT_AGENT set — skipping maintenance agent"
+    return 0
+  fi
+
+  # The systemd unit is the canonical "fully installed" marker — the agent
+  # installer writes it last, so its presence means a prior run completed. A
+  # bare binary with no unit is a PARTIAL install: fall through and let the
+  # idempotent installer finish the job rather than skip forever.
+  if [[ -f /etc/systemd/system/culvert-maint.service ]]; then
+    info "Maintenance agent already installed — leaving it unchanged"
+    return 0
+  fi
+
+  if [[ ! -f "$maint_installer" || ! -f cmd/culvert-maint/go.mod ]]; then
+    warn "Maintenance agent sources not found in this checkout — skipping"
+    return 0
+  fi
+
+  # It is a systemd service, so systemd is the one hard requirement.
+  if ! command -v systemctl &>/dev/null; then
+    warn "systemd not detected — the maintenance agent is a systemd service; skipping"
+    return 0
+  fi
+
+  # The agent's sudoers allowlist is path-bound to this stack's directory. A
+  # path with whitespace/quotes/shell-or-sed metacharacters can't be rendered
+  # safely into the sudoers grammar (the agent installer rejects it), so skip
+  # the whole step cleanly rather than leave a half-bound install behind.
+  case "$INSTALL_DIR" in
+    *[[:space:]\"\'\\\&\|\$\`\(\)]*)
+      warn "Install path '$INSTALL_DIR' has characters that can't be bound in the agent's sudoers allowlist."
+      warn "Skipping the maintenance agent. Move the checkout to a plain path and re-run, or install it manually."
+      return 0 ;;
+  esac
+
+  # The unprivileged culvert-maint service must be able to chdir into the stack
+  # (the runner sets cmd.Dir = compose_project_dir before sudo). If the stack
+  # lives somewhere only its owner can traverse (e.g. a 0700 home, or /root when
+  # run as a non-default root checkout), the agent could never operate it — so
+  # skip cleanly instead of installing a guaranteed-broken binding.
+  if ! path_world_traversable "$INSTALL_DIR"; then
+    warn "Stack at '$INSTALL_DIR' is not traversable by an unprivileged service user."
+    warn "The maintenance agent runs as 'culvert-maint' and could not operate it; skipping."
+    warn "For unattended/appliance installs, place the stack at a system path, e.g.:"
+    warn "  sudo CULVERT_DIR=/srv/culvert bash scripts/install.sh"
+    return 0
+  fi
+
+  # Build into a throwaway temp dir so we never leave a (possibly root-owned)
+  # binary in the working tree; cleaned up on every return path. Prefer the
+  # host Go toolchain (fast), else build inside a throwaway golang container —
+  # Docker is already up here, so no host Go is required. The module is
+  # self-contained (its own go.mod / go.sum).
+  local build_dir maint_bin go_image
+  go_image="${CULVERT_GO_IMAGE:-golang:1.25}"
+  build_dir="$(mktemp -d)" || { warn "mktemp failed — skipping maintenance agent"; return 0; }
+  trap "rm -rf '$build_dir'" RETURN
+  maint_bin="$build_dir/culvert-maint"
+
+  if command -v go &>/dev/null; then
+    info "Building culvert-maint with the host Go toolchain..."
+    ( cd cmd/culvert-maint && go build -o "$maint_bin" . ) \
+      || warn "Host 'go build' failed — falling back to a Go build container..."
+  fi
+  if [[ ! -x "$maint_bin" ]]; then
+    info "Building culvert-maint in a Go container ($go_image; no host Go required)..."
+    if ! sudo docker run --rm \
+           -v "$INSTALL_DIR/cmd/culvert-maint":/src:ro,z \
+           -v "$build_dir":/out:z \
+           -w /src "$go_image" go build -o /out/culvert-maint . ; then
+      warn "Could not build culvert-maint (host Go and container build both failed)."
+      warn "Culvert is unaffected. Re-run later from $INSTALL_DIR:"
+      warn "  (cd cmd/culvert-maint && go build -o culvert-maint .) \\"
+      warn "    && sudo bash $maint_installer cmd/culvert-maint/culvert-maint"
+      return 0
+    fi
+  fi
+  if [[ ! -x "$maint_bin" ]]; then
+    warn "culvert-maint binary missing after build — skipping (Culvert is unaffected)."
+    return 0
+  fi
+
+  info "Running maintenance agent installer..."
+  if ! sudo bash "$maint_installer" "$maint_bin"; then
+    warn "Maintenance agent install did not complete — Culvert is unaffected."
+    return 0
+  fi
+
+  # The installer seeds /etc/culvert-maint/config.toml from the example, whose
+  # compose_project_dir default is /srv/culvert. This stack lives at
+  # $INSTALL_DIR and the sudoers allowlist is path-bound to compose_project_dir,
+  # so when the value is still the example default and we are elsewhere, point
+  # it at this stack and re-run to re-render the binding. We only ever rewrite
+  # the untouched default — never an operator-edited path.
+  if [[ "$INSTALL_DIR" != "/srv/culvert" ]] \
+     && grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
+    info "Pointing maintenance agent at this stack (compose_project_dir=$INSTALL_DIR)..."
+    sudo sed -i "s|^compose_project_dir = .*|compose_project_dir = \"$INSTALL_DIR\"|" /etc/culvert-maint/config.toml
+    if ! sudo bash "$maint_installer" "$maint_bin"; then
+      warn "Re-rendering the sudoers binding for $INSTALL_DIR failed."
+      warn "Fix compose_project_dir in /etc/culvert-maint/config.toml and re-run the installer."
+      return 0
+    fi
+  fi
+
+  MAINT_AGENT_INSTALLED=1
+  info "Maintenance agent installed (not started)."
+}
+
+install_maint_agent || true
+
 echo ""
 echo -e "${GREEN}============================================================${NC}"
 echo -e "${GREEN}  Culvert is running!${NC}"
@@ -620,5 +793,15 @@ echo "    docker compose up -d --build    # rebuild and restart"
 echo ""
 if [[ "$CURRENT_USER" != "root" ]] && ! groups "$CURRENT_USER" | grep -qw docker; then
   echo -e "${YELLOW}  NOTE: Log out and back in to use 'docker' without sudo.${NC}"
+  echo ""
+fi
+if [[ "${MAINT_AGENT_INSTALLED:-0}" == "1" ]]; then
+  echo "  Maintenance agent installed (systemd: culvert-maint), not yet started."
+  echo "  It is host-side day-2 tooling (backup/restore, Docker image updates),"
+  echo "  reached on the host via /run/culvert-maint.sock — not by the in-container"
+  echo "  admin UI by default."
+  echo "  Before starting it, set the allowed caller(s):"
+  echo "    sudo \$EDITOR /etc/culvert-maint/config.toml   # set allow_peers"
+  echo "    sudo systemctl enable --now culvert-maint"
   echo ""
 fi
