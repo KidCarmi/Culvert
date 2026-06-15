@@ -162,6 +162,7 @@ func findDiagnosticCheck(c OperatorContract, code string) *OperatorContractCheck
 
 func TestApiDiagnostics_WarnsOnClusterInsecure(t *testing.T) {
 	// Snapshot + restore the globals we mutate so this test is hermetic.
+	resetPolicyStoreForDiag(t) // verdict folds in policyStore; keep it leak-proof
 	prevInsecure := clusterInsecure
 	clusterRoleMu.Lock()
 	prevRole := clusterRole.role
@@ -206,6 +207,7 @@ func TestApiDiagnostics_WarnsOnClusterInsecure(t *testing.T) {
 }
 
 func TestApiDiagnostics_WarnsOnClusteredSAMLState(t *testing.T) {
+	resetPolicyStoreForDiag(t) // verdict folds in policyStore; keep it leak-proof
 	prevRegistry := idpRegistry
 	prevInsecure := clusterInsecure
 	clusterRoleMu.Lock()
@@ -895,12 +897,16 @@ func TestApiDiagnostics_SessionSecretMissingFail(t *testing.T) {
 	}
 }
 
-// TestApiDiagnostics_EmptyPolicyWarn — Scenario 3, diagnostics side.
-// Explicit assertion that policy_loaded surfaces as warn (not fail)
-// when the ruleset is empty. The default test process has policyStore
-// at version 0 / no rules; this test snapshots and restores the store
-// so it is hermetic regardless of run order with future policy tests.
-func TestApiDiagnostics_EmptyPolicyWarn(t *testing.T) {
+// resetPolicyStoreForDiag snapshots and clears the global policyStore for the
+// duration of the test, restoring it on cleanup. Any diagnostics test that
+// asserts on the aggregate Verdict MUST call this: the verdict folds in
+// policyStore.List(), so an auth rule leaked by an earlier test (which only
+// resets the store at its own setup, per the setupProxyTest convention) can
+// flip the verdict to fail under -shuffle/-count — e.g. a leaked
+// CredentialRequired rule with no credential-capable provider configured trips
+// the auth_cr_no_credential_provider diagFail check.
+func resetPolicyStoreForDiag(t *testing.T) {
+	t.Helper()
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version
@@ -916,6 +922,15 @@ func TestApiDiagnostics_EmptyPolicyWarn(t *testing.T) {
 		policyStore.updatedAt = prevUpdated
 		policyStore.mu.Unlock()
 	})
+}
+
+// TestApiDiagnostics_EmptyPolicyWarn — Scenario 3, diagnostics side.
+// Explicit assertion that policy_loaded surfaces as warn (not fail)
+// when the ruleset is empty. The default test process has policyStore
+// at version 0 / no rules; this test snapshots and restores the store
+// so it is hermetic regardless of run order with future policy tests.
+func TestApiDiagnostics_EmptyPolicyWarn(t *testing.T) {
+	resetPolicyStoreForDiag(t)
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
