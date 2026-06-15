@@ -362,7 +362,7 @@ tr.dragging  { opacity: .4; }
       <span class="icon">📋</span> Policy
     </div>
     <div class="nav-item" data-view="authpolicy">
-      <span class="icon">🪪</span> Auth Exempt
+      <span class="icon">🪪</span> Auth Policy
     </div>
     <div class="nav-item" data-view="urlcat" data-min-role="operator">
       <span class="icon">🏷️</span> URL Categories
@@ -2358,17 +2358,23 @@ Firefox (all platforms):
 
     </div><!-- /view-policy -->
 
-    <!-- ── AUTH EXEMPT RULES (Stage-1 authentication policy) ─────────────── -->
+    <!-- ── AUTH POLICY RULES (Stage-1 authentication policy) ─────────────── -->
     <div class="view" id="view-authpolicy">
       <div class="panel" style="margin-bottom:14px">
         <div class="panel-body" style="font-size:.85rem;color:var(--muted)">
-          ⚠️ <strong style="color:var(--text)">Exempt ≠ Allow.</strong>
-          An exemption skips <em>end-user authentication only</em>, and only when the client presents
-          <em>no credentials</em>. Stage-2 policy still decides access — default-deny still applies.
-          No identity is ever created for exempt traffic. Creating, editing, deleting and reordering
-          exempt rules requires the <strong>admin</strong> role.
+          ⚠️ <strong style="color:var(--text)">Stage-1 outcome ≠ Allow.</strong>
+          Auth Policy rules decide <em>how a client authenticates</em> — they never allow traffic.
+          Stage-2 policy still decides access and default-deny still applies. Creating, editing,
+          deleting and reordering these rules requires the <strong>admin</strong> role.
+          <ul style="margin:8px 0 0;padding-left:18px">
+            <li><strong style="color:#fbbf24">Exempt</strong> — skips end-user authentication only, and only
+              when the client presents <em>no credentials</em>. No identity is ever created. Stage-2 still decides.</li>
+            <li><strong style="color:#60a5fa">CredentialRequired</strong> — returns a deterministic
+              <em>407 credential challenge</em>; the client must authenticate first. It <strong>does not allow
+              traffic</strong>, and the Stage-2 decision applies only after the client authenticates.</li>
+          </ul>
           <div id="ap-default-allow-warn" style="display:none;margin-top:8px;color:#fbbf24">
-            ⚠ The default policy action is <strong>Allow</strong> while exempt rules exist — exemptions add
+            ⚠ The default policy action is <strong>Allow</strong> while auth rules exist — exemptions add
             little over an allow-all default. Set the default action to deny (Zero Trust).
           </div>
         </div>
@@ -2376,20 +2382,26 @@ Firefox (all platforms):
 
       <div class="panel" style="margin-bottom:14px">
         <div class="panel-header">
-          <span class="panel-title">Auth Exempt Rules</span>
-          <button class="btn sm" data-click="apShowAdd">+ Add Exempt Rule</button>
+          <span class="panel-title">Auth Policy Rules</span>
+          <button class="btn sm" data-click="apShowAdd">+ Add Auth Rule</button>
         </div>
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>#</th><th>Name</th><th>On</th><th>Owner</th><th>Reason</th><th>Source CIDRs</th><th>Destination</th><th>Expiry</th><th>Warnings</th><th></th></tr></thead>
+            <thead><tr><th>#</th><th>Name</th><th>Outcome</th><th>On</th><th>Owner</th><th>Reason</th><th>Source CIDRs</th><th>Destination</th><th>Expiry</th><th>Warnings</th><th></th></tr></thead>
             <tbody id="ap-rules"></tbody>
           </table>
         </div>
       </div>
 
       <div class="panel" id="ap-form-panel" style="display:none">
-        <div class="panel-header"><span class="panel-title" id="ap-form-title">Add Exempt Rule</span></div>
+        <div class="panel-header"><span class="panel-title" id="ap-form-title">Add Auth Rule</span></div>
         <div class="panel-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+          <div><label class="label">Outcome *</label>
+            <select class="input" id="ap-outcome" data-change="apOutcomeChanged" style="width:100%">
+              <option value="Exempt">Exempt — skip authentication only</option>
+              <option value="CredentialRequired">CredentialRequired — force 407 credential challenge</option>
+            </select>
+            <div id="ap-outcome-help" style="font-size:.72rem;color:var(--muted);margin-top:4px"></div></div>
           <div><label class="label">Name *</label><input type="text" class="input" id="ap-name" style="width:100%"></div>
           <div><label class="label">Owner *</label><input type="text" class="input" id="ap-owner" placeholder="ops-team" style="width:100%"></div>
           <div><label class="label">Reason *</label><input type="text" class="input" id="ap-reason" placeholder="legacy device cannot authenticate" style="width:100%"></div>
@@ -2404,14 +2416,14 @@ Firefox (all platforms):
           <div><label class="label">HTTP Method (optional)</label><input type="text" class="input" id="ap-method" placeholder="GET" style="width:100%"></div>
           <div style="display:flex;align-items:end;gap:16px">
             <label style="font-size:.85rem"><input type="checkbox" id="ap-enabled" checked> Enabled</label>
-            <label style="font-size:.85rem" title="Waives authentication for ALL destinations from the matched source — least privilege is bypassed">
+            <label id="ap-broad-label" style="font-size:.85rem" title="Waives authentication for ALL destinations from the matched source — least privilege is bypassed">
               <input type="checkbox" id="ap-broad"> Broad exemption (all destinations)</label>
           </div>
         </div>
         <div class="panel-body" style="display:flex;gap:10px;border-top:1px solid var(--border)">
           <button class="btn" data-click="apSave">💾 Save</button>
           <button class="btn ghost" data-click="apCancel">Cancel</button>
-          <span style="font-size:.78rem;color:var(--muted);align-self:center">
+          <span id="ap-dest-hint" style="font-size:.78rem;color:var(--muted);align-self:center">
             A destination (FQDN or category group) is required unless “Broad exemption” is explicitly checked.
           </span>
         </div>
@@ -3976,6 +3988,7 @@ document.addEventListener('change', e => {
     case 'releaseDispSelectRelease': if (el.value) document.getElementById('rel-disp-channel').value = ''; break;
     case 'releaseDispSelectChannel': if (el.value) document.getElementById('rel-disp-release').value = ''; break;
     case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
+    case 'apOutcomeChanged':  apOutcomeChanged(); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
 });
@@ -4149,7 +4162,7 @@ const viewMeta = {
   diagnostics:  { title: 'Diagnostics',   meta: 'Operator contract — readiness, security posture, and risky-mode warnings' },
   users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
-  authpolicy:     { title: 'Auth Exempt Rules', meta: 'Stage-1 authentication exemptions — Exempt skips authentication only; Stage-2 policy still applies' },
+  authpolicy:     { title: 'Auth Policy Rules', meta: 'Stage-1 authentication policy — Exempt skips authentication; CredentialRequired forces a 407 challenge. Neither allows traffic; Stage-2 policy still applies' },
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
   releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
 };
@@ -9094,15 +9107,22 @@ async function runPolicyTest() {
   if (data.auth) {
     const a = data.auth;
     const exempt = a.outcome === 'Exempt';
-    const badge = exempt
-      ? '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🪪 Exempt</span>'
-      : `<span style="color:var(--muted)">${escHtml(a.outcome)} (today's auth gate applies)</span>`;
+    const credReq = a.outcome === 'CredentialRequired';
+    let badge;
+    if (exempt) {
+      badge = '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🪪 Exempt</span>';
+    } else if (credReq) {
+      badge = '<span style="background:rgba(96,165,250,.15);color:#60a5fa;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🔐 CredentialRequired</span>';
+    } else {
+      badge = `<span style="color:var(--muted)">${escHtml(a.outcome)} (today's auth gate applies)</span>`;
+    }
     authHtml = `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px">
       <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-1 Authentication: ${badge}</div>
       ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''}</div>` : ''}
       ${exempt ? `<div class="pt-sub" style="color:#fbbf24;margin-top:4px">Exempt skips authentication only — it does NOT allow traffic. The Stage-2 access decision below still applies (Stage-2 sees authSource="${escHtml(a.stage2AuthSource)}").</div>` : ''}
-      ${a.credentialsPresented ? '<div class="pt-sub" style="color:var(--muted);margin-top:4px">Credentials presented — at runtime, credentials always win and exemptions are never evaluated.</div>' : ''}
-      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — all exemptions are forced to Default (auth required).</div>' : ''}
+      ${credReq ? '<div class="pt-sub" style="color:#60a5fa;margin-top:4px">CredentialRequired returns a deterministic 407 credential challenge — the client must authenticate first. This is NOT Allow. At runtime Stage-2 is NOT evaluated until the client authenticates; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-authentication decision (with the authenticated identity) may differ.</div>' : ''}
+      ${a.credentialsPresented ? '<div class="pt-sub" style="color:var(--muted);margin-top:4px">Credentials presented — at runtime, credentials always win and the Stage-1 outcome is not evaluated.</div>' : ''}
+      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — all exemptions are forced to Default (auth required). CredentialRequired is unaffected.</div>' : ''}
     </div>`;
   }
 
@@ -9161,6 +9181,13 @@ async function loadAuthPolicy() {
   } catch(e) { console.error(e); }
 }
 
+function apOutcomeBadge(r) {
+  const o = (r.auth && r.auth.outcome) || 'Exempt';
+  if (o === 'CredentialRequired')
+    return '<span style="background:rgba(96,165,250,.15);color:#60a5fa;padding:2px 8px;border-radius:12px;font-size:.72rem;font-weight:600">🔐 CredentialRequired</span>';
+  return '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.72rem;font-weight:600">🪪 Exempt</span>';
+}
+
 function apDestSummary(r) {
   if (r.auth && r.auth.broadExemption) return '<span style="color:#fbbf24">ALL (broad)</span>';
   const parts = [];
@@ -9181,7 +9208,7 @@ function apSourceSummary(r) {
 function renderAuthPolicy() {
   const tbody = document.getElementById('ap-rules');
   if (!apRules.length) {
-    tbody.innerHTML = '<tr><td colspan="10"><div class="empty-state"><div class="empty-icon">🪪</div>No exempt rules — all clients authenticate</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">🪪</div>No auth rules — all clients authenticate</div></td></tr>';
     return;
   }
   tbody.innerHTML = apRules.map((r, i) => {
@@ -9192,6 +9219,7 @@ function renderAuthPolicy() {
     return `<tr style="${enabled ? '' : 'opacity:.45'}">
       <td>${r.priority}</td>
       <td>${escHtml(r.name)}</td>
+      <td>${apOutcomeBadge(r)}</td>
       <td>${enabled ? '✓' : '✗'}</td>
       <td>${escHtml(r.auth && r.auth.owner || '')}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml(r.auth && r.auth.reason || '')}">${escHtml(r.auth && r.auth.reason || '')}</td>
@@ -9209,14 +9237,35 @@ function renderAuthPolicy() {
   }).join('');
 }
 
+// apOutcomeChanged gates the destination/broad-exemption controls by outcome.
+// CredentialRequired forces a non-interactive 407 challenge: broadExemption is an
+// Exempt-only acknowledgement (and the backend rejects it on CR), so it is
+// disabled, unchecked and visually dimmed, and a destination is always required.
+function apOutcomeChanged() {
+  const cr = document.getElementById('ap-outcome').value === 'CredentialRequired';
+  const broad = document.getElementById('ap-broad');
+  const broadLabel = document.getElementById('ap-broad-label');
+  if (cr) { broad.checked = false; }
+  broad.disabled = cr;
+  if (broadLabel) broadLabel.style.opacity = cr ? '.4' : '';
+  document.getElementById('ap-outcome-help').textContent = cr
+    ? 'Returns a deterministic 407 credential challenge — the client must authenticate first. Does NOT allow traffic; Stage-2 applies only after authentication. A destination is required.'
+    : 'Skips end-user authentication only (no identity is created), and only when the client presents no credentials. Stage-2 still decides access.';
+  document.getElementById('ap-dest-hint').textContent = cr
+    ? 'A destination (FQDN or category group) is required for CredentialRequired rules.'
+    : 'A destination (FQDN or category group) is required unless “Broad exemption” is explicitly checked.';
+}
+
 function apShowAdd() {
   apEditPriority = null;
-  document.getElementById('ap-form-title').textContent = 'Add Exempt Rule';
+  document.getElementById('ap-form-title').textContent = 'Add Auth Rule';
   ['ap-name','ap-owner','ap-reason','ap-cidrs','ap-destfqdn','ap-destgroup','ap-expires','ap-method'].forEach(id =>
     document.getElementById(id).value = '');
+  document.getElementById('ap-outcome').value = 'Exempt';
   document.getElementById('ap-protocol').value = '';
   document.getElementById('ap-enabled').checked = true;
   document.getElementById('ap-broad').checked = false;
+  apOutcomeChanged();
   document.getElementById('ap-form-panel').style.display = 'block';
 }
 
@@ -9224,7 +9273,8 @@ function apEditRule(priority) {
   const r = apRules.find(x => x.priority === priority);
   if (!r) return;
   apEditPriority = priority;
-  document.getElementById('ap-form-title').textContent = `Edit Exempt Rule #${priority}`;
+  document.getElementById('ap-form-title').textContent = `Edit Auth Rule #${priority}`;
+  document.getElementById('ap-outcome').value = (r.auth && r.auth.outcome) || 'Exempt';
   document.getElementById('ap-name').value = r.name || '';
   document.getElementById('ap-owner').value = r.auth && r.auth.owner || '';
   document.getElementById('ap-reason').value = r.auth && r.auth.reason || '';
@@ -9238,6 +9288,7 @@ function apEditRule(priority) {
   document.getElementById('ap-method').value = r.auth && r.auth.method || '';
   document.getElementById('ap-enabled').checked = r.enabled === undefined || r.enabled === null || r.enabled;
   document.getElementById('ap-broad').checked = !!(r.auth && r.auth.broadExemption);
+  apOutcomeChanged();
   document.getElementById('ap-form-panel').style.display = 'block';
 }
 
@@ -9248,6 +9299,10 @@ function apCancel() {
 
 async function apSave() {
   const cidrs = document.getElementById('ap-cidrs').value.split(',').map(s => s.trim()).filter(Boolean);
+  const outcome = document.getElementById('ap-outcome').value;
+  // broadExemption is Exempt-only — never send it for CredentialRequired (the
+  // backend rejects it, but force it false here so a stale checkbox cannot leak).
+  const broad = outcome === 'CredentialRequired' ? false : document.getElementById('ap-broad').checked;
   const rule = {
     name:     document.getElementById('ap-name').value.trim(),
     ruleType: 'auth',
@@ -9256,13 +9311,13 @@ async function apSave() {
     destFQDN:          document.getElementById('ap-destfqdn').value.trim(),
     destCategoryGroup: document.getElementById('ap-destgroup').value.trim(),
     auth: {
-      outcome:        'Exempt',
+      outcome:        outcome,
       owner:          document.getElementById('ap-owner').value.trim(),
       reason:         document.getElementById('ap-reason').value.trim(),
       expiresAt:      document.getElementById('ap-expires').value.trim(),
       protocol:       document.getElementById('ap-protocol').value,
       method:         document.getElementById('ap-method').value.trim(),
-      broadExemption: document.getElementById('ap-broad').checked,
+      broadExemption: broad,
     },
   };
   if (apEditPriority !== null) rule.priority = apEditPriority;
@@ -9273,17 +9328,17 @@ async function apSave() {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(rule),
     });
-    toast(apEditPriority !== null ? 'Exempt rule updated' : 'Exempt rule added', 'success');
+    toast(apEditPriority !== null ? 'Auth rule updated' : 'Auth rule added', 'success');
     apCancel();
     loadAuthPolicy();
   } catch(err) { toast('Save failed: ' + err.message, 'error'); }
 }
 
 async function apDeleteRule(priority) {
-  if (!await confirmDialog('Delete this exempt rule? Clients it covered will be challenged for authentication again.')) return;
+  if (!await confirmDialog('Delete this auth rule? Clients it covered will fall back to the default authentication gate.')) return;
   try {
     await api(`/api/authpolicy?priority=${priority}`, { method: 'DELETE' });
-    toast('Exempt rule deleted', 'success');
+    toast('Auth rule deleted', 'success');
     loadAuthPolicy();
   } catch(err) { toast('Delete failed: ' + err.message, 'error'); }
 }
