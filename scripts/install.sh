@@ -643,9 +643,27 @@ setup_at_rest_encryption() {
     info "avoid disturbing an existing CA bundle; set CULVERT_CA_PASSPHRASE yourself if needed)."
   fi
 
-  if [[ "$choice" != "2" ]]; then
-    warn "Back up $envfile (mode 600). Data encrypted under this passphrase cannot be"
-    warn "recovered if it is lost."
+  if [[ "$choice" == "2" ]]; then
+    # The admin chose their own passphrase — don't echo it; just remind them.
+    info "Keep your passphrase safe. It's required to read encrypted data and is not recoverable if lost."
+  else
+    # Auto-generated: the admin must save it. Show it prominently so they can
+    # copy it to a password manager — but only when stdout is a real terminal,
+    # so it never lands in a redirected install log / CI output.
+    echo ""
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}  IMPORTANT — SAVE YOUR ENCRYPTION PASSPHRASE${NC}"
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    if [[ -t 1 ]]; then
+      echo -e "  Passphrase: ${GREEN}${pass}${NC}"
+    else
+      echo    "  (passphrase hidden — output is redirected; read it from the file below)"
+    fi
+    echo    "  Stored in:  $envfile  (chmod 600)"
+    echo    "  → Copy it into a password manager / secrets vault now."
+    echo    "  → If this passphrase is lost, data encrypted with it CANNOT be recovered."
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    echo ""
   fi
 }
 
