@@ -94,6 +94,7 @@ services:
       - CP_KEY=${CP_KEY:-}           # e.g. /certs/grpc-key.pem
       - CP_CA=${CP_CA:-}             # e.g. /certs/grpc-ca.pem
       - CULVERT_CA_PASSPHRASE=${CULVERT_CA_PASSPHRASE:-}
+      - CULVERT_LOG_PASSPHRASE=${CULVERT_LOG_PASSPHRASE:-} # encrypts saved request logs (/data/logstore); falls back to the CA passphrase
     command: >
       sh -c '
         ARGS="-port 8080

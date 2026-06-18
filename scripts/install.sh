@@ -548,6 +548,74 @@ dump_compose_diagnostics() {
   echo "" >&2
 }
 
+###############################################################################
+# Saved-log encryption passphrase
+###############################################################################
+# Sets CULVERT_LOG_PASSPHRASE, which encrypts the saved request-log history
+# (/data/logstore) at rest with AES-256. Stored in $INSTALL_DIR/.env, which
+# docker-compose.yml reads as ${CULVERT_LOG_PASSPHRASE:-}. We NEVER overwrite an
+# existing value (regenerating would make previously saved logs unreadable).
+# Scoped to logs only — the SSL-inspection CA passphrase (CULVERT_CA_PASSPHRASE)
+# is left to the operator so this never disturbs an existing CA bundle.
+setup_log_passphrase() {
+  local envfile="$INSTALL_DIR/.env"
+  if [[ -f "$envfile" ]] && grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    info "Saved-log encryption passphrase already configured in $envfile — keeping it."
+    return
+  fi
+
+  local choice="1"
+  if [[ -t 0 ]]; then
+    echo ""
+    echo "Encrypt saved request logs at rest? (AES-256; only applies if you later"
+    echo "enable 'Save logs to disk' in the admin UI)"
+    echo "  [1] Auto-generate a strong passphrase  (recommended)"
+    echo "  [2] Enter my own passphrase"
+    echo "  [3] Skip — saved logs would be stored unencrypted"
+    read -rp "Choose [1/2/3] (default 1): " choice || true
+    [[ -z "$choice" ]] && choice="1"
+  else
+    info "Non-interactive install: auto-generating a saved-log passphrase (saved to .env)."
+  fi
+
+  local pass=""
+  case "$choice" in
+    2)
+      read -rsp "Enter passphrase: " pass; echo ""
+      local pass2=""; read -rsp "Confirm passphrase: " pass2; echo ""
+      [[ -n "$pass" ]] || error "Empty passphrase."
+      [[ "$pass" == "$pass2" ]] || error "Passphrases did not match."
+      ;;
+    3)
+      warn "Skipping log encryption — if you enable saving, logs are stored unencrypted."
+      warn "You can enable it later: set CULVERT_LOG_PASSPHRASE in $envfile and restart."
+      return
+      ;;
+    *)
+      pass="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
+      [[ -n "$pass" ]] || pass="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
+      info "Generated a random 40-character saved-log passphrase."
+      ;;
+  esac
+
+  touch "$envfile"; chmod 600 "$envfile"
+  if grep -vE '^CULVERT_LOG_PASSPHRASE=' "$envfile" > "$envfile.tmp" 2>/dev/null; then
+    mv "$envfile.tmp" "$envfile"
+  else
+    rm -f "$envfile.tmp"
+  fi
+  printf 'CULVERT_LOG_PASSPHRASE=%s\n' "$pass" >> "$envfile"
+  chmod 600 "$envfile"
+
+  if [[ "$choice" != "2" ]]; then
+    warn "This passphrase is stored in $envfile (mode 600). If it is lost, any logs"
+    warn "saved under it can't be read — you'd purge and start a fresh store."
+  fi
+}
+
+step "Saved-log encryption"
+setup_log_passphrase
+
 info "Pulling images and starting services (first run may take 1-2 minutes)..."
 
 # `docker compose up -d --wait` (Compose v2.17+) blocks until containers are
