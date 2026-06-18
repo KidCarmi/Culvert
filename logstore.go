@@ -272,10 +272,13 @@ func openLogStoreTTL(dir string, ttl time.Duration, maxBytes int64, encKey []byt
 	}
 	db, err := badger.Open(opts)
 	if err != nil {
-		// A key/plaintext mismatch (passphrase added or changed) surfaces here;
-		// map it to a clear, actionable sentinel so the handler can guide the
-		// admin to purge rather than echo a raw Badger error.
-		if strings.Contains(strings.ToLower(err.Error()), "encrypt") {
+		// A key/plaintext mismatch (passphrase added, changed, lost, or salt
+		// gone) surfaces here; map it to a clear, actionable sentinel so the
+		// handler can guide the admin to purge rather than echo a raw Badger
+		// error. Match the exported sentinels first, with a string fallback.
+		if errors.Is(err, badger.ErrEncryptionKeyMismatch) ||
+			errors.Is(err, badger.ErrInvalidEncryptionKey) ||
+			strings.Contains(strings.ToLower(err.Error()), "encrypt") {
 			return nil, errLogStoreEncMismatch
 		}
 		return nil, err

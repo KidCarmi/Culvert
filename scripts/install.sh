@@ -571,6 +571,7 @@ secret_already_set() {
 env_put() {
   local var="$1" val="$2" file="$3"
   touch "$file"; chmod 600 "$file"
+  sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
   if grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null; then mv "$file.tmp" "$file"; else rm -f "$file.tmp"; fi
   printf '%s=%s\n' "$var" "$val" >> "$file"
   chmod 600 "$file"
@@ -579,7 +580,8 @@ env_put() {
 gen_passphrase() {
   local p
   p="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
-  [[ -n "$p" ]] || p="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
+  [[ -n "$p" ]] || p="$(head -c 48 /dev/urandom 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
+  [[ -n "$p" ]] || error "Could not generate a passphrase (openssl and /dev/urandom both unavailable)."
   printf '%s' "$p"
 }
 
@@ -622,6 +624,12 @@ setup_at_rest_encryption() {
       local pass2=""; read -rsp "Confirm passphrase: " pass2; echo ""
       [[ -n "$pass" ]] || error "Empty passphrase."
       [[ "$pass" == "$pass2" ]] || error "Passphrases did not match."
+      # The passphrase is stored in .env, which docker compose interpolates
+      # ($VAR), treats # as a comment, etc. Restrict to characters that survive
+      # that round-trip intact so the value reaching the container is exact.
+      if printf '%s' "$pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+        error "Passphrase has characters unsafe for the .env file. Use letters, digits, and simple punctuation (no \$, quotes, backslash, #, /, or spaces)."
+      fi
       ;;
     3)
       warn "Skipping encryption at rest. Enable later by setting CULVERT_LOG_PASSPHRASE"

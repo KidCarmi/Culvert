@@ -120,6 +120,12 @@ func TestLogStore_EncryptedRoundTrip(t *testing.T) {
 	if _, err := openLogStoreTTL(dir, 0, 0, wrong); !errors.Is(err, errLogStoreEncMismatch) {
 		t.Errorf("wrong key err = %v, want errLogStoreEncMismatch", err)
 	}
+
+	// "Lost passphrase": opening an encrypted store with NO key must be rejected
+	// (not silently read ciphertext as plaintext).
+	if _, err := openLogStoreTTL(dir, 0, 0, nil); !errors.Is(err, errLogStoreEncMismatch) {
+		t.Errorf("no-key open of encrypted store err = %v, want errLogStoreEncMismatch (must not open as plaintext)", err)
+	}
 }
 
 func TestPurgeLogStore_OfflineReset(t *testing.T) {
