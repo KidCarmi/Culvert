@@ -334,82 +334,94 @@ func apiLogsRetention(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, logStoreRetentionView())
-
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		var body struct {
-			Enabled        *bool    `json:"enabled"`
-			RetentionDays  *int     `json:"retentionDays"`
-			RetentionMaxGB *float64 `json:"retentionMaxGB"`
-		}
-		if err := decodeJSON(r, &body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		// Resolve target retention: the provided value, else the current store's,
-		// else 0 (no limit).
-		days, gb := 0, 0.0
-		if ls := globalLogStore.Load(); ls != nil {
-			days, gb = ls.RetentionDays(), ls.RetentionMaxGB()
-		}
-		if body.RetentionDays != nil {
-			days = *body.RetentionDays
-		}
-		if body.RetentionMaxGB != nil {
-			gb = *body.RetentionMaxGB
-		}
-		if days < 0 || days > 3650 {
-			http.Error(w, "retentionDays must be between 0 and 3650", http.StatusBadRequest)
-			return
-		}
-		if gb < 0 || gb > 10000 {
-			http.Error(w, "retentionMaxGB must be between 0 and 10000", http.StatusBadRequest)
-			return
-		}
-
-		switch {
-		case body.Enabled != nil && !*body.Enabled:
-			setLogStoreDesired(days, gb) // remember retention across the disable
-			disableLogStore()
-			auditEvent(r, "logstore.disable", "history", "")
-		case body.Enabled != nil && *body.Enabled:
-			if err := enableLogStore(resolveLifecycleCtx(), logStoreDir, days, gb); err != nil {
-				// enableLogStore records the desired retention only on success,
-				// so a failure leaves it intact.
-				if errors.Is(err, errLogStoreEncMismatch) {
-					http.Error(w, "saved logs use a different encryption key — purge saved logs, then enable again", http.StatusConflict)
-					return
-				}
-				// Log the detail; return a generic message so a filesystem path
-				// can't leak in the HTTP response.
-				logger.Printf("WARN apiLogsRetention: enable failed: %v", err)
-				http.Error(w, "cannot enable history store", http.StatusInternalServerError)
-				return
-			}
-			auditEvent(r, "logstore.enable", "history", fmt.Sprintf("days=%d maxGB=%g", days, gb))
-		default:
-			// No enable change: update retention only (store must be on).
-			ls := globalLogStore.Load()
-			if ls == nil {
-				http.Error(w, "history store is off — enable it first", http.StatusConflict)
-				return
-			}
-			ls.SetRetention(days, gb)
-			setLogStoreDesired(days, gb)
-			auditEvent(r, "logstore.retention", "history", fmt.Sprintf("days=%d maxGB=%g", days, gb))
-		}
-		// Enforce a (possibly lowered) size cap promptly in the background.
-		if ls := globalLogStore.Load(); ls != nil {
-			go ls.RunRetention()
-		}
-		adminSettingsSave()
-		jsonOK(w, logStoreRetentionView())
-
+		apiLogsRetentionUpdate(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// apiLogsRetentionUpdate handles the admin PUT: parse + validate retention, then
+// apply the enable/disable/retention change and persist.
+func apiLogsRetentionUpdate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled        *bool    `json:"enabled"`
+		RetentionDays  *int     `json:"retentionDays"`
+		RetentionMaxGB *float64 `json:"retentionMaxGB"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	// Resolve target retention: the provided value, else the current store's,
+	// else 0 (no limit).
+	days, gb := 0, 0.0
+	if ls := globalLogStore.Load(); ls != nil {
+		days, gb = ls.RetentionDays(), ls.RetentionMaxGB()
+	}
+	if body.RetentionDays != nil {
+		days = *body.RetentionDays
+	}
+	if body.RetentionMaxGB != nil {
+		gb = *body.RetentionMaxGB
+	}
+	if days < 0 || days > 3650 {
+		http.Error(w, "retentionDays must be between 0 and 3650", http.StatusBadRequest)
+		return
+	}
+	if gb < 0 || gb > 10000 {
+		http.Error(w, "retentionMaxGB must be between 0 and 10000", http.StatusBadRequest)
+		return
+	}
+	if !applyRetentionUpdate(w, r, body.Enabled, days, gb) {
+		return // applyRetentionUpdate already wrote the error response
+	}
+	// Enforce a (possibly lowered) size cap promptly in the background.
+	if ls := globalLogStore.Load(); ls != nil {
+		go ls.RunRetention()
+	}
+	adminSettingsSave()
+	jsonOK(w, logStoreRetentionView())
+}
+
+// applyRetentionUpdate performs the enable/disable/retention-only action. It
+// writes the HTTP error and returns false on failure; true on success.
+func applyRetentionUpdate(w http.ResponseWriter, r *http.Request, enabled *bool, days int, gb float64) bool {
+	switch {
+	case enabled != nil && !*enabled:
+		setLogStoreDesired(days, gb) // remember retention across the disable
+		disableLogStore()
+		auditEvent(r, "logstore.disable", "history", "")
+	case enabled != nil && *enabled:
+		if err := enableLogStore(resolveLifecycleCtx(), logStoreDir, days, gb); err != nil {
+			// enableLogStore records the desired retention only on success, so a
+			// failure leaves it intact.
+			if errors.Is(err, errLogStoreEncMismatch) {
+				http.Error(w, "saved logs use a different encryption key — purge saved logs, then enable again", http.StatusConflict)
+				return false
+			}
+			// Log the detail; return a generic message so a filesystem path
+			// can't leak in the HTTP response.
+			logger.Printf("WARN apiLogsRetention: enable failed: %v", err)
+			http.Error(w, "cannot enable history store", http.StatusInternalServerError)
+			return false
+		}
+		auditEvent(r, "logstore.enable", "history", fmt.Sprintf("days=%d maxGB=%g", days, gb))
+	default:
+		// No enable change: update retention only (store must be on).
+		ls := globalLogStore.Load()
+		if ls == nil {
+			http.Error(w, "history store is off — enable it first", http.StatusConflict)
+			return false
+		}
+		ls.SetRetention(days, gb)
+		setLogStoreDesired(days, gb)
+		auditEvent(r, "logstore.retention", "history", fmt.Sprintf("days=%d maxGB=%g", days, gb))
+	}
+	return true
 }
 
 // apiLogsPurge deletes all stored history (admin only). Works whether saving is
