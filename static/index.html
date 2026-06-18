@@ -707,10 +707,10 @@ tr.dragging  { opacity: .4; }
         </select>
         <button class="btn ghost sm" data-click="clearFilter">Clear</button>
         <select class="select" id="log-source" data-change="onLogSourceChange"
-                title="Live = in-memory tail (last 5 000). Persistent file = JSONL on disk. History = retention store: deep pagination, survives restart.">
-          <option value="live">Live (tail)</option>
-          <option value="file">Persistent file</option>
-          <option value="store">History (retention)</option>
+                title="Live = the last 5,000 requests in memory (always on). Saved logs = on-disk history with retention + deep search (admin enables it). Raw JSON file = the legacy plain-text log, for export.">
+          <option value="live">Live (memory)</option>
+          <option value="store">Saved logs</option>
+          <option value="file">Raw JSON file (advanced)</option>
         </select>
         <label style="display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer;margin-left:auto">
           <input type="checkbox" id="auto-scroll" checked> Auto-scroll
@@ -733,25 +733,34 @@ tr.dragging  { opacity: .4; }
         </div>
       </div>
 
-      <!-- Retention &amp; usage panel (history store) -->
-      <details class="panel" id="log-retention-panel" style="display:none;margin-bottom:14px">
-        <summary style="cursor:pointer;font-size:.9rem;font-weight:600;padding:12px 16px">🗄 History Retention &amp; Usage</summary>
-        <div style="padding:0 16px 16px">
-          <div id="log-retention-usage" style="font-size:.82rem;color:var(--muted);margin-bottom:12px">Loading…</div>
-          <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end">
-            <div>
-              <label class="form-label">Keep for (days) <span style="color:var(--muted);font-weight:400">0 = no age limit</span></label>
-              <input type="number" min="0" max="3650" class="input" id="ret-days" style="width:130px">
+      <!-- Save-to-disk + retention + usage panel (history store) -->
+      <div class="panel" id="log-retention-panel" style="display:none;margin-bottom:14px">
+        <div style="padding:14px 16px">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:.95rem;font-weight:600">
+            <input type="checkbox" id="ret-enabled" data-change="toggleLogSaving"> Save logs to disk
+            <span style="font-weight:400;font-size:.78rem;color:var(--muted)">(off = live feed only, last 5,000 in memory)</span>
+          </label>
+
+          <div id="ret-controls" style="margin-top:14px">
+            <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end">
+              <div>
+                <label class="form-label">Keep for (days) <span style="color:var(--muted);font-weight:400">0 = no age limit</span></label>
+                <input type="number" min="0" max="3650" class="input" id="ret-days" style="width:130px">
+              </div>
+              <div>
+                <label class="form-label">Max size (GB) <span style="color:var(--muted);font-weight:400">0 = no size limit</span></label>
+                <input type="number" min="0" max="10000" step="0.1" class="input" id="ret-gb" style="width:130px">
+              </div>
+              <button class="btn" data-click="saveRetention">Save</button>
+              <button class="btn ghost" data-click="purgeHistory" style="color:var(--red)">Purge all</button>
             </div>
-            <div>
-              <label class="form-label">Max size (GB) <span style="color:var(--muted);font-weight:400">0 = no size limit</span></label>
-              <input type="number" min="0" max="10000" step="0.1" class="input" id="ret-gb" style="width:130px">
-            </div>
-            <button class="btn" data-click="saveRetention">Save Retention</button>
+            <div id="ret-estimate" style="font-size:.78rem;color:var(--muted);margin-top:12px"></div>
+            <div id="ret-encryption" style="font-size:.8rem;margin-top:8px"></div>
+            <div id="log-retention-usage" style="font-size:.82rem;color:var(--muted);margin-top:8px">Loading…</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-top:8px">Age changes apply to newly logged requests; the size cap prunes oldest entries on the next sweep. Turning saving off keeps existing data on disk.</div>
           </div>
-          <div style="font-size:.72rem;color:var(--muted);margin-top:8px">Age changes apply to newly logged requests; the size cap prunes oldest entries on the next sweep.</div>
         </div>
-      </details>
+      </div>
 
       <div class="panel">
         <div class="panel-header">
@@ -3729,6 +3738,7 @@ document.addEventListener('click', e => {
     case 'historyApply':      historyApply(); break;
     case 'historyPage':       historyPage(arg); break;
     case 'saveRetention':     saveRetention(); break;
+    case 'purgeHistory':      purgeHistory(); break;
     case 'setLogTab':         setLogTab(arg || ''); break;
 
     // ── Blocklist ──
@@ -3975,6 +3985,7 @@ document.addEventListener('change', e => {
   switch (el.dataset.change) {
     case 'applyLogFilter':    applyLogFilter(); break;
     case 'onLogSourceChange': onLogSourceChange(); break;
+    case 'toggleLogSaving':   toggleLogSaving(); break;
     case 'importBlocklist':   importBlocklist(el); break;
     case 'loadXMLFile':       loadXMLFile(e); break;
     case 'syncSAMLMetadataSourceChoice': syncSAMLMetadataSourceChoice(); break;
@@ -5229,32 +5240,88 @@ function historyPage(dir) {
   fetchHistory();
 }
 
+function humanBytes(n) {
+  n = n || 0;
+  if (n < 1024) return n + ' B';
+  const u = ['KB','MB','GB','TB']; let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(1) + ' ' + u[i];
+}
+
 async function loadRetention() {
   try {
     const d = await api('/api/logs/retention');
-    const u = d.usage || {};
-    const usageEl = document.getElementById('log-retention-usage');
-    if (!d.enabled) {
-      usageEl.innerHTML = '⚠ History store disabled. Set <code>log_store_path</code> to enable persistent history + retention.';
-    } else {
-      const mb = ((u.bytes || 0) / (1024*1024)).toFixed(1);
-      const oldest = u.oldestMs ? new Date(u.oldestMs).toLocaleString() : '—';
-      usageEl.innerHTML = `Stored: <b>${fmt(u.count || 0)}</b>${u.capped ? '+' : ''} entries · <b>${mb} MB</b> · oldest: ${oldest}` +
-        (u.dropped ? ` · <span class="text-red">${fmt(u.dropped)} dropped</span>` : '') +
-        (u.pruned ? ` · ${fmt(u.pruned)} pruned` : '');
-    }
+    const u = d.usage || {}, est = d.estimate || {};
+    document.getElementById('ret-enabled').checked = !!d.enabled;
+    document.getElementById('ret-controls').style.opacity = d.enabled ? '1' : '0.6';
     document.getElementById('ret-days').value = d.retentionDays || 0;
     document.getElementById('ret-gb').value   = d.retentionMaxGB || 0;
+
+    // Encryption-at-rest status.
+    const encEl = document.getElementById('ret-encryption');
+    if (d.encrypted) {
+      encEl.innerHTML = '🔒 <b>Encrypted at rest</b> (AES-256)';
+      encEl.style.color = 'var(--green)';
+    } else if (d.encryptionAvailable) {
+      encEl.innerHTML = '🔓 Not encrypted. A passphrase is set — encryption applies to a fresh store; <b>Purge all</b> to switch.';
+      encEl.style.color = d.enabled ? 'var(--red)' : 'var(--muted)';
+    } else {
+      encEl.innerHTML = '🔓 Not encrypted — set <code>CULVERT_LOG_PASSPHRASE</code> (or reuse <code>CULVERT_CA_PASSPHRASE</code>) to encrypt saved logs.';
+      encEl.style.color = d.enabled ? 'var(--red)' : 'var(--muted)';
+    }
+
+    // Disk estimate (computed from live traffic; shown even when saving is off).
+    const perDay = est.bytesPerDay || 0;
+    document.getElementById('ret-estimate').innerHTML =
+      `📊 At current traffic (~${(est.reqPerMin || 0).toFixed(0)} req/min, ~${est.avgEntryBytes || 0} B/entry): ` +
+      `<b>${humanBytes(perDay)}/day</b> · 1 week ≈ <b>${humanBytes(est.bytesPerWeek)}</b> · 1 month ≈ <b>${humanBytes(est.bytesPerMonth)}</b>`;
+
+    const usageEl = document.getElementById('log-retention-usage');
+    if (d.enabled) {
+      const oldest = u.oldestMs ? new Date(u.oldestMs).toLocaleString() : '—';
+      usageEl.innerHTML = `Stored now: <b>${fmt(u.count || 0)}</b>${u.capped ? '+' : ''} entries · <b>${humanBytes(u.bytes)}</b> · oldest: ${oldest}` +
+        (u.dropped ? ` · <span class="text-red">${fmt(u.dropped)} dropped</span>` : '') +
+        (u.pruned ? ` · ${fmt(u.pruned)} pruned` : '');
+      if (d.retentionMaxGB > 0 && perDay > 0 && d.retentionDays > 0) {
+        const daysToCap = (d.retentionMaxGB * (1 << 30)) / perDay;
+        if (daysToCap < d.retentionDays) {
+          usageEl.innerHTML += `<br><span class="text-red">⚠ At this rate the ${d.retentionMaxGB} GB cap fills in ~${daysToCap.toFixed(0)} days — before your ${d.retentionDays}-day window. Raise the cap or shorten the days.</span>`;
+        }
+      }
+    } else if (d.configurable === false) {
+      usageEl.innerHTML = '⚠ Log saving can’t be enabled (no data directory configured).';
+    } else {
+      usageEl.innerHTML = 'Saving is off — only the live 5,000-entry memory feed is kept. Flip the switch to start saving to disk.';
+    }
   } catch(e) { console.error(e); }
 }
 
-async function saveRetention() {
+// toggleLogSaving flips disk persistence on/off, sending the current retention.
+async function toggleLogSaving() {
+  const enabled = document.getElementById('ret-enabled').checked;
   const days = parseInt(document.getElementById('ret-days').value, 10) || 0;
   const gb   = parseFloat(document.getElementById('ret-gb').value) || 0;
   try {
     await api('/api/logs/retention', {
-      method: 'PUT',
-      headers: {'Content-Type':'application/json'},
+      method: 'PUT', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({enabled, retentionDays: days, retentionMaxGB: gb}),
+    });
+    toast(enabled ? 'Log saving enabled' : 'Log saving disabled (data kept)', 'success');
+    loadRetention();
+    if (logSource === 'store') fetchLogs();
+  } catch(e) {
+    toast('Error: ' + e.message, 'error');
+    loadRetention(); // revert the switch to the server's truth
+  }
+}
+
+async function saveRetention() {
+  if (!document.getElementById('ret-enabled').checked) { toast('Enable log saving first', 'error'); return; }
+  const days = parseInt(document.getElementById('ret-days').value, 10) || 0;
+  const gb   = parseFloat(document.getElementById('ret-gb').value) || 0;
+  try {
+    await api('/api/logs/retention', {
+      method: 'PUT', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({retentionDays: days, retentionMaxGB: gb}),
     });
     toast('Retention updated', 'success');
@@ -5262,11 +5329,27 @@ async function saveRetention() {
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
+async function purgeHistory() {
+  const ok = await confirmAction('Purge saved logs', 'Delete ALL saved log history? This cannot be undone. (Saving stays enabled.)', 'Purge');
+  if (!ok) return;
+  try {
+    await api('/api/logs/purge', {method:'POST'});
+    toast('Saved history purged', 'success');
+    loadRetention();
+    if (logSource === 'store') fetchLogs();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
 function renderLogs() {
   const tbody = document.getElementById('live-log');
   const dash  = document.getElementById('dash-log');
   if (logEntries.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
+    // Source-aware hint so an empty table explains itself.
+    let msg = 'No requests yet';
+    if (logSource === 'store')      msg = 'No saved logs in this range. Turn on “Save logs to disk” above, or widen the time range.';
+    else if (logSource === 'file')  msg = 'No persistent JSON log file found (set <code>request_log_file</code>), or it’s empty.';
+    const empty = `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div>${msg}</div></td></tr>`;
+    tbody.innerHTML = empty;
     dash.innerHTML  = '<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">📭</div>No requests yet</div></td></tr>';
   } else {
     tbody.innerHTML = logEntries.map(rowHTML).join('');

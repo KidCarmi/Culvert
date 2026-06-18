@@ -18,6 +18,10 @@
 #   /data/threatfeeds.json  Local threat intelligence database (auto-synced)
 #   /data/ui_users.json     Admin UI users (persisted across restarts)
 #   /data/idp_profiles.json IdP profiles — OIDC/SAML SSO providers (persisted across restarts)
+#   /data/logstore/         Saved request-log history (enable from the admin UI →
+#                           Live Feed → "Save logs to disk"). AES-256 encrypted at
+#                           rest when CULVERT_LOG_PASSPHRASE (or CULVERT_CA_PASSPHRASE)
+#                           is set; /data/logstore.salt holds the per-store KDF salt.
 #
 # YARA rules (/app/yara in the proxy container):
 #   Starter rules are bundled in the image (yara/sample_rules.yar).
@@ -111,6 +115,12 @@ services:
       # Optional: manually set the server's public IP/domain for TLS cert SANs.
       # Usually not needed — auto-detected in Docker containers.
       # - CULVERT_PUBLIC_IP=203.0.113.50
+      # Encryption-at-rest passphrases — read from the host env / .env file
+      # (leave unset to disable; secrets stay out of this file). CA passphrase
+      # encrypts the SSL-inspection CA key; LOG passphrase encrypts saved request
+      # logs (/data/logstore) and falls back to the CA passphrase when unset.
+      - CULVERT_CA_PASSPHRASE=${CULVERT_CA_PASSPHRASE:-}
+      - CULVERT_LOG_PASSPHRASE=${CULVERT_LOG_PASSPHRASE:-}
     command: [
       "-port",           "8080",
       "-ui-port",        "9090",

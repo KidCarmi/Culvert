@@ -135,6 +135,16 @@ default_action: ""      # "allow" (passthrough) | "deny" (zero-trust); auto-dete
 audit_log_file: ""      # Persistent JSONL audit log path (e.g. "/data/audit.jsonl")
 syslog_addr: ""         # Syslog forwarding: "udp://host:514" or "tcp://host:601"
 
+# Saved request-log HISTORY (queryable, retention-managed; survives restart).
+# Normally enabled from the admin UI (Live Feed → "Save logs to disk") with no
+# config — it defaults to <data-dir>/logstore. These options only SEED the
+# initial state; the GUI choice is authoritative thereafter.
+log_store_path: ""        # explicit dir; empty = <data-dir>/logstore, enabled via UI
+log_retention_days: 0     # age limit in days (0 = no age limit)
+log_retention_max_gb: 0   # size cap in GB (0 = no size limit)
+# Encryption at rest (AES-256) for the saved logs is controlled by the
+# CULVERT_LOG_PASSPHRASE env var (falls back to CULVERT_CA_PASSPHRASE), not YAML.
+
 # ── Admin UI ──────────────────────────────────────────────────────────────
 
 ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all)

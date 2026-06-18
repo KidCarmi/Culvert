@@ -36,8 +36,9 @@ import (
 //   - 135 — Slice 8 added /api/authpolicy + /api/authpolicy/reorder.
 //   - 136 — Live Feed added its history/retention route.
 //   - 141 — P1.6d-0 added 5 /api/releases* dispatch-management routes.
+//   - 142 — Live Feed added /api/logs/purge.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 141
+	const want = 142
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

@@ -563,6 +563,136 @@ dump_compose_diagnostics() {
   echo "" >&2
 }
 
+###############################################################################
+# Encryption-at-rest passphrase
+###############################################################################
+# is_fresh_deployment — true when this looks like a first-time install: the
+# proxy-data Docker volume does not exist yet (Docker creates it on the first
+# `docker compose up`). Any docker error => treat as NOT fresh (conservative).
+is_fresh_deployment() {
+  local vols
+  vols="$(sudo docker volume ls --format '{{.Name}}' 2>/dev/null)" || return 1
+  ! grep -qE '(^|_)proxy-data$' <<<"$vols"
+}
+
+# secret_already_set VAR — true if VAR is non-empty in the host env or in .env.
+secret_already_set() {
+  local var="$1" envfile="$2"
+  [[ -n "${!var:-}" ]] && return 0
+  [[ -f "$envfile" ]] && grep -Eq "^${var}=.+" "$envfile" 2>/dev/null
+}
+
+# env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).
+env_put() {
+  local var="$1" val="$2" file="$3"
+  touch "$file"; chmod 600 "$file"
+  sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
+  if grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null; then mv "$file.tmp" "$file"; else rm -f "$file.tmp"; fi
+  printf '%s=%s\n' "$var" "$val" >> "$file"
+  chmod 600 "$file"
+}
+
+gen_passphrase() {
+  local p
+  p="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
+  [[ -n "$p" ]] || p="$(head -c 48 /dev/urandom 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
+  [[ -n "$p" ]] || error "Could not generate a passphrase (openssl and /dev/urandom both unavailable)."
+  printf '%s' "$p"
+}
+
+# Encrypts data at rest (AES-256), value(s) stored in $INSTALL_DIR/.env which
+# docker-compose.yml reads as ${CULVERT_*_PASSPHRASE:-}. We never overwrite an
+# existing value. On a FRESH deployment (no data volume yet) we can safely also
+# encrypt the SSL-inspection CA key, because there's no existing CA bundle to
+# clash with; on an EXISTING deployment we only set the saved-log passphrase and
+# leave the CA passphrase to the operator.
+setup_at_rest_encryption() {
+  local envfile="$INSTALL_DIR/.env"
+  if secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" || secret_already_set CULVERT_CA_PASSPHRASE "$envfile"; then
+    info "Encryption passphrase already configured — keeping existing values."
+    return
+  fi
+
+  local fresh=0; is_fresh_deployment && fresh=1
+
+  local choice="1"
+  if [[ -t 0 ]]; then
+    echo ""
+    if [[ "$fresh" == 1 ]]; then
+      echo "First-time install — encrypt data at rest? (SSL-inspection CA key + saved logs, AES-256)"
+    else
+      echo "Encrypt saved request logs at rest? (AES-256; applies when you enable 'Save logs to disk')"
+    fi
+    echo "  [1] Auto-generate a strong passphrase  (recommended)"
+    echo "  [2] Enter my own passphrase"
+    echo "  [3] Skip — store unencrypted"
+    read -rp "Choose [1/2/3] (default 1): " choice || true
+    [[ -z "$choice" ]] && choice="1"
+  else
+    info "Non-interactive install: auto-generating an encryption passphrase (saved to .env)."
+  fi
+
+  local pass=""
+  case "$choice" in
+    2)
+      read -rsp "Enter passphrase: " pass; echo ""
+      local pass2=""; read -rsp "Confirm passphrase: " pass2; echo ""
+      [[ -n "$pass" ]] || error "Empty passphrase."
+      [[ "$pass" == "$pass2" ]] || error "Passphrases did not match."
+      # The passphrase is stored in .env, which docker compose interpolates
+      # ($VAR), treats # as a comment, etc. Restrict to characters that survive
+      # that round-trip intact so the value reaching the container is exact.
+      if printf '%s' "$pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+        error "Passphrase has characters unsafe for the .env file. Use letters, digits, and simple punctuation (no \$, quotes, backslash, #, /, or spaces)."
+      fi
+      ;;
+    3)
+      warn "Skipping encryption at rest. Enable later by setting CULVERT_LOG_PASSPHRASE"
+      warn "(and, on a clean setup, CULVERT_CA_PASSPHRASE) in $envfile, then restart."
+      return
+      ;;
+    *)
+      pass="$(gen_passphrase)"
+      info "Generated a random 40-character passphrase."
+      ;;
+  esac
+
+  env_put CULVERT_LOG_PASSPHRASE "$pass" "$envfile"
+  if [[ "$fresh" == 1 ]]; then
+    env_put CULVERT_CA_PASSPHRASE "$pass" "$envfile"
+    info "Fresh deployment — also encrypting the SSL-inspection CA key with this passphrase."
+  else
+    info "Existing deployment — set the saved-log passphrase only (left the CA key untouched to"
+    info "avoid disturbing an existing CA bundle; set CULVERT_CA_PASSPHRASE yourself if needed)."
+  fi
+
+  if [[ "$choice" == "2" ]]; then
+    # The admin chose their own passphrase — don't echo it; just remind them.
+    info "Keep your passphrase safe. It's required to read encrypted data and is not recoverable if lost."
+  else
+    # Auto-generated: the admin must save it. Show it prominently so they can
+    # copy it to a password manager — but only when stdout is a real terminal,
+    # so it never lands in a redirected install log / CI output.
+    echo ""
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}  IMPORTANT — SAVE YOUR ENCRYPTION PASSPHRASE${NC}"
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    if [[ -t 1 ]]; then
+      echo -e "  Passphrase: ${GREEN}${pass}${NC}"
+    else
+      echo    "  (passphrase hidden — output is redirected; read it from the file below)"
+    fi
+    echo    "  Stored in:  $envfile  (chmod 600)"
+    echo    "  → Copy it into a password manager / secrets vault now."
+    echo    "  → If this passphrase is lost, data encrypted with it CANNOT be recovered."
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+    echo ""
+  fi
+}
+
+step "Encryption at rest"
+setup_at_rest_encryption
+
 info "Pulling images and starting services (first run may take 1-2 minutes)..."
 
 # `docker compose up -d --wait` (Compose v2.17+) blocks until containers are

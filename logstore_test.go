@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,8 +48,179 @@ func drainLogStore(t *testing.T, s *logStore, want int) []LogEntry {
 	}
 }
 
+func TestEnableDisablePurgeLogStore(t *testing.T) {
+	isolateLogRing(t)
+	old := globalLogStore.Swap(nil)
+	oldDir := logStoreDir
+	t.Cleanup(func() { disableLogStore(); globalLogStore.Store(old); logStoreDir = oldDir })
+
+	dir := t.TempDir()
+	logStoreDir = dir
+	if err := enableLogStore(context.Background(), dir, 0, 0); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if globalLogStore.Load() == nil {
+		t.Fatal("store should be enabled")
+	}
+	logAdd(LogEntry{TS: time.Now().UnixMilli(), Host: "h.example.com", Status: "OK"})
+	drainLogStore(t, globalLogStore.Load(), 1)
+
+	if err := purgeLogStore(); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if _, total, _ := globalLogStore.Load().Query(0, 0, 0, 100, nil); total != 0 {
+		t.Errorf("after purge total = %d, want 0", total)
+	}
+
+	disableLogStore()
+	if globalLogStore.Load() != nil {
+		t.Error("store should be disabled after disableLogStore")
+	}
+}
+
+// TestEnableLogStore_ConcurrentSafe exercises the lifecycle mutex: many
+// concurrent enables must publish exactly one store (no double-open, no orphan,
+// no panic) — verified under -race.
+func TestLogStore_EncryptedRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	key, err := logStoreEncKey(dir, "correct horse battery staple")
+	if err != nil {
+		t.Fatalf("derive key: %v", err)
+	}
+	if len(key) != logStoreEncKeyLen {
+		t.Fatalf("key len = %d, want %d", len(key), logStoreEncKeyLen)
+	}
+	s, err := openLogStoreTTL(dir, 0, 0, key)
+	if err != nil {
+		t.Fatalf("open encrypted: %v", err)
+	}
+	if !s.Encrypted() {
+		t.Error("store should report encrypted")
+	}
+	s.Add(LogEntry{TS: time.Now().UnixMilli(), Host: "secret.example.com", Status: "OK"})
+	got := drainLogStore(t, s, 1)
+	if len(got) != 1 || got[0].Host != "secret.example.com" {
+		t.Fatalf("encrypted read-back failed: %+v", got)
+	}
+	_ = s.Close()
+
+	// Reopening the SAME dir with the SAME passphrase+salt works.
+	key2, _ := logStoreEncKey(dir, "correct horse battery staple")
+	s2, err := openLogStoreTTL(dir, 0, 0, key2)
+	if err != nil {
+		t.Fatalf("reopen encrypted: %v", err)
+	}
+	if _, total, _ := s2.Query(0, 0, 0, 10, nil); total != 1 {
+		t.Errorf("reopen total = %d, want 1", total)
+	}
+	_ = s2.Close()
+
+	// Wrong passphrase → mismatch sentinel.
+	wrong, _ := logStoreEncKey(dir, "wrong passphrase")
+	if _, err := openLogStoreTTL(dir, 0, 0, wrong); !errors.Is(err, errLogStoreEncMismatch) {
+		t.Errorf("wrong key err = %v, want errLogStoreEncMismatch", err)
+	}
+
+	// "Lost passphrase": opening an encrypted store with NO key must be rejected
+	// (not silently read ciphertext as plaintext).
+	if _, err := openLogStoreTTL(dir, 0, 0, nil); !errors.Is(err, errLogStoreEncMismatch) {
+		t.Errorf("no-key open of encrypted store err = %v, want errLogStoreEncMismatch (must not open as plaintext)", err)
+	}
+}
+
+func TestPurgeLogStore_OfflineReset(t *testing.T) {
+	old := globalLogStore.Swap(nil)
+	oldDir := logStoreDir
+	dir := t.TempDir()
+	logStoreDir = dir
+	t.Cleanup(func() { disableLogStore(); globalLogStore.Store(old); logStoreDir = oldDir })
+
+	// Create a plaintext store on disk, then disable (data kept).
+	if err := enableLogStore(context.Background(), dir, 0, 0); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	disableLogStore()
+	// Drop a salt sidecar to confirm it's removed too.
+	_ = os.WriteFile(dir+".salt", []byte("x"), 0o600)
+
+	// Purge while OFF resets the on-disk dir (migration path).
+	if err := purgeLogStore(); err != nil {
+		t.Fatalf("offline purge: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("store dir should be removed after offline purge, stat err=%v", err)
+	}
+	if _, err := os.Stat(dir + ".salt"); !os.IsNotExist(err) {
+		t.Error("salt sidecar should be removed after offline purge")
+	}
+}
+
+func TestEnableLogStore_ConcurrentSafe(t *testing.T) {
+	old := globalLogStore.Swap(nil)
+	oldDir := logStoreDir
+	dir := t.TempDir()
+	logStoreDir = dir
+	t.Cleanup(func() { disableLogStore(); globalLogStore.Store(old); logStoreDir = oldDir })
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = enableLogStore(context.Background(), dir, 7, 1) }()
+	}
+	wg.Wait()
+
+	ls := globalLogStore.Load()
+	if ls == nil {
+		t.Fatal("store should be enabled after concurrent enables")
+	}
+	if ls.RetentionDays() != 7 {
+		t.Errorf("RetentionDays = %d, want 7", ls.RetentionDays())
+	}
+}
+
+func TestApiLogsRetention_EnableDisable(t *testing.T) {
+	old := globalLogStore.Swap(nil)
+	oldDir := logStoreDir
+	logStoreDir = t.TempDir()
+	t.Cleanup(func() { disableLogStore(); globalLogStore.Store(old); logStoreDir = oldDir })
+
+	rec := httptest.NewRecorder()
+	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"enabled":true,"retentionDays":7,"retentionMaxGB":2}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable PUT %d: %s", rec.Code, rec.Body.String())
+	}
+	ls := globalLogStore.Load()
+	if ls == nil {
+		t.Fatal("store should be enabled after PUT enabled:true")
+	}
+	if ls.RetentionDays() != 7 {
+		t.Errorf("RetentionDays = %d, want 7", ls.RetentionDays())
+	}
+
+	rec = httptest.NewRecorder()
+	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"enabled":false}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable PUT %d", rec.Code)
+	}
+	if globalLogStore.Load() != nil {
+		t.Error("store should be disabled after PUT enabled:false")
+	}
+}
+
+func TestLogStoreDiskEstimate(t *testing.T) {
+	est := logStoreDiskEstimate()
+	if v, _ := est["avgEntryBytes"].(int64); v <= 0 {
+		t.Errorf("avgEntryBytes = %v, want > 0", est["avgEntryBytes"])
+	}
+	for _, k := range []string{"bytesPerDay", "bytesPerWeek", "bytesPerMonth", "reqPerMin"} {
+		if _, ok := est[k]; !ok {
+			t.Errorf("estimate missing key %q", k)
+		}
+	}
+}
+
 func TestLogStore_WriteQueryNewestFirst(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -73,7 +246,7 @@ func TestLogStore_WriteQueryNewestFirst(t *testing.T) {
 }
 
 func TestLogStore_OffsetPagination(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -104,7 +277,7 @@ func TestLogStore_OffsetPagination(t *testing.T) {
 }
 
 func TestLogStore_FilterAndTimeRange(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -135,7 +308,7 @@ func TestLogStore_FilterAndTimeRange(t *testing.T) {
 
 func TestLogStore_AgeRetentionTTL(t *testing.T) {
 	// 1-second TTL: entries must be gone from reads shortly after expiry.
-	s, err := openLogStoreTTL(t.TempDir(), 1*time.Second, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 1*time.Second, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -164,7 +337,7 @@ func TestLogStore_SizeRetentionPrunesOldest(t *testing.T) {
 	logStorePruneBatch = 10
 	defer func() { logStorePruneBatch = old }()
 
-	s, err := openLogStoreTTL(t.TempDir(), 0, 1)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 1, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -193,7 +366,7 @@ func TestLogStore_SizeRetentionPrunesOldest(t *testing.T) {
 }
 
 func TestLogStore_Stats(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -216,13 +389,13 @@ func TestLogStore_Stats(t *testing.T) {
 
 func TestApiLogs_SourceStore(t *testing.T) {
 	isolateLogRing(t)
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	old := globalLogStore
-	globalLogStore = s
-	t.Cleanup(func() { globalLogStore = old; _ = s.Close() })
+	old := globalLogStore.Load()
+	globalLogStore.Store(s)
+	t.Cleanup(func() { globalLogStore.Store(old); _ = s.Close() })
 
 	base := time.Now().UnixMilli()
 	for i := 0; i < 20; i++ {
@@ -262,9 +435,9 @@ func TestApiLogs_SourceStore(t *testing.T) {
 }
 
 func TestApiLogs_SourceStore_Disabled(t *testing.T) {
-	old := globalLogStore
-	globalLogStore = nil
-	t.Cleanup(func() { globalLogStore = old })
+	old := globalLogStore.Load()
+	globalLogStore.Store(nil)
+	t.Cleanup(func() { globalLogStore.Store(old) })
 
 	req := httptest.NewRequest(http.MethodGet, "/api/logs?source=store", http.NoBody)
 	rec := httptest.NewRecorder()
@@ -285,13 +458,13 @@ func TestApiLogs_SourceStore_Disabled(t *testing.T) {
 }
 
 func TestApiLogsRetention_GetPut(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 7*24*time.Hour, 2<<30) // 7 days, 2 GB
+	s, err := openLogStoreTTL(t.TempDir(), 7*24*time.Hour, 2<<30, nil) // 7 days, 2 GB
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	old := globalLogStore
-	globalLogStore = s
-	t.Cleanup(func() { globalLogStore = old; _ = s.Close() })
+	old := globalLogStore.Load()
+	globalLogStore.Store(s)
+	t.Cleanup(func() { globalLogStore.Store(old); _ = s.Close() })
 
 	// GET reports the current policy.
 	rec := httptest.NewRecorder()
@@ -336,9 +509,9 @@ func TestApiLogsRetention_GetPut(t *testing.T) {
 // before comparing. Without the fix the range filter matched nothing/everything.
 func TestApiLogs_TimeRangeMemory(t *testing.T) {
 	isolateLogRing(t)
-	oldLS := globalLogStore
-	globalLogStore = nil
-	t.Cleanup(func() { globalLogStore = oldLS })
+	oldLS := globalLogStore.Load()
+	globalLogStore.Store(nil)
+	t.Cleanup(func() { globalLogStore.Store(oldLS) })
 
 	mid := time.Now().Unix()
 	add := func(sec int64, host string) {
@@ -370,13 +543,13 @@ func TestApiLogs_TimeRangeMemory(t *testing.T) {
 }
 
 func TestApiLogsRetention_ViewerForbidden(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	old := globalLogStore
-	globalLogStore = s
-	t.Cleanup(func() { globalLogStore = old; _ = s.Close() })
+	old := globalLogStore.Load()
+	globalLogStore.Store(s)
+	t.Cleanup(func() { globalLogStore.Store(old); _ = s.Close() })
 
 	// No admin role on the context → uiRole defaults to viewer → PUT must 403.
 	rec := httptest.NewRecorder()
@@ -390,7 +563,7 @@ func TestApiLogsRetention_ViewerForbidden(t *testing.T) {
 // this fails if the send/close synchronization regresses (no send on a closed
 // channel, no panic).
 func TestLogStore_AddCloseRace(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0)
+	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -412,9 +585,9 @@ func TestLogStore_AddCloseRace(t *testing.T) {
 }
 
 func TestApiLogsRetention_DisabledConflict(t *testing.T) {
-	old := globalLogStore
-	globalLogStore = nil
-	t.Cleanup(func() { globalLogStore = old })
+	old := globalLogStore.Load()
+	globalLogStore.Store(nil)
+	t.Cleanup(func() { globalLogStore.Store(old) })
 
 	rec := httptest.NewRecorder()
 	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"retentionDays":30}`))

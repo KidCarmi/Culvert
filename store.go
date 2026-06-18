@@ -352,7 +352,8 @@ func logAdd(e LogEntry) {
 	}
 
 	// Persist to the queryable history store (async, non-blocking, nil-safe).
-	globalLogStore.Add(e)
+	// Atomic load so a runtime enable/disable swap is race-free on the hot path.
+	globalLogStore.Load().Add(e)
 }
 
 func logGet() []LogEntry {
