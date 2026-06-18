@@ -60,16 +60,34 @@ func (c *capturedAlerts) count() int {
 // are injected (one shared fake agent for every endpoint key).
 func newService(t *testing.T, cat *Catalog, agent AgentClient) (*DispatchService, *capturedAudit, *capturedAlerts) {
 	t.Helper()
+	return newServiceWith(t, cat, func(AgentEndpoint) (AgentClient, error) { return agent, nil })
+}
+
+// newServiceWith builds a service with a caller-supplied client factory (for
+// multi-agent / endpoint-rebinding tests); audit/alert/op-id are injected.
+func newServiceWith(t *testing.T, cat *Catalog, newClient func(AgentEndpoint) (AgentClient, error)) (*DispatchService, *capturedAudit, *capturedAlerts) {
+	t.Helper()
 	svc, err := NewDispatchService(&fakeCatProvider{cat: cat}, DispatchConfig{ProxyRepo: dispatchRepo})
 	if err != nil {
 		t.Fatalf("NewDispatchService: %v", err)
 	}
 	au, al := &capturedAudit{}, &capturedAlerts{}
-	svc.newClient = func(AgentEndpoint) (AgentClient, error) { return agent, nil }
+	svc.newClient = newClient
 	svc.newOpID = func() string { return "OP01" }
 	svc.auditSink = au.add
 	svc.alert = al.fire
 	return svc, au, al
+}
+
+// freshDispatchSeq is the RunningDigests sequence for a clean OutcomePlan
+// dispatch driven through the SERVICE: pre-plan read (prior), executor anchor
+// (prior), post-verify read (target).
+func freshDispatchSeq() [][]string {
+	return [][]string{
+		{dispatchRepo + "@" + digB},
+		{dispatchRepo + "@" + digB},
+		{dispatchRepo + "@" + digA},
+	}
 }
 
 var testEP = AgentEndpoint{Key: "agent-1", BaseURL: "http://agent.invalid"}
@@ -377,6 +395,130 @@ func TestService_DispatchAuditedBeforeTerminal(t *testing.T) {
 	}
 }
 
+// ─── P1.6d-0 findings: isolation, rebinding, key, alert suppression ─────────
+
+// A dispatch to agent B runs while agent A holds its single-flight — the
+// registry is per-agent, not a global lock.
+func TestService_PerAgentIsolation(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agentA := &fakeAgent{}
+	agentB := &fakeAgent{applyOpID: "op-b", waitState: agentStateSucceeded, runningSeq: freshDispatchSeq()}
+	agents := map[string]*fakeAgent{"A": agentA, "B": agentB}
+	svc, _, _ := newServiceWith(t, cat, func(ep AgentEndpoint) (AgentClient, error) { return agents[ep.Key], nil })
+
+	// Hold agent A's single-flight (as if a dispatch were mid-op).
+	regA, err := svc.registryFor(AgentEndpoint{Key: "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regA.exec.acquire() {
+		t.Fatal("acquire A should succeed")
+	}
+	defer regA.exec.release()
+
+	rep, err := svc.Dispatch(context.Background(), "admin@1", AgentEndpoint{Key: "B"},
+		DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+	if err != nil {
+		t.Fatalf("dispatch to B while A is busy: %v", err)
+	}
+	if rep.Terminal != TerminalSucceeded {
+		t.Fatalf("agent B terminal=%s; want succeeded (A's lock must not block B)", rep.Terminal)
+	}
+	if len(agentB.applyReqs) != 1 {
+		t.Fatalf("agent B should have applied once; got %d", len(agentB.applyReqs))
+	}
+}
+
+// A caller-supplied idempotency key is preserved verbatim (never re-minted).
+func TestService_CallerSuppliedIdempotencyKeyPreserved(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{applyOpID: "op-c", waitState: agentStateSucceeded, runningSeq: freshDispatchSeq()}
+	svc, _, _ := newService(t, cat, agent) // newOpID pinned → OP01 (must NOT be used)
+
+	opts := DefaultDispatchOptions()
+	opts.IdempotencyKey = "caller-key-123"
+	rep, err := svc.Dispatch(context.Background(), "admin@2", testEP, DispatchTarget{ReleaseID: "rel_a"}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.applyReqs[0].IdempotencyKey != "caller-key-123" {
+		t.Fatalf("apply key = %q; want the caller-supplied caller-key-123", agent.applyReqs[0].IdempotencyKey)
+	}
+	if rep.IdempotencyKey != "caller-key-123" {
+		t.Fatalf("report key = %q; want caller-key-123", rep.IdempotencyKey)
+	}
+}
+
+func TestService_SuccessDoesNotAlert(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent := &fakeAgent{applyOpID: "op-s", waitState: agentStateSucceeded, runningSeq: freshDispatchSeq()}
+	svc, _, al := newService(t, cat, agent)
+	rep, err := svc.Dispatch(context.Background(), "admin@3", testEP, DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Terminal != TerminalSucceeded {
+		t.Fatalf("terminal=%s; want succeeded", rep.Terminal)
+	}
+	if al.count() != 0 {
+		t.Fatalf("a successful dispatch must not alert; fired %d", al.count())
+	}
+}
+
+// Stale already-current is audited but does NOT page (it is a re-plan signal).
+func TestService_StaleAlreadyCurrentDoesNotAlert(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	drift := dispatchRepo + "@sha256:" + repeat64('e')
+	// pre-plan read shows target (already_current); executor re-read shows drift.
+	agent := &fakeAgent{runningSeq: [][]string{{dispatchRepo + "@" + digA}, {drift}}}
+	svc, au, al := newService(t, cat, agent)
+
+	rep, err := svc.Dispatch(context.Background(), "admin@4", testEP, DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions())
+	if !errors.Is(err, errStaleAlreadyCurrent) {
+		t.Fatalf("err = %v; want errStaleAlreadyCurrent", err)
+	}
+	if rep.Terminal != TerminalFailedNeedsAttn {
+		t.Fatalf("terminal=%s; want failed_needs_attn", rep.Terminal)
+	}
+	if al.count() != 0 {
+		t.Fatalf("stale already-current must NOT page; fired %d", al.count())
+	}
+	if len(au.byAction("release.dispatch.outcome")) != 1 {
+		t.Fatalf("stale must still be audited; got %+v", au.entries)
+	}
+}
+
+// Changing an endpoint's transport for the same key rebuilds the client.
+func TestService_EndpointRebindingUsesNewClient(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	agent1 := &fakeAgent{applyOpID: "op1", waitState: agentStateSucceeded, runningSeq: freshDispatchSeq()}
+	agent2 := &fakeAgent{applyOpID: "op2", waitState: agentStateSucceeded, runningSeq: freshDispatchSeq()}
+	var built []string
+	svc, _, _ := newServiceWith(t, cat, func(ep AgentEndpoint) (AgentClient, error) {
+		built = append(built, ep.BaseURL)
+		if ep.BaseURL == "url1" {
+			return agent1, nil
+		}
+		return agent2, nil
+	})
+
+	if _, err := svc.Dispatch(context.Background(), "admin@5", AgentEndpoint{Key: "X", BaseURL: "url1"},
+		DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions()); err != nil {
+		t.Fatal(err)
+	}
+	// Same key, new transport ⇒ rebind to the new client.
+	if _, err := svc.Dispatch(context.Background(), "admin@5", AgentEndpoint{Key: "X", BaseURL: "url2"},
+		DispatchTarget{ReleaseID: "rel_a"}, DefaultDispatchOptions()); err != nil {
+		t.Fatal(err)
+	}
+	if len(built) != 2 || built[0] != "url1" || built[1] != "url2" {
+		t.Fatalf("client factory built from %v; want [url1 url2]", built)
+	}
+	if len(agent2.applyReqs) != 1 {
+		t.Fatalf("rebind must route the second dispatch to the new client; agent2 applies=%d", len(agent2.applyReqs))
+	}
+}
+
 // ─── real transport wiring (default httpAgentClient, end-to-end) ─────────────
 
 func TestService_RealTransportEndToEnd(t *testing.T) {
@@ -428,10 +570,12 @@ func TestService_RealTransportEndToEnd(t *testing.T) {
 
 func repeat64(b byte) string { return strings.Repeat(string(b), 64) }
 
-// waitFor polls cond up to ~2s, failing the test if it never holds.
+// waitFor polls cond up to ~10s, failing the test if it never holds. The
+// generous ceiling is headroom for slow CI under -race + coverage; a passing
+// cond returns immediately, so it does not slow the happy path.
 func waitFor(t *testing.T, cond func() bool, what string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

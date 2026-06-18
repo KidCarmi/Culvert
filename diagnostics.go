@@ -158,6 +158,8 @@ func buildOperatorContract() OperatorContract {
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
+	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(),
+		cfg != nil && cfg.UnauthMode(), hasCredentialCapableProvider())...)
 	return OperatorContract{
 		Verdict:     rollUpVerdict(checks),
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -853,6 +855,69 @@ func authExemptDiagnostics(rules []PolicyRule, defaultAction PolicyAction) []Ope
 		})
 	}
 	return checks
+}
+
+// authCredentialRequiredDiagnostics reports operator risks for CredentialRequired
+// (CR) Stage-1 rules. It NEVER mutates rules — report only. Pure over an explicit
+// ruleset plus the two environmental facts it needs, so it is testable without
+// globals (buildOperatorContract supplies the live values):
+//
+//   - unauthMode: CR rules cannot fire while the proxy runs in UnauthMode (the
+//     whole auth gate is skipped), so they are dead rules → WARN.
+//   - hasCredProvider: whether any credential-capable validator is configured. CR
+//     rules with no such validator would challenge (407) covered requests forever
+//     → FAIL. SAML alone does NOT count (it cannot validate a presented in-band
+//     credential — see hasCredentialCapableProvider).
+func authCredentialRequiredDiagnostics(rules []PolicyRule, unauthMode, hasCredProvider bool) []OperatorContractCheck {
+	var names []string
+	for i := range rules {
+		r := &rules[i]
+		if ruleTypeOf(r) == ruleTypeAuth && r.Auth != nil && r.Auth.Outcome == OutcomeCredentialRequired {
+			names = append(names, r.Name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	var checks []OperatorContractCheck
+	if unauthMode {
+		checks = append(checks, OperatorContractCheck{
+			Code:           "auth_cr_dead_under_unauth_mode",
+			Status:         diagWarn,
+			Message:        "CredentialRequired rules cannot fire while the proxy is in UnauthMode (the auth gate is skipped): " + strings.Join(names, ", "),
+			OperatorAction: "Disable UnauthMode under Settings if these rules should enforce authentication, or remove the rules.",
+		})
+	}
+	if !hasCredProvider {
+		checks = append(checks, OperatorContractCheck{
+			Code:           "auth_cr_no_credential_provider",
+			Status:         diagFail,
+			Message:        "CredentialRequired rules exist but no credential-capable validator is configured — covered requests would be challenged (407) indefinitely: " + strings.Join(names, ", "),
+			OperatorAction: "Configure a local account, a legacy auth provider, or an OIDC IdP (SAML alone cannot validate presented credentials), or remove the CredentialRequired rules.",
+		})
+	}
+	return checks
+}
+
+// hasCredentialCapableProvider reports whether any validator that can verify a
+// PRESENTED in-band credential is configured: a local bcrypt account, the legacy
+// auth provider, or an enabled OIDC IdP profile. SAML profiles are excluded —
+// SAMLProvider.Verify always returns false (interactive browser SSO only), so a
+// SAML-only deployment cannot satisfy a CredentialRequired rule.
+func hasCredentialCapableProvider() bool {
+	if cfg != nil {
+		if cfg.GetUser() != "" || cfg.ProviderEnabled() {
+			return true
+		}
+	}
+	if idpRegistry != nil {
+		for _, p := range idpRegistry.All() {
+			if p != nil && p.Enabled && p.Type == IdPTypeOIDC {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // exemptRiskBuckets collects offending exempt-rule names per risk category.

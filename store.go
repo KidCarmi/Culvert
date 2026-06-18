@@ -36,6 +36,8 @@ var (
 	statBytesSent   int64 // total bytes sent upstream (request bodies)
 	statBytesRecv   int64 // total bytes received from upstream (response bodies)
 	statAuthExempt  int64 // Stage-1 Exempt decisions (Phase 1 Slice 5: defined, NOT incremented from runtime yet)
+
+	statAuthCredentialRequired int64 // Stage-1 CredentialRequired decisions (Phase 2 Slice 2: defined, NOT incremented from runtime yet)
 )
 
 // ─── Time-series: requests per minute, last 60 minutes ───────────────────────

@@ -362,7 +362,7 @@ tr.dragging  { opacity: .4; }
       <span class="icon">📋</span> Policy
     </div>
     <div class="nav-item" data-view="authpolicy">
-      <span class="icon">🪪</span> Auth Exempt
+      <span class="icon">🪪</span> Auth Policy
     </div>
     <div class="nav-item" data-view="urlcat" data-min-role="operator">
       <span class="icon">🏷️</span> URL Categories
@@ -409,6 +409,9 @@ tr.dragging  { opacity: .4; }
     </div>
     <div class="nav-item" data-view="updates" data-min-role="admin">
       <span class="icon">&#x2B06;</span> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
+    </div>
+    <div class="nav-item" data-view="releases">
+      <span class="icon">🚀</span> Releases
     </div>
     <div class="nav-item" data-view="diagnostics" data-min-role="admin">
       <span class="icon">🩺</span> Diagnostics
@@ -2364,17 +2367,23 @@ Firefox (all platforms):
 
     </div><!-- /view-policy -->
 
-    <!-- ── AUTH EXEMPT RULES (Stage-1 authentication policy) ─────────────── -->
+    <!-- ── AUTH POLICY RULES (Stage-1 authentication policy) ─────────────── -->
     <div class="view" id="view-authpolicy">
       <div class="panel" style="margin-bottom:14px">
         <div class="panel-body" style="font-size:.85rem;color:var(--muted)">
-          ⚠️ <strong style="color:var(--text)">Exempt ≠ Allow.</strong>
-          An exemption skips <em>end-user authentication only</em>, and only when the client presents
-          <em>no credentials</em>. Stage-2 policy still decides access — default-deny still applies.
-          No identity is ever created for exempt traffic. Creating, editing, deleting and reordering
-          exempt rules requires the <strong>admin</strong> role.
+          ⚠️ <strong style="color:var(--text)">Stage-1 outcome ≠ Allow.</strong>
+          Auth Policy rules decide <em>how a client authenticates</em> — they never allow traffic.
+          Stage-2 policy still decides access and default-deny still applies. Creating, editing,
+          deleting and reordering these rules requires the <strong>admin</strong> role.
+          <ul style="margin:8px 0 0;padding-left:18px">
+            <li><strong style="color:#fbbf24">Exempt</strong> — skips end-user authentication only, and only
+              when the client presents <em>no credentials</em>. No identity is ever created. Stage-2 still decides.</li>
+            <li><strong style="color:#60a5fa">CredentialRequired</strong> — returns a deterministic
+              <em>407 credential challenge</em>; the client must authenticate first. It <strong>does not allow
+              traffic</strong>, and the Stage-2 decision applies only after the client authenticates.</li>
+          </ul>
           <div id="ap-default-allow-warn" style="display:none;margin-top:8px;color:#fbbf24">
-            ⚠ The default policy action is <strong>Allow</strong> while exempt rules exist — exemptions add
+            ⚠ The default policy action is <strong>Allow</strong> while auth rules exist — exemptions add
             little over an allow-all default. Set the default action to deny (Zero Trust).
           </div>
         </div>
@@ -2382,20 +2391,26 @@ Firefox (all platforms):
 
       <div class="panel" style="margin-bottom:14px">
         <div class="panel-header">
-          <span class="panel-title">Auth Exempt Rules</span>
-          <button class="btn sm" data-click="apShowAdd">+ Add Exempt Rule</button>
+          <span class="panel-title">Auth Policy Rules</span>
+          <button class="btn sm" data-click="apShowAdd">+ Add Auth Rule</button>
         </div>
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>#</th><th>Name</th><th>On</th><th>Owner</th><th>Reason</th><th>Source CIDRs</th><th>Destination</th><th>Expiry</th><th>Warnings</th><th></th></tr></thead>
+            <thead><tr><th>#</th><th>Name</th><th>Outcome</th><th>On</th><th>Owner</th><th>Reason</th><th>Source CIDRs</th><th>Destination</th><th>Expiry</th><th>Warnings</th><th></th></tr></thead>
             <tbody id="ap-rules"></tbody>
           </table>
         </div>
       </div>
 
       <div class="panel" id="ap-form-panel" style="display:none">
-        <div class="panel-header"><span class="panel-title" id="ap-form-title">Add Exempt Rule</span></div>
+        <div class="panel-header"><span class="panel-title" id="ap-form-title">Add Auth Rule</span></div>
         <div class="panel-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+          <div><label class="label">Outcome *</label>
+            <select class="input" id="ap-outcome" data-change="apOutcomeChanged" style="width:100%">
+              <option value="Exempt">Exempt — skip authentication only</option>
+              <option value="CredentialRequired">CredentialRequired — force 407 credential challenge</option>
+            </select>
+            <div id="ap-outcome-help" style="font-size:.72rem;color:var(--muted);margin-top:4px"></div></div>
           <div><label class="label">Name *</label><input type="text" class="input" id="ap-name" style="width:100%"></div>
           <div><label class="label">Owner *</label><input type="text" class="input" id="ap-owner" placeholder="ops-team" style="width:100%"></div>
           <div><label class="label">Reason *</label><input type="text" class="input" id="ap-reason" placeholder="legacy device cannot authenticate" style="width:100%"></div>
@@ -2410,14 +2425,14 @@ Firefox (all platforms):
           <div><label class="label">HTTP Method (optional)</label><input type="text" class="input" id="ap-method" placeholder="GET" style="width:100%"></div>
           <div style="display:flex;align-items:end;gap:16px">
             <label style="font-size:.85rem"><input type="checkbox" id="ap-enabled" checked> Enabled</label>
-            <label style="font-size:.85rem" title="Waives authentication for ALL destinations from the matched source — least privilege is bypassed">
+            <label id="ap-broad-label" style="font-size:.85rem" title="Waives authentication for ALL destinations from the matched source — least privilege is bypassed">
               <input type="checkbox" id="ap-broad"> Broad exemption (all destinations)</label>
           </div>
         </div>
         <div class="panel-body" style="display:flex;gap:10px;border-top:1px solid var(--border)">
           <button class="btn" data-click="apSave">💾 Save</button>
           <button class="btn ghost" data-click="apCancel">Cancel</button>
-          <span style="font-size:.78rem;color:var(--muted);align-self:center">
+          <span id="ap-dest-hint" style="font-size:.78rem;color:var(--muted);align-self:center">
             A destination (FQDN or category group) is required unless “Broad exemption” is explicitly checked.
           </span>
         </div>
@@ -3567,6 +3582,53 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-governance -->
 
+    <!-- ═══ RELEASE MANAGEMENT (P1.6d-1) ═════════════════════════════════ -->
+    <div class="view" id="view-releases">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Release Management</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <label style="font-size:.75rem;color:var(--muted)">Agent
+              <input id="rel-agent" value="local" data-change="releaseAgentChange"
+                style="margin-left:6px;width:120px;padding:4px 6px;font-size:.8rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+            </label>
+            <button class="btn ghost sm" data-click="loadReleases">↺ Refresh</button>
+          </div>
+        </div>
+        <div style="padding:16px;display:grid;gap:12px">
+
+          <!-- Catalog -->
+          <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+            <div style="display:flex;align-items:center;margin-bottom:8px">
+              <div style="font-size:.78rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Release Catalog</div>
+              <span id="rel-catalog-meta" style="margin-left:auto;color:var(--muted);font-size:.72rem"></span>
+            </div>
+            <div id="rel-catalog" style="font-size:.85rem"><div style="color:var(--muted)">Loading…</div></div>
+          </div>
+
+          <!-- Current + Dispatch -->
+          <div style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+            <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+              <div style="font-size:.78rem;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Current Release</div>
+              <div id="rel-current" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">—</span></div>
+            </div>
+
+            <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
+              <div style="display:flex;align-items:center;margin-bottom:8px">
+                <div style="font-size:.78rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Dispatch Status</div>
+                <div style="margin-left:auto;display:flex;gap:6px" data-min-role="admin">
+                  <button id="rel-resume-btn" class="btn ghost sm" data-click="releaseResume" style="display:none">⟳ Resume</button>
+                  <button class="btn primary sm" data-click="releaseDispatchOpen">＋ Dispatch</button>
+                </div>
+              </div>
+              <div id="rel-status" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">No dispatch recorded for this agent.</span></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div><!-- /view-releases -->
+
     <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
     <!-- (embedded inside Security panel later, but available as standalone) -->
 
@@ -3596,6 +3658,39 @@ Firefox (all platforms):
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button class="btn ghost" data-click="confirmDialogResolve" data-arg="false">Cancel</button>
       <button class="btn danger" id="confirm-dialog-ok" data-click="confirmDialogResolve" data-arg="true">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Release dispatch modal (P1.6d-1, admin-only) -->
+<div id="release-dispatch-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px 28px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
+    <h3 style="margin:0 0 12px;font-size:1.05rem;font-weight:700">Dispatch Release</h3>
+    <p style="margin:0 0 16px;font-size:.82rem;color:var(--muted);line-height:1.5">Choose a release <b>or</b> a channel (not both). The agent applies the verified pinned digest.</p>
+    <div style="display:grid;gap:12px">
+      <label style="font-size:.78rem;color:var(--muted)">Release
+        <select id="rel-disp-release" data-change="releaseDispSelectRelease" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)"></select>
+      </label>
+      <label style="font-size:.78rem;color:var(--muted)">— or — Channel
+        <select id="rel-disp-channel" data-change="releaseDispSelectChannel" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+          <option value="">(none)</option>
+          <option value="recommended">recommended</option>
+          <option value="lts">lts</option>
+          <option value="critical">critical</option>
+        </select>
+      </label>
+      <label style="font-size:.78rem;color:var(--muted)">Agent
+        <input id="rel-disp-agent" value="local" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+      </label>
+      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-prebackup" data-change="releaseDispToggleBackup"> Pre-restart config backup (pre_backup)</label>
+      <label id="rel-disp-passlabel" style="font-size:.78rem;color:var(--muted);display:none">Backup passphrase reference (required for pre_backup)
+        <input id="rel-disp-passphrase" placeholder="env ref, e.g. CULVERT_BACKUP_PASSPHRASE" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+      </label>
+      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-norollback"> Disable auto-rollback (no_rollback)</label>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px">
+      <button class="btn ghost" data-click="releaseDispatchCancel">Cancel</button>
+      <button class="btn primary" id="rel-disp-submit" data-click="releaseDispatchSubmit">Dispatch</button>
     </div>
   </div>
 </div>
@@ -3871,6 +3966,13 @@ document.addEventListener('click', e => {
     case 'cdrTestPickFile':    cdrTestPickFile(); break;
     case 'cdrAuditFilter':     cdrAuditFilter(arg); break;
 
+    // ── Release management (P1.6d-1) ──
+    case 'loadReleases':           loadReleases(); break;
+    case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
+    case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
+    case 'releaseDispatchSubmit':  releaseDispatchSubmit(); break;
+    case 'releaseResume':          releaseResume(); break;
+
     default:
       console.warn('CSP delegation: unknown click action:', fn);
   }
@@ -3893,6 +3995,11 @@ document.addEventListener('change', e => {
     case 'syncFileFilter':    document.getElementById('pol-file-filter').checked = (el.value !== ''); break;
     case 'addCgCat':          addCgCat(); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
+    case 'releaseAgentChange':      releaseAgentChange(); break;
+    case 'releaseDispSelectRelease': if (el.value) document.getElementById('rel-disp-channel').value = ''; break;
+    case 'releaseDispSelectChannel': if (el.value) document.getElementById('rel-disp-release').value = ''; break;
+    case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
+    case 'apOutcomeChanged':  apOutcomeChanged(); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
 });
@@ -4066,8 +4173,9 @@ const viewMeta = {
   diagnostics:  { title: 'Diagnostics',   meta: 'Operator contract — readiness, security posture, and risky-mode warnings' },
   users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
-  authpolicy:     { title: 'Auth Exempt Rules', meta: 'Stage-1 authentication exemptions — Exempt skips authentication only; Stage-2 policy still applies' },
+  authpolicy:     { title: 'Auth Policy Rules', meta: 'Stage-1 authentication policy — Exempt skips authentication; CredentialRequired forces a 407 challenge. Neither allows traffic; Stage-2 policy still applies' },
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
+  releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -4102,6 +4210,8 @@ function switchView(name) {
   if (name === 'cdr')            loadCDRData();
   if (name === 'diagnostics')    loadDiagnostics();
   if (name === 'governance')     loadGovernance();
+  if (name === 'releases')       loadReleases();
+  if (name !== 'releases')       releaseStopStatusPoll(); // stop polling when leaving the panel
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -9080,15 +9190,22 @@ async function runPolicyTest() {
   if (data.auth) {
     const a = data.auth;
     const exempt = a.outcome === 'Exempt';
-    const badge = exempt
-      ? '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🪪 Exempt</span>'
-      : `<span style="color:var(--muted)">${escHtml(a.outcome)} (today's auth gate applies)</span>`;
+    const credReq = a.outcome === 'CredentialRequired';
+    let badge;
+    if (exempt) {
+      badge = '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🪪 Exempt</span>';
+    } else if (credReq) {
+      badge = '<span style="background:rgba(96,165,250,.15);color:#60a5fa;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🔐 CredentialRequired</span>';
+    } else {
+      badge = `<span style="color:var(--muted)">${escHtml(a.outcome)} (today's auth gate applies)</span>`;
+    }
     authHtml = `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px">
       <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-1 Authentication: ${badge}</div>
       ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''}</div>` : ''}
       ${exempt ? `<div class="pt-sub" style="color:#fbbf24;margin-top:4px">Exempt skips authentication only — it does NOT allow traffic. The Stage-2 access decision below still applies (Stage-2 sees authSource="${escHtml(a.stage2AuthSource)}").</div>` : ''}
-      ${a.credentialsPresented ? '<div class="pt-sub" style="color:var(--muted);margin-top:4px">Credentials presented — at runtime, credentials always win and exemptions are never evaluated.</div>' : ''}
-      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — all exemptions are forced to Default (auth required).</div>' : ''}
+      ${credReq ? '<div class="pt-sub" style="color:#60a5fa;margin-top:4px">CredentialRequired returns a deterministic 407 credential challenge — the client must authenticate first. This is NOT Allow. At runtime Stage-2 is NOT evaluated until the client authenticates; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-authentication decision (with the authenticated identity) may differ.</div>' : ''}
+      ${a.credentialsPresented ? '<div class="pt-sub" style="color:var(--muted);margin-top:4px">Credentials presented — at runtime, credentials always win and the Stage-1 outcome is not evaluated.</div>' : ''}
+      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — all exemptions are forced to Default (auth required). CredentialRequired is unaffected.</div>' : ''}
     </div>`;
   }
 
@@ -9147,6 +9264,13 @@ async function loadAuthPolicy() {
   } catch(e) { console.error(e); }
 }
 
+function apOutcomeBadge(r) {
+  const o = (r.auth && r.auth.outcome) || 'Exempt';
+  if (o === 'CredentialRequired')
+    return '<span style="background:rgba(96,165,250,.15);color:#60a5fa;padding:2px 8px;border-radius:12px;font-size:.72rem;font-weight:600">🔐 CredentialRequired</span>';
+  return '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.72rem;font-weight:600">🪪 Exempt</span>';
+}
+
 function apDestSummary(r) {
   if (r.auth && r.auth.broadExemption) return '<span style="color:#fbbf24">ALL (broad)</span>';
   const parts = [];
@@ -9167,7 +9291,7 @@ function apSourceSummary(r) {
 function renderAuthPolicy() {
   const tbody = document.getElementById('ap-rules');
   if (!apRules.length) {
-    tbody.innerHTML = '<tr><td colspan="10"><div class="empty-state"><div class="empty-icon">🪪</div>No exempt rules — all clients authenticate</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">🪪</div>No auth rules — all clients authenticate</div></td></tr>';
     return;
   }
   tbody.innerHTML = apRules.map((r, i) => {
@@ -9178,6 +9302,7 @@ function renderAuthPolicy() {
     return `<tr style="${enabled ? '' : 'opacity:.45'}">
       <td>${r.priority}</td>
       <td>${escHtml(r.name)}</td>
+      <td>${apOutcomeBadge(r)}</td>
       <td>${enabled ? '✓' : '✗'}</td>
       <td>${escHtml(r.auth && r.auth.owner || '')}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml(r.auth && r.auth.reason || '')}">${escHtml(r.auth && r.auth.reason || '')}</td>
@@ -9195,14 +9320,35 @@ function renderAuthPolicy() {
   }).join('');
 }
 
+// apOutcomeChanged gates the destination/broad-exemption controls by outcome.
+// CredentialRequired forces a non-interactive 407 challenge: broadExemption is an
+// Exempt-only acknowledgement (and the backend rejects it on CR), so it is
+// disabled, unchecked and visually dimmed, and a destination is always required.
+function apOutcomeChanged() {
+  const cr = document.getElementById('ap-outcome').value === 'CredentialRequired';
+  const broad = document.getElementById('ap-broad');
+  const broadLabel = document.getElementById('ap-broad-label');
+  if (cr) { broad.checked = false; }
+  broad.disabled = cr;
+  if (broadLabel) broadLabel.style.opacity = cr ? '.4' : '';
+  document.getElementById('ap-outcome-help').textContent = cr
+    ? 'Returns a deterministic 407 credential challenge — the client must authenticate first. Does NOT allow traffic; Stage-2 applies only after authentication. A destination is required.'
+    : 'Skips end-user authentication only (no identity is created), and only when the client presents no credentials. Stage-2 still decides access.';
+  document.getElementById('ap-dest-hint').textContent = cr
+    ? 'A destination (FQDN or category group) is required for CredentialRequired rules.'
+    : 'A destination (FQDN or category group) is required unless “Broad exemption” is explicitly checked.';
+}
+
 function apShowAdd() {
   apEditPriority = null;
-  document.getElementById('ap-form-title').textContent = 'Add Exempt Rule';
+  document.getElementById('ap-form-title').textContent = 'Add Auth Rule';
   ['ap-name','ap-owner','ap-reason','ap-cidrs','ap-destfqdn','ap-destgroup','ap-expires','ap-method'].forEach(id =>
     document.getElementById(id).value = '');
+  document.getElementById('ap-outcome').value = 'Exempt';
   document.getElementById('ap-protocol').value = '';
   document.getElementById('ap-enabled').checked = true;
   document.getElementById('ap-broad').checked = false;
+  apOutcomeChanged();
   document.getElementById('ap-form-panel').style.display = 'block';
 }
 
@@ -9210,7 +9356,8 @@ function apEditRule(priority) {
   const r = apRules.find(x => x.priority === priority);
   if (!r) return;
   apEditPriority = priority;
-  document.getElementById('ap-form-title').textContent = `Edit Exempt Rule #${priority}`;
+  document.getElementById('ap-form-title').textContent = `Edit Auth Rule #${priority}`;
+  document.getElementById('ap-outcome').value = (r.auth && r.auth.outcome) || 'Exempt';
   document.getElementById('ap-name').value = r.name || '';
   document.getElementById('ap-owner').value = r.auth && r.auth.owner || '';
   document.getElementById('ap-reason').value = r.auth && r.auth.reason || '';
@@ -9224,6 +9371,7 @@ function apEditRule(priority) {
   document.getElementById('ap-method').value = r.auth && r.auth.method || '';
   document.getElementById('ap-enabled').checked = r.enabled === undefined || r.enabled === null || r.enabled;
   document.getElementById('ap-broad').checked = !!(r.auth && r.auth.broadExemption);
+  apOutcomeChanged();
   document.getElementById('ap-form-panel').style.display = 'block';
 }
 
@@ -9234,6 +9382,10 @@ function apCancel() {
 
 async function apSave() {
   const cidrs = document.getElementById('ap-cidrs').value.split(',').map(s => s.trim()).filter(Boolean);
+  const outcome = document.getElementById('ap-outcome').value;
+  // broadExemption is Exempt-only — never send it for CredentialRequired (the
+  // backend rejects it, but force it false here so a stale checkbox cannot leak).
+  const broad = outcome === 'CredentialRequired' ? false : document.getElementById('ap-broad').checked;
   const rule = {
     name:     document.getElementById('ap-name').value.trim(),
     ruleType: 'auth',
@@ -9242,13 +9394,13 @@ async function apSave() {
     destFQDN:          document.getElementById('ap-destfqdn').value.trim(),
     destCategoryGroup: document.getElementById('ap-destgroup').value.trim(),
     auth: {
-      outcome:        'Exempt',
+      outcome:        outcome,
       owner:          document.getElementById('ap-owner').value.trim(),
       reason:         document.getElementById('ap-reason').value.trim(),
       expiresAt:      document.getElementById('ap-expires').value.trim(),
       protocol:       document.getElementById('ap-protocol').value,
       method:         document.getElementById('ap-method').value.trim(),
-      broadExemption: document.getElementById('ap-broad').checked,
+      broadExemption: broad,
     },
   };
   if (apEditPriority !== null) rule.priority = apEditPriority;
@@ -9259,17 +9411,17 @@ async function apSave() {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(rule),
     });
-    toast(apEditPriority !== null ? 'Exempt rule updated' : 'Exempt rule added', 'success');
+    toast(apEditPriority !== null ? 'Auth rule updated' : 'Auth rule added', 'success');
     apCancel();
     loadAuthPolicy();
   } catch(err) { toast('Save failed: ' + err.message, 'error'); }
 }
 
 async function apDeleteRule(priority) {
-  if (!await confirmDialog('Delete this exempt rule? Clients it covered will be challenged for authentication again.')) return;
+  if (!await confirmDialog('Delete this auth rule? Clients it covered will fall back to the default authentication gate.')) return;
   try {
     await api(`/api/authpolicy?priority=${priority}`, { method: 'DELETE' });
-    toast('Exempt rule deleted', 'success');
+    toast('Auth rule deleted', 'success');
     loadAuthPolicy();
   } catch(err) { toast('Delete failed: ' + err.message, 'error'); }
 }
@@ -9302,6 +9454,259 @@ async function loadAuditLog() {
     auditEntries = d.entries || [];
     renderAuditLog();
   } catch(err) { toast('Failed to load audit log: ' + err.message, 'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Release Management (P1.6d-1) — consumes existing /api/releases* routes only.
+// No new routes, no backend logic; read for viewers, dispatch/resume for admins.
+// ═══════════════════════════════════════════════════════════════════════════
+let releaseCatalog = null;
+let releaseStatusTimer = null;
+
+function releaseCurrentAgent() {
+  const el = document.getElementById('rel-agent');
+  return (el && el.value.trim()) || 'local';
+}
+function releaseAgentChange() { loadReleaseCurrent(); loadReleaseStatus(); }
+function releaseStopStatusPoll() { if (releaseStatusTimer) { clearTimeout(releaseStatusTimer); releaseStatusTimer = null; } }
+
+async function loadReleases() {
+  await loadReleaseCatalog();
+  await loadReleaseCurrent();
+  await loadReleaseStatus();
+}
+
+async function loadReleaseCatalog() {
+  const box = document.getElementById('rel-catalog');
+  const meta = document.getElementById('rel-catalog-meta');
+  if (box) box.innerHTML = '<div style="color:var(--muted)">Loading…</div>';
+  try {
+    const d = await api('/api/releases');
+    releaseCatalog = d;
+    renderReleaseCatalog(d, box, meta);
+  } catch (err) {
+    if (box) box.innerHTML = '<div style="color:var(--danger)">Failed to load catalog: ' + escHtml(err.message) + '</div>';
+    if (meta) meta.textContent = '';
+  }
+}
+
+function relSeverityBadge(s) {
+  const sev = (s || '').toString();
+  const color = sev === 'critical' ? 'var(--danger)' : 'var(--muted)';
+  return '<span style="font-size:.72rem;color:' + color + '">' + escHtml(sev || 'unknown') + '</span>';
+}
+function relChannelBadge(c) {
+  return '<span style="display:inline-block;padding:2px 7px;border-radius:999px;font-size:.68rem;font-weight:700;background:rgba(20,184,166,.15);color:#2dd4bf;margin-right:4px">' + escHtml(c) + '</span>';
+}
+
+function renderReleaseCatalog(d, box, meta) {
+  box = box || document.getElementById('rel-catalog');
+  meta = meta || document.getElementById('rel-catalog-meta');
+  if (!box) return;
+  if (!d || d.available !== true) {
+    box.innerHTML = '<div style="color:var(--muted)">No catalog loaded (available: false). A seeded or refreshed catalog will appear here.</div>';
+    if (meta) meta.textContent = '';
+    populateReleaseDispatchReleases([]);
+    return;
+  }
+  if (meta) meta.textContent = d.generated_at ? ('generated ' + escHtml(d.generated_at)) : '';
+  const rels = d.releases || [];
+  if (rels.length === 0) {
+    box.innerHTML = '<div style="color:var(--muted)">Catalog is empty.</div>';
+    populateReleaseDispatchReleases([]);
+    return;
+  }
+  let html = '<table style="width:100%;border-collapse:collapse"><thead><tr style="text-align:left;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em">'
+    + '<th style="padding:6px 8px">Release</th><th style="padding:6px 8px">Version</th><th style="padding:6px 8px">Severity</th><th style="padding:6px 8px">Channels</th></tr></thead><tbody>';
+  rels.forEach(r => {
+    const chans = (r.Channels || []).map(relChannelBadge).join('');
+    html += '<tr style="border-top:1px solid var(--border)">'
+      + '<td style="padding:6px 8px;font-family:monospace">' + escHtml(r.ReleaseID || '') + '</td>'
+      + '<td style="padding:6px 8px">' + escHtml(r.VersionID || '') + '</td>'
+      + '<td style="padding:6px 8px">' + relSeverityBadge(r.Severity) + '</td>'
+      + '<td style="padding:6px 8px">' + (chans || '<span style="color:var(--muted)">—</span>') + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+  populateReleaseDispatchReleases(rels);
+}
+
+function populateReleaseDispatchReleases(rels) {
+  const sel = document.getElementById('rel-disp-release');
+  if (!sel) return;
+  let opts = '<option value="">(choose a release)</option>';
+  (rels || []).forEach(r => {
+    opts += '<option value="' + escHtml(r.ReleaseID || '') + '">' + escHtml((r.ReleaseID || '') + ' — ' + (r.VersionID || '')) + '</option>';
+  });
+  sel.innerHTML = opts;
+}
+
+async function loadReleaseCurrent() {
+  const box = document.getElementById('rel-current');
+  if (!box) return;
+  const agent = releaseCurrentAgent();
+  try {
+    const r = await apiFetch('/api/releases/current?agent=' + encodeURIComponent(agent));
+    if (r.status === 404) { box.innerHTML = '<span style="color:var(--muted)">Unknown agent: ' + escHtml(agent) + '</span>'; return; }
+    if (r.status === 503) { box.innerHTML = '<span style="color:var(--warn,#f59e0b)">Agent unreachable</span>'; return; }
+    if (!r.ok)            { box.innerHTML = '<span style="color:var(--danger)">Error ' + r.status + '</span>'; return; }
+    const c = await r.json();
+    if (c.known) {
+      box.innerHTML = '<div><b>' + escHtml(c.release_id || '') + '</b> <span style="color:var(--muted)">' + escHtml(c.version_id || '') + '</span></div>'
+        + '<div style="color:var(--muted);font-size:.75rem;margin-top:4px">agent: ' + escHtml(agent) + '</div>';
+    } else {
+      box.innerHTML = '<span style="color:var(--muted)">Custom / unrecognized release on ' + escHtml(agent) + '</span>';
+    }
+  } catch (err) {
+    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>';
+  }
+}
+
+async function loadReleaseStatus(forceMore) {
+  releaseStopStatusPoll();
+  const box = document.getElementById('rel-status');
+  if (!box) return;
+  const agent = releaseCurrentAgent();
+  const more = (forceMore | 0);
+  try {
+    const rec = await api('/api/releases/dispatch/status?agent=' + encodeURIComponent(agent));
+    renderReleaseStatus(rec);
+    // Keep refreshing while a dispatch is in flight, OR for a few forced rounds
+    // after an action (dispatch/resume) whose background store update may lag
+    // the 202 response — otherwise the panel could freeze on a stale record.
+    if ((rec && rec.phase === 'dispatched') || more > 0) {
+      releaseStatusTimer = setTimeout(() => loadReleaseStatus(more > 0 ? more - 1 : 0), 2500);
+    }
+  } catch (err) {
+    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>';
+  }
+}
+
+function renderReleaseStatus(rec) {
+  const box = document.getElementById('rel-status');
+  const resumeBtn = document.getElementById('rel-resume-btn');
+  if (!box) return;
+  if (!rec || !rec.phase || rec.phase === 'none') {
+    box.innerHTML = '<span style="color:var(--muted)">No dispatch recorded for this agent.</span>';
+    if (resumeBtn) resumeBtn.style.display = 'none';
+    return;
+  }
+  const rows = [['phase', rec.phase]];
+  if (rec.op_id)      rows.push(['op_id', rec.op_id]);
+  if (rec.release_id) rows.push(['release', rec.release_id]);
+  if (rec.terminal)   rows.push(['terminal', rec.terminal]);
+  rows.push(['verified', rec.verified ? 'yes' : 'no']);
+  if (rec.detail)     rows.push(['detail', rec.detail]);
+  box.innerHTML = rows.map(kv =>
+    '<div><span style="color:var(--muted);display:inline-block;min-width:72px">' + escHtml(kv[0]) + '</span> <span style="font-family:monospace">' + escHtml(String(kv[1])) + '</span></div>'
+  ).join('');
+  // Resumable: a needs-attention terminal that still carries the op_id of an
+  // interrupted watch. Resume re-polls that op — it NEVER starts a new dispatch.
+  const resumable = rec.terminal === 'failed_needs_attn' && !!rec.op_id && !!rec.dispatch_id;
+  if (resumeBtn) {
+    resumeBtn.style.display = resumable ? '' : 'none';
+    resumeBtn.dataset.dispatchId = rec.dispatch_id || '';
+  }
+}
+
+function releaseDispatchOpen() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  document.getElementById('rel-disp-release').value = '';
+  document.getElementById('rel-disp-channel').value = '';
+  document.getElementById('rel-disp-agent').value = releaseCurrentAgent();
+  document.getElementById('rel-disp-prebackup').checked = false;
+  document.getElementById('rel-disp-norollback').checked = false;
+  document.getElementById('rel-disp-passphrase').value = '';
+  document.getElementById('rel-disp-passlabel').style.display = 'none';
+  document.getElementById('release-dispatch-modal').style.display = 'flex';
+}
+function releaseDispatchCancel() {
+  document.getElementById('release-dispatch-modal').style.display = 'none';
+}
+
+async function releaseDispatchSubmit() {
+  const releaseId = document.getElementById('rel-disp-release').value;
+  const channel   = document.getElementById('rel-disp-channel').value;
+  const agent     = document.getElementById('rel-disp-agent').value.trim() || 'local';
+  if (releaseId && channel) { toast('Choose a release OR a channel, not both', 'error'); return; }
+  if (!releaseId && !channel) { toast('Choose a release or a channel', 'error'); return; }
+  const preBackup = document.getElementById('rel-disp-prebackup').checked;
+  const passphraseRef = document.getElementById('rel-disp-passphrase').value.trim();
+  // pre_backup is honored by the agent ONLY with a passphrase_ref; without one
+  // the planner silently skips the backup. Require it so the checkbox is meaningful.
+  if (preBackup && !passphraseRef) {
+    toast('Pre-backup requires a backup passphrase reference (or uncheck it)', 'error');
+    return;
+  }
+  const body = {
+    agent: agent,
+    pre_backup: preBackup,
+    no_rollback: document.getElementById('rel-disp-norollback').checked,
+  };
+  if (preBackup) body.passphrase_ref = passphraseRef;
+  if (releaseId) body.release_id = releaseId; else body.channel = channel;
+  const btn = document.getElementById('rel-disp-submit');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/api/releases/dispatch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    let payload = {};
+    try { payload = await r.json(); } catch (_) {}
+    if (r.status === 202) {
+      toast('Dispatch accepted (op ' + (payload.op_id || '?') + ')', 'success');
+      releaseDispatchCancel();
+      if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
+    } else if (r.status === 200) {
+      // No-op success: the agent is already running the target release.
+      toast(payload.status === 'already_current'
+        ? 'Already on the target release — no dispatch needed'
+        : 'Dispatch accepted', 'success');
+      releaseDispatchCancel();
+      if (agent === releaseCurrentAgent()) { loadReleaseCurrent(); loadReleaseStatus(); }
+    } else if (r.status === 409) {
+      toast(payload.status === 'stale_replan_required' ? 'Node drifted — re-plan required' : 'A dispatch is already in flight on this agent', 'error');
+    } else if (r.status === 404) {
+      toast('Unknown agent: ' + agent, 'error');
+    } else if (r.status === 503) {
+      toast('Agent unavailable' + (payload.detail ? ': ' + payload.detail : ''), 'error');
+    } else if (r.status === 502) {
+      toast('Dispatch failed: ' + (payload.detail || 'agent error'), 'error');
+    } else {
+      toast('Refused: ' + (payload.kind || payload.detail || ('HTTP ' + r.status)), 'error');
+    }
+  } catch (err) {
+    toast('Dispatch error: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function releaseResume() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const resumeBtn  = document.getElementById('rel-resume-btn');
+  const dispatchId = resumeBtn ? resumeBtn.dataset.dispatchId : '';
+  const agent      = releaseCurrentAgent();
+  if (!dispatchId) { toast('No resumable operation', 'error'); return; }
+  try {
+    const r = await apiFetch('/api/releases/dispatch/resume', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: agent, dispatch_id: dispatchId }),
+    });
+    let payload = {};
+    try { payload = await r.json(); } catch (_) {}
+    if (r.status === 202) {
+      toast('Resume started (op ' + (payload.op_id || '?') + ')', 'success');
+      // The resume's store update lands AFTER this 202 (background goroutine), so
+      // force several polls to catch the resumed op's new terminal rather than
+      // freezing on the stale failed_needs_attn record.
+      loadReleaseStatus(6);
+    } else {
+      toast('Resume failed: ' + (payload.detail || ('HTTP ' + r.status)), 'error');
+    }
+  } catch (err) {
+    toast('Resume error: ' + err.message, 'error');
+  }
 }
 
 function renderAuditLog() {

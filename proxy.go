@@ -268,7 +268,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	var authenticatedIdentity string
 	var authenticatedGroups []string
 	authenticatedSource := "unauth" // default: no credentials presented
-	var authLog AuthLogFields       // Stage-1 auth observability; zero unless an exempt rule matched
+	var authLog AuthLogFields       // Stage-1 auth observability; zero unless an exempt or credential-required rule matched
 
 	authRequired := !cfg.UnauthMode() && (cfg.AuthEnabled() || cfg.ProviderEnabled() || len(idpRegistry.EnabledProviders()) > 0)
 
@@ -337,6 +337,30 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				incAuthExempt()
 				logger.Printf("AUTH_EXEMPT rule=%q id=%q %s -> %q {req_id=%s}",
 					sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
+			} else if d.Outcome == OutcomeCredentialRequired {
+				// ── 3b. No credentials — Stage-1 CredentialRequired challenge ──
+				// A matched CR rule demands a non-interactive credential
+				// challenge. Unlike Exempt this is NOT a waiver: we return a
+				// deterministic 407 immediately and DO NOT fall through to
+				// Stage-2 — the request must authenticate first. No identity is
+				// created (authenticatedIdentity stays empty → X-User-Identity is
+				// never set), the SSO captive redirect is suppressed, and the CR
+				// auth fields are attached to the request-log record. CRED_REQUIRED
+				// is a policy-driven challenge, not a failed credential attempt;
+				// statAuthFail is still bumped for 407-counter compatibility.
+				// Reachable only with no presented credentials (failed/malformed
+				// credentials 407 in arm 2 above; resolveNoCredAuthOutcome returns
+				// Default whenever a Proxy-Authorization header is present). The
+				// kill switch does NOT disable CR.
+				authLog = authLogFieldsFor(d)
+				atomic.AddInt64(&statAuthFail, 1)
+				incAuthCredentialRequired()
+				w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
+				http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+				recordRequestAuth(clientIP, r.Method, r.Host, "CRED_REQUIRED", d.Rule.Name, "", "", authLog)
+				logger.Printf("AUTH_CR rule=%q id=%q %s -> %q {req_id=%s action=challenge}",
+					sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
+				return
 			} else {
 				// ── 3. No credentials ────────────────────────────────────────
 				isBrowser := strings.Contains(r.Header.Get("User-Agent"), "Mozilla")

@@ -587,4 +587,18 @@ var uiRoutes = []uiRouteMetadata{
 	// ── Governance (Phase C3 — read-only control-plane visibility) ───────
 	{Path: "/api/governance/control-plane", Handler: "apiGovernanceControlPlane", Domain: "governance", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleAdmin, Note: "C3: read-only governance surface; admin-only by design"}}},
+
+	// ── Release management (P1.6d-0; dispatch service backend, no GUI) ─────
+	{Path: "/api/releases", Handler: "apiReleases", Domain: "release", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/releases/current", Handler: "apiReleaseCurrent", Domain: "release", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/releases/dispatch/status", Handler: "apiReleaseDispatchStatus", Domain: "release", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/releases/dispatch", Handler: "apiReleaseDispatch", Domain: "release", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true,
+			Note: "async dispatch; audited by DispatchService via auditAdd (not handler auditEvent), so AuditExpected stays false"}}},
+	{Path: "/api/releases/dispatch/resume", Handler: "apiReleaseDispatchResume", Domain: "release", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true,
+			Note: "re-poll existing op_id; never calls Apply; audited by DispatchService"}}},
 }
