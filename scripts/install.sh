@@ -549,33 +549,70 @@ dump_compose_diagnostics() {
 }
 
 ###############################################################################
-# Saved-log encryption passphrase
+# Encryption-at-rest passphrase
 ###############################################################################
-# Sets CULVERT_LOG_PASSPHRASE, which encrypts the saved request-log history
-# (/data/logstore) at rest with AES-256. Stored in $INSTALL_DIR/.env, which
-# docker-compose.yml reads as ${CULVERT_LOG_PASSPHRASE:-}. We NEVER overwrite an
-# existing value (regenerating would make previously saved logs unreadable).
-# Scoped to logs only — the SSL-inspection CA passphrase (CULVERT_CA_PASSPHRASE)
-# is left to the operator so this never disturbs an existing CA bundle.
-setup_log_passphrase() {
+# is_fresh_deployment — true when this looks like a first-time install: the
+# proxy-data Docker volume does not exist yet (Docker creates it on the first
+# `docker compose up`). Any docker error => treat as NOT fresh (conservative).
+is_fresh_deployment() {
+  local vols
+  vols="$(sudo docker volume ls --format '{{.Name}}' 2>/dev/null)" || return 1
+  ! grep -qE '(^|_)proxy-data$' <<<"$vols"
+}
+
+# secret_already_set VAR — true if VAR is non-empty in the host env or in .env.
+secret_already_set() {
+  local var="$1" envfile="$2"
+  [[ -n "${!var:-}" ]] && return 0
+  [[ -f "$envfile" ]] && grep -Eq "^${var}=.+" "$envfile" 2>/dev/null
+}
+
+# env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).
+env_put() {
+  local var="$1" val="$2" file="$3"
+  touch "$file"; chmod 600 "$file"
+  if grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null; then mv "$file.tmp" "$file"; else rm -f "$file.tmp"; fi
+  printf '%s=%s\n' "$var" "$val" >> "$file"
+  chmod 600 "$file"
+}
+
+gen_passphrase() {
+  local p
+  p="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
+  [[ -n "$p" ]] || p="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
+  printf '%s' "$p"
+}
+
+# Encrypts data at rest (AES-256), value(s) stored in $INSTALL_DIR/.env which
+# docker-compose.yml reads as ${CULVERT_*_PASSPHRASE:-}. We never overwrite an
+# existing value. On a FRESH deployment (no data volume yet) we can safely also
+# encrypt the SSL-inspection CA key, because there's no existing CA bundle to
+# clash with; on an EXISTING deployment we only set the saved-log passphrase and
+# leave the CA passphrase to the operator.
+setup_at_rest_encryption() {
   local envfile="$INSTALL_DIR/.env"
-  if [[ -f "$envfile" ]] && grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
-    info "Saved-log encryption passphrase already configured in $envfile — keeping it."
+  if secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" || secret_already_set CULVERT_CA_PASSPHRASE "$envfile"; then
+    info "Encryption passphrase already configured — keeping existing values."
     return
   fi
+
+  local fresh=0; is_fresh_deployment && fresh=1
 
   local choice="1"
   if [[ -t 0 ]]; then
     echo ""
-    echo "Encrypt saved request logs at rest? (AES-256; only applies if you later"
-    echo "enable 'Save logs to disk' in the admin UI)"
+    if [[ "$fresh" == 1 ]]; then
+      echo "First-time install — encrypt data at rest? (SSL-inspection CA key + saved logs, AES-256)"
+    else
+      echo "Encrypt saved request logs at rest? (AES-256; applies when you enable 'Save logs to disk')"
+    fi
     echo "  [1] Auto-generate a strong passphrase  (recommended)"
     echo "  [2] Enter my own passphrase"
-    echo "  [3] Skip — saved logs would be stored unencrypted"
+    echo "  [3] Skip — store unencrypted"
     read -rp "Choose [1/2/3] (default 1): " choice || true
     [[ -z "$choice" ]] && choice="1"
   else
-    info "Non-interactive install: auto-generating a saved-log passphrase (saved to .env)."
+    info "Non-interactive install: auto-generating an encryption passphrase (saved to .env)."
   fi
 
   local pass=""
@@ -587,34 +624,33 @@ setup_log_passphrase() {
       [[ "$pass" == "$pass2" ]] || error "Passphrases did not match."
       ;;
     3)
-      warn "Skipping log encryption — if you enable saving, logs are stored unencrypted."
-      warn "You can enable it later: set CULVERT_LOG_PASSPHRASE in $envfile and restart."
+      warn "Skipping encryption at rest. Enable later by setting CULVERT_LOG_PASSPHRASE"
+      warn "(and, on a clean setup, CULVERT_CA_PASSPHRASE) in $envfile, then restart."
       return
       ;;
     *)
-      pass="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
-      [[ -n "$pass" ]] || pass="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
-      info "Generated a random 40-character saved-log passphrase."
+      pass="$(gen_passphrase)"
+      info "Generated a random 40-character passphrase."
       ;;
   esac
 
-  touch "$envfile"; chmod 600 "$envfile"
-  if grep -vE '^CULVERT_LOG_PASSPHRASE=' "$envfile" > "$envfile.tmp" 2>/dev/null; then
-    mv "$envfile.tmp" "$envfile"
+  env_put CULVERT_LOG_PASSPHRASE "$pass" "$envfile"
+  if [[ "$fresh" == 1 ]]; then
+    env_put CULVERT_CA_PASSPHRASE "$pass" "$envfile"
+    info "Fresh deployment — also encrypting the SSL-inspection CA key with this passphrase."
   else
-    rm -f "$envfile.tmp"
+    info "Existing deployment — set the saved-log passphrase only (left the CA key untouched to"
+    info "avoid disturbing an existing CA bundle; set CULVERT_CA_PASSPHRASE yourself if needed)."
   fi
-  printf 'CULVERT_LOG_PASSPHRASE=%s\n' "$pass" >> "$envfile"
-  chmod 600 "$envfile"
 
   if [[ "$choice" != "2" ]]; then
-    warn "This passphrase is stored in $envfile (mode 600). If it is lost, any logs"
-    warn "saved under it can't be read — you'd purge and start a fresh store."
+    warn "Back up $envfile (mode 600). Data encrypted under this passphrase cannot be"
+    warn "recovered if it is lost."
   fi
 }
 
-step "Saved-log encryption"
-setup_log_passphrase
+step "Encryption at rest"
+setup_at_rest_encryption
 
 info "Pulling images and starting services (first run may take 1-2 minutes)..."
 
