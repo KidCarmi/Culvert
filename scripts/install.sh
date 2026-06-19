@@ -113,10 +113,10 @@ dump_docker_diagnostics() {
 
 REPO_URL="https://github.com/KidCarmi/Culvert.git"
 # Where to clone/run the stack. Honor CULVERT_DIR if set. Otherwise: root (the
-# appliance / first-boot / OVA case) gets the system path /srv/culvert — it is
-# world-traversable, so the unprivileged maintenance-agent service can reach it,
-# and it matches the agent config's compose_project_dir default. Non-root keeps
-# the familiar ~/Culvert.
+# appliance / first-boot / OVA case) gets the system path /srv/culvert — it
+# matches the agent config's compose_project_dir default, and the maintenance
+# agent reaches it via the culvert-maint group (0750 root:culvert-maint, granted
+# post-install) rather than world bits. Non-root keeps the familiar ~/Culvert.
 if [[ -n "${CULVERT_DIR:-}" ]]; then
   INSTALL_DIR="$CULVERT_DIR"
 elif [[ "$(id -u)" -eq 0 ]]; then
@@ -760,16 +760,18 @@ step "Maintenance agent (optional)"
 # and move on. Opt out entirely with CULVERT_SKIP_MAINT_AGENT=1.
 MAINT_AGENT_INSTALLED=0
 
-# path_world_traversable — true when an unprivileged service user (not the
-# owner, no special group) can traverse every ancestor of $1 and read $1's
-# docker-compose.yml. The agent runs as the unprivileged culvert-maint user and
-# the runner does chdir(compose_project_dir) BEFORE sudo, so a 0700 path such as
-# /root/Culvert makes every operation fail before sudo is even reached. We use
-# the world-execute / world-read bits as a conservative proxy: a system path
-# like /srv/culvert passes; a 0700 home or /root is rejected.
-path_world_traversable() {
-  local p="$1" mode
-  # Every ancestor (and the dir itself) must have the world-execute bit.
+# agent_ancestors_traversable — true when every ANCESTOR above $1 (its parent
+# up to /) is world-searchable. The agent runs as the unprivileged culvert-maint
+# user and the runner does chdir(compose_project_dir) BEFORE sudo, so the path
+# must be reachable by that user. We grant the LEAF dir group traversal
+# post-install (0750 root:culvert-maint via ensure_agent_traversal), so the leaf
+# itself has no world requirement and the compose file is read by root (no
+# world-read needed) — but ancestors we will not modify must already be
+# searchable, or the agent could never chdir in. A system path like /srv/culvert
+# passes (/, /srv are 0755); a 0700 home or /root is rejected at an ancestor.
+agent_ancestors_traversable() {
+  local p mode
+  p="$(dirname "$1")"
   while :; do
     [[ -d "$p" ]] || return 1
     mode="$(stat -c '%a' "$p" 2>/dev/null)" || return 1
@@ -777,9 +779,49 @@ path_world_traversable() {
     [[ "$p" == "/" ]] && break
     p="$(dirname "$p")"
   done
-  # The compose file itself must be world-readable.
-  mode="$(stat -c '%a' "$1/docker-compose.yml" 2>/dev/null)" || return 1
-  case "${mode: -1}" in 4|5|6|7) return 0 ;; *) return 1 ;; esac
+  return 0
+}
+
+# resolve_maint_version — the release tag to pin the agent to. Tracks the
+# running proxy so the agent matches the stack it operates: CULVERT_MAINT_VERSION
+# wins, else the proxy image's org.opencontainers.image.version label (bare
+# semver from docker/metadata-action, normalized to vX.Y.Z). Empty output means
+# "unknown" — the caller then BUILDS from source instead of downloading.
+resolve_maint_version() {
+  if [[ -n "${CULVERT_MAINT_VERSION:-}" ]]; then
+    echo "${CULVERT_MAINT_VERSION}"
+    return 0
+  fi
+  local v
+  v="$(sudo docker inspect culvert --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
+  if [[ -z "$v" || "$v" == "<no value>" ]]; then
+    v="$(sudo docker image inspect "$PINNED_TAG" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
+  fi
+  [[ "$v" == "<no value>" ]] && v=""
+  if [[ -n "$v" ]]; then
+    case "$v" in v*) echo "$v" ;; *) echo "v$v" ;; esac
+    return 0
+  fi
+  echo ""
+}
+
+# ensure_agent_traversal — grant the culvert-maint service group traversal of
+# the stack dir without world bits (least-privilege 0750 root:culvert-maint),
+# now that the installer has created the culvert-maint user/group. Only ADDS
+# access (chgrp + g+rx); never removes any. Probes with the real identity.
+ensure_agent_traversal() {
+  if sudo -u culvert-maint test -x "$INSTALL_DIR" 2>/dev/null; then
+    return 0
+  fi
+  info "Granting culvert-maint group traversal of $INSTALL_DIR (0750 root:culvert-maint)..."
+  sudo chgrp culvert-maint "$INSTALL_DIR" 2>/dev/null || true
+  sudo chmod g+rx "$INSTALL_DIR" 2>/dev/null || true
+  if sudo -u culvert-maint test -x "$INSTALL_DIR" 2>/dev/null; then
+    return 0
+  fi
+  warn "culvert-maint still cannot traverse $INSTALL_DIR — operations will fail at chdir."
+  warn "An ancestor directory is likely not searchable; move the stack under a system path (e.g. /srv/culvert)."
+  return 1
 }
 
 install_maint_agent() {
@@ -790,17 +832,11 @@ install_maint_agent() {
     return 0
   fi
 
-  # The systemd unit is the canonical "fully installed" marker — the agent
-  # installer writes it last, so its presence means a prior run completed. A
-  # bare binary with no unit is a PARTIAL install: fall through and let the
-  # idempotent installer finish the job rather than skip forever.
-  if [[ -f /etc/systemd/system/culvert-maint.service ]]; then
-    info "Maintenance agent already installed — leaving it unchanged"
-    return 0
-  fi
-
-  if [[ ! -f "$maint_installer" || ! -f cmd/culvert-maint/go.mod ]]; then
-    warn "Maintenance agent sources not found in this checkout — skipping"
+  # The installer script is required for every path (it installs binary,
+  # sudoers, and unit). The Go sources are only needed for the BUILD fallback —
+  # the signed-release download path does not need them.
+  if [[ ! -f "$maint_installer" ]]; then
+    warn "Maintenance agent installer not found in this checkout — skipping"
     return 0
   fi
 
@@ -808,6 +844,31 @@ install_maint_agent() {
   if ! command -v systemctl &>/dev/null; then
     warn "systemd not detected — the maintenance agent is a systemd service; skipping"
     return 0
+  fi
+
+  # Version we WANT installed (env → running proxy). Empty = build from source.
+  local target_version
+  target_version="$(resolve_maint_version)"
+
+  # Upgrade-aware: the systemd unit is the "fully installed" marker (written
+  # last). If it exists AND the installed agent already reports the target
+  # version, leave it. If versions differ, fall through to the idempotent
+  # (re)install to UPGRADE. A bare binary with no unit is a PARTIAL install —
+  # also fall through and let the installer finish.
+  if [[ -f /etc/systemd/system/culvert-maint.service ]]; then
+    local installed_version=""
+    if command -v culvert-maint &>/dev/null; then
+      installed_version="$(culvert-maint --version 2>/dev/null || true)"
+    fi
+    if [[ -n "$target_version" && "$installed_version" == "$target_version" ]]; then
+      info "Maintenance agent already at $target_version — leaving it unchanged"
+      return 0
+    fi
+    if [[ -z "$target_version" ]]; then
+      info "Maintenance agent installed ($installed_version); cannot resolve a target version — leaving it unchanged"
+      return 0
+    fi
+    info "Upgrading maintenance agent ($installed_version → $target_version)..."
   fi
 
   # The agent's sudoers allowlist is path-bound to this stack's directory. A
@@ -822,88 +883,109 @@ install_maint_agent() {
   esac
 
   # The unprivileged culvert-maint service must be able to chdir into the stack
-  # (the runner sets cmd.Dir = compose_project_dir before sudo). If the stack
-  # lives somewhere only its owner can traverse (e.g. a 0700 home, or /root when
-  # run as a non-default root checkout), the agent could never operate it — so
-  # skip cleanly instead of installing a guaranteed-broken binding.
-  if ! path_world_traversable "$INSTALL_DIR"; then
-    warn "Stack at '$INSTALL_DIR' is not traversable by an unprivileged service user."
-    warn "The maintenance agent runs as 'culvert-maint' and could not operate it; skipping."
-    warn "For unattended/appliance installs, place the stack at a system path, e.g.:"
+  # (the runner sets cmd.Dir = compose_project_dir before sudo). We grant the
+  # LEAF group traversal post-install (0750 root:culvert-maint), so it has no
+  # world requirement — but an ANCESTOR we will not modify that is unsearchable
+  # (e.g. a 0700 home, or /root) means the agent could never reach the stack.
+  # Skip cleanly instead of binding a guaranteed-broken path.
+  if ! agent_ancestors_traversable "$INSTALL_DIR"; then
+    warn "An ancestor of '$INSTALL_DIR' is not searchable by an unprivileged service user."
+    warn "The maintenance agent runs as 'culvert-maint' and could not chdir into the stack; skipping."
+    warn "For unattended/appliance installs, place the stack under a system path, e.g.:"
     warn "  sudo CULVERT_DIR=/srv/culvert bash scripts/install.sh"
     return 0
   fi
 
-  # Build into a throwaway temp dir so we never leave a (possibly root-owned)
-  # binary in the working tree; cleaned up on every return path. Prefer the
-  # host Go toolchain (fast), else build inside a throwaway golang container —
-  # Docker is already up here, so no host Go is required. The module is
-  # self-contained (its own go.mod / go.sum).
-  #
-  # libc / glibc strategy (the two builds differ ON PURPOSE):
-  #  - Host build: default toolchain (cgo on). The binary links the host's own
-  #    libc, so os/user honors NSS (LDAP/SSSD) when resolving allow_peers
-  #    usernames, and there is no glibc-version mismatch — it runs on the very
-  #    host it was built on.
-  #  - Container fallback: CGO_ENABLED=0 (static). A cgo binary from a newer
-  #    build image would demand that image's glibc and crash-loop on an older
-  #    host ("GLIBC_2.xx not found"); a static binary runs anywhere. The
-  #    trade-off is that os/user falls back to pure-Go /etc/passwd parsing, so
-  #    on a host whose allow_peers come from NSS the operator must use numeric
-  #    UIDs (warned below).
-  local build_dir maint_bin go_image
-  go_image="${CULVERT_GO_IMAGE:-golang:1.25}"
-  build_dir="$(mktemp -d)" || { warn "mktemp failed — skipping maintenance agent"; return 0; }
-  trap "rm -rf '$build_dir'" RETURN
-  maint_bin="$build_dir/culvert-maint"
-
-  if command -v go &>/dev/null; then
-    info "Building culvert-maint with the host Go toolchain..."
-    ( cd cmd/culvert-maint && go build -o "$maint_bin" . ) \
-      || warn "Host 'go build' failed — falling back to a Go build container..."
+  # ── Install: prefer the signed release, fall back to a local build. ─────────
+  local installed_ok=0
+  if [[ -n "$target_version" && -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]]; then
+    info "Installing maintenance agent from the signed release ($target_version)..."
+    # No positional binary → the agent installer downloads + cosign-verifies the
+    # release asset itself (fail-closed). Pass the resolved version through.
+    if sudo CULVERT_MAINT_VERSION="$target_version" bash "$maint_installer"; then
+      installed_ok=1
+    else
+      warn "Signed-release install failed (network/registry/verify) — falling back to a local build."
+    fi
   fi
-  if [[ ! -x "$maint_bin" ]]; then
-    info "Building culvert-maint in a Go container ($go_image; static, no host Go required)..."
-    if ! sudo docker run --rm -e CGO_ENABLED=0 \
-           -v "$INSTALL_DIR/cmd/culvert-maint":/src:ro,z \
-           -v "$build_dir":/out:z \
-           -w /src "$go_image" go build -o /out/culvert-maint . ; then
-      warn "Could not build culvert-maint (host Go and container build both failed)."
-      warn "Culvert is unaffected. Re-run later from $INSTALL_DIR:"
-      warn "  (cd cmd/culvert-maint && go build -o culvert-maint .) \\"
-      warn "    && sudo bash $maint_installer cmd/culvert-maint/culvert-maint"
+
+  if [[ "$installed_ok" -ne 1 ]]; then
+    # Build fallback (air-gap / registry-down / unknown version). Build into a
+    # throwaway temp dir so we never leave a (possibly root-owned) binary in the
+    # working tree; cleaned up on every return path. Prefer the host Go
+    # toolchain (fast), else a throwaway golang container — Docker is already up.
+    #
+    # libc / glibc strategy (the two builds differ ON PURPOSE):
+    #  - Host build: default toolchain (cgo on). os/user honors NSS (LDAP/SSSD)
+    #    when resolving allow_peers usernames; no glibc-version mismatch.
+    #  - Container fallback: CGO_ENABLED=0 (static). Runs anywhere, but os/user
+    #    falls back to pure-Go /etc/passwd parsing, so on a host whose
+    #    allow_peers come from NSS the operator must use numeric UIDs (warned).
+    if [[ ! -f cmd/culvert-maint/go.mod ]]; then
+      warn "No release installed and agent sources not present for a build fallback — skipping (Culvert is unaffected)."
       return 0
     fi
-    warn "Built a static (CGO_ENABLED=0) binary: allow_peers must be local"
-    warn "/etc/passwd users or numeric UIDs — NSS/LDAP usernames won't resolve."
-  fi
-  if [[ ! -x "$maint_bin" ]]; then
-    warn "culvert-maint binary missing after build — skipping (Culvert is unaffected)."
-    return 0
-  fi
+    local build_dir maint_bin go_image
+    go_image="${CULVERT_GO_IMAGE:-golang:1.25}"
+    build_dir="$(mktemp -d)" || { warn "mktemp failed — skipping maintenance agent"; return 0; }
+    trap "rm -rf '$build_dir'" RETURN
+    maint_bin="$build_dir/culvert-maint"
 
-  info "Running maintenance agent installer..."
-  if ! sudo bash "$maint_installer" "$maint_bin"; then
-    warn "Maintenance agent install did not complete — Culvert is unaffected."
-    return 0
+    if command -v go &>/dev/null; then
+      info "Building culvert-maint with the host Go toolchain..."
+      ( cd cmd/culvert-maint && go build -o "$maint_bin" . ) \
+        || warn "Host 'go build' failed — falling back to a Go build container..."
+    fi
+    if [[ ! -x "$maint_bin" ]]; then
+      info "Building culvert-maint in a Go container ($go_image; static, no host Go required)..."
+      if ! sudo docker run --rm -e CGO_ENABLED=0 \
+             -v "$INSTALL_DIR/cmd/culvert-maint":/src:ro,z \
+             -v "$build_dir":/out:z \
+             -w /src "$go_image" go build -o /out/culvert-maint . ; then
+        warn "Could not build culvert-maint (host Go and container build both failed)."
+        warn "Culvert is unaffected. Re-run later from $INSTALL_DIR:"
+        warn "  (cd cmd/culvert-maint && go build -o culvert-maint .) \\"
+        warn "    && sudo CULVERT_MAINT_SKIP_VERIFY=1 bash $maint_installer cmd/culvert-maint/culvert-maint"
+        return 0
+      fi
+      warn "Built a static (CGO_ENABLED=0) binary: allow_peers must be local"
+      warn "/etc/passwd users or numeric UIDs — NSS/LDAP usernames won't resolve."
+    fi
+    if [[ ! -x "$maint_bin" ]]; then
+      warn "culvert-maint binary missing after build — skipping (Culvert is unaffected)."
+      return 0
+    fi
+
+    info "Running maintenance agent installer (local build)..."
+    # A freshly built binary has no signature; trust it explicitly.
+    if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" "$maint_bin"; then
+      warn "Maintenance agent install did not complete — Culvert is unaffected."
+      return 0
+    fi
   fi
 
   # The installer seeds /etc/culvert-maint/config.toml from the example, whose
   # compose_project_dir default is /srv/culvert. This stack lives at
   # $INSTALL_DIR and the sudoers allowlist is path-bound to compose_project_dir,
   # so when the value is still the example default and we are elsewhere, point
-  # it at this stack and re-run to re-render the binding. We only ever rewrite
-  # the untouched default — never an operator-edited path.
+  # it at this stack and re-render the binding. We only ever rewrite the
+  # untouched default — never an operator-edited path. Re-render reuses the
+  # already-installed binary (skip-verify) so we never download twice.
   if [[ "$INSTALL_DIR" != "/srv/culvert" ]] \
      && grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
     info "Pointing maintenance agent at this stack (compose_project_dir=$INSTALL_DIR)..."
     sudo sed -i "s|^compose_project_dir = .*|compose_project_dir = \"$INSTALL_DIR\"|" /etc/culvert-maint/config.toml
-    if ! sudo bash "$maint_installer" "$maint_bin"; then
+    if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
       warn "Re-rendering the sudoers binding for $INSTALL_DIR failed."
       warn "Fix compose_project_dir in /etc/culvert-maint/config.toml and re-run the installer."
       return 0
     fi
   fi
+
+  # Grant the unprivileged agent group traversal of the stack dir (least-
+  # privilege 0750 root:culvert-maint), now that the user/group exist.
+  # Non-fatal: a warning here means operations would fail at chdir.
+  ensure_agent_traversal || true
 
   MAINT_AGENT_INSTALLED=1
   info "Maintenance agent installed (not started)."
