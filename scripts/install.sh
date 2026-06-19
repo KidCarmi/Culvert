@@ -798,8 +798,14 @@ resolve_maint_version() {
     v="$(sudo docker image inspect "$PINNED_TAG" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
   fi
   [[ "$v" == "<no value>" ]] && v=""
-  if [[ -n "$v" ]]; then
-    case "$v" in v*) echo "$v" ;; *) echo "v$v" ;; esac
+  # Normalize a leading v, then accept ONLY a real release semver (vX.Y.Z[-pre]).
+  # main-branch / dev images carry a non-release label (e.g. "main" → "vmain")
+  # for which no signed release asset exists; returning it would make the
+  # installer 404 on the download and then fall back anyway. Emit empty instead
+  # so the caller goes straight to the build fallback.
+  [[ -n "$v" && "$v" != v* ]] && v="v$v"
+  if [[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+    echo "$v"
     return 0
   fi
   echo ""
