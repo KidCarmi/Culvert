@@ -166,7 +166,7 @@ func enableLogStore(ctx context.Context, dir string, days int, gb float64) error
 	}
 	jctx, cancel := context.WithCancel(ctx)
 	ls.cancelJanitor = cancel
-	startLogStoreRetention(jctx, ls, 5*time.Minute)
+	startLogStoreRetention(jctx, ls, time.Minute)
 	globalLogStore.Store(ls)
 	setLogStoreDesired(days, gb)
 	return nil
@@ -351,6 +351,12 @@ func logStoreKeyTS(k []byte) int64 {
 // counter rather than stalling request handling.
 func (s *logStore) Add(e LogEntry) {
 	if s == nil {
+		return
+	}
+	// Emergency minimal mode: stop persisting low-priority (access/traffic)
+	// entries so the store stops growing under disk pressure; keep security
+	// (WARN/ERROR) events. The in-memory live feed still receives everything.
+	if minimalMode() && logEntryLowPriority(e.Level) {
 		return
 	}
 	s.closeMu.RLock()
@@ -572,67 +578,25 @@ func (s *logStore) Stats() logStoreStats {
 	return st
 }
 
-// RunRetention enforces the size cap: when on-disk size exceeds maxBytes it
-// deletes the oldest logStorePruneBatch entries and runs value-log GC. Age
-// retention is handled natively by per-key TTL, so this only addresses size.
-// One bounded pass per call; the janitor calls it on a timer so the cap
+// RunRetention enforces the size cap: when the tracked size exceeds maxBytes it
+// removes entries (low-priority first) until back under the cap, audits the
+// cleanup, and runs value-log GC. Age retention is handled natively by per-key
+// TTL. One bounded pass per call; the janitor calls it on a timer so the cap
 // converges across passes despite lazy LSM size accounting.
 func (s *logStore) RunRetention() {
 	if s == nil {
 		return
 	}
-	// Hold the read lock for the whole pass so Close cannot close the DB
-	// underneath an in-flight prune (shutdown safety).
-	s.closeMu.RLock()
-	defer s.closeMu.RUnlock()
-	if s.closed {
-		return
-	}
 	maxBytes := atomic.LoadInt64(&s.maxBytes)
-	if maxBytes <= 0 || atomic.LoadInt64(&s.bytesUsed) <= maxBytes {
+	if maxBytes <= 0 {
 		return
 	}
-	keys := make([][]byte, 0, logStorePruneBatch)
-	var freed int64
-	_ = s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Rewind(); it.Valid() && len(keys) < logStorePruneBatch; it.Next() {
-			item := it.Item()
-			keys = append(keys, item.KeyCopy(nil))
-			freed += itemLogicalSize(item)
-		}
-		return nil
-	})
-	if len(keys) == 0 {
+	used := atomic.LoadInt64(&s.bytesUsed)
+	if used <= maxBytes {
 		return
 	}
-	wb := s.db.NewWriteBatch()
-	for _, k := range keys {
-		_ = wb.Delete(k)
-	}
-	if err := wb.Flush(); err != nil {
-		logger.Printf("WARN logstore: retention delete: %v", err)
-		return
-	}
-	// Decrement the logical counter, clamping at zero (EstimatedSize is an
-	// estimate and TTL may have already removed some accounted bytes). A CAS
-	// loop keeps the clamp atomic against a concurrent flush increment — a
-	// plain Add-then-Store could wipe a flush that landed in between.
-	for {
-		old := atomic.LoadInt64(&s.bytesUsed)
-		nv := old - freed
-		if nv < 0 {
-			nv = 0
-		}
-		if atomic.CompareAndSwapInt64(&s.bytesUsed, old, nv) {
-			break
-		}
-	}
-	atomic.AddInt64(&statLogStorePruned, int64(len(keys)))
-	_ = s.db.RunValueLogGC(0.5) // reclaim disk; ErrNoRewrite is expected and ignored
+	freed, count, levels := s.cleanupBytes(used - maxBytes)
+	recordPressureCleanup("max log storage exceeded", freed, count, levels)
 }
 
 // SetRetention updates the retention policy at runtime. The new TTL applies to
@@ -767,6 +731,7 @@ func logStoreRetentionView() map[string]any {
 			"encryptionAvailable": logStoreEncryptionAvailable(),
 			"usage":               logStoreUsage(),
 			"estimate":            logStoreDiskEstimate(),
+			"guard":               diskGuardStatus(),
 		}
 	}
 	return map[string]any{
@@ -778,11 +743,13 @@ func logStoreRetentionView() map[string]any {
 		"encryptionAvailable": logStoreEncryptionAvailable(),
 		"usage":               logStoreUsage(),
 		"estimate":            logStoreDiskEstimate(),
+		"guard":               diskGuardStatus(),
 	}
 }
 
-// startLogStoreRetention runs the size janitor every interval until ctx is
-// cancelled (graceful shutdown).
+// startLogStoreRetention runs the disk-protection + size janitor every interval
+// until ctx is cancelled (graceful shutdown). Each tick enforces disk
+// protection (overrides retention near the critical threshold) and the size cap.
 func startLogStoreRetention(ctx context.Context, s *logStore, interval time.Duration) {
 	if s == nil || ctx == nil {
 		return // nil ctx would panic on <-ctx.Done(); guard defensively
@@ -795,7 +762,7 @@ func startLogStoreRetention(ctx context.Context, s *logStore, interval time.Dura
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.RunRetention()
+				runDiskGuard(s)
 			}
 		}
 	}()

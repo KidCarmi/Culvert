@@ -758,6 +758,25 @@ tr.dragging  { opacity: .4; }
             <div id="ret-encryption" style="font-size:.8rem;margin-top:8px"></div>
             <div id="log-retention-usage" style="font-size:.82rem;color:var(--muted);margin-top:8px">Loading…</div>
             <div style="font-size:.72rem;color:var(--muted);margin-top:8px">Age changes apply to newly logged requests; the size cap prunes oldest entries on the next sweep. Turning saving off keeps existing data on disk.</div>
+
+            <!-- Disk protection (always shown; protects the host even when saving is off) -->
+            <div style="margin-top:14px;border-top:1px solid rgba(127,127,127,.18);padding-top:12px">
+              <div style="font-weight:600;font-size:.85rem;margin-bottom:8px">🛡 Disk Protection
+                <span id="guard-mode-badge" style="margin-left:8px;font-size:.7rem;font-weight:700;padding:2px 8px;border-radius:99px"></span>
+              </div>
+              <div id="guard-warning" class="text-red" style="display:none;font-size:.82rem;font-weight:600;margin-bottom:10px"></div>
+              <div id="guard-status" style="font-size:.82rem;color:var(--muted);margin-bottom:10px">…</div>
+              <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end">
+                <div>
+                  <label class="form-label">Critical disk threshold (%)
+                    <span style="color:var(--muted);font-weight:400">at this disk usage, old logs are deleted even before retention expires</span>
+                  </label>
+                  <input type="number" min="50" max="99" class="input" id="ret-critical" style="width:130px">
+                </div>
+                <button class="btn" data-click="saveDiskThreshold">Save threshold</button>
+              </div>
+              <div style="font-size:.72rem;color:var(--muted);margin-top:8px">Disk protection always overrides retention. If cleanup can't free enough, the proxy keeps running and switches to <b>Minimal</b> logging — security events only — and raises an alert.</div>
+            </div>
           </div>
         </div>
       </div>
@@ -3738,6 +3757,7 @@ document.addEventListener('click', e => {
     case 'historyApply':      historyApply(); break;
     case 'historyPage':       historyPage(arg); break;
     case 'saveRetention':     saveRetention(); break;
+    case 'saveDiskThreshold': saveDiskThreshold(); break;
     case 'purgeHistory':      purgeHistory(); break;
     case 'setLogTab':         setLogTab(arg || ''); break;
 
@@ -5293,7 +5313,54 @@ async function loadRetention() {
     } else {
       usageEl.innerHTML = 'Saving is off — only the live 5,000-entry memory feed is kept. Flip the switch to start saving to disk.';
     }
+
+    renderDiskGuard(d.guard || {});
   } catch(e) { console.error(e); }
+}
+
+// renderDiskGuard shows disk usage, logging mode, last cleanup, pressure
+// deletions, the warning banner, and the critical-threshold input.
+function renderDiskGuard(g) {
+  document.getElementById('ret-critical').value = g.criticalDiskPct || 95;
+
+  const badge = document.getElementById('guard-mode-badge');
+  const minimal = !!g.minimalMode;
+  badge.textContent = (g.loggingMode || 'Normal') + ' logging';
+  badge.style.background = minimal ? 'rgba(239,68,68,.15)' : 'rgba(34,197,94,.15)';
+  badge.style.color = minimal ? 'var(--red)' : 'var(--green)';
+
+  const gw = document.getElementById('guard-warning');
+  if (g.warning) { gw.textContent = '⚠ ' + g.warning; gw.style.display = ''; }
+  else { gw.style.display = 'none'; }
+
+  let s = '';
+  if (g.diskUsedPct !== undefined) {
+    const crit = g.diskUsedPct >= (g.criticalDiskPct || 95);
+    s += `Disk: <b${crit ? ' class="text-red"' : ''}>${g.diskUsedPct.toFixed(1)}%</b> used ` +
+         `(${humanBytes(g.diskFreeBytes)} free of ${humanBytes(g.diskTotalBytes)})`;
+  } else {
+    s += 'Disk usage unavailable';
+  }
+  if (g.lastCleanupMs) {
+    s += `<br>Last auto-cleanup: ${new Date(g.lastCleanupMs).toLocaleString()}` +
+         (g.lastCleanupReason ? ` — ${escHtml(g.lastCleanupReason)}` : '');
+  }
+  if (g.pressureCount) {
+    s += `<br>Deleted under disk pressure: <b>${fmt(g.pressureCount)}</b> entries (${humanBytes(g.pressureBytes)})`;
+  }
+  document.getElementById('guard-status').innerHTML = s;
+}
+
+async function saveDiskThreshold() {
+  const pct = parseInt(document.getElementById('ret-critical').value, 10) || 95;
+  try {
+    await api('/api/logs/retention', {
+      method: 'PUT', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({criticalDiskPct: pct}),
+    });
+    toast('Critical disk threshold updated', 'success');
+    loadRetention();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
 // toggleLogSaving flips disk persistence on/off, sending the current retention.
