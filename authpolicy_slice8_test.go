@@ -165,10 +165,10 @@ func itoa(n int) string { return strconv.Itoa(n) }
 func TestSlice8_InvalidAuthRuleRejected(t *testing.T) {
 	withFreshPolicyStore(t)
 	for name, mutate := range map[string]func(map[string]any){
-		"missing owner":    func(m map[string]any) { m["auth"].(map[string]any)["owner"] = "" },
-		"missing reason":   func(m map[string]any) { m["auth"].(map[string]any)["reason"] = "" },
-		"reserved outcome": func(m map[string]any) { m["auth"].(map[string]any)["outcome"] = "SSORequired" },
-		"no destination":   func(m map[string]any) { delete(m, "destFQDN") },
+		"missing owner":   func(m map[string]any) { m["auth"].(map[string]any)["owner"] = "" },
+		"missing reason":  func(m map[string]any) { m["auth"].(map[string]any)["reason"] = "" },
+		"unknown outcome": func(m map[string]any) { m["auth"].(map[string]any)["outcome"] = "Bogus" },
+		"no destination":  func(m map[string]any) { delete(m, "destFQDN") },
 		"identity predicate": func(m map[string]any) {
 			m["subjectMatch"].(map[string]any)["all"] = []map[string]any{{"type": "directory_group", "values": []string{"eng"}}}
 		},

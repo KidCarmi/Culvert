@@ -55,11 +55,13 @@ func TestValidatePolicyRule_AcceptsValidAuthRule(t *testing.T) {
 	if err := validatePolicyRule(r, nil, -1); err == nil {
 		t.Fatal("validatePolicyRule must reject an invalid auth rule (missing spec)")
 	}
-	// And one with a reserved outcome is rejected, surfacing the validateAuthRule reason.
+	// And one with an unsupported outcome is rejected, surfacing the
+	// validateAuthRule reason. (SSORequired is no longer reserved as of Phase 3
+	// Slice 2; only genuinely-unknown outcomes are rejected here.)
 	r = validExemptRule()
-	r.Auth.Outcome = OutcomeSSORequired
-	if err := validatePolicyRule(r, nil, -1); err == nil || !strings.Contains(err.Error(), "reserved") {
-		t.Fatalf("validatePolicyRule must reject a reserved-outcome auth rule, got: %v", err)
+	r.Auth.Outcome = "Bogus"
+	if err := validatePolicyRule(r, nil, -1); err == nil {
+		t.Fatalf("validatePolicyRule must reject an unsupported-outcome auth rule, got: %v", err)
 	}
 }
 
@@ -79,17 +81,17 @@ func TestValidateAuthRule_UnsupportedOutcomeRejected(t *testing.T) {
 	}
 }
 
-func TestValidateAuthRule_ReservedOutcomesRejected(t *testing.T) {
-	// Phase 2 Slice 1 accepted CredentialRequired; only SSORequired stays reserved.
-	for _, oc := range []AuthOutcome{OutcomeSSORequired} {
-		r := validExemptRule()
+// Phase 2 Slice 1 activated CredentialRequired; Phase 3 Slice 2 activated
+// SSORequired. No AuthOutcome remains reserved — every defined outcome is now
+// accepted at validation (SSORequired stays runtime-inert until a later slice).
+// Only undefined/unknown outcome strings are rejected
+// (TestValidateAuthRule_UnsupportedOutcomeRejected).
+func TestValidateAuthRule_AllDefinedOutcomesAccepted(t *testing.T) {
+	for _, oc := range []AuthOutcome{OutcomeExempt, OutcomeCredentialRequired, OutcomeSSORequired} {
+		r := validExemptRule() // has owner/reason/subjectMatch/destination, no broadExemption
 		r.Auth.Outcome = oc
-		_, err := validateAuthRule(r)
-		if err == nil {
-			t.Errorf("outcome %q must be rejected as reserved", oc)
-		}
-		if err != nil && !strings.Contains(err.Error(), "reserved") {
-			t.Errorf("outcome %q should be rejected as reserved, got: %v", oc, err)
+		if _, err := validateAuthRule(r); err != nil {
+			t.Errorf("defined outcome %q must be accepted, got: %v", oc, err)
 		}
 	}
 }

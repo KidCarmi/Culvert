@@ -155,10 +155,13 @@ func TestPrePhase2_ProviderRefs_APIRejected(t *testing.T) {
 	body["auth"].(map[string]any)["providerRefs"] = []string{"okta-prod"}
 	w := httptest.NewRecorder()
 	apiAuthPolicy(w, roleReq(RoleAdmin, "POST", "/api/authpolicy", body))
-	if w.Code != 400 || !strings.Contains(w.Body.String(), "providerRefs is reserved") {
-		t.Fatalf("POST with providerRefs = %d (%q), want 400 reserved", w.Code, w.Body.String())
+	// providerRefs is active for SSORequired as of Phase 3 Slice 2, but remains
+	// rejected on Exempt rules (this rule is Exempt). The rejection still 400s;
+	// the message now names the outcome rather than "reserved".
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "providerRefs is not valid on Exempt") {
+		t.Fatalf("POST with providerRefs on Exempt = %d (%q), want 400", w.Code, w.Body.String())
 	}
 	if got := len(listAuthRules()); got != 0 {
-		t.Errorf("reserved-field rule must not be stored, got %d", got)
+		t.Errorf("providerRefs-bearing Exempt rule must not be stored, got %d", got)
 	}
 }

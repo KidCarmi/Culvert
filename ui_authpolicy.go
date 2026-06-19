@@ -126,6 +126,15 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Referential providerRefs check (SSORequired) — registry-aware, write-door
+	// only. Bulk persistence paths stay shape-only so registry drift never drops
+	// stored rules (DR-4). Phase 3 Slice 2.
+	if rule.Auth != nil {
+		if err := validateSSOProviderRefsLive(rule.Auth); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	added := policyStore.Add(rule)
 	policyStore.Save()
 	logger.Printf("UI: auth rule added priority=%s name=%q owner=%q",
@@ -163,6 +172,13 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := validatePolicyRule(rule, policyStore.List(), priority); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	// Referential providerRefs check (SSORequired) — write-door only (DR-4).
+	if rule.Auth != nil {
+		if err := validateSSOProviderRefsLive(rule.Auth); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if !policyStore.Update(priority, rule) {
 		http.Error(w, "rule not found", http.StatusNotFound)
