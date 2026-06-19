@@ -261,26 +261,31 @@ func TestP3S2_Persistence_RollbackImportClusterPreserveSSO(t *testing.T) {
 	}
 }
 
-// ── Resolver / runtime inertness ─────────────────────────────────────────────
+// ── Pure resolver (generalized in Phase 3 Slice 3) ───────────────────────────
+//
+// As of Slice 2 these asserted the pure resolver returned Default for SSORequired.
+// Slice 3 generalized the FULL pure resolver to return SSORequired (priority-
+// ordered). The RUNTIME no-credentials path stays SSO-inert and never shadows
+// Exempt/CR — that invariant is owned by the Phase 3 Slice 3 suite
+// (TestP3S3_Runtime_SSODoesNotShadow). Here we pin the pure-resolver behavior.
 
-func TestP3S2_ResolverInert_SSORequiredReturnsDefault(t *testing.T) {
+func TestP3S2_PureResolver_SSORequiredResolves(t *testing.T) {
 	ctx := RequestContext{ClientIP: "10.0.5.7", Host: "portal.example.com", Protocol: "http", Method: "GET"}
-	if d := resolveAuthOutcomeFrom([]PolicyRule{validSSORule()}, ctx); d.Outcome != OutcomeDefault {
-		t.Fatalf("SSORequired must be resolver-inert (Default), got %q", d.Outcome)
+	if d := resolveAuthOutcomeFrom([]PolicyRule{validSSORule()}, ctx); d.Outcome != OutcomeSSORequired {
+		t.Fatalf("pure resolver must return SSORequired (Phase 3 Slice 3), got %q", d.Outcome)
 	}
 }
 
-// A higher-priority SSORequired rule must NOT shadow a lower-priority Exempt
-// rule: the resolver skips the inert SSO rule and Exempt wins.
-func TestP3S2_ResolverInert_SSODoesNotShadowExempt(t *testing.T) {
+// In the pure resolver, a higher-priority SSORequired rule wins by priority.
+func TestP3S2_PureResolver_SSOPriorityOverExempt(t *testing.T) {
 	sso := validSSORule()
 	sso.Priority = 1
 	ex := validExemptRule()
 	ex.Name, ex.Priority, ex.DestFQDN = "exempt-2", 2, "portal.example.com"
 	ex.SubjectMatch = &SubjectMatch{SchemaVersion: 1, All: []SubjectPredicate{{Type: subjectPredicateCIDR, Values: []string{"10.0.5.0/24"}}}}
 	ctx := RequestContext{ClientIP: "10.0.5.7", Host: "portal.example.com", Protocol: "http", Method: "GET"}
-	if d := resolveAuthOutcomeFrom([]PolicyRule{sso, ex}, ctx); d.Outcome != OutcomeExempt {
-		t.Fatalf("inert SSO@1 must not shadow Exempt@2; got %q", d.Outcome)
+	if d := resolveAuthOutcomeFrom([]PolicyRule{sso, ex}, ctx); d.Outcome != OutcomeSSORequired {
+		t.Fatalf("pure resolver: SSO@1 must win by priority; got %q", d.Outcome)
 	}
 }
 

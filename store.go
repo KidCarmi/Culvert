@@ -37,7 +37,9 @@ var (
 	statBytesRecv   int64 // total bytes received from upstream (response bodies)
 	statAuthExempt  int64 // Stage-1 Exempt decisions (Phase 1 Slice 5: defined, NOT incremented from runtime yet)
 
-	statAuthCredentialRequired int64 // Stage-1 CredentialRequired decisions (Phase 2 Slice 2: defined, NOT incremented from runtime yet)
+	statAuthCredentialRequired int64 // Stage-1 CredentialRequired decisions (Phase 2 Slice 3: wired onto the runtime path)
+
+	statAuthSSORequired int64 // Stage-1 SSORequired decisions (Phase 3 Slice 3: defined, NOT incremented from runtime yet)
 )
 
 // ─── Time-series: requests per minute, last 60 minutes ───────────────────────

@@ -278,6 +278,7 @@ type simResp struct {
 	} `json:"rule"`
 	Auth struct {
 		Outcome              string `json:"outcome"`
+		RuntimeOutcome       string `json:"runtimeOutcome"`
 		KillSwitch           bool   `json:"killSwitch"`
 		CredentialsPresented bool   `json:"credentialsPresented"`
 		Stage2AuthSource     string `json:"stage2AuthSource"`
