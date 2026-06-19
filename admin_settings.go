@@ -59,6 +59,9 @@ type AdminSettings struct {
 	LogStoreEnabledSaved bool `json:"log_store_enabled_saved"`
 	LogStoreEnabled      bool `json:"log_store_enabled"`
 
+	// LogCriticalDiskPct is the disk-protection threshold (%). 0 = use default.
+	LogCriticalDiskPct int `json:"log_critical_disk_pct,omitempty"`
+
 	// Session
 	SessionTimeoutHours int `json:"session_timeout_hours,omitempty"`
 
@@ -191,6 +194,9 @@ func applyAdminServices(s *AdminSettings) {
 		// retention only — never force-disable.
 		globalLogStore.Load().SetRetention(s.LogRetentionDays, s.LogRetentionMaxGB)
 		setLogStoreDesired(s.LogRetentionDays, s.LogRetentionMaxGB)
+	}
+	if s.LogCriticalDiskPct > 0 {
+		setCriticalDiskPct(s.LogCriticalDiskPct)
 	}
 	applyBlocklistFeeds(s)
 	if s.SaaSFeedURL != "" {
@@ -361,6 +367,7 @@ func SaveAdminSettings() {
 	s.LogStoreEnabled = globalLogStore.Load() != nil
 	s.LogRetentionSaved = true
 	s.LogRetentionDays, s.LogRetentionMaxGB = getLogStoreDesired()
+	s.LogCriticalDiskPct = getCriticalDiskPct()
 
 	// YARA engine settings
 	s.YARASettingsSaved = true

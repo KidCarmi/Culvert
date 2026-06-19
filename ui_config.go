@@ -348,33 +348,32 @@ func apiLogsRetention(w http.ResponseWriter, r *http.Request) {
 // apply the enable/disable/retention change and persist.
 func apiLogsRetentionUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Enabled        *bool    `json:"enabled"`
-		RetentionDays  *int     `json:"retentionDays"`
-		RetentionMaxGB *float64 `json:"retentionMaxGB"`
+		Enabled         *bool    `json:"enabled"`
+		RetentionDays   *int     `json:"retentionDays"`
+		RetentionMaxGB  *float64 `json:"retentionMaxGB"`
+		CriticalDiskPct *int     `json:"criticalDiskPct"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	// Resolve target retention: the provided value, else the current store's,
-	// else 0 (no limit).
-	days, gb := 0, 0.0
-	if ls := globalLogStore.Load(); ls != nil {
-		days, gb = ls.RetentionDays(), ls.RetentionMaxGB()
+	// Critical disk threshold is independent of the store being enabled.
+	if !applyCriticalDiskPct(w, body.CriticalDiskPct) {
+		return // out-of-range error already written
 	}
-	if body.RetentionDays != nil {
-		days = *body.RetentionDays
-	}
-	if body.RetentionMaxGB != nil {
-		gb = *body.RetentionMaxGB
-	}
-	if days < 0 || days > 3650 {
-		http.Error(w, "retentionDays must be between 0 and 3650", http.StatusBadRequest)
+	// Settings-only change (e.g. just the critical-disk threshold): apply and
+	// return without requiring the store to be on.
+	if body.Enabled == nil && body.RetentionDays == nil && body.RetentionMaxGB == nil {
+		if body.CriticalDiskPct != nil {
+			auditEvent(r, "logstore.disk_threshold", "history", fmt.Sprintf("criticalDiskPct=%d", *body.CriticalDiskPct))
+		}
+		adminSettingsSave()
+		jsonOK(w, logStoreRetentionView())
 		return
 	}
-	if gb < 0 || gb > 10000 {
-		http.Error(w, "retentionMaxGB must be between 0 and 10000", http.StatusBadRequest)
-		return
+	days, gb, ok := resolveRetentionTarget(w, body.RetentionDays, body.RetentionMaxGB)
+	if !ok {
+		return // validation error already written
 	}
 	if !applyRetentionUpdate(w, r, body.Enabled, days, gb) {
 		return // applyRetentionUpdate already wrote the error response
@@ -385,6 +384,45 @@ func apiLogsRetentionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	adminSettingsSave()
 	jsonOK(w, logStoreRetentionView())
+}
+
+// applyCriticalDiskPct validates and applies an optional critical-disk-usage
+// threshold (50–99). Returns false after writing a 400 if out of range; nil
+// pointer is a no-op success.
+func applyCriticalDiskPct(w http.ResponseWriter, p *int) bool {
+	if p == nil {
+		return true
+	}
+	if *p < 50 || *p > 99 {
+		http.Error(w, "criticalDiskPct must be between 50 and 99", http.StatusBadRequest)
+		return false
+	}
+	setCriticalDiskPct(*p)
+	return true
+}
+
+// resolveRetentionTarget resolves the effective retention (provided value, else
+// the current store's, else 0) and validates the bounds. Returns ok=false after
+// writing a 400 on a range violation.
+func resolveRetentionTarget(w http.ResponseWriter, rdays *int, rgb *float64) (days int, gb float64, ok bool) {
+	if ls := globalLogStore.Load(); ls != nil {
+		days, gb = ls.RetentionDays(), ls.RetentionMaxGB()
+	}
+	if rdays != nil {
+		days = *rdays
+	}
+	if rgb != nil {
+		gb = *rgb
+	}
+	if days < 0 || days > 3650 {
+		http.Error(w, "retentionDays must be between 0 and 3650", http.StatusBadRequest)
+		return 0, 0, false
+	}
+	if gb < 0 || gb > 10000 {
+		http.Error(w, "retentionMaxGB must be between 0 and 10000", http.StatusBadRequest)
+		return 0, 0, false
+	}
+	return days, gb, true
 }
 
 // applyRetentionUpdate performs the enable/disable/retention-only action. It
