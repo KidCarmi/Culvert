@@ -815,7 +815,9 @@ ensure_agent_traversal() {
   fi
   info "Granting culvert-maint group traversal of $INSTALL_DIR (0750 root:culvert-maint)..."
   sudo chgrp culvert-maint "$INSTALL_DIR" 2>/dev/null || true
-  sudo chmod g+rx "$INSTALL_DIR" 2>/dev/null || true
+  # Group SEARCH only (chdir), not read — the agent never lists the dir; docker
+  # (under sudo, as root) reads the compose file. Matches the X_OK probe intent.
+  sudo chmod g+x "$INSTALL_DIR" 2>/dev/null || true
   if sudo -u culvert-maint test -x "$INSTALL_DIR" 2>/dev/null; then
     return 0
   fi

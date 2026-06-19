@@ -510,6 +510,14 @@ jobs:
         run: |
           cat subjects/subjects-*.txt > all-subjects.txt
           echo "Merged SLSA subjects:"; cat all-subjects.txt
+          # Fail closed if any leg dropped its artifact — partial provenance
+          # (fewer subjects than published binaries) is a silent supply-chain
+          # gap. Expect 7: 5 proxy binaries + 2 linux agent binaries.
+          n=$(grep -c . all-subjects.txt)
+          if [ "$n" -ne 7 ]; then
+            echo "::error::expected 7 SLSA subjects (5 proxy + 2 agent), got $n — a release leg likely failed to upload its subjects artifact"
+            exit 1
+          fi
           echo "hashes=$(base64 -w0 all-subjects.txt)" >> "$GITHUB_OUTPUT"
 
   # ─── SLSA provenance ──────────────────────────────────────────────────────

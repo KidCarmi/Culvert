@@ -157,6 +157,9 @@ trap cleanup EXIT
 # $CULVERT_MAINT_SIG/_PEM) when present, or trusted with $CULVERT_MAINT_SKIP_VERIFY=1.
 
 CERT_OIDC_ISSUER=${CULVERT_MAINT_CERT_OIDC_ISSUER:-https://token.actions.githubusercontent.com}
+# The cosign verifier image IS the root of trust for the download path. A bare
+# tag is mutable; high-assurance / air-gapped operators should override this
+# with a digest-pinned ref (ghcr.io/sigstore/cosign:v2.4.1@sha256:<digest>).
 COSIGN_IMAGE=${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign:v2.4.1}
 GH_REPO=${CULVERT_MAINT_GITHUB_REPO:-KidCarmi/Culvert}
 
@@ -179,7 +182,10 @@ verify_cosign() {
     [ -f "$_dir/$_bin.sig" ] || die "missing signature: $_bin.sig"
     [ -f "$_dir/$_bin.pem" ] || die "missing certificate: $_bin.pem"
     log "verifying $_bin with cosign (identity=$_ident) ..."
-    docker run --rm -v "$_dir:/work:ro" -w /work "$COSIGN_IMAGE" \
+    # --user 0:0: the scratch dir is mktemp -d (0700 root); the cosign image
+    # defaults to USER nonroot (65532), which could not traverse/read the
+    # root-owned mount. The files are root-owned, so run cosign as root.
+    docker run --rm --user 0:0 -v "$_dir:/work:ro" -w /work "$COSIGN_IMAGE" \
         verify-blob \
         --certificate "$_bin.pem" \
         --signature   "$_bin.sig" \
@@ -217,6 +223,9 @@ if [ -n "${BIN_ARG:-}" ]; then
         cp "$_sig"    "$CLEAN_VERIFY_DIR/culvert-maint.sig"
         cp "$_pem"    "$CLEAN_VERIFY_DIR/culvert-maint.pem"
         verify_cosign "$CLEAN_VERIFY_DIR" culvert-maint "$_ident"
+        # Install the EXACT bytes that just passed cosign, not the original
+        # path (which a racing process could swap post-verification).
+        BIN_SRC="$CLEAN_VERIFY_DIR/culvert-maint"
     fi
     log "using local agent binary: $BIN_SRC"
 else
@@ -273,7 +282,14 @@ fi
 
 # ── 3. Binary ────────────────────────────────────────────────────────────────
 
-install -m 0755 -o root -g root "$BIN_SRC" /usr/local/bin/culvert-maint
+# Skip the copy when re-running with the already-installed binary as the source
+# (the quick-start re-render path passes /usr/local/bin/culvert-maint) — GNU
+# `install` errors "are the same file" and would abort under set -e.
+if [ "$(readlink -f "$BIN_SRC")" = "$(readlink -f /usr/local/bin/culvert-maint 2>/dev/null)" ]; then
+    log "binary source is already the installed binary; skipping copy"
+else
+    install -m 0755 -o root -g root "$BIN_SRC" /usr/local/bin/culvert-maint
+fi
 log "installed /usr/local/bin/culvert-maint"
 
 # ── 4. Config (never clobber an existing one) ────────────────────────────────
