@@ -104,11 +104,14 @@ func TestP2S1_CR_RejectsInvalid(t *testing.T) {
 	}
 }
 
-func TestP2S1_SSORequiredStillReserved(t *testing.T) {
+// SSORequired was reserved in Phase 2; Phase 3 Slice 2 activated its validation
+// and persistence (still runtime-inert). Acceptance is owned by the Phase 3
+// Slice 2 suite; here we only confirm it is no longer rejected at validation.
+func TestP2S1_SSORequiredActivatedInPhase3(t *testing.T) {
 	r := validCRRule()
 	r.Auth.Outcome = OutcomeSSORequired
-	if _, err := validateAuthRule(r); err == nil {
-		t.Fatal("SSORequired must remain reserved/rejected")
+	if _, err := validateAuthRule(r); err != nil {
+		t.Fatalf("SSORequired must validate as of Phase 3 Slice 2: %v", err)
 	}
 }
 

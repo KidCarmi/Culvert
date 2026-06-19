@@ -61,7 +61,8 @@ func TestP2S4_API_RejectsCRInvalidForms(t *testing.T) {
 		"broadExemption on CR": func(m map[string]any) { m["auth"].(map[string]any)["broadExemption"] = true },
 		"no destination":       func(m map[string]any) { delete(m, "destFQDN") },
 		"providerRefs set":     func(m map[string]any) { m["auth"].(map[string]any)["providerRefs"] = []string{"oidc-corp"} },
-		"reserved SSORequired": func(m map[string]any) { m["auth"].(map[string]any)["outcome"] = "SSORequired" },
+		// Note: SSORequired is no longer an "invalid CR form" — it is a valid
+		// outcome as of Phase 3 Slice 2 (CR providerRefs stays deferred above).
 	}
 	for name, mutate := range cases {
 		body := crRuleMap("p2s4-bad-" + strings.ReplaceAll(name, " ", "-"))

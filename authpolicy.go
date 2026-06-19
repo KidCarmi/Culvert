@@ -667,11 +667,13 @@ var identityPredicateTypes = map[string]bool{
 }
 
 // validateAuthRule validates a ruleType="auth" rule. Supported outcomes are
-// Exempt (Phase 1) and CredentialRequired (Phase 2 Slice 1 — validated and
-// persisted, but runtime-inert: the resolver returns Default for it until a
-// later slice wires it). It returns any non-fatal warnings (broad scope, broad
-// exemption, expired, ignored method) alongside a fatal error. It does NOT
-// mutate the rule and has no runtime side effects. See
+// Exempt (Phase 1), CredentialRequired (Phase 2 Slice 1) and SSORequired
+// (Phase 3 Slice 2 — validated and persisted, but runtime-inert: the resolver
+// returns Default for it until a later slice wires it). It returns any non-fatal
+// warnings (broad scope, broad exemption, expired, ignored method) alongside a
+// fatal error. It is PURE — it does NOT consult the IdP registry or any other
+// global (the providerRefs referential check is validateSSOProviderRefsLive,
+// applied only at the API write door) — and has no runtime side effects. See
 // roadmap/AUTH-POLICY-PHASE1-PLAN.md §3/§5 and roadmap/AUTH-POLICY-PHASE2-PLAN.md.
 func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 	spec := rule.Auth
@@ -700,21 +702,97 @@ func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 	return warnings, nil
 }
 
-// validateAuthOutcomeAndProviders enforces the supported outcomes
-// (Exempt and CredentialRequired) and the reserved-ProviderRefs invariant.
-// SSORequired stays reserved. CredentialRequired is mechanism-neutral: no
-// mechanism field is read or required (Phase 2 Slice 1).
+// validateAuthOutcomeAndProviders enforces the supported outcomes (Exempt,
+// CredentialRequired, SSORequired) and the outcome-gated providerRefs rules.
+// providerRefs is SHAPE-validated here only (registry-free, so the bulk
+// persistence gate via policyRulePersistable stays pure); the referential check
+// that each ref names an enabled, type-compatible IdP runs at the API write door
+// (validateSSOProviderRefsLive). Outcome gating (Phase 3 Slice 2):
+//   - SSORequired: providerRefs allowed (empty = all compatible enabled
+//     interactive IdPs; one/many recorded for later runtime selection).
+//   - CredentialRequired: providerRefs rejected (deferred to a later slice).
+//   - Exempt: providerRefs rejected (no provider concept).
 func validateAuthOutcomeAndProviders(spec *AuthRuleSpec) error {
 	switch spec.Outcome {
-	case OutcomeExempt, OutcomeCredentialRequired:
+	case OutcomeExempt, OutcomeCredentialRequired, OutcomeSSORequired:
 		// supported
-	case OutcomeSSORequired:
-		return fmt.Errorf("auth outcome %q is reserved and not yet implemented (Exempt and CredentialRequired are supported)", spec.Outcome)
 	default:
-		return fmt.Errorf("auth outcome must be Exempt or CredentialRequired")
+		return fmt.Errorf("auth outcome must be Exempt, CredentialRequired, or SSORequired")
 	}
+	if spec.Outcome == OutcomeSSORequired {
+		return validateSSOProviderRefsShape(spec.ProviderRefs)
+	}
+	// Exempt and CredentialRequired do not accept providerRefs in Phase 3 Slice 2.
 	if len(spec.ProviderRefs) != 0 {
-		return fmt.Errorf("providerRefs is reserved for a later phase and cannot be set")
+		if spec.Outcome == OutcomeCredentialRequired {
+			return fmt.Errorf("providerRefs for CredentialRequired is deferred and cannot be set yet")
+		}
+		return fmt.Errorf("providerRefs is not valid on Exempt rules")
+	}
+	return nil
+}
+
+// maxAuthProviderRefs caps an SSORequired rule's providerRefs list to a sane
+// bound. The realistic ceiling is the number of configured IdP profiles; this
+// fixed cap is a generous guard against accidental or abusive blow-up.
+const maxAuthProviderRefs = 16
+
+// validateSSOProviderRefsShape validates the SHAPE of an SSORequired rule's
+// providerRefs WITHOUT consulting the IdP registry, so it is safe in the pure
+// persistence gate. Empty is valid (= all compatible enabled interactive IdPs).
+// Each entry must be a trimmed, non-empty profile ID; duplicates are rejected;
+// the list is capped. The referential check (each ref is an enabled OIDC/SAML
+// profile) lives in validateSSOProviderRefsLive and runs at the API write door
+// only — never here — so registry drift can never retroactively drop a stored
+// rule (DR-4).
+func validateSSOProviderRefsShape(refs []string) error {
+	if len(refs) > maxAuthProviderRefs {
+		return fmt.Errorf("providerRefs has %d entries; maximum is %d", len(refs), maxAuthProviderRefs)
+	}
+	seen := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		// Require canonical (already-trimmed, non-empty) IDs so stored refs match
+		// what validateSSOProviderRefsLive looks up and the later runtime selector
+		// consumes — and so the duplicate check below cannot be bypassed by
+		// surrounding whitespace (e.g. "corp-oidc" vs " corp-oidc ").
+		if ref == "" || strings.TrimSpace(ref) != ref {
+			return fmt.Errorf("providerRefs entries must be non-empty IdP profile IDs without surrounding whitespace")
+		}
+		if seen[ref] {
+			return fmt.Errorf("providerRefs contains a duplicate entry %q", ref)
+		}
+		seen[ref] = true
+	}
+	return nil
+}
+
+// validateSSOProviderRefsLive is the REFERENTIAL counterpart to
+// validateSSOProviderRefsShape: it checks that every providerRef on an
+// SSORequired rule resolves to an ENABLED IdP profile of an interactive type
+// (OIDC or SAML) in the live registry. It is consulted ONLY at the API write
+// door (apiAuthPolicyCreate/Update) — never in the bulk persistence gate — and
+// is fail-closed: a missing, disabled, or non-interactive ref is rejected at
+// write time. Empty providerRefs is valid (= all compatible enabled interactive
+// IdPs). Stored rules are NOT re-checked here, so a later IdP deletion/disable
+// does not drop them (DR-4); runtime + diagnostics fail closed in later slices.
+func validateSSOProviderRefsLive(spec *AuthRuleSpec) error {
+	if spec == nil || spec.Outcome != OutcomeSSORequired || len(spec.ProviderRefs) == 0 {
+		return nil
+	}
+	if idpRegistry == nil {
+		return fmt.Errorf("providerRefs set but no IdP profiles are configured")
+	}
+	for _, ref := range spec.ProviderRefs {
+		id := strings.TrimSpace(ref)
+		p := idpRegistry.Get(id)
+		switch {
+		case p == nil:
+			return fmt.Errorf("providerRef %q does not match any configured IdP profile", id)
+		case !p.Enabled:
+			return fmt.Errorf("providerRef %q references a disabled IdP profile", id)
+		case p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML:
+			return fmt.Errorf("providerRef %q is not an interactive (OIDC or SAML) IdP", id)
+		}
 	}
 	return nil
 }
@@ -788,12 +866,16 @@ func validateAuthExpiry(rule PolicyRule) ([]string, error) {
 //     non-breaking loosening.
 //   - Exempt requires a destination selector OR an explicit broadExemption ack.
 func validateAuthDestination(rule PolicyRule) ([]string, error) {
-	if rule.Auth.Outcome == OutcomeCredentialRequired {
+	// CredentialRequired and SSORequired both require a concrete destination and
+	// reject broadExemption: a credential-challenge / SSO-redirect outcome is the
+	// opposite of a blanket waiver, so it must be least-privilege. broadExemption
+	// remains an Exempt-only acknowledgement.
+	if rule.Auth.Outcome == OutcomeCredentialRequired || rule.Auth.Outcome == OutcomeSSORequired {
 		if rule.Auth.BroadExemption {
-			return nil, fmt.Errorf("broadExemption is an Exempt-only acknowledgement and is not valid on CredentialRequired rules")
+			return nil, fmt.Errorf("broadExemption is an Exempt-only acknowledgement and is not valid on %s rules", rule.Auth.Outcome)
 		}
 		if !authRuleHasDestination(rule) {
-			return nil, fmt.Errorf("CredentialRequired rule requires a destination (destFQDN, destCategory, or destCategoryGroup)")
+			return nil, fmt.Errorf("%s rule requires a destination (destFQDN, destCategory, or destCategoryGroup)", rule.Auth.Outcome)
 		}
 		return nil, nil
 	}
