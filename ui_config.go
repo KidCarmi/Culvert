@@ -361,12 +361,12 @@ func apiLogsRetentionUpdate(w http.ResponseWriter, r *http.Request) {
 	if !applyCriticalDiskPct(w, body.CriticalDiskPct) {
 		return // out-of-range error already written
 	}
-	// Settings-only change (e.g. just the critical-disk threshold): apply and
-	// return without requiring the store to be on.
-	if body.Enabled == nil && body.RetentionDays == nil && body.RetentionMaxGB == nil {
-		if body.CriticalDiskPct != nil {
-			auditEvent(r, "logstore.disk_threshold", "history", fmt.Sprintf("criticalDiskPct=%d", *body.CriticalDiskPct))
-		}
+	// Settings-only change (just the critical-disk threshold): apply, audit, and
+	// return without requiring the store to be on. An all-nil body falls through
+	// to the retention path below, which audits its own no-op/409 — so we never
+	// return a 2xx without an audit (keeps C2c's AuditExpected contract honest).
+	if body.CriticalDiskPct != nil && body.Enabled == nil && body.RetentionDays == nil && body.RetentionMaxGB == nil {
+		auditEvent(r, "logstore.disk_threshold", "history", fmt.Sprintf("criticalDiskPct=%d", *body.CriticalDiskPct))
 		adminSettingsSave()
 		jsonOK(w, logStoreRetentionView())
 		return

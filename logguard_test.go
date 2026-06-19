@@ -215,6 +215,41 @@ func TestEnterExitMinimalMode_RestoresLogLevel(t *testing.T) {
 	}
 }
 
+// TestExitMinimalMode_PreservesAdminLogLevelChange proves that if an admin sets
+// the log level WHILE minimal mode is active, exiting minimal mode does not
+// clobber the admin's choice (it only restores the pre-minimal level when the
+// level is still the WARN that entry forced).
+func TestExitMinimalMode_PreservesAdminLogLevelChange(t *testing.T) {
+	orig := GetLogLevel()
+	t.Cleanup(func() { SetLogLevel(orig); exitMinimalMode() })
+
+	SetLogLevel(ParseLogLevel("debug")) // pre-minimal level
+	enterMinimalMode(99)
+	if GetLogLevel() != LevelWarn {
+		t.Fatalf("entry should force warn, got %v", GetLogLevel())
+	}
+	// Admin changes the level during minimal mode.
+	SetLogLevel(ParseLogLevel("error"))
+	exitMinimalMode()
+	if GetLogLevel() != ParseLogLevel("error") {
+		t.Errorf("admin's error level was clobbered on exit, got %v", GetLogLevel())
+	}
+}
+
+// TestApiLogsRetention_EmptyBodyAudits proves an all-nil PUT does NOT take the
+// settings-only no-audit early return: with the store off it returns 409 (not a
+// silent 2xx), so AuditExpected stays honest.
+func TestApiLogsRetention_EmptyBodyAudits(t *testing.T) {
+	oldStore := globalLogStore.Swap(nil)
+	t.Cleanup(func() { globalLogStore.Store(oldStore) })
+
+	rec := httptest.NewRecorder()
+	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{}`))
+	if rec.Code != 409 {
+		t.Errorf("empty PUT with store off: status %d, want 409 (must not be a silent 2xx)", rec.Code)
+	}
+}
+
 // TestRecordPressureCleanup_Audits verifies an audit event is emitted with the
 // required fields (reason, disk usage, removed amount, categories). Asserts on
 // entry content, not ring length (audit ring saturates under -shuffle).

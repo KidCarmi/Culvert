@@ -295,7 +295,12 @@ func exitMinimalMode() {
 	logGuard.warning = ""
 	logGuard.mu.Unlock()
 
-	SetLogLevel(prior)
+	// Only restore the pre-minimal level if nothing changed it meanwhile. If an
+	// admin set the log level during minimal mode, GetLogLevel() != the WARN we
+	// forced on entry — honor the admin's choice instead of clobbering it.
+	if GetLogLevel() == LevelWarn {
+		SetLogLevel(prior)
+	}
 	auditSystem("logstore.minimal_mode", "logging", "DISABLED — disk recovered, normal logging resumed")
 	logger.Printf("LogGuard: minimal logging mode cleared — normal logging resumed")
 }
@@ -313,26 +318,10 @@ func runDiskGuard(s *logStore) {
 	usedPct, _, total, err := diskUsage(logStoreDir)
 	crit := float64(getCriticalDiskPct())
 
-	if err == nil && usedPct >= crit {
-		// (2) Disk protection overrides retention: free enough to drop to
-		// (crit - margin) of the whole volume.
-		targetUsed := (crit - diskRecoverMargin) / 100 * float64(total)
-		need := int64(usedPct/100*float64(total) - targetUsed)
-		if need > 0 {
-			freed, count, levels := s.cleanupBytes(need)
-			recordPressureCleanup("critical disk usage (overrides retention)", freed, count, levels)
-		}
-		// Re-check: if still critical, deleting logs can't fix it (disk full
-		// from non-log data) → emergency minimal mode. Otherwise post a warning.
-		if again, _, _, e2 := diskUsage(logStoreDir); e2 == nil && again >= crit {
-			enterMinimalMode(again)
-		} else {
-			exitMinimalMode()
-			logGuard.mu.Lock()
-			logGuard.warning = fmt.Sprintf("Disk usage reached %.0f%%. Old logs were deleted before the configured retention period expired. Consider expanding disk capacity or reducing retention settings.", usedPct)
-			logGuard.mu.Unlock()
-		}
-	} else if err == nil {
+	switch {
+	case err == nil && usedPct >= crit:
+		s.handleDiskCritical(usedPct, float64(total), crit)
+	case err == nil:
 		exitMinimalMode() // disk healthy
 	}
 
@@ -344,6 +333,37 @@ func runDiskGuard(s *logStore) {
 	if usedPct < crit-diskRecoverMargin && !logGuard.minimal.Load() {
 		logGuard.warning = ""
 	}
+	logGuard.mu.Unlock()
+}
+
+// handleDiskCritical runs the disk-critical cleanup (priority 2): it overrides
+// retention to free space, then re-checks — if logs can't bring the disk back
+// under the threshold it engages emergency minimal mode, otherwise it posts the
+// operator warning. Caller has confirmed usedPct >= crit.
+func (s *logStore) handleDiskCritical(usedPct, total, crit float64) {
+	// Free enough to drop the whole volume to (crit - margin). Cap the target at
+	// the logstore's own size — we can only ever delete our own logs, so when the
+	// disk is full from non-log data this avoids an unreachable target (and
+	// wasteful empty scans once our logs are gone; the re-check then trips
+	// minimal mode).
+	targetUsed := (crit - diskRecoverMargin) / 100 * total
+	need := int64(usedPct/100*total - targetUsed)
+	if own := atomic.LoadInt64(&s.bytesUsed); need > own {
+		need = own
+	}
+	if need > 0 {
+		freed, count, levels := s.cleanupBytes(need)
+		recordPressureCleanup("critical disk usage (overrides retention)", freed, count, levels)
+	}
+	// Re-check: if still critical, deleting logs can't fix it (disk full from
+	// non-log data) → emergency minimal mode. Otherwise post a warning.
+	if again, _, _, e2 := diskUsage(logStoreDir); e2 == nil && again >= crit {
+		enterMinimalMode(again)
+		return
+	}
+	exitMinimalMode()
+	logGuard.mu.Lock()
+	logGuard.warning = fmt.Sprintf("Disk usage reached %.0f%%. Old logs were deleted before the configured retention period expired. Consider expanding disk capacity or reducing retention settings.", usedPct)
 	logGuard.mu.Unlock()
 }
 
