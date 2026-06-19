@@ -43,11 +43,27 @@ die()  { printf 'install.sh: ERROR — %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat >&2 <<EOF
-usage: sudo $0 /path/to/culvert-maint-binary
+usage: sudo $0 [/path/to/culvert-maint-binary]
 
 Installs the Culvert Maintenance Agent (binary, config, sudoers, systemd
-unit). Idempotent. Must run as root. Build the binary first with:
-  (cd cmd/culvert-maint && go build -o culvert-maint .)
+unit). Idempotent. Must run as root.
+
+Binary source (in precedence order):
+  1. positional argument          a prebuilt local binary
+  2. \$CULVERT_MAINT_BIN            same, via env
+  3. signed release download       requires \$CULVERT_MAINT_VERSION=vX.Y.Z
+                                   (cosign-verified, fail-closed)
+
+Env knobs:
+  CULVERT_MAINT_VERSION        release tag to download (e.g. v1.2.3)
+  CULVERT_MAINT_GITHUB_REPO    owner/repo for the release + cosign identity
+                               (default KidCarmi/Culvert)
+  CULVERT_MAINT_RELEASE_BASE   override the asset base URL
+  CULVERT_MAINT_SIG / _PEM      signature/cert for verifying a local binary
+  CULVERT_MAINT_CERT_IDENTITY  override the expected cosign cert identity
+  CULVERT_MAINT_COSIGN_IMAGE   pinned cosign image (default ghcr.io/sigstore/cosign:v2.4.1)
+  CULVERT_MAINT_SKIP_VERIFY=1  trust a hand-supplied LOCAL binary without
+                               verification (never honored on the download path)
 EOF
     exit "${1:-1}"
 }
@@ -92,11 +108,11 @@ case "${1:-}" in
 esac
 
 [ "$(id -u)" -eq 0 ] || die "must be run as root"
-[ "${1:-}" != "" ] || usage
 
-BIN_SRC=$1
-[ -f "$BIN_SRC" ] || die "binary not found: $BIN_SRC"
-[ -x "$BIN_SRC" ] || die "binary is not executable: $BIN_SRC"
+# Binary source is OPTIONAL: a positional path takes precedence over the env
+# var; when neither is set, the agent is downloaded from the signed release
+# (resolved + verified in §1b below, after the temp-cleanup trap is armed).
+BIN_ARG=${1:-${CULVERT_MAINT_BIN:-}}
 
 for c in id install useradd groupadd getent awk sed grep mktemp visudo systemctl docker; do
     command -v "$c" >/dev/null 2>&1 || die "required command not found: $c"
@@ -116,9 +132,130 @@ for f in "$SYSTEMD_UNIT" "$SUDOERS_TEMPLATE" "$CONFIG_TEMPLATE"; do
     [ -f "$f" ] || die "missing packaging file: $f"
 done
 
-# Temp file for the rendered sudoers; cleaned up on any exit.
+# Temp paths cleaned up on any exit: the rendered sudoers file and the
+# download/verify scratch dirs from §1b. Declared before the trap so `set -u`
+# never trips on an unset name inside the handler.
 RENDERED_SUDOERS=""
-trap '[ -n "$RENDERED_SUDOERS" ] && rm -f "$RENDERED_SUDOERS"' EXIT
+CLEAN_DL_DIR=""
+CLEAN_VERIFY_DIR=""
+cleanup() {
+    [ -n "$RENDERED_SUDOERS" ] && rm -f "$RENDERED_SUDOERS"
+    [ -n "$CLEAN_DL_DIR" ] && rm -rf "$CLEAN_DL_DIR"
+    [ -n "$CLEAN_VERIFY_DIR" ] && rm -rf "$CLEAN_VERIFY_DIR"
+    return 0
+}
+trap cleanup EXIT
+
+# ── 1b. Resolve the agent binary: local (positional/env) or download+verify ──
+#
+# Runs in pre-flight, BEFORE any host mutation (the binary install at §3 and
+# the P1.4 pinned-image seed at §5). A download/verify failure therefore aborts
+# with the OLD install untouched — never a half-installed state. The download
+# path ALWAYS cosign-verifies and FAILS CLOSED; an unverified download is worse
+# than a host build, so verification is non-optional there. A locally supplied
+# binary is the operator's own artifact: verified against sibling .sig/.pem (or
+# $CULVERT_MAINT_SIG/_PEM) when present, or trusted with $CULVERT_MAINT_SKIP_VERIFY=1.
+
+CERT_OIDC_ISSUER=${CULVERT_MAINT_CERT_OIDC_ISSUER:-https://token.actions.githubusercontent.com}
+COSIGN_IMAGE=${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign:v2.4.1}
+GH_REPO=${CULVERT_MAINT_GITHUB_REPO:-KidCarmi/Culvert}
+
+# Map host arch → release asset arch (matches ci.yml's linux-only legs).
+case "$(uname -m)" in
+    x86_64|amd64)  ASSET_ARCH=amd64 ;;
+    aarch64|arm64) ASSET_ARCH=arm64 ;;
+    *) die "unsupported architecture '$(uname -m)' — culvert-maint ships linux/amd64 and linux/arm64 only" ;;
+esac
+
+# Default keyless cert identity = the ci.yml release workflow at a given tag.
+cert_identity_for() {
+    printf 'https://github.com/%s/.github/workflows/ci.yml@refs/tags/%s' "$GH_REPO" "$1"
+}
+
+# cosign verify-blob in a pinned container — no host cosign dependency (docker
+# is already required for the seed step). $1=dir $2=binary basename $3=identity.
+verify_cosign() {
+    _dir=$1; _bin=$2; _ident=$3
+    [ -f "$_dir/$_bin.sig" ] || die "missing signature: $_bin.sig"
+    [ -f "$_dir/$_bin.pem" ] || die "missing certificate: $_bin.pem"
+    log "verifying $_bin with cosign (identity=$_ident) ..."
+    docker run --rm -v "$_dir:/work:ro" -w /work "$COSIGN_IMAGE" \
+        verify-blob \
+        --certificate "$_bin.pem" \
+        --signature   "$_bin.sig" \
+        --certificate-identity "$_ident" \
+        --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
+        "$_bin" \
+        || die "cosign verification FAILED for $_bin — refusing to install"
+    log "cosign verification OK for $_bin"
+}
+
+if [ -n "${BIN_ARG:-}" ]; then
+    # ── Local binary (positional arg or $CULVERT_MAINT_BIN) ───────────────────
+    BIN_SRC=$BIN_ARG
+    [ -f "$BIN_SRC" ] || die "binary not found: $BIN_SRC"
+    [ -x "$BIN_SRC" ] || die "binary is not executable: $BIN_SRC"
+
+    if [ "${CULVERT_MAINT_SKIP_VERIFY:-}" = "1" ]; then
+        warn "CULVERT_MAINT_SKIP_VERIFY=1 — installing local binary WITHOUT signature verification"
+    else
+        _sig=${CULVERT_MAINT_SIG:-$BIN_SRC.sig}
+        _pem=${CULVERT_MAINT_PEM:-$BIN_SRC.pem}
+        if [ ! -f "$_sig" ] || [ ! -f "$_pem" ]; then
+            die "no signature material for '$BIN_SRC' (looked for $_sig / $_pem). Supply them, set CULVERT_MAINT_SIG/_PEM, or set CULVERT_MAINT_SKIP_VERIFY=1 to trust a hand-supplied binary."
+        fi
+        if [ -n "${CULVERT_MAINT_CERT_IDENTITY:-}" ]; then
+            _ident=$CULVERT_MAINT_CERT_IDENTITY
+        elif [ -n "${CULVERT_MAINT_VERSION:-}" ]; then
+            _ident=$(cert_identity_for "$CULVERT_MAINT_VERSION")
+        else
+            die "to verify a local binary set CULVERT_MAINT_CERT_IDENTITY (or CULVERT_MAINT_VERSION to derive it), or CULVERT_MAINT_SKIP_VERIFY=1 to trust it"
+        fi
+        # Stage into a temp dir so cosign resolves the sibling files by basename.
+        CLEAN_VERIFY_DIR=$(mktemp -d)
+        cp "$BIN_SRC" "$CLEAN_VERIFY_DIR/culvert-maint"
+        cp "$_sig"    "$CLEAN_VERIFY_DIR/culvert-maint.sig"
+        cp "$_pem"    "$CLEAN_VERIFY_DIR/culvert-maint.pem"
+        verify_cosign "$CLEAN_VERIFY_DIR" culvert-maint "$_ident"
+    fi
+    log "using local agent binary: $BIN_SRC"
+else
+    # ── Download the signed release asset (always verified, fail-closed) ──────
+    VERSION=${CULVERT_MAINT_VERSION:-}
+    [ -n "$VERSION" ] || die "no binary given and CULVERT_MAINT_VERSION is unset.
+  Pass a prebuilt binary:    sudo $0 /path/to/culvert-maint
+  or pin a release to fetch: CULVERT_MAINT_VERSION=vX.Y.Z sudo $0
+  (the quick-start scripts/install.sh derives the version from the running proxy.)"
+    case "$VERSION" in
+        v*) : ;;
+        *)  die "CULVERT_MAINT_VERSION must be a release tag like 'v1.2.3', got '$VERSION'" ;;
+    esac
+    reject_unsafe "CULVERT_MAINT_VERSION" "$VERSION"
+
+    # Pick a download tool (only required on this path — not for local/offline).
+    if command -v curl >/dev/null 2>&1; then DL_TOOL=curl
+    elif command -v wget >/dev/null 2>&1; then DL_TOOL=wget
+    else die "need curl or wget to download the release asset"; fi
+
+    ASSET="culvert-maint-linux-$ASSET_ARCH"
+    BASE=${CULVERT_MAINT_RELEASE_BASE:-https://github.com/$GH_REPO/releases/download/$VERSION}
+    CLEAN_DL_DIR=$(mktemp -d)
+    log "downloading $ASSET ($VERSION) from $BASE ..."
+    for f in "$ASSET" "$ASSET.sig" "$ASSET.pem"; do
+        if [ "$DL_TOOL" = curl ]; then
+            curl -fsSL -o "$CLEAN_DL_DIR/$f" "$BASE/$f" || die "download failed: $BASE/$f"
+        else
+            wget -q -O "$CLEAN_DL_DIR/$f" "$BASE/$f" || die "download failed: $BASE/$f"
+        fi
+    done
+
+    _ident=${CULVERT_MAINT_CERT_IDENTITY:-$(cert_identity_for "$VERSION")}
+    verify_cosign "$CLEAN_DL_DIR" "$ASSET" "$_ident"
+
+    chmod 0755 "$CLEAN_DL_DIR/$ASSET"
+    BIN_SRC="$CLEAN_DL_DIR/$ASSET"
+    log "downloaded + verified agent binary: $BIN_SRC"
+fi
 
 # ── 2. Service account ───────────────────────────────────────────────────────
 
