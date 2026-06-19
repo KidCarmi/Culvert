@@ -363,8 +363,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				return
 			} else {
 				// ── 3. No credentials ────────────────────────────────────────
-				isBrowser := strings.Contains(r.Header.Get("User-Agent"), "Mozilla")
-				if isBrowser && r.Method != http.MethodConnect {
+				// browserRedirectEligibleLegacy is the verbatim pre-Slice-1
+				// predicate (Mozilla User-Agent && non-CONNECT). Phase 3 Slice 1
+				// extracted it to client_class.go without changing behavior;
+				// Slice 4 will flip this to the deterministic classifyClient.
+				if browserRedirectEligibleLegacy(r) {
 					// Route browser to appropriate IdP based on email domain hint.
 					loginURL := resolveCaptivePortalURL(r)
 					// Inline guard for static-analysis visibility:
