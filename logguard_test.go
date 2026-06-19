@@ -236,6 +236,35 @@ func TestExitMinimalMode_PreservesAdminLogLevelChange(t *testing.T) {
 	}
 }
 
+// TestEffectiveAdminLogLevel_NotForcedWarn proves the level persisted to
+// admin_settings.json reflects the admin's real preference, not the WARN that
+// minimal mode forces — so a restart during disk pressure doesn't lose it.
+func TestEffectiveAdminLogLevel_NotForcedWarn(t *testing.T) {
+	orig := GetLogLevel()
+	t.Cleanup(func() { SetLogLevel(orig); exitMinimalMode() })
+
+	// Admin prefers DEBUG; disk goes critical and minimal mode forces WARN.
+	SetLogLevel(ParseLogLevel("debug"))
+	enterMinimalMode(99)
+	if GetLogLevel() != LevelWarn {
+		t.Fatalf("entry should force warn live, got %v", GetLogLevel())
+	}
+	// Persistence must capture the admin's DEBUG, not the forced WARN.
+	if got := effectiveAdminLogLevel(); got != ParseLogLevel("debug") {
+		t.Errorf("effectiveAdminLogLevel = %v during minimal mode, want debug (admin's pref)", got)
+	}
+	// If the admin overrides to ERROR during minimal mode, that is their intent.
+	SetLogLevel(ParseLogLevel("error"))
+	if got := effectiveAdminLogLevel(); got != ParseLogLevel("error") {
+		t.Errorf("effectiveAdminLogLevel = %v after admin override, want error", got)
+	}
+	exitMinimalMode()
+	// Outside minimal mode it just mirrors the live level.
+	if got := effectiveAdminLogLevel(); got != ParseLogLevel("error") {
+		t.Errorf("effectiveAdminLogLevel = %v outside minimal mode, want error", got)
+	}
+}
+
 // TestApiLogsRetention_EmptyBodyAudits proves an all-nil PUT does NOT take the
 // settings-only no-audit early return: with the store off it returns 409 (not a
 // silent 2xx), so AuditExpected stays honest.

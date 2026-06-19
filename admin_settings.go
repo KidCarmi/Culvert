@@ -322,7 +322,7 @@ func SaveAdminSettings() {
 		ConnLimitMaxPerIP:     connLimiter.MaxPerIP(),
 		BlockPageHTML:         getBlockPageHTML(),
 		MetricsToken:          metricsToken,
-		LogLevel:              GetLogLevel().String(),
+		LogLevel:              effectiveAdminLogLevel().String(),
 		SessionTimeoutHours:   int(getSessionTTL().Hours()),
 		UIAllowIPs:            ListUIAllowedCIDRs(),
 		TrustForwardedHeaders: trustForwardedHeaders,

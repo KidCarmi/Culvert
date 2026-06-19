@@ -170,6 +170,18 @@ func (s *logStore) cleanupBytes(need int64) (freed, count int64, levels map[stri
 // hit. When lowOnly is true, only LOW-priority entries are deleted (others are
 // skipped). Records deleted entries' levels into the shared breakdown. Caller
 // holds closeMu.RLock.
+//
+// "Low-before-high" is best-effort ("when possible"): pass 1 scans at most
+// logStoreScanCap (500k) entries hunting for low-priority keys. In the
+// pathological case where the oldest 500k entries are ALL high-priority
+// (WARN/ERROR) and low-priority entries exist only deeper in the store, pass 1
+// finds none and pass 2 (lowOnly=false) deletes the oldest security records
+// instead. This is an accepted limitation: the bounded scan caps value-read
+// cost, and preventing disk exhaustion (priority 2) outranks the ordering
+// preference — so deleting the oldest records to free space is correct even when
+// they happen to be security logs. The case requires >500k consecutive oldest
+// security entries, which does not arise in normal traffic where access/traffic
+// logs dominate.
 func (s *logStore) deletePass(need, maxKeys int64, lowOnly bool, levels map[string]int64) (freed, count int64) {
 	if maxKeys <= 0 {
 		return 0, 0
@@ -307,6 +319,27 @@ func exitMinimalMode() {
 
 // minimalMode reports whether emergency minimal logging is active.
 func minimalMode() bool { return logGuard.minimal.Load() }
+
+// effectiveAdminLogLevel returns the log level that reflects the ADMIN's intent,
+// for persistence in admin_settings.json. During emergency minimal mode the live
+// level is forced to WARN; persisting that would clobber the admin's real
+// preference on restart. So while minimal mode is active and the live level is
+// still the forced WARN (the admin hasn't overridden it), we report the
+// pre-minimal level instead. If the admin did change the level during minimal
+// mode (live != WARN), that is their intent and we report it as-is — kept
+// consistent with exitMinimalMode's restore heuristic.
+func effectiveAdminLogLevel() LogLevel {
+	if !logGuard.minimal.Load() {
+		return GetLogLevel()
+	}
+	if live := GetLogLevel(); live != LevelWarn {
+		return live // admin overrode the forced level during minimal mode
+	}
+	logGuard.mu.Lock()
+	prior := logGuard.priorLogLevel
+	logGuard.mu.Unlock()
+	return prior
+}
 
 // runDiskGuard is one pass of the disk-protection janitor (priority order 2→3):
 // disk-critical cleanup that overrides retention, then the size cap. Age TTL is
