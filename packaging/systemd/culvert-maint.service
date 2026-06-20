@@ -67,11 +67,23 @@ ProtectKernelLogs=true
 ProtectProc=invisible
 ProcSubset=pid
 
-# Writable paths the agent needs:
+# RuntimeDirectory creates /run/culvert-maint owned by the service user at
+# start, so the unprivileged agent can bind its UDS at
+# /run/culvert-maint/culvert-maint.sock. It cannot create a socket directly in
+# root-owned /run. The directory is automatically in the writable set.
+RuntimeDirectory=culvert-maint
+RuntimeDirectoryMode=0755
+# Preserve the directory inode across restarts. The Release Management opt-in
+# (docker-compose.maint-agent.yml) bind-mounts /run/culvert-maint into the proxy
+# container; with the default Preserve=no, systemd would delete + recreate the
+# dir (new inode) on every restart — including the frequent Restart=on-failure —
+# leaving the proxy's mount pointing at the old inode and Release Management back
+# at "Agent unreachable". The agent removes any stale socket file on start.
+RuntimeDirectoryPreserve=yes
+
+# Writable paths the agent needs (beyond RuntimeDirectory above):
 #  - /var/lib/culvert-maint for state (audit log, op logs)
-#  - /run for the UDS socket file (a future hardening pass may move
-#    to RuntimeDirectory= and a /run/culvert-maint/ subdir)
-ReadWritePaths=/var/lib/culvert-maint /run
+ReadWritePaths=/var/lib/culvert-maint
 
 # Capability set: empty by default. The agent does not need any
 # capabilities to do its own work; sudo / docker provides the

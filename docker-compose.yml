@@ -110,6 +110,10 @@ services:
       # - ./yara:/app/yara:ro
       # Uncomment to use a custom config file:
       # - ./config.yaml:/app/config.yaml:ro
+      # To let the admin UI's Release Management reach the host maintenance
+      # agent, do NOT add /var/run/docker.sock here — use the opt-in override
+      # docker-compose.maint-agent.yml (mounts only the agent's /v1 UDS).
+      # See docs/operator/release-management-agent.md.
     environment:
       - TZ=UTC
       # Optional: manually set the server's public IP/domain for TLS cert SANs.

@@ -2,7 +2,7 @@
 //
 // D1.6a foundation slice:
 //   - reads /etc/culvert-maint/config.toml (or path from --config)
-//   - listens on a Unix domain socket (default /run/culvert-maint.sock)
+//   - listens on a Unix domain socket (default /run/culvert-maint/culvert-maint.sock)
 //   - exposes the read-only API (/v1/health, /v1/status, /v1/audit,
 //     /v1/operations/{id}, /v1/operations/{id}/logs)
 //   - every state-changing endpoint (/v1/backups, /v1/restores/*, etc.)

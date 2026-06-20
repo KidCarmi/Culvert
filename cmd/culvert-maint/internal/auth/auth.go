@@ -1,6 +1,6 @@
 // Package auth implements the agent's local-socket authentication gate.
 //
-// Default transport is the Unix domain socket at /run/culvert-maint.sock.
+// Default transport is the Unix domain socket at /run/culvert-maint/culvert-maint.sock.
 // On Linux the gate uses SO_PEERCRED to read the connecting peer's UID
 // and gates against an operator-configured allowlist of UIDs / usernames.
 // Anyone not on the allowlist is rejected with HTTP 403.

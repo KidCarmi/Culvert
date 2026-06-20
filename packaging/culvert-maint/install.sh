@@ -302,6 +302,17 @@ else
     log "$CONFIG_DEST already exists; left unchanged"
 fi
 
+# Migrate the pre-RuntimeDirectory socket default. The systemd unit now makes
+# only /run/culvert-maint writable (RuntimeDirectory) — not /run — so an existing
+# config still pointing at /run/culvert-maint.sock would fail to bind at startup.
+# Rewrite ONLY the untouched old default; never touch a customized value. This is
+# a bug-fix exception to "never clobber an existing config" (the old value cannot
+# work under the new unit). socket_path is not sudoers-bound, so no re-render.
+if grep -q '^socket_path = "/run/culvert-maint.sock"' "$CONFIG_DEST" 2>/dev/null; then
+    sed -i 's|^socket_path = "/run/culvert-maint.sock"|socket_path = "/run/culvert-maint/culvert-maint.sock"|' "$CONFIG_DEST"
+    log "migrated socket_path to /run/culvert-maint/culvert-maint.sock (managed RuntimeDirectory)"
+fi
+
 # ── 5. Resolve + validate config, then seed the pinned image tag ─────────────
 
 PROJECT_DIR=$(extract_toml_string compose_project_dir)
@@ -444,7 +455,7 @@ Next steps:
   3. Start the agent:                systemctl start culvert-maint
   4. Tail the journal for errors:    journalctl -u culvert-maint -f
   5. Smoke test (as the allowed CP user):
-        curl --unix-socket /run/culvert-maint.sock http://localhost/v1/health
+        curl --unix-socket /run/culvert-maint/culvert-maint.sock http://localhost/v1/health
 
 If you change compose_project_dir or compose_file later, re-run this
 script — it will re-render and re-install the sudoers file with the

@@ -41,8 +41,8 @@ func TestLocalAgentEndpoint(t *testing.T) {
 		wantURL string
 	}{
 		{"empty", "", false, ""},
-		{"bare socket", "/run/culvert-maint.sock", true, "http://unix"},
-		{"unix scheme", "unix:///run/culvert-maint.sock", true, "http://unix"},
+		{"bare socket", "/run/culvert-maint/culvert-maint.sock", true, "http://unix"},
+		{"unix scheme", "unix:///run/culvert-maint/culvert-maint.sock", true, "http://unix"},
 		{"http url", "http://127.0.0.1:8888", true, "http://127.0.0.1:8888"},
 		{"https url", "https://maint.local:443", true, "https://maint.local:443"},
 		{"bad scheme", "ftp://maint", false, ""},
@@ -73,7 +73,7 @@ func TestLocalAgentEndpoint(t *testing.T) {
 
 func TestReleaseAgentResolver(t *testing.T) {
 	// Configured local agent resolves only the "local" key.
-	resolve, note := releaseAgentResolver("/run/culvert-maint.sock")
+	resolve, note := releaseAgentResolver("/run/culvert-maint/culvert-maint.sock")
 	if note == "none" {
 		t.Fatal("note should describe the configured endpoint")
 	}

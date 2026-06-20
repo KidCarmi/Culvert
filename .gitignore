@@ -1,6 +1,7 @@
 # Compiled binaries
 proxy
 culvert
+/Culvert
 updater/culvert-updater
 
 # Local configuration (may contain real passwords — never commit)
