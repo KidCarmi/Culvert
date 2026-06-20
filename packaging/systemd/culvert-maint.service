@@ -67,11 +67,16 @@ ProtectKernelLogs=true
 ProtectProc=invisible
 ProcSubset=pid
 
-# Writable paths the agent needs:
+# RuntimeDirectory creates /run/culvert-maint owned by the service user at
+# start (and removes it on stop), so the unprivileged agent can bind its UDS
+# at /run/culvert-maint/culvert-maint.sock. It cannot create a socket directly
+# in root-owned /run. The directory is automatically in the writable set.
+RuntimeDirectory=culvert-maint
+RuntimeDirectoryMode=0755
+
+# Writable paths the agent needs (beyond RuntimeDirectory above):
 #  - /var/lib/culvert-maint for state (audit log, op logs)
-#  - /run for the UDS socket file (a future hardening pass may move
-#    to RuntimeDirectory= and a /run/culvert-maint/ subdir)
-ReadWritePaths=/var/lib/culvert-maint /run
+ReadWritePaths=/var/lib/culvert-maint
 
 # Capability set: empty by default. The agent does not need any
 # capabilities to do its own work; sudo / docker provides the

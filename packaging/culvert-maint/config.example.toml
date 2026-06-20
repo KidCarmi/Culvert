@@ -34,8 +34,10 @@ allow_peers = ["culvert-cp"]
 # (no path separator).
 compose_file = "docker-compose.yml"
 
-# UDS path for the agent's API. Mode is fixed at 0660 regardless.
-socket_path = "/run/culvert-maint.sock"
+# UDS path for the agent's API. Mode is fixed at 0660 regardless. Lives under
+# /run/culvert-maint/ — the systemd unit's RuntimeDirectory, owned by the
+# unprivileged culvert-maint user (it cannot bind a socket directly in /run).
+socket_path = "/run/culvert-maint/culvert-maint.sock"
 
 # State directory root: audit log, per-op logs, optional state.json.
 state_dir = "/var/lib/culvert-maint"

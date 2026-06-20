@@ -82,7 +82,7 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 	if cfg.ComposeFile != "docker-compose.yml" {
 		t.Errorf("ComposeFile default: got %q", cfg.ComposeFile)
 	}
-	if cfg.SocketPath != "/run/culvert-maint.sock" {
+	if cfg.SocketPath != "/run/culvert-maint/culvert-maint.sock" {
 		t.Errorf("SocketPath default: got %q", cfg.SocketPath)
 	}
 	if cfg.StateDir != "/var/lib/culvert-maint" {

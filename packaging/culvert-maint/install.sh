@@ -444,7 +444,7 @@ Next steps:
   3. Start the agent:                systemctl start culvert-maint
   4. Tail the journal for errors:    journalctl -u culvert-maint -f
   5. Smoke test (as the allowed CP user):
-        curl --unix-socket /run/culvert-maint.sock http://localhost/v1/health
+        curl --unix-socket /run/culvert-maint/culvert-maint.sock http://localhost/v1/health
 
 If you change compose_project_dir or compose_file later, re-run this
 script — it will re-render and re-install the sudoers file with the

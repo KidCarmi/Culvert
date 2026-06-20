@@ -990,6 +990,16 @@ install_maint_agent() {
     fi
   fi
 
+  # Migrate the pre-RuntimeDirectory socket default. Installs seeded before the
+  # /run/culvert-maint/ move have socket_path = "/run/culvert-maint.sock", which
+  # the unprivileged agent cannot bind directly in root-owned /run. Rewrite ONLY
+  # the untouched old default to the managed-runtime-dir path; never touch a
+  # customized value. socket_path is not sudoers-bound, so no re-render needed.
+  if grep -q '^socket_path = "/run/culvert-maint.sock"' /etc/culvert-maint/config.toml 2>/dev/null; then
+    info "Migrating socket_path to the managed runtime dir (/run/culvert-maint/culvert-maint.sock)..."
+    sudo sed -i 's|^socket_path = "/run/culvert-maint.sock"|socket_path = "/run/culvert-maint/culvert-maint.sock"|' /etc/culvert-maint/config.toml
+  fi
+
   # Grant the unprivileged agent group traversal of the stack dir (least-
   # privilege 0750 root:culvert-maint), now that the user/group exist.
   # Non-fatal: a warning here means operations would fail at chdir.
@@ -1032,7 +1042,7 @@ fi
 if [[ "${MAINT_AGENT_INSTALLED:-0}" == "1" ]]; then
   echo "  Maintenance agent installed (systemd: culvert-maint), not yet started."
   echo "  It is host-side day-2 tooling (backup/restore, Docker image updates),"
-  echo "  reached on the host via /run/culvert-maint.sock — not by the in-container"
+  echo "  reached on the host via /run/culvert-maint/culvert-maint.sock — not by the in-container"
   echo "  admin UI by default."
   echo "  Before starting it, set the allowed caller(s):"
   echo "    sudo \$EDITOR /etc/culvert-maint/config.toml   # set allow_peers"

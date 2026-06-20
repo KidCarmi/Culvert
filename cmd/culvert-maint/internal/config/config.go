@@ -44,7 +44,8 @@ type Config struct {
 	// Filename within ComposeProjectDir. Default "docker-compose.yml".
 	ComposeFile string
 
-	// UDS path. Default "/run/culvert-maint.sock". Mode is fixed at
+	// UDS path. Default "/run/culvert-maint/culvert-maint.sock" (under the
+	// systemd RuntimeDirectory the service user owns). Mode is fixed at
 	// 0660 regardless of config.
 	SocketPath string
 
@@ -138,7 +139,7 @@ type rawConfig struct {
 
 const (
 	defaultComposeFile      = "docker-compose.yml"
-	defaultSocketPath       = "/run/culvert-maint.sock"
+	defaultSocketPath       = "/run/culvert-maint/culvert-maint.sock"
 	defaultStateDir         = "/var/lib/culvert-maint"
 	defaultPrivilegeMode    = string(PrivilegeSudoers)
 	defaultHealthBaseURL    = "http://127.0.0.1:8080"
@@ -218,7 +219,7 @@ func validate(raw *rawConfig) (*Config, error) {
 	}
 	cfg.ComposeFile = cf
 
-	// socket_path — default /run/culvert-maint.sock. Must be absolute.
+	// socket_path — default /run/culvert-maint/culvert-maint.sock. Must be absolute.
 	sp := raw.SocketPath
 	if sp == "" {
 		sp = defaultSocketPath

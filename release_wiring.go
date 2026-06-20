@@ -29,7 +29,7 @@ const (
 	// a managed config surface.
 	defaultReleaseProxyRepo = "ghcr.io/kidcarmi/culvert"
 	// defaultMaintAgentSocket is the culvert-maint server's default unix socket.
-	defaultMaintAgentSocket = "/run/culvert-maint.sock"
+	defaultMaintAgentSocket = "/run/culvert-maint/culvert-maint.sock"
 	// localAgentKey is the stable key for the CP's own maintenance agent.
 	localAgentKey = "local"
 
