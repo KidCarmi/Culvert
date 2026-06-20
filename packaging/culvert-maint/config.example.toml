@@ -19,6 +19,13 @@ compose_project_dir = "/srv/culvert"
 # refuses to start with an empty list. Each entry is either a numeric
 # UID or a username that exists on the host. Required; no default.
 # Single config surface — there is no equivalent CLI flag.
+#
+# PREFER NUMERIC UIDs. The shipped release binary is statically linked
+# (CGO_ENABLED=0), so username resolution uses pure-Go /etc/passwd parsing
+# and CANNOT see NSS-backed directories (LDAP/SSSD/systemd-userdb). A
+# username that lives only in a directory will fail to resolve and the
+# agent will refuse to start. Numeric UIDs always work and are the
+# authorization key the agent actually enforces — e.g. allow_peers = [1000].
 allow_peers = ["culvert-cp"]
 
 # ── Optional — defaults shown ──────────────────────────────────────────────

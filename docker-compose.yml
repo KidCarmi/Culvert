@@ -129,6 +129,7 @@ services:
       "-policy",         "/data/policy.json",
       "-logfile",        "/data/proxy.log",
       "-audit-log",      "/data/audit.jsonl",
+      "-request-log",    "/data/requests.jsonl",
       "-geoip-db",       "/app/GeoLite2-Country.mmdb",
       "-clamav-addr",    "tcp:clamav:3310",
       "-yara-rules-dir", "/data/yara",

@@ -87,6 +87,16 @@ func run(configPath string) error {
 		log.Printf("WARN: privilege_mode=docker_group_lab — effectively root-equivalent; not for production")
 	}
 
+	// Advisory pre-flight: the runner chdir's into ComposeProjectDir BEFORE
+	// sudo, so if this service identity cannot traverse it, every operation
+	// fails at chdir before sudo is reached. Warn loudly but do NOT fail
+	// closed — the real authority boundary is sudoers + the actual compose run.
+	if err := dirTraversable(cfg.ComposeProjectDir); err != nil {
+		log.Printf("WARN: compose_project_dir %q is not traversable by this user (%v) — "+
+			"operations will fail at chdir before sudo. Ensure it is 0750 root:culvert-maint "+
+			"(or world-searchable) and every ancestor is searchable.", cfg.ComposeProjectDir, err)
+	}
+
 	pol, err := auth.NewPolicy(cfg.AllowPeers)
 	if err != nil {
 		return fmt.Errorf("auth policy: %w", err)
