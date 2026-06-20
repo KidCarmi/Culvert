@@ -78,13 +78,28 @@ and sets `CULVERT_MAINT_AGENT_URL=unix:///run/culvert-maint/culvert-maint.sock`.
 ### 4. Verify
 
 Reload Release Management in the admin UI — **Current Release** should now resolve
-instead of "Agent unreachable". From the proxy container:
+instead of "Agent unreachable".
+
+To confirm the agent socket is mounted and visible inside the proxy container:
 
 ```bash
-docker compose exec proxy wget -qO- --timeout=5 \
-  --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/health
-# {"agent_version":"...","status":"ok"}
+docker compose exec proxy ls -l /run/culvert-maint/culvert-maint.sock
+# srw-rw---- 1 ... culvert-maint ... /run/culvert-maint/culvert-maint.sock
 ```
+
+> The stock proxy image is Alpine, whose busybox `wget` has no `--unix-socket`
+> option, so the in-container HTTP probe is `ls` of the mounted socket; the admin
+> UI is the functional check. To hit `/v1/health` directly from the host, the
+> caller must **both** be able to open the `0660 culvert-maint:culvert-maint`
+> socket (the kernel checks this on `connect()`, before `allow_peers`) **and**
+> have its UID in `allow_peers`. Simplest is **root** — it opens the socket
+> directly, so just add `"root"` to `allow_peers`:
+> ```bash
+> sudo curl --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/health
+> ```
+> A non-root probe user must additionally be a member of the `culvert-maint`
+> group (e.g. `sudo -u <user> -g culvert-maint curl …`, with `<user>`'s UID in
+> `allow_peers`).
 
 ## Troubleshooting
 
