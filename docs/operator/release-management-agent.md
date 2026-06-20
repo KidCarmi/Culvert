@@ -78,13 +78,21 @@ and sets `CULVERT_MAINT_AGENT_URL=unix:///run/culvert-maint/culvert-maint.sock`.
 ### 4. Verify
 
 Reload Release Management in the admin UI — **Current Release** should now resolve
-instead of "Agent unreachable". From the proxy container:
+instead of "Agent unreachable".
+
+To confirm the agent socket is mounted and visible inside the proxy container:
 
 ```bash
-docker compose exec proxy wget -qO- --timeout=5 \
-  --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/health
-# {"agent_version":"...","status":"ok"}
+docker compose exec proxy ls -l /run/culvert-maint/culvert-maint.sock
+# srw-rw---- 1 ... culvert-maint ... /run/culvert-maint/culvert-maint.sock
 ```
+
+> The stock proxy image is Alpine, whose busybox `wget` has no `--unix-socket`
+> option, so the in-container HTTP probe is `ls` of the mounted socket; the admin
+> UI is the functional check. To hit `/v1/health` directly, do it from a host
+> with GNU `curl` **as a UID listed in `allow_peers`** (the agent authenticates
+> the caller), e.g. `sudo -u culvert-cp curl --unix-socket \
+> /run/culvert-maint/culvert-maint.sock http://unix/v1/health`.
 
 ## Troubleshooting
 
