@@ -89,10 +89,17 @@ docker compose exec proxy ls -l /run/culvert-maint/culvert-maint.sock
 
 > The stock proxy image is Alpine, whose busybox `wget` has no `--unix-socket`
 > option, so the in-container HTTP probe is `ls` of the mounted socket; the admin
-> UI is the functional check. To hit `/v1/health` directly, do it from a host
-> with GNU `curl` **as a UID listed in `allow_peers`** (the agent authenticates
-> the caller), e.g. `sudo -u culvert-cp curl --unix-socket \
-> /run/culvert-maint/culvert-maint.sock http://unix/v1/health`.
+> UI is the functional check. To hit `/v1/health` directly from the host, the
+> caller must **both** be able to open the `0660 culvert-maint:culvert-maint`
+> socket (the kernel checks this on `connect()`, before `allow_peers`) **and**
+> have its UID in `allow_peers`. Simplest is **root** — it opens the socket
+> directly, so just add `"root"` to `allow_peers`:
+> ```bash
+> sudo curl --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/health
+> ```
+> A non-root probe user must additionally be a member of the `culvert-maint`
+> group (e.g. `sudo -u <user> -g culvert-maint curl …`, with `<user>`'s UID in
+> `allow_peers`).
 
 ## Troubleshooting
 
