@@ -289,10 +289,11 @@ func TestP3S2_PureResolver_SSOPriorityOverExempt(t *testing.T) {
 	}
 }
 
-// End-to-end: a no-credentials request matching ONLY an SSORequired rule gets
-// today's Default gate behavior (407 for a non-browser), proving SSORequired is
-// runtime-inert and proxy.go is untouched (no SSO redirect, no 403 fail-closed).
-func TestP3S2_RuntimeInert_DefaultGateBehavior(t *testing.T) {
+// End-to-end: a no-credentials NON-BROWSER request matching an SSORequired rule
+// is failed closed (403, no Basic 407) as of Phase 3 Slice 4 — SSORequired is
+// now runtime-active. (Comprehensive SSO runtime coverage lives in the Slice 4
+// suite; this pins that the Slice-2-persisted rule actually enforces.)
+func TestP3S2_RuntimeActive_NonBrowserFailsClosed(t *testing.T) {
 	setupAuthGateTest(t)
 	const host = "p3s2-sso.example.test"
 	sso := validSSORule()
@@ -302,11 +303,11 @@ func TestP3S2_RuntimeInert_DefaultGateBehavior(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	handleRequest(w, makeRequest("http://"+host+"/", map[string]string{"User-Agent": "curl/8.0"}))
-	if w.Code != http.StatusProxyAuthRequired {
-		t.Fatalf("SSORequired must be runtime-inert: a non-browser no-cred request must hit the Default 407 gate, got %d", w.Code)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("non-browser SSORequired must fail closed (403), got %d", w.Code)
 	}
-	if w.Header().Get("Proxy-Authenticate") != `Basic realm="Culvert"` {
-		t.Errorf("inert SSO path must keep the Default Basic challenge, got %q", w.Header().Get("Proxy-Authenticate"))
+	if w.Header().Get("Proxy-Authenticate") != "" {
+		t.Errorf("SSORequired 403 must NOT carry a Basic challenge (no 407 affordance), got %q", w.Header().Get("Proxy-Authenticate"))
 	}
 }
 

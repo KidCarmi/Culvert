@@ -307,56 +307,46 @@ func simulateAuthOutcome(rules []PolicyRule, sourceIP, host, protocol, method, i
 	}
 	hasCreds := identity != "" || (rawAuthSource != "" && rawAuthSource != "unauth")
 	d := AuthDecision{Outcome: OutcomeDefault}
-	// runtimeOutcome is what the LIVE gate resolves today. For every outcome other
-	// than SSORequired it equals d.Outcome; SSORequired is resolved by the policy
-	// engine but not yet wired (runtimeInertOutcomes excludes it), so the runtime
-	// gate currently resolves a lower-priority Exempt/CR rule or the default gate.
-	// The Stage-2 preview is driven by runtimeOutcome so it never reports an
-	// access decision the live request would not actually receive today.
-	runtimeOutcome := OutcomeDefault
 	note := authExemptNote
 	if hasCreds {
 		note = "Credentials presented — at runtime, valid credentials and sessions always win and exemptions are " +
 			"never evaluated; failed credentials get 407 and are never exempted. Stage-1 outcome is Default."
 	} else {
 		ctx := RequestContext{ClientIP: sourceIP, Host: host, Protocol: protocol, Method: method}
-		d = resolveAuthOutcomeFrom(rules, ctx) // FULL pure resolver — may return SSORequired
-		runtimeOutcome = d.Outcome
+		d = resolveAuthOutcomeFrom(rules, ctx) // priority-ordered resolver (matches the live gate)
 		if d.Outcome == OutcomeCredentialRequired {
 			// CredentialRequired is a CHALLENGE class, not an access decision. It
 			// is NOT Allow or Block: the client must authenticate first, then the
 			// Stage-2 decision below applies. (Wired onto the runtime no-credentials
-			// path in Phase 2 Slice 3; the simulator surfaces the resolver's decision.)
+			// path in Phase 2 Slice 3.)
 			note = "CredentialRequired — a non-interactive credential challenge (407) would be required before this " +
 				"request proceeds. This is NOT Allow or Block; the Stage-2 decision below applies only after the client authenticates."
 		}
 		if d.Outcome == OutcomeSSORequired {
-			// SSORequired is resolved by the policy engine (Phase 3 Slice 3) but is
-			// NOT yet enforced at runtime — proxy.go does not consume it until Slice
-			// 4. To avoid reporting an outcome the live gate would not produce, also
-			// resolve what the RUNTIME gate does today (it excludes SSORequired) and
-			// surface it in the note + drive the Stage-2 preview from it.
-			rt := resolveAuthOutcomeFromExcluding(rules, ctx, runtimeInertOutcomes)
-			runtimeOutcome = rt.Outcome
-			note = "SSORequired — an interactive browser SSO redirect would be required before this request proceeds. " +
-				"This is NOT Allow or Block; the Stage-2 decision below applies only after the client authenticates. " +
-				"NOT yet enforced at runtime (lands in a later slice): the live gate currently handles this request as " +
-				runtimeOutcomePhrase(rt.Outcome) + ", and the Stage-2 preview below reflects that runtime outcome."
+			// SSORequired is a CHALLENGE class enforced at runtime (Phase 3 Slice 4):
+			// a browser client is redirected (302) to the IdP / scoped selection page;
+			// a non-browser or CONNECT client, or a request with no eligible IdP after
+			// providerRefs filtering, is failed closed (403) — never a 407. It is NOT
+			// Allow or Block, and Stage-2 runs only after the client completes SSO and
+			// a session exists.
+			note = "SSORequired — an interactive browser SSO redirect (302) would be required before this request " +
+				"proceeds; non-browser and CONNECT clients are failed closed (403). This is NOT Allow or Block; the " +
+				"Stage-2 decision below applies only after the client completes SSO and a session is established."
 		}
 	}
 	stage2AuthSource = rawAuthSource
 	if stage2AuthSource == "" {
 		stage2AuthSource = "unauth"
 	}
-	// Stage-2 sees authSource=exempt only when the RUNTIME outcome is Exempt
-	// (mirrors Slice 7 runtime wiring; for an inert SSORequired decision this is
-	// the runtime fall-through outcome, not the Stage-1 SSORequired outcome).
-	if runtimeOutcome == OutcomeExempt {
+	// Stage-2 sees authSource=exempt only when the resolved outcome is Exempt
+	// (mirrors Slice 7 runtime wiring). A CR/SSORequired/Default decision keeps the
+	// unauthenticated source — those outcomes do not authenticate the request here.
+	if d.Outcome == OutcomeExempt {
 		stage2AuthSource = authSourceExempt
 	}
 	block = map[string]any{
 		"outcome":              string(d.Outcome),
-		"runtimeOutcome":       string(runtimeOutcome),
+		"runtimeOutcome":       string(d.Outcome), // runtime now resolves the same outcome the simulator shows
 		"killSwitch":           authExemptKillSwitchEngaged(),
 		"credentialsPresented": hasCreds,
 		"stage2AuthSource":     stage2AuthSource,
@@ -370,20 +360,6 @@ func simulateAuthOutcome(rules []PolicyRule, sourceIP, host, protocol, method, i
 		}
 	}
 	return stage2AuthSource, block
-}
-
-// runtimeOutcomePhrase renders an operator-facing description of the outcome the
-// live auth gate currently produces (used by the simulator when the Stage-1
-// resolver returns an outcome that is not yet wired onto the runtime path).
-func runtimeOutcomePhrase(o AuthOutcome) string {
-	switch o {
-	case OutcomeExempt:
-		return "Exempt (authentication waived; Stage-2 still decides)"
-	case OutcomeCredentialRequired:
-		return "CredentialRequired (a 407 credential challenge)"
-	default:
-		return "Default (today's standard authentication gate)"
-	}
 }
 
 // authPrioritiesWouldChange reports whether applying PolicyStore.Reorder with
