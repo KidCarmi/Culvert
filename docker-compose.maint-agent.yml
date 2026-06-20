@@ -1,0 +1,45 @@
+# Culvert — Release Management ⇄ maintenance-agent wiring (OPT-IN override).
+#
+# Lets the in-proxy Release Management API reach the host `culvert-maint` agent
+# over the agent's OWN Unix-domain socket so the admin UI stops showing
+# "Agent unreachable".
+#
+# This is NOT the Docker socket. It mounts the maintenance agent's narrow,
+# authenticated /v1 API socket — the agent authenticates the caller
+# (SO_PEERCRED + allow_peers) and every Docker action it performs is bounded by
+# the path-locked sudoers allowlist (/etc/sudoers.d/culvert-maint). A compromised
+# proxy therefore still cannot exceed the agent's allowlisted surface, and
+# /var/run/docker.sock is NEVER mounted.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d
+#
+# Prerequisites (see docs/operator/release-management-agent.md for the full
+# walk-through):
+#   1. CULVERT_MAINT_GID — the host GID of the `culvert-maint` group:
+#        export CULVERT_MAINT_GID=$(getent group culvert-maint | cut -d: -f3)
+#   2. The proxy container's host UID must be listed in the agent's allow_peers:
+#        docker compose exec proxy id -u        # → add to allow_peers
+#        sudoedit /etc/culvert-maint/config.toml
+#        sudo systemctl restart culvert-maint
+#
+# Requires the agent's socket at /run/culvert-maint/culvert-maint.sock (the
+# default once the RuntimeDirectory unit is installed). If your agent still uses
+# the legacy /run/culvert-maint.sock, update CULVERT_MAINT_AGENT_URL below.
+
+services:
+  proxy:
+    # Mount the agent UDS directory (NOT /var/run/docker.sock). Read-only: the
+    # proxy only connects to the existing socket; it never manages the directory.
+    volumes:
+      - /run/culvert-maint:/run/culvert-maint:ro
+    # The socket is 0660 culvert-maint:culvert-maint, so the proxy process must
+    # be in the culvert-maint group to connect. Numeric GID — the container has
+    # no culvert-maint group entry. `:?` fails the `up` early with a clear hint
+    # if the GID was not exported.
+    group_add:
+      - "${CULVERT_MAINT_GID:?run: export CULVERT_MAINT_GID=$(getent group culvert-maint | cut -d: -f3)}"
+    environment:
+      # Point the Release Management client at the agent UDS. Matches the agent's
+      # socket_path default under its systemd RuntimeDirectory.
+      CULVERT_MAINT_AGENT_URL: "unix:///run/culvert-maint/culvert-maint.sock"

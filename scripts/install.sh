@@ -750,11 +750,13 @@ step "Maintenance agent (optional)"
 # automation for unattended (e.g. OVA / first-boot) deployments.
 #
 # It is reached on the host via its UDS by a local operator or the control
-# plane. We do NOT mount that socket into the proxy container — doing so would
-# let a compromised proxy drive host-level backup/restore/upgrade, which defeats
-# the agent's isolation. In-container UI integration (a socket mount or
-# CULVERT_MAINT_AGENT_URL) is therefore a deliberate, separate decision and is
-# intentionally out of scope here.
+# plane. By default we do NOT wire that socket into the proxy container, so the
+# in-container Release Management UI reports the agent as "unreachable" until you
+# opt in. Mounting the AGENT's UDS (NOT /var/run/docker.sock) is the supported,
+# isolation-preserving opt-in — the agent's SO_PEERCRED + allow_peers + sudoers
+# allowlist remain the privilege boundary, so a compromised proxy still cannot
+# exceed the agent's narrow allowlisted surface. See docker-compose.maint-agent.yml
+# and docs/operator/release-management-agent.md.
 #
 # Optional + best-effort: a failure NEVER fails the Culvert install — we warn
 # and move on. Opt out entirely with CULVERT_SKIP_MAINT_AGENT=1.
@@ -1042,8 +1044,8 @@ fi
 if [[ "${MAINT_AGENT_INSTALLED:-0}" == "1" ]]; then
   echo "  Maintenance agent installed (systemd: culvert-maint), not yet started."
   echo "  It is host-side day-2 tooling (backup/restore, Docker image updates),"
-  echo "  reached on the host via /run/culvert-maint/culvert-maint.sock — not by the in-container"
-  echo "  admin UI by default."
+  echo "  reached on the host via /run/culvert-maint/culvert-maint.sock — and, opt-in, by the"
+  echo "  admin UI's Release Management (see docs/operator/release-management-agent.md)."
   echo "  Before starting it, set the allowed caller(s):"
   echo "    sudo \$EDITOR /etc/culvert-maint/config.toml   # set allow_peers"
   echo "    sudo systemctl enable --now culvert-maint"
