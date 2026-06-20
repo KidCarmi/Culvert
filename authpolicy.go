@@ -251,11 +251,13 @@ func resolveNoCredAuthOutcome(r *http.Request, clientIP string) AuthDecision {
 	if r.Header.Get("Proxy-Authorization") != "" {
 		return AuthDecision{Outcome: OutcomeDefault}
 	}
-	// RUNTIME PATH — the generalized resolver returns Exempt, CredentialRequired,
-	// or Default. proxy.go's arm-3 hook now handles BOTH Exempt (waive) and CR
-	// (deterministic 407 challenge) — Phase 2 Slice 3. Highest-priority matching
-	// auth rule wins, so an admin can intentionally place CR above Exempt.
-	return resolveAuthOutcome(authRequestContext(r, clientIP))
+	// RUNTIME PATH — proxy.go's arm-3 hook handles Exempt (waive) and CR
+	// (deterministic 407 challenge) — Phase 2 Slice 3. SSORequired resolves in the
+	// FULL pure resolver (Phase 3 Slice 3) but is NOT yet wired here, so it is
+	// excluded (runtimeInertOutcomes): it can neither win nor shadow a
+	// lower-priority Exempt/CR rule. The SSORequired exclusion is removed in Slice
+	// 4. Highest-priority matching (non-inert) auth rule wins.
+	return resolveAuthOutcomeFromExcluding(policyStore.List(), authRequestContext(r, clientIP), runtimeInertOutcomes)
 }
 
 // ─── Kill switch (§1.11) — read-once accessor only ──────────────────────────
@@ -392,33 +394,42 @@ func resolveAuthOutcome(ctx RequestContext) AuthDecision {
 	return resolveAuthOutcomeFrom(policyStore.List(), ctx)
 }
 
-// resolveAuthOutcomeFrom is the pure core of the resolver, taking an explicit
-// ruleset so it is testable without global state. It evaluates Stage-1 auth
-// rules in priority order (lowest Priority value first, mirroring
-// PolicyStore.sortLocked / Evaluate) and returns the matched rule's outcome
-// (Exempt or CredentialRequired) for the first matching auth rule. Otherwise it
-// returns Default (Plan Freeze #9). It has no side effects and is NOT called
-// from proxy.go to drive CR — proxy.go consumes only Exempt today, so a
-// CredentialRequired decision is treated exactly like Default there (Phase 2
-// Slice 2: CR resolves but stays runtime-inert until Slice 3 wires it).
+// resolveAuthOutcomeFrom is the FULL pure resolver, taking an explicit ruleset so
+// it is testable without global state. It evaluates Stage-1 auth rules in
+// priority order (lowest Priority value first, mirroring PolicyStore.sortLocked /
+// Evaluate) and returns the matched rule's outcome (Exempt, CredentialRequired,
+// or SSORequired) for the first matching auth rule. Otherwise it returns Default
+// (Plan Freeze #9). It has no side effects beyond the Exempt kill-switch read.
 //
-// SSORequired is reserved and inert (never matches). Access (Stage-2) rules are
-// ignored entirely.
+// This full resolver is consumed by the simulator and observability. The RUNTIME
+// no-credentials path uses resolveAuthOutcomeFromExcluding with
+// runtimeInertOutcomes so that an outcome proxy.go does not yet consume
+// (SSORequired, Phase 3 Slice 3) cannot win OR shadow a lower-priority Exempt/CR
+// rule. This mirrors the Phase 2 Slice 2 Exempt-only stopgap (removed in Slice 3
+// when CR shipped); the SSORequired exclusion is removed in Phase 3 Slice 4 when
+// SSORequired is wired onto the hot path.
 //
 // Break-glass kill switch (env CULVERT_AUTHBYPASS_DISABLE or the runtime toggle)
 // disables Exempt ONLY: a matching Exempt rule is suppressed (fails closed to
 // auth-required) and evaluation continues to lower-priority rules / Default.
-// CredentialRequired is NOT disabled by the kill switch — it already requires
-// authentication. The kill-switch read is the one piece of global state this
-// otherwise-pure core consults.
-//
-// Phase 2 Slice 3 wired CredentialRequired onto the proxy hot path, so this
-// generalized resolver is once again the runtime resolver (via resolveAuthOutcome
-// → resolveNoCredAuthOutcome). proxy.go now handles BOTH Exempt and CR, so a
-// higher-priority CR rule legitimately beating a lower-priority Exempt rule is
-// the admin's intended priority — not a shadowing regression (the Slice-2
-// Exempt-only stopgap is removed).
+// CredentialRequired and SSORequired are NOT disabled by the kill switch — they
+// already require authentication.
 func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision {
+	return resolveAuthOutcomeFromExcluding(rules, ctx, nil)
+}
+
+// runtimeInertOutcomes are AuthOutcomes the resolver surfaces to the simulator
+// and observability but that proxy.go does NOT yet consume. On the runtime path
+// they are treated as non-matching so they neither win nor shadow a
+// lower-priority Exempt/CredentialRequired rule. SSORequired is inert until
+// Phase 3 Slice 4 wires it (mirrors the Phase 2 Slice 2 Exempt-only stopgap).
+var runtimeInertOutcomes = map[AuthOutcome]bool{OutcomeSSORequired: true}
+
+// resolveAuthOutcomeFromExcluding is the pure core. An outcome present in skip is
+// treated as NON-MATCHING: the rule neither wins nor stops evaluation, so it
+// cannot shadow a lower-priority rule. skip is nil for the full pure resolver
+// (simulator/observability) and runtimeInertOutcomes for the runtime path.
+func resolveAuthOutcomeFromExcluding(rules []PolicyRule, ctx RequestContext, skip map[AuthOutcome]bool) AuthDecision {
 	// Evaluate in priority order. Sort a copy so the decision is deterministic
 	// regardless of the caller's slice ordering (policyStore.List() is already
 	// sorted, but the contract must not depend on that).
@@ -433,9 +444,14 @@ func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision
 		if !ok {
 			continue
 		}
+		// Not-yet-wired outcomes are inert on the runtime path: treated as
+		// non-matching so they cannot win or shadow lower-priority rules.
+		if skip[outcome] {
+			continue
+		}
 		// Kill switch disables Exempt only: suppress a matching Exempt rule and
-		// fall through to lower-priority rules / Default. CR (and future
-		// outcomes) are unaffected — they already require authentication.
+		// fall through to lower-priority rules / Default. CR and SSORequired are
+		// unaffected — they already require authentication.
 		if outcome == OutcomeExempt && authExemptKillSwitchEngaged() {
 			continue
 		}
@@ -448,7 +464,7 @@ func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision
 // effective Stage-1 auth rule that matches the request, and if so returns its
 // outcome (Exempt or CredentialRequired). It returns ("", false) when the rule
 // does not apply: a non-auth rule, a disabled rule, a missing spec, a
-// not-yet-implemented outcome (SSORequired/Default/unknown), an unscoped or
+// not-yet-implemented outcome (Default/unknown), an unscoped or
 // malformed subject, an unmet destination, an out-of-schedule or expired rule,
 // or a protocol/method mismatch — every check fails closed. The outcome is NOT
 // interpreted here (no exempt/challenge semantics); the resolver applies the
@@ -465,9 +481,10 @@ func authRuleMatches(rule *PolicyRule, ctx RequestContext) (AuthOutcome, bool) {
 		return "", false
 	}
 	switch spec.Outcome {
-	case OutcomeExempt, OutcomeCredentialRequired:
-		// implemented
-	default: // SSORequired / Default / unknown — reserved and inert
+	case OutcomeExempt, OutcomeCredentialRequired, OutcomeSSORequired:
+		// implemented — the pure resolver returns all three. SSORequired is kept
+		// off the runtime path via runtimeInertOutcomes until Phase 3 Slice 4.
+	default: // Default / unknown — reserved and inert
 		return "", false
 	}
 	// Source scope: typed CIDR SubjectMatch. nil / unknown predicate / bad IP all
@@ -515,12 +532,15 @@ func authRuleMatches(rule *PolicyRule, ctx RequestContext) (AuthOutcome, bool) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // authLogFieldsFor builds the low-cardinality observability fields for an auth
-// decision. It carries NO identity: an Exempt decision is described by outcome +
-// rule id/name (+ low-cardinality subject predicate type names and the matched
-// rule's subject schema version) only. A non-Exempt / Default decision yields the
-// zero value, so logging stays byte-identical for un-exempted requests. Pure.
+// decision. It carries NO identity: an Exempt/CredentialRequired/SSORequired
+// decision is described by outcome + rule id/name (+ low-cardinality subject
+// predicate type names and the matched rule's subject schema version) only.
+// providerRefs VALUES are intentionally NOT serialized (they would be a
+// higher-cardinality dimension); the decision still carries them via d.Rule for
+// later runtime use. A Default decision yields the zero value, so logging stays
+// byte-identical for un-decided requests. Pure.
 func authLogFieldsFor(d AuthDecision) AuthLogFields {
-	if d.Rule == nil || (d.Outcome != OutcomeExempt && d.Outcome != OutcomeCredentialRequired) {
+	if d.Rule == nil || (d.Outcome != OutcomeExempt && d.Outcome != OutcomeCredentialRequired && d.Outcome != OutcomeSSORequired) {
 		return AuthLogFields{}
 	}
 	f := AuthLogFields{
@@ -559,11 +579,18 @@ func incAuthExempt() {
 }
 
 // incAuthCredentialRequired increments the Stage-1 CredentialRequired-decision
-// counter exposed as culvert_auth_credential_required_total. Defined in Phase 2
-// Slice 2 but intentionally NOT called from proxy.go / the request path yet — CR
-// is runtime-inert until Slice 3 wires it, so the metric stays at zero.
+// counter exposed as culvert_auth_credential_required_total. Wired onto the proxy
+// hot path in Phase 2 Slice 3.
 func incAuthCredentialRequired() {
 	atomic.AddInt64(&statAuthCredentialRequired, 1)
+}
+
+// incAuthSSORequired increments the Stage-1 SSORequired-decision counter exposed
+// as culvert_auth_sso_required_total. Defined in Phase 3 Slice 3 but intentionally
+// NOT called from proxy.go / the request path yet — SSORequired is runtime-inert
+// until Slice 4 wires it, so the metric stays at zero.
+func incAuthSSORequired() {
+	atomic.AddInt64(&statAuthSSORequired, 1)
 }
 
 // matchSubject reports whether clientIP satisfies a typed SubjectMatch. Predicate

@@ -57,10 +57,13 @@ func TestP2S2_Resolver_DisabledExpiredNonMatchingCR_Default(t *testing.T) {
 }
 
 func TestP2S2_Resolver_SSORequiredInert(t *testing.T) {
+	// Phase 3 Slice 3 generalized the FULL pure resolver to RETURN SSORequired.
+	// It stays inert on the RUNTIME path (resolveNoCredAuthOutcome excludes it via
+	// runtimeInertOutcomes) until Slice 4 — see the Phase 3 Slice 3 suite.
 	r := validCRRule()
 	r.Auth.Outcome = OutcomeSSORequired
-	if d := resolveAuthOutcomeFrom([]PolicyRule{r}, p2s2CtxMatch()); d.Outcome != OutcomeDefault {
-		t.Errorf("SSORequired must be inert (Default), got %q", d.Outcome)
+	if d := resolveAuthOutcomeFrom([]PolicyRule{r}, p2s2CtxMatch()); d.Outcome != OutcomeSSORequired {
+		t.Errorf("pure resolver must return SSORequired (Phase 3 Slice 3), got %q", d.Outcome)
 	}
 }
 

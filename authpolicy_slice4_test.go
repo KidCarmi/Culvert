@@ -313,14 +313,16 @@ func TestSlice4_NoDestinationWithoutBroadFailsClosed(t *testing.T) {
 
 // ── Reserved outcomes remain inert ───────────────────────────────────────────
 
-// Phase 2 Slice 2 made CredentialRequired resolve; only SSORequired stays
-// reserved/inert in the pure resolver.
+// Phase 2 Slice 2 made CredentialRequired resolve and Phase 3 Slice 3 made
+// SSORequired resolve in the pure resolver. The only inert outcomes left are
+// Default and genuinely-unknown/future outcome strings (the authRuleMatches
+// default branch fails closed).
 func TestSlice4_ReservedOutcomesInert(t *testing.T) {
-	for _, oc := range []AuthOutcome{OutcomeSSORequired} {
+	for _, oc := range []AuthOutcome{OutcomeDefault, AuthOutcome("FutureOutcome")} {
 		r := authRule()
 		r.Auth.Outcome = oc
 		if d := resolveAuthOutcomeFrom([]PolicyRule{r}, matchingCtx()); d.Outcome != OutcomeDefault {
-			t.Errorf("reserved outcome %q must be inert (Default), got %q", oc, d.Outcome)
+			t.Errorf("inert/unknown outcome %q must resolve Default, got %q", oc, d.Outcome)
 		}
 	}
 }

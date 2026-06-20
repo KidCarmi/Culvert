@@ -383,6 +383,10 @@ culvert_auth_exempt_decisions_total %d
 # HELP culvert_auth_credential_required_total Total Stage-1 authentication-policy CredentialRequired decisions
 # TYPE culvert_auth_credential_required_total counter
 culvert_auth_credential_required_total %d
+
+# HELP culvert_auth_sso_required_total Total Stage-1 authentication-policy SSORequired decisions
+# TYPE culvert_auth_sso_required_total counter
+culvert_auth_sso_required_total %d
 `,
 		total, allowed, blocked, authFail,
 		int64(bl.Count()),
@@ -401,6 +405,7 @@ culvert_auth_credential_required_total %d
 		bytesRecv,
 		atomic.LoadInt64(&statAuthExempt),
 		atomic.LoadInt64(&statAuthCredentialRequired),
+		atomic.LoadInt64(&statAuthSSORequired),
 	)
 
 	// Append per-rule hit counters, latency histogram, and CDR metrics.
