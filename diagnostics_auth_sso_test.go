@@ -233,6 +233,21 @@ func TestP3S5_Shadow_EmptyScheduleCountsAsFullShadow(t *testing.T) {
 	}
 }
 
+// A schedule with an invalid IANA timezone is failed closed by authRuleMatches
+// (via authScheduleParseable) — the rule never fires at runtime. It must NOT be
+// classified as a full shadower (the lower rule IS still reachable).
+func TestP3S5_Shadow_UnparseableTimezoneNotFullShadow(t *testing.T) {
+	cidrs := []string{"10.0.5.0/24"}
+	const host = "portal.example.com"
+	a := authRuleAt(OutcomeSSORequired, "sso-1", 1, cidrs, host)
+	a.Schedule = &PolicySchedule{Timezone: "Not/AZone"} // invalid tz → fails closed at runtime
+	b := authRuleAt(OutcomeExempt, "exempt-2", 2, cidrs, host)
+	c := diagHas(t, authRuleShadowDiagnostics([]PolicyRule{a, b}), "auth_rule_shadowed", diagWarn)
+	if strings.Contains(c.Message, "fully shadows") {
+		t.Errorf("rule with unparseable timezone cannot be a full shadower (never fires): %q", c.Message)
+	}
+}
+
 func TestP3S5_Shadow_DisabledAndExpiredExcluded(t *testing.T) {
 	cidrs := []string{"10.0.5.0/24"}
 	const host = "portal.example.com"
