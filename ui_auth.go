@@ -782,12 +782,37 @@ func supportedSAMLMetadataNameIDFormats() []saml.NameIDFormat {
 
 // GET /auth/select?relay=...  — IdP selection screen for multi-tenancy.
 // Renders a minimal HTML page listing all enabled providers.
+// filterProvidersByID keeps only providers whose bare profile ID (stripIdPPrefix
+// of Name) appears in the comma-separated want list. An empty want returns the
+// providers unchanged.
+func filterProvidersByID(providers []IdentityProvider, want string) []IdentityProvider {
+	if want == "" {
+		return providers
+	}
+	allow := make(map[string]bool)
+	for _, id := range strings.Split(want, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			allow[id] = true
+		}
+	}
+	out := providers[:0]
+	for _, p := range providers {
+		if allow[stripIdPPrefix(p.Name())] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func authSelectProvider(w http.ResponseWriter, r *http.Request) {
 	relay := r.URL.Query().Get("relay")
 	if relay == "" {
 		relay = "/"
 	}
-	providers := idpRegistry.EnabledProviders()
+	// Optional providers= filter (Phase 3 Slice 4) scopes the selection to a set
+	// of bare IdP profile IDs (used by an SSORequired rule's providerRefs); absent
+	// → all enabled providers (backward-compatible; Default flow unaffected).
+	providers := filterProvidersByID(idpRegistry.EnabledProviders(), r.URL.Query().Get("providers"))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!DOCTYPE html><html><head>
 <meta charset="utf-8"><title>Culvert — Sign In</title>

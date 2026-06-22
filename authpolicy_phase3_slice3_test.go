@@ -96,9 +96,9 @@ func TestP3S3_PureResolver_MixedPriority(t *testing.T) {
 	}
 }
 
-// ── Runtime: SSORequired is inert and must not shadow Exempt/CR ───────────────
+// ── Runtime: SSORequired is active and wins by priority (Phase 3 Slice 4) ─────
 
-func TestP3S3_Runtime_SSODoesNotShadow(t *testing.T) {
+func TestP3S3_Runtime_SSOWinsByPriority(t *testing.T) {
 	setupAuthGateTest(t)
 	const host = "p3s3-shadow.example.test"
 	mk := func(base PolicyRule, name string, prio int) PolicyRule {
@@ -107,27 +107,28 @@ func TestP3S3_Runtime_SSODoesNotShadow(t *testing.T) {
 		return r
 	}
 
-	// SSO@1 + Exempt@2 → runtime resolves Exempt (SSO skipped, not shadowing).
+	// SSO@1 + Exempt@2 → SSO wins by priority (priority-only model, no special
+	// Exempt precedence).
 	withFreshPolicyStore(t)
 	policyStore.Add(mk(validSSORule(), "sso-1", 1))
 	policyStore.Add(mk(validExemptRule(), "ex-2", 2))
-	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeExempt {
-		t.Errorf("runtime: inert SSO@1 must not shadow Exempt@2; got %q", d.Outcome)
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeSSORequired {
+		t.Errorf("runtime: SSO@1 must win over Exempt@2 by priority; got %q", d.Outcome)
 	}
 
-	// SSO@1 + CR@2 → runtime resolves CredentialRequired.
+	// SSO@1 + CR@2 → SSO wins by priority.
 	withFreshPolicyStore(t)
 	policyStore.Add(mk(validSSORule(), "sso-1", 1))
 	policyStore.Add(mk(validCRRule(), "cr-2", 2))
-	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeCredentialRequired {
-		t.Errorf("runtime: inert SSO@1 must not shadow CR@2; got %q", d.Outcome)
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeSSORequired {
+		t.Errorf("runtime: SSO@1 must win over CR@2 by priority; got %q", d.Outcome)
 	}
 
-	// SSO-only → runtime resolves Default (inert).
+	// SSO-only → runtime resolves SSORequired (runtime-active).
 	withFreshPolicyStore(t)
 	policyStore.Add(mk(validSSORule(), "sso-only", 1))
-	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeDefault {
-		t.Errorf("runtime: SSO-only must resolve Default (inert); got %q", d.Outcome)
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeSSORequired {
+		t.Errorf("runtime: SSO-only must resolve SSORequired (active); got %q", d.Outcome)
 	}
 }
 
@@ -156,7 +157,7 @@ func TestP3S3_Runtime_ExemptCRUnchanged(t *testing.T) {
 
 // ── Observability ────────────────────────────────────────────────────────────
 
-func TestP3S3_Metric_DefinedNotIncrementedByRuntime(t *testing.T) {
+func TestP3S3_Metric_ExposedAndIncrementsOnRuntimeSSO(t *testing.T) {
 	old := metricsToken
 	metricsToken = ""
 	t.Cleanup(func() { metricsToken = old })
@@ -167,12 +168,12 @@ func TestP3S3_Metric_DefinedNotIncrementedByRuntime(t *testing.T) {
 	policyStore.Add(scopeLocal(validSSORule(), "sso-metric", host))
 
 	start := atomic.LoadInt64(&statAuthSSORequired)
-	// A live request matching the SSO rule must NOT increment the counter
-	// (SSORequired is runtime-inert; proxy.go does not consume it yet).
+	// A live request matching the SSO rule now increments the counter (Phase 3
+	// Slice 4 — a non-browser SSO request fails closed 403 and counts).
 	w := httptest.NewRecorder()
 	handleRequest(w, makeRequest("http://"+host+"/", map[string]string{"User-Agent": "curl/8.0"}))
-	if got := atomic.LoadInt64(&statAuthSSORequired); got != start {
-		t.Errorf("request path must not increment statAuthSSORequired: %d → %d", start, got)
+	if got := atomic.LoadInt64(&statAuthSSORequired); got != start+1 {
+		t.Errorf("runtime SSO response must increment statAuthSSORequired: %d → %d", start, got)
 	}
 
 	// Exposed in the metrics output.
@@ -186,13 +187,6 @@ func TestP3S3_Metric_DefinedNotIncrementedByRuntime(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics output missing %q", want)
 		}
-	}
-
-	// The increment helper works (wiring proof for Slice 4; unused at runtime now).
-	incAuthSSORequired()
-	t.Cleanup(func() { atomic.AddInt64(&statAuthSSORequired, -1) })
-	if got := atomic.LoadInt64(&statAuthSSORequired); got != start+1 {
-		t.Errorf("incAuthSSORequired must bump the counter: %d → %d", start, got)
 	}
 }
 
@@ -221,8 +215,8 @@ func TestP3S3_Simulator_ShowsSSORequiredSeparateFromStage2(t *testing.T) {
 	if resp.Auth.Outcome != "SSORequired" {
 		t.Fatalf("simulator Stage-1 outcome = %q, want SSORequired", resp.Auth.Outcome)
 	}
-	if !strings.Contains(resp.Auth.Note, "NOT Allow") || !strings.Contains(resp.Auth.Note, "yet enforced at runtime") {
-		t.Errorf("SSORequired note must frame it as not-Allow and not-yet-enforced: %q", resp.Auth.Note)
+	if !strings.Contains(resp.Auth.Note, "NOT Allow") || !strings.Contains(resp.Auth.Note, "302") {
+		t.Errorf("SSORequired note must frame it as not-Allow and describe the 302/403 challenge: %q", resp.Auth.Note)
 	}
 	// Stage-2 stays separate: SSORequired must not borrow the exempt authSource,
 	// and default-deny still applies independently.
@@ -234,43 +228,37 @@ func TestP3S3_Simulator_ShowsSSORequiredSeparateFromStage2(t *testing.T) {
 	}
 }
 
-// The simulator must not report an outcome the live gate would not produce: when
-// SSORequired shadows a lower-priority Exempt/CR rule in the FULL resolver, the
-// block still shows SSORequired (the resolved Stage-1 outcome) but runtimeOutcome
-// + the Stage-2 preview reflect what the live (SSO-inert) gate does today.
-func TestP3S3_Simulator_SSODivergenceReportsRuntimeOutcome(t *testing.T) {
+// With SSORequired runtime-active (Phase 3 Slice 4), the simulator's reported
+// outcome MATCHES the live gate — there is no longer any divergence. runtimeOutcome
+// equals outcome for the priority winner (SSO beats lower Exempt/CR).
+func TestP3S3_Simulator_RuntimeMatchesResolver(t *testing.T) {
 	mk := func(base PolicyRule, name string, prio int) PolicyRule {
 		base.Name, base.Priority, base.DestFQDN = name, prio, "portal.example.com"
 		base.SubjectMatch = &SubjectMatch{SchemaVersion: 1, All: []SubjectPredicate{{Type: subjectPredicateCIDR, Values: []string{"10.0.5.0/24"}}}}
 		return base
 	}
 
-	// SSO@1 + Exempt@2: Stage-1 outcome SSORequired, but runtime waives (Exempt).
+	// SSO@1 + Exempt@2: SSO wins by priority at runtime too — no divergence.
 	withFreshPolicyStore(t)
 	setDefaultPolicyAction("deny")
 	policyStore.Add(mk(validSSORule(), "sso-1", 1))
 	policyStore.Add(mk(validExemptRule(), "ex-2", 2))
 	resp := runSim(t, map[string]any{"sourceIP": "10.0.5.7", "host": "portal.example.com"})
-	if resp.Auth.Outcome != "SSORequired" {
-		t.Fatalf("Stage-1 outcome must still show SSORequired, got %q", resp.Auth.Outcome)
+	if resp.Auth.Outcome != "SSORequired" || resp.Auth.RuntimeOutcome != "SSORequired" {
+		t.Errorf("SSO@1+Exempt@2: outcome=%q runtimeOutcome=%q, want both SSORequired", resp.Auth.Outcome, resp.Auth.RuntimeOutcome)
 	}
-	if resp.Auth.RuntimeOutcome != "Exempt" {
-		t.Errorf("runtimeOutcome must reflect the live gate (Exempt), got %q", resp.Auth.RuntimeOutcome)
-	}
-	if resp.Auth.Stage2AuthSource != "exempt" {
-		t.Errorf("Stage-2 preview must reflect the runtime Exempt authSource, got %q", resp.Auth.Stage2AuthSource)
-	}
-	if !strings.Contains(resp.Auth.Note, "Exempt") {
-		t.Errorf("note must name the runtime outcome (Exempt): %q", resp.Auth.Note)
+	// SSORequired does not authenticate the request: Stage-2 does not see exempt.
+	if resp.Auth.Stage2AuthSource == "exempt" {
+		t.Errorf("SSORequired must not set stage2AuthSource=exempt, got %q", resp.Auth.Stage2AuthSource)
 	}
 
-	// SSO@1 + CR@2: Stage-1 SSORequired, runtime CredentialRequired.
+	// SSO@1 + CR@2: SSO wins by priority — no divergence.
 	withFreshPolicyStore(t)
 	policyStore.Add(mk(validSSORule(), "sso-1", 1))
 	policyStore.Add(mk(validCRRule(), "cr-2", 2))
 	resp = runSim(t, map[string]any{"sourceIP": "10.0.5.7", "host": "portal.example.com"})
-	if resp.Auth.Outcome != "SSORequired" || resp.Auth.RuntimeOutcome != "CredentialRequired" {
-		t.Errorf("SSO@1+CR@2: outcome=%q runtimeOutcome=%q, want SSORequired / CredentialRequired", resp.Auth.Outcome, resp.Auth.RuntimeOutcome)
+	if resp.Auth.Outcome != "SSORequired" || resp.Auth.RuntimeOutcome != "SSORequired" {
+		t.Errorf("SSO@1+CR@2: outcome=%q runtimeOutcome=%q, want both SSORequired", resp.Auth.Outcome, resp.Auth.RuntimeOutcome)
 	}
 }
 

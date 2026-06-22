@@ -361,12 +361,53 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				logger.Printf("AUTH_CR rule=%q id=%q %s -> %q {req_id=%s action=challenge}",
 					sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
 				return
+			} else if d.Outcome == OutcomeSSORequired {
+				// ── 3c. No credentials — Stage-1 SSORequired challenge (Slice 4) ──
+				// A matched SSORequired rule demands an INTERACTIVE browser SSO
+				// flow. No identity is created (authenticatedIdentity stays empty →
+				// X-User-Identity is never set), and the branch returns immediately
+				// — Stage-2 never runs until the client completes SSO and a session
+				// exists. classifyClient is consulted ONLY here (the Default path
+				// below keeps browserRedirectEligibleLegacy). Reachable only with no
+				// presented credentials (failed/malformed credentials 407 in arm 2;
+				// resolveNoCredAuthOutcome returns Default whenever a
+				// Proxy-Authorization header is present).
+				authLog = authLogFieldsFor(d)
+				// Only a browser can complete an interactive SSO flow. Resolving the
+				// portal URL can ALLOCATE IdP callback state (PKCE / SAML stores) as a
+				// side effect, so it is done ONLY for browser clients: a non-browser or
+				// CONNECT request fails closed WITHOUT touching those capped stores
+				// (otherwise a stream of denied requests could churn / evict legitimate
+				// in-flight browser logins). classifyClient is consulted ONLY here.
+				if classifyClient(r) == clientBrowser {
+					if portalURL, eligible := resolveSSOPortalURL(r, d.Rule.Auth.ProviderRefs); eligible > 0 && portalURL != "" && isSafeCaptiveRedirect(portalURL) {
+						// Browser + ≥1 eligible IdP → 302 to the captive portal /
+						// provider flow scoped by providerRefs.
+						incAuthSSORequired()
+						recordRequestAuth(clientIP, r.Method, r.Host, "SSO_REDIRECT", d.Rule.Name, "", "", authLog)
+						logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=redirect}",
+							sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
+						http.Redirect(w, r, portalURL, http.StatusFound) // #nosec G710 -- portalURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
+						return
+					}
+				}
+				// DR-1 fail-closed: non-browser, CONNECT, or a browser with no eligible
+				// IdP after providerRefs filtering. No Basic 407 (a false affordance —
+				// the rule wants interactive SSO, not Basic), no identity, and no SSO
+				// callback state was allocated for the rejected request.
+				incAuthSSORequired()
+				recordRequestAuth(clientIP, r.Method, r.Host, "SSO_DENIED", d.Rule.Name, "", "", authLog)
+				logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=deny}",
+					sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
+				http.Error(w, "Forbidden: destination requires interactive SSO", http.StatusForbidden)
+				return
 			} else {
 				// ── 3. No credentials ────────────────────────────────────────
 				// browserRedirectEligibleLegacy is the verbatim pre-Slice-1
-				// predicate (Mozilla User-Agent && non-CONNECT). Phase 3 Slice 1
-				// extracted it to client_class.go without changing behavior;
-				// Slice 4 will flip this to the deterministic classifyClient.
+				// predicate (Mozilla User-Agent && non-CONNECT) — the Default
+				// compatibility path. It is intentionally NOT classifyClient:
+				// classifyClient drives SSORequired (arm 3c) only; the Default path
+				// stays legacy-pinned (DR-5).
 				if browserRedirectEligibleLegacy(r) {
 					// Route browser to appropriate IdP based on email domain hint.
 					loginURL := resolveCaptivePortalURL(r)
@@ -670,6 +711,80 @@ func resolveCaptivePortalURL(r *http.Request) string {
 
 	// Legacy single OIDC provider.
 	return cfg.OIDCLoginURL()
+}
+
+// resolveSSOPortalURL resolves the captive-portal redirect for a matched
+// SSORequired rule (Phase 3 Slice 4), scoped by the rule's providerRefs. It
+// returns the redirect URL and the number of ELIGIBLE providers (enabled,
+// interactive OIDC/SAML). providerRefs are registry IDs, never URLs:
+//   - empty refs → all enabled interactive providers.
+//   - non-empty → only refs that resolve to an enabled interactive provider;
+//     disabled/deleted/non-interactive refs are ignored at runtime (DR-4).
+//
+// By eligible-set cardinality:
+//   - 0  → ("", 0): the caller fails closed (403).
+//   - 1  → that provider's CaptiveLoginURL (direct redirect).
+//   - >1 → "/auth/select?relay=…&providers=<ids>" (scoped selection page).
+func resolveSSOPortalURL(r *http.Request, providerRefs []string) (string, int) {
+	elig := eligibleSSOProviders(providerRefs)
+	switch len(elig) {
+	case 0:
+		return "", 0
+	case 1:
+		return elig[0].prov.CaptiveLoginURL(ssoRelayURL(r), r), 1
+	default:
+		ids := make([]string, 0, len(elig))
+		for i := range elig {
+			ids = append(ids, elig[i].id)
+		}
+		return fmt.Sprintf("/auth/select?relay=%s&providers=%s",
+			url.QueryEscape(ssoRelayURL(r)), url.QueryEscape(strings.Join(ids, ","))), len(elig)
+	}
+}
+
+// ssoEligibleProvider pairs an IdP profile ID with its live provider.
+type ssoEligibleProvider struct {
+	id   string
+	prov IdentityProvider
+}
+
+// eligibleSSOProviders returns the enabled, interactive (OIDC/SAML) providers
+// selected by providerRefs (empty → all). Disabled, deleted, or non-interactive
+// refs are skipped. Pure registry reads — no side effects (it never calls
+// CaptiveLoginURL), so it is safe to invoke for eligibility counting.
+func eligibleSSOProviders(providerRefs []string) []ssoEligibleProvider {
+	if idpRegistry == nil {
+		return nil
+	}
+	ids := providerRefs
+	if len(ids) == 0 {
+		all := idpRegistry.All()
+		ids = make([]string, 0, len(all))
+		for _, p := range all {
+			ids = append(ids, p.ID)
+		}
+	}
+	var out []ssoEligibleProvider
+	for _, ref := range ids {
+		id := strings.TrimSpace(ref)
+		p := idpRegistry.Get(id)
+		if p == nil || !p.Enabled || (p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML) {
+			continue
+		}
+		if live, ok := idpRegistry.LiveProvider(id); ok {
+			out = append(out, ssoEligibleProvider{id: id, prov: live})
+		}
+	}
+	return out
+}
+
+// ssoRelayURL is the original URL the browser was trying to reach (carried
+// through the SSO flow as the post-login return target).
+func ssoRelayURL(r *http.Request) string {
+	if r.Host != "" {
+		return "http://" + r.Host + r.URL.RequestURI()
+	}
+	return r.URL.String()
 }
 
 func parseProxyAuth(r *http.Request) (string, string, bool) {
