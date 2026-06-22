@@ -160,6 +160,10 @@ func buildOperatorContract() OperatorContract {
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(),
 		cfg != nil && cfg.UnauthMode(), hasCredentialCapableProvider())...)
+	// SSORequired risk diagnostics + auth-rule shadow/overlap diagnostics (Phase 3
+	// Slice 5). Report-only; contribute nothing when no SSO/auth rules apply.
+	checks = append(checks, authSSORequiredDiagnostics(policyStore.List(), cfg != nil && cfg.UnauthMode())...)
+	checks = append(checks, authRuleShadowDiagnostics(policyStore.List())...)
 	return OperatorContract{
 		Verdict:     rollUpVerdict(checks),
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
