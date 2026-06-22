@@ -125,7 +125,11 @@ func TestP3S6_UI_SimulatorSeparatesStagesAndHandlesSSO(t *testing.T) {
 	if idx < 0 {
 		t.Fatal("simulator SSORequired note not found")
 	}
-	note := s[idx : idx+400]
+	end := idx + 400
+	if end > len(s) {
+		end = len(s)
+	}
+	note := s[idx:end]
 	if !strings.Contains(note, "NOT Allow") {
 		t.Error("simulator SSORequired note must state it is NOT Allow")
 	}
