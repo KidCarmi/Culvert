@@ -320,13 +320,24 @@ func TestLogStore_AgeRetentionTTL(t *testing.T) {
 	}
 	drainLogStore(t, s, 20)
 
-	time.Sleep(1500 * time.Millisecond)
-	_, total, err := s.Query(0, 0, 0, 1000, nil)
-	if err != nil {
-		t.Fatalf("Query after expiry: %v", err)
-	}
-	if total != 0 {
-		t.Errorf("after TTL expiry total = %d, want 0", total)
+	// Badger filters TTL-expired entries at read time, so once the 1s TTL passes
+	// Query returns total=0. Poll up to a generous deadline instead of a single
+	// fixed sleep: the old "sleep 1.5s then assert" left only a ~0.5s margin over
+	// the 1s TTL, which flaked under the shuffled determinism gate's parallel load.
+	deadline := time.Now().Add(8 * time.Second)
+	var total int
+	for {
+		var qerr error
+		if _, total, qerr = s.Query(0, 0, 0, 1000, nil); qerr != nil {
+			t.Fatalf("Query after expiry: %v", qerr)
+		}
+		if total == 0 {
+			break // all entries expired out of reads — success
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after TTL expiry total = %d, want 0 (entries did not expire within deadline)", total)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
