@@ -7090,7 +7090,9 @@ async function loadDeliveryHistory() {
 // fmtFeedInterval renders a Go duration string ("24h0m0s", "0s") for display.
 function fmtFeedInterval(s) {
   if (!s || s === '0s') return 'Disabled';
-  return s.replace(/(\d+h)0m0s$/, '$1').replace(/(\d+m)0s$/, '$1');
+  // Strip the trailing zero components ("…h0m0s" → "…h", "…m0s" → "…m").
+  // The literal anchors carry no quantifier, so there is no backtracking.
+  return s.replace(/h0m0s$/, 'h').replace(/m0s$/, 'm');
 }
 
 async function fetchBlocklistFeed() {
@@ -9358,7 +9360,11 @@ async function loadAuthPolicy() {
     try {
       const idpData = await api('/api/idp');
       _policyIdPList = Array.isArray(idpData) ? idpData : ((idpData && idpData.profiles) || []);
-    } catch (_) { /* selector falls back to empty; backend still validates refs */ }
+    } catch (e) {
+      // Non-fatal: the selector falls back to empty and the backend still
+      // validates providerRefs on write. Log for diagnosability.
+      console.debug('providerRefs selector: /api/idp unavailable', e);
+    }
     const d = await api('/api/authpolicy');
     apRules = d.rules || [];
     document.getElementById('ap-default-allow-warn').style.display =
