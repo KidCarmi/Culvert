@@ -9619,7 +9619,7 @@ async function loadReleaseCurrent() {
     if (!r.ok)            { box.innerHTML = '<span style="color:var(--danger)">Error ' + r.status + '</span>'; return; }
     const c = await r.json();
     if (c.available === false) {
-      box.innerHTML = '<span style="color:var(--muted)">No catalog loaded — current release is undetermined until a catalog is seeded (the agent is reachable).</span>';
+      box.innerHTML = '<span style="color:var(--muted)">No catalog loaded — current release is undetermined until a catalog is seeded. Agent reachability is not checked on this path.</span>';
     } else if (c.known) {
       box.innerHTML = '<div><b>' + escHtml(c.release_id || '') + '</b> <span style="color:var(--muted)">' + escHtml(c.version_id || '') + '</span></div>'
         + '<div style="color:var(--muted);font-size:.75rem;margin-top:4px">agent: ' + escHtml(agent) + '</div>';
