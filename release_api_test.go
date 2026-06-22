@@ -544,6 +544,26 @@ func TestReleaseAPI_CurrentUnknownAgent404(t *testing.T) {
 	}
 }
 
+// No catalog published ⇒ Current() returns errDispatchNoCatalog BEFORE it ever
+// contacts the agent. That must surface as a normal no-catalog read
+// (200 / available:false), NOT a 503 — the UI renders every 503 from this
+// endpoint as "Agent unreachable", which mislabels a reachable agent.
+func TestReleaseAPI_CurrentNoCatalog(t *testing.T) {
+	newReleaseFixture(t, nil, map[string]*fakeAgent{"A": {}}) // nil catalog provider
+	rec := httptest.NewRecorder()
+	apiReleaseCurrent(rec, releaseReq(http.MethodGet, "/api/releases/current?agent=A", nil, RoleViewer))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET current (no catalog) = %d; want 200, not a 503 'unreachable' (%s)", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	if body["available"] != false {
+		t.Fatalf("available = %v; want false when no catalog", body["available"])
+	}
+	if body["known"] != false {
+		t.Fatalf("known = %v; want false when no catalog", body["known"])
+	}
+}
+
 // ─── channel-target dispatch ────────────────────────────────────────────────
 
 func TestReleaseAPI_ChannelDispatchSucceeds(t *testing.T) {

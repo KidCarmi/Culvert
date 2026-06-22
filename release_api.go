@@ -250,12 +250,21 @@ func apiReleaseCurrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view, err := rm.svc.Current(r.Context(), ep)
+	if errors.Is(err, errDispatchNoCatalog) {
+		// No catalog published yet: Current() bails BEFORE contacting the agent,
+		// so this is NOT an agent-reachability failure. Surface it as a normal
+		// no-catalog read (200 / available:false) — the same signal GET /api/releases
+		// uses — instead of a 503 the UI mislabels as "Agent unreachable".
+		jsonOK(w, map[string]any{"agent": agent, "available": false, "known": false})
+		return
+	}
 	if err != nil {
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"agent": agent, "error": err.Error()})
 		return
 	}
 	jsonOK(w, map[string]any{
 		"agent":      agent,
+		"available":  true,
 		"known":      view.Known,
 		"release_id": view.ReleaseID,
 		"version_id": view.VersionID,
