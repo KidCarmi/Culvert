@@ -210,6 +210,13 @@ func authRuleShadowDiagnostics(rules []PolicyRule) []OperatorContractCheck {
 	return checks
 }
 
+// scheduleEffectivelyAlwaysActive reports whether a schedule is always active:
+// nil (no schedule field) or an all-zero struct (e.g. JSON {"schedule":{}}).
+// matchSchedule returns true for both cases, so both are full-shadow-eligible.
+func scheduleEffectivelyAlwaysActive(s *PolicySchedule) bool {
+	return s == nil || (len(s.Days) == 0 && s.TimeStart == "" && s.TimeEnd == "")
+}
+
 // authRuleCovers reports whether higher-priority rule a conservatively shadows
 // lower-priority rule b, and whether the shadow is full (b can never fire).
 func authRuleCovers(a, b *PolicyRule) (covered, full bool) {
@@ -221,7 +228,7 @@ func authRuleCovers(a, b *PolicyRule) (covered, full bool) {
 		return false, false
 	}
 	// A full shadow needs full subject containment AND an always-active shadower.
-	if fullSubject && a.Schedule == nil && a.Auth.ExpiresAt == "" {
+	if fullSubject && scheduleEffectivelyAlwaysActive(a.Schedule) && a.Auth.ExpiresAt == "" {
 		return true, true
 	}
 	return true, false

@@ -218,6 +218,21 @@ func TestP3S5_Shadow_ScheduledShadowerIsPartial(t *testing.T) {
 	}
 }
 
+// An all-empty (non-nil) PolicySchedule is semantically identical to nil:
+// matchSchedule returns true for it, so the shadower fires on every request.
+// authRuleCovers must treat it as always-active → full shadow, not partial.
+func TestP3S5_Shadow_EmptyScheduleCountsAsFullShadow(t *testing.T) {
+	cidrs := []string{"10.0.5.0/24"}
+	const host = "portal.example.com"
+	a := authRuleAt(OutcomeSSORequired, "sso-1", 1, cidrs, host)
+	a.Schedule = &PolicySchedule{} // non-nil but all-empty → always active
+	b := authRuleAt(OutcomeExempt, "exempt-2", 2, cidrs, host)
+	c := diagHas(t, authRuleShadowDiagnostics([]PolicyRule{a, b}), "auth_rule_shadowed", diagWarn)
+	if !strings.Contains(c.Message, "fully shadows") {
+		t.Errorf("empty (always-active) schedule must be classified as a FULL shadow, got: %q", c.Message)
+	}
+}
+
 func TestP3S5_Shadow_DisabledAndExpiredExcluded(t *testing.T) {
 	cidrs := []string{"10.0.5.0/24"}
 	const host = "portal.example.com"
