@@ -2400,7 +2400,15 @@ Firefox (all platforms):
             <li><strong style="color:#60a5fa">CredentialRequired</strong> — returns a deterministic
               <em>407 credential challenge</em>; the client must authenticate first. It <strong>does not allow
               traffic</strong>, and the Stage-2 decision applies only after the client authenticates.</li>
+            <li><strong style="color:#34d399">SSORequired</strong> — requires an <em>interactive browser SSO</em>
+              login first: a browser is <strong>redirected (302)</strong> to the IdP, while a non-browser or
+              CONNECT client is <strong>failed closed (403)</strong>. It <strong>does not allow traffic</strong>;
+              Stage-2 still decides access only after an identity exists.</li>
           </ul>
+          <div style="font-size:.78rem;color:var(--muted);margin-top:6px">
+            Unsatisfiable or conflicting rules (no IdP, unavailable providerRefs, non-browser SSO, shadowed rules)
+            are reported under <strong>Diagnostics</strong>.
+          </div>
           <div id="ap-default-allow-warn" style="display:none;margin-top:8px;color:#fbbf24">
             ⚠ The default policy action is <strong>Allow</strong> while auth rules exist — exemptions add
             little over an allow-all default. Set the default action to deny (Zero Trust).
@@ -2428,8 +2436,13 @@ Firefox (all platforms):
             <select class="input" id="ap-outcome" data-change="apOutcomeChanged" style="width:100%">
               <option value="Exempt">Exempt — skip authentication only</option>
               <option value="CredentialRequired">CredentialRequired — force 407 credential challenge</option>
+              <option value="SSORequired">SSORequired — require interactive browser SSO</option>
             </select>
             <div id="ap-outcome-help" style="font-size:.72rem;color:var(--muted);margin-top:4px"></div></div>
+          <div id="ap-providerrefs-wrap" style="display:none"><label class="label">SSO providers (providerRefs)</label>
+            <select class="input" id="ap-providerrefs" multiple size="4" style="width:100%"></select>
+            <div id="ap-providerrefs-help" style="font-size:.72rem;color:var(--muted);margin-top:4px">
+              Leave empty = all compatible enabled IdPs. Select one = direct redirect to that IdP. Select several = scoped selection page. Only enabled OIDC/SAML providers are listed.</div></div>
           <div><label class="label">Name *</label><input type="text" class="input" id="ap-name" style="width:100%"></div>
           <div><label class="label">Owner *</label><input type="text" class="input" id="ap-owner" placeholder="ops-team" style="width:100%"></div>
           <div><label class="label">Reason *</label><input type="text" class="input" id="ap-reason" placeholder="legacy device cannot authenticate" style="width:100%"></div>
@@ -4193,7 +4206,7 @@ const viewMeta = {
   diagnostics:  { title: 'Diagnostics',   meta: 'Operator contract — readiness, security posture, and risky-mode warnings' },
   users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
-  authpolicy:     { title: 'Auth Policy Rules', meta: 'Stage-1 authentication policy — Exempt skips authentication; CredentialRequired forces a 407 challenge. Neither allows traffic; Stage-2 policy still applies' },
+  authpolicy:     { title: 'Auth Policy Rules', meta: 'Stage-1 authentication policy — Exempt skips authentication; CredentialRequired forces a 407 challenge; SSORequired forces interactive browser SSO (302) or fails closed (403). None allow traffic; Stage-2 policy still applies' },
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
   releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
 };
@@ -9258,21 +9271,38 @@ async function runPolicyTest() {
     const a = data.auth;
     const exempt = a.outcome === 'Exempt';
     const credReq = a.outcome === 'CredentialRequired';
+    const sso = a.outcome === 'SSORequired';
     let badge;
     if (exempt) {
       badge = '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🪪 Exempt</span>';
     } else if (credReq) {
       badge = '<span style="background:rgba(96,165,250,.15);color:#60a5fa;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🔐 CredentialRequired</span>';
+    } else if (sso) {
+      badge = '<span style="background:rgba(52,211,153,.15);color:#34d399;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🌐 SSORequired</span>';
     } else {
       badge = `<span style="color:var(--muted)">${escHtml(a.outcome)} (today's auth gate applies)</span>`;
+    }
+    // runtimeOutcome is the per-client resolution of the Stage-1 outcome
+    // (e.g. SSORequired → redirect for a browser, fail-closed for a
+    // non-browser/CONNECT client). It is shown SEPARATELY from the declared
+    // outcome above and the Stage-2 decision below so the three stages are
+    // never conflated.
+    const rtRaw = a.runtimeOutcome || '';
+    let runtimeLine = '';
+    if (rtRaw && rtRaw !== a.outcome) {
+      runtimeLine = `<div class="pt-sub" style="margin-top:4px">Runtime outcome for this client: <strong>${escHtml(rtRaw)}</strong></div>`;
+    } else if (rtRaw) {
+      runtimeLine = `<div class="pt-sub" style="margin-top:4px">Runtime outcome: <strong>${escHtml(rtRaw)}</strong></div>`;
     }
     authHtml = `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px">
       <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-1 Authentication: ${badge}</div>
       ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''}</div>` : ''}
+      ${runtimeLine}
       ${exempt ? `<div class="pt-sub" style="color:#fbbf24;margin-top:4px">Exempt skips authentication only — it does NOT allow traffic. The Stage-2 access decision below still applies (Stage-2 sees authSource="${escHtml(a.stage2AuthSource)}").</div>` : ''}
       ${credReq ? '<div class="pt-sub" style="color:#60a5fa;margin-top:4px">CredentialRequired returns a deterministic 407 credential challenge — the client must authenticate first. This is NOT Allow. At runtime Stage-2 is NOT evaluated until the client authenticates; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-authentication decision (with the authenticated identity) may differ.</div>' : ''}
+      ${sso ? '<div class="pt-sub" style="color:#34d399;margin-top:4px">SSORequired requires an interactive browser SSO login first. A browser client is redirected (302) to the IdP; a non-browser or CONNECT client is failed closed (403). This is NOT Allow. Stage-2 is NOT evaluated until SSO completes and a session exists; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-SSO decision (with the authenticated identity) may differ.</div>' : ''}
       ${a.credentialsPresented ? '<div class="pt-sub" style="color:var(--muted);margin-top:4px">Credentials presented — at runtime, credentials always win and the Stage-1 outcome is not evaluated.</div>' : ''}
-      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — all exemptions are forced to Default (auth required). CredentialRequired is unaffected.</div>' : ''}
+      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — all exemptions are forced to Default (auth required). CredentialRequired and SSORequired are unaffected.</div>' : ''}
     </div>`;
   }
 
@@ -9323,6 +9353,12 @@ let apEditPriority = null; // null = add mode
 
 async function loadAuthPolicy() {
   try {
+    // Populate the IdP list for the SSORequired providerRefs selector (viewer-
+    // readable; reused from the policy provider options). Best-effort.
+    try {
+      const idpData = await api('/api/idp');
+      _policyIdPList = Array.isArray(idpData) ? idpData : ((idpData && idpData.profiles) || []);
+    } catch (_) { /* selector falls back to empty; backend still validates refs */ }
     const d = await api('/api/authpolicy');
     apRules = d.rules || [];
     document.getElementById('ap-default-allow-warn').style.display =
@@ -9335,6 +9371,8 @@ function apOutcomeBadge(r) {
   const o = (r.auth && r.auth.outcome) || 'Exempt';
   if (o === 'CredentialRequired')
     return '<span style="background:rgba(96,165,250,.15);color:#60a5fa;padding:2px 8px;border-radius:12px;font-size:.72rem;font-weight:600">🔐 CredentialRequired</span>';
+  if (o === 'SSORequired')
+    return '<span style="background:rgba(52,211,153,.15);color:#34d399;padding:2px 8px;border-radius:12px;font-size:.72rem;font-weight:600">🌐 SSORequired</span>';
   return '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.72rem;font-weight:600">🪪 Exempt</span>';
 }
 
@@ -9387,23 +9425,49 @@ function renderAuthPolicy() {
   }).join('');
 }
 
-// apOutcomeChanged gates the destination/broad-exemption controls by outcome.
-// CredentialRequired forces a non-interactive 407 challenge: broadExemption is an
-// Exempt-only acknowledgement (and the backend rejects it on CR), so it is
-// disabled, unchecked and visually dimmed, and a destination is always required.
+// apOutcomeChanged gates the destination/broad-exemption/providerRefs controls by
+// outcome. Both challenge outcomes (CredentialRequired, SSORequired) require a
+// destination and reject broadExemption (an Exempt-only acknowledgement), so the
+// broad checkbox is disabled+unchecked+dimmed for them. The providerRefs selector
+// is shown for SSORequired only.
 function apOutcomeChanged() {
-  const cr = document.getElementById('ap-outcome').value === 'CredentialRequired';
+  const outcome = document.getElementById('ap-outcome').value;
+  const challenge = outcome === 'CredentialRequired' || outcome === 'SSORequired';
+  const sso = outcome === 'SSORequired';
   const broad = document.getElementById('ap-broad');
   const broadLabel = document.getElementById('ap-broad-label');
-  if (cr) { broad.checked = false; }
-  broad.disabled = cr;
-  if (broadLabel) broadLabel.style.opacity = cr ? '.4' : '';
-  document.getElementById('ap-outcome-help').textContent = cr
-    ? 'Returns a deterministic 407 credential challenge — the client must authenticate first. Does NOT allow traffic; Stage-2 applies only after authentication. A destination is required.'
-    : 'Skips end-user authentication only (no identity is created), and only when the client presents no credentials. Stage-2 still decides access.';
-  document.getElementById('ap-dest-hint').textContent = cr
-    ? 'A destination (FQDN or category group) is required for CredentialRequired rules.'
+  if (challenge) { broad.checked = false; }
+  broad.disabled = challenge;
+  if (broadLabel) broadLabel.style.opacity = challenge ? '.4' : '';
+  document.getElementById('ap-providerrefs-wrap').style.display = sso ? '' : 'none';
+  const help = {
+    CredentialRequired: 'Returns a deterministic 407 credential challenge — the client must authenticate first. Does NOT allow traffic; Stage-2 applies only after authentication. A destination is required.',
+    SSORequired: 'Requires interactive browser SSO first: browser → 302 redirect to the IdP, non-browser/CONNECT → 403 fail-closed. Does NOT allow traffic; Stage-2 applies only after SSO completes. A destination is required.',
+    Exempt: 'Skips end-user authentication only (no identity is created), and only when the client presents no credentials. Stage-2 still decides access.',
+  };
+  document.getElementById('ap-outcome-help').textContent = help[outcome] || help.Exempt;
+  document.getElementById('ap-dest-hint').textContent = challenge
+    ? 'A destination (FQDN or category group) is required for ' + outcome + ' rules.'
     : 'A destination (FQDN or category group) is required unless “Broad exemption” is explicitly checked.';
+}
+
+// apPopulateProviderRefs fills the SSO providerRefs multiselect from the enabled
+// OIDC/SAML IdPs, marking `selected` those in selectedIds. A previously-saved ref
+// that is no longer enabled/present is still rendered (selected, labelled
+// "unavailable") so editing a rule never silently drops it.
+function apPopulateProviderRefs(selectedIds) {
+  const sel = document.getElementById('ap-providerrefs');
+  const want = new Set(selectedIds || []);
+  const eligible = (_policyIdPList || []).filter(p => p.enabled && (p.type === 'oidc' || p.type === 'saml'));
+  const eligibleIds = new Set(eligible.map(p => p.id));
+  let html = eligible.map(p =>
+    `<option value="${escHtml(p.id)}"${want.has(p.id) ? ' selected' : ''}>${escHtml(p.name)} (${escHtml(String(p.type).toUpperCase())})</option>`
+  ).join('');
+  // Preserve any selected ref that is not currently an eligible option.
+  (selectedIds || []).filter(id => !eligibleIds.has(id)).forEach(id => {
+    html += `<option value="${escHtml(id)}" selected>${escHtml(id)} (unavailable)</option>`;
+  });
+  sel.innerHTML = html;
 }
 
 function apShowAdd() {
@@ -9415,6 +9479,7 @@ function apShowAdd() {
   document.getElementById('ap-protocol').value = '';
   document.getElementById('ap-enabled').checked = true;
   document.getElementById('ap-broad').checked = false;
+  apPopulateProviderRefs([]);
   apOutcomeChanged();
   document.getElementById('ap-form-panel').style.display = 'block';
 }
@@ -9438,6 +9503,7 @@ function apEditRule(priority) {
   document.getElementById('ap-method').value = r.auth && r.auth.method || '';
   document.getElementById('ap-enabled').checked = r.enabled === undefined || r.enabled === null || r.enabled;
   document.getElementById('ap-broad').checked = !!(r.auth && r.auth.broadExemption);
+  apPopulateProviderRefs((r.auth && r.auth.providerRefs) || []);
   apOutcomeChanged();
   document.getElementById('ap-form-panel').style.display = 'block';
 }
@@ -9450,9 +9516,25 @@ function apCancel() {
 async function apSave() {
   const cidrs = document.getElementById('ap-cidrs').value.split(',').map(s => s.trim()).filter(Boolean);
   const outcome = document.getElementById('ap-outcome').value;
-  // broadExemption is Exempt-only — never send it for CredentialRequired (the
-  // backend rejects it, but force it false here so a stale checkbox cannot leak).
-  const broad = outcome === 'CredentialRequired' ? false : document.getElementById('ap-broad').checked;
+  // broadExemption is Exempt-only — never send it for a challenge outcome
+  // (CredentialRequired/SSORequired); the backend rejects it but force false here
+  // so a stale checkbox cannot leak.
+  const challenge = outcome === 'CredentialRequired' || outcome === 'SSORequired';
+  const broad = challenge ? false : document.getElementById('ap-broad').checked;
+  const auth = {
+    outcome:        outcome,
+    owner:          document.getElementById('ap-owner').value.trim(),
+    reason:         document.getElementById('ap-reason').value.trim(),
+    expiresAt:      document.getElementById('ap-expires').value.trim(),
+    protocol:       document.getElementById('ap-protocol').value,
+    method:         document.getElementById('ap-method').value.trim(),
+    broadExemption: broad,
+  };
+  // providerRefs is SSORequired-only (the backend rejects it on Exempt/CR). An
+  // empty selection means "all compatible enabled interactive IdPs".
+  if (outcome === 'SSORequired') {
+    auth.providerRefs = Array.from(document.getElementById('ap-providerrefs').selectedOptions).map(o => o.value);
+  }
   const rule = {
     name:     document.getElementById('ap-name').value.trim(),
     ruleType: 'auth',
@@ -9460,15 +9542,7 @@ async function apSave() {
     subjectMatch: { schemaVersion: 1, all: [{ type: 'cidr', values: cidrs }] },
     destFQDN:          document.getElementById('ap-destfqdn').value.trim(),
     destCategoryGroup: document.getElementById('ap-destgroup').value.trim(),
-    auth: {
-      outcome:        outcome,
-      owner:          document.getElementById('ap-owner').value.trim(),
-      reason:         document.getElementById('ap-reason').value.trim(),
-      expiresAt:      document.getElementById('ap-expires').value.trim(),
-      protocol:       document.getElementById('ap-protocol').value,
-      method:         document.getElementById('ap-method').value.trim(),
-      broadExemption: broad,
-    },
+    auth: auth,
   };
   if (apEditPriority !== null) rule.priority = apEditPriority;
   const url = apEditPriority !== null ? `/api/authpolicy?priority=${apEditPriority}` : '/api/authpolicy';
