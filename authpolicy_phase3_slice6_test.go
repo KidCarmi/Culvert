@@ -32,6 +32,7 @@ func TestP3S6_UI_ExposesSSORequiredAndProviderRefs(t *testing.T) {
 		`value="SSORequired"`,             // SSORequired is selectable in the outcome dropdown
 		`id="ap-providerrefs-wrap"`,       // providerRefs field wrapper (revealed for SSO only)
 		`id="ap-providerrefs"`,            // the multiselect itself
+		`for="ap-providerrefs"`,           // its label is associated with the control (a11y/reliability)
 		`id="ap-providerrefs-help"`,       // help text for the selector
 		`function apPopulateProviderRefs`, // fills the selector from enabled OIDC/SAML IdPs
 		`function apOutcomeChanged`,       // gating handler reveals the selector
