@@ -308,3 +308,16 @@ func TestP3S5_Shadow_CategoryAnyCoversSpecificFQDN(t *testing.T) {
 		t.Errorf("CategoryAny dest rule covers any host — must report a full shadow, got: %q", c.Message)
 	}
 }
+
+// TestP3S5_Shadow_NoDestFilter_WithCountry_NoFalsePositive guards against the
+// Codex P2 finding: a rule with no FQDN/category/group but a non-empty DestCountry
+// is NOT unrestricted — the runtime geo-IP check limits it to specific countries
+// (fails closed on cache miss). destCovers must return false for it, so we do not
+// falsely report a shadow for hosts outside that country scope.
+func TestP3S5_Shadow_NoDestFilter_WithCountry_NoFalsePositive(t *testing.T) {
+	cidrs := []string{"10.0.0.0/8"}
+	a := authRuleAt(OutcomeSSORequired, "sso-geo-1", 1, cidrs, "" /* no FQDN */)
+	a.DestCountry = []string{"US"} // country-restricted — not a match-all shadower
+	b := authRuleAt(OutcomeExempt, "exempt-portal-2", 2, cidrs, "portal.example.com")
+	diagAbsent(t, authRuleShadowDiagnostics([]PolicyRule{a, b}), "auth_rule_shadowed")
+}

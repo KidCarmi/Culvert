@@ -281,9 +281,14 @@ func destCovers(a, b *PolicyRule) bool {
 	if a.DestCategoryGroup != "" {
 		return a.DestCategoryGroup == b.DestCategoryGroup
 	}
-	// All three destination dimensions are unset (or CategoryAny, which is
-	// runtime-equivalent to empty — see matchDest). An unrestricted rule matches
-	// every host, so it covers whatever destination b targets.
+	// All four destination dimensions are unset (DestFQDN, DestCategory/CategoryAny,
+	// DestCategoryGroup, DestCountry — all documented "empty = any" in PolicyRule,
+	// mirroring matchDest). An unrestricted rule matches every host.
+	// DestCountry restricts to specific geo-matched countries (fails closed on cache
+	// miss), so a country-scoped rule is not a match-all shadower.
+	if len(a.DestCountry) > 0 {
+		return false
+	}
 	return true
 }
 
