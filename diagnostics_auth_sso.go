@@ -210,6 +210,25 @@ func authRuleShadowDiagnostics(rules []PolicyRule) []OperatorContractCheck {
 	return checks
 }
 
+// scheduleEffectivelyAlwaysActive reports whether a schedule is always active:
+// nil (no schedule field) or an all-zero struct (e.g. JSON {"schedule":{}}) with
+// a parseable (or absent) timezone. It mirrors the two runtime gates that would
+// prevent a rule from ever firing:
+//   - authScheduleParseable: an invalid IANA timezone causes authRuleMatches to
+//     fail closed, so that rule never shadows anything regardless of days/times.
+//   - matchSchedule: non-empty Days or TimeStart+TimeEnd constrain firing windows.
+func scheduleEffectivelyAlwaysActive(s *PolicySchedule) bool {
+	if s == nil {
+		return true
+	}
+	// An unparseable timezone fails closed at runtime (authRuleMatches →
+	// authScheduleParseable). Such a rule never fires, so it is not a full shadower.
+	if !authScheduleParseable(s) {
+		return false
+	}
+	return len(s.Days) == 0 && s.TimeStart == "" && s.TimeEnd == ""
+}
+
 // authRuleCovers reports whether higher-priority rule a conservatively shadows
 // lower-priority rule b, and whether the shadow is full (b can never fire).
 func authRuleCovers(a, b *PolicyRule) (covered, full bool) {
@@ -221,7 +240,7 @@ func authRuleCovers(a, b *PolicyRule) (covered, full bool) {
 		return false, false
 	}
 	// A full shadow needs full subject containment AND an always-active shadower.
-	if fullSubject && a.Schedule == nil && a.Auth.ExpiresAt == "" {
+	if fullSubject && scheduleEffectivelyAlwaysActive(a.Schedule) && a.Auth.ExpiresAt == "" {
 		return true, true
 	}
 	return true, false
