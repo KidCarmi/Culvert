@@ -273,3 +273,38 @@ func TestP3S5_Shadow_DifferentDestDimensions_NoFalsePositive(t *testing.T) {
 	b.DestCategory = "SocialMedia"
 	diagAbsent(t, authRuleShadowDiagnostics([]PolicyRule{a, b}), "auth_rule_shadowed")
 }
+
+// destCovers bug: a rule with no destination filter (DestFQDN="", DestCategory="",
+// DestCategoryGroup="") matches any destination at runtime (all three fields are
+// documented "empty = any" in PolicyRule), but destCovers previously returned false
+// for this case, silently missing shadows where a catch-all auth rule shadows a
+// destination-scoped exempt rule.
+
+// TestP3S5_Shadow_NoDestFilterShadowsSpecificFQDN proves the bug: a higher-priority
+// SSO rule with no destination restriction must be detected as a full shadow over a
+// lower-priority exempt rule that is scoped to a specific FQDN.
+func TestP3S5_Shadow_NoDestFilterShadowsSpecificFQDN(t *testing.T) {
+	cidrs := []string{"10.0.0.0/8"}
+	// Rule A: no destination filter — matches any host at runtime.
+	a := authRuleAt(OutcomeSSORequired, "sso-catchall-1", 1, cidrs, "" /* no FQDN */)
+	// Rule B: exempt rule scoped to a specific FQDN — permanently shadowed by A.
+	b := authRuleAt(OutcomeExempt, "exempt-portal-2", 2, cidrs, "portal.example.com")
+	c := diagHas(t, authRuleShadowDiagnostics([]PolicyRule{a, b}), "auth_rule_shadowed", diagWarn)
+	if !strings.Contains(c.Message, "fully shadows") {
+		t.Errorf("no-dest-filter rule covers any host — must report a full shadow, got: %q", c.Message)
+	}
+}
+
+// TestP3S5_Shadow_CategoryAnyCoversSpecificFQDN is the CategoryAny variant of the
+// same bug: DestCategory=CategoryAny is semantically "any category" (identical to
+// empty at runtime), so it must also be treated as no-filter by destCovers.
+func TestP3S5_Shadow_CategoryAnyCoversSpecificFQDN(t *testing.T) {
+	cidrs := []string{"10.0.0.0/8"}
+	a := authRuleAt(OutcomeSSORequired, "sso-catchall-1", 1, cidrs, "" /* no FQDN */)
+	a.DestCategory = CategoryAny
+	b := authRuleAt(OutcomeExempt, "exempt-portal-2", 2, cidrs, "portal.example.com")
+	c := diagHas(t, authRuleShadowDiagnostics([]PolicyRule{a, b}), "auth_rule_shadowed", diagWarn)
+	if !strings.Contains(c.Message, "fully shadows") {
+		t.Errorf("CategoryAny dest rule covers any host — must report a full shadow, got: %q", c.Message)
+	}
+}

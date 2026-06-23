@@ -281,7 +281,10 @@ func destCovers(a, b *PolicyRule) bool {
 	if a.DestCategoryGroup != "" {
 		return a.DestCategoryGroup == b.DestCategoryGroup
 	}
-	return false
+	// All three destination dimensions are unset (or CategoryAny, which is
+	// runtime-equivalent to empty — see matchDest). An unrestricted rule matches
+	// every host, so it covers whatever destination b targets.
+	return true
 }
 
 // subjectFullyContained reports whether every CIDR in b is contained within some
