@@ -242,8 +242,14 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Auth not yet configured — first-time or intentionally disabled.
-		if !cfg.AuthEnabled() {
+		// No admin credential configured yet — first-run, intentionally
+		// disabled, or open-proxy (unauth) mode completed during setup before
+		// any admin user exists. Inject RoleAdmin so the operator can always
+		// reach the UI (to create an admin or manage policy) and is never
+		// locked out. This deliberately uses AdminCredentialsConfigured rather
+		// than AuthEnabled: AuthEnabled also counts unauthMode, which would
+		// otherwise gate the UI with no credential able to satisfy it.
+		if !cfg.AdminCredentialsConfigured() {
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return

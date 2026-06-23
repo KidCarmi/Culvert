@@ -1683,6 +1683,24 @@ func (c *Config) AuthEnabled() bool {
 	return c.user != "" || c.provider != nil || c.unauthMode
 }
 
+// AdminCredentialsConfigured reports whether an admin can actually
+// authenticate to the admin UI — i.e. a local password user or an external
+// auth provider exists. Unlike AuthEnabled, it deliberately does NOT count
+// unauthMode: open-proxy mode governs PROXY traffic and says nothing about
+// whether an admin login exists.
+//
+// The admin-UI gate (uiAuthMiddleware) and the login/status handlers use this
+// — NOT AuthEnabled — to decide when to operate the UI open (RoleAdmin). That
+// keeps a first-run setup completed in unauth/open mode (which creates no
+// admin user) from gating the UI with a credential that does not exist, i.e.
+// from permanently locking the operator out of the UI they need to add an
+// admin or manage policy. Creating an admin re-gates the UI immediately.
+func (c *Config) AdminCredentialsConfigured() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.user != "" || c.provider != nil
+}
+
 // UnauthMode returns true when the proxy is explicitly configured to run
 // without authentication (open proxy mode, setup is still considered done).
 func (c *Config) UnauthMode() bool {

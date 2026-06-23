@@ -46,7 +46,11 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role, ok := cfg.VerifyUIUser(body.User, body.Pass)
-	if !cfg.AuthEnabled() {
+	// No admin credential configured (first-run or unauth/open mode set during
+	// setup before any admin user exists): operate the UI open as RoleAdmin.
+	// Uses AdminCredentialsConfigured, not AuthEnabled, so unauthMode alone
+	// does not block a login when there is no credential to verify against.
+	if !cfg.AdminCredentialsConfigured() {
 		role, ok = RoleAdmin, true
 	}
 	if ok {
@@ -121,7 +125,12 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !cfg.AuthEnabled() {
+	// No admin credential configured (first-run or unauth/open mode set during
+	// setup before any admin user exists): report an open admin session so the
+	// SPA renders the dashboard instead of an unsatisfiable login overlay.
+	// Uses AdminCredentialsConfigured, not AuthEnabled, so unauthMode alone
+	// does not flip this to a logged-out state with no credential to log in.
+	if !cfg.AdminCredentialsConfigured() {
 		jsonOK(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
 		return
 	}
