@@ -1683,22 +1683,30 @@ func (c *Config) AuthEnabled() bool {
 	return c.user != "" || c.provider != nil || c.unauthMode
 }
 
-// AdminCredentialsConfigured reports whether an admin can actually
-// authenticate to the admin UI — i.e. a local password user or an external
-// auth provider exists. Unlike AuthEnabled, it deliberately does NOT count
-// unauthMode: open-proxy mode governs PROXY traffic and says nothing about
-// whether an admin login exists.
+// AdminCredentialsConfigured reports whether the admin UI has any credential
+// to authenticate against — a legacy single user, an external auth provider,
+// or at least one RBAC roster user. Unlike AuthEnabled, it deliberately does
+// NOT count unauthMode: open-proxy mode governs PROXY traffic and says nothing
+// about whether an admin login exists.
 //
 // The admin-UI gate (uiAuthMiddleware) and the login/status handlers use this
 // — NOT AuthEnabled — to decide when to operate the UI open (RoleAdmin). That
 // keeps a first-run setup completed in unauth/open mode (which creates no
 // admin user) from gating the UI with a credential that does not exist, i.e.
 // from permanently locking the operator out of the UI they need to add an
-// admin or manage policy. Creating an admin re-gates the UI immediately.
+// admin or manage policy.
+//
+// The roster (uiUsers) check is essential to the recovery path: the
+// /api/auth/users create-admin handler calls SetUIUser, which populates
+// uiUsers WITHOUT setting the legacy c.user field. Checking only c.user/
+// provider would leave the UI open (anonymous RoleAdmin) even after an admin
+// is created, and apiAuthLogin would keep accepting arbitrary credentials,
+// until a restart synced c.user from disk. Counting uiUsers re-gates the UI
+// the moment any credential exists.
 func (c *Config) AdminCredentialsConfigured() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != "" || c.provider != nil
+	return c.user != "" || c.provider != nil || len(c.uiUsers) > 0
 }
 
 // UnauthMode returns true when the proxy is explicitly configured to run

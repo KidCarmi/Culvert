@@ -68,6 +68,33 @@ func assertJSON(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	return m
 }
 
+// clearAdminCredentials puts cfg into a genuine "no admin credential" state —
+// no legacy user, no external provider, and an empty RBAC roster — and
+// restores the prior state on cleanup. The admin UI operates open (RoleAdmin)
+// only when AdminCredentialsConfigured() is false, which counts the roster
+// (uiUsers), not just the legacy c.user field. SetAuth("","") alone clears
+// c.user but leaves uiUsers intact, so a roster populated by an earlier test
+// would otherwise keep the UI gated and mask the open-path behaviour these
+// tests pin.
+func clearAdminCredentials(t *testing.T) {
+	t.Helper()
+	prevUser := cfg.GetUser()
+	cfg.mu.Lock()
+	prevUsers := cfg.uiUsers
+	prevProvider := cfg.provider
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.provider = nil
+	cfg.mu.Unlock()
+	_ = cfg.SetAuth("", "")
+	t.Cleanup(func() {
+		_ = cfg.SetAuth(prevUser, "")
+		cfg.mu.Lock()
+		cfg.uiUsers = prevUsers
+		cfg.provider = prevProvider
+		cfg.mu.Unlock()
+	})
+}
+
 // ─── Middleware helpers ───────────────────────────────────────────────────────
 
 func TestAddUIAllowedCIDR(t *testing.T) {
@@ -264,7 +291,7 @@ func TestAPISetupComplete_UnauthMode(t *testing.T) {
 // ─── /api/auth ────────────────────────────────────────────────────────────────
 
 func TestAPIAuthStatus_NoAuth(t *testing.T) {
-	_ = cfg.SetAuth("", "")
+	clearAdminCredentials(t)
 	w := httptest.NewRecorder()
 	apiAuthStatus(w, getReq("/api/auth/status"))
 	assertStatus(t, w, http.StatusOK)
@@ -287,7 +314,7 @@ func TestAPIAuthLogin_WrongMethod(t *testing.T) {
 }
 
 func TestAPIAuthLogin_NoAuth(t *testing.T) {
-	_ = cfg.SetAuth("", "")
+	clearAdminCredentials(t)
 	initSecret(t)
 
 	w := httptest.NewRecorder()

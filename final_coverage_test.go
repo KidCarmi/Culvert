@@ -355,7 +355,7 @@ func TestAPITimeseries_WrongMethod(_ *testing.T) {
 // ─── apiAuthLogin success when auth disabled ──────────────────────────────────
 
 func TestAPIAuthLogin_Success_AuthDisabled(t *testing.T) {
-	_ = cfg.SetAuth("", "")
+	clearAdminCredentials(t)
 
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/auth/login", map[string]any{

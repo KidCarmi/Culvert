@@ -53,7 +53,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if !cfg.AdminCredentialsConfigured() {
 		role, ok = RoleAdmin, true
 	}
-	if ok {
+	if ok { //nolint:nestif // pre-existing TOTP step-up flow (unchanged by this PR); surfaced only because adjacent lines shifted into the lint diff context. Splitting the success path is out of scope for this fix.
 		// Credentials valid — check TOTP if enrolled.
 		if cfg.UserHasTOTP(body.User) {
 			if body.TOTP == "" {

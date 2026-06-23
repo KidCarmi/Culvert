@@ -154,8 +154,9 @@ func TestAPIAuthLogin_InvalidCreds(t *testing.T) {
 }
 
 func TestAPIAuthLogin_AuthDisabled(t *testing.T) {
-	// When auth is disabled, any credentials succeed
-	_ = cfg.SetAuth("", "")
+	// When auth is disabled (no legacy user, no provider, empty roster),
+	// any credentials succeed.
+	clearAdminCredentials(t)
 
 	w := httptest.NewRecorder()
 	r := jsonReq(http.MethodPost, "/api/auth/login", map[string]any{

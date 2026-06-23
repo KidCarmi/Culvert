@@ -26,9 +26,16 @@ import (
 // independent of unauthMode — exactly as it does on a brand-new install.
 func TestUnauthSetup_DoesNotLockOutAdminUI(t *testing.T) {
 	// Simulate the post-{"unauth":true}-setup state: no admin user, no
-	// provider, unauthMode=true.
+	// provider, unauthMode=true. Snapshot and clear the RBAC roster too —
+	// AdminCredentialsConfigured counts uiUsers, and SetAuth("","") does not
+	// clear the roster, so a roster populated by an earlier test would
+	// otherwise keep the UI gated and mask the lockout this test pins.
 	prevUser := cfg.GetUser()
 	prevUnauth := cfg.UnauthMode()
+	cfg.mu.Lock()
+	prevUsers := cfg.uiUsers
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.mu.Unlock()
 	if err := cfg.SetAuth("", ""); err != nil { // ensure no local user
 		t.Fatalf("SetAuth clear: %v", err)
 	}
@@ -36,6 +43,9 @@ func TestUnauthSetup_DoesNotLockOutAdminUI(t *testing.T) {
 	t.Cleanup(func() {
 		cfg.SetUnauthMode(prevUnauth)
 		_ = cfg.SetAuth(prevUser, "")
+		cfg.mu.Lock()
+		cfg.uiUsers = prevUsers
+		cfg.mu.Unlock()
 	})
 
 	// 1. uiAuthMiddleware must let an anonymous request through as RoleAdmin
@@ -85,6 +95,39 @@ func TestUnauthSetup_DoesNotLockOutAdminUI(t *testing.T) {
 		}
 		if body.Role != string(RoleAdmin) {
 			t.Fatalf("auth/status role = %q, want %q", body.Role, RoleAdmin)
+		}
+	})
+
+	// 3. Recovery path: creating an admin via the /api/auth/users handler
+	//    (SetUIUser populates the RBAC roster but NOT the legacy c.user field)
+	//    must immediately re-gate the UI. Without counting uiUsers, the UI
+	//    would stay open as anonymous RoleAdmin and apiAuthLogin would accept
+	//    arbitrary credentials until a restart synced c.user from disk.
+	t.Run("creating_admin_regates_ui", func(t *testing.T) {
+		if err := cfg.SetUIUser("recovery_admin", "Recover1Pass", RoleAdmin); err != nil {
+			t.Fatalf("SetUIUser: %v", err)
+		}
+		t.Cleanup(func() { cfg.mu.Lock(); delete(cfg.uiUsers, "recovery_admin"); cfg.mu.Unlock() })
+
+		if !cfg.AdminCredentialsConfigured() {
+			t.Fatalf("after SetUIUser created an admin, AdminCredentialsConfigured()=false → UI stays open to anonymous admin (P1 hole); want true")
+		}
+
+		var reached bool
+		sentinel := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+		})
+		handler := uiAuthMiddleware(sentinel)
+		req := httptest.NewRequest(http.MethodGet, "/api/config", http.NoBody)
+		req.RemoteAddr = "198.51.100.52:0"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if reached {
+			t.Fatalf("anonymous /api/config reached the handler after an admin was created; UI must re-gate (want 401)")
+		}
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("anonymous /api/config after admin creation got %d, want 401", rec.Code)
 		}
 	})
 }
