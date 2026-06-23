@@ -14,6 +14,10 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -35,12 +39,17 @@ const (
 
 	envReleaseProxyRepo = "CULVERT_RELEASE_PROXY_REPO"
 	envMaintAgentURL    = "CULVERT_MAINT_AGENT_URL"
+	// envReleaseCatalogTrustKeys is a JSON array of operator trust roots:
+	// [{"key_id":"prod-2026","alg":"ed25519","public_key":"<base64-raw-32-byte-key>"}]
+	envReleaseCatalogTrustKeys = "CULVERT_RELEASE_CATALOG_TRUST_KEYS"
 )
 
 type releaseStartupConfig struct {
-	proxyRepo  string
-	catalogDir string
-	maintURL   string // CP-local maint agent endpoint (unix socket path or http[s] URL)
+	proxyRepo    string
+	catalogDir   string
+	maintURL     string // CP-local maint agent endpoint (unix socket path or http[s] URL)
+	trustKeys    []TrustKey
+	trustKeysErr error
 }
 
 // resolveReleaseStartupConfig reads the static inputs (env + dataDir). No mutable
@@ -61,10 +70,13 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 	if maintURL == "" {
 		maintURL = defaultMaintAgentSocket
 	}
+	trustKeys, trustKeysErr := parseReleaseCatalogTrustKeys(getenv(envReleaseCatalogTrustKeys))
 	return releaseStartupConfig{
-		proxyRepo:  proxyRepo,
-		catalogDir: filepath.Join(dataDir, "release_catalog"),
-		maintURL:   maintURL,
+		proxyRepo:    proxyRepo,
+		catalogDir:   filepath.Join(dataDir, "release_catalog"),
+		maintURL:     maintURL,
+		trustKeys:    trustKeys,
+		trustKeysErr: trustKeysErr,
 	}
 }
 
@@ -75,7 +87,11 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	// Permissive trust: the holder is never reloaded here (it starts with NO
 	// catalog), so the mode is inert — but permissive is the safe default for the
 	// later refresh slice (unsigned OK; present signatures must verify).
-	trust, err := NewTrustStore(nil, VerifyPermissive)
+	if cfg.trustKeysErr != nil {
+		logger.Printf("release management disabled: catalog trust keys: %v", cfg.trustKeysErr)
+		return
+	}
+	trust, err := NewTrustStore(cfg.trustKeys, VerifyPermissive)
 	if err != nil {
 		logger.Printf("release management disabled: trust store: %v", err)
 		return
@@ -104,6 +120,32 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	setReleaseManager(newReleaseManager(svc, resolve))
 	logger.Printf("release management enabled: proxy_repo=%q local_agent=%s",
 		sanitizeLog(cfg.proxyRepo), note)
+}
+
+type releaseCatalogTrustKeyJSON struct {
+	KeyID     string `json:"key_id"`
+	Alg       string `json:"alg"`
+	PublicKey string `json:"public_key"`
+}
+
+func parseReleaseCatalogTrustKeys(raw string) ([]TrustKey, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var in []releaseCatalogTrustKeyJSON
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		return nil, fmt.Errorf("%s must be JSON array: %w", envReleaseCatalogTrustKeys, err)
+	}
+	out := make([]TrustKey, 0, len(in))
+	for _, k := range in {
+		pub, err := base64.StdEncoding.DecodeString(k.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("trust key %q: public_key must be std-base64: %w", sanitizeLog(k.KeyID), err)
+		}
+		out = append(out, TrustKey{KeyID: k.KeyID, Alg: k.Alg, PublicKey: ed25519.PublicKey(pub)})
+	}
+	return out, nil
 }
 
 // releaseAgentResolver maps the single CP-local maintenance agent (key "local")

@@ -33,6 +33,8 @@ import (
 // the service's registry stays bounded by the configured agent set.
 type agentResolver func(key string) (AgentEndpoint, bool)
 
+const releaseMethodNotAllowed = "method not allowed"
+
 // releaseManager is the API backend: the dispatch service, the agent resolver,
 // and the bounded status store. Constructed at startup and published via
 // setReleaseManager; nil ⇒ the routes report "not configured" (503).
@@ -194,7 +196,7 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, releaseMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
 	cat := rm.svc.catalog()
@@ -236,7 +238,7 @@ func apiReleaseCurrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, releaseMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
 	agent := r.URL.Query().Get("agent")
@@ -283,7 +285,7 @@ func apiReleaseDispatchStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, releaseMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
 	agent := r.URL.Query().Get("agent")
@@ -335,7 +337,7 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, releaseMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
 	var body dispatchRequest
@@ -508,7 +510,7 @@ func apiReleaseDispatchResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, releaseMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
 	var body resumeRequest

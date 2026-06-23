@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +32,30 @@ func TestResolveReleaseStartupConfig_EnvOverride(t *testing.T) {
 	cfg := resolveReleaseStartupConfigFrom(func(k string) string { return env[k] })
 	if cfg.proxyRepo != "registry.local/culvert" || cfg.maintURL != "http://127.0.0.1:9999" {
 		t.Fatalf("env override not honored: %+v", cfg)
+	}
+}
+
+func TestResolveReleaseStartupConfig_TrustKeysEnv(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		envReleaseCatalogTrustKeys: `[{"key_id":"catalog-prod","alg":"ed25519","public_key":"` +
+			base64.StdEncoding.EncodeToString(pub) + `"}]`,
+	}
+	cfg := resolveReleaseStartupConfigFrom(func(k string) string { return env[k] })
+	if cfg.trustKeysErr != nil {
+		t.Fatalf("trustKeysErr = %v", cfg.trustKeysErr)
+	}
+	if len(cfg.trustKeys) != 1 {
+		t.Fatalf("trustKeys len = %d; want 1", len(cfg.trustKeys))
+	}
+	if cfg.trustKeys[0].KeyID != "catalog-prod" || cfg.trustKeys[0].Alg != catalogSigAlg {
+		t.Fatalf("trust key = %+v; want catalog-prod/%s", cfg.trustKeys[0], catalogSigAlg)
+	}
+	if string(cfg.trustKeys[0].PublicKey) != string(pub) {
+		t.Fatal("trust key public key did not round-trip from env")
 	}
 }
 
@@ -121,6 +147,37 @@ func TestLoadReleaseManagement_LoadsSeededCatalog(t *testing.T) {
 
 // writeUnsignedCatalogDir materializes a memSource's index + manifests on disk
 // WITHOUT a signature — loadable under permissive trust (no keys).
+func TestLoadReleaseManagement_LoadsSignedSeededCatalogWithConfiguredTrust(t *testing.T) {
+	t.Cleanup(func() { setReleaseManager(nil) })
+	dir := t.TempDir()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSignedCatalogDir(t, dir, priv, validSource())
+
+	setReleaseManager(nil)
+	loadReleaseManagement(releaseStartupConfig{
+		proxyRepo:  defaultReleaseProxyRepo,
+		catalogDir: dir,
+		maintURL:   "",
+		trustKeys: []TrustKey{{
+			KeyID:     holderTestKeyID,
+			Alg:       catalogSigAlg,
+			PublicKey: pub,
+		}},
+	})
+	if currentReleaseManager() == nil {
+		t.Fatal("manager not published")
+	}
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	body := decodeBody(t, rec)
+	if body["available"] != true {
+		t.Fatalf("available = %v; want true for signed catalog trusted at startup; body=%s", body["available"], rec.Body.String())
+	}
+}
+
 func writeUnsignedCatalogDir(t *testing.T, dir string, ms *memSource) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(dir, "manifests"), 0o750); err != nil {
