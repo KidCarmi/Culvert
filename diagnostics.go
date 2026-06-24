@@ -876,9 +876,16 @@ func authCredentialRequiredDiagnostics(rules []PolicyRule, unauthMode, hasCredPr
 	var names []string
 	for i := range rules {
 		r := &rules[i]
-		if ruleTypeOf(r) == ruleTypeAuth && r.Auth != nil && r.Auth.Outcome == OutcomeCredentialRequired {
-			names = append(names, r.Name)
+		if ruleTypeOf(r) != ruleTypeAuth || r.Auth == nil || r.Auth.Outcome != OutcomeCredentialRequired {
+			continue
 		}
+		// Disabled or already-expired rules cannot fire (authRuleMatches checks
+		// ruleIsEnabled + authRuleNotExpired), so they must not produce findings —
+		// otherwise an inert rule could falsely FAIL the operator contract.
+		if !ruleIsEnabled(r) || !authRuleNotExpired(r.Auth) {
+			continue
+		}
+		names = append(names, r.Name)
 	}
 	if len(names) == 0 {
 		return nil
