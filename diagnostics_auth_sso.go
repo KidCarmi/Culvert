@@ -262,6 +262,13 @@ func protoMethodCovers(a, b *AuthRuleSpec) bool {
 // destCovers reports whether a's destination selector covers b's, using only
 // cheap/provable forms (see the function-doc limits).
 func destCovers(a, b *PolicyRule) bool {
+	// BroadExemption with no concrete selector means "all destinations" at runtime:
+	// authRuleMatches skips the dest-required guard and matchDest returns true when
+	// no selector is set. Treat it as covering any destination b might carry so
+	// shadow diagnostics are not silently suppressed for auth-bypass patterns.
+	if a.Auth != nil && a.Auth.BroadExemption && !authRuleHasDestination(*a) {
+		return true
+	}
 	if a.DestFQDN != "" {
 		if b.DestFQDN == "" {
 			return false
@@ -273,7 +280,11 @@ func destCovers(a, b *PolicyRule) bool {
 			suffix := a.DestFQDN[1:] // ".example.com"
 			return b.DestFQDN == a.DestFQDN[2:] || strings.HasSuffix(b.DestFQDN, suffix)
 		}
-		return false
+		// Palo Alto-style: a bare FQDN implicitly covers all its subdomains at
+		// runtime (matchFQDN: host == pattern || HasSuffix(host, "."+pattern)).
+		// Mirror the same containment here so "example.com" at higher priority is
+		// flagged as shadowing a lower-priority "www.example.com" rule.
+		return strings.HasSuffix(b.DestFQDN, "."+a.DestFQDN)
 	}
 	if a.DestCategory != "" && a.DestCategory != CategoryAny {
 		return a.DestCategory == b.DestCategory

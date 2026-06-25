@@ -273,3 +273,48 @@ func TestP3S5_Shadow_DifferentDestDimensions_NoFalsePositive(t *testing.T) {
 	b.DestCategory = "SocialMedia"
 	diagAbsent(t, authRuleShadowDiagnostics([]PolicyRule{a, b}), "auth_rule_shadowed")
 }
+
+// ── Edge-case shadow tests ────────────────────────────────────────────────────
+
+// A BroadExemption=true Exempt rule at higher priority matches ALL destinations at
+// runtime (authRuleMatches skips the dest-required guard; matchDest returns true
+// when no selector is set). If its source CIDR contains the lower-priority rule's
+// CIDR, it fully shadows that rule — the SSO/CR requirement is silently bypassed.
+// destCovers must return true for broadExemption rules with no destination selector
+// so the shadow diagnostic fires.
+func TestEdge_Shadow_BroadExemptionShadowsSSO(t *testing.T) {
+	en := true
+	// Rule A: Exempt for ALL destinations from 10.0.0.0/8 (broadExemption acknowledged).
+	broadExempt := PolicyRule{
+		Priority: 1, Name: "broad-exempt", ID: "id-broad-exempt",
+		RuleType: ruleTypeAuth, Enabled: &en,
+		SubjectMatch: &SubjectMatch{
+			SchemaVersion: 1,
+			All:           []SubjectPredicate{{Type: subjectPredicateCIDR, Values: []string{"10.0.0.0/8"}}},
+		},
+		Auth: &AuthRuleSpec{Outcome: OutcomeExempt, Owner: "ops", Reason: "test", BroadExemption: true},
+	}
+	// Rule B: SSORequired for portal.example.com from 10.0.0.0/16 (⊂ Rule A's /8).
+	sso := authRuleAt(OutcomeSSORequired, "sso-2", 2, []string{"10.0.0.0/16"}, "portal.example.com")
+
+	c := diagHas(t, authRuleShadowDiagnostics([]PolicyRule{broadExempt, sso}), "auth_rule_shadowed", diagWarn)
+	if !strings.Contains(c.Message, "fully shadows") {
+		t.Errorf("broadExemption (all-dest, /8 ⊃ /16) must be a full shadow: %q", c.Message)
+	}
+}
+
+// A non-wildcard FQDN like "example.com" implicitly covers all its subdomains at
+// runtime (matchFQDN Palo Alto style: host == pattern || HasSuffix(host, "."+pattern)).
+// destCovers must apply the same containment logic so "example.com" at prio 1 is
+// flagged as shadowing "www.example.com" at prio 2.
+func TestEdge_Shadow_PaloAltoSubdomainCoverage(t *testing.T) {
+	cidrs := []string{"10.0.0.0/8"}
+	// Rule A: prio 1, DestFQDN="example.com" — matches example.com AND *.example.com at runtime.
+	a := authRuleAt(OutcomeSSORequired, "apex-1", 1, cidrs, "example.com")
+	// Rule B: prio 2, DestFQDN="www.example.com" — subset of A's runtime match scope.
+	b := authRuleAt(OutcomeExempt, "www-2", 2, cidrs, "www.example.com")
+	c := diagHas(t, authRuleShadowDiagnostics([]PolicyRule{a, b}), "auth_rule_shadowed", diagWarn)
+	if !strings.Contains(c.Message, "fully shadows") {
+		t.Errorf("apex FQDN implicitly covers subdomains at runtime → full shadow: %q", c.Message)
+	}
+}
