@@ -266,7 +266,10 @@ func destCovers(a, b *PolicyRule) bool {
 	// authRuleMatches skips the dest-required guard and matchDest returns true when
 	// no selector is set. Treat it as covering any destination b might carry so
 	// shadow diagnostics are not silently suppressed for auth-bypass patterns.
-	if a.Auth != nil && a.Auth.BroadExemption && !authRuleHasDestination(*a) {
+	// DestCountry is not tracked by authRuleHasDestination but IS applied by
+	// matchDest (fail-closed on GeoIP cache miss), so a country-scoped broadExemption
+	// rule does NOT cover all destinations — exclude it from the early return.
+	if a.Auth != nil && a.Auth.BroadExemption && !authRuleHasDestination(*a) && len(a.DestCountry) == 0 {
 		return true
 	}
 	if a.DestFQDN != "" {

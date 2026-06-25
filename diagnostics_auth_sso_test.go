@@ -303,6 +303,28 @@ func TestEdge_Shadow_BroadExemptionShadowsSSO(t *testing.T) {
 	}
 }
 
+// A broadExemption Exempt rule that ALSO carries a DestCountry filter is NOT an
+// all-destination rule at runtime: matchDest applies the country filter (fail-closed
+// on GeoIP cache miss), so hosts outside the configured countries are unaffected.
+// destCovers must NOT return true for these rules to avoid false shadow warnings.
+func TestEdge_Shadow_BroadExemptionWithCountryNotAllDest(t *testing.T) {
+	en := true
+	countryExempt := PolicyRule{
+		Priority: 1, Name: "country-exempt", ID: "id-country-exempt",
+		RuleType: ruleTypeAuth, Enabled: &en,
+		SubjectMatch: &SubjectMatch{
+			SchemaVersion: 1,
+			All:           []SubjectPredicate{{Type: subjectPredicateCIDR, Values: []string{"10.0.0.0/8"}}},
+		},
+		DestCountry: []string{"US"},
+		Auth:        &AuthRuleSpec{Outcome: OutcomeExempt, Owner: "ops", Reason: "test", BroadExemption: true},
+	}
+	sso := authRuleAt(OutcomeSSORequired, "sso-2", 2, []string{"10.0.0.0/16"}, "portal.example.com")
+	// Country-scoped broadExemption must NOT shadow a specific FQDN rule (different
+	// destination dimensions — documented conservative false-negative is correct here).
+	diagAbsent(t, authRuleShadowDiagnostics([]PolicyRule{countryExempt, sso}), "auth_rule_shadowed")
+}
+
 // A non-wildcard FQDN like "example.com" implicitly covers all its subdomains at
 // runtime (matchFQDN Palo Alto style: host == pattern || HasSuffix(host, "."+pattern)).
 // destCovers must apply the same containment logic so "example.com" at prio 1 is
