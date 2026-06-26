@@ -127,11 +127,11 @@ Single-page application with real-time updates:
 - **Release catalog** - local catalog loader with fail-closed validation, manifest hash binding, optional signature verification, and channel pointers for recommended/LTS/critical releases
 - **Pinned-image dispatch** - Control Plane dispatches only immutable `repo@sha256:<digest>` image refs; mutable tags are refused before the maintenance agent is called
 - **Maintenance-agent flow** - release dispatch uses the agent's existing `/v1/status`, `/v1/upgrades/apply`, and `/v1/operations/{op_id}` endpoints, then verifies success from `running_image.repo_digests`
-- **Resume-safe operations** - accepted operations record an op id, idempotency key, and target digest so the Control Plane can resume polling after a restart without starting a second apply
+- **Resume API** - accepted operations expose their op id, idempotency key, and target digest for explicit status/resume calls while the Control Plane process is running
 - **Single-flight guard** - one active release dispatch per agent; concurrent requests are rejected instead of queued or duplicated
 - **Digest verification gate** - an agent-reported success is not trusted until the running digest matches the catalog-pinned digest
 - **Legacy Docker updater retained** - the Docker update sidecar is still present for compatibility while the catalog + dispatch + maintenance-agent path is proven in production
-- **Air-gapped support path** - repo rewrite support lets operators dispatch a catalog digest through a configured local mirror while preserving the original digest
+- **Local repository allowlist** - dispatch is limited to the configured release repository; publish catalogs against that same repository until repo-rewrite wiring is enabled
 
 ### Resilience & Operations
 
@@ -328,6 +328,8 @@ Three things to do once the containers are up:
 
 Culvert's preferred release path is catalog-driven: the Control Plane loads a local release catalog, resolves the requested release or channel to an immutable `repo@sha256:<digest>` image ref, dispatches that ref to the local maintenance agent, polls the operation, and verifies the final running digest before reporting success.
 
+The quick-start installer attempts to wire the local maintenance agent automatically over its Unix-domain socket. It never mounts `/var/run/docker.sock` into the proxy. If Docker is rootless, userns-remapped, customized, or the validation checks fail, the installer leaves Release Management disabled and prints the custom-wiring path instead.
+
 Operator-facing API flow:
 
 ```bash
@@ -339,7 +341,7 @@ curl -k -X POST https://<host>:9090/api/releases/dispatch \
 curl -k "https://<host>:9090/api/releases/dispatch/status?agent=local"
 ```
 
-The catalog lives under the configured data directory at `release_catalog/`. A signed catalog can be used by configuring public trust roots with `CULVERT_RELEASE_CATALOG_TRUST_KEYS`; do not put private signing keys or registry credentials in this variable. The legacy Docker updater remains available for compatibility, but release catalog dispatch does not call its APIs or Docker socket path.
+The catalog lives under the configured data directory at `release_catalog/`. Clean installs may report `available:false` until a trusted catalog is published there. A signed catalog can be used by configuring public trust roots with `CULVERT_RELEASE_CATALOG_TRUST_KEYS`; do not put private signing keys or registry credentials in this variable. The legacy Docker updater remains available for compatibility, but release catalog dispatch does not call its APIs or Docker socket path.
 
 > **Backup & restore.** For the supported Docker Compose backup, restore, and cleanup commands, see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
 
