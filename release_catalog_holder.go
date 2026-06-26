@@ -63,13 +63,29 @@ func NewCatalogHolder(dir string, trust TrustStore, opts ...HolderOption) *Catal
 }
 
 // GetCatalog returns the currently-published catalog, or nil if none is
-// published. The returned *Catalog is immutable; to observe the freshest
-// catalog, call GetCatalog again (do not retain it across a refresh point).
-func (h *CatalogHolder) GetCatalog() *Catalog { return h.cur.Load() }
+// published OR (enforce mode) the published catalog has passed its freshness
+// window. The returned *Catalog is immutable; to observe the freshest catalog,
+// call GetCatalog again (do not retain it across a refresh point).
+//
+// The use-time expiry check is the counterpart to the load-time freshness gate
+// (Reload): load time proves the catalog was fresh when accepted; this keeps a
+// long-running CP from serving or dispatching a catalog past expires_at + skew
+// before a restart/refresh re-evaluates it. The catalog is NOT unpublished (the
+// rollback floor and the previous-catalog-on-failed-reload semantics are
+// unchanged) — it is merely hidden from readers once expired, so /api/releases
+// reports available:false and dispatch refuses with RefusedNoCatalog.
+func (h *CatalogHolder) GetCatalog() *Catalog {
+	cat := h.cur.Load()
+	if cat != nil && h.fresh.isExpiredNow(cat) {
+		return nil
+	}
+	return cat
+}
 
-// HasCatalog reports whether a catalog is currently published (vs the explicit
-// no-catalog state).
-func (h *CatalogHolder) HasCatalog() bool { return h.cur.Load() != nil }
+// HasCatalog reports whether a catalog is currently published AND still within
+// its freshness window (vs the explicit no-catalog / expired state). Routed
+// through GetCatalog so the two never disagree.
+func (h *CatalogHolder) HasCatalog() bool { return h.GetCatalog() != nil }
 
 // store atomically publishes an already-verified, immutable *Catalog. It is the
 // single publish primitive: every caller (Reload here, the Refresher in P1.5b)

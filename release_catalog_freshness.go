@@ -82,6 +82,23 @@ func checkCatalogFreshness(cat *Catalog, now time.Time, skew time.Duration) erro
 	return nil
 }
 
+// isExpiredNow reports whether cat has passed its freshness window as of now.
+// It is the USE-TIME counterpart to checkCatalogFreshness and is consulted on the
+// holder read path (GetCatalog). It is a no-op unless the policy is enabled
+// (enforce mode); a published catalog in enforce mode always carries a non-zero
+// expires_at (the load-time gate rejects a missing one), so the zero-expiry guard
+// here is purely defensive and never hides a legitimately-published catalog.
+func (p freshnessPolicy) isExpiredNow(cat *Catalog) bool {
+	if !p.enabled || cat.ExpiresAt().IsZero() {
+		return false
+	}
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	return now().After(cat.ExpiresAt().Add(p.skew))
+}
+
 // checkCatalogRollback verifies the catalog version is present and not below the
 // supplied floor. Pure given (cat, floor); persistence is the caller's job.
 func checkCatalogRollback(cat *Catalog, floor int) error {

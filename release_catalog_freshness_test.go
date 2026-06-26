@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"os"
 	"path/filepath"
@@ -123,6 +124,65 @@ func TestApply_DisabledIsNoop(t *testing.T) {
 	// A disabled policy ignores even a missing expiry / version.
 	if err := (freshnessPolicy{}).applyFreshnessAndRollback(&Catalog{}); err != nil {
 		t.Fatalf("disabled policy must be a no-op; got %v", err)
+	}
+}
+
+// ─── isExpiredNow (use-time) ─────────────────────────────────────────────────
+
+func TestIsExpiredNow(t *testing.T) {
+	exp := mustTime(t, "2026-01-10T00:00:00Z")
+	cat := &Catalog{expiresAt: exp}
+	cases := []struct {
+		name    string
+		enabled bool
+		now     string
+		want    bool
+	}{
+		{"disabled never expires", false, "2030-01-01T00:00:00Z", false},
+		{"before expiry", true, "2026-01-09T00:00:00Z", false},
+		{"within skew", true, "2026-01-10T00:02:00Z", false},
+		{"past expiry+skew", true, "2026-01-10T00:10:00Z", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := mustTime(t, tc.now)
+			p := freshnessPolicy{enabled: tc.enabled, now: func() time.Time { return now }, skew: catalogClockSkew}
+			if got := p.isExpiredNow(cat); got != tc.want {
+				t.Errorf("isExpiredNow = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A catalog accepted while fresh is HIDDEN from readers once the live clock
+// passes expires_at + skew — without unpublishing it or touching the floor.
+func TestHolder_UseTimeExpiryHidesCatalog(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	dir := t.TempDir()
+	writeSignedCatalogDir(t, dir, priv, freshValidSource("2026-05-10T00:00:00Z", 1))
+
+	clock := mustTime(t, "2026-05-01T00:00:00Z") // after generated_at, before expiry
+	now := func() time.Time { return clock }
+	ts, err := NewTrustStore([]TrustKey{{KeyID: holderTestKeyID, Alg: catalogSigAlg, PublicKey: pub}}, VerifyEnforce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewCatalogHolder(dir, ts, WithFreshnessEnforcement(now, catalogClockSkew, filepath.Join(t.TempDir(), "s.json")))
+
+	if err := h.Reload(); err != nil {
+		t.Fatalf("fresh catalog must load: %v", err)
+	}
+	if h.GetCatalog() == nil || !h.HasCatalog() {
+		t.Fatal("catalog must be visible while fresh")
+	}
+	// Advance the clock past expiry + skew: the same published pointer is now
+	// hidden from readers.
+	clock = mustTime(t, "2026-05-10T00:10:00Z")
+	if h.GetCatalog() != nil {
+		t.Fatal("expired catalog must be hidden from GetCatalog (use-time expiry)")
+	}
+	if h.HasCatalog() {
+		t.Fatal("HasCatalog must reflect use-time expiry")
 	}
 }
 
