@@ -129,6 +129,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, smoke]
 
+    # Expose the pushed manifest-list digest + computed version so the
+    # catalog-pipeline job (P2a) can generate + gate the release catalog against
+    # the digest the workflow actually pushed.
+    outputs:
+      proxy_digest: ${{ steps.build.outputs.digest }}
+      version_bare: ${{ steps.next-ver.outputs.version_bare }}
+
     permissions:
       contents: read
       packages: write      # push to ghcr.io
@@ -309,6 +316,66 @@ jobs:
               --rekor-url=https://rekor.sigstore.dev \
               "${IMAGE}:${tag}@${{ steps.build-updater.outputs.digest }}"
           done
+
+  # ─── Release catalog gate (P2a) ─────────────────────────────────────────────
+  # Generates the release catalog from the digest the docker job actually pushed,
+  # then runs the in-repo gate (TestReleaseCatalogGate) which round-trips the
+  # generated bundle through the REAL LoadVerifiedCatalog verifier and asserts
+  # every list_digest equals the pushed manifest-list digest. The gate fails the
+  # release on a tag ref, a digest mismatch, a mutated/invalid manifest, or a
+  # freshness/schema violation — so an official catalog can never be published
+  # out of step with the image. The ephemeral ed25519 key the gate signs with is
+  # in-process and discarded; the attached bundle is UNSIGNED (P2b adds the
+  # official Sigstore-identity signature and the Control-Plane verifier).
+  catalog-pipeline:
+    name: "Supply Chain · Release catalog gate"
+    runs-on: ubuntu-latest
+    needs: [docker]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0   # tag history for catalog_version
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+      - name: Build catalog spec from the pushed digest
+        id: spec
+        env:
+          DIGEST: ${{ needs.docker.outputs.proxy_digest }}
+          VERSION: ${{ needs.docker.outputs.version_bare }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"  || { echo "missing pushed digest"; exit 1; }
+          test -n "$VERSION" || { echo "missing version";      exit 1; }
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EXP=$(date -u -d '+90 days' +%Y-%m-%dT%H:%M:%SZ)
+          # Monotonic catalog_version = (count of v* tags) + 1.
+          CATVER=$(( $(git tag --list 'v*' | wc -l | tr -d ' ') + 1 ))
+          OUT="$RUNNER_TEMP/catalog-out"
+          mkdir -p "$OUT"
+          cat > "$RUNNER_TEMP/spec.json" <<EOF
+          {"generated_at":"$NOW","expires_at":"$EXP","catalog_version":$CATVER,
+           "entries":[{"release_id":"culvert-$VERSION","version_id":"$VERSION","severity":"normal",
+             "repo":"ghcr.io/kidcarmi/culvert","list_digest":"$DIGEST",
+             "platforms":["linux/amd64","linux/arm64"],"created_at":"$NOW",
+             "channels":["recommended"]}]}
+          EOF
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+      - name: Run release catalog gate (generate + verify + digest-match)
+        env:
+          CULVERT_RELEASE_GEN_SPEC: ${{ runner.temp }}/spec.json
+          CULVERT_RELEASE_GEN_OUT: ${{ steps.spec.outputs.out }}
+          CULVERT_RELEASE_EXPECT_DIGEST: ${{ needs.docker.outputs.proxy_digest }}
+        run: go test -run TestReleaseCatalogGate -count=1 -v .
+      - name: Upload generated catalog bundle (unsigned; audit/P2b)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-catalog-bundle
+          path: ${{ steps.spec.outputs.out }}
+          if-no-files-found: error
 
   # ─── Auto-tag ───────────────────────────────────────────────────────────
   # On every push to main, fetch the latest semver tag, bump the patch
