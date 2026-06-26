@@ -124,7 +124,7 @@ Single-page application with real-time updates:
 
 ### Release Management & Updates
 
-- **Release catalog** - local catalog loader with fail-closed validation, manifest hash binding, optional signature verification, and channel pointers for recommended/LTS/critical releases
+- **Release catalog** - catalog loader with fail-closed validation, manifest hash binding, ed25519 signature verification (enforce-by-default when trust roots are present), freshness (`expires_at`) and rollback (`catalog_version`) protection, and channel pointers for recommended/LTS/critical releases
 - **Pinned-image dispatch** - Control Plane dispatches only immutable `repo@sha256:<digest>` image refs; mutable tags are refused before the maintenance agent is called
 - **Maintenance-agent flow** - release dispatch uses the agent's existing `/v1/status`, `/v1/upgrades/apply`, and `/v1/operations/{op_id}` endpoints, then verifies success from `running_image.repo_digests`
 - **Resume API** - accepted operations expose their op id, idempotency key, and target digest for explicit status/resume calls while the Control Plane process is running
@@ -326,7 +326,7 @@ Three things to do once the containers are up:
 
 #### Release catalog updates
 
-Culvert's preferred release path is catalog-driven: the Control Plane loads a local release catalog, resolves the requested release or channel to an immutable `repo@sha256:<digest>` image ref, dispatches that ref to the local maintenance agent, polls the operation, and verifies the final running digest before reporting success.
+The catalog-driven release path is being rolled out as the future default (the legacy Docker updater remains the supported fallback until at least one production catalog-driven update succeeds — see [`docs/operator/enterprise-release-catalog-plan.md`](docs/operator/enterprise-release-catalog-plan.md)). The Control Plane loads a trusted release catalog, resolves the requested release or channel to an immutable `repo@sha256:<digest>` image ref, dispatches that ref to the local maintenance agent, polls the operation, and verifies the final running digest before reporting success.
 
 The quick-start installer attempts to wire the local maintenance agent automatically over its Unix-domain socket. It never mounts `/var/run/docker.sock` into the proxy. If Docker is rootless, userns-remapped, customized, or the validation checks fail, the installer leaves Release Management disabled and prints the custom-wiring path instead.
 
@@ -341,7 +341,7 @@ curl -k -X POST https://<host>:9090/api/releases/dispatch \
 curl -k "https://<host>:9090/api/releases/dispatch/status?agent=local"
 ```
 
-The catalog lives under the configured data directory at `release_catalog/`. Clean installs may report `available:false` until a trusted catalog is published there. A signed catalog can be used by configuring public trust roots with `CULVERT_RELEASE_CATALOG_TRUST_KEYS`; do not put private signing keys or registry credentials in this variable. The legacy Docker updater remains available for compatibility, but release catalog dispatch does not call its APIs or Docker socket path.
+The catalog lives under the configured data directory at `release_catalog/`. Signature verification is **enforce-by-default**: whenever a trust root is present (a baked-in official key, or operator keys via `CULVERT_RELEASE_CATALOG_TRUST_KEYS`), catalogs must be validly signed, unexpired (`expires_at`), and at or above the highest accepted `catalog_version` (rollback protection). With no trust roots configured, Release Management stays disabled and `/api/releases` reports `available:false` — an unsigned catalog is **never** auto-trusted. Configure only **public** trust roots in `CULVERT_RELEASE_CATALOG_TRUST_KEYS`; never put private signing keys or registry credentials there. `CULVERT_RELEASE_CATALOG_VERIFY=permissive|disabled` is a deliberate, logged **break-glass** override (e.g. local dev with an unsigned catalog) — leave it unset in production. The legacy Docker updater remains available for compatibility, but release catalog dispatch does not call its APIs or Docker socket path.
 
 > **Backup & restore.** For the supported Docker Compose backup, restore, and cleanup commands, see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
 
