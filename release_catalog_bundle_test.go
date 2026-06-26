@@ -140,6 +140,15 @@ func TestBundle_HappyImport(t *testing.T) {
 }
 
 // A traversal entry name rejects the WHOLE bundle (never silently skipped).
+// The keyless (.sigstore) sidecar is classified as a staged catalog file, so an
+// air-gap bundle's Sigstore signature survives import (P2b — Codex review fix).
+func TestBundle_ClassifiesSigstoreSidecar(t *testing.T) {
+	dst, isIndex, ok := classifyBundleEntry(&tar.Header{Name: "index.json.sigstore", Typeflag: tar.TypeReg})
+	if !ok || isIndex || dst != "index.json.sigstore" {
+		t.Fatalf("index.json.sigstore: dst=%q isIndex=%v ok=%v; want staged as index.json.sigstore", dst, isIndex, ok)
+	}
+}
+
 func TestBundle_TraversalRejected(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {

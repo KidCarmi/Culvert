@@ -57,6 +57,15 @@ const (
 	// catalog from at startup (P1.7). Auto-seed runs ONLY in enforce mode; the
 	// installer never bakes a default. Unset ⇒ no fetch (behavior unchanged).
 	envReleaseCatalogURL = "CULVERT_RELEASE_CATALOG_URL"
+	// envReleaseSigstoreIdentity is the OPTIONAL operator override for the pinned
+	// keyless identity policy, JSON {"issuer","san_regex"} (P2b). Unset ⇒ the baked
+	// official identity. Break-glass / fork-mirror use only; env-only (GUI-parity
+	// deferral, same as the other CULVERT_RELEASE_* vars).
+	envReleaseSigstoreIdentity = "CULVERT_RELEASE_SIGSTORE_IDENTITY"
+	// envReleaseSigstoreTrustedRoot is the OPTIONAL path to a custom Sigstore TUF
+	// trusted_root.json (P2b). Unset ⇒ the baked embed (empty in OSS ⇒ scheme
+	// dormant). PUBLIC trust material only — never private keys.
+	envReleaseSigstoreTrustedRoot = "CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT"
 )
 
 // bakedReleaseTrustKeysJSON is the BAKED-IN public trust root set, in the same
@@ -75,6 +84,10 @@ type releaseStartupConfig struct {
 	catalogURL     string     // optional http(s) origin to auto-seed the signed catalog (P1.7); "" ⇒ no fetch
 	trustKeys      []TrustKey // baked roots ∪ operator-configured roots
 	trustKeysErr   error
+	sigstore       *sigstoreVerifier // optional keyless (Sigstore-identity) verifier; nil ⇒ scheme inactive
+	sigstoreActive bool              // true ⇒ a Sigstore trusted root is present
+	sigstoreWarn   string            // loud one-line note (identity set without a root) ("" ⇒ none)
+	sigstoreErr    error             // fatal Sigstore config error ⇒ Release Management disabled
 	verifyMode     VerifyMode
 	verifyModeWarn string // loud break-glass message to log once at startup ("" ⇒ none)
 }
@@ -99,7 +112,14 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 	}
 	catalogDir := filepath.Join(dataDir, "release_catalog")
 	keys, keysErr := combinedReleaseTrustKeys(getenv(envReleaseCatalogTrustKeys))
-	mode, warn := resolveCatalogVerifyMode(getenv(envReleaseCatalogVerify), len(keys))
+	sig := resolveSigstoreWiring(getenv)
+	// Enforce-by-default keys off ANY configured trusted scheme (ed25519 ring OR
+	// the Sigstore verifier) — not just the ed25519 ring count.
+	nSchemes := len(keys)
+	if sig.active {
+		nSchemes++
+	}
+	mode, warn := resolveCatalogVerifyMode(getenv(envReleaseCatalogVerify), nSchemes)
 	return releaseStartupConfig{
 		proxyRepo:      proxyRepo,
 		catalogDir:     catalogDir,
@@ -108,6 +128,10 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 		catalogURL:     strings.TrimSpace(getenv(envReleaseCatalogURL)),
 		trustKeys:      keys,
 		trustKeysErr:   keysErr,
+		sigstore:       sig.verifier,
+		sigstoreActive: sig.active,
+		sigstoreWarn:   sig.warn,
+		sigstoreErr:    sig.err,
 		verifyMode:     mode,
 		verifyModeWarn: warn,
 	}
@@ -170,18 +194,25 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 		logger.Printf("release management disabled: catalog trust keys: %v", cfg.trustKeysErr)
 		return
 	}
+	if cfg.sigstoreErr != nil {
+		logger.Printf("release management disabled: sigstore trust: %v", cfg.sigstoreErr)
+		return
+	}
+	if cfg.sigstoreWarn != "" {
+		logger.Printf("%s", cfg.sigstoreWarn)
+	}
 	if cfg.verifyModeWarn != "" {
 		logger.Printf("%s", cfg.verifyModeWarn)
 	}
 	// Central Phase 1 invariant: production wiring enters VerifyEnforce whenever a
-	// trust root (baked or configured) is present. With NO roots and no break-glass
-	// override, the mode is enforce with an EMPTY ring → NewTrustStore fails closed
-	// → Release Management is DISABLED. An unsigned catalog is never auto-trusted;
-	// the only way to load one is the explicit CULVERT_RELEASE_CATALOG_VERIFY
-	// break-glass.
-	trust, err := NewTrustStore(cfg.trustKeys, cfg.verifyMode)
+	// trust root (baked or configured, ed25519 OR Sigstore) is present. With NO
+	// trusted scheme and no break-glass override, the mode is enforce with an EMPTY
+	// trust store → NewTrustStoreWithSigstore fails closed → Release Management is
+	// DISABLED. An unsigned catalog is never auto-trusted; the only way to load one
+	// is the explicit CULVERT_RELEASE_CATALOG_VERIFY break-glass.
+	trust, err := NewTrustStoreWithSigstore(cfg.trustKeys, cfg.verifyMode, cfg.sigstore)
 	if err != nil {
-		logger.Printf("release management disabled: %v (configure CULVERT_RELEASE_CATALOG_TRUST_KEYS, or set CULVERT_RELEASE_CATALOG_VERIFY=permissive for break-glass)", err)
+		logger.Printf("release management disabled: %v (configure CULVERT_RELEASE_CATALOG_TRUST_KEYS, ship baked roots, or set CULVERT_RELEASE_CATALOG_VERIFY=permissive for break-glass)", err)
 		return
 	}
 
@@ -233,9 +264,25 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	resolve, note := releaseAgentResolver(cfg.maintURL)
 	rm := newReleaseManager(svc, resolve)
 	rm.verifyMode = cfg.verifyMode
+	rm.trustSchemes = trustSchemes(cfg)
 	setReleaseManager(rm)
-	logger.Printf("release management enabled: proxy_repo=%q verify=%s local_agent=%s",
-		sanitizeLog(cfg.proxyRepo), cfg.verifyMode, note)
+	logger.Printf("release management enabled: proxy_repo=%q verify=%s schemes=%s local_agent=%s",
+		sanitizeLog(cfg.proxyRepo), cfg.verifyMode, rm.trustSchemes, note)
+}
+
+// trustSchemes returns a compact log-safe description of the active trust schemes.
+func trustSchemes(cfg releaseStartupConfig) string {
+	schemes := make([]string, 0, 2)
+	if len(cfg.trustKeys) > 0 {
+		schemes = append(schemes, catalogSigAlg)
+	}
+	if cfg.sigstoreActive {
+		schemes = append(schemes, sigstoreSigAlg)
+	}
+	if len(schemes) == 0 {
+		return "none"
+	}
+	return strings.Join(schemes, "+")
 }
 
 // runStartupAutoSeed performs one verified auto-seed from cfg.catalogURL. It

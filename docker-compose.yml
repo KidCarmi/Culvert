@@ -140,6 +140,13 @@ services:
       # this URL at startup. Verification happens in the binary; unset ⇒ no fetch.
       # The installer never bakes a default URL.
       - CULVERT_RELEASE_CATALOG_URL=${CULVERT_RELEASE_CATALOG_URL:-}
+      # OPTIONAL keyless (Sigstore-identity) trust overrides (P2b). Break-glass /
+      # fork-mirror use only — the official identity + trusted root are baked at
+      # build time. IDENTITY is JSON {"issuer","san_regex"}; TRUSTED_ROOT is a path
+      # to a custom Sigstore TUF trusted_root.json. PUBLIC trust material only —
+      # never private signing keys. Unset ⇒ baked defaults (scheme dormant in OSS).
+      - CULVERT_RELEASE_SIGSTORE_IDENTITY=${CULVERT_RELEASE_SIGSTORE_IDENTITY:-}
+      - CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT=${CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT:-}
     command: [
       "-port",           "8080",
       "-ui-port",        "9090",

@@ -196,17 +196,31 @@ func (p *HTTPCatalogProvider) Stage(ctx context.Context) (stagingDir string, err
 	if notModified {
 		return "", errCatalogUnchanged
 	}
-	sigBytes, sigMissing, err := p.fetchSignature(ctx)
+	// Fetch each scheme's sidecar ONLY when that scheme is configured, so neither
+	// sidecar's absence/error can block the OTHER scheme. A 403/500 on .sig at an
+	// origin that uses non-404 for absent objects must NOT reject a keyless-only
+	// catalog, and vice-versa. Each present sidecar then participates in
+	// verifyIndexSignature's scheme selection exactly like the local-dir source —
+	// a present-but-invalid artifact rejects (no downgrade).
+	sigBytes, sigMissing, err := p.fetchSignatureIfConfigured(ctx)
 	if err != nil {
 		return "", err
 	}
-	if err := verifyIndexSignature(idxBytes, bytesSignatureSource{sig: sigBytes, missing: sigMissing}, p.trust); err != nil {
+	bundleBytes, bundleMissing, err := p.fetchSigstoreBundleIfConfigured(ctx)
+	if err != nil {
+		return "", err
+	}
+	src := bytesSignatureSource{
+		sig: sigBytes, missing: sigMissing,
+		bundle: bundleBytes, bundleMissing: bundleMissing,
+	}
+	if err := verifyIndexSignature(idxBytes, src, p.trust); err != nil {
 		// Forged/unsigned (enforce) index ⇒ reject here, having fetched NO manifests.
 		return "", err
 	}
 
 	// ── Phase 2: index is trusted — enumerate + fetch manifests into staging ──
-	if err := p.stageVerified(ctx, stage, idxBytes, sigBytes, sigMissing); err != nil {
+	if err := p.stageVerified(ctx, stage, idxBytes, src); err != nil {
 		return "", err
 	}
 
@@ -215,10 +229,13 @@ func (p *HTTPCatalogProvider) Stage(ctx context.Context) (stagingDir string, err
 	return stage, nil
 }
 
-// stageVerified writes the (already-verified) index + signature and fetches each
+// stageVerified writes the (already-verified) index + sidecars and fetches each
 // referenced manifest into the staging dir. The index is parsed here ONLY after
-// its signature was checked in Phase 1 (§5.1).
-func (p *HTTPCatalogProvider) stageVerified(ctx context.Context, stage string, idxBytes, sigBytes []byte, sigMissing bool) error {
+// its signature was checked in Phase 1 (§5.1). Both sidecars (.sig and .sigstore)
+// are persisted so a subsequent LoadVerifiedCatalog over the staged dir re-verifies
+// under the SAME scheme that accepted it here (no scheme drift between fetch and
+// re-verify).
+func (p *HTTPCatalogProvider) stageVerified(ctx context.Context, stage string, idxBytes []byte, src bytesSignatureSource) error {
 	var idx catalogIndexFile
 	if err := json.Unmarshal(idxBytes, &idx); err != nil {
 		return fmt.Errorf("release catalog: parse verified index: %w", err)
@@ -229,8 +246,13 @@ func (p *HTTPCatalogProvider) stageVerified(ctx context.Context, stage string, i
 	if err := os.WriteFile(filepath.Join(stage, "index.json"), idxBytes, 0o600); err != nil {
 		return err
 	}
-	if !sigMissing {
-		if err := os.WriteFile(filepath.Join(stage, "index.json.sig"), sigBytes, 0o600); err != nil {
+	if !src.missing {
+		if err := os.WriteFile(filepath.Join(stage, "index.json.sig"), src.sig, 0o600); err != nil {
+			return err
+		}
+	}
+	if !src.bundleMissing {
+		if err := os.WriteFile(filepath.Join(stage, "index.json.sigstore"), src.bundle, 0o600); err != nil {
 			return err
 		}
 	}
@@ -287,6 +309,18 @@ func (p *HTTPCatalogProvider) fetchIndex(ctx context.Context) (body []byte, etag
 	}
 }
 
+// fetchSignatureIfConfigured GETs index.json.sig, but ONLY when the ed25519 scheme
+// is configured (the trust ring is non-empty). When it is not (e.g. a Sigstore-only
+// store), no request is made and the sidecar is reported missing — verifyIndexSignature
+// skips the ed25519 branch in that case, so the value is inert and an ed25519-sidecar
+// fetch error can never block a keyless catalog.
+func (p *HTTPCatalogProvider) fetchSignatureIfConfigured(ctx context.Context) (sig []byte, missing bool, err error) {
+	if len(p.trust.keys) == 0 {
+		return nil, true, nil
+	}
+	return p.fetchSignature(ctx)
+}
+
 // fetchSignature GETs index.json.sig; a 404 yields missing=true (unsigned —
 // handled per mode by verifyIndexSignature).
 func (p *HTTPCatalogProvider) fetchSignature(ctx context.Context) (sig []byte, missing bool, err error) {
@@ -306,6 +340,34 @@ func (p *HTTPCatalogProvider) fetchSignature(ctx context.Context) (sig []byte, m
 		return b, false, nil
 	default:
 		return nil, false, fmt.Errorf("release catalog: signature HTTP %d", resp.StatusCode)
+	}
+}
+
+// fetchSigstoreBundleIfConfigured GETs index.json.sigstore, but ONLY when the
+// Sigstore scheme is configured (trust carries a verifier). When it is not, no
+// request is made and the sidecar is reported missing — verifyIndexSignature skips
+// the Sigstore branch entirely in that case, so the value is inert. A 404 yields
+// missing=true (handled per mode by scheme selection, exactly like .sig).
+func (p *HTTPCatalogProvider) fetchSigstoreBundleIfConfigured(ctx context.Context) (bundle []byte, missing bool, err error) {
+	if p.trust.sigstore == nil {
+		return nil, true, nil
+	}
+	resp, err := p.doGet(ctx, "index.json.sigstore", nil)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return nil, true, nil
+	case http.StatusOK:
+		b, rerr := readAllBounded(resp.Body, p.maxBytes)
+		if rerr != nil {
+			return nil, false, fmt.Errorf("release catalog: read sigstore bundle: %w", rerr)
+		}
+		return b, false, nil
+	default:
+		return nil, false, fmt.Errorf("release catalog: sigstore bundle HTTP %d", resp.StatusCode)
 	}
 }
 
@@ -374,11 +436,15 @@ func readAllBounded(r io.Reader, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-// bytesSignatureSource adapts in-memory signature bytes to the P1.3
-// SignatureSource interface so the HTTP provider can reuse verifyIndexSignature.
+// bytesSignatureSource adapts in-memory sidecar bytes to the SignatureSource and
+// sigstoreSource interfaces so the HTTP provider can reuse verifyIndexSignature.
+// A "missing" sidecar surfaces as os.ErrNotExist so scheme selection can tell
+// absent (fall-through) apart from present-but-invalid (reject).
 type bytesSignatureSource struct {
-	sig     []byte
-	missing bool
+	sig           []byte
+	missing       bool
+	bundle        []byte
+	bundleMissing bool
 }
 
 func (b bytesSignatureSource) ReadSignature() ([]byte, error) {
@@ -386,4 +452,11 @@ func (b bytesSignatureSource) ReadSignature() ([]byte, error) {
 		return nil, os.ErrNotExist
 	}
 	return b.sig, nil
+}
+
+func (b bytesSignatureSource) ReadSigstoreBundle() ([]byte, error) {
+	if b.bundleMissing {
+		return nil, os.ErrNotExist
+	}
+	return b.bundle, nil
 }
