@@ -23,9 +23,10 @@ func (f *fakeStager) Stage(context.Context) (string, error) {
 	return f.dir, nil
 }
 
-// seedFixture builds an enforce trust store (trusting pub under holderTestKeyID),
-// a fixed clock after the fixtures' generated_at, and the shared dirs.
-func seedFixture(t *testing.T) (pub ed25519.PublicKey, priv ed25519.PrivateKey, trust TrustStore, base string) {
+// seedFixture builds an enforce trust store (trusting a fresh key under
+// holderTestKeyID) and a shared base dir; the returned private key signs the
+// staged fixtures.
+func seedFixture(t *testing.T) (priv ed25519.PrivateKey, trust TrustStore, base string) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -35,7 +36,7 @@ func seedFixture(t *testing.T) (pub ed25519.PublicKey, priv ed25519.PrivateKey, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pub, priv, trust, t.TempDir()
+	return priv, trust, t.TempDir()
 }
 
 // stageSignedDir materializes a signed+fresh catalog into base/<name> (same FS as
@@ -61,7 +62,7 @@ func autoSeedCfg(t *testing.T, base string, trust TrustStore) (autoSeedConfig, s
 }
 
 func TestAutoSeed_HappyPath(t *testing.T) {
-	_, priv, trust, base := seedFixture(t)
+	priv, trust, base := seedFixture(t)
 	cfg, catalogDir := autoSeedCfg(t, base, trust)
 	stage := stageSignedDir(t, base, "stage", priv, "2099-01-01T00:00:00Z", 3)
 
@@ -83,7 +84,7 @@ func TestAutoSeed_HappyPath(t *testing.T) {
 }
 
 func TestAutoSeed_UnchangedIsNoop(t *testing.T) {
-	_, _, trust, base := seedFixture(t)
+	_, trust, base := seedFixture(t)
 	cfg, catalogDir := autoSeedCfg(t, base, trust)
 	if err := autoSeedCatalog(context.Background(), &fakeStager{err: errCatalogUnchanged}, cfg); err != nil {
 		t.Fatalf("304 must be a no-op, got %v", err)
@@ -97,26 +98,24 @@ func TestAutoSeed_FailClosedMatrix(t *testing.T) {
 	cases := []struct {
 		name  string
 		build func(t *testing.T, base string, priv ed25519.PrivateKey) string
-		// otherKey: sign with a DIFFERENT key so verification fails
-		otherKey bool
 	}{
 		{"forged: untrusted signing key", func(t *testing.T, base string, _ ed25519.PrivateKey) string {
 			_, other, _ := ed25519.GenerateKey(nil)
 			return stageSignedDir(t, base, "stage", other, "2099-01-01T00:00:00Z", 3)
-		}, true},
+		}},
 		{"expired", func(t *testing.T, base string, priv ed25519.PrivateKey) string {
 			return stageSignedDir(t, base, "stage", priv, "2026-04-19T00:00:00Z", 3) // before now
-		}, false},
+		}},
 		{"missing expires_at", func(t *testing.T, base string, priv ed25519.PrivateKey) string {
 			return stageSignedDir(t, base, "stage", priv, "", 3)
-		}, false},
+		}},
 		{"missing catalog_version", func(t *testing.T, base string, priv ed25519.PrivateKey) string {
 			return stageSignedDir(t, base, "stage", priv, "2099-01-01T00:00:00Z", 0)
-		}, false},
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, priv, trust, base := seedFixture(t)
+			priv, trust, base := seedFixture(t)
 			cfg, catalogDir := autoSeedCfg(t, base, trust)
 			stage := tc.build(t, base, priv)
 			err := autoSeedCatalog(context.Background(), &fakeStager{dir: stage}, cfg)
@@ -135,7 +134,7 @@ func TestAutoSeed_FailClosedMatrix(t *testing.T) {
 }
 
 func TestAutoSeed_RollbackRefused(t *testing.T) {
-	_, priv, trust, base := seedFixture(t)
+	priv, trust, base := seedFixture(t)
 	cfg, catalogDir := autoSeedCfg(t, base, trust)
 	// Persisted floor is 5; the served catalog is version 4 (a downgrade).
 	if err := (freshnessPolicy{enabled: true, statePath: cfg.statePath}).writeVersionFloor(5); err != nil {
@@ -153,7 +152,7 @@ func TestAutoSeed_RollbackRefused(t *testing.T) {
 
 // A pre-existing good on-disk catalog is NOT clobbered by a failing seed.
 func TestAutoSeed_FailedSeedPreservesExisting(t *testing.T) {
-	_, priv, trust, base := seedFixture(t)
+	priv, trust, base := seedFixture(t)
 	cfg, catalogDir := autoSeedCfg(t, base, trust)
 	// Install a good v5 catalog first (simulate prior good state).
 	good := stageSignedDir(t, base, "good", priv, "2099-01-01T00:00:00Z", 5)
@@ -198,7 +197,7 @@ func TestSwapCatalogDir_ReplacesAndCleansBackup(t *testing.T) {
 // ─── runStartupAutoSeed SSRF / scheme guard (no network needed) ──────────────
 
 func TestRunStartupAutoSeed_RejectsPrivateAndBadScheme(t *testing.T) {
-	_, _, trust, base := seedFixture(t)
+	_, trust, base := seedFixture(t)
 	cfg := releaseStartupConfig{
 		catalogDir: filepath.Join(base, "release_catalog"),
 		statePath:  filepath.Join(base, "state.json"),
