@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -226,6 +227,26 @@ func TestSeedHost(t *testing.T) {
 	}
 	if got := seedHost("://broken"); got != "configured-url" {
 		t.Errorf("malformed URL host = %q; want placeholder", got)
+	}
+}
+
+func TestRedactSeedError(t *testing.T) {
+	raw := "https://user:s3cr3t@cdn.example.com/releases/index.json?X-Sig=ABC123&exp=999"
+	// Simulate a transport error that embedded the full URL (net/http *url.Error).
+	err := errors.New(`Get "https://user:s3cr3t@cdn.example.com/releases/index.json?X-Sig=ABC123&exp=999": dial tcp: timeout`)
+	got := redactSeedError(err, raw)
+	for _, leak := range []string{"s3cr3t", "X-Sig=ABC123", "exp=999", "user:s3cr3t"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("redacted error still leaks %q: %s", leak, got)
+		}
+	}
+	// The host is fine to keep (already logged separately).
+	if !strings.Contains(got, "cdn.example.com") {
+		t.Errorf("redaction over-stripped the host: %s", got)
+	}
+	// A malformed URL must not panic; returns the message as-is.
+	if redactSeedError(errors.New("boom"), "://bad") != "boom" {
+		t.Error("malformed URL handling changed the message unexpectedly")
 	}
 }
 

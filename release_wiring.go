@@ -202,8 +202,12 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	if cfg.catalogURL != "" {
 		if cfg.verifyMode == VerifyEnforce {
 			if err := runStartupAutoSeed(cfg, trust); err != nil {
-				logger.Printf("release catalog: auto-seed from %q did not update the catalog: %v",
-					sanitizeLog(seedHost(cfg.catalogURL)), err)
+				// Redact the URL's credentials/query before logging: a transport
+				// error wraps net/http's *url.Error, whose string includes the full
+				// request URL (path + query, and any userinfo) — a presigned URL's
+				// signature would otherwise leak into startup logs.
+				logger.Printf("release catalog: auto-seed from %q did not update the catalog: %s",
+					sanitizeLog(seedHost(cfg.catalogURL)), sanitizeLog(redactSeedError(err, cfg.catalogURL)))
 			}
 		} else {
 			logger.Printf("release catalog: auto-seed skipped — it only runs in enforce mode (verify=%s); an unsigned catalog is never auto-downloaded", cfg.verifyMode)
@@ -279,6 +283,32 @@ func seedHost(raw string) string {
 		return u.Host
 	}
 	return "configured-url"
+}
+
+// redactSeedError returns err's message with the seed URL's sensitive components
+// (userinfo and raw query — e.g. a presigned-URL signature) stripped, since a
+// transport error wraps net/http's *url.Error whose string embeds the full
+// request URL. The host is preserved (it is already logged separately and is not
+// secret). The result is still passed through sanitizeLog at the call site.
+func redactSeedError(err error, rawURL string) string {
+	msg := err.Error()
+	u, perr := url.Parse(rawURL)
+	if perr != nil {
+		return msg
+	}
+	if u.User != nil {
+		// Strip "user:password" (and the bare username) wherever they appear.
+		if s := u.User.String(); s != "" {
+			msg = strings.ReplaceAll(msg, s, "REDACTED")
+		}
+		if name := u.User.Username(); name != "" {
+			msg = strings.ReplaceAll(msg, name, "REDACTED")
+		}
+	}
+	if u.RawQuery != "" {
+		msg = strings.ReplaceAll(msg, u.RawQuery, "REDACTED")
+	}
+	return msg
 }
 
 type releaseCatalogTrustKeyJSON struct {
