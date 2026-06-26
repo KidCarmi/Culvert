@@ -331,7 +331,13 @@ jobs:
     name: "Supply Chain · Release catalog gate"
     runs-on: ubuntu-latest
     needs: [docker]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Run on BOTH the main-push run (early feedback before auto-tag) AND the
+    # tag-release run, where the `release` job actually publishes assets — the
+    # `release` job depends on this job, so a failed catalog gate blocks the
+    # release (genuinely release-blocking, not just a main-push proof).
+    if: >-
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
     steps:
@@ -345,11 +351,15 @@ jobs:
         id: spec
         env:
           DIGEST: ${{ needs.docker.outputs.proxy_digest }}
+          # version_bare is set only on the main-push run; on the tag-release run
+          # derive it from the tag ref (refs/tags/vX.Y.Z → X.Y.Z).
           VERSION: ${{ needs.docker.outputs.version_bare }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          test -n "$DIGEST"  || { echo "missing pushed digest"; exit 1; }
-          test -n "$VERSION" || { echo "missing version";      exit 1; }
+          test -n "$DIGEST" || { echo "missing pushed digest"; exit 1; }
+          if [ -z "$VERSION" ]; then VERSION="${REF_NAME#v}"; fi
+          test -n "$VERSION" || { echo "missing version"; exit 1; }
           NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           EXP=$(date -u -d '+90 days' +%Y-%m-%dT%H:%M:%SZ)
           # Monotonic catalog_version = (count of v* tags) + 1.
@@ -427,7 +437,9 @@ jobs:
     # Security gate must pass before any release binary is built or published.
     # The "release-approved" job lives in security-release-gate.yml and is
     # enforced as a required status check via Branch Protection rules.
-    needs: [test, docker]
+    # catalog-pipeline is a hard dependency so the release-blocking catalog gate
+    # (digest-match + verify) must pass before any release asset is published.
+    needs: [test, docker, catalog-pipeline]
     if: startsWith(github.ref, 'refs/tags/v')
 
     permissions:
