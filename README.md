@@ -106,7 +106,7 @@ Single-page application with real-time updates:
 | Config Versions | Auto-snapshot history, side-by-side diff, one-click rollback |
 | PAC | PAC file generator with custom exclusions |
 | Audit Log | Tamper-evident JSONL trail of all admin actions |
-| Diagnostics | Operator contract — storage, policy load, root CA, session HMAC, CDR, cluster TLS posture, updater URL, config-version health, risky-but-allowed warnings |
+| Diagnostics | Operator contract — storage, policy load, root CA, session HMAC, CDR, cluster TLS posture, release-management health, config-version health, risky-but-allowed warnings |
 | Governance | Read-only control-plane visibility — route inventory, C2/C2c/C4 counters, derived health, parity-test catalog (admin-only) |
 | Users | User management with RBAC role assignment |
 | Settings | Session timeout, UI access control, syslog, config export/import |
@@ -122,14 +122,16 @@ Single-page application with real-time updates:
 - **Webhook alerts** - HMAC-SHA256 signed notifications for threats, blocks, lockouts
 - **Request tracing** - auto-generated X-Request-ID for end-to-end correlation
 
-### Self-Update System
+### Release Management & Updates
 
-- **Docker update sidecar** - lightweight Go service with Docker socket access, triggered from the GUI
-- **One-click update** - pull, recreate, health check, automatic rollback on failure (SSE progress stream)
-- **Rollback** - previous container preserved for 1 hour (configurable); one-click restore
-- **Self-update** - updater can update itself via reaper container pattern
-- **Air-gapped mode** - load images from tarball when no registry access
-- **Concurrent operation guard** - prevents double-click races on update/rollback
+- **Release catalog** - local catalog loader with fail-closed validation, manifest hash binding, optional signature verification, and channel pointers for recommended/LTS/critical releases
+- **Pinned-image dispatch** - Control Plane dispatches only immutable `repo@sha256:<digest>` image refs; mutable tags are refused before the maintenance agent is called
+- **Maintenance-agent flow** - release dispatch uses the agent's existing `/v1/status`, `/v1/upgrades/apply`, and `/v1/operations/{op_id}` endpoints, then verifies success from `running_image.repo_digests`
+- **Resume API** - accepted operations expose their op id, idempotency key, and target digest for explicit status/resume calls while the Control Plane process is running
+- **Single-flight guard** - one active release dispatch per agent; concurrent requests are rejected instead of queued or duplicated
+- **Digest verification gate** - an agent-reported success is not trusted until the running digest matches the catalog-pinned digest
+- **Legacy Docker updater retained** - the Docker update sidecar is still present for compatibility while the catalog + dispatch + maintenance-agent path is proven in production
+- **Local repository allowlist** - dispatch is limited to the configured release repository; publish catalogs against that same repository until repo-rewrite wiring is enabled
 
 ### Resilience & Operations
 
@@ -320,7 +322,26 @@ Three things to do once the containers are up:
    curl http://<host>:8080/ready
    ```
    Returns `200` with `{"status":"ready", "checks":{...}}` when ready, `503` with `"status":"not_ready"` when a gating check fails. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the full checks-map reference.
-3. **Open Diagnostics** — Admin UI → **Infrastructure → Diagnostics**. The page surfaces the operator contract: storage path, policy load, root CA, session HMAC, CDR, cluster TLS posture, updater URL, config-version health, and any active risky-but-allowed warnings (`cluster-insecure`, unauth mode). Resolve any `fail` rows before exposing the proxy to clients.
+3. **Open Diagnostics** — Admin UI → **Infrastructure → Diagnostics**. The page surfaces the operator contract: storage path, policy load, root CA, session HMAC, CDR, cluster TLS posture, release-management health, config-version health, and any active risky-but-allowed warnings (`cluster-insecure`, unauth mode). Resolve any `fail` rows before exposing the proxy to clients.
+
+#### Release catalog updates
+
+Culvert's preferred release path is catalog-driven: the Control Plane loads a local release catalog, resolves the requested release or channel to an immutable `repo@sha256:<digest>` image ref, dispatches that ref to the local maintenance agent, polls the operation, and verifies the final running digest before reporting success.
+
+The quick-start installer attempts to wire the local maintenance agent automatically over its Unix-domain socket. It never mounts `/var/run/docker.sock` into the proxy. If Docker is rootless, userns-remapped, customized, or the validation checks fail, the installer leaves Release Management disabled and prints the custom-wiring path instead.
+
+Operator-facing API flow:
+
+```bash
+curl -k https://<host>:9090/api/releases
+curl -k "https://<host>:9090/api/releases/current?agent=local"
+curl -k -X POST https://<host>:9090/api/releases/dispatch \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"local","channel":"recommended"}'
+curl -k "https://<host>:9090/api/releases/dispatch/status?agent=local"
+```
+
+The catalog lives under the configured data directory at `release_catalog/`. Clean installs may report `available:false` until a trusted catalog is published there. A signed catalog can be used by configuring public trust roots with `CULVERT_RELEASE_CATALOG_TRUST_KEYS`; do not put private signing keys or registry credentials in this variable. The legacy Docker updater remains available for compatibility, but release catalog dispatch does not call its APIs or Docker socket path.
 
 > **Backup & restore.** For the supported Docker Compose backup, restore, and cleanup commands, see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
 
@@ -508,6 +529,9 @@ Distributed (Data Plane):
 |----------|-------------|
 | `CULVERT_CA_PASSPHRASE` | CA private key encryption passphrase (required for SSL inspection) |
 | `CULVERT_C2_ENFORCE` | C2 metadata-driven admin RBAC enforcement mode. Default = `enforce` (fail-closed). Set to `false`/`0`/`no`/`off` to revert to shadow (log-only) mode without rebuild. Read once at startup. |
+| `CULVERT_RELEASE_PROXY_REPO` | Bare image repository allowed for release dispatch. Defaults to `ghcr.io/kidcarmi/culvert`; do not include a tag or digest. |
+| `CULVERT_MAINT_AGENT_URL` | Local maintenance-agent endpoint for release dispatch. Defaults to the Unix socket path `/run/culvert-maint/culvert-maint.sock`; `http://` and `https://` endpoints are also supported for controlled deployments. |
+| `CULVERT_RELEASE_CATALOG_TRUST_KEYS` | JSON array of public Ed25519 catalog trust roots. Public keys only; never place private signing keys or credentials here. |
 
 ---
 
@@ -667,13 +691,19 @@ hashcache.go       - SHA-256 scan cache with TTL
 controlplane.go    - gRPC Control Plane / Data Plane
 plugin.go          - Middleware plugin chain
 catdb.go           - URL category database
+release_catalog.go - Release catalog validation, manifest hash binding, and digest indexing
+release_wiring.go  - Release management startup wiring and local maintenance-agent resolver
+release_api.go     - /api/releases catalog/current/dispatch/status/resume endpoints
+release_dispatch.go - Catalog-pinned release planning and repo rewrite checks
+release_dispatch_exec.go - Maintenance-agent apply, op polling, and digest verification
+release_dispatch_service.go - Dispatch orchestration, single-flight, audit, alert, and resume
 update.go          - Self-update system (binary + Docker)
 update_cluster.go  - Rolling cluster update orchestrator (canary, drain, HA sync)
 scan_remote.go     - Remote scan sidecar client for process-isolated scanning
 blocklist_feed.go  - Domain blocklist URL feed syncer
 bootstrap.go       - Bootstrap script/compose generators for node enrollment
 static/            - Embedded SPA (vanilla JS, Chart.js)
-updater/           - Docker update sidecar (Go service with rollback)
+updater/           - Legacy Docker update sidecar (retained for compatibility)
 scripts/           - Install script (multi-distro), CI runner setup
 deploy/            - Prometheus + Grafana stack
 yara/              - Starter YARA detection rules

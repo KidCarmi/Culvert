@@ -761,6 +761,7 @@ step "Maintenance agent (optional)"
 # Optional + best-effort: a failure NEVER fails the Culvert install — we warn
 # and move on. Opt out entirely with CULVERT_SKIP_MAINT_AGENT=1.
 MAINT_AGENT_INSTALLED=0
+MAINT_AGENT_WIRED=0
 
 # agent_ancestors_traversable — true when every ANCESTOR above $1 (its parent
 # up to /) is world-searchable. The agent runs as the unprivileged culvert-maint
@@ -832,6 +833,199 @@ ensure_agent_traversal() {
   warn "culvert-maint still cannot traverse $INSTALL_DIR — operations will fail at chdir."
   warn "An ancestor directory is likely not searchable; move the stack under a system path (e.g. /srv/culvert)."
   return 1
+}
+
+maint_toml_string() {
+  local key="$1" file="${2:-/etc/culvert-maint/config.toml}"
+  sudo awk -v k="$key" '
+    BEGIN { FS="=" }
+    /^[[:space:]]*#/ { next }
+    $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
+      v=$2
+      sub(/^[[:space:]]*"/, "", v)
+      sub(/"[[:space:]]*$/, "", v)
+      print v
+      exit
+    }
+  ' "$file" 2>/dev/null
+}
+
+docker_security_options() {
+  sudo docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null || true
+}
+
+proxy_mounts_docker_socket() {
+  local cid="$1"
+  sudo docker inspect "$cid" --format '{{range .Mounts}}{{println .Source " " .Destination}}{{end}}' 2>/dev/null |
+    grep -Eq '(^|[[:space:]])(/var/run/docker\.sock|/run/docker\.sock)([[:space:]]|$)'
+}
+
+patch_allow_peers_numeric_uid() {
+  local uid="$1" cfg="/etc/culvert-maint/config.toml" tmp
+  case "$uid" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  tmp="$(mktemp)" || return 1
+  if ! sudo awk -v uid="$uid" '
+    BEGIN { patched=0 }
+    /^[[:space:]]*allow_peers[[:space:]]*=/ && patched == 0 {
+      line=$0
+      if (line ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
+        print "allow_peers = [\"" uid "\"]"
+        patched=1
+        next
+      }
+      if (line ~ "\"" uid "\"") {
+        print line
+        patched=1
+        next
+      }
+      if (line !~ /\][[:space:]]*$/) {
+        print line
+        patched=2
+        next
+      }
+      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", line)
+      print line
+      patched=1
+      next
+    }
+    { print }
+    END { if (patched == 0 || patched == 2) exit 42 }
+  ' "$cfg" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  sudo install -m 0640 -o root -g culvert-maint "$tmp" "$cfg"
+  rm -f "$tmp"
+}
+
+verify_maint_agent_health_as_proxy_uid() {
+  local uid="$1" gid="$2" sock="$3"
+  command -v curl >/dev/null 2>&1 || return 1
+  sudo -n -u "#$uid" -g "#$gid" curl -fsS --unix-socket "$sock" http://unix/v1/health >/dev/null 2>&1
+}
+
+wire_release_agent_for_compose() {
+  local maint_installer="$1"
+  local cfg="/etc/culvert-maint/config.toml"
+  local sudoers="/etc/sudoers.d/culvert-maint"
+  local socket_path="/run/culvert-maint/culvert-maint.sock"
+  local default_repo="ghcr.io/kidcarmi/culvert"
+
+  if [[ -n "${CULVERT_SKIP_RELEASE_AGENT_WIRING:-}" ]]; then
+    info "CULVERT_SKIP_RELEASE_AGENT_WIRING set - leaving Release Management agent wiring disabled"
+    return 0
+  fi
+
+  local sec_opts
+  sec_opts="$(docker_security_options)"
+  if [[ -z "$sec_opts" ]] || grep -Eqi 'rootless|userns' <<<"$sec_opts"; then
+    warn "Release Management auto-wiring skipped: Docker is rootless/userns-remapped or security options could not be read."
+    warn "Use docs/operator/release-management-agent.md for a custom, explicit wiring."
+    return 0
+  fi
+
+  local proxy_cid
+  proxy_cid="$(sudo docker compose ps -q proxy 2>/dev/null || true)"
+  if [[ -z "$proxy_cid" ]] || [[ "$(sudo docker inspect "$proxy_cid" --format '{{.State.Running}}' 2>/dev/null || true)" != "true" ]]; then
+    warn "Release Management auto-wiring skipped: proxy container is not running."
+    return 0
+  fi
+  if proxy_mounts_docker_socket "$proxy_cid"; then
+    warn "Release Management auto-wiring skipped: proxy container has a Docker socket mount."
+    warn "Remove the Docker socket from the proxy before enabling Release Management."
+    return 0
+  fi
+
+  local proxy_uid
+  proxy_uid="$(sudo docker compose exec -T proxy id -u 2>/dev/null | tr -d '\r\n' || true)"
+  if [[ ! "$proxy_uid" =~ ^[0-9]+$ ]] || [[ "$proxy_uid" == "0" ]]; then
+    warn "Release Management auto-wiring skipped: proxy UID is not a non-root numeric UID (got '$proxy_uid')."
+    return 0
+  fi
+
+  local maint_gid
+  maint_gid="$(getent group culvert-maint | awk -F: '{print $3}' | head -n1)"
+  if [[ ! "$maint_gid" =~ ^[0-9]+$ ]]; then
+    warn "Release Management auto-wiring skipped: culvert-maint group/GID not found."
+    return 0
+  fi
+  if [[ ! -f "$cfg" || ! -f "$sudoers" ]]; then
+    warn "Release Management auto-wiring skipped: maintenance-agent config or sudoers file is missing."
+    return 0
+  fi
+
+  local cfg_project cfg_socket cfg_repo release_repo
+  cfg_project="$(maint_toml_string compose_project_dir "$cfg")"
+  cfg_socket="$(maint_toml_string socket_path "$cfg")"
+  cfg_repo="$(maint_toml_string proxy_repo "$cfg")"
+  [[ -n "$cfg_socket" ]] || cfg_socket="$socket_path"
+  [[ -n "$cfg_repo" ]] || cfg_repo="$default_repo"
+  release_repo="${CULVERT_RELEASE_PROXY_REPO:-${CULVERT_PROXY_REPO:-$default_repo}}"
+
+  if [[ "$cfg_project" != "$INSTALL_DIR" ]]; then
+    warn "Release Management auto-wiring skipped: maint-agent compose_project_dir ($cfg_project) does not match install dir ($INSTALL_DIR)."
+    return 0
+  fi
+  if [[ "$cfg_repo" != "$release_repo" ]]; then
+    warn "Release Management auto-wiring skipped: maint-agent proxy_repo ($cfg_repo) does not match release proxy repo ($release_repo)."
+    return 0
+  fi
+  if [[ "$cfg_socket" != "$socket_path" ]]; then
+    warn "Release Management auto-wiring skipped: maint-agent socket_path is not the default ($cfg_socket)."
+    return 0
+  fi
+
+  info "Authorizing proxy UID $proxy_uid for the local maintenance agent..."
+  if ! patch_allow_peers_numeric_uid "$proxy_uid"; then
+    warn "Release Management auto-wiring skipped: could not safely patch allow_peers."
+    return 0
+  fi
+  env_put CULVERT_MAINT_GID "$maint_gid" "$INSTALL_DIR/.env"
+  env_put CULVERT_RELEASE_PROXY_REPO "$release_repo" "$INSTALL_DIR/.env"
+
+  # Re-render sudoers after the config patch, then start the service.
+  if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
+    warn "Release Management auto-wiring skipped: maint-agent sudoers/config re-render failed."
+    return 0
+  fi
+  if ! sudo systemctl enable --now culvert-maint >/dev/null 2>&1; then
+    warn "Release Management auto-wiring skipped: could not start culvert-maint."
+    return 0
+  fi
+
+  local i
+  for i in $(seq 1 20); do
+    [[ -S "$socket_path" ]] && break
+    sleep 1
+  done
+  if [[ ! -S "$socket_path" ]]; then
+    warn "Release Management auto-wiring skipped: maint-agent socket did not appear at $socket_path."
+    return 0
+  fi
+  if ! verify_maint_agent_health_as_proxy_uid "$proxy_uid" "$maint_gid" "$socket_path"; then
+    warn "Release Management auto-wiring skipped: /v1/health did not authorize the proxy UID."
+    return 0
+  fi
+
+  info "Mounting the maint-agent UDS into the proxy with the safe override..."
+  if ! sudo docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d; then
+    warn "Release Management auto-wiring skipped: compose override failed."
+    return 0
+  fi
+  if ! sudo docker compose exec -T proxy test -S "$socket_path" >/dev/null 2>&1; then
+    warn "Release Management auto-wiring skipped: proxy cannot see the maint-agent socket after override."
+    return 0
+  fi
+  proxy_cid="$(sudo docker compose ps -q proxy 2>/dev/null || true)"
+  if [[ -n "$proxy_cid" ]] && proxy_mounts_docker_socket "$proxy_cid"; then
+    warn "Release Management auto-wiring skipped: proxy gained a Docker socket mount after override."
+    return 0
+  fi
+
+  MAINT_AGENT_WIRED=1
+  info "Release Management wired to local culvert-maint over the UDS (no Docker socket mounted)."
 }
 
 install_maint_agent() {
@@ -1008,7 +1202,8 @@ install_maint_agent() {
   ensure_agent_traversal || true
 
   MAINT_AGENT_INSTALLED=1
-  info "Maintenance agent installed (not started)."
+  info "Maintenance agent installed."
+  wire_release_agent_for_compose "$maint_installer"
 }
 
 install_maint_agent || true
@@ -1042,12 +1237,16 @@ if [[ "$CURRENT_USER" != "root" ]] && ! groups "$CURRENT_USER" | grep -qw docker
   echo ""
 fi
 if [[ "${MAINT_AGENT_INSTALLED:-0}" == "1" ]]; then
-  echo "  Maintenance agent installed (systemd: culvert-maint), not yet started."
-  echo "  It is host-side day-2 tooling (backup/restore, Docker image updates),"
-  echo "  reached on the host via /run/culvert-maint/culvert-maint.sock — and, opt-in, by the"
-  echo "  admin UI's Release Management (see docs/operator/release-management-agent.md)."
-  echo "  Before starting it, set the allowed caller(s):"
-  echo "    sudo \$EDITOR /etc/culvert-maint/config.toml   # set allow_peers"
-  echo "    sudo systemctl enable --now culvert-maint"
+  echo "  Maintenance agent installed (systemd: culvert-maint)."
+  if [[ "${MAINT_AGENT_WIRED:-0}" == "1" ]]; then
+    echo "  Release Management is wired locally over /run/culvert-maint/culvert-maint.sock."
+    echo "  No Docker socket is mounted into the proxy."
+    echo "  Note: /api/releases may still report available:false until a trusted"
+    echo "  release catalog is published into /data/release_catalog."
+  else
+    echo "  Release Management auto-wiring was not enabled. This is fail-closed;"
+    echo "  see the warnings above and docs/operator/release-management-agent.md"
+    echo "  for custom Docker, userns-remap, rootless, or remote-agent setups."
+  fi
   echo ""
 fi

@@ -25,7 +25,7 @@ compose_project_dir = "/srv/culvert"
 # and CANNOT see NSS-backed directories (LDAP/SSSD/systemd-userdb). A
 # username that lives only in a directory will fail to resolve and the
 # agent will refuse to start. Numeric UIDs always work and are the
-# authorization key the agent actually enforces — e.g. allow_peers = [1000].
+# authorization key the agent actually enforces — e.g. allow_peers = ["1000"].
 allow_peers = ["culvert-cp"]
 
 # ── Optional — defaults shown ──────────────────────────────────────────────
