@@ -5,6 +5,9 @@ host-side `culvert-maint` agent. By default the proxy container has no route to
 that agent, so the panel shows **"Agent unreachable"**. This page explains the
 model and the supported, isolation-preserving way to wire them together.
 
+For the long-term trusted catalog roadmap, see
+[`enterprise-release-catalog-plan.md`](enterprise-release-catalog-plan.md).
+
 > **The maintenance-agent socket is not the Docker socket.** This wiring mounts
 > the agent's own `/v1` API socket — never `/var/run/docker.sock`. The agent is
 > the privilege boundary; mounting it does not grant the proxy raw Docker.
