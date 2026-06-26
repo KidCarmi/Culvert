@@ -14,7 +14,11 @@
 // boundary) — there is deliberately no "publish raw *Catalog" entry point.
 package main
 
-import "sync/atomic"
+import (
+	"time"
+
+	"sync/atomic"
+)
 
 // CatalogHolder holds the current verified *Catalog behind an atomic pointer and
 // rebuilds it from a local directory on demand. Reads (GetCatalog) are lock-free;
@@ -25,13 +29,37 @@ type CatalogHolder struct {
 	cur   atomic.Pointer[Catalog]
 	dir   string
 	trust TrustStore
+	// fresh is the enforce-mode freshness + rollback gate (Phase 1). The zero
+	// value is DISABLED, so a holder built without WithFreshnessEnforcement
+	// behaves exactly as the signature-only P1.5 holder did.
+	fresh freshnessPolicy
+}
+
+// HolderOption configures an optional holder behavior. Options are variadic so
+// every existing two-argument NewCatalogHolder(dir, trust) caller keeps working.
+type HolderOption func(*CatalogHolder)
+
+// WithFreshnessEnforcement turns on the enforce-mode freshness (expires_at) and
+// rollback (catalog_version) gate. Production wiring enables it ONLY when the
+// trust store is in VerifyEnforce mode; break-glass (permissive/disabled) and the
+// signature-boundary unit tests leave it off. now defaults to time.Now when nil.
+// statePath is the JSON file that persists the monotonic version floor across
+// restarts ("" disables rollback persistence but still requires catalog_version).
+func WithFreshnessEnforcement(now func() time.Time, skew time.Duration, statePath string) HolderOption {
+	return func(h *CatalogHolder) {
+		h.fresh = freshnessPolicy{enabled: true, now: now, skew: skew, statePath: statePath}
+	}
 }
 
 // NewCatalogHolder returns a holder that loads/verifies from dir using trust. It
 // does NOT load yet: until the first successful Reload, GetCatalog returns nil
 // (the explicit no-catalog state).
-func NewCatalogHolder(dir string, trust TrustStore) *CatalogHolder {
-	return &CatalogHolder{dir: dir, trust: trust}
+func NewCatalogHolder(dir string, trust TrustStore, opts ...HolderOption) *CatalogHolder {
+	h := &CatalogHolder{dir: dir, trust: trust}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
 }
 
 // GetCatalog returns the currently-published catalog, or nil if none is
@@ -65,6 +93,13 @@ func (h *CatalogHolder) Reload() error {
 	cat, err := LoadVerifiedCatalog(src, h.trust)
 	if err != nil {
 		return err // keep the current catalog (which may be nil)
+	}
+	// Authenticity passed; now apply the enforce-mode freshness + rollback gate
+	// (a no-op when disabled). A stale/replayed/downgrade catalog is rejected here
+	// — AFTER signature verification, so it can only narrow trust — and the
+	// previous catalog is left untouched, identical to a verification failure.
+	if err := h.fresh.applyFreshnessAndRollback(cat); err != nil {
+		return err
 	}
 	h.store(cat)
 	return nil

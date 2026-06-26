@@ -130,6 +130,11 @@ services:
       # it is valid only when the host agent socket is mounted.
       - CULVERT_RELEASE_PROXY_REPO=${CULVERT_RELEASE_PROXY_REPO:-}
       - CULVERT_RELEASE_CATALOG_TRUST_KEYS=${CULVERT_RELEASE_CATALOG_TRUST_KEYS:-}
+      # Break-glass ONLY. Catalog signature verification is enforce-by-default
+      # whenever a trust root is present; set this to permissive/disabled to
+      # deliberately relax it (e.g. local dev / unsigned catalog). Leave unset
+      # in production. PUBLIC keys only above — never private signing material.
+      - CULVERT_RELEASE_CATALOG_VERIFY=${CULVERT_RELEASE_CATALOG_VERIFY:-}
     command: [
       "-port",           "8080",
       "-ui-port",        "9090",

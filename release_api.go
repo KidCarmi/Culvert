@@ -46,6 +46,10 @@ type releaseManager struct {
 	// ULID) — the per-agent status store relies on lexical dispatch_id ordering
 	// to decide which dispatch owns an agent's slot (see dispatchStore.update).
 	newID func() string
+	// verifyMode is the catalog signature mode this manager was wired with,
+	// surfaced read-only on GET /api/releases so operators can see whether the
+	// channel is enforced or in a break-glass state. Zero value = enforce.
+	verifyMode VerifyMode
 }
 
 func newReleaseManager(svc *DispatchService, resolve agentResolver) *releaseManager {
@@ -201,15 +205,27 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 	}
 	cat := rm.svc.catalog()
 	if cat == nil {
-		jsonOK(w, map[string]any{"available": false, "reason": "no catalog published"})
+		jsonOK(w, map[string]any{
+			"available":   false,
+			"reason":      "no catalog published",
+			"verify_mode": rm.verifyMode.String(),
+		})
 		return
 	}
-	jsonOK(w, map[string]any{
+	out := map[string]any{
 		"available":    true,
+		"verify_mode":  rm.verifyMode.String(),
 		"generated_at": cat.GeneratedAt().UTC().Format(time.RFC3339),
 		"releases":     cat.List(),
 		"channels":     channelPointers(cat),
-	})
+	}
+	if v := cat.Version(); v > 0 {
+		out["catalog_version"] = v
+	}
+	if exp := cat.ExpiresAt(); !exp.IsZero() {
+		out["expires_at"] = exp.UTC().Format(time.RFC3339)
+	}
+	jsonOK(w, out)
 }
 
 func channelPointers(cat *Catalog) map[string]any {

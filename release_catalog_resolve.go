@@ -75,6 +75,16 @@ func (c *Catalog) List() []ReleaseView {
 // GeneratedAt returns the index's generated_at, for staleness display later.
 func (c *Catalog) GeneratedAt() time.Time { return c.generatedAt }
 
+// ExpiresAt returns the index's expires_at (the freshness floor). A zero value
+// means the catalog declared no expiry — tolerated by the structural loader but
+// rejected by the enforce-mode freshness gate.
+func (c *Catalog) ExpiresAt() time.Time { return c.expiresAt }
+
+// Version returns the index's catalog_version (the monotonic rollback counter).
+// 0 means unset; the enforce-mode gate requires ≥ 1 and refuses any value below
+// the persisted floor.
+func (c *Catalog) Version() int { return c.version }
+
 func (c *Catalog) channelsFor(relID string) []Channel {
 	var chs []Channel
 	for ch, id := range c.channels {

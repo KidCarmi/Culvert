@@ -56,31 +56,65 @@ grow toward fuller TUF roles only when needed.
 
 Deliver a secure first production path without overbuilding.
 
-- Add baked public release catalog trust roots to the Control Plane image.
-- Keep operator override/extension via `CULVERT_RELEASE_CATALOG_TRUST_KEYS`.
-- Require signed catalogs for the official auto-seed path.
-- Add `expires_at` and monotonically increasing catalog version metadata.
-- Reject expired catalogs, future-dated catalogs beyond clock skew tolerance,
-  unsupported schema majors, duplicate versions, repo mismatch, mutable tags,
-  malformed digests, missing manifests, and manifest hash mismatch.
-- Publish official catalog bundle as:
-  - `index.json`
-  - `index.json.sig`
-  - referenced manifest files
-  - optional `catalog.bundle.json` for one-file offline transfer
-- Add installer support for `CULVERT_RELEASE_CATALOG_URL`.
-  - Download to a temp path.
-  - Verify before writing into `release_catalog/`.
-  - Atomic rename into place.
-  - Fail closed to `available:false` if anything is wrong.
-- Update `/api/releases` status to expose catalog trust/freshness state without
-  leaking keys or sensitive paths.
+### Central rule — verification primitives are not enough; wiring must enforce
+
+The single most important Phase 1 property is that **production wiring actually
+enters `VerifyEnforce`**. Having signature/freshness primitives in the codebase
+is worthless if the default boot path runs permissive with no trust roots. The
+binding rule (`release_wiring.go::resolveCatalogVerifyMode`):
+
+- **Trust roots present (baked OR `CULVERT_RELEASE_CATALOG_TRUST_KEYS`) ⇒
+  `VerifyEnforce`.** This is automatic and is the only production mode.
+- **No roots and no override ⇒ Release Management is DISABLED** (enforce with an
+  empty ring fails closed in `NewTrustStore`). An unsigned catalog on disk is
+  **never** auto-trusted — `/api/releases` reports `available:false`.
+- **Permissive / disabled are EXPLICIT break-glass only**, via
+  `CULVERT_RELEASE_CATALOG_VERIFY=permissive|disabled`, read once at startup, and
+  always logged with a loud warning. Permissive accepts an *unsigned* catalog but
+  still rejects a present-but-invalid signature; disabled skips verification
+  (local dev only). There is no other path to a non-enforce mode.
+
+This mirrors the existing `CULVERT_C2_ENFORCE` kill-switch convention: secure by
+default, relax only by deliberate, visible opt-in.
+
+### Status
+
+Implemented:
+
+- ✅ Baked trust-root seam (`bakedReleaseTrustKeysJSON`, linker-injected at
+  official-build time; PUBLIC keys only) + operator extension via
+  `CULVERT_RELEASE_CATALOG_TRUST_KEYS`; the two are merged into one ring.
+- ✅ Enforce-by-default wiring (the central rule above); break-glass env.
+- ✅ ed25519 detached-signature verification over the raw index (pre-existing),
+  now actually engaged in the production holder.
+- ✅ `expires_at` and `catalog_version` in the index schema (structurally
+  tolerant load; **enforced** in enforce mode).
+- ✅ Freshness gate: reject expired catalogs and future-dated `generated_at`
+  beyond a 5-minute skew tolerance; `expires_at` is **required** in enforce.
+- ✅ Rollback/freeze gate: `catalog_version` required (≥ 1) and a monotonic
+  floor persisted at `<dataDir>/release_catalog_state.json`; a lower version is
+  refused. A corrupt floor file fails closed (never silently resets to 0).
+- ✅ `/api/releases` surfaces `verify_mode`, `catalog_version`, `expires_at`
+  without leaking keys or paths.
+- ✅ Phase 1 CI fail-closed matrix (see CI and E2E Gates).
+
+Still to do in Phase 1:
+
+- ☐ Publish the official catalog bundle (`index.json`, `index.json.sig`,
+  manifests, optional `catalog.bundle.json`) and ship the baked public root.
+- ☐ Installer support for `CULVERT_RELEASE_CATALOG_URL`: download to a temp
+  path, **verify before** writing into `release_catalog/`, atomic rename into
+  place, fail closed to `available:false` on any error. (The verified HTTP
+  source and refresher exist but are not yet wired into startup.)
 
 Acceptance:
 - A clean install can auto-seed the official signed catalog and show
   `available:true`.
-- Removing the signature, changing a manifest, expiring the catalog, or using a
-  tag results in `available:false` and no dispatch.
+- Removing the signature, changing a manifest, expiring the catalog, replaying
+  a lower `catalog_version`, signing with an untrusted key, or using a tag
+  results in `available:false` and no dispatch.
+- With no trust roots configured, Release Management stays disabled; no unsigned
+  catalog is ever auto-trusted.
 
 ## Phase 2: Release Pipeline and Image Trust
 
@@ -108,9 +142,11 @@ Acceptance:
 
 Prevent stale metadata and downgrade attacks.
 
-- Store the highest accepted catalog version in the data directory.
-- Refuse catalogs with a lower version unless an explicit break-glass recovery
-  flag is present.
+- ✅ Store the highest accepted catalog version in the data directory
+  (`<dataDir>/release_catalog_state.json`) — landed early in Phase 1.
+- ✅ Refuse catalogs with a lower version — landed early in Phase 1.
+- ☐ Add an explicit break-glass recovery flag to accept a lower version
+  (intentional rollback). Today a downgrade requires removing the state file.
 - Add short-lived timestamp/freshness metadata for online installs.
 - Keep longer-lived signed bundle mode for air-gapped installs.
 - Add operator-visible states:
@@ -198,8 +234,30 @@ Acceptance:
 
 ## CI and E2E Gates
 
-- Unit tests for signature verification, expiry, rollback counters, key
-  rotation, repo mismatch, and malformed refs.
+Implemented (Phase 1):
+
+- ✅ **Fail-closed matrix** (`release_catalog_phase1_ci_test.go`,
+  `TestPhase1CI_FailClosedMatrix`): through the production enforce-mode holder,
+  an unsigned, sig-stripped/tampered, wrong-key, expired, missing-`expires_at`,
+  and missing-`catalog_version` catalog each fails closed (matching error kind,
+  nothing published). Plus `TestPhase1CI_RollbackReplayRefused` for downgrade
+  replay against the persisted floor.
+- ✅ **Wiring-mode tests** (`release_wiring_test.go`):
+  `TestResolveCatalogVerifyMode` (roots ⇒ enforce; permissive/disabled are
+  break-glass; unrecognized ⇒ enforce), `TestCombinedReleaseTrustKeys_*` (baked
+  ∪ env, malformed baked fails closed),
+  `TestLoadReleaseManagement_UnsignedNotAutoTrusted` (no roots ⇒ disabled, never
+  auto-trust unsigned).
+- ✅ **Freshness/rollback unit tests** (`release_catalog_freshness_test.go`):
+  expiry, skew tolerance, future-dating, version floor persistence + corrupt
+  floor fail-closed.
+- ✅ **Install contract** (`release_management_install_contract_test.go`): the
+  break-glass env is forwarded by compose; no Docker socket; no unsigned
+  auto-seed.
+
+Remaining:
+
+- Unit tests for key rotation fixtures.
 - Contract tests for installer behavior:
   - no unsigned catalog seed
   - no default trusted URL without verification

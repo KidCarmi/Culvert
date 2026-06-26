@@ -76,6 +76,14 @@ func manifestJSON(releaseID, versionID, severity, repo, listDigest string) strin
 //
 //nolint:unparam // test catalog builder; generated_at kept explicit for clarity
 func buildCatalogSource(channels map[string]string, schemaVersion int, generatedAt string, rels []relSpec) *memSource {
+	return buildCatalogSourceFull(channels, schemaVersion, generatedAt, "", 0, rels)
+}
+
+// buildCatalogSourceFull is buildCatalogSource plus the Phase 1 freshness fields.
+// expires_at and catalog_version are emitted ONLY when non-empty / non-zero, so
+// the default path produces a byte-identical index to the pre-Phase-1 builder
+// (the structural loader tolerates their absence; the enforce gate requires them).
+func buildCatalogSourceFull(channels map[string]string, schemaVersion int, generatedAt, expiresAt string, catalogVersion int, rels []relSpec) *memSource {
 	mans := map[string][]byte{}
 	entries := make([]string, 0, len(rels))
 	for _, r := range rels {
@@ -86,9 +94,28 @@ func buildCatalogSource(channels map[string]string, schemaVersion int, generated
 			r.releaseID, r.versionID, r.ref, hex.EncodeToString(sum[:])))
 	}
 	chJSON, _ := json.Marshal(channels)
-	idx := fmt.Sprintf(`{"schema_version":%d,"generated_at":%q,"channels":%s,"releases":[%s]}`,
-		schemaVersion, generatedAt, chJSON, strings.Join(entries, ","))
+	var fresh string
+	if expiresAt != "" {
+		fresh += fmt.Sprintf(`"expires_at":%q,`, expiresAt)
+	}
+	if catalogVersion != 0 {
+		fresh += fmt.Sprintf(`"catalog_version":%d,`, catalogVersion)
+	}
+	idx := fmt.Sprintf(`{"schema_version":%d,"generated_at":%q,%s"channels":%s,"releases":[%s]}`,
+		schemaVersion, generatedAt, fresh, chJSON, strings.Join(entries, ","))
 	return &memSource{index: []byte(idx), manifests: mans}
+}
+
+// freshValidSource is validSource with a far-future expires_at and catalog_version
+// 1 — i.e. a catalog that passes the enforce-mode freshness + rollback gate.
+func freshValidSource(expiresAt string, catalogVersion int) *memSource {
+	return buildCatalogSourceFull(
+		map[string]string{"recommended": "rel_a", "lts": "rel_b", "critical": "rel_a"},
+		1, "2026-04-18T00:00:00Z", expiresAt, catalogVersion,
+		[]relSpec{
+			{ref: "a.json", releaseID: "rel_a", versionID: "1.10.0", raw: manifestJSON("rel_a", "1.10.0", "critical", repo, digA)},
+			{ref: "b.json", releaseID: "rel_b", versionID: "1.9.0", raw: manifestJSON("rel_b", "1.9.0", "normal", repo, digB)},
+		})
 }
 
 // validSource: rel_a (1.10.0, recommended+critical) and rel_b (1.9.0, lts), plus

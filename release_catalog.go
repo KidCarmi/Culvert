@@ -122,6 +122,13 @@ type Catalog struct {
 	byPinnedRef map[string]string // PinnedRef → ReleaseID (reverse index)
 	channels    map[Channel]string
 	generatedAt time.Time
+	// expiresAt is the index's expires_at (freshness floor). Zero ⇒ the catalog
+	// declared no expiry; the structural loader tolerates that, but the enforce
+	// freshness gate (release_catalog_freshness.go) REQUIRES a non-zero value.
+	expiresAt time.Time
+	// version is the index's catalog_version (rollback counter). 0 ⇒ unset; the
+	// enforce gate requires ≥ 1 and refuses any value below the persisted floor.
+	version int
 }
 
 // ResolvedRelease is the forward-resolution result handed (by a later slice)
@@ -152,10 +159,12 @@ type ReleaseView struct {
 // ─── on-disk shapes (timestamps kept as strings for clean parse errors) ──────
 
 type catalogIndexFile struct {
-	SchemaVersion int                 `json:"schema_version"`
-	GeneratedAt   string              `json:"generated_at"`
-	Channels      map[string]string   `json:"channels"`
-	Releases      []catalogIndexEntry `json:"releases"`
+	SchemaVersion  int                 `json:"schema_version"`
+	GeneratedAt    string              `json:"generated_at"`
+	ExpiresAt      string              `json:"expires_at"`
+	CatalogVersion int                 `json:"catalog_version"`
+	Channels       map[string]string   `json:"channels"`
+	Releases       []catalogIndexEntry `json:"releases"`
 }
 
 type catalogIndexEntry struct {
@@ -217,6 +226,22 @@ func loadCatalogFromIndexBytes(idxBytes []byte, src CatalogSource) (*Catalog, er
 	if err != nil {
 		return nil, fmt.Errorf("release catalog: index generated_at: %w", err)
 	}
+	// expires_at and catalog_version are parsed STRUCTURALLY-TOLERANT here: a
+	// missing value is allowed at this layer (the bare LoadCatalog and the P1.2/
+	// P1.3 fixtures predate these fields), but a PRESENT value must be well-formed
+	// (fail closed on a malformed timestamp / negative version). Freshness/rollback
+	// ENFORCEMENT (requiring the fields and comparing against now / the persisted
+	// floor) is the enforce-mode gate in release_catalog_freshness.go, not here.
+	var expAt time.Time
+	if idx.ExpiresAt != "" {
+		expAt, err = time.Parse(time.RFC3339, idx.ExpiresAt)
+		if err != nil {
+			return nil, fmt.Errorf("release catalog: index expires_at: %w", err)
+		}
+	}
+	if idx.CatalogVersion < 0 {
+		return nil, fmt.Errorf("release catalog: index catalog_version %d must be ≥ 0", idx.CatalogVersion)
+	}
 	if len(idx.Releases) == 0 {
 		return nil, errors.New("release catalog: index has no releases")
 	}
@@ -226,6 +251,8 @@ func loadCatalogFromIndexBytes(idxBytes []byte, src CatalogSource) (*Catalog, er
 		byPinnedRef: make(map[string]string, len(idx.Releases)),
 		channels:    make(map[Channel]string),
 		generatedAt: genAt,
+		expiresAt:   expAt,
+		version:     idx.CatalogVersion,
 	}
 
 	for i := range idx.Releases {

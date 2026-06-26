@@ -39,17 +39,39 @@ const (
 
 	envReleaseProxyRepo = "CULVERT_RELEASE_PROXY_REPO"
 	envMaintAgentURL    = "CULVERT_MAINT_AGENT_URL"
-	// envReleaseCatalogTrustKeys is a JSON array of operator trust roots:
+	// envReleaseCatalogTrustKeys is a JSON array of operator trust roots that
+	// EXTEND the baked roots:
 	// [{"key_id":"prod-2026","alg":"ed25519","public_key":"<base64-raw-32-byte-key>"}]
 	envReleaseCatalogTrustKeys = "CULVERT_RELEASE_CATALOG_TRUST_KEYS"
+	// envReleaseCatalogVerify is the read-once break-glass override for the catalog
+	// signature mode. The SECURE DEFAULT is enforce whenever any trust root is
+	// present; this env exists only to deliberately relax that:
+	//   - "enforce"    — explicit enforce (default when roots present).
+	//   - "permissive" — BREAK-GLASS: load an unsigned catalog with a loud warning
+	//                    (a present-but-invalid signature is still rejected).
+	//   - "disabled"   — BREAK-GLASS: skip verification entirely (local dev only).
+	// Unset + roots present ⇒ enforce. Unset + no roots ⇒ Release Management is
+	// disabled (an unsigned catalog is NEVER auto-trusted).
+	envReleaseCatalogVerify = "CULVERT_RELEASE_CATALOG_VERIFY"
 )
 
+// bakedReleaseTrustKeysJSON is the BAKED-IN public trust root set, in the same
+// JSON shape as CULVERT_RELEASE_CATALOG_TRUST_KEYS. It is empty in the open-source
+// tree and is populated at official-build time via the linker
+// (`-ldflags "-X main.bakedReleaseTrustKeysJSON=[...]"`) so a shipped Control
+// Plane trusts the official release-signing key out of the box and enters enforce
+// mode automatically. It holds PUBLIC keys only — never private key material.
+var bakedReleaseTrustKeysJSON = ""
+
 type releaseStartupConfig struct {
-	proxyRepo    string
-	catalogDir   string
-	maintURL     string // CP-local maint agent endpoint (unix socket path or http[s] URL)
-	trustKeys    []TrustKey
-	trustKeysErr error
+	proxyRepo      string
+	catalogDir     string
+	statePath      string     // persisted rollback version floor (sibling of catalogDir)
+	maintURL       string     // CP-local maint agent endpoint (unix socket path or http[s] URL)
+	trustKeys      []TrustKey // baked roots ∪ operator-configured roots
+	trustKeysErr   error
+	verifyMode     VerifyMode
+	verifyModeWarn string // loud break-glass message to log once at startup ("" ⇒ none)
 }
 
 // resolveReleaseStartupConfig reads the static inputs (env + dataDir). No mutable
@@ -70,13 +92,67 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 	if maintURL == "" {
 		maintURL = defaultMaintAgentSocket
 	}
-	trustKeys, trustKeysErr := parseReleaseCatalogTrustKeys(getenv(envReleaseCatalogTrustKeys))
+	catalogDir := filepath.Join(dataDir, "release_catalog")
+	keys, keysErr := combinedReleaseTrustKeys(getenv(envReleaseCatalogTrustKeys))
+	mode, warn := resolveCatalogVerifyMode(getenv(envReleaseCatalogVerify), len(keys))
 	return releaseStartupConfig{
-		proxyRepo:    proxyRepo,
-		catalogDir:   filepath.Join(dataDir, "release_catalog"),
-		maintURL:     maintURL,
-		trustKeys:    trustKeys,
-		trustKeysErr: trustKeysErr,
+		proxyRepo:      proxyRepo,
+		catalogDir:     catalogDir,
+		statePath:      filepath.Join(dataDir, "release_catalog_state.json"),
+		maintURL:       maintURL,
+		trustKeys:      keys,
+		trustKeysErr:   keysErr,
+		verifyMode:     mode,
+		verifyModeWarn: warn,
+	}
+}
+
+// combinedReleaseTrustKeys merges the BAKED roots with the operator-configured
+// roots (env). Either being malformed is fail-closed (Release Management stays
+// disabled rather than booting with a half-parsed trust ring).
+func combinedReleaseTrustKeys(envRaw string) ([]TrustKey, error) {
+	baked, err := parseReleaseCatalogTrustKeys(bakedReleaseTrustKeysJSON)
+	if err != nil {
+		return nil, fmt.Errorf("baked trust keys: %w", err)
+	}
+	configured, err := parseReleaseCatalogTrustKeys(envRaw)
+	if err != nil {
+		return nil, err
+	}
+	return append(baked, configured...), nil
+}
+
+// resolveCatalogVerifyMode implements the central Phase 1 rule: trust roots imply
+// VerifyEnforce; permissive/disabled are EXPLICIT break-glass only. It returns the
+// mode plus a loud one-line warning to log when a break-glass mode is selected.
+//
+//   - override "disabled"   → VerifyDisabled (break-glass; warn).
+//   - override "permissive" → VerifyPermissive (break-glass; warn).
+//   - override "enforce" or unset, roots present → VerifyEnforce (secure default).
+//   - unset, NO roots       → VerifyEnforce with an empty ring; NewTrustStore then
+//     fails closed and Release Management is disabled (never auto-trusts unsigned).
+func resolveCatalogVerifyMode(override string, nRoots int) (VerifyMode, string) {
+	switch strings.ToLower(strings.TrimSpace(override)) {
+	case "disabled":
+		return VerifyDisabled, "release catalog: signature verification DISABLED via " +
+			envReleaseCatalogVerify + "=disabled (BREAK-GLASS — unsigned/forged catalogs are NOT rejected; local dev only)"
+	case "permissive":
+		return VerifyPermissive, "release catalog: signature verification PERMISSIVE via " +
+			envReleaseCatalogVerify + "=permissive (BREAK-GLASS — UNSIGNED catalogs are accepted; a present-but-invalid signature is still rejected)"
+	case "enforce", "":
+		if nRoots == 0 {
+			// Secure default with no roots: enforce-empty fails closed downstream
+			// (NewTrustStore rejects an empty enforce ring) and Release Management
+			// is disabled. Surface that as a warning rather than a silent 503.
+			return VerifyEnforce, "release catalog: no trust roots present; Release Management will be DISABLED " +
+				"(set CULVERT_RELEASE_CATALOG_TRUST_KEYS, ship baked roots, or use CULVERT_RELEASE_CATALOG_VERIFY=permissive for break-glass)"
+		}
+		return VerifyEnforce, ""
+	default:
+		// An unrecognized value must not silently relax: fall back to the secure
+		// default and warn so the typo is visible.
+		return VerifyEnforce, "release catalog: unrecognized " + envReleaseCatalogVerify +
+			" value " + fmt.Sprintf("%q", override) + "; defaulting to enforce"
 	}
 }
 
@@ -84,28 +160,41 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 // Best-effort and NON-FATAL: on any failure globalReleaseMgr stays nil so the
 // routes report 503 rather than panicking.
 func loadReleaseManagement(cfg releaseStartupConfig) {
-	// Permissive trust: the holder is never reloaded here (it starts with NO
-	// catalog), so the mode is inert — but permissive is the safe default for the
-	// later refresh slice (unsigned OK; present signatures must verify).
 	if cfg.trustKeysErr != nil {
 		logger.Printf("release management disabled: catalog trust keys: %v", cfg.trustKeysErr)
 		return
 	}
-	trust, err := NewTrustStore(cfg.trustKeys, VerifyPermissive)
+	if cfg.verifyModeWarn != "" {
+		logger.Printf("%s", cfg.verifyModeWarn)
+	}
+	// Central Phase 1 invariant: production wiring enters VerifyEnforce whenever a
+	// trust root (baked or configured) is present. With NO roots and no break-glass
+	// override, the mode is enforce with an EMPTY ring → NewTrustStore fails closed
+	// → Release Management is DISABLED. An unsigned catalog is never auto-trusted;
+	// the only way to load one is the explicit CULVERT_RELEASE_CATALOG_VERIFY
+	// break-glass.
+	trust, err := NewTrustStore(cfg.trustKeys, cfg.verifyMode)
 	if err != nil {
-		logger.Printf("release management disabled: trust store: %v", err)
+		logger.Printf("release management disabled: %v (configure CULVERT_RELEASE_CATALOG_TRUST_KEYS, or set CULVERT_RELEASE_CATALOG_VERIFY=permissive for break-glass)", err)
 		return
 	}
-	// Empty holder ⇒ GetCatalog() == nil until populated. Run a BEST-EFFORT
-	// startup load so a catalog already seeded/cached in cfg.catalogDir is usable
-	// immediately (and survives restarts) instead of reporting available:false
-	// until a refresh runs — there is no production refresher yet. A failure (no
-	// catalog present, or a signature we can't verify under permissive trust) is
-	// the normal no-catalog state: reads degrade to {available:false}. Signed
-	// catalogs need a configured trust ring (the deferred authenticity slice).
-	holder := NewCatalogHolder(cfg.catalogDir, trust)
+
+	// Freshness (expires_at) + rollback (catalog_version) are enforced ONLY in
+	// enforce mode — break-glass intentionally relaxes the whole trust channel.
+	var holder *CatalogHolder
+	if cfg.verifyMode == VerifyEnforce {
+		holder = NewCatalogHolder(cfg.catalogDir, trust,
+			WithFreshnessEnforcement(nil, catalogClockSkew, cfg.statePath))
+	} else {
+		holder = NewCatalogHolder(cfg.catalogDir, trust)
+	}
+
+	// BEST-EFFORT startup load so a catalog already seeded/cached in cfg.catalogDir
+	// is usable immediately (and survives restarts). A failure (no catalog, or one
+	// that fails verification / freshness / rollback) is the normal no-catalog
+	// state: reads degrade to {available:false}.
 	if err := holder.Reload(); err != nil {
-		logger.Printf("release management: no catalog loaded from %q (%v); reads report available:false until one is present",
+		logger.Printf("release management: no catalog loaded from %q (%v); reads report available:false until a trusted one is present",
 			sanitizeLog(cfg.catalogDir), err)
 	}
 
@@ -117,9 +206,11 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	}
 
 	resolve, note := releaseAgentResolver(cfg.maintURL)
-	setReleaseManager(newReleaseManager(svc, resolve))
-	logger.Printf("release management enabled: proxy_repo=%q local_agent=%s",
-		sanitizeLog(cfg.proxyRepo), note)
+	rm := newReleaseManager(svc, resolve)
+	rm.verifyMode = cfg.verifyMode
+	setReleaseManager(rm)
+	logger.Printf("release management enabled: proxy_repo=%q verify=%s local_agent=%s",
+		sanitizeLog(cfg.proxyRepo), cfg.verifyMode, note)
 }
 
 type releaseCatalogTrustKeyJSON struct {

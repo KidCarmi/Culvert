@@ -31,6 +31,7 @@ func TestReleaseManagementComposeForwardsSafeEnvOnly(t *testing.T) {
 	for _, want := range []string{
 		"CULVERT_RELEASE_PROXY_REPO=${CULVERT_RELEASE_PROXY_REPO:-}",
 		"CULVERT_RELEASE_CATALOG_TRUST_KEYS=${CULVERT_RELEASE_CATALOG_TRUST_KEYS:-}",
+		"CULVERT_RELEASE_CATALOG_VERIFY=${CULVERT_RELEASE_CATALOG_VERIFY:-}",
 	} {
 		if !strings.Contains(compose, want) {
 			t.Errorf("docker-compose.yml must forward %s so release wiring env takes effect in clean installs", want)
