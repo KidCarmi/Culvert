@@ -6,6 +6,9 @@ host-side `culvert-maint` agent. On a normal quick-start install,
 Docker and host posture. This page explains the model, what the installer
 checks, and the manual path for custom deployments.
 
+For the long-term trusted catalog roadmap, see
+[`enterprise-release-catalog-plan.md`](enterprise-release-catalog-plan.md).
+
 > **The maintenance-agent socket is not the Docker socket.** This wiring mounts
 > the agent's own `/v1` API socket — never `/var/run/docker.sock`. The agent is
 > the privilege boundary; mounting it does not grant the proxy raw Docker.
