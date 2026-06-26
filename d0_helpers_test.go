@@ -107,7 +107,7 @@ var d0KnownRoutes = func() []string {
 	seen := make(map[string]bool, len(uiRoutes))
 	for _, r := range uiRoutes {
 		if seen[r.Path] {
-			continue // duplicates are flagged by TestC1_RouteMetadata_Locked135
+			continue // duplicates are flagged by TestC1_RouteMetadata_Locked141
 		}
 		seen[r.Path] = true
 		out = append(out, r.Path)

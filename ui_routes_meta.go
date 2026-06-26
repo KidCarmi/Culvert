@@ -66,7 +66,7 @@ type uiRouteMetadata struct {
 	Methods []uiRouteMethod // per-method contract (length ≥ 1)
 }
 
-// uiRoutes is the alphabetised metadata table for all 133 admin-UI routes.
+// uiRoutes is the alphabetised metadata table for all 137 admin-UI routes.
 //
 // MIGRATION BUCKETS (per the C1.5 schema-evolution decision):
 //
