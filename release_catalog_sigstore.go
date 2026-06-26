@@ -13,12 +13,14 @@
 // timestamp, and the trusted root is baked, so nothing reaches sigstore.dev at
 // runtime (air-gap safe).
 //
-// Scope (roadmap/D1.6d-P2b-sigstore-identity-trust-plan.md — P2b-1): the verifier,
-// the .sigstore sidecar source, scheme selection, and wiring resolution. NO
-// release-side signing and NO baked official root yet (P2b-2) — the embedded
-// trusted root is empty in the open-source tree, so this scheme is DORMANT until a
-// root is baked or an operator supplies one. Verifying identity (cert chain + SAN
-// + issuer) happens BEFORE any other bundle content is trusted.
+// Scope (roadmap/D1.6d-P2b-sigstore-identity-trust-plan.md): P2b-1 shipped the
+// verifier, the .sigstore sidecar source, scheme selection, and wiring resolution.
+// As of P2b-2a the official Sigstore public-good trusted root is BAKED into the
+// embed below, so the scheme is ACTIVE by default (an operator can override or
+// deactivate it via CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT). NO release-side signing
+// yet — CI keyless signing + the end-to-end/image-sig gates are P2b-2b. Verifying
+// identity (cert chain + SAN + issuer) happens BEFORE any other bundle content is
+// trusted.
 package main
 
 import (
@@ -235,10 +237,12 @@ func resolveSigstoreWiring(getenv func(string) string) sigstoreWiring {
 	if len(bytes.TrimSpace(rootJSON)) == 0 {
 		if overridden {
 			return sigstoreWiring{warn: "release catalog: " + envReleaseSigstoreIdentity +
-				" is set but no Sigstore trusted root is present; the keyless scheme is INACTIVE " +
-				"(bake an official root in P2b-2 or set " + envReleaseSigstoreTrustedRoot + ")"}
+				" is set but the Sigstore trusted root is empty; the keyless scheme is INACTIVE " +
+				"(restore the baked root or set " + envReleaseSigstoreTrustedRoot + " to a valid root)"}
 		}
-		return sigstoreWiring{} // OSS default: dormant, no warning.
+		// Reached only when an operator OVERRIDES the (now baked, non-empty) root
+		// with an empty file — the supported deactivation path. Dormant, no warning.
+		return sigstoreWiring{}
 	}
 
 	sv, err := newSigstoreVerifier(rootJSON, id)
