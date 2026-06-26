@@ -157,6 +157,12 @@ func (p *HTTPCatalogProvider) checkRedirect(req *http.Request, via []*http.Reque
 	return nil
 }
 
+// SetStageBase sets the parent directory for the temp staging dir. Callers that
+// will atomically rename the staged dir into place MUST point this at the SAME
+// filesystem as the destination (e.g. the data dir), otherwise os.Rename fails
+// with EXDEV. "" keeps the default (os.TempDir()). Must be called before Stage.
+func (p *HTTPCatalogProvider) SetStageBase(dir string) { p.stageBase = dir }
+
 // SetRetry configures the minimal retry/backoff hook. retries is the number of
 // EXTRA attempts after the first on a transport error; backoff(attempt) is the
 // delay before attempt N (>=1). Either zero disables retry.

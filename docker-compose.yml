@@ -135,6 +135,11 @@ services:
       # deliberately relax it (e.g. local dev / unsigned catalog). Leave unset
       # in production. PUBLIC keys only above — never private signing material.
       - CULVERT_RELEASE_CATALOG_VERIFY=${CULVERT_RELEASE_CATALOG_VERIFY:-}
+      # OPTIONAL signed-catalog auto-seed origin (P1.7). When set AND trust roots
+      # are present, the Control Plane fetches + verifies the signed catalog from
+      # this URL at startup. Verification happens in the binary; unset ⇒ no fetch.
+      # The installer never bakes a default URL.
+      - CULVERT_RELEASE_CATALOG_URL=${CULVERT_RELEASE_CATALOG_URL:-}
     command: [
       "-port",           "8080",
       "-ui-port",        "9090",
