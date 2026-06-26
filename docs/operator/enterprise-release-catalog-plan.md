@@ -118,25 +118,43 @@ Acceptance:
 
 ## Phase 2: Release Pipeline and Image Trust
 
-Move catalog publication into the release process.
+Move catalog publication into the release process. Split into two slices because
+"keyless" implies an *identity* (Fulcio) trust root, which is a change to the
+baked-ed25519 model Phase 1 shipped — see
+`roadmap/D1.6d-P2-release-pipeline-signing-plan.md`.
 
-- Extend release workflow to resolve the pushed image digest after publish.
-- Generate the catalog from release metadata, not hand-edited JSON.
-- Sign container images with cosign or an equivalent supported signer.
-- Sign catalog metadata with a release signing key held outside the repository.
-- Emit provenance/attestation for the build.
-- Attach catalog bundle, signatures, checksums, and provenance to the GitHub
-  Release or an official immutable release bucket.
-- Add CI gates:
-  - catalog refs are `repo@sha256:<64 hex>` only
-  - catalog digest matches the image digest produced by the workflow
-  - catalog verifies with the baked public key
-  - image signature verifies against the expected identity/key
-  - provenance exists for release images
+### Phase 2a — pipeline + keyless image trust (no Control-Plane trust change)
+
+- ✅ Generate the catalog from release metadata, not hand-edited JSON
+  (`release_gen.go`, deterministic; byte-stable so the loader's RAW-bytes
+  manifest hashing holds).
+- ✅ Release-blocking CI gate (`catalog-pipeline` job in `ci.yml`) that
+  round-trips the generated bundle through the REAL `LoadVerifiedCatalog`
+  (`TestReleaseCatalogGate`), so the gate can never drift from runtime
+  verification. Gate asserts: refs are `repo@sha256:<64hex>` only (no tags),
+  every `list_digest` equals the pushed manifest-list digest, freshness/schema
+  present, generation is deterministic.
+- ✅ Keyless cosign image signing + embedded provenance (already in `ci.yml`).
+- ✅ Attach the generated bundle (`index.json`, manifests, `checksums.txt`) to
+  the run as an artifact. The bundle is **UNSIGNED in P2a** — the gate's ephemeral
+  ed25519 key is in-process/discarded and is NOT the official trust signature.
+- Catalog is NOT yet trusted by a shipped Control Plane (no baked official root) —
+  that is P2b.
+
+### Phase 2b — Control-Plane keyless catalog trust (separate, reviewed)
+
+- Sign the catalog with the chosen keyless backend (Sigstore identity).
+- Add the in-binary verifier (Fulcio root + pinned `KidCarmi/Culvert`
+  release-workflow identity, Rekor), bundle offline roots for air-gap.
+- Ship the official root and publish the trusted official catalog so end-users
+  can update through Release Management.
+- CI gate: image signature verifies against the expected workflow identity.
 
 Acceptance:
-- A release cannot publish an official catalog unless image, catalog, and
-  provenance checks all pass.
+- 2a: a release cannot attach a catalog unless generation + digest-match +
+  freshness/schema + image signing + provenance all pass.
+- 2b: a shipped Control Plane trusts the official keyless-signed catalog and
+  fails closed on identity/signature/freshness/rollback violations.
 
 ## Phase 3: Rollback and Freeze Protection
 

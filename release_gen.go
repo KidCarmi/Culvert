@@ -206,9 +206,6 @@ func validateGenTimestamps(spec releaseCatalogSpec) error {
 	return nil
 }
 
-// defaultCatalogTTL is the P2a default validity window (created_at + this).
-const defaultCatalogTTL = 90 * 24 * time.Hour
-
 // writeReleaseBundle materializes the bundle into dir as index.json,
 // manifests/<ref>, an optional index.json.sig (when sig != nil), and an
 // audit-only checksums.txt. Files are written with restrictive modes; dir is
