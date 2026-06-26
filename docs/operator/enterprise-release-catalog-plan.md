@@ -98,14 +98,19 @@ Implemented:
   without leaking keys or paths.
 - ✅ Phase 1 CI fail-closed matrix (see CI and E2E Gates).
 
+- ✅ Verified auto-seed via `CULVERT_RELEASE_CATALOG_URL` (P1.7): at startup, in
+  enforce mode only, fetch the signed catalog from the URL, **verify before**
+  writing (signature + freshness + rollback, read-only), atomic move-aside swap
+  into `release_catalog/`, fail closed to `available:false` on any error. Verify
+  happens in the binary (trust roots there); the installer only forwards the env.
+  See `roadmap/D1.6d-P1.7-catalog-autoseed-plan.md`.
+
 Still to do in Phase 1:
 
 - ☐ Publish the official catalog bundle (`index.json`, `index.json.sig`,
-  manifests, optional `catalog.bundle.json`) and ship the baked public root.
-- ☐ Installer support for `CULVERT_RELEASE_CATALOG_URL`: download to a temp
-  path, **verify before** writing into `release_catalog/`, atomic rename into
-  place, fail closed to `available:false` on any error. (The verified HTTP
-  source and refresher exist but are not yet wired into startup.)
+  manifests, optional `catalog.bundle.json`) and ship the baked public root
+  (Phase 2 release pipeline). Until then, auto-seed needs an operator-provided
+  signed catalog URL + trust roots.
 
 Acceptance:
 - A clean install can auto-seed the official signed catalog and show
