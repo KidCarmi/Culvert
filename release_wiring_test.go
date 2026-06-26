@@ -232,13 +232,24 @@ func TestLoadReleaseManagement_UnsignedNotAutoTrusted(t *testing.T) {
 	writeUnsignedCatalogDir(t, dir, validSource())
 
 	setReleaseManager(nil)
-	// Resolve through the REAL resolver with empty env so this exercises the
-	// production decision (no roots ⇒ enforce-empty ⇒ disabled), not a literal.
+	// Resolve through the REAL resolver with empty env. The baked official
+	// Sigstore root (P2b-2a) now ACTIVATES the keyless scheme ⇒ enforce mode, so
+	// Release Management is ENABLED. The security property is unchanged and tested
+	// here at the catalog level: an UNSIGNED on-disk catalog must NOT be trusted —
+	// scheme selection finds no .sigstore and no ed25519 sig ⇒ enforce reject ⇒
+	// the catalog is never published (available:false), no dispatch.
 	cfg := resolveReleaseStartupConfigFrom(func(string) string { return "" })
 	cfg.catalogDir = dir
+	cfg.statePath = filepath.Join(t.TempDir(), "state.json")
 	loadReleaseManagement(cfg)
-	if currentReleaseManager() != nil {
-		t.Fatal("an unsigned catalog must NOT be auto-trusted: manager must stay unpublished (503)")
+	if currentReleaseManager() == nil {
+		t.Fatal("manager should be enabled (baked Sigstore root ⇒ enforce mode)")
+	}
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	body := decodeBody(t, rec)
+	if body["available"] == true {
+		t.Fatalf("an unsigned catalog must NOT be auto-trusted: available must be false; body=%s", rec.Body.String())
 	}
 }
 
