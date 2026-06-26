@@ -53,6 +53,10 @@ const (
 	// Unset + roots present ⇒ enforce. Unset + no roots ⇒ Release Management is
 	// disabled (an unsigned catalog is NEVER auto-trusted).
 	envReleaseCatalogVerify = "CULVERT_RELEASE_CATALOG_VERIFY"
+	// envReleaseCatalogURL is the OPTIONAL http(s) origin to auto-seed the signed
+	// catalog from at startup (P1.7). Auto-seed runs ONLY in enforce mode; the
+	// installer never bakes a default. Unset ⇒ no fetch (behavior unchanged).
+	envReleaseCatalogURL = "CULVERT_RELEASE_CATALOG_URL"
 )
 
 // bakedReleaseTrustKeysJSON is the BAKED-IN public trust root set, in the same
@@ -68,6 +72,7 @@ type releaseStartupConfig struct {
 	catalogDir     string
 	statePath      string     // persisted rollback version floor (sibling of catalogDir)
 	maintURL       string     // CP-local maint agent endpoint (unix socket path or http[s] URL)
+	catalogURL     string     // optional http(s) origin to auto-seed the signed catalog (P1.7); "" ⇒ no fetch
 	trustKeys      []TrustKey // baked roots ∪ operator-configured roots
 	trustKeysErr   error
 	verifyMode     VerifyMode
@@ -100,6 +105,7 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 		catalogDir:     catalogDir,
 		statePath:      filepath.Join(dataDir, "release_catalog_state.json"),
 		maintURL:       maintURL,
+		catalogURL:     strings.TrimSpace(getenv(envReleaseCatalogURL)),
 		trustKeys:      keys,
 		trustKeysErr:   keysErr,
 		verifyMode:     mode,
@@ -189,6 +195,25 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 		holder = NewCatalogHolder(cfg.catalogDir, trust)
 	}
 
+	// Verified auto-seed (P1.7): ONLY in enforce mode and ONLY when a URL is set.
+	// Runs BEFORE the holder load so a freshly-seeded catalog is what gets
+	// published (and the holder, not auto-seed, raises the rollback floor). Any
+	// failure is logged host-only and leaves the on-disk catalog untouched.
+	if cfg.catalogURL != "" {
+		if cfg.verifyMode == VerifyEnforce {
+			if err := runStartupAutoSeed(cfg, trust); err != nil {
+				// Redact the URL's credentials/query before logging: a transport
+				// error wraps net/http's *url.Error, whose string includes the full
+				// request URL (path + query, and any userinfo) — a presigned URL's
+				// signature would otherwise leak into startup logs.
+				logger.Printf("release catalog: auto-seed from %q did not update the catalog: %s",
+					sanitizeLog(seedHost(cfg.catalogURL)), sanitizeLog(redactSeedError(err, cfg.catalogURL)))
+			}
+		} else {
+			logger.Printf("release catalog: auto-seed skipped — it only runs in enforce mode (verify=%s); an unsigned catalog is never auto-downloaded", cfg.verifyMode)
+		}
+	}
+
 	// BEST-EFFORT startup load so a catalog already seeded/cached in cfg.catalogDir
 	// is usable immediately (and survives restarts). A failure (no catalog, or one
 	// that fails verification / freshness / rollback) is the normal no-catalog
@@ -211,6 +236,79 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	setReleaseManager(rm)
 	logger.Printf("release management enabled: proxy_repo=%q verify=%s local_agent=%s",
 		sanitizeLog(cfg.proxyRepo), cfg.verifyMode, note)
+}
+
+// runStartupAutoSeed performs one verified auto-seed from cfg.catalogURL. It
+// applies an inline SSRF guard (url.Parse + scheme + isPrivateHost) BEFORE any
+// outbound request — defense-in-depth on top of the provider's dial-time guard —
+// stages onto the data-dir filesystem (so the final rename is atomic), and runs
+// the auto-seed under a bounded timeout. Non-fatal: the caller logs the error.
+func runStartupAutoSeed(cfg releaseStartupConfig, trust TrustStore) error {
+	u, err := url.Parse(cfg.catalogURL)
+	if err != nil {
+		return fmt.Errorf("%s: %w", envReleaseCatalogURL, err)
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return fmt.Errorf("%s scheme %q must be http or https", envReleaseCatalogURL, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%s has no host", envReleaseCatalogURL)
+	}
+	if err := isPrivateHost(u.Host); err != nil {
+		return fmt.Errorf("%s host rejected (SSRF guard): %w", envReleaseCatalogURL, err)
+	}
+
+	prov, err := NewHTTPCatalogProvider(cfg.catalogURL, trust)
+	if err != nil {
+		return err
+	}
+	// Stage onto the SAME filesystem as the destination so the swap rename is
+	// atomic (release_catalog lives directly under the data dir).
+	prov.SetStageBase(filepath.Dir(cfg.catalogDir))
+
+	ctx, cancel := context.WithTimeout(context.Background(), httpCatalogDefaultTimeout)
+	defer cancel()
+	return autoSeedCatalog(ctx, prov, autoSeedConfig{
+		catalogDir: cfg.catalogDir,
+		statePath:  cfg.statePath,
+		trust:      trust,
+		skew:       catalogClockSkew,
+	})
+}
+
+// seedHost returns just the host of a seed URL for log lines, so userinfo/query
+// never reach the logs. Falls back to a placeholder on a malformed URL.
+func seedHost(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return "configured-url"
+}
+
+// redactSeedError returns err's message with the seed URL's sensitive components
+// (userinfo and raw query — e.g. a presigned-URL signature) stripped, since a
+// transport error wraps net/http's *url.Error whose string embeds the full
+// request URL. The host is preserved (it is already logged separately and is not
+// secret). The result is still passed through sanitizeLog at the call site.
+func redactSeedError(err error, rawURL string) string {
+	msg := err.Error()
+	u, perr := url.Parse(rawURL)
+	if perr != nil {
+		return msg
+	}
+	if u.User != nil {
+		// Strip "user:password" (and the bare username) wherever they appear.
+		if s := u.User.String(); s != "" {
+			msg = strings.ReplaceAll(msg, s, "REDACTED")
+		}
+		if name := u.User.Username(); name != "" {
+			msg = strings.ReplaceAll(msg, name, "REDACTED")
+		}
+	}
+	if u.RawQuery != "" {
+		msg = strings.ReplaceAll(msg, u.RawQuery, "REDACTED")
+	}
+	return msg
 }
 
 type releaseCatalogTrustKeyJSON struct {
