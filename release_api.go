@@ -50,6 +50,10 @@ type releaseManager struct {
 	// surfaced read-only on GET /api/releases so operators can see whether the
 	// channel is enforced or in a break-glass state. Zero value = enforce.
 	verifyMode VerifyMode
+	// trustSchemes is the compact log-safe description of the active trust
+	// schemes ("ed25519", "sigstore", "ed25519+sigstore", or "none"), surfaced
+	// read-only on GET /api/releases (P2b). Empty ⇒ omitted.
+	trustSchemes string
 }
 
 func newReleaseManager(svc *DispatchService, resolve agentResolver) *releaseManager {
@@ -205,11 +209,15 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 	}
 	cat := rm.svc.catalog()
 	if cat == nil {
-		jsonOK(w, map[string]any{
+		unavail := map[string]any{
 			"available":   false,
 			"reason":      "no catalog published",
 			"verify_mode": rm.verifyMode.String(),
-		})
+		}
+		if rm.trustSchemes != "" {
+			unavail["trust_schemes"] = rm.trustSchemes
+		}
+		jsonOK(w, unavail)
 		return
 	}
 	out := map[string]any{
@@ -218,6 +226,9 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 		"generated_at": cat.GeneratedAt().UTC().Format(time.RFC3339),
 		"releases":     cat.List(),
 		"channels":     channelPointers(cat),
+	}
+	if rm.trustSchemes != "" {
+		out["trust_schemes"] = rm.trustSchemes
 	}
 	if v := cat.Version(); v > 0 {
 		out["catalog_version"] = v

@@ -99,20 +99,34 @@ type TrustKey struct {
 	PublicKey ed25519.PublicKey
 }
 
-// TrustStore is an immutable key ring (key_id → ed25519 public key) plus the
-// active enforcement mode. Built once at startup; lookups are pure.
+// TrustStore is an immutable key ring (key_id → ed25519 public key) plus an
+// OPTIONAL Sigstore-identity verifier (P2b) and the active enforcement mode. Built
+// once at startup; lookups are pure. A catalog is accepted iff it verifies under at
+// least one CONFIGURED scheme (ed25519 ring non-empty OR sigstore != nil).
 type TrustStore struct {
-	keys map[string]ed25519.PublicKey
-	mode VerifyMode
+	keys     map[string]ed25519.PublicKey
+	sigstore *sigstoreVerifier // nil ⇒ Sigstore scheme not configured
+	mode     VerifyMode
 }
 
-// NewTrustStore builds a TrustStore, enforcing the §4.1.1 construction
-// invariants fail-closed: every key is ed25519 and EXACTLY ed25519.PublicKeySize
-// bytes, every key_id is bounded and unique, and the ring is non-empty in
-// enforce mode. The length check is load-bearing: ed25519.Verify PANICS on a
-// wrong-length key, so an invalid key must be rejected here and can NEVER reach
-// Verify. Any violation returns a non-nil error (the caller refuses to boot).
+// NewTrustStore builds an ed25519-only TrustStore (the P1.3 surface). It is a thin
+// wrapper over NewTrustStoreWithSigstore(keys, mode, nil) so every existing caller
+// keeps the same fail-closed semantics (empty ring in enforce mode is rejected).
 func NewTrustStore(keys []TrustKey, mode VerifyMode) (TrustStore, error) {
+	return NewTrustStoreWithSigstore(keys, mode, nil)
+}
+
+// NewTrustStoreWithSigstore builds a TrustStore that may carry BOTH schemes. It
+// enforces the §4.1.1 ed25519 construction invariants fail-closed: every key is
+// ed25519 and EXACTLY ed25519.PublicKeySize bytes, every key_id is bounded and
+// unique. The length check is load-bearing: ed25519.Verify PANICS on a
+// wrong-length key, so an invalid key must be rejected here and can NEVER reach
+// Verify.
+//
+// Enforce-mode non-emptiness is satisfied by EITHER scheme: in enforce mode at
+// least one trusted scheme must be configured (a non-empty ed25519 ring OR a
+// Sigstore verifier), otherwise the store trusts nothing and boot is refused.
+func NewTrustStoreWithSigstore(keys []TrustKey, mode VerifyMode, ss *sigstoreVerifier) (TrustStore, error) {
 	ring := make(map[string]ed25519.PublicKey, len(keys))
 	for i := range keys {
 		k := keys[i]
@@ -136,10 +150,10 @@ func NewTrustStore(keys []TrustKey, mode VerifyMode) (TrustStore, error) {
 		copy(pub, k.PublicKey)
 		ring[k.KeyID] = pub
 	}
-	if mode == VerifyEnforce && len(ring) == 0 {
-		return TrustStore{}, errors.New("release catalog: trust ring is empty in enforce mode (an empty allowlist trusts nothing)")
+	if mode == VerifyEnforce && len(ring) == 0 && ss == nil {
+		return TrustStore{}, errors.New("release catalog: no trusted scheme configured in enforce mode (an empty allowlist trusts nothing)")
 	}
-	return TrustStore{keys: ring, mode: mode}, nil
+	return TrustStore{keys: ring, sigstore: ss, mode: mode}, nil
 }
 
 // Mode returns the store's enforcement mode.
@@ -204,30 +218,35 @@ func LoadVerifiedCatalog(src SignedCatalogSource, trust TrustStore) (*Catalog, e
 	return loadCatalogFromIndexBytes(idxBytes, src)
 }
 
-// handleSignatureReadError maps a failed ReadSignature into the mode-correct
-// outcome (plan §6): a MISSING signature loads under permissive (returns nil to
-// proceed) but rejects under enforce; a present-but-unreadable signature
-// (permission/oversize from a non-dir source) is never permissive-degradable and
-// fails closed in all modes. Flattened (early returns) to keep nesting shallow.
-func handleSignatureReadError(err error, mode VerifyMode) error {
-	if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("release catalog: read signature: %w", err)
-	}
-	if mode != VerifyPermissive {
-		return fmt.Errorf("%w (enforce mode)", errSigMissing)
-	}
-	if logger != nil {
-		logger.Printf("release catalog: UNSIGNED catalog loaded (permissive mode); no index signature present")
-	}
-	return nil
-}
+// schemeOutcome is the tri-state result of consulting one configured trust scheme
+// for its sidecar artifact. It is the heart of the downgrade-safe composition rule
+// (plan §"Scheme selection & precedence"):
+//
+//   - schemeAbsent: the artifact read returned fs.ErrNotExist ONLY. The other
+//     scheme MAY be consulted (fall-through). This is the single permitted bypass.
+//   - schemeAccept: the artifact was present AND verified. Accept the catalog.
+//   - schemeReject: the artifact was present (readable OR unreadable) but did not
+//     verify. The catalog is rejected — the other scheme is NEVER consulted as a
+//     fallback (artifact-owns-outcome). Closes the strip-one-sig downgrade vector.
+type schemeOutcome int
 
-// verifyIndexSignature applies the trust gate to the already-read index bytes.
-// It returns nil to PROCEED (verified, or intentionally skipped) and a non-nil
-// error to REJECT fail-closed. Mode semantics (plan §6):
+const (
+	schemeAbsent schemeOutcome = iota
+	schemeAccept
+	schemeReject
+)
+
+// verifyIndexSignature applies the trust gate to the already-read index bytes,
+// composing the configured schemes per the exact precedence rule. It returns nil
+// to PROCEED (verified, or intentionally skipped) and a non-nil error to REJECT
+// fail-closed. Mode semantics (plan §6):
 //   - disabled:   skip verification (break-glass).
-//   - enforce:    a MISSING or INVALID signature → reject.
-//   - permissive: a MISSING signature → load with a warning; INVALID → reject.
+//   - enforce:    a MISSING-for-all-schemes or INVALID signature → reject.
+//   - permissive: MISSING for all schemes → load with a warning; INVALID → reject.
+//
+// Precedence: Sigstore identity (if configured) is consulted first; only a true
+// fs.ErrNotExist on its sidecar falls through to ed25519; only a true fs.ErrNotExist
+// there falls through to the mode-based no-artifact decision.
 func verifyIndexSignature(idxBytes []byte, src SignatureSource, trust TrustStore) error {
 	if trust.mode == VerifyDisabled {
 		if logger != nil {
@@ -236,34 +255,104 @@ func verifyIndexSignature(idxBytes []byte, src SignatureSource, trust TrustStore
 		return nil
 	}
 
-	sigBytes, err := src.ReadSignature()
-	if err != nil {
-		// nil ⇒ proceed (permissive + missing); non-nil ⇒ reject fail-closed.
-		return handleSignatureReadError(err, trust.mode)
+	// Scheme 1: Sigstore identity (keyless), when configured.
+	if trust.sigstore != nil {
+		ss, _ := src.(sigstoreSource) // nil if the source can't supply a .sigstore
+		switch outcome, err := verifySigstoreScheme(idxBytes, ss, trust.sigstore); outcome {
+		case schemeAccept:
+			return nil
+		case schemeReject:
+			return err
+		case schemeAbsent:
+			// fall through to ed25519
+		}
 	}
 
+	// Scheme 2: ed25519 detached signature, when configured.
+	if len(trust.keys) > 0 {
+		switch outcome, err := verifyEd25519Scheme(idxBytes, src, trust); outcome {
+		case schemeAccept:
+			return nil
+		case schemeReject:
+			return err
+		case schemeAbsent:
+			// fall through to the no-artifact decision
+		}
+	}
+
+	// Scheme 3: no artifact present for any configured scheme.
+	return noArtifactOutcome(trust.mode)
+}
+
+// verifySigstoreScheme consults the .sigstore sidecar. A source that cannot supply
+// one (src == nil) is treated as absent (fall-through), never a bypass: with no
+// other scheme satisfied, the no-artifact decision still fails closed in enforce.
+func verifySigstoreScheme(idxBytes []byte, src sigstoreSource, sv *sigstoreVerifier) (schemeOutcome, error) {
+	if src == nil {
+		return schemeAbsent, nil
+	}
+	bundleBytes, err := src.ReadSigstoreBundle()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return schemeAbsent, nil
+		}
+		return schemeReject, fmt.Errorf("release catalog: read sigstore bundle: %w", err)
+	}
+	if len(bundleBytes) > catalogMaxReadBytes {
+		return schemeReject, fmt.Errorf("%w (%d > %d)", errSigstoreOversize, len(bundleBytes), catalogMaxReadBytes)
+	}
+	if err := sv.verifyIndexBundle(idxBytes, bundleBytes); err != nil {
+		return schemeReject, err
+	}
+	if logger != nil {
+		logger.Printf("release catalog: Sigstore identity signature VERIFIED")
+	}
+	return schemeAccept, nil
+}
+
+// verifyEd25519Scheme consults the index.json.sig detached-signature sidecar.
+func verifyEd25519Scheme(idxBytes []byte, src SignatureSource, trust TrustStore) (schemeOutcome, error) {
+	sigBytes, err := src.ReadSignature()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return schemeAbsent, nil
+		}
+		return schemeReject, fmt.Errorf("release catalog: read signature: %w", err)
+	}
 	// Bound the signature bytes in the loader too — not only in the dir source —
 	// so every SignatureSource is covered (plan §5.2 / FA13).
 	if len(sigBytes) > catalogMaxReadBytes {
-		return fmt.Errorf("%w (%d > %d)", errSigOversize, len(sigBytes), catalogMaxReadBytes)
+		return schemeReject, fmt.Errorf("%w (%d > %d)", errSigOversize, len(sigBytes), catalogMaxReadBytes)
 	}
-
 	keyID, sig, err := parseSigEnvelope(sigBytes)
 	if err != nil {
-		return err
+		return schemeReject, err
 	}
 	// keyID is already validated to bounded printable ASCII by parseSigEnvelope,
 	// so it is safe to embed in errors/logs (no CWE-117 vector).
 	pub, ok := trust.lookup(keyID)
 	if !ok {
-		return fmt.Errorf("%w: %q", errSigUntrusted, keyID)
+		return schemeReject, fmt.Errorf("%w: %q", errSigUntrusted, keyID)
 	}
 	// pub is guaranteed ed25519.PublicKeySize by NewTrustStore — Verify cannot panic.
 	if !ed25519.Verify(pub, idxBytes, sig) {
-		return fmt.Errorf("%w: key_id %q", errSigVerify, keyID)
+		return schemeReject, fmt.Errorf("%w: key_id %q", errSigVerify, keyID)
 	}
 	if logger != nil {
 		logger.Printf("release catalog: signature VERIFIED (key_id=%q)", sanitizeLog(keyID))
 	}
-	return nil
+	return schemeAccept, nil
+}
+
+// noArtifactOutcome is the mode-based decision when NO configured scheme found its
+// sidecar (every present scheme returned fs.ErrNotExist). Permissive loads with a
+// warning; enforce rejects. (Disabled is handled earlier in verifyIndexSignature.)
+func noArtifactOutcome(mode VerifyMode) error {
+	if mode == VerifyPermissive {
+		if logger != nil {
+			logger.Printf("release catalog: UNSIGNED catalog loaded (permissive mode); no signature present for any configured scheme")
+		}
+		return nil
+	}
+	return fmt.Errorf("%w (enforce mode)", errSigMissing)
 }
