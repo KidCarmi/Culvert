@@ -143,6 +143,30 @@ func TestConnLimiter_ConcurrentEnableReconfigure(t *testing.T) {
 	}
 }
 
+// TestConnLimiter_ReleaseWhileDisabled verifies that Release correctly decrements
+// the counter even when the limiter is disabled between Acquire and Release. A
+// connection acquired while the limiter is enabled, released while it is
+// disabled, must not leave a phantom counter entry that blocks future connections
+// after the limiter is re-enabled.
+func TestConnLimiter_ReleaseWhileDisabled(t *testing.T) {
+	cl := &ConnLimiter{conns: make(map[string]*int64)}
+	cl.Enable(1)
+
+	if !cl.Acquire("1.2.3.4") {
+		t.Fatal("first acquire should succeed")
+	}
+
+	cl.Disable()
+	cl.Release("1.2.3.4") // must decrement even though limiter is now disabled
+
+	cl.Enable(1)
+	// Counter must be 0; the next acquire must succeed (no live connections).
+	if !cl.Acquire("1.2.3.4") {
+		t.Fatal("acquire after disable/enable cycle should succeed: Release leaked the counter while disabled")
+	}
+	cl.Release("1.2.3.4")
+}
+
 func TestLatencyHistogram_Observe(t *testing.T) {
 	h := newLatencyHistogram()
 	h.Observe(0.001) // 1ms → 5ms bucket

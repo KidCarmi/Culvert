@@ -114,10 +114,11 @@ func (cl *ConnLimiter) Acquire(ip string) bool {
 }
 
 // Release decrements the connection count for ip.
+// The enabled flag is intentionally NOT checked here: a counter entry can only
+// exist because a prior Acquire incremented it (Acquire only increments while
+// enabled). Skipping the decrement when the limiter is disabled leaks phantom
+// counters that permanently block the IP once the limiter is re-enabled.
 func (cl *ConnLimiter) Release(ip string) {
-	if !cl.enabled.Load() {
-		return
-	}
 	cl.mu.Lock()
 	ctr, ok := cl.conns[ip]
 	cl.mu.Unlock()
