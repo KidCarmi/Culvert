@@ -113,14 +113,8 @@ func generateReleaseCatalog(spec releaseCatalogSpec) (*releaseBundle, error) {
 			ManifestSHA256: hex.EncodeToString(sum[:]),
 		})
 
-		for _, ch := range e.Channels {
-			if _, known := catalogKnownChannel(string(ch)); !known {
-				return nil, fmt.Errorf("release gen: release %q: unknown channel %q", e.ReleaseID, ch)
-			}
-			if prev, dup := channels[string(ch)]; dup {
-				return nil, fmt.Errorf("release gen: channel %q points at both %q and %q", ch, prev, e.ReleaseID)
-			}
-			channels[string(ch)] = e.ReleaseID
+		if err := collectChannels(channels, e.ReleaseID, e.Channels); err != nil {
+			return nil, err
 		}
 	}
 
@@ -137,6 +131,23 @@ func generateReleaseCatalog(spec releaseCatalogSpec) (*releaseBundle, error) {
 		return nil, fmt.Errorf("release gen: marshal index: %w", err)
 	}
 	return &releaseBundle{Index: idxBytes, Manifests: manifests}, nil
+}
+
+// collectChannels records each of a release's channel pointers into the shared
+// channels map, rejecting unknown channel keys and any channel that would point
+// at two different releases. Extracted from generateReleaseCatalog to keep that
+// function's nesting (and cognitive complexity) low.
+func collectChannels(channels map[string]string, relID string, chs []Channel) error {
+	for _, ch := range chs {
+		if _, known := catalogKnownChannel(string(ch)); !known {
+			return fmt.Errorf("release gen: release %q: unknown channel %q", relID, ch)
+		}
+		if prev, dup := channels[string(ch)]; dup {
+			return fmt.Errorf("release gen: channel %q points at both %q and %q", ch, prev, relID)
+		}
+		channels[string(ch)] = relID
+	}
+	return nil
 }
 
 // genManifest validates one entry and returns its raw, byte-stable manifest bytes.
