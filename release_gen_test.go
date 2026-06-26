@@ -14,21 +14,25 @@ import (
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+// genFixtureNow is the fixed generated_at/created_at used across the generator
+// fixtures (kept as one constant rather than repeating the literal).
+const genFixtureNow = "2026-05-01T00:00:00Z"
+
 func validGenSpec() releaseCatalogSpec {
 	return releaseCatalogSpec{
-		GeneratedAt:    "2026-05-01T00:00:00Z",
+		GeneratedAt:    genFixtureNow,
 		ExpiresAt:      "2026-07-30T00:00:00Z", // ~90d later
 		CatalogVersion: 7,
 		Entries: []releaseEntrySpec{
 			{
 				ReleaseID: "rel_b", VersionID: "1.9.0", Severity: "normal",
 				Repo: repo, ListDigest: digB, Platforms: []string{"linux/arm64", "linux/amd64"},
-				CreatedAt: "2026-05-01T00:00:00Z", Channels: []Channel{ChannelLTS},
+				CreatedAt: genFixtureNow, Channels: []Channel{ChannelLTS},
 			},
 			{
 				ReleaseID: "rel_a", VersionID: "1.10.0", Severity: "critical",
 				Repo: repo, ListDigest: digA, Platforms: []string{"linux/amd64", "linux/arm64"},
-				CreatedAt: "2026-05-01T00:00:00Z", Channels: []Channel{ChannelRecommended, ChannelCritical},
+				CreatedAt: genFixtureNow, Channels: []Channel{ChannelRecommended, ChannelCritical},
 			},
 		},
 	}
