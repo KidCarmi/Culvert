@@ -200,14 +200,7 @@ func TestReleaseCatalogGate(t *testing.T) {
 	if specPath == "" {
 		t.Skip("release gate: set CULVERT_RELEASE_GEN_SPEC to run (CI only)")
 	}
-	raw, err := os.ReadFile(specPath) // #nosec G304 -- CI-provided spec path, not attacker input
-	if err != nil {
-		t.Fatal(err)
-	}
-	var spec releaseCatalogSpec
-	if err := json.Unmarshal(raw, &spec); err != nil {
-		t.Fatalf("parse spec: %v", err)
-	}
+	spec := readGenSpec(t, specPath)
 	bundle, err := generateReleaseCatalog(spec)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -230,21 +223,50 @@ func TestReleaseCatalogGate(t *testing.T) {
 		t.Fatalf("rollback: %v", err)
 	}
 
-	// The pushed manifest-list digest must equal every catalog list_digest.
-	if want := os.Getenv("CULVERT_RELEASE_EXPECT_DIGEST"); want != "" {
-		for i := range spec.Entries {
-			if spec.Entries[i].ListDigest != want {
-				t.Fatalf("release %q list_digest %q != pushed digest %q",
-					spec.Entries[i].ReleaseID, spec.Entries[i].ListDigest, want)
-			}
-		}
-	}
+	assertGatePushedDigest(t, spec)
+	emitGateBundle(t, bundle)
+}
 
-	// Emit the UNSIGNED official bundle for attachment (P2b adds the real sig).
-	if out := os.Getenv("CULVERT_RELEASE_GEN_OUT"); out != "" {
-		if err := writeReleaseBundle(out, bundle, nil); err != nil {
-			t.Fatalf("write output bundle: %v", err)
-		}
-		t.Logf("release gate: wrote unsigned bundle to %s", filepath.Clean(out))
+// readGenSpec reads + parses the CI-provided generator spec.
+func readGenSpec(t *testing.T, path string) releaseCatalogSpec {
+	t.Helper()
+	raw, err := os.ReadFile(path) // #nosec G304 -- CI-provided spec path, not attacker input
+	if err != nil {
+		t.Fatal(err)
 	}
+	var spec releaseCatalogSpec
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		t.Fatalf("parse spec: %v", err)
+	}
+	return spec
+}
+
+// assertGatePushedDigest fails the gate unless every release's list_digest equals
+// the pushed manifest-list digest (CULVERT_RELEASE_EXPECT_DIGEST), when set.
+func assertGatePushedDigest(t *testing.T, spec releaseCatalogSpec) {
+	t.Helper()
+	want := os.Getenv("CULVERT_RELEASE_EXPECT_DIGEST")
+	if want == "" {
+		return
+	}
+	for i := range spec.Entries {
+		if spec.Entries[i].ListDigest != want {
+			t.Fatalf("release %q list_digest %q != pushed digest %q",
+				spec.Entries[i].ReleaseID, spec.Entries[i].ListDigest, want)
+		}
+	}
+}
+
+// emitGateBundle writes the UNSIGNED official bundle for attachment when
+// CULVERT_RELEASE_GEN_OUT is set (P2b adds the real signature).
+func emitGateBundle(t *testing.T, bundle *releaseBundle) {
+	t.Helper()
+	out := os.Getenv("CULVERT_RELEASE_GEN_OUT")
+	if out == "" {
+		return
+	}
+	if err := writeReleaseBundle(out, bundle, nil); err != nil {
+		t.Fatalf("write output bundle: %v", err)
+	}
+	t.Logf("release gate: wrote unsigned bundle to %s", filepath.Clean(out))
 }
