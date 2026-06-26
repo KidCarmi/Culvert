@@ -196,14 +196,16 @@ func (p *HTTPCatalogProvider) Stage(ctx context.Context) (stagingDir string, err
 	if notModified {
 		return "", errCatalogUnchanged
 	}
-	sigBytes, sigMissing, err := p.fetchSignature(ctx)
+	// Fetch each scheme's sidecar ONLY when that scheme is configured, so neither
+	// sidecar's absence/error can block the OTHER scheme. A 403/500 on .sig at an
+	// origin that uses non-404 for absent objects must NOT reject a keyless-only
+	// catalog, and vice-versa. Each present sidecar then participates in
+	// verifyIndexSignature's scheme selection exactly like the local-dir source —
+	// a present-but-invalid artifact rejects (no downgrade).
+	sigBytes, sigMissing, err := p.fetchSignatureIfConfigured(ctx)
 	if err != nil {
 		return "", err
 	}
-	// Fetch the Sigstore (keyless) sidecar ONLY when that scheme is configured, so
-	// an ed25519-only deployment makes no extra request. When configured, the
-	// bundle participates in verifyIndexSignature's scheme selection exactly like
-	// the local-dir source — a present-but-invalid bundle rejects (no downgrade).
 	bundleBytes, bundleMissing, err := p.fetchSigstoreBundleIfConfigured(ctx)
 	if err != nil {
 		return "", err
@@ -305,6 +307,18 @@ func (p *HTTPCatalogProvider) fetchIndex(ctx context.Context) (body []byte, etag
 	default:
 		return nil, "", "", false, fmt.Errorf("release catalog: index HTTP %d", resp.StatusCode)
 	}
+}
+
+// fetchSignatureIfConfigured GETs index.json.sig, but ONLY when the ed25519 scheme
+// is configured (the trust ring is non-empty). When it is not (e.g. a Sigstore-only
+// store), no request is made and the sidecar is reported missing — verifyIndexSignature
+// skips the ed25519 branch in that case, so the value is inert and an ed25519-sidecar
+// fetch error can never block a keyless catalog.
+func (p *HTTPCatalogProvider) fetchSignatureIfConfigured(ctx context.Context) (sig []byte, missing bool, err error) {
+	if len(p.trust.keys) == 0 {
+		return nil, true, nil
+	}
+	return p.fetchSignature(ctx)
 }
 
 // fetchSignature GETs index.json.sig; a 404 yields missing=true (unsigned —

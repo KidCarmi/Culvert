@@ -118,20 +118,19 @@ func TestSigstore_RequiresFullIdentity(t *testing.T) {
 
 // ─── scheme selection (downgrade-safe composition) ────────────────────────────
 
-// memDualSource is an in-memory source that can supply BOTH sidecars (ed25519
-// .sig and the .sigstore bundle) with independently injectable read errors, so
-// the tri-state precedence rule can be exercised exhaustively.
+// memDualSource is an in-memory SignatureSource + sigstoreSource that can supply
+// BOTH sidecars (ed25519 .sig and the .sigstore bundle) with independently
+// injectable read errors, so verifyIndexSignature's tri-state precedence rule can
+// be exercised exhaustively. It deliberately implements ONLY the two sidecar reads
+// (not ReadIndex/ReadManifest) — verifyIndexSignature takes a SignatureSource and
+// type-asserts sigstoreSource, nothing more.
 type memDualSource struct {
-	index     []byte
-	manifests map[string][]byte
 	sig       []byte
 	sigErr    error
 	bundle    []byte
 	bundleErr error
 }
 
-func (m *memDualSource) ReadIndex() ([]byte, error)          { return m.index, nil }
-func (m *memDualSource) ReadManifest(string) ([]byte, error) { return nil, errors.New("no manifest") }
 func (m *memDualSource) ReadSignature() ([]byte, error)      { return m.sig, m.sigErr }
 func (m *memDualSource) ReadSigstoreBundle() ([]byte, error) { return m.bundle, m.bundleErr }
 
@@ -156,7 +155,7 @@ func dualTrust(t *testing.T, idx []byte, mode VerifyMode) (TrustStore, []byte) {
 func TestScheme_SigstoreAbsentFallsThroughToEd25519(t *testing.T) {
 	idx := []byte("the-index")
 	ts, sigEnv := dualTrust(t, idx, VerifyEnforce)
-	src := &memDualSource{index: idx, sig: sigEnv, bundleErr: fs.ErrNotExist}
+	src := &memDualSource{sig: sigEnv, bundleErr: fs.ErrNotExist}
 	if err := verifyIndexSignature(idx, src, ts); err != nil {
 		t.Fatalf("sigstore-absent + valid ed25519: err = %v; want accept", err)
 	}
@@ -167,7 +166,7 @@ func TestScheme_SigstoreAbsentFallsThroughToEd25519(t *testing.T) {
 func TestScheme_SigstorePresentInvalidNoEd25519Fallback(t *testing.T) {
 	idx := []byte("the-index")
 	ts, sigEnv := dualTrust(t, idx, VerifyEnforce)
-	src := &memDualSource{index: idx, sig: sigEnv, bundle: []byte("garbage-not-a-bundle")}
+	src := &memDualSource{sig: sigEnv, bundle: []byte("garbage-not-a-bundle")}
 	err := verifyIndexSignature(idx, src, ts)
 	if err == nil {
 		t.Fatal("present-but-invalid .sigstore with a valid ed25519 sig was ACCEPTED; downgrade vector open")
@@ -181,7 +180,7 @@ func TestScheme_SigstorePresentInvalidNoEd25519Fallback(t *testing.T) {
 func TestScheme_SigstoreUnreadableNoFallback(t *testing.T) {
 	idx := []byte("the-index")
 	ts, sigEnv := dualTrust(t, idx, VerifyEnforce)
-	src := &memDualSource{index: idx, sig: sigEnv, bundleErr: errors.New("permission denied")}
+	src := &memDualSource{sig: sigEnv, bundleErr: errors.New("permission denied")}
 	if err := verifyIndexSignature(idx, src, ts); err == nil {
 		t.Fatal("unreadable .sigstore was accepted via ed25519 fall-through; want reject")
 	}
@@ -191,7 +190,7 @@ func TestScheme_SigstoreUnreadableNoFallback(t *testing.T) {
 func TestScheme_BothAbsentEnforceRejects(t *testing.T) {
 	idx := []byte("the-index")
 	ts, _ := dualTrust(t, idx, VerifyEnforce)
-	src := &memDualSource{index: idx, sigErr: fs.ErrNotExist, bundleErr: fs.ErrNotExist}
+	src := &memDualSource{sigErr: fs.ErrNotExist, bundleErr: fs.ErrNotExist}
 	if err := verifyIndexSignature(idx, src, ts); !errors.Is(err, errSigMissing) {
 		t.Fatalf("both absent + enforce: err = %v; want errSigMissing", err)
 	}
@@ -201,7 +200,7 @@ func TestScheme_BothAbsentEnforceRejects(t *testing.T) {
 func TestScheme_BothAbsentPermissiveLoads(t *testing.T) {
 	idx := []byte("the-index")
 	ts, _ := dualTrust(t, idx, VerifyPermissive)
-	src := &memDualSource{index: idx, sigErr: fs.ErrNotExist, bundleErr: fs.ErrNotExist}
+	src := &memDualSource{sigErr: fs.ErrNotExist, bundleErr: fs.ErrNotExist}
 	if err := verifyIndexSignature(idx, src, ts); err != nil {
 		t.Fatalf("both absent + permissive: err = %v; want load", err)
 	}

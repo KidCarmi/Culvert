@@ -114,7 +114,7 @@ func newSigstoreVerifierFromMaterial(tm root.TrustedMaterial, id sigstoreIdentit
 	if strings.TrimSpace(id.Issuer) == "" || strings.TrimSpace(id.SANRegex) == "" {
 		return nil, fmt.Errorf("%w: identity requires both issuer and san_regex", errSigstoreConfig)
 	}
-	v, err := verify.NewSignedEntityVerifier(tm,
+	v, err := verify.NewVerifier(tm,
 		verify.WithTransparencyLog(1),
 		verify.WithIntegratedTimestamps(1),
 	)
