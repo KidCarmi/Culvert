@@ -353,7 +353,8 @@ jobs:
       (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
       startsWith(github.ref, 'refs/tags/v')
     permissions:
-      contents: read
+      contents: write     # attach the signed catalog to the GitHub Release (tag path)
+      id-token: write     # cosign keyless blob signing of index.json (tag path)
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -394,12 +395,79 @@ jobs:
           CULVERT_RELEASE_GEN_OUT: ${{ steps.spec.outputs.out }}
           CULVERT_RELEASE_EXPECT_DIGEST: ${{ needs.docker.outputs.proxy_digest }}
         run: go test -run TestReleaseCatalogGate -count=1 -v .
-      - name: Upload generated catalog bundle (unsigned; audit/P2b)
+
+      # ── Keyless catalog signing + verification (TAG path only) ────────────────
+      # On a tag release, sign the deterministic index.json keyless (Fulcio +
+      # Rekor, no private key), then prove the SHIPPED in-binary verifier accepts
+      # it (baked root + pinned ci.yml identity), and prove the pushed image was
+      # signed by the SAME identity. Signing requires a tagged-release OIDC SAN
+      # (@refs/tags/v*), so these steps never run on the main-push gate.
+      - name: Install cosign
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign catalog index keyless (cosign sign-blob → index.json.sigstore)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          OUT="${{ steps.spec.outputs.out }}"
+          cosign sign-blob --yes \
+            --bundle "$OUT/index.json.sigstore" \
+            "$OUT/index.json"
+          test -s "$OUT/index.json.sigstore" || { echo "empty .sigstore bundle"; exit 1; }
+      - name: Keyless end-to-end verify (baked root + pinned identity)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          CULVERT_RELEASE_GEN_OUT: ${{ steps.spec.outputs.out }}
+          CULVERT_RELEASE_GEN_VERIFY_SIGSTORE: "1"
+        run: go test -run TestReleaseCatalogKeylessVerify -count=1 -v .
+      - name: Verify pushed image signature matches the pinned release identity
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          # Single source of truth shared with the in-binary verifier
+          # (TestReleaseIdentitySSOT pins release_identity.env == Go constants).
+          # Read the RAW values via cut — NOT `source` — because the SAN regex
+          # contains backslashes (`github\.com`) that bash escape-processing would
+          # strip, drifting the CI regex from the validated Go constant.
+          ISSUER=$(grep '^CULVERT_RELEASE_SIGSTORE_ISSUER=' release_identity.env | cut -d= -f2-)
+          SAN_REGEX=$(grep '^CULVERT_RELEASE_SIGSTORE_SAN_REGEX=' release_identity.env | cut -d= -f2-)
+          test -n "$ISSUER" && test -n "$SAN_REGEX" || { echo "missing identity in release_identity.env"; exit 1; }
+          cosign verify \
+            --certificate-oidc-issuer="$ISSUER" \
+            --certificate-identity-regexp="$SAN_REGEX" \
+            "ghcr.io/kidcarmi/culvert@${{ needs.docker.outputs.proxy_digest }}"
+
+      - name: Upload generated catalog bundle (signed on tag path)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-catalog-bundle
           path: ${{ steps.spec.outputs.out }}
           if-no-files-found: error
+      # Package the COMPLETE signed catalog (index.json + index.json.sigstore +
+      # manifests/<ref>) as one tar.gz. A bare index.json + signature is NOT a
+      # usable catalog — the verified index references manifests/<ref> that the
+      # loader/HTTP provider must fetch. The archive is exactly what the air-gap
+      # BundleCatalogProvider imports (gzip-sniffing tar reader staging index.json,
+      # index.json.sigstore, manifests/*).
+      - name: Package signed catalog bundle (tag path)
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: pkg
+        run: |
+          set -euo pipefail
+          OUT="${{ steps.spec.outputs.out }}"
+          test -s "$OUT/index.json.sigstore" || { echo "missing signed bundle"; exit 1; }
+          BUNDLE="$RUNNER_TEMP/culvert-release-catalog-${{ github.ref_name }}.tar.gz"
+          tar -C "$OUT" -czf "$BUNDLE" index.json index.json.sigstore manifests
+          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+      - name: Attach complete signed catalog bundle to the GitHub Release (tag path)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: ${{ steps.pkg.outputs.bundle }}
 
   # ─── Auto-tag ───────────────────────────────────────────────────────────
   # On every push to main, fetch the latest semver tag, bump the patch
