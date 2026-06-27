@@ -1,0 +1,367 @@
+name: Maintenance Agent Update E2E
+
+# Drives the REAL Culvert maintenance agent through a REAL Docker container
+# update: pull a new image digest -> retag culvert/proxy:pinned -> recreate the
+# proxy container -> health-gate -> verify the running image digest flipped.
+#
+# Everything is LOCAL (a registry:2 on 127.0.0.1:5000, two locally-built proxy
+# images) so the run is deterministic and needs no ghcr / external network for
+# the image flow. The core proof is step "Assert the flip": the proxy
+# container's RepoDigest changes from D1 (v1) to D2 (v2) and /health still 200s.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: maint-agent-update-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Agent-driven container update
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    env:
+      REGISTRY: 127.0.0.1:5000
+      REPO: 127.0.0.1:5000/culvert
+      PINNED_TAG: culvert/proxy:pinned
+      E2E_DIR: test/e2e/maint-agent
+      COMPOSE_FILE_NAME: docker-compose.e2e.yml
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      # The agent's resolve_target runs `docker manifest inspect` against the
+      # registry with NO --insecure flag. The daemon's `insecure-registries`
+      # setting does NOT apply to the client-side `docker manifest` command, so
+      # a plain-HTTP registry fails there. Run a TLS registry that BOTH the
+      # daemon (pull/push, via /etc/docker/certs.d) AND the CLI (manifest
+      # inspect / curl, via the system CA store) trust — no --insecure anywhere,
+      # no daemon restart needed. Configure trust BEFORE anything pulls/pushes.
+      - name: Start TLS local registry (trusted by daemon + CLI)
+        run: |
+          set -euxo pipefail
+          CERT_DIR="$RUNNER_TEMP/registry-certs"
+          mkdir -p "$CERT_DIR"
+
+          # Self-signed cert with SAN IP:127.0.0.1 (the registry host:port host).
+          openssl req -x509 -newkey rsa:4096 -nodes \
+            -keyout "$CERT_DIR/registry.key" \
+            -out "$CERT_DIR/registry.crt" \
+            -days 2 \
+            -subj "/CN=127.0.0.1" \
+            -addext "subjectAltName=IP:127.0.0.1"
+          # registry:2 runs as a non-root user in newer images; make the bind-
+          # mounted cert material readable to it.
+          chmod 0644 "$CERT_DIR/registry.crt" "$CERT_DIR/registry.key"
+
+          # Trust path 1 — the DAEMON (docker pull/push) reads per-registry CAs
+          # from /etc/docker/certs.d/<host:port>/ca.crt. No daemon restart.
+          sudo mkdir -p "/etc/docker/certs.d/127.0.0.1:5000"
+          sudo cp "$CERT_DIR/registry.crt" "/etc/docker/certs.d/127.0.0.1:5000/ca.crt"
+
+          # Trust path 2 — the CLI (`docker manifest inspect`) and curl talk TLS
+          # directly and validate against the SYSTEM CA store.
+          sudo cp "$CERT_DIR/registry.crt" /usr/local/share/ca-certificates/registry-e2e.crt
+          sudo update-ca-certificates
+
+          docker run -d --restart=always --name registry \
+            -p 127.0.0.1:5000:5000 \
+            -v "$CERT_DIR:/certs:ro" \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+            registry:2
+
+          # Wait for the registry API to answer over HTTPS using the system CA.
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS https://127.0.0.1:5000/v2/ >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: TLS registry did not come up"
+            docker logs registry 2>&1 | tail -n 50 || true
+            exit 1
+          fi
+          curl -fsS https://127.0.0.1:5000/v2/
+
+      # Build TWO genuinely-different proxy images (distinct BUILD_VARIANT ->
+      # distinct content -> distinct registry digest). Push both; capture each
+      # pushed digest from RepoDigests (populated by `docker push`). The images
+      # are ALSO in the local daemon store, which `docker tag` + `compose up`
+      # need.
+      - name: Build, push, and capture v1 + v2 digests
+        id: images
+        run: |
+          set -euxo pipefail
+          # Build + push, then echo ONLY the repo-bound pushed digest on stdout.
+          # All docker chatter is redirected to stderr so the command
+          # substitution that calls this captures the digest line alone.
+          build_push_digest() {
+            variant="$1"
+            tag="$REPO:$variant"
+            docker build \
+              -f "$E2E_DIR/Dockerfile.e2e" \
+              --build-arg "BUILD_VARIANT=$variant" \
+              -t "$tag" . 1>&2
+            docker push "$tag" 1>&2
+            # RepoDigests is populated after push; pick the one for our repo.
+            docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" \
+              | grep "^${REPO}@sha256:" | head -n1
+          }
+
+          D1_REF="$(build_push_digest v1)"
+          D2_REF="$(build_push_digest v2)"
+
+          D1="${D1_REF#${REPO}@}"
+          D2="${D2_REF#${REPO}@}"
+
+          echo "v1 ref: $D1_REF"
+          echo "v2 ref: $D2_REF"
+
+          if [ -z "$D1" ] || [ -z "$D2" ]; then
+            echo "FATAL: failed to capture a pushed digest (D1=$D1 D2=$D2)"; exit 1
+          fi
+          if [ "$D1" = "$D2" ]; then
+            echo "FATAL: v1 and v2 produced the SAME digest ($D1); the flip would be unobservable"; exit 1
+          fi
+
+          {
+            echo "d1=$D1"
+            echo "d2=$D2"
+            echo "d1_ref=$D1_REF"
+            echo "d2_ref=$D2_REF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Seed the FIXED local tag to v1 so compose starts on v1 (exactly what the
+      # installers do before the first `up`).
+      - name: Seed culvert/proxy:pinned = v1
+        run: |
+          set -euxo pipefail
+          docker tag "${{ steps.images.outputs.d1_ref }}" "$PINNED_TAG"
+          docker image inspect "$PINNED_TAG" --format '{{index .RepoDigests 0}}' || true
+
+      - name: Render agent config
+        id: cfg
+        run: |
+          set -euxo pipefail
+          PROJECT_DIR="$RUNNER_TEMP/maint-e2e/compose"
+          STATE_DIR="$RUNNER_TEMP/maint-e2e/state"
+          SOCK_PATH="$RUNNER_TEMP/maint-e2e/agent.sock"
+          mkdir -p "$PROJECT_DIR" "$STATE_DIR"
+
+          # The agent chdir's into compose_project_dir for every docker call, so
+          # the compose file must live there under the configured bare filename.
+          cp "$E2E_DIR/$COMPOSE_FILE_NAME" "$PROJECT_DIR/$COMPOSE_FILE_NAME"
+
+          RUNNER_UID="$(id -u)"
+          CONFIG_PATH="$RUNNER_TEMP/maint-e2e/config.toml"
+          sed \
+            -e "s|@@PROJECT_DIR@@|$PROJECT_DIR|g" \
+            -e "s|@@SOCK_PATH@@|$SOCK_PATH|g" \
+            -e "s|@@STATE_DIR@@|$STATE_DIR|g" \
+            -e "s|@@RUNNER_UID@@|$RUNNER_UID|g" \
+            "$E2E_DIR/config.toml.tmpl" > "$CONFIG_PATH"
+
+          echo "----- rendered config.toml -----"
+          cat "$CONFIG_PATH"
+          echo "--------------------------------"
+
+          {
+            echo "project_dir=$PROJECT_DIR"
+            echo "state_dir=$STATE_DIR"
+            echo "sock_path=$SOCK_PATH"
+            echo "config_path=$CONFIG_PATH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build the maintenance agent
+        run: |
+          set -euxo pipefail
+          ( cd cmd/culvert-maint && go build -o "$RUNNER_TEMP/maint-e2e/culvert-maint" . )
+          "$RUNNER_TEMP/maint-e2e/culvert-maint" -version || true
+
+      - name: Bring up proxy on v1
+        run: |
+          set -euxo pipefail
+          PROJECT_DIR="${{ steps.cfg.outputs.project_dir }}"
+          docker compose -f "$PROJECT_DIR/$COMPOSE_FILE_NAME" up -d
+
+          # Wait for /health to answer 200 (proxy is alive on v1).
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: proxy /health did not come up on v1"
+            docker compose -f "$PROJECT_DIR/$COMPOSE_FILE_NAME" ps || true
+            docker logs culvert-e2e-proxy 2>&1 | tail -n 200 || true
+            exit 1
+          fi
+
+          # Assert the running container is actually v1 (D1). RepoDigests lives on
+          # the IMAGE, not the container, so resolve the container's image id first.
+          RUNNING_IMG="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy)"
+          RUNNING_REF="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RUNNING_IMG" | grep "^${REPO}@sha256:" | head -n1 || true)"
+          echo "running ref (expect v1): $RUNNING_REF"
+          if [ "$RUNNING_REF" != "${{ steps.images.outputs.d1_ref }}" ]; then
+            echo "FATAL: proxy is not running v1 ($RUNNING_REF != ${{ steps.images.outputs.d1_ref }})"
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:8080/ready >/dev/null && echo "/ready OK on v1"
+
+      - name: Start the agent
+        run: |
+          set -euxo pipefail
+          CONFIG_PATH="${{ steps.cfg.outputs.config_path }}"
+          SOCK_PATH="${{ steps.cfg.outputs.sock_path }}"
+          AGENT_LOG="$RUNNER_TEMP/maint-e2e/agent.log"
+          nohup "$RUNNER_TEMP/maint-e2e/culvert-maint" -config "$CONFIG_PATH" >"$AGENT_LOG" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/maint-e2e/agent.pid"
+
+          # Wait for the UDS to appear and answer /v1/health.
+          ok=""
+          for i in $(seq 1 60); do
+            if [ -S "$SOCK_PATH" ] && curl -fsS --unix-socket "$SOCK_PATH" http://localhost/v1/health >/dev/null 2>&1; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: agent socket/health did not come up"
+            echo "----- agent log -----"; cat "$AGENT_LOG" || true
+            exit 1
+          fi
+          echo "----- agent /v1/health -----"
+          curl -fsS --unix-socket "$SOCK_PATH" http://localhost/v1/health; echo
+          echo "----- agent /v1/status -----"
+          curl -fsS --unix-socket "$SOCK_PATH" http://localhost/v1/status; echo
+
+      - name: Drive the update (apply v2) and poll to terminal
+        id: apply
+        run: |
+          set -euxo pipefail
+          SOCK_PATH="${{ steps.cfg.outputs.sock_path }}"
+          TARGET_REF="${{ steps.images.outputs.d2_ref }}"
+
+          # POST /v1/upgrades/apply -> 202 Accepted with {"op_id": "...", ...}.
+          APPLY_RESP="$(curl -fsS --unix-socket "$SOCK_PATH" \
+            -H 'Content-Type: application/json' \
+            -X POST \
+            -d "{\"image_ref\":\"$TARGET_REF\"}" \
+            http://localhost/v1/upgrades/apply)"
+          echo "apply response: $APPLY_RESP"
+
+          OP_ID="$(printf '%s' "$APPLY_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["op_id"])')"
+          if [ -z "$OP_ID" ]; then
+            echo "FATAL: no op_id in apply response"; exit 1
+          fi
+          echo "op_id=$OP_ID"
+
+          # Poll GET /v1/operations/{id} until the op reaches a terminal state.
+          STATE=""
+          OP_JSON=""
+          for i in $(seq 1 120); do
+            OP_JSON="$(curl -fsS --unix-socket "$SOCK_PATH" "http://localhost/v1/operations/$OP_ID" || true)"
+            STATE="$(printf '%s' "$OP_JSON" | python3 -c 'import sys,json; d=sys.stdin.read(); print((json.loads(d).get("state","") if d.strip() else ""))' 2>/dev/null || true)"
+            echo "poll $i: state=$STATE"
+            case "$STATE" in
+              succeeded|failed|cancelled) break ;;
+            esac
+            sleep 2
+          done
+
+          echo "----- final op record -----"
+          printf '%s\n' "$OP_JSON" | python3 -m json.tool || printf '%s\n' "$OP_JSON"
+
+          # Always pull the per-op log for diagnosability.
+          echo "----- op log -----"
+          curl -fsS --unix-socket "$SOCK_PATH" "http://localhost/v1/operations/$OP_ID/logs" || true
+
+          if [ "$STATE" != "succeeded" ]; then
+            echo "FATAL: apply op did not succeed (state=$STATE)"
+            exit 1
+          fi
+          echo "op_id=$OP_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Assert the flip (D1 -> D2) and health
+        run: |
+          set -euxo pipefail
+          D2_REF="${{ steps.images.outputs.d2_ref }}"
+          D1_REF="${{ steps.images.outputs.d1_ref }}"
+
+          # The proxy container must now report the v2 digest. RepoDigests lives on
+          # the IMAGE, not the container, so resolve the container's image id first.
+          RUNNING_IMG="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy)"
+          RUNNING_REF="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RUNNING_IMG" | grep "^${REPO}@sha256:" | head -n1 || true)"
+          echo "running ref after apply (expect v2): $RUNNING_REF"
+
+          if [ "$RUNNING_REF" = "$D1_REF" ]; then
+            echo "FATAL: the container is STILL on v1 — the update did not flip the image"
+            exit 1
+          fi
+          if [ "$RUNNING_REF" != "$D2_REF" ]; then
+            echo "FATAL: running digest is neither the expected v2 nor v1 (got $RUNNING_REF, want $D2_REF)"
+            exit 1
+          fi
+
+          # And it is healthy on the new image.
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: proxy /health failed AFTER the flip"
+            docker logs culvert-e2e-proxy 2>&1 | tail -n 200 || true
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:8080/ready >/dev/null && echo "/ready OK on v2"
+          echo "PROOF: container image flipped v1 -> v2 and stayed healthy."
+
+      # Always-on diagnostics so any failure above is debuggable from the log.
+      - name: Diagnostics (always)
+        if: always()
+        run: |
+          set +e
+          SOCK_PATH="${{ steps.cfg.outputs.sock_path }}"
+          PROJECT_DIR="${{ steps.cfg.outputs.project_dir }}"
+          echo "===== agent log ====="
+          cat "$RUNNER_TEMP/maint-e2e/agent.log" 2>/dev/null
+          echo "===== agent /v1/status ====="
+          curl -fsS --unix-socket "$SOCK_PATH" http://localhost/v1/status 2>/dev/null; echo
+          echo "===== agent /v1/audit ====="
+          curl -fsS --unix-socket "$SOCK_PATH" "http://localhost/v1/audit?limit=50" 2>/dev/null; echo
+          echo "===== compose ps ====="
+          docker compose -f "$PROJECT_DIR/$COMPOSE_FILE_NAME" ps 2>/dev/null
+          echo "===== proxy docker logs (tail) ====="
+          docker logs culvert-e2e-proxy 2>&1 | tail -n 200
+          echo "===== local images ====="
+          docker image ls | grep -E 'culvert|registry' 2>/dev/null
+
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set +e
+          PROJECT_DIR="${{ steps.cfg.outputs.project_dir }}"
+          if [ -f "$RUNNER_TEMP/maint-e2e/agent.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/maint-e2e/agent.pid")" 2>/dev/null
+          fi
+          docker compose -f "$PROJECT_DIR/$COMPOSE_FILE_NAME" down -v 2>/dev/null
+          docker rm -f culvert-e2e-proxy registry 2>/dev/null
+          exit 0

@@ -1,0 +1,39 @@
+# Reference config for the maintenance-agent E2E. The workflow renders the
+# live copy with @@PLACEHOLDER@@ tokens substituted (project dir, socket path,
+# runner uid). Kept here as documentation-of-record; see
+# cmd/culvert-maint/internal/config/config.go for the authoritative schema.
+
+# docker_group_lab: run `docker compose` WITHOUT sudo (the runner user is in
+# the docker group). The agent logs a "root-equivalent" WARN — expected in CI.
+privilege_mode = "docker_group_lab"
+
+# Absolute dir holding docker-compose.e2e.yml; the agent chdir's here for every
+# compose invocation.
+compose_project_dir = "@@PROJECT_DIR@@"
+# Bare filename (no path separator) within compose_project_dir.
+compose_file = "docker-compose.e2e.yml"
+
+# UDS the curl client connects to. Under RUNNER_TEMP so it is writable + clean.
+socket_path = "@@SOCK_PATH@@"
+# State dir for operations/<op_id>.log + audit.jsonl.
+state_dir = "@@STATE_DIR@@"
+
+# Repo the pinned pull/tag bind to. Must be a BARE repo (no tag, no @digest);
+# a registry host:port colon before the first '/' is allowed.
+proxy_repo = "127.0.0.1:5000/culvert"
+# image_allowlist MUST match the local registry repo (the ghcr default does
+# NOT). Accepts a tag or an @sha256:<64hex> digest of exactly this repo.
+image_allowlist = "^127\\.0\\.0\\.1:5000/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$"
+
+# SO_PEERCRED allowlist: the runner's own numeric uid so the curl client is
+# permitted on the UDS. The agent refuses to start with an empty list.
+allow_peers = ["@@RUNNER_UID@@"]
+
+# Health gate target: the proxy data-plane port published on host loopback.
+health_base_url = "http://127.0.0.1:8080"
+health_path = "/health"
+ready_path = "/ready"
+
+# Generous bounds so a slow CI pull/restart never trips a timeout.
+operation_timeout = "20m"
+stage_timeout = "8m"
