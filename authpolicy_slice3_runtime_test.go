@@ -60,7 +60,7 @@ func TestS3_DefaultMode_Parity(t *testing.T) {
 
 func TestS3_DefaultExempt_OpensUnmatched_AuthSourceUnauth(t *testing.T) {
 	setupAuthGateTest(t)
-	cfg.SetUnauthMode(true) // defaultAuthOutcome = Exempt
+	cfg.SetUnauthMode(true) // open mode (defaultAuthOutcome Exempt)
 	t.Cleanup(func() { cfg.SetUnauthMode(false) })
 	const host = "s3-defexempt-unauth.example.test"
 	allowFor("allow-unauth", host, "unauth") // matches only if authSource=="unauth"
@@ -247,6 +247,32 @@ func TestS3_NoBackend_DefaultInert_ExemptScopedFires(t *testing.T) {
 	handleRequest(w, nonBrowserReq(host2))
 	if w.Code == http.StatusProxyAuthRequired {
 		t.Fatalf("default-Exempt unmatched (no backend) must open, not 407, got %d", w.Code)
+	}
+}
+
+// ── P1 (Codex): SAML-only deployment must not let Basic creds spoof identity ──
+
+// A SAML-only deployment (no local user, no OIDC) is NOT credential-capable.
+// credCapable excludes SAML, so a Basic Proxy-Authorization must NOT enter the
+// credential branch (where VerifyAuth with no local user would accept any creds
+// and mint the supplied username as the identity). It fails closed instead.
+func TestS3_SAMLOnly_BasicCredsCannotSpoofIdentity(t *testing.T) {
+	setupProxyTest(t)                                  // no local user, no legacy provider
+	withSSORegistry(t, idp("corp", IdPTypeSAML, true)) // browser-only IdP
+	const host = "s3-saml-spoof.example.test"
+
+	w := httptest.NewRecorder()
+	r := basicAuthReq(host, "evil", "whatever")
+	handleRequest(w, r)
+
+	if w.Code != http.StatusProxyAuthRequired {
+		t.Fatalf("SAML-only + Basic creds must fail closed (407), got %d", w.Code)
+	}
+	if got := r.Header.Get("X-User-Identity"); got != "" {
+		t.Errorf("SAML-only must not mint an identity from Basic creds, got %q", got)
+	}
+	if e := findLogByHost(t, host); e.Identity == "evil" {
+		t.Errorf("Basic creds must not spoof identity, got %q", e.Identity)
 	}
 }
 

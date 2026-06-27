@@ -159,7 +159,7 @@ func TestSlice7_UnauthRuleDoesNotMatchExemptTraffic(t *testing.T) {
 // that whole-gate skip is exactly what S2 removes.)
 func TestSlice7_DefaultExempt_ScopedExemptStillFires(t *testing.T) {
 	setupAuthGateTest(t)
-	cfg.SetUnauthMode(true) // defaultAuthOutcome = Exempt (open)
+	cfg.SetUnauthMode(true) // open mode (defaultAuthOutcome Exempt)
 	t.Cleanup(func() { cfg.SetUnauthMode(false) })
 	const host = "slice7-unauthmode.example.test"
 	policyStore.Add(slice7ExemptRule(host)) // scoped Exempt — now fires by priority
