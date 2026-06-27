@@ -225,6 +225,7 @@ func TestP2S3_KillSwitchDoesNotDisableCR(t *testing.T) {
 // no-match. (Pre-S2 this asserted the opposite: UnauthMode skipped the gate.)
 func TestP2S3_DefaultExempt_CRStillEnforces(t *testing.T) {
 	setupAuthGateTest(t)
+	withFreshPolicyStore(t) // restore the global store on cleanup (no rule leak)
 	cfg.SetUnauthMode(true) // open mode (defaultAuthOutcome Exempt)
 	t.Cleanup(func() { cfg.SetUnauthMode(false) })
 	const host = "p2s3-unauth.example.test"

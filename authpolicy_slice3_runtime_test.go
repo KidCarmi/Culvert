@@ -60,6 +60,7 @@ func TestS3_DefaultMode_Parity(t *testing.T) {
 
 func TestS3_DefaultExempt_OpensUnmatched_AuthSourceUnauth(t *testing.T) {
 	setupAuthGateTest(t)
+	withFreshPolicyStore(t) // restore the global store on cleanup (no rule leak)
 	cfg.SetUnauthMode(true) // open mode (defaultAuthOutcome Exempt)
 	t.Cleanup(func() { cfg.SetUnauthMode(false) })
 	const host = "s3-defexempt-unauth.example.test"
@@ -95,6 +96,7 @@ func TestS3_DefaultExempt_DefaultDenyStillBlocks(t *testing.T) {
 
 func TestS3_ScopedCR_OverDefaultExempt_407(t *testing.T) {
 	setupAuthGateTest(t)
+	withFreshPolicyStore(t)
 	cfg.SetUnauthMode(true) // default Exempt
 	t.Cleanup(func() { cfg.SetUnauthMode(false) })
 	const host = "s3-cr-over-exempt.example.test"
@@ -138,6 +140,7 @@ func TestS3_ScopedSSO_OverDefaultExempt_BrowserAnd403(t *testing.T) {
 // "unauth"): it matches a Stage-2 rule scoped to authSource=exempt.
 func TestS3_ScopedExempt_OverDefaultExempt_AuthSourceExempt(t *testing.T) {
 	setupAuthGateTest(t)
+	withFreshPolicyStore(t)
 	cfg.SetUnauthMode(true) // default Exempt
 	t.Cleanup(func() { cfg.SetUnauthMode(false) })
 	const host = "s3-scopedexempt.example.test"
@@ -229,6 +232,9 @@ func TestS3_NoBackend_DefaultInert_ExemptScopedFires(t *testing.T) {
 	// No backend + Default → inert (covered by parity test); here assert that
 	// under Exempt, a scoped CR rule still fires even with NO credential backend.
 	setupProxyTest(t)       // no user/provider
+	withFreshPolicyStore(t) // CRITICAL: restore the store on cleanup — otherwise a
+	// leftover CR rule with NO credential provider leaks an auth_cr_no_credential_provider
+	// FAIL into a later diagnostics test (the QA·Determinism order-dependent flake).
 	cfg.SetUnauthMode(true) // default Exempt
 	t.Cleanup(func() { cfg.SetUnauthMode(false) })
 	const host = "s3-nobackend-exempt-cr.example.test"
