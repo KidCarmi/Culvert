@@ -234,6 +234,42 @@ func TestDAO_InvalidValuesFailClosed(t *testing.T) {
 	}
 }
 
+// ── Helper: resolveLoadedDefaultAuthOutcome branch coverage ──────────────────
+
+func TestDAO_ResolveLoadedDefaultAuthOutcome(t *testing.T) {
+	sp := func(s string) *string { return &s }
+	cases := []struct {
+		name string
+		env  uiUsersFileEnvelope
+		want AuthOutcome
+	}{
+		{"authoritative Exempt", uiUsersFileEnvelope{DefaultAuthOutcome: sp("Exempt")}, OutcomeExempt},
+		{"authoritative Default", uiUsersFileEnvelope{DefaultAuthOutcome: sp("Default")}, OutcomeDefault},
+		{"authoritative wins over mirror", uiUsersFileEnvelope{DefaultAuthOutcome: sp("Default"), UnauthMode: true}, OutcomeDefault},
+		{"invalid fails closed", uiUsersFileEnvelope{DefaultAuthOutcome: sp("garbage"), UnauthMode: true}, OutcomeDefault},
+		{"present-but-empty fails closed (not legacy fallthrough)", uiUsersFileEnvelope{DefaultAuthOutcome: sp(""), UnauthMode: true}, OutcomeDefault},
+		{"absent key migrates from mirror (true)", uiUsersFileEnvelope{UnauthMode: true}, OutcomeExempt},
+		{"absent key migrates from mirror (false)", uiUsersFileEnvelope{}, OutcomeDefault},
+	}
+	for _, tc := range cases {
+		if got := resolveLoadedDefaultAuthOutcome(tc.env); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Present-but-empty default_auth_outcome must fail closed even when the legacy
+// mirror is true — it must NOT reopen the proxy (Codex P2 / fail-closed contract).
+func TestDAO_PresentButEmptyFailsClosed(t *testing.T) {
+	c := loadEnvelope(t, `{"default_auth_outcome":"","unauth_mode":true,"users":[]}`)
+	if c.defaultAuthOutcome != OutcomeDefault {
+		t.Errorf("present-but-empty default_auth_outcome must fail closed to Default, got %q", c.defaultAuthOutcome)
+	}
+	if c.UnauthMode() {
+		t.Error("present-but-empty must not reopen the proxy")
+	}
+}
+
 // ── 8. Concurrent load / read / set is race-free (run with -race) ────────────
 
 func TestDAO_ConcurrentAccess(t *testing.T) {

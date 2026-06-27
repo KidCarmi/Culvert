@@ -1734,6 +1734,37 @@ func normalizeDefaultAuthOutcome(s string) (AuthOutcome, bool) {
 	}
 }
 
+// resolveLoadedDefaultAuthOutcome computes the authoritative global default from
+// a loaded envelope (Slice 2 migration; see AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md
+// §3). When default_auth_outcome is present it wins (fail-closed-normalized) and
+// the legacy unauth_mode mirror is ignored; otherwise it migrates one-way from
+// the legacy bool (true⇒Exempt, false/absent/bare-array⇒Default). Deterministic
+// and idempotent. Early returns keep LoadUIUsersFile flat.
+func resolveLoadedDefaultAuthOutcome(env uiUsersFileEnvelope) AuthOutcome {
+	// Key present (non-nil) ⇒ authoritative, even when empty: an empty or
+	// otherwise non-canonical value fails closed to Default and the legacy
+	// mirror is NOT consulted (a present-but-empty field must never reopen).
+	if env.DefaultAuthOutcome != nil {
+		raw := *env.DefaultAuthOutcome
+		outcome, ok := normalizeDefaultAuthOutcome(raw)
+		if !ok {
+			logWarnf("Loader: ui_users.json: invalid default_auth_outcome %q — failing closed to %q",
+				sanitizeLog(raw), string(OutcomeDefault))
+		} else if env.UnauthMode != (outcome == OutcomeExempt) {
+			// Both fields present and disagreeing: default_auth_outcome is
+			// authoritative; surface the (bounded-window) drift for debugging.
+			logWarnf("Loader: ui_users.json: default_auth_outcome=%q disagrees with legacy unauth_mode=%v — using default_auth_outcome (authoritative)",
+				string(outcome), env.UnauthMode)
+		}
+		return outcome
+	}
+	// Key absent ⇒ one-way legacy migration from the mirror.
+	if env.UnauthMode {
+		return OutcomeExempt
+	}
+	return OutcomeDefault
+}
+
 // ─── UI multi-user admin management ──────────────────────────────────────────
 
 // validatePasswordComplexity enforces minimum password strength:
@@ -1837,10 +1868,12 @@ type uiUserRecord struct {
 // roster along with global settings that must survive restarts.
 type uiUsersFileEnvelope struct {
 	// DefaultAuthOutcome is the single authoritative persisted global Stage-1
-	// default. Written explicitly on every save (no omitempty) so "Default"
-	// round-trips and migration is idempotent. See
-	// AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md.
-	DefaultAuthOutcome string `json:"default_auth_outcome"`
+	// default. A POINTER so the loader can distinguish "key absent" (nil ⇒
+	// migrate from the legacy mirror) from "key present but empty/invalid"
+	// (non-nil "" ⇒ fail closed to Default, never reopen). Written explicitly on
+	// every save (always non-nil) so "Default" round-trips and migration is
+	// idempotent. See AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md.
+	DefaultAuthOutcome *string `json:"default_auth_outcome"`
 	// UnauthMode is the LEGACY field, retained ONLY as a downgrade-compatibility
 	// mirror: read for one-way migration when default_auth_outcome is absent,
 	// and written (= outcome==Exempt) so a pre-Slice-2 binary can still read the
@@ -1875,29 +1908,7 @@ func (c *Config) LoadUIUsersFile() error {
 	} else if err := json.Unmarshal(data, &records); err != nil {
 		return err
 	}
-	// Resolve the authoritative global default (Slice 2 migration). When
-	// default_auth_outcome is present it wins (fail-closed-normalized) and the
-	// legacy unauth_mode mirror is ignored; otherwise migrate one-way from the
-	// legacy bool (true⇒Exempt, false/absent/bare-array⇒Default). Deterministic
-	// and idempotent. See AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md §3.
-	var resolved AuthOutcome
-	if env.DefaultAuthOutcome != "" {
-		outcome, ok := normalizeDefaultAuthOutcome(env.DefaultAuthOutcome)
-		resolved = outcome
-		if !ok {
-			logWarnf("Loader: ui_users.json: invalid default_auth_outcome %q — failing closed to %q",
-				sanitizeLog(env.DefaultAuthOutcome), string(OutcomeDefault))
-		} else if env.UnauthMode != (resolved == OutcomeExempt) {
-			// Both fields present and disagreeing: default_auth_outcome is
-			// authoritative; surface the (bounded-window) drift for debugging.
-			logWarnf("Loader: ui_users.json: default_auth_outcome=%q disagrees with legacy unauth_mode=%v — using default_auth_outcome (authoritative)",
-				string(resolved), env.UnauthMode)
-		}
-	} else if env.UnauthMode {
-		resolved = OutcomeExempt
-	} else {
-		resolved = OutcomeDefault
-	}
+	resolved := resolveLoadedDefaultAuthOutcome(env)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1939,8 +1950,9 @@ func (c *Config) SaveUIUsersFile() error {
 	if outcome == "" {
 		outcome = OutcomeDefault
 	}
+	authoritative := string(outcome)
 	env := uiUsersFileEnvelope{
-		DefaultAuthOutcome: string(outcome),
+		DefaultAuthOutcome: &authoritative,
 		UnauthMode:         outcome == OutcomeExempt,
 		Users:              make([]uiUserRecord, 0, len(c.uiUsers)),
 	}
