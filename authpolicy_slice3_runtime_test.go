@@ -282,6 +282,40 @@ func TestS3_SAMLOnly_BasicCredsCannotSpoofIdentity(t *testing.T) {
 	}
 }
 
+// ── Kill switch + no credential backend: CR rules must still fire ─────────────
+//
+// Bug: when the kill switch is engaged AND there is no credential backend, the
+// auth gate (authRequired) evaluates to false (credCapable=false, ssoCapable=false,
+// effectiveDefault=Default after kill switch). The gate is never entered, so CR
+// rules silently stop challenging and requests fall through to Stage-2.
+//
+// Fix: authRequired must use the ORIGINAL effectiveDefault (pre-kill-switch) so
+// the gate is entered whenever the deployment was originally configured as Exempt.
+// Inside the gate, effectiveDefault (kill-switched) governs the resolver — that is
+// where scoped Exempt outcomes are suppressed. CR/SSO rules are never suppressed
+// by the kill switch in either path.
+func TestS3_KillSwitch_NoBackend_CRStillFires(t *testing.T) {
+	setupProxyTest(t)       // no user/provider → credCapable=false, ssoCapable=false
+	withFreshPolicyStore(t) // clean store; restore on cleanup (prevents rule leaks into diagnostics tests)
+	cfg.SetUnauthMode(true) // default Exempt
+	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	setAuthExemptDisabled(true) // kill switch: forces effectiveDefault → Default
+	t.Cleanup(func() { setAuthExemptDisabled(false) })
+
+	const host = "s3-ks-nobackend-cr.example.test"
+	policyStore.Add(p2s3CR("cr-ks-nb", host))
+
+	start := crCount()
+	w := httptest.NewRecorder()
+	handleRequest(w, nonBrowserReq(host))
+	// The kill switch must NOT disable CR even with no credential backend.
+	// The CR rule must challenge with 407 and increment the metric.
+	if w.Code != http.StatusProxyAuthRequired || crCount() != start+1 {
+		t.Fatalf("kill switch must NOT disable CR with no credential backend (want 407 + metric +1), got code=%d crDelta=%d",
+			w.Code, crCount()-start)
+	}
+}
+
 // ── Migration diagnostic fires only for the intended case ────────────────────
 
 func TestS3_MigrationDiagnostic_Scoping(t *testing.T) {

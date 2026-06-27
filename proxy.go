@@ -286,13 +286,21 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	// authRequired uses (credCapable || ssoCapable) — byte-identical to today's
 	// backend term under Default — plus the Exempt-default term. Arm 2 (Basic
 	// validation) gates on credCapable ONLY.
-	effectiveDefault := cfg.DefaultAuthOutcome()
+	// originalEffective is captured BEFORE the kill switch is applied so that
+	// authRequired reflects whether the deployment was ORIGINALLY configured as
+	// Exempt. Inside the auth gate, effectiveDefault (kill-switched) governs the
+	// resolver — that is where scoped Exempt outcomes are suppressed. Using the
+	// kill-switched value for the gate-entry decision incorrectly skips the gate
+	// in no-backend Exempt deployments, preventing CR/SSO rules from firing.
+	// See TestS3_KillSwitch_NoBackend_CRStillFires.
+	originalEffective := cfg.DefaultAuthOutcome()
+	effectiveDefault := originalEffective
 	if authExemptKillSwitchEngaged() {
 		effectiveDefault = OutcomeDefault
 	}
 	credCapable := hasCredentialCapableProvider()
 	ssoCapable := len(idpRegistry.EnabledProviders()) > 0
-	authRequired := credCapable || ssoCapable || effectiveDefault == OutcomeExempt
+	authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
 
 	if authRequired {
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
