@@ -13,12 +13,14 @@
 // timestamp, and the trusted root is baked, so nothing reaches sigstore.dev at
 // runtime (air-gap safe).
 //
-// Scope (roadmap/D1.6d-P2b-sigstore-identity-trust-plan.md — P2b-1): the verifier,
-// the .sigstore sidecar source, scheme selection, and wiring resolution. NO
-// release-side signing and NO baked official root yet (P2b-2) — the embedded
-// trusted root is empty in the open-source tree, so this scheme is DORMANT until a
-// root is baked or an operator supplies one. Verifying identity (cert chain + SAN
-// + issuer) happens BEFORE any other bundle content is trusted.
+// Scope (roadmap/D1.6d-P2b-sigstore-identity-trust-plan.md): P2b-1 shipped the
+// verifier, the .sigstore sidecar source, scheme selection, and wiring resolution.
+// As of P2b-2a the official Sigstore public-good trusted root is BAKED into the
+// embed below, so the scheme is ACTIVE by default (an operator can override or
+// deactivate it via CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT). NO release-side signing
+// yet — CI keyless signing + the end-to-end/image-sig gates are P2b-2b. Verifying
+// identity (cert chain + SAN + issuer) happens BEFORE any other bundle content is
+// trusted.
 package main
 
 import (
@@ -38,11 +40,14 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// bakedSigstoreTrustedRootJSON is the BAKED Sigstore TUF trusted root (Fulcio CA +
-// Rekor/CT log keys) used for OFFLINE keyless verification. It is EMPTY in the
-// open-source tree — the official root is baked in P2b-2 — so the Sigstore scheme
-// is DORMANT here unless an operator supplies one via
-// CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT. It holds PUBLIC trust material only.
+// bakedSigstoreTrustedRootJSON is the BAKED Sigstore trusted root (Fulcio CA +
+// Rekor/CT log keys + TSA) used for OFFLINE keyless verification. It is the
+// Sigstore public-good `trusted_root.json` (P2b-2a), so the Sigstore scheme is
+// ACTIVE by default — an operator may override it via
+// CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT (e.g. a fresher root after key rotation,
+// or an empty file to deactivate). PUBLIC trust material only — never private
+// keys. Provenance + refresh procedure: trusted_root.provenance.txt and
+// docs/operator/sigstore-trusted-root-lifecycle.md.
 //
 //go:embed trusted_root.json
 var bakedSigstoreTrustedRootJSON []byte
@@ -54,13 +59,17 @@ const sigstoreSigAlg = "sigstore"
 // officialSigstoreIssuer / officialSigstoreSANRegex are the PINNED identity of the
 // official release-signing workflow (plan §"Identity-policy specificity"):
 //   - issuer EXACTLY the GitHub Actions OIDC issuer (no regex — exact match),
-//   - SAN anchored to the full repo slug (no owner/repo wildcard) and to a release
-//     TAG ref, so only a tagged release of THIS repo's workflow can sign a catalog.
+//   - SAN anchored to the full repo slug AND the EXACT signing workflow file
+//     (`ci.yml`) AND a release TAG ref, so ONLY a tagged release run of this repo's
+//     `ci.yml` can mint a catalog-valid identity (P2b-2 security review P0-1).
 //
-// A workflow-file rename needs a policy update + an overlap window (documented).
+// The `ci\.yml` pin (vs a `[^@]+` workflow wildcard) keeps the signing surface to
+// the one intended workflow. Cost: renaming the signing workflow file needs a
+// coordinated identity update + overlap window — see
+// docs/operator/sigstore-trusted-root-lifecycle.md.
 const (
 	officialSigstoreIssuer   = "https://token.actions.githubusercontent.com"
-	officialSigstoreSANRegex = `^https://github\.com/KidCarmi/Culvert/\.github/workflows/[^@]+@refs/tags/v.*$`
+	officialSigstoreSANRegex = `^https://github\.com/KidCarmi/Culvert/\.github/workflows/ci\.yml@refs/tags/v.*$`
 )
 
 // Distinct sigstore error kinds (parallel to the ed25519 errSig* set) so callers/
@@ -228,10 +237,12 @@ func resolveSigstoreWiring(getenv func(string) string) sigstoreWiring {
 	if len(bytes.TrimSpace(rootJSON)) == 0 {
 		if overridden {
 			return sigstoreWiring{warn: "release catalog: " + envReleaseSigstoreIdentity +
-				" is set but no Sigstore trusted root is present; the keyless scheme is INACTIVE " +
-				"(bake an official root in P2b-2 or set " + envReleaseSigstoreTrustedRoot + ")"}
+				" is set but the Sigstore trusted root is empty; the keyless scheme is INACTIVE " +
+				"(restore the baked root or set " + envReleaseSigstoreTrustedRoot + " to a valid root)"}
 		}
-		return sigstoreWiring{} // OSS default: dormant, no warning.
+		// Reached only when an operator OVERRIDES the (now baked, non-empty) root
+		// with an empty file — the supported deactivation path. Dormant, no warning.
+		return sigstoreWiring{}
 	}
 
 	sv, err := newSigstoreVerifier(rootJSON, id)

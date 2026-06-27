@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"io/fs"
@@ -8,14 +9,21 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/testing/ca"
 )
 
 // ─── test harness ─────────────────────────────────────────────────────────────
 
 // matchingIdentity is a SAN that satisfies officialSigstoreSANRegex (a tagged
-// release of THIS repo's workflow). Used to mint a leaf cert in the virtual CA.
-const matchingIdentity = "https://github.com/KidCarmi/Culvert/.github/workflows/release.yml@refs/tags/v1.2.3"
+// release run of THIS repo's pinned signing workflow, ci.yml). Used to mint a
+// leaf cert in the virtual CA.
+const matchingIdentity = "https://github.com/KidCarmi/Culvert/.github/workflows/ci.yml@refs/tags/v1.2.3"
+
+// wrongWorkflowIdentity is a tagged release of THIS repo but a DIFFERENT workflow
+// file (release.yml) — it must be REJECTED now that the SAN is pinned to ci.yml
+// (P2b-2 security review P0-1: narrow the signing surface to one workflow).
+const wrongWorkflowIdentity = "https://github.com/KidCarmi/Culvert/.github/workflows/release.yml@refs/tags/v1.2.3"
 
 // newTestSigstore builds a VirtualSigstore (offline Fulcio + Rekor + CT) and a
 // verifier pinned to the official identity, both backed by the SAME trust
@@ -89,6 +97,44 @@ func TestSigstore_RejectsWrongIssuer(t *testing.T) {
 	}
 	if err := sv.verifyIndexEntity(idx, entity); !errors.Is(err, errSigstoreVerify) {
 		t.Fatalf("wrong issuer: err = %v; want errSigstoreVerify", err)
+	}
+}
+
+// A signature from a DIFFERENT workflow file of THIS repo, on a tag, is rejected:
+// the SAN is pinned to ci.yml, so release.yml@refs/tags/v* must not verify.
+func TestSigstore_RejectsWrongWorkflowFile(t *testing.T) {
+	vs, sv := newTestSigstore(t)
+	idx := []byte(`{"schema_version":1,"releases":[]}`)
+	entity, err := vs.Sign(wrongWorkflowIdentity, officialSigstoreIssuer, idx)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if err := sv.verifyIndexEntity(idx, entity); !errors.Is(err, errSigstoreVerify) {
+		t.Fatalf("wrong workflow file: err = %v; want errSigstoreVerify", err)
+	}
+}
+
+// The baked embed is the real Sigstore public-good trusted_root.json (P2b-2a):
+// it must be non-empty and parse via the same path the verifier uses, with
+// Fulcio + Rekor + CT material present (guards against baking the wrong artifact,
+// e.g. TUF root.json metadata).
+func TestSigstore_BakedRootCanBeParsed(t *testing.T) {
+	if len(bytes.TrimSpace(bakedSigstoreTrustedRootJSON)) == 0 {
+		t.Fatal("baked trusted_root.json is empty; P2b-2a must bake the official root")
+	}
+	tr, err := root.NewTrustedRootFromJSON(bakedSigstoreTrustedRootJSON)
+	if err != nil {
+		t.Fatalf("baked trusted_root.json does not parse via root.NewTrustedRootFromJSON: %v", err)
+	}
+	if len(tr.FulcioCertificateAuthorities()) == 0 {
+		t.Error("baked root has no Fulcio certificate authorities")
+	}
+	if len(tr.RekorLogs()) == 0 {
+		t.Error("baked root has no Rekor transparency logs")
+	}
+	// The baked root must also drive a usable verifier under the official identity.
+	if _, err := newSigstoreVerifier(bakedSigstoreTrustedRootJSON, officialSigstoreIdentity()); err != nil {
+		t.Fatalf("newSigstoreVerifier with the baked root failed: %v", err)
 	}
 }
 
@@ -242,18 +288,26 @@ func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
-// OSS default (empty baked root, no override) ⇒ scheme dormant, no warning/error.
-func TestResolveSigstoreWiring_OSSDormant(t *testing.T) {
+// Default build (baked official root, no override) ⇒ scheme ACTIVE, no warn/error
+// (P2b-2a — the embed is no longer empty).
+func TestResolveSigstoreWiring_BakedRootActive(t *testing.T) {
 	w := resolveSigstoreWiring(env(nil))
-	if w.active || w.verifier != nil || w.err != nil || w.warn != "" {
-		t.Fatalf("OSS default should be dormant+silent; got %+v", w)
+	if !w.active || w.verifier == nil || w.err != nil || w.warn != "" {
+		t.Fatalf("baked root should activate the scheme silently; got %+v", w)
 	}
 }
 
 // Identity override set WITHOUT a trusted root ⇒ inactive + a visible warning.
+// With the official root now baked, "no root" is reachable only by overriding the
+// trusted-root path with an EMPTY file (deactivation).
 func TestResolveSigstoreWiring_IdentityWithoutRootWarns(t *testing.T) {
+	emptyRoot := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(emptyRoot, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	w := resolveSigstoreWiring(env(map[string]string{
-		envReleaseSigstoreIdentity: `{"issuer":"https://x","san_regex":"^https://y$"}`,
+		envReleaseSigstoreIdentity:    `{"issuer":"https://x","san_regex":"^https://y$"}`,
+		envReleaseSigstoreTrustedRoot: emptyRoot,
 	}))
 	if w.active || w.verifier != nil {
 		t.Fatalf("identity without root must stay inactive; got %+v", w)
@@ -283,8 +337,9 @@ func TestResolveSigstoreWiring_BadRootPathErrors(t *testing.T) {
 	}
 }
 
-// An empty trusted-root override file is treated as no-root (dormant), matching
-// the empty baked embed.
+// An empty trusted-root override file is treated as no-root (dormant) — the
+// supported way to DEACTIVATE the keyless scheme now that the official root is
+// baked.
 func TestResolveSigstoreWiring_EmptyRootPathDormant(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "empty.json")
 	if err := os.WriteFile(p, nil, 0o600); err != nil {

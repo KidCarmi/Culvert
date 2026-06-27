@@ -1,0 +1,13 @@
+Sigstore trusted_root.json — provenance (baked embed for keyless catalog verification, P2b-2a)
+
+source_url:   https://raw.githubusercontent.com/sigstore/root-signing/main/targets/trusted_root.json
+fetched_utc:  2026-06-26
+sha256:       6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66
+bytes:        6787
+mediaType:    application/vnd.dev.sigstore.trustedroot+json;version=0.1
+contents:     Sigstore public-good instance — 2 Fulcio CAs, 2 Rekor logs, 2 CT logs, 1 TSA (PUBLIC material only)
+verified:     parses via sigstore-go root.NewTrustedRootFromJSON (FulcioCAs=2 RekorLogs=2 CTLogs=2)
+
+To refresh (Fulcio/Rekor key rotation): re-fetch the same target, diff, re-validate it
+parses, update this file's sha256/date, and commit. See
+docs/operator/sigstore-trusted-root-lifecycle.md.
