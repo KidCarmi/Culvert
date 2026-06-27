@@ -430,10 +430,15 @@ jobs:
           set -euo pipefail
           # Single source of truth shared with the in-binary verifier
           # (TestReleaseIdentitySSOT pins release_identity.env == Go constants).
-          . ./release_identity.env
+          # Read the RAW values via cut — NOT `source` — because the SAN regex
+          # contains backslashes (`github\.com`) that bash escape-processing would
+          # strip, drifting the CI regex from the validated Go constant.
+          ISSUER=$(grep '^CULVERT_RELEASE_SIGSTORE_ISSUER=' release_identity.env | cut -d= -f2-)
+          SAN_REGEX=$(grep '^CULVERT_RELEASE_SIGSTORE_SAN_REGEX=' release_identity.env | cut -d= -f2-)
+          test -n "$ISSUER" && test -n "$SAN_REGEX" || { echo "missing identity in release_identity.env"; exit 1; }
           cosign verify \
-            --certificate-oidc-issuer="$CULVERT_RELEASE_SIGSTORE_ISSUER" \
-            --certificate-identity-regexp="$CULVERT_RELEASE_SIGSTORE_SAN_REGEX" \
+            --certificate-oidc-issuer="$ISSUER" \
+            --certificate-identity-regexp="$SAN_REGEX" \
             "ghcr.io/kidcarmi/culvert@${{ needs.docker.outputs.proxy_digest }}"
 
       - name: Upload generated catalog bundle (signed on tag path)
