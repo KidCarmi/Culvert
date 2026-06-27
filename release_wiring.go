@@ -17,6 +17,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -265,6 +267,33 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	rm := newReleaseManager(svc, resolve)
 	rm.verifyMode = cfg.verifyMode
 	rm.trustSchemes = trustSchemes(cfg)
+	// Runtime catalog refresh (admin POST /api/releases/catalog-refresh): re-run
+	// the verified auto-seed (only when a URL is configured AND in enforce mode)
+	// then reload from disk — the SAME sequence as startup, so a release published
+	// to the catalog origin after boot appears without a restart. Captures
+	// cfg+trust+holder; verification is never relaxed, and an auto-seed failure
+	// leaves the on-disk catalog untouched (fail-closed).
+	//
+	// refreshMu serializes the FULL stage+swap+reload sequence: two concurrent
+	// admin refreshes must not stage different catalog versions and swap/reload
+	// out of order, which could leave the holder on N+1 while disk holds N (the
+	// next restart's rollback gate would then refuse N and lose the catalog).
+	//
+	// Auto-seed errors are redacted before they leave this closure: a transport
+	// failure wraps net/http's *url.Error whose string includes the full request
+	// URL, so a presigned/credentialed CULVERT_RELEASE_CATALOG_URL would otherwise
+	// leak into the API response and audit log (startup redacts the same way).
+	var refreshMu sync.Mutex
+	rm.refresh = func(_ context.Context) error {
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
+		if cfg.catalogURL != "" && cfg.verifyMode == VerifyEnforce {
+			if err := runStartupAutoSeed(cfg, trust); err != nil {
+				return errors.New(redactSeedError(err, cfg.catalogURL))
+			}
+		}
+		return holder.Reload()
+	}
 	setReleaseManager(rm)
 	logger.Printf("release management enabled: proxy_repo=%q verify=%s schemes=%s local_agent=%s",
 		sanitizeLog(cfg.proxyRepo), cfg.verifyMode, rm.trustSchemes, note)
