@@ -1,0 +1,58 @@
+# E2E compose for the maintenance-agent BACKUP + UPGRADE flow.
+#
+# Identical proxy to docker-compose.e2e.yml, PLUS the profile-gated `cli`
+# service and the `culvert-backups` volume — so the agent's backup path
+#   docker compose --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE \
+#     cli --encrypt --backup /backup/<file>
+# has a service to run and a volume to write into. The agent never edits this
+# file; it only runs the compose commands its sudoers/allowlist permit.
+#
+# Mirrors the production D1.5 contract: the `cli` service shares the proxy
+# image (no version skew), mounts /data (read state to pack) + /backup (write
+# the archive), exposes NO ports, and mounts NO docker.sock.
+services:
+  proxy:
+    image: culvert/proxy:pinned
+    container_name: culvert-e2e-proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080" # data-plane proxy: serves /health, /ready, /metrics
+      - "127.0.0.1:9090:9090" # admin UI (plain HTTP via -ui-no-tls)
+    volumes:
+      - proxy-data:/data
+    environment:
+      - TZ=UTC
+    command: [
+      "-port",            "8080",
+      "-ui-port",         "9090",
+      "-ui-no-tls",
+      "-ca-path",         "/data/ca.bundle",
+      "-policy",          "/data/policy.json",
+      "-logfile",         "/data/proxy.log",
+      "-audit-log",       "/data/audit.jsonl",
+      "-request-log",     "/data/requests.jsonl",
+      "-threat-feed-db",  "/data/threatfeeds.json",
+      "-ui-users-file",   "/data/ui_users.json"
+    ]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  # Profile-gated one-shot operator container (D1.5). Same image as proxy so
+  # backup/restore never version-skews from the running daemon. The empty
+  # command clears the daemon CMD; the agent supplies one-shot flags via
+  # `run --rm cli --encrypt --backup /backup/<file>`.
+  cli:
+    image: culvert/proxy:pinned
+    profiles: ["cli"]
+    volumes:
+      - proxy-data:/data
+      - culvert-backups:/backup
+    command: []
+
+volumes:
+  proxy-data:
+  culvert-backups: # backup archives produced by the cli service land here (/backup)
