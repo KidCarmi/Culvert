@@ -398,13 +398,13 @@ func newestAuditTS() int64 {
 	if len(all) == 0 {
 		return 0
 	}
-	var max int64
+	var newest int64
 	for i := range all {
-		if all[i].TS > max {
-			max = all[i].TS
+		if all[i].TS > newest {
+			newest = all[i].TS
 		}
 	}
-	return max
+	return newest
 }
 
 // auditHasRefresh scans the global audit ring (not a length delta — the ring is
