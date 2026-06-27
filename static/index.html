@@ -3632,6 +3632,7 @@ Firefox (all platforms):
               <input id="rel-agent" value="local" data-change="releaseAgentChange"
                 style="margin-left:6px;width:120px;padding:4px 6px;font-size:.8rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
             </label>
+            <button class="btn ghost sm" data-click="releaseCatalogRefresh" data-min-role="admin" title="Re-fetch the signed catalog from its configured origin (CULVERT_RELEASE_CATALOG_URL) and reload — no restart needed">⟳ Refresh catalog</button>
             <button class="btn ghost sm" data-click="loadReleases">↺ Refresh</button>
           </div>
         </div>
@@ -4008,6 +4009,7 @@ document.addEventListener('click', e => {
 
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
+    case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
     case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
     case 'releaseDispatchSubmit':  releaseDispatchSubmit(); break;
@@ -9646,6 +9648,26 @@ async function loadReleases() {
   await loadReleaseCatalog();
   await loadReleaseCurrent();
   await loadReleaseStatus();
+}
+
+// releaseCatalogRefresh re-fetches the signed catalog from its configured origin
+// (admin POST /api/releases/catalog-refresh) and reloads the panel — so a release
+// published to the catalog URL after startup appears without restarting the proxy.
+async function releaseCatalogRefresh() {
+  try {
+    const r = await apiFetch('/api/releases/catalog-refresh', { method: 'POST' });
+    let payload = {};
+    try { payload = await r.json(); } catch (_) {}
+    if (r.ok) {
+      toast(payload.available ? 'Catalog refreshed from origin' : 'Refreshed — no catalog available', 'success');
+    } else {
+      toast('Refresh failed: ' + (payload.error || ('HTTP ' + r.status)), 'error');
+    }
+  } catch (err) {
+    toast('Refresh failed: ' + err.message, 'error');
+  }
+  await loadReleaseCatalog();
+  await loadReleaseCurrent();
 }
 
 async function loadReleaseCatalog() {

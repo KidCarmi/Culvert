@@ -601,4 +601,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/releases/dispatch/resume", Handler: "apiReleaseDispatchResume", Domain: "release", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true,
 			Note: "re-poll existing op_id; never calls Apply; audited by DispatchService"}}},
+	{Path: "/api/releases/catalog-refresh", Handler: "apiReleaseCatalogRefresh", Domain: "release", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "re-fetch the catalog from the configured origin + reload; verification unchanged; audited via auditEvent"}}},
 }

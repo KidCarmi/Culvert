@@ -265,6 +265,20 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	rm := newReleaseManager(svc, resolve)
 	rm.verifyMode = cfg.verifyMode
 	rm.trustSchemes = trustSchemes(cfg)
+	// Runtime catalog refresh (admin POST /api/releases/catalog-refresh): re-run
+	// the verified auto-seed (only when a URL is configured AND in enforce mode)
+	// then reload from disk — the SAME sequence as startup, so a release published
+	// to the catalog origin after boot appears without a restart. Captures
+	// cfg+trust+holder; verification is never relaxed, and an auto-seed failure
+	// leaves the on-disk catalog untouched (fail-closed).
+	rm.refresh = func(_ context.Context) error {
+		if cfg.catalogURL != "" && cfg.verifyMode == VerifyEnforce {
+			if err := runStartupAutoSeed(cfg, trust); err != nil {
+				return err
+			}
+		}
+		return holder.Reload()
+	}
 	setReleaseManager(rm)
 	logger.Printf("release management enabled: proxy_repo=%q verify=%s schemes=%s local_agent=%s",
 		sanitizeLog(cfg.proxyRepo), cfg.verifyMode, rm.trustSchemes, note)

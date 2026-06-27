@@ -54,6 +54,13 @@ type releaseManager struct {
 	// schemes ("ed25519", "sigstore", "ed25519+sigstore", or "none"), surfaced
 	// read-only on GET /api/releases (P2b). Empty ⇒ omitted.
 	trustSchemes string
+	// refresh re-fetches the catalog from the configured origin (P1.7 auto-seed,
+	// when CULVERT_RELEASE_CATALOG_URL is set + enforce) and reloads the on-disk
+	// catalog, so a release published AFTER startup appears without restarting the
+	// proxy. Set at startup by loadReleaseManagement; nil ⇒ refresh unavailable.
+	// On a fetch/verify failure it returns an error and leaves the current catalog
+	// untouched (fail-closed, mirroring startup auto-seed).
+	refresh func(context.Context) error
 }
 
 func newReleaseManager(svc *DispatchService, resolve agentResolver) *releaseManager {
@@ -180,6 +187,7 @@ func registerReleaseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/releases/dispatch", apiReleaseDispatch)
 	mux.HandleFunc("/api/releases/dispatch/status", apiReleaseDispatchStatus)
 	mux.HandleFunc("/api/releases/dispatch/resume", apiReleaseDispatchResume)
+	mux.HandleFunc("/api/releases/catalog-refresh", apiReleaseCatalogRefresh)
 }
 
 func writeReleaseUnavailable(w http.ResponseWriter) {
@@ -251,6 +259,49 @@ func channelPointers(cat *Catalog) map[string]any {
 		}
 	}
 	return out
+}
+
+// ─── POST /api/releases/catalog-refresh ──────────────────────────────────────
+//
+// Re-fetches the signed catalog from the configured origin
+// (CULVERT_RELEASE_CATALOG_URL, when set + enforce mode) and reloads it, so a
+// release published after startup appears WITHOUT restarting the proxy. Admin-
+// only and audited. Verification is NOT relaxed — the same baked-root + pinned-
+// identity + freshness/rollback gate runs as at startup, and on any fetch/verify
+// failure the existing catalog is left untouched (fail-closed).
+func apiReleaseCatalogRefresh(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	rm := currentReleaseManager()
+	if rm == nil || rm.svc == nil || rm.refresh == nil {
+		writeReleaseUnavailable(w)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, releaseMethodNotAllowed, http.StatusMethodNotAllowed)
+		return
+	}
+	if err := rm.refresh(r.Context()); err != nil {
+		auditEvent(r, "release.catalog.refresh", "catalog", "result=error: "+sanitizeLog(err.Error()))
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"refreshed": false, "error": err.Error()})
+		return
+	}
+	cat := rm.svc.catalog()
+	avail := cat != nil
+	detail := "result=ok available=false"
+	if avail {
+		detail = "result=ok available=true"
+	}
+	auditEvent(r, "release.catalog.refresh", "catalog", detail)
+	out := map[string]any{"refreshed": true, "available": avail, "verify_mode": rm.verifyMode.String()}
+	if avail {
+		if v := cat.Version(); v > 0 {
+			out["catalog_version"] = v
+		}
+		out["channels"] = channelPointers(cat)
+	}
+	jsonOK(w, out)
 }
 
 // ─── GET /api/releases/current?agent=<key> ──────────────────────────────────
