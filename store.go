@@ -1711,22 +1711,37 @@ func (c *Config) DefaultAuthOutcome() AuthOutcome {
 	return OutcomeDefault
 }
 
-// SetUnauthMode enables or disables explicit unauthenticated (open) mode. Shim
-// over the authoritative defaultAuthOutcome field; persistence is unchanged.
-func (c *Config) SetUnauthMode(enabled bool) {
-	c.mu.Lock()
-	if enabled {
-		c.defaultAuthOutcome = OutcomeExempt
-	} else {
-		c.defaultAuthOutcome = OutcomeDefault
+// SetDefaultAuthOutcome sets the authoritative global Stage-1 default applied on
+// no-match, fail-closed: any value other than OutcomeExempt normalizes to
+// OutcomeDefault. Persists so the setting survives restarts. This is the
+// canonical setter; SetUnauthMode is a thin legacy shim over it.
+func (c *Config) SetDefaultAuthOutcome(outcome AuthOutcome) {
+	resolved := OutcomeDefault
+	if outcome == OutcomeExempt {
+		resolved = OutcomeExempt
 	}
+	c.mu.Lock()
+	c.defaultAuthOutcome = resolved
 	c.mu.Unlock()
-	if enabled {
-		logger.Printf("Auth: mode UNAUTH (open proxy, no credentials required)")
+	if resolved == OutcomeExempt {
+		logger.Printf("Auth: default authentication = Open unmatched traffic (defaultAuthOutcome=Exempt)")
+	} else {
+		logger.Printf("Auth: default authentication = Require authentication (defaultAuthOutcome=Default)")
 	}
 	// Persist so the setting survives restarts.
 	if err := c.SaveUIUsersFile(); err != nil {
 		logWarnf("Auth: failed to persist defaultAuthOutcome: %v", err)
+	}
+}
+
+// SetUnauthMode is a legacy boolean shim over SetDefaultAuthOutcome
+// (true⇒Exempt, false⇒Default). Retained for the setup flow and internal
+// callers; the settings API uses SetDefaultAuthOutcome directly.
+func (c *Config) SetUnauthMode(enabled bool) {
+	if enabled {
+		c.SetDefaultAuthOutcome(OutcomeExempt)
+	} else {
+		c.SetDefaultAuthOutcome(OutcomeDefault)
 	}
 }
 

@@ -968,11 +968,11 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		jsonOK(w, map[string]any{
-			"authEnabled": cfg.AuthEnabled(),
-			"user":        cfg.GetUser(), // password is NEVER returned
-			"proxyPort":   cfg.ProxyPort,
-			"uiPort":      cfg.UIPort,
-			"unauthMode":  cfg.UnauthMode(),
+			"authEnabled":        cfg.AuthEnabled(),
+			"user":               cfg.GetUser(), // password is NEVER returned
+			"proxyPort":          cfg.ProxyPort,
+			"uiPort":             cfg.UIPort,
+			"defaultAuthOutcome": string(cfg.DefaultAuthOutcome()), // "Default" | "Exempt"
 		})
 
 	case http.MethodPost:
@@ -1006,7 +1006,11 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// PUT /api/settings/unauth-mode — toggle proxy authentication requirement
+// PUT /api/settings/unauth-mode — set the global default authentication behavior.
+// (Route name is legacy; the contract is the defaultAuthOutcome string. Scoped
+// auth rules always evaluate first; this default applies only to unmatched
+// traffic, and Exempt is NOT an allow — Stage-2 policy and default-deny still
+// apply.) Accepts {"defaultAuthOutcome":"Default"|"Exempt"}.
 func apiUnauthMode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1016,23 +1020,30 @@ func apiUnauthMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Enabled bool `json:"enabled"`
+		DefaultAuthOutcome string `json:"defaultAuthOutcome"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	cfg.SetUnauthMode(body.Enabled)
-	if body.Enabled {
-		auditEvent(r, "settings.update", "unauthMode", "enabled — proxy accepts unauthenticated traffic; policy rules govern access")
-		adminSettingsSave()
-		logger.Printf("UI: unauth mode enabled — proxy accepts traffic without credentials")
-	} else {
-		auditEvent(r, "settings.update", "unauthMode", "disabled — proxy requires credentials")
-		adminSettingsSave()
-		logger.Printf("UI: unauth mode disabled — proxy requires credentials")
+	// Only the two v1 global defaults are valid; anything else is rejected
+	// (reserved outcomes like CredentialRequired are not valid global defaults).
+	switch AuthOutcome(body.DefaultAuthOutcome) {
+	case OutcomeDefault, OutcomeExempt:
+	default:
+		http.Error(w, `defaultAuthOutcome must be "Default" or "Exempt"`, http.StatusBadRequest)
+		return
 	}
-	jsonOK(w, map[string]any{"ok": true, "unauthMode": body.Enabled})
+	outcome := AuthOutcome(body.DefaultAuthOutcome)
+	cfg.SetDefaultAuthOutcome(outcome)
+	adminSettingsSave()
+	if outcome == OutcomeExempt {
+		auditEvent(r, "settings.update", "defaultAuthOutcome", "Exempt — unmatched traffic is open (not Allow; Stage-2 policy still governs); scoped auth rules still enforce")
+	} else {
+		auditEvent(r, "settings.update", "defaultAuthOutcome", "Default — unmatched traffic requires authentication")
+	}
+	logger.Printf("UI: default authentication set to %q", sanitizeLog(string(outcome)))
+	jsonOK(w, map[string]any{"ok": true, "defaultAuthOutcome": string(outcome)})
 }
 
 // GET/PUT /api/settings/log-level — view/change runtime log level.

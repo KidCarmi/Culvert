@@ -1865,24 +1865,32 @@ Firefox (all platforms):
         </div>
       </div>
 
-      <!-- Proxy Authentication Mode -->
+      <!-- Default Authentication Behavior -->
       <div class="panel" style="margin-top:18px">
-        <div class="panel-header"><span class="panel-title">🔑 Proxy Authentication Mode</span></div>
+        <div class="panel-header"><span class="panel-title">🔑 Default authentication behavior</span></div>
         <div class="panel-body">
-          <div id="s-unauth-status-bar" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.85rem;background:rgba(20,184,166,.08);border:1px solid rgba(20,184,166,.2)">
-            <span id="s-unauth-mode-icon" style="font-size:1.2rem">🔒</span>
+          <div id="s-default-auth-status-bar" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.85rem;background:rgba(20,184,166,.08);border:1px solid rgba(20,184,166,.2)">
+            <span id="s-default-auth-icon" style="font-size:1.2rem">🔒</span>
             <div>
-              <div id="s-unauth-mode-label" style="font-weight:600">Credentials Required</div>
-              <div id="s-unauth-mode-desc" style="font-size:.75rem;color:var(--muted)">Proxy requires Proxy-Authorization. Clients must authenticate before any traffic is forwarded.</div>
+              <div id="s-default-auth-label" style="font-weight:600">Require authentication</div>
+              <div id="s-default-auth-desc" style="font-size:.75rem;color:var(--muted)">Traffic that matches no auth rule must authenticate.</div>
             </div>
           </div>
+          <div style="margin-bottom:12px">
+            <label class="label" for="s-default-auth-select">Default for unmatched traffic</label>
+            <select class="input" id="s-default-auth-select" data-change="setDefaultAuthOutcome" style="max-width:340px">
+              <option value="Default">Require authentication</option>
+              <option value="Exempt">Open unmatched traffic</option>
+            </select>
+            <span id="s-default-auth-save-status" style="font-size:.8rem;color:var(--muted);margin-left:10px"></span>
+          </div>
           <p class="hint">
-            <strong>Credentials Required</strong> - Proxy port demands authentication (407). Use when all clients authenticate via local/LDAP/OIDC credentials.<br>
-            <strong>Open / Policy-Only</strong> — Proxy accepts all clients without credentials. Identity is set to <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> for unauthenticated traffic. <strong>Policy rules</strong> control access — create a rule with Auth Source = <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> to allow or block unauthenticated users. Recommended when using a PAC file with PBAC.
+            Scoped <strong>auth rules are evaluated first and always enforce</strong> — this setting applies <strong>only to traffic that no rule matches</strong>.<br>
+            <strong>Require authentication</strong> — unmatched traffic must authenticate (407 / SSO), unless no auth backend is configured.<br>
+            <strong>Open unmatched traffic</strong> — unmatched traffic is admitted without credentials (authSource <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code>). This is <strong>not Allow</strong>: Stage-2 policy still decides access and <strong>default-deny still applies</strong>.
           </p>
-          <div style="display:flex;gap:10px;align-items:center">
-            <button class="btn" id="s-unauth-toggle-btn" data-click="toggleUnauthMode">Enable Open / Policy-Only</button>
-            <span id="s-unauth-save-status" style="font-size:.8rem;color:var(--muted)"></span>
+          <div id="s-default-auth-enforce-warn" style="display:none;margin-top:6px;padding:8px 12px;border-radius:6px;font-size:.78rem;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:#fbbf24">
+            ⚠ Open unmatched traffic is selected and scoped CredentialRequired/SSORequired rules exist — those rules still enforce for matching traffic. See <strong>Diagnostics</strong> for details.
           </div>
         </div>
       </div>
@@ -3853,7 +3861,6 @@ document.addEventListener('click', e => {
     case 'saveUIAllowIPs':    saveUIAllowIPs(); break;
     case 'removeUIAllowIP':   removeUIAllowIP(+arg); break;
     case 'saveNetworkTLS':    saveNetworkTLS(); break;
-    case 'toggleUnauthMode':  toggleUnauthMode(); break;
     case 'saveSyslog':        saveSyslog(); break;
     case 'disableSyslog':     disableSyslog(); break;
     case 'saveMetricsToken':  saveMetricsToken(); break;
@@ -6621,46 +6628,55 @@ function exportLogs(format) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Settings
 // ═══════════════════════════════════════════════════════════════════════════
-let _unauthMode = false;
+let _defaultAuthOutcome = 'Default';
 
-function renderUnauthModeUI(enabled) {
-  _unauthMode = enabled;
-  const bar  = document.getElementById('s-unauth-status-bar');
-  const icon = document.getElementById('s-unauth-mode-icon');
-  const lbl  = document.getElementById('s-unauth-mode-label');
-  const desc = document.getElementById('s-unauth-mode-desc');
-  const btn  = document.getElementById('s-unauth-toggle-btn');
-  if (!bar) return;
-  if (enabled) {
-    bar.style.background = 'rgba(34,197,94,.08)';
-    bar.style.borderColor = 'rgba(34,197,94,.25)';
-    icon.textContent = '🌐';
-    lbl.textContent = 'Open / Policy-Only';
-    desc.textContent = 'Proxy accepts all traffic without credentials. Policy rules control access based on identity.';
-    btn.textContent = 'Switch to Credentials Required';
-    btn.className = 'btn danger';
-  } else {
-    bar.style.background = 'rgba(20,184,166,.08)';
-    bar.style.borderColor = 'rgba(20,184,166,.2)';
-    icon.textContent = '🔒';
-    lbl.textContent = 'Credentials Required';
-    desc.textContent = 'Proxy requires Proxy-Authorization. Clients must authenticate before any traffic is forwarded.';
-    btn.textContent = 'Enable Open / Policy-Only';
-    btn.className = 'btn';
+// renderDefaultAuthUI reflects the global default-authentication setting. `open`
+// is true when the default is Exempt (open unmatched traffic).
+function renderDefaultAuthUI(outcome) {
+  _defaultAuthOutcome = (outcome === 'Exempt') ? 'Exempt' : 'Default';
+  const open = _defaultAuthOutcome === 'Exempt';
+  const bar  = document.getElementById('s-default-auth-status-bar');
+  const icon = document.getElementById('s-default-auth-icon');
+  const lbl  = document.getElementById('s-default-auth-label');
+  const desc = document.getElementById('s-default-auth-desc');
+  const sel  = document.getElementById('s-default-auth-select');
+  if (sel) sel.value = _defaultAuthOutcome;
+  if (bar) {
+    if (open) {
+      bar.style.background = 'rgba(34,197,94,.08)';
+      bar.style.borderColor = 'rgba(34,197,94,.25)';
+      icon.textContent = '🌐';
+      lbl.textContent = 'Open unmatched traffic';
+      desc.textContent = 'Traffic that matches no auth rule is admitted without credentials (authSource "unauth"). Not Allow — Stage-2 policy and default-deny still apply.';
+    } else {
+      bar.style.background = 'rgba(20,184,166,.08)';
+      bar.style.borderColor = 'rgba(20,184,166,.2)';
+      icon.textContent = '🔒';
+      lbl.textContent = 'Require authentication';
+      desc.textContent = 'Traffic that matches no auth rule must authenticate.';
+    }
+  }
+  // Warn when Open is selected and scoped CR/SSO rules exist (those still enforce).
+  const warn = document.getElementById('s-default-auth-enforce-warn');
+  if (warn) {
+    const hasChallengeRules = Array.isArray(apRules) && apRules.some(r =>
+      r.auth && (r.auth.outcome === 'CredentialRequired' || r.auth.outcome === 'SSORequired'));
+    warn.style.display = (open && hasChallengeRules) ? 'block' : 'none';
   }
 }
 
-async function toggleUnauthMode() {
-  const next = !_unauthMode;
-  const statusEl = document.getElementById('s-unauth-save-status');
+async function setDefaultAuthOutcome() {
+  const sel = document.getElementById('s-default-auth-select');
+  const outcome = sel ? sel.value : 'Default';
+  const statusEl = document.getElementById('s-default-auth-save-status');
   try {
     await api('/api/settings/unauth-mode', {
       method: 'PUT', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({enabled: next})
+      body: JSON.stringify({defaultAuthOutcome: outcome})
     });
-    renderUnauthModeUI(next);
-    toast('Proxy auth mode updated', 'success');
-    if (statusEl) { statusEl.textContent = next ? '✅ Open / Policy-Only active' : '✅ Credentials Required active'; statusEl.style.color = 'var(--green)'; }
+    renderDefaultAuthUI(outcome);
+    toast('Default authentication updated', 'success');
+    if (statusEl) { statusEl.textContent = '✅ ' + (outcome === 'Exempt' ? 'Open unmatched traffic' : 'Require authentication') + ' active'; statusEl.style.color = 'var(--green)'; }
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -6668,7 +6684,7 @@ async function loadSettings() {
   try {
     const s = await api('/api/settings');
     document.getElementById('s-user').value = s.user || '';
-    renderUnauthModeUI(!!s.unauthMode);
+    renderDefaultAuthUI(s.defaultAuthOutcome || 'Default');
   } catch(e) { console.error(e); }
   // Session timeout
   try {
@@ -9274,8 +9290,12 @@ async function runPolicyTest() {
     const exempt = a.outcome === 'Exempt';
     const credReq = a.outcome === 'CredentialRequired';
     const sso = a.outcome === 'SSORequired';
+    const scopedExempt = exempt && !!a.rule;       // explicit Exempt rule → authSource=exempt
+    const defaultExempt = exempt && !a.rule;       // global default Open → authSource=unauth
     let badge;
-    if (exempt) {
+    if (defaultExempt) {
+      badge = '<span style="background:rgba(34,197,94,.15);color:#34d399;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🌐 Open unmatched (default)</span>';
+    } else if (exempt) {
       badge = '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🪪 Exempt</span>';
     } else if (credReq) {
       badge = '<span style="background:rgba(96,165,250,.15);color:#60a5fa;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🔐 CredentialRequired</span>';
@@ -9298,13 +9318,15 @@ async function runPolicyTest() {
     }
     authHtml = `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px">
       <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-1 Authentication: ${badge}</div>
-      ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''}</div>` : ''}
+      ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''} <span style="color:var(--muted)">(scoped rules evaluate first)</span></div>` : `<div class="pt-sub" style="color:var(--muted)">No scoped auth rule matched — the global default applies (Default authentication: <strong>${escHtml(a.defaultAuthOutcome || 'Default')}</strong>).</div>`}
       ${runtimeLine}
-      ${exempt ? `<div class="pt-sub" style="color:#fbbf24;margin-top:4px">Exempt skips authentication only — it does NOT allow traffic. The Stage-2 access decision below still applies (Stage-2 sees authSource="${escHtml(a.stage2AuthSource)}").</div>` : ''}
+      ${scopedExempt ? `<div class="pt-sub" style="color:#fbbf24;margin-top:4px">Scoped Exempt rule — skips authentication only; it does NOT allow traffic. Stage-2 still applies and sees authSource="${escHtml(a.stage2AuthSource)}".</div>` : ''}
+      ${defaultExempt ? `<div class="pt-sub" style="color:#34d399;margin-top:4px">Open unmatched traffic (defaultAuthOutcome=Exempt) — admitted without authentication because no rule matched. This is NOT Allow: Stage-2 policy and default-deny still apply, and Stage-2 sees authSource="${escHtml(a.stage2AuthSource)}" (no identity).</div>` : ''}
       ${credReq ? '<div class="pt-sub" style="color:#60a5fa;margin-top:4px">CredentialRequired returns a deterministic 407 credential challenge — the client must authenticate first. This is NOT Allow. At runtime Stage-2 is NOT evaluated until the client authenticates; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-authentication decision (with the authenticated identity) may differ.</div>' : ''}
       ${sso ? '<div class="pt-sub" style="color:#34d399;margin-top:4px">SSORequired requires an interactive browser SSO login first. A browser client is redirected (302) to the IdP; a non-browser or CONNECT client is failed closed (403). This is NOT Allow. Stage-2 is NOT evaluated until SSO completes and a session exists; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-SSO decision (with the authenticated identity) may differ.</div>' : ''}
       ${a.credentialsPresented ? '<div class="pt-sub" style="color:var(--muted);margin-top:4px">Credentials presented — at runtime, credentials always win and the Stage-1 outcome is not evaluated.</div>' : ''}
-      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — all exemptions are forced to Default (auth required). CredentialRequired and SSORequired are unaffected.</div>' : ''}
+      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — exemptions (scoped Exempt and the Open default) are forced to Require authentication. CredentialRequired and SSORequired are unaffected.</div>' : ''}
+      <div class="pt-sub" style="margin-top:6px;color:${a.stage2Reached ? '#34d399' : 'var(--muted)'}">Stage-2: <strong>${a.stage2Reached ? 'reached at runtime' : 'NOT reached at runtime'}</strong>.${a.stage2Note ? ' ' + escHtml(a.stage2Note) : ''}</div>
     </div>`;
   }
 
