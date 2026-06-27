@@ -55,9 +55,10 @@ jobs:
           KEYS="$RUNNER_TEMP/keys.json"; PRIV="$RUNNER_TEMP/priv.seed"
 
           seed() { # version version_id [expires]
+            local expires="${3:-2099-01-01T00:00:00Z}"
             CULVERT_E2E_SEED_OUT=/data/release_catalog CULVERT_E2E_SEED_KEYS="$KEYS" \
             CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" \
-            CULVERT_E2E_SEED_VERSION_ID="$2" ${3:+CULVERT_E2E_SEED_EXPIRES="$3"} \
+            CULVERT_E2E_SEED_VERSION_ID="$2" CULVERT_E2E_SEED_EXPIRES="$expires" \
               go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
           }
           start_cp() { # proxyport uiport
@@ -132,9 +133,10 @@ jobs:
           KEYS="$RUNNER_TEMP/keys.json"; PRIV="$RUNNER_TEMP/priv.seed"
 
           seed() { # version version_id [expires]
+            local expires="${3:-2099-01-01T00:00:00Z}"
             CULVERT_E2E_SEED_OUT="$SEED/release_catalog" CULVERT_E2E_SEED_KEYS="$KEYS" \
             CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" \
-            CULVERT_E2E_SEED_VERSION_ID="$2" ${3:+CULVERT_E2E_SEED_EXPIRES="$3"} \
+            CULVERT_E2E_SEED_VERSION_ID="$2" CULVERT_E2E_SEED_EXPIRES="$expires" \
               go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
             # The image runs as the non-root `proxy` user and enforce mode writes the
             # rollback floor under /data, so make the whole bind mount r/w for any UID.
