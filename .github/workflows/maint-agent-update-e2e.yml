@@ -46,32 +46,59 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      # The agent's resolve_target runs `docker manifest inspect --verbose`
-      # against the registry. The fixed template carries no --insecure flag, so
-      # the daemon must trust the plain-HTTP local registry. Configure it BEFORE
-      # anything pulls/pushes, then restart docker.
-      - name: Trust local insecure registry
+      # The agent's resolve_target runs `docker manifest inspect` against the
+      # registry with NO --insecure flag. The daemon's `insecure-registries`
+      # setting does NOT apply to the client-side `docker manifest` command, so
+      # a plain-HTTP registry fails there. Run a TLS registry that BOTH the
+      # daemon (pull/push, via /etc/docker/certs.d) AND the CLI (manifest
+      # inspect / curl, via the system CA store) trust — no --insecure anywhere,
+      # no daemon restart needed. Configure trust BEFORE anything pulls/pushes.
+      - name: Start TLS local registry (trusted by daemon + CLI)
         run: |
           set -euxo pipefail
-          echo '{ "insecure-registries": ["127.0.0.1:5000"] }' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-          # Wait for the daemon to come back.
-          for i in $(seq 1 30); do
-            if docker info >/dev/null 2>&1; then echo "docker up"; break; fi
-            sleep 1
-          done
-          docker info --format '{{json .RegistryConfig.InsecureRegistryCIDRs}}'
+          CERT_DIR="$RUNNER_TEMP/registry-certs"
+          mkdir -p "$CERT_DIR"
 
-      - name: Start local registry
-        run: |
-          set -euxo pipefail
-          docker run -d --restart=always -p 127.0.0.1:5000:5000 --name registry registry:2
-          # Wait for the registry API to answer.
+          # Self-signed cert with SAN IP:127.0.0.1 (the registry host:port host).
+          openssl req -x509 -newkey rsa:4096 -nodes \
+            -keyout "$CERT_DIR/registry.key" \
+            -out "$CERT_DIR/registry.crt" \
+            -days 2 \
+            -subj "/CN=127.0.0.1" \
+            -addext "subjectAltName=IP:127.0.0.1"
+          # registry:2 runs as a non-root user in newer images; make the bind-
+          # mounted cert material readable to it.
+          chmod 0644 "$CERT_DIR/registry.crt" "$CERT_DIR/registry.key"
+
+          # Trust path 1 — the DAEMON (docker pull/push) reads per-registry CAs
+          # from /etc/docker/certs.d/<host:port>/ca.crt. No daemon restart.
+          sudo mkdir -p "/etc/docker/certs.d/127.0.0.1:5000"
+          sudo cp "$CERT_DIR/registry.crt" "/etc/docker/certs.d/127.0.0.1:5000/ca.crt"
+
+          # Trust path 2 — the CLI (`docker manifest inspect`) and curl talk TLS
+          # directly and validate against the SYSTEM CA store.
+          sudo cp "$CERT_DIR/registry.crt" /usr/local/share/ca-certificates/registry-e2e.crt
+          sudo update-ca-certificates
+
+          docker run -d --restart=always --name registry \
+            -p 127.0.0.1:5000:5000 \
+            -v "$CERT_DIR:/certs:ro" \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+            registry:2
+
+          # Wait for the registry API to answer over HTTPS using the system CA.
+          ok=""
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1; then echo "registry up"; break; fi
+            if curl -fsS https://127.0.0.1:5000/v2/ >/dev/null 2>&1; then ok=1; break; fi
             sleep 1
           done
-          curl -fsS http://127.0.0.1:5000/v2/
+          if [ -z "$ok" ]; then
+            echo "FATAL: TLS registry did not come up"
+            docker logs registry 2>&1 | tail -n 50 || true
+            exit 1
+          fi
+          curl -fsS https://127.0.0.1:5000/v2/
 
       # Build TWO genuinely-different proxy images (distinct BUILD_VARIANT ->
       # distinct content -> distinct registry digest). Push both; capture each

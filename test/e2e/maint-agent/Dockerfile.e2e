@@ -3,11 +3,11 @@
 # Differences from the production Dockerfile:
 #   - NO GeoIP download stage (db-ip.com is often blocked on CI runners and is
 #     irrelevant to the update flow).
-#   - A BUILD_VARIANT build-arg baked into a label + an in-image file so two
-#     builds (v1, v2) produce DISTINCT content digests deterministically. We
-#     cannot fabricate a `repo@sha256:` via `docker tag`; the agent's
-#     resolve_target/pull/verify compare REAL registry digests, so the two
-#     versions must genuinely differ.
+#   - A BUILD_VARIANT build-arg baked into the binary (`-X main.version`), the
+#     /app/VERSION file, and an image LABEL so two builds (v1, v2) produce
+#     DISTINCT content digests deterministically. We cannot fabricate a
+#     `repo@sha256:` via `docker tag`; the agent's resolve_target/pull/verify
+#     compare REAL registry digests, so the two versions must genuinely differ.
 #   - wget is present (alpine base) for the compose healthcheck.
 FROM golang:1.25-alpine AS builder
 WORKDIR /app
@@ -37,6 +37,9 @@ COPY --from=builder --chown=proxy:proxy /app/culvert .
 COPY --from=builder --chown=proxy:proxy /app/VERSION ./VERSION
 VOLUME ["/data"]
 EXPOSE 8080 9090
-RUN echo "build-variant=${BUILD_VARIANT}" > /app/E2E_VARIANT
+# The LABEL is applied LAST so the layer/config it adds is distinct per variant.
+# Combined with the per-variant binary (-X main.version) and VERSION file, this
+# guarantees v1 and v2 carry different registry digests. (No extra RUN marker:
+# writing under /app would need a root-owned writable dir after USER proxy.)
 LABEL culvert.e2e.variant="${BUILD_VARIANT}"
 ENTRYPOINT ["./culvert"]
