@@ -1,0 +1,199 @@
+name: Catalog E2E (real binary)
+
+# End-to-end proof that the release catalog works on a real VM, two ways:
+#   1. catalog-e2e        — the bare culvert BINARY (fast, no Docker)
+#   2. catalog-e2e-docker — the actual proxy IMAGE (how production runs)
+#
+# Each runs the same 4-phase sequence against a REAL Control Plane in enforce mode,
+# asserting over HTTP (/api/releases) that the catalog is verified, loaded, served,
+# UPGRADED, and that downgrade/tamper are refused:
+#   P1 serve     — seed v1 → available:true (catalog_version 1, version 1.0.0)
+#   P2 upgrade   — re-seed v2 (higher version, same key) → restart → available:true
+#                  (catalog_version 2, version 2.0.0) + the rollback floor rises to 2
+#   P3 rollback  — re-seed v1 (below the floor) → restart → available:false (refused)
+#   P4 tamper    — re-seed v2, mutate index.json after signing → available:false
+#
+# This is a stopgap runtime gate until the production keyless cutover (Phase 6). It
+# uses the ed25519 scheme (a fresh per-run keypair, persisted + reused across the
+# re-seeds so the CP trusts every version) so it needs no OIDC/Sigstore signing and
+# runs deterministically. The keyless scheme + the dispatch→maint-agent update are
+# covered elsewhere (ci.yml TestReleaseCatalogKeylessVerify; the maint-agent E2E).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: catalog-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  catalog-e2e:
+    name: Catalog E2E (real VM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build culvert binary (baked Sigstore root embedded)
+        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
+
+      - name: Serve + upgrade + anti-rollback + tamper (real binary)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /data/release_catalog
+          sudo chown -R "$USER" /data
+          KEYS="$RUNNER_TEMP/keys.json"; PRIV="$RUNNER_TEMP/priv.seed"
+
+          seed() { # version version_id [expires]
+            local expires="${3:-2099-01-01T00:00:00Z}"
+            CULVERT_E2E_SEED_OUT=/data/release_catalog CULVERT_E2E_SEED_KEYS="$KEYS" \
+            CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" \
+            CULVERT_E2E_SEED_VERSION_ID="$2" CULVERT_E2E_SEED_EXPIRES="$expires" \
+              go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
+          }
+          start_cp() { # proxyport uiport
+            CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$KEYS")" CULVERT_RELEASE_CATALOG_VERIFY=enforce \
+              ./culvert -port "$1" -ui-port "$2" -ui-no-tls > "$RUNNER_TEMP/cp.log" 2>&1 &
+            echo $! > "$RUNNER_TEMP/cp.pid"
+            for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:$1/health" >/dev/null 2>&1 && return 0; sleep 1; done
+            echo "FAIL: CP not ready"; cat "$RUNNER_TEMP/cp.log"; return 1
+          }
+          stop_cp() { kill "$(cat "$RUNNER_TEMP/cp.pid" 2>/dev/null)" 2>/dev/null || true; wait 2>/dev/null || true; }
+          body() { curl -fsS "http://127.0.0.1:$1/api/releases"; }
+
+          echo "── P1 serve v1 ──────────────────────────────────────────────"
+          seed 1 1.0.0
+          start_cp 18080 19090
+          B=$(body 19090); echo "$B"
+          echo "$B" | grep -q '"available":true'   || { echo "FAIL P1: not available"; exit 1; }
+          echo "$B" | grep -q '"catalog_version":1' || { echo "FAIL P1: not v1"; exit 1; }
+          echo "$B" | grep -q 'culvert-1.0.0'       || { echo "FAIL P1: wrong release"; exit 1; }
+          stop_cp
+
+          echo "── P2 upgrade to v2 ─────────────────────────────────────────"
+          seed 2 2.0.0 2099-06-01T00:00:00Z
+          start_cp 18081 19091
+          B=$(body 19091); echo "$B"
+          echo "$B" | grep -q '"available":true'    || { echo "FAIL P2: not available"; exit 1; }
+          echo "$B" | grep -q '"catalog_version":2' || { echo "FAIL P2: did not upgrade to v2"; exit 1; }
+          echo "$B" | grep -q 'culvert-2.0.0'        || { echo "FAIL P2: wrong release"; exit 1; }
+          grep -q '"highest_accepted_version":2' /data/release_catalog_state.json || { echo "FAIL P2: floor not raised"; exit 1; }
+          stop_cp
+
+          echo "── P3 anti-rollback (re-seed v1, below floor 2) ─────────────"
+          seed 1 1.0.0
+          start_cp 18082 19092
+          B=$(body 19092); echo "$B"
+          echo "$B" | grep -q '"available":false' || { echo "FAIL P3: a DOWNGRADE to v1 was accepted!"; exit 1; }
+          grep -qi "rollback" "$RUNNER_TEMP/cp.log" || { echo "FAIL P3: no rollback-refused log"; exit 1; }
+          stop_cp
+
+          echo "── P4 tamper (re-seed v2, mutate index after signing) ───────"
+          seed 2 2.0.0 2099-06-01T00:00:00Z
+          printf ' ' >> /data/release_catalog/index.json
+          start_cp 18083 19093
+          B=$(body 19093); echo "$B"
+          echo "$B" | grep -q '"available":false' || { echo "FAIL P4: a TAMPERED catalog was accepted!"; exit 1; }
+          stop_cp
+          echo "ALL PHASES PASSED (binary): serve → upgrade → anti-rollback → tamper-reject"
+
+      - name: Teardown
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/cp.pid" 2>/dev/null)" 2>/dev/null || true
+          echo "=== cp.log ==="; cat "$RUNNER_TEMP/cp.log" 2>/dev/null || true
+
+  catalog-e2e-docker:
+    name: Catalog E2E (Docker image)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build the proxy image
+        run: docker build -t culvert:e2e -f Dockerfile .
+
+      - name: Serve + upgrade + anti-rollback + tamper (proxy container)
+        run: |
+          set -euo pipefail
+          SEED="$RUNNER_TEMP/e2e-data"
+          mkdir -p "$SEED/release_catalog"
+          KEYS="$RUNNER_TEMP/keys.json"; PRIV="$RUNNER_TEMP/priv.seed"
+
+          seed() { # version version_id [expires]
+            local expires="${3:-2099-01-01T00:00:00Z}"
+            CULVERT_E2E_SEED_OUT="$SEED/release_catalog" CULVERT_E2E_SEED_KEYS="$KEYS" \
+            CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" \
+            CULVERT_E2E_SEED_VERSION_ID="$2" CULVERT_E2E_SEED_EXPIRES="$expires" \
+              go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
+          }
+          run_proxy() { # name proxyport uiport
+            # Run the container as the HOST runner UID so it shares ownership with
+            # the host-seeded catalog files (read) AND the /data state it writes
+            # (rollback floor, config_versions, updater_token). This avoids the
+            # cross-UID bind-mount permission problem entirely — a re-seed between
+            # phases just overwrites host-owned files, no chmod needed.
+            docker run -d --name "$1" --user "$(id -u):$(id -g)" \
+              -e CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$KEYS")" \
+              -e CULVERT_RELEASE_CATALOG_VERIFY=enforce \
+              -v "$SEED:/data" -p "$2:8080" -p "$3:9090" \
+              culvert:e2e -port 8080 -ui-port 9090 -ui-no-tls >/dev/null
+            for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:$2/health" >/dev/null 2>&1 && return 0; sleep 1; done
+            echo "FAIL: container $1 not ready"; docker logs "$1"; return 1
+          }
+          body() { curl -fsS "http://127.0.0.1:$1/api/releases"; }
+
+          echo "── P1 serve v1 ──────────────────────────────────────────────"
+          seed 1 1.0.0
+          run_proxy culvert-e2e-1 18080 19090
+          B=$(body 19090); echo "$B"
+          echo "$B" | grep -q '"available":true'    || { echo "FAIL P1"; docker logs culvert-e2e-1; exit 1; }
+          echo "$B" | grep -q '"catalog_version":1' || { echo "FAIL P1: not v1"; exit 1; }
+          echo "$B" | grep -q 'culvert-1.0.0'        || { echo "FAIL P1: wrong release"; exit 1; }
+          docker rm -f culvert-e2e-1 >/dev/null
+
+          echo "── P2 upgrade to v2 ─────────────────────────────────────────"
+          seed 2 2.0.0 2099-06-01T00:00:00Z
+          run_proxy culvert-e2e-2 18081 19091
+          B=$(body 19091); echo "$B"
+          echo "$B" | grep -q '"available":true'    || { echo "FAIL P2"; docker logs culvert-e2e-2; exit 1; }
+          echo "$B" | grep -q '"catalog_version":2' || { echo "FAIL P2: did not upgrade"; exit 1; }
+          echo "$B" | grep -q 'culvert-2.0.0'        || { echo "FAIL P2: wrong release"; exit 1; }
+          grep -q '"highest_accepted_version":2' "$SEED/release_catalog_state.json" || { echo "FAIL P2: floor not raised"; exit 1; }
+          docker rm -f culvert-e2e-2 >/dev/null
+
+          echo "── P3 anti-rollback (re-seed v1, below floor 2) ─────────────"
+          seed 1 1.0.0
+          run_proxy culvert-e2e-3 18082 19092
+          B=$(body 19092); echo "$B"
+          echo "$B" | grep -q '"available":false' || { echo "FAIL P3: a DOWNGRADE was accepted!"; docker logs culvert-e2e-3; exit 1; }
+          docker rm -f culvert-e2e-3 >/dev/null
+
+          echo "── P4 tamper (re-seed v2, mutate index after signing) ───────"
+          seed 2 2.0.0 2099-06-01T00:00:00Z
+          printf ' ' >> "$SEED/release_catalog/index.json"
+          run_proxy culvert-e2e-4 18083 19093
+          B=$(body 19093); echo "$B"
+          echo "$B" | grep -q '"available":false' || { echo "FAIL P4: a TAMPERED catalog was accepted!"; docker logs culvert-e2e-4; exit 1; }
+          docker rm -f culvert-e2e-4 >/dev/null
+          echo "ALL PHASES PASSED (docker): serve → upgrade → anti-rollback → tamper-reject"
+
+      - name: Teardown + logs
+        if: always()
+        run: |
+          for n in culvert-e2e-1 culvert-e2e-2 culvert-e2e-3 culvert-e2e-4; do
+            echo "=== $n ==="; docker logs "$n" 2>&1 | tail -15 || true
+            docker rm -f "$n" >/dev/null 2>&1 || true
+          done
