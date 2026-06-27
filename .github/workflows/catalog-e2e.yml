@@ -1,0 +1,102 @@
+name: Catalog E2E (real binary)
+
+# End-to-end proof that the release catalog works on a real VM: build the actual
+# culvert binary, seed a SIGNED catalog on disk, start the real Control Plane in
+# enforce mode, and assert over HTTP that /api/releases serves the catalog
+# (available:true) — then that a TAMPERED catalog is rejected (available:false).
+#
+# This is a stopgap runtime gate until the production keyless cutover (Phase 6).
+# It uses the ed25519 scheme (a fresh in-job keypair) so it needs no OIDC/Sigstore
+# signing identity and runs deterministically on every push/PR. The keyless scheme
+# is exercised separately by the tag-path gates in ci.yml (TestReleaseCatalogKeylessVerify).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: catalog-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  catalog-e2e:
+    name: Catalog E2E (real VM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build culvert binary (baked Sigstore root embedded)
+        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
+
+      # dataDir is the fixed /data path (no flag); the CP loads its catalog from
+      # /data/release_catalog at startup. Create it writable, then seed a signed
+      # catalog + the matching ed25519 trust key via the in-repo helper test.
+      - name: Seed a SIGNED catalog into /data/release_catalog
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /data/release_catalog
+          sudo chown -R "$USER" /data
+          CULVERT_E2E_SEED_OUT=/data/release_catalog \
+          CULVERT_E2E_SEED_KEYS="$RUNNER_TEMP/keys.json" \
+            go test -run TestE2ESeedSignedCatalog -count=1 -v .
+          test -s /data/release_catalog/index.json
+          test -s /data/release_catalog/index.json.sig
+          test -s "$RUNNER_TEMP/keys.json"
+
+      - name: Start the Control Plane (enforce) with the signed catalog
+        run: |
+          set -euo pipefail
+          export CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$RUNNER_TEMP/keys.json")"
+          export CULVERT_RELEASE_CATALOG_VERIFY=enforce
+          ./culvert -port 18080 -ui-port 19090 -ui-no-tls > "$RUNNER_TEMP/cp.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cp.pid"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then echo "CP ready after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          echo "FAIL: CP did not become ready"; cat "$RUNNER_TEMP/cp.log"; exit 1
+
+      - name: Assert the signed catalog is served (available:true)
+        run: |
+          set -euo pipefail
+          BODY=$(curl -fsS http://127.0.0.1:19090/api/releases)
+          echo "$BODY"
+          echo "$BODY" | grep -q '"available":true'      || { echo "FAIL: catalog not available"; exit 1; }
+          echo "$BODY" | grep -q '"verify_mode":"enforce"' || { echo "FAIL: not enforce mode"; exit 1; }
+          echo "$BODY" | grep -q '"catalog_version":1'    || { echo "FAIL: wrong catalog_version"; exit 1; }
+          echo "$BODY" | grep -q 'culvert-9.9.9'          || { echo "FAIL: seeded release missing"; exit 1; }
+          echo "PASS: real Control Plane verified + served the signed catalog"
+
+      - name: Assert a TAMPERED catalog is rejected (available:false)
+        run: |
+          set -euo pipefail
+          kill "$(cat "$RUNNER_TEMP/cp.pid")" 2>/dev/null || true
+          sleep 1
+          printf ' ' >> /data/release_catalog/index.json   # mutate AFTER signing
+          export CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$RUNNER_TEMP/keys.json")"
+          export CULVERT_RELEASE_CATALOG_VERIFY=enforce
+          ./culvert -port 18081 -ui-port 19091 -ui-no-tls > "$RUNNER_TEMP/cp2.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cp2.pid"
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18081/health >/dev/null 2>&1 && break; sleep 1; done
+          BODY=$(curl -fsS http://127.0.0.1:19091/api/releases)
+          echo "$BODY"
+          echo "$BODY" | grep -q '"available":false' || { echo "FAIL: a tampered catalog was trusted!"; exit 1; }
+          echo "PASS: tampered catalog correctly rejected in a real process"
+
+      - name: Teardown + logs
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/cp.pid" 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat "$RUNNER_TEMP/cp2.pid" 2>/dev/null)" 2>/dev/null || true
+          echo "=== cp.log ===";  cat "$RUNNER_TEMP/cp.log"  2>/dev/null || true
+          echo "=== cp2.log ==="; cat "$RUNNER_TEMP/cp2.log" 2>/dev/null || true
