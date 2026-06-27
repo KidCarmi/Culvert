@@ -1,0 +1,310 @@
+name: Maintenance Agent Backup + Upgrade E2E
+
+# Drives the REAL Culvert maintenance agent through a REAL encrypted BACKUP and
+# a REAL container UPGRADE, proving both halves end to end:
+#
+#   Phase A — explicit backup: POST /v1/backups (encrypt=true) -> the agent runs
+#     `docker compose --profile cli run --rm -e CULVERT_BACKUP_PASSPHRASE
+#      cli --encrypt --backup /backup/<file>` -> the op reaches succeeded and the
+#     artifact is listed by GET /v1/backups (size>0, encrypted=true).
+#
+#   Phase B — backup-gated upgrade: POST /v1/upgrades/apply with pre_backup=true
+#     -> the agent takes an encrypted `pre-upgrade-<ts>.tar.gz.enc` backup BEFORE
+#     pulling, then retags culvert/proxy:pinned and recreates the proxy. We assert
+#     the pre-upgrade backup exists AND the image flipped v1 -> v2 AND it is
+#     healthy. (A pre_backup failure aborts the upgrade before any pull, so a
+#     green Phase B proves the backup really ran first.)
+#
+# Everything is LOCAL (a TLS registry:2 on 127.0.0.1:5000, two locally-built
+# proxy images, a profile-gated `cli` service + culvert-backups volume) so the
+# run is deterministic and needs no ghcr / external network for the image flow.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: maint-agent-backup-upgrade-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Agent-driven backup + upgrade
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    env:
+      REGISTRY: 127.0.0.1:5000
+      REPO: 127.0.0.1:5000/culvert
+      PINNED_TAG: culvert/proxy:pinned
+      E2E_DIR: test/e2e/maint-agent
+      SRC_COMPOSE: docker-compose.backup-e2e.yml
+      COMPOSE_FILE_NAME: docker-compose.e2e.yml # name the agent's config.toml expects in the project dir
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      # Ephemeral, run-scoped backup passphrase. Generated (never hardcoded) so
+      # no secret lands in the repo; persisted to GITHUB_ENV so the nohup'd agent
+      # inherits it and resolves passphrase_ref=env:CULVERT_BACKUP_PASSPHRASE.
+      - name: Generate ephemeral backup passphrase
+        run: echo "CULVERT_BACKUP_PASSPHRASE=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+
+      # TLS registry trusted by BOTH the daemon (/etc/docker/certs.d) and the CLI
+      # (system CA) — the agent's `docker manifest inspect` carries no --insecure.
+      - name: Start TLS local registry (trusted by daemon + CLI)
+        run: |
+          set -euxo pipefail
+          CERT_DIR="$RUNNER_TEMP/registry-certs"
+          mkdir -p "$CERT_DIR"
+          openssl req -x509 -newkey rsa:4096 -nodes \
+            -keyout "$CERT_DIR/registry.key" \
+            -out "$CERT_DIR/registry.crt" \
+            -days 2 \
+            -subj "/CN=127.0.0.1" \
+            -addext "subjectAltName=IP:127.0.0.1"
+          chmod 0644 "$CERT_DIR/registry.crt" "$CERT_DIR/registry.key"
+          sudo mkdir -p "/etc/docker/certs.d/127.0.0.1:5000"
+          sudo cp "$CERT_DIR/registry.crt" "/etc/docker/certs.d/127.0.0.1:5000/ca.crt"
+          sudo cp "$CERT_DIR/registry.crt" /usr/local/share/ca-certificates/registry-e2e.crt
+          sudo update-ca-certificates
+          docker run -d --restart=always --name registry \
+            -p 127.0.0.1:5000:5000 \
+            -v "$CERT_DIR:/certs:ro" \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+            registry:2
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS https://127.0.0.1:5000/v2/ >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          [ -n "$ok" ] || { echo "FATAL: TLS registry did not come up"; docker logs registry 2>&1 | tail -n 50 || true; exit 1; }
+          curl -fsS https://127.0.0.1:5000/v2/
+
+      - name: Build, push, and capture v1 + v2 digests
+        id: images
+        run: |
+          set -euxo pipefail
+          build_push_digest() {
+            variant="$1"; tag="$REPO:$variant"
+            docker build -f "$E2E_DIR/Dockerfile.e2e" --build-arg "BUILD_VARIANT=$variant" -t "$tag" . 1>&2
+            docker push "$tag" 1>&2
+            docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" | grep "^${REPO}@sha256:" | head -n1
+          }
+          D1_REF="$(build_push_digest v1)"
+          D2_REF="$(build_push_digest v2)"
+          D1="${D1_REF#${REPO}@}"; D2="${D2_REF#${REPO}@}"
+          [ -n "$D1" ] && [ -n "$D2" ] || { echo "FATAL: empty digest (D1=$D1 D2=$D2)"; exit 1; }
+          [ "$D1" != "$D2" ] || { echo "FATAL: v1 and v2 share a digest ($D1); the flip would be unobservable"; exit 1; }
+          { echo "d1_ref=$D1_REF"; echo "d2_ref=$D2_REF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Seed culvert/proxy:pinned = v1
+        run: |
+          set -euxo pipefail
+          docker tag "${{ steps.images.outputs.d1_ref }}" "$PINNED_TAG"
+
+      - name: Render agent config
+        id: cfg
+        run: |
+          set -euxo pipefail
+          PROJECT_DIR="$RUNNER_TEMP/maint-e2e/compose"
+          STATE_DIR="$RUNNER_TEMP/maint-e2e/state"
+          SOCK_PATH="$RUNNER_TEMP/maint-e2e/agent.sock"
+          mkdir -p "$PROJECT_DIR" "$STATE_DIR"
+          # Copy the BACKUP compose (proxy + cli + culvert-backups) into the
+          # project dir under the bare name the rendered config.toml references.
+          cp "$E2E_DIR/$SRC_COMPOSE" "$PROJECT_DIR/$COMPOSE_FILE_NAME"
+          RUNNER_UID="$(id -u)"
+          CONFIG_PATH="$RUNNER_TEMP/maint-e2e/config.toml"
+          sed \
+            -e "s|@@PROJECT_DIR@@|$PROJECT_DIR|g" \
+            -e "s|@@SOCK_PATH@@|$SOCK_PATH|g" \
+            -e "s|@@STATE_DIR@@|$STATE_DIR|g" \
+            -e "s|@@RUNNER_UID@@|$RUNNER_UID|g" \
+            "$E2E_DIR/config.toml.tmpl" > "$CONFIG_PATH"
+          echo "----- rendered config.toml -----"; cat "$CONFIG_PATH"; echo "--------------------------------"
+          {
+            echo "project_dir=$PROJECT_DIR"
+            echo "sock_path=$SOCK_PATH"
+            echo "config_path=$CONFIG_PATH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build the maintenance agent
+        run: |
+          set -euxo pipefail
+          ( cd cmd/culvert-maint && go build -o "$RUNNER_TEMP/maint-e2e/culvert-maint" . )
+          "$RUNNER_TEMP/maint-e2e/culvert-maint" -version || true
+
+      - name: Bring up proxy on v1
+        run: |
+          set -euxo pipefail
+          PROJECT_DIR="${{ steps.cfg.outputs.project_dir }}"
+          docker compose -f "$PROJECT_DIR/$COMPOSE_FILE_NAME" up -d
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: proxy /health did not come up on v1"
+            docker compose -f "$PROJECT_DIR/$COMPOSE_FILE_NAME" ps || true
+            docker logs culvert-e2e-proxy 2>&1 | tail -n 200 || true
+            exit 1
+          fi
+          RUNNING_IMG="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy)"
+          RUNNING_REF="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RUNNING_IMG" | grep "^${REPO}@sha256:" | head -n1 || true)"
+          echo "running ref (expect v1): $RUNNING_REF"
+          [ "$RUNNING_REF" = "${{ steps.images.outputs.d1_ref }}" ] || { echo "FATAL: proxy not on v1"; exit 1; }
+
+      - name: Start the agent
+        run: |
+          set -euxo pipefail
+          CONFIG_PATH="${{ steps.cfg.outputs.config_path }}"
+          SOCK_PATH="${{ steps.cfg.outputs.sock_path }}"
+          AGENT_LOG="$RUNNER_TEMP/maint-e2e/agent.log"
+          # CULVERT_BACKUP_PASSPHRASE is in the job env (GITHUB_ENV) and is
+          # inherited by this nohup'd process, so the agent can resolve
+          # passphrase_ref=env:CULVERT_BACKUP_PASSPHRASE and forward it to the cli.
+          nohup "$RUNNER_TEMP/maint-e2e/culvert-maint" -config "$CONFIG_PATH" >"$AGENT_LOG" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/maint-e2e/agent.pid"
+          ok=""
+          for i in $(seq 1 60); do
+            if [ -S "$SOCK_PATH" ] && curl -fsS --unix-socket "$SOCK_PATH" http://localhost/v1/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: agent socket/health did not come up"; cat "$AGENT_LOG" || true; exit 1
+          fi
+          echo "----- agent /v1/status -----"; curl -fsS --unix-socket "$SOCK_PATH" http://localhost/v1/status; echo
+
+      # ── PHASE A — explicit encrypted backup via /v1/backups ────────────────
+      - name: "Phase A — explicit encrypted backup"
+        run: |
+          set -euxo pipefail
+          SOCK="${{ steps.cfg.outputs.sock_path }}"
+          FN="e2e-explicit-${{ github.run_id }}.tar.gz.enc"
+
+          RESP="$(curl -fsS --unix-socket "$SOCK" -H 'Content-Type: application/json' -X POST \
+            -d "{\"filename\":\"$FN\",\"encrypt\":true,\"passphrase_ref\":\"env:CULVERT_BACKUP_PASSPHRASE\"}" \
+            http://localhost/v1/backups)"
+          echo "backup response: $RESP"
+          OP_ID="$(printf '%s' "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["op_id"])')"
+          [ -n "$OP_ID" ] || { echo "FATAL: no op_id from /v1/backups"; exit 1; }
+
+          STATE=""; OP_JSON=""
+          for i in $(seq 1 90); do
+            OP_JSON="$(curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID" || true)"
+            STATE="$(printf '%s' "$OP_JSON" | python3 -c 'import sys,json;d=sys.stdin.read();print(json.loads(d).get("state","") if d.strip() else "")' 2>/dev/null || true)"
+            echo "poll $i: state=$STATE"
+            case "$STATE" in succeeded|failed|cancelled) break;; esac
+            sleep 2
+          done
+          echo "----- op log -----"; curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID/logs" || true
+          [ "$STATE" = "succeeded" ] || { echo "FATAL: backup op did not succeed (state=$STATE)"; exit 1; }
+
+          # The artifact must now be listed by the agent, encrypted, non-empty.
+          BACKUPS="$(curl -fsS --unix-socket "$SOCK" http://localhost/v1/backups)"
+          echo "backups: $BACKUPS"
+          echo "$BACKUPS" | jq -e --arg fn "$FN" \
+            '[.[] | select(.filename==$fn and (.size_bytes//0)>0 and .encrypted==true)] | length>0' >/dev/null \
+            || { echo "FATAL: explicit backup $FN not listed as encrypted + non-empty"; exit 1; }
+          echo "PHASE A OK: encrypted backup created + listed"
+
+      # ── PHASE B — backup-gated upgrade (pre_backup -> flip) ─────────────────
+      - name: "Phase B — pre_backup upgrade (apply v2) and poll to terminal"
+        run: |
+          set -euxo pipefail
+          SOCK="${{ steps.cfg.outputs.sock_path }}"
+          TARGET_REF="${{ steps.images.outputs.d2_ref }}"
+
+          RESP="$(curl -fsS --unix-socket "$SOCK" -H 'Content-Type: application/json' -X POST \
+            -d "{\"image_ref\":\"$TARGET_REF\",\"pre_backup\":true,\"passphrase_ref\":\"env:CULVERT_BACKUP_PASSPHRASE\"}" \
+            http://localhost/v1/upgrades/apply)"
+          echo "apply response: $RESP"
+          OP_ID="$(printf '%s' "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["op_id"])')"
+          [ -n "$OP_ID" ] || { echo "FATAL: no op_id from /v1/upgrades/apply"; exit 1; }
+
+          STATE=""; OP_JSON=""
+          for i in $(seq 1 120); do
+            OP_JSON="$(curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID" || true)"
+            STATE="$(printf '%s' "$OP_JSON" | python3 -c 'import sys,json;d=sys.stdin.read();print(json.loads(d).get("state","") if d.strip() else "")' 2>/dev/null || true)"
+            echo "poll $i: state=$STATE"
+            case "$STATE" in succeeded|failed|cancelled) break;; esac
+            sleep 2
+          done
+          echo "----- final op record -----"; printf '%s\n' "$OP_JSON" | python3 -m json.tool || printf '%s\n' "$OP_JSON"
+          echo "----- op log -----"; OPLOG="$(curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID/logs" || true)"; printf '%s\n' "$OPLOG"
+          [ "$STATE" = "succeeded" ] || { echo "FATAL: pre_backup upgrade did not succeed (state=$STATE)"; exit 1; }
+
+          # Soft check: the op log should mention the pre_backup stage running (not skipped).
+          printf '%s' "$OPLOG" | grep -qi "pre_backup" && echo "op log references pre_backup stage" || echo "NOTE: pre_backup not seen in op log text (artifact check is authoritative)"
+
+      - name: "Phase B — assert pre-upgrade backup exists AND the image flipped"
+        run: |
+          set -euxo pipefail
+          SOCK="${{ steps.cfg.outputs.sock_path }}"
+          D1_REF="${{ steps.images.outputs.d1_ref }}"; D2_REF="${{ steps.images.outputs.d2_ref }}"
+
+          # 1) A pre-upgrade-*.tar.gz.enc backup must now exist (proves the agent
+          #    took the encrypted backup BEFORE the pull — pre_backup failure aborts
+          #    the upgrade, so a succeeded op + this artifact = backup ran first).
+          BACKUPS="$(curl -fsS --unix-socket "$SOCK" http://localhost/v1/backups)"
+          echo "backups: $BACKUPS"
+          echo "$BACKUPS" | jq -e \
+            '[.[] | select((.filename|startswith("pre-upgrade-")) and (.filename|endswith(".tar.gz.enc")) and (.size_bytes//0)>0 and .encrypted==true)] | length>0' >/dev/null \
+            || { echo "FATAL: no encrypted pre-upgrade-*.tar.gz.enc backup found"; exit 1; }
+          echo "pre-upgrade backup OK"
+
+          # 2) The proxy image must have flipped v1 -> v2 and stayed healthy.
+          RUNNING_IMG="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy)"
+          RUNNING_REF="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RUNNING_IMG" | grep "^${REPO}@sha256:" | head -n1 || true)"
+          echo "running ref after apply (expect v2): $RUNNING_REF"
+          [ "$RUNNING_REF" != "$D1_REF" ] || { echo "FATAL: still on v1 — the update did not flip the image"; exit 1; }
+          [ "$RUNNING_REF" = "$D2_REF" ] || { echo "FATAL: running digest is neither v2 nor v1 (got $RUNNING_REF, want $D2_REF)"; exit 1; }
+
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "FATAL: proxy /health failed AFTER the flip"; docker logs culvert-e2e-proxy 2>&1 | tail -n 200 || true; exit 1; }
+          curl -fsS http://127.0.0.1:8080/ready >/dev/null && echo "/ready OK on v2"
+          echo "PROOF: agent took an encrypted pre-upgrade backup, then flipped v1 -> v2 and stayed healthy."
+
+      - name: Diagnostics (always)
+        if: always()
+        run: |
+          set +e
+          SOCK="${{ steps.cfg.outputs.sock_path }}"
+          PROJECT_DIR="${{ steps.cfg.outputs.project_dir }}"
+          echo "===== agent log ====="; cat "$RUNNER_TEMP/maint-e2e/agent.log" 2>/dev/null
+          echo "===== agent /v1/status ====="; curl -fsS --unix-socket "$SOCK" http://localhost/v1/status 2>/dev/null; echo
+          echo "===== agent /v1/backups ====="; curl -fsS --unix-socket "$SOCK" http://localhost/v1/backups 2>/dev/null; echo
+          echo "===== agent /v1/audit ====="; curl -fsS --unix-socket "$SOCK" "http://localhost/v1/audit?limit=50" 2>/dev/null; echo
+          echo "===== compose ps ====="; docker compose -f "$PROJECT_DIR/$COMPOSE_FILE_NAME" ps 2>/dev/null
+          echo "===== proxy docker logs (tail) ====="; docker logs culvert-e2e-proxy 2>&1 | tail -n 150
+          echo "===== local images ====="; docker image ls | grep -E 'culvert|registry' 2>/dev/null
+
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set +e
+          PROJECT_DIR="${{ steps.cfg.outputs.project_dir }}"
+          if [ -f "$RUNNER_TEMP/maint-e2e/agent.pid" ]; then kill "$(cat "$RUNNER_TEMP/maint-e2e/agent.pid")" 2>/dev/null; fi
+          docker compose -f "$PROJECT_DIR/$COMPOSE_FILE_NAME" down -v 2>/dev/null
+          docker rm -f culvert-e2e-proxy registry 2>/dev/null
+          exit 0

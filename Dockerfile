@@ -46,10 +46,15 @@ RUN apk add --no-cache wget && \
 #   • No new privileges: --security-opt no-new-privileges
 FROM alpine:3.22
 
+# /data and /backup are pre-created + chowned to proxy so that a FRESH named
+# volume mounted over them (proxy-data:/data, culvert-backups:/backup) inherits
+# proxy ownership — otherwise Docker creates the volume mountpoint root-owned and
+# the non-root `cli` user (same image) gets "permission denied" writing the first
+# backup to /backup. /backup is only used by the profile-gated `cli` service.
 RUN apk upgrade --no-cache && \
     apk add --no-cache ca-certificates tzdata && \
     addgroup -S proxy && adduser -S proxy -G proxy && \
-    mkdir -p /data && chown proxy:proxy /data
+    mkdir -p /data /backup && chown proxy:proxy /data /backup
 
 # Switch to non-root user before COPY so all assets are owned by proxy from
 # the start — no extra chown layer needed after the binary is written.

@@ -30,7 +30,7 @@ ARG BUILD_VARIANT=v1
 RUN apk upgrade --no-cache \
     && apk add --no-cache ca-certificates tzdata wget \
     && addgroup -S proxy && adduser -S proxy -G proxy \
-    && mkdir -p /data && chown proxy:proxy /data
+    && mkdir -p /data /backup && chown proxy:proxy /data /backup
 USER proxy
 WORKDIR /app
 COPY --from=builder --chown=proxy:proxy /app/culvert .
