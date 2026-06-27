@@ -447,13 +447,27 @@ jobs:
           name: release-catalog-bundle
           path: ${{ steps.spec.outputs.out }}
           if-no-files-found: error
-      - name: Attach signed catalog to the GitHub Release (tag path)
+      # Package the COMPLETE signed catalog (index.json + index.json.sigstore +
+      # manifests/<ref>) as one tar.gz. A bare index.json + signature is NOT a
+      # usable catalog — the verified index references manifests/<ref> that the
+      # loader/HTTP provider must fetch. The archive is exactly what the air-gap
+      # BundleCatalogProvider imports (gzip-sniffing tar reader staging index.json,
+      # index.json.sigstore, manifests/*).
+      - name: Package signed catalog bundle (tag path)
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: pkg
+        run: |
+          set -euo pipefail
+          OUT="${{ steps.spec.outputs.out }}"
+          test -s "$OUT/index.json.sigstore" || { echo "missing signed bundle"; exit 1; }
+          BUNDLE="$RUNNER_TEMP/culvert-release-catalog-${{ github.ref_name }}.tar.gz"
+          tar -C "$OUT" -czf "$BUNDLE" index.json index.json.sigstore manifests
+          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+      - name: Attach complete signed catalog bundle to the GitHub Release (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
-          files: |
-            ${{ steps.spec.outputs.out }}/index.json
-            ${{ steps.spec.outputs.out }}/index.json.sigstore
+          files: ${{ steps.pkg.outputs.bundle }}
 
   # ─── Auto-tag ───────────────────────────────────────────────────────────
   # On every push to main, fetch the latest semver tag, bump the patch
