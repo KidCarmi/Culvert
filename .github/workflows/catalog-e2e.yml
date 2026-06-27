@@ -3,14 +3,21 @@ name: Catalog E2E (real binary)
 # End-to-end proof that the release catalog works on a real VM, two ways:
 #   1. catalog-e2e        — the bare culvert BINARY (fast, no Docker)
 #   2. catalog-e2e-docker — the actual proxy IMAGE (how production runs)
-# Each seeds a SIGNED catalog, starts the real Control Plane in enforce mode, and
-# asserts over HTTP that /api/releases serves it (available:true) — then that a
-# TAMPERED catalog is rejected (available:false).
 #
-# This is a stopgap runtime gate until the production keyless cutover (Phase 6).
-# It uses the ed25519 scheme (a fresh in-job keypair) so it needs no OIDC/Sigstore
-# signing identity and runs deterministically on every push/PR. The keyless scheme
-# is exercised separately by the tag-path gates in ci.yml (TestReleaseCatalogKeylessVerify).
+# Each runs the same 4-phase sequence against a REAL Control Plane in enforce mode,
+# asserting over HTTP (/api/releases) that the catalog is verified, loaded, served,
+# UPGRADED, and that downgrade/tamper are refused:
+#   P1 serve     — seed v1 → available:true (catalog_version 1, version 1.0.0)
+#   P2 upgrade   — re-seed v2 (higher version, same key) → restart → available:true
+#                  (catalog_version 2, version 2.0.0) + the rollback floor rises to 2
+#   P3 rollback  — re-seed v1 (below the floor) → restart → available:false (refused)
+#   P4 tamper    — re-seed v2, mutate index.json after signing → available:false
+#
+# This is a stopgap runtime gate until the production keyless cutover (Phase 6). It
+# uses the ed25519 scheme (a fresh per-run keypair, persisted + reused across the
+# re-seeds so the CP trusts every version) so it needs no OIDC/Sigstore signing and
+# runs deterministically. The keyless scheme + the dispatch→maint-agent update are
+# covered elsewhere (ci.yml TestReleaseCatalogKeylessVerify; the maint-agent E2E).
 
 on:
   push:
@@ -40,68 +47,70 @@ jobs:
       - name: Build culvert binary (baked Sigstore root embedded)
         run: CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
 
-      # dataDir is the fixed /data path (no flag); the CP loads its catalog from
-      # /data/release_catalog at startup. Create it writable, then seed a signed
-      # catalog + the matching ed25519 trust key via the in-repo helper test.
-      - name: Seed a SIGNED catalog into /data/release_catalog
+      - name: Serve + upgrade + anti-rollback + tamper (real binary)
         run: |
           set -euo pipefail
           sudo mkdir -p /data/release_catalog
           sudo chown -R "$USER" /data
-          CULVERT_E2E_SEED_OUT=/data/release_catalog \
-          CULVERT_E2E_SEED_KEYS="$RUNNER_TEMP/keys.json" \
-            go test -run TestE2ESeedSignedCatalog -count=1 -v .
-          test -s /data/release_catalog/index.json
-          test -s /data/release_catalog/index.json.sig
-          test -s "$RUNNER_TEMP/keys.json"
+          KEYS="$RUNNER_TEMP/keys.json"; PRIV="$RUNNER_TEMP/priv.seed"
 
-      - name: Start the Control Plane (enforce) with the signed catalog
-        run: |
-          set -euo pipefail
-          export CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$RUNNER_TEMP/keys.json")"
-          export CULVERT_RELEASE_CATALOG_VERIFY=enforce
-          ./culvert -port 18080 -ui-port 19090 -ui-no-tls > "$RUNNER_TEMP/cp.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/cp.pid"
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then echo "CP ready after ${i}s"; exit 0; fi
-            sleep 1
-          done
-          echo "FAIL: CP did not become ready"; cat "$RUNNER_TEMP/cp.log"; exit 1
+          seed() { # version version_id [expires]
+            CULVERT_E2E_SEED_OUT=/data/release_catalog CULVERT_E2E_SEED_KEYS="$KEYS" \
+            CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" \
+            CULVERT_E2E_SEED_VERSION_ID="$2" ${3:+CULVERT_E2E_SEED_EXPIRES="$3"} \
+              go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
+          }
+          start_cp() { # proxyport uiport
+            CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$KEYS")" CULVERT_RELEASE_CATALOG_VERIFY=enforce \
+              ./culvert -port "$1" -ui-port "$2" -ui-no-tls > "$RUNNER_TEMP/cp.log" 2>&1 &
+            echo $! > "$RUNNER_TEMP/cp.pid"
+            for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:$1/health" >/dev/null 2>&1 && return 0; sleep 1; done
+            echo "FAIL: CP not ready"; cat "$RUNNER_TEMP/cp.log"; return 1
+          }
+          stop_cp() { kill "$(cat "$RUNNER_TEMP/cp.pid" 2>/dev/null)" 2>/dev/null || true; wait 2>/dev/null || true; }
+          body() { curl -fsS "http://127.0.0.1:$1/api/releases"; }
 
-      - name: Assert the signed catalog is served (available:true)
-        run: |
-          set -euo pipefail
-          BODY=$(curl -fsS http://127.0.0.1:19090/api/releases)
-          echo "$BODY"
-          echo "$BODY" | grep -q '"available":true'      || { echo "FAIL: catalog not available"; exit 1; }
-          echo "$BODY" | grep -q '"verify_mode":"enforce"' || { echo "FAIL: not enforce mode"; exit 1; }
-          echo "$BODY" | grep -q '"catalog_version":1'    || { echo "FAIL: wrong catalog_version"; exit 1; }
-          echo "$BODY" | grep -q 'culvert-9.9.9'          || { echo "FAIL: seeded release missing"; exit 1; }
-          echo "PASS: real Control Plane verified + served the signed catalog"
+          echo "── P1 serve v1 ──────────────────────────────────────────────"
+          seed 1 1.0.0
+          start_cp 18080 19090
+          B=$(body 19090); echo "$B"
+          echo "$B" | grep -q '"available":true'   || { echo "FAIL P1: not available"; exit 1; }
+          echo "$B" | grep -q '"catalog_version":1' || { echo "FAIL P1: not v1"; exit 1; }
+          echo "$B" | grep -q 'culvert-1.0.0'       || { echo "FAIL P1: wrong release"; exit 1; }
+          stop_cp
 
-      - name: Assert a TAMPERED catalog is rejected (available:false)
-        run: |
-          set -euo pipefail
-          kill "$(cat "$RUNNER_TEMP/cp.pid")" 2>/dev/null || true
-          sleep 1
-          printf ' ' >> /data/release_catalog/index.json   # mutate AFTER signing
-          export CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$RUNNER_TEMP/keys.json")"
-          export CULVERT_RELEASE_CATALOG_VERIFY=enforce
-          ./culvert -port 18081 -ui-port 19091 -ui-no-tls > "$RUNNER_TEMP/cp2.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/cp2.pid"
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18081/health >/dev/null 2>&1 && break; sleep 1; done
-          BODY=$(curl -fsS http://127.0.0.1:19091/api/releases)
-          echo "$BODY"
-          echo "$BODY" | grep -q '"available":false' || { echo "FAIL: a tampered catalog was trusted!"; exit 1; }
-          echo "PASS: tampered catalog correctly rejected in a real process"
+          echo "── P2 upgrade to v2 ─────────────────────────────────────────"
+          seed 2 2.0.0 2099-06-01T00:00:00Z
+          start_cp 18081 19091
+          B=$(body 19091); echo "$B"
+          echo "$B" | grep -q '"available":true'    || { echo "FAIL P2: not available"; exit 1; }
+          echo "$B" | grep -q '"catalog_version":2' || { echo "FAIL P2: did not upgrade to v2"; exit 1; }
+          echo "$B" | grep -q 'culvert-2.0.0'        || { echo "FAIL P2: wrong release"; exit 1; }
+          grep -q '"highest_accepted_version":2' /data/release_catalog_state.json || { echo "FAIL P2: floor not raised"; exit 1; }
+          stop_cp
 
-      - name: Teardown + logs
+          echo "── P3 anti-rollback (re-seed v1, below floor 2) ─────────────"
+          seed 1 1.0.0
+          start_cp 18082 19092
+          B=$(body 19092); echo "$B"
+          echo "$B" | grep -q '"available":false' || { echo "FAIL P3: a DOWNGRADE to v1 was accepted!"; exit 1; }
+          grep -qi "rollback" "$RUNNER_TEMP/cp.log" || { echo "FAIL P3: no rollback-refused log"; exit 1; }
+          stop_cp
+
+          echo "── P4 tamper (re-seed v2, mutate index after signing) ───────"
+          seed 2 2.0.0 2099-06-01T00:00:00Z
+          printf ' ' >> /data/release_catalog/index.json
+          start_cp 18083 19093
+          B=$(body 19093); echo "$B"
+          echo "$B" | grep -q '"available":false' || { echo "FAIL P4: a TAMPERED catalog was accepted!"; exit 1; }
+          stop_cp
+          echo "ALL PHASES PASSED (binary): serve → upgrade → anti-rollback → tamper-reject"
+
+      - name: Teardown
         if: always()
         run: |
           kill "$(cat "$RUNNER_TEMP/cp.pid" 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat "$RUNNER_TEMP/cp2.pid" 2>/dev/null)" 2>/dev/null || true
-          echo "=== cp.log ===";  cat "$RUNNER_TEMP/cp.log"  2>/dev/null || true
-          echo "=== cp2.log ==="; cat "$RUNNER_TEMP/cp2.log" 2>/dev/null || true
+          echo "=== cp.log ==="; cat "$RUNNER_TEMP/cp.log" 2>/dev/null || true
 
   catalog-e2e-docker:
     name: Catalog E2E (Docker image)
@@ -115,68 +124,72 @@ jobs:
       - name: Build the proxy image
         run: docker build -t culvert:e2e -f Dockerfile .
 
-      # Seed a SIGNED catalog on the host, then bind-mount it as the container's
-      # /data. The image runs as the non-root `proxy` user and enforce mode WRITES
-      # the rollback floor (/data/release_catalog_state.json), so the bind mount
-      # must be readable AND writable by any UID — chmod a+rwX (throwaway CI data).
-      - name: Seed a SIGNED catalog for the container's /data
+      - name: Serve + upgrade + anti-rollback + tamper (proxy container)
         run: |
           set -euo pipefail
           SEED="$RUNNER_TEMP/e2e-data"
           mkdir -p "$SEED/release_catalog"
-          CULVERT_E2E_SEED_OUT="$SEED/release_catalog" \
-          CULVERT_E2E_SEED_KEYS="$RUNNER_TEMP/keys.json" \
-            go test -run TestE2ESeedSignedCatalog -count=1 -v .
-          chmod -R a+rwX "$SEED"
-          test -s "$SEED/release_catalog/index.json.sig"
-          test -s "$RUNNER_TEMP/keys.json"
+          KEYS="$RUNNER_TEMP/keys.json"; PRIV="$RUNNER_TEMP/priv.seed"
 
-      - name: Run the proxy CONTAINER (enforce) with the signed catalog
-        run: |
-          set -euo pipefail
-          docker run -d --name culvert-e2e \
-            -e CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$RUNNER_TEMP/keys.json")" \
-            -e CULVERT_RELEASE_CATALOG_VERIFY=enforce \
-            -v "$RUNNER_TEMP/e2e-data:/data" \
-            -p 18080:8080 -p 19090:9090 \
-            culvert:e2e -port 8080 -ui-port 9090 -ui-no-tls
-          for i in $(seq 1 40); do
-            if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then echo "container ready after ${i}s"; exit 0; fi
-            sleep 1
-          done
-          echo "FAIL: container did not become ready"; docker logs culvert-e2e; exit 1
+          seed() { # version version_id [expires]
+            CULVERT_E2E_SEED_OUT="$SEED/release_catalog" CULVERT_E2E_SEED_KEYS="$KEYS" \
+            CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" \
+            CULVERT_E2E_SEED_VERSION_ID="$2" ${3:+CULVERT_E2E_SEED_EXPIRES="$3"} \
+              go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
+            # The image runs as the non-root `proxy` user and enforce mode writes the
+            # rollback floor under /data, so make the whole bind mount r/w for any UID.
+            chmod -R a+rwX "$SEED"
+          }
+          run_proxy() { # name proxyport uiport
+            docker run -d --name "$1" \
+              -e CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$KEYS")" \
+              -e CULVERT_RELEASE_CATALOG_VERIFY=enforce \
+              -v "$SEED:/data" -p "$2:8080" -p "$3:9090" \
+              culvert:e2e -port 8080 -ui-port 9090 -ui-no-tls >/dev/null
+            for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:$2/health" >/dev/null 2>&1 && return 0; sleep 1; done
+            echo "FAIL: container $1 not ready"; docker logs "$1"; return 1
+          }
+          body() { curl -fsS "http://127.0.0.1:$1/api/releases"; }
 
-      - name: Assert the signed catalog is served (available:true)
-        run: |
-          set -euo pipefail
-          BODY=$(curl -fsS http://127.0.0.1:19090/api/releases)
-          echo "$BODY"
-          echo "$BODY" | grep -q '"available":true'       || { echo "FAIL: catalog not available"; docker logs culvert-e2e; exit 1; }
-          echo "$BODY" | grep -q '"verify_mode":"enforce"' || { echo "FAIL: not enforce mode"; exit 1; }
-          echo "$BODY" | grep -q '"catalog_version":1'     || { echo "FAIL: wrong catalog_version"; exit 1; }
-          echo "$BODY" | grep -q 'culvert-9.9.9'           || { echo "FAIL: seeded release missing"; exit 1; }
-          echo "PASS: proxy container verified + served the signed catalog"
+          echo "── P1 serve v1 ──────────────────────────────────────────────"
+          seed 1 1.0.0
+          run_proxy culvert-e2e-1 18080 19090
+          B=$(body 19090); echo "$B"
+          echo "$B" | grep -q '"available":true'    || { echo "FAIL P1"; docker logs culvert-e2e-1; exit 1; }
+          echo "$B" | grep -q '"catalog_version":1' || { echo "FAIL P1: not v1"; exit 1; }
+          echo "$B" | grep -q 'culvert-1.0.0'        || { echo "FAIL P1: wrong release"; exit 1; }
+          docker rm -f culvert-e2e-1 >/dev/null
 
-      - name: Assert a TAMPERED catalog is rejected (available:false)
-        run: |
-          set -euo pipefail
-          docker rm -f culvert-e2e >/dev/null 2>&1 || true
-          printf ' ' >> "$RUNNER_TEMP/e2e-data/release_catalog/index.json"   # mutate AFTER signing
-          docker run -d --name culvert-e2e2 \
-            -e CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$RUNNER_TEMP/keys.json")" \
-            -e CULVERT_RELEASE_CATALOG_VERIFY=enforce \
-            -v "$RUNNER_TEMP/e2e-data:/data" \
-            -p 18081:8080 -p 19091:9090 \
-            culvert:e2e -port 8080 -ui-port 9090 -ui-no-tls
-          for i in $(seq 1 40); do curl -fsS http://127.0.0.1:18081/health >/dev/null 2>&1 && break; sleep 1; done
-          BODY=$(curl -fsS http://127.0.0.1:19091/api/releases)
-          echo "$BODY"
-          echo "$BODY" | grep -q '"available":false' || { echo "FAIL: a tampered catalog was trusted!"; docker logs culvert-e2e2; exit 1; }
-          echo "PASS: tampered catalog correctly rejected in the proxy container"
+          echo "── P2 upgrade to v2 ─────────────────────────────────────────"
+          seed 2 2.0.0 2099-06-01T00:00:00Z
+          run_proxy culvert-e2e-2 18081 19091
+          B=$(body 19091); echo "$B"
+          echo "$B" | grep -q '"available":true'    || { echo "FAIL P2"; docker logs culvert-e2e-2; exit 1; }
+          echo "$B" | grep -q '"catalog_version":2' || { echo "FAIL P2: did not upgrade"; exit 1; }
+          echo "$B" | grep -q 'culvert-2.0.0'        || { echo "FAIL P2: wrong release"; exit 1; }
+          grep -q '"highest_accepted_version":2' "$SEED/release_catalog_state.json" || { echo "FAIL P2: floor not raised"; exit 1; }
+          docker rm -f culvert-e2e-2 >/dev/null
+
+          echo "── P3 anti-rollback (re-seed v1, below floor 2) ─────────────"
+          seed 1 1.0.0
+          run_proxy culvert-e2e-3 18082 19092
+          B=$(body 19092); echo "$B"
+          echo "$B" | grep -q '"available":false' || { echo "FAIL P3: a DOWNGRADE was accepted!"; docker logs culvert-e2e-3; exit 1; }
+          docker rm -f culvert-e2e-3 >/dev/null
+
+          echo "── P4 tamper (re-seed v2, mutate index after signing) ───────"
+          seed 2 2.0.0 2099-06-01T00:00:00Z
+          printf ' ' >> "$SEED/release_catalog/index.json"
+          run_proxy culvert-e2e-4 18083 19093
+          B=$(body 19093); echo "$B"
+          echo "$B" | grep -q '"available":false' || { echo "FAIL P4: a TAMPERED catalog was accepted!"; docker logs culvert-e2e-4; exit 1; }
+          docker rm -f culvert-e2e-4 >/dev/null
+          echo "ALL PHASES PASSED (docker): serve → upgrade → anti-rollback → tamper-reject"
 
       - name: Teardown + logs
         if: always()
         run: |
-          echo "=== culvert-e2e logs ===";  docker logs culvert-e2e  2>&1 | tail -25 || true
-          echo "=== culvert-e2e2 logs ==="; docker logs culvert-e2e2 2>&1 | tail -25 || true
-          docker rm -f culvert-e2e culvert-e2e2 >/dev/null 2>&1 || true
+          for n in culvert-e2e-1 culvert-e2e-2 culvert-e2e-3 culvert-e2e-4; do
+            echo "=== $n ==="; docker logs "$n" 2>&1 | tail -15 || true
+            docker rm -f "$n" >/dev/null 2>&1 || true
+          done
