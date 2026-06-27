@@ -270,7 +270,29 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	authenticatedSource := "unauth" // default: no credentials presented
 	var authLog AuthLogFields       // Stage-1 auth observability; zero unless an exempt or credential-required rule matched
 
-	authRequired := !cfg.UnauthMode() && (cfg.AuthEnabled() || cfg.ProviderEnabled() || len(idpRegistry.EnabledProviders()) > 0)
+	// Slice 3 (S2): scoped auth rules evaluate first; the global
+	// defaultAuthOutcome applies only on no-match. effectiveDefault is the global
+	// default forced to Default when the Exempt kill switch is engaged.
+	//
+	// Two distinct backend predicates (both EXCLUDE the Exempt term, so the gate
+	// never depends on the global default):
+	//   - credCapable: a validator that can verify a PRESENTED Basic credential
+	//     (local account, legacy provider, or enabled OIDC). SAML is browser-only
+	//     and is EXCLUDED — otherwise a SAML-only deployment would enter the Basic
+	//     branch, SAML ResolveIdentity would fail, and cfg.VerifyAuth with no local
+	//     user accepts any creds → identity spoofing.
+	//   - ssoCapable: any enabled interactive IdP (OIDC or SAML) that can drive the
+	//     no-credentials SSO/captive path. SAML IS included here.
+	// authRequired uses (credCapable || ssoCapable) — byte-identical to today's
+	// backend term under Default — plus the Exempt-default term. Arm 2 (Basic
+	// validation) gates on credCapable ONLY.
+	effectiveDefault := cfg.DefaultAuthOutcome()
+	if authExemptKillSwitchEngaged() {
+		effectiveDefault = OutcomeDefault
+	}
+	credCapable := hasCredentialCapableProvider()
+	ssoCapable := len(idpRegistry.EnabledProviders()) > 0
+	authRequired := credCapable || ssoCapable || effectiveDefault == OutcomeExempt
 
 	if authRequired {
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
@@ -284,8 +306,15 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			authenticatedSource = identityAuthSource(id, "local")
 		} else {
 			// ── 2. Basic Auth header ──────────────────────────────────────────
+			// Credential validation runs ONLY when a credential-capable validator
+			// exists (credCapable — SAML-only does NOT count). Without one,
+			// presented credentials must not become an implicit allow path (e.g.
+			// VerifyAuth accepting any creds when no user is set, or a SAML-only
+			// deployment spoofing identities); they fall through to arm 3, where
+			// resolveNoCredAuthOutcome returns Default for any Proxy-Authorization
+			// header (never default-exempted).
 			u, p, ok := parseProxyAuth(r)
-			if ok {
+			if ok && credCapable {
 				// Try IdP registry providers first (OIDC introspection).
 				authed := false
 				for _, prov := range idpRegistry.EnabledProviders() {
@@ -313,127 +342,143 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					authenticatedIdentity = u
 					authenticatedSource = "local"
 				}
-			} else if d := resolveNoCredAuthOutcome(r, clientIP); d.Outcome == OutcomeExempt {
-				// ── 3a. No credentials — Stage-1 auth-policy exemption ───────
-				// An explicitly matched auth/exempt rule waives the challenge
-				// for this request ONLY. No identity is created:
-				// authenticatedIdentity stays empty, so X-User-Identity is
-				// never set and groups stay nil. authenticatedSource becomes
-				// "exempt" (NOT "unauth") so Stage-2 policy, request logs, and
-				// SIEM can distinguish explicit exemptions from plain
-				// unauthenticated traffic. Execution falls through to the same
-				// blocklist/threat/policy pipeline as every other request —
-				// default-deny still applies. Note: a stale/expired session
-				// cookie with no Proxy-Authorization lands here too and is
-				// treated as "no credentials" (exempt-eligible). Presented
-				// credentials of ANY shape — valid, invalid, or malformed
-				// (unsupported scheme / bad base64, where parseProxyAuth
-				// returns ok=false) — are never exempted:
-				// resolveNoCredAuthOutcome returns Default whenever a
-				// Proxy-Authorization header is present, so malformed
-				// credentials keep today's 407 below.
-				authLog = authLogFieldsFor(d)
-				authenticatedSource = authSourceExempt
-				incAuthExempt()
-				logger.Printf("AUTH_EXEMPT rule=%q id=%q %s -> %q {req_id=%s}",
-					sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
-			} else if d.Outcome == OutcomeCredentialRequired {
-				// ── 3b. No credentials — Stage-1 CredentialRequired challenge ──
-				// A matched CR rule demands a non-interactive credential
-				// challenge. Unlike Exempt this is NOT a waiver: we return a
-				// deterministic 407 immediately and DO NOT fall through to
-				// Stage-2 — the request must authenticate first. No identity is
-				// created (authenticatedIdentity stays empty → X-User-Identity is
-				// never set), the SSO captive redirect is suppressed, and the CR
-				// auth fields are attached to the request-log record. CRED_REQUIRED
-				// is a policy-driven challenge, not a failed credential attempt;
-				// statAuthFail is still bumped for 407-counter compatibility.
-				// Reachable only with no presented credentials (failed/malformed
-				// credentials 407 in arm 2 above; resolveNoCredAuthOutcome returns
-				// Default whenever a Proxy-Authorization header is present). The
-				// kill switch does NOT disable CR.
-				authLog = authLogFieldsFor(d)
-				atomic.AddInt64(&statAuthFail, 1)
-				incAuthCredentialRequired()
-				w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
-				http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
-				recordRequestAuth(clientIP, r.Method, r.Host, "CRED_REQUIRED", d.Rule.Name, "", "", authLog)
-				logger.Printf("AUTH_CR rule=%q id=%q %s -> %q {req_id=%s action=challenge}",
-					sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
-				return
-			} else if d.Outcome == OutcomeSSORequired {
-				// ── 3c. No credentials — Stage-1 SSORequired challenge (Slice 4) ──
-				// A matched SSORequired rule demands an INTERACTIVE browser SSO
-				// flow. No identity is created (authenticatedIdentity stays empty →
-				// X-User-Identity is never set), and the branch returns immediately
-				// — Stage-2 never runs until the client completes SSO and a session
-				// exists. classifyClient is consulted ONLY here (the Default path
-				// below keeps browserRedirectEligibleLegacy). Reachable only with no
-				// presented credentials (failed/malformed credentials 407 in arm 2;
-				// resolveNoCredAuthOutcome returns Default whenever a
-				// Proxy-Authorization header is present).
-				authLog = authLogFieldsFor(d)
-				// Only a browser can complete an interactive SSO flow. Resolving the
-				// portal URL can ALLOCATE IdP callback state (PKCE / SAML stores) as a
-				// side effect, so it is done ONLY for browser clients: a non-browser or
-				// CONNECT request fails closed WITHOUT touching those capped stores
-				// (otherwise a stream of denied requests could churn / evict legitimate
-				// in-flight browser logins). classifyClient is consulted ONLY here.
-				if classifyClient(r) == clientBrowser {
-					if portalURL, eligible := resolveSSOPortalURL(r, d.Rule.Auth.ProviderRefs); eligible > 0 && portalURL != "" && isSafeCaptiveRedirect(portalURL) {
-						// Browser + ≥1 eligible IdP → 302 to the captive portal /
-						// provider flow scoped by providerRefs.
-						incAuthSSORequired()
-						recordRequestAuth(clientIP, r.Method, r.Host, "SSO_REDIRECT", d.Rule.Name, "", "", authLog)
-						logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=redirect}",
-							sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
-						http.Redirect(w, r, portalURL, http.StatusFound) // #nosec G710 -- portalURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
-						return
-					}
-				}
-				// DR-1 fail-closed: non-browser, CONNECT, or a browser with no eligible
-				// IdP after providerRefs filtering. No Basic 407 (a false affordance —
-				// the rule wants interactive SSO, not Basic), no identity, and no SSO
-				// callback state was allocated for the rejected request.
-				incAuthSSORequired()
-				recordRequestAuth(clientIP, r.Method, r.Host, "SSO_DENIED", d.Rule.Name, "", "", authLog)
-				logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=deny}",
-					sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
-				http.Error(w, "Forbidden: destination requires interactive SSO", http.StatusForbidden)
-				return
 			} else {
-				// ── 3. No credentials ────────────────────────────────────────
-				// browserRedirectEligibleLegacy is the verbatim pre-Slice-1
-				// predicate (Mozilla User-Agent && non-CONNECT) — the Default
-				// compatibility path. It is intentionally NOT classifyClient:
-				// classifyClient drives SSORequired (arm 3c) only; the Default path
-				// stays legacy-pinned (DR-5).
-				if browserRedirectEligibleLegacy(r) {
-					// Route browser to appropriate IdP based on email domain hint.
-					loginURL := resolveCaptivePortalURL(r)
-					// Inline guard for static-analysis visibility:
-					// resolveCaptivePortalURL returns either a same-origin
-					// path ("/auth/select?relay=...") or an admin-configured
-					// absolute http(s) IdP URL. isSafeCaptiveRedirect rejects
-					// protocol-relative ("//evil"), data:/javascript:, and
-					// any other shape (covered by TestIsSafeCaptiveRedirect).
-					if loginURL != "" && isSafeCaptiveRedirect(loginURL) {
-						// gosec G710's SSA pass cannot follow the
-						// isSafeCaptiveRedirect predicate; the guard above is
-						// the actual safety check.
-						http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
-						return
+				// ── 3. No credentials — resolve the Stage-1 outcome and dispatch.
+				// A switch (not an if-else chain) keeps gocritic happy; cases 3a/3a'
+				// fall through to Stage-2, 3b/3c/Default write a response and return.
+				d := resolveNoCredAuthOutcome(r, clientIP, effectiveDefault)
+				switch {
+				case d.Outcome == OutcomeExempt && d.Rule != nil:
+					// ── 3a. No credentials — SCOPED Exempt rule (Rule != nil) ────
+					// An explicitly matched auth/exempt rule waives the challenge
+					// for this request ONLY. No identity is created:
+					// authenticatedIdentity stays empty, so X-User-Identity is
+					// never set and groups stay nil. authenticatedSource becomes
+					// "exempt" (NOT "unauth") so Stage-2 policy, request logs, and
+					// SIEM can distinguish explicit exemptions from plain
+					// unauthenticated traffic. Execution falls through to the same
+					// blocklist/threat/policy pipeline as every other request —
+					// default-deny still applies. Note: a stale/expired session
+					// cookie with no Proxy-Authorization lands here too and is
+					// treated as "no credentials" (exempt-eligible). Presented
+					// credentials of ANY shape — valid, invalid, or malformed
+					// (unsupported scheme / bad base64, where parseProxyAuth
+					// returns ok=false) — are never exempted:
+					// resolveNoCredAuthOutcome returns Default whenever a
+					// Proxy-Authorization header is present, so malformed
+					// credentials keep today's 407 below.
+					authLog = authLogFieldsFor(d)
+					authenticatedSource = authSourceExempt
+					incAuthExempt()
+					logger.Printf("AUTH_EXEMPT rule=%q id=%q %s -> %q {req_id=%s}",
+						sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
+				case d.Outcome == OutcomeExempt:
+					// ── 3a'. No credentials — DEFAULT Exempt (no scoped match) ───
+					// defaultAuthOutcome=Exempt opened this UNMATCHED request. This is
+					// NOT a scoped exemption: no rule, no identity, authenticatedSource
+					// stays "unauth" (distinct from a scoped Exempt rule's "exempt"),
+					// and no exempt metric. Mirrors legacy open mode — falls through to
+					// Stage-2, where default-deny still applies (open ≠ allow).
+					logger.Printf("AUTH_DEFAULT_EXEMPT (open, no rule) %s -> %q {req_id=%s}",
+						clientIP, sanitizeLog(r.Host), reqID)
+				case d.Outcome == OutcomeCredentialRequired:
+					// ── 3b. No credentials — Stage-1 CredentialRequired challenge ──
+					// A matched CR rule demands a non-interactive credential
+					// challenge. Unlike Exempt this is NOT a waiver: we return a
+					// deterministic 407 immediately and DO NOT fall through to
+					// Stage-2 — the request must authenticate first. No identity is
+					// created (authenticatedIdentity stays empty → X-User-Identity is
+					// never set), the SSO captive redirect is suppressed, and the CR
+					// auth fields are attached to the request-log record. CRED_REQUIRED
+					// is a policy-driven challenge, not a failed credential attempt;
+					// statAuthFail is still bumped for 407-counter compatibility.
+					// Reachable only with no presented credentials (failed/malformed
+					// credentials 407 in arm 2 above; resolveNoCredAuthOutcome returns
+					// Default whenever a Proxy-Authorization header is present). The
+					// kill switch does NOT disable CR.
+					authLog = authLogFieldsFor(d)
+					atomic.AddInt64(&statAuthFail, 1)
+					incAuthCredentialRequired()
+					w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
+					http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+					recordRequestAuth(clientIP, r.Method, r.Host, "CRED_REQUIRED", d.Rule.Name, "", "", authLog)
+					logger.Printf("AUTH_CR rule=%q id=%q %s -> %q {req_id=%s action=challenge}",
+						sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
+					return
+				case d.Outcome == OutcomeSSORequired:
+					// ── 3c. No credentials — Stage-1 SSORequired challenge (Slice 4) ──
+					// A matched SSORequired rule demands an INTERACTIVE browser SSO
+					// flow. No identity is created (authenticatedIdentity stays empty →
+					// X-User-Identity is never set), and the branch returns immediately
+					// — Stage-2 never runs until the client completes SSO and a session
+					// exists. classifyClient is consulted ONLY here (the Default path
+					// below keeps browserRedirectEligibleLegacy). Reachable only with no
+					// presented credentials (failed/malformed credentials 407 in arm 2;
+					// resolveNoCredAuthOutcome returns Default whenever a
+					// Proxy-Authorization header is present).
+					authLog = authLogFieldsFor(d)
+					// Only a browser can complete an interactive SSO flow. Resolving the
+					// portal URL can ALLOCATE IdP callback state (PKCE / SAML stores) as a
+					// side effect, so it is done ONLY for browser clients: a non-browser or
+					// CONNECT request fails closed WITHOUT touching those capped stores
+					// (otherwise a stream of denied requests could churn / evict legitimate
+					// in-flight browser logins). classifyClient is consulted ONLY here.
+					if classifyClient(r) == clientBrowser {
+						if portalURL, eligible := resolveSSOPortalURL(r, d.Rule.Auth.ProviderRefs); eligible > 0 && portalURL != "" && isSafeCaptiveRedirect(portalURL) {
+							// Browser + ≥1 eligible IdP → 302 to the captive portal /
+							// provider flow scoped by providerRefs.
+							incAuthSSORequired()
+							recordRequestAuth(clientIP, r.Method, r.Host, "SSO_REDIRECT", d.Rule.Name, "", "", authLog)
+							logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=redirect}",
+								sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
+							http.Redirect(w, r, portalURL, http.StatusFound) // #nosec G710 -- portalURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
+							return
+						}
 					}
+					// DR-1 fail-closed: non-browser, CONNECT, or a browser with no eligible
+					// IdP after providerRefs filtering. No Basic 407 (a false affordance —
+					// the rule wants interactive SSO, not Basic), no identity, and no SSO
+					// callback state was allocated for the rejected request.
+					incAuthSSORequired()
+					recordRequestAuth(clientIP, r.Method, r.Host, "SSO_DENIED", d.Rule.Name, "", "", authLog)
+					logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=deny}",
+						sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
+					http.Error(w, "Forbidden: destination requires interactive SSO", http.StatusForbidden)
+					return
+				default:
+					// ── 3. No credentials ────────────────────────────────────────
+					// browserRedirectEligibleLegacy is the verbatim pre-Slice-1
+					// predicate (Mozilla User-Agent && non-CONNECT) — the Default
+					// compatibility path. It is intentionally NOT classifyClient:
+					// classifyClient drives SSORequired (arm 3c) only; the Default path
+					// stays legacy-pinned (DR-5).
+					if browserRedirectEligibleLegacy(r) {
+						// Route browser to appropriate IdP based on email domain hint.
+						loginURL := resolveCaptivePortalURL(r)
+						// Inline guard for static-analysis visibility:
+						// resolveCaptivePortalURL returns either a same-origin
+						// path ("/auth/select?relay=...") or an admin-configured
+						// absolute http(s) IdP URL. isSafeCaptiveRedirect rejects
+						// protocol-relative ("//evil"), data:/javascript:, and
+						// any other shape (covered by TestIsSafeCaptiveRedirect).
+						if loginURL != "" && isSafeCaptiveRedirect(loginURL) {
+							// gosec G710's SSA pass cannot follow the
+							// isSafeCaptiveRedirect predicate; the guard above is
+							// the actual safety check.
+							http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
+							return
+						}
+					}
+					atomic.AddInt64(&statAuthFail, 1)
+					w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
+					if u := cfg.OIDCLoginURL(); u != "" {
+						w.Header().Set("Link", `<`+u+`>; rel="authorization_endpoint"`)
+					}
+					http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+					recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
+					logger.Printf("AUTH_FAIL (no-credentials) %s {req_id=%s action=block}", clientIP, reqID)
+					return
 				}
-				atomic.AddInt64(&statAuthFail, 1)
-				w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
-				if u := cfg.OIDCLoginURL(); u != "" {
-					w.Header().Set("Link", `<`+u+`>; rel="authorization_endpoint"`)
-				}
-				http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
-				recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
-				logger.Printf("AUTH_FAIL (no-credentials) %s {req_id=%s action=block}", clientIP, reqID)
-				return
 			}
 		}
 	}

@@ -1699,6 +1699,18 @@ func (c *Config) UnauthMode() bool {
 	return c.defaultAuthOutcome == OutcomeExempt
 }
 
+// DefaultAuthOutcome returns the authoritative global Stage-1 default applied on
+// no-match (Slice 3 runtime wiring). Fail-closed: only OutcomeExempt is returned
+// as Exempt; any other/empty value normalizes to OutcomeDefault.
+func (c *Config) DefaultAuthOutcome() AuthOutcome {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.defaultAuthOutcome == OutcomeExempt {
+		return OutcomeExempt
+	}
+	return OutcomeDefault
+}
+
 // SetUnauthMode enables or disables explicit unauthenticated (open) mode. Shim
 // over the authoritative defaultAuthOutcome field; persistence is unchanged.
 func (c *Config) SetUnauthMode(enabled bool) {

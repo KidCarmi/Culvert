@@ -164,29 +164,38 @@ func TestP2S2_Metric_DefinedNotIncrementedByRuntime(t *testing.T) {
 
 // ── Diagnostics ──────────────────────────────────────────────────────────────
 
-func TestP2S2_Diag_CRUnderUnauthMode_Warn(t *testing.T) {
-	checks := authCredentialRequiredDiagnostics([]PolicyRule{validCRRule()}, true /*unauthMode*/, true /*hasCredProvider*/)
-	if c, ok := hasCheck(checks, "auth_cr_dead_under_unauth_mode"); !ok || c.Status != diagWarn {
-		t.Errorf("expected WARN auth_cr_dead_under_unauth_mode, got %+v", checks)
+// Slice 3 (S2): CR rules no longer carry a "dead under UnauthMode" WARN — under
+// defaultAuthOutcome=Exempt they ENFORCE, surfaced by the migration diagnostic.
+func TestP2S2_Diag_CRDefaultExemptMigration_Warn(t *testing.T) {
+	// CR diagnostics must NOT emit the removed dead-under-unauth code.
+	if _, ok := hasCheck(authCredentialRequiredDiagnostics([]PolicyRule{validCRRule()}, true), "auth_cr_dead_under_unauth_mode"); ok {
+		t.Error("auth_cr_dead_under_unauth_mode must be removed in Slice 3")
+	}
+	// The migration diagnostic WARNs only when the global default is Exempt.
+	if c, ok := hasCheck(authDefaultExemptMigrationDiagnostics([]PolicyRule{validCRRule()}, true), "auth_default_exempt_rules_now_enforce"); !ok || c.Status != diagWarn {
+		t.Errorf("expected WARN auth_default_exempt_rules_now_enforce under default Exempt")
+	}
+	if got := authDefaultExemptMigrationDiagnostics([]PolicyRule{validCRRule()}, false); got != nil {
+		t.Errorf("no migration WARN when default is not Exempt, got %+v", got)
 	}
 }
 
 func TestP2S2_Diag_CRNoCredentialProvider_Fail(t *testing.T) {
-	checks := authCredentialRequiredDiagnostics([]PolicyRule{validCRRule()}, false, false /*no cred provider*/)
+	checks := authCredentialRequiredDiagnostics([]PolicyRule{validCRRule()}, false /*no cred provider*/)
 	c, ok := hasCheck(checks, "auth_cr_no_credential_provider")
 	if !ok || c.Status != diagFail {
 		t.Errorf("expected FAIL auth_cr_no_credential_provider, got %+v", checks)
 	}
 	// With a credential-capable provider, no FAIL.
 	ok2 := func() bool {
-		_, found := hasCheck(authCredentialRequiredDiagnostics([]PolicyRule{validCRRule()}, false, true), "auth_cr_no_credential_provider")
+		_, found := hasCheck(authCredentialRequiredDiagnostics([]PolicyRule{validCRRule()}, true), "auth_cr_no_credential_provider")
 		return found
 	}()
 	if ok2 {
 		t.Error("must not FAIL when a credential-capable provider exists")
 	}
 	// No CR rules → no checks at all.
-	if got := authCredentialRequiredDiagnostics([]PolicyRule{validExemptRule()}, true, false); got != nil {
+	if got := authCredentialRequiredDiagnostics([]PolicyRule{validExemptRule()}, false); got != nil {
 		t.Errorf("no CR rules → no CR checks, got %+v", got)
 	}
 }
@@ -233,7 +242,7 @@ func TestP2S3_RuntimePriority_CRBeatsLowerExempt(t *testing.T) {
 	policyStore.Add(ex)
 
 	// The runtime resolver returns CR@1 (highest priority wins).
-	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeCredentialRequired {
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1", OutcomeDefault); d.Outcome != OutcomeCredentialRequired {
 		t.Fatalf("runtime resolver: CR@1 must win over Exempt@2, got %q", d.Outcome)
 	}
 	// End-to-end: CR@1 wins → 407 challenge (not waived).

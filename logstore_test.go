@@ -32,7 +32,11 @@ func adminReq(method, target, body string) *http.Request {
 // writes on a 500ms timer, so tests must not assume synchronous persistence.
 func drainLogStore(t *testing.T, s *logStore, want int) []LogEntry {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// Generous deadline: Add() is async (buffered channel → background writer
+	// goroutine → Badger), and under the shuffled determinism gate's CPU
+	// saturation that writer can be starved for several seconds before it
+	// flushes, so reads transiently see fewer than `want` entries.
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		got, total, err := s.Query(0, 0, 0, 100000, nil)
 		if err != nil {
@@ -307,8 +311,14 @@ func TestLogStore_FilterAndTimeRange(t *testing.T) {
 }
 
 func TestLogStore_AgeRetentionTTL(t *testing.T) {
-	// 1-second TTL: entries must be gone from reads shortly after expiry.
-	s, err := openLogStoreTTL(t.TempDir(), 1*time.Second, 0, nil)
+	// Short TTL: entries must be gone from reads shortly after expiry. The TTL is
+	// 5s (not 1s) so the 20 entries reliably COEXIST in reads long enough for the
+	// initial drain to observe all of them even when the async writer goroutine is
+	// starved and flushes them a few seconds late under the determinism gate's
+	// parallel load — with a 1s TTL the earliest entries could expire before the
+	// last were written, so the drain never saw 20 at once ("have 0" flake).
+	const ttl = 5 * time.Second
+	s, err := openLogStoreTTL(t.TempDir(), ttl, 0, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -320,11 +330,11 @@ func TestLogStore_AgeRetentionTTL(t *testing.T) {
 	}
 	drainLogStore(t, s, 20)
 
-	// Badger filters TTL-expired entries at read time, so once the 1s TTL passes
-	// Query returns total=0. Poll up to a generous deadline instead of a single
-	// fixed sleep: the old "sleep 1.5s then assert" left only a ~0.5s margin over
-	// the 1s TTL, which flaked under the shuffled determinism gate's parallel load.
-	deadline := time.Now().Add(8 * time.Second)
+	// Badger filters TTL-expired entries at read time, so once the TTL passes
+	// Query returns total=0. Poll up to a generous deadline (well beyond the TTL)
+	// instead of a single fixed sleep, so slow expiry detection under parallel
+	// load does not flake.
+	deadline := time.Now().Add(ttl + 15*time.Second)
 	var total int
 	for {
 		var qerr error
