@@ -138,12 +138,14 @@ jobs:
             CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" \
             CULVERT_E2E_SEED_VERSION_ID="$2" CULVERT_E2E_SEED_EXPIRES="$expires" \
               go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
-            # The image runs as the non-root `proxy` user and enforce mode writes the
-            # rollback floor under /data, so make the whole bind mount r/w for any UID.
-            chmod -R a+rwX "$SEED"
           }
           run_proxy() { # name proxyport uiport
-            docker run -d --name "$1" \
+            # Run the container as the HOST runner UID so it shares ownership with
+            # the host-seeded catalog files (read) AND the /data state it writes
+            # (rollback floor, config_versions, updater_token). This avoids the
+            # cross-UID bind-mount permission problem entirely — a re-seed between
+            # phases just overwrites host-owned files, no chmod needed.
+            docker run -d --name "$1" --user "$(id -u):$(id -g)" \
               -e CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$KEYS")" \
               -e CULVERT_RELEASE_CATALOG_VERIFY=enforce \
               -v "$SEED:/data" -p "$2:8080" -p "$3:9090" \
