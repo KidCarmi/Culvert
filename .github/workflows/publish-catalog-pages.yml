@@ -1,0 +1,136 @@
+name: Publish Release Catalog (Pages)
+
+# Publishes the SIGNED release-catalog bundle attached to a GitHub Release to
+# this repo's GitHub Pages site, so a Control Plane can auto-seed it via:
+#   CULVERT_RELEASE_CATALOG_URL=https://kidcarmi.github.io/Culvert/release-catalog
+#
+# SECURITY MODEL: the Pages host is UNTRUSTED transport. Integrity comes from the
+# catalog's keyless Sigstore signature, verified in-binary against the baked
+# trusted root + pinned ci.yml identity (offline Rekor timestamp). A tampered or
+# MITM'd catalog is rejected regardless of where it is served — Pages only
+# provides AVAILABILITY, never trust. This workflow refuses to publish a bundle
+# that is missing its signature (index.json.sigstore).
+#
+# Triggers:
+#   - workflow_run after "CI" completes → auto-publish on a tag build. We use
+#     workflow_run (NOT release:published) because the catalog assets are
+#     attached by CI via softprops/action-gh-release using GITHUB_TOKEN, and
+#     GitHub does NOT fire release:published from GITHUB_TOKEN-caused events — so
+#     that trigger would never run. workflow_run fires regardless, AFTER CI has
+#     attached the signed bundle, and runs from the default branch (which also
+#     satisfies the github-pages environment's deployment-branch policy).
+#   - workflow_dispatch → manually (re)publish a chosen tag (e.g. v1.0.0).
+#
+# ONE-TIME SETUP (repo owner): Settings → Pages → Build and deployment →
+# Source = "GitHub Actions". (deploy-pages fails until this is set.)
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.0.0). Default: latest release."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize Pages deploys; never cancel an in-flight deployment.
+concurrency:
+  group: pages-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish signed catalog to Pages
+    runs-on: ubuntu-latest
+    # Manual dispatch always runs. workflow_run only proceeds for a SUCCESSFUL CI
+    # run on a tag push (head_branch is the tag, e.g. "v1.0.0") — branch/PR CI
+    # completions are skipped cleanly so they never spuriously fail.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push' &&
+           startsWith(github.event.workflow_run.head_branch, 'v')) }}
+    permissions:
+      contents: read # read release assets via gh
+      pages: write # deploy to Pages
+      id-token: write # Pages OIDC
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      # Resolve the target tag from the trigger. External input is passed via env
+      # (never interpolated into the shell) and validated to a vX.Y.Z shape to
+      # avoid script injection and to refuse non-release refs.
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IN_TAG: ${{ github.event.inputs.tag }}
+          WR_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          TAG="${IN_TAG:-$WR_TAG}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          fi
+          case "$TAG" in
+            v[0-9]*) : ;;
+            *) echo "FATAL: refusing non-release tag '$TAG'"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing catalog from release $TAG"
+
+      # Pull the signed bundle from the release and lay it out at the Pages path
+      # the Control Plane fetches: <base>/release-catalog/{index.json,
+      # index.json.sigstore, manifests/<ref>}. Refuse an unsigned bundle.
+      - name: Download + stage the signed catalog bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl site/release-catalog
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'culvert-release-catalog-*.tar.gz' --dir dl
+          BUNDLE="$(ls dl/culvert-release-catalog-*.tar.gz | head -n1 || true)"
+          [ -n "$BUNDLE" ] || { echo "FATAL: no catalog bundle attached to release $TAG"; exit 1; }
+          tar xzf "$BUNDLE" -C site/release-catalog
+          test -s site/release-catalog/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
+          test -s site/release-catalog/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore — refusing to publish an unsigned catalog"; exit 1; }
+          test -d site/release-catalog/manifests           || { echo "FATAL: bundle missing manifests/"; exit 1; }
+          echo "Staged catalog:"; ls -R site/release-catalog
+
+      # .nojekyll keeps Pages from running Jekyll over the raw catalog files; the
+      # landing page is a human convenience and is not consumed by the CP.
+      - name: Landing page + .nojekyll
+        run: |
+          set -euo pipefail
+          touch site/.nojekyll
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Culvert release catalog</title>
+          <h1>Culvert &mdash; signed release catalog</h1>
+          <p>Sigstore-signed Culvert release catalog. Integrity is guaranteed by the
+          keyless signature and verified in the binary; this host is untrusted transport.</p>
+          <p>Point <code>CULVERT_RELEASE_CATALOG_URL</code> at this base:</p>
+          <pre>https://kidcarmi.github.io/Culvert/release-catalog</pre>
+          <ul>
+            <li><a href="release-catalog/index.json">release-catalog/index.json</a></li>
+            <li><a href="release-catalog/index.json.sigstore">release-catalog/index.json.sigstore</a></li>
+          </ul>
+          HTML
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
