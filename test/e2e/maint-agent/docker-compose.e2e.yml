@@ -1,0 +1,47 @@
+# E2E test compose for the Culvert maintenance-agent update flow.
+#
+# Proxy-only (NO clamav, NO updater, NO cli) so the stack comes up fast and
+# the agent's /ready gate passes (no degraded optional subsystems). The image
+# is the FIXED local tag culvert/proxy:pinned — exactly what the maintenance
+# agent retags a pulled digest to (P1.4). The agent never edits this file; it
+# only runs `docker tag <repo@sha256> culvert/proxy:pinned` + `up -d`.
+#
+# The agent's health probe hits http://127.0.0.1:8080/health and /ready, so
+# the proxy port is published on the host loopback. -ui-no-tls keeps the admin
+# UI plain-HTTP (not probed here, but avoids self-signed-cert startup cost).
+services:
+  proxy:
+    image: culvert/proxy:pinned
+    container_name: culvert-e2e-proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080" # data-plane proxy: serves /health, /ready, /metrics
+      - "127.0.0.1:9090:9090" # admin UI (plain HTTP via -ui-no-tls)
+    volumes:
+      - proxy-data:/data
+    environment:
+      - TZ=UTC
+    # Minimal flag set: no clamav sidecar, no SSL-inspection CA passphrase.
+    # All state lives under the proxy-data volume so a container recreate on
+    # the new image keeps the same /data.
+    command: [
+      "-port",            "8080",
+      "-ui-port",         "9090",
+      "-ui-no-tls",
+      "-ca-path",         "/data/ca.bundle",
+      "-policy",          "/data/policy.json",
+      "-logfile",         "/data/proxy.log",
+      "-audit-log",       "/data/audit.jsonl",
+      "-request-log",     "/data/requests.jsonl",
+      "-threat-feed-db",  "/data/threatfeeds.json",
+      "-ui-users-file",   "/data/ui_users.json"
+    ]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  proxy-data:
