@@ -12,15 +12,22 @@ name: Publish Release Catalog (Pages)
 # that is missing its signature (index.json.sigstore).
 #
 # Triggers:
-#   - release: published → auto-publish each new tagged release's catalog
-#   - workflow_dispatch  → manually (re)publish a chosen tag (e.g. v1.0.0)
+#   - workflow_run after "CI" completes → auto-publish on a tag build. We use
+#     workflow_run (NOT release:published) because the catalog assets are
+#     attached by CI via softprops/action-gh-release using GITHUB_TOKEN, and
+#     GitHub does NOT fire release:published from GITHUB_TOKEN-caused events — so
+#     that trigger would never run. workflow_run fires regardless, AFTER CI has
+#     attached the signed bundle, and runs from the default branch (which also
+#     satisfies the github-pages environment's deployment-branch policy).
+#   - workflow_dispatch → manually (re)publish a chosen tag (e.g. v1.0.0).
 #
 # ONE-TIME SETUP (repo owner): Settings → Pages → Build and deployment →
 # Source = "GitHub Actions". (deploy-pages fails until this is set.)
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -40,6 +47,14 @@ jobs:
   publish:
     name: Publish signed catalog to Pages
     runs-on: ubuntu-latest
+    # Manual dispatch always runs. workflow_run only proceeds for a SUCCESSFUL CI
+    # run on a tag push (head_branch is the tag, e.g. "v1.0.0") — branch/PR CI
+    # completions are skipped cleanly so they never spuriously fail.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push' &&
+           startsWith(github.event.workflow_run.head_branch, 'v')) }}
     permissions:
       contents: read # read release assets via gh
       pages: write # deploy to Pages
@@ -56,10 +71,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IN_TAG: ${{ github.event.inputs.tag }}
-          REL_TAG: ${{ github.event.release.tag_name }}
+          WR_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
-          TAG="${IN_TAG:-$REL_TAG}"
+          TAG="${IN_TAG:-$WR_TAG}"
           if [ -z "$TAG" ]; then
             TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
           fi
