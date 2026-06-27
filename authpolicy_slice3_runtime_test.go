@@ -316,6 +316,34 @@ func TestS3_KillSwitch_NoBackend_CRStillFires(t *testing.T) {
 	}
 }
 
+// ── Kill switch + no backend + unmatched traffic must remain inert ────────────
+//
+// Regression: authRequired uses originalEffective (pre-kill-switch) so the gate
+// is entered in originally-Exempt no-backend deployments, allowing CR rules to
+// fire. But if no rule matches and the kill switch forces OutcomeDefault, the
+// default: arm must NOT issue an unfulfillable 407 — it must fall through to
+// Stage-2 just as Default+no-backend does in the inert path.
+func TestS3_KillSwitch_NoBackend_UnmatchedInert(t *testing.T) {
+	setupProxyTest(t)       // no user/provider → credCapable=false, ssoCapable=false
+	withFreshPolicyStore(t) // no CR/SSO rule — unmatched traffic
+	cfg.SetUnauthMode(true) // default Exempt
+	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	setAuthExemptDisabled(true) // kill switch: forces effectiveDefault → Default
+	t.Cleanup(func() { setAuthExemptDisabled(false) })
+
+	const host = "s3-ks-nobackend-unmatched.example.test"
+	w := httptest.NewRecorder()
+	handleRequest(w, nonBrowserReq(host))
+	// Kill switch + no backend + no matching rule → inert (Stage-2 reached, not 407).
+	// A 407 here is unfulfillable — there is no credential backend to satisfy it.
+	if w.Code == http.StatusProxyAuthRequired {
+		t.Fatalf("kill switch + no backend + no matching rule must be inert (Stage-2, not 407), got %d", w.Code)
+	}
+	if e := findLogByHost(t, host); e.Status != "POLICY_DEFAULT_DENY" {
+		t.Errorf("unmatched no-backend kill-switch request must reach Stage-2 default-deny, got %+v", e)
+	}
+}
+
 // ── Migration diagnostic fires only for the intended case ────────────────────
 
 func TestS3_MigrationDiagnostic_Scoping(t *testing.T) {

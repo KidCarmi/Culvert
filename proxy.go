@@ -454,6 +454,18 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					http.Error(w, "Forbidden: destination requires interactive SSO", http.StatusForbidden)
 					return
 				default:
+					// ── 3d. No credentials — Default outcome (inert or 407) ─────
+					// When no credential or SSO backend is configured,
+					// OutcomeDefault is inert: fall through to Stage-2 exactly as
+					// happens when authRequired=false in pure Default mode. Without
+					// this guard a no-backend Exempt deployment with the kill switch
+					// engaged would issue an unfulfillable 407 for unmatched (or
+					// kill-switch-suppressed Exempt) traffic — there is no backend
+					// to ever satisfy the challenge.
+					// See TestS3_KillSwitch_NoBackend_UnmatchedInert.
+					if !credCapable && !ssoCapable {
+						break
+					}
 					// ── 3. No credentials ────────────────────────────────────────
 					// browserRedirectEligibleLegacy is the verbatim pre-Slice-1
 					// predicate (Mozilla User-Agent && non-CONNECT) — the Default
