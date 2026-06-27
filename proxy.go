@@ -270,7 +270,20 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	authenticatedSource := "unauth" // default: no credentials presented
 	var authLog AuthLogFields       // Stage-1 auth observability; zero unless an exempt or credential-required rule matched
 
-	authRequired := !cfg.UnauthMode() && (cfg.AuthEnabled() || cfg.ProviderEnabled() || len(idpRegistry.EnabledProviders()) > 0)
+	// Slice 3 (S2): scoped auth rules evaluate first; the global
+	// defaultAuthOutcome applies only on no-match. effectiveDefault is the global
+	// default forced to Default when the Exempt kill switch is engaged.
+	// credBackend is the credential backend EXCLUDING the Exempt term (so the
+	// gate never depends on the global default). Under Default this reduces to
+	// today's condition exactly (byte-identical); only Exempt mode now enters the
+	// block to evaluate scoped rules instead of skipping. See
+	// AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md.
+	effectiveDefault := cfg.DefaultAuthOutcome()
+	if authExemptKillSwitchEngaged() {
+		effectiveDefault = OutcomeDefault
+	}
+	credBackend := cfg.GetUser() != "" || cfg.ProviderEnabled() || len(idpRegistry.EnabledProviders()) > 0
+	authRequired := credBackend || effectiveDefault == OutcomeExempt
 
 	if authRequired {
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
@@ -284,8 +297,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			authenticatedSource = identityAuthSource(id, "local")
 		} else {
 			// ── 2. Basic Auth header ──────────────────────────────────────────
+			// Credential validation runs ONLY when a credential backend exists.
+			// Without one, presented credentials must not become an implicit allow
+			// path (e.g. VerifyAuth accepting any creds when no user is set); they
+			// fall through to arm 3, where resolveNoCredAuthOutcome returns Default
+			// for any Proxy-Authorization header (never default-exempted).
 			u, p, ok := parseProxyAuth(r)
-			if ok {
+			if ok && credBackend {
 				// Try IdP registry providers first (OIDC introspection).
 				authed := false
 				for _, prov := range idpRegistry.EnabledProviders() {
@@ -313,8 +331,8 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					authenticatedIdentity = u
 					authenticatedSource = "local"
 				}
-			} else if d := resolveNoCredAuthOutcome(r, clientIP); d.Outcome == OutcomeExempt {
-				// ── 3a. No credentials — Stage-1 auth-policy exemption ───────
+			} else if d := resolveNoCredAuthOutcome(r, clientIP, effectiveDefault); d.Outcome == OutcomeExempt && d.Rule != nil {
+				// ── 3a. No credentials — SCOPED Exempt rule (Rule != nil) ────
 				// An explicitly matched auth/exempt rule waives the challenge
 				// for this request ONLY. No identity is created:
 				// authenticatedIdentity stays empty, so X-User-Identity is
@@ -337,6 +355,15 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				incAuthExempt()
 				logger.Printf("AUTH_EXEMPT rule=%q id=%q %s -> %q {req_id=%s}",
 					sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
+			} else if d.Outcome == OutcomeExempt {
+				// ── 3a'. No credentials — DEFAULT Exempt (no scoped match) ───
+				// defaultAuthOutcome=Exempt opened this UNMATCHED request. This is
+				// NOT a scoped exemption: no rule, no identity, authenticatedSource
+				// stays "unauth" (distinct from a scoped Exempt rule's "exempt"),
+				// and no exempt metric. Mirrors legacy open mode — falls through to
+				// Stage-2, where default-deny still applies (open ≠ allow).
+				logger.Printf("AUTH_DEFAULT_EXEMPT (open, no rule) %s -> %q {req_id=%s}",
+					clientIP, sanitizeLog(r.Host), reqID)
 			} else if d.Outcome == OutcomeCredentialRequired {
 				// ── 3b. No credentials — Stage-1 CredentialRequired challenge ──
 				// A matched CR rule demands a non-interactive credential

@@ -197,10 +197,13 @@ func withCredentialEnv(t *testing.T, withLocalUser bool) {
 	}
 }
 
-func TestP2S4_Diagnostics_CRDeadUnderUnauthMode_Warn(t *testing.T) {
+// Slice 3 (S2): under default Exempt a scoped CR rule ENFORCES; the end-to-end
+// diagnostics surface the migration WARN (not the removed dead-under-unauth one).
+func TestP2S4_Diagnostics_CRDefaultExemptMigration_Warn(t *testing.T) {
 	resetPolicyStoreForDiag(t)
-	withCredentialEnv(t, true) // credential-capable, so only the UnauthMode WARN fires
-	cfg.SetUnauthMode(true)
+	withCredentialEnv(t, true) // credential-capable, so the no-provider FAIL does not fire
+	cfg.SetUnauthMode(true)    // defaultAuthOutcome = Exempt
+	t.Cleanup(func() { cfg.SetUnauthMode(false) })
 	policyStore.Add(validCRRule())
 
 	w := httptest.NewRecorder()
@@ -209,9 +212,12 @@ func TestP2S4_Diagnostics_CRDeadUnderUnauthMode_Warn(t *testing.T) {
 		t.Fatalf("diagnostics = %d", w.Code)
 	}
 	c := decodeContract(t, w)
-	found := findDiagnosticCheck(c, "auth_cr_dead_under_unauth_mode")
+	if found := findDiagnosticCheck(c, "auth_cr_dead_under_unauth_mode"); found != nil {
+		t.Fatalf("removed code auth_cr_dead_under_unauth_mode must not appear: %+v", found)
+	}
+	found := findDiagnosticCheck(c, "auth_default_exempt_rules_now_enforce")
 	if found == nil || found.Status != diagWarn {
-		t.Fatalf("auth_cr_dead_under_unauth_mode WARN missing: %+v", found)
+		t.Fatalf("auth_default_exempt_rules_now_enforce WARN missing: %+v", found)
 	}
 }
 

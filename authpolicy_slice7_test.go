@@ -152,32 +152,31 @@ func TestSlice7_UnauthRuleDoesNotMatchExemptTraffic(t *testing.T) {
 	}
 }
 
-// Control for the test above: in UnauthMode the same rule DOES match, because
-// authSource stays "unauth" (the auth gate — and exempt evaluation — is skipped).
-func TestSlice7_UnauthMode_GateAndExemptSkipped(t *testing.T) {
+// Slice 3 (S2): under default Exempt (open) a SCOPED Exempt rule still FIRES by
+// priority — it is NOT skipped. The exempt metric moves and the log carries
+// AuthOutcome=Exempt with the rule's identity (authSource becomes "exempt", not
+// "unauth"). (Pre-S2 this asserted UnauthMode skipped exempt evaluation entirely;
+// that whole-gate skip is exactly what S2 removes.)
+func TestSlice7_DefaultExempt_ScopedExemptStillFires(t *testing.T) {
 	setupAuthGateTest(t)
-	cfg.SetUnauthMode(true)
+	cfg.SetUnauthMode(true) // defaultAuthOutcome = Exempt (open)
 	t.Cleanup(func() { cfg.SetUnauthMode(false) })
 	const host = "slice7-unauthmode.example.test"
-	policyStore.Add(slice7ExemptRule(host)) // present but must never be evaluated
-	policyStore.Add(PolicyRule{
-		Priority: 2, Name: "allow-unauth-only", Action: ActionAllow,
-		AuthSource: "unauth", DestFQDN: host,
-	})
+	policyStore.Add(slice7ExemptRule(host)) // scoped Exempt — now fires by priority
 
 	before := exemptCount()
 	w := httptest.NewRecorder()
 	handleRequest(w, makeRequest("http://"+host+"/", nil))
 
-	if got := exemptCount(); got != before {
-		t.Errorf("UnauthMode must skip exempt evaluation entirely: metric %d → %d", before, got)
+	if got := exemptCount(); got != before+1 {
+		t.Errorf("scoped Exempt must fire over default Exempt: metric %d → %d", before, got)
 	}
 	e := findLogByHost(t, host)
-	if e.RuleMatched != "allow-unauth-only" {
-		t.Errorf("UnauthMode traffic must still match AuthSource=unauth rules, got %+v", e)
+	if e.AuthOutcome != "Exempt" {
+		t.Errorf("scoped Exempt traffic must carry AuthOutcome=Exempt, got %+v", e)
 	}
-	if e.AuthOutcome != "" {
-		t.Errorf("UnauthMode entries must carry no auth outcome, got %q", e.AuthOutcome)
+	if e.AuthPolicyRuleName != "slice7-exempt" {
+		t.Errorf("scoped Exempt must record the rule identity, got %q", e.AuthPolicyRuleName)
 	}
 }
 
