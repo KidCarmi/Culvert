@@ -1,0 +1,487 @@
+name: Install Lifecycle E2E
+
+# Proves the WHOLE system lifecycle driven by the REAL quick-start installer
+# (scripts/install.sh) on a real ubuntu-latest VM — high level (does the stack
+# install, run, migrate, and upgrade while staying healthy?) AND low level (do
+# the installer's own contracts hold: pinned-tag seeding, .env idempotency,
+# fresh-vs-existing detection, non-destructive re-run, host-agent install?).
+#
+# Two independent jobs so a flake in one cannot fail the other:
+#   stack-lifecycle  — install.sh brings up the proxy stack, then a second run
+#                      migrates idempotently (state preserved), then a pinned
+#                      image bump upgrades it (v1 -> v2) preserving /data.
+#   agent-installer  — install.sh installs the host-side maintenance agent
+#                      (packaging/culvert-maint/install.sh); assert the systemd
+#                      unit, sudoers grammar, config seeding/migration, and that
+#                      the installed unit actually runs and answers /v1/health.
+#
+# Hermetic w.r.t. Culvert artifacts: a local TLS registry (trusted by the daemon
+# via /etc/docker/certs.d) serves two genuinely-distinct proxy image digests;
+# clamav + the ghcr updater sidecar are stubbed via an auto-merged
+# docker-compose.override.yml so the run needs NO ghcr pulls and NO 250 MB
+# ClamAV signature download. The proxy is the REAL culvert/proxy:pinned image,
+# started by the REAL compose file via the REAL installer — only the orthogonal
+# sidecars are stubbed. (It does still pull stock Docker Hub base images —
+# registry:2, busybox, alpine, golang — which are pre-pulled with retry below.)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: install-lifecycle-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: 127.0.0.1:5000
+  REPO: 127.0.0.1:5000/culvert
+  PINNED_TAG: culvert/proxy:pinned
+  PROXY_DOCKERFILE: test/e2e/maint-agent/Dockerfile.e2e
+  OVERRIDE_SRC: test/e2e/install-lifecycle/docker-compose.override.yml
+  # The stack lives under a system path so the unprivileged culvert-maint
+  # service can traverse it (install.sh's agent_ancestors_traversable gate) —
+  # exactly the appliance layout the installer recommends.
+  STACK_DIR: /srv/culvert
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1 — Proxy stack: fresh install -> idempotent migrate -> version upgrade.
+  # ───────────────────────────────────────────────────────────────────────────
+  stack-lifecycle:
+    name: Stack install + migrate + upgrade
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Preflight — guard Docker baseline + pre-pull base images
+        run: |
+          set -euxo pipefail
+          docker --version; docker compose version
+          dpkg -l 2>/dev/null | grep -E '^ii.*(docker|moby|containerd)' || true
+          # install.sh's "cleanup" step would `apt-get remove` moby-engine if
+          # present, tearing out the running daemon (and this job's registry)
+          # mid-run. Current ubuntu-24.04 ships docker-ce, so the cleanup is
+          # inert — but fail LOUDLY if a future runner image regresses to moby.
+          if dpkg -l moby-engine 2>/dev/null | grep -q '^ii'; then
+            echo "FATAL: runner ships moby-engine; install.sh's cleanup would remove the running Docker. Pin the runner image."; exit 1
+          fi
+          pull_retry() {
+            for i in 1 2 3 4; do
+              if docker pull "$1" 1>&2; then return 0; fi
+              echo "pull $1 failed (attempt $i) — retrying" 1>&2; sleep $((i * 3))
+            done
+            echo "FATAL: could not pull $1 after retries"; return 1
+          }
+          # registry:2 backs the local registry; busybox backs the stubbed
+          # sidecars (pulled by `docker compose up` inside install.sh).
+          pull_retry registry:2
+          pull_retry busybox:stable
+
+      # TLS registry trusted by BOTH the daemon (/etc/docker/certs.d) and the
+      # CLI (system CA store) — install.sh's seed step does `docker pull
+      # <repo@sha256>` with no --insecure, so the daemon must trust it natively.
+      - name: Start TLS local registry (trusted by daemon + CLI)
+        run: |
+          set -euxo pipefail
+          CERT_DIR="$RUNNER_TEMP/registry-certs"
+          mkdir -p "$CERT_DIR"
+          openssl req -x509 -newkey rsa:4096 -nodes \
+            -keyout "$CERT_DIR/registry.key" \
+            -out "$CERT_DIR/registry.crt" \
+            -days 2 \
+            -subj "/CN=127.0.0.1" \
+            -addext "subjectAltName=IP:127.0.0.1"
+          chmod 0644 "$CERT_DIR/registry.crt" "$CERT_DIR/registry.key"
+          sudo mkdir -p "/etc/docker/certs.d/127.0.0.1:5000"
+          sudo cp "$CERT_DIR/registry.crt" "/etc/docker/certs.d/127.0.0.1:5000/ca.crt"
+          sudo cp "$CERT_DIR/registry.crt" /usr/local/share/ca-certificates/registry-e2e.crt
+          sudo update-ca-certificates
+          docker run -d --restart=always --name registry \
+            -p 127.0.0.1:5000:5000 \
+            -v "$CERT_DIR:/certs:ro" \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+            registry:2
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS https://127.0.0.1:5000/v2/ >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          [ -n "$ok" ] || { echo "FATAL: TLS registry did not come up"; docker logs registry 2>&1 | tail -n 50 || true; exit 1; }
+
+      # Two genuinely-distinct proxy images (distinct BUILD_VARIANT -> distinct
+      # binary -> distinct registry digest), so the upgrade phase is observable.
+      - name: Build, push, capture v1 + v2 proxy digests
+        id: images
+        run: |
+          set -euxo pipefail
+          build_push_digest() {
+            variant="$1"; tag="$REPO:$variant"
+            docker build -f "$PROXY_DOCKERFILE" --build-arg "BUILD_VARIANT=$variant" -t "$tag" . 1>&2
+            docker push "$tag" 1>&2
+            docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" | grep "^${REPO}@sha256:" | head -n1
+          }
+          D1_REF="$(build_push_digest v1)"
+          D2_REF="$(build_push_digest v2)"
+          D1="${D1_REF#${REPO}@}"; D2="${D2_REF#${REPO}@}"
+          [ -n "$D1" ] && [ -n "$D2" ] || { echo "FATAL: empty digest (D1=$D1 D2=$D2)"; exit 1; }
+          [ "$D1" != "$D2" ] || { echo "FATAL: v1 and v2 share a digest ($D1); upgrade would be unobservable"; exit 1; }
+          { echo "d1_ref=$D1_REF"; echo "d2_ref=$D2_REF"; } >> "$GITHUB_OUTPUT"
+
+      # Stage the repo at the system path and drop the CI override beside the
+      # base compose file (docker compose auto-merges docker-compose.override.yml).
+      - name: Stage stack at $STACK_DIR
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p "$STACK_DIR"
+          sudo cp -a "$GITHUB_WORKSPACE/." "$STACK_DIR/"
+          sudo cp "$STACK_DIR/$OVERRIDE_SRC" "$STACK_DIR/docker-compose.override.yml"
+          sudo test -f "$STACK_DIR/docker-compose.yml"
+          sudo test -f "$STACK_DIR/scripts/install.sh"
+
+      # ── PHASE 1 — FRESH INSTALL ────────────────────────────────────────────
+      # Run the REAL installer as root (the appliance/first-boot path). Seed the
+      # pinned tag from the v1 registry digest; skip only the Release-Management
+      # auto-wiring (it re-ups compose with explicit -f flags that would bypass
+      # our override and pull the heavy sidecars — its runtime is covered by the
+      # maint-agent-update E2E). The maintenance-agent INSTALL still runs.
+      - name: "Phase 1 — fresh install (scripts/install.sh)"
+        run: |
+          set -euxo pipefail
+          cd "$STACK_DIR"
+          # The maintenance-agent install is exercised by the agent-installer job;
+          # skip it here to keep the stack lifecycle fast + hermetic (no Go build).
+          sudo env "PATH=$PATH" \
+            CULVERT_PROXY_SEED_REF="${{ steps.images.outputs.d1_ref }}" \
+            CULVERT_SKIP_MAINT_AGENT=1 \
+            bash scripts/install.sh </dev/null
+
+      - name: "Phase 1 — assert fresh install (high + low level)"
+        run: |
+          set -euxo pipefail
+          D1_REF="${{ steps.images.outputs.d1_ref }}"
+
+          # High level: proxy serves /health and /ready, admin UI port answers.
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "FATAL: proxy /health did not come up after install"; exit 1; }
+          # /ready is EXPECTED to be 503 here: the override stubs ClamAV, so the
+          # proxy reports the scanner unreachable and /ready degrades by design.
+          # We only assert the endpoint ANSWERS (200 or 503) — a 000 means the
+          # server isn't serving at all. (/health is the always-200 liveness gate.)
+          rcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:8080/ready || true)"
+          echo "/ready -> HTTP $rcode (503 expected under the ClamAV stub)"
+          case "$rcode" in 200|503) : ;; *) echo "FATAL: /ready did not answer (HTTP $rcode)"; exit 1 ;; esac
+          code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 https://127.0.0.1:9090/ || true)"
+          echo "admin UI :9090 -> HTTP $code"; [ "$code" != "000" ] || { echo "FATAL: admin UI port 9090 did not answer"; exit 1; }
+
+          # Low level: install.sh seeded the FIXED local tag to our v1 digest.
+          PINNED_IMG="$(sudo docker image inspect "$PINNED_TAG" --format '{{.Id}}')"
+          SEED_IMG="$(sudo docker image inspect "$D1_REF" --format '{{.Id}}')"
+          [ "$PINNED_IMG" = "$SEED_IMG" ] || { echo "FATAL: $PINNED_TAG ($PINNED_IMG) != seeded v1 ($SEED_IMG)"; exit 1; }
+
+          # Low level: the running proxy IS the seeded v1 image.
+          running_digest() {
+            local img; img="$(sudo docker inspect --format '{{.Image}}' culvert 2>/dev/null)"
+            sudo docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$img" 2>/dev/null | grep "^${REPO}@sha256:" | head -n1 || true
+          }
+          RUN="$(running_digest)"; echo "running proxy: $RUN"
+          [ "$RUN" = "$D1_REF" ] || { echo "FATAL: proxy not on v1 ($RUN != $D1_REF)"; exit 1; }
+
+          # Low level: .env created mode 600 with BOTH passphrases (fresh path).
+          sudo test -f "$STACK_DIR/.env" || { echo "FATAL: .env was not created"; exit 1; }
+          PERM="$(sudo stat -c '%a' "$STACK_DIR/.env")"; [ "$PERM" = "600" ] || { echo "FATAL: .env mode is $PERM, want 600"; exit 1; }
+          sudo grep -Eq '^CULVERT_CA_PASSPHRASE=.+'  "$STACK_DIR/.env" || { echo "FATAL: CULVERT_CA_PASSPHRASE missing on fresh install"; exit 1; }
+          sudo grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$STACK_DIR/.env" || { echo "FATAL: CULVERT_LOG_PASSPHRASE missing on fresh install"; exit 1; }
+
+          # Low level: the proxy-data named volume exists.
+          sudo docker volume ls --format '{{.Name}}' | grep -Eq '(^|_)proxy-data$' || { echo "FATAL: proxy-data volume not created"; exit 1; }
+
+          # Low level (security invariant): the proxy must NOT mount a Docker socket.
+          if sudo docker inspect culvert --format '{{range .Mounts}}{{println .Source}}{{end}}' | grep -Eq '/(var/)?run/docker\.sock'; then
+            echo "FATAL: proxy mounts the Docker socket — install must never do this"; exit 1
+          fi
+          echo "PHASE 1 OK: fresh install healthy; pinned=v1; .env(600,both); no docker.sock."
+
+      # ── PHASE 2 — record migrate invariants + write a /data sentinel ────────
+      - name: "Phase 2 — capture invariants + seed sentinel"
+        id: capture
+        run: |
+          set -euxo pipefail
+          ENV_SHA="$(sudo sha256sum "$STACK_DIR/.env" | awk '{print $1}')"
+          echo "env_sha=$ENV_SHA" >> "$GITHUB_OUTPUT"
+          # Persistent marker inside the proxy-data volume — must survive a
+          # migrate (idempotent re-run) and the version upgrade.
+          SENTINEL="lifecycle-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          sudo docker exec culvert sh -c "printf '%s' '$SENTINEL' > /data/e2e_sentinel.txt"
+          echo "sentinel=$SENTINEL" >> "$GITHUB_OUTPUT"
+          echo "captured env sha=$ENV_SHA sentinel=$SENTINEL"
+
+      # ── PHASE 3 — MIGRATE (idempotent re-run; existing deployment) ──────────
+      - name: "Phase 3 — migrate (re-run scripts/install.sh)"
+        run: |
+          set -euxo pipefail
+          cd "$STACK_DIR"
+          # Same invocation; the installer must detect the existing deployment
+          # and be non-destructive (no reseed, no passphrase rewrite).
+          sudo env "PATH=$PATH" \
+            CULVERT_PROXY_SEED_REF="${{ steps.images.outputs.d1_ref }}" \
+            CULVERT_SKIP_MAINT_AGENT=1 \
+            bash scripts/install.sh </dev/null 2>&1 | tee "$RUNNER_TEMP/migrate.log"
+
+      - name: "Phase 3 — assert migrate is non-destructive + idempotent"
+        run: |
+          set -euxo pipefail
+          LOG="$RUNNER_TEMP/migrate.log"
+
+          # The installer recognized the EXISTING deployment (not fresh) and the
+          # already-present pinned tag (no reseed).
+          grep -q "already present; not reseeding" "$LOG" || { echo "FATAL: re-run reseeded the pinned tag (expected 'not reseeding')"; sed -n '1,200p' "$LOG"; exit 1; }
+          # Assert specifically the "already configured" short-circuit — proving
+          # NO passphrase was rewritten. (Not the weaker "Existing deployment"
+          # line, which prints on a first-time write to an existing volume.)
+          grep -q "Encryption passphrase already configured" "$LOG" || { echo "FATAL: re-run did not short-circuit the encryption setup (passphrase may have been rewritten)"; sed -n '1,200p' "$LOG"; exit 1; }
+
+          # .env is byte-for-byte unchanged (passphrase preserved).
+          NOW_SHA="$(sudo sha256sum "$STACK_DIR/.env" | awk '{print $1}')"
+          [ "$NOW_SHA" = "${{ steps.capture.outputs.env_sha }}" ] || { echo "FATAL: .env changed across migrate ($NOW_SHA != ${{ steps.capture.outputs.env_sha }})"; exit 1; }
+
+          # The /data sentinel survived (volume not recreated/wiped).
+          GOT="$(sudo docker exec culvert cat /data/e2e_sentinel.txt 2>/dev/null || true)"
+          [ "$GOT" = "${{ steps.capture.outputs.sentinel }}" ] || { echo "FATAL: /data sentinel lost across migrate (got '$GOT')"; exit 1; }
+
+          # Still healthy and still on v1.
+          curl -fsS http://127.0.0.1:8080/health >/dev/null || { echo "FATAL: proxy unhealthy after migrate"; exit 1; }
+          running_digest() {
+            local img; img="$(sudo docker inspect --format '{{.Image}}' culvert 2>/dev/null)"
+            sudo docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$img" 2>/dev/null | grep "^${REPO}@sha256:" | head -n1 || true
+          }
+          [ "$(running_digest)" = "${{ steps.images.outputs.d1_ref }}" ] || { echo "FATAL: proxy digest drifted on idempotent re-run"; exit 1; }
+          echo "PHASE 3 OK: migrate preserved .env + /data + version; idempotent."
+
+      # ── PHASE 4 — VERSION UPGRADE (pinned bump v1 -> v2, state preserved) ───
+      # The documented operator upgrade: retag the pinned tag to the new digest
+      # and `docker compose up -d` (auto-merging the override). /data must carry
+      # over unchanged.
+      - name: "Phase 4 — upgrade pinned v1 -> v2 and re-up"
+        run: |
+          set -euxo pipefail
+          cd "$STACK_DIR"
+          sudo docker tag "${{ steps.images.outputs.d2_ref }}" "$PINNED_TAG"
+          sudo docker compose up -d --wait --wait-timeout 180 || sudo docker compose up -d
+
+      - name: "Phase 4 — assert the upgrade flipped + state preserved"
+        run: |
+          set -euxo pipefail
+          D1_REF="${{ steps.images.outputs.d1_ref }}"; D2_REF="${{ steps.images.outputs.d2_ref }}"
+          running_digest() {
+            local img; img="$(sudo docker inspect --format '{{.Image}}' culvert 2>/dev/null)"
+            sudo docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$img" 2>/dev/null | grep "^${REPO}@sha256:" | head -n1 || true
+          }
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "FATAL: proxy /health failed after upgrade"; exit 1; }
+          RUN="$(running_digest)"; echo "running after upgrade: $RUN"
+          [ "$RUN" != "$D1_REF" ] || { echo "FATAL: still on v1 — upgrade did not flip the image"; exit 1; }
+          [ "$RUN" = "$D2_REF" ] || { echo "FATAL: running digest is neither v2 nor v1 (got $RUN, want $D2_REF)"; exit 1; }
+
+          # The /data sentinel and .env survived the version upgrade.
+          GOT="$(sudo docker exec culvert cat /data/e2e_sentinel.txt 2>/dev/null || true)"
+          [ "$GOT" = "${{ steps.capture.outputs.sentinel }}" ] || { echo "FATAL: /data sentinel lost across upgrade (got '$GOT')"; exit 1; }
+          NOW_SHA="$(sudo sha256sum "$STACK_DIR/.env" | awk '{print $1}')"
+          [ "$NOW_SHA" = "${{ steps.capture.outputs.env_sha }}" ] || { echo "FATAL: .env changed across upgrade"; exit 1; }
+          echo "PROOF: install -> migrate -> upgrade (v1->v2) all healthy, /data + .env preserved."
+
+      - name: Diagnostics (always)
+        if: always()
+        run: |
+          set +e
+          echo "===== compose ps ====="; ( cd "$STACK_DIR" && sudo docker compose ps -a )
+          echo "===== proxy logs (tail) ====="; sudo docker logs culvert 2>&1 | tail -n 150
+          echo "===== .env (keys only) ====="; sudo sed -E 's/=.*/=<redacted>/' "$STACK_DIR/.env" 2>/dev/null
+          echo "===== volumes ====="; sudo docker volume ls | grep -E 'proxy-data|culvert' 2>/dev/null
+          echo "===== images ====="; sudo docker image ls | grep -E 'culvert|registry|busybox' 2>/dev/null
+
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set +e
+          ( cd "$STACK_DIR" && sudo docker compose down -v )
+          sudo docker rm -f registry culvert 2>/dev/null
+          exit 0
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Host-side maintenance-agent installer (the agent half of install.sh).
+  # ───────────────────────────────────────────────────────────────────────────
+  agent-installer:
+    name: Maintenance-agent installer lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Preflight — guard Docker baseline + pre-pull base images
+        run: |
+          set -euxo pipefail
+          docker --version; docker compose version
+          if dpkg -l moby-engine 2>/dev/null | grep -q '^ii'; then
+            echo "FATAL: runner ships moby-engine; install.sh's cleanup would remove the running Docker. Pin the runner image."; exit 1
+          fi
+          for i in 1 2 3 4; do
+            if docker pull busybox:stable; then break; fi
+            echo "pull busybox failed (attempt $i) — retrying"; sleep $((i * 3))
+            [ "$i" = 4 ] && { echo "FATAL: could not pull busybox"; exit 1; }
+          done
+
+      # No registry needed here: pre-seed the pinned tag locally so neither
+      # install.sh nor the agent installer reaches out to ghcr. The agent build
+      # falls back to source (resolve_maint_version is empty for a dev image),
+      # which is exactly the air-gapped path we want to exercise.
+      - name: Build + locally seed culvert/proxy:pinned
+        run: |
+          set -euxo pipefail
+          docker build -f "$PROXY_DOCKERFILE" --build-arg BUILD_VARIANT=v1 -t "$PINNED_TAG" .
+          docker image inspect "$PINNED_TAG" --format 'seeded {{.Id}}'
+
+      - name: Stage stack at $STACK_DIR
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p "$STACK_DIR"
+          sudo cp -a "$GITHUB_WORKSPACE/." "$STACK_DIR/"
+          sudo cp "$STACK_DIR/$OVERRIDE_SRC" "$STACK_DIR/docker-compose.override.yml"
+
+      # Run the REAL installer. The pinned tag is pre-seeded (no pull); the
+      # maintenance agent builds from source and installs via the REAL
+      # packaging/culvert-maint/install.sh. Skip only the compose auto-wiring.
+      - name: "Install via scripts/install.sh (agent included)"
+        run: |
+          set -euxo pipefail
+          cd "$STACK_DIR"
+          # Force the source-build path deterministically: the E2E proxy image
+          # carries no release-semver label, so resolve_maint_version is empty
+          # and the installer builds from source anyway — pinning it here keeps
+          # the agent path stable even if the image later gains a version label
+          # (which would otherwise divert to the signed-release download path).
+          sudo env "PATH=$PATH" \
+            CULVERT_SKIP_RELEASE_AGENT_WIRING=1 \
+            CULVERT_MAINT_FORCE_BUILD=1 \
+            bash scripts/install.sh </dev/null
+
+      - name: "Assert the agent installer artifacts"
+        run: |
+          set -euxo pipefail
+          # Binary + version.
+          command -v culvert-maint >/dev/null || { echo "FATAL: culvert-maint not on PATH"; exit 1; }
+          VER="$(culvert-maint --version 2>/dev/null || true)"; echo "agent version: $VER"
+          [ -n "$VER" ] || { echo "FATAL: culvert-maint --version produced no output"; exit 1; }
+
+          # Service account.
+          getent passwd culvert-maint >/dev/null || { echo "FATAL: culvert-maint user missing"; exit 1; }
+          getent group  culvert-maint >/dev/null || { echo "FATAL: culvert-maint group missing"; exit 1; }
+
+          # systemd unit + sudoers grammar.
+          sudo test -f /etc/systemd/system/culvert-maint.service || { echo "FATAL: systemd unit missing"; exit 1; }
+          sudo test -f /etc/sudoers.d/culvert-maint || { echo "FATAL: sudoers drop-in missing"; exit 1; }
+          sudo visudo -c -f /etc/sudoers.d/culvert-maint || { echo "FATAL: sudoers drop-in fails visudo -c"; exit 1; }
+
+          # Config seeded + migrated: compose_project_dir points at THIS stack,
+          # socket_path is the managed runtime-dir path (not the old default).
+          CFG=/etc/culvert-maint/config.toml
+          sudo test -f "$CFG" || { echo "FATAL: $CFG missing"; exit 1; }
+          sudo grep -Eq "^compose_project_dir = \"$STACK_DIR\"" "$CFG" || { echo "FATAL: compose_project_dir not pointed at $STACK_DIR"; sudo grep -n compose_project_dir "$CFG"; exit 1; }
+          sudo grep -Eq '^socket_path = "/run/culvert-maint/culvert-maint\.sock"' "$CFG" || { echo "FATAL: socket_path not migrated to the managed runtime dir"; sudo grep -n socket_path "$CFG"; exit 1; }
+          echo "AGENT INSTALL OK: binary+unit+sudoers+config all present and bound to $STACK_DIR."
+
+      # Prove the INSTALLED unit actually runs and serves /v1. The agent's
+      # socket is mode 0660 owned by the culvert-maint service user, so we
+      # connect as ROOT (which bypasses the socket's DAC perms) and authorize
+      # root's UID (0) in allow_peers — SO_PEERCRED then sees UID 0 and admits
+      # it. (install.sh leaves the service stopped when wiring is skipped; the
+      # real wiring path authorizes the proxy container's UID + group instead.
+      # The SO_PEERCRED matrix has its own unit tests; this is a liveness smoke.)
+      - name: "Start the installed unit + assert /v1 health"
+        run: |
+          set -euxo pipefail
+          CFG=/etc/culvert-maint/config.toml
+          SOCK=/run/culvert-maint/culvert-maint.sock
+          sudo sed -i 's|^allow_peers = .*|allow_peers = ["0"]|' "$CFG"
+          sudo grep -n '^allow_peers' "$CFG"
+          sudo systemctl enable --now culvert-maint
+          ok=""
+          for i in $(seq 1 30); do
+            if sudo test -S "$SOCK" && sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: installed unit did not answer /v1/health"
+            sudo systemctl status culvert-maint --no-pager -l 2>&1 | tail -n 40 || true
+            sudo journalctl -u culvert-maint --no-pager -n 60 2>&1 || true
+            exit 1
+          fi
+          echo "----- /v1/health -----"; sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/health; echo
+          echo "----- /v1/status -----"; sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/status; echo
+          sudo systemctl is-active --quiet culvert-maint || { echo "FATAL: culvert-maint not active"; exit 1; }
+          echo "AGENT RUNTIME OK: installed unit is active and serves /v1 over the UDS."
+
+      # Idempotent re-run: the installer must leave the already-installed agent
+      # unchanged (no rebuild/reinstall churn).
+      - name: "Re-run installer — assert agent idempotency"
+        run: |
+          set -euxo pipefail
+          cd "$STACK_DIR"
+          sudo env "PATH=$PATH" CULVERT_SKIP_RELEASE_AGENT_WIRING=1 CULVERT_MAINT_FORCE_BUILD=1 \
+            bash scripts/install.sh </dev/null 2>&1 | tee "$RUNNER_TEMP/agent-rerun.log"
+          # ASCII-only match (the installer's full line ends with an em-dash tail
+          # we deliberately do not depend on): either "already at <ver>" or the
+          # "cannot resolve a target version" branch proves it left things alone.
+          grep -Eq "Maintenance agent already at|cannot resolve a target version" "$RUNNER_TEMP/agent-rerun.log" \
+            || { echo "FATAL: re-run did not report the agent as already-installed/unchanged"; sed -n '1,200p' "$RUNNER_TEMP/agent-rerun.log"; exit 1; }
+          sudo systemctl is-active --quiet culvert-maint || { echo "FATAL: agent not active after re-run"; exit 1; }
+          echo "AGENT IDEMPOTENT OK: re-run left the installed agent unchanged + active."
+
+      - name: Diagnostics (always)
+        if: always()
+        run: |
+          set +e
+          echo "===== agent --version ====="; culvert-maint --version
+          echo "===== config.toml ====="; sudo cat /etc/culvert-maint/config.toml 2>/dev/null
+          echo "===== sudoers drop-in ====="; sudo cat /etc/sudoers.d/culvert-maint 2>/dev/null
+          echo "===== systemctl status ====="; sudo systemctl status culvert-maint --no-pager -l 2>&1 | tail -n 40
+          echo "===== journal (tail) ====="; sudo journalctl -u culvert-maint --no-pager -n 80 2>&1
+
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set +e
+          # Hosted runners are ephemeral, so this is belt-and-suspenders — but
+          # clean the installed host state fully so a (hypothetical) self-hosted
+          # runner is not poisoned for the next run's idempotency assertions.
+          sudo systemctl disable --now culvert-maint 2>/dev/null
+          ( cd "$STACK_DIR" && sudo docker compose down -v )
+          sudo docker rm -f culvert 2>/dev/null
+          sudo rm -f /etc/sudoers.d/culvert-maint /etc/systemd/system/culvert-maint.service /usr/local/bin/culvert-maint
+          sudo rm -rf /etc/culvert-maint /var/lib/culvert-maint
+          sudo systemctl daemon-reload 2>/dev/null
+          sudo userdel culvert-maint 2>/dev/null
+          sudo groupdel culvert-maint 2>/dev/null
+          exit 0
