@@ -27,7 +27,7 @@ import (
 //   • In-process httptest.Server — no os/exec, no Playwright, no new CI
 //     job. Runs inside the existing `go test ./...` invocation.
 //   • Per-test fixture. Globals (cfg.user, cfg.passHash, cfg.uiUsers,
-//     cfg.unauthMode, dataDir) are snapshotted at fixture start and
+//     cfg.defaultAuthOutcome, dataDir) are snapshotted at fixture start and
 //     restored in t.Cleanup. Tests are deterministic under
 //     -count=2 -shuffle=on.
 //   • Audit assertions are content-based (Action + host substring +
@@ -70,7 +70,7 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 	cfg.mu.Lock()
 	prevUser := cfg.user
 	prevPassHash := cfg.passHash
-	prevUnauth := cfg.unauthMode
+	prevAuthOutcome := cfg.defaultAuthOutcome
 	prevUsers := make(map[string]*uiAdminUser, len(cfg.uiUsers))
 	for k, v := range cfg.uiUsers {
 		prevUsers[k] = v
@@ -129,7 +129,7 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 		cfg.mu.Lock()
 		cfg.user = prevUser
 		cfg.passHash = prevPassHash
-		cfg.unauthMode = prevUnauth
+		cfg.defaultAuthOutcome = prevAuthOutcome
 		cfg.uiUsers = prevUsers
 		cfg.mu.Unlock()
 		cfg.cache.clear()
