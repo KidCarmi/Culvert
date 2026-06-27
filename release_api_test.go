@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -302,6 +303,120 @@ func TestReleaseAPI_ResumeRejectsViewer(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer resume = %d; want 403", rec.Code)
 	}
+}
+
+// ─── catalog refresh endpoint ────────────────────────────────────────────────
+
+// TestReleaseAPI_CatalogRefresh exercises the runtime catalog-refresh handler
+// (POST /api/releases/catalog-refresh): role gating, the refresh-unavailable
+// path (closure not wired), method gating, the success path, and the
+// fail-closed error path that leaves the response a 503 and audits the failure.
+func TestReleaseAPI_CatalogRefresh(t *testing.T) {
+	cat := mustLoad(t, validSource())
+
+	t.Run("viewer rejected", func(t *testing.T) {
+		newReleaseFixture(t, cat, map[string]*fakeAgent{"A": {}})
+		rec := httptest.NewRecorder()
+		apiReleaseCatalogRefresh(rec, releaseReq(http.MethodPost, "/api/releases/catalog-refresh", nil, RoleViewer))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("viewer refresh = %d; want 403", rec.Code)
+		}
+	})
+
+	t.Run("unavailable when refresh closure not wired", func(t *testing.T) {
+		newReleaseFixture(t, cat, map[string]*fakeAgent{"A": {}}) // newReleaseManager leaves rm.refresh nil
+		rec := httptest.NewRecorder()
+		apiReleaseCatalogRefresh(rec, releaseReq(http.MethodPost, "/api/releases/catalog-refresh", nil, RoleAdmin))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("refresh unavailable = %d; want 503", rec.Code)
+		}
+	})
+
+	t.Run("method gated to POST", func(t *testing.T) {
+		rm, _, _ := newReleaseFixture(t, cat, map[string]*fakeAgent{"A": {}})
+		rm.refresh = func(context.Context) error { return nil }
+		rec := httptest.NewRecorder()
+		apiReleaseCatalogRefresh(rec, releaseReq(http.MethodGet, "/api/releases/catalog-refresh", nil, RoleAdmin))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET refresh = %d; want 405", rec.Code)
+		}
+	})
+
+	t.Run("success reloads and reports catalog", func(t *testing.T) {
+		newReleaseFixture(t, cat, map[string]*fakeAgent{"A": {}})
+		currentReleaseManager().refresh = func(context.Context) error { return nil }
+		// Unique actor IP (TEST-NET-2) lets us find this event by content rather
+		// than by length delta — the audit ring is bounded and saturates under
+		// repeated/shuffled runs (see CLAUDE.md test-authoring pitfalls).
+		const actorIP = "198.51.100.21"
+		base := newestAuditTS()
+		rec := httptest.NewRecorder()
+		apiReleaseCatalogRefresh(rec, catalogRefreshReq(actorIP, RoleAdmin))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("admin refresh = %d; want 200 (%s)", rec.Code, rec.Body.String())
+		}
+		body := decodeBody(t, rec)
+		if body["refreshed"] != true || body["available"] != true {
+			t.Fatalf("refresh body = %s; want refreshed/available true", rec.Body.String())
+		}
+		if !auditHasRefresh(actorIP, base) {
+			t.Fatal("success did not emit a release.catalog.refresh audit event")
+		}
+	})
+
+	t.Run("error is fail-closed and audited", func(t *testing.T) {
+		newReleaseFixture(t, cat, map[string]*fakeAgent{"A": {}})
+		currentReleaseManager().refresh = func(context.Context) error { return errors.New("verify failed") }
+		const actorIP = "198.51.100.22"
+		base := newestAuditTS()
+		rec := httptest.NewRecorder()
+		apiReleaseCatalogRefresh(rec, catalogRefreshReq(actorIP, RoleAdmin))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("refresh error = %d; want 503", rec.Code)
+		}
+		if body := decodeBody(t, rec); body["refreshed"] != false {
+			t.Fatalf("refresh error body = %s; want refreshed=false", rec.Body.String())
+		}
+		if !auditHasRefresh(actorIP, base) {
+			t.Fatal("error path did not emit a release.catalog.refresh audit event")
+		}
+	})
+}
+
+// catalogRefreshReq builds a POST refresh request with a caller-chosen client IP
+// so audit assertions can discriminate by Actor content.
+func catalogRefreshReq(actorIP string, role UIRole) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/api/releases/catalog-refresh", http.NoBody)
+	r.RemoteAddr = actorIP + ":1234"
+	return r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, role))
+}
+
+// newestAuditTS returns the TS of the most recent audit entry (0 if empty), used
+// as a baseline so auditHasRefresh only considers entries written after it.
+func newestAuditTS() int64 {
+	all := auditGet()
+	if len(all) == 0 {
+		return 0
+	}
+	var max int64
+	for i := range all {
+		if all[i].TS > max {
+			max = all[i].TS
+		}
+	}
+	return max
+}
+
+// auditHasRefresh scans the global audit ring (not a length delta — the ring is
+// bounded) for a release.catalog.refresh entry from actorIP at/after sinceTS.
+func auditHasRefresh(actorIP string, sinceTS int64) bool {
+	for _, e := range auditGet() {
+		if e.Action == "release.catalog.refresh" && e.TS >= sinceTS &&
+			strings.Contains(e.Actor, actorIP) {
+			return true
+		}
+	}
+	return false
 }
 
 // ─── status endpoint ─────────────────────────────────────────────────────────
