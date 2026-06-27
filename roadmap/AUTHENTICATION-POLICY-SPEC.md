@@ -83,6 +83,14 @@ when the request is unauthenticated **and** authentication is otherwise required
   Scoped rules always win by priority; the kill switch forces `Default`. This
   global default replaces the retired `UnauthMode` toggle — see
   `AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md` (the authority for that work).
+- **Evaluation order (no pre-rule global skip):** auth rules are evaluated
+  **first** (first match wins by priority); the global `defaultAuthOutcome` is
+  consulted **only on no-match**. The legacy pre-rule `!cfg.UnauthMode()` skip
+  (`proxy.go`) is removed and replaced by this post-rule default, so scoped
+  `Exempt`/`CredentialRequired`/`SSORequired` rules are **never** dead under the
+  global default — `Default`+backend still issues the legacy `407`/`302` and
+  Stage 2 is not reached; only no-backend or `Exempt`-on-no-match falls through
+  to Stage 2 with `authSource="unauth"`.
 - On `exempt`: set `authSource = "exempt"`, leave identity empty, do **not** set
   `X-User-Identity`. No real user identity is minted. Execution continues to
   Stage 2 — policy still governs.

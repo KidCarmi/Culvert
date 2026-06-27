@@ -76,7 +76,8 @@ global short-circuit.
 | Scoped `Exempt` rule matches | waive auth | `exempt` | runs (default-deny applies) |
 | Scoped `CredentialRequired` matches | `407` challenge | — | not reached |
 | Scoped `SSORequired` matches | `302` (browser) / `403` (non-browser/CONNECT) | — | not reached |
-| No rule matches, `defaultAuthOutcome=Default` | today's gate (`407`/captive, or inert if no backend) | `unauth` | runs |
+| No rule matches, `Default`, auth backend configured | today's gate — `407` / `302` captive challenge, **returns** | — | **not reached** |
+| No rule matches, `Default`, no auth backend | inert (today's behavior) | `unauth` | runs |
 | No rule matches, `defaultAuthOutcome=Exempt` | open | `unauth` | runs (default-deny applies) |
 | Kill switch engaged | forced `Default` (rows above re-evaluated) | per above | per above |
 
@@ -137,15 +138,25 @@ The existing `unauth_mode` / `auth_cr_dead_under_unauth_mode` /
 
 ---
 
-## 6. SOCKS5 (out of scope, invariant preserved)
+## 6. SOCKS5 (out of scope for enforcement; one intentional, test-pinned change)
 
-- `UnauthMode` never governed SOCKS5; SOCKS5 auth is gated by `AuthEnabled()`.
-- Deleting the field (Slice 5) removes the `AuthEnabled() = … || unauthMode`
-  term, which today inverts SOCKS5 to *require* credentials when UnauthMode is
-  on. SOCKS5 behavior is otherwise preserved.
-- No global-exempt may reach the SOCKS5 path. The §1.7 invariant of
-  `AUTHENTICATION-POLICY-SPEC.md` (no SOCKS5 exemption before policy alignment)
-  stays intact.
+- `UnauthMode` never governed SOCKS5 directly; SOCKS5 auth is gated by
+  `AuthEnabled()`. But `AuthEnabled()` is defined as
+  `user != "" || provider != nil || unauthMode`, so today turning UnauthMode on
+  *inverts* SOCKS5 to **require** USERPASS — the opposite of its effect on HTTP.
+- **Intentional behavior change (not preservation).** When Slice 5 deletes the
+  `unauthMode` field, the `|| unauthMode` term is removed from `AuthEnabled()`.
+  For an open-mode install with **no** configured user/provider
+  (`unauth_mode=true` from setup → migrated to `defaultAuthOutcome=Exempt`),
+  SOCKS5 then negotiates **no-auth** instead of requiring USERPASS. This is the
+  intended correction — it removes the inversion footgun and makes "open" mean
+  open on SOCKS5 too. Slice 5 **MUST pin this transition with a test**:
+  - open install, no user/provider → SOCKS5 negotiates no-auth (was: required USERPASS);
+  - install **with** a real user/provider → SOCKS5 auth unchanged (still required).
+- The global `defaultAuthOutcome` value itself is **not** read by `socks5.go`;
+  no global-exempt *rule evaluation* reaches the SOCKS5 path. The §1.7 invariant
+  of `AUTHENTICATION-POLICY-SPEC.md` (no SOCKS5 policy/exemption enforcement
+  before SOCKS5 policy alignment) stays intact.
 
 ---
 
@@ -170,7 +181,7 @@ The existing `unauth_mode` / `auth_cr_dead_under_unauth_mode` /
 | 2 | Config + persistence + migration | `store.go` field/accessor/envelope; load-time migration; `UnauthMode()` kept as a derived shim; no runtime change |
 | 3 | Runtime wiring (S2) + migration diagnostic | `proxy.go` no-match default; `authSource` preservation; kill switch; `auth_default_exempt_rules_now_enforce` |
 | 4 | UI / API / simulator | replace toggle with "Default authentication: Require / Open"; back-compat `/api/settings/unauth-mode`; simulator surfaces the global default |
-| 5 | Cluster + cleanup | `ConfigSnapshot` field swap; repoint diagnostics; decouple `AuthEnabled()`; delete the `unauthMode` field + shim + legacy envelope field; rewrite the CLAUDE.md architecture note |
+| 5 | Cluster + cleanup | `ConfigSnapshot` field swap; repoint diagnostics; decouple `AuthEnabled()` (remove `\|\| unauthMode`); delete the `unauthMode` field + shim + legacy envelope field; **pin the §6 SOCKS5 transition with a test**; rewrite the CLAUDE.md architecture note |
 
 Each slice is independently shippable, plan-first, and carries no silent behavior
 change. Slices 2–5 implement strictly against this document.
