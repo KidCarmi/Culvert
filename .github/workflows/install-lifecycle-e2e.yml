@@ -412,22 +412,24 @@ jobs:
           sudo grep -Eq '^socket_path = "/run/culvert-maint/culvert-maint\.sock"' "$CFG" || { echo "FATAL: socket_path not migrated to the managed runtime dir"; sudo grep -n socket_path "$CFG"; exit 1; }
           echo "AGENT INSTALL OK: binary+unit+sudoers+config all present and bound to $STACK_DIR."
 
-      # Prove the INSTALLED unit actually runs: authorize this runner's UID,
-      # start the service, and assert it answers /v1/health + /v1/status over the
-      # UDS. (install.sh leaves the service stopped when wiring is skipped; the
-      # wiring path normally does this allow_peers patch + start.)
+      # Prove the INSTALLED unit actually runs and serves /v1. The agent's
+      # socket is mode 0660 owned by the culvert-maint service user, so we
+      # connect as ROOT (which bypasses the socket's DAC perms) and authorize
+      # root's UID (0) in allow_peers — SO_PEERCRED then sees UID 0 and admits
+      # it. (install.sh leaves the service stopped when wiring is skipped; the
+      # real wiring path authorizes the proxy container's UID + group instead.
+      # The SO_PEERCRED matrix has its own unit tests; this is a liveness smoke.)
       - name: "Start the installed unit + assert /v1 health"
         run: |
           set -euxo pipefail
           CFG=/etc/culvert-maint/config.toml
           SOCK=/run/culvert-maint/culvert-maint.sock
-          UID_NUM="$(id -u)"
-          sudo sed -i "s|^allow_peers = .*|allow_peers = [\"$UID_NUM\"]|" "$CFG"
+          sudo sed -i 's|^allow_peers = .*|allow_peers = ["0"]|' "$CFG"
           sudo grep -n '^allow_peers' "$CFG"
           sudo systemctl enable --now culvert-maint
           ok=""
           for i in $(seq 1 30); do
-            if [ -S "$SOCK" ] && curl -fsS --unix-socket "$SOCK" http://localhost/v1/health >/dev/null 2>&1; then ok=1; break; fi
+            if sudo test -S "$SOCK" && sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/health >/dev/null 2>&1; then ok=1; break; fi
             sleep 1
           done
           if [ -z "$ok" ]; then
@@ -436,10 +438,10 @@ jobs:
             sudo journalctl -u culvert-maint --no-pager -n 60 2>&1 || true
             exit 1
           fi
-          echo "----- /v1/health -----"; curl -fsS --unix-socket "$SOCK" http://localhost/v1/health; echo
-          echo "----- /v1/status -----"; curl -fsS --unix-socket "$SOCK" http://localhost/v1/status; echo
+          echo "----- /v1/health -----"; sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/health; echo
+          echo "----- /v1/status -----"; sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/status; echo
           sudo systemctl is-active --quiet culvert-maint || { echo "FATAL: culvert-maint not active"; exit 1; }
-          echo "AGENT RUNTIME OK: installed unit is active and authorizes this peer."
+          echo "AGENT RUNTIME OK: installed unit is active and serves /v1 over the UDS."
 
       # Idempotent re-run: the installer must leave the already-installed agent
       # unchanged (no rebuild/reinstall churn).
