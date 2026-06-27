@@ -147,29 +147,40 @@ func TestAPIAlertsWebhooks_DELETE(t *testing.T) {
 
 // ── apiUnauthMode ─────────────────────────────────────────────────────────────
 
-func TestAPIUnauthMode_EnableDisable(t *testing.T) {
-	// Enable.
-	req := adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"enabled":true}`)
+func TestAPIUnauthMode_SetDefaultAuthOutcome(t *testing.T) {
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
+
+	// Exempt (open unmatched traffic).
+	req := adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"Exempt"}`)
 	w := httptest.NewRecorder()
 	apiUnauthMode(w, req)
-
 	if w.Code != http.StatusOK {
-		t.Errorf("enable: expected 200, got %d: %s", w.Code, w.Body.String())
+		t.Errorf("Exempt: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if !cfg.UnauthMode() {
-		t.Error("unauth mode should be enabled")
+	if cfg.DefaultAuthOutcome() != OutcomeExempt {
+		t.Error("defaultAuthOutcome should be Exempt")
 	}
 
-	// Disable.
-	req = adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"enabled":false}`)
+	// Default (require authentication).
+	req = adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"Default"}`)
 	w = httptest.NewRecorder()
 	apiUnauthMode(w, req)
-
 	if w.Code != http.StatusOK {
-		t.Errorf("disable: expected 200, got %d", w.Code)
+		t.Errorf("Default: expected 200, got %d", w.Code)
 	}
-	if cfg.UnauthMode() {
-		t.Error("unauth mode should be disabled")
+	if cfg.DefaultAuthOutcome() != OutcomeDefault {
+		t.Error("defaultAuthOutcome should be Default")
+	}
+
+	// Invalid value → 400, state unchanged.
+	req = adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"CredentialRequired"}`)
+	w = httptest.NewRecorder()
+	apiUnauthMode(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("invalid outcome: expected 400, got %d", w.Code)
+	}
+	if cfg.DefaultAuthOutcome() != OutcomeDefault {
+		t.Error("invalid outcome must not change the setting")
 	}
 }
 
