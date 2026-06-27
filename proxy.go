@@ -302,7 +302,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	ssoCapable := len(idpRegistry.EnabledProviders()) > 0
 	authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
 
-	if authRequired {
+	if authRequired { //nolint:nestif // auth gate complexity is inherent to the multi-arm auth dispatch (credential, SSO, CR, exempt paths)
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
 		if sess, err := readSessionCookie(r); err == nil && sess != nil {
 			id := sess.Identity()
