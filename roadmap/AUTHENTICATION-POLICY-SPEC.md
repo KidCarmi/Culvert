@@ -76,8 +76,21 @@ when the request is unauthenticated **and** authentication is otherwise required
   | `mtls_required` | future | Device/client certificate required                 |
   | `surrogate_ip`  | future | Transparent / surrogate identity                   |
 
-- **Fail-closed default:** no Stage-1 match ⇒ auth required (`407`). This is the
-  structural default, not a branch.
+- **Fail-closed default (configurable via `defaultAuthOutcome`):** no Stage-1
+  match ⇒ the global `defaultAuthOutcome` applies. It defaults to `Default`
+  (auth required / `407` — the structural fail-closed default, unchanged), and
+  may be set to `Exempt` for open-by-default on *unmatched* traffic only.
+  Scoped rules always win by priority; the kill switch forces `Default`. This
+  global default replaces the retired `UnauthMode` toggle — see
+  `AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md` (the authority for that work).
+- **Evaluation order (no pre-rule global skip):** auth rules are evaluated
+  **first** (first match wins by priority); the global `defaultAuthOutcome` is
+  consulted **only on no-match**. The legacy pre-rule `!cfg.UnauthMode()` skip
+  (`proxy.go`) is removed and replaced by this post-rule default, so scoped
+  `Exempt`/`CredentialRequired`/`SSORequired` rules are **never** dead under the
+  global default — `Default`+backend still issues the legacy `407`/`302` and
+  Stage 2 is not reached; only no-backend or `Exempt`-on-no-match falls through
+  to Stage 2 with `authSource="unauth"`.
 - On `exempt`: set `authSource = "exempt"`, leave identity empty, do **not** set
   `X-User-Identity`. No real user identity is minted. Execution continues to
   Stage 2 — policy still governs.
@@ -261,8 +274,13 @@ stable `*_rule_id` dimensions.
 This spec explicitly does **not** include, and future work must not silently
 introduce, the following:
 
-- **No removal of global `UnauthMode`.** It is retained for lab / setup. Only its
-  *production* use is replaced by scoped Authentication Policy.
+- **~~No removal of global `UnauthMode`.~~** *(Amended.)* `UnauthMode` is
+  **retired** and replaced by the scoped-policy-aware global
+  `defaultAuthOutcome` (`Default` = fail-closed; `Exempt` = open-on-no-match,
+  kill-switch-guarded). The global toggle no longer overrides scoped rules:
+  scoped `Exempt`/`CredentialRequired`/`SSORequired` win by priority. See
+  `AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md` for the frozen contract and the
+  Slice 1–5 program.
 - **No admin UI authentication changes.** Admin RBAC, sessions, and the admin
   login path are out of scope. "Exempt" applies to **end-user proxy traffic
   only** and is never an admin-UI actor.
