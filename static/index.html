@@ -6629,6 +6629,9 @@ function exportLogs(format) {
 // Settings
 // ═══════════════════════════════════════════════════════════════════════════
 let _defaultAuthOutcome = 'Default';
+// Human labels for the two global defaults (single source — avoids duplicated
+// string literals across the render and save handlers).
+const DEFAULT_AUTH_LABELS = { Default: 'Require authentication', Exempt: 'Open unmatched traffic' };
 
 // renderDefaultAuthUI reflects the global default-authentication setting. `open`
 // is true when the default is Exempt (open unmatched traffic).
@@ -6646,13 +6649,13 @@ function renderDefaultAuthUI(outcome) {
       bar.style.background = 'rgba(34,197,94,.08)';
       bar.style.borderColor = 'rgba(34,197,94,.25)';
       icon.textContent = '🌐';
-      lbl.textContent = 'Open unmatched traffic';
+      lbl.textContent = DEFAULT_AUTH_LABELS.Exempt;
       desc.textContent = 'Traffic that matches no auth rule is admitted without credentials (authSource "unauth"). Not Allow — Stage-2 policy and default-deny still apply.';
     } else {
       bar.style.background = 'rgba(20,184,166,.08)';
       bar.style.borderColor = 'rgba(20,184,166,.2)';
       icon.textContent = '🔒';
-      lbl.textContent = 'Require authentication';
+      lbl.textContent = DEFAULT_AUTH_LABELS.Default;
       desc.textContent = 'Traffic that matches no auth rule must authenticate.';
     }
   }
@@ -6676,7 +6679,7 @@ async function setDefaultAuthOutcome() {
     });
     renderDefaultAuthUI(outcome);
     toast('Default authentication updated', 'success');
-    if (statusEl) { statusEl.textContent = '✅ ' + (outcome === 'Exempt' ? 'Open unmatched traffic' : 'Require authentication') + ' active'; statusEl.style.color = 'var(--green)'; }
+    if (statusEl) { statusEl.textContent = '✅ ' + (DEFAULT_AUTH_LABELS[outcome] || DEFAULT_AUTH_LABELS.Default) + ' active'; statusEl.style.color = 'var(--green)'; }
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 

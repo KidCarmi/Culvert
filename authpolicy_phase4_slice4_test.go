@@ -80,11 +80,21 @@ func TestP4S4_API_RBAC(t *testing.T) {
 
 // ── Simulator parity with the Slice 3 runtime matrix ─────────────────────────
 
-// simBlock calls the simulator and returns its auth block for assertions.
-func simBlock(t *testing.T, rules []PolicyRule, sourceIP, host string) map[string]any {
+// simBlock calls the simulator (client 10.0.5.7) and returns its auth block.
+func simBlock(t *testing.T, rules []PolicyRule, host string) map[string]any {
 	t.Helper()
-	_, block := simulateAuthOutcome(rules, sourceIP, host, "http", "GET", "", "")
+	_, block := simulateAuthOutcome(rules, "10.0.5.7", host, "http", "GET", "", "")
 	return block
+}
+
+// assertBlock fails for each want key whose simulator-block value differs.
+func assertBlock(t *testing.T, label string, b, want map[string]any) {
+	t.Helper()
+	for k, v := range want {
+		if b[k] != v {
+			t.Errorf("%s: block[%q] = %v, want %v", label, k, b[k], v)
+		}
+	}
 }
 
 func TestP4S4_Simulator_Matrix(t *testing.T) {
@@ -94,49 +104,32 @@ func TestP4S4_Simulator_Matrix(t *testing.T) {
 		setAuthExemptDisabled(false)
 	})
 
-	// scoped Exempt → authSource=exempt, Stage-2 reached, not fromDefault.
-	b := simBlock(t, []PolicyRule{validExemptRule()}, "10.0.5.7", "updates.example.com")
-	if b["outcome"] != "Exempt" || b["stage2AuthSource"] != authSourceExempt || b["stage2Reached"] != true || b["fromDefault"] != false {
-		t.Errorf("scoped Exempt: %+v", b)
-	}
+	// Scoped-rule cases (global default does not matter — a rule matches).
+	assertBlock(t, "scoped Exempt", simBlock(t, []PolicyRule{validExemptRule()}, "updates.example.com"),
+		map[string]any{"outcome": "Exempt", "stage2AuthSource": authSourceExempt, "stage2Reached": true, "fromDefault": false})
+	assertBlock(t, "scoped CR", simBlock(t, []PolicyRule{validCRRule()}, "updates.example.com"),
+		map[string]any{"outcome": "CredentialRequired", "stage2Reached": false})
+	assertBlock(t, "scoped SSO", simBlock(t, []PolicyRule{validSSORule()}, "portal.example.com"),
+		map[string]any{"outcome": "SSORequired", "stage2Reached": false})
 
-	// scoped CredentialRequired → Stage-2 NOT reached.
-	b = simBlock(t, []PolicyRule{validCRRule()}, "10.0.5.7", "updates.example.com")
-	if b["outcome"] != "CredentialRequired" || b["stage2Reached"] != false {
-		t.Errorf("scoped CR: %+v", b)
-	}
-
-	// scoped SSORequired → Stage-2 NOT reached.
-	b = simBlock(t, []PolicyRule{validSSORule()}, "10.0.5.7", "portal.example.com")
-	if b["outcome"] != "SSORequired" || b["stage2Reached"] != false {
-		t.Errorf("scoped SSO: %+v", b)
-	}
-
-	// no match + Default → outcome Default, fromDefault, Stage-2 not reached (407/redirect first).
+	// no match + Default → 407/redirect first, Stage-2 not reached.
 	cfg.SetDefaultAuthOutcome(OutcomeDefault)
-	b = simBlock(t, nil, "10.0.5.7", "nomatch.example.com")
-	if b["outcome"] != "Default" || b["fromDefault"] != true || b["stage2Reached"] != false {
-		t.Errorf("no-match Default: %+v", b)
-	}
+	assertBlock(t, "no-match Default", simBlock(t, nil, "nomatch.example.com"),
+		map[string]any{"outcome": "Default", "fromDefault": true, "stage2Reached": false})
 
-	// no match + Exempt → default-Exempt: authSource=unauth, Stage-2 reached, fromDefault.
+	// no match + Exempt → default-Exempt: authSource=unauth, Stage-2 reached, no scoped rule.
 	cfg.SetDefaultAuthOutcome(OutcomeExempt)
-	b = simBlock(t, nil, "10.0.5.7", "nomatch.example.com")
-	if b["outcome"] != "Exempt" || b["stage2AuthSource"] != "unauth" || b["stage2Reached"] != true ||
-		b["fromDefault"] != true || b["defaultAuthOutcome"] != "Exempt" {
-		t.Errorf("no-match Exempt: %+v", b)
-	}
+	b := simBlock(t, nil, "nomatch.example.com")
+	assertBlock(t, "no-match Exempt", b,
+		map[string]any{"outcome": "Exempt", "stage2AuthSource": "unauth", "stage2Reached": true, "fromDefault": true, "defaultAuthOutcome": "Exempt"})
 	if b["rule"] != nil {
 		t.Errorf("default-Exempt must carry no scoped rule, got %+v", b["rule"])
 	}
 
 	// kill switch forces Default even when the global default is Exempt.
 	setAuthExemptDisabled(true)
-	b = simBlock(t, nil, "10.0.5.7", "nomatch.example.com")
-	if b["outcome"] != "Default" || b["killSwitch"] != true {
-		t.Errorf("kill switch must force Default: %+v", b)
-	}
-	setAuthExemptDisabled(false)
+	assertBlock(t, "kill switch", simBlock(t, nil, "nomatch.example.com"),
+		map[string]any{"outcome": "Default", "killSwitch": true})
 }
 
 // ── Static UI: new default-authentication language ───────────────────────────
