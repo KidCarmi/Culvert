@@ -28,14 +28,18 @@ import (
 // rule count taxes the hot path.
 func buildPolicyStore(n int) *PolicyStore {
 	ps := &PolicyStore{}
+	rules := make([]PolicyRule, n)
 	for i := 0; i < n; i++ {
-		ps.Add(PolicyRule{
+		rules[i] = PolicyRule{
 			Priority: i + 1,
 			Name:     fmt.Sprintf("rule-%d", i),
 			DestFQDN: fmt.Sprintf("no-match-%d.example.invalid", i),
 			Action:   ActionAllow,
-		})
+		}
 	}
+	// ReplaceAll sorts ONCE; an Add-per-rule loop would sort on every insert
+	// (O(n^2 log n) — pathological at n=10000, multi-minute build).
+	ps.ReplaceAll(rules)
 	return ps
 }
 

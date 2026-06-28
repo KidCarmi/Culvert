@@ -192,9 +192,16 @@ external harnesses and fixtures.
   header scrub at 10/100/1000/10000 rules. `proxy-nightly-e2e.yml` runs all
   three (advisory), uploads pprof + a benchstat baseline. Build tags keep every
   load test OUT of `qa-gate.yml`.
-- **PR-3:** `proxy-weekly-stress.yml` — long-lived tunnel churn, slow/broken
-  upstream, restart-under-traffic, policy churn, goroutine-leak + RSS-growth
-  detection, benchstat regression gate.
+- **PR-3 (shipped):** first weekly resilience framework, Go-native + advisory.
+  `proxy_stress_test.go` (tag `proxystress`): tunnel churn (long-lived + churn),
+  slow/broken upstream fixtures, policy churn under traffic — each ending in a
+  goroutine + active-conn + RSS leak assertion (`stress_helpers_test.go`).
+  `proxy_restart_test.go` (tag `proxybinload`): restart-under-traffic against the
+  shipped binary (graceful SIGTERM drain + fresh-instance recovery).
+  `bench_regression_test.go` (tag `benchgate`): deterministic allocs/op
+  regression gate vs the PR-2 baseline (`testdata/bench/policy-baseline.txt`),
+  paired with a benchstat ns/op diff. `proxy-weekly-stress.yml` runs all three
+  (stress under `-race`); advisory, not a required check.
 
 ### How PR-1 reaches a loopback upstream without weakening SSRF
 
@@ -227,9 +234,31 @@ gate; none are fixed in PR-2.
   pre-allocated / indexed matcher is a candidate optimization, tracked via the
   benchmark baseline.
 - **`dataDir` is hardcoded to `/data`** (no flag/env/config override). This
-  forces the nightly real-binary job to `sudo chown /data` and makes
+  forces the nightly/weekly real-binary jobs to `sudo chown /data` and makes
   out-of-container binary testing awkward. A `-data-dir` flag (with GUI parity)
-  would improve testability and operator ergonomics.
+  would improve testability and operator ergonomics. **Not fixed here** —
+  follow-up debt (only CI prep is affected, not correctness).
+
+- **CONNECT relay stall on the first bytes under concurrent tunnel setup
+  (PR-3).** Surfaced by the tunnel-churn stress test: when many tunnels are
+  established near-simultaneously, the first small write through a freshly
+  established `handleTunnelBypass` tunnel occasionally never completes (~one byte
+  is not relayed; the relay goroutines park in `IO wait`). It is rare per-tunnel
+  and does NOT reproduce with a single tunnel (the PR-1 byte-relay test is
+  reliable), which points at a relay race on the first post-CONNECT bytes (the
+  discarded `Hijack` `bufrw` is a prime suspect). The stress test stays
+  deterministic via retry-on-fresh-tunnel and **logs the retry count** so the
+  stall is visible, never masked. **Not fixed here** — follow-up debt; a focused
+  investigation of `handleTunnelBypass`'s first-byte handling (and whether the
+  hijack read-buffer is being dropped) is the next step.
+
+### Explicit follow-up debt (carried, not fixed in PR-1–3)
+
+1. Policy `Evaluate` allocates ~2/rule/request (linear latency + GC pressure at
+   large policy sets) — candidate: indexed/pre-allocated matcher.
+2. `dataDir` hardcoded to `/data` — add a `-data-dir` flag (GUI parity).
+3. CONNECT first-byte relay stall under concurrent setup — investigate
+   `handleTunnelBypass` (discarded hijack buffer / first-write race).
 
 ## 9. Production-readiness acceptance criteria
 
