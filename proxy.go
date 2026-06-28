@@ -460,6 +460,68 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	return authOutcome{identity: authenticatedIdentity, groups: authenticatedGroups, source: authenticatedSource, log: authLog}, true
 }
 
+// preDispatchBlocked runs the pre-policy content gates (legacy blocklist,
+// threat-intel feed, plugin decision, file-extension profile) against an
+// already-authenticated request. It returns true if it has written a terminal
+// block response (403 / block page) and the caller must return. Behaviour is
+// identical to the previously-inlined gates (DEBT-002 extraction; no logic change).
+func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields) bool {
+	// Legacy blocklist check (still active alongside policy engine).
+	if bl.IsBlocked(host) {
+		atomic.AddInt64(&statBlocked, 1)
+		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
+		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity, authLog)
+		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
+		return true
+	}
+
+	// Threat intelligence feed check — covers both plain HTTP destinations
+	// and CONNECT tunnel targets.
+	if globalSecScanner.Enabled() {
+		// Domain-level check (applies to CONNECT and plain HTTP).
+		if result := globalSecScanner.CheckDomain(host); result != nil {
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
+			logger.Printf("THREAT_BLOCKED domain %s -> %q (%q)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
+			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
+			return true
+		}
+		// Full-URL check for non-CONNECT (plain HTTP) requests.
+		if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
+			if result := globalSecScanner.CheckURL(r.URL.String()); result != nil {
+				atomic.AddInt64(&statBlocked, 1)
+				recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
+				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
+				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
+				return true
+			}
+		}
+	}
+
+	// Plugin check.
+	if pluginDecision(clientIP, r.Method, host) == DecisionBlock {
+		atomic.AddInt64(&statBlocked, 1)
+		http.Error(w, "Forbidden by plugin", http.StatusForbidden)
+		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity, authLog)
+		return true
+	}
+
+	// File block profile — check URL path extension for non-tunnel requests.
+	// CONNECT tunnels are opaque until SSL inspection; inner requests go through
+	// handleRequest again and will be checked at that point.
+	if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
+		if ext := fileBlocker.CheckPath(r.URL.Path); ext != "" {
+			atomic.AddInt64(&statFileBlocked, 1)
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, authLog)
+			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
+			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
+			return true
+		}
+	}
+	return false
+}
+
 func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
 	start := time.Now()
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -524,58 +586,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		host = h
 	}
 
-	// Legacy blocklist check (still active alongside policy engine).
-	if bl.IsBlocked(host) {
-		atomic.AddInt64(&statBlocked, 1)
-		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
-		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity, authLog)
-		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
+	// ── Pre-policy content blocks (blocklist / threat / plugin / file) ──────
+	// Extracted to preDispatchBlocked (DEBT-002). Returns true if it already
+	// wrote a terminal block response.
+	if preDispatchBlocked(w, r, clientIP, host, reqID, authenticatedIdentity, authLog) {
 		return
-	}
-
-	// Threat intelligence feed check — covers both plain HTTP destinations
-	// and CONNECT tunnel targets.
-	if globalSecScanner.Enabled() {
-		// Domain-level check (applies to CONNECT and plain HTTP).
-		if result := globalSecScanner.CheckDomain(host); result != nil {
-			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
-			logger.Printf("THREAT_BLOCKED domain %s -> %q (%q)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
-			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
-			return
-		}
-		// Full-URL check for non-CONNECT (plain HTTP) requests.
-		if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
-			if result := globalSecScanner.CheckURL(r.URL.String()); result != nil {
-				atomic.AddInt64(&statBlocked, 1)
-				recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
-				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
-				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
-				return
-			}
-		}
-	}
-
-	// Plugin check.
-	if pluginDecision(clientIP, r.Method, host) == DecisionBlock {
-		atomic.AddInt64(&statBlocked, 1)
-		http.Error(w, "Forbidden by plugin", http.StatusForbidden)
-		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity, authLog)
-		return
-	}
-
-	// File block profile — check URL path extension for non-tunnel requests.
-	// CONNECT tunnels are opaque until SSL inspection; inner requests go through
-	// handleRequest again and will be checked at that point.
-	if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
-		if ext := fileBlocker.CheckPath(r.URL.Path); ext != "" {
-			atomic.AddInt64(&statFileBlocked, 1)
-			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, authLog)
-			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
-			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
-			return
-		}
 	}
 
 	// ── Policy engine (PBAC) pre-check ───────────────────────────────────────
