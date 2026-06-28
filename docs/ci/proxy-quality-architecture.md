@@ -181,9 +181,17 @@ external harnesses and fixtures.
   policy-through-proxy allow/block/default-deny. Non-blocking
   `proxy-pr-gate.yml` (PR + `workflow_dispatch`), artifacts on failure. **Does
   not touch `qa-gate.yml`.**
-- **PR-2:** k6 HTTP load smoke + Go CONNECT-tunnel harness, pprof capture,
-  latency/error thresholds, `proxy-nightly-e2e.yml`, policy-size matrix
-  10/100/1000, log + metric assertions.
+- **PR-2 (shipped):** Go-native load tier — no k6/JS (project preference: Go as
+  much as possible). `proxy_load_test.go` (build tag `proxyload`): in-process
+  HTTP + CONNECT concurrency harness with latency percentiles, 0%-error /
+  metric-movement / no-leak assertions, optional 1000-rule policy load, and
+  pprof capture. `proxy_binary_load_test.go` (build tag `proxybinload`): drives
+  the SHIPPED binary over a real socket via `http.ProxyURL` (unconditional — no
+  k6 `HTTP_PROXY` loopback-bypass problem), asserting graceful SIGTERM shutdown.
+  `policy_bench_test.go`: the repo's first `func Benchmark`s — policy eval +
+  header scrub at 10/100/1000/10000 rules. `proxy-nightly-e2e.yml` runs all
+  three (advisory), uploads pprof + a benchstat baseline. Build tags keep every
+  load test OUT of `qa-gate.yml`.
 - **PR-3:** `proxy-weekly-stress.yml` — long-lived tunnel churn, slow/broken
   upstream, restart-under-traffic, policy churn, goroutine-leak + RSS-growth
   detection, benchstat regression gate.
@@ -202,6 +210,26 @@ real tunnel at a `127.0.0.1` fixture. The negative tests (`SSRFBlocksLoopback`,
 already present) continue to assert the guard rejects loopback when *not* relaxed.
 
 ---
+
+## 8a. Findings surfaced by PR-2 (baselines, not yet fixed)
+
+These are recorded as benchmark baselines and tracked for the PR-3 regression
+gate; none are fixed in PR-2.
+
+- **Policy evaluation scales linearly with a steep per-rule cost.** On a CI
+  runner, `Evaluate` measured ≈4.8 µs at 10 rules, ≈45 µs at 100, ≈437 µs at
+  1000, and ≈4.37 ms at 10000 rules — with **2 allocations per rule per request**
+  (20000 allocs / 960 KB at 10k rules). Because the proxy calls `Evaluate` on
+  every request, a large policy set is a first-order latency + GC-pressure
+  factor. End-to-end this is visible: the in-process HTTP load p50 rose from
+  ≈1.5 ms (no policy) to ≈5.2 ms and p95 from ≈15 ms to ≈30 ms under a 1000-rule
+  set. The README's "Enterprise 500–2000 req/s" does not bound policy size — a
+  pre-allocated / indexed matcher is a candidate optimization, tracked via the
+  benchmark baseline.
+- **`dataDir` is hardcoded to `/data`** (no flag/env/config override). This
+  forces the nightly real-binary job to `sudo chown /data` and makes
+  out-of-container binary testing awkward. A `-data-dir` flag (with GUI parity)
+  would improve testability and operator ergonomics.
 
 ## 9. Production-readiness acceptance criteria
 
