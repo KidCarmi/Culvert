@@ -34,14 +34,24 @@
   already uses proper packages — the team can do this; it just hasn't back-ported it.
 - **Direction:** ADR-0002. Incremental leaf-cluster extraction into `internal/`. **No rewrite.**
 
-## DEBT-002 — `handleRequest` ~497 lines · HIGH
-- **Principal (HV):** `proxy.go:219`→~716. `.golangci.yml:68` sets `cyclop max-complexity: 15`;
-  this function is ~10× over by branch count, so the gate is suppressed or excluded for the single
-  most-exercised security function in the binary.
+## DEBT-002 — `handleRequest` oversized · HIGH · **spike done, partial**
+- **Principal (HV):** the single most-exercised security function carried the entire
+  auth+policy+dispatch tree; `.golangci.yml:68` sets `cyclop max-complexity: 15`, so it shipped
+  under a `//nolint:gocognit,cyclop,funlen` suppression.
 - **Interest:** auth-bypass / SSRF-ordering bugs hide in nested branching that no reviewer can hold
   in working memory; the lint gate is not protecting the code that needs it most.
-- **Recommendation:** Extract cohesive stages (auth → policy → SSRF/dial → relay) into named
-  helpers; remove the suppression so the gate re-engages. **Complexity M.** First ADR-0002 candidate.
+- **2026-06-28 — de-risking spike (shipped):** extracted the ~225-line Stage-1 auth pipeline into
+  `resolveRequestAuth` (`proxy.go`), behaviour-preserving (deterministic line-move + bare-`return`→
+  `return authOutcome{}, false`; **full root-package suite green and byte-for-byte matching the
+  pre-change baseline**, 93.9s vs 94.5s; gocyclo verified). Result: `handleRequest` cyclomatic
+  complexity **dropped to 45**, `resolveRequestAuth` is **29** — the auth decision tree is now an
+  independently testable unit (the 453 auth/proxy tests drive it via `handleRequest`, unchanged).
+- **Honest status — NOT done:** extraction *relocated* complexity; both functions are still **>15**,
+  so both still carry suppressions (net suppression count unchanged). The spike proves the pattern is
+  safe; completing DEBT-002 needs ~3 more extractions to get the dispatcher under budget and remove
+  the suppressions: **(a)** pre-policy content blocks (blocklist/threat/plugin/fileblock),
+  **(b)** the policy-action switch (drop/blockpage/redirect/allow + default), **(c)** the telemetry
+  tail (latency + OTLP span). Each is the same low-risk mechanical pattern. **Remaining: Complexity M.**
 
 ## DEBT-003 — God-files · MEDIUM
 - `main.go` (2,367), `store.go` (2,313, ≥5 unrelated stores behind one file's locks),

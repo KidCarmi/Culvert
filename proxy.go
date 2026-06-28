@@ -216,47 +216,22 @@ func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, pa
 	recordRequestAuthURI(clientIP, "CONNECT", hostOnly, status, ruleMatched, actionTaken, "", "inspect", uri, AuthLogFields{})
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
-	start := time.Now()
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+// authOutcome carries the Stage-1 adaptive-auth result from
+// resolveRequestAuth back to handleRequest.
+type authOutcome struct {
+	identity string
+	groups   []string
+	source   string
+	log      AuthLogFields
+}
 
-	// ── Request tracing: generate X-Request-ID if not present ────────────
-	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get("X-Request-ID"), "\n", ""), "\r", "") // sanitize for CWE-117
-	if reqID == "" {
-		reqID = generateRequestID()
-		r.Header.Set("X-Request-ID", reqID)
-	}
-	w.Header().Set("X-Request-ID", reqID)
-
-	// ── W3C Trace Context: propagate or generate traceparent ────────────
-	if r.Header.Get("Traceparent") == "" {
-		r.Header.Set("Traceparent", generateTraceparent())
-	}
-
-	// ── Connection limit per IP ─────────────────────────────────────────
-	if !connLimiter.Acquire(clientIP) {
-		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
-		return
-	}
-	defer connLimiter.Release(clientIP)
-
-	// IP filter check.
-	if !ipf.Allowed(clientIP) {
-		atomic.AddInt64(&statBlocked, 1)
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED", "", "", "", "")
-		logger.Printf("IP_BLOCKED %s {req_id=%s action=block}", clientIP, reqID)
-		return
-	}
-
-	// Rate limit check.
-	if !rl.AllowAuto(clientIP) {
-		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "", "", "")
-		logger.Printf("RATE_LIMITED %s {req_id=%s action=block}", clientIP, reqID)
-		return
-	}
-
+// resolveRequestAuth runs the Stage-1 adaptive authentication pipeline
+// (session cookie -> Proxy-Authorization Basic -> no-credential outcome
+// dispatch). When it returns proceed=false it has ALREADY written a terminal
+// response (407 / redirect / 403) and the caller MUST return immediately.
+// Behaviour is identical to the previously-inlined pipeline; this is a
+// structural extraction only (DEBT-002), no logic change.
+func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID string) (authOutcome, bool) { //nolint:gocognit,cyclop,funlen // Stage-1 credential-resolution decision tree; complexity is inherent and now isolated/testable (DEBT-002; further sub-extraction tracked there)
 	// ── Adaptive Authentication ───────────────────────────────────────────────
 	// Resolution order:
 	//  1. Signed session cookie (browser SSO — OIDC code flow or SAML).
@@ -337,7 +312,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 						http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 						recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
 						logger.Printf("AUTH_FAIL %s {req_id=%s action=block}", clientIP, reqID)
-						return
+						return authOutcome{}, false
 					}
 					authenticatedIdentity = u
 					authenticatedSource = "local"
@@ -404,7 +379,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					recordRequestAuth(clientIP, r.Method, r.Host, "CRED_REQUIRED", d.Rule.Name, "", "", authLog)
 					logger.Printf("AUTH_CR rule=%q id=%q %s -> %q {req_id=%s action=challenge}",
 						sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
-					return
+					return authOutcome{}, false
 				case d.Outcome == OutcomeSSORequired:
 					// ── 3c. No credentials — Stage-1 SSORequired challenge (Slice 4) ──
 					// A matched SSORequired rule demands an INTERACTIVE browser SSO
@@ -432,7 +407,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 							logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=redirect}",
 								sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
 							http.Redirect(w, r, portalURL, http.StatusFound) // #nosec G710 -- portalURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
-							return
+							return authOutcome{}, false
 						}
 					}
 					// DR-1 fail-closed: non-browser, CONNECT, or a browser with no eligible
@@ -444,7 +419,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=deny}",
 						sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
 					http.Error(w, "Forbidden: destination requires interactive SSO", http.StatusForbidden)
-					return
+					return authOutcome{}, false
 				default:
 					// ── 3. No credentials ────────────────────────────────────────
 					// browserRedirectEligibleLegacy is the verbatim pre-Slice-1
@@ -466,7 +441,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 							// isSafeCaptiveRedirect predicate; the guard above is
 							// the actual safety check.
 							http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
-							return
+							return authOutcome{}, false
 						}
 					}
 					atomic.AddInt64(&statAuthFail, 1)
@@ -477,11 +452,66 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 					recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
 					logger.Printf("AUTH_FAIL (no-credentials) %s {req_id=%s action=block}", clientIP, reqID)
-					return
+					return authOutcome{}, false
 				}
 			}
 		}
 	}
+	return authOutcome{identity: authenticatedIdentity, groups: authenticatedGroups, source: authenticatedSource, log: authLog}, true
+}
+
+func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
+	start := time.Now()
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+	// ── Request tracing: generate X-Request-ID if not present ────────────
+	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get("X-Request-ID"), "\n", ""), "\r", "") // sanitize for CWE-117
+	if reqID == "" {
+		reqID = generateRequestID()
+		r.Header.Set("X-Request-ID", reqID)
+	}
+	w.Header().Set("X-Request-ID", reqID)
+
+	// ── W3C Trace Context: propagate or generate traceparent ────────────
+	if r.Header.Get("Traceparent") == "" {
+		r.Header.Set("Traceparent", generateTraceparent())
+	}
+
+	// ── Connection limit per IP ─────────────────────────────────────────
+	if !connLimiter.Acquire(clientIP) {
+		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
+		return
+	}
+	defer connLimiter.Release(clientIP)
+
+	// IP filter check.
+	if !ipf.Allowed(clientIP) {
+		atomic.AddInt64(&statBlocked, 1)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED", "", "", "", "")
+		logger.Printf("IP_BLOCKED %s {req_id=%s action=block}", clientIP, reqID)
+		return
+	}
+
+	// Rate limit check.
+	if !rl.AllowAuto(clientIP) {
+		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "", "", "")
+		logger.Printf("RATE_LIMITED %s {req_id=%s action=block}", clientIP, reqID)
+		return
+	}
+
+	// ── Adaptive Authentication (Stage-1) ──────────────────────────────────
+	// Resolved by resolveRequestAuth (DEBT-002 extraction). It writes any
+	// terminal 407/redirect/403 itself; proceed=false means "already handled".
+	auth, proceed := resolveRequestAuth(w, r, clientIP, reqID)
+	if !proceed {
+		return
+	}
+	authenticatedIdentity := auth.identity
+	authenticatedGroups := auth.groups
+	authenticatedSource := auth.source
+	authLog := auth.log
 
 	// Set internal identity headers — scrubForwardedHeaders removes them
 	// before forwarding upstream.
