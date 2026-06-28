@@ -6483,12 +6483,21 @@ function initPolicyDragDrop() {
     const toPri   = parseInt(row.dataset.priority);
     if (fromPri === toPri) return;
 
+    // The table renders Stage-2 access rules only (auth rules are hidden), so
+    // these DOM rows yield just the access-rule priorities, in their new order.
     const allRows = [...document.querySelectorAll('#pol-table tr[data-priority]')];
-    const priorities = allRows.map(r => parseInt(r.dataset.priority));
-    const fromIdx = priorities.indexOf(fromPri);
-    const toIdx   = priorities.indexOf(toPri);
-    priorities.splice(fromIdx, 1);
-    priorities.splice(toIdx, 0, fromPri);
+    const accessOrder = allRows.map(r => parseInt(r.dataset.priority));
+    const fromIdx = accessOrder.indexOf(fromPri);
+    const toIdx   = accessOrder.indexOf(toPri);
+    accessOrder.splice(fromIdx, 1);
+    accessOrder.splice(toIdx, 0, fromPri);
+    // /api/policy/reorder expects the COMPLETE ordered priority list. Rebuild
+    // it from the full store order, pinning each Stage-1 auth rule at its
+    // current slot so its priority is unchanged (keeping the reorder operator-
+    // level, not admin), and filling the remaining slots with the reordered
+    // access priorities.
+    const queue = [...accessOrder];
+    const priorities = polRules.map(r => r.ruleType === 'auth' ? r.priority : queue.shift());
 
     try {
       await api('/api/policy/reorder', {
@@ -6550,7 +6559,9 @@ function showMoveTarget(pri, direction) {
   document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
   // Build a list of other rule names.
   const currentRule = polRules.find(r => r.priority === pri);
-  const otherRules = polRules.filter(r => r.priority !== pri);
+  // Only Stage-2 access rules are valid move targets here; auth rules are
+  // managed via the Auth Policy panel.
+  const otherRules = polRules.filter(r => r.priority !== pri && r.ruleType !== 'auth');
   if (!otherRules.length) { toast('No other rules to move relative to', 'error'); return; }
   const options = otherRules.map(r => `<option value="${escHtml(r.name)}">${escHtml(r.name)}</option>`).join('');
   const label = direction === 'before' ? 'Move BEFORE rule:' : 'Move AFTER rule:';
@@ -8286,7 +8297,12 @@ function renderPolicy() {
     return;
   }
   const tbody = document.getElementById('pol-table');
-  const total = polRules.length;
+  // Stage-1 auth rules (ruleType:"auth") are managed in the Auth Policy panel
+  // via /api/authpolicy. They share the unified policy store (and its priority
+  // namespace) with Stage-2 access rules, but must never appear in this
+  // access-rules table — filter them out of the view.
+  const accessRules = polRules.filter(r => r.ruleType !== 'auth');
+  const total = accessRules.length;
   updateDefaultActionBadge();
   if (!total) {
     document.getElementById('pol-count').textContent = '0 rules';
@@ -8296,7 +8312,7 @@ function renderPolicy() {
 
   // F20: client-side search + action filter
   const q = (document.getElementById('pol-filter')?.value || '').toLowerCase().trim();
-  const filtered = polRules.filter(r => {
+  const filtered = accessRules.filter(r => {
     if (polActionFilter && r.action !== polActionFilter) return false;
     if (!q) return true;
     const haystack = [r.name, r.sourceIP, r.sourceIdentity, r.sourceGroup, r.authSource,
