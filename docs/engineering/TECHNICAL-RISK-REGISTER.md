@@ -15,7 +15,11 @@
 | RISK-001 | BLOCKER | OPEN | Multi-CP HA split-brain (no quorum/fencing) | `ha.go` (no `demote`/`stepDown`/quorum symbol, 570 LOC) **HV** |
 | RISK-002 | HIGH | OPEN | OIDC introspection path missing SSRF dial guard | `auth_oidc.go:94` vs `auth_oidc_flow.go:300` **HV** |
 | RISK-003 | HIGH | OPEN | Webhook HMAC secret persisted cleartext on disk | `alerts.go:169` |
-| RISK-006 | HIGH | OPEN | Security gate fetches scanners `@latest`; CodeQL non-blocking | `security-release-gate.yml:52,110,252`; `ci.yml:72` |
+| RISK-006 | MEDIUM | OPEN | Gate config blind spots: `--ignore-unfixed` + `HIGH,CRITICAL` only (masks unfixed/medium) | `security-release-gate.yml:135-143` — **trivy-verified 2026-06-28** |
+| RISK-014 | MEDIUM | OPEN | Reachability gate (govulncheck) scans root module only; nested modules unanalyzed | `security-release-gate.yml:114` vs `updater/go.mod`, `cmd/culvert-maint/go.mod` |
+| RISK-015 | LOW | OPEN | Single-scanner gate; detection-source divergence (Dependabot 5 vs Trivy DB 3) | trivy run vs Dependabot count, 2026-06-28 |
+| RISK-016 | MEDIUM | OPEN | Scanners installed `@latest`; CodeQL non-blocking | `security-release-gate.yml:52,110,252`; `ci.yml:72` |
+| RISK-ACC-1 | HIGH | ACCEPTED | 5 `docker/docker` CVEs in `updater/` (no upstream fix) | `updater/go.mod`; resolution = DEBT-008 |
 | RISK-005 | MEDIUM | OPEN | Interrupted restore can leave `/data` absent | `restore.go:876-894` |
 | RISK-008 | MEDIUM | OPEN | Username timing oracle enables user enumeration | `store.go:1670` |
 | RISK-009 | MEDIUM | OPEN | `InsecureSkipVerify` admin toggle silent on auth hot path | `auth_oidc.go:95`, `auth_ldap.go:122` |
@@ -61,15 +65,72 @@
   on export. **Complexity S.**
 - **Owner:** unassigned · **Target:** this week.
 
-## RISK-006 — CI security gate supply-chain soft spots · HIGH · OPEN
-- **Current state:** The mandatory gate installs its own scanners from `@latest`
+## RISK-006 — Trivy gate config blind spots · MEDIUM · OPEN
+- **Current state (trivy-verified 2026-06-28):** The blocking trivy gate runs
+  `trivy fs --severity CRITICAL,HIGH --ignore-unfixed --ignorefile .trivyignore`
+  (`security-release-gate.yml:135-143`). I ran the *exact* command locally: it exits **0 (green)**
+  while an unfiltered scan of the same tree finds **2 HIGH + 1 MEDIUM** real CVEs. The gate cannot
+  fail on a vulnerability that (a) has no upstream fix yet (`--ignore-unfixed`), (b) is MEDIUM or
+  lower, or (c) is listed in `.trivyignore`. All three masking mechanisms are currently active.
+- **Why this matters beyond the updater:** the masked CVEs today happen to be in `updater/` (being
+  removed, RISK-ACC-1). But the *configuration* applies to the **root proxy binary** too: a future
+  HIGH in a root dependency with no released patch would ship behind a green gate, silently.
+  "Green gate" means "no fixed, HIGH/CRITICAL, non-ignored, Trivy-DB-known vuln" — **not** "no
+  known vulns on the branch." Dependabot's 5 alerts coexisting with a green gate is the proof.
+- **Impact:** Latent — false confidence that a green gate == a clean branch. No current root-module
+  exposure (root scans 0 vulns).
+- **Recommendation:** Keep `--ignore-unfixed` for the *blocking* gate (un-actionable noise is a real
+  cost) but add a **non-blocking, visible "known-unfixed / medium" report** (e.g. a second trivy run
+  with `--ignore-unfixed=false --severity MEDIUM,HIGH,CRITICAL` that posts to the log/summary), and
+  give every `.trivyignore` entry an `# expires:` date that a CI check enforces. **Complexity S.**
+- **Owner:** unassigned · **Target:** this month.
+
+## RISK-014 — Reachability gate covers root module only · MEDIUM · OPEN
+- **Current state:** `vuln-govulncheck` runs `govulncheck ./...` from the repo root
+  (`security-release-gate.yml:114`). govulncheck does not traverse separate modules, so
+  `updater/go.mod` and `cmd/culvert-maint/go.mod` get **no reachability analysis** — they are
+  covered only by trivy (no reachability) plus the hand-written `.trivyignore` reasoning.
+- **Impact:** The two secondary binaries' reachable-vuln posture is asserted by prose, not analyzed.
+  (Note: I could not run govulncheck locally to independently confirm root-module reachability —
+  the org egress policy blocks `vuln.go.dev` with 403. CI is not behind this policy, so the CI run
+  is authoritative; this register relies on the CI gate's own govulncheck for root reachability.)
+- **Recommendation:** Add a govulncheck step per nested module (`cd updater && govulncheck ./...`,
+  same for `cmd/culvert-maint`). When `updater/` is removed (DEBT-008), this shrinks to one extra
+  step. **Complexity XS.**
+
+## RISK-015 — Single-scanner gate; detection-source divergence · LOW · OPEN
+- **Current state:** Dependabot (GitHub Advisory DB) reports **5** docker/docker alerts; Trivy (its
+  own DB) reports **3** of them; the Go vuln DB (govulncheck) is a third source. The blocking gate
+  relies on Trivy's DB for dependency-graph coverage. The three sources demonstrably disagree on
+  count and timing of advisory ingestion.
+- **Impact:** An advisory present in one DB but not yet in Trivy's can pass the gate until Trivy
+  ingests it. Low, but it means the gate's recall is bounded by one vendor's DB freshness.
+- **Recommendation:** Treat Dependabot as the *advisory* superset and reconcile it against the gate
+  periodically (this exercise). Optionally add `osv-scanner` as a second non-blocking source.
+  **Complexity S.**
+
+## RISK-016 — Scanners installed `@latest`; CodeQL non-blocking · MEDIUM · OPEN
+- **Current state:** The gate installs its own scanners from `@latest`
   (`security-release-gate.yml:52` gosec, `:110` govulncheck, `:252` go-licenses) and runs
   `KidCarmi/Dependency-Obituary@main` (`ci.yml:72`). CodeQL is in no gate's `needs:` (advisory only).
 - **Impact:** The gate meant to catch supply-chain risk is itself unpinned and non-reproducible;
   deep SAST findings never block a merge.
 - **Recommendation:** Pin scanner versions (or vendor), SHA-pin the `@main` action, add CodeQL to
-  the blocking set. **Complexity S.**
-- **Owner:** unassigned · **Target:** this week.
+  the blocking set. **Complexity S.** *(This was the original RISK-006 before the 2026-06-28 split.)*
+
+## RISK-ACC-1 — `docker/docker` CVEs in the updater · HIGH · ACCEPTED
+- **Current state (trivy-verified 2026-06-28):** 5 CVEs in `github.com/docker/docker v28.5.2`,
+  all in `updater/go.mod` only: `CVE-2026-41567` (HIGH), `CVE-2026-42306` (HIGH),
+  `CVE-2026-41568` (MEDIUM) — confirmed by local trivy — plus `CVE-2026-34040`, `CVE-2026-33997`
+  (in `.trivyignore`). **None have an upstream fix.** The root proxy binary and `cmd/culvert-maint`
+  are unaffected (0 vulns).
+- **Why accepted, not fixed:** (1) no upstream patch exists, so there is nothing to bump to;
+  (2) the entire legacy Docker updater is being **removed** (maintainer in progress; DEBT-008),
+  which closes all 5 at once; (3) bumping dependencies in code slated for deletion is wasted work.
+- **Acceptance conditions / expiry:** this acceptance is valid **only until the updater module is
+  removed**. If updater removal stalls, re-evaluate: confirm the `.trivyignore` reachability
+  rationale still holds and that the updater is not exposed to untrusted Docker registry/plugin input.
+- **Resolution:** DEBT-008 (remove legacy updater). **Owner:** maintainer · **Target:** with DEBT-008.
 
 ## RISK-005 — Interrupted restore leaves `/data` absent · MEDIUM · OPEN
 - **Current state:** `restore.go:876-894` does move-aside (`rename /data → /data.bak.<ts>`) then
@@ -122,3 +183,12 @@
 ### Review log
 - **2026-06-28** — Register created from the baseline audit. RISK-001/002 hand-verified; remainder
   on sub-reviewer evidence. No items closed yet.
+- **2026-06-28 (PM)** — **Security-gate validation exercise.** Ran trivy 0.71.2 locally (DB from
+  `mirror.gcr.io`), replicating the exact CI gate command and diffing against an unfiltered scan.
+  Findings: all dependency vulns are in `updater/go.mod` (`docker/docker v28.5.2`, 5 CVEs, no
+  upstream fix); root proxy binary and `cmd/culvert-maint` scan **clean**. Split original RISK-006
+  into RISK-006 (gate config blind spots, trivy-verified), RISK-014 (govulncheck root-only),
+  RISK-015 (scanner-DB divergence), RISK-016 (original `@latest`/CodeQL finding). Added RISK-ACC-1
+  (updater docker CVEs, ACCEPTED pending DEBT-008 removal — maintainer working on it).
+  Limitation: govulncheck reachability could not be run locally (`vuln.go.dev` blocked by org
+  egress policy, 403); CI's own govulncheck remains authoritative for root reachability.

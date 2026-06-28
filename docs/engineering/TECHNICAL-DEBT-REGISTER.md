@@ -74,10 +74,16 @@
   listener-level test through `handleConnect`'s inspect branch. **Complexity M.** (Cross-listed:
   this is debt with a latent risk.)
 
-## DEBT-008 — Two update mechanisms · LOW
+## DEBT-008 — Two update mechanisms · LOW → **active removal**
 - Legacy `updater/` sidecar and the new release-catalog dispatch both ship. Documented as a
   deliberate transition (the updater is the fallback until catalog-driven update succeeds in prod).
   **Track to actually remove the fallback** once superseded; don't let it become permanent.
+- **2026-06-28:** This is now also the resolution path for **RISK-ACC-1** — the `updater/` module's
+  `docker/docker v28.5.2` carries all 5 of the repo's open Dependabot alerts (2 HIGH + 1 MEDIUM
+  Trivy-confirmed, 2 more in `.trivyignore`; no upstream fix). The maintainer is actively removing
+  the updater. Removing `updater/go.mod` deletes the entire vulnerable dependency tree and closes
+  all 5 alerts at once — the correct fix, vs. bumping deps in soon-deleted code. **Priority raised
+  in practice** by the alert pressure, even though the structural debt itself is LOW.
 
 ## DEBT-009 — Three config durability layers · LOW
 - CLI flags / YAML / `admin_settings.json` can hold different values for the same setting; which

@@ -23,7 +23,7 @@ A score only moves when the underlying evidence changes in the repository.
 |---|:---:|:---:|---|
 | Security | 4.0 | → | Fail-closed RBAC, 600k PBKDF2, DNS-rebind-safe SSRF. Open: RISK-002, RISK-003. |
 | Testing | 4.0 | → | Behavioral suite, race+shuffle determinism gate. Gap: DEBT-007 (no e2e MITM test). |
-| CI/CD & Release | 4.0 | → | SHA-pinned actions, cosign keyless, SLSA L3. Open: RISK-006. |
+| CI/CD & Release | 4.0 | → | SHA-pinned actions, cosign keyless, SLSA L3. Gate verified to genuinely clear the **root binary** (0 vulns). Open: RISK-006/014/015/016 (gate blind spots). |
 | Documentation | 3.5 | ↑ | Strong `CLAUDE.md` + roadmap; governance layer seeded 2026-06-28. Gaps: missing runbooks. |
 | Operability (single-CP) | 3.5 | → | Fail-static confirmed, atomic restore, OTLP traces. No distinct `/readyz`. |
 | Maintainability | 2.5 | → | God-files, 497-line `handleRequest`, ~359 globals. See DEBT-001..005. |
