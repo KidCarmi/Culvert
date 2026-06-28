@@ -6483,10 +6483,15 @@ function initPolicyDragDrop() {
     const toPri   = parseInt(row.dataset.priority);
     if (fromPri === toPri) return;
 
-    const allRows = [...document.querySelectorAll('#pol-table tr[data-priority]')];
-    const priorities = allRows.map(r => parseInt(r.dataset.priority));
+    // /api/policy/reorder is access-only: it expects every Stage-2 access-rule
+    // priority exactly once and permutes them among their own slots (auth rules
+    // keep their priorities). Build the COMPLETE access order from the store —
+    // not the DOM — so an active search/action filter can't truncate the list,
+    // then apply the drag.
+    const priorities = polRules.filter(r => r.ruleType !== 'auth').map(r => r.priority);
     const fromIdx = priorities.indexOf(fromPri);
     const toIdx   = priorities.indexOf(toPri);
+    if (fromIdx < 0 || toIdx < 0) return;
     priorities.splice(fromIdx, 1);
     priorities.splice(toIdx, 0, fromPri);
 
@@ -6550,7 +6555,9 @@ function showMoveTarget(pri, direction) {
   document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
   // Build a list of other rule names.
   const currentRule = polRules.find(r => r.priority === pri);
-  const otherRules = polRules.filter(r => r.priority !== pri);
+  // Only Stage-2 access rules are valid move targets here; auth rules are
+  // managed via the Auth Policy panel.
+  const otherRules = polRules.filter(r => r.priority !== pri && r.ruleType !== 'auth');
   if (!otherRules.length) { toast('No other rules to move relative to', 'error'); return; }
   const options = otherRules.map(r => `<option value="${escHtml(r.name)}">${escHtml(r.name)}</option>`).join('');
   const label = direction === 'before' ? 'Move BEFORE rule:' : 'Move AFTER rule:';
@@ -8286,7 +8293,12 @@ function renderPolicy() {
     return;
   }
   const tbody = document.getElementById('pol-table');
-  const total = polRules.length;
+  // Stage-1 auth rules (ruleType:"auth") are managed in the Auth Policy panel
+  // via /api/authpolicy. They share the unified policy store (and its priority
+  // namespace) with Stage-2 access rules, but must never appear in this
+  // access-rules table — filter them out of the view.
+  const accessRules = polRules.filter(r => r.ruleType !== 'auth');
+  const total = accessRules.length;
   updateDefaultActionBadge();
   if (!total) {
     document.getElementById('pol-count').textContent = '0 rules';
@@ -8296,7 +8308,7 @@ function renderPolicy() {
 
   // F20: client-side search + action filter
   const q = (document.getElementById('pol-filter')?.value || '').toLowerCase().trim();
-  const filtered = polRules.filter(r => {
+  const filtered = accessRules.filter(r => {
     if (polActionFilter && r.action !== polActionFilter) return false;
     if (!q) return true;
     const haystack = [r.name, r.sourceIP, r.sourceIdentity, r.sourceGroup, r.authSource,
