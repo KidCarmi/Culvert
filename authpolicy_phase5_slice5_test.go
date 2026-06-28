@@ -59,7 +59,7 @@ func TestS5_AdminUI_ExemptKeepsGated(t *testing.T) {
 	// Exempt + no backend ⇒ IsConfigured ⇒ unauthenticated /api request is 401.
 	cfg.SetDefaultAuthOutcome(OutcomeExempt)
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/settings", http.NoBody))
+	h.ServeHTTP(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/settings", http.NoBody))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("Exempt-no-backend admin UI must stay gated (401), got %d — security regression", w.Code)
 	}
@@ -67,7 +67,7 @@ func TestS5_AdminUI_ExemptKeepsGated(t *testing.T) {
 	// Default + no backend ⇒ NOT configured ⇒ first-time setup grants RoleAdmin.
 	cfg.SetDefaultAuthOutcome(OutcomeDefault)
 	w = httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/settings", http.NoBody))
+	h.ServeHTTP(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/settings", http.NoBody))
 	if w.Code != http.StatusOK {
 		t.Fatalf("Default-no-backend (unconfigured) must open for first-time setup (200), got %d", w.Code)
 	}
