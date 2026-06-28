@@ -388,50 +388,62 @@ func TestSlice8_Simulator_CredentialsPresentedNeverExempt(t *testing.T) {
 	}
 }
 
-// Operator-level /api/policy/reorder and /api/policy/move must not reposition
-// Stage-1 auth rules; access-only reorders stay operator-level.
+// Operator-level /api/policy/reorder and /api/policy/move are access-only: they
+// permute Stage-2 access rules among their own priority slots (PermutePriorities)
+// and never touch a Stage-1 auth rule's priority. Auth rules are reordered solely
+// via /api/authpolicy (admin-only), so there is no operator/admin escalation here.
+// Priorities are deliberately NON-CONTIGUOUS (access uses max+10, auth max+1) to
+// exercise the real-world case the full-list Reorder contract mishandled.
 func TestSlice8_OperatorReorderMoveCannotShiftAuthRules(t *testing.T) {
 	withFreshPolicyStore(t)
 	a := validExemptRule()
-	a.Priority = 1
+	a.Priority = 21
 	policyStore.Add(a)
-	policyStore.Add(PolicyRule{Priority: 2, Name: "acc-1", Action: ActionAllow})
-	policyStore.Add(PolicyRule{Priority: 3, Name: "acc-2", Action: ActionAllow})
+	policyStore.Add(PolicyRule{Priority: 10, Name: "acc-1", Action: ActionAllow})
+	policyStore.Add(PolicyRule{Priority: 20, Name: "acc-2", Action: ActionAllow})
 
-	// Access-only reorder (auth rule keeps priority 1) → operator OK.
+	authPriUnchanged := func(where string) {
+		t.Helper()
+		for _, r := range policyStore.List() {
+			if r.Name == a.Name && r.Priority != 21 {
+				t.Fatalf("%s: auth rule priority changed to %d, want 21", where, r.Priority)
+			}
+		}
+	}
+
+	// Access-only reorder (swap the two access rules) → operator OK, auth untouched.
 	w := httptest.NewRecorder()
-	apiPolicyReorder(w, roleReq(RoleOperator, "POST", "/api/policy/reorder", map[string]any{"priorities": []int{1, 3, 2}}))
+	apiPolicyReorder(w, roleReq(RoleOperator, "POST", "/api/policy/reorder", map[string]any{"priorities": []int{20, 10}}))
 	if w.Code != 200 {
 		t.Fatalf("operator access-only reorder = %d: %s", w.Code, w.Body.String())
 	}
+	authPriUnchanged("reorder")
 
-	// Reorder that moves the auth rule off priority 1 → operator 403, admin OK.
-	w = httptest.NewRecorder()
-	apiPolicyReorder(w, roleReq(RoleOperator, "POST", "/api/policy/reorder", map[string]any{"priorities": []int{2, 1, 3}}))
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("operator reorder shifting auth rule = %d, want 403", w.Code)
-	}
-	w = httptest.NewRecorder()
-	apiPolicyReorder(w, roleReq(RoleAdmin, "POST", "/api/policy/reorder", map[string]any{"priorities": []int{2, 1, 3}}))
-	if w.Code != 200 {
-		t.Fatalf("admin reorder shifting auth rule = %d: %s", w.Code, w.Body.String())
+	// A reorder list that includes the auth rule's priority is rejected — for
+	// operator AND admin alike (no escalation; auth is reordered via /api/authpolicy).
+	for _, role := range []UIRole{RoleOperator, RoleAdmin} {
+		w = httptest.NewRecorder()
+		apiPolicyReorder(w, roleReq(role, "POST", "/api/policy/reorder", map[string]any{"priorities": []int{10, 20, 21}}))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s reorder including auth priority = %d, want 400", role, w.Code)
+		}
 	}
 
-	// Reset, then /api/policy/move: operator moving the auth rule → 403; admin OK.
-	withFreshPolicyStore(t)
-	a2 := validExemptRule()
-	a2.Priority = 1
-	policyStore.Add(a2)
-	policyStore.Add(PolicyRule{Priority: 2, Name: "acc-3", Action: ActionAllow})
+	// /api/policy/move: moving an access rule to last stays operator-level and
+	// leaves the auth rule's priority untouched (the move never crosses it).
 	w = httptest.NewRecorder()
-	apiPolicyMove(w, roleReq(RoleOperator, "POST", "/api/policy/move", map[string]any{"priority": 1, "position": "last"}))
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("operator move of auth rule = %d, want 403", w.Code)
-	}
-	w = httptest.NewRecorder()
-	apiPolicyMove(w, roleReq(RoleAdmin, "POST", "/api/policy/move", map[string]any{"priority": 1, "position": "last"}))
+	apiPolicyMove(w, roleReq(RoleOperator, "POST", "/api/policy/move", map[string]any{"priority": 10, "position": "last"}))
 	if w.Code != 200 {
-		t.Fatalf("admin move of auth rule = %d: %s", w.Code, w.Body.String())
+		t.Fatalf("operator access-rule move = %d: %s", w.Code, w.Body.String())
+	}
+	authPriUnchanged("move")
+
+	// Moving the auth rule itself via the access endpoint is rejected: it is not
+	// among the access rules buildMovedPriorities considers.
+	w = httptest.NewRecorder()
+	apiPolicyMove(w, roleReq(RoleOperator, "POST", "/api/policy/move", map[string]any{"priority": 21, "position": "last"}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("move of auth rule via access endpoint = %d, want 400", w.Code)
 	}
 }
 

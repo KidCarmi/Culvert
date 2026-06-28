@@ -396,29 +396,3 @@ func simulateAuthOutcome(rules []PolicyRule, sourceIP, host, protocol, method, i
 	}
 	return stage2AuthSource, block
 }
-
-// authPrioritiesWouldChange reports whether applying PolicyStore.Reorder with
-// orderedPriorities would assign any Stage-1 auth rule a different priority
-// (Reorder assigns newPriority = index+1). Used by the operator-level
-// /api/policy/reorder and /api/policy/move handlers: pure access-rule
-// reorders that leave every auth rule at its current priority stay operator-
-// level, while any repositioning of an auth rule is an admin-only mutation
-// (consistent with /api/authpolicy).
-func authPrioritiesWouldChange(orderedPriorities []int) bool {
-	rules := policyStore.List()
-	authPri := make(map[int]bool)
-	for i := range rules {
-		if ruleTypeOf(&rules[i]) == ruleTypeAuth {
-			authPri[rules[i].Priority] = true
-		}
-	}
-	if len(authPri) == 0 {
-		return false
-	}
-	for idx, p := range orderedPriorities {
-		if authPri[p] && idx+1 != p {
-			return true
-		}
-	}
-	return false
-}

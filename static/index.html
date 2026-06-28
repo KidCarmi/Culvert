@@ -6483,21 +6483,17 @@ function initPolicyDragDrop() {
     const toPri   = parseInt(row.dataset.priority);
     if (fromPri === toPri) return;
 
-    // The table renders Stage-2 access rules only (auth rules are hidden), so
-    // these DOM rows yield just the access-rule priorities, in their new order.
-    const allRows = [...document.querySelectorAll('#pol-table tr[data-priority]')];
-    const accessOrder = allRows.map(r => parseInt(r.dataset.priority));
-    const fromIdx = accessOrder.indexOf(fromPri);
-    const toIdx   = accessOrder.indexOf(toPri);
-    accessOrder.splice(fromIdx, 1);
-    accessOrder.splice(toIdx, 0, fromPri);
-    // /api/policy/reorder expects the COMPLETE ordered priority list. Rebuild
-    // it from the full store order, pinning each Stage-1 auth rule at its
-    // current slot so its priority is unchanged (keeping the reorder operator-
-    // level, not admin), and filling the remaining slots with the reordered
-    // access priorities.
-    const queue = [...accessOrder];
-    const priorities = polRules.map(r => r.ruleType === 'auth' ? r.priority : queue.shift());
+    // /api/policy/reorder is access-only: it expects every Stage-2 access-rule
+    // priority exactly once and permutes them among their own slots (auth rules
+    // keep their priorities). Build the COMPLETE access order from the store —
+    // not the DOM — so an active search/action filter can't truncate the list,
+    // then apply the drag.
+    const priorities = polRules.filter(r => r.ruleType !== 'auth').map(r => r.priority);
+    const fromIdx = priorities.indexOf(fromPri);
+    const toIdx   = priorities.indexOf(toPri);
+    if (fromIdx < 0 || toIdx < 0) return;
+    priorities.splice(fromIdx, 1);
+    priorities.splice(toIdx, 0, fromPri);
 
     try {
       await api('/api/policy/reorder', {

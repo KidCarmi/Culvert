@@ -1079,14 +1079,30 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	// Repositioning a Stage-1 auth rule is an admin-only mutation (the
-	// /api/authpolicy contract). Pure access-rule reorders that leave every
-	// auth rule at its current priority remain operator-level. Documented
-	// dynamic role escalation — see the uiRoutes Note and C4 observability.
-	if authPrioritiesWouldChange(body.Priorities) && !requireRole(w, r, RoleAdmin) {
+	// Access-only contract: the list must be exactly the current Stage-2 access-
+	// rule priority set. Stage-1 auth rules are reordered exclusively via
+	// /api/authpolicy (admin-only) and keep their priorities, so this endpoint
+	// permutes access rules among their own slots and never touches an auth rule
+	// (no operator/admin escalation). Rejecting any auth priority — and any
+	// partial/stale list — keeps the permutation well-defined.
+	accessPris := make(map[int]bool)
+	rules := policyStore.List()
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) == ruleTypeAccess {
+			accessPris[rules[i].Priority] = true
+		}
+	}
+	if len(body.Priorities) != len(accessPris) {
+		http.Error(w, "priorities must list every access rule exactly once", http.StatusBadRequest)
 		return
 	}
-	if !policyStore.Reorder(body.Priorities) {
+	for _, p := range body.Priorities {
+		if !accessPris[p] {
+			http.Error(w, fmt.Sprintf("priority %d is not an access rule", p), http.StatusBadRequest)
+			return
+		}
+	}
+	if !policyStore.PermutePriorities(body.Priorities) {
 		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
 		return
 	}
@@ -1182,24 +1198,28 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Access-only: build the moved order over Stage-2 access rules and permute
+	// just those priorities. Stage-1 auth rules are reordered via /api/authpolicy
+	// and keep their priorities, so an access move never crosses or renumbers one
+	// (no operator/admin escalation). Moving an auth rule via this endpoint is
+	// rejected because buildMovedPriorities won't find it among the access rules.
 	rules := policyStore.List()
-	if len(rules) == 0 {
+	accessRules := make([]PolicyRule, 0, len(rules))
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) == ruleTypeAccess {
+			accessRules = append(accessRules, rules[i])
+		}
+	}
+	if len(accessRules) == 0 {
 		http.Error(w, "no rules to reorder", http.StatusBadRequest)
 		return
 	}
-	priorities, err := buildMovedPriorities(rules, body.Priority, body.Position, body.TargetName)
+	priorities, err := buildMovedPriorities(accessRules, body.Priority, body.Position, body.TargetName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Repositioning a Stage-1 auth rule is an admin-only mutation (the
-	// /api/authpolicy contract): this covers both moving an auth rule itself
-	// and moving an access rule across one (which shifts its priority).
-	// Documented dynamic role escalation — see the uiRoutes Note and C4.
-	if authPrioritiesWouldChange(priorities) && !requireRole(w, r, RoleAdmin) {
-		return
-	}
-	if !policyStore.Reorder(priorities) {
+	if !policyStore.PermutePriorities(priorities) {
 		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
 		return
 	}
