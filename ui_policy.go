@@ -1062,6 +1062,20 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"deleted": deleted})
 }
 
+// listAccessRules returns the Stage-2 access rules from the policy store, in
+// priority order. Stage-1 auth rules are excluded — they are managed via
+// /api/authpolicy and keep their priorities through every access-side reorder.
+func listAccessRules() []PolicyRule {
+	rules := policyStore.List()
+	out := make([]PolicyRule, 0, len(rules))
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) == ruleTypeAccess {
+			out = append(out, rules[i])
+		}
+	}
+	return out
+}
+
 // POST /api/policy/reorder — drag-and-drop priority reordering
 // Body: {"priorities": [3,1,2]} — ordered list of old priorities (new order)
 func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
@@ -1085,12 +1099,10 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	// permutes access rules among their own slots and never touches an auth rule
 	// (no operator/admin escalation). Rejecting any auth priority — and any
 	// partial/stale list — keeps the permutation well-defined.
-	accessPris := make(map[int]bool)
-	rules := policyStore.List()
-	for i := range rules {
-		if ruleTypeOf(&rules[i]) == ruleTypeAccess {
-			accessPris[rules[i].Priority] = true
-		}
+	access := listAccessRules()
+	accessPris := make(map[int]bool, len(access))
+	for i := range access {
+		accessPris[access[i].Priority] = true
 	}
 	if len(body.Priorities) != len(accessPris) {
 		http.Error(w, "priorities must list every access rule exactly once", http.StatusBadRequest)
@@ -1203,18 +1215,12 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 	// and keep their priorities, so an access move never crosses or renumbers one
 	// (no operator/admin escalation). Moving an auth rule via this endpoint is
 	// rejected because buildMovedPriorities won't find it among the access rules.
-	rules := policyStore.List()
-	accessRules := make([]PolicyRule, 0, len(rules))
-	for i := range rules {
-		if ruleTypeOf(&rules[i]) == ruleTypeAccess {
-			accessRules = append(accessRules, rules[i])
-		}
-	}
-	if len(accessRules) == 0 {
+	access := listAccessRules()
+	if len(access) == 0 {
 		http.Error(w, "no rules to reorder", http.StatusBadRequest)
 		return
 	}
-	priorities, err := buildMovedPriorities(accessRules, body.Priority, body.Position, body.TargetName)
+	priorities, err := buildMovedPriorities(access, body.Priority, body.Position, body.TargetName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
