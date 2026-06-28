@@ -820,6 +820,31 @@ func TestReorder_DuplicatePriorities(t *testing.T) {
 	}
 }
 
+func TestPermutePriorities_DuplicatePriorityInStore(t *testing.T) {
+	// Duplicate priorities can enter the store via ReplaceAll (e.g. config import).
+	// PermutePriorities must return false rather than silently reassigning only the
+	// last rule that shares the ambiguous priority slot.
+	ps := newTestPolicyStore()
+	ps.ReplaceAll([]PolicyRule{
+		{Priority: 5, Name: "dup-a", Action: ActionAllow},
+		{Priority: 5, Name: "dup-b", Action: ActionAllow},
+		{Priority: 10, Name: "single", Action: ActionDrop},
+	})
+
+	// Swapping priorities 5 and 10 is ambiguous because two rules share priority 5.
+	ok := ps.PermutePriorities([]int{10, 5})
+	if ok {
+		t.Errorf("PermutePriorities should return false when store has duplicate priority; got true; store: %v", ps.List())
+	}
+	// The store must be unchanged on failure.
+	rules := ps.List()
+	for _, r := range rules {
+		if r.Name == "single" && r.Priority != 10 {
+			t.Errorf("store mutated despite failure: 'single' priority = %d, want 10", r.Priority)
+		}
+	}
+}
+
 func TestEvaluate_CategoryAnyMatchesAll(t *testing.T) {
 	// A rule with DestCategory="Any" should behave as "match any category"
 	// (the category condition is effectively a no-op).
