@@ -75,7 +75,7 @@ type ConfigSnapshot struct {
 	RateLimitRPM          int      `json:"rate_limit_rpm"`
 	RateLimitExempt       []string `json:"rate_limit_exempt"` // IP/CIDR rate-limit whitelist; nil→skip, []→clear on DP. NO omitempty: an empty list must serialize as [] so removing the last exemption propagates as a clear, not a skip.
 	AuthEnabled           bool     `json:"auth_enabled"`
-	UnauthMode            bool     `json:"unauth_mode"`
+	DefaultAuthOutcome    string   `json:"default_auth_outcome"` // "Default" | "Exempt"; informational (DP does not apply it)
 	ProxyBaseURL          string   `json:"proxy_base_url,omitempty"`
 	TrustForwardedHeaders bool     `json:"trust_forwarded_headers,omitempty"`
 	UpdatedAt             string   `json:"updated_at"`
@@ -1821,7 +1821,7 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 		IPList:                ipf.List(),
 		RateLimitRPM:          rl.Limit(),
 		AuthEnabled:           cfg.AuthEnabled(),
-		UnauthMode:            cfg.UnauthMode(),
+		DefaultAuthOutcome:    string(cfg.DefaultAuthOutcome()),
 		ProxyBaseURL:          cfg.ProxyBaseURL(),
 		TrustForwardedHeaders: trustForwardedHeaders,
 	}

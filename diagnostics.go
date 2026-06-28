@@ -146,7 +146,7 @@ func buildOperatorContract() OperatorContract {
 		checkDPLastGoodConfigSnapshot(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
-		checkUnauthMode(),
+		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),
 		checkUpdaterURL(),
 		checkConfigSnapshotValidator(),
@@ -512,22 +512,22 @@ func hasNonBaseURLComponents(u *url.URL) bool {
 	return u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil
 }
 
-// checkUnauthMode is a visible WARN when the proxy is in unauthenticated
-// pass-through mode. Per scope, we surface the risk — we never remove the
-// operator's freedom to run this way.
-func checkUnauthMode() OperatorContractCheck {
-	if cfg != nil && cfg.UnauthMode() {
+// checkDefaultAuthOpen is a visible WARN when the global default authentication
+// is Open unmatched traffic (defaultAuthOutcome=Exempt). Report-only — we never
+// remove the operator's freedom to run this way.
+func checkDefaultAuthOpen() OperatorContractCheck {
+	if cfg != nil && cfg.DefaultAuthOutcome() == OutcomeExempt {
 		return OperatorContractCheck{
-			Code:           "unauth_mode",
+			Code:           "default_auth_open",
 			Status:         diagWarn,
-			Message:        "proxy is running in unauthenticated mode — no client credentials required",
-			OperatorAction: "If clients should authenticate, disable Unauth Mode under Settings; otherwise rely on policy rules to gate access.",
+			Message:        "default authentication is Open unmatched traffic — traffic that matches no auth rule is admitted without credentials (not Allow; Stage-2 policy still governs)",
+			OperatorAction: "Set default authentication to Require under Settings if unmatched traffic should authenticate; otherwise rely on policy rules to gate access.",
 		}
 	}
 	return OperatorContractCheck{
-		Code:    "unauth_mode",
+		Code:    "default_auth_open",
 		Status:  diagOK,
-		Message: "client authentication enforced (or no IdP configured)",
+		Message: "default authentication requires credentials for unmatched traffic (or no IdP configured)",
 	}
 }
 
@@ -937,7 +937,7 @@ func authDefaultExemptMigrationDiagnostics(rules []PolicyRule, defaultExempt boo
 	return []OperatorContractCheck{{
 		Code:           "auth_default_exempt_rules_now_enforce",
 		Status:         diagWarn,
-		Message:        "The global default authentication is Exempt (open). Scoped CredentialRequired/SSORequired rules — previously DEAD under the legacy UnauthMode — now ENFORCE for matching traffic under defaultAuthOutcome=Exempt (auth rules evaluate first; the global default applies only on no-match): " + strings.Join(names, ", "),
+		Message:        "The global default authentication is Open unmatched traffic (defaultAuthOutcome=Exempt). Scoped CredentialRequired/SSORequired rules still ENFORCE for matching traffic — auth rules evaluate first; the global default applies only on no-match: " + strings.Join(names, ", "),
 		OperatorAction: "Confirm these rules should enforce. To restore fully-open behavior remove them; to require authentication globally, set the default authentication to Required.",
 	}}
 }

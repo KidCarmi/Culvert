@@ -129,7 +129,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"cluster_posture":            false,
 		"saml_state_posture":         false,
 		"saml_base_url":              false,
-		"unauth_mode":                false,
+		"default_auth_open":          false,
 		"yara_engine_posture":        false,
 		"updater_url":                false,
 		"config_snapshot_validator":  false,

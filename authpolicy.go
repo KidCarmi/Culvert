@@ -188,7 +188,7 @@ func Decide(ctx RequestContext) AccessDecision {
 
 // authSourceExempt is the categorical auth source recorded for requests whose
 // authentication challenge was waived by a Stage-1 exempt rule. Distinct from
-// "unauth" (global UnauthMode / pre-gate default) so Stage-2 policy, request
+// "unauth" (no credentials / default-Exempt open default) so Stage-2 policy, request
 // logs, and SIEM can target explicit exemptions separately — e.g. allow
 // authSource=exempt only to specific destinations, or report exempt traffic on
 // its own. No identity is ever attached to an exempt request.
@@ -199,7 +199,7 @@ const authSourceExempt = "exempt"
 // request logs, and SIEM exports:
 //
 //	exempt — Stage-1 exemption waived authentication (Slice 7)
-//	unauth — no credentials presented / global UnauthMode
+//	unauth — no credentials presented / open default (defaultAuthOutcome=Exempt)
 //	local  — local bcrypt account authentication
 //	system — reserved for internal/system-originated traffic (future)
 //

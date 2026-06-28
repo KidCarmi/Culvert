@@ -12,8 +12,8 @@ import (
 //
 // All functions here are REPORT-ONLY: they never mutate rules, never touch the
 // request path, and only build OperatorContractCheck rows (warn/fail). They are
-// pure over the supplied ruleset plus the two environmental facts they read
-// (UnauthMode and the live IdP registry via eligibleSSOProviders / idpRegistry).
+// pure over the supplied ruleset plus the live IdP registry (via
+// eligibleSSOProviders / idpRegistry).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // authSSORequiredDiagnostics reports operator risks for SSORequired (SSO) Stage-1

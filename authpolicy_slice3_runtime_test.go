@@ -60,9 +60,9 @@ func TestS3_DefaultMode_Parity(t *testing.T) {
 
 func TestS3_DefaultExempt_OpensUnmatched_AuthSourceUnauth(t *testing.T) {
 	setupAuthGateTest(t)
-	withFreshPolicyStore(t) // restore the global store on cleanup (no rule leak)
-	cfg.SetUnauthMode(true) // open mode (defaultAuthOutcome Exempt)
-	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	withFreshPolicyStore(t)                  // restore the global store on cleanup (no rule leak)
+	cfg.SetDefaultAuthOutcome(OutcomeExempt) // open mode (defaultAuthOutcome Exempt)
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 	const host = "s3-defexempt-unauth.example.test"
 	allowFor("allow-unauth", host, "unauth") // matches only if authSource=="unauth"
 
@@ -81,8 +81,8 @@ func TestS3_DefaultExempt_OpensUnmatched_AuthSourceUnauth(t *testing.T) {
 
 func TestS3_DefaultExempt_DefaultDenyStillBlocks(t *testing.T) {
 	setupAuthGateTest(t)
-	cfg.SetUnauthMode(true)
-	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	cfg.SetDefaultAuthOutcome(OutcomeExempt)
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 	const host = "s3-defexempt-deny.example.test"
 	// No allow rule → default-deny must still block.
 	w := httptest.NewRecorder()
@@ -97,8 +97,8 @@ func TestS3_DefaultExempt_DefaultDenyStillBlocks(t *testing.T) {
 func TestS3_ScopedCR_OverDefaultExempt_407(t *testing.T) {
 	setupAuthGateTest(t)
 	withFreshPolicyStore(t)
-	cfg.SetUnauthMode(true) // default Exempt
-	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	cfg.SetDefaultAuthOutcome(OutcomeExempt) // default Exempt
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 	const host = "s3-cr-over-exempt.example.test"
 	policyStore.Add(p2s3CR("cr-1", host))
 
@@ -118,8 +118,8 @@ func TestS3_ScopedSSO_OverDefaultExempt_BrowserAnd403(t *testing.T) {
 	setupAuthGateTest(t)
 	withFreshPolicyStore(t)
 	withSSORegistry(t, idp("corp", IdPTypeOIDC, true))
-	cfg.SetUnauthMode(true) // default Exempt
-	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	cfg.SetDefaultAuthOutcome(OutcomeExempt) // default Exempt
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 	const host = "s3-sso-over-exempt.example.test"
 	policyStore.Add(localSSO(host))
 
@@ -141,8 +141,8 @@ func TestS3_ScopedSSO_OverDefaultExempt_BrowserAnd403(t *testing.T) {
 func TestS3_ScopedExempt_OverDefaultExempt_AuthSourceExempt(t *testing.T) {
 	setupAuthGateTest(t)
 	withFreshPolicyStore(t)
-	cfg.SetUnauthMode(true) // default Exempt
-	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	cfg.SetDefaultAuthOutcome(OutcomeExempt) // default Exempt
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 	const host = "s3-scopedexempt.example.test"
 	policyStore.Add(slice7ExemptRule(host)) // scoped Exempt
 	allowFor("allow-exempt", host, "exempt")
@@ -166,8 +166,8 @@ func TestS3_ScopedExempt_OverDefaultExempt_AuthSourceExempt(t *testing.T) {
 
 func TestS3_KillSwitch_ForcesDefault(t *testing.T) {
 	setupAuthGateTest(t)
-	cfg.SetUnauthMode(true) // default Exempt …
-	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	cfg.SetDefaultAuthOutcome(OutcomeExempt) // default Exempt …
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 	setAuthExemptDisabled(true) // … but kill switch forces Default (cleanup in setupAuthGateTest)
 
 	// No scoped rule, no creds → forced Default → 407 (open is suppressed).
@@ -204,9 +204,9 @@ func TestS3_KillSwitch_ForcesDefault(t *testing.T) {
 // ── Presented credentials are never default-exempted ─────────────────────────
 
 func TestS3_PresentedCreds_NotDefaultExempted(t *testing.T) {
-	setupAuthGateTest(t)    // backend user alice/secret
-	cfg.SetUnauthMode(true) // default Exempt
-	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	setupAuthGateTest(t)                     // backend user alice/secret
+	cfg.SetDefaultAuthOutcome(OutcomeExempt) // default Exempt
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 
 	// Bad creds in open mode → 407, NOT opened.
 	const host = "s3-badcreds.example.test"
@@ -235,8 +235,8 @@ func TestS3_NoBackend_DefaultInert_ExemptScopedFires(t *testing.T) {
 	withFreshPolicyStore(t) // CRITICAL: restore the store on cleanup — otherwise a
 	// leftover CR rule with NO credential provider leaks an auth_cr_no_credential_provider
 	// FAIL into a later diagnostics test (the QA·Determinism order-dependent flake).
-	cfg.SetUnauthMode(true) // default Exempt
-	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	cfg.SetDefaultAuthOutcome(OutcomeExempt) // default Exempt
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 	const host = "s3-nobackend-exempt-cr.example.test"
 	policyStore.Add(p2s3CR("cr-nb", host))
 

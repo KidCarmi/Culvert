@@ -242,8 +242,10 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Auth not yet configured — first-time or intentionally disabled.
-		if !cfg.AuthEnabled() {
+		// Setup not yet complete — first-time bootstrap. Gate on IsConfigured (NOT
+		// AuthEnabled): open mode (defaultAuthOutcome=Exempt) counts as configured,
+		// so it keeps the admin UI gated rather than granting RoleAdmin to all.
+		if !cfg.IsConfigured() {
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
