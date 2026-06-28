@@ -251,7 +251,7 @@ func TestAPISetupComplete_UnauthMode(t *testing.T) {
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "")
-	defer func() { cfg.SetUnauthMode(false) }()
+	defer func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) }()
 
 	w := httptest.NewRecorder()
 	initSecret(t)

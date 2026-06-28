@@ -1583,11 +1583,11 @@ type Config struct {
 	// over the local bcrypt credentials for Verify calls.
 	provider AuthProvider
 
-	// defaultAuthOutcome is the single authoritative global Stage-1 default
-	// (applied only on no-match; see AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md).
-	// OutcomeExempt == legacy "open / UnauthMode"; OutcomeDefault == auth
-	// required (fail-closed). Empty value is treated as OutcomeDefault.
-	// UnauthMode()/SetUnauthMode() are behavior-identical shims over this field.
+	// defaultAuthOutcome is the SINGLE authoritative global Stage-1 default,
+	// applied only on no-match (see AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md).
+	// OutcomeExempt == open unmatched traffic; OutcomeDefault == auth required
+	// (fail-closed; empty normalizes to Default). Read via DefaultAuthOutcome(),
+	// set via SetDefaultAuthOutcome() — the only API/UI/cluster/diagnostics path.
 	defaultAuthOutcome AuthOutcome
 
 	// uiUsers holds the multi-user admin roster with per-user roles.
@@ -1686,17 +1686,17 @@ func (c *Config) VerifyAuth(user, pass string) bool {
 func (c *Config) AuthEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt
+	return c.user != "" || c.provider != nil
 }
 
-// UnauthMode returns true when the proxy is explicitly configured to run
-// without authentication (open proxy mode, setup is still considered done).
-// Shim over the authoritative defaultAuthOutcome field — behavior-identical to
-// the pre-Slice-2 boolean.
-func (c *Config) UnauthMode() bool {
+// IsConfigured reports whether initial setup is complete: a credential backend
+// exists OR the operator deliberately chose the open default (Exempt). The admin
+// UI and setup flow gate on this — NOT AuthEnabled — so that open mode keeps the
+// admin UI gated and makes setup one-time (Slice 5).
+func (c *Config) IsConfigured() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.defaultAuthOutcome == OutcomeExempt
+	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt
 }
 
 // DefaultAuthOutcome returns the authoritative global Stage-1 default applied on
@@ -1713,8 +1713,8 @@ func (c *Config) DefaultAuthOutcome() AuthOutcome {
 
 // SetDefaultAuthOutcome sets the authoritative global Stage-1 default applied on
 // no-match, fail-closed: any value other than OutcomeExempt normalizes to
-// OutcomeDefault. Persists so the setting survives restarts. This is the
-// canonical setter; SetUnauthMode is a thin legacy shim over it.
+// OutcomeDefault. Persists so the setting survives restarts. This is the only
+// setter for the global default.
 func (c *Config) SetDefaultAuthOutcome(outcome AuthOutcome) {
 	resolved := OutcomeDefault
 	if outcome == OutcomeExempt {
@@ -1731,17 +1731,6 @@ func (c *Config) SetDefaultAuthOutcome(outcome AuthOutcome) {
 	// Persist so the setting survives restarts.
 	if err := c.SaveUIUsersFile(); err != nil {
 		logWarnf("Auth: failed to persist defaultAuthOutcome: %v", err)
-	}
-}
-
-// SetUnauthMode is a legacy boolean shim over SetDefaultAuthOutcome
-// (true⇒Exempt, false⇒Default). Retained for the setup flow and internal
-// callers; the settings API uses SetDefaultAuthOutcome directly.
-func (c *Config) SetUnauthMode(enabled bool) {
-	if enabled {
-		c.SetDefaultAuthOutcome(OutcomeExempt)
-	} else {
-		c.SetDefaultAuthOutcome(OutcomeDefault)
 	}
 }
 
@@ -1901,11 +1890,11 @@ type uiUsersFileEnvelope struct {
 	// every save (always non-nil) so "Default" round-trips and migration is
 	// idempotent. See AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md.
 	DefaultAuthOutcome *string `json:"default_auth_outcome"`
-	// UnauthMode is the LEGACY field, retained ONLY as a downgrade-compatibility
-	// mirror: read for one-way migration when default_auth_outcome is absent,
-	// and written (= outcome==Exempt) so a pre-Slice-2 binary can still read the
-	// open/closed posture. Never authoritative on load when default_auth_outcome
-	// is present. Removed in Slice 5.
+	// UnauthMode is a READ-ONLY import-compatibility input (Slice 5). It is
+	// NEVER written and is consulted ONLY by resolveLoadedDefaultAuthOutcome when
+	// default_auth_outcome is absent (a pre-Slice-2 config), mapping it once to
+	// defaultAuthOutcome. When default_auth_outcome is present it ALWAYS wins,
+	// even if the two conflict. Not part of the active architecture.
 	UnauthMode bool           `json:"unauth_mode,omitempty"`
 	Users      []uiUserRecord `json:"users"`
 }
@@ -1970,9 +1959,9 @@ func (c *Config) SaveUIUsersFile() error {
 	c.mu.RLock()
 	path := c.uiUsersFile
 	// Canonicalize for serialization: an unset in-memory value persists as the
-	// fail-closed Default. default_auth_outcome is authoritative (explicit);
-	// unauth_mode is the derived downgrade mirror (omitempty ⇒ present only when
-	// Exempt). Slice 2 dual-write; see AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md §2.
+	// fail-closed Default. default_auth_outcome is the ONLY field written (Slice
+	// 5); the legacy unauth_mode mirror is no longer written (read-only import
+	// compat only). See AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md §2.
 	outcome := c.defaultAuthOutcome
 	if outcome == "" {
 		outcome = OutcomeDefault
@@ -1980,7 +1969,6 @@ func (c *Config) SaveUIUsersFile() error {
 	authoritative := string(outcome)
 	env := uiUsersFileEnvelope{
 		DefaultAuthOutcome: &authoritative,
-		UnauthMode:         outcome == OutcomeExempt,
 		Users:              make([]uiUserRecord, 0, len(c.uiUsers)),
 	}
 	for name, u := range c.uiUsers {

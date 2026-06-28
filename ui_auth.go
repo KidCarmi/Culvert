@@ -46,7 +46,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role, ok := cfg.VerifyUIUser(body.User, body.Pass)
-	if !cfg.AuthEnabled() {
+	if !cfg.IsConfigured() {
 		role, ok = RoleAdmin, true
 	}
 	if ok {
@@ -121,7 +121,7 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !cfg.AuthEnabled() {
+	if !cfg.IsConfigured() {
 		jsonOK(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
 		return
 	}
@@ -316,7 +316,7 @@ func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	jsonOK(w, map[string]any{"needsSetup": !cfg.AuthEnabled()})
+	jsonOK(w, map[string]any{"needsSetup": !cfg.IsConfigured()})
 }
 
 // POST /api/setup/complete — sets the initial admin credential or enables unauth mode.
@@ -339,7 +339,7 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("too many attempts, locked for %ds", secs), http.StatusTooManyRequests)
 		return
 	}
-	if cfg.AuthEnabled() {
+	if cfg.IsConfigured() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
 	}
@@ -353,10 +353,10 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Unauth (open proxy) mode — skip credential requirements.
+	// Open (no-credential) mode — set the global default to Exempt.
 	if body.Unauth {
-		cfg.SetUnauthMode(true)
-		auditEvent(r, "setup.complete", "system", "unauth mode enabled — proxy requires no credentials")
+		cfg.SetDefaultAuthOutcome(OutcomeExempt)
+		auditEvent(r, "setup.complete", "system", "open mode (defaultAuthOutcome=Exempt) — unmatched traffic requires no credentials")
 		jsonOK(w, map[string]any{"ok": true, "unauth": true})
 		return
 	}

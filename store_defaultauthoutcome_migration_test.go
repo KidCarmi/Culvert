@@ -9,13 +9,13 @@ import (
 	"testing"
 )
 
-// Slice 2 — defaultAuthOutcome is the single authoritative persisted global
-// Stage-1 default; legacy unauth_mode is a read-for-migration / write-for-
-// downgrade compatibility mirror only. These tests pin migration, idempotency,
-// rollback compatibility, fail-closed handling of invalid values, and that the
-// UnauthMode()/AuthEnabled() shims stay behavior-identical. Pure persistence —
-// no runtime path is exercised. All tests use LOCAL *Config instances, so there
-// is no global cfg state to leak.
+// defaultAuthOutcome is the single authoritative persisted global Stage-1
+// default; legacy unauth_mode is a READ-ONLY one-way migration input (Slice 5 —
+// never written). These tests pin migration, idempotency, fail-closed handling
+// of invalid values, the downgrade-fails-closed behavior, and the decoupled
+// AuthEnabled()/IsConfigured() predicates. Pure persistence — no runtime path is
+// exercised. All tests use LOCAL *Config instances, so there is no global cfg
+// state to leak.
 
 // writeEnvelope writes a ui_users.json body and returns a fresh loaded Config.
 func loadEnvelope(t *testing.T, body string) *Config {
@@ -51,8 +51,8 @@ func TestDAO_LegacyLoad(t *testing.T) {
 			if c.defaultAuthOutcome != tc.want {
 				t.Errorf("defaultAuthOutcome = %q, want %q", c.defaultAuthOutcome, tc.want)
 			}
-			if c.UnauthMode() != (tc.want == OutcomeExempt) {
-				t.Errorf("UnauthMode() = %v, want %v", c.UnauthMode(), tc.want == OutcomeExempt)
+			if (c.DefaultAuthOutcome() == OutcomeExempt) != (tc.want == OutcomeExempt) {
+				t.Errorf("UnauthMode() = %v, want %v", (c.DefaultAuthOutcome() == OutcomeExempt), tc.want == OutcomeExempt)
 			}
 		})
 	}
@@ -102,15 +102,15 @@ func TestDAO_SaveLoadRoundTrip(t *testing.T) {
 		path := filepath.Join(dir, "ui_users.json")
 		c := &Config{}
 		c.SetUIUsersFile(path)
-		c.SetUnauthMode(open) // sets defaultAuthOutcome + persists
+		c.SetDefaultAuthOutcome(outcomeFor(open)) // sets defaultAuthOutcome + persists
 
 		c2 := &Config{}
 		c2.SetUIUsersFile(path)
 		if err := c2.LoadUIUsersFile(); err != nil {
 			t.Fatalf("reload: %v", err)
 		}
-		if c2.UnauthMode() != open {
-			t.Errorf("round-trip open=%v: UnauthMode()=%v", open, c2.UnauthMode())
+		if (c2.DefaultAuthOutcome() == OutcomeExempt) != open {
+			t.Errorf("round-trip open=%v: UnauthMode()=%v", open, (c2.DefaultAuthOutcome() == OutcomeExempt))
 		}
 		wantOutcome := OutcomeDefault
 		if open {
@@ -122,15 +122,24 @@ func TestDAO_SaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-// The authoritative field is always written explicitly; the legacy mirror is
-// present only when open (omitempty).
-func TestDAO_SaveWritesAuthoritativeFieldAndMirror(t *testing.T) {
+// outcomeFor maps an "open" bool to the global default (test convenience after
+// the SetUnauthMode shim was removed in Slice 5).
+func outcomeFor(open bool) AuthOutcome {
+	if open {
+		return OutcomeExempt
+	}
+	return OutcomeDefault
+}
+
+// Slice 5: the authoritative field is the ONLY field written; the legacy
+// unauth_mode mirror is NEVER written (read-only import compat only).
+func TestDAO_SaveWritesOnlyAuthoritativeField(t *testing.T) {
 	read := func(open bool) map[string]any {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "ui_users.json")
 		c := &Config{}
 		c.SetUIUsersFile(path)
-		c.SetUnauthMode(open)
+		c.SetDefaultAuthOutcome(outcomeFor(open))
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read: %v", err)
@@ -141,19 +150,14 @@ func TestDAO_SaveWritesAuthoritativeFieldAndMirror(t *testing.T) {
 		}
 		return m
 	}
-	openMap := read(true)
-	if openMap["default_auth_outcome"] != "Exempt" {
-		t.Errorf("open: default_auth_outcome = %v, want Exempt", openMap["default_auth_outcome"])
-	}
-	if openMap["unauth_mode"] != true {
-		t.Errorf("open: unauth_mode mirror = %v, want true", openMap["unauth_mode"])
-	}
-	closedMap := read(false)
-	if closedMap["default_auth_outcome"] != "Default" {
-		t.Errorf("closed: default_auth_outcome = %v, want Default (explicit, no omitempty)", closedMap["default_auth_outcome"])
-	}
-	if _, present := closedMap["unauth_mode"]; present {
-		t.Errorf("closed: unauth_mode mirror must be omitted (omitempty), got present")
+	for _, open := range []bool{true, false} {
+		m := read(open)
+		if m["default_auth_outcome"] != string(outcomeFor(open)) {
+			t.Errorf("open=%v: default_auth_outcome = %v, want %v", open, m["default_auth_outcome"], outcomeFor(open))
+		}
+		if _, present := m["unauth_mode"]; present {
+			t.Errorf("open=%v: unauth_mode mirror must NEVER be written (Slice 5), got present", open)
+		}
 	}
 }
 
@@ -265,7 +269,7 @@ func TestDAO_PresentButEmptyFailsClosed(t *testing.T) {
 	if c.defaultAuthOutcome != OutcomeDefault {
 		t.Errorf("present-but-empty default_auth_outcome must fail closed to Default, got %q", c.defaultAuthOutcome)
 	}
-	if c.UnauthMode() {
+	if c.DefaultAuthOutcome() == OutcomeExempt {
 		t.Error("present-but-empty must not reopen the proxy")
 	}
 }
@@ -291,11 +295,11 @@ func TestDAO_ConcurrentAccess(t *testing.T) {
 				case 0:
 					_ = c.LoadUIUsersFile()
 				case 1:
-					_ = c.UnauthMode()
+					_ = (c.DefaultAuthOutcome() == OutcomeExempt)
 				case 2:
 					_ = c.AuthEnabled()
 				case 3:
-					c.SetUnauthMode(j%2 == 0)
+					c.SetDefaultAuthOutcome(outcomeFor(j%2 == 0))
 				}
 			}
 		}(i)
@@ -303,10 +307,14 @@ func TestDAO_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-// ── 9. Rollback compatibility (old binary reads the mirror) ──────────────────
+// ── 9. Downgrade fails closed (Slice 5: no mirror written) ───────────────────
 
-func TestDAO_RollbackCompatibility(t *testing.T) {
-	// Old envelope shape: a pre-Slice-2 binary only knows unauth_mode.
+// Slice 5 stopped writing the legacy unauth_mode mirror. A pre-Slice-2 binary
+// that only reads unauth_mode therefore sees it ABSENT (false) regardless of the
+// open posture — i.e. a downgrade fails closed to Default (auth required). This
+// is intentional: unauth_mode is a read-only forward-migration input, never a
+// backward-compat write.
+func TestDAO_DowngradeFailsClosed_NoMirror(t *testing.T) {
 	type oldEnvelope struct {
 		UnauthMode bool              `json:"unauth_mode"`
 		Users      []json.RawMessage `json:"users"`
@@ -316,7 +324,7 @@ func TestDAO_RollbackCompatibility(t *testing.T) {
 		path := filepath.Join(dir, "ui_users.json")
 		c := &Config{}
 		c.SetUIUsersFile(path)
-		c.SetUnauthMode(open) // new-binary write (dual-write)
+		c.SetDefaultAuthOutcome(outcomeFor(open))
 
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -326,52 +334,52 @@ func TestDAO_RollbackCompatibility(t *testing.T) {
 		if err := json.Unmarshal(data, &old); err != nil {
 			t.Fatalf("old-binary unmarshal must not error: %v", err)
 		}
-		if old.UnauthMode != open {
-			t.Errorf("rollback open=%v: old binary reads unauth_mode=%v, want %v", open, old.UnauthMode, open)
+		if old.UnauthMode {
+			t.Errorf("open=%v: a downgraded binary must read unauth_mode=false (mirror not written), got true", open)
 		}
 	}
 }
 
-// ── Shim parity: UnauthMode()/AuthEnabled() are behavior-identical ───────────
+// ── Slice 5: AuthEnabled() is decoupled from defaultAuthOutcome; IsConfigured() ─
 
-func TestDAO_ShimParity(t *testing.T) {
-	// UnauthMode() mirrors outcome==Exempt.
+func TestS5_AuthEnabledDecoupled_IsConfigured(t *testing.T) {
+	// AuthEnabled() is credential-only: no user/provider ⇒ false regardless of
+	// the global default (Exempt no longer makes it true — the SOCKS5 inversion
+	// fix flows from this).
 	c := &Config{}
-	c.defaultAuthOutcome = OutcomeExempt
-	if !c.UnauthMode() {
-		t.Error("Exempt ⇒ UnauthMode() must be true")
+	for _, o := range []AuthOutcome{OutcomeDefault, OutcomeExempt} {
+		c.defaultAuthOutcome = o
+		if c.AuthEnabled() {
+			t.Errorf("no user/provider + %s ⇒ AuthEnabled() must be false", o)
+		}
 	}
-	c.defaultAuthOutcome = OutcomeDefault
-	if c.UnauthMode() {
-		t.Error("Default ⇒ UnauthMode() must be false")
-	}
-
-	// AuthEnabled() parity: open (Exempt) makes setup "complete" exactly as the
-	// legacy bool did; with no user/provider, Default ⇒ false, Exempt ⇒ true.
-	c2 := &Config{}
-	c2.defaultAuthOutcome = OutcomeDefault
-	if c2.AuthEnabled() {
-		t.Error("no user/provider + Default ⇒ AuthEnabled() false")
-	}
-	c2.defaultAuthOutcome = OutcomeExempt
-	if !c2.AuthEnabled() {
-		t.Error("Exempt ⇒ AuthEnabled() true (legacy unauthMode parity)")
-	}
-	// A configured user keeps AuthEnabled() true regardless of the default.
-	c3 := &Config{user: "admin"}
-	c3.defaultAuthOutcome = OutcomeDefault
-	if !c3.AuthEnabled() {
+	// A credential backend ⇒ AuthEnabled() true.
+	if cu := (&Config{user: "admin"}); !cu.AuthEnabled() {
 		t.Error("configured user ⇒ AuthEnabled() true")
 	}
 
-	// SetUnauthMode round-trips through the shim.
-	c4 := &Config{}
-	c4.SetUnauthMode(true)
-	if c4.defaultAuthOutcome != OutcomeExempt || !c4.UnauthMode() {
-		t.Errorf("SetUnauthMode(true): outcome=%q UnauthMode=%v", c4.defaultAuthOutcome, c4.UnauthMode())
+	// IsConfigured(): no backend + Default ⇒ false; no backend + Exempt ⇒ true
+	// (open mode counts as configured); credential backend ⇒ true.
+	c.defaultAuthOutcome = OutcomeDefault
+	if c.IsConfigured() {
+		t.Error("no backend + Default ⇒ IsConfigured() false")
 	}
-	c4.SetUnauthMode(false)
-	if c4.defaultAuthOutcome != OutcomeDefault || c4.UnauthMode() {
-		t.Errorf("SetUnauthMode(false): outcome=%q UnauthMode=%v", c4.defaultAuthOutcome, c4.UnauthMode())
+	c.defaultAuthOutcome = OutcomeExempt
+	if !c.IsConfigured() {
+		t.Error("no backend + Exempt ⇒ IsConfigured() true (open mode is configured)")
+	}
+	if cu := (&Config{user: "admin"}); !cu.IsConfigured() {
+		t.Error("configured user ⇒ IsConfigured() true")
+	}
+
+	// SetDefaultAuthOutcome round-trips.
+	c4 := &Config{}
+	c4.SetDefaultAuthOutcome(OutcomeExempt)
+	if c4.DefaultAuthOutcome() != OutcomeExempt {
+		t.Errorf("SetDefaultAuthOutcome(Exempt): got %q", c4.DefaultAuthOutcome())
+	}
+	c4.SetDefaultAuthOutcome(OutcomeDefault)
+	if c4.DefaultAuthOutcome() != OutcomeDefault {
+		t.Errorf("SetDefaultAuthOutcome(Default): got %q", c4.DefaultAuthOutcome())
 	}
 }
