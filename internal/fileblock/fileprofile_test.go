@@ -1,9 +1,9 @@
-package main
+package fileblock
 
-// fileprofile_test.go — focused tests for FileProfileStore persistence
-// after saveLocked was hardened to write via atomicWriteFile (P3.1
-// follow-up #2). Each test uses a fresh &FileProfileStore{} bound to a
-// t.TempDir() — no globalProfileStore mutation, safe under -shuffle=on.
+// Focused tests for FileProfileStore persistence (moved from package main during
+// the internal/fileblock extraction, ADR-0002). Each test uses a fresh
+// FileProfileStore bound to a t.TempDir() — no global mutation, safe under
+// -shuffle=on. assertNoTmpLeak is the package-local copy (fileblock_test.go).
 
 import (
 	"path/filepath"
@@ -41,7 +41,7 @@ func TestFileProfileStore_Save_PersistsAndReloads(t *testing.T) {
 	}
 }
 
-// atomicWriteFile creates *.tmp.* files in the parent dir and renames
+// AtomicWrite creates *.tmp.* files in the parent dir and renames
 // them into place. After Create/Update/Delete the parent dir must
 // contain the JSON file only — no orphaned tmp files.
 func TestFileProfileStore_Save_NoTmpLeak(t *testing.T) {
@@ -134,7 +134,7 @@ func TestFileProfileStore_ReplaceAll_PersistsAndReloads(t *testing.T) {
 	}
 }
 
-// ReplaceAll's atomicWriteFile path must not orphan *.tmp.* files in the
+// ReplaceAll's AtomicWrite path must not orphan *.tmp.* files in the
 // parent directory.
 func TestFileProfileStore_ReplaceAll_NoTmpLeak(t *testing.T) {
 	dir := t.TempDir()
@@ -198,11 +198,11 @@ func TestFileProfileStore_ReplaceAll_EmptyPathNoOps(t *testing.T) {
 
 // Persistence is best-effort: if saveLocked fails (parent directory
 // missing), the in-memory swap still happens and the call must not panic.
+// obs.Printf (used by ReplaceAll on persist failure) routes to a default
+// stderr sink in tests, so no logger wiring is required here.
 func TestFileProfileStore_ReplaceAll_PersistFailureDoesNotPanic(t *testing.T) {
-	ensureFileblockTestLogger(t)
-
 	dir := t.TempDir()
-	// Path under a directory that doesn't exist — atomicWriteFile fails at
+	// Path under a directory that doesn't exist — AtomicWrite fails at
 	// os.CreateTemp because the parent dir is missing.
 	path := filepath.Join(dir, "missing", "fileprofiles.json")
 

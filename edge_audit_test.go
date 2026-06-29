@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
 // ─── Finding 1.1: Blocklist.ClearAll ────────────────────────────────────────
@@ -42,7 +44,9 @@ func TestBlocklistClearAll(t *testing.T) {
 // ─── Finding 1.1: FileBlocker.ClearAll ──────────────────────────────────────
 
 func TestFileBlockerClearAll(t *testing.T) {
-	fb := &FileBlocker{extensions: map[string]bool{".exe": true, ".dll": true}}
+	fb := fileblock.NewBlocker()
+	fb.Add(".exe")
+	fb.Add(".dll")
 	fb.ClearAll()
 	if fb.Count() != 0 {
 		t.Errorf("expected 0 after ClearAll, got %d", fb.Count())

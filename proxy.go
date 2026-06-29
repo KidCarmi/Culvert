@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
 // relayBufSize is the size of each pooled relay buffer.
@@ -1672,7 +1674,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			atomic.AddInt64(&statBlocked, 1)
 			recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
 			resp.Body.Close()
-			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "global ext")
+			fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "global ext")
 			break
 		}
 		// 2. Per-rule file profile — check the inner request URL against the
@@ -1682,7 +1684,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			atomic.AddInt64(&statBlocked, 1)
 			recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
 			resp.Body.Close()
-			fileBlockConn(clientTLS, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
+			fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
 			break
 		}
 		// 3. Content-Disposition header — catches downloads that use a generic
@@ -1693,19 +1695,19 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 				atomic.AddInt64(&statBlocked, 1)
 				recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
 				resp.Body.Close()
-				fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
+				fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
 				break
 			}
 			// Per-rule profile: check the CD filename against the matched rule's
 			// file profile (catches SourceForge-style /files/latest/download URLs).
 			if match != nil && match.Rule != nil && match.Rule.FileFiltering && match.Rule.FileProfile != "" {
-				if fn := extractCDFilename(cd); fn != "" {
+				if fn := fileblock.ExtractCDFilename(cd); fn != "" {
 					if match.Rule.FileProfileBlocked(fn) {
 						atomic.AddInt64(&statFileBlocked, 1)
 						atomic.AddInt64(&statBlocked, 1)
 						recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
 						resp.Body.Close()
-						fileBlockConn(clientTLS, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
+						fileblock.BlockConn(clientTLS, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
 						break
 					}
 				}
@@ -1718,7 +1720,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			atomic.AddInt64(&statBlocked, 1)
 			recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
 			resp.Body.Close()
-			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-type")
+			fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-type")
 			break
 		}
 
@@ -1773,7 +1775,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
 					recordInspectBlock(clientIP, "FILE_BLOCKED", "magic:"+archType, "", hostOnly, req.URL.Path, match)
-					fileBlockConn(clientTLS, hostOnly, req.URL.Path, "magic:"+archType, "magic bytes")
+					fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, "magic:"+archType, "magic bytes")
 					break
 				}
 				// File blocking: polyglot detection — block files whose
@@ -1783,7 +1785,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
 					recordInspectBlock(clientIP, "POLYGLOT_BLOCKED", reason, "", hostOnly, req.URL.Path, match)
-					fileBlockConn(clientTLS, hostOnly, req.URL.Path, reason, "polyglot")
+					fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, reason, "polyglot")
 					break
 				}
 

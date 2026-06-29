@@ -1,4 +1,10 @@
-package main
+// Package fileblock is the file-type blocking engine: an extension/MIME/
+// Content-Disposition blocklist (FileBlocker) and named file-type profiles
+// (FileProfileStore, in fileprofile.go). It depends only on the shared seam
+// (internal/obs for logging, internal/fileutil for atomic persistence) and the
+// standard library — no dependency on the rest of Culvert (ADR-0002 leaf,
+// unblocked by the ADR-0003 seam).
+package fileblock
 
 import (
 	"encoding/json"
@@ -8,6 +14,9 @@ import (
 	"path"
 	"strings"
 	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // FileBlocker holds the set of file extensions to block.
@@ -20,7 +29,11 @@ type FileBlocker struct {
 	path       string // persistence file (e.g. /data/fileblock.json); "" = no persistence
 }
 
-var fileBlocker = &FileBlocker{extensions: map[string]bool{}}
+// NewBlocker returns an empty, ready-to-use FileBlocker. package main holds the
+// process-wide singleton (var fileBlocker = fileblock.NewBlocker()).
+func NewBlocker() *FileBlocker {
+	return &FileBlocker{extensions: map[string]bool{}}
+}
 
 // SetPath configures the persistence file and loads any previously saved
 // extensions from it. If the file doesn't exist, the current in-memory
@@ -32,7 +45,7 @@ func (fb *FileBlocker) SetPath(p string) {
 	if p == "" {
 		return
 	}
-	data, err := os.ReadFile(p)
+	data, err := os.ReadFile(p) // #nosec G304 -- operator-configured persistence path
 	if err != nil {
 		return // file doesn't exist yet — keep current state
 	}
@@ -59,12 +72,12 @@ func (fb *FileBlocker) save() {
 		exts = append(exts, ext)
 	}
 	data, _ := json.Marshal(exts)
-	_ = atomicWriteFile(fb.path, data, 0o600)
+	_ = fileutil.AtomicWrite(fb.path, data, 0o600)
 }
 
-// defaultBlockedExts is loaded at startup when no config override is provided.
+// DefaultBlockedExts is loaded at startup when no config override is provided.
 // Covers common Windows malware/script delivery formats.
-var defaultBlockedExts = []string{
+var DefaultBlockedExts = []string{
 	".exe", ".dll", ".bat", ".cmd", ".ps1",
 	".vbs", ".scr", ".msi", ".pif", ".com",
 }
@@ -77,6 +90,7 @@ func (fb *FileBlocker) norm(ext string) string {
 	return ext
 }
 
+// Add inserts a normalised extension into the block list and persists.
 func (fb *FileBlocker) Add(ext string) {
 	ext = fb.norm(ext)
 	if ext == "" || ext == "." {
@@ -120,7 +134,8 @@ func (fb *FileBlocker) ReplaceAll(exts []string) {
 	fb.mu.Unlock()
 }
 
-func (fb *FileBlocker) Remove(ext string) { //nolint:unused // called from UI API
+// Remove deletes an extension from the block list and persists.
+func (fb *FileBlocker) Remove(ext string) {
 	ext = fb.norm(ext)
 	fb.mu.Lock()
 	delete(fb.extensions, ext)
@@ -128,6 +143,7 @@ func (fb *FileBlocker) Remove(ext string) { //nolint:unused // called from UI AP
 	fb.mu.Unlock()
 }
 
+// List returns a snapshot of the blocked extensions.
 func (fb *FileBlocker) List() []string {
 	fb.mu.RLock()
 	defer fb.mu.RUnlock()
@@ -146,6 +162,7 @@ func (fb *FileBlocker) ClearAll() {
 	fb.mu.Unlock()
 }
 
+// Count returns the number of blocked extensions.
 func (fb *FileBlocker) Count() int {
 	fb.mu.RLock()
 	defer fb.mu.RUnlock()
@@ -224,11 +241,11 @@ func (fb *FileBlocker) CheckContentType(contentType string) string {
 	return ""
 }
 
-// extractCDFilename extracts the filename from a Content-Disposition header.
+// ExtractCDFilename extracts the filename from a Content-Disposition header.
 // Returns "" if no filename is found. Used by per-rule file profile checking
 // when the download URL doesn't contain the file extension (e.g. SourceForge's
 // /files/latest/download pattern).
-func extractCDFilename(cd string) string {
+func ExtractCDFilename(cd string) string {
 	if cd == "" {
 		return ""
 	}
@@ -267,19 +284,19 @@ func (fb *FileBlocker) CheckContentDisposition(cd string) string {
 	return ""
 }
 
-// fileBlockConn writes a synthetic HTTP/1.1 403 response to a raw connection
+// BlockConn writes a synthetic HTTP/1.1 403 response to a raw connection
 // (typically the client side of an SSL-inspected tunnel) when a file-blocking
 // check fires inside handleTunnelInspect. After writing the response, the
 // connection is explicitly closed to prevent HTTP/1.1 connection reuse — a
 // browser with a pipelined second request in the same TLS session could
 // otherwise bypass the block on retry.
-func fileBlockConn(dst interface {
+func BlockConn(dst interface {
 	Write([]byte) (int, error)
 	Close() error
 }, host, urlPath, ext, source string) {
-	logger.Printf("FILE_BLOCKED (tunnel %s) -> %q%q (ext=%q)", source, sanitizeLog(host), sanitizeLog(urlPath), sanitizeLog(ext))
+	obs.Printf("FILE_BLOCKED (tunnel %s) -> %q%q (ext=%q)", source, obs.Sanitize(host), obs.Sanitize(urlPath), obs.Sanitize(ext))
 	body := fmt.Sprintf("Blocked: file type %s is not allowed (%s)\r\n", ext, source)
-	fmt.Fprintf(dst, //nolint:errcheck
+	fmt.Fprintf(dst, //nolint:errcheck // best-effort write of the 403 block response
 		"HTTP/1.1 403 Forbidden\r\n"+
 			"Content-Type: text/plain; charset=utf-8\r\n"+
 			"Content-Length: %d\r\n"+
@@ -287,5 +304,5 @@ func fileBlockConn(dst interface {
 			"\r\n%s",
 		len(body), body,
 	)
-	dst.Close() //nolint:errcheck -- force-close prevents pipelined request bypass
+	dst.Close() //nolint:errcheck // force-close prevents pipelined-request bypass
 }

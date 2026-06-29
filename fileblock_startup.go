@@ -16,6 +16,8 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+
+	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
 // loadFileBlocking initialises fileBlocker (extension list + persistence
@@ -48,7 +50,7 @@ func loadFileBlockerExtensions(exts []string) {
 			fileBlocker.Add(ext)
 		}
 	} else {
-		for _, ext := range defaultBlockedExts {
+		for _, ext := range fileblock.DefaultBlockedExts {
 			fileBlocker.Add(ext)
 		}
 	}

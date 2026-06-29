@@ -1,4 +1,4 @@
-package main
+package fileblock
 
 import (
 	"encoding/json"
@@ -9,6 +9,9 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // FileExtProfile is a named set of file extensions used for per-policy-rule blocking.
@@ -25,8 +28,6 @@ type FileProfileStore struct {
 	profiles []*FileExtProfile
 	path     string
 }
-
-var globalProfileStore = &FileProfileStore{}
 
 // builtInProfiles seeds the store on first use so existing policy rules that
 // reference the legacy hardcoded profile names continue to work.
@@ -80,7 +81,7 @@ func (s *FileProfileStore) Load(path string) error {
 	defer s.mu.Unlock()
 	s.path = path
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- operator-configured profiles path
 	if errors.Is(err, os.ErrNotExist) {
 		// First run — seed built-ins and persist.
 		s.profiles = make([]*FileExtProfile, len(builtInProfiles))
@@ -93,6 +94,16 @@ func (s *FileProfileStore) Load(path string) error {
 	return json.Unmarshal(data, &s.profiles)
 }
 
+// SetPath sets the persistence file path without reading from disk (use Load to
+// also read existing profiles). Added for the package boundary: package main
+// integration tests need to redirect persistence without the whitebox field
+// access they relied on before the move.
+func (s *FileProfileStore) SetPath(p string) {
+	s.mu.Lock()
+	s.path = p
+	s.mu.Unlock()
+}
+
 func (s *FileProfileStore) saveLocked() error {
 	if s.path == "" {
 		return nil
@@ -101,9 +112,10 @@ func (s *FileProfileStore) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(s.path, data, 0o600)
+	return fileutil.AtomicWrite(s.path, data, 0o600)
 }
 
+// Save persists the current profile set to the configured path.
 func (s *FileProfileStore) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -130,18 +142,17 @@ func (s *FileProfileStore) ReplaceAll(profiles []FileExtProfile) {
 		s.profiles[i] = &p
 	}
 	if err := s.saveLocked(); err != nil {
-		logger.Printf("FileProfileStore: ReplaceAll persist: %v", err)
+		obs.Printf("FileProfileStore: ReplaceAll persist: %v", err)
 	}
 	s.mu.Unlock()
 }
 
 // GetByName returns the profile with the given name (case-insensitive), or nil.
 func (s *FileProfileStore) GetByName(name string) *FileExtProfile {
-	lower := strings.ToLower(name)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, p := range s.profiles {
-		if strings.ToLower(p.Name) == lower {
+		if strings.EqualFold(p.Name, name) {
 			return p
 		}
 	}
@@ -168,9 +179,8 @@ func (s *FileProfileStore) Create(name string, exts []string) (*FileExtProfile, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	lower := strings.ToLower(name)
 	for _, p := range s.profiles {
-		if strings.ToLower(p.Name) == lower {
+		if strings.EqualFold(p.Name, name) {
 			return nil, fmt.Errorf("profile %q already exists", name)
 		}
 	}
@@ -191,13 +201,12 @@ func (s *FileProfileStore) Update(id, name string, exts []string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	lower := strings.ToLower(name)
 	for _, p := range s.profiles {
 		if p.ID == id {
 			// Check name uniqueness (allow keeping the same name).
-			if strings.ToLower(p.Name) != lower {
+			if !strings.EqualFold(p.Name, name) {
 				for _, other := range s.profiles {
-					if other.ID != id && strings.ToLower(other.Name) == lower {
+					if other.ID != id && strings.EqualFold(other.Name, name) {
 						return fmt.Errorf("profile %q already exists", name)
 					}
 				}

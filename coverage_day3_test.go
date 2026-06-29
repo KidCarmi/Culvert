@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
 // ── buildMovedPriorities ────────────────────────────────────────────────────
@@ -163,7 +165,7 @@ func TestExtractCDFilename(t *testing.T) {
 		{`attachment; filename*=UTF-8''eXeScope_Setup.exe`, "eXeScope_Setup.exe"},
 	}
 	for _, tt := range tests {
-		got := extractCDFilename(tt.cd)
+		got := fileblock.ExtractCDFilename(tt.cd)
 		if got != tt.want {
 			t.Errorf("extractCDFilename(%q) = %q, want %q", tt.cd, got, tt.want)
 		}
@@ -203,7 +205,7 @@ func TestFileBlocker_SetPath_PersistAndReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fileblock.json")
 
-	fb1 := &FileBlocker{extensions: map[string]bool{}}
+	fb1 := fileblock.NewBlocker()
 	fb1.Add(".exe")
 	fb1.Add(".dll")
 	fb1.SetPath(path) // saves current state
@@ -212,7 +214,7 @@ func TestFileBlocker_SetPath_PersistAndReload(t *testing.T) {
 	fb1.Add(".bat") // triggers save with all 3
 
 	// Create a new FileBlocker and load from the same file.
-	fb2 := &FileBlocker{extensions: map[string]bool{}}
+	fb2 := fileblock.NewBlocker()
 	fb2.SetPath(path)
 	if fb2.Count() != 3 {
 		t.Errorf("reloaded count = %d, want 3", fb2.Count())
@@ -230,7 +232,8 @@ func TestFileBlocker_SetPath_EmptyFile(t *testing.T) {
 	path := filepath.Join(dir, "fileblock.json")
 	os.WriteFile(path, []byte("[]"), 0o600) //nolint:errcheck
 
-	fb := &FileBlocker{extensions: map[string]bool{".default": true}}
+	fb := fileblock.NewBlocker()
+	fb.Add(".default")
 	fb.SetPath(path) // load empty file → clears defaults
 	if fb.Count() != 0 {
 		t.Errorf("expected 0 after loading empty JSON array, got %d", fb.Count())
