@@ -48,6 +48,34 @@ leaf has none (totp); a hub (scan) needs a shared-foundation seam layer first (s
 **Next leaves (no foundation work needed, mappable now):** `geoip`, `fileblock` — candidates to
 confirm the pattern repeats. Hubs (`scan`) wait for the logging/alerting/util seam. Per the
 extraction protocol, do not start the next extraction until this one is reviewed.
+
+### 2026-06-28 — dependency mapping: `geoip` vs `fileblock` (next-leaf selection, no code moved)
+
+| Dimension | `geoip` | `fileblock` |
+|---|---|---|
+| Files | `geoip.go` (engine) + `geoip_startup*.go` (wiring, stays in main) | `fileblock.go` + `fileprofile.go` + `fileblock_startup*.go` (wiring) |
+| Engine outbound coupling to `package main` | **NONE** (stdlib + `geoip2-golang` only) | **`logger`, `sanitizeLog`, `atomicWriteFile`** (fileblock.go:280,62; fileprofile.go:104,133) |
+| Logging/config/metrics coupling | engine: none; wiring shim uses `logger`+`cfg` (stays in main) | yes — logging + file-util in the engine itself |
+| Inbound API surface | `geo` global → 3 call sites (enrollment/policy/proxy) + `InitGeoDB` (startup) | `fileBlocker` → 7 files, `globalProfileStore` → 4 files |
+| Export work | export `geo` (or provide pkg funcs) + `InitGeoDB`; ~3–4 call sites | export `fileBlocker`, `globalProfileStore`, types; ~10 call sites |
+| File-cohesion snag | `geoip.go` also bundles `countryTraffic` + `activeConns` (NOT geoip; used by events/proxy/main) → must split, leaving those in main | `fileBlockConn` writes HTTP 403 (like `dpiBlock`) — response-writing in the leaf |
+| Test movement | engine has no dedicated unit test today (only `geoip_startup_test.go`, stays in main); optionally add one | `fileblock_test.go`, `fileprofile.go` tests + `fileblock_replaceall_test.go` move with the engine |
+| Import-cycle risk | none (engine imports no Culvert pkg) | none structurally, but the 3 cross-cutting deps would force main imports → solved only via seam/inject |
+| Expected diff scope | medium: 1 file split + export 1 global + ~3–4 call sites + startup test tweak | large: seam layer first, then ~10 call sites + type exports + test moves |
+| Behaviour risk | LOW (pure move + export) | MEDIUM (seam wiring touches a hot-path block + broad call-site churn) |
+| Classification | **NEAR-LEAF** (engine is a true leaf; file bundles unrelated concerns) | **NEAR-HUB** (cross-cutting deps + 7-file inbound) |
+| Recommendation | **EXTRACT NEXT** — no seam prerequisite | **DEFER** — needs the shared logging + `atomicWriteFile` seam first |
+
+**Smallest seam fileblock needs (per the protocol):** the same logging seam every hub needs
+(`logger`/`sanitizeLog`) PLUS an `atomicWriteFile` home (a shared `internal/util` or an injected
+writer). That seam is the gating prerequisite for `fileblock`, `scan`, and most other hubs — it is
+the natural *next foundational step* once a couple more clean leaves confirm the pattern.
+
+**Decision: `geoip` is the safer next extraction** — its engine has zero cross-cutting coupling, so
+it needs no seam. The only added work vs. `totp` is a file split (extract the GeoIP lookup engine;
+leave `countryTraffic`/`activeConns` in main as their own file) and exporting the `geo` global for
+~3–4 call sites. `fileblock` is deferred until the logging/util seam exists. *(Awaiting approval
+before any code moves.)*
 - **Related:** DEBT-001, DEBT-002, DEBT-003 (Technical Debt Register)
 
 ## Context
