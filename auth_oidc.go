@@ -92,6 +92,7 @@ func NewOIDCAuth(cfg OIDCConfig) (*OIDCAuth, error) {
 		ttl = 2 * time.Minute
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = ssrfSafeDialContext // SSRF guard at dial level (RISK-002): the admin-configured IntrospectURL is reached per-request
 	if cfg.TLSSkipVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // InsecureSkipVerify is config-guarded by cfg.TLSSkipVerify
 	}

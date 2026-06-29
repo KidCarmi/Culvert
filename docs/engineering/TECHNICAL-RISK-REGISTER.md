@@ -13,7 +13,7 @@
 | ID | Sev | Status | Title | Evidence |
 |---|---|---|---|---|
 | RISK-001 | BLOCKER | OPEN | Multi-CP HA split-brain (no quorum/fencing) | `ha.go` (no `demote`/`stepDown`/quorum symbol, 570 LOC) **HV** |
-| RISK-002 | HIGH | OPEN | OIDC introspection path missing SSRF dial guard | `auth_oidc.go:94` vs `auth_oidc_flow.go:300` **HV** |
+| RISK-002 | HIGH | ✅ CLOSED | OIDC introspection path missing SSRF dial guard | fixed `auth_oidc.go:95` (2026-06-28) |
 | RISK-003 | HIGH | OPEN | Webhook HMAC secret persisted cleartext on disk | `alerts.go:169` |
 | RISK-006 | MEDIUM | OPEN | Gate config blind spots: `--ignore-unfixed` + `HIGH,CRITICAL` only (masks unfixed/medium) | `security-release-gate.yml:135-143` — **trivy-verified 2026-06-28** |
 | RISK-014 | MEDIUM | OPEN | Reachability gate (govulncheck) scans root module only; nested modules unanalyzed | `security-release-gate.yml:114` vs `updater/go.mod`, `cmd/culvert-maint/go.mod` |
@@ -48,14 +48,18 @@
 - **Until then:** ACCEPTED-only for single-CP deployments. Multi-CP on flaky networks is unsafe.
 - **Owner:** unassigned · **Target:** mitigation this month.
 
-## RISK-002 — OIDC introspection missing SSRF guard · HIGH · OPEN
-- **Current state (HV):** `auth_oidc.go:94` clones the transport with **no**
-  `transport.DialContext = ssrfSafeDialContext`; the sibling `auth_oidc_flow.go:300` sets it. The
-  admin-configured `IntrospectURL` is reached on every token-validating request.
-- **Impact:** A misconfigured/malicious introspection URL can reach `169.254.169.254`/loopback —
-  a per-request SSRF that violates the project's own SSRF-everywhere convention on exactly one path.
-- **Recommendation:** Add the one line mirroring the flow variant. **Complexity XS.**
-- **Owner:** unassigned · **Target:** this week.
+## RISK-002 — OIDC introspection missing SSRF guard · HIGH · ✅ CLOSED 2026-06-28
+- **Was (HV):** `NewOIDCAuth` (`auth_oidc.go`) cloned the introspection transport with **no**
+  `DialContext = ssrfSafeDialContext`, unlike the sibling `auth_oidc_flow.go:300`. The
+  admin-configured introspection URL is reached on every token-validating request → per-request SSRF
+  toward `169.254.169.254`/loopback.
+- **Fix:** added `transport.DialContext = ssrfSafeDialContext` after the clone (`auth_oidc.go:95`),
+  byte-mirroring the flow variant. The guard runs `ssrfControl` post-DNS (DNS-rebind safe).
+- **Tests:** 9 server-based OIDC unit tests hit a `127.0.0.1` test IdP, which the new guard correctly
+  rejects; updated them to use the existing `allowLoopbackSSRF(t)` seam (the SSRF dialer is a package
+  var explicitly swappable in tests). Validated: build, vet, full auth `-race` (59.5s) green.
+- **Note:** the OIDC *flow*, SAML, alerts, threatfeed, blocklist, and release-catalog HTTP paths
+  already carried the guard; this closes the one introspection path that lacked it.
 
 ## RISK-003 — Webhook HMAC secret cleartext at rest · HIGH · OPEN
 - **Current state:** `alerts.go:169` marshals `AlertWebhook.Secret` to `0600` JSON and it
