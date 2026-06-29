@@ -1,8 +1,32 @@
 # ADR-0002: Decompose the flat `package main` into `internal/` packages, incrementally
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-06-28 — maintainer accepted the incremental direction)
 - **Date:** 2026-06-28
-- **Deciders:** Chief Engineering Advisor (proposed); project maintainer (to decide)
+- **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
+- **Proving PR:** first clean leaf extraction (target under evaluation — see Notes 2026-06-28)
+
+## Notes / log
+
+### 2026-06-28 — dependency mapping of the proposed first leaf (`internal/scan`)
+The first attempted proving target, `internal/scan` (yara/clam/scanner), was **mapped before any
+code move** (per the extraction execution rules) and found to be a **hub, not a leaf**:
+
+- **Outbound coupling to 4 cross-cutting `package main` subsystems:** logging (`logger`,
+  `logWarnf`, `sanitizeLog`), file util (`atomicWriteFile`), host util (`stripHostPort`), and
+  alerting (`fireAlert`).
+- **Large inbound surface (~20 files):** `dpiScanner` (10 files), `ClamAV` (15 files),
+  `statDPIBlocked` (5), plus `globalYARA`, `dpiBlock`, `isTextContentType`, `yaraGet*/Set*` — most
+  currently **unexported**, so a move forces exporting ~15 symbols and rewriting ~20 call sites.
+- **Orchestrator entanglement:** the (out-of-scope) `security_scan.go` embeds `*ClamAV` and
+  coordinates the cluster; it is the cluster's primary consumer and is itself not a leaf.
+
+**Decision:** do NOT move `scan` first. It requires a foundational seam layer (logging/alerting
+injection + a shared util package) and a large API-export pass — a multi-PR program, not a minimal
+proving PR. **Re-target the proving PR to a genuinely clean leaf.** `totp.go` was verified clean
+(stdlib-only imports, zero `package main` coupling, ~2–3 function inbound surface) and is the
+recommended proving target. This finding is itself the first concrete payoff of the proving
+process: it shows the decomposition must sequence *true* leaves first and build shared-foundation
+seams before extracting hubs like `scan`.
 - **Related:** DEBT-001, DEBT-002, DEBT-003 (Technical Debt Register)
 
 ## Context
