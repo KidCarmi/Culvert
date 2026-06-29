@@ -1337,16 +1337,39 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	clientConn, _, err := hijacker.Hijack()
+	// Hijack BEFORE sending the 200 and relay the response by hand. Calling
+	// w.WriteHeader(200) and THEN hijacking discards the *bufio.ReadWriter the
+	// server returns — and the server's request reader may have already buffered
+	// client bytes into it (body bytes a client pipelines right after CONNECT).
+	// A raw-conn relay never sees those stranded bytes, so the upstream stalls
+	// waiting for them: the rare first-byte tunnel hang observed under concurrent
+	// setup. Hijack first, send the 200, then FLUSH any buffered client bytes to
+	// the upstream before starting the byte relay.
+	clientConn, clientBuf, err := hijacker.Hijack()
 	if err != nil {
 		logger.Printf("Hijack error: %v", err)
 		return
 	}
 	defer clientConn.Close()
 
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		logger.Printf("CONNECT 200 write error %q: %v", sanitizeLog(r.Host), err)
+		return
+	}
+
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
+
+	// Drain bytes the HTTP server already buffered from the client during request
+	// parsing; without this they are lost and the upstream blocks forever.
+	if clientBuf != nil {
+		if n := clientBuf.Reader.Buffered(); n > 0 {
+			if _, err := io.CopyN(destConn, clientBuf.Reader, int64(n)); err != nil {
+				logger.Printf("CONNECT prebuffer flush error %q: %v", sanitizeLog(r.Host), err)
+				return
+			}
+		}
+	}
 
 	done := make(chan struct{}, 2)
 	// B2: Each relay closes its own dst write half after copy completes,

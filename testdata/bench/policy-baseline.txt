@@ -1,12 +1,12 @@
 goos: linux
 goarch: amd64
 pkg: github.com/KidCarmi/Culvert
-BenchmarkPolicyEvaluate_NoMatch/rules=10-4         	    1000	      4772 ns/op	     960 B/op	      20 allocs/op
-BenchmarkPolicyEvaluate_NoMatch/rules=100-4        	    1000	     45323 ns/op	    9600 B/op	     200 allocs/op
-BenchmarkPolicyEvaluate_NoMatch/rules=1000-4       	    1000	    437368 ns/op	   96000 B/op	    2000 allocs/op
-BenchmarkPolicyEvaluate_NoMatch/rules=10000-4      	    1000	   4368911 ns/op	  960001 B/op	   20000 allocs/op
-BenchmarkPolicyEvaluate_MatchLast/rules=11-4       	    1000	      4678 ns/op	    1152 B/op	      25 allocs/op
-BenchmarkPolicyEvaluate_MatchLast/rules=101-4      	    1000	     43408 ns/op	    9792 B/op	     205 allocs/op
-BenchmarkPolicyEvaluate_MatchLast/rules=1001-4     	    1000	    439051 ns/op	   96192 B/op	    2005 allocs/op
-BenchmarkPolicyEvaluate_MatchLast/rules=10001-4    	    1000	   4485303 ns/op	  960192 B/op	   20005 allocs/op
-BenchmarkScrubForwardedHeaders-4                   	    1000	      2606 ns/op	    1040 B/op	      13 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=10-4         	     300	       561 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=100-4        	     300	      3001 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=1000-4       	     300	     27583 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=10000-4      	     300	    281002 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=11-4       	     300	      1264 ns/op	     144 B/op	       4 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=101-4      	     300	      4920 ns/op	     144 B/op	       4 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=1001-4     	     300	     27793 ns/op	     144 B/op	       4 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=10001-4    	     300	    281007 ns/op	     144 B/op	       4 allocs/op
+BenchmarkScrubForwardedHeaders-4                   	     300	      2243 ns/op	    1040 B/op	      13 allocs/op

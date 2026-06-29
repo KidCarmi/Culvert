@@ -218,47 +218,52 @@ already present) continue to assert the guard rejects loopback when *not* relaxe
 
 ---
 
-## 8a. Findings surfaced by PR-2 (baselines, not yet fixed)
+## 8a. Findings surfaced by the CI program (status)
 
-These are recorded as benchmark baselines and tracked for the PR-3 regression
-gate; none are fixed in PR-2.
+The stress/benchmark tooling surfaced three findings. Two are now **resolved**;
+one remains as carried debt.
 
-- **Policy evaluation scales linearly with a steep per-rule cost.** On a CI
-  runner, `Evaluate` measured ≈4.8 µs at 10 rules, ≈45 µs at 100, ≈437 µs at
-  1000, and ≈4.37 ms at 10000 rules — with **2 allocations per rule per request**
-  (20000 allocs / 960 KB at 10k rules). Because the proxy calls `Evaluate` on
-  every request, a large policy set is a first-order latency + GC-pressure
-  factor. End-to-end this is visible: the in-process HTTP load p50 rose from
-  ≈1.5 ms (no policy) to ≈5.2 ms and p95 from ≈15 ms to ≈30 ms under a 1000-rule
-  set. The README's "Enterprise 500–2000 req/s" does not bound policy size — a
-  pre-allocated / indexed matcher is a candidate optimization, tracked via the
-  benchmark baseline.
-- **`dataDir` is hardcoded to `/data`** (no flag/env/config override). This
-  forces the nightly/weekly real-binary jobs to `sudo chown /data` and makes
-  out-of-container binary testing awkward. A `-data-dir` flag (with GUI parity)
-  would improve testability and operator ergonomics. **Not fixed here** —
-  follow-up debt (only CI prep is affected, not correctness).
+- **✅ RESOLVED — Policy `Evaluate` allocated ~2/rule/request.** Root cause:
+  `matchFQDN` (policy.go) called `normalizeHost()` on BOTH the host AND the rule
+  pattern for every rule scanned; `normalizeHost` runs `idna.ToASCII`, which
+  allocates (~1 alloc/48 B each) → ~2 allocs/rule. The host is identical across
+  all rules in one `Evaluate`, and each rule's pattern is fixed across requests.
+  Fix: (1) normalize the host **once** per `Evaluate` (`normHost`); (2) precompute
+  each rule's normalized pattern (`PolicyRule.normFQDN`, unexported/not
+  serialized) in `sortLocked()` at mutation time; (3) split `matchFQDN` into a
+  `matchFQDNNorm` core that compares already-normalized inputs, with `matchDest`
+  delegating to a `matchDestNorm(rule, host, normHost)` core (single source of
+  truth; non-hot callers unchanged) and a fall-back to the allocating path when a
+  rule's `normFQDN` is unset (correctness never depends on precompute). Result:
+  allocations went from **O(rules) to O(1)** — 1000 rules: `2000 allocs/96 KB/
+  437 µs` → `1 alloc/48 B/27 µs` (≈16× faster); 10000 rules: `4.37 ms → 281 µs`.
+  Locked in by `TestBenchGate_PolicyEvalAllocs` (constant-bound gate).
 
-- **CONNECT relay stall on the first bytes under concurrent tunnel setup
-  (PR-3).** Surfaced by the tunnel-churn stress test: when many tunnels are
-  established near-simultaneously, the first small write through a freshly
-  established `handleTunnelBypass` tunnel occasionally never completes (~one byte
-  is not relayed; the relay goroutines park in `IO wait`). It is rare per-tunnel
-  and does NOT reproduce with a single tunnel (the PR-1 byte-relay test is
-  reliable), which points at a relay race on the first post-CONNECT bytes (the
-  discarded `Hijack` `bufrw` is a prime suspect). The stress test stays
-  deterministic via retry-on-fresh-tunnel and **logs the retry count** so the
-  stall is visible, never masked. **Not fixed here** — follow-up debt; a focused
-  investigation of `handleTunnelBypass`'s first-byte handling (and whether the
-  hijack read-buffer is being dropped) is the next step.
+- **✅ RESOLVED — CONNECT first-byte relay stall under concurrent tunnel setup.**
+  Surfaced by the tunnel-churn stress test (~50% of full-suite runs stalled on
+  one byte; relay goroutines parked in `IO wait`). Root cause: `handleTunnelBypass`
+  called `w.WriteHeader(200)` then `hijacker.Hijack()` and **discarded the
+  returned `*bufio.ReadWriter`** — any client bytes the HTTP server had already
+  buffered during request parsing were stranded there, so the raw-conn relay
+  never forwarded them and the upstream blocked forever. Fix: hijack first, write
+  the `200 Connection Established` by hand, then `io.CopyN` the
+  `clientBuf.Reader.Buffered()` bytes to the upstream before relaying. After the
+  fix the churn test reports **0 relay retries** across heavy runs (750+ tunnels).
+  The retry-on-fresh-tunnel in the stress test is retained as cheap resilience.
 
-### Explicit follow-up debt (carried, not fixed in PR-1–3)
+- **⏳ CARRIED DEBT — `dataDir` is hardcoded to `/data`** (no flag/env/config
+  override). Forces the nightly/weekly real-binary jobs to `sudo chown /data` and
+  makes out-of-container binary testing awkward. A `-data-dir` flag (with GUI
+  parity per the project's CLI↔GUI parity rule) is the fix. Not addressed here —
+  only CI prep is affected, not correctness.
 
-1. Policy `Evaluate` allocates ~2/rule/request (linear latency + GC pressure at
-   large policy sets) — candidate: indexed/pre-allocated matcher.
-2. `dataDir` hardcoded to `/data` — add a `-data-dir` flag (GUI parity).
-3. CONNECT first-byte relay stall under concurrent setup — investigate
-   `handleTunnelBypass` (discarded hijack buffer / first-write race).
+### Follow-up debt status
+
+1. ✅ Policy `Evaluate` per-rule allocation — **resolved** (host-normalize-once +
+   precomputed `normFQDN`; O(rules)→O(1) allocs). See §8a.
+2. ⏳ `dataDir` hardcoded to `/data` — **open**; add a `-data-dir` flag (GUI parity).
+3. ✅ CONNECT first-byte relay stall — **resolved** (`handleTunnelBypass` now
+   hijacks-first and flushes the buffered hijack reader to the upstream). See §8a.
 
 ## 9. Production-readiness acceptance criteria
 

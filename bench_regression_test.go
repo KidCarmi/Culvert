@@ -23,20 +23,18 @@ import (
 	"testing"
 )
 
-// TestBenchGate_PolicyEvalAllocs fails if policy evaluation's per-op allocation
-// count regresses beyond a small headroom over the PR-2 baseline.
+// TestBenchGate_PolicyEvalAllocs locks in the O(1)-allocation policy hot path.
+// Before the host-normalize-once + precomputed-normFQDN optimization, Evaluate
+// allocated ~2/rule (2000 allocs/op at 1000 rules); it is now a small CONSTANT
+// regardless of rule count. The bound is therefore a constant, not a function of
+// rule count — any reintroduction of per-rule allocation fails this gate.
 func TestBenchGate_PolicyEvalAllocs(t *testing.T) {
-	cases := []struct {
-		rules     int
-		maxAllocs int64 // 2*rules baseline + headroom
-	}{
-		{10, 24},       // baseline 20
-		{100, 220},     // baseline 200
-		{1000, 2200},   // baseline 2000
-		{10000, 22000}, // baseline 20000
-	}
-	for _, tc := range cases {
-		ps := buildPolicyStore(tc.rules)
+	// Post-optimization: 1 alloc/op (the single per-request host normalization),
+	// independent of rule count. Headroom of a few absorbs runtime noise while
+	// still catching an O(rules) regression immediately.
+	const maxAllocs int64 = 4
+	for _, rules := range []int{10, 100, 1000, 10000} {
+		ps := buildPolicyStore(rules)
 		res := testing.Benchmark(func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -44,11 +42,11 @@ func TestBenchGate_PolicyEvalAllocs(t *testing.T) {
 			}
 		})
 		allocs := res.AllocsPerOp()
-		t.Logf("Evaluate rules=%d: %d allocs/op (bound %d), %d ns/op", tc.rules, allocs, tc.maxAllocs, res.NsPerOp())
-		if allocs > tc.maxAllocs {
-			t.Errorf("REGRESSION: Evaluate rules=%d allocates %d/op, exceeds bound %d (baseline ~%d). "+
-				"Per-request allocation growth on the policy hot path — see docs/ci/proxy-quality-architecture.md.",
-				tc.rules, allocs, tc.maxAllocs, tc.rules*2)
+		t.Logf("Evaluate rules=%d: %d allocs/op (bound %d), %d ns/op", rules, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: Evaluate rules=%d allocates %d/op, exceeds constant bound %d — "+
+				"per-rule allocation has returned to the policy hot path (host/pattern re-normalization?). "+
+				"See docs/ci/proxy-quality-architecture.md §8a.", rules, allocs, maxAllocs)
 		}
 	}
 }

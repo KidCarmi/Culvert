@@ -48,6 +48,11 @@ func stressEnvInt(key string, def int) int {
 	return def
 }
 
+// raceDetectorOn is set true by a //go:build race companion file. The race
+// detector adds ~5–10× shadow memory, so RSS-based leak detection is
+// meaningless under -race; the goroutine + active-conn checks still apply.
+var raceDetectorOn = false
+
 // resourceSnapshot captures the leak-relevant counters at a point in time.
 type resourceSnapshot struct {
 	goroutines  int
@@ -104,7 +109,10 @@ func assertNoResourceLeak(t *testing.T, base resourceSnapshot, goroutineTol int,
 			if a != 0 {
 				t.Errorf("active-connection leak: gauge=%d after teardown, want 0", a)
 			}
-			if rssGrowthKBMax > 0 && base.rssKB > 0 && rss-base.rssKB > rssGrowthKBMax {
+			switch {
+			case raceDetectorOn:
+				t.Logf("RSS check skipped under -race (race detector inflates RSS); goroutine + active-conn checks still applied")
+			case rssGrowthKBMax > 0 && base.rssKB > 0 && rss-base.rssKB > rssGrowthKBMax:
 				t.Errorf("RSS grew %d KB (baseline %d → %d), exceeds bound %d KB", rss-base.rssKB, base.rssKB, rss, rssGrowthKBMax)
 			}
 			t.Logf("resources: goroutines %d→%d (tol %d), activeConns=%d, RSS %dKB→%dKB",
