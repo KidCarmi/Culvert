@@ -3,7 +3,7 @@
 - **Status:** Accepted (2026-06-28 — maintainer accepted the incremental direction)
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
-- **Proving PR:** first clean leaf extraction (target under evaluation — see Notes 2026-06-28)
+- **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
 
 ## Notes / log
 
@@ -27,6 +27,27 @@ proving PR. **Re-target the proving PR to a genuinely clean leaf.** `totp.go` wa
 recommended proving target. This finding is itself the first concrete payoff of the proving
 process: it shows the decomposition must sequence *true* leaves first and build shared-foundation
 seams before extracting hubs like `scan`.
+
+### 2026-06-28 — proving PR shipped: `internal/totp` (✅ ADR-0002 validated)
+The strategy is proven viable on a genuine leaf. `totp.go` was moved to `internal/totp` (package
+`totp`) with the totp tests relocated as whitebox tests:
+
+- **Minimal public API:** exactly ONE symbol exported (`VerifyTOTPReturnCounter`, the lone
+  production caller in `ui_auth.go`); everything else stays unexported and is tested in-package.
+- **Clean leaf, proven by tooling:** `go list -deps ./internal/totp` shows **no Culvert package**
+  (stdlib-only) — no `package main` global leaks, no import cycle; `main` imports it.
+- **Behaviour unchanged, validated:** full `go test ./...` green (main + totp), `go test -race`
+  green on auth/totp paths, `go vet ./...` clean, `golangci-lint ./internal/totp` 0 issues,
+  coverage 97.3% (CI floor for `totp.go` is 85%, satisfied via substring match on the new path).
+
+**Dependency-direction rule established for the program:** `internal/*` packages MUST NOT import
+`package main` (enforced naturally by Go — a back-import is a compile-time cycle). Cross-cutting
+concerns a leaf needs (logging, alerting, utils) must be satisfied without importing main: a true
+leaf has none (totp); a hub (scan) needs a shared-foundation seam layer first (see prior note).
+
+**Next leaves (no foundation work needed, mappable now):** `geoip`, `fileblock` — candidates to
+confirm the pattern repeats. Hubs (`scan`) wait for the logging/alerting/util seam. Per the
+extraction protocol, do not start the next extraction until this one is reviewed.
 - **Related:** DEBT-001, DEBT-002, DEBT-003 (Technical Debt Register)
 
 ## Context
