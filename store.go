@@ -1648,6 +1648,13 @@ func (c *Config) SetAuth(user, pass string) error {
 	return nil
 }
 
+// dummyBcryptHash is a fixed bcrypt hash (cost = DefaultCost, matching stored
+// credential hashes) used to equalise local-auth timing on a username miss
+// (RISK-008). Without it, a wrong username returns instantly while a correct
+// username pays the ~bcrypt cost, leaking which usernames exist via a timing
+// oracle. Computed once at init; the input is always valid so the error is nil.
+var dummyBcryptHash, _ = bcrypt.GenerateFromPassword([]byte("culvert-timing-equaliser"), bcrypt.DefaultCost)
+
 // VerifyAuth checks credentials against the active auth backend:
 //   - External provider (LDAP / OIDC) if configured, otherwise
 //   - Local bcrypt hash with a short-lived cache.
@@ -1668,6 +1675,10 @@ func (c *Config) VerifyAuth(user, pass string) bool {
 		return true // auth disabled
 	}
 	if user != storedUser {
+		// RISK-008: equalise timing with the correct-username path so a wrong
+		// username is indistinguishable from a wrong password — defeats
+		// username enumeration via a timing oracle.
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(pass))
 		return false
 	}
 	if ok, hit := c.cache.get(user, pass); hit {

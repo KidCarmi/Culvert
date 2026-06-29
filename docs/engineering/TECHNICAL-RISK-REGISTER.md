@@ -21,7 +21,7 @@
 | RISK-016 | MEDIUM | OPEN | Scanners installed `@latest`; CodeQL non-blocking | `security-release-gate.yml:52,110,252`; `ci.yml:72` |
 | RISK-ACC-1 | HIGH | ACCEPTED | 5 `docker/docker` CVEs in `updater/` (no upstream fix) | `updater/go.mod`; resolution = DEBT-008 |
 | RISK-005 | MEDIUM | OPEN | Interrupted restore can leave `/data` absent | `restore.go:876-894` |
-| RISK-008 | MEDIUM | OPEN | Username timing oracle enables user enumeration | `store.go:1670` |
+| RISK-008 | MEDIUM | ✅ CLOSED | Username timing oracle enables user enumeration | fixed `store.go` (2026-06-28) |
 | RISK-009 | MEDIUM | OPEN | `InsecureSkipVerify` admin toggle silent on auth hot path | `auth_oidc.go:95`, `auth_ldap.go:122` |
 | RISK-010 | MEDIUM | OPEN | Self-update has no in-binary image signature/digest check | `update.go:496-608` |
 | RISK-011 | MEDIUM | OPEN | Cluster rolling-update auto-rollback unverified | `update_cluster.go:804-852` |
@@ -145,11 +145,15 @@
 - **Recommendation:** Document the recovery in a runbook; consider a boot-time check that detects an
   orphaned `/data.bak.*` and surfaces it. **Complexity S.**
 
-## RISK-008 — Username timing oracle · MEDIUM · OPEN
-- **Current state:** `store.go:1670` returns before the bcrypt compare when the username is unknown,
-  so a valid username triggers ~100ms bcrypt and an invalid one returns near-instantly.
-- **Impact:** Remotely measurable user-enumeration oracle.
-- **Recommendation:** Compare against a fixed dummy hash on miss. **Complexity XS.**
+## RISK-008 — Username timing oracle · MEDIUM · ✅ CLOSED 2026-06-28
+- **Was:** `VerifyAuth` (`store.go`) returned before the bcrypt compare on an unknown username, so a
+  valid username paid ~100ms of bcrypt while an invalid one returned near-instantly — a remotely
+  measurable user-enumeration oracle.
+- **Fix:** on a username miss, run `bcrypt.CompareHashAndPassword(dummyBcryptHash, pass)` against a
+  fixed init-time dummy hash (cost = DefaultCost, matching stored hashes) before returning false, so
+  a wrong username is timing-indistinguishable from a wrong password.
+- **Residual:** the 5-minute auth cache still makes a *repeat* correct-and-cached login fast; the fix
+  addresses the primary first-probe enumeration vector. Validated: build, vet, auth/store tests green.
 
 ## RISK-009 — `InsecureSkipVerify` toggle is silent · MEDIUM · OPEN
 - **Current state:** `auth_oidc.go:95`, `auth_oidc_flow.go:302`, `auth_ldap.go:122` honor an admin
