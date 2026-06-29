@@ -121,6 +121,29 @@ keeps SSRF/host-resolution in main). Lesson reinforced: read the candidate's sou
 it clean. **Next:** `fileblock` still needs the shared logging + `atomicWriteFile` seam first — that
 seam is the recommended next *foundational* step. Per protocol, stop here for review; do not start
 `fileblock`.
+
+### 2026-06-28 — fileblock re-mapped against the seam (ADR-0003 shipped); no code moved
+Re-mapped `fileblock` now that `internal/obs` + `internal/fileutil` exist. **Read both source files
+in full** (the geoip lesson): `fileblock.go` and `fileprofile.go` couple to `package main` ONLY via
+`atomicWriteFile` (→`fileutil.AtomicWrite`), `logger.Printf` (→`obs.Printf`), and `sanitizeLog`
+(→`obs.Sanitize`) — all now seam-covered. No other hidden dependency; the engine has no config/runtime
+coupling (config is read by the startup wiring, which stays in main).
+
+- **Now a TRUE LEAF** (coupling-wise). Imports would be: stdlib + `google/uuid` + `internal/obs` +
+  `internal/fileutil`; no cycle (`main`→`fileblock`→leaves).
+- **Inbound surface:** `fileBlocker` (7 files), `globalProfileStore` (3), `fileBlockConn`+
+  `extractCDFilename` (proxy), `FileExtProfile` (controlplane), `defaultBlockedExts` (startup).
+- **Low-churn plan (geoip pattern):** keep the singletons in main as vars of the internal types
+  (`var fileBlocker = fileblock.NewBlocker()`, `var globalProfileStore = &fileblock.FileProfileStore{}`)
+  so the ~10 method call sites stay UNCHANGED; only ~3–4 files change (the two free funcs in proxy,
+  the `FileExtProfile` type ref in controlplane, `defaultBlockedExts` in startup). Export surface:
+  `FileBlocker`/`FileProfileStore`/`FileExtProfile` types, `NewBlocker`, `BlockConn`,
+  `ExtractCDFilename`, `DefaultBlockedExts`.
+- **Tests:** move `fileblock_test.go`, `fileblock_replaceall_test.go`, `fileprofile_test.go`
+  (whitebox) into the package; `fileblock_startup_test.go` stays in main.
+- **Behaviour risk LOW** (verbatim move; logging via the sink → same logger; atomic-write identical).
+
+**Recommendation: extract `fileblock` next.** Awaiting approval; no code moves until then.
 - **Related:** DEBT-001, DEBT-002, DEBT-003 (Technical Debt Register)
 
 ## Context

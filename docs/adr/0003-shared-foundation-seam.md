@@ -133,6 +133,12 @@ Maintainer approved the two-package shape and "stop for review after the seam." 
 - **No call sites changed** in `package main` (logger/sanitizeLog/logWarnf untouched; atomicWriteFile
   delegates). The seam adds capability without churn — exactly the "no destabilization" goal.
 
+**Seam assumption VALIDATED by the fileblock re-mapping (2026-06-28):** reading `fileblock.go` +
+`fileprofile.go` in full confirmed their *entire* `package main` coupling is exactly the three
+primitives this seam provides (`atomicWriteFile`, `logger.Printf`, `sanitizeLog`) — no other hidden
+dependency. With the seam, `fileblock` is a true leaf (coupling-wise). The seam achieved its stated
+purpose. (Mapping detail recorded in ADR-0002.)
+
 **`fileblock` is now unblocked** (it needs `obs.Printf`/`obs.Sanitize` + `fileutil.AtomicWrite`).
 Per the approved plan, **stopping here for review before mapping/extracting `fileblock`.** `scan`
 additionally needs an alerting seam (`fireAlert`) + a host-util home (`stripHostPort`) — a future,
