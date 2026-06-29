@@ -298,8 +298,12 @@ func TestDetectConflicts_NoConflict(t *testing.T) {
 
 func TestDetectConflicts_SamePriorityDiffAction(t *testing.T) {
 	ps := &PolicyStore{}
-	ps.Add(PolicyRule{Name: "r1", Priority: 1, Action: ActionAllow, DestFQDN: "*.example.com"})
-	ps.Add(PolicyRule{Name: "r2", Priority: 1, Action: ActionBlockPage, DestFQDN: "*.example.com"})
+	// Use ReplaceAll to inject the degenerate duplicate-priority state that
+	// Add now rejects; DetectConflicts must still surface it when it exists.
+	ps.ReplaceAll([]PolicyRule{
+		{Name: "r1", Priority: 1, Action: ActionAllow, DestFQDN: "*.example.com"},
+		{Name: "r2", Priority: 1, Action: ActionBlockPage, DestFQDN: "*.example.com"},
+	})
 	conflicts := ps.DetectConflicts()
 	if len(conflicts) == 0 {
 		t.Fatal("expected at least one conflict")
