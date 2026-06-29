@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/geoip"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -1660,7 +1661,7 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	// 3. GeoIP: if configured, verify DB is loaded.
-	if geoEnabled() {
+	if geoip.Enabled() {
 		checks["geoip"] = &checkResult{Status: "ok"}
 	}
 	// GeoIP is optional — absence is not a failure.

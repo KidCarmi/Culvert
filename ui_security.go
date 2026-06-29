@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/geoip"
 )
 
 // pendingCARotation holds a confirmation token for the two-step CA rotation flow.
@@ -1261,7 +1263,7 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"enabled": geoEnabled(),
+		"enabled": geoip.Enabled(),
 		"dbPath":  uiCfgGeoIPDB,
 	})
 }

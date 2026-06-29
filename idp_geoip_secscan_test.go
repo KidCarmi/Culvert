@@ -268,19 +268,21 @@ func TestRecordAndGetActiveConns(t *testing.T) {
 	recordActiveConn(-1)
 }
 
-// ─── geoip.go: LookupFull/LookupCached when geo disabled ──────────────────────
+// ─── geoip.go: geo wrapper LookupFull/LookupCached when geo disabled ──────────
+// The host-based wrapper lives in package main (geoResolver); the IP→country
+// engine moved to internal/geoip (ADR-0002). These assert the wrapper's
+// disabled-geo early return; the engine's disabled path is covered by
+// internal/geoip/geoip_test.go.
 
 func TestGeoCache_LookupFull_GeoDisabled(t *testing.T) {
-	g := &geoCache{}
-	code, name := g.LookupFull("example.com")
+	code, name := geo.LookupFull("example.com")
 	if code != "" || name != "" {
 		t.Errorf("LookupFull with geo disabled should return empty, got code=%q name=%q", code, name)
 	}
 }
 
 func TestGeoCache_LookupCached_GeoDisabled(t *testing.T) {
-	g := &geoCache{}
-	code, ok := g.LookupCached("example.com")
+	code, ok := geo.LookupCached("example.com")
 	if ok || code != "" {
 		t.Error("LookupCached with geo disabled should return false")
 	}
