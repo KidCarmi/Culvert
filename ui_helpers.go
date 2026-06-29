@@ -114,6 +114,17 @@ func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriorit
 			return fmt.Errorf("rule name already exists")
 		}
 	}
+	// Duplicate priority check. When rule.Priority > 0, the caller is
+	// supplying an explicit slot; reject it if another rule already owns that
+	// slot. For update operations editPriority is the current slot (excluded
+	// from the check so keeping the same priority is always allowed).
+	if rule.Priority > 0 {
+		for i := range existingRules {
+			if existingRules[i].Priority == rule.Priority && existingRules[i].Priority != editPriority {
+				return fmt.Errorf("priority %d is already in use", rule.Priority)
+			}
+		}
+	}
 	// Schedule timezone is validated for both rule types.
 	if rule.Schedule != nil && rule.Schedule.Timezone != "" {
 		if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
