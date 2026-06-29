@@ -522,6 +522,98 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 	return false
 }
 
+// applyPolicyDecision dispatches the matched policy action (drop / block page
+// / redirect / allow-with-file-profile) or, on no match, the configured default
+// (allow passthrough vs zero-trust deny). It returns true if it wrote a terminal
+// response and the caller must return; false means the request proceeds to
+// transport dispatch. Behaviour is identical to the previously-inlined switch
+// (DEBT-002 extraction; no logic change).
+func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields, match *PolicyMatch) bool { //nolint:gocognit,cyclop,funlen // policy-action dispatch is inherently branchy; isolated and independently testable (DEBT-002)
+	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
+		ruleMet.RecordHit(match.Rule.Name)
+		// Per-rule "log full URL": capture host+path (no query) when the matched
+		// rule opts in. For a CONNECT tunnel the inner path is encrypted, so this
+		// yields host:port here; the decrypted inner URLs are logged separately in
+		// handleTunnelInspect when SSL inspection is on.
+		ruleURI := ""
+		if match.Rule.LogFullURI {
+			ruleURI = policyLogURI(r.Host, r.URL.Path)
+		}
+		switch match.Action {
+		case ActionDrop:
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "", ruleURI, authLog)
+			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			// Silent TCP RST — hijack and close without sending an HTTP response.
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				conn.Close()
+			}
+			return true
+
+		case ActionBlockPage:
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "", ruleURI, authLog)
+			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
+			return true
+
+		case ActionRedirect:
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity, "", ruleURI, authLog)
+			if !isSafeRedirectURL(match.Rule.RedirectURL) {
+				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return true
+			}
+			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
+			return true
+
+		case ActionAllow:
+			// Per-rule file profile: even when the policy allows the request,
+			// the attached file-extension profile can still block specific
+			// download types (e.g. "Allow github.com but block Executables").
+			// CONNECT tunnels are handled inside handleTunnelInspect where
+			// the inner URL is visible; here we only check plain HTTP.
+			if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
+				if match.Rule != nil && match.Rule.FileProfileBlocked(r.URL.Path) {
+					atomic.AddInt64(&statFileBlocked, 1)
+					atomic.AddInt64(&statBlocked, 1)
+					recordRequestAuthURI(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", ruleURI, authLog)
+					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
+					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
+					return true
+				}
+			}
+			if ruleLogsTraffic(match.Rule) {
+				recordRequestAuthURI(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, "", ruleURI, authLog)
+			} else {
+				// "Log traffic" off: count the request for stats/dashboards but
+				// write no feed/history entry (volume control).
+				recordStats(clientIP, r.Host, "OK", match.Rule.Name, string(ActionAllow))
+			}
+			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
+			// Fall through to normal handling below.
+		}
+	} else {
+		// No rule matched — apply the configured default action.
+		if defaultPolicyAction() == "allow" {
+			// Passthrough mode: allow all unmatched traffic (initial setup).
+			recordRequestAuth(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow", authenticatedIdentity, authLog)
+		} else {
+			// Zero Trust: deny by default. Serve the custom HTML block page so
+			// end-users see a clear, branded explanation.
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, authLog)
+			logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
+			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
+			return true
+		}
+	}
+	return false
+}
+
 func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
 	start := time.Now()
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -600,87 +692,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	identity := r.Header.Get("X-User-Identity")
 	match := policyStore.Evaluate(clientIP, identity, authenticatedSource, host, authenticatedGroups)
 
-	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
-		ruleMet.RecordHit(match.Rule.Name)
-		// Per-rule "log full URL": capture host+path (no query) when the matched
-		// rule opts in. For a CONNECT tunnel the inner path is encrypted, so this
-		// yields host:port here; the decrypted inner URLs are logged separately in
-		// handleTunnelInspect when SSL inspection is on.
-		ruleURI := ""
-		if match.Rule.LogFullURI {
-			ruleURI = policyLogURI(r.Host, r.URL.Path)
-		}
-		switch match.Action {
-		case ActionDrop:
-			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "", ruleURI, authLog)
-			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
-			// Silent TCP RST — hijack and close without sending an HTTP response.
-			if hj, ok := w.(http.Hijacker); ok {
-				conn, _, _ := hj.Hijack()
-				conn.Close()
-			}
-			return
-
-		case ActionBlockPage:
-			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "", ruleURI, authLog)
-			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
-			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
-			return
-
-		case ActionRedirect:
-			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_REDIRECT", match.Rule.Name, string(ActionRedirect), authenticatedIdentity, "", ruleURI, authLog)
-			if !isSafeRedirectURL(match.Rule.RedirectURL) {
-				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
-				http.Error(w, "Forbidden", http.StatusForbidden)
-				return
-			}
-			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
-			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
-			return
-
-		case ActionAllow:
-			// Per-rule file profile: even when the policy allows the request,
-			// the attached file-extension profile can still block specific
-			// download types (e.g. "Allow github.com but block Executables").
-			// CONNECT tunnels are handled inside handleTunnelInspect where
-			// the inner URL is visible; here we only check plain HTTP.
-			if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
-				if match.Rule != nil && match.Rule.FileProfileBlocked(r.URL.Path) {
-					atomic.AddInt64(&statFileBlocked, 1)
-					atomic.AddInt64(&statBlocked, 1)
-					recordRequestAuthURI(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", ruleURI, authLog)
-					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
-					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
-					return
-				}
-			}
-			if ruleLogsTraffic(match.Rule) {
-				recordRequestAuthURI(clientIP, r.Method, r.Host, "OK", match.Rule.Name, string(ActionAllow), authenticatedIdentity, "", ruleURI, authLog)
-			} else {
-				// "Log traffic" off: count the request for stats/dashboards but
-				// write no feed/history entry (volume control).
-				recordStats(clientIP, r.Host, "OK", match.Rule.Name, string(ActionAllow))
-			}
-			logger.Printf("POLICY_ALLOW rule=%q pri=%s %s %s %q [%s] {req_id=%s identity=%s rule=%s action=allow}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
-			// Fall through to normal handling below.
-		}
-	} else {
-		// No rule matched — apply the configured default action.
-		if defaultPolicyAction() == "allow" {
-			// Passthrough mode: allow all unmatched traffic (initial setup).
-			recordRequestAuth(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow", authenticatedIdentity, authLog)
-		} else {
-			// Zero Trust: deny by default. Serve the custom HTML block page so
-			// end-users see a clear, branded explanation.
-			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, authLog)
-			logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
-			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
-			return
-		}
+	// ── Policy action dispatch ──────────────────────────────────────────────
+	// Extracted to applyPolicyDecision (DEBT-002). Returns true if it wrote a
+	// terminal drop / block / redirect / deny response.
+	if applyPolicyDecision(w, r, clientIP, host, reqID, authenticatedIdentity, authLog, match) {
+		return
 	}
 
 	// ── Geo-IP tracking (async) ───────────────────────────────────────────────
