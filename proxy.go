@@ -1240,8 +1240,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		done <- struct{}{}
 	}
-	go relayWS(clientConn, br)       // target → client (br may have buffered bytes)
-	go relayWS(destConn, clientConn) // client → target
+	go relayWS(clientConn, br) // target → client (br may have buffered bytes)
+	// client → target: read via clientBuf.Reader, NOT the raw clientConn. The
+	// HTTP server may have buffered client bytes (frames a client pipelines right
+	// after the Upgrade request) into the hijacked reader; relaying the raw conn
+	// would strand them and the target would block waiting. Same class of bug as
+	// the CONNECT bypass path.
+	go relayWS(destConn, clientBuf.Reader)
 	<-done
 	<-done
 }
@@ -1470,7 +1475,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	rawClient, _, err := hijacker.Hijack()
+	rawClient, clientBuf, err := hijacker.Hijack()
 	if err != nil {
 		upstreamTLS.Close()
 		logger.Printf("SSL_INSPECT hijack error: %v", err)
@@ -1481,7 +1486,13 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// TLS ClientHello starts with 0x16 (handshake record). If the client
 	// is sending SSH, RDP, or another non-TLS protocol through CONNECT,
 	// fall back to raw relay instead of crashing on TLS handshake.
-	peekBuf := bufio.NewReaderSize(rawClient, 1)
+	//
+	// Read through clientBuf.Reader (the hijacked buffer) rather than a fresh
+	// reader over the raw conn: the HTTP server may have already buffered client
+	// bytes (a pipelined ClientHello) into it, and reading the raw conn would
+	// strand them — breaking protocol detection / the client handshake. Same
+	// class of bug as the CONNECT bypass path.
+	peekBuf := clientBuf.Reader
 	firstByte, err := peekBuf.Peek(1)
 	if err != nil {
 		rawClient.Close()   //nolint:errcheck // best-effort cleanup on peek failure

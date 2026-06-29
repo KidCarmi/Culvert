@@ -250,6 +250,14 @@ one remains as carried debt.
   `clientBuf.Reader.Buffered()` bytes to the upstream before relaying. After the
   fix the churn test reports **0 relay retries** across heavy runs (750+ tunnels).
   The retry-on-fresh-tunnel in the stress test is retained as cheap resilience.
+  The SAME class of bug was then found and fixed in the two sibling tunnel
+  handlers: `handleWebSocket` relayed client→target from the raw conn (now from
+  `clientBuf.Reader`, so frames pipelined after the Upgrade reach the target —
+  proven by `TestProxyE2E_WebSocket_PipelinedClientBytes`, which fails without
+  the fix), and `handleTunnelInspect` peeked the client's first byte (the TLS
+  ClientHello, for protocol detection) from a fresh reader over the raw conn —
+  now from the hijacked `clientBuf.Reader`, so a pipelined ClientHello is not
+  stranded.
 
 - **⏳ CARRIED DEBT — `dataDir` is hardcoded to `/data`** (no flag/env/config
   override). Forces the nightly/weekly real-binary jobs to `sudo chown /data` and

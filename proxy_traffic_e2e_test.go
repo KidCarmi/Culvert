@@ -37,6 +37,85 @@ import (
 	"time"
 )
 
+// TestProxyE2E_WebSocket_PipelinedClientBytes proves the WebSocket relay does
+// not strand client bytes that arrive pipelined with the Upgrade request. The
+// client writes the Upgrade request AND a payload in a SINGLE write, so the
+// proxy's HTTP server buffers the payload into the hijacked reader; the fix
+// relays that reader (not the raw conn) to the target, so the payload must
+// arrive upstream. (Regression test for the discarded-hijack-buffer class of
+// bug shared by handleTunnelBypass / handleWebSocket / handleTunnelInspect.)
+func TestProxyE2E_WebSocket_PipelinedClientBytes(t *testing.T) {
+	allowLoopbackTunnel(t) // handleWebSocket SSRF-guards the target host
+
+	const payload = "PIPELINED-WS-FRAME-AFTER-HANDSHAKE"
+	got := make(chan string, 1)
+
+	// Fake WebSocket upstream: read the Upgrade request, reply 101, then read the
+	// relayed client payload and report it.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ws upstream listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		ubr := bufio.NewReader(c)
+		for { // drain request headers
+			line, err := ubr.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if line == "\r\n" || line == "\n" {
+				break
+			}
+		}
+		c.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")) //nolint:errcheck
+		buf := make([]byte, len(payload))
+		if _, err := io.ReadFull(ubr, buf); err != nil {
+			got <- "ERR:" + err.Error()
+			return
+		}
+		got <- string(buf)
+	}()
+
+	proxyURL := startTestProxy(t)
+	conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Upgrade request + payload in ONE write so the server buffers the payload.
+	target := ln.Addr().String()
+	req := "GET http://" + target + "/ws HTTP/1.1\r\nHost: " + target +
+		"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+	if _, err := conn.Write([]byte(req + payload)); err != nil {
+		t.Fatalf("write upgrade+payload: %v", err)
+	}
+
+	status, err := readConnectStatus(bufio.NewReader(conn))
+	if err != nil {
+		t.Fatalf("read upgrade response: %v", err)
+	}
+	if status != http.StatusSwitchingProtocols {
+		t.Fatalf("proxy upgrade status = %d, want 101", status)
+	}
+
+	select {
+	case g := <-got:
+		if g != payload {
+			t.Errorf("upstream received %q, want %q — pipelined client bytes were stranded in the hijack buffer", g, payload)
+		}
+	case <-time.After(4 * time.Second):
+		t.Errorf("upstream never received the pipelined payload — bytes stranded in the discarded hijack buffer")
+	}
+}
+
 // ─── fixtures ────────────────────────────────────────────────────────────────
 
 // echoServer is an in-process TCP echo upstream on a random loopback port. It
