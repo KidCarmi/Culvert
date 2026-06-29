@@ -1,6 +1,7 @@
 # ADR-0003: Shared-foundation seam for `internal/` packages (logging + atomic file write)
 
-- **Status:** Proposed (2026-06-28) — design only, no code moved; awaiting maintainer approval
+- **Status:** Accepted & implemented (2026-06-28) — `internal/obs` + `internal/fileutil` shipped;
+  see "Implementation note" for the one revision vs. the original design
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (to decide)
 - **Related:** ADR-0002 (incremental `internal/` decomposition), DEBT-001
 
@@ -44,9 +45,13 @@ func Sanitize(s string) string                // the canonical CWE-117 strip (mo
 - **Wiring (main, startup, once):** `obs.SetSink(func(l string){ logger.Print(l) })` — internal
   logs flow into the SAME rotating/JSON logger. Published before serving traffic; read via
   `atomic.Pointer` (mirrors the `upstreamTransport` publish-once pattern, no hot-path race).
-- **`Sanitize` becomes canonical:** `proxy.go`'s `sanitizeLog` becomes a one-line
-  `return obs.Sanitize(s)`. One function body changes; **220 call-sites unchanged**; no divergence
-  risk (single implementation).
+- **`Sanitize` is an INDEPENDENT copy (revised from the original "delegate" plan):** `obs.Sanitize`
+  copies `sanitizeLog`'s body; **`proxy.go`'s `sanitizeLog` is left UNCHANGED**. Reason: CLAUDE.md
+  warns CodeQL's CWE-117 query recognises the *inline* `strings.ReplaceAll` sanitiser at each call
+  site, and delegating across a package boundary risks losing that recognition at all 220 sites.
+  The two 3-line copies are each behaviour-tested (the "no control byte survives" property); the
+  tiny duplication is the deliberately safer trade vs. a CodeQL regression. (Original design said
+  delegate — see Implementation note.)
 - **No auto-sanitize in Printf:** callers keep sanitizing specific values (`obs.Sanitize(x)` + `%q`),
   preserving the existing CWE-117 convention exactly.
 
@@ -108,3 +113,27 @@ separate follow-up PR.
 
 Approve the two-package seam (`internal/obs` + `internal/fileutil`) as designed, or direct a
 different shape (single `internal/platform`, or injection). No code moves until approved.
+
+## Implementation note (2026-06-28 — shipped)
+
+Maintainer approved the two-package shape and "stop for review after the seam." Implemented:
+
+- **`internal/obs`** — `SetSink` (atomic publish-once), `Printf`, `Warnf`, `Sanitize`; default sink
+  = stderr. `main.go::initLogger` wires `obs.SetSink(logger.Print)` once at startup (before serving).
+- **`internal/fileutil`** — `AtomicWrite` (impl moved verbatim from `main.go`); `main.go`'s
+  `atomicWriteFile` is now a one-line delegator (**45 call-sites unchanged**).
+- **One revision vs. design:** `sanitizeLog` was NOT changed to delegate (CodeQL recognition, above);
+  `obs.Sanitize` is an independent copy instead. `logWarnf` (main) also unchanged — `obs.Warnf` is
+  the internal-package equivalent.
+- **Both packages are true leaves:** `go list -deps` shows neither imports any Culvert package; `main`
+  imports both; no cycle.
+- **Validation:** `go build ./...`, `go vet ./...`, `golangci-lint ./internal/obs ./internal/fileutil`
+  0 issues, package tests green (obs 96.4%, fileutil 52.8% coverage; no CI floor on these), full
+  `go test ./...` + `-race` (proxy logs through the published sink) green.
+- **No call sites changed** in `package main` (logger/sanitizeLog/logWarnf untouched; atomicWriteFile
+  delegates). The seam adds capability without churn — exactly the "no destabilization" goal.
+
+**`fileblock` is now unblocked** (it needs `obs.Printf`/`obs.Sanitize` + `fileutil.AtomicWrite`).
+Per the approved plan, **stopping here for review before mapping/extracting `fileblock`.** `scan`
+additionally needs an alerting seam (`fireAlert`) + a host-util home (`stripHostPort`) — a future,
+similar increment.
