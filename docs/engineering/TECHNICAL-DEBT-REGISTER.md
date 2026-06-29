@@ -10,7 +10,7 @@
 | ID | Sev | Title | Principal location |
 |---|---|---|---|
 | DEBT-001 | HIGH | Flat `package main` — no compiler-enforced boundaries | all 152 root `.go` files; see ADR-0002 |
-| DEBT-002 | HIGH | `handleRequest` is ~497 lines on the hottest security path | `proxy.go:219` **HV** |
+| DEBT-002 | ✅ CLOSED | `handleRequest` was ~497 lines / cyclo 73 on the hottest security path | `proxy.go` — decomposed 2026-06-28 |
 | DEBT-003 | MEDIUM | God-files (4 over 1,800 LOC) | `main.go`, `store.go`, `controlplane.go`, `proxy.go` |
 | DEBT-004 | MEDIUM | `configBackup` god-struct with 3 divergent memberships | `ui_policy.go:736`, `configversion.go` |
 | DEBT-005 | MEDIUM | `main.go` is a 30-`init*` hand-wired DI container | `main.go` (30 `initX` funcs) |
@@ -34,24 +34,32 @@
   already uses proper packages — the team can do this; it just hasn't back-ported it.
 - **Direction:** ADR-0002. Incremental leaf-cluster extraction into `internal/`. **No rewrite.**
 
-## DEBT-002 — `handleRequest` oversized · HIGH · **spike done, partial**
-- **Principal (HV):** the single most-exercised security function carried the entire
-  auth+policy+dispatch tree; `.golangci.yml:68` sets `cyclop max-complexity: 15`, so it shipped
-  under a `//nolint:gocognit,cyclop,funlen` suppression.
-- **Interest:** auth-bypass / SSRF-ordering bugs hide in nested branching that no reviewer can hold
-  in working memory; the lint gate is not protecting the code that needs it most.
-- **2026-06-28 — de-risking spike (shipped):** extracted the ~225-line Stage-1 auth pipeline into
-  `resolveRequestAuth` (`proxy.go`), behaviour-preserving (deterministic line-move + bare-`return`→
-  `return authOutcome{}, false`; **full root-package suite green and byte-for-byte matching the
-  pre-change baseline**, 93.9s vs 94.5s; gocyclo verified). Result: `handleRequest` cyclomatic
-  complexity **dropped to 45**, `resolveRequestAuth` is **29** — the auth decision tree is now an
-  independently testable unit (the 453 auth/proxy tests drive it via `handleRequest`, unchanged).
-- **Honest status — NOT done:** extraction *relocated* complexity; both functions are still **>15**,
-  so both still carry suppressions (net suppression count unchanged). The spike proves the pattern is
-  safe; completing DEBT-002 needs ~3 more extractions to get the dispatcher under budget and remove
-  the suppressions: **(a)** pre-policy content blocks (blocklist/threat/plugin/fileblock),
-  **(b)** the policy-action switch (drop/blockpage/redirect/allow + default), **(c)** the telemetry
-  tail (latency + OTLP span). Each is the same low-risk mechanical pattern. **Remaining: Complexity M.**
+## DEBT-002 — `handleRequest` oversized · ✅ CLOSED 2026-06-28
+- **Was:** the single most-exercised security function carried the entire auth + content-block +
+  policy + dispatch + telemetry pipeline — ~497 lines, gocyclo **73**, behind a
+  `//nolint:gocognit,cyclop,funlen` suppression (the lint gate was not protecting the code that
+  most needed it; auth-bypass / SSRF-ordering bugs hide in nested branching).
+- **Resolution — behaviour-preserving, test-guarded extraction (6 commits, each validated with
+  build + `go vet` + full root-package suite + `-race` on the hot path + gocyclo):**
+  | helper | gocyclo | suppression |
+  |---|---|---|
+  | `resolveRequestAuth` (Stage-1 adaptive auth) | 29 | retained — inherent, now isolated/testable |
+  | `applyPolicyDecision` (drop/block/redirect/allow/default) | 15 | retains `funlen`+`nestif` (82-line switch) |
+  | `preDispatchBlocked` (blocklist/threat/plugin/file) | 11 | **none** |
+  | `recordRequestTelemetry` (latency + OTLP) | 6 | **none** |
+  | `resolveSSLAction` | 5 | **none** |
+  | `setupRequestTracing` | 3 | **none** |
+  | `trackDestinationCountry` | 2 | **none** |
+- **Result (evidence):** `handleRequest` gocyclo **73 → 11**, and **its `//nolint` suppression was
+  removed entirely**. Authoritative `golangci-lint v2.5.0 --enable=cyclop,funlen,gocognit,nestif`
+  reports **zero findings** for `handleRequest`. The 453 auth/proxy/policy tests (which drive
+  `handleRequest` directly via `httptest`) pass unchanged — behaviour preserved.
+- **Honest note:** extraction *relocated* the inherent auth/policy complexity into two isolated,
+  independently-testable units that keep justified suppressions; it did not erase that complexity.
+  The win: the **dispatcher is now readable and lint-clean**, and each stage is testable alone.
+- **Follow-on (not DEBT-002):** the remaining pre-existing complexity suppressions in `proxy.go`
+  (`handleHTTP` gocognit 32, `handleWebSocket` funlen, `handleTunnelInspect` 57) are separate
+  functions, out of scope here; candidates for a future targeted pass if prioritised.
 
 ## DEBT-003 — God-files · MEDIUM
 - `main.go` (2,367), `store.go` (2,313, ≥5 unrelated stores behind one file's locks),

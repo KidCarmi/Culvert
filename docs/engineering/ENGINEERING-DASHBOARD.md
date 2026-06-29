@@ -26,7 +26,7 @@ A score only moves when the underlying evidence changes in the repository.
 | CI/CD & Release | 4.0 | → | SHA-pinned actions, cosign keyless, SLSA L3. Gate verified to genuinely clear the **root binary** (0 vulns). Open: RISK-006/014/015/016 (gate blind spots). |
 | Documentation | 3.5 | ↑ | Strong `CLAUDE.md` + roadmap; governance layer seeded 2026-06-28. Gaps: missing runbooks. |
 | Operability (single-CP) | 3.5 | → | Fail-static confirmed, atomic restore, OTLP traces. No distinct `/readyz`. |
-| Maintainability | 2.5 | → | God-files, 497-line `handleRequest`, ~359 globals. See DEBT-001..005. |
+| Maintainability | 2.6 | ↑ | DEBT-002 closed: `handleRequest` 73→11 cyclo, suppression removed (evidence-backed). Still gated by god-files + ~359 globals (DEBT-001/003). |
 | Architecture | 2.5 | → | Flat `package main`, no compiler-enforced boundaries. See ADR-0002. |
 | HA / DR readiness | 2.0 | → | Split-brain-capable, no quorum/fencing. See RISK-001 (BLOCKER). |
 
@@ -71,8 +71,8 @@ Sequenced backlog (full detail in the registers):
    RISK-008 (username timing oracle), RISK-009 (`InsecureSkipVerify` warning), RISK-006 (pin CI scanners).
 2. **This month:** RISK-001 mitigation (fencing token + honest HA docs + split-brain runbook),
    DEBT-007 (e2e MITM test), add CodeQL to the merge-blocking set.
-3. **This quarter (ADR-gated):** DEBT-002 (decompose `handleRequest`), then begin ADR-0002
-   leaf-cluster `internal/` extraction.
+3. **This quarter (ADR-gated):** ✅ DEBT-002 (decompose `handleRequest`) — **done 2026-06-28**
+   (73→11 cyclo, suppression removed). Next: begin ADR-0002 leaf-cluster `internal/` extraction.
 4. **Roadmap:** real HA consensus, self-update in-binary verification, rollback verification.
 
 ---
