@@ -4,6 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout` (+ the `obs`/`fileutil` seam, ADR-0003)
 
 ## Notes / log
 
@@ -216,6 +217,43 @@ files, shared test helpers, whitebox isolation, and direct type construction sca
 filename map shows. Future near-hub mappings must read the test sources up front and budget for
 integration-test isolation rewrites. **Three leaves done (`totp`, `geoip`, `fileblock`) + the seam.**
 - **Related:** DEBT-001, DEBT-002, DEBT-003 (Technical Debt Register)
+
+### 2026-06-29 — `internal/lockout` extracted (fourth leaf)
+Moved `lockout.go` (login account-lockout `LoginLimiter` + admin-API `APIRateLimiter` + `LockoutMsg`
++ their constants) into `internal/lockout`. A **genuinely clean leaf**: stdlib-only, zero Culvert
+coupling — needed **no new seam** (unlike the deferred `scan` hub, which still waits on an alerting
+seam because `fireAlert` is a 16-file core primitive). Production surface was trivial: only
+`ui_auth.go` (loginLimiter) and `ui_middleware.go` (apiLimiter), both unchanged via the alias shim.
+
+`package main` keeps `lockout_vars.go` (alias pattern, as geoip/fileblock): type aliases
+`LoginLimiter`/`APIRateLimiter`, the `loginLimiter`/`apiLimiter` singletons, `var LockoutMsg =
+lockout.Msg`, and the legacy `lockout*`/`apiRate*` const names the test suite references.
+
+**Test surface was again the hard part** (the lesson, fourth time), and the resolution is a **net
+design improvement, not just churn**:
+- Engine unit tests + `LockoutMsg` test → moved into `package lockout` (whitebox).
+- The 3 `TestAPIRateLimiter_*` tests were **split out of `p5_test.go`** into the package (they need
+  whitebox access to the now-internal `APIRateLimiter.entries`).
+- The cross-cutting isolation helper `snapshotLoginLimiter` (used by `policy_misc_test.go`,
+  `auth_password_change_no_versioning_test.go`) previously reached into `loginLimiter.mu`/`.entries`.
+  It now delegates to a **single new exported method `(*LoginLimiter).SnapshotAndClear() func()`** —
+  the *only* added API beyond a pure move. This is cleaner than the prior whitebox: the snapshot/
+  restore is owned by the type that owns the mutex, instead of poked from a foreign package's tests.
+- The pollution regression test no longer hand-constructs a locked `lockoutEntry`; it drives the
+  pre-locked state through the production `RecordFailure` API (max failures ⇒ locked), which the
+  test's own premise ("a prior test left the user locked") makes semantically exact.
+
+**One added export, flagged for review:** `SnapshotAndClear` (test-support, but a legitimate
+self-contained operation; named without a `ForTest` suffix because it is a real, reusable
+snapshot/restore). Lint surfaced two findings on the new package lines (gocritic `unnamedResult` on
+`Check`, revive repetitive-name on `LockoutMsg`); both fixed cleanly — named `Check`'s results to
+match its doc comment, and renamed the package func to `Msg` (package-main name stays `LockoutMsg`
+via the shim).
+
+Validation: `go build ./...`, `go vet`, `golangci-lint` (0 issues on the new pkg + new lines),
+`-race` on the package and the main lockout-path/auth-login tests, and the determinism gate
+(`-count=2 -shuffle=on`) on every `snapshotLoginLimiter` consumer — all green. **Four leaves done
+(`totp`, `geoip`, `fileblock`, `lockout`) + the seam.**
 
 ## Context
 

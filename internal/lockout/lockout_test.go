@@ -1,4 +1,4 @@
-package main
+package lockout
 
 import (
 	"strings"
@@ -24,7 +24,7 @@ func TestLoginLimiter_CheckLockedAccount(t *testing.T) {
 	l := newLimiter()
 	const user = "alice"
 	// Trigger lockout.
-	for i := 0; i < lockoutMaxAttempts; i++ {
+	for i := 0; i < MaxAttempts; i++ {
 		l.RecordFailure(user)
 	}
 	locked, secs := l.Check(user)
@@ -42,7 +42,7 @@ func TestLoginLimiter_CheckExpiredLock(t *testing.T) {
 	// Manually insert an expired lockout entry.
 	l.mu.Lock()
 	l.entries[user] = &lockoutEntry{
-		attempts:    lockoutMaxAttempts,
+		attempts:    MaxAttempts,
 		lockedUntil: time.Now().Add(-time.Second), // already expired
 	}
 	l.mu.Unlock()
@@ -68,7 +68,7 @@ func TestLoginLimiter_CheckExpiredLock(t *testing.T) {
 func TestLoginLimiter_RecordFailure_NotYetLocked(t *testing.T) {
 	l := newLimiter()
 	const user = "charlie"
-	for i := 0; i < lockoutMaxAttempts-1; i++ {
+	for i := 0; i < MaxAttempts-1; i++ {
 		locked := l.RecordFailure(user)
 		if locked {
 			t.Errorf("attempt %d should not trigger lockout yet", i+1)
@@ -80,7 +80,7 @@ func TestLoginLimiter_RecordFailure_TriggersLockout(t *testing.T) {
 	l := newLimiter()
 	const user = "dave"
 	var justLocked bool
-	for i := 0; i < lockoutMaxAttempts; i++ {
+	for i := 0; i < MaxAttempts; i++ {
 		justLocked = l.RecordFailure(user)
 	}
 	if !justLocked {
@@ -98,8 +98,8 @@ func TestLoginLimiter_RecordFailure_WindowReset(t *testing.T) {
 	// Manually insert a stale entry (failure outside the window).
 	l.mu.Lock()
 	l.entries[user] = &lockoutEntry{
-		attempts:  lockoutMaxAttempts - 1,
-		firstFail: time.Now().Add(-(lockoutWindow + time.Second)), // outside window
+		attempts:  MaxAttempts - 1,
+		firstFail: time.Now().Add(-(Window + time.Second)), // outside window
 	}
 	l.mu.Unlock()
 
@@ -109,8 +109,8 @@ func TestLoginLimiter_RecordFailure_WindowReset(t *testing.T) {
 		t.Error("should not lock immediately after window reset")
 	}
 	left := l.AttemptsLeft(user)
-	if left != lockoutMaxAttempts-1 {
-		t.Errorf("after window reset, attempts left = %d, want %d", left, lockoutMaxAttempts-1)
+	if left != MaxAttempts-1 {
+		t.Errorf("after window reset, attempts left = %d, want %d", left, MaxAttempts-1)
 	}
 }
 
@@ -124,7 +124,7 @@ func TestLoginLimiter_RecordSuccess_ClearsFailures(t *testing.T) {
 
 	l.RecordSuccess(user)
 
-	if l.AttemptsLeft(user) != lockoutMaxAttempts {
+	if l.AttemptsLeft(user) != MaxAttempts {
 		t.Error("RecordSuccess should reset failure counter to max")
 	}
 }
@@ -133,8 +133,8 @@ func TestLoginLimiter_RecordSuccess_ClearsFailures(t *testing.T) {
 
 func TestLoginLimiter_AttemptsLeft_Default(t *testing.T) {
 	l := newLimiter()
-	if got := l.AttemptsLeft("nobody"); got != lockoutMaxAttempts {
-		t.Errorf("AttemptsLeft for unknown user = %d, want %d", got, lockoutMaxAttempts)
+	if got := l.AttemptsLeft("nobody"); got != MaxAttempts {
+		t.Errorf("AttemptsLeft for unknown user = %d, want %d", got, MaxAttempts)
 	}
 }
 
@@ -144,15 +144,15 @@ func TestLoginLimiter_AttemptsLeft_AfterFailures(t *testing.T) {
 	l.RecordFailure(user)
 	l.RecordFailure(user)
 
-	if got := l.AttemptsLeft(user); got != lockoutMaxAttempts-2 {
-		t.Errorf("AttemptsLeft = %d, want %d", got, lockoutMaxAttempts-2)
+	if got := l.AttemptsLeft(user); got != MaxAttempts-2 {
+		t.Errorf("AttemptsLeft = %d, want %d", got, MaxAttempts-2)
 	}
 }
 
 func TestLoginLimiter_AttemptsLeft_ZeroWhenLocked(t *testing.T) {
 	l := newLimiter()
 	const user = "heidi"
-	for i := 0; i < lockoutMaxAttempts; i++ {
+	for i := 0; i < MaxAttempts; i++ {
 		l.RecordFailure(user)
 	}
 	if got := l.AttemptsLeft(user); got != 0 {
@@ -162,12 +162,52 @@ func TestLoginLimiter_AttemptsLeft_ZeroWhenLocked(t *testing.T) {
 
 // ─── LockoutMsg ───────────────────────────────────────────────────────────────
 
-func TestLockoutMsg(t *testing.T) {
-	msg := LockoutMsg(300)
+func TestMsg(t *testing.T) {
+	msg := Msg(300)
 	if !strings.Contains(msg, "300") {
-		t.Errorf("LockoutMsg should contain seconds, got %q", msg)
+		t.Errorf("Msg should contain seconds, got %q", msg)
 	}
 	if !strings.Contains(msg, "locked") || !strings.Contains(msg, "300") {
-		t.Errorf("LockoutMsg should mention lock, got %q", msg)
+		t.Errorf("Msg should mention lock, got %q", msg)
+	}
+}
+
+// ─── API Rate Limiter ───────────────────────────────────────────────────────
+
+func TestAPIRateLimiter_Allow(t *testing.T) {
+	lim := &APIRateLimiter{entries: map[string]*apiRateEntry{}}
+	for i := 0; i < Burst; i++ {
+		if !lim.Allow("10.0.0.1") {
+			t.Fatalf("request %d should be allowed", i)
+		}
+	}
+	// Next should be rejected.
+	if lim.Allow("10.0.0.1") {
+		t.Error("should be rate limited after burst")
+	}
+}
+
+func TestAPIRateLimiter_DifferentIPs(t *testing.T) {
+	lim := &APIRateLimiter{entries: map[string]*apiRateEntry{}}
+	for i := 0; i < Burst; i++ {
+		lim.Allow("10.0.0.1")
+	}
+	// Different IP should still be allowed.
+	if !lim.Allow("10.0.0.2") {
+		t.Error("different IP should not be rate limited")
+	}
+}
+
+func TestAPIRateLimiter_Cleanup(t *testing.T) {
+	lim := &APIRateLimiter{entries: map[string]*apiRateEntry{}}
+	lim.Allow("10.0.0.1")
+	if len(lim.entries) != 1 {
+		t.Fatal("expected 1 entry")
+	}
+	// Manually expire the entry.
+	lim.entries["10.0.0.1"].windowStart = lim.entries["10.0.0.1"].windowStart.Add(-2 * RateWindow)
+	lim.Cleanup()
+	if len(lim.entries) != 0 {
+		t.Error("expected cleanup to remove expired entry")
 	}
 }

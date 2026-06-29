@@ -1,4 +1,7 @@
-package main
+// Package lockout provides the login account-lockout limiter and the admin-API
+// rate limiter. It is a self-contained leaf (stdlib only, no Culvert coupling)
+// extracted from the flat package main per ADR-0002.
+package lockout
 
 import (
 	"fmt"
@@ -9,16 +12,19 @@ import (
 // ---------------------------------------------------------------------------
 // Login rate-limiter / account lockout
 //
-// After lockoutMaxAttempts consecutive failures within lockoutWindow the
-// account is locked for lockoutDuration.  A successful login resets the
-// counter.  Keys are usernames; the limiter is not persisted across restarts
-// (intentional — a restart by an operator is a valid recovery path).
+// After MaxAttempts consecutive failures within Window the account is locked
+// for Duration.  A successful login resets the counter.  Keys are usernames;
+// the limiter is not persisted across restarts (intentional — a restart by an
+// operator is a valid recovery path).
 // ---------------------------------------------------------------------------
 
 const (
-	lockoutMaxAttempts = 5
-	lockoutWindow      = 10 * time.Minute
-	lockoutDuration    = 15 * time.Minute
+	// MaxAttempts is the number of consecutive failures that triggers a lock.
+	MaxAttempts = 5
+	// Window is the span within which failures accumulate toward a lock.
+	Window = 10 * time.Minute
+	// Duration is how long an account stays locked once tripped.
+	Duration = 15 * time.Minute
 )
 
 type lockoutEntry struct {
@@ -33,11 +39,14 @@ type LoginLimiter struct {
 	entries map[string]*lockoutEntry
 }
 
-var loginLimiter = &LoginLimiter{entries: map[string]*lockoutEntry{}}
+// NewLoginLimiter returns a ready-to-use LoginLimiter.
+func NewLoginLimiter() *LoginLimiter {
+	return &LoginLimiter{entries: map[string]*lockoutEntry{}}
+}
 
 // Check returns (locked bool, secondsRemaining int).
 // A locked account must not be verified further.
-func (l *LoginLimiter) Check(username string) (bool, int) {
+func (l *LoginLimiter) Check(username string) (locked bool, secondsRemaining int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e := l.entries[username]
@@ -67,7 +76,7 @@ func (l *LoginLimiter) RecordFailure(username string) bool {
 	}
 	now := time.Now()
 	// Reset window if too much time has passed since the first failure.
-	if !e.firstFail.IsZero() && now.Sub(e.firstFail) > lockoutWindow {
+	if !e.firstFail.IsZero() && now.Sub(e.firstFail) > Window {
 		e.attempts = 0
 		e.firstFail = time.Time{}
 		e.lockedUntil = time.Time{}
@@ -76,8 +85,8 @@ func (l *LoginLimiter) RecordFailure(username string) bool {
 		e.firstFail = now
 	}
 	e.attempts++
-	if e.attempts >= lockoutMaxAttempts {
-		e.lockedUntil = now.Add(lockoutDuration)
+	if e.attempts >= MaxAttempts {
+		e.lockedUntil = now.Add(Duration)
 		return true
 	}
 	return false
@@ -96,30 +105,57 @@ func (l *LoginLimiter) AttemptsLeft(username string) int {
 	defer l.mu.Unlock()
 	e := l.entries[username]
 	if e == nil {
-		return lockoutMaxAttempts
+		return MaxAttempts
 	}
-	left := lockoutMaxAttempts - e.attempts
+	left := MaxAttempts - e.attempts
 	if left < 0 {
 		left = 0
 	}
 	return left
 }
 
-// LockoutMsg returns a human-readable lockout error.
-func LockoutMsg(seconds int) string {
+// SnapshotAndClear captures the current limiter state, replaces it with an
+// empty map, and returns a closure that restores the captured state. It is the
+// exported equivalent of the whitebox snapshot/restore idiom used for test
+// isolation of the package-global limiter: the entries are deep-copied under
+// the mutex and the restore runs under the mutex too, so neither tears against
+// a concurrent reader/writer. Production code never calls this; it exists so
+// package main's test isolation helper does not need access to the unexported
+// entries map across the package boundary (ADR-0002 extraction).
+func (l *LoginLimiter) SnapshotAndClear() func() {
+	l.mu.Lock()
+	saved := make(map[string]*lockoutEntry, len(l.entries))
+	for k, v := range l.entries {
+		cp := *v
+		saved[k] = &cp
+	}
+	l.entries = map[string]*lockoutEntry{}
+	l.mu.Unlock()
+	return func() {
+		l.mu.Lock()
+		l.entries = saved
+		l.mu.Unlock()
+	}
+}
+
+// Msg returns a human-readable lockout error. Exposed in package main as
+// LockoutMsg via the shim alias.
+func Msg(seconds int) string {
 	return fmt.Sprintf("Account temporarily locked. Try again in %d seconds.", seconds)
 }
 
 // ---------------------------------------------------------------------------
 // Admin API rate limiter — protects mutation endpoints against abuse.
 //
-// A sliding window of apiRateBurst requests is allowed per IP per apiRateWindow.
+// A sliding window of Burst requests is allowed per IP per RateWindow.
 // This runs *after* session auth, so it limits authenticated admin actions.
 // ---------------------------------------------------------------------------
 
 const (
-	apiRateBurst  = 60              // max API mutations per window
-	apiRateWindow = 1 * time.Minute // sliding window width
+	// Burst is the max API mutations allowed per window.
+	Burst = 60
+	// RateWindow is the sliding window width for the API rate limiter.
+	RateWindow = 1 * time.Minute
 )
 
 type apiRateEntry struct {
@@ -133,7 +169,10 @@ type APIRateLimiter struct {
 	entries map[string]*apiRateEntry
 }
 
-var apiLimiter = &APIRateLimiter{entries: map[string]*apiRateEntry{}}
+// NewAPIRateLimiter returns a ready-to-use APIRateLimiter.
+func NewAPIRateLimiter() *APIRateLimiter {
+	return &APIRateLimiter{entries: map[string]*apiRateEntry{}}
+}
 
 // Allow returns true if the IP is within the rate limit for API mutations.
 func (a *APIRateLimiter) Allow(ip string) bool {
@@ -141,12 +180,12 @@ func (a *APIRateLimiter) Allow(ip string) bool {
 	defer a.mu.Unlock()
 	e := a.entries[ip]
 	now := time.Now()
-	if e == nil || now.Sub(e.windowStart) > apiRateWindow {
+	if e == nil || now.Sub(e.windowStart) > RateWindow {
 		a.entries[ip] = &apiRateEntry{count: 1, windowStart: now}
 		return true
 	}
 	e.count++
-	return e.count <= apiRateBurst
+	return e.count <= Burst
 }
 
 // Cleanup removes expired entries.
@@ -155,7 +194,7 @@ func (a *APIRateLimiter) Cleanup() {
 	defer a.mu.Unlock()
 	now := time.Now()
 	for k, e := range a.entries {
-		if now.Sub(e.windowStart) > apiRateWindow {
+		if now.Sub(e.windowStart) > RateWindow {
 			delete(a.entries, k)
 		}
 	}
