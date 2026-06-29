@@ -116,6 +116,44 @@ func TestProxyE2E_WebSocket_PipelinedClientBytes(t *testing.T) {
 	}
 }
 
+// TestProxyE2E_HostHeaderSpoofCannotBypassPolicy proves policy is evaluated on
+// the request-target authority (what the proxy actually dials), NOT the
+// spoofable Host header. A client sends an absolute-form request to a BLOCKED
+// host while setting the Host header to an ALLOWED host; the proxy must block
+// it. If policy ever keyed on the Host header instead, this is a critical
+// policy-evasion / host-confusion bypass.
+func TestProxyE2E_HostHeaderSpoofCannotBypassPolicy(t *testing.T) {
+	proxyURL := startTestProxy(t)
+	policyStore.rules = nil
+	// Block one host; allow everything else. The two outcomes are
+	// distinguishable: keying on the URL host → 403 (block-evil); keying on the
+	// Host header (allowed.example) → allow-rest → dial → 502. So 403 proves the
+	// proxy used the request-target, not the header.
+	policyStore.Add(PolicyRule{Priority: 1, Name: "block-evil", DestFQDN: "blocked.example", Action: ActionBlockPage})
+	policyStore.Add(PolicyRule{Priority: 2, Name: "allow-rest", DestFQDN: "*", Action: ActionAllow})
+
+	conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Absolute-form target = blocked.example; spoofed Host header = allowed.example.
+	if _, err := fmt.Fprint(conn, "GET http://blocked.example/ HTTP/1.1\r\nHost: allowed.example\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("Host-header spoof: got %d, want 403 — policy must key on the request-target host (blocked.example), "+
+			"not the Host header (allowed.example). A non-403 means a host-confusion policy bypass.", resp.StatusCode)
+	}
+}
+
 // ─── fixtures ────────────────────────────────────────────────────────────────
 
 // echoServer is an in-process TCP echo upstream on a random loopback port. It
