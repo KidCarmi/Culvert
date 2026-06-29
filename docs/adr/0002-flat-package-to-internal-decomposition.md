@@ -95,6 +95,32 @@ duplicated (divergence risk in security code). Resolution options under review (
   `internal/geoip.LookupByIP`. Callers' API preserved (main keeps `geo`-shaped wrappers); the package
   is a true IP→country leaf. No seam, no security-dup. Recommended.
 Stopped for maintainer decision (the resolution touches the "no redesign / no seam yet" constraints).
+
+### 2026-06-28 — shipped: `internal/geoip` via Option F (second leaf, ✅)
+Maintainer chose **Option F**. The GeoIP IP→country engine moved to `internal/geoip`; `resolveHost`
+(with the shared `isPrivateIP` SSRF check) stayed in `package main`, which keeps a thin host-based
+`geo` wrapper so callers are unchanged.
+
+- **`internal/geoip` public API (minimal):** `InitGeoDB`, `Enabled`, `LookupByIP(net.IP)`,
+  `LookupCachedByIP(net.IP)`. The cache/`geoResult`/`geoDB` internals stay unexported.
+- **True leaf, proven:** `go list -deps ./internal/geoip` imports **no Culvert package** (stdlib +
+  `geoip2-golang`); `main` imports it; no cycle. `countryTraffic`/`activeConns` stayed in main.
+- **Call sites unchanged:** `geo.LookupFull`/`LookupCached` in enrollment/policy/proxy untouched
+  (main-side wrapper preserves the API); only `geoEnabled()`→`geoip.Enabled()` (main.go, ui_security.go)
+  and `InitGeoDB`→`geoip.InitGeoDB` (startup) changed mechanically.
+- **Behaviour preserved, validated:** `go build ./...`, `go vet ./...`, full `go test ./...` green,
+  `-race` green on geoip/proxy paths, `golangci-lint ./internal/geoip` 0 issues. Engine coverage
+  44.8% — the DB-read path needs a real `.mmdb` fixture (none shipped); tests are behaviour-based
+  (disabled / nil-IP / bad-path / cache-hit), **not** padded. No CI coverage floor applies to this package.
+- **Two diff-resurfaced findings handled** (same class as DEBT-002's nestif): a `geoCache` whitebox
+  test retargeted to the `geo` wrapper, and a `//nolint:noctx` on `resolveHost`'s pre-existing
+  `net.LookupHost` (moved verbatim; context-aware DNS is a separate out-of-scope change).
+
+**Pattern now demonstrated twice** (`totp` true leaf, `geoip` near-leaf via a main-side wrapper that
+keeps SSRF/host-resolution in main). Lesson reinforced: read the candidate's source before declaring
+it clean. **Next:** `fileblock` still needs the shared logging + `atomicWriteFile` seam first — that
+seam is the recommended next *foundational* step. Per protocol, stop here for review; do not start
+`fileblock`.
 - **Related:** DEBT-001, DEBT-002, DEBT-003 (Technical Debt Register)
 
 ## Context

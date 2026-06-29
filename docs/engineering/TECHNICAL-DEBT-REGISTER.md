@@ -33,14 +33,16 @@
 - **Proof it's payable:** `cmd/culvert-maint/internal/{server,ops,runner,auth,config,audit,health}`
   already uses proper packages — the team can do this; it just hasn't back-ported it.
 - **Direction:** ADR-0002 (Accepted). Incremental leaf-cluster extraction into `internal/`. **No rewrite.**
-- **Progress (2026-06-28):** first leaf shipped — `internal/totp` (proving PR). Stdlib-only leaf,
-  one exported symbol, no cycle, behaviour unchanged, green. Mapping the originally-proposed
-  `internal/scan` first showed it is a **hub** (outbound coupling to logging/alerting/file/host
-  utils; ~20-file inbound surface) — recorded in ADR-0002. **Sequencing learned:** true leaves
-  first (`totp` done; `geoip`, `fileblock` next), then a shared logging/alerting/util seam layer,
-  then hubs (`scan`). Score impact: one 113-line leaf out of ~58K LOC does **not** yet move the
-  Architecture/Maintainability score — the principal (flat namespace, ~359 globals) is essentially
-  unchanged; this is a proof-of-method, not a dent in the debt yet.
+- **Progress (2026-06-28):** **two leaves shipped** — `internal/totp` (proving PR) and
+  `internal/geoip` (the GeoIP engine; `resolveHost`+SSRF check stayed in main via a thin wrapper,
+  ADR-0002 option F). Both: minimal exported API, no cycle, behaviour unchanged, validated green.
+  Mapping `internal/scan` first showed it is a **hub** (logging/alerting/file/host coupling;
+  ~20-file inbound) — recorded in ADR-0002. **Sequencing learned:** true leaves first (`totp`,
+  `geoip` done), then a shared **logging + `atomicWriteFile` seam** (the gating prerequisite for
+  `fileblock` and `scan`), then hubs. Score impact: two small leaves out of ~58K LOC do **not** yet
+  move the Architecture/Maintainability score — the principal (flat namespace, ~359 globals) is
+  essentially unchanged; this is proof-of-method (repeatable, safe boundaries), not a dent yet.
+  **Recommended next foundational step:** design the shared seam layer rather than chase more leaves.
 
 ## DEBT-002 — `handleRequest` oversized · ✅ CLOSED 2026-06-28
 - **Was:** the single most-exercised security function carried the entire auth + content-block +
