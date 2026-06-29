@@ -76,6 +76,25 @@ it needs no seam. The only added work vs. `totp` is a file split (extract the Ge
 leave `countryTraffic`/`activeConns` in main as their own file) and exporting the `geo` global for
 ~3–4 call sites. `fileblock` is deferred until the logging/util seam exists. *(Awaiting approval
 before any code moves.)*
+
+### 2026-06-28 — CORRECTION during geoip execution: engine is NOT zero-coupling
+While reading `geoip.go` to perform the split, found a coupling the mapping **missed**: the engine's
+`resolveHost` (geoip-internal, no external callers) calls **`isPrivateIP`** (`proxy.go:108`), which
+reads the **`privateCIDRs`** SSRF backbone and is **shared by 5 files** (proxy, security, threatfeed,
+release_catalog_http, geoip). Root cause of the miss: the outbound grep checked `isPrivateHost`, not
+`isPrivateIP`. **Lesson for the program:** symbol-name greps are necessary-but-insufficient for
+mapping; read the source of the candidate before declaring it a leaf (the build would have caught it,
+but the *mapping* should). `geoip` is therefore a **NEAR-LEAF with a security-critical dependency**,
+not a true leaf. `isPrivateIP`/`privateCIDRs` cannot move (5 users, SSRF backbone) and must NOT be
+duplicated (divergence risk in security code). Resolution options under review (no code moved):
+- **(A) IP-based engine:** move `resolveHost` OUT to main; `internal/geoip` exposes IP-based lookup.
+  Changes the lookup signature host→IP at call sites → an API redesign (constraint conflict).
+- **(B) Inject an `IsPrivateIP` predicate** into `internal/geoip` (a minimal seam). Keeps the
+  host-based API and behavior identical; cost is one injected func var wired by main at startup.
+- **(F) Split `resolveHost` to main, keep a thin host-based wrapper in main** delegating to
+  `internal/geoip.LookupByIP`. Callers' API preserved (main keeps `geo`-shaped wrappers); the package
+  is a true IP→country leaf. No seam, no security-dup. Recommended.
+Stopped for maintainer decision (the resolution touches the "no redesign / no seam yet" constraints).
 - **Related:** DEBT-001, DEBT-002, DEBT-003 (Technical Debt Register)
 
 ## Context
