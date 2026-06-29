@@ -614,6 +614,44 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 	return false
 }
 
+// recordRequestTelemetry records per-request observability after dispatch:
+// the Prometheus latency histogram and (when enabled) one OTLP span. Pure
+// side-effects, no early returns. Extracted from handleRequest (DEBT-002).
+func recordRequestTelemetry(r *http.Request, start time.Time, sslAction SSLAction, match *PolicyMatch, host, clientIP string) {
+	// Record request latency for Prometheus histogram.
+	latencyHist.Observe(time.Since(start).Seconds())
+
+	// OTLP span export: record one span per proxied request for Jaeger/Tempo.
+	// Only fires when the OTLP endpoint is configured; the Enabled() check
+	// avoids constructing the SpanRecord struct on the common no-OTLP path.
+	if globalOTLPTraces.Enabled() {
+		traceID, spanID := parseTraceparent(r.Header.Get("Traceparent"))
+		sslStr := ""
+		if sslAction == SSLInspect {
+			sslStr = "inspect"
+		} else if r.Method == http.MethodConnect {
+			sslStr = "bypass"
+		}
+		ruleName := ""
+		if match != nil && match.Rule != nil {
+			ruleName = match.Rule.Name
+		}
+		globalOTLPTraces.RecordSpan(SpanRecord{
+			TraceID:   traceID,
+			SpanID:    spanID,
+			Name:      "proxy_request",
+			Method:    r.Method,
+			Host:      host,
+			Status:    "OK",
+			Rule:      ruleName,
+			ClientIP:  clientIP,
+			SSLAction: sslStr,
+			StartNano: start.UnixNano(),
+			EndNano:   time.Now().UnixNano(),
+		})
+	}
+}
+
 func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
 	start := time.Now()
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -742,38 +780,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		handleHTTP(w, r)
 	}
 
-	// Record request latency for Prometheus histogram.
-	latencyHist.Observe(time.Since(start).Seconds())
-
-	// OTLP span export: record one span per proxied request for Jaeger/Tempo.
-	// Only fires when the OTLP endpoint is configured; the Enabled() check
-	// avoids constructing the SpanRecord struct on the common no-OTLP path.
-	if globalOTLPTraces.Enabled() {
-		traceID, spanID := parseTraceparent(r.Header.Get("Traceparent"))
-		sslStr := ""
-		if sslAction == SSLInspect {
-			sslStr = "inspect"
-		} else if r.Method == http.MethodConnect {
-			sslStr = "bypass"
-		}
-		ruleName := ""
-		if match != nil && match.Rule != nil {
-			ruleName = match.Rule.Name
-		}
-		globalOTLPTraces.RecordSpan(SpanRecord{
-			TraceID:   traceID,
-			SpanID:    spanID,
-			Name:      "proxy_request",
-			Method:    r.Method,
-			Host:      host,
-			Status:    "OK",
-			Rule:      ruleName,
-			ClientIP:  clientIP,
-			SSLAction: sslStr,
-			StartNano: start.UnixNano(),
-			EndNano:   time.Now().UnixNano(),
-		})
-	}
+	recordRequestTelemetry(r, start, sslAction, match, host, clientIP)
 }
 
 const maxUsernameLen = 256
