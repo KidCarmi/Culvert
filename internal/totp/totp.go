@@ -1,8 +1,8 @@
-package main
-
-// totp.go — TOTP (RFC 6238) validation using only the standard library.
-// Implements HMAC-SHA1 based one-time password with a 30-second step,
-// 6-digit output, and ±1 step tolerance for clock skew.
+// Package totp implements TOTP (RFC 6238) validation using only the standard
+// library: HMAC-SHA1 with a 30-second step, 6-digit output, and ±1 step clock
+// skew. It has no dependencies on the rest of Culvert (first internal/ leaf
+// extracted under ADR-0002).
+package totp
 
 import (
 	"crypto/hmac"
@@ -23,15 +23,16 @@ const (
 // verifyTOTP checks a 6-digit code against the stored TOTP secret.
 //
 // Backwards-compatible wrapper around verifyTOTPAt; callers that need replay
-// protection MUST use verifyTOTPReturnCounter and persist the matched counter
-// (see Config.SetTOTPLastCounter). Empty secrets are rejected fail-closed to
-// prevent validating against a zero-key HMAC in misconfigured/orphaned records.
+// protection MUST use VerifyTOTPReturnCounter and persist the matched counter
+// (see Config.SetTOTPLastCounter in package main). Empty secrets are rejected
+// fail-closed to prevent validating against a zero-key HMAC in
+// misconfigured/orphaned records.
 func verifyTOTP(secret, code string) bool {
-	ok, _ := verifyTOTPReturnCounter(secret, code, time.Now().Unix(), 0)
+	ok, _ := VerifyTOTPReturnCounter(secret, code, time.Now().Unix(), 0)
 	return ok
 }
 
-// verifyTOTPReturnCounter validates a TOTP code and returns (ok, counter) where
+// VerifyTOTPReturnCounter validates a TOTP code and returns (ok, counter) where
 // counter is the matched time-step. Callers MUST track the last-matched counter
 // per user and reject codes whose matched counter is <= lastCounter to close
 // the replay window (RFC 6238 §5.2). Passing lastCounter = 0 disables replay
@@ -39,11 +40,11 @@ func verifyTOTP(secret, code string) bool {
 //
 // A nowUnix parameter is taken instead of calling time.Now() so tests can
 // exercise the function deterministically without clock monkey-patching.
-func verifyTOTPReturnCounter(secret, code string, nowUnix, lastCounter int64) (bool, int64) {
+func VerifyTOTPReturnCounter(secret, code string, nowUnix, lastCounter int64) (ok bool, counter int64) {
 	return verifyTOTPAt(secret, code, nowUnix, lastCounter)
 }
 
-func verifyTOTPAt(secret, code string, nowUnix, lastCounter int64) (bool, int64) {
+func verifyTOTPAt(secret, code string, nowUnix, lastCounter int64) (ok bool, counter int64) {
 	code = strings.TrimSpace(code)
 	if len(code) != totpDigits {
 		return false, 0
@@ -69,7 +70,7 @@ func verifyTOTPAt(secret, code string, nowUnix, lastCounter int64) (bool, int64)
 		return false, 0
 	}
 
-	counter := nowUnix / totpPeriod
+	counter = nowUnix / totpPeriod
 
 	for i := -int64(totpSkew); i <= int64(totpSkew); i++ {
 		candidate := counter + i

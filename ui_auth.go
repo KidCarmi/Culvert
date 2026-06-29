@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/totp"
 	"github.com/crewjam/saml"
 )
 
@@ -59,7 +60,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 			}
 			secret := cfg.GetTOTPSecret(body.User)
 			lastCounter := cfg.GetTOTPLastCounter(body.User)
-			totpOK, matchedCounter := verifyTOTPReturnCounter(secret, body.TOTP, time.Now().Unix(), lastCounter)
+			totpOK, matchedCounter := totp.VerifyTOTPReturnCounter(secret, body.TOTP, time.Now().Unix(), lastCounter)
 			if totpOK {
 				// Persist the matched counter to close the replay window for
 				// this step and all earlier steps within the skew tolerance.
