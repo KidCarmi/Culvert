@@ -22,7 +22,7 @@
 | RISK-ACC-1 | HIGH | ACCEPTED | 5 `docker/docker` CVEs in `updater/` (no upstream fix) | `updater/go.mod`; resolution = DEBT-008 |
 | RISK-005 | MEDIUM | OPEN | Interrupted restore can leave `/data` absent | `restore.go:876-894` |
 | RISK-008 | MEDIUM | ✅ CLOSED | Username timing oracle enables user enumeration | fixed `store.go` (2026-06-28) |
-| RISK-009 | MEDIUM | OPEN | `InsecureSkipVerify` admin toggle silent on auth hot path | `auth_oidc.go:95`, `auth_ldap.go:122` |
+| RISK-009 | MEDIUM | ✅ CLOSED | `InsecureSkipVerify` admin toggle silent on auth hot path | `auth_oidc.go:96`, `auth_oidc_flow.go:301`, `auth_ldap.go:90` |
 | RISK-010 | MEDIUM | OPEN | Self-update has no in-binary image signature/digest check | `update.go:496-608` |
 | RISK-011 | MEDIUM | OPEN | Cluster rolling-update auto-rollback unverified | `update_cluster.go:804-852` |
 | RISK-012 | LOW | OPEN | Account lockout is username-keyed (lockout-as-DoS) | `lockout.go:36,60` |
@@ -155,12 +155,16 @@
 - **Residual:** the 5-minute auth cache still makes a *repeat* correct-and-cached login fast; the fix
   addresses the primary first-probe enumeration vector. Validated: build, vet, auth/store tests green.
 
-## RISK-009 — `InsecureSkipVerify` toggle is silent · MEDIUM · OPEN
-- **Current state:** `auth_oidc.go:95`, `auth_oidc_flow.go:302`, `auth_ldap.go:122` honor an admin
-  `TLSSkipVerify` flag that fully disables cert validation on the credential-bearing channel, with
-  no warning logged at the auth hot path.
+## RISK-009 — `InsecureSkipVerify` toggle is silent · MEDIUM · ✅ CLOSED
+- **Was:** `auth_oidc.go`, `auth_oidc_flow.go`, `auth_ldap.go` honored an admin `TLSSkipVerify` flag
+  that fully disables cert validation on the credential-bearing channel, with no warning logged.
 - **Impact:** A MITM on the LDAP/OIDC path can harvest credentials when the toggle is on.
-- **Recommendation:** Log loudly (WARN) on every auth init when the toggle is enabled. **Complexity XS.**
+- **Fix (2026-06-29):** Each provider constructor (`NewOIDCAuth`, `NewOIDCFlowProvider`,
+  `NewLDAPAuth`) now emits a loud `logWarnf` WARN at init time when `cfg.TLSSkipVerify` is set,
+  naming the credential-harvest/MITM risk and the dev-only intent. Warning fires once at
+  construction (not per-request) so it surfaces in startup/reload logs without flooding the hot
+  path. Validated: build OK, lint clean on touched lines, `go test -race -run 'OIDC|LDAP|Auth|IdP'`
+  green. **Complexity XS — closed as recommended.**
 
 ## RISK-010 — Self-update has no in-binary image verification · MEDIUM · OPEN
 - **Current state:** `apiUpdateApply` (`update.go:496-608`) delegates pull/restart to the external
@@ -200,3 +204,7 @@
   (updater docker CVEs, ACCEPTED pending DEBT-008 removal — maintainer working on it).
   Limitation: govulncheck reachability could not be run locally (`vuln.go.dev` blocked by org
   egress policy, 403); CI's own govulncheck remains authoritative for root reachability.
+- **2026-06-29** — **RISK-009 CLOSED.** Added init-time WARN logs to the three credential-channel
+  auth constructors (`NewOIDCAuth`, `NewOIDCFlowProvider`, `NewLDAPAuth`) guarded by
+  `cfg.TLSSkipVerify`. Resolved a gofmt-induced `whyNoLint` finding on the pre-existing
+  `//nolint:gosec` in `auth_oidc_flow.go` by adding an explanation. Build/lint/auth-race tests green.
