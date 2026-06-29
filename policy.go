@@ -702,6 +702,9 @@ func (ps *PolicyStore) PermutePriorities(orderedPriorities []int) bool {
 	byOldPri := make(map[int]*PolicyRule, len(orderedPriorities))
 	for _, r := range ps.rules {
 		if seen[r.Priority] {
+			if _, already := byOldPri[r.Priority]; already {
+				return false // ambiguous: two store rules share a listed priority
+			}
 			byOldPri[r.Priority] = r
 		}
 	}
