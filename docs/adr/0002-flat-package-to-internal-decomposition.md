@@ -144,6 +144,42 @@ coupling (config is read by the startup wiring, which stays in main).
 - **Behaviour risk LOW** (verbatim move; logging via the sink → same logger; atomic-write identical).
 
 **Recommendation: extract `fileblock` next.** Awaiting approval; no code moves until then.
+
+### 2026-06-28 — fileblock extraction ATTEMPTED, reverted: test entanglement larger than mapped
+Began the approved extraction. The **engine move is clean** (the package compiled: `internal/fileblock`
+with `FileBlocker`/`FileProfileStore`/`FileExtProfile`/`NewBlocker`/`BlockConn`/`ExtractCDFilename`/
+`DefaultBlockedExts`, using `obs`+`fileutil`; main keeps the singletons + transitional type aliases).
+**Reverted** because reading the test sources in full (the recurring lesson) revealed the *test* surface
+is materially larger and more entangled than the filename-based map implied:
+
+1. **Two of the three "engine test files" are MIXED**, not pure engine:
+   - `fileblock_test.go`: 7 engine unit tests + **3 proxy-integration tests** (`handleRequest`/
+     `setupProxyTest`/`policyStore`) that must stay in main.
+   - `fileblock_replaceall_test.go`: engine `ReplaceAll` tests + **`TestCL13_ApplyConfigSnapshot_…`**
+     which calls `applyConfigSnapshot(ConfigSnapshot{…})` (controlplane) — must stay in main.
+2. **Staying integration tests whitebox-manipulate the global's unexported state for isolation**
+   (`snapshotFileBlocker` saves/restores `fileBlocker.path`+`.extensions`; the proxy tests seed
+   `globalProfileStore.profiles`). Once the type moves, main can't touch those fields.
+3. **Two shared test helpers** span the boundary: `assertNoTmpLeak` (`enroll_util_test.go`, used by
+   ~10 files incl. moving tests) and `ensureFileblockTestLogger` (`fileblock_startup_test.go`).
+4. **Inbound surface ~2× the map**: direct `&FileBlocker{…}` construction + `FileExtProfile` refs in
+   `coverage_day3_test.go`, `cluster_apply_persist_test.go`, `cluster_features_test.go`,
+   `edge_audit_test.go` — not just the ~3–4 files mapped.
+
+**Good news — it IS doable with the APPROVED API (no API growth):** the staying integration tests can
+be re-isolated via exported calls — `orig := fileBlocker.List()` + cleanup `fileBlocker.SetPath("")` +
+`fileBlocker.ReplaceAll(orig)`; seed via `ReplaceAll`/`Add`; `globalProfileStore.ReplaceAll(...)`.
+Moving tests drop `ensureFileblockTestLogger` (obs's default sink removes the nil-logger risk) and get
+a local `assertNoTmpLeak` copy. Type aliases collapse `controlplane.go`/`cluster_features_test.go` to
+zero changes.
+
+**Revised scope to extract fileblock (now fully understood):** ~9 touched files —
+`proxy.go` (BlockConn/ExtractCDFilename ×7, production), `fileblock_startup.go`+`_config.go`
+(`DefaultBlockedExts`), split `fileblock_test.go` + `fileblock_replaceall_test.go` (engine→package,
+integration→main with exported-API isolation), move `fileprofile_test.go`, adapt `coverage_day3_test.go`/
+`cluster_apply_persist_test.go`/`edge_audit_test.go` constructions. Mechanical but broader than mapped;
+behaviour risk LOW, **test-isolation-rewrite risk MEDIUM** (the determinism gate is the backstop).
+**Decision pending: proceed with this larger-but-bounded scope, or defer.** No code is moved (reverted).
 - **Related:** DEBT-001, DEBT-002, DEBT-003 (Technical Debt Register)
 
 ## Context
