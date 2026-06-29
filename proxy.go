@@ -269,7 +269,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	ssoCapable := len(idpRegistry.EnabledProviders()) > 0
 	authRequired := credCapable || ssoCapable || effectiveDefault == OutcomeExempt
 
-	if authRequired {
+	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
 		if sess, err := readSessionCookie(r); err == nil && sess != nil {
 			id := sess.Identity()
@@ -652,10 +652,10 @@ func recordRequestTelemetry(r *http.Request, start time.Time, sslAction SSLActio
 	}
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
-	start := time.Now()
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-
+// setupRequestTracing ensures the request carries an X-Request-ID (CWE-117
+// sanitised) and a W3C traceparent, mirroring the request ID onto the response.
+// It returns the request ID. Extracted from handleRequest (DEBT-002).
+func setupRequestTracing(w http.ResponseWriter, r *http.Request) string {
 	// ── Request tracing: generate X-Request-ID if not present ────────────
 	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get("X-Request-ID"), "\n", ""), "\r", "") // sanitize for CWE-117
 	if reqID == "" {
@@ -668,6 +668,46 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	if r.Header.Get("Traceparent") == "" {
 		r.Header.Set("Traceparent", generateTraceparent())
 	}
+	return reqID
+}
+
+// resolveSSLAction computes the effective SSL action and per-rule TLS-verify
+// option for a request, applying the smart-bypass pattern override. Extracted
+// from handleRequest (DEBT-002).
+func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, bool) {
+	// Determine SSL action and per-rule TLS options for CONNECT tunnels.
+	sslAction := SSLBypass
+	tlsSkipVerify := false
+	if match != nil {
+		if match.SSLAction == SSLInspect {
+			sslAction = SSLInspect
+		}
+		tlsSkipVerify = match.TLSSkipVerify
+	}
+	// Smart Bypass: explicit bypass-list patterns (glob or regex) always
+	// override policy-based SSL inspection, regardless of rule SSLAction.
+	if sslAction == SSLInspect && sslBypass.Matches(host) {
+		sslAction = SSLBypass
+		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
+	}
+	return sslAction, tlsSkipVerify
+}
+
+// trackDestinationCountry records the destination country for the live
+// dashboard. Runs in its own goroutine (fire-and-forget); extracted from
+// handleRequest (DEBT-002).
+func trackDestinationCountry(host string) {
+	code, name := geo.LookupFull(host)
+	if code != "" {
+		countryTraffic.Record(code, name)
+	}
+}
+
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+	reqID := setupRequestTracing(w, r)
 
 	// ── Connection limit per IP ─────────────────────────────────────────
 	if !connLimiter.Acquire(clientIP) {
@@ -737,30 +777,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		return
 	}
 
-	// ── Geo-IP tracking (async) ───────────────────────────────────────────────
+	// ── Geo-IP tracking (async) ──────────────────────────────────────────────
 	// Record destination country for the live dashboard without blocking.
-	go func(h string) {
-		code, name := geo.LookupFull(h)
-		if code != "" {
-			countryTraffic.Record(code, name)
-		}
-	}(host)
+	go trackDestinationCountry(host)
 
-	// Determine SSL action and per-rule TLS options for CONNECT tunnels.
-	sslAction := SSLBypass
-	tlsSkipVerify := false
-	if match != nil {
-		if match.SSLAction == SSLInspect {
-			sslAction = SSLInspect
-		}
-		tlsSkipVerify = match.TLSSkipVerify
-	}
-	// Smart Bypass: explicit bypass-list patterns (glob or regex) always
-	// override policy-based SSL inspection, regardless of rule SSLAction.
-	if sslAction == SSLInspect && sslBypass.Matches(host) {
-		sslAction = SSLBypass
-		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
-	}
+	sslAction, tlsSkipVerify := resolveSSLAction(match, host, clientIP)
 
 	// Identity context forwarded to SSL-inspect (consumed by CDR today;
 	// future audit enrichment can read this without re-parsing headers).
