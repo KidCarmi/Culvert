@@ -600,6 +600,29 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 			}
 		}
 		nr.Priority = maxPri + 1
+	} else {
+		// Defense-in-depth: recheck priority uniqueness under the lock.
+		// validatePolicyRule catches the common non-concurrent case; this guard
+		// closes the TOCTOU window for concurrent adds that both pass validation
+		// against the same pre-lock snapshot.
+		collision := false
+		for _, existing := range ps.rules {
+			if existing.Priority == nr.Priority {
+				collision = true
+				break
+			}
+		}
+		if collision {
+			maxPri := 0
+			for _, existing := range ps.rules {
+				if existing.Priority > maxPri {
+					maxPri = existing.Priority
+				}
+			}
+			logWarnf("Policy: Add: priority %d collision (concurrent request?) — reassigning to %d",
+				nr.Priority, maxPri+1)
+			nr.Priority = maxPri + 1
+		}
 	}
 	ps.rules = append(ps.rules, &nr)
 	ps.sortLocked()
