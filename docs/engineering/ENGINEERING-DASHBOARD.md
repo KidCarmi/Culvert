@@ -71,12 +71,12 @@ Sequenced backlog (full detail in the registers):
    RISK-008 (username timing oracle), RISK-009 (`InsecureSkipVerify` warning), RISK-006 (pin CI scanners).
 2. **This month:** RISK-001 mitigation (fencing token + honest HA docs + split-brain runbook),
    DEBT-007 (e2e MITM test), add CodeQL to the merge-blocking set.
-3. **This quarter (ADR-gated):** ✅ DEBT-002 (`handleRequest` 73→11) done; ✅ ADR-0002 leaves
-   `internal/totp` and `internal/geoip` extracted (strategy validated **twice**) — all **2026-06-28**.
-   Recommended next is the **shared logging + `atomicWriteFile` seam** (gating prerequisite for
-   `fileblock` and the `scan` hub), not more leaf-chasing.
-   *(Architecture score unchanged — two small leaves out of ~58K LOC are proof-of-method, not yet a
-   dent in DEBT-001.)*
+3. **This quarter (ADR-gated):** ✅ DEBT-002 (`handleRequest` 73→11); ✅ ADR-0002 leaves
+   `internal/totp`, `internal/geoip`, `internal/fileblock`; ✅ ADR-0003 seam
+   (`internal/obs`+`internal/fileutil`) — all **2026-06-28**. Remaining named candidate: `scan` (hub),
+   which needs one more seam increment (`fireAlert` alerting + a `stripHostPort` home).
+   *(Architecture score unchanged — 3 small leaves + a seam out of ~58K LOC are proof-of-method and
+   enabling infra, not yet a material dent in DEBT-001's ~359-global flat namespace.)*
 4. **Roadmap:** real HA consensus, self-update in-binary verification, rollback verification.
 
 ---

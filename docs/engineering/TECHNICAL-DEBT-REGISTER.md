@@ -33,9 +33,13 @@
 - **Proof it's payable:** `cmd/culvert-maint/internal/{server,ops,runner,auth,config,audit,health}`
   already uses proper packages — the team can do this; it just hasn't back-ported it.
 - **Direction:** ADR-0002 (Accepted). Incremental leaf-cluster extraction into `internal/`. **No rewrite.**
-- **Progress (2026-06-28):** **two leaves shipped** — `internal/totp` (proving PR) and
-  `internal/geoip` (the GeoIP engine; `resolveHost`+SSRF check stayed in main via a thin wrapper,
-  ADR-0002 option F). Both: minimal exported API, no cycle, behaviour unchanged, validated green.
+- **Progress (2026-06-28):** **three leaves + the shared seam shipped** — `internal/totp`,
+  `internal/geoip` (ADR-0002 option F), the `internal/obs`+`internal/fileutil` seam (ADR-0003), and
+  `internal/fileblock` (the file-type blocking engine, unblocked by the seam). All validated green
+  (build/vet/test/-race/lint/cycle); `fileblock` additionally passed a `-count=2 -shuffle` determinism
+  check on its integration-test isolation rewrites. `fileblock` was ~2× the mapped scope (test
+  entanglement) and required one method beyond the approved export list (`FileProfileStore.SetPath`);
+  recorded honestly in ADR-0002.
   Mapping `internal/scan` first showed it is a **hub** (logging/alerting/file/host coupling;
   ~20-file inbound) — recorded in ADR-0002. **Sequencing learned:** true leaves first (`totp`,
   `geoip` done), then a shared **logging + `atomicWriteFile` seam** (the gating prerequisite for

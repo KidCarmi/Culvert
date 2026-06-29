@@ -180,6 +180,41 @@ integration→main with exported-API isolation), move `fileprofile_test.go`, ada
 `cluster_apply_persist_test.go`/`edge_audit_test.go` constructions. Mechanical but broader than mapped;
 behaviour risk LOW, **test-isolation-rewrite risk MEDIUM** (the determinism gate is the backstop).
 **Decision pending: proceed with this larger-but-bounded scope, or defer.** No code is moved (reverted).
+
+### 2026-06-28 — shipped: `internal/fileblock` (third leaf, ✅, larger scope)
+Maintainer approved the larger scope. The file-type blocking engine moved to `internal/fileblock`
+(uses `internal/obs` + `internal/fileutil`); `package main` keeps the singletons + transitional type
+aliases. **Validated green:** build, `go vet`, full `go test ./...` (main + 5 internal packages),
+`-race` (main + fileblock), **`-count=2 -shuffle=on` determinism on the fileblock/integration tests**
+(the MEDIUM-risk isolation rewrites hold), `golangci-lint ./internal/fileblock` 0 issues, coverage
+76.6%; `go list -deps` confirms no Culvert-package import (clean leaf, no cycle).
+
+**Actual scope (~12 files, ~2× the original filename-map estimate) — honest record:**
+- New: `internal/fileblock/{fileblock,fileprofile}.go` + 3 moved test files; `fileblock_vars.go`
+  (singletons + 3 type aliases).
+- Split two MIXED test files: engine tests → package; the proxy (`handleRequest`) and
+  `applyConfigSnapshot` integration tests **stayed in main**, re-isolated via the exported API
+  (`List()`/`SetPath("")`/`ReplaceAll`) instead of the prior whitebox field access.
+- Adapted `proxy.go` (BlockConn/ExtractCDFilename ×8, production), `fileblock_startup*.go`
+  (`DefaultBlockedExts`), and 3 more test files (`coverage_day3`, `cluster_apply_persist`,
+  `edge_audit`) whose direct `&FileBlocker{…}` construction broke on the type move.
+- Local `assertNoTmpLeak` copy in the package; dropped the `ensureFileblockTestLogger` call (obs's
+  default sink removes the nil-logger risk).
+
+**Two deviations from the approved plan, flagged for review:**
+1. **Added one method beyond the approved export list:** `FileProfileStore.SetPath(p)` (symmetric
+   with `FileBlocker.SetPath`). Required because the cluster integration test redirects persistence
+   and there was no exported way to do so without `Load`'s seeding side-effects. Minimal, behaviour-
+   preserving.
+2. **Resolved diff-resurfaced lint on the moved code** (revive doc-comments, gocritic `equalFold`/
+   `ifElseChain`, errcheck nolint-format). `equalFold` was applied as `strings.EqualFold` (behaviour-
+   equivalent); the test if-else got a justified `//nolint:gocritic`. This nudged slightly past "no
+   cleanup," but was required to pass the same lint gate as the rest of the tree.
+
+**Lesson (third time): the *test* surface, not the engine, is the hard part of extraction** — mixed
+files, shared test helpers, whitebox isolation, and direct type construction scatter far wider than a
+filename map shows. Future near-hub mappings must read the test sources up front and budget for
+integration-test isolation rewrites. **Three leaves done (`totp`, `geoip`, `fileblock`) + the seam.**
 - **Related:** DEBT-001, DEBT-002, DEBT-003 (Technical Debt Register)
 
 ## Context
