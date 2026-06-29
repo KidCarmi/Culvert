@@ -27,7 +27,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/geoip"
+	"github.com/KidCarmi/Culvert/internal/obs"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -503,6 +505,9 @@ func initLogger(s *startupState) {
 		log.Fatalf("Logger setup failed: %v", err)
 	}
 	SetLogLevel(ParseLogLevel(s.fc.LogLevel))
+	// Route internal/* package logs (obs facade) into the same logger. Published
+	// once here at startup, before any traffic is served (ADR-0003 seam).
+	obs.SetSink(func(line string) { logger.Print(line) })
 }
 
 // initLifecycleContext creates the app-wide lifecycle context.
@@ -2197,57 +2202,9 @@ func certNeedsRenewal(certFile string) (int, bool) {
 //   - The dir handle is always closed; a Close error is propagated only when
 //     Sync did not already report an error.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	f, err := os.CreateTemp(dir, base+".tmp.*")
-	if err != nil {
-		return fmt.Errorf("atomic write %s: create temp: %w", path, err)
-	}
-	tmp := f.Name()
-	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
-
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		cleanup()
-		return fmt.Errorf("atomic write %s: write: %w", path, err)
-	}
-	if err := f.Chmod(perm); err != nil {
-		_ = f.Close()
-		cleanup()
-		return fmt.Errorf("atomic write %s: chmod: %w", path, err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		cleanup()
-		return fmt.Errorf("atomic write %s: fsync: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic write %s: close: %w", path, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic write %s: rename: %w", path, err)
-	}
-
-	d, err := os.Open(dir)
-	if err != nil {
-		// Best-effort: opening a directory for sync is not portable.
-		return nil
-	}
-	syncErr := d.Sync()
-	closeErr := d.Close()
-	if syncErr != nil &&
-		!errors.Is(syncErr, syscall.EINVAL) &&
-		!errors.Is(syncErr, syscall.ENOTSUP) &&
-		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
-		return fmt.Errorf("atomic write %s: parent dir fsync: %w", path, syncErr)
-	}
-	if closeErr != nil && syncErr == nil {
-		return fmt.Errorf("atomic write %s: parent dir close: %w", path, closeErr)
-	}
-	return nil
+	// Delegates to internal/fileutil (ADR-0003 seam). Kept as a thin wrapper so
+	// all existing call sites stay unchanged.
+	return fileutil.AtomicWrite(path, data, perm)
 }
 
 // forceRenewDPCert renews the DP cert unconditionally (triggered by CA rotation).
