@@ -642,16 +642,42 @@ func initCluster(s *startupState) {
 		)
 	} else if cpAddr != "" || s.fc.Cluster.Role == "control-plane" {
 		// ── Normal CP startup ────────────────────────────────────────
-		if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
-			logger.Fatalf("ControlPlane gRPC: %v", err)
-		}
-		// Check for persisted HA config (leader restart).
-		if haCfg, err := loadHAConfig(); err == nil && haCfg.Enabled {
-			globalHA.EnableAsLeader(haCfg.PeerAddr, haCfg.AutoFailover)
-			globalHA.mu.Lock()
-			globalHA.token = haCfg.Token // restore original token
-			globalHA.mu.Unlock()
-			logger.Printf("HA: restored leader state from %s (peer=%s)", haConfigFile, haCfg.PeerAddr)
+		// Resolve the persisted HA role BEFORE asserting leadership (ADR-0004):
+		// a node persisted as standby must NOT silently come up as a second
+		// leader. A restarted leader cannot probe its peer (it never records
+		// the standby's address — see ha.go), so it resumes leadership with an
+		// honest split-brain-risk warning when auto-failover is enabled.
+		haCfg, haErr := loadHAConfig()
+		if haRestartAction(haCfg, haErr) == "standby" {
+			// Re-enter standby instead of self-asserting leader. Mirrors the
+			// --ha-join path; onPromote enables the CP gRPC server on promotion.
+			initClusterCA(clusterDBPath)
+			globalHA.StartAsStandby(appLifecycleCtx, haCfg.PeerAddr, haCfg.Token,
+				cpAddr, cpCert, cpKey, cpCA, haCfg.AutoFailover,
+				func() error {
+					return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
+				},
+			)
+			logger.Printf("HA: restarted as standby from %s (leader=%s) — not self-asserting leader (ADR-0004)",
+				haConfigFile, sanitizeLog(haCfg.PeerAddr))
+		} else {
+			if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
+				logger.Fatalf("ControlPlane gRPC: %v", err)
+			}
+			// Persisted leader (or legacy config with no role) resumes leadership.
+			if haErr == nil && haCfg.Enabled {
+				globalHA.EnableAsLeader(haCfg.PeerAddr, haCfg.AutoFailover)
+				globalHA.mu.Lock()
+				globalHA.token = haCfg.Token // restore original token
+				globalHA.mu.Unlock()
+				if haCfg.AutoFailover {
+					logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
+						"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
+						"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile)
+				} else {
+					logger.Printf("HA: resumed as leader from %s after restart (peer=%s)", haConfigFile, haCfg.PeerAddr)
+				}
+			}
 		}
 	}
 	// ── Data Plane startup: from flags, enrollment, or saved config ─────────

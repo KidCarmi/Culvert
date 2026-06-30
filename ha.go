@@ -27,11 +27,22 @@ import (
 //   1. Admin enables CP from GUI, clicks "Enable HA" → generates HA token
 //   2. GUI shows a deploy command for the standby (includes --ha-join URL)
 //   3. Admin runs command on Server B → standby syncs state, stands by
-//   4. If leader dies → standby promotes after 3 failed sync attempts
+//   4. If leader dies AND auto-failover is enabled → standby promotes after 3
+//      failed sync attempts. Auto-failover is OPT-IN and OFF by default: a
+//      2-node active/passive cluster has no witness, so unattended promotion on
+//      a surviving-leader partition is a split-brain (ADR-0004 / RISK-001).
+//      Default (manual): the standby stays read-only until an operator acts.
 //   5. DPs automatically failover (--dp-cp-addr supports comma-separated addrs)
 //
-// Leader failback: when the original leader restarts, it loads its persisted
-// HA config, detects the peer is already serving, and becomes standby.
+// Restart behaviour (ADR-0004): on restart a node honours its PERSISTED role —
+// a standby re-enters standby (it never silently self-asserts as a second
+// leader). A restarted LEADER resumes leadership because the topology gives it
+// no way to probe its peer: the standby is the gRPC client, so the leader does
+// not record the standby's address (peerAddr holds the *leader's own* advertised
+// address — see haDeployCommand). True "handshake the peer on restart, become
+// standby if it already leads" therefore requires recording the standby's
+// address and is deferred to the failover-mechanism work; until then a
+// leader-resume under auto-failover logs a split-brain-risk warning.
 //
 // Authentication: standby presents a shared HA token in every HASync RPC.
 // The leader verifies it against the stored token.
@@ -406,6 +417,21 @@ func saveHAConfig(cfg *haConfig) error {
 	// plain os.WriteFile which left a non-durable / potentially-
 	// truncated file on crash.
 	return atomicWriteFile(haConfigPath(), data, 0o600)
+}
+
+// haRestartAction decides what a node restarting on the normal CP path should
+// do given its persisted HA config: "standby" (re-enter standby, do NOT assert
+// leadership), "leader" (resume leadership — includes legacy configs with no
+// role for back-compat), or "none" (HA disabled / unreadable config → plain CP).
+// ADR-0004: a persisted standby must never silently come up as a second leader.
+func haRestartAction(cfg *haConfig, loadErr error) string {
+	if loadErr != nil || cfg == nil || !cfg.Enabled {
+		return "none"
+	}
+	if cfg.Role == "standby" {
+		return "standby"
+	}
+	return "leader"
 }
 
 func loadHAConfig() (*haConfig, error) {

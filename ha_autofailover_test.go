@@ -102,6 +102,37 @@ func TestHA_AutoFailover_OptIn(t *testing.T) {
 	}
 }
 
+// ADR-0004 Slice 1b: a node restarting on the CP path honours its persisted
+// role — a standby never silently resumes as a second leader.
+func TestHA_RestartAction_HonoursPersistedRole(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     *haConfig
+		loadErr error
+		want    string
+	}{
+		{"standby re-enters standby", &haConfig{Enabled: true, Role: "standby"}, nil, "standby"},
+		{"leader resumes leader", &haConfig{Enabled: true, Role: "leader"}, nil, "leader"},
+		{"legacy empty role resumes leader", &haConfig{Enabled: true, Role: ""}, nil, "leader"},
+		{"disabled HA → none", &haConfig{Enabled: false, Role: "leader"}, nil, "none"},
+		{"load error → none", nil, errTestHALoad, "none"},
+		{"nil cfg → none", nil, nil, "none"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := haRestartAction(c.cfg, c.loadErr); got != c.want {
+				t.Errorf("haRestartAction = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+var errTestHALoad = errTestHA("load failed")
+
+type errTestHA string
+
+func (e errTestHA) Error() string { return string(e) }
+
 // The preference survives a save/load of ha_config.json (leader-restart path).
 func TestHA_Config_RoundTripsAutoFailover(t *testing.T) {
 	origPath := clusterDBPathGlobal

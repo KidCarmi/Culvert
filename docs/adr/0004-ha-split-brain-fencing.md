@@ -131,10 +131,20 @@ split-brain into *visible, operator-recoverable* split-brain:
    auto-promotion is unsafe; default-off stops the dangerous behavior. A dead leader is promoted by an
    operator (or by a later, safe mechanism). **This is a behavior change** and must be documented in the
    release notes and the operator runbook.
-2. **Restart starts read-only.** Rewrite `main.go:647`: a restarting HA node must NOT self-assert
-   leader. It starts read-only, probes the peer; if the peer serves as leader it becomes standby; if
-   the peer is unreachable it respects the failover policy (default manual ⇒ stay read-only, wait for an
-   operator). It must read and honor the persisted `Role` (today it ignores it). Pure correctness.
+2. **Restart honors the persisted role.** Rewrite `main.go:647`: a restarting HA node must NOT
+   self-assert leader. It reads and honors the persisted `Role` (today it ignores it): a **standby
+   re-enters standby** (never silently becomes a second leader); a **leader resumes leadership** with an
+   honest split-brain-risk warning when auto-failover is enabled.
+   - **Scope correction (discovered during implementation, 2026-06-30):** the ADR originally said a
+     restarted leader should "probe the peer and become standby if it already leads." That is **not
+     implementable in the current topology**: the standby is the gRPC *client*, so the leader never
+     records the standby's address — `peerAddr` holds the *leader's own* advertised address (verified at
+     `controlplane.go:1905-1906` and `haDeployCommand`). A leader therefore has no peer address to probe
+     on restart. True peer-handshake-on-restart requires **recording the standby's advertised address**
+     (a small HASync-protocol addition) and is deferred to the failover-mechanism slice, which needs
+     peer identity anyway. Slice 1 ships the role-honoring half (the verified `main.go:647` bug) plus the
+     honest leader-resume warning; the term-visible `/healthz` (item 3) is what makes a double-leader
+     *detectable* in the interim.
 3. **Term/epoch plumbing + `/healthz` visibility.** Add a monotonic `term` to `ha_config.json` and
    `HAStateBundle` (plumbing + persistence only — cross-side *comparison semantics* are
    mechanism-dependent, F7, and are deferred). Surface `role`, `term`, `write_authority`, and
