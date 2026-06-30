@@ -212,6 +212,22 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	go h.standbyLoop(ctx, leaderAddr, token, certFile, keyFile, caFile)
 }
 
+// haStandbyMaxFail is the number of consecutive HASync failures (≈ maxFail × 5s)
+// that trips the leader-unreachable threshold.
+const haStandbyMaxFail = 3
+
+// standbyLoopState carries the standby sync loop's mutable state so the per-tick
+// logic lives in small methods (keeps standbyLoop's cognitive complexity low).
+type standbyLoopState struct {
+	h                         *HAState
+	ctx                       context.Context
+	leaderAddr, token         string
+	certFile, keyFile, caFile string
+	client                    *DataPlaneClient
+	failCount                 int
+	manualWarned              bool // warn-once latch for the auto-failover-disabled path
+}
+
 func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
 	certFile, keyFile, caFile string) {
 	// Capture the stop channel once. promote() calls Stop() (which closes then
@@ -222,47 +238,21 @@ func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
 	stopCh := h.stopCh
 	h.mu.RUnlock()
 
+	s := &standbyLoopState{
+		h: h, ctx: ctx, leaderAddr: leaderAddr, token: token,
+		certFile: certFile, keyFile: keyFile, caFile: caFile,
+	}
 	// Connect to leader using the same gRPC client infrastructure as DPs.
-	client, err := NewDataPlaneClient("ha-standby", leaderAddr, certFile, keyFile, caFile)
-	if err != nil {
-		logger.Printf("HA: failed to connect to leader: %v — will retry", err)
+	if c, cerr := NewDataPlaneClient("ha-standby", leaderAddr, certFile, keyFile, caFile); cerr != nil {
+		logger.Printf("HA: failed to connect to leader: %v — will retry", cerr)
+	} else {
+		s.client = c
 	}
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	failCount := 0
-	manualWarned := false // warn-once latch for the auto-failover-disabled path
-	const maxFail = 3
-
-	// onMaxFail handles the leader-unreachable threshold. It returns true when
-	// the standbyLoop should EXIT (auto-failover promoted this node to leader),
-	// and false when the loop should keep running (auto-failover disabled →
-	// stay standby/read-only and keep retrying, so we recover automatically if
-	// the leader returns). See ADR-0004: default-OFF auto-failover is the
-	// split-brain mitigation for the witness-less 2-node topology.
-	onMaxFail := func() bool {
-		if h.autoFailoverEnabled() {
-			h.promote("leader unreachable")
-			return true
-		}
-		if !manualWarned {
-			h.warnManualFailoverRequired(leaderAddr)
-			manualWarned = true
-		}
-		return false
-	}
-
-	// Try immediately.
-	if client != nil {
-		if h.syncFromLeader(ctx, client, token) {
-			failCount = 0
-		} else {
-			failCount++
-		}
-	} else {
-		failCount++
-	}
+	s.syncOnce() // try immediately
 
 	for {
 		select {
@@ -271,31 +261,64 @@ func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
 		case <-stopCh:
 			return
 		case <-ticker.C:
-			if client == nil {
-				// Retry connection.
-				client, err = NewDataPlaneClient("ha-standby", leaderAddr, certFile, keyFile, caFile)
-				if err != nil {
-					failCount++
-					logger.Printf("HA: reconnect to leader failed (%d/%d): %v", failCount, maxFail, err)
-					if failCount >= maxFail && onMaxFail() {
-						return
-					}
-					continue
-				}
-			}
-
-			if h.syncFromLeader(ctx, client, token) {
-				failCount = 0
-				manualWarned = false // leader recovered — re-arm the warning
-			} else {
-				failCount++
-				logger.Printf("HA: sync failed (%d/%d)", failCount, maxFail)
-				if failCount >= maxFail && onMaxFail() {
-					return
-				}
+			if s.tick() {
+				return
 			}
 		}
 	}
+}
+
+// onMaxFail handles the leader-unreachable threshold. Returns true when the loop
+// should EXIT (auto-failover promoted this node to leader); false to keep the
+// standby read-only and retrying (auto-failover disabled — the default split-
+// brain mitigation; see ADR-0004), warning once until the leader returns.
+func (s *standbyLoopState) onMaxFail() bool {
+	if s.h.autoFailoverEnabled() {
+		s.h.promote("leader unreachable")
+		return true
+	}
+	if !s.manualWarned {
+		s.h.warnManualFailoverRequired(s.leaderAddr)
+		s.manualWarned = true
+	}
+	return false
+}
+
+// syncOnce performs a single sync attempt without reconnecting (the immediate
+// try at loop start), updating failCount.
+func (s *standbyLoopState) syncOnce() {
+	if s.client == nil {
+		s.failCount++
+		return
+	}
+	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
+		s.failCount = 0
+		s.manualWarned = false
+	} else {
+		s.failCount++
+	}
+}
+
+// tick runs one loop iteration: reconnect if needed, then sync. Returns true
+// when the loop should exit (this node was promoted to leader).
+func (s *standbyLoopState) tick() bool {
+	if s.client == nil {
+		c, err := NewDataPlaneClient("ha-standby", s.leaderAddr, s.certFile, s.keyFile, s.caFile)
+		if err != nil {
+			s.failCount++
+			logger.Printf("HA: reconnect to leader failed (%d/%d): %v", s.failCount, haStandbyMaxFail, err)
+			return s.failCount >= haStandbyMaxFail && s.onMaxFail()
+		}
+		s.client = c
+	}
+	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
+		s.failCount = 0
+		s.manualWarned = false // leader recovered — re-arm the warning
+		return false
+	}
+	s.failCount++
+	logger.Printf("HA: sync failed (%d/%d)", s.failCount, haStandbyMaxFail)
+	return s.failCount >= haStandbyMaxFail && s.onMaxFail()
 }
 
 // warnManualFailoverRequired logs and alerts that the leader is unreachable
