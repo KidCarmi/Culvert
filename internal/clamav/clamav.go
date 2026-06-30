@@ -1,18 +1,7 @@
-package main
-
-import (
-	"context"
-	"encoding/binary"
-	"fmt"
-	"io"
-	"net"
-	"strings"
-	"time"
-)
-
-// ClamAV implements a ClamAV CLAMD protocol client.
-// It supports both Unix domain sockets and TCP connections for on-the-fly
-// file scanning with zero external API dependency.
+// Package clamav implements a ClamAV CLAMD protocol client (INSTREAM scanning)
+// over Unix domain sockets or TCP, with zero external API dependency. It is a
+// self-contained leaf (stdlib only, no Culvert coupling) extracted from the flat
+// package main per ADR-0002.
 //
 // Protocol: CLAMD INSTREAM command
 //
@@ -25,7 +14,20 @@ import (
 //     "stream: ... ERROR\0"             → scan error
 //
 // Reference: https://linux.die.net/man/8/clamd
-type ClamAV struct {
+package clamav
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"strings"
+	"time"
+)
+
+// Client is a ClamAV CLAMD protocol client.
+type Client struct {
 	network string // "unix" or "tcp"
 	addr    string // socket path or host:port
 	timeout time.Duration
@@ -38,13 +40,13 @@ const clamMaxConcurrent = 4 // max parallel ClamAV scans
 // when multiple requests trigger scanning simultaneously.
 var clamSem = make(chan struct{}, clamMaxConcurrent)
 
-// NewClamAV creates a client from an address string.
+// New creates a client from an address string.
 //
 //	"unix:/var/run/clamav/clamd.sock"  → Unix domain socket
 //	"tcp:localhost:3310"               → TCP connection
 //	""                                 → default Unix socket path
-func NewClamAV(addr string) *ClamAV {
-	c := &ClamAV{timeout: 30 * time.Second}
+func New(addr string) *Client {
+	c := &Client{timeout: 30 * time.Second}
 	switch {
 	case strings.HasPrefix(addr, "unix:"):
 		c.network = "unix"
@@ -65,13 +67,13 @@ func NewClamAV(addr string) *ClamAV {
 
 // Ping verifies the ClamAV daemon is reachable and responding correctly.
 // Returns nil on success, error otherwise.
-func (c *ClamAV) Ping() error {
-	conn, err := net.DialTimeout(c.network, c.addr, c.timeout)
+func (c *Client) Ping() error {
+	conn, err := (&net.Dialer{Timeout: c.timeout}).DialContext(context.Background(), c.network, c.addr)
 	if err != nil {
 		return fmt.Errorf("clamav: connect failed: %w", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(c.timeout)) //nolint:errcheck
+	conn.SetDeadline(time.Now().Add(c.timeout)) //nolint:errcheck // a failed deadline set is surfaced by the subsequent read/write
 
 	if _, err := fmt.Fprintf(conn, "zPING\x00"); err != nil {
 		return fmt.Errorf("clamav: ping write: %w", err)
@@ -89,7 +91,7 @@ func (c *ClamAV) Ping() error {
 // Returns (virusName, isMalicious, error).
 // virusName is non-empty only when isMalicious is true.
 // Concurrent scans are limited by clamSem to prevent overwhelming the daemon.
-func (c *ClamAV) Scan(data []byte) (virusName string, isMalicious bool, err error) {
+func (c *Client) Scan(data []byte) (virusName string, isMalicious bool, err error) {
 	// P6: Non-blocking semaphore with timeout to prevent goroutine backlog.
 	select {
 	case clamSem <- struct{}{}:
@@ -103,7 +105,7 @@ func (c *ClamAV) Scan(data []byte) (virusName string, isMalicious bool, err erro
 		return "", false, fmt.Errorf("clamav: connect: %w", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(c.timeout)) //nolint:errcheck
+	conn.SetDeadline(time.Now().Add(c.timeout)) //nolint:errcheck // a failed deadline set is surfaced by the subsequent read/write
 
 	// Send INSTREAM command (null-terminated).
 	if _, err := fmt.Fprintf(conn, "zINSTREAM\x00"); err != nil {
@@ -145,7 +147,7 @@ func (c *ClamAV) Scan(data []byte) (virusName string, isMalicious bool, err erro
 //	"stream: OK"                       → ("", false, nil)
 //	"stream: Eicar-Test-Signature FOUND" → ("Eicar-Test-Signature", true, nil)
 //	"stream: ... ERROR"                → ("", false, error)
-func parseClamResponse(resp string) (string, bool, error) {
+func parseClamResponse(resp string) (virusName string, isMalicious bool, err error) {
 	switch {
 	case strings.HasSuffix(resp, " OK"):
 		return "", false, nil

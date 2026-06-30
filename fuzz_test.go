@@ -72,30 +72,8 @@ func FuzzIsSafeRedirectURL(f *testing.F) {
 	})
 }
 
-// FuzzParseClamResponse ensures the ClamAV response parser never panics on
-// malformed or truncated daemon output.
-func FuzzParseClamResponse(f *testing.F) {
-	seeds := []string{
-		"stream: OK",
-		"stream: Eicar-Test-Signature FOUND",
-		"stream: ERROR",
-		"stdin: Win.Test.EICAR_HDB-1 FOUND",
-		"",
-		"FOUND",
-		"OK",
-		": FOUND",
-		"stream: some.virus.name FOUND",
-		"stream: \x00\xff FOUND",
-		"a: b: FOUND",
-		"stream: OK\nstream: FOUND",
-	}
-	for _, s := range seeds {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, resp string) {
-		_, _, _ = parseClamResponse(resp)
-	})
-}
+// FuzzParseClamResponse moved to internal/clamav (ADR-0002) — it fuzzes the
+// unexported parseClamResponse, now in package clamav.
 
 // FuzzNormaliseFeedURL ensures the feed-URL normaliser never panics on
 // arbitrary URLs from untrusted operator input.

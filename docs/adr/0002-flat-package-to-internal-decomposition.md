@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 
 ## Notes / log
 
@@ -439,6 +439,25 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` on th
 alert/webhook/scan consumers (existing `yara_degraded`/`scan_skipped` delivery still works end-to-end
 through the sink), determinism gate (`-count=2 -shuffle=on`) — all green. **Three seams now
 (`obs`/`fileutil`, `hostutil`, `alerts`); the `scan` cluster is unblocked.**
+
+### 2026-06-29 — `internal/clamav` extracted (first scan engine, eleventh leaf)
+Moved `clam.go` (the ClamAV CLAMD INSTREAM client) into `internal/clamav` — the **first piece out of
+the scan cluster**, and the cleanest: pure stdlib, **zero** Culvert coupling (no obs, no alerting, no
+globals). Idiomatic rename `ClamAV`→`Client`, `NewClamAV`→`New` (revive: `clamav.ClamAV` is
+repetitive); `clam_vars.go` aliases both back (`type ClamAV = clamav.Client`, `var NewClamAV =
+clamav.New`) so the sole consumer — `SecurityScanner.clam` in `security_scan.go` — is unchanged.
+
+The `parseClamResponse` unit tests (from the shared `logger_ca_clam_test.go`), the
+`ScanConnectionRefused` test (whitebox `timeout` field), and `FuzzParseClamResponse` (from the shared
+`fuzz_test.go`) all **moved** into the package (they use the unexported parser/field). Lint on the
+moved code: `Ping` still used `net.DialTimeout` → rewrote to `DialContext` (CLAUDE.md form, matching
+`Scan` which already used it); `unnamedResult` on `parseClamResponse` → named to match its doc; two
+bare `//nolint:errcheck` on `SetDeadline` → added reasons.
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + determinism gate
+(`-count=2 -shuffle=on`) on the package and the `security_scan` consumer — all green. **Eleven leaves
+done (… `clamav`) + three seams.** Scan cluster remaining: `yara_scan.go` (engine — needs the now-built
+`alerts` seam), `scanner.go` (DPI coordinator), `security_scan.go` (orchestrator hub).
 
 ## Context
 
