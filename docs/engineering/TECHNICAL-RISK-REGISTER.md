@@ -12,7 +12,7 @@
 
 | ID | Sev | Status | Title | Evidence |
 |---|---|---|---|---|
-| RISK-001 | BLOCKER | OPEN | Multi-CP HA split-brain (no quorum/fencing) | `ha.go` (no `demote`/`stepDown`/quorum symbol, 570 LOC) **HV** |
+| RISK-001 | HIGH | MITIGATING | Multi-CP HA split-brain (no quorum/fencing) | Slice 1 landed (ADR-0004): auto-failover OPT-IN/OFF, restart honors role, term-visible `/healthz`. Safe-automatic failover (mechanism) still open. **HV** |
 | RISK-002 | HIGH | ✅ CLOSED | OIDC introspection path missing SSRF dial guard | fixed `auth_oidc.go:95` (2026-06-28) |
 | RISK-003 | HIGH | ✅ CLOSED | Webhook HMAC secret persisted cleartext on disk | `alerts.go`, `alerts_secret.go` |
 | RISK-006 | MEDIUM | OPEN | Gate config blind spots: `--ignore-unfixed` + `HIGH,CRITICAL` only (masks unfixed/medium) | `security-release-gate.yml:135-143` — **trivy-verified 2026-06-28** |
@@ -30,23 +30,31 @@
 
 ---
 
-## RISK-001 — Multi-CP HA split-brain · BLOCKER · OPEN
-- **Current state:** Standby self-promotes after 3 missed 5s polls (~15s); a restarted leader
-  unconditionally re-asserts `leader` from `ha_config.json`; both then report `"leader":true`
-  from `/healthz`. No consensus, fencing, or failback reconciliation exists. **Hand-verified:**
-  `ha.go` contains `EnableAsLeader`/`StartAsStandby` but no `demote`/`stepDown`/`quorum`/`fenc*`.
-  Behavior is *pinned* in `ha_split_brain_failover_evidence_test.go` — it is known, not accidental.
-- **Business impact:** "Enterprise HA" is a headline claim; on any >15s CP-to-CP network blip the
-  cluster splits into two divergent leaders. Admin mutations (enrollment, tokens, CA) diverge
-  permanently and require manual recovery.
-- **Engineering/operational impact:** No safe automated failover for multi-CP; single-CP is fine.
-- **Recommendation:**
-  - *Now (Complexity S):* gate write paths behind a fencing token; refuse leader-on-restart without
-    a re-handshake; **document HA as active/passive with manual failover** and write the
-    split-brain recovery runbook (`docs/operator/`).
-  - *Roadmap (Complexity L):* real consensus (Raft or single-writer lease with fencing).
-- **Until then:** ACCEPTED-only for single-CP deployments. Multi-CP on flaky networks is unsafe.
-- **Owner:** unassigned · **Target:** mitigation this month.
+## RISK-001 — Multi-CP HA split-brain · HIGH · MITIGATING
+- **Design:** `docs/adr/0004-ha-split-brain-fencing.md` (the 2-node-no-witness theorem, the rejected
+  hand-rolled DP-quorum design with the adversarial-review findings F1–F9, and the Slice 1 / open-
+  mechanism split).
+- **Slice 1 LANDED (2026-06-30, ADR-0004):** the dangerous *default* is gone.
+  - **Auto-failover is OPT-IN and OFF by default** (`--ha-auto-failover` / `auto_failover` API field +
+    GUI checkbox). With the default, a standby that loses the leader stays **read-only**, fires
+    `ha_manual_failover_required`, and keeps retrying — no unattended self-promotion.
+  - **Restart honors the persisted role** (`haRestartAction`): a standby re-enters standby instead of
+    self-asserting as a second leader (the verified `main.go:647` bug); a leader resumes with a
+    split-brain-risk warning under auto-failover.
+  - **`/healthz` exposes `term` + `write_authority`**, so a double-leader is now *detectable* (compare
+    terms across both CPs) instead of two indistinguishable `leader:true` bodies.
+  - Behavior is re-pinned in `ha_split_brain_failover_evidence_test.go` (assertions flipped to the new
+    state) + `ha_autofailover_test.go` / `ha_term_test.go`.
+- **Residual (why still HIGH, not closed):** *safe automatic* failover does not exist yet. Under the
+  opt-in `--ha-auto-failover`, a surviving-leader partition can still split-brain (no demote/fence/
+  reconcile). The default-manual posture is safe but loses automatic failover.
+- **Open decision (ADR-0004 §Decision):** pick the automatic-failover mechanism — manual-only /
+  lease+witness (Advisor recommendation) / corrected DP-quorum / Raft. The hand-rolled DP-quorum first
+  proposed was rejected by adversarial review (stale-quorum dual-majority, silent data loss, ungated CA
+  issuance); making it safe costs as much as a lease.
+- **Posture now:** safe by default (manual failover) for any topology; **automatic** multi-CP failover
+  remains unsafe and is opt-in-with-documented-risk until the mechanism slice ships.
+- **Owner:** unassigned · **Target:** mechanism decision next.
 
 ## RISK-002 — OIDC introspection missing SSRF guard · HIGH · ✅ CLOSED 2026-06-28
 - **Was (HV):** `NewOIDCAuth` (`auth_oidc.go`) cloned the introspection transport with **no**
@@ -228,3 +236,13 @@
   the cleartext in-memory form used for signing, fail-closed on encrypt error, and migrate legacy
   cleartext on next save. Export was already redacted via `List()`. Tests prove no cleartext on disk
   + reload round-trip; delivery/HMAC tests still green.
+- **2026-06-30** — **RISK-001 → HIGH/MITIGATING (Slice 1 landed).** `docs/adr/0004-ha-split-brain-fencing.md`
+  records the design: the 2-node-no-witness theorem, a hand-rolled DP-quorum proposal **rejected** by
+  adversarial review (F1 stale-quorum dual-majority, F4 silent data loss, F6 ungated CA issuance, F7
+  term-tie), and a Slice-1 / open-mechanism split. Slice 1 shipped: auto-failover is now OPT-IN and OFF
+  by default (`--ha-auto-failover`/API/GUI), restart honors the persisted role (`haRestartAction` — a
+  standby no longer self-asserts as a second leader, the verified `main.go:647` bug), and `/healthz`
+  exposes `term` + `write_authority` so a double-leader is detectable. Severity dropped BLOCKER→HIGH
+  (no longer unsafe-by-default). Residual: *safe automatic* failover is the open mechanism decision
+  (Advisor recommends lease+witness). Re-pinned by the flipped `ha_split_brain_failover_evidence_test.go`
+  + `ha_autofailover_test.go`/`ha_term_test.go`.
