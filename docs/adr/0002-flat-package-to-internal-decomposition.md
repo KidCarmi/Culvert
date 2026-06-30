@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout` (+ the `obs`/`fileutil` seam, ADR-0003)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache` (+ the `obs`/`fileutil` seam, ADR-0003)
 
 ## Notes / log
 
@@ -254,6 +254,32 @@ Validation: `go build ./...`, `go vet`, `golangci-lint` (0 issues on the new pkg
 `-race` on the package and the main lockout-path/auth-login tests, and the determinism gate
 (`-count=2 -shuffle=on`) on every `snapshotLoginLimiter` consumer — all green. **Four leaves done
 (`totp`, `geoip`, `fileblock`, `lockout`) + the seam.**
+
+### 2026-06-29 — `internal/hashcache` extracted (fifth leaf)
+Moved `hashcache.go` (the SHA-256 scan-result cache: `HashCache`, `ScanCacheResult`, `SHA256Hex`,
+`newHashCache`) into `internal/hashcache`. **The cleanest extraction so far** — stdlib-only, zero
+Culvert coupling, and crucially **zero whitebox test access**: every consumer (the sole production
+field `SecurityScanner.cache *HashCache`, plus the `Stats`/`Clear`/`Evict` calls in
+`metrics.go`/`otlp.go`/`ui_security.go`/`security_scan.go` and the `newHashCache` call in `main.go`)
+goes through the **exported API**. So **no test had to move and no test-support API was added** —
+the opposite of the lockout/fileblock test-surface tax.
+
+`package main` keeps `hashcache_vars.go` (alias shim): type aliases `HashCache`/`ScanCacheResult`,
+`var SHA256Hex = hashcache.SHA256Hex`, and a thin `newHashCache` wrapper over `hashcache.New` (the
+constructor was renamed `newHashCache`→`New` for idiomatic `hashcache.New`). The existing black-box
+tests across `misc_test.go`/`edge_audit_test.go`/`coverage_test.go`/`final_coverage_test.go` keep
+passing unchanged through the shim. Note `cdr_proxy.go`'s `cdrHashCache` is an **unrelated** type
+(CDR epoch cache), not a consumer — left untouched.
+
+Added a focused co-located `hashcache_test.go` (as with geoip) so the leaf is self-testing
+independent of package main, covering the paths the API-level tests don't: `evictLocked` capacity
+overflow (drops ~maxSize/4) and expired-first eviction, plus defaults/TTL/Stats/SHA256Hex. Lint on
+the new lines surfaced `unnamedResult` on `Stats` (named its results to match the doc comment) and
+`builtinShadow` on a test `const max` (Go 1.21 builtin — renamed `capacity`); both fixed.
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` on the package and the
+security-scan/hashcache consumer tests, determinism gate (`-count=2 -shuffle=on`) — all green.
+**Five leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`) + the seam.**
 
 ## Context
 

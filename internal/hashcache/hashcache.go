@@ -1,9 +1,10 @@
-package main
-
-// SHA256 Scan Result Cache
+// Package hashcache provides a size-bounded, TTL-evicting cache of security
+// scan results keyed on the SHA-256 digest of scanned content. It is a
+// self-contained leaf (stdlib only, no Culvert coupling) extracted from the
+// flat package main per ADR-0002.
 //
 // Avoids redundant ClamAV / YARA scans by caching the outcome of each scan
-// keyed on the SHA-256 digest of the scanned content.  The same executable or
+// keyed on the SHA-256 digest of the scanned content. The same executable or
 // document delivered from multiple hosts is therefore scanned only once per TTL
 // window, dramatically reducing CPU load on busy proxies.
 //
@@ -12,6 +13,7 @@ package main
 //   - On capacity overflow: expired entries are evicted first; if still full,
 //     ~25 % of entries are dropped (simple, avoids per-entry LRU bookkeeping).
 //   - All operations are mutex-protected; hit/miss counters use atomic int64.
+package hashcache
 
 import (
 	"crypto/sha256"
@@ -45,9 +47,9 @@ type HashCache struct {
 	misses  atomic.Int64
 }
 
-// newHashCache returns a HashCache with the given capacity and TTL.
+// New returns a HashCache with the given capacity and TTL.
 // Sensible defaults are used when size ≤ 0 or ttl ≤ 0.
-func newHashCache(maxSize int, ttl time.Duration) *HashCache {
+func New(maxSize int, ttl time.Duration) *HashCache {
 	if maxSize <= 0 {
 		maxSize = 10_000
 	}
@@ -99,11 +101,11 @@ func (c *HashCache) Set(hash string, result ScanCacheResult) {
 }
 
 // Stats returns (hits, misses, currentSize) for Prometheus / admin UI.
-func (c *HashCache) Stats() (int64, int64, int) {
+func (c *HashCache) Stats() (hits, misses int64, currentSize int) {
 	c.mu.RLock()
-	size := len(c.entries)
+	currentSize = len(c.entries)
 	c.mu.RUnlock()
-	return c.hits.Load(), c.misses.Load(), size
+	return c.hits.Load(), c.misses.Load(), currentSize
 }
 
 // Evict removes a specific hash from the cache.
