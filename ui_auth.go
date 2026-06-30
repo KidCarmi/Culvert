@@ -349,15 +349,16 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("too many attempts, locked for %ds", secs), http.StatusTooManyRequests)
 		return
 	}
-	// Hold setupCompleteMu across the IsConfigured() check and the SetAuth /
-	// SetDefaultAuthOutcome call below so the two can't interleave across
-	// concurrent requests (see setupCompleteMu doc comment).
-	setupCompleteMu.Lock()
-	defer setupCompleteMu.Unlock()
+	// Fast, lock-free rejection for the common "already done" case. Body
+	// decode/validation below must happen BEFORE setupCompleteMu is taken —
+	// otherwise a client that stalls or drips its request body could
+	// monopolize the lock and block the legitimate first-time setup request
+	// during the bootstrap window.
 	if cfg.IsConfigured() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
 	}
+
 	var body struct {
 		User   string `json:"user"`
 		Pass   string `json:"pass"`
@@ -365,6 +366,32 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if !body.Unauth {
+		body.User = strings.TrimSpace(body.User)
+		if len(body.User) < 1 || len(body.User) > 64 {
+			loginLimiter.RecordFailure(setupKey)
+			http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
+			return
+		}
+		if err := validatePasswordComplexity(body.Pass); err != nil {
+			loginLimiter.RecordFailure(setupKey)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Authoritative re-check under setupCompleteMu: the fast check above is
+	// racy by design (no lock held during body decode/validation), so a
+	// concurrent request may have completed setup in the meantime. Only the
+	// lock-held check below — held across the check and the write — decides
+	// whether this request is allowed to mutate cfg.
+	setupCompleteMu.Lock()
+	defer setupCompleteMu.Unlock()
+	if cfg.IsConfigured() {
+		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
 	}
 
@@ -376,17 +403,6 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body.User = strings.TrimSpace(body.User)
-	if len(body.User) < 1 || len(body.User) > 64 {
-		loginLimiter.RecordFailure(setupKey)
-		http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
-		return
-	}
-	if err := validatePasswordComplexity(body.Pass); err != nil {
-		loginLimiter.RecordFailure(setupKey)
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
 	if err := cfg.SetAuth(body.User, body.Pass); err != nil {
 		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 		return
