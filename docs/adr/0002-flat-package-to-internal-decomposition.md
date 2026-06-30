@@ -4,7 +4,8 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
 
@@ -546,6 +547,85 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + det
 (… `scanner`, `scanexcl`) + three seams.** The scan cluster's engines (`clamav`, `yara`), DPI scanner,
 and exclusion store are all behind compiler-enforced boundaries; the `SecurityScanner` orchestrator
 remains the recorded, deliberate composition-root integration point in `package main`.
+
+### 2026-06-30 — three final clean leaves: `filemagic`, `clientclass`, `backupcrypt`
+With the scan cluster closed at its composition root, a final sweep for *genuinely clean* leaves
+(stdlib-only, no hub coupling, no whitebox-test entanglement that forces an interface refactor)
+surfaced three, all extracted with the established alias-shim pattern:
+
+- **`internal/filemagic`** (15th) — magic-byte detection (`Detect`, `CheckVsContentType` + the
+  signature tables). Pure `strings`. `filemagic.go` keeps the two shim vars (`DetectMagic`,
+  `CheckMagicVsContentType`); **`IsBlockedArchive` stays in main** because it consults the
+  `fileBlocker` singleton (it is glue, not detection). Renames `fileMagicSig`→`Sig`,
+  `DetectMagic`→`Detect`, `CheckMagicVsContentType`→`CheckVsContentType` (revive). The `filemagic_test.go`
+  black-box tests stay in main via the shim; a co-located package test covers `Detect`/`CheckVsContentType`.
+- **`internal/clientclass`** (16th) — the deterministic client classifier (browser / CONNECT /
+  non-browser) governing captive-portal SSO eligibility. Pure `net/http`+`strings`. `client_class.go`
+  keeps `type ClientClass = clientclass.Class`, the three `client*` consts, and the
+  `classifyClient`/`browserRedirectEligibleLegacy` shim vars — so `proxy.go` and the auth-path tests
+  are unchanged. The Plan-Freeze-#5 "no User-Agent in `Classify`" invariant moved verbatim into the
+  package doc; the legacy UA heuristic stays quarantined in `BrowserRedirectEligibleLegacy`.
+- **`internal/backupcrypt`** (17th) — the D1.4 AES-256-GCM + PBKDF2 backup-envelope crypto
+  (`EncryptBlob`/`DecryptBlob`/`IsEncryptedBlob`/`ZeroBytes` + the AAD-bound 43-byte header). Pure
+  stdlib + `x/crypto/pbkdf2`, zero hub coupling. `backup_encrypt.go` keeps the shim (consts
+  `backupEncMagic`/`…MagicLen`/`…HdrLen`/`…KDFIters`/`backupPassphrase{Env,MinLen}`, the
+  `errBackupDecryptOpaque` var, and the four crypto func vars) so `backup.go`/`restore.go`/
+  `list_backups.go`/`main.go` and the integration test suite are unchanged. The opaque-error contract
+  (wrong-passphrase and tamper are indistinguishable; header-level errors are specific because they
+  leak no passphrase info) moved verbatim. The integration tests (`runBackupEncrypted`/`runRestoreDryRun`)
+  **stay in main** — they exercise the crypto through the shim; a co-located package test covers the
+  crypto layer directly (round-trip, opaque-on-wrong-key, ciphertext/header tamper → AAD failure,
+  below-floor rejection, short-prefix sniff, `ZeroBytes`).
+
+Each shipped one-per-commit behind the full gate (build/vet/`golangci-lint` 0-issues + diff-mode/
+`-race`/determinism on the consumers). **Decision recorded — `identity.go` is deliberately NOT
+extracted:** its `IdentityProvider` interface embeds `AuthProvider` (the auth-backend interface root
+in `auth.go`, implemented across local/LDAP/OIDC/SAML), so moving it would drag the auth interface
+graph out, and pulling *only* the `Identity` DTO would fragment a cohesive 49-line file for a 17-prod
++ 38-test alias churn at marginal benefit. It stays as a shared model in `package main` by design.
+
+## Decomposition Complete (leaf-extraction phase) — 2026-06-30
+
+The leaf-first extraction phase of ADR-0002 is **complete**. A final size-ordered sweep of every
+remaining root `*.go` file confirmed no genuinely-clean leaf remains: the small files are either the
+`*_vars.go` alias shims of already-extracted leaves, the shipped `*_startup*.go` wiring DTOs (the PR3
+pilot, covered by `startup_slice_contract_test.go`), or hub glue coupled to a core singleton/interface
+(`auth.go`'s `AuthProvider`, `ui_rbac.go`, `ca_metrics.go`, `identity.go`).
+
+**17 leaves extracted** (stdlib-/x-only, compiler-enforced boundaries, no `package main` back-import):
+`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`,
+`syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`.
+
+**3 foundational seams built** (publish-once injection so a leaf never imports main):
+`obs`/`fileutil` (ADR-0003), `hostutil`, `alerts`.
+
+**What deliberately stays in `package main`, and why** (this is the recorded decision, not unfinished
+work):
+
+| Category | Representative files | Why it stays |
+|---|---|---|
+| **Composition roots / orchestrators** | `security_scan.go` (`SecurityScanner`), `proxy.go` | Wire multiple subsystems together (threat feed + remote scanner + YARA + DPI + hash cache); extracting needs a dependency-injection refactor with its own ADR, not a mechanical move. |
+| **Core hubs (large inbound surface + shared mutable globals)** | `store.go`, `policy.go`, `controlplane.go`, `enrollment.go`, `upstream.go`, `ca.go`, the `release_*` cluster, the `ui_*` admin surface, the `auth_*` backends | Reachable by both the proxy hot path and the admin write path; moving them is the high-risk endgame, deliberately gated behind the leaf phase and a `-race`-covered hot-path spike. |
+| **Auth interface graph** | `auth.go` (`AuthProvider`), `identity.go` (`Identity`/`IdentityProvider`) | Root interfaces implemented across every auth backend; a shared model, not a leaf. |
+| **Startup-wiring DTOs** | `*_startup.go` / `*_startup_config.go` (the PR3 pilot) | Resolver + DTO seams that intentionally live next to `main.go`'s init shims; pinned by `startup_slice_contract_test.go`. |
+| **Alias shims** | `*_vars.go`, `client_class.go`, `filemagic.go`, `backup_encrypt.go`, `clam_vars.go` | The thin `package main` faces of the extracted leaves — by design. |
+
+**Lessons banked across the phase** (kept here so the hub-extraction program inherits them):
+1. *The test surface, not the engine, is the hard part* — mixed engine/integration files, shared
+   isolation helpers, whitebox global-state access, and direct struct construction scatter far wider
+   than a filename map shows. Read the test sources up front.
+2. *Symbol-name greps are necessary but insufficient* — read the candidate's full source before
+   declaring it a leaf (the `geoip`/`isPrivateIP` miss).
+3. *Test-support APIs should be owned by the type that owns the mutex* — `SnapshotAndClear`/`Snapshot`
+   replaced foreign-package whitebox poking and are net design wins, not churn.
+4. *Idiomatic renames at the boundary* (revive: drop the package-name prefix) keep the package face
+   clean while the alias shim preserves every call site.
+
+**Next program (separate, not part of this phase):** hub extraction starts from the
+`roadmap/ARCH_DISCOVERY.md` MEDIUM-risk list (`initBlocklist`, `initObservability`,
+`initConnAndRateLimit`, …) and the composition-root DI refactor for `security_scan.go`, each behind
+its own ADR. The deferred BLOCKER **RISK-001** (HA split-brain) remains the top open item in the
+Technical Risk Register and is the recommended next focus now that the migration runway is clear.
 
 ## Context
 
