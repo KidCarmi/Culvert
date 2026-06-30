@@ -14,7 +14,7 @@
 |---|---|---|---|---|
 | RISK-001 | BLOCKER | OPEN | Multi-CP HA split-brain (no quorum/fencing) | `ha.go` (no `demote`/`stepDown`/quorum symbol, 570 LOC) **HV** |
 | RISK-002 | HIGH | ✅ CLOSED | OIDC introspection path missing SSRF dial guard | fixed `auth_oidc.go:95` (2026-06-28) |
-| RISK-003 | HIGH | OPEN | Webhook HMAC secret persisted cleartext on disk | `alerts.go:169` |
+| RISK-003 | HIGH | ✅ CLOSED | Webhook HMAC secret persisted cleartext on disk | `alerts.go`, `alerts_secret.go` |
 | RISK-006 | MEDIUM | OPEN | Gate config blind spots: `--ignore-unfixed` + `HIGH,CRITICAL` only (masks unfixed/medium) | `security-release-gate.yml:135-143` — **trivy-verified 2026-06-28** |
 | RISK-014 | MEDIUM | OPEN | Reachability gate (govulncheck) scans root module only; nested modules unanalyzed | `security-release-gate.yml:114` vs `updater/go.mod`, `cmd/culvert-maint/go.mod` |
 | RISK-015 | LOW | OPEN | Single-scanner gate; detection-source divergence (Dependabot 5 vs Trivy DB 3) | trivy run vs Dependabot count, 2026-06-28 |
@@ -61,13 +61,28 @@
 - **Note:** the OIDC *flow*, SAML, alerts, threatfeed, blocklist, and release-catalog HTTP paths
   already carried the guard; this closes the one introspection path that lacked it.
 
-## RISK-003 — Webhook HMAC secret cleartext at rest · HIGH · OPEN
-- **Current state:** `alerts.go:169` marshals `AlertWebhook.Secret` to `0600` JSON and it
-  round-trips through config export/import. The CA bundle is AES-GCM encrypted; this secret is not.
-- **Impact:** File read or an exported config bundle lets an attacker forge signed alert payloads.
-- **Recommendation:** Encrypt at rest with the existing CA-bundle scheme (or a derived key); redact
-  on export. **Complexity S.**
-- **Owner:** unassigned · **Target:** this week.
+## RISK-003 — Webhook HMAC secret cleartext at rest · HIGH · ✅ CLOSED
+- **Was:** `AlertStore.save()` marshalled `AlertWebhook.Secret` (the HMAC signing key) to `0600` JSON
+  in cleartext. The CA bundle was AES-GCM encrypted; this secret was not.
+- **Impact:** A read of `alert_webhooks.json` (or a copied data dir) let an attacker forge signed
+  alert payloads.
+- **Fix (2026-06-30, `alerts_secret.go`):** secrets are now **AES-256-GCM encrypted at rest** under a
+  per-data-dir random key (`.alert_webhook_key`, `0600`, generated on first save, cached per path).
+  `save()` encrypts a copy before marshalling (`enc:v1:` + base64(nonce‖ciphertext)); `Init()`
+  decrypts back into the in-memory cleartext used for HMAC signing. **Fail-closed:** an encrypt error
+  aborts the write rather than falling back to cleartext. Legacy cleartext (no `enc:` prefix) loads
+  unchanged and is migrated on the next save; an unrecoverable decrypt drops the secret (deliveries
+  go unsigned, admin re-enters) instead of signing with garbage.
+  - **Export side was already safe:** config export uses `AlertStore.List()`, which strips `Secret`
+    (`ui_config.go`), so the "redact on export" half of the recommendation was already in place.
+  - **Threat model:** mitigates the stated vectors (reading the webhook JSON; a config-export bundle —
+    neither contains the key). It does not defend against an attacker who reads the whole data dir
+    including the hidden key file — inherent to local-key encryption-at-rest, and a far higher bar
+    than cleartext in a 0600 file.
+  - Tests (`alerts_secret_test.go`): no cleartext on disk + `enc:v1:` marker present, decrypt
+    round-trip on reload, encrypt/decrypt unit round-trip (empty + legacy passthrough), legacy
+    cleartext migrated on save. Webhook HMAC delivery tests still green (signing unaffected).
+    Build/vet/lint/`-race`/determinism all green. **Complexity S — closed as recommended.**
 
 ## RISK-006 — Trivy gate config blind spots · MEDIUM · OPEN
 - **Current state (trivy-verified 2026-06-28):** The blocking trivy gate runs
@@ -208,3 +223,8 @@
   auth constructors (`NewOIDCAuth`, `NewOIDCFlowProvider`, `NewLDAPAuth`) guarded by
   `cfg.TLSSkipVerify`. Resolved a gofmt-induced `whyNoLint` finding on the pre-existing
   `//nolint:gosec` in `auth_oidc_flow.go` by adding an explanation. Build/lint/auth-race tests green.
+- **2026-06-30** — **RISK-003 CLOSED.** Webhook HMAC secrets are now AES-256-GCM encrypted at rest
+  under a per-data-dir key (`alerts_secret.go`); `AlertStore.save()`/`Init()` encrypt/decrypt around
+  the cleartext in-memory form used for signing, fail-closed on encrypt error, and migrate legacy
+  cleartext on next save. Export was already redacted via `List()`. Tests prove no cleartext on disk
+  + reload round-trip; delivery/HMAC tests still green.

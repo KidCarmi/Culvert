@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sync"
 	"time"
@@ -160,6 +161,24 @@ func (as *AlertStore) Init(path string) {
 	defer as.mu.Unlock()
 	if err := json.Unmarshal(data, &as.hooks); err != nil {
 		logger.Printf("AlertStore: parse %s: %v", path, err)
+		return
+	}
+	// RISK-003: secrets are AES-GCM encrypted at rest. Decrypt into the
+	// in-memory cleartext form used for HMAC signing. Legacy cleartext (no
+	// enc prefix) passes through unchanged and is migrated on the next save.
+	dir := filepath.Dir(path)
+	for i := range as.hooks {
+		pt, err := decryptWebhookSecret(as.hooks[i].Secret, dir)
+		if err != nil {
+			// Unrecoverable (corrupt blob or lost key): drop the secret so
+			// deliveries continue UNSIGNED rather than signing with garbage.
+			// The admin must re-enter it; we do not auto-resave (no data loss
+			// on a transient key-read failure).
+			logger.Printf("AlertStore: webhook %q secret decrypt failed, disabling signing: %v", sanitizeLog(as.hooks[i].ID), err)
+			as.hooks[i].Secret = ""
+			continue
+		}
+		as.hooks[i].Secret = pt
 	}
 }
 
@@ -167,7 +186,21 @@ func (as *AlertStore) save() {
 	if as.filePath == "" {
 		return
 	}
-	data, _ := json.MarshalIndent(as.hooks, "", "  ") // #nosec G117 -- Secret is the HMAC signing key; intentionally persisted so webhooks survive restart
+	// RISK-003: encrypt each secret before it touches disk. The in-memory
+	// as.hooks keeps the cleartext (needed for HMAC signing), so encrypt a copy.
+	dir := filepath.Dir(as.filePath)
+	encHooks := make([]AlertWebhook, len(as.hooks))
+	copy(encHooks, as.hooks)
+	for i := range encHooks {
+		enc, err := encryptWebhookSecret(encHooks[i].Secret, dir)
+		if err != nil {
+			// Fail closed: never fall back to writing the cleartext secret.
+			logger.Printf("AlertStore: webhook secret encrypt failed, not persisting: %v", err)
+			return
+		}
+		encHooks[i].Secret = enc
+	}
+	data, _ := json.MarshalIndent(encHooks, "", "  ") // #nosec G117 -- Secret holds AES-GCM ciphertext at rest (RISK-003), not the cleartext key
 	tmp := as.filePath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil { // #nosec G306
 		logger.Printf("AlertStore: write %s: %v", tmp, err)
