@@ -235,7 +235,7 @@ func TestValidateYARASource_PartialSkip(t *testing.T) {
 // ─── ContentScanner DPI bypass hosts (Tier 3.4) ───────────────────────────────
 
 func TestContentScanner_BypassHosts_SetGetIs(t *testing.T) {
-	s := &ContentScanner{maxBytes: 1 << 20}
+	s := newContentScanner(1 << 20)
 	s.SetBypassHosts([]string{"Example.com", "  internal.local  ", ""})
 
 	list := s.BypassHosts()
@@ -275,7 +275,7 @@ func TestContentScanner_BypassHosts_LoadSave(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dpi.json")
 
-	s := &ContentScanner{maxBytes: 1 << 20}
+	s := newContentScanner(1 << 20)
 	if err := s.Load(path); err != nil {
 		t.Fatalf("Load missing file: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestContentScanner_BypassHosts_LoadSave(t *testing.T) {
 	s.Save()
 
 	// Re-load in a fresh scanner.
-	s2 := &ContentScanner{maxBytes: 1 << 20}
+	s2 := newContentScanner(1 << 20)
 	if err := s2.Load(path); err != nil {
 		t.Fatalf("reload: %v", err)
 	}

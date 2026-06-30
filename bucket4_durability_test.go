@@ -158,11 +158,8 @@ func TestBucket4_ContentScanner_Save_AtomicWriteFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dpi_patterns.json")
 
-	s := &ContentScanner{
-		path:        path,
-		bypassHosts: map[string]bool{},
-		maxBytes:    1 << 20,
-	}
+	s := newContentScanner(1 << 20)
+	s.SetPath(path)
 	if err := s.Set([]string{`bucket4-dpi-test-regex`}); err != nil {
 		t.Fatalf("seed Set: %v", err)
 	}
@@ -172,15 +169,15 @@ func TestBucket4_ContentScanner_Save_AtomicWriteFile(t *testing.T) {
 	assertNoTmpLeftovers(t, dir)
 
 	// Round-trip via Load on a fresh scanner.
-	fresh := &ContentScanner{bypassHosts: map[string]bool{}}
+	fresh := newContentScanner(0)
 	if err := fresh.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := len(fresh.raw); got != 1 {
+	if got := len(fresh.List()); got != 1 {
 		t.Fatalf("loaded %d patterns, want 1", got)
 	}
-	if fresh.raw[0] != "bucket4-dpi-test-regex" {
-		t.Errorf("fresh.raw[0] = %q, want bucket4-dpi-test-regex", fresh.raw[0])
+	if fresh.List()[0] != "bucket4-dpi-test-regex" {
+		t.Errorf("fresh.List()[0] = %q, want bucket4-dpi-test-regex", fresh.List()[0])
 	}
 }
 

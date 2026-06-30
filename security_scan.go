@@ -595,7 +595,7 @@ func scanBlockConn(dst interface{ Write([]byte) (int, error) }, host, reason, so
 // maxScanBufferBytes returns the maximum bytes to buffer for scanning, taking
 // the larger of the DPI scanner limit and the security scanner limit.
 func maxScanBufferBytes() int64 {
-	dpi := dpiScanner.maxBytes
+	dpi := dpiScanner.MaxBytes()
 	sec := globalSecScanner.MaxBytes()
 	if sec > dpi {
 		return sec

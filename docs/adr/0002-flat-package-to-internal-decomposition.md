@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 
 ## Notes / log
 
@@ -489,6 +489,36 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues on the new pkg 
 + determinism gate (`-count=2 -shuffle=on`) on the package and the scan/diagnostics/settings consumers
 — all green. **Twelve leaves done (… `clamav`, `yara`) + three seams.** Scan cluster remaining:
 `scanner.go` (DPI coordinator) and `security_scan.go` (the orchestrator hub).
+
+### 2026-06-29 — `internal/scanner` extracted (DPI ContentScanner, thirteenth leaf)
+Moved the DPI `ContentScanner` engine (regex signatures over inspected response bodies + per-host
+bypass list + atomic persistence) into `internal/scanner`. Coupling was all seam: `atomicWriteFile`→
+`fileutil.AtomicWrite`, `stripHostPort`→`hostutil.StripHostPort`, `logWarnf`/`sanitizeLog`→`obs`.
+`matchDPIRegexWithTimeout`→exported `MatchRegexWithTimeout` (its only external user is a unit test).
+
+**Split decision (like connlimit's tracing helpers):** the `dpiBlock` 403-writer, its `statDPIBlocked`
+counter (read directly by `events`/`metrics`/`otlp`/`ui_config`/`ui_security`), and the pure
+`isTextContentType` helper **stayed** in `package main` (trimmed `scanner.go`) — they are
+response/observability concerns, not the scan engine, and keeping the counter in main avoided
+threading an accessor through five reader sites. The shim there provides `type ContentScanner =
+scanner.ContentScanner`, `dpiScanner = scanner.New(1<<20)`, a `newContentScanner` constructor var, and
+a `matchDPIRegexWithTimeout` alias — so the consumers (controlplane, configversion, inspection_rules,
+proxy, scan_svc, security_scan, ui) are unchanged. The one production whitebox
+(`security_scan.go` reading `dpiScanner.maxBytes`) became `MaxBytes()`.
+
+**Test surface:** persistence/cluster tests built `ContentScanner` with struct literals over the
+unexported `path`/`raw`/`maxBytes`/`bypassHosts` fields across ~6 files; all switched to
+`newContentScanner(...)` + the new exported `SetPath`/`Path`/`MaxBytes` accessors (reads of `.raw` →
+existing `List()`). No test had to move — `matchDPIRegexWithTimeout`/`isTextContentType` tests work via
+the shim. Added a focused co-located `scanner_test.go` (Set/Scan/Remove, bypass match+port-strip,
+Save/Load envelope round-trip, fail-closed timeout). (Care: a too-broad sed briefly rewrote a
+`CategoryStore` test's `cs.path` — reverted; that store stays in main and is legitimately whitebox.)
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + determinism gate
+(`-count=2 -shuffle=on`) on the package and the scan consumers — all green. **Thirteen leaves done
+(… `yara`, `scanner`) + three seams. Only `security_scan.go` (the orchestrator hub) remains in the
+scan cluster** — it embeds ClamAV, drives YARA + the DPI scanner + threat feed + hash cache, and is
+the genuine integration point (deliberately last).
 
 ## Context
 

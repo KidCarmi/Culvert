@@ -260,7 +260,7 @@ func TestBodyNeedsBuffering(t *testing.T) {
 	}()
 
 	// No scanners active.
-	dpiScanner = &ContentScanner{maxBytes: 1 << 20}
+	dpiScanner = newContentScanner(1 << 20)
 	globalSecScanner = &SecurityScanner{cache: newHashCache(100, 0)}
 	if bodyNeedsBuffering("text/html") {
 		t.Fatal("should not buffer when no scanners active")
@@ -284,7 +284,7 @@ func TestMaxScanBufferBytes_DPIvsSec(t *testing.T) {
 		globalSecScanner = origSec
 	}()
 
-	dpiScanner = &ContentScanner{maxBytes: 2 << 20}
+	dpiScanner = newContentScanner(2 << 20)
 	globalSecScanner = &SecurityScanner{maxBytes: 5 << 20, cache: newHashCache(100, 0)}
 
 	got := maxScanBufferBytes()
@@ -292,7 +292,7 @@ func TestMaxScanBufferBytes_DPIvsSec(t *testing.T) {
 		t.Fatalf("maxScanBufferBytes = %d, want %d", got, 5<<20)
 	}
 
-	dpiScanner.maxBytes = 10 << 20
+	dpiScanner = newContentScanner(10 << 20)
 	got = maxScanBufferBytes()
 	if got != 10<<20 {
 		t.Fatalf("maxScanBufferBytes = %d, want %d (DPI larger)", got, 10<<20)
@@ -315,7 +315,7 @@ func TestSafeScanBody_NilOnEmpty(t *testing.T) {
 func TestSafeDPIScan_NoPatterns(t *testing.T) {
 	origDPI := dpiScanner
 	defer func() { dpiScanner = origDPI }()
-	dpiScanner = &ContentScanner{maxBytes: 1 << 20}
+	dpiScanner = newContentScanner(1 << 20)
 
 	pattern, matched := safeDPIScan([]byte("hello world"))
 	if matched {

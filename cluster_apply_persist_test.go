@@ -387,16 +387,16 @@ func TestApplyConfigSnapshot_URLCategoriesPersist(t *testing.T) {
 // caller-side dpiScanner.Save() hook after dpiScanner.Set() in
 // applyConfigSnapshot's snap.DPIPatterns branch (P6.2 SC-3 closure).
 func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
-	origPath := dpiScanner.path
-	origPatterns := append([]string(nil), dpiScanner.raw...)
+	origPath := dpiScanner.Path()
+	origPatterns := append([]string(nil), dpiScanner.List()...)
 	t.Cleanup(func() {
-		dpiScanner.path = origPath
+		dpiScanner.SetPath(origPath)
 		_ = dpiScanner.Set(origPatterns)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dpi_patterns.json")
-	dpiScanner.path = path
+	dpiScanner.SetPath(path)
 
 	snap := ConfigSnapshot{
 		Version:     1,
@@ -408,15 +408,15 @@ func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
 		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
 	}
 
-	fresh := &ContentScanner{bypassHosts: map[string]bool{}}
+	fresh := newContentScanner(0)
 	if err := fresh.Load(path); err != nil {
 		t.Fatalf("fresh.Load: %v", err)
 	}
-	if len(fresh.raw) != 1 {
-		t.Fatalf("loaded %d patterns, want 1", len(fresh.raw))
+	if len(fresh.List()) != 1 {
+		t.Fatalf("loaded %d patterns, want 1", len(fresh.List()))
 	}
-	if fresh.raw[0] != "p34-test-dpi-pattern" {
-		t.Errorf("fresh.raw[0] = %q, want p34-test-dpi-pattern", fresh.raw[0])
+	if fresh.List()[0] != "p34-test-dpi-pattern" {
+		t.Errorf("fresh.List()[0] = %q, want p34-test-dpi-pattern", fresh.List()[0])
 	}
 }
 
