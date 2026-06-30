@@ -1590,6 +1590,14 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			profileStr = sanitizeLog(string(match.Rule.FileProfile))
 		}
 		logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(req.URL.Path), profileStr, filterStr)
+		// Scrub client-spoofable forwarded/identity headers on the DECRYPTED
+		// inner request, exactly as the plain-HTTP path does in handleHTTP.
+		// Without this, an SSL-inspected HTTPS request could inject
+		// X-User-Identity (impersonating an authenticated user to upstreams that
+		// trust the proxy's identity header) or leak private X-Forwarded-For /
+		// X-Real-IP addresses — a defense the plain-HTTP path already has but the
+		// inspect path was missing.
+		scrubForwardedHeaders(req)
 		// Strip hop-by-hop headers before forwarding upstream.
 		removeHopHeaders(req.Header)
 
