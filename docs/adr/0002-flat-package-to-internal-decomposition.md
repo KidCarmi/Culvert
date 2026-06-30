@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 
 ## Notes / log
 
@@ -519,6 +519,33 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + det
 (… `yara`, `scanner`) + three seams. Only `security_scan.go` (the orchestrator hub) remains in the
 scan cluster** — it embeds ClamAV, drives YARA + the DPI scanner + threat feed + hash cache, and is
 the genuine integration point (deliberately last).
+
+### 2026-06-29 — `internal/scanexcl` extracted; `security_scan.go` orchestrator stays in main
+Mapping `security_scan.go` for extraction confirmed it is the **scan integration hub, not a leaf**:
+`SecurityScanner` reaches package-main globals that are themselves *not* extracted — `globalThreatFeed`
+(`threatfeed.go`) and `globalRemoteScanner` (`scan_remote.go`) — plus `globalYARA`, `dpiScanner`,
+`globalScanExclusions`. Moving the orchestrator would require either cascading those two subsystems
+out *or* a dependency-injection refactor (interfaces for the threat-checker / remote-scanner
+collaborators). That is a real architectural initiative deserving its own ADR, **not** a mechanical
+move — so the orchestrator (`SecurityScanner`, the `safe*` panic wrappers, `scanBlock`/`scanBlockConn`,
+`decompressForScan`, the buffer-sizing helpers, `secScanStatusMap`, and the Prometheus counters)
+**stays in `package main` as the composition-root layer**, by deliberate decision.
+
+What *was* cleanly extractable: **`ScanExclusionStore`** — the admin-managed hash/host allowlist —
+is a genuine self-contained leaf (only the `hostutil` seam + os/json). Moved to `internal/scanexcl`
+as `Store` (revive-clean; `New()` constructor, `exclusionsFile` + `sortStrings` unexported). The trim
+left `security_scan.go` at 549 lines (was 701). `security_scan.go` keeps the shim
+(`type ScanExclusionStore = scanexcl.Store`, `globalScanExclusions = scanexcl.New()`) so the consumers
+(`main.go` Load, `proxy.go` IsHostExcluded, `ui_security.go` Lists/Replace/Save, ScanBody's
+IsHashExcluded) are unchanged. The whitebox tests (which built the store with `{hashes,hosts}` literals
+and tested the unexported `sortStrings`) **moved** from `tier3_coverage_test.go` into the package;
+`ui_security_coverage_test.go`'s isolation helper switched to `scanexcl.New()`.
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + determinism gate
+(`-count=2 -shuffle=on`) on the package and the scan consumers — all green. **Fourteen leaves done
+(… `scanner`, `scanexcl`) + three seams.** The scan cluster's engines (`clamav`, `yara`), DPI scanner,
+and exclusion store are all behind compiler-enforced boundaries; the `SecurityScanner` orchestrator
+remains the recorded, deliberate composition-root integration point in `package main`.
 
 ## Context
 
