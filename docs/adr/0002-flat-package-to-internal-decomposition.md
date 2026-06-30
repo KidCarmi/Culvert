@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit` (+ the `obs`/`fileutil` and `hostutil` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog` (+ the `obs`/`fileutil` and `hostutil` seams)
 
 ## Notes / log
 
@@ -385,6 +385,32 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + det
 (`-count=2 -shuffle=on`) on the package and the startup-slice/proxy consumers — all green.
 **Nine leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`,
 `rewrite`, `connlimit`) + two seams (`obs`/`fileutil`, `hostutil`).**
+
+### 2026-06-29 — `internal/syslog` extracted (tenth leaf)
+Moved the `syslogWriter` SIEM-forwarding engine into `internal/syslog` (→ `Writer`/`NewWriter`).
+syslog was **not a pure leaf** — three couplings, each resolved cleanly:
+- **`AuditEntry`/`LogEntry` types** (the `WriteAudit`/`WriteRequest` params): the writers only
+  `json.Marshal` the entry, so the signatures changed to `any`. A syslog forwarder genuinely doesn't
+  need the concrete struct shape; callers (`store.go`, a coverage test) pass the same values
+  unchanged. This decouples the leaf from the store layer entirely.
+- **`logger`/`sanitizeLog`** (in `InitSyslog`): `InitSyslog` **stayed** in `package main` (trimmed
+  `syslog.go`) along with the `globalSyslog` global, a `syslogWriter` shim alias, and a
+  `newSyslogWriter` constructor wrapper — so the obs coupling lives where it belongs and the package
+  is pure stdlib.
+- **`ui_config.go` calling the unexported `writeMsg`** (the connectivity "test message"): swapped to
+  the already-exported `io.Writer` `Write` (same PRI=14 path), so no internal method had to leak.
+
+The three `formatMsg`/`Format` unit tests (whitebox `&syslogWriter{…}` + unexported `formatMsg`)
+moved out of the shared `distributed_rl_test.go` into the package; the integration test in
+`coverage_boost_test.go` keeps using the `newSyslogWriter` shim + `WriteRequest` (now `any`). Lint on
+the moved code surfaced two house-rule items now that the lines are "changed": `noctx` on
+`net.DialTimeout` → rewrote to `(&net.Dialer{Timeout}).DialContext(context.Background(), …)` (the
+CLAUDE.md-required form, behaviour-identical); and a bare `//nolint:errcheck` → added a reason.
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues on the new pkg + new lines), `-race`
++ determinism gate (`-count=2 -shuffle=on`) on the package and the store/ui_config consumers — all
+green. **Ten leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`,
+`rewrite`, `connlimit`, `syslog`) + two seams (`obs`/`fileutil`, `hostutil`).**
 
 ## Context
 

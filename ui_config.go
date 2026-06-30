@@ -959,7 +959,9 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
-	globalSyslog.writeMsg(14, "Culvert syslog test message — connectivity verified")
+	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
+	// now via the exported io.Writer surface (writeMsg is package-internal).
+	_, _ = globalSyslog.Write([]byte("Culvert syslog test message — connectivity verified"))
 	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
 }
 
