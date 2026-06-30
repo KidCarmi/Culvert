@@ -166,11 +166,17 @@ unsafe default. It does not yet provide *safe automatic* failover — that is th
 | **Corrected DP-quorum** | DP-majority as witness, built to the review's full bar (fresh-heartbeat quorum, sub-second heartbeat, majority-acked term, gated issuance, documented LWW). | Large — a hand-rolled consensus core. No external dependency. | None (heavier heartbeat) |
 | **Raft (≥3 CPs)** | `hashicorp/raft`; ClusterStore becomes an FSM. | Largest — multi-month, changes the persistence model, 3-node minimum. The only option that makes "enterprise HA" literally true. | Raft lib + 3rd CP |
 
-**Advisor recommendation for the open decision (not yet accepted):** if *automatic* failover is
-required, **lease + witness** is the best cost/safety trade now that the review has shown hand-rolled
-DP-quorum costs as much as a lease while being harder to verify. Raft is the correct long-horizon
-answer if multi-CP consensus becomes a hard product requirement. This is recorded as the recommendation;
-the choice is the maintainer's and is deliberately **not** made in this ADR.
+**Maintainer decision (2026-06-30): Raft is SHELVED** — "I don't need 3CP now." Recorded as a
+long-horizon roadmap option only, to be revisited if/when multi-CP consensus becomes a hard product
+requirement. It is NOT the next step.
+
+**Advisor recommendation for the remaining decision:** if/when *automatic* failover becomes a priority,
+**lease + witness** is the path — and crucially it does **not** require a 3rd CP (the witness is a
+small external lease target: an object-store/file/DNS lease, not a Culvert node), so it is fully
+compatible with the "no 3CP" decision. Until then, **Slice 1's manual-by-default posture is the
+resting state** and is safe for any topology. The choice between "rest at manual" and "build
+lease+witness" stays the maintainer's; the corrected-DP-quorum option remains rejected on
+cost/verifiability grounds (see §Rejected).
 
 ## Consequences
 
@@ -198,6 +204,8 @@ the choice is the maintainer's and is deliberately **not** made in this ADR.
 
 ## Decision needed from the maintainer (for the OPEN part)
 
-After Slice 1 lands: choose the automatic-failover mechanism (Manual-only / Lease+witness /
-Corrected-DP-quorum / Raft), or explicitly accept **manual failover as the permanent posture** for
-2-CP HA and record multi-CP consensus as out of scope.
+Slice 1 has landed and Raft is shelved (maintainer, 2026-06-30 — "no 3CP now"). The remaining choice,
+deferrable until automatic failover becomes a priority, is between **resting at manual failover** (the
+current safe-by-default posture — a legitimate permanent answer for 2-CP HA) and **building
+lease+witness** (automatic failover without a 3rd CP). Corrected-DP-quorum stays rejected. No further
+HA code is required to be in a safe state today.
