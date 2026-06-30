@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage` (+ the `obs`/`fileutil` and `hostutil` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite` (+ the `obs`/`fileutil` and `hostutil` seams)
 
 ## Notes / log
 
@@ -335,6 +335,30 @@ round-trip, invalid-template rejection leaves the prior template installed, and 
 Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + determinism gate
 (`-count=2 -shuffle=on`) on the package, main deny-path consumers green. **Seven leaves done
 (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`) + two seams.**
+
+### 2026-06-29 — `internal/rewrite` extracted (eighth leaf)
+Moved `rewrite.go` (per-host HTTP header rewrite: the rule DTO + the `Rewriter` engine) into
+`internal/rewrite`. Pure stdlib (`net/http`, `strings`, `sync`), zero Culvert coupling. The DTO is a
+config/API/cluster type threaded through `config.go`, `admin_settings.go`, `configversion.go`,
+`controlplane.go`, `ui_config.go`, `ui_policy.go`; the `rewriter` singleton is driven by `main.go`,
+`proxy.go` (both hot-path Apply calls), and the `rewrite_default_action` startup slice — all unchanged
+via the `rewrite_vars.go` alias shim (`type RewriteRule = rewrite.Rule`, `var rewriter =
+rewrite.NewRewriter()`).
+
+**Lockout-class test surface** (not black-box like the last three): the dedicated `rewrite_test.go`
+engine tests **moved** into the package (they use the unexported `matchesHost` + `&Rewriter{nextID}`),
+and the two `matchesHost` tests living in the shared `rewrite_scanner_policy_test.go` moved with them.
+The startup-slice isolation helper `resetRewriteDefaultGlobals` previously reached into
+`rewriter.rules`/`.nextID`/`.mu`; it now delegates to **one new exported method
+`(*Rewriter).Snapshot() func()`** (snapshot rules+nextID, return a restore closure) — the only added
+API beyond a pure move, the same shape as lockout's `SnapshotAndClear`. Lint: revive flagged
+`rewrite.RewriteRule` as repetitive, so the package type is `Rule` (package-main name stays
+`RewriteRule` via the alias).
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + determinism gate
+(`-count=2 -shuffle=on`) on the package and the startup-slice/proxy consumers — all green.
+**Eight leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`,
+`rewrite`) + two seams (`obs`/`fileutil`, `hostutil`).**
 
 ## Context
 

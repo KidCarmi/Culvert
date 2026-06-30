@@ -22,21 +22,16 @@ func ensureRewriteDefaultTestLogger(t *testing.T) {
 	}
 }
 
-// resetRewriteDefaultGlobals snapshots/restores rewriter.rules,
-// rewriter.nextID, and defaultPolicyActionAllow for isolation under
-// -shuffle.
+// resetRewriteDefaultGlobals snapshots/restores the rewriter state and
+// defaultPolicyActionAllow for isolation under -shuffle. The rewriter half
+// delegates to rewrite.Rewriter.Snapshot (the engine now lives in
+// internal/rewrite; this helper no longer reaches into its unexported fields).
 func resetRewriteDefaultGlobals(t *testing.T) {
 	t.Helper()
-	rewriter.mu.RLock()
-	origRules := append([]RewriteRule(nil), rewriter.rules...)
-	origNext := rewriter.nextID
-	rewriter.mu.RUnlock()
+	restoreRewriter := rewriter.Snapshot()
 	origAction := atomic.LoadInt32(&defaultPolicyActionAllow)
 	t.Cleanup(func() {
-		rewriter.mu.Lock()
-		rewriter.rules = origRules
-		rewriter.nextID = origNext
-		rewriter.mu.Unlock()
+		restoreRewriter()
 		atomic.StoreInt32(&defaultPolicyActionAllow, origAction)
 	})
 }

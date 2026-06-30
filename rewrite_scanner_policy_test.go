@@ -5,22 +5,8 @@ import (
 	"testing"
 )
 
-// ─── Rewriter extras ─────────────────────────────────────────────────────────
-
-func TestRewriter_matchesHost_CaseInsensitive(t *testing.T) {
-	r := &RewriteRule{Host: "Example.COM"}
-	if !r.matchesHost("example.com") {
-		t.Error("matchesHost should be case-insensitive")
-	}
-}
-
-func TestRewriter_matchesHost_WildcardExact(t *testing.T) {
-	// *.example.com: "example.com" itself should match (without www.)
-	r := &RewriteRule{Host: "*.example.com"}
-	if !r.matchesHost("example.com") {
-		t.Error("wildcard pattern should also match the bare domain")
-	}
-}
+// Rewriter matchesHost tests moved to internal/rewrite (ADR-0002) — matchesHost
+// is unexported and now lives in package rewrite.
 
 // ─── ContentScanner extras ────────────────────────────────────────────────────
 

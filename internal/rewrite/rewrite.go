@@ -1,4 +1,8 @@
-package main
+// Package rewrite owns per-host HTTP header rewrite rules: the rule DTO, the
+// ordered active rule set, and the request/response header mutators. It is a
+// self-contained leaf (stdlib only, no Culvert coupling) extracted from the flat
+// package main per ADR-0002.
+package rewrite
 
 import (
 	"net/http"
@@ -6,7 +10,7 @@ import (
 	"sync"
 )
 
-// RewriteRule defines header mutations applied to requests and/or responses
+// Rule defines header mutations applied to requests and/or responses
 // whose destination host matches the given pattern.
 //
 // Example (config.yaml):
@@ -20,7 +24,7 @@ import (
 //	  - host: ""           # empty = match all hosts
 //	    resp_set:
 //	      Strict-Transport-Security: "max-age=31536000"
-type RewriteRule struct {
+type Rule struct {
 	// ID is assigned automatically when the rule is added at runtime.
 	ID int `json:"id"`
 
@@ -40,7 +44,7 @@ type RewriteRule struct {
 }
 
 // matchesHost reports whether the rule applies to host.
-func (r *RewriteRule) matchesHost(host string) bool {
+func (r *Rule) matchesHost(host string) bool {
 	if r.Host == "" {
 		return true // wildcard — matches everything
 	}
@@ -56,16 +60,19 @@ func (r *RewriteRule) matchesHost(host string) bool {
 // Rewriter holds the ordered list of active rewrite rules and applies them.
 type Rewriter struct {
 	mu     sync.RWMutex
-	rules  []RewriteRule
+	rules  []Rule
 	nextID int
 }
 
-var rewriter = &Rewriter{nextID: 1}
+// NewRewriter returns a Rewriter with ID assignment starting at 1.
+func NewRewriter() *Rewriter {
+	return &Rewriter{nextID: 1}
+}
 
 // SetRules replaces the full rule set (used during startup from config).
-func (rw *Rewriter) SetRules(rules []RewriteRule) {
+func (rw *Rewriter) SetRules(rules []Rule) {
 	rw.mu.Lock()
-	rw.rules = make([]RewriteRule, len(rules))
+	rw.rules = make([]Rule, len(rules))
 	for i, r := range rules {
 		r.ID = rw.nextID
 		rw.nextID++
@@ -75,16 +82,16 @@ func (rw *Rewriter) SetRules(rules []RewriteRule) {
 }
 
 // List returns a snapshot of the current rules.
-func (rw *Rewriter) List() []RewriteRule {
+func (rw *Rewriter) List() []Rule {
 	rw.mu.RLock()
 	defer rw.mu.RUnlock()
-	out := make([]RewriteRule, len(rw.rules))
+	out := make([]Rule, len(rw.rules))
 	copy(out, rw.rules)
 	return out
 }
 
 // Add appends a rule and returns it with the assigned ID.
-func (rw *Rewriter) Add(rule RewriteRule) RewriteRule {
+func (rw *Rewriter) Add(rule Rule) Rule {
 	rw.mu.Lock()
 	rule.ID = rw.nextID
 	rw.nextID++
@@ -146,5 +153,23 @@ func (rw *Rewriter) ApplyResponse(host string, resp *http.Response) {
 		for _, k := range rule.RespRemove {
 			resp.Header.Del(k)
 		}
+	}
+}
+
+// Snapshot captures the current rules and ID counter and returns a closure that
+// restores them, under the mutex on both ends. Production code never calls this;
+// it exists so package main's startup-slice test isolation helper can save and
+// restore the package-global rewriter without reaching across the package
+// boundary into the unexported fields (ADR-0002 extraction).
+func (rw *Rewriter) Snapshot() func() {
+	rw.mu.RLock()
+	savedRules := append([]Rule(nil), rw.rules...)
+	savedNext := rw.nextID
+	rw.mu.RUnlock()
+	return func() {
+		rw.mu.Lock()
+		rw.rules = savedRules
+		rw.nextID = savedNext
+		rw.mu.Unlock()
 	}
 }

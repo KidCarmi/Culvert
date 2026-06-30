@@ -1,4 +1,4 @@
-package main
+package rewrite
 
 import (
 	"net/http"
@@ -34,11 +34,26 @@ func TestRewriteRule_MatchesHost(t *testing.T) {
 		{"*.CORP.LOCAL", "app.corp.local", true},
 	}
 	for _, c := range cases {
-		rule := &RewriteRule{Host: c.pattern}
+		rule := &Rule{Host: c.pattern}
 		got := rule.matchesHost(c.host)
 		if got != c.want {
 			t.Errorf("matchesHost(pattern=%q, host=%q) = %v, want %v", c.pattern, c.host, got, c.want)
 		}
+	}
+}
+
+func TestRewriter_matchesHost_CaseInsensitive(t *testing.T) {
+	r := &Rule{Host: "Example.COM"}
+	if !r.matchesHost("example.com") {
+		t.Error("matchesHost should be case-insensitive")
+	}
+}
+
+func TestRewriter_matchesHost_WildcardExact(t *testing.T) {
+	// *.example.com: "example.com" itself should match (without www.)
+	r := &Rule{Host: "*.example.com"}
+	if !r.matchesHost("example.com") {
+		t.Error("wildcard pattern should also match the bare domain")
 	}
 }
 
@@ -50,8 +65,8 @@ func newTestRewriter() *Rewriter {
 
 func TestRewriter_AddAssignsID(t *testing.T) {
 	rw := newTestRewriter()
-	r1 := rw.Add(RewriteRule{Host: "a.com"})
-	r2 := rw.Add(RewriteRule{Host: "b.com"})
+	r1 := rw.Add(Rule{Host: "a.com"})
+	r2 := rw.Add(Rule{Host: "b.com"})
 
 	if r1.ID == r2.ID {
 		t.Error("IDs should be unique")
@@ -63,8 +78,8 @@ func TestRewriter_AddAssignsID(t *testing.T) {
 
 func TestRewriter_List(t *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{Host: "a.com"})
-	rw.Add(RewriteRule{Host: "b.com"})
+	rw.Add(Rule{Host: "a.com"})
+	rw.Add(Rule{Host: "b.com"})
 
 	list := rw.List()
 	if len(list) != 2 {
@@ -79,8 +94,8 @@ func TestRewriter_List(t *testing.T) {
 
 func TestRewriter_RemoveByID(t *testing.T) {
 	rw := newTestRewriter()
-	r1 := rw.Add(RewriteRule{Host: "a.com"})
-	rw.Add(RewriteRule{Host: "b.com"})
+	r1 := rw.Add(Rule{Host: "a.com"})
+	rw.Add(Rule{Host: "b.com"})
 
 	if !rw.RemoveByID(r1.ID) {
 		t.Error("RemoveByID should return true for existing ID")
@@ -100,9 +115,9 @@ func TestRewriter_RemoveByID(t *testing.T) {
 
 func TestRewriter_SetRules(t *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{Host: "old.com"})
+	rw.Add(Rule{Host: "old.com"})
 
-	rw.SetRules([]RewriteRule{
+	rw.SetRules([]Rule{
 		{Host: "new1.com"},
 		{Host: "new2.com"},
 	})
@@ -125,7 +140,7 @@ func TestRewriter_SetRules(t *testing.T) {
 
 func TestRewriter_ApplyRequest_Set(t *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{
+	rw.Add(Rule{
 		Host:   "example.com",
 		ReqSet: map[string]string{"X-Proxy": "Culvert", "X-Custom": "value"},
 	})
@@ -144,7 +159,7 @@ func TestRewriter_ApplyRequest_Set(t *testing.T) {
 
 func TestRewriter_ApplyRequest_Add(t *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{
+	rw.Add(Rule{
 		Host:   "example.com",
 		ReqAdd: map[string]string{"Via": "1.1 proxy"},
 	})
@@ -161,7 +176,7 @@ func TestRewriter_ApplyRequest_Add(t *testing.T) {
 
 func TestRewriter_ApplyRequest_Remove(t *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{
+	rw.Add(Rule{
 		Host:      "example.com",
 		ReqRemove: []string{"Cookie", "Authorization"},
 	})
@@ -185,7 +200,7 @@ func TestRewriter_ApplyRequest_Remove(t *testing.T) {
 
 func TestRewriter_ApplyRequest_NoMatchSkipped(t *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{
+	rw.Add(Rule{
 		Host:   "example.com",
 		ReqSet: map[string]string{"X-Added": "yes"},
 	})
@@ -201,12 +216,12 @@ func TestRewriter_ApplyRequest_NoMatchSkipped(t *testing.T) {
 func TestRewriter_ApplyRequest_MultipleRules(t *testing.T) {
 	rw := newTestRewriter()
 	// Rule 1: matches all hosts (empty pattern).
-	rw.Add(RewriteRule{
+	rw.Add(Rule{
 		Host:   "",
 		ReqSet: map[string]string{"X-Global": "1"},
 	})
 	// Rule 2: only example.com.
-	rw.Add(RewriteRule{
+	rw.Add(Rule{
 		Host:   "example.com",
 		ReqSet: map[string]string{"X-Specific": "1"},
 	})
@@ -231,14 +246,14 @@ func TestRewriter_ApplyRequest_MultipleRules(t *testing.T) {
 
 func TestRewriter_ApplyResponse_Nil(_ *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{Host: "example.com", RespSet: map[string]string{"X-Frame-Options": "DENY"}})
+	rw.Add(Rule{Host: "example.com", RespSet: map[string]string{"X-Frame-Options": "DENY"}})
 	// Should not panic.
 	rw.ApplyResponse("example.com", nil)
 }
 
 func TestRewriter_ApplyResponse_Set(t *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{
+	rw.Add(Rule{
 		Host:    "example.com",
 		RespSet: map[string]string{"Strict-Transport-Security": "max-age=31536000"},
 	})
@@ -253,7 +268,7 @@ func TestRewriter_ApplyResponse_Set(t *testing.T) {
 
 func TestRewriter_ApplyResponse_Remove(t *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{
+	rw.Add(Rule{
 		Host:       "example.com",
 		RespRemove: []string{"Server", "X-Powered-By"},
 	})
@@ -277,7 +292,7 @@ func TestRewriter_ApplyResponse_Remove(t *testing.T) {
 
 func TestRewriter_ApplyResponse_Add(t *testing.T) {
 	rw := newTestRewriter()
-	rw.Add(RewriteRule{
+	rw.Add(Rule{
 		Host:    "example.com",
 		RespAdd: map[string]string{"X-Custom-Header": "appended"},
 	})
@@ -289,5 +304,29 @@ func TestRewriter_ApplyResponse_Add(t *testing.T) {
 	vals := resp.Header["X-Custom-Header"]
 	if len(vals) != 2 {
 		t.Errorf("expected 2 X-Custom-Header values, got %v", vals)
+	}
+}
+
+// ─── Snapshot (test-support API) ──────────────────────────────────────────────
+
+func TestRewriter_Snapshot_RestoresRulesAndID(t *testing.T) {
+	rw := newTestRewriter()
+	rw.Add(Rule{Host: "before.com"})
+
+	restore := rw.Snapshot()
+	rw.SetRules([]Rule{{Host: "during1.com"}, {Host: "during2.com"}})
+	if len(rw.List()) != 2 {
+		t.Fatalf("expected mutated state of 2 rules, got %d", len(rw.List()))
+	}
+
+	restore()
+	list := rw.List()
+	if len(list) != 1 || list[0].Host != "before.com" {
+		t.Errorf("Snapshot restore failed: %+v", list)
+	}
+	// nextID must be restored too: the next Add gets the pre-snapshot ID.
+	added := rw.Add(Rule{Host: "after.com"})
+	if added.ID != 2 {
+		t.Errorf("post-restore Add ID = %d, want 2 (nextID restored)", added.ID)
 	}
 }
