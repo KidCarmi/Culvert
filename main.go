@@ -82,6 +82,7 @@ type startupState struct {
 	cpGRPCCA                *string
 	haJoin                  *string
 	haToken                 *string
+	haAutoFailover          *bool
 	dpCPAddr                *string
 	dpNodeID                *string
 	dpCert                  *string
@@ -235,6 +236,7 @@ func parseFlags(s *startupState) {
 	s.cpGRPCCA = flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
 	s.haJoin = flag.String("ha-join", "", "HA standby: leader CP gRPC address to sync from (e.g. cp1:50051)")
 	s.haToken = flag.String("ha-token", "", "HA standby: authentication token (from leader's deploy command)")
+	s.haAutoFailover = flag.Bool("ha-auto-failover", false, "HA: allow the standby to self-promote on leader loss. DEFAULT OFF — 2-node active/passive has no witness, so unattended auto-promotion can split-brain (ADR-0004/RISK-001). Off = manual failover.")
 	s.dpCPAddr = flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
 	s.dpNodeID = flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
 	s.dpCert = flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
@@ -633,7 +635,7 @@ func initCluster(s *startupState) {
 		// ── HA Standby: sync state from leader, then stand by ────────
 		initClusterCA(clusterDBPath)
 		globalHA.StartAsStandby(appLifecycleCtx, *s.haJoin, *s.haToken,
-			cpAddr, cpCert, cpKey, cpCA,
+			cpAddr, cpCert, cpKey, cpCA, *s.haAutoFailover,
 			func() error {
 				return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
 			},
@@ -645,7 +647,7 @@ func initCluster(s *startupState) {
 		}
 		// Check for persisted HA config (leader restart).
 		if haCfg, err := loadHAConfig(); err == nil && haCfg.Enabled {
-			globalHA.EnableAsLeader(haCfg.PeerAddr)
+			globalHA.EnableAsLeader(haCfg.PeerAddr, haCfg.AutoFailover)
 			globalHA.mu.Lock()
 			globalHA.token = haCfg.Token // restore original token
 			globalHA.mu.Unlock()

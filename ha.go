@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/alerts"
 )
 
 // ── Control Plane High Availability ─────────────────────────────────────────
@@ -36,36 +38,48 @@ import (
 
 // HAState tracks the HA status of this Control Plane instance.
 type HAState struct {
-	mu       sync.RWMutex
-	role     string    // "leader", "standby", or "" (HA disabled)
-	token    string    // shared HA token for authentication
-	peerAddr string    // address of the other CP
-	since    time.Time // when current role was acquired
-	stopCh   chan struct{}
+	mu           sync.RWMutex
+	role         string    // "leader", "standby", or "" (HA disabled)
+	token        string    // shared HA token for authentication
+	peerAddr     string    // address of the other CP
+	since        time.Time // when current role was acquired
+	autoFailover bool      // standby self-promotes on leader loss (default OFF — see ADR-0004)
+	stopCh       chan struct{}
 }
 
 var globalHA = &HAState{}
 
 // HAStatus returns a snapshot of the current HA state for API/UI consumption.
 type HAStatus struct {
-	Enabled  bool   `json:"enabled"`
-	Role     string `json:"role"`                // "leader", "standby", or ""
-	Since    string `json:"since,omitempty"`     // RFC3339
-	PeerAddr string `json:"peer_addr,omitempty"` // other CP address
+	Enabled      bool   `json:"enabled"`
+	Role         string `json:"role"`                // "leader", "standby", or ""
+	Since        string `json:"since,omitempty"`     // RFC3339
+	PeerAddr     string `json:"peer_addr,omitempty"` // other CP address
+	AutoFailover bool   `json:"auto_failover"`       // standby self-promotes on leader loss (ADR-0004)
 }
 
 func (h *HAState) Status() HAStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	s := HAStatus{
-		Enabled:  h.role != "",
-		Role:     h.role,
-		PeerAddr: h.peerAddr,
+		Enabled:      h.role != "",
+		Role:         h.role,
+		PeerAddr:     h.peerAddr,
+		AutoFailover: h.autoFailover,
 	}
 	if !h.since.IsZero() {
 		s.Since = h.since.Format(time.RFC3339)
 	}
 	return s
+}
+
+// autoFailoverEnabled reports whether this node may self-promote on leader loss.
+// Default OFF: 2-node active/passive has no witness, so unattended auto-promotion
+// is unsafe (split-brain). See ADR-0004 / RISK-001.
+func (h *HAState) autoFailoverEnabled() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.autoFailover
 }
 
 // IsLeader returns true if this CP is the HA leader.
@@ -85,25 +99,30 @@ func (h *HAState) VerifyToken(token string) bool {
 // ── Leader Mode ─────────────────────────────────────────────────────────────
 
 // EnableAsLeader marks this node as the HA leader and generates an HA token.
-// Returns the generated token for inclusion in the standby deploy command.
-func (h *HAState) EnableAsLeader(peerAddr string) string {
+// autoFailover records whether the standby is permitted to self-promote on
+// leader loss (default OFF — see ADR-0004); the leader stores the preference so
+// the standby deploy command carries it. Returns the generated token for
+// inclusion in the standby deploy command.
+func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.role = "leader"
 	h.peerAddr = peerAddr
 	h.since = time.Now()
+	h.autoFailover = autoFailover
 	h.token = generateHAToken()
 	h.stopCh = make(chan struct{})
 
 	// Persist HA config so leader restarts know HA is enabled.
 	_ = saveHAConfig(&haConfig{
-		Enabled:  true,
-		Token:    h.token,
-		PeerAddr: peerAddr,
-		Role:     "leader",
+		Enabled:      true,
+		Token:        h.token,
+		PeerAddr:     peerAddr,
+		Role:         "leader",
+		AutoFailover: autoFailover,
 	})
 
-	logger.Printf("HA: enabled as leader (peer=%s)", sanitizeLog(peerAddr))
+	logger.Printf("HA: enabled as leader (peer=%s, auto_failover=%v)", sanitizeLog(peerAddr), autoFailover)
 	return h.token
 }
 
@@ -113,7 +132,7 @@ func (h *HAState) EnableAsLeader(peerAddr string) string {
 // When the leader becomes unreachable (3 consecutive failures), the standby
 // promotes itself to leader by calling onPromote.
 func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
-	grpcAddr, certFile, keyFile, caFile string,
+	grpcAddr, certFile, keyFile, caFile string, autoFailover bool,
 	onPromote func() error) {
 
 	h.mu.Lock()
@@ -121,18 +140,20 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	h.peerAddr = leaderAddr
 	h.token = token
 	h.since = time.Now()
+	h.autoFailover = autoFailover
 	h.stopCh = make(chan struct{})
 	h.mu.Unlock()
 
 	// Persist HA config so standby restarts know HA is enabled.
 	_ = saveHAConfig(&haConfig{
-		Enabled:  true,
-		Token:    token,
-		PeerAddr: leaderAddr,
-		Role:     "standby",
+		Enabled:      true,
+		Token:        token,
+		PeerAddr:     leaderAddr,
+		Role:         "standby",
+		AutoFailover: autoFailover,
 	})
 
-	logger.Printf("HA: starting as standby (leader=%s)", sanitizeLog(leaderAddr))
+	logger.Printf("HA: starting as standby (leader=%s, auto_failover=%v)", sanitizeLog(leaderAddr), autoFailover)
 
 	go h.standbyLoop(ctx, leaderAddr, token, grpcAddr, certFile, keyFile, caFile, onPromote)
 }
@@ -151,7 +172,26 @@ func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
 	defer ticker.Stop()
 
 	failCount := 0
+	manualWarned := false // warn-once latch for the auto-failover-disabled path
 	const maxFail = 3
+
+	// onMaxFail handles the leader-unreachable threshold. It returns true when
+	// the standbyLoop should EXIT (auto-failover promoted this node to leader),
+	// and false when the loop should keep running (auto-failover disabled →
+	// stay standby/read-only and keep retrying, so we recover automatically if
+	// the leader returns). See ADR-0004: default-OFF auto-failover is the
+	// split-brain mitigation for the witness-less 2-node topology.
+	onMaxFail := func() bool {
+		if h.autoFailoverEnabled() {
+			h.promote(grpcAddr, certFile, keyFile, caFile, onPromote)
+			return true
+		}
+		if !manualWarned {
+			h.warnManualFailoverRequired(leaderAddr)
+			manualWarned = true
+		}
+		return false
+	}
 
 	// Try immediately.
 	if client != nil {
@@ -177,8 +217,7 @@ func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
 				if err != nil {
 					failCount++
 					logger.Printf("HA: reconnect to leader failed (%d/%d): %v", failCount, maxFail, err)
-					if failCount >= maxFail {
-						h.promote(grpcAddr, certFile, keyFile, caFile, onPromote)
+					if failCount >= maxFail && onMaxFail() {
 						return
 					}
 					continue
@@ -187,16 +226,32 @@ func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
 
 			if h.syncFromLeader(ctx, client, token) {
 				failCount = 0
+				manualWarned = false // leader recovered — re-arm the warning
 			} else {
 				failCount++
 				logger.Printf("HA: sync failed (%d/%d)", failCount, maxFail)
-				if failCount >= maxFail {
-					h.promote(grpcAddr, certFile, keyFile, caFile, onPromote)
+				if failCount >= maxFail && onMaxFail() {
 					return
 				}
 			}
 		}
 	}
+}
+
+// warnManualFailoverRequired logs and alerts that the leader is unreachable
+// while automatic failover is disabled, so this standby is intentionally
+// staying read-only. The operator must promote it (admin UI) or restart it as
+// leader. See ADR-0004 / RISK-001.
+func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
+	logger.Printf("HA: leader %s unreachable and automatic failover is DISABLED — staying standby (read-only). "+
+		"Manual failover required: promote via the admin UI or restart this node as leader (ADR-0004/RISK-001).",
+		sanitizeLog(leaderAddr))
+	go alerts.Fire("ha_manual_failover_required", alerts.Payload{
+		Event:  "ha_manual_failover_required",
+		Host:   leaderAddr,
+		Detail: "leader unreachable; automatic failover disabled; standby staying read-only pending manual action",
+		Source: "ha",
+	})
 }
 
 // syncFromLeader calls HASync on the leader and applies the state bundle.
@@ -329,10 +384,11 @@ func (h *HAState) Stop() {
 const haConfigFile = "ha_config.json"
 
 type haConfig struct {
-	Enabled  bool   `json:"enabled"`
-	Token    string `json:"token"`
-	PeerAddr string `json:"peer_addr"`
-	Role     string `json:"role"` // "leader" or "standby"
+	Enabled      bool   `json:"enabled"`
+	Token        string `json:"token"`
+	PeerAddr     string `json:"peer_addr"`
+	Role         string `json:"role"`          // "leader" or "standby"
+	AutoFailover bool   `json:"auto_failover"` // standby self-promotes on leader loss (ADR-0004; default OFF)
 }
 
 func haConfigPath() string {
@@ -422,10 +478,11 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 		}
 		status := globalHA.Status()
 		resp := map[string]any{
-			"enabled":   status.Enabled,
-			"role":      status.Role,
-			"since":     status.Since,
-			"peer_addr": status.PeerAddr,
+			"enabled":       status.Enabled,
+			"role":          status.Role,
+			"since":         status.Since,
+			"peer_addr":     status.PeerAddr,
+			"auto_failover": status.AutoFailover,
 		}
 		if status.Enabled && status.Role == "leader" {
 			resp["deploy_cmd"] = haDeployCommand()
@@ -451,7 +508,8 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 // See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (runtime/lifecycle).
 func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		LeaderAddr string `json:"leader_addr"` // this leader's externally reachable gRPC address
+		LeaderAddr   string `json:"leader_addr"`   // this leader's externally reachable gRPC address
+		AutoFailover bool   `json:"auto_failover"` // opt-in standby self-promotion (default OFF — ADR-0004)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -478,14 +536,15 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enable as leader and generate token.
-	token := globalHA.EnableAsLeader(req.LeaderAddr)
+	token := globalHA.EnableAsLeader(req.LeaderAddr, req.AutoFailover)
 
 	deployCmd := haDeployCommand()
 	jsonOK(w, map[string]any{
-		"ok":          true,
-		"role":        "leader",
-		"leader_addr": req.LeaderAddr,
-		"deploy_cmd":  deployCmd,
+		"ok":            true,
+		"role":          "leader",
+		"leader_addr":   req.LeaderAddr,
+		"auto_failover": req.AutoFailover,
+		"deploy_cmd":    deployCmd,
 	})
 
 	auditAdd(AuditEntry{
@@ -494,7 +553,7 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 		Actor:  sessionAdmin(r),
 		Action: "cluster.ha-enable",
 		Object: req.LeaderAddr,
-		Detail: fmt.Sprintf("HA enabled, token generated (token=%s…)", token[:8]),
+		Detail: fmt.Sprintf("HA enabled, token generated (token=%s…), auto_failover=%v", token[:8], req.AutoFailover),
 	})
 }
 
@@ -512,6 +571,7 @@ func haDeployCommand() string {
 	globalHA.mu.RLock()
 	token := globalHA.token
 	leaderAddr := globalHA.peerAddr
+	autoFailover := globalHA.autoFailover
 	globalHA.mu.RUnlock()
 
 	cmd := fmt.Sprintf("./culvert --cp-grpc-addr %s --ha-join %s --ha-token %s",
@@ -523,6 +583,11 @@ func haDeployCommand() string {
 	}
 	if caFile != "" {
 		cmd += fmt.Sprintf(" \\\n  --cp-grpc-ca %s", caFile)
+	}
+	// Carry the auto-failover preference to the standby (default OFF — the
+	// flag only appears when the operator explicitly enabled it). See ADR-0004.
+	if autoFailover {
+		cmd += " \\\n  --ha-auto-failover"
 	}
 	return cmd
 }

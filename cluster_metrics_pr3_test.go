@@ -76,7 +76,7 @@ func TestClusterMetrics_HAFailover_EnableAsLeaderDoesNotIncrement(t *testing.T) 
 	defer restore()
 
 	before := statHAFailovers.Load()
-	globalHA.EnableAsLeader("cp2:50051")
+	globalHA.EnableAsLeader("cp2:50051", false)
 	if got := statHAFailovers.Load(); got != before {
 		t.Errorf("ha_failovers = %d, want %d after EnableAsLeader (not a failover)", got, before)
 	}

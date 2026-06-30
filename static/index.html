@@ -3100,6 +3100,12 @@ Firefox (all platforms):
                 <input id="ha-leader-addr" class="input" placeholder="e.g. cp1.internal:50051" style="margin-top:4px">
                 <span style="font-size:.7rem;color:var(--muted);margin-top:2px;display:block">The hostname/IP that the standby server can reach this CP on</span>
               </label>
+              <label style="font-size:.8rem;color:var(--muted);display:flex;align-items:flex-start;gap:8px">
+                <input id="ha-auto-failover" type="checkbox" style="margin-top:3px">
+                <span>Automatic failover <span style="color:#f59e0b">(advanced — leave OFF unless you understand the risk)</span>
+                  <span style="font-size:.7rem;color:var(--muted);margin-top:2px;display:block">When ON, the standby self-promotes if it cannot reach this leader for ~15s. With only two Control Planes and no witness, a network partition where this leader is still alive causes BOTH nodes to act as leader (split-brain) and admin state diverges. Default OFF = manual failover: on leader loss the standby stays read-only until an operator promotes it or restarts it as leader.</span>
+                </span>
+              </label>
               <div style="margin-top:4px">
                 <button class="btn" id="ha-enable-btn" data-click="enableHA">Enable HA</button>
               </div>
@@ -3111,6 +3117,7 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="ha-role-val">—</div><div class="stat-label">This Node</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-peer-val">—</div><div class="stat-label">Peer</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-since-val">—</div><div class="stat-label">Since</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-failover-val">—</div><div class="stat-label">Failover</div></div>
             </div>
             <details style="margin-top:12px">
               <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;font-weight:600">Deploy Standby CP</summary>
@@ -10769,13 +10776,14 @@ async function enableControlPlane() {
 async function enableHA() {
   const leaderAddr = document.getElementById('ha-leader-addr').value.trim();
   if (!leaderAddr) { toast('This server\'s reachable address is required', 'error'); return; }
+  const autoFailover = document.getElementById('ha-auto-failover').checked;
   const btn = document.getElementById('ha-enable-btn');
   btn.disabled = true; btn.textContent = 'Enabling…';
   try {
     const r = await api('/api/cluster/ha', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ leader_addr: leaderAddr })
+      body: JSON.stringify({ leader_addr: leaderAddr, auto_failover: autoFailover })
     });
     if (!r) return;
     toast('HA enabled - this node is now the leader', 'success');
@@ -10803,6 +10811,9 @@ async function loadHA(isCP) {
       document.getElementById('ha-role-val').innerHTML = `<span style="color:${roleColor}">${escHtml(r.role)}</span>`;
       document.getElementById('ha-peer-val').textContent = r.peer_addr || '—';
       document.getElementById('ha-since-val').textContent = r.since ? timeAgo(new Date(r.since)) : '—';
+      document.getElementById('ha-failover-val').innerHTML = r.auto_failover
+        ? '<span style="color:#f59e0b">Automatic</span>'
+        : '<span style="color:#22c55e">Manual</span>';
       if (r.deploy_cmd) {
         document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
       }
