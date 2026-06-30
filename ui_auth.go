@@ -11,10 +11,20 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/crewjam/saml"
 )
+
+// setupCompleteMu serializes apiSetupComplete's "is setup already done?"
+// check against its own writes. The endpoint is intentionally public
+// (reachable before any admin account exists), so without this lock two
+// concurrent POSTs can both observe !cfg.IsConfigured() before either call
+// finishes, letting more than one caller provision an admin credential —
+// each one landing in the uiUsers RBAC roster as a permanent, independently
+// usable admin login.
+var setupCompleteMu sync.Mutex
 
 // POST /api/auth/login — validate admin credentials, set session cookie.
 // When TOTP is enrolled for the user, a first-pass response of {"totp_required":true}
@@ -339,6 +349,11 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("too many attempts, locked for %ds", secs), http.StatusTooManyRequests)
 		return
 	}
+	// Hold setupCompleteMu across the IsConfigured() check and the SetAuth /
+	// SetDefaultAuthOutcome call below so the two can't interleave across
+	// concurrent requests (see setupCompleteMu doc comment).
+	setupCompleteMu.Lock()
+	defer setupCompleteMu.Unlock()
 	if cfg.IsConfigured() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
