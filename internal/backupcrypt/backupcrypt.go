@@ -55,7 +55,7 @@ const (
 	// KDFIters is the PBKDF2-SHA256 iteration count for v1 envelopes.
 	KDFIters = 600_000
 	// PassphraseEnv names the env var the CLI reads the backup passphrase from.
-	PassphraseEnv = "CULVERT_BACKUP_PASSPHRASE"
+	PassphraseEnv = "CULVERT_BACKUP_PASSPHRASE" // #nosec G101 -- env-var NAME, not a credential (NOSONAR)
 	// PassphraseMinLen is the soft floor below which the CLI warns (does not enforce).
 	PassphraseMinLen = 12
 )

@@ -43,11 +43,16 @@
     split-brain-risk warning under auto-failover.
   - **`/healthz` exposes `term` + `write_authority`**, so a double-leader is now *detectable* (compare
     terms across both CPs) instead of two indistinguishable `leader:true` bodies.
+  - **Explicit promote primitive (Slice 1e, PR #525 review):** `POST /api/cluster/ha/promote` +
+    UI button + `HAState.PromoteManually()` make operator manual failover real (it had no endpoint
+    before); the CP rolling update (`updateCPWithHA`) now arms a coordinated planned handoff
+    (`HAStateBundle.PromoteRequested`) instead of relying on auto-promote, closing a regression
+    default-manual introduced. Failback stays deferred.
   - Behavior is re-pinned in `ha_split_brain_failover_evidence_test.go` (assertions flipped to the new
-    state) + `ha_autofailover_test.go` / `ha_term_test.go`.
-- **Residual (why still HIGH, not closed):** *safe automatic* failover does not exist yet. Under the
-  opt-in `--ha-auto-failover`, a surviving-leader partition can still split-brain (no demote/fence/
-  reconcile). The default-manual posture is safe but loses automatic failover.
+    state) + `ha_autofailover_test.go` / `ha_term_test.go` / `ha_promote_test.go`.
+- **Residual (why still HIGH, not closed):** *safe automatic* failover on UNPLANNED leader loss does
+  not exist yet. Under the opt-in `--ha-auto-failover`, a surviving-leader partition can still
+  split-brain (no demote/fence/reconcile); failback is deferred. The default-manual posture is safe.
 - **Open decision (ADR-0004 §Decision):** pick the automatic-failover mechanism — manual-only /
   lease+witness (Advisor recommendation) / corrected DP-quorum / Raft. The hand-rolled DP-quorum first
   proposed was rejected by adversarial review (stale-quorum dual-majority, silent data loss, ungated CA

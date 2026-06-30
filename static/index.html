@@ -3120,6 +3120,11 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="ha-failover-val">—</div><div class="stat-label">Failover</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-term-val">—</div><div class="stat-label">Term</div></div>
             </div>
+            <!-- Manual failover: shown only when this node is a standby -->
+            <div id="ha-promote-row" style="display:none;margin-bottom:16px">
+              <button class="btn warn" id="ha-promote-btn" data-click="promoteHA">Promote this node to Leader</button>
+              <span style="font-size:.75rem;color:var(--muted);margin-left:8px">Use when the leader is down and automatic failover is off. Confirm the leader is truly gone first — promoting while the leader still serves causes split-brain.</span>
+            </div>
             <details style="margin-top:12px">
               <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;font-weight:600">Deploy Standby CP</summary>
               <p style="color:var(--muted);font-size:.8rem;margin:8px 0">
@@ -10796,6 +10801,22 @@ async function enableHA() {
   }
 }
 
+async function promoteHA() {
+  if (!confirm('Promote this standby to Leader?\n\nOnly do this if the current leader is truly down. Promoting while the leader is still serving will cause split-brain (two leaders, diverging state).')) return;
+  const btn = document.getElementById('ha-promote-btn');
+  btn.disabled = true; btn.textContent = 'Promoting…';
+  try {
+    const r = await api('/api/cluster/ha/promote', { method: 'POST' });
+    if (!r) return;
+    toast('This node is now the leader', 'success');
+    loadCluster();
+  } catch(e) {
+    toast('Promote failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Promote this node to Leader';
+  }
+}
+
 async function loadHA(isCP) {
   const panel = document.getElementById('cluster-ha-panel');
   if (!isCP) { panel.style.display = 'none'; return; }
@@ -10816,6 +10837,8 @@ async function loadHA(isCP) {
         ? '<span style="color:#f59e0b">Automatic</span>'
         : '<span style="color:#22c55e">Manual</span>';
       document.getElementById('ha-term-val').textContent = (r.term != null) ? r.term : '—';
+      // Manual-failover button: only a standby can be promoted.
+      document.getElementById('ha-promote-row').style.display = (r.role === 'standby') ? '' : 'none';
       if (r.deploy_cmd) {
         document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
       }

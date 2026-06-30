@@ -153,9 +153,22 @@ split-brain into *visible, operator-recoverable* split-brain:
 4. **Flip the evidence test.** `ha_split_brain_failover_evidence_test.go` pins today's (unsafe)
    behavior by design; update its assertions to pin the new behavior as each fact changes, preserving
    it as the regression backstop.
+5. **Slice 1e — the explicit promote primitive (added during PR #525 review).** Making auto-failover
+   opt-in exposed two gaps a Codex review surfaced: (a) **no operator promote path existed** — Slice 1
+   told operators to "promote via the admin UI," but `promote()` was only reachable from the
+   auto-failover loop; and (b) the **CP rolling-update path (`updateCPWithHA`) relied on the standby
+   auto-promoting**, so with auto-failover off it would leave the cluster leaderless. Both are closed by
+   one primitive: `HAState.PromoteManually()` (idempotent `promote()` guard so loop/manual/planned
+   can't double-fire) + `POST /api/cluster/ha/promote` (RoleAdmin) + a UI "Promote to Leader" button
+   shown for a standby. For the update path, the leader arms a **coordinated planned handoff**
+   (`HAStateBundle.PromoteRequested`): the standby promotes on its next HASync pull — honored even when
+   auto-failover is off, because a planned update is deliberate, not unattended. *Failback* (the old
+   leader rejoining as standby) is unchanged — still the deferred 2-node-failback work, now at least
+   detectable via the `/healthz` term.
 
-Slice 1 is **mitigation, not a cure**: it makes the failure honest and recoverable and removes the
-unsafe default. It does not yet provide *safe automatic* failover — that is the mechanism decision.
+Slice 1 is **mitigation, not a cure**: it makes the failure honest and recoverable, removes the unsafe
+default, and gives operators/orchestrators a real (planned) promote path. It does not yet provide
+*safe automatic* failover on unplanned leader loss — that is the mechanism decision.
 
 ### Open — the automatic-failover mechanism (decide deliberately, separate change)
 

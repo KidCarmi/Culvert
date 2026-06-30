@@ -401,9 +401,9 @@ func TestCertManager_GetCert_EmptyServerName_Audit(t *testing.T) {
 
 // ── ConnLimiter edge cases ─────────────────────────────────────────────────
 
-func newTestConnLimiter(max int) *ConnLimiter {
+func newTestConnLimiter(limit int) *ConnLimiter {
 	cl := newConnLimiter()
-	cl.Enable(max)
+	cl.Enable(limit)
 	return cl
 }
 

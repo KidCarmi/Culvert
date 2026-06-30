@@ -33,8 +33,10 @@ func TestHA_Term_Lifecycle(t *testing.T) {
 	h.mu.Lock()
 	h.role = "standby"
 	h.term = 5
+	h.promoted.Store(false)
+	h.pc = promoteContext{onPromote: func() error { return nil }, set: true}
 	h.mu.Unlock()
-	h.promote("", "", "", "", func() error { return nil })
+	h.promote("test")
 	if got := h.Status().Term; got != 6 {
 		t.Fatalf("promote term = %d, want 6 (5+1)", got)
 	}

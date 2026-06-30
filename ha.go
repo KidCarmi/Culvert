@@ -50,13 +50,32 @@ import (
 // HAState tracks the HA status of this Control Plane instance.
 type HAState struct {
 	mu           sync.RWMutex
-	role         string    // "leader", "standby", or "" (HA disabled)
-	token        string    // shared HA token for authentication
-	peerAddr     string    // address of the other CP
-	since        time.Time // when current role was acquired
-	autoFailover bool      // standby self-promotes on leader loss (default OFF — see ADR-0004)
-	term         uint64    // leadership epoch — bumped on each promotion (ADR-0004 Slice 1c)
+	role         string         // "leader", "standby", or "" (HA disabled)
+	token        string         // shared HA token for authentication
+	peerAddr     string         // address of the other CP
+	since        time.Time      // when current role was acquired
+	autoFailover bool           // standby self-promotes on leader loss (default OFF — see ADR-0004)
+	term         uint64         // leadership epoch — bumped on each promotion (ADR-0004 Slice 1c)
+	pc           promoteContext // params captured at StartAsStandby so a manual/planned promote can reuse them
 	stopCh       chan struct{}
+
+	// plannedPromotion (leader side) signals the standby, via the next HASync
+	// bundle, to perform a COORDINATED promotion — a planned handoff (e.g. a CP
+	// rolling update) that must happen even when auto-failover is OFF. Distinct
+	// from unplanned auto-failover. (ADR-0004 Slice 1e.)
+	plannedPromotion atomic.Bool
+	// promoted guards promote() so the expensive onPromote (gRPC server start)
+	// runs at most once whether triggered by the sync loop, a manual API call,
+	// or a planned handoff.
+	promoted atomic.Bool
+}
+
+// promoteContext holds the parameters StartAsStandby threads into the sync loop,
+// captured so PromoteManually / a planned handoff can promote without them.
+type promoteContext struct {
+	grpcAddr, certFile, keyFile, caFile string
+	onPromote                           func() error
+	set                                 bool
 }
 
 var globalHA = &HAState{}
@@ -138,7 +157,7 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) string {
 		Term:         h.term,
 	})
 
-	logger.Printf("HA: enabled as leader (peer=%s, auto_failover=%v, term=%d)", sanitizeLog(peerAddr), autoFailover, h.term)
+	logger.Printf("HA: enabled as leader (peer=%q, auto_failover=%v, term=%d)", sanitizeLog(peerAddr), autoFailover, h.term)
 	return h.token
 }
 
@@ -168,13 +187,14 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	grpcAddr, certFile, keyFile, caFile string, autoFailover bool,
 	onPromote func() error) {
-
 	h.mu.Lock()
 	h.role = "standby"
 	h.peerAddr = leaderAddr
 	h.token = token
 	h.since = time.Now()
 	h.autoFailover = autoFailover
+	h.pc = promoteContext{grpcAddr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile, onPromote: onPromote, set: true}
+	h.promoted.Store(false)
 	h.stopCh = make(chan struct{})
 	h.mu.Unlock()
 
@@ -187,14 +207,20 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 		AutoFailover: autoFailover,
 	})
 
-	logger.Printf("HA: starting as standby (leader=%s, auto_failover=%v)", sanitizeLog(leaderAddr), autoFailover)
+	logger.Printf("HA: starting as standby (leader=%q, auto_failover=%v)", sanitizeLog(leaderAddr), autoFailover)
 
-	go h.standbyLoop(ctx, leaderAddr, token, grpcAddr, certFile, keyFile, caFile, onPromote)
+	go h.standbyLoop(ctx, leaderAddr, token, certFile, keyFile, caFile)
 }
 
 func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
-	grpcAddr, certFile, keyFile, caFile string,
-	onPromote func() error) {
+	certFile, keyFile, caFile string) {
+	// Capture the stop channel once. promote() calls Stop() (which closes then
+	// nils h.stopCh), so reading the field per-iteration could select on a nil
+	// channel after a manual/planned promotion; the local keeps the closed
+	// channel reachable so the loop exits cleanly.
+	h.mu.RLock()
+	stopCh := h.stopCh
+	h.mu.RUnlock()
 
 	// Connect to leader using the same gRPC client infrastructure as DPs.
 	client, err := NewDataPlaneClient("ha-standby", leaderAddr, certFile, keyFile, caFile)
@@ -217,7 +243,7 @@ func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
 	// split-brain mitigation for the witness-less 2-node topology.
 	onMaxFail := func() bool {
 		if h.autoFailoverEnabled() {
-			h.promote(grpcAddr, certFile, keyFile, caFile, onPromote)
+			h.promote("leader unreachable")
 			return true
 		}
 		if !manualWarned {
@@ -242,7 +268,7 @@ func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
 		select {
 		case <-ctx.Done():
 			return
-		case <-h.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			if client == nil {
@@ -302,7 +328,17 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: parse state bundle error: %v", err)
 		return false
 	}
-	return applyHABundle(&bundle, token)
+	ok := applyHABundle(&bundle, token)
+	// Coordinated planned handoff (ADR-0004 Slice 1e): the leader sets
+	// PromoteRequested in the bundle before a deliberate takedown (e.g. a CP
+	// rolling update). Promote even when auto-failover is OFF — this is a
+	// planned, leader-initiated handoff, not an unattended auto-failover. Only
+	// after the state apply succeeded, so the new leader has the latest state.
+	if ok && bundle.PromoteRequested && !h.IsLeader() {
+		logger.Printf("HA: leader requested a planned promotion — performing coordinated handoff")
+		h.promote("planned handoff requested by leader")
+	}
+	return ok
 }
 
 // applyHABundle applies a decoded HA state bundle on the standby, fail-closed
@@ -372,16 +408,29 @@ func applyReplicatedCA(certPEM []byte, caKeyEncrypted, token string) error {
 	return nil
 }
 
-// promote switches this standby to leader mode. The grpcAddr/certFile/keyFile/
-// caFile params are threaded from Start → standbyLoop → promote for call-site
-// symmetry with the reconnect path and kept for a future promote impl; they are
-// pre-existing and not introduced by CA-3.
-//
-//nolint:unparam // see note above — params kept for signature symmetry / future use
-func (h *HAState) promote(grpcAddr, certFile, keyFile, caFile string, onPromote func() error) {
-	logger.Printf("HA: leader unreachable — promoting to leader")
+// promote switches this standby to leader mode using the promote context
+// captured at StartAsStandby. reason labels the trigger (unplanned auto-failover,
+// a manual operator promotion, or a coordinated planned handoff). It is
+// idempotent: the `promoted` guard ensures the expensive onPromote (gRPC server
+// start) runs at most once, so a manual/planned promote cannot race the sync
+// loop's auto-promote. On an onPromote failure the guard is reset so a later
+// attempt can retry.
+func (h *HAState) promote(reason string) {
+	if !h.promoted.CompareAndSwap(false, true) {
+		return // already promoted (or another trigger won the race)
+	}
+	h.mu.RLock()
+	pc := h.pc
+	h.mu.RUnlock()
+	if !pc.set || pc.onPromote == nil {
+		h.promoted.Store(false)
+		logger.Printf("HA: promote (%s) requested but no promote context available — ignoring", reason)
+		return
+	}
 
-	if err := onPromote(); err != nil {
+	logger.Printf("HA: promoting to leader (%s)", reason)
+	if err := pc.onPromote(); err != nil {
+		h.promoted.Store(false) // allow a later retry
 		logger.Printf("HA: promote failed: %v — staying as standby", err)
 		return
 	}
@@ -405,7 +454,37 @@ func (h *HAState) promote(grpcAddr, certFile, keyFile, caFile string, onPromote 
 	// Update persisted config.
 	_ = saveHAConfig(cfg)
 
+	// Becoming leader makes the standby sync loop pointless — stop it so a
+	// manual/planned promotion (which runs outside the loop) doesn't leave it
+	// spinning against the old leader. Idempotent with the auto-failover path,
+	// which also exits the loop after promote returns.
+	h.Stop()
+
 	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
+}
+
+// PromoteManually performs an explicit, operator- or orchestrator-triggered
+// promotion of this standby to leader — the manual-failover path (ADR-0004
+// Slice 1e). Unlike auto-failover it does NOT require --ha-auto-failover: an
+// explicit promotion is a deliberate, coordinated action, not an unattended
+// reaction to leader silence, so it carries no split-brain surprise. Returns an
+// error if this node is not a promotable standby.
+func (h *HAState) PromoteManually() error {
+	h.mu.RLock()
+	role := h.role
+	ctxSet := h.pc.set
+	h.mu.RUnlock()
+	if role != "standby" {
+		return fmt.Errorf("cannot promote: node role is %q, not standby", role)
+	}
+	if !ctxSet {
+		return fmt.Errorf("cannot promote: no promote context (node was not started as a standby)")
+	}
+	h.promote("manual promotion")
+	if !h.IsLeader() {
+		return fmt.Errorf("promotion did not complete (see logs)")
+	}
+	return nil
 }
 
 // Stop terminates the sync loop.
@@ -621,6 +700,47 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 		Action: "cluster.ha-enable",
 		Object: req.LeaderAddr,
 		Detail: fmt.Sprintf("HA enabled, token generated (token=%s…), auto_failover=%v", token[:8], req.AutoFailover),
+	})
+}
+
+// ── Planned promotion (leader side) ─────────────────────────────────────────
+
+// RequestPlannedPromotion (leader) arms the coordinated-handoff flag so the next
+// HASync bundle instructs the standby to promote. Used before a deliberate
+// leader takedown (e.g. a CP rolling update). Clear with ClearPlannedPromotion.
+func (h *HAState) RequestPlannedPromotion() { h.plannedPromotion.Store(true) }
+
+// ClearPlannedPromotion disarms the coordinated-handoff flag.
+func (h *HAState) ClearPlannedPromotion() { h.plannedPromotion.Store(false) }
+
+// apiClusterHAPromote handles POST /api/cluster/ha/promote — the explicit
+// manual-failover action (ADR-0004 Slice 1e). It promotes THIS node (a standby)
+// to leader. Auth: admin RBAC for the operator UI path. Unlike auto-failover it
+// needs no --ha-auto-failover, because an explicit promotion is deliberate.
+func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	if err := globalHA.PromoteManually(); err != nil {
+		// Inline-sanitize the engine error (CWE-117) before it reaches the log
+		// via the response path; the message names only role/context, no input.
+		http.Error(w, "promote failed: "+err.Error(), http.StatusConflict)
+		return
+	}
+	status := globalHA.Status()
+	jsonOK(w, map[string]any{"ok": true, "role": status.Role, "term": status.Term})
+
+	auditAdd(AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  sessionAdmin(r),
+		Action: "cluster.ha-promote",
+		Object: "self",
+		Detail: fmt.Sprintf("manual standby→leader promotion (term=%d)", status.Term),
 	})
 }
 

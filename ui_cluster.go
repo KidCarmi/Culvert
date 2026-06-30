@@ -588,6 +588,7 @@ func registerClusterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations)             // GET revocation sync status
 	mux.HandleFunc("/api/cluster/rotation", apiClusterRotation)                   // GET CA rotation progress
 	mux.HandleFunc("/api/cluster/ha", apiClusterHA)                               // GET HA status
+	mux.HandleFunc("/api/cluster/ha/promote", apiClusterHAPromote)                // POST manual standby→leader promotion
 	mux.HandleFunc("/api/cluster/bandwidth", apiBandwidthPolicies)                // GET/POST/DELETE bandwidth QoS policies
 	mux.HandleFunc("/api/cluster/bootstrap/", apiBootstrapRouter)                 // GET bootstrap script/compose (token-authed)
 }

@@ -202,7 +202,7 @@ func (as *AlertStore) save() {
 	}
 	data, _ := json.MarshalIndent(encHooks, "", "  ") // #nosec G117 -- Secret holds AES-GCM ciphertext at rest (RISK-003), not the cleartext key
 	tmp := as.filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil { // #nosec G306
+	if err := os.WriteFile(tmp, data, 0o600); err != nil { // #nosec G306
 		logger.Printf("AlertStore: write %s: %v", tmp, err)
 		return
 	}

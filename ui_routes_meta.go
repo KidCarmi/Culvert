@@ -516,6 +516,10 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "no direct auditEvent observed"},
 		}},
+	{Path: "/api/cluster/ha/promote", Handler: "apiClusterHAPromote", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/cluster/bandwidth", Handler: "apiBandwidthPolicies", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
