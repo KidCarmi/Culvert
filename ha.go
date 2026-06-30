@@ -352,6 +352,15 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		return false
 	}
 	ok := applyHABundle(&bundle, token)
+	if ok {
+		// Seed the standby's epoch from the leader's term (ADR-0004 Slice 1c/1e,
+		// Codex P2): without this a standby starts at term 0, so its first
+		// promotion reports term 1 — identical to the original leader's term 1,
+		// and the /healthz split-brain signal can't tell which side promoted
+		// later. Carrying the leader term means a promotion yields leaderTerm+1,
+		// strictly greater, so the post-promotion epoch is monotonic.
+		h.seedTermFromLeader(bundle.LeaderTerm)
+	}
 	// Coordinated planned handoff (ADR-0004 Slice 1e): the leader sets
 	// PromoteRequested in the bundle before a deliberate takedown (e.g. a CP
 	// rolling update). Promote even when auto-failover is OFF — this is a
@@ -362,6 +371,17 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		h.promote("planned handoff requested by leader")
 	}
 	return ok
+}
+
+// seedTermFromLeader raises this standby's epoch to the leader's term (never
+// lowers it), so a later promotion produces a strictly-higher epoch than the
+// leader's last-known term. Standby-only; a no-op once this node is leader.
+func (h *HAState) seedTermFromLeader(leaderTerm uint64) {
+	h.mu.Lock()
+	if h.role != "leader" && leaderTerm > h.term {
+		h.term = leaderTerm
+	}
+	h.mu.Unlock()
 }
 
 // applyHABundle applies a decoded HA state bundle on the standby, fail-closed

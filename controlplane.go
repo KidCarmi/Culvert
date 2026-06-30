@@ -881,6 +881,10 @@ type HAStateBundle struct {
 	// leader down. Honored even when auto-failover is OFF, because it is an
 	// explicit leader-initiated handoff, not an unattended auto-failover.
 	PromoteRequested bool `json:"promote_requested,omitempty"`
+	// LeaderTerm carries the leader's current epoch so the standby can seed its
+	// own term (ADR-0004 Slice 1c, Codex P2) and a promotion yields a strictly
+	// higher epoch — making the /healthz split-brain signal meaningful.
+	LeaderTerm uint64 `json:"leader_term,omitempty"`
 }
 
 // haEncryptKey encrypts data with AES-256-GCM using a key derived from the
@@ -974,6 +978,7 @@ func (s *controlPlaneServer) HASync(_ context.Context, raw json.RawMessage) (jso
 		Config:           CurrentConfigSnapshot(),
 		Version:          globalConfigStore.Get().Version,
 		PromoteRequested: globalHA.plannedPromotion.Load(), // ADR-0004 Slice 1e: coordinated handoff
+		LeaderTerm:       globalHA.Status().Term,           // ADR-0004 Slice 1c/P2: seed standby epoch
 	}
 
 	resp, _ := json.Marshal(bundle)

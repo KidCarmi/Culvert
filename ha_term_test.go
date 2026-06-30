@@ -55,6 +55,40 @@ func TestHA_Term_Lifecycle(t *testing.T) {
 	}
 }
 
+// Codex P2: a standby seeds its epoch from the leader's term so a later
+// promotion yields a strictly-higher epoch (the /healthz split-brain signal).
+func TestHA_SeedTermFromLeader(t *testing.T) {
+	tempHADir(t)
+	h := &HAState{}
+	h.mu.Lock()
+	h.role = "standby"
+	h.term = 0
+	h.stopCh = make(chan struct{})
+	h.pc = promoteContext{onPromote: func() error { return nil }, set: true}
+	h.mu.Unlock()
+
+	h.seedTermFromLeader(7) // leader is at epoch 7
+	if got := h.Status().Term; got != 7 {
+		t.Fatalf("seeded term = %d, want 7", got)
+	}
+	// Never lowers.
+	h.seedTermFromLeader(3)
+	if got := h.Status().Term; got != 7 {
+		t.Errorf("seed must not lower the term: got %d, want 7", got)
+	}
+	// A promotion now produces a strictly-higher epoch than the leader's 7.
+	h.promote("test")
+	if got := h.Status().Term; got != 8 {
+		t.Errorf("post-promotion term = %d, want 8 (7+1, > leader's 7)", got)
+	}
+
+	// Once leader, seeding is a no-op (does not get dragged backward/forward).
+	h.seedTermFromLeader(99)
+	if got := h.Status().Term; got != 8 {
+		t.Errorf("leader term must not be reseeded: got %d, want 8", got)
+	}
+}
+
 // /healthz exposes term + write_authority so an external monitor can detect a
 // double-leader by scraping both CPs.
 func TestHA_Healthz_ExposesTermAndWriteAuthority(t *testing.T) {
