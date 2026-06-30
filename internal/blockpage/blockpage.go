@@ -1,4 +1,8 @@
-package main
+// Package blockpage owns the corporate "Access Denied" block page: the default
+// HTML template, the runtime-mutable override, and the 403 response writer. It
+// is a self-contained leaf (stdlib only, no Culvert coupling) extracted from the
+// flat package main per ADR-0002.
+package blockpage
 
 import (
 	"bytes"
@@ -8,7 +12,7 @@ import (
 	"time"
 )
 
-const blockPageHTML = `<!DOCTYPE html>
+const defaultHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -59,54 +63,54 @@ a:hover{text-decoration:underline}
 </body>
 </html>`
 
-type blockPageData struct {
+type pageData struct {
 	URL       string
 	Category  string
 	RuleName  string
 	Timestamp string
 }
 
-// blockPageState holds the current block page template (mutable at runtime).
-var blockPageState = struct {
+// state holds the current block page template (mutable at runtime).
+var state = struct {
 	mu      sync.RWMutex
 	tmpl    *template.Template
 	htmlSrc string // raw HTML for GET /api/blockpage
 }{
-	tmpl:    template.Must(template.New("block").Parse(blockPageHTML)),
-	htmlSrc: blockPageHTML,
+	tmpl:    template.Must(template.New("block").Parse(defaultHTML)),
+	htmlSrc: defaultHTML,
 }
 
-// setBlockPageHTML replaces the block page template at runtime.
-func setBlockPageHTML(html string) error {
+// SetHTML replaces the block page template at runtime.
+func SetHTML(html string) error {
 	t, err := template.New("block").Parse(html)
 	if err != nil {
 		return err
 	}
-	blockPageState.mu.Lock()
-	blockPageState.tmpl = t
-	blockPageState.htmlSrc = html
-	blockPageState.mu.Unlock()
+	state.mu.Lock()
+	state.tmpl = t
+	state.htmlSrc = html
+	state.mu.Unlock()
 	return nil
 }
 
-// getBlockPageHTML returns the current raw HTML source.
-func getBlockPageHTML() string {
-	blockPageState.mu.RLock()
-	defer blockPageState.mu.RUnlock()
-	return blockPageState.htmlSrc
+// GetHTML returns the current raw HTML source.
+func GetHTML() string {
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	return state.htmlSrc
 }
 
-// serveBlockPage writes a 403 HTML response using the corporate block page template.
-func serveBlockPage(w http.ResponseWriter, url, category, ruleName string) {
-	data := blockPageData{
+// Serve writes a 403 HTML response using the corporate block page template.
+func Serve(w http.ResponseWriter, url, category, ruleName string) {
+	data := pageData{
 		URL:       url,
 		Category:  category,
 		RuleName:  ruleName,
 		Timestamp: time.Now().Format("2006-01-02 15:04:05 MST"),
 	}
-	blockPageState.mu.RLock()
-	tmpl := blockPageState.tmpl
-	blockPageState.mu.RUnlock()
+	state.mu.RLock()
+	tmpl := state.tmpl
+	state.mu.RUnlock()
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
 		http.Error(w, "Forbidden", http.StatusForbidden)

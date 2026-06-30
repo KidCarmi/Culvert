@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb` (+ the `obs`/`fileutil` and `hostutil` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage` (+ the `obs`/`fileutil` and `hostutil` seams)
 
 ## Notes / log
 
@@ -316,6 +316,25 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` on th
 main feedsync/category consumers, determinism gate (`-count=2 -shuffle=on`) — all green.
 **Six leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`) + two seams
 (`obs`/`fileutil`, `hostutil`).**
+
+### 2026-06-29 — `internal/blockpage` extracted (seventh leaf)
+Moved `blockpage.go` (the corporate "Access Denied" page: default HTML template, runtime override,
+403 writer) into `internal/blockpage`. Pure stdlib (`html/template`, `net/http`, `bytes`, `sync`,
+`time`), zero Culvert coupling, and — like hashcache/catdb — **zero whitebox test access**: every
+consumer is black-box. `serveBlockPage`→`Serve`, `setBlockPageHTML`→`SetHTML`,
+`getBlockPageHTML`→`GetHTML`; the default-template const and the mutable `state`/`pageData` are
+package-internal (no external refs).
+
+`package main` keeps `blockpage_vars.go` (thin wrappers) so the call sites stay unchanged —
+`proxy.go` (`serveBlockPage` on every deny path), `admin_settings.go` (get/set for restart-durable
+custom HTML), and the black-box tests in `edge_audit_test.go` / `policy_misc_test.go`. Added a
+focused co-located `blockpage_test.go` (the file had none): default render, custom-template
+round-trip, invalid-template rejection leaves the prior template installed, and the execute-error →
+403 fallback path.
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + determinism gate
+(`-count=2 -shuffle=on`) on the package, main deny-path consumers green. **Seven leaves done
+(`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`) + two seams.**
 
 ## Context
 
