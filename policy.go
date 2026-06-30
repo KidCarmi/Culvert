@@ -954,7 +954,29 @@ func matchAuthSource(ruleAuthSource, actualAuthSource string) bool {
 	if strings.EqualFold(ruleAuthSource, actualAuthSource) {
 		return true
 	}
-	return strings.EqualFold(stripIdPPrefix(ruleAuthSource), stripIdPPrefix(actualAuthSource))
+	// Legacy/canonical alias: a bare profile ID ("okta") and its prefixed form
+	// ("oidc:okta") refer to the same provider, so they match. BUT two DIFFERENT
+	// explicit schemes MUST NOT alias — a rule scoped to "oidc:okta" must not
+	// authorize a "saml:okta" source (cross-IdP/cross-scheme confusion). Match
+	// iff the bare names are equal AND the schemes are compatible (either side
+	// bare, or the same scheme).
+	ruleScheme, ruleName := splitIdPSource(ruleAuthSource)
+	actScheme, actName := splitIdPSource(actualAuthSource)
+	if !strings.EqualFold(ruleName, actName) {
+		return false
+	}
+	return ruleScheme == "" || actScheme == "" || strings.EqualFold(ruleScheme, actScheme)
+}
+
+// splitIdPSource separates an auth-source string into its IdP scheme
+// ("oidc"/"saml", or "" when bare/non-IdP) and the profile name.
+func splitIdPSource(source string) (scheme, name string) {
+	for _, p := range []string{"oidc:", "saml:"} {
+		if rest, ok := strings.CutPrefix(source, p); ok && rest != "" {
+			return strings.TrimSuffix(p, ":"), rest
+		}
+	}
+	return "", source
 }
 
 func stripIdPPrefix(source string) string {

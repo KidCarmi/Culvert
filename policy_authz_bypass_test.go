@@ -91,26 +91,31 @@ func TestAuthzBypass_AuthSourceNotForgeable(t *testing.T) {
 		t.Error("a local request should match AuthSource=local")
 	}
 
-	// IdP-prefix alias: rule "oidc:okta" matches "okta" but not look-alikes.
+	// A scheme-scoped rule "oidc:okta" matches the bare legacy alias "okta" and
+	// the exact "oidc:okta", but must NOT authorize a DIFFERENT scheme's same-
+	// named source ("saml:okta") — cross-IdP/cross-scheme aliasing was a finding,
+	// now fixed (see matchAuthSource).
 	idpRule := PolicyRule{Priority: 1, Name: "okta", DestFQDN: "*", AuthSource: "oidc:okta", Action: ActionAllow}
 	for src, want := range map[string]bool{
-		"oidc:okta": true,
-		"okta":      true, // documented prefix-strip alias
-		// FINDING (documented): matchAuthSource strips oidc:/saml: from BOTH sides,
-		// so a rule scoped to "oidc:okta" ALSO authorizes a "saml:okta" source —
-		// cross-IdP/cross-scheme aliasing. Asserted as the ACTUAL behavior here and
-		// reported for product review (see bug report).
-		"saml:okta": true,
+		"oidc:okta": true,  // exact
+		"okta":      true,  // bare legacy alias (same provider, unspecified scheme)
+		"saml:okta": false, // FIXED: cross-scheme must NOT authorize
 		"okta-evil": false,
 		"evil:okta": false,
 		"unauth":    false,
 	} {
 		got := evalMatch(idpRule, "203.0.113.1", "u", src, "site.example", nil) != nil
-		// NOTE: matchAuthSource strips oidc:/saml: from BOTH sides, so "saml:okta"
-		// could alias to "okta". If that happens this assertion documents it as a
-		// finding rather than silently passing.
 		if got != want {
 			t.Errorf("authSource %q matched=%v, want %v (cross-source/look-alike must not authorize)", src, got, want)
+		}
+	}
+
+	// A BARE rule "okta" is scheme-agnostic by design (migration): it matches any
+	// scheme of that provider.
+	bareRule := PolicyRule{Priority: 1, Name: "okta-bare", DestFQDN: "*", AuthSource: "okta", Action: ActionAllow}
+	for _, src := range []string{"okta", "oidc:okta", "saml:okta"} {
+		if evalMatch(bareRule, "203.0.113.1", "u", src, "site.example", nil) == nil {
+			t.Errorf("bare AuthSource rule should match %q (scheme-agnostic provider alias)", src)
 		}
 	}
 }
