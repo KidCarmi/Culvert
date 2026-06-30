@@ -28,6 +28,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/alerts"
 )
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -497,7 +499,7 @@ func yaraSaturationCheck(inflight int64) (bool, bool) {
 	}
 	logWarnf("YARA: regex skipped: too many in-flight goroutines (%d)", inflight)
 	if yaraGetAlertDegraded() {
-		go fireAlert("yara_degraded", AlertPayload{
+		go alerts.Fire("yara_degraded", alerts.Payload{
 			Source: "yara",
 			Detail: fmt.Sprintf("regex skipped: inflight=%d max=%d — YARA engine saturated", inflight, max),
 		})
@@ -513,7 +515,7 @@ func yaraDegradedCheck(inflight int64) {
 	}
 	max := yaraGetMaxInflight()
 	if inflight >= (max*80)/100 {
-		go fireAlert("yara_degraded", AlertPayload{
+		go alerts.Fire("yara_degraded", alerts.Payload{
 			Source: "yara",
 			Detail: fmt.Sprintf("inflight=%d/%d — approaching YARA saturation", inflight, max),
 		})

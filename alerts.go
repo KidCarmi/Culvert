@@ -34,6 +34,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/alerts"
 )
 
 // webhookSem bounds concurrent webhook delivery goroutines to prevent
@@ -81,15 +83,14 @@ type AlertWebhook struct {
 	Secret  string   `json:"secret,omitempty"` // HMAC-SHA256 signing secret (never returned in list)
 }
 
-// AlertPayload is the JSON body POSTed to each matching webhook.
-type AlertPayload struct {
-	Event     string `json:"event"`
-	Timestamp string `json:"timestamp"`
-	Actor     string `json:"actor"` // client IP or username
-	Host      string `json:"host"`
-	Detail    string `json:"detail"` // virus name / rule name / pattern
-	Source    string `json:"source"` // "clamav","yara","threatfeed","policy","auth"
-}
+// AlertPayload is the JSON body POSTed to each matching webhook. The struct now
+// lives in internal/alerts (the producer seam, ADR-0002); this alias keeps every
+// package-main producer/consumer unqualified. fireAlert is installed as the
+// alerts.Sink at init so internal packages (the scan engines) can fire via
+// alerts.Fire without depending on this delivery implementation.
+type AlertPayload = alerts.Payload
+
+func init() { alerts.SetSink(fireAlert) }
 
 // ── Delivery History (Finding 8.1) ────────────────────────────────────────────
 

@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 )
@@ -612,7 +613,7 @@ func logScanLimitExceeded(host, clientIP string, maxBytes int64) {
 	if logger != nil {
 		logger.Printf("SCAN: response from %s exceeds scan limit (%d bytes), forwarded unscanned", sanitizeLog(host), maxBytes)
 	}
-	go fireAlert("scan_skipped", AlertPayload{
+	go alerts.Fire("scan_skipped", alerts.Payload{
 		Actor:  clientIP,
 		Host:   host,
 		Detail: fmt.Sprintf("response exceeds scan limit (%d bytes)", maxBytes),

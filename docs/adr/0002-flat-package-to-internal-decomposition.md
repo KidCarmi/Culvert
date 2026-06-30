@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog` (+ the `obs`/`fileutil` and `hostutil` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 
 ## Notes / log
 
@@ -411,6 +411,34 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues on the new pkg 
 + determinism gate (`-count=2 -shuffle=on`) on the package and the store/ui_config consumers — all
 green. **Ten leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`,
 `rewrite`, `connlimit`, `syslog`) + two seams (`obs`/`fileutil`, `hostutil`).**
+
+## Tier 2 — `internal/alerts` producer seam (unblocks the `scan` cluster)
+
+The clean self-contained leaves are exhausted; the remaining subsystems are hubs. The first Tier-2
+target is the `scan` cluster (yara/clam/scanner/security_scan), whose only blocker beyond the existing
+`obs`/`fileutil`/`hostutil` seams was `fireAlert`. `fireAlert` lives in `alerts.go` — a 504-line hub
+(webhook store + persistence, HMAC signing, SSRF-guarded HTTP delivery, retry queue) that must NOT
+move wholesale.
+
+### 2026-06-29 — `internal/alerts` seam built
+Rather than move the delivery hub, built a minimal **producer seam** mirroring the `obs` sink pattern:
+`internal/alerts` owns the `Payload` DTO and a publish-once `Fire`/`SetSink` indirection
+(`atomic.Pointer[Sink]`). `package main` aliases `type AlertPayload = alerts.Payload` (every existing
+producer/consumer unchanged) and installs the real dispatcher at package init:
+`func init() { alerts.SetSink(fireAlert) }` — `fireAlert`'s signature already matches `alerts.Sink`.
+The webhook/retry/SSRF code stays entirely in `package main`.
+
+The scan cluster touches alerting at exactly three sites (`yara_scan.go` ×2 `yara_degraded`,
+`security_scan.go` ×1 `scan_skipped`); all three were redirected from `fireAlert(…, AlertPayload{…})`
+to `alerts.Fire(…, alerts.Payload{…})` — so they are already extraction-ready and no longer reference
+the package-main symbol. `Fire` is a no-op when no sink is installed, so unit tests that never wire
+alerting are unaffected. Added a co-located `alerts_test.go` (no-op-without-sink, deliver-intact,
+publish-once-replace).
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` on the package plus the
+alert/webhook/scan consumers (existing `yara_degraded`/`scan_skipped` delivery still works end-to-end
+through the sink), determinism gate (`-count=2 -shuffle=on`) — all green. **Three seams now
+(`obs`/`fileutil`, `hostutil`, `alerts`); the `scan` cluster is unblocked.**
 
 ## Context
 
