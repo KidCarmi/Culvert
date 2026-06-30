@@ -281,6 +281,21 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` on th
 security-scan/hashcache consumer tests, determinism gate (`-count=2 -shuffle=on`) — all green.
 **Five leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`) + the seam.**
 
+### 2026-06-29 — `internal/hostutil` seam built (prerequisite for catdb + scan)
+Mapping `catdb` for extraction surfaced that it is **not a pure leaf**: `CommunityDB.Lookup` calls
+`normalizeHost`, a `package main` helper in `security.go`. Rather than inject or (worse) duplicate a
+**security-relevant** normalizer (IDNA fail-open is tracked as RISK-013 — divergence across copies
+would be dangerous), the right move is the small **pure** host-helper seam the ADR already flagged
+the `scan` hub needs: `stripHostPort` lives right next to `normalizeHost`.
+
+`internal/hostutil` now owns `NormalizeHost` + `StripHostPort` (stdlib + `golang.org/x/net/idna`,
+zero Culvert coupling). `security.go` keeps two thin unqualified wrappers so every call site (policy,
+store, catdb, scanner, security_scan) and the black-box tests (`misc_test.go`,
+`scan_host_ipv6_test.go`) stay unchanged; the now-unused `idna` and `strings` imports were dropped
+from `security.go`. A focused co-located `hostutil_test.go` covers IDN→punycode, the IP/ASCII fast
+paths, and the bare-IPv6 preservation edge case. This seam unblocks **both** `catdb` (next) and the
+deferred `scan` hub. Build/vet/lint/test all green. (Sibling to the ADR-0003 `obs`/`fileutil` seam.)
+
 ## Context
 
 The entire root program is one flat `package main`: 152 source files, ~1,950 top-level functions,

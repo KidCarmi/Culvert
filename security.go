@@ -4,51 +4,19 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"golang.org/x/net/idna"
+	"github.com/KidCarmi/Culvert/internal/hostutil"
 )
 
-// normalizeHost applies IDNA2008 normalization (RFC 5890) to a hostname,
-// converting Unicode/Punycode domains to their canonical ASCII form. This
-// prevents IDN homograph attacks where visually similar Unicode characters
-// (e.g., Cyrillic 'а' vs Latin 'a') bypass blocklists and policy rules.
-//
-// Returns the lowercased, IDNA-normalized host. If normalization fails
-// (e.g., the host is an IP address or already ASCII), the input is returned
-// lowercased — fail-open for usability since most hosts are pure ASCII.
-func normalizeHost(host string) string {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	if host == "" {
-		return host
-	}
-	// Skip IDNA for IP addresses and already-pure-ASCII hostnames
-	// (fast path — avoids allocation for the common case).
-	if net.ParseIP(host) != nil {
-		return host
-	}
-	ascii, err := idna.ToASCII(host)
-	if err != nil {
-		return host // fail-open: return lowercased original
-	}
-	return strings.ToLower(ascii)
-}
-
-// stripHostPort removes a trailing :port and IPv6 brackets from a host value,
-// accepting all shapes that reach scan/bypass lookups: "host:port",
-// "[v6]:port", "[v6]", bare "v6", and bare "host". A naive
-// LastIndex(host, ":") cut corrupts bare IPv6 literals (already de-bracketed
-// by net.SplitHostPort upstream) — "2001:db8::1" would become "2001:db8:".
-func stripHostPort(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	return strings.Trim(host, "[]")
-}
+// normalizeHost and stripHostPort moved to internal/hostutil (ADR-0002/0003).
+// These thin wrappers keep the unqualified package-main call sites (policy,
+// store, catdb, scanner, security_scan) and the existing tests unchanged.
+func normalizeHost(host string) string { return hostutil.NormalizeHost(host) }
+func stripHostPort(host string) string { return hostutil.StripHostPort(host) }
 
 // ─── SSRF-safe dialer ────────────────────────────────────────────────────────
 
