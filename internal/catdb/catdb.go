@@ -1,6 +1,7 @@
-package main
-
-// CommunityDB — Layer 2 of the two-tier URL categorisation engine.
+// Package catdb is Layer 2 of the two-tier URL categorisation engine — the
+// community category store. It is a self-contained leaf extracted from the flat
+// package main per ADR-0002; it contains the BadgerDB dependency (the proxy's
+// only category-DB use of Badger) behind a narrow API.
 //
 // Storage: BadgerDB (v4, pure-Go, no CGo).
 //
@@ -11,13 +12,17 @@ package main
 // strip the leftmost label and retry, stopping before a bare TLD.
 // e.g. "sub.facebook.com" → "facebook.com" → stop (next would be "com").
 //
-// Layer 1 (catStore, admin-managed) is always consulted first; CommunityDB
-// is the fallback for entries not in the admin-managed lists.
+// Layer 1 (the admin-managed catStore in package main) is always consulted
+// first; this community store is the fallback for entries not in the
+// admin-managed lists.
+package catdb
 
 import (
 	"strings"
 
 	badger "github.com/dgraph-io/badger/v4"
+
+	"github.com/KidCarmi/Culvert/internal/hostutil"
 )
 
 // CommunityDB wraps a BadgerDB instance for URL category lookups.
@@ -26,14 +31,10 @@ type CommunityDB struct {
 	db *badger.DB
 }
 
-// communityDB is the process-wide community category store.
-// Nil when disabled (no --cat-feed-db flag supplied).
-var communityDB *CommunityDB
-
-// openCommunityDB opens (or creates) a BadgerDB at the given directory.
+// Open opens (or creates) a BadgerDB at the given directory.
 // Truncate is enabled so a crashed container can restart without manual
 // intervention — BadgerDB replays and truncates a corrupted value log.
-func openCommunityDB(dir string) (*CommunityDB, error) {
+func Open(dir string) (*CommunityDB, error) {
 	opts := badger.DefaultOptions(dir).
 		// Reduce per-file size: 128 MiB vs the 1 GiB default.
 		// Limits peak mmap memory inside Docker containers.
@@ -59,7 +60,7 @@ func (c *CommunityDB) Close() error {
 // stopping when no further parent exists above the TLD.
 // Returns ("", false) when no entry is found.
 func (c *CommunityDB) Lookup(host string) (string, bool) {
-	host = normalizeHost(host)
+	host = hostutil.NormalizeHost(host)
 	for {
 		cat, found := c.getExact(host)
 		if found {

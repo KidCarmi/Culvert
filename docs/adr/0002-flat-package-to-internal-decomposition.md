@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache` (+ the `obs`/`fileutil` seam, ADR-0003)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb` (+ the `obs`/`fileutil` and `hostutil` seams)
 
 ## Notes / log
 
@@ -295,6 +295,27 @@ store, catdb, scanner, security_scan) and the black-box tests (`misc_test.go`,
 from `security.go`. A focused co-located `hostutil_test.go` covers IDN→punycode, the IP/ASCII fast
 paths, and the bare-IPv6 preservation edge case. This seam unblocks **both** `catdb` (next) and the
 deferred `scan` hub. Build/vet/lint/test all green. (Sibling to the ADR-0003 `obs`/`fileutil` seam.)
+
+### 2026-06-29 — `internal/catdb` extracted (sixth leaf, unblocked by hostutil)
+Moved `catdb.go` (the Layer-2 community URL category store, `CommunityDB`) into `internal/catdb`,
+now that `hostutil` exists: `Lookup` calls `hostutil.NormalizeHost` instead of the package-main
+helper. **Architectural win beyond the boundary:** the leaf now **contains the BadgerDB dependency**
+for the category path — `github.com/dgraph-io/badger/v4` no longer appears in the flat namespace for
+URL categorisation (the audit-log stores `logguard.go`/`logstore.go` still use Badger; future
+`internal/auditlog`-style candidates).
+
+`package main` keeps `catdb_vars.go` (alias shim): `type CommunityDB = catdb.CommunityDB`, the
+`communityDB` singleton, and an `openCommunityDB` wrapper over `catdb.Open` (constructor renamed
+`openCommunityDB`→`Open`). All consumers stay unchanged — `policy.go` (Lookup), `feedsync.go`
+(`*CommunityDB` field + BulkWrite), `main.go` (open/close + shutdown hook), `ui_policy.go` (nil
+check). Like hashcache, **zero whitebox test access** — the 7 `CommunityDB` tests were a clean
+black-box block, so they **moved** into `internal/catdb/catdb_test.go` (the feedsync tests in the
+shared `catdb_feedsync_test.go` keep driving `openCommunityDB` via the shim).
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` on the package and the
+main feedsync/category consumers, determinism gate (`-count=2 -shuffle=on`) — all green.
+**Six leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`) + two seams
+(`obs`/`fileutil`, `hostutil`).**
 
 ## Context
 
