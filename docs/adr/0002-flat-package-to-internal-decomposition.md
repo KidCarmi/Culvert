@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 
 ## Notes / log
 
@@ -458,6 +458,37 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + det
 (`-count=2 -shuffle=on`) on the package and the `security_scan` consumer — all green. **Eleven leaves
 done (… `clamav`) + three seams.** Scan cluster remaining: `yara_scan.go` (engine — needs the now-built
 `alerts` seam), `scanner.go` (DPI coordinator), `security_scan.go` (orchestrator hub).
+
+### 2026-06-29 — `internal/yara` extracted (YARA engine, twelfth leaf — the biggest single move)
+Moved `yara_scan.go` (982 lines, the pure-Go YARA engine) into `internal/yara`. Coupling was clean —
+only the `obs` and (just-built) `alerts` seams — so `logger.Printf`→`obs.Printf`, `logWarnf`→
+`obs.Warnf`, `sanitizeLog`→`obs.Sanitize`; the three alert sites already used `alerts.Fire`. Renames:
+`YARARuleSet`→`RuleSet`, the runtime config funcs `yaraGet*`/`yaraSet*`→`Get*`/`Set*`,
+`ValidateYARASource`→`ValidateSource`, posture consts `yaraFailClosed`/`yaraFailOpenWithAlert`→
+`FailClosed`/`FailOpenWithAlert` (revive). Added `NewRuleSet`, a `LoadSource(src)` test-support method
+(directory-free rule install), and `Inflight()`.
+
+`yara_vars.go` shims it all back to package main: `type YARARuleSet = yara.RuleSet`, the `globalYARA`
+singleton, `var`-aliases for the 12 config funcs + `ValidateYARASource`, the posture consts, and a
+`yaraInflightLoad()` wrapper — so the ~40 consumer sites across `admin_settings.go`, `diagnostics.go`,
+`security_scan.go`, `ui_security.go`, `main.go` are unchanged. The one production whitebox
+(`ui_security.go` reaching `globalYARA.mu`/`.dir`) became `globalYARA.Dir()`.
+
+**Test surface (the bulk of the work).** The 502-line `yara_test.go` engine suite moved into the
+package (with its `yaraRule` helper); a package-main `yaraRule` copy (`yara_testhelpers_test.go`)
+serves the cross-subsystem tests. Whitebox tests of unexported internals moved into the package too:
+`resolveRulePath` + `sanitizeYARAName` (out of `tier3_coverage_test.go`) and `FuzzParseYARALiteral`
+(out of `fuzz_test.go`). The `SecurityScanner` tests in `final_coverage_test.go` /
+`rewrite_scanner_policy_test.go` that built a rule set via `parseYARASrc`+`y.rules=` switched to the
+exported `LoadSource`; the remaining tier3 RuleSet tests use the public API + `SetDir` and stayed.
+Lint on the moved engine: doc comments on the 12 newly-exported config funcs; `max`→`limit`
+(builtinShadow); named/`nolint`-documented results; `//nolint:cyclop,funlen` on the pre-existing
+single-pass rule parser (verbatim move; decomposition is out of scope).
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues on the new pkg + new lines), `-race`
++ determinism gate (`-count=2 -shuffle=on`) on the package and the scan/diagnostics/settings consumers
+— all green. **Twelve leaves done (… `clamav`, `yara`) + three seams.** Scan cluster remaining:
+`scanner.go` (DPI coordinator) and `security_scan.go` (the orchestrator hub).
 
 ## Context
 

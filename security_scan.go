@@ -677,7 +677,7 @@ func secScanStatusMap() map[string]interface{} {
 		"clamav_status":         globalSecScanner.ClamAVStatus(),
 		"yara_rules":            globalYARA.Count(),
 		"yara_warnings":         len(globalYARA.Warnings()), // Tier 2.1
-		"yara_inflight":         yaraInflight.Load(),        // Tier 1.3
+		"yara_inflight":         yaraInflightLoad(),         // Tier 1.3
 		"yara_inflight_max":     yaraGetMaxInflight(),       // Tier 1.3
 		"yara_enabled":          yaraGetEnabled(),
 		"yara_timeout_secs":     yaraGetTimeoutSecs(),

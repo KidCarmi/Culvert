@@ -1,9 +1,10 @@
-package main
+package yara
 
 import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -125,15 +126,15 @@ func TestParseYARASrc_Empty(t *testing.T) {
 	}
 }
 
-// ─── YARARuleSet.Match ────────────────────────────────────────────────────────
+// ─── RuleSet.Match ────────────────────────────────────────────────────────
 
-func newYARASet(t *testing.T, src string) *YARARuleSet {
+func newYARASet(t *testing.T, src string) *RuleSet {
 	t.Helper()
 	rules, err := parseYARASrc(src)
 	if err != nil {
 		t.Fatalf("parseYARASrc: %v", err)
 	}
-	y := &YARARuleSet{}
+	y := &RuleSet{}
 	y.rules = rules
 	return y
 }
@@ -216,13 +217,13 @@ func TestYARARuleSet_Match_HexPattern(t *testing.T) {
 }
 
 func TestYARARuleSet_Enabled(t *testing.T) {
-	y := &YARARuleSet{}
+	y := &RuleSet{}
 	if y.Enabled() {
-		t.Error("empty YARARuleSet should not be enabled")
+		t.Error("empty RuleSet should not be enabled")
 	}
 	y.rules = []yaraCompiledRule{{name: "test"}}
 	if !y.Enabled() {
-		t.Error("YARARuleSet with rules should be enabled")
+		t.Error("RuleSet with rules should be enabled")
 	}
 }
 
@@ -232,7 +233,7 @@ func TestYARARuleSet_LoadDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "test.yar"), []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	y := &YARARuleSet{}
+	y := &RuleSet{}
 	if err := y.LoadDir(dir); err != nil {
 		t.Fatalf("LoadDir error: %v", err)
 	}
@@ -246,7 +247,7 @@ func TestYARARuleSet_LoadDir(t *testing.T) {
 
 func TestYARARuleSet_LoadDir_Empty(t *testing.T) {
 	dir := t.TempDir()
-	y := &YARARuleSet{}
+	y := &RuleSet{}
 	if err := y.LoadDir(dir); err != nil {
 		t.Fatalf("LoadDir error on empty dir: %v", err)
 	}
@@ -442,7 +443,7 @@ func TestMatchRegexWithTimeout_Normal(t *testing.T) {
 }
 
 func TestMatchRegexWithTimeout_TimeoutFailsClosed(t *testing.T) {
-	re := regexp.MustCompile(`^(a+)+$`)
+	re := regexp.MustCompile(`^(a+)+$`) //nolint:gocritic // intentional pathological regex to exercise the match-timeout path
 	// Use a catastrophic backtracking input with near-zero timeout.
 	// The input "aaa...!" triggers exponential backtracking in the regex engine,
 	// ensuring the timeout fires even on fast CI runners.
@@ -469,7 +470,7 @@ func TestMatchRegexWithTimeout_InflightCap(t *testing.T) {
 
 	// Store a value well above the cap so straggler Add(-1) calls from
 	// previous tests can't drop it below the runtime max.
-	yaraInflight.Store(yaraGetMaxInflight() + 100)
+	yaraInflight.Store(GetMaxInflight() + 100)
 	re := regexp.MustCompile(`test`)
 	// Must return true (fail-closed) when the inflight cap is reached.
 	// Saturation must never silently allow content through.
@@ -489,7 +490,7 @@ func TestYARA_SaturationFailsClosed(t *testing.T) {
 	old := yaraInflight.Load()
 	defer yaraInflight.Store(old)
 
-	yaraInflight.Store(yaraGetMaxInflight())
+	yaraInflight.Store(GetMaxInflight())
 
 	re := regexp.MustCompile(`clean`)
 	// Even content that would otherwise not match any rule must be treated
@@ -498,5 +499,106 @@ func TestYARA_SaturationFailsClosed(t *testing.T) {
 	if !result {
 		t.Error("YARA saturation must fail-closed (return true); " +
 			"returning false silently allows unscanned content through")
+	}
+}
+
+// ─── resolveRulePath (whitebox; moved from tier3_coverage_test.go) ─────────────
+
+func TestResolveRulePath_Basic(t *testing.T) {
+	dir := t.TempDir()
+	y := &RuleSet{dir: dir}
+
+	path, got, err := y.resolveRulePath("myrule")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != filepath.Clean(dir) {
+		t.Errorf("dir = %q, want %q", got, dir)
+	}
+	want := filepath.Join(dir, "myrule.yar")
+	if path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+}
+
+func TestResolveRulePath_NoDirConfigured(t *testing.T) {
+	y := &RuleSet{}
+	if _, _, err := y.resolveRulePath("rule"); err == nil {
+		t.Fatal("expected error when dir is empty")
+	}
+}
+
+func TestResolveRulePath_InvalidName(t *testing.T) {
+	y := &RuleSet{dir: t.TempDir()}
+	if _, _, err := y.resolveRulePath("../escape"); err == nil {
+		t.Fatal("expected error for traversal attempt")
+	}
+}
+
+// FuzzParseYARALiteral exercises the YARA string-literal parser which handles
+// escape sequences from untrusted rule files. (moved from fuzz_test.go)
+func FuzzParseYARALiteral(f *testing.F) {
+	seeds := []string{
+		`"hello world"`,
+		`"test\x41\x42"`,
+		`"line\nnewline"`,
+		`"tab\there"`,
+		`"back\\slash"`,
+		`"quote\""`,
+		`""`,
+		`"unclosed`,
+		`"\xff\x00"`,
+		`"` + string([]byte{0x00, 0x01, 0x02}) + `"`,
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		_, _, _ = parseYARALiteralString(s)
+	})
+}
+
+// ─── sanitizeYARAName (whitebox; moved from tier3_coverage_test.go) ────────────
+
+func TestSanitizeYARAName_Valid(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"rule1", "rule1"},
+		{"Rule_1-foo", "Rule_1-foo"},
+		{"  trim  ", "trim"},
+		{"name.yar", "name"},
+		{"name.yara", "name"},
+		{"A", "A"},
+	}
+	for _, c := range cases {
+		got, err := sanitizeYARAName(c.in)
+		if err != nil {
+			t.Errorf("sanitizeYARAName(%q) unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("sanitizeYARAName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSanitizeYARAName_Invalid(t *testing.T) {
+	bad := []string{
+		"",
+		"   ",
+		"..",
+		"../etc/passwd",
+		"foo/bar",
+		"foo bar",
+		"foo\\bar",
+		"foo;rm",
+		"foo$bar",
+		strings.Repeat("a", 65),
+	}
+	for _, in := range bad {
+		if _, err := sanitizeYARAName(in); err == nil {
+			t.Errorf("sanitizeYARAName(%q) expected error, got nil", in)
+		}
 	}
 }

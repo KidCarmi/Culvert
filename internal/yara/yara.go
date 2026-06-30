@@ -1,4 +1,4 @@
-package main
+package yara
 
 // Pure-Go YARA rule engine.
 //
@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -56,25 +57,45 @@ type yaraCompiledRule struct {
 	condExpr string // lower-cased raw expression for yaraBoolExpr
 }
 
-// ── YARARuleSet ───────────────────────────────────────────────────────────────
+// ── RuleSet ───────────────────────────────────────────────────────────────
 
-// YARARuleSet holds compiled YARA rules loaded from a directory.
+// RuleSet holds compiled YARA rules loaded from a directory.
 // All methods are safe for concurrent use.
-type YARARuleSet struct {
+type RuleSet struct {
 	mu       sync.RWMutex
 	rules    []yaraCompiledRule
 	dir      string
 	warnings []string // parse/load warnings from the most recent LoadDir call
 }
 
-// globalYARA is the process-wide YARA rule set.
-var globalYARA = &YARARuleSet{}
+// NewRuleSet returns an empty RuleSet.
+func NewRuleSet() *RuleSet { return &RuleSet{} }
+
+// LoadSource compiles rules from a literal source string and installs them,
+// replacing the current rule set; it returns any parser warnings. It is the
+// directory-free counterpart to LoadDir, used for programmatic/test rule
+// loading (the package-main test suite builds rule sets this way).
+func (y *RuleSet) LoadSource(src string) ([]string, error) {
+	rules, warnings, err := parseYARASrcWithWarnings(src)
+	if err != nil {
+		return warnings, err
+	}
+	y.mu.Lock()
+	y.rules = rules
+	y.warnings = warnings
+	y.mu.Unlock()
+	return warnings, nil
+}
+
+// Inflight returns the current count of in-flight regex-match goroutines
+// (observability; surfaced in the security-scan stats map).
+func Inflight() int64 { return yaraInflight.Load() }
 
 // LoadDir loads all *.yar and *.yara files from dir, replacing current rules
 // atomically. Errors in individual rule files are logged and captured in
 // y.warnings so admins can see which files failed to parse; the remaining
 // rules are still loaded.
-func (y *YARARuleSet) LoadDir(dir string) error {
+func (y *RuleSet) LoadDir(dir string) error {
 	var files []string
 	for _, pat := range []string{"*.yar", "*.yara"} {
 		m, _ := filepath.Glob(filepath.Join(dir, pat))
@@ -87,7 +108,7 @@ func (y *YARARuleSet) LoadDir(dir string) error {
 		rules, err := loadYARAFile(f)
 		if err != nil {
 			msg := fmt.Sprintf("%s: %v", filepath.Base(f), err)
-			logger.Printf("YARA: skipping %s", msg)
+			obs.Printf("YARA: skipping %s", msg)
 			warnings = append(warnings, msg)
 			continue
 		}
@@ -104,14 +125,14 @@ func (y *YARARuleSet) LoadDir(dir string) error {
 	// suppress matching after a reload (P8).
 	yaraInflight.Store(0)
 
-	logger.Printf("YARA: %d rule(s) loaded from %d file(s) in %s (%d warnings)",
+	obs.Printf("YARA: %d rule(s) loaded from %d file(s) in %s (%d warnings)",
 		len(loaded), len(files), dir, len(warnings))
 	return nil
 }
 
 // Names returns the names of all currently loaded rules.
 // Tier 2.1: exposes the rule set so admins can verify which rules are active.
-func (y *YARARuleSet) Names() []string {
+func (y *RuleSet) Names() []string {
 	y.mu.RLock()
 	defer y.mu.RUnlock()
 	out := make([]string, len(y.rules))
@@ -126,7 +147,7 @@ func (y *YARARuleSet) Names() []string {
 // *files*, not the rule names inside them — otherwise ReadRule fails whenever
 // a single file bundles multiple rules (the common case for starter kits). The
 // returned list is sorted and de-duplicated across the two extensions.
-func (y *YARARuleSet) Files() []string {
+func (y *RuleSet) Files() []string {
 	y.mu.RLock()
 	dir := y.dir
 	y.mu.RUnlock()
@@ -161,7 +182,7 @@ func (y *YARARuleSet) Files() []string {
 // that file. Tier 3.2: lets the GUI show "sample_rules.yar → [EICAR_Test_File,
 // WebShell_…]" without a second round trip. File stems with no parsable rules
 // (parse failures, empty files) map to an empty slice.
-func (y *YARARuleSet) FileRules() map[string][]string {
+func (y *RuleSet) FileRules() map[string][]string {
 	y.mu.RLock()
 	dir := y.dir
 	y.mu.RUnlock()
@@ -197,7 +218,7 @@ func (y *YARARuleSet) FileRules() map[string][]string {
 // Warnings returns a copy of any parse/load warnings from the most recent
 // LoadDir call. Empty when all rule files loaded cleanly.
 // Tier 2.1: lets admins surface silently-skipped rules in the UI.
-func (y *YARARuleSet) Warnings() []string {
+func (y *RuleSet) Warnings() []string {
 	y.mu.RLock()
 	defer y.mu.RUnlock()
 	if len(y.warnings) == 0 {
@@ -209,21 +230,21 @@ func (y *YARARuleSet) Warnings() []string {
 }
 
 // Dir returns the directory the rule set was loaded from.
-func (y *YARARuleSet) Dir() string {
+func (y *RuleSet) Dir() string {
 	y.mu.RLock()
 	defer y.mu.RUnlock()
 	return y.dir
 }
 
 // Enabled reports whether any rules are currently loaded.
-func (y *YARARuleSet) Enabled() bool {
+func (y *RuleSet) Enabled() bool {
 	y.mu.RLock()
 	defer y.mu.RUnlock()
 	return len(y.rules) > 0
 }
 
 // Count returns the number of loaded rules.
-func (y *YARARuleSet) Count() int {
+func (y *RuleSet) Count() int {
 	y.mu.RLock()
 	defer y.mu.RUnlock()
 	return len(y.rules)
@@ -263,7 +284,7 @@ func sanitizeYARAName(name string) (string, error) {
 // New files are always created with the .yar extension. If an existing
 // .yara file matches the name, that path is returned instead so Read/Delete
 // find the existing file.
-func (y *YARARuleSet) resolveRulePath(name string) (path, dir string, err error) {
+func (y *RuleSet) resolveRulePath(name string) (path, dir string, err error) {
 	clean, err := sanitizeYARAName(name)
 	if err != nil {
 		return "", "", err
@@ -297,7 +318,7 @@ func (y *YARARuleSet) resolveRulePath(name string) (path, dir string, err error)
 }
 
 // ReadRule returns the raw source of the named rule file. Tier 3.2.
-func (y *YARARuleSet) ReadRule(name string) (string, error) {
+func (y *RuleSet) ReadRule(name string) (string, error) {
 	path, _, err := y.resolveRulePath(name)
 	if err != nil {
 		return "", err
@@ -316,8 +337,8 @@ func (y *YARARuleSet) ReadRule(name string) (string, error) {
 // set atomically. Tier 3.2. Uses tmp+rename for crash-safety. Returns the
 // parser warnings (if any) so the admin can see what was skipped inside the
 // rule file even on success.
-func (y *YARARuleSet) WriteRule(name, src string) ([]string, error) {
-	names, warnings, err := ValidateYARASource(src)
+func (y *RuleSet) WriteRule(name, src string) ([]string, error) {
+	names, warnings, err := ValidateSource(src)
 	if err != nil {
 		return warnings, err
 	}
@@ -354,7 +375,7 @@ func (y *YARARuleSet) WriteRule(name, src string) ([]string, error) {
 }
 
 // DeleteRule removes the named rule file from disk and reloads. Tier 3.2.
-func (y *YARARuleSet) DeleteRule(name string) error {
+func (y *RuleSet) DeleteRule(name string) error {
 	path, dir, err := y.resolveRulePath(name)
 	if err != nil {
 		return err
@@ -369,14 +390,14 @@ func (y *YARARuleSet) DeleteRule(name string) error {
 // SetDir updates the rules directory without loading. Used on first-time
 // startup when /data/yara/ does not yet exist and the admin wants to create
 // rules via the API. Tier 3.2.
-func (y *YARARuleSet) SetDir(dir string) {
+func (y *RuleSet) SetDir(dir string) {
 	y.mu.Lock()
 	y.dir = dir
 	y.mu.Unlock()
 }
 
 // Match returns the names of every rule that matches data.
-func (y *YARARuleSet) Match(data []byte) []string {
+func (y *RuleSet) Match(data []byte) []string {
 	y.mu.RLock()
 	rules := y.rules
 	y.mu.RUnlock()
@@ -420,11 +441,11 @@ func evalYARARule(r *yaraCompiledRule, data []byte) bool {
 	}
 }
 
-// yaraFailClosed / yaraFailOpenWithAlert are the two posture strings for the
+// FailClosed / FailOpenWithAlert are the two posture strings for the
 // on_timeout and on_saturation policies.
 const (
-	yaraFailClosed        = "fail_closed"
-	yaraFailOpenWithAlert = "fail_open_with_alert"
+	FailClosed        = "fail_closed"
+	FailOpenWithAlert = "fail_open_with_alert"
 )
 
 // Runtime-configurable YARA engine parameters. Defaults match the original
@@ -443,40 +464,64 @@ func init() {
 	yaraEngineEnabledVar.Store(true)
 	yaraMaxInflightVar.Store(int64(50))
 	yaraTimeoutSecsVar.Store(int64(5))
-	yaraOnTimeoutVar.Store(yaraFailClosed)
-	yaraOnSaturationVar.Store(yaraFailClosed)
+	yaraOnTimeoutVar.Store(FailClosed)
+	yaraOnSaturationVar.Store(FailClosed)
 	yaraAlertDegradedVar.Store(true)
 }
 
 // Getters — called from the scan hot-path; must not block.
-func yaraGetEnabled() bool       { return yaraEngineEnabledVar.Load() }
-func yaraGetMaxInflight() int64  { return yaraMaxInflightVar.Load() }
-func yaraGetTimeoutSecs() int64  { return yaraTimeoutSecsVar.Load() }
-func yaraGetAlertDegraded() bool { return yaraAlertDegradedVar.Load() }
-func yaraGetOnTimeout() string {
+
+// GetEnabled reports whether the YARA engine is enabled.
+func GetEnabled() bool { return yaraEngineEnabledVar.Load() }
+
+// GetMaxInflight returns the in-flight regex-goroutine cap.
+func GetMaxInflight() int64 { return yaraMaxInflightVar.Load() }
+
+// GetTimeoutSecs returns the per-regex match timeout in seconds.
+func GetTimeoutSecs() int64 { return yaraTimeoutSecsVar.Load() }
+
+// GetAlertDegraded reports whether degraded-mode alerts are enabled.
+func GetAlertDegraded() bool { return yaraAlertDegradedVar.Load() }
+
+// GetOnTimeout returns the on-timeout posture (FailClosed | FailOpenWithAlert).
+func GetOnTimeout() string {
 	if v, ok := yaraOnTimeoutVar.Load().(string); ok && v != "" {
 		return v
 	}
-	return yaraFailClosed
+	return FailClosed
 }
-func yaraGetOnSaturation() string {
+
+// GetOnSaturation returns the on-saturation posture (FailClosed | FailOpenWithAlert).
+func GetOnSaturation() string {
 	if v, ok := yaraOnSaturationVar.Load().(string); ok && v != "" {
 		return v
 	}
-	return yaraFailClosed
+	return FailClosed
 }
 
 // Setters — called from the Admin API handler and LoadAdminSettings.
-func yaraSetEnabled(v bool)        { yaraEngineEnabledVar.Store(v) }
-func yaraSetMaxInflight(n int64)   { yaraMaxInflightVar.Store(n) }
-func yaraSetTimeoutSecs(n int64)   { yaraTimeoutSecsVar.Store(n) }
-func yaraSetOnTimeout(v string)    { yaraOnTimeoutVar.Store(v) }
-func yaraSetOnSaturation(v string) { yaraOnSaturationVar.Store(v) }
-func yaraSetAlertDegraded(v bool)  { yaraAlertDegradedVar.Store(v) }
+
+// SetEnabled toggles the YARA engine on/off.
+func SetEnabled(v bool) { yaraEngineEnabledVar.Store(v) }
+
+// SetMaxInflight sets the in-flight regex-goroutine cap.
+func SetMaxInflight(n int64) { yaraMaxInflightVar.Store(n) }
+
+// SetTimeoutSecs sets the per-regex match timeout in seconds.
+func SetTimeoutSecs(n int64) { yaraTimeoutSecsVar.Store(n) }
+
+// SetOnTimeout sets the on-timeout posture (FailClosed | FailOpenWithAlert).
+func SetOnTimeout(v string) { yaraOnTimeoutVar.Store(v) }
+
+// SetOnSaturation sets the on-saturation posture (FailClosed | FailOpenWithAlert).
+func SetOnSaturation(v string) { yaraOnSaturationVar.Store(v) }
+
+// SetAlertDegraded toggles degraded-mode alerting.
+func SetAlertDegraded(v bool) { yaraAlertDegradedVar.Store(v) }
 
 func matchYARAString(s *yaraStringDef, data []byte) bool {
 	if s.re != nil {
-		timeout := time.Duration(yaraGetTimeoutSecs()) * time.Second
+		timeout := time.Duration(GetTimeoutSecs()) * time.Second
 		return matchRegexWithTimeout(s.re, data, timeout)
 	}
 	if s.noCase {
@@ -492,32 +537,32 @@ var yaraInflight atomic.Int64
 // caller must return result immediately without attempting the regex match.
 // Posture is controlled by yaraOnSaturationVar: fail_closed returns true (block),
 // fail_open_with_alert returns false (allow) and fires a degraded alert.
-func yaraSaturationCheck(inflight int64) (bool, bool) {
-	max := yaraGetMaxInflight()
-	if inflight < max {
+func yaraSaturationCheck(inflight int64) (saturated, result bool) {
+	limit := GetMaxInflight()
+	if inflight < limit {
 		return false, false
 	}
-	logWarnf("YARA: regex skipped: too many in-flight goroutines (%d)", inflight)
-	if yaraGetAlertDegraded() {
+	obs.Warnf("YARA: regex skipped: too many in-flight goroutines (%d)", inflight)
+	if GetAlertDegraded() {
 		go alerts.Fire("yara_degraded", alerts.Payload{
 			Source: "yara",
-			Detail: fmt.Sprintf("regex skipped: inflight=%d max=%d — YARA engine saturated", inflight, max),
+			Detail: fmt.Sprintf("regex skipped: inflight=%d max=%d — YARA engine saturated", inflight, limit),
 		})
 	}
-	return true, yaraGetOnSaturation() != yaraFailOpenWithAlert
+	return true, GetOnSaturation() != FailOpenWithAlert
 }
 
 // yaraDegradedCheck fires a degraded alert when inflight is approaching the cap.
 // Tier 1.3: visibility into approaching saturation before matches start dropping.
 func yaraDegradedCheck(inflight int64) {
-	if !yaraGetAlertDegraded() {
+	if !GetAlertDegraded() {
 		return
 	}
-	max := yaraGetMaxInflight()
-	if inflight >= (max*80)/100 {
+	limit := GetMaxInflight()
+	if inflight >= (limit*80)/100 {
 		go alerts.Fire("yara_degraded", alerts.Payload{
 			Source: "yara",
-			Detail: fmt.Sprintf("inflight=%d/%d — approaching YARA saturation", inflight, max),
+			Detail: fmt.Sprintf("inflight=%d/%d — approaching YARA saturation", inflight, limit),
 		})
 	}
 }
@@ -526,9 +571,9 @@ func yaraDegradedCheck(inflight int64) {
 // Posture is controlled by yaraOnTimeoutVar: fail_closed returns true (block),
 // fail_open_with_alert returns false (allow).
 func yaraTimeoutResult(timeout time.Duration, pattern string) bool {
-	logWarnf("YARA: regex timeout after %s on pattern %q (inflight: %d)",
-		timeout, sanitizeLog(pattern), yaraInflight.Load())
-	return yaraGetOnTimeout() != yaraFailOpenWithAlert
+	obs.Warnf("YARA: regex timeout after %s on pattern %q (inflight: %d)",
+		timeout, obs.Sanitize(pattern), yaraInflight.Load())
+	return GetOnTimeout() != FailOpenWithAlert
 }
 
 // matchRegexWithTimeout runs re.Match(data) in a goroutine. Returns true
@@ -672,14 +717,16 @@ func loadYARAFile(path string) ([]yaraCompiledRule, error) {
 func parseYARASrc(src string) ([]yaraCompiledRule, error) {
 	rules, warnings, err := parseYARASrcWithWarnings(src)
 	for _, w := range warnings {
-		logger.Printf("YARA: %s", w)
+		obs.Printf("YARA: %s", w)
 	}
 	return rules, err
 }
 
 // parseYARASrcWithWarnings is the internal parser used by both parseYARASrc
-// (which forwards warnings to the logger) and ValidateYARASource (which
+// (which forwards warnings to the logger) and ValidateSource (which
 // returns them to the caller so the admin UI can display them).
+//
+//nolint:unparam // error is always nil today but is part of the parser's forward-compatible contract (ValidateSource / parseYARASrc propagate it)
 func parseYARASrcWithWarnings(src string) ([]yaraCompiledRule, []string, error) {
 	var lines []string
 	sc := bufio.NewScanner(strings.NewReader(src))
@@ -713,7 +760,7 @@ func parseYARASrcWithWarnings(src string) ([]yaraCompiledRule, []string, error) 
 	return rules, warnings, nil
 }
 
-// ValidateYARASource parses a YARA rule source string without loading it into
+// ValidateSource parses a YARA rule source string without loading it into
 // the global rule set. Used by the admin UI's "validate" feature so operators
 // can check a rule before persisting it. Tier 3.1.
 //
@@ -721,7 +768,7 @@ func parseYARASrcWithWarnings(src string) ([]yaraCompiledRule, []string, error) 
 // Returns an error only when the source contains no valid rules at all; a
 // non-empty warnings slice with a non-empty names slice indicates a source
 // that loaded some rules but skipped others.
-func ValidateYARASource(src string) (names []string, warnings []string, err error) {
+func ValidateSource(src string) (names []string, warnings []string, err error) {
 	rules, warnings, perr := parseYARASrcWithWarnings(src)
 	if perr != nil {
 		return nil, warnings, perr
@@ -747,6 +794,7 @@ func stripYARAComment(s string) string {
 	return s
 }
 
+//nolint:cyclop,funlen // pre-existing single-pass YARA rule parser moved verbatim during the internal/yara split (ADR-0002); decomposition is a separate, out-of-scope change
 func parseYARARule(lines []string, start int) (yaraCompiledRule, int, error) {
 	header := strings.TrimSpace(lines[start])
 	parts := strings.Fields(header)
@@ -805,7 +853,7 @@ func parseYARARule(lines []string, start int) (yaraCompiledRule, int, error) {
 					// quote with %q so CodeQL sees the sanitiser inline.
 					safeName := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(name, "\n", "_"), "\r", "_"), "\t", "_")
 					safeErr := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(err.Error(), "\n", "_"), "\r", "_"), "\t", "_")
-					logger.Printf("YARA: rule %q: string parse error: %q", safeName, safeErr)
+					obs.Printf("YARA: rule %q: string parse error: %q", safeName, safeErr)
 				}
 			case "condition":
 				condParts = append(condParts, raw)
@@ -880,6 +928,8 @@ func parseYARAStringDef(line string) (yaraStringDef, error) {
 // parseYARALiteralString extracts the string value and modifier keywords.
 // Input:  `"hello world" nocase`
 // Output: ("hello world", "nocase", nil)
+//
+//nolint:gocritic // results are (value, mods, error) as documented above
 func parseYARALiteralString(s string) (string, string, error) {
 	if !strings.HasPrefix(s, "\"") {
 		return "", "", fmt.Errorf("expected opening quote")

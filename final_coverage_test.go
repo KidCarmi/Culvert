@@ -19,11 +19,10 @@ import (
 // BodyScanEnabled() returns true (requires clam != nil OR globalYARA.Enabled()).
 func makeScannerWithYARA(t *testing.T) (*SecurityScanner, func()) { //nolint:gocritic // unnamed cleanup func is idiomatic Go
 	t.Helper()
-	rules, err := parseYARASrc(yaraRule("TestCacheRule", `        $a = "MATCH_THIS_STRING"`, "any of them"))
-	if err != nil {
-		t.Fatalf("parseYARASrc: %v", err)
+	y := &YARARuleSet{}
+	if _, err := y.LoadSource(yaraRule("TestCacheRule", `        $a = "MATCH_THIS_STRING"`, "any of them")); err != nil {
+		t.Fatalf("LoadSource: %v", err)
 	}
-	y := &YARARuleSet{rules: rules}
 	old := globalYARA
 	globalYARA = y
 	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
@@ -223,8 +222,7 @@ func TestBlocklist_SetMode_Block(t *testing.T) {
 func TestSecurityScanner_ScanBody_YARA_Clean(t *testing.T) {
 	// YARA enabled but no match
 	y := &YARARuleSet{}
-	rules, _ := parseYARASrc(yaraRule("DetectEICAR", `        $a = "EICAR_MATCH"`, "any of them"))
-	y.rules = rules
+	_, _ = y.LoadSource(yaraRule("DetectEICAR", `        $a = "EICAR_MATCH"`, "any of them"))
 
 	old := globalYARA
 	globalYARA = y

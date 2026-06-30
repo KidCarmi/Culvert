@@ -121,25 +121,5 @@ func FuzzMatchDest(f *testing.F) {
 	})
 }
 
-// FuzzParseYARALiteral exercises the YARA string-literal parser which handles
-// escape sequences from untrusted rule files.
-func FuzzParseYARALiteral(f *testing.F) {
-	seeds := []string{
-		`"hello world"`,
-		`"test\x41\x42"`,
-		`"line\nnewline"`,
-		`"tab\there"`,
-		`"back\\slash"`,
-		`"quote\""`,
-		`""`,
-		`"unclosed`,
-		`"\xff\x00"`,
-		`"` + string([]byte{0x00, 0x01, 0x02}) + `"`,
-	}
-	for _, s := range seeds {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, s string) {
-		_, _, _ = parseYARALiteralString(s)
-	})
-}
+// FuzzParseYARALiteral moved to internal/yara (ADR-0002) — it fuzzes the
+// unexported parseYARALiteralString, now in package yara.

@@ -108,8 +108,7 @@ func TestSSLBypassMatcher_CompileBypassPattern(t *testing.T) {
 func TestSecurityScanner_ScanBody_WithYARA(t *testing.T) {
 	// Install a YARA rule that matches "EICAR"
 	y := &YARARuleSet{}
-	rules, _ := parseYARASrc(yaraRule("Detect", `        $a = "EICAR"`, "any of them"))
-	y.rules = rules
+	_, _ = y.LoadSource(yaraRule("Detect", `        $a = "EICAR"`, "any of them"))
 
 	// Temporarily swap globalYARA
 	old := globalYARA

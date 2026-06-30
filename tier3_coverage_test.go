@@ -4,87 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-// ─── sanitizeYARAName ─────────────────────────────────────────────────────────
-
-func TestSanitizeYARAName_Valid(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"rule1", "rule1"},
-		{"Rule_1-foo", "Rule_1-foo"},
-		{"  trim  ", "trim"},
-		{"name.yar", "name"},
-		{"name.yara", "name"},
-		{"A", "A"},
-	}
-	for _, c := range cases {
-		got, err := sanitizeYARAName(c.in)
-		if err != nil {
-			t.Errorf("sanitizeYARAName(%q) unexpected error: %v", c.in, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("sanitizeYARAName(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
-func TestSanitizeYARAName_Invalid(t *testing.T) {
-	bad := []string{
-		"",
-		"   ",
-		"..",
-		"../etc/passwd",
-		"foo/bar",
-		"foo bar",
-		"foo\\bar",
-		"foo;rm",
-		"foo$bar",
-		strings.Repeat("a", 65),
-	}
-	for _, in := range bad {
-		if _, err := sanitizeYARAName(in); err == nil {
-			t.Errorf("sanitizeYARAName(%q) expected error, got nil", in)
-		}
-	}
-}
-
-// ─── resolveRulePath ──────────────────────────────────────────────────────────
-
-func TestResolveRulePath_Basic(t *testing.T) {
-	dir := t.TempDir()
-	y := &YARARuleSet{dir: dir}
-
-	path, got, err := y.resolveRulePath("myrule")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != filepath.Clean(dir) {
-		t.Errorf("dir = %q, want %q", got, dir)
-	}
-	want := filepath.Join(dir, "myrule.yar")
-	if path != want {
-		t.Errorf("path = %q, want %q", path, want)
-	}
-}
-
-func TestResolveRulePath_NoDirConfigured(t *testing.T) {
-	y := &YARARuleSet{}
-	if _, _, err := y.resolveRulePath("rule"); err == nil {
-		t.Fatal("expected error when dir is empty")
-	}
-}
-
-func TestResolveRulePath_InvalidName(t *testing.T) {
-	y := &YARARuleSet{dir: t.TempDir()}
-	if _, _, err := y.resolveRulePath("../escape"); err == nil {
-		t.Fatal("expected error for traversal attempt")
-	}
-}
+// sanitizeYARAName + resolveRulePath tests moved to internal/yara (ADR-0002) —
+// they exercise the unexported helpers + the dir field.
 
 // ─── ReadRule / WriteRule / DeleteRule ────────────────────────────────────────
 
