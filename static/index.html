@@ -3118,6 +3118,7 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="ha-peer-val">—</div><div class="stat-label">Peer</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-since-val">—</div><div class="stat-label">Since</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-failover-val">—</div><div class="stat-label">Failover</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-term-val">—</div><div class="stat-label">Term</div></div>
             </div>
             <details style="margin-top:12px">
               <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;font-weight:600">Deploy Standby CP</summary>
@@ -10814,6 +10815,7 @@ async function loadHA(isCP) {
       document.getElementById('ha-failover-val').innerHTML = r.auto_failover
         ? '<span style="color:#f59e0b">Automatic</span>'
         : '<span style="color:#22c55e">Manual</span>';
+      document.getElementById('ha-term-val').textContent = (r.term != null) ? r.term : '—';
       if (r.deploy_cmd) {
         document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
       }

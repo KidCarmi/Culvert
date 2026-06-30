@@ -55,6 +55,7 @@ type HAState struct {
 	peerAddr     string    // address of the other CP
 	since        time.Time // when current role was acquired
 	autoFailover bool      // standby self-promotes on leader loss (default OFF — see ADR-0004)
+	term         uint64    // leadership epoch — bumped on each promotion (ADR-0004 Slice 1c)
 	stopCh       chan struct{}
 }
 
@@ -67,6 +68,7 @@ type HAStatus struct {
 	Since        string `json:"since,omitempty"`     // RFC3339
 	PeerAddr     string `json:"peer_addr,omitempty"` // other CP address
 	AutoFailover bool   `json:"auto_failover"`       // standby self-promotes on leader loss (ADR-0004)
+	Term         uint64 `json:"term"`                // leadership epoch (ADR-0004 Slice 1c)
 }
 
 func (h *HAState) Status() HAStatus {
@@ -77,6 +79,7 @@ func (h *HAState) Status() HAStatus {
 		Role:         h.role,
 		PeerAddr:     h.peerAddr,
 		AutoFailover: h.autoFailover,
+		Term:         h.term,
 	}
 	if !h.since.IsZero() {
 		s.Since = h.since.Format(time.RFC3339)
@@ -121,6 +124,7 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) string {
 	h.peerAddr = peerAddr
 	h.since = time.Now()
 	h.autoFailover = autoFailover
+	h.term = 1 // first leadership epoch (ADR-0004 Slice 1c)
 	h.token = generateHAToken()
 	h.stopCh = make(chan struct{})
 
@@ -131,10 +135,29 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) string {
 		PeerAddr:     peerAddr,
 		Role:         "leader",
 		AutoFailover: autoFailover,
+		Term:         h.term,
 	})
 
-	logger.Printf("HA: enabled as leader (peer=%s, auto_failover=%v)", sanitizeLog(peerAddr), autoFailover)
+	logger.Printf("HA: enabled as leader (peer=%s, auto_failover=%v, term=%d)", sanitizeLog(peerAddr), autoFailover, h.term)
 	return h.token
+}
+
+// ResumeAsLeader restores leader state from a persisted haConfig on restart
+// WITHOUT bumping the term — it is the same leadership epoch continuing, not a
+// new promotion. Replaces the previous EnableAsLeader-then-patch-token dance in
+// main.go so the persisted term/token survive a restart intact (ADR-0004).
+func (h *HAState) ResumeAsLeader(cfg *haConfig) {
+	h.mu.Lock()
+	h.role = "leader"
+	h.peerAddr = cfg.PeerAddr
+	h.token = cfg.Token
+	h.autoFailover = cfg.AutoFailover
+	h.term = cfg.Term
+	h.since = time.Now()
+	h.stopCh = make(chan struct{})
+	h.mu.Unlock()
+	// Re-persist the SAME values (idempotent; keeps the file canonical).
+	_ = saveHAConfig(cfg)
 }
 
 // ── Standby Mode ────────────────────────────────────────────────────────────
@@ -366,18 +389,23 @@ func (h *HAState) promote(grpcAddr, certFile, keyFile, caFile string, onPromote 
 	h.mu.Lock()
 	h.role = "leader"
 	h.since = time.Now()
+	h.term++ // new leadership epoch (ADR-0004 Slice 1c)
+	cfg := &haConfig{
+		Enabled:      true,
+		Token:        h.token,
+		PeerAddr:     h.peerAddr,
+		Role:         "leader",
+		AutoFailover: h.autoFailover,
+		Term:         h.term,
+	}
+	newTerm := h.term
 	h.mu.Unlock()
 	statHAFailovers.Add(1) // CL-9 PR3: count standby→leader promotions only
 
 	// Update persisted config.
-	_ = saveHAConfig(&haConfig{
-		Enabled:  true,
-		Token:    h.token,
-		PeerAddr: h.peerAddr,
-		Role:     "leader",
-	})
+	_ = saveHAConfig(cfg)
 
-	logger.Printf("HA: now serving as leader (promoted from standby)")
+	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
 }
 
 // Stop terminates the sync loop.
@@ -400,6 +428,7 @@ type haConfig struct {
 	PeerAddr     string `json:"peer_addr"`
 	Role         string `json:"role"`          // "leader" or "standby"
 	AutoFailover bool   `json:"auto_failover"` // standby self-promotes on leader loss (ADR-0004; default OFF)
+	Term         uint64 `json:"term"`          // leadership epoch (ADR-0004 Slice 1c)
 }
 
 func haConfigPath() string {
@@ -478,20 +507,31 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	status := globalHA.Status()
 	// If HA is not enabled, this node is standalone — always healthy.
 	if !status.Enabled {
-		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true}
+		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true, "write_authority": true}
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
 	}
 	if status.Role == "leader" {
-		resp := map[string]any{"status": "ok", "role": "leader", "leader": true, "since": status.Since}
+		// ADR-0004 Slice 1c: surface term + write_authority + auto_failover so an
+		// external monitor scraping BOTH CPs can DETECT split-brain (two nodes
+		// reporting role=leader, comparable by term). write_authority is the
+		// honest Slice-1 value (role==leader); the failover-mechanism slice will
+		// gate it on quorum.
+		resp := map[string]any{
+			"status": "ok", "role": "leader", "leader": true, "since": status.Since,
+			"term": status.Term, "write_authority": true, "auto_failover": status.AutoFailover,
+		}
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
-	resp, _ := json.Marshal(map[string]any{"status": "standby", "role": "standby", "leader": false})
+	resp, _ := json.Marshal(map[string]any{
+		"status": "standby", "role": "standby", "leader": false,
+		"term": status.Term, "write_authority": false, "auto_failover": status.AutoFailover,
+	})
 	_, _ = w.Write(resp)
 }
 
@@ -509,6 +549,7 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 			"since":         status.Since,
 			"peer_addr":     status.PeerAddr,
 			"auto_failover": status.AutoFailover,
+			"term":          status.Term,
 		}
 		if status.Enabled && status.Role == "leader" {
 			resp["deploy_cmd"] = haDeployCommand()

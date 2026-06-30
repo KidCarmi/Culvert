@@ -666,10 +666,7 @@ func initCluster(s *startupState) {
 			}
 			// Persisted leader (or legacy config with no role) resumes leadership.
 			if haErr == nil && haCfg.Enabled {
-				globalHA.EnableAsLeader(haCfg.PeerAddr, haCfg.AutoFailover)
-				globalHA.mu.Lock()
-				globalHA.token = haCfg.Token // restore original token
-				globalHA.mu.Unlock()
+				globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
 				if haCfg.AutoFailover {
 					logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
 						"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
