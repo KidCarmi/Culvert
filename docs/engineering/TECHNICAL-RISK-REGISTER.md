@@ -20,7 +20,7 @@
 | RISK-015 | LOW | OPEN | Single-scanner gate; detection-source divergence (Dependabot 5 vs Trivy DB 3) | trivy run vs Dependabot count, 2026-06-28 |
 | RISK-016 | MEDIUM | OPEN | Scanners installed `@latest`; CodeQL non-blocking | `security-release-gate.yml:52,110,252`; `ci.yml:72` |
 | RISK-ACC-1 | HIGH | ACCEPTED | 5 `docker/docker` CVEs in `updater/` (no upstream fix) | `updater/go.mod`; resolution = DEBT-008 |
-| RISK-005 | MEDIUM | OPEN | Interrupted restore can leave `/data` absent | `restore.go:876-894` |
+| RISK-005 | MEDIUM | ✅ CLOSED | Interrupted restore can leave `/data` absent | boot guard `checkInterruptedRestore` (`restore.go`) + runbook §8b |
 | RISK-008 | MEDIUM | ✅ CLOSED | Username timing oracle enables user enumeration | fixed `store.go` (2026-06-28) |
 | RISK-009 | MEDIUM | ✅ CLOSED | `InsecureSkipVerify` admin toggle silent on auth hot path | `auth_oidc.go:96`, `auth_oidc_flow.go:301`, `auth_ldap.go:90` |
 | RISK-010 | MEDIUM | OPEN | Self-update has no in-binary image signature/digest check | `update.go:496-608` |
@@ -159,14 +159,24 @@
   rationale still holds and that the updater is not exposed to untrusted Docker registry/plugin input.
 - **Resolution:** DEBT-008 (remove legacy updater). **Owner:** maintainer · **Target:** with DEBT-008.
 
-## RISK-005 — Interrupted restore leaves `/data` absent · MEDIUM · OPEN
-- **Current state:** `restore.go:876-894` does move-aside (`rename /data → /data.bak.<ts>`) then
-  swap; a kill between the two renames leaves `/data` missing and the binary cannot boot. The error
-  names the recovery command but there is no auto-recovery and no test for the mid-kill path.
-- **Impact:** Operator must manually `mv /data.bak.<ts> /data`. Mitigated by the offline-restore
-  contract (`compose down` first).
-- **Recommendation:** Document the recovery in a runbook; consider a boot-time check that detects an
-  orphaned `/data.bak.*` and surfaces it. **Complexity S.**
+## RISK-005 — Interrupted restore leaves `/data` absent · MEDIUM · ✅ CLOSED 2026-06-30
+- **Was:** `runRestoreCommit` (`restore.go`) does move-aside (`rename /data → /data.bak.<ts>-<pid>`)
+  then swap (`rename /data.staging.<ts>-<pid> → /data`). A kill between the two renames left `/data`
+  missing; the next normal boot would create a fresh **empty** `/data` and **silently lose the
+  operator's data**, with the recovery `.bak` discoverable only by hand.
+- **Fix (`checkInterruptedRestore`, `restore.go`):** a boot-time guard, called from `main()` right
+  after the one-shot CLI commands (so `--list`/`--cleanup-restore-leftovers` and `--restore` still
+  operate on the orphaned state). When `/data` is **absent AND** an interrupted-restore `.bak` sibling
+  exists, it **refuses to boot** (`FATAL` + `os.Exit(1)`) and prints the exact recovery moves — REVERT
+  (`mv .bak /data`) or, if a correlated `.staging` is present, COMPLETE (`mv .staging /data`). It
+  reuses the D1.3c `discoverLeftovers` scanner (sibling-only, exact-name regex, no symlink follow), and
+  points at the **newest** `.bak` when several generations exist. A genuine fresh install (no `/data`,
+  no `.bak`) is unaffected.
+- **Tests (`restore_interrupted_test.go`):** present-dir no-op, fresh-install no-op, bak-only refusal
+  with actionable `mv`, bak+staging offers both options, lone-staging does NOT block, newest-bak
+  selection.
+- **Runbook:** recovery documented in `docs/operator/docker-compose-backup-restore.md` §8b (offline
+  `down` → `mv` → `up`, deliberate REVERT vs COMPLETE choice). **Complexity S — closed as recommended.**
 
 ## RISK-008 — Username timing oracle · MEDIUM · ✅ CLOSED 2026-06-28
 - **Was:** `VerifyAuth` (`store.go`) returned before the bcrypt compare on an unknown username, so a
@@ -246,3 +256,9 @@
   (no longer unsafe-by-default). Residual: *safe automatic* failover is the open mechanism decision
   (Advisor recommends lease+witness). Re-pinned by the flipped `ha_split_brain_failover_evidence_test.go`
   + `ha_autofailover_test.go`/`ha_term_test.go`.
+- **2026-06-30** — **RISK-005 CLOSED.** Boot-time guard `checkInterruptedRestore` (`restore.go`),
+  called from `main()` after the one-shot CLI commands, refuses to start when `/data` is absent AND an
+  interrupted-restore `.bak` sibling exists — instead of silently booting on an empty dir and losing
+  data. Prints actionable REVERT / COMPLETE `mv` moves (newest `.bak`), reusing the D1.3c
+  `discoverLeftovers` scanner; fresh installs unaffected. Tests in `restore_interrupted_test.go`;
+  recovery runbook in `docs/operator/docker-compose-backup-restore.md` §8b.

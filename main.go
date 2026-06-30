@@ -172,6 +172,14 @@ func main() {
 	s := &startupState{}
 	parseFlags(s)
 	handleOneShotCommands(s)
+	// RISK-005: refuse to boot on a data dir left missing by a restore commit
+	// that was killed mid-rename (would otherwise start empty + silently lose
+	// data). Runs AFTER the one-shots so --list/--cleanup-restore-leftovers and
+	// --restore can still operate on the orphaned state.
+	if err := checkInterruptedRestore(dataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
 	setInsecureFlag(s)
 	runEnrollmentMode(s)
 	loadFileConfigAndFlags(s)
