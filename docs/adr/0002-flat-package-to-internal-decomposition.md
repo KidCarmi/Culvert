@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite` (+ the `obs`/`fileutil` and `hostutil` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit` (+ the `obs`/`fileutil` and `hostutil` seams)
 
 ## Notes / log
 
@@ -359,6 +359,32 @@ Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + det
 (`-count=2 -shuffle=on`) on the package and the startup-slice/proxy consumers — all green.
 **Eight leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`,
 `rewrite`) + two seams (`obs`/`fileutil`, `hostutil`).**
+
+### 2026-06-29 — `internal/connlimit` extracted (ninth leaf)
+Moved the per-IP `ConnLimiter` (proxy hot-path flood/slow-read guard) into `internal/connlimit`.
+Pure stdlib (`sync`, `sync/atomic`), zero Culvert coupling. The two request-tracing helpers
+(`generateRequestID`/`generateTraceparent`) **stayed** in the trimmed `connlimit.go` — they are
+request-scoped tracing, not connection limiting, so labelling them under a `connlimit` package would
+mislead. `connlimit_vars.go` shims the type alias + the `connLimiter` singleton + a `newConnLimiter`
+constructor var.
+
+This was the **most consumer-entangled leaf so far** but resolved without moving a single test. The
+wrinkle: six **production** sites plus several tests reached into the unexported `enabled atomic.Bool`
+via `connLimiter.enabled.Load()`. Added one exported accessor `(*ConnLimiter).Enabled() bool` and
+rewrote those reads (`admin_settings.go`, `ui_config.go` ×5) — a genuine improvement (no more
+whitebox in production). Every test built `ConnLimiter` with a struct literal over now-unexported
+fields; all ten sites across four files (`connlimit_test.go`, `edge_audit_test.go`,
+`security_audit_test.go`, `connlimit_startup_test.go` — incl. the S1 conn+rate-limit startup-slice
+isolation reconstruction) switched to the `newConnLimiter()` constructor, leaving them black-box and
+in place (the unrelated latency-histogram tests sharing `connlimit_test.go` were untouched). Added a
+focused co-located `connlimit_test.go` covering New/Enable/Disable/Enabled, the acquire-limit/release
+cleanup, and a `-race` reconfigure-under-load case. Lint: SA4000 on a doubled `Acquire` expression —
+split into two statements.
+
+Validation: `go build`/`go vet ./...`, `golangci-lint` (0 issues), `-race` + determinism gate
+(`-count=2 -shuffle=on`) on the package and the startup-slice/proxy consumers — all green.
+**Nine leaves done (`totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`,
+`rewrite`, `connlimit`) + two seams (`obs`/`fileutil`, `hostutil`).**
 
 ## Context
 

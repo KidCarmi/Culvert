@@ -318,7 +318,7 @@ func SaveAdminSettings() {
 		IPFilterList:          ipf.List(),
 		RateLimitRPM:          rl.Limit(),
 		RateLimitExemptions:   rl.ListExemptions(),
-		ConnLimitEnabled:      connLimiter.enabled.Load(),
+		ConnLimitEnabled:      connLimiter.Enabled(),
 		ConnLimitMaxPerIP:     connLimiter.MaxPerIP(),
 		BlockPageHTML:         getBlockPageHTML(),
 		MetricsToken:          metricsToken,

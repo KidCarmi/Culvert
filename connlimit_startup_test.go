@@ -40,10 +40,7 @@ func snapshotConnAndRateLimitGlobals(t *testing.T) {
 	oldIPF := ipf
 	oldRL := rl
 
-	connLimiter = &ConnLimiter{
-		conns:    make(map[string]*int64),
-		maxPerIP: defaultMaxConnsPerIP,
-	}
+	connLimiter = newConnLimiter()
 	ipf = &IPFilter{single: map[string]bool{}}
 	rl = newRateLimiter()
 
@@ -132,7 +129,7 @@ func TestLoadConnAndRateLimit_AllZeroReturnsNil(t *testing.T) {
 	if got != nil {
 		t.Errorf("loadConnAndRateLimit(all-zero) returned non-nil cancel; want nil")
 	}
-	if connLimiter.enabled.Load() {
+	if connLimiter.Enabled() {
 		t.Errorf("connLimiter.enabled = true after all-zero cfg; want false")
 	}
 }
@@ -146,7 +143,7 @@ func TestLoadConnAndRateLimit_ConnLimiterEnabled(t *testing.T) {
 
 	loadConnAndRateLimit(connAndRateLimitStartupConfig{MaxConnsPerIP: 50}, ctx)
 
-	if !connLimiter.enabled.Load() {
+	if !connLimiter.Enabled() {
 		t.Error("connLimiter.enabled = false; want true after MaxConnsPerIP=50")
 	}
 	if got := connLimiter.MaxPerIP(); got != 50 {
