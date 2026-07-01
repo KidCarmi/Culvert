@@ -350,8 +350,13 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("too many attempts, locked for %ds", secs), http.StatusTooManyRequests)
 		return
 	}
-	setupCompleteMu.Lock()
-	defer setupCompleteMu.Unlock()
+	// Fast-path reject, and — more importantly — read + validate the body
+	// BEFORE taking setupCompleteMu. Decoding blocks on network I/O (the
+	// client controls how slowly the body arrives, up to the server's
+	// ReadTimeout); holding the global setup lock across that would let an
+	// unauthenticated client stall every other setup request, including the
+	// legitimate operator's. The lock only needs to cover the final
+	// re-check-and-mutate below, once everything about the request is known.
 	if cfg.IsConfigured() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
@@ -366,6 +371,27 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !body.Unauth {
+		body.User = strings.TrimSpace(body.User)
+		if len(body.User) < 1 || len(body.User) > 64 {
+			loginLimiter.RecordFailure(setupKey)
+			http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
+			return
+		}
+		if err := validatePasswordComplexity(body.Pass); err != nil {
+			loginLimiter.RecordFailure(setupKey)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	setupCompleteMu.Lock()
+	defer setupCompleteMu.Unlock()
+	if cfg.IsConfigured() {
+		http.Error(w, "setup already complete", http.StatusForbidden)
+		return
+	}
+
 	// Open (no-credential) mode — set the global default to Exempt.
 	if body.Unauth {
 		cfg.SetDefaultAuthOutcome(OutcomeExempt)
@@ -374,17 +400,6 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body.User = strings.TrimSpace(body.User)
-	if len(body.User) < 1 || len(body.User) > 64 {
-		loginLimiter.RecordFailure(setupKey)
-		http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
-		return
-	}
-	if err := validatePasswordComplexity(body.Pass); err != nil {
-		loginLimiter.RecordFailure(setupKey)
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
 	if err := cfg.SetAuth(body.User, body.Pass); err != nil {
 		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 		return
