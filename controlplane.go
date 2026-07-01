@@ -944,7 +944,8 @@ func haDecryptKey(encoded string, token string) ([]byte, error) {
 // Authenticated via a shared HA token (not node cert pinning).
 func (s *controlPlaneServer) HASync(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var req struct {
-		Token string `json:"token"`
+		Token       string `json:"token"`
+		StandbyAddr string `json:"standby_addr"`
 	}
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, fmt.Errorf("invalid request: %w", err)
@@ -954,6 +955,11 @@ func (s *controlPlaneServer) HASync(_ context.Context, raw json.RawMessage) (jso
 	if !globalHA.VerifyToken(req.Token) {
 		return nil, status.Errorf(codes.PermissionDenied, "invalid HA token")
 	}
+
+	// ADR-0005 S0: record the standby's advertised address as the failback
+	// target (only after the token check, so an unauthenticated caller cannot
+	// poison it). No-op unless we are the leader and the address changed.
+	globalHA.RecordStandbyAddr(req.StandbyAddr)
 
 	// Build state bundle.
 	stateJSON, err := globalClusterStore.ExportState()

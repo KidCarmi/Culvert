@@ -53,6 +53,7 @@ type HAState struct {
 	role         string         // "leader", "standby", or "" (HA disabled)
 	token        string         // shared HA token for authentication
 	peerAddr     string         // address of the other CP
+	standbyAddr  string         // leader-side: the standby's advertised address, learned via HASync (ADR-0005 S0 — failback target)
 	since        time.Time      // when current role was acquired
 	autoFailover bool           // standby self-promotes on leader loss (default OFF — see ADR-0004)
 	term         uint64         // leadership epoch — bumped on each promotion (ADR-0004 Slice 1c)
@@ -83,11 +84,12 @@ var globalHA = &HAState{}
 // HAStatus returns a snapshot of the current HA state for API/UI consumption.
 type HAStatus struct {
 	Enabled      bool   `json:"enabled"`
-	Role         string `json:"role"`                // "leader", "standby", or ""
-	Since        string `json:"since,omitempty"`     // RFC3339
-	PeerAddr     string `json:"peer_addr,omitempty"` // other CP address
-	AutoFailover bool   `json:"auto_failover"`       // standby self-promotes on leader loss (ADR-0004)
-	Term         uint64 `json:"term"`                // leadership epoch (ADR-0004 Slice 1c)
+	Role         string `json:"role"`                   // "leader", "standby", or ""
+	Since        string `json:"since,omitempty"`        // RFC3339
+	PeerAddr     string `json:"peer_addr,omitempty"`    // other CP address
+	AutoFailover bool   `json:"auto_failover"`          // standby self-promotes on leader loss (ADR-0004)
+	Term         uint64 `json:"term"`                   // leadership epoch (ADR-0004 Slice 1c)
+	StandbyAddr  string `json:"standby_addr,omitempty"` // leader-side failback target (ADR-0005 S0)
 }
 
 func (h *HAState) Status() HAStatus {
@@ -99,11 +101,65 @@ func (h *HAState) Status() HAStatus {
 		PeerAddr:     h.peerAddr,
 		AutoFailover: h.autoFailover,
 		Term:         h.term,
+		StandbyAddr:  h.standbyAddr,
 	}
 	if !h.since.IsZero() {
 		s.Since = h.since.Format(time.RFC3339)
 	}
 	return s
+}
+
+// snapshotConfigLocked builds the persisted haConfig from the live state.
+// Caller must hold h.mu. Centralises the field→config mapping so RecordStandbyAddr
+// (and future callers) persist a canonical record.
+func (h *HAState) snapshotConfigLocked() *haConfig {
+	return &haConfig{
+		Enabled:      h.role != "",
+		Token:        h.token,
+		PeerAddr:     h.peerAddr,
+		Role:         h.role,
+		AutoFailover: h.autoFailover,
+		Term:         h.term,
+		StandbyAddr:  h.standbyAddr,
+	}
+}
+
+// RecordStandbyAddr (leader side) records the standby's advertised address,
+// learned from the HASync request (ADR-0005 S0). This is the failback target:
+// when this leader later loses the lease and demotes, it must resync FROM the
+// standby — but the topology otherwise never tells the leader the standby's
+// address (ADR-0004 asymmetry). Persisted (throttled to changes) so it survives
+// a leader restart. No-op unless we are the leader and the address changed.
+func (h *HAState) RecordStandbyAddr(addr string) {
+	if addr == "" {
+		return
+	}
+	h.mu.Lock()
+	if h.role != "leader" || h.standbyAddr == addr {
+		h.mu.Unlock()
+		return
+	}
+	h.standbyAddr = addr
+	cfg := h.snapshotConfigLocked()
+	h.mu.Unlock()
+	_ = saveHAConfig(cfg)
+	logger.Printf("HA: recorded standby address %q (failback target, ADR-0005 S0)", sanitizeLog(addr))
+}
+
+// StandbyAddr returns the leader's recorded standby address (failback target),
+// or "" if not yet learned.
+func (h *HAState) StandbyAddr() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.standbyAddr
+}
+
+// advertiseAddr returns this node's own gRPC address (captured at StartAsStandby)
+// so the standby can advertise it to the leader in each HASync request.
+func (h *HAState) advertiseAddr() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.pc.grpcAddr
 }
 
 // autoFailoverEnabled reports whether this node may self-promote on leader loss.
@@ -172,6 +228,7 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 	h.token = cfg.Token
 	h.autoFailover = cfg.AutoFailover
 	h.term = cfg.Term
+	h.standbyAddr = cfg.StandbyAddr // restore failback target across restart (ADR-0005 S0)
 	h.since = time.Now()
 	h.stopCh = make(chan struct{})
 	h.mu.Unlock()
@@ -339,7 +396,9 @@ func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
 
 // syncFromLeader calls HASync on the leader and applies the state bundle.
 func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) bool {
-	reqBytes, _ := json.Marshal(map[string]string{"token": token})
+	// ADR-0005 S0: advertise this standby's own address so the leader can record
+	// it as the failback target (the topology otherwise never tells the leader).
+	reqBytes, _ := json.Marshal(map[string]string{"token": token, "standby_addr": h.advertiseAddr()})
 	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
 		logger.Printf("HA: HASync RPC error: %v", err)
@@ -548,9 +607,10 @@ type haConfig struct {
 	Enabled      bool   `json:"enabled"`
 	Token        string `json:"token"`
 	PeerAddr     string `json:"peer_addr"`
-	Role         string `json:"role"`          // "leader" or "standby"
-	AutoFailover bool   `json:"auto_failover"` // standby self-promotes on leader loss (ADR-0004; default OFF)
-	Term         uint64 `json:"term"`          // leadership epoch (ADR-0004 Slice 1c)
+	Role         string `json:"role"`                   // "leader" or "standby"
+	AutoFailover bool   `json:"auto_failover"`          // standby self-promotes on leader loss (ADR-0004; default OFF)
+	Term         uint64 `json:"term"`                   // leadership epoch (ADR-0004 Slice 1c)
+	StandbyAddr  string `json:"standby_addr,omitempty"` // leader-side failback target (ADR-0005 S0)
 }
 
 func haConfigPath() string {
