@@ -8,6 +8,7 @@ package main
 // on; if any of these can be forged, the whole model collapses.
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -202,7 +203,7 @@ func TestAuthzBypass_XFFCannotChangeSourceIPAuthz(t *testing.T) {
 	doReq := func(xff string) int {
 		p := *proxyURL
 		client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(&p)}, Timeout: 5 * time.Second}
-		req, _ := http.NewRequest(http.MethodGet, backend.URL+"/", nil)
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, backend.URL+"/", http.NoBody)
 		if xff != "" {
 			req.Header.Set("X-Forwarded-For", xff)
 		}

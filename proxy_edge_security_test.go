@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -24,11 +25,11 @@ import (
 // exact framing the proxy emitted). It answers every request with 200 / no body.
 func startRawUpstream(t *testing.T) (host string, recorded func() []string) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := ctxListen("127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("raw upstream listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	var mu sync.Mutex
 	var blocks []string
 	go func() {
@@ -37,35 +38,49 @@ func startRawUpstream(t *testing.T) (host string, recorded func() []string) {
 			if err != nil {
 				return
 			}
-			go func(conn net.Conn) {
-				defer conn.Close()
-				br := bufio.NewReader(conn)
-				for {
-					var b strings.Builder
-					for {
-						line, err := br.ReadString('\n')
-						if err != nil {
-							return
-						}
-						b.WriteString(line)
-						if line == "\r\n" || line == "\n" {
-							break
-						}
-					}
-					mu.Lock()
-					blocks = append(blocks, b.String())
-					mu.Unlock()
-					if _, err := conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")); err != nil {
-						return
-					}
-				}
-			}(c)
+			go serveRawUpstream(c, &mu, &blocks)
 		}
 	}()
 	return ln.Addr().String(), func() []string {
 		mu.Lock()
 		defer mu.Unlock()
 		return append([]string(nil), blocks...)
+	}
+}
+
+// serveRawUpstream reads keep-alive request header blocks off conn, records each
+// verbatim under mu, and answers 200 / no body. Extracted from startRawUpstream
+// to keep cognitive complexity within bounds.
+func serveRawUpstream(conn net.Conn, mu *sync.Mutex, blocks *[]string) {
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	for {
+		block, ok := readHeaderBlock(br)
+		if !ok {
+			return
+		}
+		mu.Lock()
+		*blocks = append(*blocks, block)
+		mu.Unlock()
+		if _, err := conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")); err != nil {
+			return
+		}
+	}
+}
+
+// readHeaderBlock reads lines up to and including the blank line that terminates
+// an HTTP header block, returning the raw block and false on read error/EOF.
+func readHeaderBlock(br *bufio.Reader) (string, bool) {
+	var b strings.Builder
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return "", false
+		}
+		b.WriteString(line)
+		if line == "\r\n" || line == "\n" {
+			return b.String(), true
+		}
 	}
 }
 
@@ -89,11 +104,11 @@ func TestEdge_RequestSmugglingNoAmbiguousFramingUpstream(t *testing.T) {
 			"\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
 	}
 	for _, p := range payloads {
-		conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+		conn, err := dialTimeout(proxyURL.Host)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
-		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 		conn.Write([]byte(p)) //nolint:errcheck
 		buf := make([]byte, 4096)
 		conn.Read(buf) //nolint:errcheck
@@ -134,7 +149,7 @@ func TestEdge_MalformedProxyAuthNeverAuthenticates(t *testing.T) {
 	for _, h := range headers {
 		p := *proxyURL
 		client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(&p)}, Timeout: 5 * time.Second}
-		req, _ := http.NewRequest(http.MethodGet, backend.URL+"/", nil)
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, backend.URL+"/", http.NoBody)
 		req.Header.Set("Proxy-Authorization", h)
 		resp, err := client.Do(req)
 		if err != nil {
@@ -161,7 +176,7 @@ func TestEdge_DropActionSilentClose(t *testing.T) {
 	policyStore.Add(PolicyRule{Priority: 1, Name: "drop-all", DestFQDN: "*", Action: ActionDrop})
 
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 5 * time.Second}
-	resp, err := client.Get(backend.URL + "/")
+	resp, err := ctxGet(client, backend.URL+"/")
 	if err == nil {
 		resp.Body.Close()
 		t.Errorf("Drop action returned an HTTP response (%d) — must silently close with no response", resp.StatusCode)
@@ -190,7 +205,7 @@ func TestEdge_RedirectOpenRedirectProtection(t *testing.T) {
 
 	// Safe: absolute http(s) to a public host literal → 302 with Location.
 	setRedirect("http://8.8.8.8/elsewhere")
-	resp, err := client.Get(backend.URL + "/")
+	resp, err := ctxGet(client, backend.URL+"/")
 	if err != nil {
 		t.Fatalf("safe redirect GET: %v", err)
 	}
@@ -209,7 +224,7 @@ func TestEdge_RedirectOpenRedirectProtection(t *testing.T) {
 		"ftp://evil.example/x",
 	} {
 		setRedirect(bad)
-		r, err := client.Get(backend.URL + "/")
+		r, err := ctxGet(client, backend.URL+"/")
 		if err != nil {
 			t.Fatalf("unsafe redirect GET (%q): %v", bad, err)
 		}
@@ -230,13 +245,13 @@ func TestEdge_DuplicateAndMissingHostHandled(t *testing.T) {
 	proxyURL := startTestProxy(t)
 	// Authority-form GET (no scheme/host in the target, empty Host) — the proxy
 	// must answer (some 4xx/5xx) and not hang or crash.
-	conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	conn, err := dialTimeout(proxyURL.Host)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
-	fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: \r\n\r\n")
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: \r\n\r\n")
 	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
 	if err != nil {
 		return // connection closed without a response is acceptable (fail-closed)

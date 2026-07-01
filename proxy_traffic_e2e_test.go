@@ -24,6 +24,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -52,11 +53,11 @@ func TestProxyE2E_WebSocket_PipelinedClientBytes(t *testing.T) {
 
 	// Fake WebSocket upstream: read the Upgrade request, reply 101, then read the
 	// relayed client payload and report it.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := ctxListen("127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("ws upstream listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
@@ -83,12 +84,12 @@ func TestProxyE2E_WebSocket_PipelinedClientBytes(t *testing.T) {
 	}()
 
 	proxyURL := startTestProxy(t)
-	conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	conn, err := dialTimeout(proxyURL.Host)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	// Upgrade request + payload in ONE write so the server buffers the payload.
 	target := ln.Addr().String()
@@ -132,12 +133,12 @@ func TestProxyE2E_HostHeaderSpoofCannotBypassPolicy(t *testing.T) {
 	policyStore.Add(PolicyRule{Priority: 1, Name: "block-evil", DestFQDN: "blocked.example", Action: ActionBlockPage})
 	policyStore.Add(PolicyRule{Priority: 2, Name: "allow-rest", DestFQDN: "*", Action: ActionAllow})
 
-	conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	conn, err := dialTimeout(proxyURL.Host)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	// Absolute-form target = blocked.example; spoofed Host header = allowed.example.
 	if _, err := fmt.Fprint(conn, "GET http://blocked.example/ HTTP/1.1\r\nHost: allowed.example\r\nConnection: close\r\n\r\n"); err != nil {
@@ -167,7 +168,7 @@ type echoServer struct {
 
 func startEchoServer(t *testing.T) *echoServer {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := ctxListen("127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("echo fixture listen: %v", err)
 	}
@@ -185,7 +186,7 @@ func startEchoServer(t *testing.T) *echoServer {
 			}(c)
 		}
 	}()
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	return es
 }
 
@@ -264,12 +265,12 @@ func TestProxyE2E_CONNECT_ByteRelay(t *testing.T) {
 
 	baseGoroutines := runtime.NumGoroutine()
 
-	conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	conn, err := dialTimeout(proxyURL.Host)
 	if err != nil {
 		t.Fatalf("dial proxy %s: %v", proxyURL.Host, err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	// Establish the tunnel.
 	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", echo.addr, echo.addr); err != nil {
@@ -321,12 +322,12 @@ func TestProxyE2E_CONNECT_DeniedDoesNotReachUpstream(t *testing.T) {
 	policyStore.rules = nil
 	policyStore.Add(PolicyRule{Priority: 1, Name: "block-all-connect", DestFQDN: "*", Action: ActionBlockPage})
 
-	conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	conn, err := dialTimeout(proxyURL.Host)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", echo.addr, echo.addr); err != nil {
 		t.Fatalf("write CONNECT: %v", err)
@@ -364,7 +365,7 @@ func TestProxyE2E_HTTPForward_PostAndIdentityStrip(t *testing.T) {
 		Timeout:   5 * time.Second,
 	}
 	body := []byte("payload-body-round-trip")
-	req, err := http.NewRequest(http.MethodPost, backend.URL+"/submit", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, backend.URL+"/submit", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -439,7 +440,7 @@ func TestProxyE2E_PolicyThroughProxy(t *testing.T) {
 				Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 				Timeout:   5 * time.Second,
 			}
-			resp, err := client.Get(backend.URL + "/")
+			resp, err := ctxGet(client, backend.URL+"/")
 			if err != nil {
 				t.Fatalf("proxy GET failed: %v", err)
 			}
@@ -512,7 +513,7 @@ func runConcurrentGets(t *testing.T, proxyURL *url.URL, targetURL string, n int)
 				Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 				Timeout:   5 * time.Second,
 			}
-			resp, err := client.Get(targetURL + "/")
+			resp, err := ctxGet(client, targetURL+"/")
 			if err != nil {
 				t.Errorf("concurrent client %d: %v", idx, err)
 				statuses[idx] = -1

@@ -19,6 +19,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -29,6 +30,12 @@ import (
 	"testing"
 	"time"
 )
+
+// dialTimeout is the context-aware replacement for net.DialTimeout (noctx),
+// with the 5s connect timeout the E2E suites use.
+func dialTimeout(addr string) (net.Conn, error) {
+	return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(context.Background(), "tcp", addr)
+}
 
 // setupInspectCA installs a fresh in-memory CA into the global certMgr (saved
 // and restored on cleanup) and returns it plus a cert pool a client can use to
@@ -82,34 +89,34 @@ func readCONNECT200(c net.Conn) error {
 // the meaningful signal that distinguishes inspect (succeeds) from bypass
 // (fails, because the upstream's real cert is not signed by the proxy CA).
 func connectAndTLS(proxyHost, target, serverName string, roots *x509.CertPool) (*tls.Conn, error) {
-	raw, err := net.DialTimeout("tcp", proxyHost, 5*time.Second)
+	raw, err := dialTimeout(proxyHost)
 	if err != nil {
 		return nil, err
 	}
-	raw.SetDeadline(time.Now().Add(15 * time.Second))
+	_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
 	if _, err := fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
-		raw.Close()
+		raw.Close() //nolint:errcheck // best-effort close on write failure
 		return nil, err
 	}
 	if err := readCONNECT200(raw); err != nil {
-		raw.Close()
+		raw.Close() //nolint:errcheck // best-effort close on CONNECT failure
 		return nil, err
 	}
 	tc := tls.Client(raw, &tls.Config{RootCAs: roots, ServerName: serverName}) // #nosec G402 -- test trusts only the proxy CA
-	if err := tc.Handshake(); err != nil {
-		tc.Close()
+	if err := tc.HandshakeContext(context.Background()); err != nil {
+		tc.Close() //nolint:errcheck // best-effort close on handshake failure
 		return nil, fmt.Errorf("client TLS handshake: %w", err)
 	}
 	return tc, nil
 }
 
-// inspectRule installs a single inspect rule (DestFQDN=* so it matches the
-// loopback target) with the given action and skip-verify, replacing all rules.
-func inspectRule(action PolicyAction, tlsSkipVerify bool) {
+// inspectRule installs a single allow+inspect rule (DestFQDN=* so it matches the
+// loopback target) with the given skip-verify, replacing all rules.
+func inspectRule(tlsSkipVerify bool) {
 	policyStore.rules = nil
 	policyStore.Add(PolicyRule{
 		Priority: 1, Name: "inspect-all", DestFQDN: "*",
-		Action: action, SSLAction: SSLInspect, TLSSkipVerify: tlsSkipVerify,
+		Action: ActionAllow, SSLAction: SSLInspect, TLSSkipVerify: tlsSkipVerify,
 	})
 }
 
@@ -138,17 +145,17 @@ func TestMITM_InspectMITMsAndScrubsIdentity(t *testing.T) {
 	target := upstream.Listener.Addr().String()
 
 	proxyURL := startTestProxy(t)
-	inspectRule(ActionAllow, true) // skip-verify so the proxy accepts httptest's self-signed upstream
+	inspectRule(true) // skip-verify so the proxy accepts httptest's self-signed upstream
 
 	missBefore := cacheMisses(cm)
 	tc, err := connectAndTLS(proxyURL.Host, target, "inspect.test", proxyRoots)
 	if err != nil {
 		t.Fatalf("inspect handshake must succeed when client trusts the proxy CA: %v", err)
 	}
-	defer tc.Close()
+	defer tc.Close() //nolint:errcheck // test cleanup
 
 	// Inner HTTPS request carrying spoofed identity + private forwarded headers.
-	fmt.Fprint(tc, "GET / HTTP/1.1\r\nHost: inspect.test\r\n"+
+	_, _ = fmt.Fprint(tc, "GET / HTTP/1.1\r\nHost: inspect.test\r\n"+
 		"X-User-Identity: attacker@evil.example\r\n"+
 		"X-Forwarded-For: 10.1.2.3\r\n"+
 		"X-Real-IP: 192.168.5.5\r\n"+
@@ -201,7 +208,7 @@ func TestMITM_BypassDoesNotMITM(t *testing.T) {
 
 	tc, err := connectAndTLS(proxyURL.Host, target, "inspect.test", proxyRoots)
 	if err == nil {
-		tc.Close()
+		tc.Close() //nolint:errcheck // test cleanup
 		t.Fatalf("bypass path: handshake unexpectedly SUCCEEDED trusting only the proxy CA — that means the proxy MITM'd a BYPASS rule (inspection leak)")
 	}
 	// Sanity: trusting the REAL upstream cert, bypass succeeds.
@@ -209,7 +216,7 @@ func TestMITM_BypassDoesNotMITM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bypass path should pass through the real upstream cert: %v", err)
 	}
-	okTLS.Close()
+	okTLS.Close() //nolint:errcheck // test cleanup
 }
 
 // TestMITM_BlockedHTTPSNotReached proves a block rule denies the CONNECT before
@@ -230,13 +237,13 @@ func TestMITM_BlockedHTTPSNotReached(t *testing.T) {
 	policyStore.rules = nil
 	policyStore.Add(PolicyRule{Priority: 1, Name: "block-all", DestFQDN: "*", Action: ActionBlockPage, SSLAction: SSLInspect})
 
-	raw, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	raw, err := dialTimeout(proxyURL.Host)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer raw.Close()
-	raw.SetDeadline(time.Now().Add(5 * time.Second))
-	fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	_ = raw.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 	if err := readCONNECT200(raw); err == nil {
 		t.Errorf("blocked CONNECT returned 200 — must be denied before the tunnel")
 	}
@@ -260,21 +267,21 @@ func TestMITM_BadUpstreamCertFailsClosed(t *testing.T) {
 	target := upstream.Listener.Addr().String()
 
 	proxyURL := startTestProxy(t)
-	inspectRule(ActionAllow, false) // verify ON → httptest's self-signed cert is untrusted
+	inspectRule(false) // verify ON → httptest's self-signed cert is untrusted
 
-	raw, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	raw, err := dialTimeout(proxyURL.Host)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer raw.Close()
-	raw.SetDeadline(time.Now().Add(5 * time.Second))
-	fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	_ = raw.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 	// The proxy does its upstream TLS handshake BEFORE replying to CONNECT; an
 	// untrusted upstream cert must yield a non-200 (502), not a tunnel.
 	if err := readCONNECT200(raw); err == nil {
 		// If 200 somehow returned, the client handshake must still not bridge.
 		tc := tls.Client(raw, &tls.Config{RootCAs: proxyRoots, ServerName: "inspect.test"})
-		if tc.Handshake() == nil {
+		if tc.HandshakeContext(context.Background()) == nil {
 			t.Errorf("bad upstream cert: proxy established an inspected tunnel anyway — fail-open")
 		}
 	}
@@ -301,14 +308,14 @@ func TestMITM_LargeResponseIntegrity(t *testing.T) {
 	target := upstream.Listener.Addr().String()
 
 	proxyURL := startTestProxy(t)
-	inspectRule(ActionAllow, true)
+	inspectRule(true)
 
 	tc, err := connectAndTLS(proxyURL.Host, target, "inspect.test", proxyRoots)
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
-	defer tc.Close()
-	fmt.Fprint(tc, "GET /big HTTP/1.1\r\nHost: inspect.test\r\nConnection: close\r\n\r\n")
+	defer tc.Close() //nolint:errcheck // test cleanup
+	_, _ = fmt.Fprint(tc, "GET /big HTTP/1.1\r\nHost: inspect.test\r\nConnection: close\r\n\r\n")
 	resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
@@ -338,20 +345,20 @@ func TestMITM_CertCacheHitThenRotateClears(t *testing.T) {
 	target := upstream.Listener.Addr().String()
 
 	proxyURL := startTestProxy(t)
-	inspectRule(ActionAllow, true)
+	inspectRule(true)
 
 	doReq := func() {
 		tc, err := connectAndTLS(proxyURL.Host, target, "cache.test", proxyRoots)
 		if err != nil {
 			t.Fatalf("handshake: %v", err)
 		}
-		fmt.Fprint(tc, "GET / HTTP/1.1\r\nHost: cache.test\r\nConnection: close\r\n\r\n")
+		_, _ = fmt.Fprint(tc, "GET / HTTP/1.1\r\nHost: cache.test\r\nConnection: close\r\n\r\n")
 		resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
 		if err == nil {
 			io.Copy(io.Discard, resp.Body) //nolint:errcheck
 			resp.Body.Close()
 		}
-		tc.Close()
+		tc.Close() //nolint:errcheck // test cleanup
 	}
 
 	_, m0, _ := cm.CacheStats()

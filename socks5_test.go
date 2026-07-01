@@ -103,7 +103,7 @@ func startSOCKS5Listener(t *testing.T) net.Listener {
 			c.Close()
 		}
 		mu.Unlock()
-		ln.Close()
+		_ = ln.Close()
 		acceptLoop.Wait() // accept loop has exited → no further handlers.Add
 		handlers.Wait()   // all handlers drained → no global reads after this point
 	})

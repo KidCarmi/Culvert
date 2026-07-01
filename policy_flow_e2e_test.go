@@ -8,9 +8,9 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,9 +20,10 @@ import (
 // ruleHitCount returns the runtime hit counter for the named rule (matched-rule
 // observability), or -1 if absent.
 func ruleHitCount(name string) int64 {
-	for _, r := range policyStore.List() {
-		if r.Name == name {
-			return r.HitCount
+	rules := policyStore.List()
+	for i := range rules {
+		if rules[i].Name == name {
+			return rules[i].HitCount
 		}
 	}
 	return -1
@@ -41,7 +42,7 @@ func TestPolicyFlow_PriorityFirstMatchWins(t *testing.T) {
 	policyStore.Add(PolicyRule{Priority: 1, Name: "block-first", DestFQDN: "*", Action: ActionBlockPage})
 	policyStore.Add(PolicyRule{Priority: 2, Name: "allow-second", DestFQDN: "*", Action: ActionAllow})
 
-	resp, err := client.Get(backend.URL + "/")
+	resp, err := ctxGet(client, backend.URL+"/")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -62,7 +63,7 @@ func TestPolicyFlow_PriorityFirstMatchWins(t *testing.T) {
 	policyStore.Add(PolicyRule{Priority: 2, Name: "block-second", DestFQDN: "*", Action: ActionBlockPage})
 
 	before := cb.hitCount()
-	resp2, err := client.Get(backend.URL + "/")
+	resp2, err := ctxGet(client, backend.URL+"/")
 	if err != nil {
 		t.Fatalf("GET2: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestPolicyFlow_RuleUpdateWhileTrafficFlows(t *testing.T) {
 
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 5 * time.Second}
 	get := func() int {
-		resp, err := client.Get(backend.URL + "/")
+		resp, err := ctxGet(client, backend.URL+"/")
 		if err != nil {
 			t.Fatalf("GET: %v", err)
 		}
@@ -117,6 +118,16 @@ func TestPolicyFlow_RuleUpdateWhileTrafficFlows(t *testing.T) {
 	}
 
 	// Churn under concurrent traffic: every response must be a clean 200 or 403.
+	if bad := churnPolicyUnderTraffic(proxyURL, backend.URL+"/", allow, block); bad != 0 {
+		t.Errorf("policy update under traffic produced %d inconsistent responses (want only 200/403)", bad)
+	}
+}
+
+// churnPolicyUnderTraffic flips the policy (allow/block) in a background loop
+// while 12 clients each issue 25 GETs, and returns the count of responses that
+// were neither 200 nor 403 (or transport errors) — must be 0 under a correct
+// hot-reload path. Extracted to keep the test within funlen bounds.
+func churnPolicyUnderTraffic(proxyURL *url.URL, targetURL string, allow, block func()) int64 {
 	var unexpected int64
 	stop := make(chan struct{})
 	var churn sync.WaitGroup
@@ -144,7 +155,7 @@ func TestPolicyFlow_RuleUpdateWhileTrafficFlows(t *testing.T) {
 			defer wg.Done()
 			cl := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 5 * time.Second}
 			for r := 0; r < 25; r++ {
-				resp, err := cl.Get(backend.URL + "/")
+				resp, err := ctxGet(cl, targetURL)
 				if err != nil {
 					atomic.AddInt64(&unexpected, 1)
 					continue
@@ -159,9 +170,7 @@ func TestPolicyFlow_RuleUpdateWhileTrafficFlows(t *testing.T) {
 	wg.Wait()
 	close(stop)
 	churn.Wait()
-	if unexpected != 0 {
-		t.Errorf("policy update under traffic produced %d inconsistent responses (want only 200/403)", unexpected)
-	}
+	return unexpected
 }
 
 // TestPolicyFlow_IPLiterals proves policy matches IPv4 and IPv6 literal hosts
@@ -173,7 +182,7 @@ func TestPolicyFlow_IPLiterals(t *testing.T) {
 		policyStore.rules = nil
 		policyStore.Add(PolicyRule{Priority: 1, Name: "allow-v4", DestFQDN: "127.0.0.1", Action: ActionAllow})
 		client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 5 * time.Second}
-		resp, err := client.Get(backend.URL + "/")
+		resp, err := ctxGet(client, backend.URL+"/")
 		if err != nil {
 			t.Fatalf("GET: %v", err)
 		}
@@ -184,15 +193,18 @@ func TestPolicyFlow_IPLiterals(t *testing.T) {
 	})
 
 	t.Run("ipv6_literal", func(t *testing.T) {
-		ln, err := net.Listen("tcp", "[::1]:0")
+		ln, err := ctxListen("[::1]:0")
 		if err != nil {
 			t.Skipf("IPv6 loopback unavailable: %v", err)
 		}
 		var hits int64
-		srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			atomic.AddInt64(&hits, 1)
-			w.WriteHeader(http.StatusOK)
-		})}}
+		srv := &httptest.Server{Listener: ln, Config: &http.Server{
+			ReadHeaderTimeout: 5 * time.Second,
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt64(&hits, 1)
+				w.WriteHeader(http.StatusOK)
+			}),
+		}}
 		srv.Start()
 		defer srv.Close()
 
@@ -200,7 +212,7 @@ func TestPolicyFlow_IPLiterals(t *testing.T) {
 		policyStore.rules = nil
 		policyStore.Add(PolicyRule{Priority: 1, Name: "block-v6", DestFQDN: "::1", Action: ActionBlockPage})
 		client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 5 * time.Second}
-		resp, err := client.Get(srv.URL + "/")
+		resp, err := ctxGet(client, srv.URL+"/")
 		if err != nil {
 			t.Fatalf("GET: %v", err)
 		}
@@ -224,12 +236,12 @@ func TestPolicyFlow_MalformedConnectRejected(t *testing.T) {
 		"host:99999",     // out-of-range port
 		"a b.example:80", // space in host
 	} {
-		conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+		conn, err := dialTimeout(proxyURL.Host)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
-		conn.SetDeadline(time.Now().Add(5 * time.Second))
-		fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", authority, authority)
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", authority, authority)
 		resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
 		if err != nil {
 			conn.Close()

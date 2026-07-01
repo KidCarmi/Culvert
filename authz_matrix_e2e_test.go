@@ -12,6 +12,7 @@ package main
 // actually reached.
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -40,8 +41,8 @@ func startAuthProxy(t *testing.T, provider IdentityProvider, rules []PolicyRule)
 	t.Cleanup(func() { cfg.SetAuth("", "") }) //nolint:errcheck
 
 	policyStore.rules = nil
-	for _, r := range rules {
-		policyStore.Add(r)
+	for i := range rules {
+		policyStore.Add(rules[i])
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +86,7 @@ func proxiedGet(t *testing.T, proxyURL *url.URL, targetURL, user, pass string, c
 			return http.ErrUseLastResponse
 		},
 	}
-	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, targetURL, http.NoBody)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -253,7 +254,7 @@ func TestAuthzMatrix_IdentityHeaderSpoofIgnored(t *testing.T) {
 	// Unauthenticated, but spoofing X-User-Identity: alice (who WOULD be allowed).
 	p := *proxyURL
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(&p)}, Timeout: 5 * time.Second}
-	req, _ := http.NewRequest(http.MethodGet, backend.URL+"/", nil)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, backend.URL+"/", http.NoBody)
 	req.Header.Set("X-User-Identity", "alice")
 	resp, err := client.Do(req)
 	if err != nil {

@@ -17,6 +17,7 @@ package main
 //   go test -run '^$' -bench 'BenchmarkPolicy|BenchmarkScrub' -benchmem .
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"testing"
@@ -90,7 +91,7 @@ func BenchmarkPolicyEvaluate_MatchLast(b *testing.B) {
 func BenchmarkScrubForwardedHeaders(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		r, _ := http.NewRequest(http.MethodGet, "http://target.example.com/", nil)
+		r, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://target.example.com/", http.NoBody)
 		r.Header.Set("X-Forwarded-For", "10.0.0.1, 203.0.113.9, 192.168.1.1")
 		r.Header.Set("X-Real-IP", "10.1.2.3")
 		r.Header.Set("X-User-Identity", "spoofed@evil.example")
