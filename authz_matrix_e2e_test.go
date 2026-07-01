@@ -38,7 +38,7 @@ func startAuthProxy(t *testing.T, provider IdentityProvider, rules []PolicyRule)
 	if err := cfg.SetAuth("admin", "admin-pass"); err != nil {
 		t.Fatalf("SetAuth: %v", err)
 	}
-	t.Cleanup(func() { cfg.SetAuth("", "") }) //nolint:errcheck
+	t.Cleanup(func() { cfg.SetAuth("", "") }) //nolint:errcheck // test I/O; error not actionable
 
 	policyStore.rules = nil
 	for i := range rules {
@@ -171,7 +171,7 @@ func TestAuthzMatrix_SessionCookie(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode session: %v", err)
 		}
-		return &http.Cookie{Name: sessionCookieName, Value: val, Path: "/"}
+		return &http.Cookie{Name: sessionCookieName, Value: val, Path: "/"} // #nosec G124 -- request-side session-cookie fixture sent TO the proxy; Secure/HttpOnly/SameSite are response attributes, irrelevant here
 	}
 
 	t.Run("valid_session_right_group_allow", func(t *testing.T) {

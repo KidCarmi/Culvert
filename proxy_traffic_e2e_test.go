@@ -74,7 +74,7 @@ func TestProxyE2E_WebSocket_PipelinedClientBytes(t *testing.T) {
 				break
 			}
 		}
-		c.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")) //nolint:errcheck
+		c.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")) //nolint:errcheck // test I/O; error not actionable
 		buf := make([]byte, len(payload))
 		if _, err := io.ReadFull(ubr, buf); err != nil {
 			got <- "ERR:" + err.Error()
@@ -217,7 +217,7 @@ func startCountingBackend(t *testing.T) (*httptest.Server, *countingBackend) {
 		cb.lastBodySeen.Store(string(body))
 		// Echo the body back so the client can verify round-trip integrity.
 		w.WriteHeader(http.StatusOK)
-		w.Write(body) //nolint:errcheck
+		w.Write(body) //nolint:errcheck // test I/O; error not actionable
 	}))
 	t.Cleanup(srv.Close)
 	return srv, cb
@@ -519,7 +519,7 @@ func runConcurrentGets(t *testing.T, proxyURL *url.URL, targetURL string, n int)
 				statuses[idx] = -1
 				return
 			}
-			io.Copy(io.Discard, resp.Body) //nolint:errcheck
+			io.Copy(io.Discard, resp.Body) //nolint:errcheck // test I/O; error not actionable
 			resp.Body.Close()
 			statuses[idx] = resp.StatusCode
 		}(i)

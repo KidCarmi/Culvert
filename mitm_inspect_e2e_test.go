@@ -139,7 +139,7 @@ func TestMITM_InspectMITMsAndScrubsIdentity(t *testing.T) {
 		got.xrealip = r.Header.Get("X-Real-IP")
 		got.hits++
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("inspected-ok")) //nolint:errcheck
+		w.Write([]byte("inspected-ok")) //nolint:errcheck // test I/O; error not actionable
 	}))
 	defer upstream.Close()
 	target := upstream.Listener.Addr().String()
@@ -297,12 +297,12 @@ func TestMITM_LargeResponseIntegrity(t *testing.T) {
 	const n = 1 << 20 // 1 MiB
 	payload := make([]byte, n)
 	for i := range payload {
-		payload[i] = byte(i * 31)
+		payload[i] = byte(i * 31) // #nosec G115 -- deterministic test payload; byte truncation is intentional
 	}
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", n))
 		w.WriteHeader(http.StatusOK)
-		w.Write(payload) //nolint:errcheck
+		w.Write(payload) //nolint:errcheck // test I/O; error not actionable
 	}))
 	defer upstream.Close()
 	target := upstream.Listener.Addr().String()
@@ -339,7 +339,7 @@ func TestMITM_CertCacheHitThenRotateClears(t *testing.T) {
 
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok")) //nolint:errcheck
+		w.Write([]byte("ok")) //nolint:errcheck // test I/O; error not actionable
 	}))
 	defer upstream.Close()
 	target := upstream.Listener.Addr().String()
@@ -355,7 +355,7 @@ func TestMITM_CertCacheHitThenRotateClears(t *testing.T) {
 		_, _ = fmt.Fprint(tc, "GET / HTTP/1.1\r\nHost: cache.test\r\nConnection: close\r\n\r\n")
 		resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
 		if err == nil {
-			io.Copy(io.Discard, resp.Body) //nolint:errcheck
+			io.Copy(io.Discard, resp.Body) //nolint:errcheck // test I/O; error not actionable
 			resp.Body.Close()
 		}
 		tc.Close() //nolint:errcheck // test cleanup

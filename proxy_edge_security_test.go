@@ -109,9 +109,9 @@ func TestEdge_RequestSmugglingNoAmbiguousFramingUpstream(t *testing.T) {
 			t.Fatalf("dial: %v", err)
 		}
 		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-		conn.Write([]byte(p)) //nolint:errcheck
+		conn.Write([]byte(p)) //nolint:errcheck // test I/O; error not actionable
 		buf := make([]byte, 4096)
-		conn.Read(buf) //nolint:errcheck
+		conn.Read(buf) //nolint:errcheck // test I/O; error not actionable
 		conn.Close()
 	}
 	time.Sleep(150 * time.Millisecond)

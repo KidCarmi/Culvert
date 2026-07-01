@@ -60,7 +60,7 @@ func socks5HandshakeAuth(t *testing.T, conn net.Conn, user, pass string) byte {
 // all handlers — guaranteeing no handler can touch globals after the test ends.
 func startSOCKS5Listener(t *testing.T) net.Listener {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := ctxListen("127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
