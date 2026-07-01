@@ -876,6 +876,15 @@ type HAStateBundle struct {
 	CAKeyEncrypted string          `json:"ca_key_encrypted,omitempty"` // base64(salt + nonce + ciphertext)
 	Config         ConfigSnapshot  `json:"config"`
 	Version        int64           `json:"version"`
+	// PromoteRequested signals the standby to perform a COORDINATED planned
+	// promotion (ADR-0004 Slice 1e) — e.g. before a CP rolling update takes the
+	// leader down. Honored even when auto-failover is OFF, because it is an
+	// explicit leader-initiated handoff, not an unattended auto-failover.
+	PromoteRequested bool `json:"promote_requested,omitempty"`
+	// LeaderTerm carries the leader's current epoch so the standby can seed its
+	// own term (ADR-0004 Slice 1c, Codex P2) and a promotion yields a strictly
+	// higher epoch — making the /healthz split-brain signal meaningful.
+	LeaderTerm uint64 `json:"leader_term,omitempty"`
 }
 
 // haEncryptKey encrypts data with AES-256-GCM using a key derived from the
@@ -963,11 +972,13 @@ func (s *controlPlaneServer) HASync(_ context.Context, raw json.RawMessage) (jso
 	}
 
 	bundle := HAStateBundle{
-		ClusterState:   stateJSON,
-		CACertPEM:      string(globalClusterCA.CACertPEM()),
-		CAKeyEncrypted: caKeyEncrypted,
-		Config:         CurrentConfigSnapshot(),
-		Version:        globalConfigStore.Get().Version,
+		ClusterState:     stateJSON,
+		CACertPEM:        string(globalClusterCA.CACertPEM()),
+		CAKeyEncrypted:   caKeyEncrypted,
+		Config:           CurrentConfigSnapshot(),
+		Version:          globalConfigStore.Get().Version,
+		PromoteRequested: globalHA.plannedPromotion.Load(), // ADR-0004 Slice 1e: coordinated handoff
+		LeaderTerm:       globalHA.Status().Term,           // ADR-0004 Slice 1c/P2: seed standby epoch
 	}
 
 	resp, _ := json.Marshal(bundle)

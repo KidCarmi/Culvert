@@ -1,5 +1,7 @@
 package main
 
+import "github.com/KidCarmi/Culvert/internal/geoip"
+
 // geoip_startup.go — startup-time loader for the GeoIP database slice
 // (PR3 expansion, Batch 1).
 //
@@ -14,7 +16,7 @@ func loadGeoIP(cfg geoIPStartupConfig) {
 		logger.Printf("GeoIP: disabled (no -geoip-db set; destCountry rules will be skipped)")
 		return
 	}
-	if err := InitGeoDB(cfg.DBPath); err != nil {
+	if err := geoip.InitGeoDB(cfg.DBPath); err != nil {
 		logger.Printf("GeoIP: failed to open %s (%v) — GeoIP disabled", cfg.DBPath, err)
 		return
 	}

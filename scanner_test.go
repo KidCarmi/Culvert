@@ -92,7 +92,7 @@ func TestDecompressForScan_GzipBomb(t *testing.T) {
 // ── ContentScanner unit tests ──────────────────────────────────────────────────
 
 func freshScanner() *ContentScanner {
-	return &ContentScanner{maxBytes: 1 << 20}
+	return newContentScanner(1 << 20)
 }
 
 func TestScanner_EmptyDoesNotMatch(t *testing.T) {
@@ -202,9 +202,7 @@ func TestScanner_LoadSave(t *testing.T) {
 	if err := s.Set([]string{`evil`, `malware`}); err != nil {
 		t.Fatalf("Set error: %v", err)
 	}
-	s.mu.Lock()
-	s.path = path
-	s.mu.Unlock()
+	s.SetPath(path)
 	s.Save()
 
 	if _, err := os.Stat(path); err != nil {

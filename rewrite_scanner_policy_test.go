@@ -5,22 +5,8 @@ import (
 	"testing"
 )
 
-// ─── Rewriter extras ─────────────────────────────────────────────────────────
-
-func TestRewriter_matchesHost_CaseInsensitive(t *testing.T) {
-	r := &RewriteRule{Host: "Example.COM"}
-	if !r.matchesHost("example.com") {
-		t.Error("matchesHost should be case-insensitive")
-	}
-}
-
-func TestRewriter_matchesHost_WildcardExact(t *testing.T) {
-	// *.example.com: "example.com" itself should match (without www.)
-	r := &RewriteRule{Host: "*.example.com"}
-	if !r.matchesHost("example.com") {
-		t.Error("wildcard pattern should also match the bare domain")
-	}
-}
+// Rewriter matchesHost tests moved to internal/rewrite (ADR-0002) — matchesHost
+// is unexported and now lives in package rewrite.
 
 // ─── ContentScanner extras ────────────────────────────────────────────────────
 
@@ -122,8 +108,7 @@ func TestSSLBypassMatcher_CompileBypassPattern(t *testing.T) {
 func TestSecurityScanner_ScanBody_WithYARA(t *testing.T) {
 	// Install a YARA rule that matches "EICAR"
 	y := &YARARuleSet{}
-	rules, _ := parseYARASrc(yaraRule("Detect", `        $a = "EICAR"`, "any of them"))
-	y.rules = rules
+	_, _ = y.LoadSource(yaraRule("Detect", `        $a = "EICAR"`, "any of them"))
 
 	// Temporarily swap globalYARA
 	old := globalYARA

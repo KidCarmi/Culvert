@@ -72,30 +72,8 @@ func FuzzIsSafeRedirectURL(f *testing.F) {
 	})
 }
 
-// FuzzParseClamResponse ensures the ClamAV response parser never panics on
-// malformed or truncated daemon output.
-func FuzzParseClamResponse(f *testing.F) {
-	seeds := []string{
-		"stream: OK",
-		"stream: Eicar-Test-Signature FOUND",
-		"stream: ERROR",
-		"stdin: Win.Test.EICAR_HDB-1 FOUND",
-		"",
-		"FOUND",
-		"OK",
-		": FOUND",
-		"stream: some.virus.name FOUND",
-		"stream: \x00\xff FOUND",
-		"a: b: FOUND",
-		"stream: OK\nstream: FOUND",
-	}
-	for _, s := range seeds {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, resp string) {
-		_, _, _ = parseClamResponse(resp)
-	})
-}
+// FuzzParseClamResponse moved to internal/clamav (ADR-0002) — it fuzzes the
+// unexported parseClamResponse, now in package clamav.
 
 // FuzzNormaliseFeedURL ensures the feed-URL normaliser never panics on
 // arbitrary URLs from untrusted operator input.
@@ -143,25 +121,5 @@ func FuzzMatchDest(f *testing.F) {
 	})
 }
 
-// FuzzParseYARALiteral exercises the YARA string-literal parser which handles
-// escape sequences from untrusted rule files.
-func FuzzParseYARALiteral(f *testing.F) {
-	seeds := []string{
-		`"hello world"`,
-		`"test\x41\x42"`,
-		`"line\nnewline"`,
-		`"tab\there"`,
-		`"back\\slash"`,
-		`"quote\""`,
-		`""`,
-		`"unclosed`,
-		`"\xff\x00"`,
-		`"` + string([]byte{0x00, 0x01, 0x02}) + `"`,
-	}
-	for _, s := range seeds {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, s string) {
-		_, _, _ = parseYARALiteralString(s)
-	})
-}
+// FuzzParseYARALiteral moved to internal/yara (ADR-0002) — it fuzzes the
+// unexported parseYARALiteralString, now in package yara.

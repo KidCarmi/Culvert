@@ -62,6 +62,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
 // ─── globalProfileStore ─────────────────────────────────────────────
@@ -71,10 +73,9 @@ import (
 // triggered by applyConfigSnapshot's snap.FileProfiles branch
 // (controlplane.go:1521–1523).
 func TestApplyConfigSnapshot_FileProfilesPersist(t *testing.T) {
-	origPath := globalProfileStore.path
 	origProfiles := globalProfileStore.List()
 	t.Cleanup(func() {
-		globalProfileStore.path = origPath
+		globalProfileStore.SetPath("") // drop the test's temp persistence path
 		restored := make([]FileExtProfile, 0, len(origProfiles))
 		for _, p := range origProfiles {
 			restored = append(restored, *p)
@@ -84,7 +85,7 @@ func TestApplyConfigSnapshot_FileProfilesPersist(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fileprofiles.json")
-	globalProfileStore.path = path
+	globalProfileStore.SetPath(path)
 
 	snap := ConfigSnapshot{
 		Version: 1,
@@ -188,10 +189,9 @@ func TestApplyConfigSnapshot_BandwidthPoliciesPersist(t *testing.T) {
 // efficiency observation (out of P3.4 scope per the brief's
 // "no broad persistence framework rewrite" constraint).
 func TestApplyConfigSnapshot_FileBlockExtensionsPersist(t *testing.T) {
-	origPath := fileBlocker.path
 	origExts := fileBlocker.List()
 	t.Cleanup(func() {
-		fileBlocker.SetPath(origPath)
+		fileBlocker.SetPath("") // drop the test's temp persistence path
 		fileBlocker.ClearAll()
 		for _, ext := range origExts {
 			fileBlocker.Add(ext)
@@ -216,7 +216,7 @@ func TestApplyConfigSnapshot_FileBlockExtensionsPersist(t *testing.T) {
 
 	// Read the file directly and unmarshal — FileBlocker's on-disk
 	// shape is `[]string` per fileblock.go save() body.
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- test-controlled temp path
 	if err != nil {
 		t.Fatalf("read %q: %v", path, err)
 	}
@@ -240,7 +240,7 @@ func TestApplyConfigSnapshot_FileBlockExtensionsPersist(t *testing.T) {
 
 	// Fresh-reader evidence: SetPath() on a brand-new FileBlocker
 	// should load the same extensions.
-	fresh := &FileBlocker{extensions: map[string]bool{}}
+	fresh := fileblock.NewBlocker()
 	fresh.SetPath(path)
 	freshExts := fresh.List()
 	if len(freshExts) != 3 {
@@ -387,16 +387,16 @@ func TestApplyConfigSnapshot_URLCategoriesPersist(t *testing.T) {
 // caller-side dpiScanner.Save() hook after dpiScanner.Set() in
 // applyConfigSnapshot's snap.DPIPatterns branch (P6.2 SC-3 closure).
 func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
-	origPath := dpiScanner.path
-	origPatterns := append([]string(nil), dpiScanner.raw...)
+	origPath := dpiScanner.Path()
+	origPatterns := append([]string(nil), dpiScanner.List()...)
 	t.Cleanup(func() {
-		dpiScanner.path = origPath
+		dpiScanner.SetPath(origPath)
 		_ = dpiScanner.Set(origPatterns)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dpi_patterns.json")
-	dpiScanner.path = path
+	dpiScanner.SetPath(path)
 
 	snap := ConfigSnapshot{
 		Version:     1,
@@ -408,15 +408,15 @@ func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
 		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
 	}
 
-	fresh := &ContentScanner{bypassHosts: map[string]bool{}}
+	fresh := newContentScanner(0)
 	if err := fresh.Load(path); err != nil {
 		t.Fatalf("fresh.Load: %v", err)
 	}
-	if len(fresh.raw) != 1 {
-		t.Fatalf("loaded %d patterns, want 1", len(fresh.raw))
+	if len(fresh.List()) != 1 {
+		t.Fatalf("loaded %d patterns, want 1", len(fresh.List()))
 	}
-	if fresh.raw[0] != "p34-test-dpi-pattern" {
-		t.Errorf("fresh.raw[0] = %q, want p34-test-dpi-pattern", fresh.raw[0])
+	if fresh.List()[0] != "p34-test-dpi-pattern" {
+		t.Errorf("fresh.List()[0] = %q, want p34-test-dpi-pattern", fresh.List()[0])
 	}
 }
 

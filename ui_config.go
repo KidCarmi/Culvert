@@ -562,7 +562,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		}
 		filename = "culvert-upstream"
 	case "connlimit":
-		b.ConnLimitEnabled = connLimiter.enabled.Load()
+		b.ConnLimitEnabled = connLimiter.Enabled()
 		b.ConnLimitMaxPerIP = connLimiter.MaxPerIP()
 		filename = "culvert-connlimit"
 	default: // "all" or empty — full export
@@ -593,7 +593,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.URL})
 		}
 		// Connection limits.
-		b.ConnLimitEnabled = connLimiter.enabled.Load()
+		b.ConnLimitEnabled = connLimiter.Enabled()
 		b.ConnLimitMaxPerIP = connLimiter.MaxPerIP()
 	}
 
@@ -959,7 +959,9 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
-	globalSyslog.writeMsg(14, "Culvert syslog test message — connectivity verified")
+	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
+	// now via the exported io.Writer surface (writeMsg is package-internal).
+	_, _ = globalSyslog.Write([]byte("Culvert syslog test message — connectivity verified"))
 	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
 }
 
@@ -1205,7 +1207,7 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"enabled":   connLimiter.enabled.Load(),
+			"enabled":   connLimiter.Enabled(),
 			"maxPerIP":  connLimiter.MaxPerIP(),
 			"activeIPs": connLimiter.ActiveIPs(),
 		})
@@ -1226,9 +1228,9 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 		} else if body.MaxPerIP > 0 {
 			connLimiter.Enable(body.MaxPerIP)
 		}
-		auditEvent(r, "connlimit.update", fmt.Sprintf("enabled=%v max=%d", connLimiter.enabled.Load(), connLimiter.MaxPerIP()), "")
+		auditEvent(r, "connlimit.update", fmt.Sprintf("enabled=%v max=%d", connLimiter.Enabled(), connLimiter.MaxPerIP()), "")
 		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "enabled": connLimiter.enabled.Load(), "maxPerIP": connLimiter.MaxPerIP()})
+		jsonOK(w, map[string]any{"ok": true, "enabled": connLimiter.Enabled(), "maxPerIP": connLimiter.MaxPerIP()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

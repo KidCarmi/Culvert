@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/geoip"
 )
 
 // pendingCARotation holds a confirmation token for the two-step CA rotation flow.
@@ -599,10 +601,7 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	globalYARA.mu.RLock()
-	dir := globalYARA.dir
-	globalYARA.mu.RUnlock()
-
+	dir := globalYARA.Dir() // engine moved to internal/yara; use the exported getter
 	if dir == "" {
 		http.Error(w, "no YARA rules directory configured", http.StatusServiceUnavailable)
 		return
@@ -1261,7 +1260,7 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"enabled": geoEnabled(),
+		"enabled": geoip.Enabled(),
 		"dbPath":  uiCfgGeoIPDB,
 	})
 }

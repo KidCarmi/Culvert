@@ -24,16 +24,16 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/scanexcl"
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 )
@@ -99,166 +99,16 @@ var globalSecScanner = &SecurityScanner{
 	maxBytes: 5 << 20,                 // 5 MiB default
 }
 
-// ── ScanExclusionStore (Tier 3.3) ─────────────────────────────────────────────
+// ── ScanExclusionStore (moved to internal/scanexcl, ADR-0002) ──────────────────
 
-// ScanExclusionStore holds admin-managed exclusions: known-good SHA-256
-// content hashes and hostnames that bypass all body scanning. It is designed
-// for an extreme read:write ratio (IsHashExcluded / IsHostExcluded are called
-// on every request; writes happen only when an admin updates the lists), so
-// it uses sync.RWMutex per CLAUDE.md's read-heavy store convention.
-type ScanExclusionStore struct {
-	mu     sync.RWMutex
-	hashes map[string]bool
-	hosts  map[string]bool
-	path   string // JSON file for persistence (optional)
-}
-
-// scanExclusionsFile is the on-disk JSON envelope for ScanExclusionStore.
-type scanExclusionsFile struct {
-	Hashes []string `json:"hashes"`
-	Hosts  []string `json:"hosts"`
-}
+// ScanExclusionStore is the package-main alias for the relocated admin-managed
+// allowlist store, so the consumers (main.go Load, proxy.go IsHostExcluded,
+// ui_security.go Lists/Replace/Save) and ScanBody's IsHashExcluded check stay
+// unqualified.
+type ScanExclusionStore = scanexcl.Store
 
 // globalScanExclusions is the process-wide exclusion store.
-var globalScanExclusions = &ScanExclusionStore{
-	hashes: map[string]bool{},
-	hosts:  map[string]bool{},
-}
-
-// Load reads the JSON file at path into the store. Missing file is not an error.
-func (s *ScanExclusionStore) Load(path string) error {
-	s.mu.Lock()
-	s.path = path
-	s.mu.Unlock()
-	data, err := os.ReadFile(path) // #nosec G304 -- admin-configured path
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("scan exclusions read: %w", err)
-	}
-	var f scanExclusionsFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		return fmt.Errorf("scan exclusions parse: %w", err)
-	}
-	s.mu.Lock()
-	s.hashes = make(map[string]bool, len(f.Hashes))
-	for _, h := range f.Hashes {
-		s.hashes[strings.ToLower(h)] = true
-	}
-	s.hosts = make(map[string]bool, len(f.Hosts))
-	for _, h := range f.Hosts {
-		s.hosts[stripHostPort(strings.ToLower(h))] = true
-	}
-	s.mu.Unlock()
-	return nil
-}
-
-// Save persists the exclusion lists to the configured file path using an
-// atomic tmp+rename write. No-op if no path configured.
-func (s *ScanExclusionStore) Save() error {
-	s.mu.RLock()
-	path := s.path
-	f := scanExclusionsFile{
-		Hashes: make([]string, 0, len(s.hashes)),
-		Hosts:  make([]string, 0, len(s.hosts)),
-	}
-	for h := range s.hashes {
-		f.Hashes = append(f.Hashes, h)
-	}
-	for h := range s.hosts {
-		f.Hosts = append(f.Hosts, h)
-	}
-	s.mu.RUnlock()
-	if path == "" {
-		return nil
-	}
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil { // #nosec G306
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// Replace atomically swaps the exclusion lists, normalising to lower case.
-func (s *ScanExclusionStore) Replace(hashes, hosts []string) {
-	hmap := make(map[string]bool, len(hashes))
-	for _, h := range hashes {
-		h = strings.TrimSpace(strings.ToLower(h))
-		if h != "" {
-			hmap[h] = true
-		}
-	}
-	hostMap := make(map[string]bool, len(hosts))
-	for _, h := range hosts {
-		h = stripHostPort(strings.TrimSpace(strings.ToLower(h)))
-		if h != "" {
-			hostMap[h] = true
-		}
-	}
-	s.mu.Lock()
-	s.hashes = hmap
-	s.hosts = hostMap
-	s.mu.Unlock()
-}
-
-// IsHashExcluded reports whether the SHA-256 hex is on the hash allowlist.
-// Hot path: called on every ScanBody invocation. RLock-only.
-func (s *ScanExclusionStore) IsHashExcluded(hash string) bool {
-	if s == nil {
-		return false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.hashes[strings.ToLower(hash)]
-}
-
-// IsHostExcluded reports whether the hostname is on the host allowlist.
-// Hot path: called once per proxied HTTP request before buffering. RLock-only.
-func (s *ScanExclusionStore) IsHostExcluded(host string) bool {
-	if s == nil || host == "" {
-		return false
-	}
-	// Strip port suffix and IPv6 brackets if present.
-	host = stripHostPort(host)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.hosts[strings.ToLower(host)]
-}
-
-// Lists returns copies of the current hash and host lists, sorted for stable
-// admin output.
-func (s *ScanExclusionStore) Lists() (hashes []string, hosts []string) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	hashes = make([]string, 0, len(s.hashes))
-	for h := range s.hashes {
-		hashes = append(hashes, h)
-	}
-	hosts = make([]string, 0, len(s.hosts))
-	for h := range s.hosts {
-		hosts = append(hosts, h)
-	}
-	sortStrings(hashes)
-	sortStrings(hosts)
-	return hashes, hosts
-}
-
-// sortStrings is a tiny helper to avoid pulling sort into this file's imports
-// when only ScanExclusionStore needs it.
-func sortStrings(s []string) {
-	// Insertion sort — exclusion lists are short (dozens of entries) so the
-	// constant-factor cost of reflection-based sort.Strings is not worth it.
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
-}
+var globalScanExclusions = scanexcl.New()
 
 // Init configures the scanner.
 //
@@ -594,7 +444,7 @@ func scanBlockConn(dst interface{ Write([]byte) (int, error) }, host, reason, so
 // maxScanBufferBytes returns the maximum bytes to buffer for scanning, taking
 // the larger of the DPI scanner limit and the security scanner limit.
 func maxScanBufferBytes() int64 {
-	dpi := dpiScanner.maxBytes
+	dpi := dpiScanner.MaxBytes()
 	sec := globalSecScanner.MaxBytes()
 	if sec > dpi {
 		return sec
@@ -612,7 +462,7 @@ func logScanLimitExceeded(host, clientIP string, maxBytes int64) {
 	if logger != nil {
 		logger.Printf("SCAN: response from %s exceeds scan limit (%d bytes), forwarded unscanned", sanitizeLog(host), maxBytes)
 	}
-	go fireAlert("scan_skipped", AlertPayload{
+	go alerts.Fire("scan_skipped", alerts.Payload{
 		Actor:  clientIP,
 		Host:   host,
 		Detail: fmt.Sprintf("response exceeds scan limit (%d bytes)", maxBytes),
@@ -676,7 +526,7 @@ func secScanStatusMap() map[string]interface{} {
 		"clamav_status":         globalSecScanner.ClamAVStatus(),
 		"yara_rules":            globalYARA.Count(),
 		"yara_warnings":         len(globalYARA.Warnings()), // Tier 2.1
-		"yara_inflight":         yaraInflight.Load(),        // Tier 1.3
+		"yara_inflight":         yaraInflightLoad(),         // Tier 1.3
 		"yara_inflight_max":     yaraGetMaxInflight(),       // Tier 1.3
 		"yara_enabled":          yaraGetEnabled(),
 		"yara_timeout_secs":     yaraGetTimeoutSecs(),

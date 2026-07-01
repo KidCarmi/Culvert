@@ -910,6 +910,65 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	return nil
 }
 
+// checkInterruptedRestore is the boot-time guard for RISK-005. A restore commit
+// killed in the critical window (after `os.Rename(dataDir → .bak)` and before
+// `os.Rename(staging → dataDir)`, runRestoreCommit steps 6–7) leaves dataDir
+// ABSENT while its `<dataDir>.bak.<ts>-<pid>` sibling (the previous data, moved
+// aside) — and usually a matching `.staging.<ts>-<pid>` (the new data, staged
+// but not yet promoted) — remain on disk. Starting normally in that state would
+// create a fresh empty dataDir and SILENTLY lose the operator's data, with the
+// recovery `.bak` only discoverable by hand.
+//
+// This guard, called once at startup after the one-shot CLI commands (so
+// --list-restore-leftovers / --cleanup-restore-leftovers still run), refuses to
+// boot when dataDir is missing AND an interrupted-restore `.bak` sibling exists,
+// printing the exact recovery moves. It reuses the D1.3c leftover scanner
+// (discoverLeftovers), which only admits safe, exact-name, sibling directories.
+//
+// A genuine fresh install (dataDir absent, NO `.bak` sibling) is unaffected:
+// the guard returns nil and normal first-run initialization proceeds.
+func checkInterruptedRestore(dataDir string) error {
+	if _, err := os.Stat(dataDir); err == nil {
+		return nil // dataDir present — normal boot
+	} else if !os.IsNotExist(err) {
+		return nil // unexpected stat error — don't block boot on a transient FS issue
+	}
+	// dataDir is absent. Scan for interrupted-restore siblings.
+	leftovers, _, err := discoverLeftovers(dataDir)
+	if err != nil {
+		return nil // cannot scan the parent dir — nothing to assert
+	}
+	var newestBak, newestStaging *leftover
+	for i := range leftovers {
+		lo := &leftovers[i]
+		switch lo.Kind {
+		case leftoverBak:
+			if newestBak == nil || lo.Timestamp.After(newestBak.Timestamp) {
+				newestBak = lo
+			}
+		case leftoverStaging:
+			if newestStaging == nil || lo.Timestamp.After(newestStaging.Timestamp) {
+				newestStaging = lo
+			}
+		}
+	}
+	// Only a `.bak` (the moved-aside previous data) marks an interrupted
+	// restore. No `.bak` ⇒ a genuine fresh install — let boot proceed.
+	if newestBak == nil {
+		return nil
+	}
+	msg := fmt.Sprintf("interrupted restore detected: data directory %q is missing, but the previous "+
+		"data was preserved at %q (a restore commit was killed before it finished). "+
+		"Recover by choosing ONE, then start Culvert again:\n"+
+		"    REVERT to the previous data:            mv %q %q",
+		dataDir, newestBak.Path, newestBak.Path, dataDir)
+	if newestStaging != nil {
+		msg += fmt.Sprintf("\n    COMPLETE the restore (promote staged):  mv %q %q", newestStaging.Path, dataDir)
+	}
+	msg += "\n    (run --list-restore-leftovers to inspect all leftovers)"
+	return fmt.Errorf("%s", msg)
+}
+
 // stageArtifacts creates stagingDir and populates it according to the
 // mode predicate. Pass 1 writes tarball-sourced artifacts using each
 // file's manifest mode. Pass 2 walks current dataDir for preserve-

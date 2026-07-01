@@ -46,7 +46,7 @@ func snapshotDPIScanner(t *testing.T) string {
 	orig := dpiScanner
 	dir := t.TempDir()
 	path := filepath.Join(dir, "content_scan.json")
-	fresh := &ContentScanner{maxBytes: 1 << 20}
+	fresh := newContentScanner(1 << 20)
 	// Configure the persistence path via Load on a non-existent file
 	// (sets s.path, leaves store empty — scanner.go Load).
 	_ = fresh.Load(path)

@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
 // relayBufSize is the size of each pooled relay buffer.
@@ -216,47 +218,22 @@ func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, pa
 	recordRequestAuthURI(clientIP, "CONNECT", hostOnly, status, ruleMatched, actionTaken, "", "inspect", uri, AuthLogFields{})
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,cyclop,funlen // request dispatcher; complexity is inherent to the auth+policy+routing pipeline
-	start := time.Now()
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+// authOutcome carries the Stage-1 adaptive-auth result from
+// resolveRequestAuth back to handleRequest.
+type authOutcome struct {
+	identity string
+	groups   []string
+	source   string
+	log      AuthLogFields
+}
 
-	// ── Request tracing: generate X-Request-ID if not present ────────────
-	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get("X-Request-ID"), "\n", ""), "\r", "") // sanitize for CWE-117
-	if reqID == "" {
-		reqID = generateRequestID()
-		r.Header.Set("X-Request-ID", reqID)
-	}
-	w.Header().Set("X-Request-ID", reqID)
-
-	// ── W3C Trace Context: propagate or generate traceparent ────────────
-	if r.Header.Get("Traceparent") == "" {
-		r.Header.Set("Traceparent", generateTraceparent())
-	}
-
-	// ── Connection limit per IP ─────────────────────────────────────────
-	if !connLimiter.Acquire(clientIP) {
-		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
-		return
-	}
-	defer connLimiter.Release(clientIP)
-
-	// IP filter check.
-	if !ipf.Allowed(clientIP) {
-		atomic.AddInt64(&statBlocked, 1)
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED", "", "", "", "")
-		logger.Printf("IP_BLOCKED %s {req_id=%s action=block}", clientIP, reqID)
-		return
-	}
-
-	// Rate limit check.
-	if !rl.AllowAuto(clientIP) {
-		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "", "", "")
-		logger.Printf("RATE_LIMITED %s {req_id=%s action=block}", clientIP, reqID)
-		return
-	}
-
+// resolveRequestAuth runs the Stage-1 adaptive authentication pipeline
+// (session cookie -> Proxy-Authorization Basic -> no-credential outcome
+// dispatch). When it returns proceed=false it has ALREADY written a terminal
+// response (407 / redirect / 403) and the caller MUST return immediately.
+// Behaviour is identical to the previously-inlined pipeline; this is a
+// structural extraction only (DEBT-002), no logic change.
+func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID string) (authOutcome, bool) { //nolint:gocognit,cyclop,funlen // Stage-1 credential-resolution decision tree; complexity is inherent and now isolated/testable (DEBT-002; further sub-extraction tracked there)
 	// ── Adaptive Authentication ───────────────────────────────────────────────
 	// Resolution order:
 	//  1. Signed session cookie (browser SSO — OIDC code flow or SAML).
@@ -294,7 +271,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 	ssoCapable := len(idpRegistry.EnabledProviders()) > 0
 	authRequired := credCapable || ssoCapable || effectiveDefault == OutcomeExempt
 
-	if authRequired {
+	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
 		if sess, err := readSessionCookie(r); err == nil && sess != nil {
 			id := sess.Identity()
@@ -337,7 +314,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 						http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 						recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
 						logger.Printf("AUTH_FAIL %s {req_id=%s action=block}", clientIP, reqID)
-						return
+						return authOutcome{}, false
 					}
 					authenticatedIdentity = u
 					authenticatedSource = "local"
@@ -404,7 +381,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					recordRequestAuth(clientIP, r.Method, r.Host, "CRED_REQUIRED", d.Rule.Name, "", "", authLog)
 					logger.Printf("AUTH_CR rule=%q id=%q %s -> %q {req_id=%s action=challenge}",
 						sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
-					return
+					return authOutcome{}, false
 				case d.Outcome == OutcomeSSORequired:
 					// ── 3c. No credentials — Stage-1 SSORequired challenge (Slice 4) ──
 					// A matched SSORequired rule demands an INTERACTIVE browser SSO
@@ -432,7 +409,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 							logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=redirect}",
 								sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
 							http.Redirect(w, r, portalURL, http.StatusFound) // #nosec G710 -- portalURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
-							return
+							return authOutcome{}, false
 						}
 					}
 					// DR-1 fail-closed: non-browser, CONNECT, or a browser with no eligible
@@ -444,7 +421,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=deny}",
 						sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
 					http.Error(w, "Forbidden: destination requires interactive SSO", http.StatusForbidden)
-					return
+					return authOutcome{}, false
 				default:
 					// ── 3. No credentials ────────────────────────────────────────
 					// browserRedirectEligibleLegacy is the verbatim pre-Slice-1
@@ -466,7 +443,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 							// isSafeCaptiveRedirect predicate; the guard above is
 							// the actual safety check.
 							http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
-							return
+							return authOutcome{}, false
 						}
 					}
 					atomic.AddInt64(&statAuthFail, 1)
@@ -477,30 +454,27 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
 					recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
 					logger.Printf("AUTH_FAIL (no-credentials) %s {req_id=%s action=block}", clientIP, reqID)
-					return
+					return authOutcome{}, false
 				}
 			}
 		}
 	}
+	return authOutcome{identity: authenticatedIdentity, groups: authenticatedGroups, source: authenticatedSource, log: authLog}, true
+}
 
-	// Set internal identity headers — scrubForwardedHeaders removes them
-	// before forwarding upstream.
-	if authenticatedIdentity != "" {
-		r.Header.Set("X-User-Identity", authenticatedIdentity)
-	}
-
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-
+// preDispatchBlocked runs the pre-policy content gates (legacy blocklist,
+// threat-intel feed, plugin decision, file-extension profile) against an
+// already-authenticated request. It returns true if it has written a terminal
+// block response (403 / block page) and the caller must return. Behaviour is
+// identical to the previously-inlined gates (DEBT-002 extraction; no logic change).
+func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields) bool {
 	// Legacy blocklist check (still active alongside policy engine).
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
 		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity, authLog)
 		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
-		return
+		return true
 	}
 
 	// Threat intelligence feed check — covers both plain HTTP destinations
@@ -512,7 +486,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
 			logger.Printf("THREAT_BLOCKED domain %s -> %q (%q)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
 			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
-			return
+			return true
 		}
 		// Full-URL check for non-CONNECT (plain HTTP) requests.
 		if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
@@ -521,7 +495,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
 				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
 				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
-				return
+				return true
 			}
 		}
 	}
@@ -531,7 +505,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by plugin", http.StatusForbidden)
 		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity, authLog)
-		return
+		return true
 	}
 
 	// File block profile — check URL path extension for non-tunnel requests.
@@ -544,17 +518,19 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, authLog)
 			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
-			return
+			return true
 		}
 	}
+	return false
+}
 
-	// ── Policy engine (PBAC) pre-check ───────────────────────────────────────
-	// X-User-Identity is the authenticated identity set by the auth layer
-	// (OIDC/LDAP); scrubForwardedHeaders already stripped any client-supplied
-	// value, so this value is safe to use for policy matching.
-	identity := r.Header.Get("X-User-Identity")
-	match := policyStore.Evaluate(clientIP, identity, authenticatedSource, host, authenticatedGroups)
-
+// applyPolicyDecision dispatches the matched policy action (drop / block page
+// / redirect / allow-with-file-profile) or, on no match, the configured default
+// (allow passthrough vs zero-trust deny). It returns true if it wrote a terminal
+// response and the caller must return; false means the request proceeds to
+// transport dispatch. Behaviour is identical to the previously-inlined switch
+// (DEBT-002 extraction; no logic change).
+func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields, match *PolicyMatch) bool { //nolint:gocognit,cyclop,funlen // policy-action dispatch is inherently branchy; isolated and independently testable (DEBT-002)
 	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
 		ruleMet.RecordHit(match.Rule.Name)
 		// Per-rule "log full URL": capture host+path (no query) when the matched
@@ -575,14 +551,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 				conn, _, _ := hj.Hijack()
 				conn.Close()
 			}
-			return
+			return true
 
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "", ruleURI, authLog)
 			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
-			return
+			return true
 
 		case ActionRedirect:
 			atomic.AddInt64(&statBlocked, 1)
@@ -590,11 +566,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			if !isSafeRedirectURL(match.Rule.RedirectURL) {
 				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
 				http.Error(w, "Forbidden", http.StatusForbidden)
-				return
+				return true
 			}
 			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
-			return
+			return true
 
 		case ActionAllow:
 			// Per-rule file profile: even when the policy allows the request,
@@ -609,7 +585,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 					recordRequestAuthURI(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", ruleURI, authLog)
 					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
 					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
-					return
+					return true
 				}
 			}
 			if ruleLogsTraffic(match.Rule) {
@@ -634,53 +610,16 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, authLog)
 			logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
 			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
-			return
+			return true
 		}
 	}
+	return false
+}
 
-	// ── Geo-IP tracking (async) ───────────────────────────────────────────────
-	// Record destination country for the live dashboard without blocking.
-	go func(h string) {
-		code, name := geo.LookupFull(h)
-		if code != "" {
-			countryTraffic.Record(code, name)
-		}
-	}(host)
-
-	// Determine SSL action and per-rule TLS options for CONNECT tunnels.
-	sslAction := SSLBypass
-	tlsSkipVerify := false
-	if match != nil {
-		if match.SSLAction == SSLInspect {
-			sslAction = SSLInspect
-		}
-		tlsSkipVerify = match.TLSSkipVerify
-	}
-	// Smart Bypass: explicit bypass-list patterns (glob or regex) always
-	// override policy-based SSL inspection, regardless of rule SSLAction.
-	if sslAction == SSLInspect && sslBypass.Matches(host) {
-		sslAction = SSLBypass
-		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
-	}
-
-	// Identity context forwarded to SSL-inspect (consumed by CDR today;
-	// future audit enrichment can read this without re-parsing headers).
-	proxyID := ProxyIdentity{
-		ClientIP:   clientIP,
-		Identity:   authenticatedIdentity,
-		AuthSource: authenticatedSource,
-		Groups:     authenticatedGroups,
-	}
-
-	switch {
-	case r.Method == http.MethodConnect:
-		handleTunnel(w, r, sslAction, tlsSkipVerify, match, proxyID)
-	case isWebSocketUpgrade(r):
-		handleWebSocket(w, r)
-	default:
-		handleHTTP(w, r)
-	}
-
+// recordRequestTelemetry records per-request observability after dispatch:
+// the Prometheus latency histogram and (when enabled) one OTLP span. Pure
+// side-effects, no early returns. Extracted from handleRequest (DEBT-002).
+func recordRequestTelemetry(r *http.Request, start time.Time, sslAction SSLAction, match *PolicyMatch, host, clientIP string) {
 	// Record request latency for Prometheus histogram.
 	latencyHist.Observe(time.Since(start).Seconds())
 
@@ -713,6 +652,158 @@ func handleRequest(w http.ResponseWriter, r *http.Request) { //nolint:gocognit,c
 			EndNano:   time.Now().UnixNano(),
 		})
 	}
+}
+
+// setupRequestTracing ensures the request carries an X-Request-ID (CWE-117
+// sanitised) and a W3C traceparent, mirroring the request ID onto the response.
+// It returns the request ID. Extracted from handleRequest (DEBT-002).
+func setupRequestTracing(w http.ResponseWriter, r *http.Request) string {
+	// ── Request tracing: generate X-Request-ID if not present ────────────
+	reqID := strings.ReplaceAll(strings.ReplaceAll(r.Header.Get("X-Request-ID"), "\n", ""), "\r", "") // sanitize for CWE-117
+	if reqID == "" {
+		reqID = generateRequestID()
+		r.Header.Set("X-Request-ID", reqID)
+	}
+	w.Header().Set("X-Request-ID", reqID)
+
+	// ── W3C Trace Context: propagate or generate traceparent ────────────
+	if r.Header.Get("Traceparent") == "" {
+		r.Header.Set("Traceparent", generateTraceparent())
+	}
+	return reqID
+}
+
+// resolveSSLAction computes the effective SSL action and per-rule TLS-verify
+// option for a request, applying the smart-bypass pattern override. Extracted
+// from handleRequest (DEBT-002).
+func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, bool) {
+	// Determine SSL action and per-rule TLS options for CONNECT tunnels.
+	sslAction := SSLBypass
+	tlsSkipVerify := false
+	if match != nil {
+		if match.SSLAction == SSLInspect {
+			sslAction = SSLInspect
+		}
+		tlsSkipVerify = match.TLSSkipVerify
+	}
+	// Smart Bypass: explicit bypass-list patterns (glob or regex) always
+	// override policy-based SSL inspection, regardless of rule SSLAction.
+	if sslAction == SSLInspect && sslBypass.Matches(host) {
+		sslAction = SSLBypass
+		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
+	}
+	return sslAction, tlsSkipVerify
+}
+
+// trackDestinationCountry records the destination country for the live
+// dashboard. Runs in its own goroutine (fire-and-forget); extracted from
+// handleRequest (DEBT-002).
+func trackDestinationCountry(host string) {
+	code, name := geo.LookupFull(host)
+	if code != "" {
+		countryTraffic.Record(code, name)
+	}
+}
+
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+	reqID := setupRequestTracing(w, r)
+
+	// ── Connection limit per IP ─────────────────────────────────────────
+	if !connLimiter.Acquire(clientIP) {
+		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
+		return
+	}
+	defer connLimiter.Release(clientIP)
+
+	// IP filter check.
+	if !ipf.Allowed(clientIP) {
+		atomic.AddInt64(&statBlocked, 1)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		recordRequest(clientIP, r.Method, r.Host, "IP_BLOCKED", "", "", "", "")
+		logger.Printf("IP_BLOCKED %s {req_id=%s action=block}", clientIP, reqID)
+		return
+	}
+
+	// Rate limit check.
+	if !rl.AllowAuto(clientIP) {
+		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "", "", "")
+		logger.Printf("RATE_LIMITED %s {req_id=%s action=block}", clientIP, reqID)
+		return
+	}
+
+	// ── Adaptive Authentication (Stage-1) ──────────────────────────────────
+	// Resolved by resolveRequestAuth (DEBT-002 extraction). It writes any
+	// terminal 407/redirect/403 itself; proceed=false means "already handled".
+	auth, proceed := resolveRequestAuth(w, r, clientIP, reqID)
+	if !proceed {
+		return
+	}
+	authenticatedIdentity := auth.identity
+	authenticatedGroups := auth.groups
+	authenticatedSource := auth.source
+	authLog := auth.log
+
+	// Set internal identity headers — scrubForwardedHeaders removes them
+	// before forwarding upstream.
+	if authenticatedIdentity != "" {
+		r.Header.Set("X-User-Identity", authenticatedIdentity)
+	}
+
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+
+	// ── Pre-policy content blocks (blocklist / threat / plugin / file) ──────
+	// Extracted to preDispatchBlocked (DEBT-002). Returns true if it already
+	// wrote a terminal block response.
+	if preDispatchBlocked(w, r, clientIP, host, reqID, authenticatedIdentity, authLog) {
+		return
+	}
+
+	// ── Policy engine (PBAC) pre-check ───────────────────────────────────────
+	// X-User-Identity is the authenticated identity set by the auth layer
+	// (OIDC/LDAP); scrubForwardedHeaders already stripped any client-supplied
+	// value, so this value is safe to use for policy matching.
+	identity := r.Header.Get("X-User-Identity")
+	match := policyStore.Evaluate(clientIP, identity, authenticatedSource, host, authenticatedGroups)
+
+	// ── Policy action dispatch ──────────────────────────────────────────────
+	// Extracted to applyPolicyDecision (DEBT-002). Returns true if it wrote a
+	// terminal drop / block / redirect / deny response.
+	if applyPolicyDecision(w, r, clientIP, host, reqID, authenticatedIdentity, authLog, match) {
+		return
+	}
+
+	// ── Geo-IP tracking (async) ──────────────────────────────────────────────
+	// Record destination country for the live dashboard without blocking.
+	go trackDestinationCountry(host)
+
+	sslAction, tlsSkipVerify := resolveSSLAction(match, host, clientIP)
+
+	// Identity context forwarded to SSL-inspect (consumed by CDR today;
+	// future audit enrichment can read this without re-parsing headers).
+	proxyID := ProxyIdentity{
+		ClientIP:   clientIP,
+		Identity:   authenticatedIdentity,
+		AuthSource: authenticatedSource,
+		Groups:     authenticatedGroups,
+	}
+
+	switch {
+	case r.Method == http.MethodConnect:
+		handleTunnel(w, r, sslAction, tlsSkipVerify, match, proxyID)
+	case isWebSocketUpgrade(r):
+		handleWebSocket(w, r)
+	default:
+		handleHTTP(w, r)
+	}
+
+	recordRequestTelemetry(r, start, sslAction, match, host, clientIP)
 }
 
 const maxUsernameLen = 256
@@ -1583,7 +1674,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			atomic.AddInt64(&statBlocked, 1)
 			recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
 			resp.Body.Close()
-			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "global ext")
+			fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "global ext")
 			break
 		}
 		// 2. Per-rule file profile — check the inner request URL against the
@@ -1593,7 +1684,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			atomic.AddInt64(&statBlocked, 1)
 			recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
 			resp.Body.Close()
-			fileBlockConn(clientTLS, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
+			fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
 			break
 		}
 		// 3. Content-Disposition header — catches downloads that use a generic
@@ -1604,19 +1695,19 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 				atomic.AddInt64(&statBlocked, 1)
 				recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
 				resp.Body.Close()
-				fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
+				fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
 				break
 			}
 			// Per-rule profile: check the CD filename against the matched rule's
 			// file profile (catches SourceForge-style /files/latest/download URLs).
 			if match != nil && match.Rule != nil && match.Rule.FileFiltering && match.Rule.FileProfile != "" {
-				if fn := extractCDFilename(cd); fn != "" {
+				if fn := fileblock.ExtractCDFilename(cd); fn != "" {
 					if match.Rule.FileProfileBlocked(fn) {
 						atomic.AddInt64(&statFileBlocked, 1)
 						atomic.AddInt64(&statBlocked, 1)
 						recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
 						resp.Body.Close()
-						fileBlockConn(clientTLS, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
+						fileblock.BlockConn(clientTLS, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
 						break
 					}
 				}
@@ -1629,7 +1720,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			atomic.AddInt64(&statBlocked, 1)
 			recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
 			resp.Body.Close()
-			fileBlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-type")
+			fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-type")
 			break
 		}
 
@@ -1684,7 +1775,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
 					recordInspectBlock(clientIP, "FILE_BLOCKED", "magic:"+archType, "", hostOnly, req.URL.Path, match)
-					fileBlockConn(clientTLS, hostOnly, req.URL.Path, "magic:"+archType, "magic bytes")
+					fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, "magic:"+archType, "magic bytes")
 					break
 				}
 				// File blocking: polyglot detection — block files whose
@@ -1694,7 +1785,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
 					recordInspectBlock(clientIP, "POLYGLOT_BLOCKED", reason, "", hostOnly, req.URL.Path, match)
-					fileBlockConn(clientTLS, hostOnly, req.URL.Path, reason, "polyglot")
+					fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, reason, "polyglot")
 					break
 				}
 

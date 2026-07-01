@@ -371,36 +371,3 @@ func TestConfig_ConsumeBackupCode(t *testing.T) {
 		t.Error("used backup code should not be reusable")
 	}
 }
-
-// ── verifyTOTP ────────────────────────────────────────────────────────────────
-
-func TestVerifyTOTP_InvalidCode(t *testing.T) {
-	// A valid base32 secret but wrong code — should return false, not panic.
-	secret := "JBSWY3DPEHPK3PXP"
-	if verifyTOTP(secret, "000000") {
-		t.Error("random code should not validate against secret")
-	}
-}
-
-func TestVerifyTOTP_EmptyInputs(t *testing.T) {
-	if verifyTOTP("", "") {
-		t.Error("empty secret+code should not validate")
-	}
-	if verifyTOTP("JBSWY3DPEHPK3PXP", "") {
-		t.Error("empty code should not validate")
-	}
-	if verifyTOTP("", "123456") {
-		t.Error("empty secret should not validate")
-	}
-}
-
-func TestVerifyTOTP_TrimsWhitespace(t *testing.T) {
-	// Whitespace-padded code should behave the same as the trimmed version
-	// (both should be false for a wrong code — the important thing is no panic).
-	secret := "JBSWY3DPEHPK3PXP"
-	r1 := verifyTOTP(secret, " 999999 ")
-	r2 := verifyTOTP(secret, "999999")
-	if r1 != r2 {
-		t.Errorf("whitespace should be trimmed: padded=%v trimmed=%v", r1, r2)
-	}
-}

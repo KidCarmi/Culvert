@@ -22,8 +22,18 @@ package main
 //   2. The discovery doc can replace "unverified — requires test"
 //      language with "verified by ha_split_brain_failover_evidence_test.go:<line>".
 //
-// NO production code is changed by this PR. NO behavior is fixed —
-// these tests pass under today's HA implementation.
+// UPDATED for ADR-0004 Slice 1 (2026-06-30). The mitigation landed:
+//   - auto-failover is now OPT-IN and OFF by default (a witness-less
+//     2-node cluster cannot auto-promote safely);
+//   - a restart HONORS the persisted role (a standby never silently
+//     resumes as a second leader — haRestartAction);
+//   - /healthz now exposes `term` + `write_authority`, so a double
+//     leader is DETECTABLE (compare terms across both CPs) instead of
+//     two indistinguishable `leader:true` bodies.
+// The assertions below are updated to pin this NEW behavior. The
+// failure mode that REMAINS open (no automatic reconcile on heal; and
+// split-brain is still POSSIBLE under opt-in auto-failover) stays
+// pinned as the work owned by the failover-mechanism slice.
 //
 // Determinism contract
 // ====================
@@ -54,26 +64,25 @@ import (
 // CL-4: Split-Brain Behavior Evidence
 // ─────────────────────────────────────────────────────────────────────
 //
-// Pre-fix behaviour (recorded here)
-// ----------------------------------
-// 1. After 3 consecutive HASync failures (≈ 15s of unreachability),
-//    the standby calls HAState.promote() which sets role="leader"
-//    and ALSO calls onPromote (which starts the gRPC server). The
-//    standbyLoop then returns — the standby never tries to sync
-//    again. ha.go:188-194, ha.go:244-266.
-// 2. The original leader is NOT notified and does NOT step down.
-//    There is no demote/failback code path: a grep for "demote",
-//    "failback", "stepDown", "Demote", "Failback" returns nothing.
-// 3. Each side's haConfig.json on disk now records role="leader".
-//    On restart of either node, main.go:636 reads its own
-//    haConfig.json and calls EnableAsLeader — the comment at
-//    ha.go:29 ("detects the peer is already serving, and becomes
-//    standby") describes intended behavior that DOES NOT EXIST IN
-//    CODE.
-// 4. apiHealthz on each side reports `leader: true` to load balancers
-//    (ha.go:331-350).
+// Post-Slice-1 behaviour (ADR-0004; recorded here)
+// -------------------------------------------------
+// 1. The standby self-promotes after 3 HASync failures ONLY when
+//    auto-failover is explicitly enabled (default OFF). With the
+//    default, the standby stays read-only and fires
+//    `ha_manual_failover_required` (ha.go standbyLoop / onMaxFail).
+// 2. The original leader is still NOT notified and does NOT step down
+//    (no demote path yet) — split-brain remains POSSIBLE under opt-in
+//    auto-failover. Automatic fencing/reconcile is the mechanism slice.
+// 3. Restart now HONORS the persisted role (haRestartAction): a
+//    standby re-enters standby; only a persisted leader resumes
+//    leadership. The old unconditional self-assert (and the stale
+//    ha.go comment) are gone.
+// 4. apiHealthz still returns `leader:true` on each leader side (the
+//    LB-readiness ambiguity remains until write_authority is gated on
+//    quorum), BUT it now ALSO exposes `term`, so two leaders are
+//    DETECTABLE by comparing terms across both CPs.
 //
-// These tests pin facts 1–4.
+// These tests pin facts 1–4 as they stand after Slice 1.
 
 // TestCL4_SplitBrain_BothSidesReportLeaderAfterPromote exercises the
 // /healthz endpoint on each "side" of a simulated split-brain. The
@@ -85,56 +94,65 @@ func TestCL4_SplitBrain_BothSidesReportLeaderAfterPromote(t *testing.T) {
 
 	token := "shared-ha-token-for-evidence-test"
 
-	// Side L: the original leader, unchanged by the partition. Its
-	// HAState was set by EnableAsLeader at HA-enable time.
+	// Side L: the original leader (term 1), unchanged by the partition.
 	sideL := &HAState{}
 	sideL.mu.Lock()
 	sideL.role = "leader"
 	sideL.token = token
 	sideL.peerAddr = "cp-s.internal:50051"
 	sideL.since = time.Now().Add(-1 * time.Hour) // L has been leader for a while
+	sideL.term = 1
 	sideL.mu.Unlock()
 
 	// Side S: the former standby, promoted after maxFail=3 HASync
-	// failures. Whitebox-simulate the result of promote(): role flips
-	// to "leader" and since updates to "now". (We do NOT call
-	// promote() directly because its onPromote starts a real gRPC
-	// server, which is out of scope for a unit test.)
+	// failures (auto-failover enabled). promote() bumps the term, so the
+	// post-promote epoch is HIGHER than L's. (We do NOT call promote()
+	// directly because its onPromote starts a real gRPC server; we set
+	// the post-promote state — role=leader, term incremented.)
 	sideS := &HAState{}
 	sideS.mu.Lock()
 	sideS.role = "leader" // ← post-promote
 	sideS.token = token
 	sideS.peerAddr = "cp-l.internal:50051"
 	sideS.since = time.Now() // promote just happened
+	sideS.term = 2           // ← promote bumped the epoch (ADR-0004 Slice 1c)
 	sideS.mu.Unlock()
 
 	// /healthz reads globalHA. Swap to L and probe.
 	globalHA = sideL
 	rL := httptest.NewRecorder()
-	apiHealthz(rL, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	apiHealthz(rL, httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody))
 	if rL.Code != http.StatusOK {
 		t.Errorf("side L /healthz status = %d; want %d (leader should respond healthy)", rL.Code, http.StatusOK)
 	}
 	if !strings.Contains(rL.Body.String(), `"role":"leader"`) {
 		t.Errorf("side L /healthz body missing role:leader: %s", rL.Body.String())
 	}
+	if !strings.Contains(rL.Body.String(), `"term":1`) {
+		t.Errorf("side L /healthz must expose term=1 (Slice 1c detection material): %s", rL.Body.String())
+	}
 
 	// Swap to S and probe.
 	globalHA = sideS
 	rS := httptest.NewRecorder()
-	apiHealthz(rS, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	apiHealthz(rS, httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody))
 	if rS.Code != http.StatusOK {
 		t.Errorf("side S /healthz status = %d; want %d (post-promote standby ALSO reports healthy)", rS.Code, http.StatusOK)
 	}
 	if !strings.Contains(rS.Body.String(), `"role":"leader"`) {
 		t.Errorf("side S /healthz body missing role:leader: %s", rS.Body.String())
 	}
+	if !strings.Contains(rS.Body.String(), `"term":2`) {
+		t.Errorf("side S /healthz must expose the higher post-promote term=2: %s", rS.Body.String())
+	}
 
-	// EVIDENCE: at this point both sides return 200 OK + role=leader.
-	// A load balancer cannot distinguish — both pass the readiness
-	// check. The body has no "split-brain" indicator, no peer
-	// disagreement field, no quorum status. This is the operator-
-	// visible failure mode flagged by CL-4.
+	// EVIDENCE (post-Slice-1): both sides still return 200 OK + role=
+	// leader, so a naive load balancer keying only on `leader` still
+	// cannot distinguish — that ambiguity remains until write_authority
+	// is gated on quorum (mechanism slice). BUT the bodies now carry
+	// DIFFERENT terms (1 vs 2), which IS the split-brain detection
+	// signal Slice 1c added: an operator/monitor scraping both CPs sees
+	// two leaders at different epochs and knows S promoted later.
 }
 
 // TestCL4_SplitBrain_NoReconcileLogicExistsOnRejoin pins the absence
@@ -181,10 +199,16 @@ func TestCL4_SplitBrain_NoReconcileLogicExistsOnRejoin(t *testing.T) {
 }
 
 // TestCL4_SplitBrain_PersistedHAConfigShowsLeaderOnBothSides pins
-// fact #3: after the standby promotes, both nodes' haConfig.json
-// files on disk record role="leader". On restart, neither will
-// detect the other as already-leading — main.go:636 simply
-// EnableAsLeader's from its own file.
+// fact #3: after an (opt-in) auto-failover promotion, both nodes'
+// haConfig.json files on disk record role="leader". Post-Slice-1 the
+// restart path honours the persisted role (haRestartAction): a node
+// whose file says "leader" resumes as leader, a node whose file says
+// "standby" re-enters standby. So two leader-role files DO each resume
+// as leader on restart — the residual split-brain that the mechanism
+// slice (fencing/reconcile) must still resolve. There is still no
+// "ask the peer who is leading" handshake (the leader records no peer
+// address — see ADR-0004), but the node no longer self-asserts leader
+// from a standby-role file.
 func TestCL4_SplitBrain_PersistedHAConfigShowsLeaderOnBothSides(t *testing.T) {
 	// Side L's haConfig directory.
 	origDB := clusterDBPathGlobal
@@ -222,11 +246,10 @@ func TestCL4_SplitBrain_PersistedHAConfigShowsLeaderOnBothSides(t *testing.T) {
 		t.Fatalf("S haConfig after promote: cfg=%+v err=%v; want Role=leader", cfgS, err)
 	}
 
-	// EVIDENCE: both files claim role=leader. On restart of either
-	// node, main.go:636 will EnableAsLeader from its own file. There
-	// is no "ask the peer who is leading" handshake — that code does
-	// not exist (a search for "demote" / "failback" / "stepDown"
-	// across *.go is documented in the file header).
+	// EVIDENCE: both files claim role=leader, so on restart each
+	// resumes as leader (haRestartAction → "leader"). The residual
+	// double-leader is detectable via /healthz term but not yet
+	// auto-reconciled — that is the failover-mechanism slice's job.
 	if cfgL.Role != cfgS.Role {
 		t.Errorf("expected BOTH sides to record role=leader (the operator-visible failure mode); got L=%q S=%q", cfgL.Role, cfgS.Role)
 	}

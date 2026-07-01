@@ -38,8 +38,9 @@ import (
 //   - 141 — P1.6d-0 added 5 /api/releases* dispatch-management routes.
 //   - 142 — Live Feed added /api/logs/purge.
 //   - 143 — Catalog refresh added /api/releases/catalog-refresh.
+//   - 144 — ADR-0004 Slice 1e added /api/cluster/ha/promote.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 143
+	const want = 144
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

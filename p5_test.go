@@ -124,45 +124,8 @@ func TestLoadFileConfig_InvalidValue(t *testing.T) {
 	}
 }
 
-// ── API Rate Limiter Tests ──────────────────────────────────────────────────
-
-func TestAPIRateLimiter_Allow(t *testing.T) {
-	lim := &APIRateLimiter{entries: map[string]*apiRateEntry{}}
-	for i := 0; i < apiRateBurst; i++ {
-		if !lim.Allow("10.0.0.1") {
-			t.Fatalf("request %d should be allowed", i)
-		}
-	}
-	// Next should be rejected.
-	if lim.Allow("10.0.0.1") {
-		t.Error("should be rate limited after burst")
-	}
-}
-
-func TestAPIRateLimiter_DifferentIPs(t *testing.T) {
-	lim := &APIRateLimiter{entries: map[string]*apiRateEntry{}}
-	for i := 0; i < apiRateBurst; i++ {
-		lim.Allow("10.0.0.1")
-	}
-	// Different IP should still be allowed.
-	if !lim.Allow("10.0.0.2") {
-		t.Error("different IP should not be rate limited")
-	}
-}
-
-func TestAPIRateLimiter_Cleanup(t *testing.T) {
-	lim := &APIRateLimiter{entries: map[string]*apiRateEntry{}}
-	lim.Allow("10.0.0.1")
-	if len(lim.entries) != 1 {
-		t.Fatal("expected 1 entry")
-	}
-	// Manually expire the entry.
-	lim.entries["10.0.0.1"].windowStart = lim.entries["10.0.0.1"].windowStart.Add(-2 * apiRateWindow)
-	lim.Cleanup()
-	if len(lim.entries) != 0 {
-		t.Error("expected cleanup to remove expired entry")
-	}
-}
+// API Rate Limiter tests moved to internal/lockout (ADR-0002) — they require
+// whitebox access to the now-internal APIRateLimiter.entries field.
 
 // ── Structured JSON Logger Tests ────────────────────────────────────────────
 

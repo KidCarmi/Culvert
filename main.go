@@ -27,6 +27,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/geoip"
+	"github.com/KidCarmi/Culvert/internal/obs"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -79,6 +82,7 @@ type startupState struct {
 	cpGRPCCA                *string
 	haJoin                  *string
 	haToken                 *string
+	haAutoFailover          *bool
 	dpCPAddr                *string
 	dpNodeID                *string
 	dpCert                  *string
@@ -168,6 +172,14 @@ func main() {
 	s := &startupState{}
 	parseFlags(s)
 	handleOneShotCommands(s)
+	// RISK-005: refuse to boot on a data dir left missing by a restore commit
+	// that was killed mid-rename (would otherwise start empty + silently lose
+	// data). Runs AFTER the one-shots so --list/--cleanup-restore-leftovers and
+	// --restore can still operate on the orphaned state.
+	if err := checkInterruptedRestore(dataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
 	setInsecureFlag(s)
 	runEnrollmentMode(s)
 	loadFileConfigAndFlags(s)
@@ -232,6 +244,7 @@ func parseFlags(s *startupState) {
 	s.cpGRPCCA = flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
 	s.haJoin = flag.String("ha-join", "", "HA standby: leader CP gRPC address to sync from (e.g. cp1:50051)")
 	s.haToken = flag.String("ha-token", "", "HA standby: authentication token (from leader's deploy command)")
+	s.haAutoFailover = flag.Bool("ha-auto-failover", false, "HA: allow the standby to self-promote on leader loss. DEFAULT OFF — 2-node active/passive has no witness, so unattended auto-promotion can split-brain (ADR-0004/RISK-001). Off = manual failover.")
 	s.dpCPAddr = flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
 	s.dpNodeID = flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
 	s.dpCert = flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
@@ -502,6 +515,9 @@ func initLogger(s *startupState) {
 		log.Fatalf("Logger setup failed: %v", err)
 	}
 	SetLogLevel(ParseLogLevel(s.fc.LogLevel))
+	// Route internal/* package logs (obs facade) into the same logger. Published
+	// once here at startup, before any traffic is served (ADR-0003 seam).
+	obs.SetSink(func(line string) { logger.Print(line) })
 }
 
 // initLifecycleContext creates the app-wide lifecycle context.
@@ -627,23 +643,46 @@ func initCluster(s *startupState) {
 		// ── HA Standby: sync state from leader, then stand by ────────
 		initClusterCA(clusterDBPath)
 		globalHA.StartAsStandby(appLifecycleCtx, *s.haJoin, *s.haToken,
-			cpAddr, cpCert, cpKey, cpCA,
+			cpAddr, cpCert, cpKey, cpCA, *s.haAutoFailover,
 			func() error {
 				return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
 			},
 		)
 	} else if cpAddr != "" || s.fc.Cluster.Role == "control-plane" {
 		// ── Normal CP startup ────────────────────────────────────────
-		if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
-			logger.Fatalf("ControlPlane gRPC: %v", err)
-		}
-		// Check for persisted HA config (leader restart).
-		if haCfg, err := loadHAConfig(); err == nil && haCfg.Enabled {
-			globalHA.EnableAsLeader(haCfg.PeerAddr)
-			globalHA.mu.Lock()
-			globalHA.token = haCfg.Token // restore original token
-			globalHA.mu.Unlock()
-			logger.Printf("HA: restored leader state from %s (peer=%s)", haConfigFile, haCfg.PeerAddr)
+		// Resolve the persisted HA role BEFORE asserting leadership (ADR-0004):
+		// a node persisted as standby must NOT silently come up as a second
+		// leader. A restarted leader cannot probe its peer (it never records
+		// the standby's address — see ha.go), so it resumes leadership with an
+		// honest split-brain-risk warning when auto-failover is enabled.
+		haCfg, haErr := loadHAConfig()
+		if haRestartAction(haCfg, haErr) == "standby" {
+			// Re-enter standby instead of self-asserting leader. Mirrors the
+			// --ha-join path; onPromote enables the CP gRPC server on promotion.
+			initClusterCA(clusterDBPath)
+			globalHA.StartAsStandby(appLifecycleCtx, haCfg.PeerAddr, haCfg.Token,
+				cpAddr, cpCert, cpKey, cpCA, haCfg.AutoFailover,
+				func() error {
+					return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
+				},
+			)
+			logger.Printf("HA: restarted as standby from %s (leader=%s) — not self-asserting leader (ADR-0004)",
+				haConfigFile, sanitizeLog(haCfg.PeerAddr))
+		} else {
+			if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
+				logger.Fatalf("ControlPlane gRPC: %v", err)
+			}
+			// Persisted leader (or legacy config with no role) resumes leadership.
+			if haErr == nil && haCfg.Enabled {
+				globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
+				if haCfg.AutoFailover {
+					logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
+						"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
+						"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile)
+				} else {
+					logger.Printf("HA: resumed as leader from %s after restart (peer=%s)", haConfigFile, haCfg.PeerAddr)
+				}
+			}
 		}
 	}
 	// ── Data Plane startup: from flags, enrollment, or saved config ─────────
@@ -1660,7 +1699,7 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	// 3. GeoIP: if configured, verify DB is loaded.
-	if geoEnabled() {
+	if geoip.Enabled() {
 		checks["geoip"] = &checkResult{Status: "ok"}
 	}
 	// GeoIP is optional — absence is not a failure.
@@ -2196,57 +2235,9 @@ func certNeedsRenewal(certFile string) (int, bool) {
 //   - The dir handle is always closed; a Close error is propagated only when
 //     Sync did not already report an error.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	f, err := os.CreateTemp(dir, base+".tmp.*")
-	if err != nil {
-		return fmt.Errorf("atomic write %s: create temp: %w", path, err)
-	}
-	tmp := f.Name()
-	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
-
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		cleanup()
-		return fmt.Errorf("atomic write %s: write: %w", path, err)
-	}
-	if err := f.Chmod(perm); err != nil {
-		_ = f.Close()
-		cleanup()
-		return fmt.Errorf("atomic write %s: chmod: %w", path, err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		cleanup()
-		return fmt.Errorf("atomic write %s: fsync: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic write %s: close: %w", path, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic write %s: rename: %w", path, err)
-	}
-
-	d, err := os.Open(dir)
-	if err != nil {
-		// Best-effort: opening a directory for sync is not portable.
-		return nil
-	}
-	syncErr := d.Sync()
-	closeErr := d.Close()
-	if syncErr != nil &&
-		!errors.Is(syncErr, syscall.EINVAL) &&
-		!errors.Is(syncErr, syscall.ENOTSUP) &&
-		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
-		return fmt.Errorf("atomic write %s: parent dir fsync: %w", path, syncErr)
-	}
-	if closeErr != nil && syncErr == nil {
-		return fmt.Errorf("atomic write %s: parent dir close: %w", path, closeErr)
-	}
-	return nil
+	// Delegates to internal/fileutil (ADR-0003 seam). Kept as a thin wrapper so
+	// all existing call sites stay unchanged.
+	return fileutil.AtomicWrite(path, data, perm)
 }
 
 // forceRenewDPCert renews the DP cert unconditionally (triggered by CA rotation).

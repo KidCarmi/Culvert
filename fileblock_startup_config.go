@@ -17,7 +17,7 @@ package main
 // store. "Resolved" means CLI-flag precedence has already been applied.
 type fileBlockStartupConfig struct {
 	// Extensions is the admin-declared list of file extensions to block.
-	// Empty ⇒ fall back to defaultBlockedExts.
+	// Empty ⇒ fall back to fileblock.DefaultBlockedExts.
 	Extensions []string
 	// ProfilesPath is the persistence file for globalProfileStore.
 	// Always non-empty after resolution (default "fileprofiles.json" if

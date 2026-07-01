@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/scanexcl"
 )
 
 // ─── apiCARotate ────────────────────────────────────────────────────────────
@@ -539,10 +541,7 @@ func isolateDPIScanner(t *testing.T) *ContentScanner {
 func isolateScanExclusions(t *testing.T) *ScanExclusionStore {
 	t.Helper()
 	orig := globalScanExclusions
-	fresh := &ScanExclusionStore{
-		hashes: map[string]bool{},
-		hosts:  map[string]bool{},
-	}
+	fresh := scanexcl.New()
 	globalScanExclusions = fresh
 	t.Cleanup(func() { globalScanExclusions = orig })
 	return fresh

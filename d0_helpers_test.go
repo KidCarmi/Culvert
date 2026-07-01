@@ -132,6 +132,7 @@ var d0KnownRoutes = func() []string {
 //   - 141 — P1.6d-0 added 5 /api/releases* dispatch-management routes.
 //   - 142 — Live Feed added /api/logs/purge.
 //   - 143 — Catalog refresh added /api/releases/catalog-refresh.
+//   - 144 — ADR-0004 Slice 1e added /api/cluster/ha/promote (manual failover).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -148,7 +149,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 143
+	const want = 144
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

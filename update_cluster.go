@@ -577,9 +577,24 @@ func updateCPWithHA(targetTag, standbyHost string) {
 	// Step 3: 30s settling period + final HASync verification.
 	settleAndVerifySync()
 
-	// Step 4: Update leader (self). After restart, standby auto-promotes
-	// because leader stops responding to HASync (3 missed polls = promotion).
-	logger.Printf("cluster update HA: updating leader (self) — standby will auto-promote")
+	// Step 4: Coordinated planned promotion (ADR-0004 Slice 1e). Pre-Slice-1
+	// this relied on the standby AUTO-promoting after the leader stopped
+	// answering HASync (3 missed polls ≈ 15s). With auto-failover now OFF by
+	// default that implicit promotion no longer happens, which would leave the
+	// cluster leaderless during the update. Instead, ARM an explicit handoff:
+	// the standby promotes on its next HASync pull (honored even when
+	// auto-failover is off, because a planned update is deliberate, not an
+	// unattended failover). Wait a few pull cycles for it to take leadership
+	// BEFORE taking this leader down, so there is no leaderless gap.
+	//
+	// Failback (the old leader rejoining as standby) remains the deferred
+	// 2-node-failback work — unchanged from before Slice 1; a double-leader on
+	// the old leader's restart is now at least detectable via /healthz term.
+	logger.Printf("cluster update HA: requesting coordinated standby promotion (planned handoff)")
+	globalHA.RequestPlannedPromotion()
+	time.Sleep(15 * time.Second) // ~3 HASync pull cycles (standby pulls every 5s)
+
+	logger.Printf("cluster update HA: updating leader (self) — standby promoted via planned handoff")
 	updateCPDirect(targetTag)
 }
 

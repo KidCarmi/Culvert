@@ -49,6 +49,7 @@ func TestOIDCAuth_Name(t *testing.T) {
 // mockIDP creates a test HTTP server that returns a fixed introspection response.
 func mockIDP(t *testing.T, resp introspectionResponse) (*httptest.Server, *OIDCAuth) {
 	t.Helper()
+	allowLoopbackSSRF(t) // NewOIDCAuth now installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp) //nolint:errcheck
@@ -98,6 +99,7 @@ func TestOIDCAuth_Verify_EmptyToken(t *testing.T) {
 // ── Scope check ───────────────────────────────────────────────────────────────
 
 func TestOIDCAuth_Verify_RequiredScopePresent(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(introspectionResponse{Active: true, Scope: "openid proxy:access email"}) //nolint:errcheck
 	}))
@@ -114,6 +116,7 @@ func TestOIDCAuth_Verify_RequiredScopePresent(t *testing.T) {
 }
 
 func TestOIDCAuth_Verify_RequiredScopeMissing(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(introspectionResponse{Active: true, Scope: "openid email"}) //nolint:errcheck
 	}))
@@ -132,6 +135,7 @@ func TestOIDCAuth_Verify_RequiredScopeMissing(t *testing.T) {
 // ── Audience check ────────────────────────────────────────────────────────────
 
 func TestOIDCAuth_Verify_AudienceStringMatch(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Return audience as a plain string.
 		raw := `{"active":true,"aud":"culvert"}`
@@ -151,6 +155,7 @@ func TestOIDCAuth_Verify_AudienceStringMatch(t *testing.T) {
 }
 
 func TestOIDCAuth_Verify_AudienceArrayMatch(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := `{"active":true,"aud":["other","culvert"]}`
 		w.Header().Set("Content-Type", "application/json")
@@ -169,6 +174,7 @@ func TestOIDCAuth_Verify_AudienceArrayMatch(t *testing.T) {
 }
 
 func TestOIDCAuth_Verify_AudienceMismatch(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := `{"active":true,"aud":"other-service"}`
 		w.Header().Set("Content-Type", "application/json")
@@ -199,6 +205,7 @@ func TestOIDCAuth_Verify_IDPUnreachable(t *testing.T) {
 }
 
 func TestOIDCAuth_Verify_IDPReturns500(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}))
@@ -213,6 +220,7 @@ func TestOIDCAuth_Verify_IDPReturns500(t *testing.T) {
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
 func TestOIDCAuth_Cache_HitAvoidsDial(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -230,6 +238,7 @@ func TestOIDCAuth_Cache_HitAvoidsDial(t *testing.T) {
 }
 
 func TestOIDCAuth_Cache_Expiry(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -277,6 +286,7 @@ func TestAudienceContains(t *testing.T) {
 // ── Basic Auth forwarded to IDP ───────────────────────────────────────────────
 
 func TestOIDCAuth_Verify_SendsBasicAuth(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	var gotUser, gotPass string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotUser, gotPass, _ = r.BasicAuth()

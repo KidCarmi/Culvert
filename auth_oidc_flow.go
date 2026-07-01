@@ -299,7 +299,8 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = ssrfSafeDialContext // SSRF guard at dial level
 	if cfg.TLSSkipVerify {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+		logWarnf("OIDC flow [%s]: TLS certificate verification DISABLED (tls_skip_verify) — credentials traverse an unverified channel vulnerable to MITM; intended for self-signed dev IdPs only", sanitizeLog(p.ID)) // RISK-009
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}                                                                                                                                              //nolint:gosec // InsecureSkipVerify is an explicit admin opt-in via cfg.TLSSkipVerify (warned above)
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 

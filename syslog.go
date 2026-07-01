@@ -1,158 +1,25 @@
 package main
 
+// syslog.go — package-main bootstrap for SIEM syslog forwarding. The Writer
+// engine moved to internal/syslog (ADR-0002); this file keeps the global, the
+// shim alias + constructor, and InitSyslog (URL parsing + startup logging) where
+// the logger/sanitizeLog coupling belongs.
+
 import (
-	"encoding/json"
-	"fmt"
-	"net"
-	"os"
 	"strings"
-	"sync"
-	"time"
+
+	"github.com/KidCarmi/Culvert/internal/syslog"
 )
 
-// syslogWriter forwards log lines to a remote syslog server over UDP or TCP.
-// Two formats are supported:
-//
-//	RFC 3164 (BSD syslog) — legacy, accepted everywhere.
-//	RFC 5424 (IETF syslog) — modern SIEMs prefer this for structured data,
-//	  microsecond timestamps, and proper UTF-8 BOM handling.
-//
-// Priority: facility=1 (user-level), severity=6 (informational) → PRI=14.
-// Audit events are sent at severity=5 (notice) → PRI=13.
-//
-// Configuration:  -syslog udp://10.0.0.1:514   (UDP, most common)
-//
-//	-syslog tcp://logs.corp.com:601 (TCP, reliable delivery)
-//	-syslog-format rfc5424          (default: rfc3164)
-type syslogWriter struct {
-	mu            sync.Mutex
-	network       string
-	addr          string
-	conn          net.Conn
-	host          string
-	tag           string
-	format        string    // "rfc3164" (default) or "rfc5424"
-	pid           string    // cached PID string for RFC 5424 PROCID
-	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
-}
+// syslogWriter is the package-main alias for the relocated engine so existing
+// unqualified references (the globalSyslog declaration, the coverage test's
+// constructor) stay unchanged.
+type syslogWriter = syslog.Writer
 
+// newSyslogWriter constructs a syslog Writer. Thin wrapper over syslog.NewWriter
+// kept for InitSyslog and the integration test that builds a writer directly.
 func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
-	host, err := os.Hostname()
-	if err != nil {
-		host = "culvert"
-	}
-	if format == "" {
-		format = "rfc3164"
-	}
-	sw := &syslogWriter{
-		network: network,
-		addr:    addr,
-		host:    host,
-		tag:     "culvert",
-		format:  format,
-		pid:     fmt.Sprintf("%d", os.Getpid()),
-	}
-	if err := sw.connect(); err != nil {
-		return nil, fmt.Errorf("syslog connect %s://%s: %w", network, addr, err)
-	}
-	return sw, nil
-}
-
-func (s *syslogWriter) connect() error {
-	conn, err := net.DialTimeout(s.network, s.addr, 5*time.Second)
-	if err != nil {
-		return err
-	}
-	s.conn = conn
-	return nil
-}
-
-// Write implements io.Writer. Each call is a single syslog message.
-func (s *syslogWriter) Write(p []byte) (int, error) {
-	s.writeMsg(14, strings.TrimRight(string(p), "\r\n"))
-	return len(p), nil
-}
-
-// WriteAudit sends an AuditEntry as a structured JSON syslog message at
-// severity=5 (notice), which most SIEMs map to a security-relevant priority.
-func (s *syslogWriter) WriteAudit(e AuditEntry) {
-	b, err := json.Marshal(e)
-	if err != nil {
-		return
-	}
-	s.writeMsg(13, string(b)) // PRI=13: facility=1 severity=5 (notice)
-}
-
-// WriteRequest sends a LogEntry (request log) as a structured JSON syslog
-// message at PRI=14 (facility=1 user-level, severity=6 informational).
-func (s *syslogWriter) WriteRequest(e LogEntry) {
-	b, err := json.Marshal(e)
-	if err != nil {
-		return
-	}
-	s.writeMsg(14, string(b)) // PRI=14: facility=1 severity=6 (informational)
-}
-
-// formatMsg builds a syslog line in the configured format.
-func (s *syslogWriter) formatMsg(pri int, msg string) string {
-	switch s.format {
-	case "rfc5424":
-		// RFC 5424: <PRI>VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID SP STRUCTURED-DATA SP MSG
-		ts := time.Now().Format(time.RFC3339Nano)
-		return fmt.Sprintf("<%d>1 %s %s %s %s - - %s\n", pri, ts, s.host, s.tag, s.pid, msg)
-	default: // rfc3164
-		ts := time.Now().Format("Jan 02 15:04:05")
-		return fmt.Sprintf("<%d>%s %s %s: %s\n", pri, ts, s.host, s.tag, msg)
-	}
-}
-
-func (s *syslogWriter) writeMsg(pri int, msg string) {
-	line := s.formatMsg(pri, msg)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.conn == nil {
-		// Backoff: don't retry more often than every 5 seconds.
-		if time.Since(s.lastReconnErr) < 5*time.Second {
-			return
-		}
-		if err := s.connect(); err != nil {
-			s.lastReconnErr = time.Now()
-			return // syslog down — swallow, never block the proxy
-		}
-		s.lastReconnErr = time.Time{} // reset on success
-	}
-	if _, err := fmt.Fprint(s.conn, line); err != nil {
-		s.conn.Close()
-		s.conn = nil
-		if time.Since(s.lastReconnErr) < 5*time.Second {
-			return
-		}
-		if err2 := s.connect(); err2 == nil {
-			fmt.Fprint(s.conn, line) //nolint:errcheck
-			s.lastReconnErr = time.Time{}
-		} else {
-			s.lastReconnErr = time.Now()
-		}
-	}
-}
-
-func (s *syslogWriter) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.conn != nil {
-		err := s.conn.Close()
-		s.conn = nil
-		return err
-	}
-	return nil
-}
-
-// Format returns the syslog message format ("rfc3164" or "rfc5424").
-func (s *syslogWriter) Format() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.format
+	return syslog.NewWriter(network, addr, format)
 }
 
 // globalSyslog is the active syslog writer; nil when syslog is not configured.
@@ -183,6 +50,6 @@ func InitSyslog(addr, syslogFmt string) error {
 		return err
 	}
 	globalSyslog = sw
-	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.format))
+	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
 	return nil
 }

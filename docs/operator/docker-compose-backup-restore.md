@@ -284,6 +284,48 @@ so live load is safe.
 
 ---
 
+## 8b. Recovering from an interrupted restore (RISK-005)
+
+A restore commit replaces `/data` with two atomic renames: it moves the
+current `/data` aside to `/data.bak.<ts>-<pid>`, then promotes the staged
+copy `/data.staging.<ts>-<pid>` into place. If the process is **killed
+between those two renames**, `/data` does not exist yet — the previous
+data is safe in the `.bak`, and the new data is ready in the `.staging`.
+
+Culvert **refuses to start** in this state instead of booting on an empty
+`/data` (which would silently lose data). Startup prints:
+
+```
+FATAL: interrupted restore detected: data directory "/data" is missing, but the
+previous data was preserved at "/data.bak.<ts>-<pid>" (a restore commit was
+killed before it finished). Recover by choosing ONE, then start Culvert again:
+    REVERT to the previous data:            mv "/data.bak.<ts>-<pid>" "/data"
+    COMPLETE the restore (promote staged):  mv "/data.staging.<ts>-<pid>" "/data"
+    (run --list-restore-leftovers to inspect all leftovers)
+```
+
+Choose deliberately:
+
+- **REVERT** (`mv /data.bak.<ts>-<pid> /data`) — discard the in-flight
+  restore and return to the data you had before. Safe default if you are
+  unsure.
+- **COMPLETE** (`mv /data.staging.<ts>-<pid> /data`) — finish the restore
+  you intended; the staged copy is the fully-materialised new `/data`.
+
+Do this **offline** (the same offline-restore contract as § 6: `docker
+compose down` → `mv …` in a transient `cli` container or on the host →
+`docker compose up -d`). Run `--list-restore-leftovers` (§ 7) first if more
+than one generation of leftovers is present. Only one of the two `mv`
+moves is needed; afterwards remove the remaining sibling with
+`--cleanup-restore-leftovers` (§ 8) once you have confirmed the proxy is
+healthy.
+
+The guard only triggers when `/data` is **absent and a `.bak` sibling
+exists** — a genuine first-run install (no `/data`, no `.bak`) boots
+normally.
+
+---
+
 ## 9. Passphrase handling
 
 `CULVERT_BACKUP_PASSPHRASE` controls encrypted-backup creation and

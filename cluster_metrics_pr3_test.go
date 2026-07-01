@@ -39,10 +39,11 @@ func TestClusterMetrics_HAFailover_SuccessIncrements(t *testing.T) {
 	h := &HAState{}
 	h.mu.Lock()
 	h.role = "standby"
+	h.pc = promoteContext{onPromote: func() error { return nil }, set: true}
 	h.mu.Unlock()
 
 	before := statHAFailovers.Load()
-	h.promote("", "", "", "", func() error { return nil })
+	h.promote("test")
 	if got := statHAFailovers.Load(); got != before+1 {
 		t.Errorf("ha_failovers = %d, want %d after successful promote", got, before+1)
 	}
@@ -57,10 +58,11 @@ func TestClusterMetrics_HAFailover_FailedDoesNotIncrement(t *testing.T) {
 	h := &HAState{}
 	h.mu.Lock()
 	h.role = "standby"
+	h.pc = promoteContext{onPromote: func() error { return errTestPromoteFail }, set: true}
 	h.mu.Unlock()
 
 	before := statHAFailovers.Load()
-	h.promote("", "", "", "", func() error { return errTestPromoteFail })
+	h.promote("test")
 	if got := statHAFailovers.Load(); got != before {
 		t.Errorf("ha_failovers = %d, want %d after failed promote", got, before)
 	}
@@ -76,7 +78,7 @@ func TestClusterMetrics_HAFailover_EnableAsLeaderDoesNotIncrement(t *testing.T) 
 	defer restore()
 
 	before := statHAFailovers.Load()
-	globalHA.EnableAsLeader("cp2:50051")
+	globalHA.EnableAsLeader("cp2:50051", false)
 	if got := statHAFailovers.Load(); got != before {
 		t.Errorf("ha_failovers = %d, want %d after EnableAsLeader (not a failover)", got, before)
 	}
