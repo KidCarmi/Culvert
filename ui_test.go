@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -259,6 +261,50 @@ func TestAPISetupComplete_UnauthMode(t *testing.T) {
 		"unauth": true,
 	}))
 	assertStatus(t, w, http.StatusOK)
+}
+
+// TestAPISetupComplete_ConcurrentRace proves apiSetupComplete's "only callable
+// once" contract is a check-then-act race: the cfg.IsConfigured() guard is
+// read, then (after bcrypt.GenerateFromPassword, which is deliberately slow)
+// the credential is written, with no lock held across the gap. On a public,
+// unauthenticated, first-boot endpoint this means an attacker racing the
+// legitimate operator's setup request can also "win" and get an admin
+// account — exactly once should ever succeed.
+func TestAPISetupComplete_ConcurrentRace(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
+	_ = cfg.SetAuth("", "")
+	t.Cleanup(func() { _ = cfg.SetAuth("", "") })
+
+	const n = 12
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	codes := make([]int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r := jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+				"user": fmt.Sprintf("racer%d", i), "pass": "RacerPass123",
+			})
+			w := httptest.NewRecorder()
+			<-start
+			apiSetupComplete(w, r)
+			codes[i] = w.Code
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	wins := 0
+	for _, code := range codes {
+		if code == http.StatusOK {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Errorf("apiSetupComplete: %d/%d concurrent requests succeeded, want exactly 1 (setup must be one-time)", wins, n)
+	}
 }
 
 // ─── /api/auth ────────────────────────────────────────────────────────────────

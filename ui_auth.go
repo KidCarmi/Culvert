@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/totp"
@@ -320,6 +321,15 @@ func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"needsSetup": !cfg.IsConfigured()})
 }
 
+// setupCompleteMu serializes apiSetupComplete end-to-end so the "only callable
+// once" contract is atomic. Without it, the cfg.IsConfigured() check-then-act
+// window (widened by the deliberately slow bcrypt.GenerateFromPassword call
+// below) lets concurrent requests to this public, unauthenticated, first-boot
+// endpoint all observe "not configured" and all successfully complete setup —
+// letting an attacker race the legitimate operator for the initial admin
+// account instead of being rejected with 403.
+var setupCompleteMu sync.Mutex
+
 // POST /api/setup/complete — sets the initial admin credential or enables unauth mode.
 // Only callable once; returns 403 if auth is already configured.
 // Body (with credentials): {"user": "...", "pass": "..."}
@@ -340,6 +350,8 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("too many attempts, locked for %ds", secs), http.StatusTooManyRequests)
 		return
 	}
+	setupCompleteMu.Lock()
+	defer setupCompleteMu.Unlock()
 	if cfg.IsConfigured() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
