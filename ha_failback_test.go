@@ -6,7 +6,13 @@ package main
 // demoted leader has nowhere to resync from (the ADR-0004 peer-address
 // asymmetry).
 
-import "testing"
+import (
+	"context"
+	"net"
+	"testing"
+
+	"google.golang.org/grpc/peer"
+)
 
 func leaderForS0(t *testing.T) *HAState {
 	t.Helper()
@@ -88,5 +94,38 @@ func TestS0_AdvertiseAddr_FromPromoteContext(t *testing.T) {
 	h.mu.Unlock()
 	if got := h.advertiseAddr(); got != "cp-standby:50051" {
 		t.Errorf("advertiseAddr = %q, want cp-standby:50051", got)
+	}
+}
+
+// PR #529 review (Codex P2): a standby launched from the HA deploy command
+// advertises its BIND address (":50051" / "0.0.0.0:50051"), which the leader
+// cannot dial. The leader normalises it against the OBSERVED peer of the
+// HASync connection, keeping the advertised port.
+func TestS0_NormalizeAdvertisedAddr(t *testing.T) {
+	peerCtx := peer.NewContext(context.Background(), &peer.Peer{
+		Addr: &net.TCPAddr{IP: net.ParseIP("198.51.100.7"), Port: 33445},
+	})
+	noPeer := context.Background()
+
+	cases := []struct {
+		name string
+		ctx  context.Context
+		adv  string
+		want string
+	}{
+		{"concrete host passes verbatim", peerCtx, "cp-standby.internal:50051", "cp-standby.internal:50051"},
+		{"empty-host bind → peer IP + advertised port", peerCtx, ":50051", "198.51.100.7:50051"},
+		{"ipv4 wildcard → peer IP + advertised port", peerCtx, "0.0.0.0:50051", "198.51.100.7:50051"},
+		{"ipv6 wildcard → peer IP + advertised port", peerCtx, "[::]:50051", "198.51.100.7:50051"},
+		{"wildcard with NO observed peer → record nothing", noPeer, ":50051", ""},
+		{"empty stays empty", peerCtx, "", ""},
+		{"non-host:port passes verbatim", peerCtx, "cp-standby.internal", "cp-standby.internal"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := normalizeAdvertisedAddr(c.ctx, c.adv); got != c.want {
+				t.Errorf("normalizeAdvertisedAddr(%q) = %q, want %q", c.adv, got, c.want)
+			}
+		})
 	}
 }
