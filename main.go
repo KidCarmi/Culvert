@@ -1085,46 +1085,13 @@ func initMTLSAndOCSP(s *startupState) {
 }
 
 // initBackgroundServices starts SSE, alert retry, updater, and cluster recovery.
+// initBackgroundServices resolves the background-services slice config and
+// hands it to the loader (background_services_startup*.go).
 func initBackgroundServices(s *startupState) {
-	// ── SSE live dashboard broadcaster ───────────────────────────────────────
-	// P1.2 / S4.SSE: parented to appLifecycleCtx so the goroutine exits when
-	// runProxyUntilShutdown calls appLifecycleCancel(). Handle discarded here;
-	// Phase 2's shutdown registry will pick it up if needed.
-	startSSEBroadcaster(appLifecycleCtx)
-
-	// ── F16: Alert retry queue ──────────────────────────────────────────────
-	go startAlertRetryLoop(appLifecycleCtx)
-
-	// ── Docker self-update system ────────────────────────────────────────────
-	// H4: install the operator-curated allowlist BEFORE validating the
-	// configured updater URL — validateUpdaterURL consults it.
-	allowlist := append([]string(nil), s.fc.Update.URLAllowlist...)
-	if cli := strings.TrimSpace(*s.updaterURLAllowFlag); cli != "" {
-		for _, entry := range strings.Split(cli, ",") {
-			if e := strings.TrimSpace(entry); e != "" {
-				allowlist = append(allowlist, e)
-			}
-		}
-	}
-	SetUpdaterURLAllowlist(allowlist)
-	if u := firstStr(*s.updaterURLFlag, s.fc.Update.UpdaterURL); u != "" {
-		if err := validateUpdaterURL(u); err != nil {
-			logWarnf("Update: invalid updater URL %q: %v — using default", u, err)
-		} else {
-			updaterURL = u
-		}
-	}
-	ensureUpdaterToken()
-	// Write current version to shared volume so the updater sidecar can read
-	// it without inspecting Docker image tags (which show "latest" for local builds).
-	// cleanSemver strips git-describe suffixes (e.g. "v0.0.19-4-g8ac6d14" → "v0.0.19")
-	// so the updater always sees a clean semver for comparison.
-	if cv := cleanSemver(version); cv != "" && cv != "dev" {
-		// #nosec G306 -- 0644 required: updater sidecar runs with cap_drop:ALL (no DAC_OVERRIDE)
-		_ = os.WriteFile("/data/version.txt", []byte(cv+"\n"), 0o644)
-	}
-	go startUpdateChecker(appLifecycleCtx)
-	recoverClusterUpdate()
+	loadBackgroundServices(
+		resolveBackgroundServicesStartupConfig(s.fc, *s.updaterURLAllowFlag, *s.updaterURLFlag, version),
+		appLifecycleCtx,
+	)
 }
 
 // initSOCKS5 starts the optional SOCKS5 listener. The accept loop is owned
