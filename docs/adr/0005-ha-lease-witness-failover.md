@@ -1,9 +1,15 @@
 # ADR-0005: Safe automatic HA failover via a fencing lease in etcd
 
-- **Status:** Accepted-direction (2026-07-01) after adversarial review. Design revised from a hand-rolled
-  witness to an **etcd-backed fencing lease** (maintainer: "do it like the big stable vendors" +
-  self-hosted → etcd). Implementation gated on **S0** (peer-address prerequisite). **F4 posture:
-  documented bounded-LWW (option A)** — not state-in-etcd.
+- **Status:** Accepted-direction, **PARKED at S0** (2026-07-01). Design adversarially reviewed and
+  revised from a hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the
+  big stable vendors" + self-hosted → etcd). **S0 (peer-address prerequisite) is SHIPPED**; S1–S5 are
+  deliberately deferred — the maintainer prioritised the decomposition program (maintainability) over
+  the automatic-failover convenience, and crucially the **etcd runtime dependency has NOT been taken
+  yet** (S1 is the point of no cheap return; pausing before it costs nothing). Resume at S1.
+  **F4 posture: documented bounded-LWW (option A)** — not state-in-etcd.
+- **Safety posture while parked:** unchanged from ADR-0004 Slice 1 — HA is safe-by-default (manual
+  failover, explicit promote, planned handoff, term-visible `/healthz`). Nothing regresses by pausing;
+  only the *automatic* convenience is deferred.
 - **Date:** 2026-07-01
 - **Deciders:** Chief Engineering Advisor (proposed + revised); project maintainer (chose etcd + LWW-A).
 - **Builds on:** ADR-0004 (HA Slice 1 — merged, PR #525). This is the deferred automatic-failover

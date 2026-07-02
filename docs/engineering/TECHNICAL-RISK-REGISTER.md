@@ -53,13 +53,18 @@
 - **Residual (why still HIGH, not closed):** *safe automatic* failover on UNPLANNED leader loss does
   not exist yet. Under the opt-in `--ha-auto-failover`, a surviving-leader partition can still
   split-brain (no demote/fence/reconcile); failback is deferred. The default-manual posture is safe.
-- **Open decision (ADR-0004 §Decision):** pick the automatic-failover mechanism — manual-only /
-  lease+witness (Advisor recommendation) / corrected DP-quorum / Raft. The hand-rolled DP-quorum first
-  proposed was rejected by adversarial review (stale-quorum dual-majority, silent data loss, ungated CA
-  issuance); making it safe costs as much as a lease.
-- **Posture now:** safe by default (manual failover) for any topology; **automatic** multi-CP failover
-  remains unsafe and is opt-in-with-documented-risk until the mechanism slice ships.
-- **Owner:** unassigned · **Target:** mechanism decision next.
+- **Mechanism DECIDED + PARKED at S0 (2026-07-01, ADR-0005):** the automatic-failover mechanism is an
+  **etcd-backed fencing lease** (maintainer chose "big-vendor, self-hosted" → etcd; hand-rolled witness
+  rejected by a second adversarial review — findings 1–8 recorded in ADR-0005 with per-slice
+  resolutions). **S0 (record the standby's advertised address — the failback prerequisite) is
+  SHIPPED**; S1–S5 (etcd LeaseProvider, keepalive/self-fence/demote, epoch fencing at every write sink
+  + DP propagation, acquire-on-loss + failback, flags/GUI/docs) are deliberately deferred in favour of
+  the decomposition program. The etcd runtime dependency has NOT been taken yet — parking before S1 is
+  the cheap pause point. F4 posture on resume: documented bounded-LWW (option A).
+- **Posture while parked:** safe by default (manual failover, explicit promote, planned handoff,
+  term-visible `/healthz`) for any topology; **automatic** failover remains opt-in-with-documented-risk
+  until S1–S5 ship.
+- **Owner:** unassigned · **Target:** resume at ADR-0005 S1 when prioritised.
 
 ## RISK-002 — OIDC introspection missing SSRF guard · HIGH · ✅ CLOSED 2026-06-28
 - **Was (HV):** `NewOIDCAuth` (`auth_oidc.go`) cloned the introspection transport with **no**
