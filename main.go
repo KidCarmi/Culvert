@@ -1800,30 +1800,10 @@ func firstStr(vals ...string) string {
 }
 
 // initUpstreamPool configures upstream proxy chaining from the file config.
+// initUpstreamPool resolves the upstream-pool slice config and hands it to
+// the loader (upstream_pool_startup*.go).
 func initUpstreamPool(fc *FileConfig) {
-	cbTimeout := 60 * time.Second
-	if fc.Upstream.CircuitBreaker.Timeout != "" {
-		if d, err := time.ParseDuration(fc.Upstream.CircuitBreaker.Timeout); err == nil {
-			cbTimeout = d
-		}
-	}
-	upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
-	applyUpstreamProxy()
-	logger.Printf("Upstream: %s", formatUpstreamSummary(fc.Upstream.Proxies))
-
-	// Start health check loop.
-	hi := fc.Upstream.HealthInterval
-	if hi == "" {
-		return
-	}
-	d, err := time.ParseDuration(hi)
-	if err != nil || d <= 0 {
-		return
-	}
-	// P1.3 / S4.UpstreamHealth: parented to appLifecycleCtx so the loop exits
-	// when runProxyUntilShutdown calls appLifecycleCancel(). The previous
-	// `for range t.C` loop had no cancellation path.
-	go runUpstreamHealthCheckLoop(appLifecycleCtx, upstreamPool, d)
+	loadUpstreamPool(resolveUpstreamPoolStartupConfig(fc), appLifecycleCtx)
 }
 
 // initClusterCA initialises the cluster CA for node enrollment.

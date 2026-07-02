@@ -57,6 +57,7 @@ func TestStartupSliceContract_PureAndDeterministic(t *testing.T) {
 		{"rewrite_default_action", func(fc *FileConfig) any { return resolveRewriteDefaultActionStartupConfig(fc) }},
 		{"session", func(fc *FileConfig) any { return resolveSessionStartupConfig(fc, "", 0) }},
 		{"ui_access_policy", func(fc *FileConfig) any { return resolveUIAccessPolicyStartupConfig(fc, "", "") }},
+		{"upstream_pool", func(fc *FileConfig) any { return resolveUpstreamPoolStartupConfig(fc) }},
 		{"ui_extras", func(fc *FileConfig) any { return resolveUIExtrasStartupConfig(fc, "", false) }},
 	}
 
