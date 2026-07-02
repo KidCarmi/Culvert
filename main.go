@@ -615,100 +615,30 @@ func initMetricsToken(s *startupState) {
 }
 
 // initCluster starts Control Plane / Data Plane gRPC and HA failover.
+// initCluster resolves the cluster slice config and hands it to the loader
+// (cluster_startup*.go), which owns the CP/HA-standby/HA-resume boot flow
+// (ADR-0004) and the 3-priority Data-Plane wiring. The fresh-enrollment
+// result is a runtime input passed alongside the resolved config.
 func initCluster(s *startupState) {
-	// ── Control Plane / Data Plane gRPC ──────────────────────────────────────
-	clusterRole.role = "standalone"
-	if h, err2 := os.Hostname(); err2 == nil {
-		clusterRole.nodeID = h
-	}
-	// ── Cluster state persistence ────────────────────────────────────────
-	clusterDBPath := firstStr(*s.clusterDB, s.fc.Cluster.StateDB, "cluster.json")
-	clusterDBPathGlobal = clusterDBPath
-	if err := globalClusterStore.Load(clusterDBPath); err != nil {
-		logger.Printf("ClusterDB: load error: %v — starting fresh", err)
-	} else {
-		nodes := globalClusterStore.ListNodes()
-		if len(nodes) > 0 {
-			logger.Printf("ClusterDB: loaded %d enrolled node(s) from %s", len(nodes), clusterDBPath)
-		}
-	}
-
-	// Merge CLI flags with YAML cluster config (CLI wins).
-	cpAddr := firstStr(*s.cpGRPCAddr, s.fc.Cluster.GRPCAddr)
-	cpCert := firstStr(*s.cpGRPCCert, s.fc.Cluster.CertFile)
-	cpKey := firstStr(*s.cpGRPCKey, s.fc.Cluster.KeyFile)
-	cpCA := firstStr(*s.cpGRPCCA, s.fc.Cluster.CAFile)
-
-	if *s.haJoin != "" && *s.haToken != "" {
-		// ── HA Standby: sync state from leader, then stand by ────────
-		initClusterCA(clusterDBPath)
-		globalHA.StartAsStandby(appLifecycleCtx, *s.haJoin, *s.haToken,
-			cpAddr, cpCert, cpKey, cpCA, *s.haAutoFailover,
-			func() error {
-				return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
-			},
-		)
-	} else if cpAddr != "" || s.fc.Cluster.Role == "control-plane" {
-		// ── Normal CP startup ────────────────────────────────────────
-		// Resolve the persisted HA role BEFORE asserting leadership (ADR-0004):
-		// a node persisted as standby must NOT silently come up as a second
-		// leader. A restarted leader cannot probe its peer (it never records
-		// the standby's address — see ha.go), so it resumes leadership with an
-		// honest split-brain-risk warning when auto-failover is enabled.
-		haCfg, haErr := loadHAConfig()
-		if haRestartAction(haCfg, haErr) == "standby" {
-			// Re-enter standby instead of self-asserting leader. Mirrors the
-			// --ha-join path; onPromote enables the CP gRPC server on promotion.
-			initClusterCA(clusterDBPath)
-			globalHA.StartAsStandby(appLifecycleCtx, haCfg.PeerAddr, haCfg.Token,
-				cpAddr, cpCert, cpKey, cpCA, haCfg.AutoFailover,
-				func() error {
-					return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
-				},
-			)
-			logger.Printf("HA: restarted as standby from %s (leader=%s) — not self-asserting leader (ADR-0004)",
-				haConfigFile, sanitizeLog(haCfg.PeerAddr))
-		} else {
-			if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
-				logger.Fatalf("ControlPlane gRPC: %v", err)
-			}
-			// Persisted leader (or legacy config with no role) resumes leadership.
-			if haErr == nil && haCfg.Enabled {
-				globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
-				if haCfg.AutoFailover {
-					logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
-						"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
-						"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile)
-				} else {
-					logger.Printf("HA: resumed as leader from %s after restart (peer=%s)", haConfigFile, haCfg.PeerAddr)
-				}
-			}
-		}
-	}
-	// ── Data Plane startup: from flags, enrollment, or saved config ─────────
-	dpAddr, dpNID, dpCertF, dpKeyF, dpCAF := *s.dpCPAddr, *s.dpNodeID, *s.dpCert, *s.dpKey, *s.dpCA
-	// Priority 1: fresh enrollment from this run.
-	if s.enrolledConfig != nil && dpAddr == "" {
-		dpAddr = s.enrolledConfig.CPAddr
-		dpNID = s.enrolledConfig.NodeID
-		dpCertF = s.enrolledConfig.CertFile
-		dpKeyF = s.enrolledConfig.KeyFile
-		dpCAF = s.enrolledConfig.CAFile
-	}
-	// Priority 2: saved enrollment config from a previous run.
-	if dpAddr == "" {
-		if ec, err := loadEnrollmentConfig(); err == nil {
-			dpAddr = ec.CPAddr
-			dpNID = ec.NodeID
-			dpCertF = ec.CertFile
-			dpKeyF = ec.KeyFile
-			dpCAF = ec.CAFile
-			logger.Printf("DataPlane: loaded enrollment config from %s", enrollmentConfigFile)
-		}
-	}
-	if dpAddr != "" {
-		startDataPlane(appLifecycleCtx, dpAddr, dpNID, dpCertF, dpKeyF, dpCAF)
-	}
+	loadCluster(
+		resolveClusterStartupConfig(s.fc, clusterCLIFlags{
+			ClusterDB:      *s.clusterDB,
+			CPGRPCAddr:     *s.cpGRPCAddr,
+			CPGRPCCert:     *s.cpGRPCCert,
+			CPGRPCKey:      *s.cpGRPCKey,
+			CPGRPCCA:       *s.cpGRPCCA,
+			HAJoin:         *s.haJoin,
+			HAToken:        *s.haToken,
+			HAAutoFailover: *s.haAutoFailover,
+			DPCPAddr:       *s.dpCPAddr,
+			DPNodeID:       *s.dpNodeID,
+			DPCert:         *s.dpCert,
+			DPKey:          *s.dpKey,
+			DPCA:           *s.dpCA,
+		}),
+		appLifecycleCtx,
+		s.enrolledConfig,
+	)
 }
 
 // initConnAndRateLimit configures per-IP connection limits, IP filter, and
