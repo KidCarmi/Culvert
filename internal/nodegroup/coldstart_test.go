@@ -1,9 +1,9 @@
-package main
+package nodegroup
 
 // D1.2b cold-start tests for /data/node_groups.json.
 //
-// Mirrors the bandwidth.json shape: NewNodeGroupStore always returns
-// a non-nil *NodeGroupStore; load errors are logged and reset s.groups
+// Mirrors the bandwidth.json shape: NewStore always returns
+// a non-nil *Store; load errors are logged and reset s.groups
 // to nil (then the constructor's nil-check at nodegroup.go:52-54
 // promotes nil to an empty slice). These tests pin the behavior across
 // missing / empty / garbage / valid / unknown-field / missing-required-
@@ -27,7 +27,7 @@ func TestColdStart_NodeGroups_Cases(t *testing.T) {
 		name       string
 		body       []byte // nil = do not write the file
 		wantGroups int
-		verify     func(t *testing.T, s *NodeGroupStore)
+		verify     func(t *testing.T, s *Store)
 	}{
 		{
 			name:       "missing_file",
@@ -46,7 +46,7 @@ func TestColdStart_NodeGroups_Cases(t *testing.T) {
 		},
 		{
 			name: "empty_object",
-			// `{}` cannot unmarshal into []NodeGroup → log + nil → constructor promotes to []NodeGroup{}.
+			// `{}` cannot unmarshal into []Group → log + nil → constructor promotes to []Group{}.
 			body:       []byte("{}"),
 			wantGroups: 0,
 		},
@@ -59,7 +59,7 @@ func TestColdStart_NodeGroups_Cases(t *testing.T) {
 			name:       "valid_one_group",
 			body:       []byte(`[{"name":"edge","label_selector":{"role":"edge"},"priority":5}]`),
 			wantGroups: 1,
-			verify: func(t *testing.T, s *NodeGroupStore) {
+			verify: func(t *testing.T, s *Store) {
 				g := s.groups[0]
 				if g.Name != "edge" {
 					t.Errorf("Name = %q, want edge", g.Name)
@@ -73,7 +73,7 @@ func TestColdStart_NodeGroups_Cases(t *testing.T) {
 			name:       "valid_with_unknown_field",
 			body:       []byte(`[{"name":"core","label_selector":{},"future_field":"ignored"}]`),
 			wantGroups: 1,
-			verify: func(t *testing.T, s *NodeGroupStore) {
+			verify: func(t *testing.T, s *Store) {
 				if s.groups[0].Name != "core" {
 					t.Errorf("Name = %q, want core", s.groups[0].Name)
 				}
@@ -86,7 +86,7 @@ func TestColdStart_NodeGroups_Cases(t *testing.T) {
 			name:       "missing_required_fields",
 			body:       []byte(`[{"priority":3}]`),
 			wantGroups: 1,
-			verify: func(t *testing.T, s *NodeGroupStore) {
+			verify: func(t *testing.T, s *Store) {
 				g := s.groups[0]
 				if g.Name != "" {
 					t.Errorf("Name should be zero value, got %q", g.Name)
@@ -112,9 +112,9 @@ func TestColdStart_NodeGroups_Cases(t *testing.T) {
 				}
 			}
 
-			s := NewNodeGroupStore(path)
+			s := NewStore(path)
 			if s == nil {
-				t.Fatal("NewNodeGroupStore returned nil — contract is always non-nil")
+				t.Fatal("NewStore returned nil — contract is always non-nil")
 			}
 			if got := len(s.groups); got != tc.wantGroups {
 				t.Errorf("groups len = %d, want %d", got, tc.wantGroups)
