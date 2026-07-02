@@ -587,7 +587,13 @@ env_put() {
   local var="$1" val="$2" file="$3"
   touch "$file"; chmod 600 "$file"
   sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
-  if grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null; then mv "$file.tmp" "$file"; else rm -f "$file.tmp"; fi
+  # grep -v exits 1 (not just erroring) whenever EVERY line matched the
+  # pattern being dropped — including the common case where $file contains
+  # only this one VAR=... line. `|| true` keeps that a no-op; the redirect
+  # into $file.tmp already ran (empty file), and we always promote it below
+  # so a stale line never survives to be duplicated by the append.
+  grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null || true
+  mv "$file.tmp" "$file"
   printf '%s=%s\n' "$var" "$val" >> "$file"
   chmod 600 "$file"
 }
