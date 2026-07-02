@@ -737,33 +737,14 @@ func initBlocklist(s *startupState) {
 	loadBlocklist(resolveBlocklistStartupConfig(s.fc, s.blPath), appLifecycleCtx)
 }
 
-// initRootCA loads or initialises the Root CA used for SSL inspection.
+// initRootCA resolves the Root-CA slice config and hands it to the loader
+// (rootca_startup*.go). The passphrase is read from env HERE (never CLI —
+// shift-left secret hygiene) and passed as a param so the resolver stays pure.
 func initRootCA(s *startupState) {
-	// ── Root CA for SSL inspection ────────────────────────────────────────────
-	// Passphrase is read from env so it never appears in CLI history or
-	// process listings (shift-left secret hygiene).
-	caPassphrase := os.Getenv(caPassphraseEnv)
-	caPathVal := firstStr(*s.caPath, s.fc.Proxy.CAPath)
-	if caPathVal != "" {
-		if err := certMgr.LoadOrInitCA(caPathVal, caPassphrase); err != nil {
-			logger.Printf("Warning: Root CA load/init failed (%v) — SSL inspection disabled", err)
-		} else {
-			logger.Printf("SSLCA: Root CA ready (persisted at %s, encrypted=%v)", caPathVal, caPassphrase != "")
-		}
-	} else {
-		if err := certMgr.InitCA(); err != nil {
-			logger.Printf("Warning: Root CA init failed (%v) — SSL inspection disabled", err)
-		} else {
-			logger.Printf("SSLCA: Root CA ready in-memory (set -ca-path + %s for persistence)", caPassphraseEnv)
-		}
-	}
-	// Store CA runtime config for API-driven rotation.
-	caRuntime.path = caPathVal
-	caRuntime.passphrase = caPassphrase
-	// Start CA auto-rotation background check.
-	if certMgr.Ready() {
-		StartCAAutoRotation(appLifecycleCtx, caPathVal, caPassphrase)
-	}
+	loadRootCA(
+		resolveRootCAStartupConfig(s.fc, *s.caPath, os.Getenv(caPassphraseEnv)),
+		appLifecycleCtx,
+	)
 }
 
 // initPolicy loads the policy rules file into the global policy store.

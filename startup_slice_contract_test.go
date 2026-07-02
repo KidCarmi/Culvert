@@ -55,6 +55,7 @@ func TestStartupSliceContract_PureAndDeterministic(t *testing.T) {
 		{"pac", func(_ *FileConfig) any { return resolvePACStartupConfig(0) }},
 		{"persistent_admin_state", func(_ *FileConfig) any { return resolvePersistentAdminStateStartupConfig("") }},
 		{"rewrite_default_action", func(fc *FileConfig) any { return resolveRewriteDefaultActionStartupConfig(fc) }},
+		{"rootca", func(fc *FileConfig) any { return resolveRootCAStartupConfig(fc, "", "") }},
 		{"session", func(fc *FileConfig) any { return resolveSessionStartupConfig(fc, "", 0) }},
 		{"ui_access_policy", func(fc *FileConfig) any { return resolveUIAccessPolicyStartupConfig(fc, "", "") }},
 		{"upstream_pool", func(fc *FileConfig) any { return resolveUpstreamPoolStartupConfig(fc) }},
