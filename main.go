@@ -764,72 +764,14 @@ func initPolicy(s *startupState) {
 }
 
 // initURLCategories loads URL categories, category groups, SaaS feed, and the community BadgerDB feed.
+// initURLCategories resolves the URL-categories slice config and hands it to
+// the loader (urlcategories_startup*.go); the returned UT1 feed syncer (nil
+// when the community feed is disabled) is stashed on startupState.
 func initURLCategories(s *startupState) {
-	// ── URL Categories ────────────────────────────────────────────────────────
-	catPath := s.fc.Proxy.URLCategoriesFile
-	if catPath == "" {
-		catPath = "categories.json"
-	}
-	if err := catStore.Load(catPath); err != nil {
-		logger.Fatalf("Cannot load URL categories: %v", err)
-	}
-	logger.Printf("URLCat: %d categories loaded from %s", len(catStore.All()), catPath)
-
-	// Seed empty catStore entries for all UT1 mapped category names so they
-	// appear in the Category Groups dropdown. The names must exist in catStore
-	// (Layer 1) for the GUI to list them, even though domains are in BadgerDB
-	// (Layer 2). lookupHostCategory checks both layers for matching.
-	ut1Seeded := 0
-	seen := map[string]bool{}
-	for _, mappedCat := range ut1CategoryMap {
-		lc := strings.ToLower(mappedCat)
-		if seen[lc] {
-			continue
-		}
-		seen[lc] = true
-		if catStore.GetByName(mappedCat) == nil {
-			_ = catStore.Set(mappedCat, []string{}, true) // empty, built-in
-			ut1Seeded++
-		}
-	}
-	if ut1Seeded > 0 {
-		catStore.Save()
-		logger.Printf("URLCat: seeded %d UT1 category name(s) into catStore for GUI visibility", ut1Seeded)
-	}
-
-	// ── Category Groups ──────────────────────────────────────────────────────
-	if err := globalCategoryGroups.Load(filepath.Join(dataDir, "category_groups.json")); err != nil {
-		logger.Printf("CategoryGroups: load error: %v", err)
-	}
-
-	// ── SaaS category feed (dynamic updates from GitHub) ────────────────────
-	// Auto-syncs curated SaaS categories (AI, Marketing, Messaging, etc.)
-	// from the Culvert repo. Additive merge: new domains added, admin
-	// removals preserved. Disabled by default; enable via admin GUI.
-	globalSaaSFeed.Configure(defaultSaaSFeedURL, 24*time.Hour)
-
-	// ── Community URL category feed (BadgerDB) ────────────────────────────────
-	// When --cat-feed-db is set, open BadgerDB and start the UT1 FeedSyncer.
-	// Layer 1 (catStore) remains the priority; BadgerDB is the fallback.
-	if *s.catFeedDB == "" { //nolint:nestif // straightforward init block; nesting is necessary
-		logger.Printf("CatFeedDB: disabled (set --cat-feed-db for community feed)")
-	} else {
-		var dbErr error
-		communityDB, dbErr = openCommunityDB(*s.catFeedDB)
-		if dbErr != nil {
-			logger.Fatalf("CatFeedDB → cannot open BadgerDB at %s: %v", *s.catFeedDB, dbErr)
-		}
-		syncD := 24 * time.Hour
-		if *s.catSyncIntvl != "" {
-			if d, err2 := time.ParseDuration(*s.catSyncIntvl); err2 == nil {
-				syncD = d
-			}
-		}
-		s.feedSyncer = newFeedSyncer(communityDB, *s.catFeedURL, syncD)
-		globalUT1FeedSyncer = s.feedSyncer // UC-6: expose Stats() to /metrics
-		s.feedSyncer.Start(appLifecycleCtx)
-		logger.Printf("CatFeedDB: BadgerDB at %s, sync every %s", *s.catFeedDB, syncD)
-	}
+	s.feedSyncer = loadURLCategories(
+		resolveURLCategoriesStartupConfig(s.fc, dataDir, *s.catFeedDB, *s.catFeedURL, *s.catSyncIntvl),
+		appLifecycleCtx,
+	)
 }
 
 // initLogStore opens the Badger-backed request-log history store when a path is
