@@ -45,6 +45,7 @@ func TestStartupSliceContract_PureAndDeterministic(t *testing.T) {
 			return resolveBackgroundServicesStartupConfig(fc, "", "", "")
 		}},
 		{"blocklist", func(fc *FileConfig) any { return resolveBlocklistStartupConfig(fc, "") }},
+		{"cdr", func(fc *FileConfig) any { return resolveCDRStartupConfig(fc, cdrCLIFlags{}) }},
 		{"conn_and_rate_limit", func(fc *FileConfig) any { return resolveConnAndRateLimitStartupConfig(fc, "", 0) }},
 		{"geoip", func(fc *FileConfig) any { return resolveGeoIPStartupConfig(fc, "") }},
 		{"inspection_rules", func(fc *FileConfig) any { return resolveInspectionRulesConfig(fc) }},

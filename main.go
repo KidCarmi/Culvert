@@ -930,94 +930,24 @@ func initUpstreamProxy(s *startupState) {
 }
 
 // initCDR wires Sluice CDR configuration, persistent state, client, and health poller.
+// initCDR resolves the CDR (Sluice) slice config and hands it to the loader
+// (cdr_startup*.go). CLI flag values are packed here; the runtime
+// enable-sentinel is read by the loader (filesystem side effect).
 func initCDR(s *startupState) {
-	// ── Sluice CDR integration (Phase 1: config plumbing only) ──────────────
-	// Client wiring into the proxy pipeline (handleTunnelInspect) lands in a
-	// follow-up phase.  For now we merge flags, validate, and log status so
-	// operators can sanity-check their setup before Phase 2 ships.
-	cdrCfg := s.fc.CDR
-	if *s.cdrEnabledFlag {
-		cdrCfg.Enabled = true
-	}
-	if ep := firstStr(*s.cdrEndpointFlag, cdrCfg.Endpoint); ep != "" {
-		cdrCfg.Endpoint = ep
-	}
-	if fm := firstStr(*s.cdrFailModeFlag, cdrCfg.FailMode); fm != "" {
-		cdrCfg.FailMode = fm
-	}
-	if pn := firstStr(*s.cdrProfileFlag, cdrCfg.DefaultProfile); pn != "" {
-		cdrCfg.DefaultProfile = pn
-	}
-	if m := firstStr(*s.cdrModeFlag, cdrCfg.DefaultMode); m != "" {
-		cdrCfg.DefaultMode = m
-	}
-	if t := firstNonZero(*s.cdrTimeoutFlag, cdrCfg.TimeoutSec); t != 0 {
-		cdrCfg.TimeoutSec = t
-	}
-	if sz := firstNonZero(*s.cdrMaxSizeFlag, cdrCfg.MaxFileSizeMB); sz != 0 {
-		cdrCfg.MaxFileSizeMB = sz
-	}
-	if fp := firstStr(*s.cdrFingerprintFlag, cdrCfg.ServerFingerprint); fp != "" {
-		cdrCfg.ServerFingerprint = fp
-	}
-	if d := firstStr(*s.cdrCertsDirFlag, cdrCfg.CertsDir); d != "" {
-		cdrCfg.CertsDir = d
-	}
-	// Runtime sentinel takes priority: if /data/cdr_enabled exists
-	// (written by the admin GUI toggle or by the first enrollment
-	// auto-enable path), CDR is on regardless of YAML/CLI.  This lets
-	// operators enable CDR via the admin UI without editing config
-	// files or restarting the proxy.
-	if cdrRuntimeEnabled() {
-		cdrCfg.Enabled = true
-	}
-
-	// Load persistent state unconditionally — the registry and policy
-	// store must know their on-disk paths even when CDR is currently
-	// disabled, otherwise Save() silently no-ops (see
-	// CDRInstanceRegistry.Save: path=="" returns nil) and any enroll /
-	// toggle done via the GUI lives only in RAM until the next restart
-	// wipes it.  Missing files are tolerated (fresh install); malformed
-	// files fail loudly so admins notice.
-	const (
-		cdrInstPath   = "/data/cdr_instances.json"
-		cdrPolicyPath = "/data/cdr_policies.json"
+	loadCDR(
+		resolveCDRStartupConfig(s.fc, cdrCLIFlags{
+			Enabled:     *s.cdrEnabledFlag,
+			Endpoint:    *s.cdrEndpointFlag,
+			FailMode:    *s.cdrFailModeFlag,
+			Profile:     *s.cdrProfileFlag,
+			Mode:        *s.cdrModeFlag,
+			TimeoutSec:  *s.cdrTimeoutFlag,
+			MaxSizeMB:   *s.cdrMaxSizeFlag,
+			Fingerprint: *s.cdrFingerprintFlag,
+			CertsDir:    *s.cdrCertsDirFlag,
+		}),
+		appLifecycleCtx,
 	)
-	if err := cdrInstances.Load(cdrInstPath); err != nil {
-		logger.Printf("CDR: instance registry load failed: %v", err)
-	}
-	if err := cdrPolicyStore.Load(cdrPolicyPath); err != nil {
-		logger.Printf("CDR: policy store load failed: %v", err)
-	}
-
-	if cdrCfg.Enabled {
-		mode := cdrCfg.DefaultMode
-		if mode == "" {
-			mode = "ENFORCE"
-		}
-		profile := cdrCfg.DefaultProfile
-		if profile == "" {
-			profile = "default"
-		}
-		failSafe := "fail-open"
-		if !cdrCfg.CDRFailOpen() {
-			failSafe = "fail-closed"
-		}
-
-		if err := initCDRClient(cdrCfg); err != nil {
-			// Non-fatal: CDR is opt-in.  If the dial fails we log + continue;
-			// handleTunnelInspect (Phase 2b) will fail-open/closed per policy.
-			logger.Printf("CDR: initial client dial failed, CDR effectively disabled: %v", sanitizeLog(err.Error()))
-		}
-
-		// Phase 2c: background Health poller — updates cached snapshot
-		// every 15s so /api/cdr/health is cheap and the GUI sees instance
-		// liveness without polling Sluice on every view.
-		startCDRHealthPoller(appLifecycleCtx)
-
-		logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 2c: client + policy engine + proxy wiring + admin API live)",
-			sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
-	}
 }
 
 // initMTLSAndOCSP is the PR3 expansion shim: resolve the upstream
