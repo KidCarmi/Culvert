@@ -1158,27 +1158,12 @@ func initSOCKS5(s *startupState) {
 }
 
 // initPersistentAdminState initializes config versioning, node groups, bandwidth, hit counters, and admin settings.
-func initPersistentAdminState(s *startupState) {
-	// ── Storage writability probe (one-shot, startup-only) ──────────────
-	// Result is cached for the diagnostics handler so /api/diagnostics
-	// stays side-effect-free. Never retries; never blocks startup.
-	probeStorageWritability()
-
-	// ── Config versioning ────────────────────────────────────────────────
-	initConfigVersioning()
-
-	// ── Node Groups ─────────────────────────────────────────────────────
-	globalNodeGroups = NewNodeGroupStore(filepath.Join(dataDir, "node_groups.json"))
-
-	// ── Bandwidth / QoS ─────────────────────────────────────────────────
-	globalBandwidth = NewBandwidthManager(filepath.Join(dataDir, "bandwidth.json"))
-
-	// ── Hit counter persistence (Finding 2.3) ───────────────────────────
-	startHitCounterPersistence(appLifecycleCtx, filepath.Join(dataDir, "hit_counters.json"))
-	RestoreHitCounts() // copy persisted hit counters back into PolicyRule.HitCount
-
-	// ── Admin settings persistence (restore GUI changes across restarts) ──
-	LoadAdminSettings(filepath.Join(dataDir, "admin_settings.json"))
+// initPersistentAdminState resolves the persistent-admin-state slice config
+// and hands it to the loader (persistent_admin_state_startup*.go). The loader
+// documents the ordering contract (probe → versioning → stores → hit counters
+// → admin settings LAST).
+func initPersistentAdminState(_ *startupState) {
+	loadPersistentAdminState(resolvePersistentAdminStateStartupConfig(dataDir), appLifecycleCtx)
 }
 
 // startAdminUI wires UI globals and launches the admin UI server.
