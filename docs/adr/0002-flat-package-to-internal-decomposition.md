@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -583,6 +583,22 @@ extracted:** its `IdentityProvider` interface embeds `AuthProvider` (the auth-ba
 in `auth.go`, implemented across local/LDAP/OIDC/SAML), so moving it would drag the auth interface
 graph out, and pulling *only* the `Identity` DTO would fragment a cohesive 49-line file for a 17-prod
 + 38-test alias churn at marginal benefit. It stays as a shared model in `package main` by design.
+
+### 2026-07-02 — `internal/bandwidth` extracted (18th leaf, post-completion addendum)
+With the startup-slice program finished, a re-sweep of the mid-size root files (which the original
+completion sweep had only sampled) found `bandwidth.go` (403 ln) had become a **clean seam-covered
+leaf**: its only couplings were `logger`/`sanitizeLog`/`atomicWriteFile` — all satisfied by
+`obs`+`fileutil`. Moved the engine (token bucket, `Manager` with F10 overlap detection, D1.2-flag-F6
+load validation, `HumanRate`) to `internal/bandwidth` (renames `BandwidthPolicy`→`Policy`,
+`BandwidthManager`→`Manager`, `NewBandwidthManager`→`NewManager`, `humanRate`→`HumanRate`; revive).
+The trimmed `bandwidth.go` keeps the alias shim + `globalBandwidth` + the `apiBandwidthPolicies`
+handler (requireRole/auditEvent are main-owned); the handler's `PolicyInfo` composite literals updated
+for the renamed embedded field. Test split (the recurring lesson): engine tests + the `TestSelectorsOverlap`
+block (from `coverage_boost_test.go`) + the D1.2b cold-start table moved into the package (local
+`assertNoTmpLeak` copy, as fileblock); the 5 handler tests stayed in main. `ConfigSnapshot`'s
+`BandwidthPolicies []BandwidthPolicy` field is untouched via the alias. `go list -deps` proof: imports
+only `obs`+`fileutil`. Same-sweep result for the siblings: `nodegroup.go` couples to `globalClusterStore`
+(needs a nodes-view seam — candidate next), `configversion.go`/`events.go` are hubs (stay).
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
