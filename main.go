@@ -821,104 +821,20 @@ func initRewriteAndDefaultAction(s *startupState) {
 }
 
 // initScanning wires up ClamAV, YARA, threat feeds, and the optional scan microservice sidecar.
+// initScanning resolves the security-scanning slice config and hands it to
+// the loader (scanning_startup*.go); the returned sidecar service (nil unless
+// --scan-svc-listen) is stashed on startupState for graceful shutdown.
 func initScanning(s *startupState) {
-	// ── Security scanning: ClamAV + YARA + Threat Feeds ─────────────────────
-	secCfg := s.fc.SecurityScan
-	clamAddr := firstStr(*s.clamavAddr, secCfg.ClamAVAddr)
-	yaraDir := firstStr(*s.yaraRulesDir, secCfg.YARARulesDir)
-	feedDB := firstStr(*s.threatFeedDB, secCfg.ThreatFeedDB)
-
-	// Remote scan service mode: delegate body scanning to a sidecar.
-	remoteScanURL := firstStr(*s.scanSvcURL, secCfg.ScanSvcURL)
-	if remoteScanURL != "" {
-		globalRemoteScanner.Init(remoteScanURL)
-		logger.Printf("ScanSvc: remote mode, delegating to %s", remoteScanURL)
-		// Threat feeds still run locally (URL/domain checks are cheap).
-		if feedDB != "" || secCfg.Enabled {
-			syncInterval := 6 * time.Hour
-			if secCfg.SyncInterval != "" {
-				if d, err := time.ParseDuration(secCfg.SyncInterval); err == nil {
-					syncInterval = d
-				}
-			}
-			globalThreatFeed.Init(feedDB, syncInterval)
-			globalThreatFeed.Start(appLifecycleCtx)
-			logger.Printf("ThreatFeed: sync every %s, db=%q", syncInterval, feedDB)
-		}
-	} else if secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "" {
-		// Scan result cache TTL.
-		cacheTTL := time.Hour
-		if secCfg.CacheTTL != "" {
-			if d, err := time.ParseDuration(secCfg.CacheTTL); err == nil {
-				cacheTTL = d
-			}
-		}
-		// Feed sync interval.
-		syncInterval := 6 * time.Hour
-		if secCfg.SyncInterval != "" {
-			if d, err := time.ParseDuration(secCfg.SyncInterval); err == nil {
-				syncInterval = d
-			}
-		}
-		cacheSize := secCfg.CacheSize
-		if cacheSize <= 0 {
-			cacheSize = 10_000
-		}
-		var maxScanBytes int64
-		if secCfg.MaxScanMB > 0 {
-			maxScanBytes = int64(secCfg.MaxScanMB) << 20
-		}
-
-		// Initialise scanner and hash cache.
-		globalSecScanner.cache = newHashCache(cacheSize, cacheTTL)
-		globalSecScanner.Init(clamAddr, maxScanBytes)
-
-		// YARA rules.
-		if yaraDir != "" {
-			// Seed the rules directory from the bundled /app/yara on first boot
-			// so starter rules are available even when yaraDir points to a
-			// persistent volume (e.g. /data/yara). Only copies if the target
-			// directory is empty or doesn't exist.
-			seedYARARules(yaraDir)
-			if err := globalYARA.LoadDir(yaraDir); err != nil {
-				logger.Printf("YARA: load error: %v", err)
-			} else {
-				logger.Printf("YARA: %d rule(s) from %s", globalYARA.Count(), yaraDir)
-			}
-		} else {
-			logger.Printf("YARA: disabled (set -yara-rules-dir to enable)")
-		}
-
-		// Tier 3.3: admin-managed scan exclusion lists (hash + host allowlists).
-		// Persisted under the same data directory as the rest of the state.
-		if dataDir != "" {
-			if err := globalScanExclusions.Load(filepath.Join(dataDir, "scan_exclusions.json")); err != nil {
-				logger.Printf("ScanExclusions: load error: %v", err)
-			}
-		}
-
-		// Threat feeds.
-		if feedDB != "" || secCfg.Enabled {
-			globalThreatFeed.Init(feedDB, syncInterval)
-			globalThreatFeed.Start(appLifecycleCtx)
-			logger.Printf("ThreatFeed: sync every %s, db=%q", syncInterval, feedDB)
-		}
-	}
-
-	// Scan microservice sidecar: expose local scanners as an HTTP service.
-	svcListenAddr := firstStr(*s.scanSvcListen, secCfg.ScanSvcListen)
-	if svcListenAddr != "" {
-		s.scanSvc = NewScanService(svcListenAddr)
-		if err := s.scanSvc.Listen(); err != nil {
-			logger.Printf("ScanSvc: listen error: %v", err)
-		} else {
-			go func() {
-				if err := s.scanSvc.Start(); err != nil {
-					logger.Printf("ScanSvc: error: %v", err)
-				}
-			}()
-		}
-	}
+	s.scanSvc = loadScanning(
+		resolveScanningStartupConfig(s.fc, scanningCLIFlags{
+			ClamAVAddr:    *s.clamavAddr,
+			YARARulesDir:  *s.yaraRulesDir,
+			ThreatFeedDB:  *s.threatFeedDB,
+			ScanSvcURL:    *s.scanSvcURL,
+			ScanSvcListen: *s.scanSvcListen,
+		}, dataDir),
+		appLifecycleCtx,
+	)
 }
 
 // initUpstreamProxy configures parent-proxy chaining when configured.
