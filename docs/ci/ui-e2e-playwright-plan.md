@@ -1,0 +1,139 @@
+# Admin-UI Browser E2E (Playwright) — Implementation Plan
+
+Status: **proposal** (no code/dependency landed yet). Companion to
+`docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
+end-to-end coverage of the Culvert admin UI without breaking the single-binary,
+zero-runtime-dependency, Go-first contract.
+
+## 1. Why — the gap
+
+Every test in the quality program so far drives the **traffic plane** over real
+sockets (policy, MITM/SSL-inspect, CONNECT relay, SOCKS5, auth×authz). None of
+it renders the **admin UI**, which is a single ~11.6k-line SPA
+(`static/index.html`) exposing **25 `data-view` panels**:
+
+```
+audit authpolicy blocklist ca-mgmt catgroups cdr certificates cluster
+dashboard diagnostics fileblock governance idproviders livefeed pac policy
+policy-tester releases rewrite security settings updates upstream urlcat users
+```
+
+Browser E2E covers what socket tests cannot:
+
+- **Login flows**: local bcrypt, session cookie (`ps_session`, dynamic `Secure`),
+  logout/revocation, lockout on bad creds, and the OIDC/SAML redirect round-trips.
+- **RBAC in the browser** — the front-end mirror of the C2 metadata-enforcement
+  invariants: does a `viewer` see admin-only panels/controls gated, and do
+  mutations surface a 403 instead of silently succeeding?
+- **CSRF**, body-limit / rate-limit UX, form validation.
+- **Live SSE dashboard** (`livefeed`, `/api/events`), config-version rollback UI,
+  the `policy-tester` panel.
+
+## 2. Stack decision — `playwright-go`, not Node
+
+The repo is deliberately **`package main`, single binary, zero runtime deps**,
+with **no `package.json` anywhere**. A Node `@playwright/test` toolchain would
+cut against that hard.
+
+[`github.com/playwright-community/playwright-go`](https://github.com/playwright-community/playwright-go)
+drives the **same Chromium** over CDP but lives inside `go test`.
+
+| Criterion | playwright-go (**recommended**) | Node @playwright/test |
+|---|---|---|
+| Language / toolchain | Go, one `go test` invocation | adds Node + npm dep tree |
+| Fits repo ethos (zero-Node) | ✅ | ✗ |
+| Built-in runner / trace-viewer / auto-retry | ✗ (wire it yourself) | ✅ richer |
+| Community / feature velocity | smaller | larger |
+| Dependency footprint | one **test-only** Go module | `node_modules` |
+
+For Culvert the tradeoff clearly favors `playwright-go`. The lost niceties
+(trace viewer, codegen, auto-retry) are acceptable for an advisory tier and can
+be re-evaluated if UI E2E becomes load-bearing.
+
+## 3. Architecture — hermetic, in-process (same pattern as the traffic E2E)
+
+Boot the **real** admin-UI handler chain in-process via `httptest.NewServer`,
+reusing the actual middleware stack, then point Playwright at the
+`127.0.0.1:<port>` URL. No separate binary, no Docker, no public internet.
+
+Today the mux + middleware are assembled **inline** inside `startUI` (ui.go),
+which returns a fully-formed `*http.Server` (port + TLS). Small enabling
+refactor:
+
+- Extract the composition into a testable helper, e.g.
+  `func buildUIHandler() http.Handler` returning
+  `uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(uiMetadataEnforcement(mux))))`.
+  `startUI` calls it and wraps the `*http.Server`; tests mount the same handler
+  under `httptest.NewServer(buildUIHandler())`.
+- This keeps the middleware order identical between prod and test — the whole
+  point (RBAC/CSRF behavior must be the real chain, not a stub).
+
+Auth setup in-test reuses existing helpers already used by the Go suites:
+`cfg.SetAuth`, `initSessionSecret`, `encodeSession`/`sessionCookieName` (so we
+can seed an admin/operator/viewer session directly, or exercise the real
+`/api/login` form).
+
+## 4. Isolation & CI — advisory, never a merge gate
+
+- **Build tag** `//go:build uie2e` so the browser tests are excluded from the
+  required `qa-gate` — identical isolation model to `proxyload` / `proxystress`.
+- **New workflow** `.github/workflows/proxy-ui-e2e.yml`: nightly (`schedule`) +
+  `workflow_dispatch`, plus an optional **non-blocking** PR run. Mirrors
+  `proxy-nightly-e2e.yml`. Never added to `qa-gate-approved` `needs` until the
+  suite has proven stable over multiple nightly runs.
+- Rationale: browser E2E is inherently flakier than socket-level Go tests;
+  keeping it advisory protects the required gate's signal.
+
+## 5. Environment gotchas (pre-solved in this runner)
+
+- Chromium is **pre-installed** at `/opt/pw-browsers` and `PLAYWRIGHT_BROWSERS_PATH`
+  is set. **Never run `playwright install`** — launch with
+  `ExecutablePath: "/opt/pw-browsers/chromium"` (and set
+  `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` so the Go binding's install step is a
+  no-op). CI installs Chromium via the OS/action, not via npm postinstall.
+- Run **headless**.
+- Select on stable `data-view="…"` attributes / element ids — **never on text**
+  in an 11.6k-line SPA.
+- **Determinism**: wait on selectors / `networkidle`; never `time.Sleep`.
+
+## 6. First slice (small, real): UI RBAC gating
+
+The browser complement to the C2 enforcement invariants. One workflow + one
+test file + one `go.mod` add. Sketch (`ui_rbac_e2e_test.go`, tag `uie2e`):
+
+```
+//go:build uie2e
+
+// 1. srv := httptest.NewServer(buildUIHandler()); seed local admin + a viewer.
+// 2. pw, _ := playwright.Run(); browser via ExecutablePath=/opt/pw-browsers/chromium, headless.
+// 3. admin session:
+//      - log in through /api/login (real form) OR inject a signed ps_session cookie
+//      - assert nav shows admin-only items (users, governance)
+//      - open data-view="policy", add a rule, Save → 2xx, rule visible
+// 4. viewer session (fresh context):
+//      - admin-only nav items are gated/hidden
+//      - a mutation (e.g. POST via the policy Save button) surfaces a 403 in the UI
+//      - GET-only panels still render
+// 5. Assert on DOM state + the surfaced status, not on sleeps.
+```
+
+Assertions map 1:1 onto the RBAC contract: admin (full) / operator (write) /
+viewer (read-only), and "C2 must never allow what the handler denies."
+
+## 7. Rollout (slice by slice — do NOT big-bang)
+
+1. **RBAC gating** (this slice) — proves the harness + the invariant that matters most.
+2. **Login/auth flows** — local login, session cookie + `Secure` flag, logout/revocation, lockout.
+3. **Policy editor round-trip** — create/edit/delete in UI, assert it takes effect on the traffic plane (cross-plane test).
+4. **Live SSE dashboard** — `/api/events` renders live events without leaking/hanging.
+5. Broaden panel coverage opportunistically; keep each slice advisory until stable.
+
+## 8. Open decisions
+
+- **Stack**: playwright-go (recommended) vs Node @playwright/test.
+- **Login path for slice 1**: exercise the real `/api/login` form (higher fidelity,
+  slightly more brittle) vs. inject a pre-signed `ps_session` cookie (faster, more
+  deterministic; auth-flow fidelity deferred to slice 2). Recommend **cookie-inject
+  for slice 1**, real form in slice 2.
+- **Trace capture**: playwright-go supports tracing; capture on failure only and
+  upload as a CI artifact (like the pprof captures in the nightly load tier).
