@@ -46,6 +46,17 @@ func extractShellFunction(t *testing.T, scriptPath, name string) string {
 	return ""
 }
 
+// runShellScript runs a fixed, test-authored bash script (never external or
+// user-supplied input) against envFile (passed in as $1) and fails the test
+// if it exits non-zero.
+func runShellScript(t *testing.T, script, envFile string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "install_script_env_put_test", envFile) // #nosec G204 -- fixed test script content, not external/user input
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("shell script failed: %v\n%s", err, out)
+	}
+}
+
 // TestInstallScript_EnvPut_ReplacesExistingValue proves that calling env_put
 // twice for the same variable REPLACES the value rather than appending a
 // second, duplicate "VAR=..." line. This is the documented contract ("set/
@@ -66,11 +77,7 @@ func TestInstallScript_EnvPut_ReplacesExistingValue(t *testing.T) {
 		`env_put CULVERT_MAINT_GID "1000" "$1"` + "\n" +
 		`env_put CULVERT_MAINT_GID "2000" "$1"` + "\n"
 
-	cmd := exec.Command("bash", "-c", script, "install_script_env_put_test", envFile)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("env_put script failed: %v\n%s", err, out)
-	}
+	runShellScript(t, script, envFile)
 
 	got, err := os.ReadFile(envFile)
 	if err != nil {
@@ -86,5 +93,38 @@ func TestInstallScript_EnvPut_ReplacesExistingValue(t *testing.T) {
 	}
 	if strings.Contains(content, "CULVERT_MAINT_GID=1000") {
 		t.Errorf(".env still contains the stale value CULVERT_MAINT_GID=1000 alongside the new one; .env content:\n%s", content)
+	}
+}
+
+// TestInstallScript_EnvPut_PreservesFileOnRealGrepFailure proves that a real
+// grep failure (exit code > 1 — e.g. an I/O error, not just "no lines
+// survived the filter") does NOT clobber the existing file with an
+// incomplete/empty temp file. Flagged in PR #530 review: treating every
+// non-zero grep exit as benign (as the first fix in this file did) would let
+// a genuine write error to $file.tmp silently promote an empty file over the
+// operator's real .env content.
+func TestInstallScript_EnvPut_PreservesFileOnRealGrepFailure(t *testing.T) {
+	fn := extractShellFunction(t, "scripts/install.sh", "env_put")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+
+	// 1) Seed the file normally (real grep). 2) Shadow `grep` with a shell
+	// function that simulates a real error (exit 2), then call env_put again.
+	script := fn + "\n" +
+		`env_put EXISTING_VAR original_value "$1"` + "\n" +
+		`grep() { return 2; }` + "\n" +
+		`env_put CULVERT_MAINT_GID new_value "$1"` + "\n"
+
+	runShellScript(t, script, envFile)
+
+	got, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", envFile, err)
+	}
+	content := string(got)
+
+	if !strings.Contains(content, "EXISTING_VAR=original_value") {
+		t.Errorf("a real grep failure while setting CULVERT_MAINT_GID lost the pre-existing EXISTING_VAR entry — the temp file must not be promoted over the original on a genuine error; .env content:\n%s", content)
 	}
 }
