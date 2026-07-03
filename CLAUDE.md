@@ -50,7 +50,7 @@ plugin.go     — Middleware plugin API
 logger.go     — Rotating file logger with JSON mode
 syslog.go     — Syslog SIEM forwarding (UDP/TCP, RFC 3164)
 config.go     — YAML + CLI flag configuration (goccy/go-yaml)
-pac.go        — PAC file generator
+pac.go        — PAC shim: handlers + routes over internal/pac (ADR-0002)
 hashcache.go  — SHA-256 scan result cache with TTL
 lockout.go    — Brute-force lockout (IP + user)
 totp.go       — TOTP 2FA (RFC 6238, inline stdlib HMAC-SHA1, no external dep)

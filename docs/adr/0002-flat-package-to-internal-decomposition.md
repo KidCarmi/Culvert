@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -625,6 +625,17 @@ tests that swapped those globals now inject the instance explicitly (`newEnabled
 `yaraRuleSetMatcher` toggle adapter, HTTP block helpers, the status map, and the singleton wiring
 (trimmed `security_scan.go`). Leaf proof: imports `clamav`+`hashcache`+`obs` (+`fileutil` transitive).
 See `docs/adr/0006-security-scanner-di.md` for the full decision record.
+
+### 2026-07-03 — `internal/pac` extracted (21st leaf)
+The PAC engine (`Config`/`Store` with Load/Get/Set persistence, `GeneratePAC`, the CIDR helpers) moved
+to `internal/pac`; the HTTP handlers (`apiPACConfig`, `servePACFile`), route registration, and the
+`pacStore` singleton stay in the trimmed `pac.go` shim. Design improvement folded in (lesson 3): the
+`pacDefaultProxyPort` package global became a Store field (`SetDefaultPort`/`DefaultPort`, set once by
+the startup slice), and the startup test's mutex/field pokes were replaced by store-owned
+`Snapshot`/`Restore` test support. `pac_test.go` moved wholesale (pure engine suite; the two
+fallback-port tests now set the per-store default instead of the global). The exclusions loop was
+extracted to a `writeExclusion` switch helper (nestif). Cluster PAC sync (`controlplane.go`) is
+untouched — it uses `pacStore.Get`/`Set` through the alias. Leaf proof: stdlib-only (no internal deps).
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
