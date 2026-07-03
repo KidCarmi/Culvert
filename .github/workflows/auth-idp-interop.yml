@@ -1,4 +1,9 @@
 name: Auth IdP Interop
+# Least-privilege default: jobs that need write scopes (packages, checks,
+# contents, security-events, pull-requests) declare them at job level.
+permissions:
+  contents: read
+
 
 on:
   workflow_dispatch:

@@ -22,7 +22,10 @@ name: Catalog E2E (real binary)
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # tags trigger removed (CI review P0-3): auto-tag only tags SHAs that
+    # already passed this workflow on the main push — the tag re-run was a
+    # full duplicate of the identical commit. Release evidence for tags
+    # remains via security-release-gate (tags) + ci.yml catalog gate.
   # Retirement step 3 (roadmap/CI-REDESIGN.md): PR-time runs are scoped to
   # the release-catalog trust chain this workflow exists to prove — these
   # globs deliberately match the Deep PR Gate's `release` filter.
@@ -30,7 +33,11 @@ on:
     branches: [main]
     paths:
       - "release_*.go"
-      - "internal/**"
+      # Non-Go trust material: the baked Sigstore root and the CI↔binary
+      # identity SSOT are release-trust inputs too (CI review P1-3).
+      - "trusted_root.json"
+      - "trusted_root.provenance.txt"
+      - "release_identity.env"
       - "test/e2e/**"
       - "Dockerfile"
       - "go.mod"
@@ -48,6 +55,7 @@ permissions:
 jobs:
   catalog-e2e:
     name: Catalog E2E (real VM)
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -126,6 +134,7 @@ jobs:
 
   catalog-e2e-docker:
     name: Catalog E2E (Docker image)
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

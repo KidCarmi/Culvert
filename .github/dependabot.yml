@@ -18,6 +18,26 @@ updates:
         patterns:
           - "google.golang.org/*"
 
+  # Nested module: the PRIVILEGED host-side maintenance agent (sudo boundary).
+  # Dependabot does not descend into nested modules — without this entry the
+  # agent never receives dependency-update PRs (CI review finding).
+  - package-ecosystem: gomod
+    directory: "/cmd/culvert-maint"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+
+  # Docker base images (Dockerfile, Dockerfile.updater) — trivy image scans
+  # gate on their CVEs; this makes the fix PRs arrive automatically instead
+  # of only the failures (CI review finding).
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+
   # GitHub Actions — keep workflow actions pinned to latest
   - package-ecosystem: github-actions
     directory: "/"

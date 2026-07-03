@@ -39,6 +39,11 @@
 ## ─────────────────────────────────────────────────────────────────────────────
 
 name: QA Gate
+# Least-privilege default: jobs that need write scopes (packages, checks,
+# contents, security-events, pull-requests) declare them at job level.
+permissions:
+  contents: read
+
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -47,7 +52,10 @@ env:
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # tags trigger removed (CI review P0-3): auto-tag only tags SHAs that
+    # already passed this workflow on the main push — the tag re-run was a
+    # full duplicate of the identical commit. Release evidence for tags
+    # remains via security-release-gate (tags) + ci.yml catalog gate.
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -62,6 +70,8 @@ jobs:
   # the committed source code is wrong — not infra, not the runner.
   qa-logic:
     name: "QA · Application logic (race + vet)"
+    # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates; full behavior retained on main pushes and tags. Dependent jobs cascade-skip; the aggregate below treats skipped as pass so the required-check name keeps reporting.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -89,12 +99,16 @@ jobs:
           # byte-for-byte reproducible. Any test reading TEST_SEED should feed
           # it to rand.New(rand.NewSource(...)).
           TEST_SEED: "20260421"
+        # pipefail is load-bearing: the default Actions shell does not set it,
+        # so without it this pipeline returns tee's always-zero status and the
+        # gate goes green on failing tests (P0, CI review). The former second
+        # -json run doubled the full -race suite inside the 25m job budget for
+        # a report nothing consumed — dropped; logic.log remains the artifact.
         run: |
+          set -o pipefail
           mkdir -p qa-reports
           go test -race -count=1 -timeout=15m -v ./... \
             2>&1 | tee qa-reports/logic.log
-          go test -race -count=1 -timeout=15m -json ./... \
-            > qa-reports/logic.json || true
 
       - name: Upload logic test reports
         if: always()
@@ -139,7 +153,18 @@ jobs:
           # sensitivity that is orthogonal to order-dependency — exactly
           # the failure-isolation principle this gate enforces (one job,
           # one layer, one failure class).
-          go test -count=2 -shuffle=on -timeout=20m ./...
+          set -o pipefail
+          go test -count=2 -shuffle=on -timeout=20m ./... 2>&1 | tee determinism.log \
+            || { grep -m1 -- "-test.shuffle " determinism.log || true; \
+                 echo "::error::determinism failure — reproduce with the printed -test.shuffle seed (log artifact: qa-determinism-log)"; exit 1; }
+
+      - name: Upload determinism log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qa-determinism-log
+          path: determinism.log
+          retention-days: 14
 
   # ─── C. Gate-critical coverage floor ───────────────────────────────────────
   # Coverage floor is enforced on the SECURITY-SENSITIVE surface specifically.
@@ -159,6 +184,8 @@ jobs:
           cache: true
 
       - name: Run tests with coverage
+        env:
+          TEST_SEED: "20260421"   # same seed as qa-logic — coverage %s must not wobble around the floors between reruns
         run: go test -count=1 -timeout=15m -coverprofile=coverage.out ./...
 
       - name: Enforce coverage floor on critical files
@@ -401,6 +428,8 @@ jobs:
   # before merge.
   qa-agent:
     name: "QA · Maintenance Agent (cmd/culvert-maint)"
+    # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates; full behavior retained on main pushes and tags. Dependent jobs cascade-skip; the aggregate below treats skipped as pass so the required-check name keeps reporting.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -454,7 +483,7 @@ jobs:
         # and does not descend into the nested module. Here we run it
         # explicitly inside cmd/culvert-maint with the same project config.
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.5.0/install.sh \
             | sh -s -- -b "$(go env GOPATH)/bin" v2.5.0
 
       - name: golangci-lint (agent module)
@@ -532,7 +561,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -547,6 +576,7 @@ jobs:
   qa-gate-approved:
     name: "✅ QA Gate — APPROVED"
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs:
       - qa-logic
       - qa-determinism
@@ -556,8 +586,35 @@ jobs:
       - qa-contract
       - qa-agent
       - qa-bench
+    # always() + skipped-as-pass: on PRs the QA jobs are skipped (superseded
+    # by the Fast/Deep PR Gates — retirement step 5) but this check name must
+    # keep reporting success so a branch-protection rule requiring it can
+    # never wedge a PR at "Expected". On main pushes/tags everything runs
+    # and failure/cancellation of any needed job fails the gate as before.
+    if: always()
     steps:
+      - name: Evaluate results (skipped = pass)
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS_JSON" | jq .
+          BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
+          if [ -n "$BAD" ]; then
+            echo "::error::failed jobs: $BAD"; exit 1
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            {
+              echo "## ✅ QA Gate — pass-through on PRs"
+              echo ""
+              echo "PR-time QA is enforced by the **Fast PR Gate** and **Deep PR Gate**"
+              echo "(roadmap/CI-REDESIGN.md, retirement step 5). This gate runs fully on"
+              echo "main pushes and release tags."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Summarise
+        if: github.event_name != 'pull_request'
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
           ## ✅ QA Gate Passed

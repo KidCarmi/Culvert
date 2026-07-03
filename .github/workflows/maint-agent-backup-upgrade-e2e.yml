@@ -22,9 +22,12 @@ name: Maintenance Agent Backup + Upgrade E2E
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # tags trigger removed (CI review P0-3): auto-tag only tags SHAs that
+    # already passed this workflow on the main push — the tag re-run was a
+    # full duplicate of the identical commit. Release evidence for tags
+    # remains via security-release-gate (tags) + ci.yml catalog gate.
   # Retirement step 2 (roadmap/CI-REDESIGN.md): off the every-PR path —
-  # nightly + main-push + tags carry the signal; maint-agent-update-e2e is
+  # nightly + main-push carry the signal; maint-agent-update-e2e is
   # the PR-time representative for the agent-driven flows.
   schedule:
     - cron: "20 2 * * *"   # 02:20 UTC nightly (staggered after install-lifecycle)
@@ -40,8 +43,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: maint-agent-backup-upgrade-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  # Scheduled runs get their own group: nightlies execute at github.ref =
+  # refs/heads/main, so sharing the push group meant a main push and the
+  # nightly could cancel each other (CI review P1-6).
+  group: maint-agent-backup-upgrade-e2e-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   contents: read

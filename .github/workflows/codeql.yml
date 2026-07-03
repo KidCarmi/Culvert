@@ -27,7 +27,7 @@ on:
       - "socks5.go"
       - "policy.go"
       - "store.go"
-      - "upstream.go"
+      - "upstream*.go"
       - "connlimit.go"
       - "main.go"
       - "auth*.go"
@@ -47,9 +47,12 @@ on:
       - "identity.go"
       - "enrollment.go"
       - "controlplane.go"
-      - "ui_rbac.go"
-      - "ui_session.go"
-      - "ui_auth.go"
+      - "ui_*.go"
+      - "update*.go"
+      - "backup*.go"
+      - "restore.go"
+      - "geoip.go"
+      - "events.go"
       - "release_*.go"
       - "internal/**"
       - ".github/workflows/codeql.yml"
@@ -69,6 +72,7 @@ concurrency:
 jobs:
   analyze:
     name: "SAST · CodeQL"
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
       contents: read

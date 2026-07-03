@@ -1,14 +1,44 @@
 # CI/CD Redesign — Lane Architecture & Retirement Checklist
 
-Status: **parallel phase — retirement steps 2, 3, 4 and the §3.9 docker-skip
-APPLIED** (2026-07-03). The heavy installer/maint e2e workflows are now
-nightly + path-filtered on PRs, catalog-e2e and CodeQL are PR-path-scoped,
-and the multi-arch QEMU image build no longer runs on PRs. Steps 1 and 5–8
-(branch-protection swap, retiring qa-gate, slimming security-gate/code-review,
-traffic-smoke promotion) remain OPEN — they require repo-admin access to
-branch protection and/or the flake-record window, and must happen
-**atomically** with branch-protection edits. This document is the authority
-for what supersedes what.
+Status: **retirement steps 2–4, §3.9 docker-skip, AND steps 5–7 in
+PASS-THROUGH MODE applied** (2026-07-03). The heavy installer/maint e2e
+workflows are nightly + path-filtered on PRs; catalog-e2e and CodeQL are
+PR-path-scoped; the QEMU image build no longer runs on PRs. Steps 5–7 were
+executed **required-check-safe**: `qa-gate.yml` and
+`security-release-gate.yml` keep their `pull_request` triggers and aggregate
+check names (`✅ QA Gate — APPROVED`, `✅ Security Gate — APPROVED`), but on
+PRs every heavy job skips and the aggregates (now `if: always()` +
+skipped-as-pass) report success with a "superseded by Fast/Deep PR Gate"
+summary — full behavior is unchanged on main pushes, tags, and the new
+weekly scan cron. `code-review.yml`'s coverage-delta and build jobs are
+deleted (tidy check moved into the Fast Gate's hygiene job).
+
+REMAINING (repo-admin only): **step 1** — in Settings → Branches, require
+`✅ Fast PR Gate — APPROVED` and `✅ Deep PR Gate — APPROVED`; once no rule
+requires the QA/Security aggregate names, the two pass-through workflows'
+`pull_request` triggers (and eventually the files' PR paths) can be dropped
+in a trivial follow-up. **Step 8** — promote traffic-smoke after its
+two-week flake-free window, then retire `proxy-pr-gate.yml`. This document
+is the authority for what supersedes what. **CI-review fix pass applied (2026-07-03,
+five-perspective agent review)**: P0s — qa-logic pipefail (main/tag QA gate
+could green on failing tests), docs-only classifier carve-out for the
+load-bearing SAML reference doc, auto-tag now waits for BOTH gate approvals
+on the SHA before tagging (mechanical release gating; tag-echo re-runs
+dropped from qa-gate/catalog/installer/maint workflows). Supply chain —
+top-level permissions on all workflows, Dependency-Obituary SHA-pinned,
+ref_name env-indirection, installer-script tag-pinned, dependabot covers
+cmd/culvert-maint + docker. Filters — admin-plane (ui_*.go), upstream*.go,
+update/backup/restore/geoip/events, .trivyignore, trust material
+(trusted_root.json, release_identity.env), deep-gate self-validation.
+Cost — ci.yml test/smoke PR-skip, proxy-pr-gate.yml deleted (triple
+duplicate), buildx cache main-scope fallback, fuzz Mon/Wed/Fri, conditional
+cancel-in-progress on ci.yml, nightly concurrency groups isolated.
+Reliability — deep-gate trivy DB mirror, TEST_SEED everywhere, determinism
+failure DX (seed + artifact), timeout-minutes on every job. DEFERRED to a
+follow-up: composite-action consolidation (classify-diff, needs-verdict,
+coverage-floor script — the load-bearing duplication), setup-go composite
+migration for the proxy-* nightly/weekly family, playwright browser cache,
+release-matrix consolidation.
 
 ## 1. Lane architecture
 

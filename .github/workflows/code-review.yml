@@ -4,10 +4,18 @@
 ## Runs on every Pull Request.  Provides inline review comments via reviewdog
 ## so developers see findings directly in the PR diff — not just in CI logs.
 ##
-## These checks are ADVISORY on feature branches and BLOCKING on PRs to main.
+## ADVISORY ONLY (retirement step 7): blocking lint lives in the Fast PR
+## Gate (--new-from-rev). This workflow exists for the inline-comment DX;
+## reviewdog also cannot post comments on fork PRs (read-only token), so it
+## must not be a hard gate.
 ## ─────────────────────────────────────────────────────────────────────────────
 
 name: Code Review
+# Least-privilege default: jobs that need write scopes (packages, checks,
+# contents, security-events, pull-requests) declare them at job level.
+permissions:
+  contents: read
+
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -25,6 +33,7 @@ jobs:
   # ─── 1. golangci-lint (comprehensive linter with inline PR comments) ────────
   lint:
     name: "Lint · golangci-lint"
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,11 +57,15 @@ jobs:
             --config=.golangci.yml
             --timeout=5m
           filter_mode: diff_context
-          fail_on_error: true
+          # Advisory: the blocking lint verdict is the Fast PR Gate's
+          # --new-from-rev run. fail_on_error:true here would also hard-fail
+          # fork PRs, where the read-only token can't post review comments.
+          fail_on_error: false
 
   # ─── 2. PR size gate ───────────────────────────────────────────────────────
   pr-size:
     name: "Review · PR size"
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -86,66 +99,15 @@ jobs:
           echo "::warning::This PR changes ${{ steps.diff.outputs.total }} lines of Go code."
           echo "Consider splitting it into smaller, focused PRs for easier review."
 
-  # ─── 3. Coverage delta — advisory, don't block merge ───────────────────────
-  # The absolute coverage threshold (≥60%) is enforced by the Security Gate's
-  # tests-race job. This delta check catches regressions but is non-blocking
-  # because checking out base branch code can fail when go.mod changes.
-  coverage-delta:
-    name: "Review · coverage delta"
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 15
-    permissions:
-      pull-requests: write
-
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version: "1.25"
-          cache: true
-
-      - name: Coverage on PR branch
-        run: |
-          go test -short -timeout=5m -coverprofile=pr.out ./...
-          PR_COV=$(go tool cover -func=pr.out | grep ^total | awk '{print $3}' | tr -d '%')
-          echo "pr_coverage=$PR_COV" >> $GITHUB_ENV
-
-      - name: Coverage on base branch
-        run: |
-          CURRENT_REF=$(git rev-parse HEAD)
-          git stash
-          git checkout ${{ github.event.pull_request.base.sha }} -- .
-          go test -short -timeout=5m -coverprofile=base.out ./... 2>/dev/null || true
-          BASE_COV=$(go tool cover -func=base.out 2>/dev/null | grep ^total | awk '{print $3}' | tr -d '%')
-          BASE_COV=${BASE_COV:-0}
-          echo "base_coverage=$BASE_COV" >> $GITHUB_ENV
-          git checkout $CURRENT_REF -- .
-
-      - name: Check coverage delta
-        run: |
-          DELTA=$(echo "$pr_coverage - $base_coverage" | bc)
-          echo "### Coverage Delta" >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | Coverage |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|----------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Base (${{ github.base_ref }}) | ${base_coverage}% |" >> $GITHUB_STEP_SUMMARY
-          echo "| PR    | ${pr_coverage}% |" >> $GITHUB_STEP_SUMMARY
-          echo "| Delta | ${DELTA}% |" >> $GITHUB_STEP_SUMMARY
-          if (( $(echo "$DELTA < -3" | bc -l) )); then
-            echo "::error::Coverage dropped by ${DELTA}% (base: ${base_coverage}%, PR: ${pr_coverage}%)"
-            echo "Test coverage must not decrease by more than 3 percentage points."
-            exit 1
-          fi
-          if (( $(echo "$DELTA < 0" | bc -l) )); then
-            echo "::warning::Coverage decreased slightly by ${DELTA}%"
-          fi
+  # ─── 3. Coverage delta — RETIRED (roadmap/CI-REDESIGN.md step 7) ───────────
+  # Superseded by the Fast PR Gate's single -race run, which enforces both the
+  # global 55% floor and the per-file security floors. The delta job ran the
+  # -short suite twice (PR + base) per PR for an advisory signal.
 
   # ─── 4. Conventional commits check ────────────────────────────────────────
   commits:
     name: "Review · commit messages"
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -172,41 +134,17 @@ jobs:
   # history scan). A PR-diff-only scan is strictly a subset — removed to
   # avoid duplicate CI minutes.
 
-  # ─── 5. Build verification ─────────────────────────────────────────────────
-  build:
-    name: "Review · build"
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version: "1.25"
-          cache: true
-
-      - name: Build
-        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o /dev/null .
-
-      - name: go mod tidy check
-        # Check-only by design. The previous auto-fix pushed bot commits to
-        # contributor branches with a contents:write token — a supply-chain
-        # foot-gun (and it could race the PR author). The failure message
-        # tells the author the exact command to run instead.
-        run: |
-          if go mod tidy -diff; then
-            echo "go.mod and go.sum are tidy ✓"
-          else
-            echo "::error::go.mod/go.sum are not tidy — run 'go mod tidy' locally and commit the result"
-            exit 1
-          fi
+  # ─── 5. Build verification — RETIRED (roadmap/CI-REDESIGN.md step 7) ───────
+  # Superseded by the Fast PR Gate's hygiene job, which builds the static
+  # binary (with ldd assert + arm64 compile check) and runs the same
+  # check-only `go mod tidy -diff`.
 
   # ─── Summary ───────────────────────────────────────────────────────────────
   review-summary:
     name: "✅ Code Review — Complete"
+    timeout-minutes: 5
     runs-on: ubuntu-latest
-    needs: [lint, pr-size, coverage-delta, build]
+    needs: [lint, pr-size]
     if: always()
     steps:
       - name: Summarise results
@@ -217,5 +155,6 @@ jobs:
           echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| golangci-lint | ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| PR size       | ${{ needs.pr-size.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Coverage delta| ${{ needs.coverage-delta.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Build check   | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Coverage delta and build verification moved to the Fast PR Gate" >> $GITHUB_STEP_SUMMARY
+          echo "(roadmap/CI-REDESIGN.md, retirement step 7)." >> $GITHUB_STEP_SUMMARY
