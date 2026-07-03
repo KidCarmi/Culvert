@@ -731,6 +731,51 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
 
+### 2026-07-03 — store.go decomposition program OPENED; Phase A (`blocklist`) DESIGNED
+`store.go` (2,324 lines) is five engines sharing a file: (1) uptime/stats/timeSeries hot-path
+counters, (2) the request-log ring + JSONL persistent log + read cache, (3) the audit ring +
+persistent log + DP→CP push queue, (4) the **Blocklist engine** (~830 lines), (5) the auth cache +
+`Config` (UI users/TOTP/`defaultAuthOutcome` — the frozen contract, stays). Phase A extracts the
+Blocklist; the ring/audit engines are later phases (their record* fan-out and DP-queue coupling
+need their own passes); the counters stay hot-path-local.
+
+**Phase A design — `internal/blocklist` (33rd), execute on next unit:**
+- **Shape:** `Blocklist` → `blocklist.Store` (main alias `Blocklist = blocklist.Store`,
+  `BlocklistEntry = blocklist.Entry`, `var bl = blocklist.New()`). `New()` returns the
+  initialized-maps zero state (mode default "block"). The ENTIRE method set moves verbatim:
+  mode (Mode/SetMode + sidecar), Load/Save (main file + .mode/.manual/.exceptions/.sources
+  sidecars, fsynced via fileutil.AtomicWrite), the O(labels) exact/wildcard matcher
+  (isListed/isExcepted/IsBlocked), Add/AddManual/AddManualBulk/Remove/ClearAll,
+  ReplaceFeedEntries, the exceptions API, List/ListWithSource/Count, the feed-attribution API
+  (SnapshotFeedSources/RestoreFeedSources/RemoveByFeedSource/CountByFeedSource/
+  RemoveUnattributedFeedEntries), MergeFromLines + normalizeBlocklistLine (exported as
+  `NormalizeLine`; hostsFileBoilerplate + looksLikeHostname move with it).
+- **Deps:** `hostutil.NormalizeHost` (already a main wrapper — engine calls the package
+  directly), `obs` (Printf/Sanitize; `logWarnf`→`obs.Warnf` under the accepted always-emit
+  precedent), `fileutil.AtomicWrite`. Pure leaf; no inversion seams needed.
+- **Hot path (the reason this is a design pass, not a casual slice):** `IsBlocked` is called from
+  `proxy.go` and `socks5.go` per request. It moves VERBATIM — same RWMutex, same map probes; the
+  package boundary adds nothing to the lock or allocation profile. Gate additions beyond the
+  standard set: `-race` over the proxy/socks5 test scope and the traffic-e2e smoke suite.
+- **Production construction sites: NONE beyond the singleton.** The CP snapshot apply already goes
+  through `ReplaceFeedEntries` + `Save` (the P3.4 fix removed the wholesale `bl = newBL`
+  construction), so no snapshot-constructor API is needed.
+- **Consumers** (all method calls through `bl`, alias-covered): ui_policy (16), ui_config (12),
+  configversion (9 — capture/apply, stays per the REJECTED verdict), controlplane (4),
+  blocklist_startup (3), main/proxy/socks5/metrics/otlp (1–2 each). `blocklist_feed.go`'s
+  blocklistfeed.Merger adapter is UNCHANGED in this slice (possible follow-up: blocklist.Store
+  satisfying the Merger directly, both being internal packages — do NOT fold into Phase A).
+- **Test surface (~20 files; the widest since ssrf):** engine suites move in-package
+  (blocklist_test.go's matcher/exception/normalize cases, blocklist_normalize_test.go — its two
+  `&Blocklist{...}` literals become `New()`+Load); integration tests stay in main on the alias,
+  with the `&Blocklist{...}` field literals in blocklist_apply_persist_test.go (×3) and
+  blocklist_feed_multi_test.go rebuilt on `New()` + `Load(tmpfile)` (both only seed maps + path —
+  Load from a written fixture reproduces the state through the public API). 15 direct field pokes
+  across main tests to rewire; count them at execution and prefer public-API rebuilds over new
+  test-support methods (add `SetPathForTest` ONLY if a fixture-file rebuild is genuinely awkward).
+- **Validation plan:** the standard full gate + `-race` on proxy/socks5/blocklist scopes +
+  `proxy_traffic_e2e` smoke + shuffled determinism on main + package.
+
 ## Engine-Extraction Wave COMPLETE (second wave) — 2026-07-03
 
 With `logstore` (32nd), the engine-extraction wave that followed the original leaf sweep is
