@@ -270,15 +270,30 @@ func (s *ContentScanner) Scan(data []byte) (string, bool) {
 // Returns false if the match does not complete in time (ReDoS prevention);
 // on timeout it fails closed (treats a timeout as a suspicious match).
 func MatchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
-	ch := make(chan bool, 1)
-	go func() {
-		ch <- re.Match(data)
-	}()
-	select {
-	case matched := <-ch:
-		return matched
-	case <-time.After(timeout):
+	matched, timedOut := runWithTimeout(func() bool { return re.Match(data) }, timeout)
+	if timedOut {
 		obs.Warnf("DPI: regex timeout after %s on pattern %q", timeout, obs.Sanitize(re.String()))
 		return true // S17: fail-closed — treat timeout as suspicious match (Zero Trust)
+	}
+	return matched
+}
+
+// runWithTimeout runs fn in a goroutine and returns (fn's result, false), or
+// (false, true) if fn does not finish within timeout. The result channel is
+// buffered so the goroutine never leaks on timeout.
+//
+// Extracted from MatchRegexWithTimeout so the timeout branch can be tested
+// DETERMINISTICALLY with a genuinely-blocking fn. The previous test raced Go's
+// (fast, RE2, non-backtracking) re.Match goroutine against a near-zero timer:
+// under -race both select cases could become ready at once, and Go picks a ready
+// case at random — a ~50% flake (observed in CI).
+func runWithTimeout(fn func() bool, timeout time.Duration) (result, timedOut bool) {
+	ch := make(chan bool, 1)
+	go func() { ch <- fn() }()
+	select {
+	case r := <-ch:
+		return r, false
+	case <-time.After(timeout):
+		return false, true
 	}
 }

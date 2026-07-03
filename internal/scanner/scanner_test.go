@@ -90,13 +90,35 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 }
 
 func TestMatchRegexWithTimeout_FailsClosed(t *testing.T) {
-	re := regexp.MustCompile(`^(a+)+$`) //nolint:gocritic // intentional pathological regex to exercise the timeout path
-	// Catastrophic backtracking input with a near-zero timeout → fail-closed.
-	if !MatchRegexWithTimeout(re, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"), time.Nanosecond) {
-		t.Error("a timed-out match must fail closed (return true)")
-	}
 	// A fast, non-matching pattern returns its real result.
 	if MatchRegexWithTimeout(regexp.MustCompile(`evil`), []byte("clean"), time.Second) {
 		t.Error("non-matching pattern should return false")
+	}
+	// A fast, matching pattern returns its real result.
+	if !MatchRegexWithTimeout(regexp.MustCompile(`evil`), []byte("this is evil"), time.Second) {
+		t.Error("matching pattern should return true")
+	}
+	// The fail-closed-on-timeout guarantee is exercised deterministically by
+	// TestRunWithTimeout below (a genuinely-blocking fn), rather than by racing a
+	// fast RE2 match against a near-zero timer.
+}
+
+// TestRunWithTimeout covers both branches of the timeout helper deterministically.
+func TestRunWithTimeout(t *testing.T) {
+	// Fast results pass through with timedOut=false.
+	if r, to := runWithTimeout(func() bool { return true }, time.Second); to || !r {
+		t.Errorf("fast true: got (result=%v, timedOut=%v), want (true, false)", r, to)
+	}
+	if r, to := runWithTimeout(func() bool { return false }, time.Second); to || r {
+		t.Errorf("fast false: got (result=%v, timedOut=%v), want (false, false)", r, to)
+	}
+
+	// A fn that blocks past the budget deterministically times out: it is parked
+	// on <-block (which is never sent to before the timer fires), so ONLY the
+	// timeout case can be selected — no race, unlike a fast regex.
+	block := make(chan struct{})
+	defer close(block)
+	if r, to := runWithTimeout(func() bool { <-block; return false }, 5*time.Millisecond); !to || r {
+		t.Errorf("blocked fn: got (result=%v, timedOut=%v), want (false, true) — must fail closed", r, to)
 	}
 }

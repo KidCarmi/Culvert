@@ -1,6 +1,6 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **slice 1 shipped** (RBAC nav gating). Companion to
+Status: **slices 1–16 shipped**. Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
@@ -49,6 +49,54 @@ zero-runtime-dependency, Go-first contract.
   discriminator, per the repo's audit-ring test guidance — never len() deltas,
   the ring is bounded at 500). Exercises auditEvent → in-memory ring →
   `/api/audit` → renderAuditLog.
+- **Slice 6 — policy-tester (simulator)** (`ui_policytester_e2e_test.go`). Dry-runs
+  the REAL policy engine via the tester panel (no traffic): a block rule the admin
+  defined is reported as a block (matching rule identified) and an allow rule as an
+  allow. Proves the simulator panel is wired to `/api/policy/test` → policyStore.
+- **Slice 7 — governance / control-plane panel** (`ui_governance_e2e_test.go`). The
+  admin-only C3 observability surface: asserts the panel renders the route
+  inventory ("routes total"), the C2 metadata-enforcement mode, and the C2 counters
+  (would_deny …) from `/api/governance/control-plane`, plus a backstop that a viewer
+  is denied the endpoint. The browser view of the C2/RBAC machinery.
+- **Slice 8 — blocklist cross-plane** (`ui_blocklist_e2e_test.go`). A host the admin
+  adds to the blocklist in the UI is blocked on the LIVE proxy (shared global
+  `bl`; the proxy's pre-policy `bl.IsBlocked` gate). Reachable → 200; after the UI
+  add → 403 and the backend is never reached. Exercises the legacy blocklist path,
+  which blocks before the policy engine.
+- **Slice 9 — header-rewrite cross-plane** (`ui_rewrite_e2e_test.go`). A request-
+  header "set" rule the admin adds in the UI is applied on the LIVE proxy (shared
+  global `rewriter`; `rewriter.ApplyRequest` before forwarding). A header-capturing
+  upstream sees no header at baseline, then the injected header after the UI add.
+- **Slice 10 — file-extension blocking cross-plane** (`ui_fileblock_e2e_test.go`). An
+  extension the admin blocks in the UI is enforced on the LIVE proxy (shared global
+  file blocker; `fileBlocker.CheckPath` in the pre-policy gate): a request for a
+  path with that extension reaches the backend at baseline, then is 403'd after the
+  UI add and never forwarded.
+- **Slice 11 — PAC served + previewed** (`ui_pac_e2e_test.go`). The dynamically
+  generated `/proxy.pac` (served UNAUTHENTICATED for browser auto-config) is a valid
+  PAC document (FindProxyForURL + PROXY, correct content-type), and the PAC panel
+  renders the same generated config in its preview.
+- **Slice 12 — diagnostics panel** (`ui_diagnostics_e2e_test.go`). Opening the panel
+  runs the built-in self-checks (`/api/diagnostics`) and renders an overall verdict
+  plus a per-check list — asserts both populate.
+- **Slice 13 — security-config panel** (`ui_security_e2e_test.go`). Renders the
+  proxy's protective config from `/api/security`: the per-IP rate-limit state
+  (Enabled/Disabled) and the source-IP filter management UI.
+- **Slice 14 — CA-management panel** (`ui_ca_e2e_test.go`). With a real root CA
+  installed (`setupInspectCA`), the panel is reachable and its endpoints answer
+  through the admin session: `/api/ca-cert` returns the live root's metadata
+  (issuer, fingerprint, validity) and `/api/ca/download` serves the PEM for
+  browser import — proving the surface is wired to the live CertManager.
+- **Slice 15 — self-update panel** (`ui_updates_e2e_test.go`). The panel is
+  reachable and `/api/update/status` (version + update availability) responds
+  through the admin's browser session.
+- **Slice 16 — config-versioning rollback, cross-plane** (`ui_configversion_e2e_test.go`).
+  The strongest governance assertion: a snapshot rolled back through the Settings
+  panel reverts the LIVE proxy plane. Baseline default-deny is snapshotted; a
+  UI-created `allow *` rule auto-snapshots (`policy.add`) and opens the plane
+  (200); the Config Versions list surfaces that snapshot; clicking Rollback +
+  confirming re-applies the baseline via `applyConfigBackup`, and the same request
+  is 403 again (deny→allow→deny, the last transition driven by a UI rollback).
 
 ### Dependency footprint (test-only)
 
