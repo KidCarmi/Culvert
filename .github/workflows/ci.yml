@@ -181,11 +181,24 @@ jobs:
       contents: read
       packages: write      # push to ghcr.io
       id-token: write      # cosign keyless image signing
+      actions: read        # require-gate.sh (tag-path guard)
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0   # full history needed for tag-based version computation
+
+      # Tag-path guard: on a v* tag this job builds, pushes, and cosign-signs
+      # ghcr images BEFORE the release job runs — so the gate check must sit
+      # here too, not only in release. Refuse unless the tagged commit was
+      # green on its main push (assert mode: the main run must already exist).
+      - name: Require gate approval on the tagged commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
+          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
 
       # ── Compute next semver on main push ──────────────────────────────────
       # GITHUB_TOKEN tag pushes (from auto-tag) can't trigger new workflows,
@@ -383,10 +396,20 @@ jobs:
     permissions:
       contents: write     # attach the signed catalog to the GitHub Release (tag path)
       id-token: write     # cosign keyless blob signing of index.json (tag path)
+      actions: read       # require-gate.sh (tag-path guard)
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0   # tag history for catalog_version
+      # Tag-path guard: this job keyless-signs the release catalog on a v*
+      # tag. Refuse unless the tagged commit was green on its main push.
+      - name: Require gate approval on the tagged commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
+          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
       - uses: ./.github/actions/setup-go-cache
       - name: Build catalog spec from the pushed digest
         id: spec
@@ -512,7 +535,7 @@ jobs:
 
     permissions:
       contents: write
-      checks: read   # poll the Security Gate conclusion before tagging
+      actions: read   # list-workflow-runs endpoint (require-gate.sh)
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -538,41 +561,17 @@ jobs:
           echo "next=$NEXT" >> $GITHUB_OUTPUT
           echo "Next version: $NEXT"
 
-      - name: Wait for Security Gate + QA Gate approval on this SHA
-        # The Security Release Gate runs in PARALLEL with this workflow on
-        # the same push, and branch protection cannot gate tag-triggered
-        # workflows — so before this comment was mechanical reality, a
-        # failing gosec/trivy/gitleaks did NOT stop the tag (and therefore
-        # the signed release) from publishing (P0, CI review). This step is
-        # the enforcement point: no tag until BOTH the Security Gate and the
-        # QA Gate conclude success for this exact commit. This also lets the
-        # QA/e2e workflows drop their tags: triggers — the tag SHA is by
-        # construction already fully validated on main.
+      - name: Require Security + QA gate approval on this SHA
+        # Gate the tag on the gate WORKFLOW FILES concluding success for this
+        # main-push commit — bound to the workflow path, not a spoofable
+        # check-run name (former hole A), and to main-push provenance so a
+        # tag re-run of the same SHA can't self-approve (former hole B).
+        # `wait`: the gates run in parallel with this job on the same push.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          for i in $(seq 1 60); do
-            RUNS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100")
-            SEC=$(echo "$RUNS" | jq -r '[.check_runs[] | select(.name == "✅ Security Gate — APPROVED")][0].conclusion // "pending"')
-            QA=$(echo "$RUNS" | jq -r '[.check_runs[] | select(.name == "✅ QA Gate — APPROVED")][0].conclusion // "pending"')
-            for PAIR in "Security Gate:$SEC" "QA Gate:$QA"; do
-              NAME="${PAIR%%:*}"; CONCLUSION="${PAIR##*:}"
-              case "$CONCLUSION" in
-                failure|cancelled|timed_out|action_required)
-                  echo "::error::$NAME concluded '$CONCLUSION' for ${GITHUB_SHA} — refusing to create a release tag"
-                  exit 1 ;;
-              esac
-            done
-            if [ "$SEC" = "success" ] && [ "$QA" = "success" ]; then
-              echo "Security Gate and QA Gate approved ${GITHUB_SHA} — proceeding to tag."
-              exit 0
-            fi
-            echo "Attempt $i/60: gates not concluded yet (security=$SEC qa=$QA); waiting 30s..."
-            sleep 30
-          done
-          echo "::error::Security Gate did not conclude within 30 minutes — refusing to create a release tag"
-          exit 1
+          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" wait
+          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" wait
 
       - name: Create and push tag
         run: |
@@ -590,15 +589,17 @@ jobs:
     # (branch protection cannot gate tag-triggered workflows — the wait step
     # in auto-tag is the mechanical enforcement point). catalog-pipeline is a
     # hard dependency so the release-blocking catalog gate (digest-match +
-    # verify) must also pass before any release asset is published. NOTE:
-    # manually-pushed tags bypass the auto-tag gate — push tags only for
-    # commits that are already green on main.
+    # verify) must also pass before any release asset is published. The
+    # "Require gate approval" step below is the in-repo backstop for
+    # manually-pushed tags (assert mode); the primary control for arbitrary
+    # tags is the v* tag ruleset (see roadmap/CI-REDESIGN.md).
     needs: [test, docker, catalog-pipeline]
     if: startsWith(github.ref, 'refs/tags/v')
 
     permissions:
       contents: write
       id-token: write   # required for cosign keyless signing and SLSA provenance
+      actions: read     # require-gate.sh (tag-path guard)
 
     strategy:
       matrix:
@@ -611,6 +612,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Tag-path guard (assert): refuse to build/sign release binaries unless
+      # the tagged commit was green on its main push. Defense-in-depth behind
+      # the docker/catalog-pipeline guards; F3 (tag ruleset) is the primary
+      # control for arbitrary-tree tags.
+      - name: Require gate approval on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
+          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
 
       - uses: ./.github/actions/setup-go-cache
 

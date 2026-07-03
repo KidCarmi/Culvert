@@ -152,6 +152,33 @@ Everything else — nightly stress/load/fuzz, weekly IdP interop, UI e2e,
 benchmarks, heavy installer e2e — is scheduled/advisory, and release-blocking
 only via the tag-path gates.
 
+### 5a. Release-gate integrity (PANW audit item 1 — REQUIRED admin step)
+
+The signing/publish jobs (`docker`, `catalog-pipeline`, `release`) and
+`auto-tag` gate on the gate **workflow files** concluding success for the
+commit on its main push, via `.github/scripts/require-gate.sh` (bound to the
+workflow path + main-push provenance — a spoofed check-run *name* or a
+tag-triggered re-run of the same SHA can no longer self-approve). This is the
+in-repo backstop.
+
+It is a BACKSTOP, not the primary control. On the tag path `require-gate.sh`
+is checked out from the **tagged tree**, so anyone able to push an arbitrary
+`v*` tag can also strip the guard. The primary control is a **repo ruleset
+that restricts `v*` tag creation to the `github-actions[bot]`** (i.e. only
+`auto-tag` may mint release tags; humans cannot push `v*` at all):
+
+> Settings → Rules → Rulesets → New tag ruleset → Target `v*` →
+> Restrict creations → Bypass list: `github-actions[bot]` only.
+
+Until that ruleset exists, a maintainer with push access can still hand-push a
+tag on a *reviewed, green* commit (the in-repo guard allows exactly that and
+refuses a non-green commit). Set the ruleset to close the arbitrary-tree class.
+
+**Deferred (same class, Phase 2):** on a *main* push the `docker` job publishes
++ cosign-signs `ghcr:latest` in parallel with the gate, with no gate
+dependency — a commit that later fails the gate has already shipped a signed
+`latest`. Fix by gating the main-push publish/sign the same way (wait mode).
+
 ## 6. Pinning policy
 
 GitHub Actions: full commit SHA + version comment (enforced convention).
