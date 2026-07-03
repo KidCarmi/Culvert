@@ -3,7 +3,7 @@ package main
 // Live-feed quick-win regression tests:
 //   - apiEvents must END the stream when the hub evicts it as a slow client
 //     (receiving from the closed channel used to busy-spin at 100% CPU).
-//   - apiEvents must reject new connections at the sseMaxClients cap.
+//   - apiEvents must reject new connections at the hub connection cap.
 //   - broadcast evictions are counted (culvert_sse_evictions_total).
 //   - /api/logs clamps the limit query parameter.
 //   - persistent request-log write failures and corrupt lines are counted.
@@ -45,12 +45,10 @@ func TestApiEvents_EvictedClientEndsStream(t *testing.T) {
 	defer cancel()
 
 	// Snapshot pre-existing hub clients so we only touch the one this test adds.
-	hub.mu.Lock()
-	before := make(map[chan []byte]struct{}, len(hub.clients))
-	for ch := range hub.clients {
+	before := make(map[chan []byte]struct{})
+	for _, ch := range hub.ClientsForTest() {
 		before[ch] = struct{}{}
 	}
-	hub.mu.Unlock()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -61,14 +59,12 @@ func TestApiEvents_EvictedClientEndsStream(t *testing.T) {
 	var target chan []byte
 	deadline := time.Now().Add(2 * time.Second)
 	for target == nil && time.Now().Before(deadline) {
-		hub.mu.Lock()
-		for ch := range hub.clients {
+		for _, ch := range hub.ClientsForTest() {
 			if _, ok := before[ch]; !ok {
 				target = ch
 				break
 			}
 		}
-		hub.mu.Unlock()
 		if target == nil {
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -77,11 +73,8 @@ func TestApiEvents_EvictedClientEndsStream(t *testing.T) {
 		t.Fatal("apiEvents never registered a channel with the hub")
 	}
 
-	// Simulate the hub evicting this client as too slow (broadcast's B21 path).
-	hub.mu.Lock()
-	close(target)
-	delete(hub.clients, target)
-	hub.mu.Unlock()
+	// Simulate the hub evicting this client as too slow (Broadcast's B21 path).
+	hub.EvictForTest(target)
 
 	select {
 	case <-done:
@@ -131,14 +124,14 @@ func TestApiEvents_WriteErrorEndsStream(t *testing.T) {
 func TestApiEvents_ClientCapRejects(t *testing.T) {
 	// Occupy one slot so the cap (set to current occupancy) is already full.
 	dummy := make(chan []byte, 1)
-	if !hub.register(dummy) {
+	if !hub.Register(dummy) {
 		t.Fatal("dummy register failed")
 	}
-	t.Cleanup(func() { hub.unregister(dummy) })
+	t.Cleanup(func() { hub.Unregister(dummy) })
 
-	oldMax := atomic.LoadInt64(&sseMaxClients)
-	atomic.StoreInt64(&sseMaxClients, int64(hub.ClientCount()))
-	t.Cleanup(func() { atomic.StoreInt64(&sseMaxClients, oldMax) })
+	oldMax := hub.MaxClients()
+	hub.SetMaxClients(int64(hub.ClientCount()))
+	t.Cleanup(func() { hub.SetMaxClients(oldMax) })
 
 	// Bounded context: if the cap fails to reject, the handler streams until
 	// the deadline instead of hanging the test forever.
@@ -153,21 +146,6 @@ func TestApiEvents_ClientCapRejects(t *testing.T) {
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("503 cap rejection should carry a Retry-After header")
-	}
-}
-
-func TestSSEHub_Broadcast_EvictionCounted(t *testing.T) {
-	h := &sseHub{clients: make(map[chan []byte]struct{})}
-	ch := make(chan []byte) // unbuffered — always "full", triggers eviction
-	h.register(ch)
-
-	before := atomic.LoadInt64(&statSSEEvicted)
-	h.broadcast([]byte("x"))
-	if got := atomic.LoadInt64(&statSSEEvicted); got != before+1 {
-		t.Errorf("statSSEEvicted = %d, want %d", got, before+1)
-	}
-	if h.ClientCount() != 0 {
-		t.Error("evicted client should be removed from the hub")
 	}
 }
 

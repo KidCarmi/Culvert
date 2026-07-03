@@ -56,7 +56,7 @@ lockout.go    — Brute-force lockout (IP + user)
 totp.go       — TOTP 2FA (RFC 6238, inline stdlib HMAC-SHA1, no external dep)
 tls.go        — UI-TLS shim: uiExtraSANs + wrapper over internal/uitls (ADR-0002)
 blockpage.go  — Block page HTML template
-events.go     — SSE event stream for live UI dashboard
+events.go     — SSE shim: broadcaster + apiEvents + /metrics exposition over internal/sse (ADR-0002; hub engine lives in the package)
 catdb.go      — URL category database
 configversion.go — Config versioning, snapshots, diff, rollback (50-version max)
 nodegroup.go  — Node group definitions with label selectors, priority-based matching

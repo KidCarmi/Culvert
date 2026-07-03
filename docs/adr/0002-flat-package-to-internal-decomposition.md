@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,20 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/sse` extracted (31st; second zero-dependency leaf)
+The SSE client hub moved out of `events.go`: `sse.Hub` owns registration under the connection cap,
+`Broadcast` with B21 slow-client eviction, and the observability counters. Deltas: the cap
+(`sseMaxClients` package var) and both counters (`statSSEEvicted`/`statSSERejected`) became
+**per-Hub** state — single production hub ⇒ identical behavior, and the cap accessor pair
+(`SetMaxClients`/`MaxClients`) is the seam the planned admin-configurable limit will use; `Rejected`
+stays handler-owned (`AddRejected` — the handler owns the 503, so it owns the count). main keeps the
+dashboard broadcaster (payload assembly reads main's stats globals), `apiEvents` (auth, framing,
+mid-stream revalidation), and the /metrics exposition (reads `Evicted()`/`Rejected()`). Test seams
+`ClientsForTest`/`EvictForTest` replaced the handler test's `hub.mu`/`hub.clients` whitebox pokes;
+the engine tests (coverage_test trio + eviction-counter) moved in-package (84% coverage) and the
+cap test now sets the per-hub cap instead of the atomic package var. Leaf proof: **zero Culvert
+imports** (second pure-stdlib leaf in a row).
 
 ### 2026-07-03 — `internal/bootstrap` extracted (30th; zero-dependency leaf)
 The one-click DP-node bootstrap generators moved to `internal/bootstrap`: the shell-script and
