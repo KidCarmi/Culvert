@@ -1,6 +1,6 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **slices 1–7 shipped**. Companion to
+Status: **slices 1–9 shipped**. Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
@@ -58,6 +58,15 @@ zero-runtime-dependency, Go-first contract.
   inventory ("routes total"), the C2 metadata-enforcement mode, and the C2 counters
   (would_deny …) from `/api/governance/control-plane`, plus a backstop that a viewer
   is denied the endpoint. The browser view of the C2/RBAC machinery.
+- **Slice 8 — blocklist cross-plane** (`ui_blocklist_e2e_test.go`). A host the admin
+  adds to the blocklist in the UI is blocked on the LIVE proxy (shared global
+  `bl`; the proxy's pre-policy `bl.IsBlocked` gate). Reachable → 200; after the UI
+  add → 403 and the backend is never reached. Exercises the legacy blocklist path,
+  which blocks before the policy engine.
+- **Slice 9 — header-rewrite cross-plane** (`ui_rewrite_e2e_test.go`). A request-
+  header "set" rule the admin adds in the UI is applied on the LIVE proxy (shared
+  global `rewriter`; `rewriter.ApplyRequest` before forwarding). A header-capturing
+  upstream sees no header at baseline, then the injected header after the UI add.
 
 ### Dependency footprint (test-only)
 

@@ -33,6 +33,8 @@ on:
       - "ui_audit_e2e_test.go"
       - "ui_policytester_e2e_test.go"
       - "ui_governance_e2e_test.go"
+      - "ui_blocklist_e2e_test.go"
+      - "ui_rewrite_e2e_test.go"
       - "ui_e2e_helpers_test.go"
       - ".github/workflows/proxy-ui-e2e.yml"
 
