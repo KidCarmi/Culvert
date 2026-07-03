@@ -1026,6 +1026,7 @@ tr.dragging  { opacity: .4; }
             <div style="background:var(--surface2);border-radius:8px;padding:12px">
               <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">ClamAV</div>
               <div id="sec-clamav-status" style="font-weight:600;font-size:.9rem">—</div>
+              <div id="sec-clamav-version" style="font-size:.7rem;color:var(--muted);margin-top:2px"></div>
               <div id="sec-clam-blocked" style="font-size:.75rem;color:var(--muted);margin-top:2px"></div>
             </div>
             <div style="background:var(--surface2);border-radius:8px;padding:12px">
@@ -5991,6 +5992,17 @@ async function loadSecScanStatus() {
       const ok = s.clamav_status === 'ok' || s.clamav_status === 'connected';
       clamEl.textContent  = s.clamav_status || '—';
       clamEl.style.color  = ok ? 'var(--green)' : (s.clamav_status === 'disabled' ? 'var(--muted)' : 'var(--red)');
+    }
+    const cvEl = document.getElementById('sec-clamav-version');
+    if (cvEl) {
+      const v = s.clamav_version;
+      if (v && v.engine) {
+        const defs = v.db_date ? ' · defs ' + escHtml(v.db_date) : (v.db_version ? ' · defs ' + escHtml(v.db_version) : '');
+        cvEl.innerHTML = escHtml(v.engine) + defs;
+        cvEl.title = v.raw || '';
+      } else {
+        cvEl.textContent = '';
+      }
     }
     const cb = document.getElementById('sec-clam-blocked');
     if (cb) cb.textContent = s.stat_clam_blocked ? s.stat_clam_blocked + ' blocked' : '';

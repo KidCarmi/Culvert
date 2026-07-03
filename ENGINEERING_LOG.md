@@ -5,6 +5,55 @@ Newest entry first.
 
 ---
 
+## 3. ClamAV engine + signature-database version surfaced to operators
+
+**What changed**
+Operators had no way to see the ClamAV engine version or how fresh the virus
+definitions are (roadmap-day2 Finding 4.3) — only a reachable/unreachable
+ping. Stale definitions are a silent security gap.
+
+- `clamav.Client.Version()` (internal/clamav): sends the CLAMD `VERSION`
+  command and parses the `ClamAV <engine>/<db-counter>/<db-date>` reply into
+  `{Engine, DBVersion, DBDate, Raw}`. Tolerant of engine-only and
+  engine+db-only replies.
+- `secscan.Scanner.ClamAVVersion()`: queries via an OPTIONAL capability
+  interface (`clamVersioner`, type-asserted) so existing test fakes are not
+  forced to implement it. Cached for 10 min (definitions change rarely;
+  errors cached only 30 s so a down daemon recovers quickly) and invalidated
+  on `Init`, mirroring the existing `ClamAVStatus` ping cache.
+- `/api/security-scan/status` gains a `clamav_version` object (local mode).
+- UI: the ClamAV card in the Scanning panel shows `engine · defs <date>`
+  under the status line, full reply on hover.
+
+**Why**
+AV currency is a first-order security signal. Surfacing engine + definition
+date lets an operator confirm freshclam is working without shelling into the
+container.
+
+**Risks**
+- One extra short-lived TCP connection to ClamAV per 10 min per admin poll
+  window (cached); negligible, and gated behind the same daemon the scanner
+  already uses.
+- `clamav_version` is absent from the status payload when ClamAV is disabled
+  or the daemon doesn't answer VERSION — the UI degrades to showing nothing,
+  never a stale value.
+
+**Validation**
+`go build`, full `go test .` + `internal/clamav` + `internal/secscan` green,
+race on both internal packages green, `--new-from-rev=main` lint 0 issues.
+9 new tests: VERSION reply parsing (full / engine-only / engine+db), a mock
+CLAMD daemon round-trip, connection-refused, and the secscan caching /
+capability-absent / disabled / error-not-cached contracts.
+
+**Remaining work / follow-ups**
+- Remote-scan-sidecar mode (`scan_svc_mode=remote`) does not surface the
+  sidecar's ClamAV version — the sidecar `Status()` map would need to include
+  it. Local mode only for now.
+- No active freshness ALERT yet (e.g. warn when `DBDate` is older than N
+  days); the data is now available for a future alerts rule.
+
+---
+
 ## 2. Raw-tunnel observability: WebSocket / CONNECT / SOCKS5 in the request log
 
 **What changed**

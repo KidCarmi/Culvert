@@ -220,7 +220,7 @@ func secScanStatusMap() map[string]interface{} {
 
 	feedTotal, feedLastSync, feedInterval := globalThreatFeed.Stats()
 	hits, misses, cacheSize := globalSecScanner.CacheStats()
-	return map[string]interface{}{
+	m := map[string]interface{}{
 		"enabled":               globalSecScanner.Enabled(),
 		"scan_svc_mode":         "local",
 		"clamav_status":         globalSecScanner.ClamAVStatus(),
@@ -246,4 +246,11 @@ func secScanStatusMap() map[string]interface{} {
 		"stat_scan_skipped":     counters.ScanSkipped,    // Tier 1.2
 		"stat_remote_scan_fail": counters.RemoteScanFail, // Tier 2.2
 	}
+	// ClamAV engine + signature-database version (Finding 4.3), so operators
+	// can see whether virus definitions are current. Absent when ClamAV is
+	// disabled or the daemon does not answer VERSION.
+	if v, ok := globalSecScanner.ClamAVVersion(); ok {
+		m["clamav_version"] = v
+	}
+	return m
 }

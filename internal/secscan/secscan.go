@@ -162,10 +162,28 @@ type Scanner struct {
 	// opening a fresh TCP connection to ClamAV on every status poll.
 	clamStatusVal    string
 	clamStatusExpiry time.Time
+
+	// ClamAV VERSION cache. Signature databases update at most a few times a
+	// day, so this is cached far longer than the ping status.
+	clamVerVal    clamav.Version
+	clamVerOK     bool
+	clamVerExpiry time.Time
 }
 
 // clamStatusTTL is how long a successful ClamAV ping result is considered fresh.
 const clamStatusTTL = 30 * time.Second
+
+// clamVersionTTL is how long a ClamAV VERSION reply is cached. Definitions
+// change a few times a day at most, so a 10-minute cache is plenty and keeps
+// the admin dashboard from opening a fresh connection on every poll.
+const clamVersionTTL = 10 * time.Minute
+
+// clamVersioner is the optional VERSION capability. *clamav.Client implements
+// it; test fakes need not, so it is type-asserted rather than folded into the
+// required ClamScanner interface.
+type clamVersioner interface {
+	Version() (clamav.Version, error)
+}
 
 // Deps carries the injectable collaborators for New. Nil collaborators behave
 // as absent (that engine/check is skipped), so partial injection is fine.
@@ -230,6 +248,10 @@ func (ss *Scanner) Init(clamAddr string, maxBytes int64, cache *hashcache.HashCa
 	// after reconfiguration runs a real ping.
 	ss.clamStatusVal = ""
 	ss.clamStatusExpiry = time.Time{}
+	// Same for the VERSION cache — a reconfigured daemon may report a
+	// different engine/signature set.
+	ss.clamVerOK = false
+	ss.clamVerExpiry = time.Time{}
 }
 
 // Enabled reports whether the scanner has been initialised.
@@ -283,6 +305,46 @@ func (ss *Scanner) ClamAVStatus() string {
 	ss.clamStatusExpiry = time.Now().Add(clamStatusTTL)
 	ss.mu.Unlock()
 	return val
+}
+
+// ClamAVVersion returns the ClamAV engine + signature database version, so
+// operators can see whether virus definitions are current. Returns ok=false
+// when ClamAV is disabled, the client does not support VERSION, or the daemon
+// is unreachable. Cached for clamVersionTTL (definitions change rarely) and
+// invalidated on Init, mirroring ClamAVStatus.
+func (ss *Scanner) ClamAVVersion() (clamav.Version, bool) {
+	ss.mu.RLock()
+	clam := ss.clam
+	if clam == nil {
+		ss.mu.RUnlock()
+		return clamav.Version{}, false
+	}
+	if ss.clamVerOK && time.Now().Before(ss.clamVerExpiry) {
+		v := ss.clamVerVal
+		ss.mu.RUnlock()
+		return v, true
+	}
+	ss.mu.RUnlock()
+
+	versioner, ok := clam.(clamVersioner)
+	if !ok {
+		return clamav.Version{}, false
+	}
+	// Query outside any lock, then cache. On error, cache a short-lived "not
+	// available" so a down daemon isn't hammered on every poll.
+	v, err := versioner.Version()
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if err != nil {
+		obs.Printf("SecurityScan: ClamAV VERSION query failed: %v", err)
+		ss.clamVerOK = false
+		ss.clamVerExpiry = time.Now().Add(clamStatusTTL) // retry sooner than a good result
+		return clamav.Version{}, false
+	}
+	ss.clamVerVal = v
+	ss.clamVerOK = true
+	ss.clamVerExpiry = time.Now().Add(clamVersionTTL)
+	return v, true
 }
 
 // ── URL / domain checks ───────────────────────────────────────────────────────
