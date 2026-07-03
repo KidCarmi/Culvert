@@ -28,7 +28,7 @@ func TestExtractToken(t *testing.T) {
 }
 
 func TestBaseURL(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "https://cp.example.com:9090/test", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://cp.example.com:9090/test", http.NoBody)
 	req.Host = "cp.example.com:9090"
 	got := BaseURL(req, false)
 	if got != "https://cp.example.com:9090" {
@@ -37,7 +37,7 @@ func TestBaseURL(t *testing.T) {
 }
 
 func TestBaseURL_XForwarded(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "http://cp.internal/test", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://cp.internal/test", http.NoBody)
 	req.Host = "cp.example.com"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	req.Header.Set("X-Forwarded-Host", "proxy.example.com")
@@ -48,7 +48,7 @@ func TestBaseURL_XForwarded(t *testing.T) {
 }
 
 func TestBaseURL_XForwardedIgnoredByDefault(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "http://cp.internal/test", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://cp.internal/test", http.NoBody)
 	req.Host = "cp.example.com"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	req.Header.Set("X-Forwarded-Host", "proxy.example.com")
@@ -60,7 +60,7 @@ func TestBaseURL_XForwardedIgnoredByDefault(t *testing.T) {
 }
 
 func TestBaseURL_PlainHTTP(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "http://cp.internal/test", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://cp.internal/test", http.NoBody)
 	req.Host = "cp.internal:9090"
 	req.Header.Set("X-Forwarded-Proto", "http")
 	got := BaseURL(req, true)
@@ -88,7 +88,7 @@ func TestEnrollmentAddr(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "https://"+tt.host+"/bootstrap", http.NoBody)
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+tt.host+"/bootstrap", http.NoBody)
 			req.Host = tt.host
 			if tt.fwdHost != "" {
 				req.Header.Set("X-Forwarded-Host", tt.fwdHost)
