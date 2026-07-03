@@ -50,7 +50,12 @@ func uiE2EBrowser(t *testing.T) playwright.Browser {
 
 	launch := playwright.BrowserTypeLaunchOptions{
 		Headless: playwright.Bool(true),
-		Args:     []string{"--no-sandbox"}, // required in the CI/sandbox container
+		// --no-sandbox: required in the CI/sandbox container.
+		// --no-proxy-server: the environment may set HTTP(S)_PROXY, which Chromium
+		// otherwise honors — tunneling even loopback requests through an agent
+		// proxy that cannot reach the in-process httptest server (the long-lived
+		// SSE stream fails with ERR_TUNNEL_CONNECTION_FAILED). Force direct.
+		Args: []string{"--no-sandbox", "--no-proxy-server"},
 	}
 	if exe := chromiumExecutable(); exe != "" {
 		launch.ExecutablePath = playwright.String(exe)
@@ -121,6 +126,30 @@ func seedUIRoster(t *testing.T, adminUser, viewerUser, pass string) {
 	})
 }
 
+// chartStubScript defines a no-op Chart.js so the SPA's on-load init does not
+// abort at initChart(). The real dashboard loads Chart.js from a CDN that is
+// unreachable in the hermetic test; without this stub initChart() throws
+// "Chart is not defined", aborting the synchronous init block BEFORE
+// connectSSE()/startTick() run — which the live-SSE test depends on. Charts
+// themselves are out of scope for these tests.
+const chartStubScript = `
+window.Chart = function(){
+  this.data = {labels: [], datasets: [{data: []},{data: []},{data: []}]};
+  this.options = {}; this.config = {};
+  this.update = function(){}; this.destroy = function(){}; this.resize = function(){};
+};
+window.Chart.register = function(){};
+window.Chart.defaults = {plugins:{}, scales:{}};
+`
+
+// injectChartStub installs the Chart stub before any page script runs.
+func injectChartStub(t *testing.T, ctx playwright.BrowserContext) {
+	t.Helper()
+	if err := ctx.AddInitScript(playwright.Script{Content: playwright.String(chartStubScript)}); err != nil {
+		t.Fatalf("add chart stub init script: %v", err)
+	}
+}
+
 // newUIPage opens a fresh browser context + page and navigates to base, waiting
 // for network idle so the SPA's on-load /api/auth/status fetch has completed.
 // The context is closed on cleanup.
@@ -131,11 +160,12 @@ func newUIPage(t *testing.T, browser playwright.Browser, base string) (playwrigh
 		t.Fatalf("new context: %v", err)
 	}
 	t.Cleanup(func() { _ = ctx.Close() })
+	injectChartStub(t, ctx)
 	page, err := ctx.NewPage()
 	if err != nil {
 		t.Fatalf("new page: %v", err)
 	}
-	if _, err := page.Goto(base+"/", playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateNetworkidle}); err != nil {
+	if _, err := page.Goto(base+"/", playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateLoad}); err != nil {
 		t.Fatalf("goto %s: %v", base, err)
 	}
 	return ctx, page
@@ -151,6 +181,7 @@ func newAuthedUIPage(t *testing.T, browser playwright.Browser, base, user string
 		t.Fatalf("new context: %v", err)
 	}
 	t.Cleanup(func() { _ = ctx.Close() })
+	injectChartStub(t, ctx)
 	if err := ctx.AddCookies([]playwright.OptionalCookie{{
 		Name:  uiSessionCookieName,
 		Value: mintUISessionValue(t, user, role),
@@ -162,7 +193,7 @@ func newAuthedUIPage(t *testing.T, browser playwright.Browser, base, user string
 	if err != nil {
 		t.Fatalf("new page: %v", err)
 	}
-	if _, err := page.Goto(base+"/", playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateNetworkidle}); err != nil {
+	if _, err := page.Goto(base+"/", playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateLoad}); err != nil {
 		t.Fatalf("goto %s: %v", base, err)
 	}
 	return ctx, page

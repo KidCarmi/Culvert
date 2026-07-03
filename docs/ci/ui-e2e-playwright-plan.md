@@ -29,6 +29,18 @@ zero-runtime-dependency, Go-first contract.
   Note: the SPA's post-submit table refresh races the panel-open fetch at
   test speed (a real user's panel-open fetch has long completed before they
   submit), so the test re-opens the panel for a deterministic single fetch.
+- **Slice 4 — live SSE dashboard** (`ui_events_e2e_test.go`). Proves the real-time
+  telemetry path: the dashboard's EventSource → `/api/events` → SPA stat tile.
+  Boots UI + a real proxy + the 1s SSE broadcaster; a block-all policy makes each
+  proxied request bump `statBlocked`; the test snapshots the rendered "blocked"
+  tile, sends N blocked requests, and asserts the tile climbs by ≥N via a live SSE
+  frame (no reload). Three environment findings baked into the harness (see
+  `ui_e2e_helpers_test.go`): (a) Chromium honors the ambient `HTTP(S)_PROXY`, so
+  the browser is launched `--no-proxy-server` to reach the loopback server;
+  (b) the SPA loads Chart.js from a CDN unreachable in the hermetic test — a
+  no-op `Chart` stub is injected so the on-load init reaches `connectSSE()`
+  instead of throwing; (c) the persistent SSE connection means `networkidle`
+  never fires, so page loads wait for `load` and rely on the retrying assertions.
 
 ### Dependency footprint (test-only)
 
