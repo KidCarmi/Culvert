@@ -44,7 +44,7 @@ connlimit.go  — Per-IP connection limiting and X-Request-ID generation
 alerts.go     — Webhook alerting for security events (HMAC-SHA256 signed)
 threatfeed.go — Threat intelligence feed integration (URLhaus, OpenPhish), domain allowlist for hosting platforms
 feedsync.go   — UT1 URL category database syncer
-blocklist_feed.go — Blocklist URL feed syncer
+blocklist_feed.go — Blocklist-feed shim: aliases over internal/blocklistfeed (ADR-0002; Merger iface + ssrf seam)
 rewrite.go    — HTTP header rewrite rules (per-host, wildcard)
 plugin.go     — Plugin shim: aliases over internal/plugin (ADR-0002)
 logger.go     — Rotating file logger with JSON mode

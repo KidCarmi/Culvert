@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -687,6 +687,22 @@ retargeted onto the DialContext var. **CodeQL contract note:** main call sites s
 gate on this commit is the empirical verdict, and the follow-on `internal/blocklistfeed` extraction
 waits for it. Package suite: 96% coverage (CIDR table incl. the IPv4-mapped-IPv6 case, cached verdicts,
 Control fail-closed cases, cache cleanup).
+
+### 2026-07-03 — `internal/blocklistfeed` extracted (25th leaf; the two-seam candidate)
+The remote blocklist syncer moved to `internal/blocklistfeed` — the extraction ADR-0002 had deferred
+pending TWO seams, both now in place. (1) The `Blocklist` hub coupling is inverted to a `Merger`
+interface (`MergeFromLines`) that `*Blocklist` satisfies — the hub stays in main, the engine depends
+only on the narrow contract. (2) The SSRF guard is the `internal/ssrf` seam (built in the prior
+commit): `fetchFeedLines`/`feedCheckRedirect` call `ssrf.PrivateHost` + `ssrf.SafeDialContext`
+inline — the same defense, now importable. main keeps the `blFeedSyncer` singleton (main.go), the
+`newBlocklistSyncer` constructor + `blFeedDefaultInterval` alias, and the admin API handler
+(ui_policy.go). **Test-seam consequence, recorded as a lesson:** the engine now calls the ssrf seam
+directly instead of the swappable main-package `ssrfSafeDialContext` var, so two integration tests
+that swapped that var broke — the loopback-allow helper was retargeted onto `ssrf.AllowLoopbackForTest()`
+(drops loopback from the guard table, covering BOTH the host check and the connect-time control), the
+redirect-block test now targets a non-loopback private IP (10.0.0.1, still caught), and the
+dialer-wiring test became a direct `feedCheckRedirect` unit test in the package. Package suite (fake
+Merger + httptest): 70% coverage. Leaf proof: imports `obs` + `ssrf` only.
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
