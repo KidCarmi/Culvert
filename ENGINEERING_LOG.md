@@ -5,6 +5,70 @@ Newest entry first.
 
 ---
 
+## 2. Raw-tunnel observability: WebSocket / CONNECT / SOCKS5 in the request log
+
+**What changed**
+Raw relays (WebSocket upgrades, CONNECT bypass tunnels, SOCKS5) emitted only
+`logger.Printf` system lines — no `LogEntry` ever reached the Live Feed, JSONL
+export, syslog SIEM, or history store, and their relayed bytes never fed the
+global byte counters (only SSL-inspected bodies did). roadmap-day2 Finding
+11.1.
+
+- New `TUNNEL_CLOSED` request-log status (INFO level): a per-connection
+  accounting entry written when a raw relay drains, carrying both byte
+  directions, a new `DurationMs` field (connection lifetime), the matched
+  rule, and the authenticated identity.
+- `recordTunnelClose` (store.go) adds the relayed bytes to
+  `statBytesSent`/`statBytesRecv` and persists the entry through the existing
+  `persistLogEntry` fan-out (ring + JSONL + syslog + history). Log-only: the
+  connection was already stats-counted at allow time, so the fan-out does not
+  double-count. `recordTunnelCloseGated` applies the per-rule "log traffic
+  off" gate, mirroring the OK-entry gate.
+- Both raw relays now count bytes per direction. Extracted a shared
+  `relayCounted` / `bidiRelayCounted` helper — dedups the previously
+  copy-pasted two-goroutine bridge in `handleWebSocket` and
+  `handleTunnelBypass` (B2 CloseWrite EOF semantics preserved).
+- `handleWebSocket` now calls `scrubForwardedHeaders` before forwarding —
+  closing a real leak: it re-writes the client request to the target via
+  `r.Write`, so a client-supplied (or internally-set) `X-User-Identity`
+  previously reached WS upstreams. Now stripped like every other forward path.
+- UI: new `TUNNEL` badge, byte↑↓ + duration subline in the log row, and a
+  "Tunnel Closed" status-filter option (`static/index.html`).
+
+**Why**
+WebSocket and tunneled traffic is a large, previously-invisible slice of what
+the proxy carries. Incident investigation, per-connection byte accounting, and
+SIEM export now cover it. The identity-header leak fix is a defense-in-depth
+bonus surfaced while wiring identity into the accounting entry.
+
+**Risks**
+- One extra request-log entry per raw connection (at close). Volume is bounded
+  by the per-rule "log traffic" gate; INFO-level so it lands in the LOW
+  storage-priority tier that the history-store janitor evicts first.
+- `LogEntry`/`Entry` gained `DurationMs` (omitempty) — wire-compatible; absent
+  on every non-tunnel entry.
+- Byte counts are best-effort: `io.Copy(Buffer)` returns the bytes copied
+  before any relay error, which is the correct accounting value.
+
+**Validation**
+`go build`, `go vet`, full `go test .` (47s) + all `internal/...` green, race
+suite on the relay paths green, `--new-from-rev=main` golangci-lint 0 issues,
+`-count=2 -shuffle=on` on the touched surface green. 6 new tests
+(`proxy_tunnel_accounting_test.go`) driving REAL WS + CONNECT traffic through
+the real proxy listener and asserting the `TUNNEL_CLOSED` entry, plus the
+log-traffic gate and global-counter contracts.
+
+**Remaining work / follow-ups**
+- SSL-inspected CONNECT tunnels already log per-inner-request; they do not get
+  a `TUNNEL_CLOSED` summary (their bytes are counted per inner request). Could
+  add a tunnel-lifetime summary for symmetry if desired.
+- SOCKS5 identity is always empty (the SOCKS5 path has no auth-identity plumb);
+  the accounting entry reflects that. Wiring SOCKS5 auth identity is separate.
+- A cluster-wide request-log aggregation RPC (Finding 7.2) would let these
+  entries roll up to the Control Plane; still per-node today.
+
+---
+
 ## 1. Upstream pool durability: GUI/API changes survive restart
 
 **What changed**

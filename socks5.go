@@ -284,10 +284,18 @@ func handleSOCKS5(conn net.Conn) {
 	recordRequest(clientIP, "SOCKS5", host, "OK", "", "", "", "")
 	logger.Printf("SOCKS5 OK %s -> %s", clientIP, target)
 
+	start := time.Now()
+	// Byte counts: each direction is written by exactly one goroutine before
+	// its done-send and read only after both receives (channel happens-before).
+	var toDest, toClient int64
 	done := make(chan struct{}, 2)
-	relay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} } //nolint:errcheck
-	go relay(destConn, conn)
-	go relay(conn, destConn)
+	relay := func(dst, src net.Conn, count *int64) {
+		n, _ := io.Copy(dst, src) //nolint:errcheck // relay copy error is expected on peer close; byte count still valid
+		*count = n
+		done <- struct{}{}
+	}
+	go relay(destConn, conn, &toDest)
+	go relay(conn, destConn, &toClient)
 	<-done
 	// Unblock the peer goroutine by closing write halves so io.Copy returns.
 	if tc, ok := destConn.(interface{ CloseWrite() error }); ok {
@@ -297,6 +305,10 @@ func handleSOCKS5(conn net.Conn) {
 		tc.CloseWrite() //nolint:errcheck
 	}
 	<-done
+
+	// Per-connection accounting entry (bytes + lifetime). Log-only: the OK
+	// entry above already ran the stats fan-out for this connection.
+	recordTunnelClose(clientIP, "SOCKS5", host, "", "", toDest, toClient, start, "")
 }
 
 // socks5Reply sends a minimal SOCKS5 reply (IPv4 bind address 0.0.0.0:0).

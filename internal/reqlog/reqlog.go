@@ -93,7 +93,7 @@ func SetHistory(fn func(Entry)) { history = fn }
 // failures and anything unexpected).
 func LevelForStatus(status string) string {
 	switch status {
-	case "OK", "POLICY_ALLOW":
+	case "OK", "POLICY_ALLOW", "TUNNEL_CLOSED":
 		return "INFO"
 	case "BLOCKED", "THREAT_BLOCKED", "FILE_BLOCKED", "SCAN_BLOCKED",
 		"DPI_BLOCKED", "POLYGLOT_BLOCKED", "CDR_BLOCKED", "CDR_SANITIZED",

@@ -710,7 +710,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodConnect:
 		handleTunnel(w, r, sslAction, tlsSkipVerify, match, proxyID)
 	case isWebSocketUpgrade(r):
-		handleWebSocket(w, r)
+		handleWebSocket(w, r, match, proxyID)
 	default:
 		handleHTTP(w, r)
 	}
@@ -1148,22 +1148,26 @@ func isWebSocketUpgrade(r *http.Request) bool {
 
 // handleWebSocket proxies a plain-HTTP WebSocket upgrade by dialling the
 // target host directly, forwarding the original HTTP request (including
-// Upgrade headers), then bridging the raw TCP streams.
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+// Upgrade headers), then bridging the raw TCP streams. match/id carry the
+// policy decision and authenticated identity for the close accounting entry.
+// dialWebSocketUpstream applies the two-layer SSRF guard (DNS-layer
+// isPrivateHost + connect-layer ssrfControl via ssrfSafeDialContext) and dials
+// the WebSocket target, normalising a bare host to :80. On failure it writes
+// the terminal error response and returns ok=false. Extracted from
+// handleWebSocket to keep it under the funlen cap.
+func dialWebSocketUpstream(w http.ResponseWriter, r *http.Request) (net.Conn, bool) {
 	host := r.Host
 	if !strings.Contains(host, ":") {
 		host += ":80"
 	}
-
 	if err := isPrivateHost(host); err != nil {
 		logger.Printf("WS SSRF block %q: %v", sanitizeLog(host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
+		return nil, false
 	}
 	// ssrfSafeDialContext applies ssrfControl on every resolved address,
-	// matching every other outbound dial in the codebase (the previous inline
-	// dialer used the same Control hook). isPrivateHost above is the DNS-layer
-	// guard; this is the connect-layer guard — defense in depth.
+	// matching every other outbound dial in the codebase. isPrivateHost above is
+	// the DNS-layer guard; this is the connect-layer guard — defense in depth.
 	destConn, err := ssrfSafeDialContext(r.Context(), "tcp", host)
 	if err != nil {
 		logger.Printf("WS dial error %q: %v", sanitizeLog(host), err)
@@ -1171,9 +1175,27 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			go fireAlert("dns_failure", AlertPayload{Host: host, Detail: err.Error(), Source: "proxy"})
 		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return nil, false
+	}
+	return destConn, true
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity) {
+	host := r.Host
+	if !strings.Contains(host, ":") {
+		host += ":80"
+	}
+
+	destConn, ok := dialWebSocketUpstream(w, r)
+	if !ok {
 		return
 	}
 	defer destConn.Close()
+
+	// Sanitise before forwarding, exactly like handleHTTP/inspect: strips the
+	// internal X-User-Identity (it previously leaked to WS targets) and
+	// private X-Forwarded-For/X-Real-IP hops. Upgrade/Connection are untouched.
+	scrubForwardedHeaders(r)
 
 	// Forward the original request to the target (preserve Upgrade headers).
 	r.RequestURI = r.URL.RequestURI()
@@ -1230,28 +1252,46 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Printf("WS: tunnel established %q", sanitizeLog(host))
+	start := time.Now()
 
-	// Bridge: drain any buffered bytes from the target first.
-	// B2: Each relay closes its own dst write half after copy completes.
-	done := make(chan struct{}, 2)
-	relayWS := func(dst net.Conn, src io.Reader) {
-		bp := getRelayBuf()
-		io.CopyBuffer(dst, src, *bp) //nolint:errcheck
-		relayBufPool.Put(bp)
-		if tc, ok := dst.(interface{ CloseWrite() error }); ok {
-			tc.CloseWrite() //nolint:errcheck
-		}
-		done <- struct{}{}
+	// Bridge both directions. client → target reads via clientBuf.Reader, NOT
+	// the raw clientConn: the HTTP server may have buffered client bytes (frames
+	// pipelined right after the Upgrade request) into the hijacked reader;
+	// relaying the raw conn would strand them and the target would block. Same
+	// class of bug as the CONNECT bypass path.
+	toClient, toDest := bidiRelayCounted(clientConn, br, destConn, clientBuf.Reader)
+
+	// Per-connection accounting entry (bytes + lifetime).
+	recordTunnelCloseGated(match, id, "WS", r.Host, toDest, toClient, start, "")
+}
+
+// relayCounted copies src→dst through a pooled relay buffer, adds the bytes
+// copied to *count, closes dst's write half so the peer sees EOF (B2 — without
+// interfering with the other direction's in-flight writes), and signals done.
+// Shared by the WebSocket and CONNECT-bypass raw relays.
+func relayCounted(dst net.Conn, src io.Reader, count *int64, done chan<- struct{}) {
+	bp := getRelayBuf()
+	n, _ := io.CopyBuffer(dst, src, *bp) //nolint:errcheck // relay copy error is expected on peer close; byte count still valid
+	relayBufPool.Put(bp)
+	*count += n
+	if tc, ok := dst.(interface{ CloseWrite() error }); ok {
+		tc.CloseWrite() //nolint:errcheck // best-effort EOF signal; peer may already be gone
 	}
-	go relayWS(clientConn, br) // target → client (br may have buffered bytes)
-	// client → target: read via clientBuf.Reader, NOT the raw clientConn. The
-	// HTTP server may have buffered client bytes (frames a client pipelines right
-	// after the Upgrade request) into the hijacked reader; relaying the raw conn
-	// would strand them and the target would block waiting. Same class of bug as
-	// the CONNECT bypass path.
-	go relayWS(destConn, clientBuf.Reader)
+	done <- struct{}{}
+}
+
+// bidiRelayCounted runs two relayCounted goroutines (aDst←aSrc and bDst←bSrc)
+// and waits for both to drain, returning the bytes copied into aDst and bDst
+// respectively. Each direction's count is written by exactly one goroutine
+// before its done-send and read only after both receives (channel
+// happens-before), so no atomics are needed.
+func bidiRelayCounted(aDst net.Conn, aSrc io.Reader, bDst net.Conn, bSrc io.Reader) (aBytes, bBytes int64) {
+	done := make(chan struct{}, 2)
+	go relayCounted(aDst, aSrc, &aBytes, done)
+	go relayCounted(bDst, bSrc, &bBytes, done)
 	<-done
 	<-done
+	return aBytes, bBytes
 }
 
 // readerConn wraps a net.Conn with a bufio.Reader so that bytes already peeked
@@ -1295,7 +1335,7 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, t
 	if sslAction == SSLInspect && certMgr.Ready() {
 		handleTunnelInspect(w, r, tlsSkipVerify, match, id)
 	} else {
-		handleTunnelBypass(w, r)
+		handleTunnelBypass(w, r, match, id)
 	}
 }
 
@@ -1321,7 +1361,9 @@ func applyUpstreamProxy() {
 }
 
 // handleTunnelBypass is the original transparent TCP tunnel (Bypass mode).
-func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
+// match/id carry the policy decision and authenticated identity for the
+// close accounting entry.
+func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity) {
 	if err := isPrivateHost(r.Host); err != nil {
 		logger.Printf("CONNECT SSRF block %q: %v", sanitizeLog(r.Host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
@@ -1368,35 +1410,30 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
+	start := time.Now()
+	var toDest, toClient int64
+
 	// Drain bytes the HTTP server already buffered from the client during request
 	// parsing; without this they are lost and the upstream blocks forever.
 	if clientBuf != nil {
 		if n := clientBuf.Reader.Buffered(); n > 0 {
-			if _, err := io.CopyN(destConn, clientBuf.Reader, int64(n)); err != nil {
+			flushed, err := io.CopyN(destConn, clientBuf.Reader, int64(n))
+			toDest += flushed
+			if err != nil {
 				logger.Printf("CONNECT prebuffer flush error %q: %v", sanitizeLog(r.Host), err)
 				return
 			}
 		}
 	}
 
-	done := make(chan struct{}, 2)
-	// B2: Each relay closes its own dst write half after copy completes,
-	// signaling EOF to the remote peer without interfering with the other
-	// relay's writes. This prevents the race where CloseWrite on one
-	// connection kills an in-flight write from the other direction.
-	relay := func(dst, src net.Conn) {
-		bp := getRelayBuf()
-		io.CopyBuffer(dst, src, *bp) //nolint:errcheck
-		relayBufPool.Put(bp)
-		if tc, ok := dst.(interface{ CloseWrite() error }); ok {
-			tc.CloseWrite() //nolint:errcheck
-		}
-		done <- struct{}{}
-	}
-	go relay(destConn, clientConn)
-	go relay(clientConn, destConn)
-	<-done
-	<-done
+	// Bridge both directions. toDest already carries any prebuffer bytes
+	// flushed above; bidiRelayCounted's relayCounted adds (+=) to it.
+	dOut, cOut := bidiRelayCounted(destConn, clientConn, clientConn, destConn)
+	toDest += dOut
+	toClient += cOut
+
+	// Per-connection accounting entry (bytes + lifetime).
+	recordTunnelCloseGated(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass")
 }
 
 // handleTunnelInspect performs SSL inspection (MITM) for CONNECT tunnels.

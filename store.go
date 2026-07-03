@@ -1001,7 +1001,7 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 // captured request URL (host+path, no query) or "" when not logged.
 func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
 	recordStats(ip, host, status, ruleMatched, actionTaken)
-	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, uri, auth)
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, 0, sslAction, uri, auth)
 }
 
 // recordRequestLogOnly writes a request-log entry WITHOUT the stats/alert/
@@ -1010,13 +1010,44 @@ func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, ident
 // allow path, so counting each inner request again would inflate statTotal
 // (a CONNECT carrying N requests would count as 1+N).
 func recordRequestLogOnly(ip, method, host, status, ruleMatched, actionTaken, identity, sslAction, uri string, auth AuthLogFields) {
-	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, sslAction, uri, auth)
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, 0, sslAction, uri, auth)
+}
+
+// recordTunnelClose writes the per-connection accounting entry emitted when a
+// raw relay (CONNECT bypass, WebSocket, SOCKS5) finishes: byte counts in both
+// directions plus the connection lifetime. Log-only — the tunnel was already
+// counted by the allow path when it was established, so running the stats
+// fan-out again would double-count statTotal/topHosts. The relayed bytes DO
+// feed the global byte counters: raw tunnels are the dominant traffic class
+// and were previously invisible in the bytes dashboard (only SSL-inspected
+// bodies were counted).
+func recordTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	atomic.AddInt64(&statBytesSent, bytesSent)
+	atomic.AddInt64(&statBytesRecv, bytesRecv)
+	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, "", identity,
+		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{})
+}
+
+// recordTunnelCloseGated is the raw-relay call-site helper: it applies the
+// per-rule "log traffic" gate (mirroring the OK entry recorded at allow time —
+// LogTraffic=false means no feed entry for this connection either), extracts
+// the matched rule name, and records the accounting entry. A nil match (no
+// rule matched, default-allow) always logs.
+func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	if match != nil && !ruleLogsTraffic(match.Rule) {
+		return
+	}
+	ruleName := ""
+	if match != nil && match.Rule != nil {
+		ruleName = match.Rule.Name
+	}
+	recordTunnelClose(id.ClientIP, method, host, id.Identity, ruleName, bytesSent, bytesRecv, start, sslAction)
 }
 
 // persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,
-// history store, and syslog — the logging half shared by recordRequestFull and
-// recordRequestLogOnly.
-func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
+// history store, and syslog — the logging half shared by recordRequestFull,
+// recordRequestLogOnly, and recordTunnelClose.
+func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv, durationMs int64, sslAction, uri string, auth AuthLogFields) {
 	entry := LogEntry{
 		TS:          time.Now().UnixMilli(),
 		Time:        time.Now().Format("15:04:05"),
@@ -1031,6 +1062,7 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 		ActionTaken: actionTaken,
 		BytesSent:   bytesSent,
 		BytesRecv:   bytesRecv,
+		DurationMs:  durationMs,
 		SSLAction:   sslAction,
 	}
 	auth.applyTo(&entry)

@@ -146,7 +146,8 @@ fully on main pushes (and the Security gate on tags + weekly cron).
 - **SSL inspect**: MITM via on-the-fly leaf certs signed by internal CA (ECDSA P-256)
 - **Cert cache**: LRU eviction at 10k entries, 1h TTL
 - **Hop-by-hop**: Dynamic stripping per RFC 7230 (parses Connection header for additional hop-by-hop names)
-- **Relay pattern**: All tunnel relays (CONNECT, WebSocket, SOCKS5) wait for BOTH goroutines; CloseWrite unblocks peers
+- **Relay pattern**: All tunnel relays (CONNECT, WebSocket, SOCKS5) wait for BOTH goroutines; CloseWrite unblocks peers. Shared `relayCounted`/`bidiRelayCounted` (proxy.go) do the byte-counted bridge for the WS + CONNECT-bypass paths.
+- **Raw-tunnel accounting**: WebSocket, CONNECT-bypass, and SOCKS5 relays emit a `TUNNEL_CLOSED` request-log entry (INFO level) at close via `recordTunnelClose`/`recordTunnelCloseGated` (store.go) — per-connection `BytesSent`/`BytesRecv` + `DurationMs` (new `Entry` field), matched rule, and identity. Log-only (the connection was stats-counted at allow time) but the relayed bytes DO feed `statBytesSent`/`statBytesRecv` (raw tunnels were previously invisible in the bytes dashboard). Gated by the per-rule "log traffic" flag like the OK entry. `handleWebSocket` also runs `scrubForwardedHeaders` before forwarding (it re-writes the request via `r.Write`, so `X-User-Identity` must be stripped like every other forward path).
 - **GeoIP policy**: Fails closed on cache miss (unknown country = rule does not match)
 - **Admin RBAC**: Three roles — admin (full), operator (write), viewer (read-only)
 - **Session**: HMAC-SHA256 signed cookies with configurable TTL (default 8h); dynamic Secure flag based on TLS state
