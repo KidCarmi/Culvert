@@ -21,6 +21,40 @@ func TestIPFilter_ModeOff(t *testing.T) {
 	}
 }
 
+// TestIPFilter_SetModeInvalidFailsClosed pins the fail-closed contract: an
+// unrecognized non-empty mode (a corrupt persisted/snapshot value reaching
+// SetMode through config reload / admin_settings restore / config-version
+// rollback / cluster ConfigSnapshot) must NOT be stored raw. Allowed() treats
+// an unknown mode as "allow all" (filter disabled), so storing garbage would
+// silently fail OPEN. SetMode coerces it to the restrictive "block" instead.
+func TestIPFilter_SetModeInvalidFailsClosed(t *testing.T) {
+	for _, bad := range []string{"deny", "blockk", "ALLOW", "off", "enabled", "x"} {
+		f := freshIPF()
+		f.SetMode(bad)
+		if got := f.Mode(); got != "block" {
+			t.Errorf("SetMode(%q): Mode() = %q, want coercion to block (fail closed)", bad, got)
+		}
+		// With an IP added, the coerced block mode must actually filter it —
+		// proving the filter is NOT silently disabled.
+		f.Add("203.0.113.9") //nolint:errcheck // valid IP literal, Add cannot fail here
+		if f.Allowed("203.0.113.9") {
+			t.Errorf("SetMode(%q): listed IP allowed — filter failed OPEN instead of blocking", bad)
+		}
+	}
+}
+
+// TestIPFilter_SetModeValidPassThrough pins that the coercion only touches
+// invalid modes: the two valid modes and the disabled sentinel are unchanged.
+func TestIPFilter_SetModeValidPassThrough(t *testing.T) {
+	for _, ok := range []string{"allow", "block", ""} {
+		f := freshIPF()
+		f.SetMode(ok)
+		if got := f.Mode(); got != ok {
+			t.Errorf("SetMode(%q): Mode() = %q, want unchanged", ok, got)
+		}
+	}
+}
+
 func TestIPFilter_AllowMode(t *testing.T) {
 	f := freshIPF()
 	f.SetMode("allow")

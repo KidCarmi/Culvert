@@ -5,6 +5,53 @@ Newest entry first.
 
 ---
 
+## 4. IP filter fails closed on a corrupt mode (was: silent fail-open)
+
+**What changed**
+`IPFilter.SetMode` stored any string verbatim, and `IPFilter.Allowed()` treats
+an unrecognized mode as "allow all" (filter disabled). The validated admin API
+rejects bad modes, but SIX persistence/snapshot callers pass the value raw:
+config reload (main.go), `admin_settings.json` restore, config-version
+rollback (`applyConfigBackup`), cluster `ConfigSnapshot` apply
+(controlplane.go), and connlimit startup. A corrupt or hand-edited persisted
+value therefore silently disabled IP filtering — a fail-OPEN security
+regression, flagged only as a dry-run warning that the apply path ignored.
+
+- `SetMode` now coerces an unrecognized non-empty mode to the restrictive
+  `"block"` (fail closed). The `""` disabled sentinel and the two valid modes
+  pass through unchanged, so the validated API path is unaffected.
+
+**Why**
+Defense-in-depth at the root cause: every unvalidated persistence/snapshot
+path becomes fail-closed instead of fail-open, without touching the six call
+sites individually. A restrictive (over-block) failure is the correct security
+default over a silent filter-disable.
+
+**Risks**
+- Extremely low. Only affects inputs that are already invalid (not "",
+  "allow", or "block"). One existing test used `"deny"` as a placeholder mode
+  and asserted it round-tripped through a cluster snapshot; updated to the
+  valid `"block"` (its round-trip intent is preserved — it was never testing
+  invalid-mode handling).
+
+**Validation**
+`go build`, full `go test .` (47s) green, race on the IPFilter / config-version
+/ cluster-snapshot paths green, `--new-from-rev=main` lint 0 issues. 2 new
+tests: invalid modes coerce to block AND actually filter (proving not
+fail-open); valid modes + "" pass through unchanged.
+
+**Remaining work / follow-ups**
+- `applyConfigBackup` still applies a config-version snapshot even when
+  pre-flight `validateConfigBackup` returns warnings (the non-dry-run path
+  reports them but proceeds). Most flagged values are now coerced safely
+  (blocklist mode → block, default action → deny, IP filter mode → block,
+  negative rate limit → skipped), so no unsafe state results, but making the
+  apply reject hard-invalid snapshots (vs. only warning) is a reasonable
+  follow-up. Logged, not addressed here (behavior change to a heavily-speced
+  subsystem).
+
+---
+
 ## 3. ClamAV engine + signature-database version surfaced to operators
 
 **What changed**

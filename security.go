@@ -55,7 +55,18 @@ type IPFilter struct {
 
 var ipf = &IPFilter{single: map[string]bool{}}
 
+// SetMode sets the IP-filter mode. Valid values are "allow" (allowlist),
+// "block" (blocklist), and "" (disabled). An unrecognized non-empty mode is
+// coerced to the restrictive "block" rather than stored raw: Allowed() treats
+// any unknown mode as "allow all" (filter disabled), so a corrupt persisted or
+// snapshotted value — config reload, admin_settings restore, config-version
+// rollback, cluster ConfigSnapshot — would otherwise silently FAIL OPEN and
+// disable IP filtering. The validated admin API path passes valid modes
+// through unchanged; only garbage is coerced. Fail closed on corruption.
 func (f *IPFilter) SetMode(mode string) {
+	if mode != "" && mode != "allow" && mode != "block" {
+		mode = "block"
+	}
 	f.mu.Lock()
 	f.mode = mode
 	f.mu.Unlock()
