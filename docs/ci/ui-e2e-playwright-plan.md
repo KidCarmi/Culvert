@@ -1,9 +1,30 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **proposal** (no code/dependency landed yet). Companion to
+Status: **slice 1 shipped** (RBAC nav gating). Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
+
+## Shipped
+
+- **Slice 1 — UI RBAC nav gating** (`ui_rbac_e2e_test.go`, `ui_e2e_helpers_test.go`,
+  build tag `uie2e`; advisory workflow `.github/workflows/proxy-ui-e2e.yml`).
+  Extracted `newAdminUIHandler()` from `newAdminUIServer` (ui.go) so the REAL
+  middleware chain mounts under `httptest.NewServer`. Verifies: admin sees
+  `users`/`governance` panels + dashboard; viewer has admin/operator nav hidden
+  but keeps the read-only dashboard; and a viewer's forced POST to
+  `/api/auth/users` is 403'd server-side (the C2 backstop), with no user created.
+
+### Dependency footprint (test-only)
+
+`go.mod` gains `playwright-community/playwright-go` + 3 small indirect deps
+(`golang-set/v2`, `go-jose/v3`, `go-stack`). All are compiled **only** under
+`-tags uie2e`, so they never enter the default `go test ./...` gate or the
+shipped binary. `go mod tidy` retains them (it evaluates custom build tags).
+If tighter supply-chain isolation is wanted later, the harness can move to a
+nested module that drives the shipped binary over a socket instead of importing
+`package main` — noted as a hardening follow-up, not required for the advisory
+tier.
 
 ## 1. Why — the gap
 
