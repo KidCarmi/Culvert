@@ -719,6 +719,22 @@ lastSync/totalDomains field pokes became `SeedStats` test support (lesson 3). Th
 `catdb_feedsync_test.go` engine suite moved in-package (84% coverage); `feedUserAgent` stays owned by
 `threatfeed.go` with the package keeping its own copy of the value. Leaf proof: `catdb`+`obs` only.
 
+### 2026-07-03 — `saas_feed.go` mapped; extraction DESIGNED, deliberately checkpointed
+The next unit is fully mapped and the design decided — recorded here so a fresh session (or the
+post-#529 branch) executes it without re-discovery. `internal/saasfeed` needs FIVE seams, the widest
+so far: (1) the `catStore` merge inverted to an injected `merge func([]Category) int` closure —
+`CategoryStore`/`CategoryEntry` live in policy.go (core hub), so the package defines its own
+`Category{name,hosts}` wire type (JSON-compatible; `builtIn` ignored) and main's closure keeps the
+GetByName/Set/AddHost/Save additive-merge logic + the added>0 Save; (2) a lifecycle-context provider
+injected via Deps — `Configure` currently parents the sync loop on main's `resolveLifecycleCtx()`
+(P6.1 UC-3 contract, do not lose the Done()-channel semantics); (3) the client injected (the
+singleton builds it with `ssrf.SafeDialContext`); (4) the SaaS sync-failure counter package-owned
+(`SyncFailures()`, read by urlcat_metrics.go — the feedsync pattern); (5) test-construction support:
+seven `&SaaSFeedSyncer{...}` field literals across saas_feed_test.go (engine tests move in-package
+with a fake merge), saas_feed_lifecycle_test.go (stays in main — drives globals; needs Deps-based
+construction), and urlcat_metrics_test.go (needs `SeedStats`, per feedsync).
+`TestCategoryStore_GetByName` in saas_feed_test.go is a policy.go test and stays in main.
+
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
 The leaf-first extraction phase of ADR-0002 is **complete**. A final size-ordered sweep of every
