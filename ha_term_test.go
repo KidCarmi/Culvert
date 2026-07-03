@@ -24,7 +24,7 @@ func TestHA_Term_Lifecycle(t *testing.T) {
 	tempHADir(t)
 
 	h := &HAState{}
-	h.EnableAsLeader("cp1:50051", false)
+	_, _ = h.EnableAsLeader("cp1:50051", false)
 	if got := h.Status().Term; got != 1 {
 		t.Fatalf("EnableAsLeader term = %d, want 1", got)
 	}

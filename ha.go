@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/halease"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
@@ -70,6 +71,14 @@ type HAState struct {
 	// runs at most once whether triggered by the sync loop, a manual API call,
 	// or a planned handoff.
 	promoted atomic.Bool
+
+	// ── Fencing lease (ADR-0005 S2; nil provider = legacy manual mode) ──
+	lease            halease.Provider
+	leaseCandidateID string
+	leaseEpoch       int64         // epoch of our current grant; 0 = not held
+	leaseConfirmedAt time.Time     // local time of the last backend-CONFIRMED grant/renew
+	leaseValidFor    time.Duration // validity the backend confirmed at leaseConfirmedAt
+	leaseStopCh      chan struct{} // keepalive loop stop; nil = not running
 }
 
 // promoteContext holds the parameters StartAsStandby threads into the sync loop,
@@ -193,16 +202,26 @@ func (h *HAState) VerifyToken(token string) bool {
 // leader loss (default OFF — see ADR-0004); the leader stores the preference so
 // the standby deploy command carries it. Returns the generated token for
 // inclusion in the standby deploy command.
-func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) string {
+func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, error) {
+	// ADR-0005 S2: even HA genesis must hold the fence when a lease backend
+	// is configured — otherwise the first leader never acquires, never
+	// keepalives, and has no write authority. No-op in legacy mode.
+	if !h.acquireLeaseForLeadership("ha enable") {
+		return "", fmt.Errorf("fencing lease not acquired — cannot enable HA leadership (see logs)")
+	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.role = "leader"
 	h.peerAddr = peerAddr
 	h.since = time.Now()
 	h.autoFailover = autoFailover
-	h.term = 1 // first leadership epoch (ADR-0004 Slice 1c)
+	if h.lease != nil {
+		h.term = termFromEpoch(h.leaseEpoch) // term collapses into the fencing epoch (ADR-0005 Finding 6)
+	} else {
+		h.term = 1 // first leadership epoch (ADR-0004 Slice 1c)
+	}
 	h.token = generateHAToken()
 	h.stopCh = make(chan struct{})
+	token, term := h.token, h.term
 
 	// Persist HA config so leader restarts know HA is enabled.
 	_ = saveHAConfig(&haConfig{
@@ -213,9 +232,11 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) string {
 		AutoFailover: autoFailover,
 		Term:         h.term,
 	})
+	h.mu.Unlock()
+	h.startLeaseKeepalive()
 
-	logger.Printf("HA: enabled as leader (peer=%q, auto_failover=%v, term=%d)", sanitizeLog(peerAddr), autoFailover, h.term)
-	return h.token
+	logger.Printf("HA: enabled as leader (peer=%q, auto_failover=%v, term=%d)", sanitizeLog(peerAddr), autoFailover, term)
+	return token, nil
 }
 
 // ResumeAsLeader restores leader state from a persisted haConfig on restart
@@ -223,16 +244,36 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) string {
 // new promotion. Replaces the previous EnableAsLeader-then-patch-token dance in
 // main.go so the persisted term/token survive a restart intact (ADR-0004).
 func (h *HAState) ResumeAsLeader(cfg *haConfig) {
+	// ADR-0005 S2: a restarting leader's old lease expired during the
+	// restart, so it must re-acquire. Granted ⇒ normal leadership (epoch,
+	// keepalive). Denied or unknown ⇒ it resumes the ROLE (ADR-0004 restart
+	// semantics) but with NO write authority (WriteAllowed()==false,
+	// fail-closed) and a CRITICAL alert — S4 replaces this stance with
+	// proper demote + resync from the recorded standby address.
+	leaseGranted := h.acquireLeaseForLeadership("leader resume")
 	h.mu.Lock()
 	h.role = "leader"
 	h.peerAddr = cfg.PeerAddr
 	h.token = cfg.Token
 	h.autoFailover = cfg.AutoFailover
 	h.term = cfg.Term
+	if h.lease != nil && leaseGranted {
+		h.term = termFromEpoch(h.leaseEpoch) // term collapses into the fencing epoch (ADR-0005 Finding 6)
+	}
 	h.standbyAddr = cfg.StandbyAddr // restore failback target across restart (ADR-0005 S0)
 	h.since = time.Now()
 	h.stopCh = make(chan struct{})
+	leaseConfigured := h.lease != nil
 	h.mu.Unlock()
+	if leaseConfigured && !leaseGranted {
+		logger.Printf("HA: CRITICAL — resumed leader role WITHOUT the fencing lease; write authority is OFF until an operator acts (ADR-0005 S2)")
+		go alerts.Fire("ha_resume_unfenced", alerts.Payload{
+			Event:  "ha_resume_unfenced",
+			Detail: "leader restarted but could not acquire the fencing lease; serving read-only (no write authority)",
+			Source: "ha",
+		})
+	}
+	h.startLeaseKeepalive()
 	// Re-persist the SAME values (idempotent; keeps the file canonical).
 	_ = saveHAConfig(cfg)
 }
@@ -531,6 +572,16 @@ func (h *HAState) promote(reason string) {
 		return
 	}
 
+	// ADR-0005 S2: every path to leadership goes through the fence. Denied
+	// or transport-unknown ⇒ no promotion. A grant whose onPromote then
+	// fails leaves an unkept lease that simply expires after its TTL
+	// (bounded stall; the S1 Provider deliberately has no Release).
+	if !h.acquireLeaseForLeadership(reason) {
+		h.promoted.Store(false)
+		logger.Printf("HA: promote (%s) blocked by the fencing lease — staying as standby", sanitizeLog(reason))
+		return
+	}
+
 	logger.Printf("HA: promoting to leader (%s)", reason)
 	if err := pc.onPromote(); err != nil {
 		h.promoted.Store(false) // allow a later retry
@@ -541,7 +592,11 @@ func (h *HAState) promote(reason string) {
 	h.mu.Lock()
 	h.role = "leader"
 	h.since = time.Now()
-	h.term++ // new leadership epoch (ADR-0004 Slice 1c)
+	if h.lease != nil {
+		h.term = termFromEpoch(h.leaseEpoch) // term collapses into the fencing epoch (ADR-0005 Finding 6)
+	} else {
+		h.term++ // new leadership epoch (ADR-0004 Slice 1c)
+	}
 	cfg := &haConfig{
 		Enabled:      true,
 		Token:        h.token,
@@ -562,6 +617,7 @@ func (h *HAState) promote(reason string) {
 	// spinning against the old leader. Idempotent with the auto-failover path,
 	// which also exits the loop after promote returns.
 	h.Stop()
+	h.startLeaseKeepalive() // after Stop(): Stop halts the keepalive too
 
 	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
 }
@@ -590,7 +646,7 @@ func (h *HAState) PromoteManually() error {
 	return nil
 }
 
-// Stop terminates the sync loop.
+// Stop terminates the sync loop and the lease keepalive loop.
 func (h *HAState) Stop() {
 	h.mu.Lock()
 	if h.stopCh != nil {
@@ -598,6 +654,7 @@ func (h *HAState) Stop() {
 		h.stopCh = nil
 	}
 	h.mu.Unlock()
+	h.stopLeaseKeepalive()
 }
 
 // ── HA Config Persistence ───────────────────────────────────────────────────
@@ -698,23 +755,27 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	if status.Role == "leader" {
 		// ADR-0004 Slice 1c: surface term + write_authority + auto_failover so an
 		// external monitor scraping BOTH CPs can DETECT split-brain (two nodes
-		// reporting role=leader, comparable by term). write_authority is the
-		// honest Slice-1 value (role==leader); the failover-mechanism slice will
-		// gate it on quorum.
+		// reporting role=leader, comparable by term). ADR-0005 S2: in lease mode
+		// write_authority is gated on the fencing lease (WriteAllowed) and the
+		// epoch + lease_valid fields are surfaced; legacy mode keeps the honest
+		// role-based value (WriteAllowed is true with no provider).
 		resp := map[string]any{
 			"status": "ok", "role": "leader", "leader": true, "since": status.Since,
-			"term": status.Term, "write_authority": true, "auto_failover": status.AutoFailover,
+			"term": status.Term, "write_authority": globalHA.WriteAllowed(), "auto_failover": status.AutoFailover,
 		}
+		addLeaseHealth(resp, globalHA)
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
-	resp, _ := json.Marshal(map[string]any{
+	standbyResp := map[string]any{
 		"status": "standby", "role": "standby", "leader": false,
 		"term": status.Term, "write_authority": false, "auto_failover": status.AutoFailover,
-	})
+	}
+	addLeaseHealth(standbyResp, globalHA)
+	resp, _ := json.Marshal(standbyResp)
 	_, _ = w.Write(resp)
 }
 
@@ -785,8 +846,13 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enable as leader and generate token.
-	token := globalHA.EnableAsLeader(req.LeaderAddr, req.AutoFailover)
+	// Enable as leader and generate token. With a fencing-lease backend
+	// configured this is Acquire-gated (ADR-0005 S2) and can fail.
+	token, err := globalHA.EnableAsLeader(req.LeaderAddr, req.AutoFailover)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 
 	deployCmd := haDeployCommand()
 	jsonOK(w, map[string]any{

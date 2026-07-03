@@ -98,7 +98,10 @@ func TestHAState_VerifyToken(t *testing.T) {
 
 func TestHAState_EnableAsLeader(t *testing.T) {
 	h := &HAState{}
-	token := h.EnableAsLeader("cp2:50051", false)
+	token, err := h.EnableAsLeader("cp2:50051", false)
+	if err != nil {
+		t.Fatalf("EnableAsLeader: %v", err)
+	}
 
 	if token == "" {
 		t.Error("expected non-empty token")
