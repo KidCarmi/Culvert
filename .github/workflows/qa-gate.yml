@@ -91,12 +91,16 @@ jobs:
           # byte-for-byte reproducible. Any test reading TEST_SEED should feed
           # it to rand.New(rand.NewSource(...)).
           TEST_SEED: "20260421"
+        # pipefail is load-bearing: the default Actions shell does not set it,
+        # so without it this pipeline returns tee's always-zero status and the
+        # gate goes green on failing tests (P0, CI review). The former second
+        # -json run doubled the full -race suite inside the 25m job budget for
+        # a report nothing consumed — dropped; logic.log remains the artifact.
         run: |
+          set -o pipefail
           mkdir -p qa-reports
           go test -race -count=1 -timeout=15m -v ./... \
             2>&1 | tee qa-reports/logic.log
-          go test -race -count=1 -timeout=15m -json ./... \
-            > qa-reports/logic.json || true
 
       - name: Upload logic test reports
         if: always()

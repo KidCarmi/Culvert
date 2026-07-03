@@ -463,11 +463,15 @@ jobs:
       - name: Package signed catalog bundle (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
         id: pkg
+        env:
+          # env-indirection: ref names may contain shell metacharacters —
+          # never interpolate ${{ github.ref_name }} directly into run: text.
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           OUT="${{ steps.spec.outputs.out }}"
           test -s "$OUT/index.json.sigstore" || { echo "missing signed bundle"; exit 1; }
-          BUNDLE="$RUNNER_TEMP/culvert-release-catalog-${{ github.ref_name }}.tar.gz"
+          BUNDLE="$RUNNER_TEMP/culvert-release-catalog-${REF_NAME}.tar.gz"
           tar -C "$OUT" -czf "$BUNDLE" index.json index.json.sigstore manifests
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
       - name: Attach complete signed catalog bundle to the GitHub Release (tag path)
@@ -483,11 +487,13 @@ jobs:
   auto-tag:
     name: Auto-Tag Release
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     needs: [test, docker]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     permissions:
       contents: write
+      checks: read   # poll the Security Gate conclusion before tagging
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -513,6 +519,36 @@ jobs:
           echo "next=$NEXT" >> $GITHUB_OUTPUT
           echo "Next version: $NEXT"
 
+      - name: Wait for Security Gate approval on this SHA
+        # The Security Release Gate runs in PARALLEL with this workflow on
+        # the same push, and branch protection cannot gate tag-triggered
+        # workflows — so before this comment was mechanical reality, a
+        # failing gosec/trivy/gitleaks did NOT stop the tag (and therefore
+        # the signed release) from publishing (P0, CI review). This step is
+        # the enforcement point: no tag until the gate concludes success
+        # for this exact commit.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            CONCLUSION=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name == "✅ Security Gate — APPROVED")][0].conclusion // "pending"')
+            case "$CONCLUSION" in
+              success)
+                echo "Security Gate approved ${GITHUB_SHA} — proceeding to tag."
+                exit 0 ;;
+              failure|cancelled|timed_out|action_required)
+                echo "::error::Security Gate concluded '$CONCLUSION' for ${GITHUB_SHA} — refusing to create a release tag"
+                exit 1 ;;
+              *)
+                echo "Attempt $i/60: Security Gate not concluded yet ($CONCLUSION); waiting 30s..."
+                sleep 30 ;;
+            esac
+          done
+          echo "::error::Security Gate did not conclude within 30 minutes — refusing to create a release tag"
+          exit 1
+
       - name: Create and push tag
         run: |
           git config user.name "github-actions[bot]"
@@ -523,11 +559,14 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    # Security gate must pass before any release binary is built or published.
-    # The "release-approved" job lives in security-release-gate.yml and is
-    # enforced as a required status check via Branch Protection rules.
-    # catalog-pipeline is a hard dependency so the release-blocking catalog gate
-    # (digest-match + verify) must pass before any release asset is published.
+    # Release gating chain: the auto-tag job refuses to create the v* tag
+    # until "✅ Security Gate — APPROVED" concluded success for the same SHA
+    # (branch protection cannot gate tag-triggered workflows — the wait step
+    # in auto-tag is the mechanical enforcement point). catalog-pipeline is a
+    # hard dependency so the release-blocking catalog gate (digest-match +
+    # verify) must also pass before any release asset is published. NOTE:
+    # manually-pushed tags bypass the auto-tag gate — push tags only for
+    # commits that are already green on main.
     needs: [test, docker, catalog-pipeline]
     if: startsWith(github.ref, 'refs/tags/v')
 
@@ -560,8 +599,10 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
+          # env-indirection: never shell-interpolate ref names (injection).
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+          go build -ldflags="-s -w -X main.version=${REF_NAME}" \
             -o culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
 
       # Maintenance agent (cmd/culvert-maint) is a SEPARATE Go module and is
@@ -582,8 +623,10 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
+          # env-indirection: never shell-interpolate ref names (injection).
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          go build -ldflags="-s -w -X culvert-maint/internal/server.Version=${{ github.ref_name }}" \
+          go build -ldflags="-s -w -X culvert-maint/internal/server.Version=${REF_NAME}" \
             -o "${GITHUB_WORKSPACE}/culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}" .
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).

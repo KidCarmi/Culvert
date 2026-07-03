@@ -72,6 +72,10 @@ jobs:
           agent=false
           while IFS= read -r f; do
             case "$f" in
+              # Load-bearing docs: docs_saml_test.go reads this file at test
+              # time, so a change to it MUST run the suite (P0, CI review).
+              # First-match-wins — keep carve-outs above the docs patterns.
+              docs/saml-idp-configuration-reference.md) code=true ;;
               *.md|docs/*|roadmap/*|LICENSE|.github/CODEOWNERS) ;;
               *) code=true ;;
             esac
