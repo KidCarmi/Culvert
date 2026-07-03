@@ -1,6 +1,6 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **slices 1–11 shipped**. Companion to
+Status: **slices 1–13 shipped**. Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
@@ -76,6 +76,12 @@ zero-runtime-dependency, Go-first contract.
   generated `/proxy.pac` (served UNAUTHENTICATED for browser auto-config) is a valid
   PAC document (FindProxyForURL + PROXY, correct content-type), and the PAC panel
   renders the same generated config in its preview.
+- **Slice 12 — diagnostics panel** (`ui_diagnostics_e2e_test.go`). Opening the panel
+  runs the built-in self-checks (`/api/diagnostics`) and renders an overall verdict
+  plus a per-check list — asserts both populate.
+- **Slice 13 — security-config panel** (`ui_security_e2e_test.go`). Renders the
+  proxy's protective config from `/api/security`: the per-IP rate-limit state
+  (Enabled/Disabled) and the source-IP filter management UI.
 
 ### Dependency footprint (test-only)
 
