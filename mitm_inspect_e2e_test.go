@@ -20,12 +20,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -491,5 +496,111 @@ func TestMITM_ForgedLeafTLSPosture(t *testing.T) {
 	if err := legacy.HandshakeContext(context.Background()); err == nil {
 		legacy.Close() //nolint:errcheck // test cleanup
 		t.Error("SECURITY: forged-leaf server accepted a TLS 1.1 handshake — MinVersion floor not enforced")
+	}
+}
+
+// selfSignedCert mints a self-signed leaf of the requested key type ("rsa" =>
+// RSA-2048, "ecdsa" => ECDSA P-256) valid for the loopback origin. Used to stand
+// up httptest origins with a chosen key algorithm so the interop matrix exercises
+// the proxy's upstream TLS client against the real spread of origin cert types.
+func selfSignedCert(t *testing.T, keyType string) tls.Certificate {
+	t.Helper()
+
+	var signer crypto.Signer
+	switch keyType {
+	case "rsa":
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("rsa.GenerateKey: %v", err)
+		}
+		signer = k
+	case "ecdsa":
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("ecdsa.GenerateKey: %v", err)
+		}
+		signer = k
+	default:
+		t.Fatalf("selfSignedCert: unknown keyType %q", keyType)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "origin.test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              []string{"origin.test", "localhost"},
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, signer.Public(), signer)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate: %v", err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: signer, Leaf: tmpl}
+}
+
+// TestMITM_OriginInterop drives the inspected path against a MATRIX of upstream
+// origin TLS postures — {TLS 1.2, TLS 1.3} × {RSA-2048, ECDSA-P256} leaves — to
+// prove the proxy's upstream TLS client interoperates with the real spread of
+// origin server configurations a SWG meets in production. Each cell stands up a
+// pinned-version httptest origin with a self-signed leaf of the chosen key type,
+// CONNECTs + SSL-inspects through the proxy (skip-verify accepts the self-signed
+// origin), and asserts the inner request round-trips 200 + body. Hermetic
+// (loopback + in-memory CA), runs in the default -race suite.
+func TestMITM_OriginInterop(t *testing.T) {
+	allowLoopbackTunnel(t)
+	_, proxyRoots := setupInspectCA(t)
+	proxyURL := startTestProxy(t)
+	inspectRule(true) // skip-verify: accept each self-signed origin leaf
+
+	versions := []struct {
+		name string
+		ver  uint16
+	}{
+		{"TLS1.2", tls.VersionTLS12},
+		{"TLS1.3", tls.VersionTLS13},
+	}
+	keyTypes := []string{"rsa", "ecdsa"}
+
+	for _, v := range versions {
+		for _, kt := range keyTypes {
+			name := v.name + "/" + kt
+			t.Run(name, func(t *testing.T) {
+				cert := selfSignedCert(t, kt)
+				srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte("origin-ok")) //nolint:errcheck // test I/O
+				}))
+				srv.TLS = &tls.Config{ //nolint:gosec // G402: version pinned to exercise one matrix cell
+					MinVersion:   v.ver,
+					MaxVersion:   v.ver,
+					Certificates: []tls.Certificate{cert},
+				}
+				srv.StartTLS()
+				defer srv.Close()
+				target := srv.Listener.Addr().String()
+
+				tc, err := connectAndTLS(proxyURL.Host, target, "origin.test", proxyRoots)
+				if err != nil {
+					t.Fatalf("inspect handshake against %s origin failed: %v", name, err)
+				}
+				defer tc.Close() //nolint:errcheck // test cleanup
+
+				_, _ = fmt.Fprint(tc, "GET / HTTP/1.1\r\nHost: origin.test\r\nConnection: close\r\n\r\n")
+				resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
+				if err != nil {
+					t.Fatalf("read inspected response (%s): %v", name, err)
+				}
+				defer resp.Body.Close()
+				body, _ := io.ReadAll(resp.Body)
+				if resp.StatusCode != http.StatusOK || string(body) != "origin-ok" {
+					t.Fatalf("interop %s: status=%d body=%q, want 200 origin-ok", name, resp.StatusCode, body)
+				}
+			})
+		}
 	}
 }

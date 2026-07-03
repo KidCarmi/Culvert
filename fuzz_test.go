@@ -9,11 +9,14 @@ package main
 //   go test -fuzz=FuzzNormaliseFeedURL   -fuzztime=30s
 //   go test -fuzz=FuzzMatchDest          -fuzztime=30s
 //   go test -fuzz=FuzzParseYARALiteral   -fuzztime=30s
+//   go test -fuzz=FuzzRemoveHopHeaders   -fuzztime=30s
 //
 // In CI the targets run for a short duration (5 s each) as a regression
 // check; the corpus/ directories capture any panics found during local runs.
 
 import (
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/threatfeed"
@@ -125,3 +128,58 @@ func FuzzMatchDest(f *testing.F) {
 
 // FuzzParseYARALiteral moved to internal/yara (ADR-0002) — it fuzzes the
 // unexported parseYARALiteralString, now in package yara.
+
+// FuzzRemoveHopHeaders fuzzes the custom RFC 7230 §6.1 Connection-token parser in
+// removeHopHeaders (proxy.go): the header the proxy uses to strip attacker- or
+// origin-supplied hop-by-hop headers before forwarding. It feeds an arbitrary
+// Connection header value (a comma-separated token list) plus an arbitrary extra
+// header, pre-populates a header entry for every listed token, and asserts the
+// parser never panics, always removes the Connection header itself, and removes
+// every non-empty token the Connection header names. It deliberately does NOT
+// assert any header survives — a fuzzed Connection value may legitimately name
+// (and thus strip) any header, including the extra one.
+func FuzzRemoveHopHeaders(f *testing.F) {
+	seeds := []struct {
+		connVal, name, val string
+	}{
+		{"close", "X-Keep", "1"},
+		{"keep-alive, Foo-Bar", "Foo-Bar", "leak"},
+		{"X-Custom-Hop", "X-Custom-Hop", "secret"},
+		{"", "X-Present", "v"},
+		{" , , ", "X-Edge", "v"},
+		{"Upgrade,Connection", "Upgrade", "websocket"},
+		{"a,b,c,d,e", "b", "v"},
+		{"X-Token\x00", "X-Token", "v"},
+		{"UPPER,lower,MiXeD", "MiXeD", "v"},
+	}
+	for _, s := range seeds {
+		f.Add(s.connVal, s.name, s.val)
+	}
+	f.Fuzz(func(t *testing.T, connVal, name, val string) {
+		h := http.Header{}
+		h.Set("Connection", connVal)
+		// Pre-populate a header for every token the Connection value names, so a
+		// successful removal is observable.
+		tokens := strings.Split(connVal, ",")
+		for _, tok := range tokens {
+			if tok = strings.TrimSpace(tok); tok != "" {
+				h.Add(tok, "populated")
+			}
+		}
+		h.Set(name, val)
+
+		removeHopHeaders(h) // must not panic
+
+		if len(h["Connection"]) != 0 {
+			t.Errorf("Connection header not stripped: %#v", h["Connection"])
+		}
+		for _, tok := range tokens {
+			if tok = strings.TrimSpace(tok); tok == "" {
+				continue
+			}
+			if h.Get(tok) != "" {
+				t.Errorf("Connection-listed hop-by-hop token %q not removed", tok)
+			}
+		}
+	})
+}
