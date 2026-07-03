@@ -120,30 +120,74 @@ type UpstreamProxy struct {
 type UpstreamPool struct {
 	mu      sync.RWMutex
 	proxies []*UpstreamProxy
-	idx     atomic.Int64 // round-robin counter
+	// entries mirrors proxies as the raw accepted UpstreamEntry values (a
+	// proxy URL may embed inline credentials, which *url.URL redacts for
+	// display). Kept so the admin-settings snapshot can round-trip the pool
+	// faithfully across restarts.
+	entries []UpstreamEntry
+	// cbThreshold/cbTimeout are remembered from the last Configure so API
+	// mutations (SetProxies) inherit the operator-configured circuit-breaker
+	// parameters instead of hardcoded defaults.
+	cbThreshold int
+	cbTimeout   time.Duration
+	idx         atomic.Int64 // round-robin counter
 }
 
 var upstreamPool = &UpstreamPool{}
 
-// Configure sets the list of upstream proxies from config.
+// Configure sets the list of upstream proxies and the circuit-breaker
+// parameters (startup / YAML-reload / import path).
 func (p *UpstreamPool) Configure(entries []UpstreamEntry, cbThreshold int, cbTimeout time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.cbThreshold = cbThreshold
+	p.cbTimeout = cbTimeout
+	p.setProxiesLocked(entries)
+}
+
+// SetProxies replaces the proxy list while keeping the circuit-breaker
+// parameters from the last Configure (admin API / persisted-settings path).
+func (p *UpstreamPool) SetProxies(entries []UpstreamEntry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.setProxiesLocked(entries)
+}
+
+func (p *UpstreamPool) setProxiesLocked(entries []UpstreamEntry) {
 	p.proxies = nil
+	p.entries = nil
 	for _, e := range entries {
 		u, err := url.Parse(e.URL)
 		if err != nil {
 			logger.Printf("Upstream: invalid URL %q: %v", sanitizeLog(e.URL), err)
 			continue
 		}
+		if u.Host == "" {
+			// "host:port" without a scheme parses as opaque (no Host) and can
+			// never be dialed by the transport — reject instead of persisting.
+			logger.Printf("Upstream: skipping URL %q: missing host (need scheme://host:port)", sanitizeLog(e.URL))
+			continue
+		}
 		up := &UpstreamProxy{
 			URL: u,
-			CB:  newCircuitBreaker(cbThreshold, cbTimeout),
+			CB:  newCircuitBreaker(p.cbThreshold, p.cbTimeout),
 		}
 		up.Healthy.Store(true)
 		p.proxies = append(p.proxies, up)
+		p.entries = append(p.entries, e)
 		logger.Printf("Upstream: added parent proxy %s", u.Redacted())
 	}
+}
+
+// Entries returns a copy of the raw accepted entries. URLs may embed inline
+// credentials — this is for persistence (admin_settings.json, mode 0600)
+// only; use List() for anything user-facing.
+func (p *UpstreamPool) Entries() []UpstreamEntry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]UpstreamEntry, len(p.entries))
+	copy(out, p.entries)
+	return out
 }
 
 // Enabled returns true if any upstream proxies are configured.

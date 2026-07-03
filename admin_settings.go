@@ -85,6 +85,19 @@ type AdminSettings struct {
 	// SaaS category feed
 	SaaSFeedURL string `json:"saas_feed_url,omitempty"`
 
+	// Upstream proxy chaining. UpstreamProxiesSaved is a sentinel (mirroring
+	// BlocklistFeedsSaved): when true the persisted list is authoritative and
+	// REPLACES the YAML/CLI-seeded pool — including the empty list, so
+	// deleting every parent proxy in the GUI survives a restart. When false
+	// (settings files predating this feature) the YAML seed is kept.
+	// Entries are stored raw because a proxy URL may embed inline
+	// credentials; the file is mode 0600 and already carries secrets
+	// (metrics_token). Circuit-breaker parameters are NOT persisted here —
+	// they stay YAML-owned and are re-applied by the upstream-pool startup
+	// slice before this file loads.
+	UpstreamProxiesSaved bool            `json:"upstream_proxies_saved"`
+	UpstreamProxies      []UpstreamEntry `json:"upstream_proxies,omitempty"`
+
 	// YARA engine runtime configuration.
 	// YARASettingsSaved is a sentinel: when false the YARA fields below are not
 	// applied on load, preventing zero-value bools from overriding init() defaults
@@ -257,6 +270,12 @@ func applyAdminNetwork(s *AdminSettings) {
 	if s.TrustForwardedHeaders {
 		trustForwardedHeaders = true
 	}
+	if s.UpstreamProxiesSaved {
+		// Authoritative replace (empty list wipes the YAML seed). SetProxies
+		// keeps the circuit-breaker parameters the startup slice configured.
+		upstreamPool.SetProxies(s.UpstreamProxies)
+		applyUpstreamProxy()
+	}
 }
 
 // applyAdminYARA restores YARA engine settings saved via the Admin GUI.
@@ -359,6 +378,10 @@ func SaveAdminSettings() {
 	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {
 		s.SaaSFeedURL = saasURL
 	}
+
+	// Upstream proxy pool (raw entries — see field comment)
+	s.UpstreamProxiesSaved = true
+	s.UpstreamProxies = upstreamPool.Entries()
 
 	// History-store enable state + retention (retention remembered even when off)
 	s.LogStoreEnabledSaved = true
