@@ -213,3 +213,35 @@ func CacheDelete(host string) {
 	delete(dnsCache.entries, host)
 	dnsCache.mu.Unlock()
 }
+
+// CacheReset replaces the DNS verdict cache with an empty one (test support;
+// pairs with AllowLoopbackForTest so stale verdicts don't leak across the
+// guard-table swap).
+func CacheReset() {
+	dnsCache.mu.Lock()
+	dnsCache.entries = make(map[string]cacheEntry)
+	dnsCache.mu.Unlock()
+}
+
+// AllowLoopbackForTest removes the loopback ranges from the guard's CIDR
+// table and returns a restore func. Test support for E2E fixtures that must
+// CONNECT/dial to 127.0.0.1 through the real proxy path — never call from
+// production code. The DNS verdict cache is reset on both swap and restore.
+func AllowLoopbackForTest() (restore func()) {
+	orig := privateCIDRs
+	lo4 := net.ParseIP("127.0.0.1")
+	lo6 := net.ParseIP("::1")
+	filtered := make([]*net.IPNet, 0, len(orig))
+	for _, c := range orig {
+		if c.Contains(lo4) || c.Contains(lo6) {
+			continue // drop loopback ranges
+		}
+		filtered = append(filtered, c)
+	}
+	privateCIDRs = filtered
+	CacheReset()
+	return func() {
+		privateCIDRs = orig
+		CacheReset()
+	}
+}
