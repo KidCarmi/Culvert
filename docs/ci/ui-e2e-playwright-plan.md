@@ -14,6 +14,12 @@ zero-runtime-dependency, Go-first contract.
   `users`/`governance` panels + dashboard; viewer has admin/operator nav hidden
   but keeps the read-only dashboard; and a viewer's forced POST to
   `/api/auth/users` is 403'd server-side (the C2 backstop), with no user created.
+- **Slice 2 — login / auth flows** (`ui_login_e2e_test.go`). Drives the REAL login
+  overlay (not cookie-inject): wrong password → error shown, still gated; correct
+  password → overlay clears, role gating applies, identity shown in the topbar;
+  logout → gated again AND `/api/auth/status` reports logged-out (session cleared);
+  and 5 failed attempts trip the brute-force lockout (429, "locked"). The
+  process-global login limiter is snapshot/cleared for isolation.
 
 ### Dependency footprint (test-only)
 

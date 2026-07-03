@@ -121,6 +121,26 @@ func seedUIRoster(t *testing.T, adminUser, viewerUser, pass string) {
 	})
 }
 
+// newUIPage opens a fresh browser context + page and navigates to base, waiting
+// for network idle so the SPA's on-load /api/auth/status fetch has completed.
+// The context is closed on cleanup.
+func newUIPage(t *testing.T, browser playwright.Browser, base string) (playwright.BrowserContext, playwright.Page) {
+	t.Helper()
+	ctx, err := browser.NewContext()
+	if err != nil {
+		t.Fatalf("new context: %v", err)
+	}
+	t.Cleanup(func() { _ = ctx.Close() })
+	page, err := ctx.NewPage()
+	if err != nil {
+		t.Fatalf("new page: %v", err)
+	}
+	if _, err := page.Goto(base+"/", playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateNetworkidle}); err != nil {
+		t.Fatalf("goto %s: %v", base, err)
+	}
+	return ctx, page
+}
+
 // mintUISessionValue produces a signed ps_ui_session cookie value for user/role,
 // identical to what setUISessionCookie writes — so the browser is authenticated
 // deterministically without driving the login overlay (that fidelity is slice 2).
