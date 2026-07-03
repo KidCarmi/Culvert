@@ -39,11 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version: "1.25"
-          cache: true
+      - uses: ./.github/actions/setup-go-cache
 
       - name: Download dependencies
         run: go mod download
@@ -391,9 +387,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0   # tag history for catalog_version
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go-cache
       - name: Build catalog spec from the pushed digest
         id: spec
         env:
@@ -618,10 +612,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version: "1.25"
-          cache: true
+      - uses: ./.github/actions/setup-go-cache
 
       - name: Download dependencies
         run: go mod download
