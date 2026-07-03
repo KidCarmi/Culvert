@@ -125,10 +125,19 @@ docker compose up -d
 
 ## CI Pipelines
 
-- `.github/workflows/ci.yml` — Build, test, Dependency Obituary, SLSA provenance, release
-- `.github/workflows/codeql.yml` — CodeQL SAST (security-and-quality query suite)
-- `.github/workflows/code-review.yml` — PR lint (golangci-lint via reviewdog), coverage delta, auto go-mod-tidy
-- `.github/workflows/security-release-gate.yml` — 10-check security gate (gosec, govulncheck, trivy, gitleaks, staticcheck, hadolint, race tests, coverage, licenses, SBOM)
+Lane architecture (authority: `roadmap/CI-REDESIGN.md`). **The required merge
+checks are `✅ Fast PR Gate — APPROVED` and `✅ Deep PR Gate — APPROVED`** —
+if a PR is red, look at those two first. The QA/Security gate check names on
+PRs are pass-through shells kept for branch-protection continuity; both run
+fully on main pushes (and the Security gate on tags + weekly cron).
+
+- `pr-fast-gate.yml` — **Lane A, required on every PR**: fmt/vet/build (+arm64 compile, static assert, tidy check), diff-scoped golangci-lint, THE single full `-race` run owning both coverage contracts (55% global + per-file floors), benchgate, govulncheck+gosec, gitleaks (even docs-only PRs), path-gated maint-agent checks, advisory traffic smoke
+- `pr-deep-gate.yml` — **Lane B, required-if-triggered** (diff-classified): build-image-once → trivy scan + compose validation, hadolint, staticcheck, determinism (any `*_test.go` change), go-licenses on dep changes, packaging (shellcheck/visudo/systemd)
+- `ci.yml` — main/tag path: build, compose smoke, multi-arch docker publish + cosign, catalog gate, auto-tag (waits for BOTH gate approvals on the SHA before tagging), release + SLSA provenance. Workflow name `CI` is load-bearing (`publish-catalog-pages.yml` triggers on it — do not rename)
+- `qa-gate.yml` / `security-release-gate.yml` — full functional QA / 10-check security scan on main pushes, tags (security), and weekly cron (security); pass-through on PRs
+- `codeql.yml` — CodeQL SAST: main pushes, weekly, and PRs touching the proxy/security/release surface
+- `code-review.yml` — advisory PR DX: reviewdog inline lint, PR-size, conventional commits
+- Nightly/weekly: `fuzz-nightly.yml` (Mon/Wed/Fri coverage-guided fuzzing), `proxy-nightly-e2e.yml` (load), `proxy-weekly-stress.yml`, `proxy-ui-e2e.yml` (playwright), `auth-idp-interop.yml`, `install-lifecycle-e2e.yml` + `maint-agent-*-e2e.yml` (installer/agent e2e — nightly + installer-surface PRs)
 
 ## Architecture Notes
 

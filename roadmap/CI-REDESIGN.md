@@ -19,7 +19,26 @@ requires the QA/Security aggregate names, the two pass-through workflows'
 `pull_request` triggers (and eventually the files' PR paths) can be dropped
 in a trivial follow-up. **Step 8** — promote traffic-smoke after its
 two-week flake-free window, then retire `proxy-pr-gate.yml`. This document
-is the authority for what supersedes what.
+is the authority for what supersedes what. **CI-review fix pass applied (2026-07-03,
+five-perspective agent review)**: P0s — qa-logic pipefail (main/tag QA gate
+could green on failing tests), docs-only classifier carve-out for the
+load-bearing SAML reference doc, auto-tag now waits for BOTH gate approvals
+on the SHA before tagging (mechanical release gating; tag-echo re-runs
+dropped from qa-gate/catalog/installer/maint workflows). Supply chain —
+top-level permissions on all workflows, Dependency-Obituary SHA-pinned,
+ref_name env-indirection, installer-script tag-pinned, dependabot covers
+cmd/culvert-maint + docker. Filters — admin-plane (ui_*.go), upstream*.go,
+update/backup/restore/geoip/events, .trivyignore, trust material
+(trusted_root.json, release_identity.env), deep-gate self-validation.
+Cost — ci.yml test/smoke PR-skip, proxy-pr-gate.yml deleted (triple
+duplicate), buildx cache main-scope fallback, fuzz Mon/Wed/Fri, conditional
+cancel-in-progress on ci.yml, nightly concurrency groups isolated.
+Reliability — deep-gate trivy DB mirror, TEST_SEED everywhere, determinism
+failure DX (seed + artifact), timeout-minutes on every job. DEFERRED to a
+follow-up: composite-action consolidation (classify-diff, needs-verdict,
+coverage-floor script — the load-bearing duplication), setup-go composite
+migration for the proxy-* nightly/weekly family, playwright browser cache,
+release-matrix consolidation.
 
 ## 1. Lane architecture
 

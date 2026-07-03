@@ -1,3 +1,6 @@
+# NOTE: the workflow name "CI" is load-bearing — publish-catalog-pages.yml
+# triggers on `workflow_run: workflows: ["CI"]`. Renaming this workflow
+# silently stops signed-catalog publication to Pages.
 name: CI
 # Least-privilege default: jobs that need write scopes (packages, checks,
 # contents, security-events, pull-requests) declare them at job level.
@@ -54,8 +57,10 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # gosec, staticcheck, tests, and fuzz are run by the Security Release
-      # Gate workflow. This job only verifies compilation.
+      # PR-time tests/lint/security live in the Fast/Deep PR Gates; the full
+      # QA/security gates run on main pushes and tags; fuzzing is scheduled
+      # (fuzz-nightly.yml). This job only verifies compilation on the
+      # main/tag path.
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
 
