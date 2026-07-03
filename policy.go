@@ -825,7 +825,7 @@ func matchDestNorm(rule *PolicyRule, host, normHost string) bool {
 	}
 	// Category group check — host must be in ANY category within the group.
 	// O(1): lookupHostCategory(host) → group.catSet[result].
-	if catGroupSet && !globalCategoryGroups.MatchesHost(rule.DestCategoryGroup, host) {
+	if catGroupSet && !categoryGroupMatchesHost(rule.DestCategoryGroup, host) {
 		return false
 	}
 	// Geo-IP country check — cache-only to avoid blocking the request goroutine.

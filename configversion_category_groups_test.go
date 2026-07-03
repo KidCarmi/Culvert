@@ -22,6 +22,8 @@ package main
 // All tests snapshot/restore the package globals they mutate.
 
 import (
+	"github.com/KidCarmi/Culvert/internal/catgroup"
+
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -37,11 +39,8 @@ import (
 func snapshotGlobalCategoryGroups(t *testing.T) {
 	t.Helper()
 	orig := globalCategoryGroups
-	dir := t.TempDir()
-	fresh := &CategoryGroupStore{
-		groups: make(map[string]*CategoryGroup),
-		path:   filepath.Join(dir, "category_groups.json"),
-	}
+	fresh := catgroup.New()
+	fresh.SetPathForTest(filepath.Join(t.TempDir(), "category_groups.json"))
 	globalCategoryGroups = fresh
 	t.Cleanup(func() { globalCategoryGroups = orig })
 }

@@ -786,6 +786,23 @@ over the proxy-e2e/policy/bypass scope, shuffled determinism ×2 (package + main
 leaf proof exactly `fileutil`+`hostutil`. Remaining in policy.go: the Phase C engine (PolicyStore/
 Evaluate/matchers) — design + adversarial review required before execution, per the program note.
 
+### 2026-07-03 — `internal/catgroup` extracted (38th; post-program extraction with its own recorded design)
+The first extraction under the program-closure rule (fresh design, not a continuation): the final
+survey had not named `categorygroup.go` (300 lines) — flagged as a gap in a post-closure review
+and approved by the maintainer. The engine is `urlcat.Store`'s sibling: named category bundles
+with pre-computed lowercase catSets for O(1) hot-path membership, JSON persistence, insertion-
+order listing. **Design decision (mirrors the urlcat fusion verdict):** the engine exposes the
+pure `MatchesCategory(group, category)`; the HOST-level match stays in main as
+`categoryGroupMatchesHost` (categorygroup.go shim), composing the two-tier
+`lookupHostCategory` fusion with the engine's O(1) check — `matchDestNorm` (policy hot path,
+its only production caller) rewired onto it. Aliases: `CategoryGroup = catgroup.Group`,
+`CategoryGroupStore = catgroup.Store`, `globalCategoryGroups = catgroup.New()`. The
+`ConfigSnapshot.CategoryGroups` / rollback wire shape is untouched (catSet was never
+serialized). Seams `Path()`/`SetPathForTest` replaced the `.path`/`.groups` field pokes in
+snapshotGlobalCategoryGroups, Bucket-4, and cluster apply-persist tests; the 11 engine tests
+moved in-package (87.5% coverage). Gates: full suite, `-race` over proxy-e2e/policy/group scope,
+shuffled ×2 (package + main), lint 0, leaf proof exactly `fileutil`+`obs`.
+
 ### 2026-07-03 — `internal/urlcat` extracted (36th; policy.go Phase A, executed from the design)
 Executed exactly per the program design below. The engine moved verbatim: `Entry`/`Store` +
 lowercase host index, `Load`/`Save` (fileutil.AtomicWrite durability comment preserved), `All`/
