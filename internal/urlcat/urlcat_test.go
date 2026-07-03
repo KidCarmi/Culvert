@@ -1,4 +1,4 @@
-package main
+package urlcat
 
 import (
 	"os"
@@ -6,9 +6,12 @@ import (
 )
 
 // ─── CategoryStore tests ──────────────────────────────────────────────────────
+// Moved in-package from package main's catstore_test.go (+ GetByName from
+// saas_feed_test.go) with the extraction (ADR-0002, policy.go decomposition
+// Phase A).
 
-func newTestCatStore() *CategoryStore {
-	return newCategoryStore(defaultCategoryEntries())
+func newTestCatStore() *Store {
+	return New(DefaultEntries())
 }
 
 func TestCategoryStore_All(t *testing.T) {
@@ -195,7 +198,7 @@ func TestCategoryStore_Load_NewFile(t *testing.T) {
 	os.Remove(f.Name())       //nolint:errcheck // test cleanup
 	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
 
-	cs := &CategoryStore{}
+	cs := &Store{}
 	if err := cs.Load(f.Name()); err != nil {
 		t.Fatalf("Load new file: %v", err)
 	}
@@ -216,7 +219,7 @@ func TestCategoryStore_Load_ExistingFile(t *testing.T) {
 	_, _ = f.WriteString(`[{"name":"TestOnly","hosts":["t.example.com"],"builtIn":false}]`)
 	f.Close()
 
-	cs := &CategoryStore{}
+	cs := &Store{}
 	if err := cs.Load(f.Name()); err != nil {
 		t.Fatalf("Load existing file: %v", err)
 	}
@@ -228,6 +231,24 @@ func TestCategoryStore_Load_ExistingFile(t *testing.T) {
 
 func TestCategoryStore_Save_NoPath(_ *testing.T) {
 	// Save with no path should be a no-op (no panic).
-	cs := &CategoryStore{entries: defaultCategoryEntries()}
+	cs := &Store{entries: DefaultEntries()}
 	cs.Save()
+}
+
+func TestStore_GetByName(t *testing.T) {
+	cs := New(DefaultEntries())
+
+	// Should find existing category (case-insensitive).
+	entry := cs.GetByName("ai")
+	if entry == nil {
+		t.Fatal("GetByName('ai') returned nil")
+	}
+	if entry.Name != "AI" {
+		t.Errorf("name = %q, want 'AI'", entry.Name)
+	}
+
+	// Non-existent.
+	if cs.GetByName("NonExistent") != nil {
+		t.Error("expected nil for non-existent category")
+	}
 }

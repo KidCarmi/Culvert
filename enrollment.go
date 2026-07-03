@@ -1285,5 +1285,6 @@ type EnrollResponse struct {
 	CertPEM string `json:"cert_pem"` // signed node certificate
 	CAPEM   string `json:"ca_pem"`   // cluster CA certificate
 	NodeID  string `json:"node_id"`
-	CPAddr  string `json:"cp_addr"` // control plane gRPC address for reconnect
+	CPAddr  string `json:"cp_addr"`         // control plane gRPC address for reconnect
+	Epoch   int64  `json:"epoch,omitempty"` // issuing CP's fencing epoch (ADR-0005 S3; seeds the DP ratchet)
 }

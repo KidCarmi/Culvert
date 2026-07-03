@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // caPassphraseEnv holds the name of the environment variable that supplies the
@@ -559,9 +560,9 @@ func initSession(s *startupState) {
 // audit/request logs. P4.3 / S1: the implementation lives in
 // observability_startup.go + observability_startup_config.go; this is
 // a thin shim that resolves the slice config and hands it to the
-// loader. No carry to startupState — the file-handle closers stay on
-// their package globals (globalSyslog, auditCloser, requestLogCloser)
-// and continue to be read by the existing syslog-close / audit-log-
+// loader. No carry to startupState — the file handles stay on their
+// owning packages' state (globalSyslog, internal/audit, internal/reqlog)
+// and continue to be released by the existing syslog-close / audit-log-
 // close / request-log-close shutdown hooks.
 func initObservability(s *startupState) {
 	loadObservability(resolveObservabilityStartupConfig(
@@ -1223,9 +1224,7 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 		return nil
 	})
 	reg.Register("request-log-close", shutdownOrderRequestLogClose, func(context.Context) error {
-		if requestLogCloser != nil {
-			_ = requestLogCloser.Close() // best-effort flush
-		}
+		_ = reqlog.Close() // best-effort flush; nil-safe
 		return nil
 	})
 	// P3.3 / S7. Release the audit-log file descriptor. Writes are
@@ -1641,6 +1640,9 @@ func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte) (*EnrollResponse
 	if err := json.Unmarshal(respRaw, &resp); err != nil {
 		return nil, fmt.Errorf("parse enrollment response: %w", err)
 	}
+	// ADR-0005 S3: seed this DP's fencing-epoch ratchet from the enrolling
+	// CP (0 = legacy CP, ratchet stays unseeded).
+	_ = dpObserveEpoch("enrollment", resp.Epoch)
 	return &resp, nil
 }
 
@@ -1883,9 +1885,15 @@ func renewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile,
 	var resp struct {
 		CertPEM string `json:"cert_pem"`
 		CAPEM   string `json:"ca_pem"`
+		Epoch   int64  `json:"epoch"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return fmt.Errorf("parse renewal response: %w", err)
+	}
+	// ADR-0005 S3: refuse a certificate signed by a fenced-out (stale-epoch)
+	// CP — installing it would re-trust a zombie's CA chain.
+	if !dpObserveEpoch("cert renewal", resp.Epoch) {
+		return fmt.Errorf("cert renewal rejected: response stamped with a stale fencing epoch")
 	}
 
 	keyDER, err := x509.MarshalECPrivateKey(privKey)

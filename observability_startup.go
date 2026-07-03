@@ -21,9 +21,9 @@ package main
 //   - globalOTLP and globalOTLPTraces both receive Configure when
 //     OTLPEndpoint is non-empty. Their internal goroutine lifecycles
 //     are unchanged — out of scope for the slice.
-//   - The audit-log file handle on auditCloser, the request-log
-//     file handle on requestLogCloser, and the syslog conn on
-//     globalSyslog continue to be read by the existing shutdown
+//   - The audit-log file handle (internal/audit), the request-log
+//     file handle (internal/reqlog), and the syslog conn on
+//     globalSyslog continue to be released by the existing shutdown
 //     hooks (syslog-close, request-log-close, audit-log-close at
 //     orders 110 / 130 / 135). No carry to startupState.
 

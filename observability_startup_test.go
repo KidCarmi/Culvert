@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 var observabilityStartupLoggerMu sync.Mutex
@@ -79,18 +80,14 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	// Audit engine (internal/audit).
 	restoreAudit := audit.ResetForTest()
 
-	// Request log (store.go).
-	oldRequestLogWriter := requestLogWriter
-	oldRequestLogCloser := requestLogCloser
-	oldRequestLogFilePath := requestLogFilePath
+	// Request-log persistence (internal/reqlog). The restore closes any
+	// handle the test-under-test opened before reinstating the snapshot.
+	restoreReqlog := reqlog.SwapPersistenceForTest()
 
 	syslogConfigured = ""
 	globalSyslog = nil
 	globalOTLP = freshOTLPExporter()
 	globalOTLPTraces = freshOTLPSpanExporter()
-	requestLogWriter = nil
-	requestLogCloser = nil
-	requestLogFilePath = ""
 
 	t.Cleanup(func() {
 		// Close handles + stop goroutines the test opened on the
@@ -101,18 +98,13 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		globalOTLP.Stop()
 		globalOTLPTraces.Stop()
 		_ = audit.Close() // close any handle the test-under-test opened
-		if requestLogCloser != nil {
-			_ = requestLogCloser.Close()
-		}
 		syslogConfigured = oldSyslogConfigured
 		globalSyslog = oldGlobalSyslog
 		globalOTLP = oldGlobalOTLP
 		globalOTLPTraces = oldGlobalOTLPTraces
 		audit.ClearPersistForTest() // closed above; restore must not double-close
 		restoreAudit()
-		requestLogWriter = oldRequestLogWriter
-		requestLogCloser = oldRequestLogCloser
-		requestLogFilePath = oldRequestLogFilePath
+		restoreReqlog()
 	})
 }
 
@@ -217,8 +209,8 @@ func TestLoadObservability_EmptyConfigIsNoOp(t *testing.T) {
 	if audit.PersistActive() {
 		t.Error("audit persistence active; want inactive (no AuditLogPath)")
 	}
-	if requestLogCloser != nil {
-		t.Errorf("requestLogCloser = %v; want nil", requestLogCloser)
+	if reqlog.PersistActive() {
+		t.Error("request-log persistence active; want inactive (no RequestLogPath)")
 	}
 }
 
@@ -247,11 +239,11 @@ func TestLoadObservability_RequestLogOpens(t *testing.T) {
 		RequestLogMaxMB: 10,
 	})
 
-	if requestLogCloser == nil {
-		t.Fatal("requestLogCloser == nil after RequestLogPath set; want non-nil")
+	if !reqlog.PersistActive() {
+		t.Fatal("request-log persistence inactive after RequestLogPath set; want active")
 	}
-	if requestLogFilePath != path {
-		t.Errorf("requestLogFilePath = %q; want %q", requestLogFilePath, path)
+	if reqlog.FilePath() != path {
+		t.Errorf("reqlog.FilePath() = %q; want %q", reqlog.FilePath(), path)
 	}
 }
 

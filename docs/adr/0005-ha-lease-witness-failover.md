@@ -1,12 +1,11 @@
 # ADR-0005: Safe automatic HA failover via a fencing lease in etcd
 
-- **Status:** Accepted-direction, **PARKED at S0** (2026-07-01). Design adversarially reviewed and
-  revised from a hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the
-  big stable vendors" + self-hosted → etcd). **S0 (peer-address prerequisite) is SHIPPED**; S1–S5 are
-  deliberately deferred — the maintainer prioritised the decomposition program (maintainability) over
-  the automatic-failover convenience, and crucially the **etcd runtime dependency has NOT been taken
-  yet** (S1 is the point of no cheap return; pausing before it costs nothing). Resume at S1.
-  **F4 posture: documented bounded-LWW (option A)** — not state-in-etcd.
+- **Status:** Accepted-direction, **RESUMED — S0 + S1 + S2 + S3 SHIPPED** (S1–S3: 2026-07-03,
+  after the ADR-0002 decomposition program completed). Design adversarially reviewed and revised
+  from a hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the big
+  stable vendors" + self-hosted → etcd). S4–S5 remain; the lease is DORMANT in production until
+  S5 wires flags (nil provider = legacy). **F4 posture: documented bounded-LWW (option A)** —
+  not state-in-etcd.
 - **Safety posture while parked:** unchanged from ADR-0004 Slice 1 — HA is safe-by-default (manual
   failover, explicit promote, planned handoff, term-visible `/healthz`). Nothing regresses by pausing;
   only the *automatic* convenience is deferred.
@@ -105,6 +104,116 @@ Recorded so implementation cannot forget them:
 - **S5 — config/flags/compose/GUI/docs.** `--ha-etcd-endpoints` (+ TLS), the etcd service in
   `docker-compose.yml`, epoch/lease status in the HA panel (GUI parity), operator runbook incl. the
   **documented LWW window**, evidence tests re-pinned, ADR-0004/RISK-001 updated.
+
+## Implementation log
+
+### 2026-07-03 — S1 SHIPPED: `internal/halease` (LeaseProvider + etcd impl + conformance suite)
+- **Package `internal/halease`:** `Provider` interface exactly per this ADR (`Acquire`/`Renew`/
+  `Read` + `Close`), with the contract written into the interface doc: grants are strictly
+  monotonic (the fencing property), **loss is an outcome (`ok=false`, nil error), transport
+  failure is an error (truth UNKNOWN)** — callers fail toward self-fence on both. `Close` MUST NOT
+  revoke a held lease (release-on-shutdown is S2 policy, not a primitive).
+- **`Etcd`:** lease-bound key `/culvert/ha/leader`; **epoch = the key's `create_revision`**
+  (from the grant txn's header revision) exactly as designed. `Acquire` is a single txn
+  (`CreateRevision==0 → Put(lease)` else `Get`); a **denied Acquire revokes its scratch lease**
+  (pinned by test — leaked leases would accumulate on every standby retry). `Renew` keepalives
+  then **re-verifies the key still carries (holder, epoch)** — guarding the fencing property even
+  if a stray keepalive outlives the key; `ErrLeaseNotFound` ⇒ loss, everything else ⇒ error.
+- **`Fake`:** injectable clock, `ExpireForTest`; the S2 Culvert-side logic unit-tests against it.
+- **One conformance suite, two backends:** `testConformance` pins grant/deny/read/renew/stale-
+  epoch/expiry-reacquire/**fencing-monotonicity** and runs against the Fake always AND against a
+  REAL etcd — `TestEtcd_Conformance_Embedded` boots `go.etcd.io/etcd/server/v3` **embed**
+  in-process (TEST-ONLY dependency; state in `t.TempDir`), so etcd's actual Raft state machine
+  exercises the mapping on every CI run with zero external infrastructure. An env-gated leg
+  (`CULVERT_TEST_ETCD_ENDPOINTS`) can additionally target an external etcd.
+- **Dependency reality check (recorded):** `go.etcd.io/etcd/{client,api,server}/v3` were ALREADY
+  in the module graph as indirects of existing dependencies — pinning them direct at v3.6.13
+  added ~80 go.sum lines total. The "point of no cheap return" was far cheaper than the parking
+  note assumed. The shipped binary links only `client/v3` (and only once S2 wires it into ha.go);
+  `server/v3` is imported exclusively by `_test.go` files.
+- **Not in S1 (by design):** no runtime wiring, no flags, no compose/GUI — the primitive is
+  dormant until S2. Nothing about ADR-0004's safe-by-default posture changes yet.
+
+### 2026-07-03 — S3 SHIPPED: epoch fencing at every write sink + DP propagation (ha_fencing.go)
+The write-sink audit is recorded in ha_fencing.go's header — the source of truth. Summary:
+- **FENCED:** `Enroll` / `RenewCert` (CA issuance — Finding 2's zombie-signing capability) and
+  `SyncRevocations` (cluster-state merge) gate on `haIssuanceAllowed()`: standalone allowed,
+  HA requires leader role AND (in lease mode) live `WriteAllowed()` — the commit-time re-check of
+  Finding 3, evaluated per RPC. Fenced calls return gRPC `FailedPrecondition`.
+- **HASync bundle** carries `Epoch`; the **PULLER verifies it against its OWN backend read**
+  before `ImportFullState` (Finding 7 — the fence sits on the pull side). A backend read failure
+  rejects the round (fail-closed: skipping a sync is recoverable, importing a zombie's state is
+  not). An epoch-0 bundle is rejected while the fence carries a real epoch (unfenced leader).
+- **ConfigSnapshot** carries `Epoch`; the DP poller (`fetchAndApply`) runs the fence BEFORE its
+  caller-side mutations (external-auth/IdP application, last-good persist, version advance —
+  Codex P1 on PR #536: the in-function check alone let a zombie poison the last-good file and
+  the version ratchet), and `applyConfigSnapshot` re-checks for its other callers. **Every
+  heartbeat reply** (`PushMetrics` → `dpHeartbeatReply`) and **both issuance responses** (Enroll
+  seeds, RenewCert is enforced — a DP refuses to install a cert signed by a stale-epoch CP)
+  carry the epoch. DP-side `dpLastSeenEpoch` is a CAS ratchet: higher/equal ratchets forward,
+  lower rejects, and an epoch-less (0) message is accepted ONLY while the ratchet is unseeded —
+  once fencing has been proven, a 0 stamp is the zombie shape (a lease-configured CP that lost
+  its lease stamps 0) and is rejected (Codex P1). The puller-side bundle fence likewise rejects
+  when NO live holder exists — an expired key reads as an empty Status with no floor, so a
+  less-than-only check would accept any positive zombie stamp (Codex P2); corollary: a
+  lease-configured standby requires a lease-holding leader (S5 wires both together).
+- **DELIBERATELY NOT FENCED (recorded rationale):** `PushMetrics`/`SyncRateLimits`/
+  `PushAuditEvents` are DP→CP telemetry aggregation — accepting them on a zombie wastes memory
+  but grants no authority; `GetConfig` reads are epoch-checked on the DP side via the snapshot
+  stamp, which is stronger than gating the serve.
+- Tests: issuance matrix (standalone/legacy-leader/standby/zombie/live-holder), the three RPCs
+  return FailedPrecondition when fenced, puller-fence accept/reject/fail-closed, the DP ratchet,
+  and an end-to-end stale-snapshot rejection through `applyConfigSnapshot`. Race + shuffled ×2 +
+  full suite green.
+
+### 2026-07-03 — S2 SHIPPED: the lease wired into HA leadership (ha_lease.go)
+Implemented exactly per the design decisions below, plus two findings from execution:
+- **Keepalive tick is clamped to [20ms, 2s]** — the naive `validFor/3` interval would make loss
+  discovery (and self-fence) arbitrarily slow under a long operator TTL; the 2s cap bounds
+  fence latency regardless of TTL.
+- **`selfFence` persists the demotion INSIDE the state lock** so any observer of the role flip
+  (IsLeader/Status) is guaranteed the config write completed — the race detector caught the
+  original flip-then-persist ordering via a test-lifecycle race that was a genuine ordering
+  smell.
+- Surfaces: `promote()`/`PromoteManually` (fence-gated, all three trigger paths),
+  `EnableAsLeader` (now returns an error; genesis must hold the fence), `ResumeAsLeader`
+  (grant ⇒ epoch+keepalive; denial ⇒ role kept, `WriteAllowed()==false`, CRITICAL
+  `ha_resume_unfenced` alert), `Stop()` (halts keepalive), `/healthz` (`write_authority` now =
+  `WriteAllowed()`; `lease_mode`/`lease_valid`/`epoch` fields), `ha_self_fenced` alert.
+  `termFromEpoch` guards the int64→uint64 collapse. Tests: ha_lease_test.go (deny/grant-collapse/
+  legacy-unchanged/loss-fence/transport-window-fence/genesis/unfenced-resume/healthz) against
+  `halease.Fake` + an erroring wrapper; race-clean ×5; full suite + shuffled ×2 green.
+
+### 2026-07-03 — S2 design decisions (recorded before implementation)
+- **Nil provider = legacy mode.** `HAState` gains a `halease.Provider` (set via
+  `SetLeaseProvider`); nil (production reality until S5 wires flags) leaves every ADR-0004
+  behavior byte-identical. All lease paths are exercised in tests via `halease.Fake`.
+- **Promotion is Acquire-gated, transport-error = deny.** `promote()` (auto/manual/planned alike)
+  calls `Acquire` first; denied OR transport error ⇒ no promotion (you cannot take leadership
+  when the fence's state is unknown). A grant followed by an `onPromote` failure leaves an
+  unkept lease that simply expires (bounded stall = TTL; logged) — the Provider deliberately has
+  no Release primitive in S1.
+- **Term collapses into the epoch on every lease-mode grant** (`term = uint64(epoch)`; etcd's
+  create_revision is already strictly monotonic, superseding the `term++`). Legacy mode keeps
+  `term++`/`seedTermFromLeader` untouched; their deletion is S4 (with the 15s trigger).
+- **Keepalive loop** (interval TTL/3): Renew ok ⇒ record confirmed-at + validFor; **lost (ok=false)
+  ⇒ immediate self-fence**; transport error ⇒ keep retrying but self-fence the moment the last
+  etcd-CONFIRMED validity window (minus `haLeaseWriteMargin`) is exhausted — etcd is the clock,
+  local time only measures elapsed-since-confirmation (Finding 3).
+- **Self-fence = in-process demote to read-only standby:** role=standby (persisted), keepalive
+  stopped, alert fired. NO resync/failback — that is S4. The demoted node stays a passive standby
+  pending operator action (matching today's manual-failover posture).
+- **`WriteAllowed()` primitive:** nil-lease ⇒ true; else lease held AND within the confirmed
+  window minus margin. S2 wires it into /healthz's `write_authority` field ONLY; stamping every
+  write sink is S3 by design.
+- **Leader restart (`ResumeAsLeader`) tries Acquire once:** granted ⇒ normal (epoch, keepalive);
+  denied/unknown ⇒ resumes the ROLE but with **no write authority** (fail-closed), CRITICAL log +
+  alert, no auto-retry — S4 replaces this stance with proper demote + resync-from-standby.
+  `EnableAsLeader` (HA genesis) must likewise acquire; its signature grows an error return.
+- **Break-glass:** manual promotion RESPECTS the fence (a bypassable fence is decoration). With
+  etcd unreachable and the old leader truly dead, the documented break-glass remains
+  restart-as-leader (which enters the fail-closed no-write-authority stance above until etcd
+  returns) — S5 documents this in the runbook.
 
 ## Consequences
 

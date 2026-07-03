@@ -10,8 +10,8 @@ Single binary, zero runtime dependencies.
 main.go       — Entrypoint, flag parsing, signal handling, graceful shutdown
 proxy.go      — HTTP/CONNECT/WebSocket handlers, tunnel relay, upstream transport, sanitizeLog
 socks5.go     — SOCKS5 protocol handler (RFC 1928/1929)
-policy.go     — Policy engine: rule evaluation, FQDN/category/GeoIP/schedule matching
-store.go      — Persistent state: request log, config store, auth Config (blocklist → internal/blocklist, audit → internal/audit per ADR-0002; shims/aliases in blocklist_vars.go + the audit section)
+policy.go     — Policy engine: rule evaluation, FQDN/category/GeoIP/schedule matching (URL-category store → internal/urlcat, SSL-bypass matcher → internal/sslbypass, FQDN glob → hostutil.MatchFQDN per ADR-0002; two-tier matchCategory/lookupHostCategory fusion stays here)
+store.go      — Composition root: stats/ts counters, auth Config, recordRequest* fan-out (blocklist → internal/blocklist, audit → internal/audit, request log → internal/reqlog per ADR-0002; shims/aliases in blocklist_vars.go + the audit/request-log sections)
 ca.go         — Root CA management, leaf cert signing, encrypted CA bundle (AES-GCM + PBKDF2), LRU cert cache
 ui.go         — startUI bootstrap only (no direct mux.HandleFunc; routes registered via register*Routes helpers)
 ui_routes_meta.go — uiRoutes: single source of truth for route metadata (method-aware via Methods []uiRouteMethod)

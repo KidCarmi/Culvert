@@ -312,16 +312,16 @@ func TestApplyConfigSnapshot_NodeGroupsPersist(t *testing.T) {
 // caller-side sslBypass.Save() hook after sslBypass.Set() in
 // applyConfigSnapshot's snap.SSLBypassPatterns branch.
 func TestApplyConfigSnapshot_SSLBypassPatternsPersist(t *testing.T) {
-	origPath := sslBypass.path
+	origPath := sslBypass.Path()
 	origPatterns := sslBypass.List()
 	t.Cleanup(func() {
-		sslBypass.path = origPath
+		sslBypass.SetPathForTest(origPath)
 		_ = sslBypass.Set(origPatterns)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ssl_bypass.json")
-	sslBypass.path = path
+	sslBypass.SetPathForTest(path)
 
 	snap := ConfigSnapshot{
 		Version:           1,
@@ -347,16 +347,16 @@ func TestApplyConfigSnapshot_SSLBypassPatternsPersist(t *testing.T) {
 // caller-side catStore.Save() hook after catStore.ReplaceAll() in
 // applyConfigSnapshot's snap.URLCategories branch (P6.1 UC-2 closure).
 func TestApplyConfigSnapshot_URLCategoriesPersist(t *testing.T) {
-	origPath := catStore.path
+	origPath := catStore.Path()
 	origEntries := catStore.All()
 	t.Cleanup(func() {
-		catStore.path = origPath
+		catStore.SetPathForTest(origPath)
 		catStore.ReplaceAll(origEntries)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "categories.json")
-	catStore.path = path
+	catStore.SetPathForTest(path)
 
 	snap := ConfigSnapshot{
 		Version: 1,

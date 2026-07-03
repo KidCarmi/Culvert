@@ -55,7 +55,7 @@ func TestBucket4_CategoryStore_Save_AtomicWriteFile(t *testing.T) {
 	path := filepath.Join(dir, "categories.json")
 
 	cs := newCategoryStore(nil)
-	cs.path = path
+	cs.SetPathForTest(path)
 	if err := cs.Set("bucket4-test-cat", []string{"example.com", "test.com"}, false); err != nil {
 		t.Fatalf("seed Set: %v", err)
 	}
@@ -130,7 +130,8 @@ func TestBucket4_SSLBypassMatcher_Save_AtomicWriteFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ssl_bypass.json")
 
-	m := &SSLBypassMatcher{path: path}
+	m := &SSLBypassMatcher{}
+	m.SetPathForTest(path)
 	if err := m.Set([]string{"*.bank.example", "*.payments.example"}); err != nil {
 		t.Fatalf("seed Set: %v", err)
 	}

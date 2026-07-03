@@ -22,7 +22,7 @@ import (
 
 // findLogByHost scans the (newest-first) request log for an entry with the given
 // host. It avoids len()-delta assertions, which are fragile under the determinism
-// gate: the request-log ring is bounded at maxLogs and evicts the oldest entry
+// gate: the request-log ring is bounded at reqlog.MaxRing and evicts the oldest entry
 // once full, so a cumulative shuffled suite makes len() stop growing. A unique
 // host per test is a stable discriminator the recent-entry scan can always find.
 func findLogByHost(t *testing.T, host string) LogEntry {

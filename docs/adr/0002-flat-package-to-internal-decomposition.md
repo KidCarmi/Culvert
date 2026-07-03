@@ -4,8 +4,9 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B), `reqlog` (35th — store.go Phase C; **the store.go program is CLOSED**), `urlcat` (36th — policy.go Phase A), `sslbypass` (37th — policy.go Phase B; FQDN glob matcher promoted to `hostutil.MatchFQDN`) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
+- **Decomposition program:** ✅ **COMPLETE** (2026-07-03) — 37 packages + 4 seams; store.go program closed (Phases A/B/C), policy.go program closed at A+B (Phase C REJECTED with a recorded re-evaluation trigger), proxy.go/controlplane.go/configversion.go extraction REJECTED with recorded verdicts. Every root file is an extracted engine, a shim, or classified composition-root/domain-core. Future extractions require a fresh recorded design + review, not a continuation of this program.
 
 ## Notes / log
 
@@ -730,6 +731,156 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — policy.go Phase C (`internal/policy`) REJECTED after design mapping — the policy.go program closes at A+B; **the ADR-0002 decomposition program is COMPLETE**
+The Phase C design pass mapped the remaining engine (PolicyStore + Evaluate + matchers, ~590 of
+policy.go's 950 post-A/B lines) and found coupling the program note had underestimated. Verdict:
+**REJECTED (deferred with an explicit re-evaluation trigger)** — recorded adversarial findings:
+
+1. **The DTO is welded to an in-flight frozen contract.** `PolicyRule` embeds `*SubjectMatch` and
+   `*AuthRuleSpec`, both owned by authpolicy.go (1,047 lines; 24 "reserved / NOT implemented /
+   later slice" markers — the AUTH-POLICY spec is still landing Phase 3 slices). Extracting the
+   rule forces the Stage-1 vocabulary to move with it: `AuthOutcome`, `AuthRuleSpec`,
+   `SubjectMatch`, the ruleType consts, `newRuleID` (ulid), and the SIX-validator chain under
+   `validateAuthRule` — including SSO provider-ref SHAPE validation whose LIVE counterpart
+   (`validateSSOProviderRefsLive`) reads the runtime IdP registry. That is a mid-program contract
+   relocation, not an engine extraction.
+2. **The load gate is a fail-closed security boundary.** `policyRulePersistable` runs inside
+   `Load`/`ReplaceAll` and DROPS rules (Phase 1 Slice 3: access rules carrying SubjectMatch would
+   otherwise fail OPEN). Injecting it as a seam creates an unwired-seam fail-open hazard; moving
+   it relocates authority over those drop semantics away from the spec that owns them.
+3. **Widest blast radius in the repo for marginal value.** `PolicyRule` reaches 73 files; the
+   reusable engines that lived in policy.go (URL categories, SSL bypass, FQDN glob) are ALREADY
+   extracted as Phases A/B + hostutil. What remains is domain core that exists to serve exactly
+   this proxy's rule vocabulary — no second consumer.
+4. **Four hot-path lookups would become seam indirections** (geo fail-closed cache, category
+   groups, file profiles, two-tier categories) — cost without corresponding benefit given 1–3.
+
+**Re-evaluation trigger:** when the auth-policy roadmap completes (SSORequired shipped,
+ProviderRefs activated, the spec unfrozen) AND a concrete second consumer for an out-of-main
+policy engine exists (e.g. DP-side local evaluation), re-run this design from scratch.
+
+**Program closure.** With this verdict every root file is accounted for: (a) extracted engine
+(37 packages + 4 seams), (b) thin shim over `internal/`, or (c) classified composition-root /
+domain-core with a recorded verdict (proxy.go, controlplane.go, policy.go+authpolicy.go domain
+core, configversion.go REJECTED, main.go startup slices program). The ADR-0002 decomposition
+program is COMPLETE — future extractions happen only against a recorded new design with its own
+review, not as continuations of this program.
+
+### 2026-07-03 — `internal/sslbypass` extracted (37th; policy.go Phase B) + `hostutil` gains MatchFQDN
+The open design point resolved first: the FQDN glob matcher has two engine consumers (policy rule
+matching + the bypass matcher) with their agreement pinned by policy_bypass_security_test.go, so a
+private copy was off the table — `matchFQDN`/`matchFQDNNorm` moved to **hostutil.MatchFQDN /
+MatchFQDNNorm** (hostutil already owns NormalizeHost, their only dependency; Phase C's policy
+engine will consume them from there too). main keeps them as thin wrapper FUNCTIONS — not func
+vars — so the per-rule call in Evaluate's hot path stays direct and inlinable. The bypass engine
+then moved verbatim to `internal/sslbypass`: `pattern` (compiled glob/`~`-regex), `Matcher`
+(zero-value valid), Set/Load/Save (AtomicWrite durability)/Add/Remove/List/Matches (per-CONNECT
+hot path, resolveSSLAction). main keeps: the `sslBypass` singleton via `SSLBypassMatcher =
+sslbypass.Matcher` alias, /api/ssl-bypass handlers, the inspection-rules startup slice, cluster
+sync, rollback. Test seams `Path()`/`SetPathForTest` replaced the `sslBypass.path` pokes
+(Bucket-4 durability + cluster apply-persist tests); six engine tests consolidated in-package
+(policy_test.go's glob/regex/Set/LoadInvalidJSON + rewrite_scanner_policy_test.go's
+AddRemove/compile — the compile test grew an invalid-regex case). Gates: full suite, `-race`
+over the proxy-e2e/policy/bypass scope, shuffled determinism ×2 (package + main), lint 0 issues,
+leaf proof exactly `fileutil`+`hostutil`. Remaining in policy.go: the Phase C engine (PolicyStore/
+Evaluate/matchers) — design + adversarial review required before execution, per the program note.
+
+### 2026-07-03 — `internal/urlcat` extracted (36th; policy.go Phase A, executed from the design)
+Executed exactly per the program design below. The engine moved verbatim: `Entry`/`Store` +
+lowercase host index, `Load`/`Save` (fileutil.AtomicWrite durability comment preserved), `All`/
+`ReplaceAll`/`Set`/`Delete`/`AddHost`/`RemoveHost`, `GetByName` (moved home from saas_feed.go),
+`DefaultEntries` + the `default_categories.json` embed (file moved into the package), and the two
+internals-reaching free functions became methods: `matchCategoryInStore` → `Store.MatchesHost`
+(hot path — policy Evaluate's category check), the admin tier of `lookupHostCategory` →
+`Store.LookupHost` (entry-scan preserved verbatim for the original-case matchedBy contract).
+`Category` + constants moved (`urlcat.Social` …) with typed-const aliases (`CategorySocial` etc.);
+`URLCategory`/`CategoryEntry`/`CategoryStore` are type aliases; `newCategoryStore = urlcat.New`
+(the `defaultCategoryEntries` alias was dropped — its last user moved with the tests). The
+TWO-TIER fusion (`matchCategory`/`lookupHostCategory` over catStore + communityDB) stays in main
+as designed. Test seams: `Path()` accessor + `SetPathForTest` — snapshotCatStore, the Bucket-4
+durability test, and the cluster apply-persist test dropped their `cs.path`/`rebuildIndex` field
+pokes onto them. catstore_test.go moved in-package wholesale (+ GetByName's test; 76% coverage).
+Moved-code lint (4 gocritic nestingReduce/equalFold) fixed by style, not suppression. Gates: full
+suite, `-race` over policy/category/proxy-e2e scope, shuffled determinism ×2, leaf proof exactly
+`fileutil`+`hostutil`. Next: Phase B (`internal/sslbypass`).
+
+### 2026-07-03 — Core-hub survey (proxy / controlplane / policy) + the policy.go decomposition program (Phases A–C)
+With store.go closed, the three remaining hubs were mapped BEFORE any move (sizes as of today):
+
+- **proxy.go (1847 lines, 38 funcs) — request-path composition root. Extraction REJECTED.**
+  Every handler (`handleRequest`/`handleHTTP`/`handleTunnel*`/`handleWebSocket`) orchestrates the
+  auth resolver, policy evaluation, scanning, cert manager, relays, and telemetry singletons —
+  that IS the composition. DEBT-002 already decomposed the mega-handlers into in-file stage
+  functions (resolveRequestAuth, preDispatchBlocked, applyPolicyDecision, recordRequestTelemetry),
+  which is the right structure for this file. The movable crumbs are pinned or worthless:
+  `sanitizeLog` must stay call-site-recognisable for CodeQL (CLAUDE.md convention), the relay-buf
+  pool and hop-header helpers are ~30 lines of stdlib. No slice meets the value bar.
+- **controlplane.go (2102 lines, 65 funcs) — cluster-sync hub. Core extraction REJECTED.**
+  `ConfigSnapshot` is the cluster sync CONTRACT: it references the DTOs of nearly every subsystem
+  by design, so moving it just relocates the hub. The gRPC service methods and the DP client
+  orchestrate main singletons (stores, HA state, cert manager) — composition, not engine. The
+  three in-file aggregators (`rateLimitAggregator`, `revocationAggregator`, `clusterAuditLog`)
+  are self-contained engines but small (~150 lines total) and bound to shared DTOs — **DEFERRED**
+  (not worth a package today; revisit only if cluster work grows them).
+- **policy.go (1374 lines, 57 funcs) — THREE engines in one file → phased program (mirrors
+  store.go).** Order A → B → C, one slice per commit, full gates each:
+  - **Phase A — `internal/urlcat` (CategoryStore, ~250 lines).** Package owns: `Entry`
+    (CategoryEntry), the `Store` with its lowercase host index, `DefaultEntries()` + the
+    `default_categories.json` embed (moves into the package), `GetByName` (currently defined in
+    saas_feed.go — moves home), and two free functions that today reach into store internals
+    become methods: `matchCategoryInStore` → `Store.MatchesHost`, the admin tier of
+    `lookupHostCategory` → `Store.LookupHost` (returns the original-case name + matched pattern —
+    move verbatim, it deliberately scans entries not the index). `URLCategory` + the `Category*`
+    constants move with aliases. The TWO-TIER fusion (`matchCategory`, `lookupHostCategory` over
+    catStore + communityDB) STAYS in main — it composes two singletons. Deps/leaf target:
+    `hostutil` + `fileutil`. Test seam: `SetPathForTest` (snapshotCatStore needs an empty store
+    with a tmp save path; `Load` would seed defaults). ~9 production files keep compiling via the
+    `catStore` singleton alias.
+  - **Phase B — `internal/sslbypass` (SSLBypassMatcher, ~150 lines).** compile/Set/Load/Save/
+    Add/Remove/List/Matches. `Matches` sits on the per-CONNECT hot path (resolveSSLAction) →
+    -race over proxy scope + traffic smoke, per the Phase A/C precedents. Open design point to
+    settle at execution: glob patterns delegate to the policy engine's `matchFQDN` — either the
+    FQDN glob matcher moves to `hostutil` as a shared primitive or the package keeps a local
+    copy; decide by mapping matchFQDN's other callers.
+  - **Phase C — `internal/policy` (PolicyStore + PolicyRule + Evaluate + matchers, ~900
+    lines).** The real engine and the widest DTO in the repo (`PolicyRule` reaches 73 files —
+    alias keeps source compat; 240-byte struct, index-based range convention preserved). FOUR
+    runtime lookups need inversion seams: `geo.LookupCached` (fail-closed contract must move
+    verbatim), `globalCategoryGroups.MatchesHost`, `globalProfileStore.GetByName` (dynamic
+    profiles beat the legacy map), and the two-tier category match (one `SetCategoryMatcher`
+    seam over the main-side fusion). Stage-1 coupling: `Evaluate` filters on `ruleTypeOf`
+    (authpolicy.go — the frozen `defaultAuthOutcome` contract owns that vocabulary), so either
+    the RuleType vocabulary moves with the rule or the filter becomes an injected predicate —
+    **Phase C requires its own recorded design + adversarial review before execution** (store.go
+    Phase C precedent). Per-rule `HitCount` is an atomic on the rule pointer and moves fine.
+    Hot path per request → full hot-path gate.
+
+### 2026-07-03 — `internal/reqlog` extracted (35th; store.go Phase C, executed from the design) — store.go program CLOSED
+Executed exactly per the recorded design below, after PR #533 merged (sequencing verdict honoured).
+The engine moved verbatim: ring (`MaxRing` 5000), persistent JSONL layer (`Init`/`Close`/the write
+half of `Add` with the count-once-log-first contract), `ReadPersistent` + TTL read cache (the
+serialised-parse trade moved untouched, per review verdict 2), `WriteErrors`/`SkippedLines`
+accessors, `LevelForStatus`. `Entry = logstore.Entry` (alias, no DTO package). The single inversion
+point `SetHistory` is wired in store.go's init — the closure performs the same
+`globalLogStore.Load().Add(e)` atomic load the inline code did (logStore.Add is nil-receiver-safe),
+so the hot path is behavior-identical. main keeps: `AuthLogFields`+`applyTo` (frozen AuthOutcome
+contract), `persistLogEntry` + the recordRequest* fan-out, the API handlers, ts/stats, topHosts.
+Aliases: `levelForStatus`/`logAdd`/`logGet`/`initRequestLog`/`requestLogReadPersistent`; the
+`maxLogs`/`requestLogMaxPersistentReturn` const aliases were DROPPED (their last users moved with
+the tests — callers use `reqlog.MaxRing`/`MaxPersistentReturn`). Counter reads in ui_config/ha/
+events went through the accessors; the shutdown hook uses `reqlog.Close()`. Test seams as designed
+(`SwapRingForTest`, `SetWriterForTest`, `SetFilePathForTest`, `SwapPersistenceForTest`,
+`ResetForTest` with resetRequestLogState's exact no-restore semantics, `PinCacheForTest`/
+`ExpireCacheForTest`, `PersistActive`/`FilePath`); main's `isolateLogRing`/`resetRequestLogState`
+became thin wrappers, and the three remaining inline ring-poke sites (loguri, edge_audit,
+coverage_boost) were rewired onto the helper. Twelve engine tests consolidated in-package (88%
+coverage) — the ring order/capacity pair now exercises the REAL ring instead of store_test.go's
+local reimplementation (`newTestLog`, deleted). Gates: full suite, `-race` over the proxy/record
+scope + the proxy_traffic_e2e suite (hot-path verdict 1), shuffled determinism ×2, leaf proof
+exactly `fileutil`+`logstore`+`obs`. **store.go is now a composition root by classification**
+(stats/ts counters, auth `Config`, recordRequest* orchestration) — the store.go decomposition
+program closes with Phases A (blocklist), B (audit), C (reqlog) shipped.
 
 ### 2026-07-03 — store.go Phase C (`reqlog`) DESIGNED + adversarially reviewed (execute after PR #533 merges)
 The request-log layer (~230 lines) is the LAST decomposable slice of store.go; executing it closes

@@ -11,34 +11,30 @@ package main
 //   - mid-stream auth re-validation (sseAuthStillValid) basics.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // isolateLogRing swaps the in-memory request-log ring for an empty one and
 // restores it on cleanup so logAdd side-effects don't leak across tests.
 func isolateLogRing(t *testing.T) {
 	t.Helper()
-	logsMu.Lock()
-	oldLogs := logs
-	logs = nil
-	logsMu.Unlock()
-	t.Cleanup(func() {
-		logsMu.Lock()
-		logs = oldLogs
-		logsMu.Unlock()
-	})
+	t.Cleanup(reqlog.SwapRingForTest())
 }
+
+// resetRequestLogState unwires the persistent request log engine state so
+// tests can safely re-init without leaking file handles or paths across
+// tests. Safe to call whether or not persistence was initialised.
+func resetRequestLogState() { reqlog.ResetForTest() }
 
 func TestApiEvents_EvictedClientEndsStream(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -209,92 +205,9 @@ func TestApiLogs_LimitClamped(t *testing.T) {
 	}
 }
 
-type failingLogWriter struct{}
-
-func (failingLogWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
-
-func TestLogAdd_CountsWriteErrors(t *testing.T) {
-	isolateLogRing(t)
-	oldWriter := requestLogWriter
-	requestLogWriter = failingLogWriter{}
-	t.Cleanup(func() { requestLogWriter = oldWriter })
-
-	before := atomic.LoadInt64(&statReqLogWriteErrors)
-	logAdd(LogEntry{TS: 1, Method: "GET", Host: "x.example.com", Status: "OK"})
-	if got := atomic.LoadInt64(&statReqLogWriteErrors); got != before+1 {
-		t.Errorf("statReqLogWriteErrors = %d, want %d", got, before+1)
-	}
-}
-
-func TestRequestLogReadPersistent_CountsCorruptLines(t *testing.T) {
-	t.Cleanup(resetRequestLogState)
-
-	good1, _ := json.Marshal(LogEntry{TS: 1, Host: "a.example.com", Status: "OK"})
-	good2, _ := json.Marshal(LogEntry{TS: 2, Host: "b.example.com", Status: "OK"})
-	content := bytes.Join([][]byte{good1, []byte("{corrupt-not-json"), good2, nil}, []byte("\n"))
-
-	path := filepath.Join(t.TempDir(), "request.jsonl")
-	if err := os.WriteFile(path, content, 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	requestLogFilePath = path
-
-	before := atomic.LoadInt64(&statReqLogSkippedLines)
-	entries, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("requestLogReadPersistent: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Errorf("parsed %d entries, want 2 (corrupt line skipped)", len(entries))
-	}
-	if got := atomic.LoadInt64(&statReqLogSkippedLines); got != before+1 {
-		t.Errorf("statReqLogSkippedLines = %d, want %d", got, before+1)
-	}
-}
-
-func TestRequestLogReadPersistent_CachedWithinTTL(t *testing.T) {
-	t.Cleanup(resetRequestLogState)
-	isolateLogRing(t)
-
-	dir := t.TempDir()
-	if err := initRequestLog(filepath.Join(dir, "request.jsonl"), 10); err != nil {
-		t.Fatalf("initRequestLog: %v", err)
-	}
-	logAdd(LogEntry{TS: 1, Host: "a.example.com", Status: "OK"})
-
-	first, err := requestLogReadPersistent()
-	if err != nil || len(first) != 1 {
-		t.Fatalf("first read: entries=%d err=%v, want 1 entry", len(first), err)
-	}
-
-	// Pin the cache expiry far into the future so the "cached" assertion below
-	// can't flake if a slow CI host lets the 2 s TTL lapse between statements.
-	reqLogReadCache.mu.Lock()
-	reqLogReadCache.expires = time.Now().Add(time.Hour)
-	reqLogReadCache.mu.Unlock()
-
-	// A write inside the TTL window is intentionally not visible yet.
-	logAdd(LogEntry{TS: 2, Host: "b.example.com", Status: "OK"})
-	cached, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("cached read: %v", err)
-	}
-	if len(cached) != 1 {
-		t.Fatalf("cached read returned %d entries, want 1 (TTL cache)", len(cached))
-	}
-
-	// Expire the cache → fresh parse sees both entries.
-	reqLogReadCache.mu.Lock()
-	reqLogReadCache.expires = time.Time{}
-	reqLogReadCache.mu.Unlock()
-	fresh, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("fresh read: %v", err)
-	}
-	if len(fresh) != 2 {
-		t.Fatalf("fresh read returned %d entries, want 2 after cache expiry", len(fresh))
-	}
-}
+// The write-error / corrupt-line counter tests and the TTL read-cache test
+// moved to internal/reqlog (ADR-0002, store.go decomposition Phase C) — they
+// exercise engine internals through the package's named test seams.
 
 func TestMetrics_LiveFeedExposition(t *testing.T) {
 	oldToken := metricsToken

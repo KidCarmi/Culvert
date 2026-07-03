@@ -512,21 +512,8 @@ func TestCertManager_LoadCA_BadPassphrase(t *testing.T) {
 	}
 }
 
-// ─── store: logAdd truncation ─────────────────────────────────────────────────
-
-func TestLogAdd_Truncation(t *testing.T) {
-	// Fill logs beyond maxLogs limit
-	for i := 0; i < maxLogs+10; i++ {
-		logAdd(LogEntry{TS: int64(i), Host: "trunctest.example.com", Status: "OK"})
-	}
-	// Verify logs were truncated to maxLogs
-	logsMu.Lock()
-	n := len(logs)
-	logsMu.Unlock()
-	if n > maxLogs {
-		t.Errorf("logAdd should cap logs at %d, got %d", maxLogs, n)
-	}
-}
+// store: logAdd truncation moved to internal/reqlog (ADR-0002, store.go
+// decomposition Phase C — TestAdd_RingTruncation).
 
 // ─── exportBundle / SaveCA with passphrase ────────────────────────────────────
 

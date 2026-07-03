@@ -41,23 +41,8 @@ func TestMergeSaaSCategories_AdditiveMerge(t *testing.T) {
 	}
 }
 
-func TestCategoryStore_GetByName(t *testing.T) {
-	cs := newCategoryStore(defaultCategoryEntries())
-
-	// Should find existing category (case-insensitive).
-	entry := cs.GetByName("ai")
-	if entry == nil {
-		t.Fatal("GetByName('ai') returned nil")
-	}
-	if entry.Name != "AI" {
-		t.Errorf("name = %q, want 'AI'", entry.Name)
-	}
-
-	// Non-existent.
-	if cs.GetByName("NonExistent") != nil {
-		t.Error("expected nil for non-existent category")
-	}
-}
+// TestCategoryStore_GetByName moved to internal/urlcat (ADR-0002, policy.go
+// decomposition Phase A) with GetByName itself.
 
 func TestApiCategoryGroups_CRUD(t *testing.T) {
 	setupProxyTest(t)
