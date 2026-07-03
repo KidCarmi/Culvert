@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/feedsync"
 )
 
 // blocklistCleanupUnattributed handles DELETE /api/blocklist?scope=unattributed:
@@ -543,7 +545,7 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 		ut1Set := make(map[string]bool)
 		feedActive := communityDB != nil // only show badge if feed is actually configured
 		if feedActive {
-			for _, cat := range ut1CategoryMap {
+			for _, cat := range feedsync.MappedCategories() {
 				ut1Set[strings.ToLower(cat)] = true
 			}
 		}

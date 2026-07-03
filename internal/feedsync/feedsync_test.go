@@ -1,4 +1,4 @@
-package main
+package feedsync
 
 import (
 	"archive/tar"
@@ -10,10 +10,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/catdb"
 )
 
-// CommunityDB engine tests moved to internal/catdb (ADR-0002). The feedsync
-// tests below still drive openCommunityDB via the package-main shim.
+// UT1 feed-syncer engine tests, moved in-package with the ADR-0002
+// extraction. The syncer is driven against a real catdb.CommunityDB opened
+// in a temp dir.
 
 // ─── classifyTarEntry tests ───────────────────────────────────────────────────
 
@@ -197,14 +200,14 @@ func TestParseTarball_BadGzip(t *testing.T) {
 
 func TestNewFeedSyncer_Defaults(t *testing.T) {
 	dir := t.TempDir()
-	db, err := openCommunityDB(dir)
+	db, err := catdb.Open(dir)
 	if err != nil {
 		t.Fatalf("openCommunityDB: %v", err)
 	}
 	defer db.Close() //nolint:errcheck // test cleanup
 
 	// Empty URL and zero interval → defaults applied.
-	fs := newFeedSyncer(db, "", 0)
+	fs := New(db, "", 0)
 	if fs.feedURL != defaultUT1FeedURL {
 		t.Errorf("feedURL = %q, want %q", fs.feedURL, defaultUT1FeedURL)
 	}
@@ -215,13 +218,13 @@ func TestNewFeedSyncer_Defaults(t *testing.T) {
 
 func TestNewFeedSyncer_CustomValues(t *testing.T) {
 	dir := t.TempDir()
-	db, err := openCommunityDB(dir)
+	db, err := catdb.Open(dir)
 	if err != nil {
 		t.Fatalf("openCommunityDB: %v", err)
 	}
 	defer db.Close() //nolint:errcheck // test cleanup
 
-	fs := newFeedSyncer(db, "http://custom.example/feed.tar.gz", 6*time.Hour)
+	fs := New(db, "http://custom.example/feed.tar.gz", 6*time.Hour)
 	if fs.feedURL != "http://custom.example/feed.tar.gz" {
 		t.Errorf("feedURL = %q", fs.feedURL)
 	}
@@ -232,13 +235,13 @@ func TestNewFeedSyncer_CustomValues(t *testing.T) {
 
 func TestFeedSyncer_Stats_Initial(t *testing.T) {
 	dir := t.TempDir()
-	db, err := openCommunityDB(dir)
+	db, err := catdb.Open(dir)
 	if err != nil {
 		t.Fatalf("openCommunityDB: %v", err)
 	}
 	defer db.Close() //nolint:errcheck // test cleanup
 
-	fs := newFeedSyncer(db, "http://example.com/feed.tar.gz", time.Hour)
+	fs := New(db, "http://example.com/feed.tar.gz", time.Hour)
 	domains, lastSync, interval := fs.Stats()
 	if domains != 0 {
 		t.Errorf("initial domains = %d, want 0", domains)
@@ -312,13 +315,13 @@ func TestFeedSyncer_Sync_OK(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	db, err := openCommunityDB(dir)
+	db, err := catdb.Open(dir)
 	if err != nil {
 		t.Fatalf("openCommunityDB: %v", err)
 	}
 	defer db.Close() //nolint:errcheck // test cleanup
 
-	fs := newFeedSyncer(db, srv.URL, time.Hour)
+	fs := New(db, srv.URL, time.Hour)
 	fs.Sync()
 
 	total, lastSync, _ := fs.Stats()
@@ -343,13 +346,13 @@ func TestFeedSyncer_Sync_Failure(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	db, err := openCommunityDB(dir)
+	db, err := catdb.Open(dir)
 	if err != nil {
 		t.Fatalf("openCommunityDB: %v", err)
 	}
 	defer db.Close() //nolint:errcheck // test cleanup
 
-	fs := newFeedSyncer(db, srv.URL, time.Hour)
+	fs := New(db, srv.URL, time.Hour)
 	// Sync should not panic on HTTP failure.
 	fs.Sync()
 
@@ -364,7 +367,7 @@ func TestFeedSyncer_Sync_Failure(t *testing.T) {
 func TestFeedSyncer_Start_CancelContext(t *testing.T) {
 	// Non-empty DB so Start doesn't trigger an immediate Sync (avoids network call).
 	dir := t.TempDir()
-	db, err := openCommunityDB(dir)
+	db, err := catdb.Open(dir)
 	if err != nil {
 		t.Fatalf("openCommunityDB: %v", err)
 	}
@@ -374,7 +377,7 @@ func TestFeedSyncer_Start_CancelContext(t *testing.T) {
 	_ = db.BulkWrite(map[string]string{"seed.example.com": "News"})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	fs := newFeedSyncer(db, "http://invalid.example.invalid/feed.tar.gz", time.Hour)
+	fs := New(db, "http://invalid.example.invalid/feed.tar.gz", time.Hour)
 	fs.Start(ctx)
 
 	// Cancel immediately — goroutine should exit without panic.

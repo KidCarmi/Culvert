@@ -10,6 +10,8 @@ package main
 import (
 	"context"
 	"strings"
+
+	"github.com/KidCarmi/Culvert/internal/feedsync"
 )
 
 // loadURLCategories initialises the URL-categorisation stack and returns the
@@ -57,7 +59,7 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 func seedUT1CategoryNames() {
 	ut1Seeded := 0
 	seen := map[string]bool{}
-	for _, mappedCat := range ut1CategoryMap {
+	for _, mappedCat := range feedsync.MappedCategories() {
 		lc := strings.ToLower(mappedCat)
 		if seen[lc] {
 			continue

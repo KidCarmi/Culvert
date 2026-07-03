@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -703,6 +703,21 @@ that swapped that var broke — the loopback-allow helper was retargeted onto `s
 redirect-block test now targets a non-loopback private IP (10.0.0.1, still caught), and the
 dialer-wiring test became a direct `feedCheckRedirect` unit test in the package. Package suite (fake
 Merger + httptest): 70% coverage. Leaf proof: imports `obs` + `ssrf` only.
+
+### 2026-07-03 — `internal/feedsync` extracted (26th leaf) + ssrf-seam CI verdict recorded
+**Seam verdict:** the CI code-scanning gates (CodeQL + gosec, both the code-scanning checks and the
+SAST jobs) are GREEN on the `internal/ssrf` seam and the `internal/blocklistfeed` extraction — the
+one-extra-call-level wrapper does NOT break the inline-guard recognition. The convention holds for
+future extractions: engines call `ssrf.PrivateHost`/`ssrf.SafeDialContext` directly inline.
+
+The UT1 URL-category syncer moved to `internal/feedsync` (`Syncer`/`New`, tarball download/parse,
+the ingest map). Depends on `internal/catdb` (already extracted) + `obs`. Deltas: the UT1 sync-failure
+counter is package-owned (`SyncFailures()`, read by `urlcat_metrics.go` — same pattern as secscan's
+counters); `ut1CategoryMap` consumers (UI feed-backed badge, startup category seeding) go through the
+exported `MappedCategories()` values accessor instead of the mutable map; the metrics test's
+lastSync/totalDomains field pokes became `SeedStats` test support (lesson 3). The whole
+`catdb_feedsync_test.go` engine suite moved in-package (84% coverage); `feedUserAgent` stays owned by
+`threatfeed.go` with the package keeping its own copy of the value. Leaf proof: `catdb`+`obs` only.
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
