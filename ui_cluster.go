@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/bootstrap"
 )
 
@@ -397,7 +398,7 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]any{
 		"local_revoked": sessionRevoked.Count(),
-		"cluster_mode":  clusterRoleIsDP.Load() || clusterRole.role == "control-plane",
+		"cluster_mode":  audit.DPMode() || clusterRole.role == "control-plane",
 	})
 }
 

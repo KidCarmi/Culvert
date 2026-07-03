@@ -367,18 +367,6 @@ func TestAPIAuthLogin_Success_AuthDisabled(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 }
 
-// ─── store.auditAdd with syslog (global nil) ──────────────────────────────────
-
-func TestAuditAdd_NoFile_NoSyslog(_ *testing.T) {
-	// Make sure auditLogFile and globalSyslog are nil
-	oldFile := auditLogFile
-	auditLogFile = nil
-	defer func() { auditLogFile = oldFile }()
-
-	// auditAdd should not panic when both file and syslog are nil
-	auditAdd(AuditEntry{TS: 1, Action: "test.action", Actor: "testactor"})
-}
-
 // ─── CertManager.GetCert ─────────────────────────────────────────────────────
 
 func TestCertManager_GetCert(t *testing.T) {
@@ -481,33 +469,6 @@ func TestValidateExternalURL_PublicHTTPS(t *testing.T) {
 	}
 }
 
-// ─── auditAdd with file ───────────────────────────────────────────────────────
-
-func TestAuditAdd_WithFile(t *testing.T) {
-	f, err := os.CreateTemp("", "auditadd*.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
-
-	oldFile := auditLogFile
-	auditLogFile = f
-	defer func() {
-		auditLogFile = oldFile
-		f.Close()
-	}()
-
-	auditAdd(AuditEntry{TS: 1, Action: "test.file.write", Actor: "testactor"})
-
-	// Verify something was written
-	f.Seek(0, 0) //nolint:errcheck // seeking to start of file; error is non-actionable in test context
-	buf := make([]byte, 1024)
-	n, _ := f.Read(buf)
-	if n == 0 {
-		t.Error("auditAdd should write to the file when auditLogFile is set")
-	}
-}
-
 // ─── ca.go: decryptBundle error paths ────────────────────────────────────────
 
 func TestDecryptBundle_TooShort(t *testing.T) {
@@ -564,28 +525,6 @@ func TestLogAdd_Truncation(t *testing.T) {
 	logsMu.Unlock()
 	if n > maxLogs {
 		t.Errorf("logAdd should cap logs at %d, got %d", maxLogs, n)
-	}
-}
-
-// ─── auditAdd truncation ──────────────────────────────────────────────────────
-
-func TestAuditAdd_Truncation(t *testing.T) {
-	oldFile := auditLogFile
-	auditLogFile = nil
-	defer func() { auditLogFile = oldFile }()
-
-	oldLog := auditLog
-	auditLog = nil
-	defer func() { auditLog = oldLog }()
-
-	for i := 0; i < maxAuditLogs+10; i++ {
-		auditAdd(AuditEntry{TS: int64(i), Action: "test"})
-	}
-	auditMu.Lock()
-	n := len(auditLog)
-	auditMu.Unlock()
-	if n > maxAuditLogs {
-		t.Errorf("auditAdd should cap at %d, got %d", maxAuditLogs, n)
 	}
 }
 
@@ -802,46 +741,6 @@ func TestAuthSelectProvider_WithRelay(t *testing.T) {
 	authSelectProvider(w, r)
 	if w.Code == 0 {
 		t.Error("authSelectProvider should write a response")
-	}
-}
-
-// ─── InitAuditLog: with oversized existing data ───────────────────────────────
-
-func TestInitAuditLog_WithManyEntries(t *testing.T) {
-	f, err := os.CreateTemp("", "auditinit*.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
-
-	// Write more than maxAuditLogs entries to trigger truncation
-	for i := 0; i < maxAuditLogs+5; i++ {
-		_, _ = f.WriteString(`{"ts":` + string(rune('0'+i%10)) + `,"action":"test"}` + "\n")
-	}
-	f.Close()
-
-	oldFile := auditLogFile
-	oldCloser := auditCloser
-	oldLog := auditLog
-	auditLogFile = nil
-	auditCloser = nil
-	auditLog = nil
-	defer func() {
-		auditLogFile = oldFile
-		auditCloser = oldCloser
-		auditLog = oldLog
-		if auditCloser != nil {
-			auditCloser.Close()
-		}
-	}()
-
-	if err := InitAuditLog(f.Name()); err != nil {
-		t.Fatalf("InitAuditLog: %v", err)
-	}
-	if auditCloser != nil {
-		auditCloser.Close()
-		auditLogFile = nil
-		auditCloser = nil
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 func withDPLastGoodConfigTestGlobals(t *testing.T) {
@@ -69,16 +71,16 @@ func TestDPLastGoodConfig_MergeCPAddressesSeedsFailoverPeers(t *testing.T) {
 }
 
 func TestDPLastGoodConfigDiagnostics_CPDownRequiresLocalSnapshot(t *testing.T) {
-	origDP := clusterRoleIsDP.Load()
+	origDP := audit.DPMode()
 	origClient := activeDPClient.Load()
 	origPollFailing := dpControlPlanePollFailing.Load()
 	origState, _ := dpLastGoodConfigSnapshotState.Load().(dpLastGoodConfigSnapshotStatus)
-	clusterRoleIsDP.Store(true)
+	audit.SetDPMode(true)
 	activeDPClient.Store(&DataPlaneClient{})
 	dpControlPlanePollFailing.Store(true)
 	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{})
 	t.Cleanup(func() {
-		clusterRoleIsDP.Store(origDP)
+		audit.SetDPMode(origDP)
 		activeDPClient.Store(origClient)
 		dpControlPlanePollFailing.Store(origPollFailing)
 		dpLastGoodConfigSnapshotState.Store(origState)

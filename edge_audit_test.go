@@ -184,62 +184,6 @@ func TestRecordRequestSSLAction(t *testing.T) {
 	}
 }
 
-// ─── Finding 6.2: auditGetMemory ────────────────────────────────────────────
-
-func TestAuditGetMemory(t *testing.T) {
-	// Seed some audit entries.
-	auditMu.Lock()
-	auditLog = nil
-	auditMu.Unlock()
-
-	now := time.Now().UnixMilli()
-	for i := 0; i < 5; i++ {
-		auditMu.Lock()
-		auditLog = append(auditLog, AuditEntry{
-			TS:     now + int64(i*1000),
-			Time:   time.Now().Format("15:04:05"),
-			Actor:  "admin",
-			Action: "test",
-		})
-		auditMu.Unlock()
-	}
-
-	// No filter.
-	entries, total := auditGetMemory(0, 100, 0, 0)
-	if total != 5 {
-		t.Errorf("expected total=5, got %d", total)
-	}
-	if len(entries) != 5 {
-		t.Errorf("expected 5 entries, got %d", len(entries))
-	}
-
-	// With pagination.
-	entries, total = auditGetMemory(2, 2, 0, 0)
-	if total != 5 {
-		t.Errorf("expected total=5, got %d", total)
-	}
-	if len(entries) != 2 {
-		t.Errorf("expected 2 entries, got %d", len(entries))
-	}
-
-	// Offset past end.
-	entries, _ = auditGetMemory(10, 5, 0, 0)
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries for offset past end, got %d", len(entries))
-	}
-
-	// With time filter.
-	entries, _ = auditGetMemory(0, 100, now+1000, now+3000)
-	if len(entries) == 0 {
-		t.Error("expected some entries with time filter")
-	}
-	for _, e := range entries {
-		if e.TS < now+1000 || e.TS > now+3000 {
-			t.Errorf("entry TS %d outside filter range [%d, %d]", e.TS, now+1000, now+3000)
-		}
-	}
-}
-
 // ─── Finding 4.4: apiScanCache handler ──────────────────────────────────────
 
 func TestAPIScanCache(t *testing.T) {

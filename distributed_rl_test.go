@@ -529,31 +529,6 @@ func TestMergeRevocations(t *testing.T) {
 	}
 }
 
-// ─── Audit event queue ─────────────────────────────────────────────────────
-
-func TestAuditEventQueue(t *testing.T) {
-	// Drain any existing events.
-	drainPendingAuditEvents()
-
-	// Queue some events.
-	queueAuditForCluster(AuditEntry{Action: "test1"})
-	queueAuditForCluster(AuditEntry{Action: "test2"})
-
-	events := drainPendingAuditEvents()
-	if len(events) != 2 {
-		t.Fatalf("expected 2 events, got %d", len(events))
-	}
-	if events[0].Action != "test1" || events[1].Action != "test2" {
-		t.Fatal("events out of order")
-	}
-
-	// Second drain should be empty.
-	events = drainPendingAuditEvents()
-	if events != nil {
-		t.Fatalf("expected nil after drain, got %d events", len(events))
-	}
-}
-
 // ─── clusterAuditLog ──────────────────────────────────────────────────────
 
 func TestClusterAuditLog_AppendAndRecent(t *testing.T) {

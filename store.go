@@ -19,6 +19,8 @@ import (
 	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // ─── Uptime ───────────────────────────────────────────────────────────────────
@@ -340,251 +342,39 @@ func logGet() []LogEntry {
 }
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────
-//
-// AuditEntry captures every configuration change made through the UI/API so
-// operators can answer "Who changed What, and When?" — a core SOC requirement.
-//
-// Actor is the client IP of the UI caller.  When the UI gains its own
-// authentication layer the Actor field will be upgraded to a username.
-// Action follows a "resource.verb" naming scheme (e.g. "policy.add").
+// The audit engine (ring + JSONL persistence + DP→CP push queue) moved to
+// internal/audit (ADR-0002, store.go decomposition Phase B). main keeps the
+// request wrappers (ui_helpers.go), the C2c middleware, the API handlers,
+// and the CP push loop — all through these aliases. The SIEM hook is wired
+// once below (the closure reads the runtime-configured syslog forwarder at
+// call time); DP mode is set by the cluster wiring via audit.SetDPMode.
 
-type AuditEntry struct {
-	TS     int64  `json:"ts"`               // Unix milliseconds
-	Time   string `json:"time"`             // human-readable "2006-01-02 15:04:05"
-	Actor  string `json:"actor"`            // client IP (or authenticated username)
-	Action string `json:"action"`           // "policy.add" | "blocklist.remove" | …
-	Object string `json:"object"`           // the specific item that changed
-	Detail string `json:"detail"`           // extra context (never contains credentials)
-	Before string `json:"before,omitempty"` // JSON snapshot before the change
-	After  string `json:"after,omitempty"`  // JSON snapshot after the change
+// AuditEntry is re-exposed unqualified (engine type is audit.Entry).
+type AuditEntry = audit.Entry
+
+// maxAuditLogs is re-exposed for tests (engine const is audit.MaxRing).
+const maxAuditLogs = audit.MaxRing
+
+func init() {
+	audit.SetSIEM(func(e audit.Entry) {
+		if globalSyslog != nil {
+			globalSyslog.WriteAudit(e)
+		}
+	})
 }
 
-const maxAuditLogs = 500
-
+// Engine funcs re-exposed under their original names.
 var (
-	auditMu          sync.Mutex
-	auditLog         []AuditEntry
-	auditLogFile     io.Writer // persistent JSONL file; nil = in-memory only
-	auditCloser      io.Closer // close on shutdown
-	auditLogFilePath string    // path to JSONL file for paginated reads
+	auditAdd                = audit.Add
+	auditGet                = audit.Get
+	auditGetMemory          = audit.GetMemory
+	auditGetPersistent      = audit.GetPersistent
+	drainPendingAuditEvents = audit.Drain
+	requeueAuditEvents      = audit.Requeue
 )
 
-// clusterRoleIsDP is set to true when this node is a Data Plane in a cluster.
-// Enables audit event queuing for centralized logging on the Control Plane.
-var clusterRoleIsDP atomic.Bool
-
-// InitAuditLog opens path for append-only JSONL persistence with rotation.
-// Existing entries are loaded into the in-memory ring buffer on startup.
-// If path is empty this is a no-op (backwards-compatible).
-// F18: Rotates at 50 MB (same as system log) to prevent unbounded disk growth.
-func InitAuditLog(path string) error {
-	if path == "" {
-		return nil
-	}
-	// Load existing entries first.
-	if data, err := os.ReadFile(path); err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-			if line == "" {
-				continue
-			}
-			var e AuditEntry
-			if json.Unmarshal([]byte(line), &e) == nil {
-				auditLog = append(auditLog, e)
-			}
-		}
-		if len(auditLog) > maxAuditLogs {
-			auditLog = auditLog[len(auditLog)-maxAuditLogs:]
-		}
-	}
-	rf, err := newRotatingFile(path, 50) // 50 MB max before rotation
-	if err != nil {
-		return fmt.Errorf("audit log open %s: %w", path, err)
-	}
-	auditLogFile = rf
-	auditCloser = rf
-	auditLogFilePath = path
-	return nil
-}
-
-// auditGetPersistent reads the JSONL audit log file with pagination.
-// Returns entries newest-first. If from/to are non-zero, filters by timestamp.
-// Falls back to in-memory buffer if no file is configured.
-func auditGetPersistent(offset, limit int, fromTS, toTS int64) ([]AuditEntry, int) {
-	if auditLogFilePath == "" {
-		all := auditGet()
-		// Apply timestamp filters.
-		if fromTS > 0 || toTS > 0 {
-			filtered := make([]AuditEntry, 0, len(all))
-			for i := range all {
-				if fromTS > 0 && all[i].TS < fromTS {
-					continue
-				}
-				if toTS > 0 && all[i].TS > toTS {
-					continue
-				}
-				filtered = append(filtered, all[i])
-			}
-			all = filtered
-		}
-		total := len(all)
-		if offset >= total {
-			return nil, total
-		}
-		end := offset + limit
-		if end > total {
-			end = total
-		}
-		return all[offset:end], total
-	}
-
-	data, err := os.ReadFile(auditLogFilePath)
-	if err != nil {
-		return auditGet(), 0
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	// Parse all entries.
-	entries := make([]AuditEntry, 0, len(lines))
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-		var e AuditEntry
-		if json.Unmarshal([]byte(line), &e) == nil {
-			if fromTS > 0 && e.TS < fromTS {
-				continue
-			}
-			if toTS > 0 && e.TS > toTS {
-				continue
-			}
-			entries = append(entries, e)
-		}
-	}
-	// Reverse to newest-first.
-	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
-		entries[i], entries[j] = entries[j], entries[i]
-	}
-	total := len(entries)
-	if offset >= total {
-		return nil, total
-	}
-	end := offset + limit
-	if end > total {
-		end = total
-	}
-	return entries[offset:end], total
-}
-
-// auditAdd appends an entry to the in-memory ring buffer and, when configured,
-// to the persistent JSONL file and the syslog forwarder.
-func auditAdd(e AuditEntry) {
-	auditMu.Lock()
-	auditLog = append(auditLog, e)
-	if len(auditLog) > maxAuditLogs {
-		auditLog = auditLog[len(auditLog)-maxAuditLogs:]
-	}
-	f := auditLogFile
-	auditMu.Unlock()
-
-	// Persist to JSONL file (outside the lock to avoid blocking callers).
-	if f != nil {
-		if b, err := json.Marshal(e); err == nil {
-			b = append(b, '\n')
-			f.Write(b) //nolint:errcheck
-		}
-	}
-	// Forward to syslog/SIEM if configured.
-	if globalSyslog != nil {
-		globalSyslog.WriteAudit(e)
-	}
-	// Queue for CP push when running as Data Plane.
-	if clusterRoleIsDP.Load() {
-		queueAuditForCluster(e)
-	}
-}
-
-// ─── Pending audit events for Data Plane → Control Plane push ───────────────
-
-var (
-	pendingAuditMu     sync.Mutex
-	pendingAuditEvents []AuditEntry
-)
-
-// queueAuditForCluster adds an audit event to the pending queue for CP push.
-// Called by auditAdd when running in data-plane mode.
-func queueAuditForCluster(e AuditEntry) {
-	pendingAuditMu.Lock()
-	pendingAuditEvents = append(pendingAuditEvents, e)
-	// Cap at 1000 to prevent unbounded growth if CP is unreachable.
-	if len(pendingAuditEvents) > 1000 {
-		pendingAuditEvents = pendingAuditEvents[len(pendingAuditEvents)-1000:]
-	}
-	pendingAuditMu.Unlock()
-}
-
-// drainPendingAuditEvents returns and clears the pending audit event queue.
-func drainPendingAuditEvents() []AuditEntry {
-	pendingAuditMu.Lock()
-	defer pendingAuditMu.Unlock()
-	if len(pendingAuditEvents) == 0 {
-		return nil
-	}
-	events := pendingAuditEvents
-	pendingAuditEvents = nil
-	return events
-}
-
-// requeueAuditEvents prepends failed events back into the pending queue
-// so they are retried on the next push interval instead of being lost.
-func requeueAuditEvents(events []AuditEntry) {
-	pendingAuditMu.Lock()
-	// Prepend old events before any new ones that arrived since drain.
-	pendingAuditEvents = append(events, pendingAuditEvents...)
-	// Cap at 1000 (keep newest).
-	if len(pendingAuditEvents) > 1000 {
-		pendingAuditEvents = pendingAuditEvents[len(pendingAuditEvents)-1000:]
-	}
-	pendingAuditMu.Unlock()
-}
-
-// auditGet returns a newest-first snapshot of the audit log.
-func auditGet() []AuditEntry {
-	auditMu.Lock()
-	cp := make([]AuditEntry, len(auditLog))
-	copy(cp, auditLog)
-	auditMu.Unlock()
-	for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
-		cp[i], cp[j] = cp[j], cp[i]
-	}
-	return cp
-}
-
-// auditGetMemory returns paginated, optionally time-filtered entries from the
-// in-memory ring buffer (newest-first).
-func auditGetMemory(offset, limit int, fromTS, toTS int64) ([]AuditEntry, int) {
-	all := auditGet()
-	if fromTS > 0 || toTS > 0 {
-		filtered := make([]AuditEntry, 0, len(all))
-		for i := range all {
-			if fromTS > 0 && all[i].TS < fromTS {
-				continue
-			}
-			if toTS > 0 && all[i].TS > toTS {
-				continue
-			}
-			filtered = append(filtered, all[i])
-		}
-		all = filtered
-	}
-	total := len(all)
-	if offset >= total {
-		return nil, total
-	}
-	end := offset + limit
-	if end > total {
-		end = total
-	}
-	return all[offset:end], total
-}
+// InitAuditLog opens path for append-only JSONL audit persistence.
+func InitAuditLog(path string) error { return audit.Init(path) }
 
 // ─── Blocklist ────────────────────────────────────────────────────────────────
 // The Blocklist engine moved to internal/blocklist (ADR-0002, store.go

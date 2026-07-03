@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,24 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/audit` extracted (34th; store.go Phase B) + fileutil gains RotatingFile
+The audit engine moved to `internal/audit`: the bounded ring (`MaxRing` 500, saturation pitfall
+preserved in the doc comment), append-only JSONL persistence with rotation, the paginated/
+time-filtered reads (`Get`/`GetMemory`/`GetPersistent` — the memory/persistent filter+paginate
+duplication collapsed into shared `filterByTime`/`paginate` helpers), and the DP→CP push queue
+(`Drain`/`Requeue`, cap 1000). Two inversion points: **SetSIEM** (main's init wires a closure over
+`globalSyslog` — runtime-configured, read at call time; `syslog.WriteAudit(any)` was already
+decoupled) and **SetDPMode/DPMode** (replaces main's `clusterRoleIsDP` atomic; set by the cluster
+wiring, read by diagnostics/ui_cluster). `fileutil` gained **RotatingFile** (moved from logger.go —
+the audit engine and the system/request logs share it; logger.go keeps `rotatingFile`/
+`newRotatingFile` aliases so its call sites are unchanged; the three rotating-writer tests moved
+in-package). main keeps: `auditEvent`/`auditEventDiff` (actor enrichment), the C2c middleware
+(observes the wrappers, untouched), the API handlers, the CP push loop, and `InitAuditLog`/
+shutdown-close as thin wrappers. Whitebox test state pokes across ~10 main files were replaced by
+five named seams (`ResetForTest`/`SwapRingForTest`/`SetPersistForTest`/`ClearPersistForTest`/
+`PersistActive`); six engine tests consolidated in-package (77% coverage). Leaf proof:
+`fileutil` only.
 
 ### 2026-07-03 — `internal/blocklist` extracted (33rd; store.go Phase A, executed from the design)
 Executed exactly per the design below. The full engine moved verbatim (matcher, mode, Load/Save +
