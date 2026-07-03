@@ -177,11 +177,9 @@ jobs:
     name: "Review · build"
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.head_ref }}
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -191,18 +189,17 @@ jobs:
       - name: Build
         run: CGO_ENABLED=0 go build -ldflags="-s -w" -o /dev/null .
 
-      - name: go mod tidy and auto-fix
+      - name: go mod tidy check
+        # Check-only by design. The previous auto-fix pushed bot commits to
+        # contributor branches with a contents:write token — a supply-chain
+        # foot-gun (and it could race the PR author). The failure message
+        # tells the author the exact command to run instead.
         run: |
-          go mod tidy
-          if git diff --exit-code go.mod go.sum; then
+          if go mod tidy -diff; then
             echo "go.mod and go.sum are tidy ✓"
           else
-            echo "::notice::go.mod/go.sum were not tidy — auto-committing fix"
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add go.mod go.sum
-            git commit -m "chore: go mod tidy (auto-fix)"
-            git push
+            echo "::error::go.mod/go.sum are not tidy — run 'go mod tidy' locally and commit the result"
+            exit 1
           fi
 
   # ─── Summary ───────────────────────────────────────────────────────────────
