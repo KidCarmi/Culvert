@@ -1,6 +1,6 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **slices 1–13 shipped**. Companion to
+Status: **slices 1–15 shipped**. Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
@@ -82,6 +82,14 @@ zero-runtime-dependency, Go-first contract.
 - **Slice 13 — security-config panel** (`ui_security_e2e_test.go`). Renders the
   proxy's protective config from `/api/security`: the per-IP rate-limit state
   (Enabled/Disabled) and the source-IP filter management UI.
+- **Slice 14 — CA-management panel** (`ui_ca_e2e_test.go`). With a real root CA
+  installed (`setupInspectCA`), the panel is reachable and its endpoints answer
+  through the admin session: `/api/ca-cert` returns the live root's metadata
+  (issuer, fingerprint, validity) and `/api/ca/download` serves the PEM for
+  browser import — proving the surface is wired to the live CertManager.
+- **Slice 15 — self-update panel** (`ui_updates_e2e_test.go`). The panel is
+  reachable and `/api/update/status` (version + update availability) responds
+  through the admin's browser session.
 
 ### Dependency footprint (test-only)
 
