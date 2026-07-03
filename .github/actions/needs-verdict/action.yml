@@ -25,7 +25,11 @@ description: "Evaluate a needs context for gate aggregates; skipped passes, fail
 
 inputs:
   needs-json:
-    description: "Pass ${{ toJSON(needs) }} from the aggregate job"
+    # NOTE: this description is plain text on purpose — a literal
+    # "$ {{ toJSON(needs) }}" here is EVALUATED by the runner when the
+    # manifest loads, and 'needs' is undefined in that context, which
+    # kills every job that uses this action.
+    description: "Pass the aggregate job's needs context, JSON-encoded via toJSON"
     required: true
   title:
     description: "Step-summary heading"
