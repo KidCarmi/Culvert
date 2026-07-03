@@ -731,6 +731,40 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
 
+### 2026-07-03 — store.go Phase C (`reqlog`) DESIGNED + adversarially reviewed (execute after PR #533 merges)
+The request-log layer (~230 lines) is the LAST decomposable slice of store.go; executing it closes
+the store.go program. Recorded design for `internal/reqlog` (35th):
+- **Package owns:** the in-memory ring (`maxLogs` 5000, `Add`/`Get`), the persistent JSONL layer
+  (`Init(path, maxMB)` on fileutil.RotatingFile, `Close`, the write half of `Add` with the
+  count-once-log-first write-error contract), `ReadPersistent` (bounded amortized parse, 1 MB
+  scanner buffer, 20k cap, rotated-archive intentionally skipped) with its TTL read cache
+  (path-keyed, serialised parse — pre-existing documented design, moves verbatim), the
+  `WriteErrors()`/`SkippedLines()` counter accessors (read by /metrics, /api/stats, /healthz), and
+  `LevelForStatus`.
+- **Entry type:** `logstore.Entry` (import) — the history store owns the wire/SIEM contract; a
+  neutral DTO micro-package was considered and REJECTED (churn without benefit). Leaf proof
+  target: `fileutil` + `logstore` + `obs`.
+- **One inversion point:** `SetHistory(func(Entry))` — main wires
+  `func(e){ globalLogStore.Load().Add(e) }`, preserving the lock-free runtime enable/disable swap
+  exactly (the closure performs the same atomic load the inline code does today).
+- **Stays in main:** `AuthLogFields`+`applyTo` (writes exported alias fields; welded to the frozen
+  `AuthOutcome` contract), the `recordRequest*`/`recordStats`/`persistLogEntry` fan-out
+  (orchestrates stats globals + syslog `WriteRequest` + this layer), topHosts, the ts/stats
+  counters.
+- **Test seams:** `SwapRingForTest` (replaces `isolateLogRing`'s pokes), `SetWriterForTest`,
+  `PinCacheForTest`/`ExpireCacheForTest` (replace the `reqLogReadCache.expires` pokes), and a
+  `ResetForTest` matching `resetRequestLogState`'s exact semantics — verify each helper's
+  snapshot-vs-clear behavior at execution before substituting.
+- **Adversarial review (recorded verdicts):** (1) hot path — `logAdd` runs per request; the only
+  change is the history hook replacing an inline atomic load with a closure doing the same load —
+  gate with `-race` over the proxy scope + traffic smoke, per the Phase A precedent. (2) The
+  serialised-parse read cache is a deliberate pre-existing trade (documented in code) — do NOT
+  "improve" it mid-move. (3) SSE/C2c consumers are alias-covered (`logGet`). (4) Value is thinner
+  than Phases A/B — justified as program completion, not standalone. (5) SEQUENCING: execute only
+  after PR #533 merges; widening an open 17-commit PR trades review quality for nothing.
+  After Phase C, store.go = stats/ts + auth `Config` + record* orchestration — composition root by
+  classification; the store.go program CLOSES.
+
 ### 2026-07-03 — `internal/audit` extracted (34th; store.go Phase B) + fileutil gains RotatingFile
 The audit engine moved to `internal/audit`: the bounded ring (`MaxRing` 500, saturation pitfall
 preserved in the doc comment), append-only JSONL persistence with rotation, the paginated/
