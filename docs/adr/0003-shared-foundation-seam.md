@@ -143,3 +143,17 @@ purpose. (Mapping detail recorded in ADR-0002.)
 Per the approved plan, **stopping here for review before mapping/extracting `fileblock`.** `scan`
 additionally needs an alerting seam (`fireAlert`) + a host-util home (`stripHostPort`) — a future,
 similar increment.
+
+## Facade extension (2026-07-03 — `obs.Debugf`)
+
+The `internal/threatfeed` extraction (ADR-0002, 28th package) carried the first `logDebugf` call
+site into an internal package. The "upgradeable later by exposing level state through `obs`" path
+anticipated in Consequences was taken, in the narrowest form:
+
+- **`obs.Debugf`** — formats with a `DEBUG ` prefix, emits only while debug logging is enabled.
+- **`obs.SetDebugEnabled(bool)`** — main publishes the boolean (atomic); the level *state* still
+  lives exclusively in `package main`, same stance as the `Warnf` nuance above.
+- **Wiring:** main's `SetLogLevel` (the single funnel for every level mutation — startup flag,
+  admin-settings load, admin API, logguard suppress/restore) mirrors `l <= LevelDebug` into
+  `obs.SetDebugEnabled` on every change. Default is off, so internal Debugf lines are dropped until
+  main first publishes — in production that happens at startup before any internal engine runs.

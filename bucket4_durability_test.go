@@ -40,6 +40,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/threatfeed"
 )
 
 // ─── catStore (CategoryStore) ───────────────────────────────────────
@@ -184,24 +186,29 @@ func TestBucket4_ContentScanner_Save_AtomicWriteFile(t *testing.T) {
 // ─── globalThreatFeed (ThreatFeed.saveToDisk) ───────────────────────
 
 // TestBucket4_ThreatFeed_SaveToDisk_AtomicWriteFile verifies that
-// ThreatFeed.saveToDisk now routes through atomicWriteFile (was
+// ThreatFeed persistence routes through the durable atomic writer (was
 // plain os.WriteFile+os.Rename without fsync per P6.2 SC-4).
 //
-// saveToDisk is an internal method; whitebox-tested by direct call.
+// Driven through the public API since the extraction to
+// internal/threatfeed (ADR-0002): Save() wraps the internal saveToDisk;
+// SetDomainAllowlist auto-persists. The durability properties under
+// test — file mode 0600, no tmp leftovers, snake_case feedDB shape —
+// are all observable on disk.
 func TestBucket4_ThreatFeed_SaveToDisk_AtomicWriteFile(t *testing.T) {
 	ensureClusterPersistTestLogger(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "threatfeed.json")
 
-	tf := &ThreatFeed{
-		dbPath:          path,
-		urls:            map[string]feedEntry{"http://bucket4-test.example/x": {Source: "test", AddedAt: time.Now()}},
-		domains:         map[string]feedEntry{"bucket4-test.example": {Source: "test", AddedAt: time.Now()}},
-		domainAllowlist: map[string]bool{"trusted-bucket4.example": true},
-		lastSync:        time.Now(),
-	}
-	if err := tf.saveToDisk(); err != nil {
-		t.Fatalf("saveToDisk: %v", err)
+	tf := threatfeed.New()
+	tf.Init(path, time.Hour) // missing file → load no-op; enables persistence
+	tf.SeedForTest(
+		map[string]string{"http://bucket4-test.example/x": "test"},
+		map[string]string{"bucket4-test.example": "test"},
+	)
+	tf.SetDomainAllowlist([]string{"trusted-bucket4.example"})
+	tf.Save()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Save did not persist: %v", err)
 	}
 
 	assertFileMode0600(t, path)

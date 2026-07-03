@@ -428,20 +428,13 @@ func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
 // (threatfeed.go:266); ImportFeedData does NOT — this test verifies
 // the latter branch becomes durable after the caller-side hook.
 func TestApplyConfigSnapshot_ThreatFeedPersist(t *testing.T) {
-	origDbPath := globalThreatFeed.dbPath
-	t.Cleanup(func() {
-		globalThreatFeed.mu.Lock()
-		globalThreatFeed.dbPath = origDbPath
-		globalThreatFeed.urls = map[string]feedEntry{}
-		globalThreatFeed.domains = map[string]feedEntry{}
-		globalThreatFeed.mu.Unlock()
-	})
-
 	dir := t.TempDir()
 	path := filepath.Join(dir, "threatfeed.json")
-	globalThreatFeed.mu.Lock()
-	globalThreatFeed.dbPath = path
-	globalThreatFeed.mu.Unlock()
+	origDbPath := globalThreatFeed.SetDBPathForTest(path)
+	t.Cleanup(func() {
+		globalThreatFeed.SetDBPathForTest(origDbPath)
+		globalThreatFeed.ImportFeedData(nil, nil) // clear seeded feed data
+	})
 
 	snap := ConfigSnapshot{
 		Version: 1,

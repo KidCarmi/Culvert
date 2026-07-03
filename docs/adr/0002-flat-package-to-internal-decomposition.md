@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,25 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/threatfeed` extracted (28th) + obs facade gains `Debugf`
+The local threat-feed manager (URLhaus/OpenPhish download, offline URL/domain lookups, the
+admin-managed domain allowlist with its nil-vs-empty persistence contract, CP export/import) moved to
+`internal/threatfeed` as a pure leaf — every dependency already had an internal home: `isPrivateIP` →
+`ssrf.PrivateIP` (inline, per the recorded seam verdict), `atomicWriteFile` → `fileutil.AtomicWrite`,
+`logger.Printf` → `obs.Printf`. `ThreatFeed` → `threatfeed.Feed` behind the usual alias;
+`normaliseFeedURL` → exported `NormaliseURL` (main's fuzz target retargets); `fetchTextFeed` became a
+method so its allowlist check reads the receiver instead of the `globalThreatFeed` singleton (only
+caller is `Sync` on the same instance — behavior identical). Moved code got the house-rule fixes
+(`NewRequestWithContext`+`http.NoBody`, named results). **Facade extension (ADR-0003):** the engine's
+one `logDebugf` line required `obs.Debugf`/`obs.SetDebugEnabled` — main's `SetLogLevel` now mirrors
+the debug-enabled boolean into obs on every level change (level state stays in main, same stance as
+`obs.Warnf`). Three whitebox suites moved in-package (engine tests, the allowlist empty-clear
+persistence regressions, the PR #247 saveToDisk race harness); main-side integration tests rewired
+onto public API + two test-support methods (`SeedForTest` replacing map pokes in the secscan feed
+tests, `SetDBPathForTest` replacing the dbPath/mu pokes in the cluster-apply persistence test); the
+bucket-4 durability test now drives `Init`+`SeedForTest`+`Save` instead of whitebox `saveToDisk`.
+Leaf proof: `fileutil`+`obs`+`ssrf` only.
 
 ### 2026-07-03 — `saas_feed.go` mapped; extraction DESIGNED (executed above)
 The next unit is fully mapped and the design decided — recorded here so a fresh session (or the

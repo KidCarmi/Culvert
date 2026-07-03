@@ -62,8 +62,8 @@ func MappedCategories() []string {
 	return out
 }
 
-// userAgent matches package main's feedUserAgent (threatfeed.go) — the
-// project-wide feed-fetch identification string.
+// userAgent matches internal/threatfeed's feedUserAgent — the project-wide
+// feed-fetch identification string.
 const userAgent = "Culvert/1.0 (+https://github.com/KidCarmi/Claude-Test)"
 
 const (

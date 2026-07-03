@@ -42,7 +42,7 @@ ocsp.go       — OCSP shim: transport wiring over internal/ocsp (ADR-0002)
 metrics.go    — Prometheus metrics (culvert_* namespace, per-rule hit counters, latency histogram)
 connlimit.go  — Per-IP connection limiting and X-Request-ID generation
 alerts.go     — Webhook alerting for security events (HMAC-SHA256 signed)
-threatfeed.go — Threat intelligence feed integration (URLhaus, OpenPhish), domain allowlist for hosting platforms
+threatfeed.go — Threat-feed shim: alias + singleton over internal/threatfeed (ADR-0002; URLhaus/OpenPhish, domain allowlist)
 feedsync.go   — Feedsync shim: aliases over internal/feedsync (ADR-0002)
 blocklist_feed.go — Blocklist-feed shim: aliases over internal/blocklistfeed (ADR-0002; Merger iface + ssrf seam)
 rewrite.go    — HTTP header rewrite rules (per-host, wildcard)

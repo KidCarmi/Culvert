@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // ── Log levels ───────────────────────────────────────────────────────────────
@@ -58,9 +60,12 @@ func ParseLogLevel(s string) LogLevel {
 // logLevel is the global minimum log level. Atomically accessed.
 var logLevel atomic.Int32
 
-// SetLogLevel sets the global minimum log level.
+// SetLogLevel sets the global minimum log level. The debug-enabled boolean is
+// mirrored into the obs facade so internal/* packages (which cannot read
+// main's level state) gate their Debugf lines identically.
 func SetLogLevel(l LogLevel) {
 	logLevel.Store(int32(l))
+	obs.SetDebugEnabled(l <= LevelDebug)
 }
 
 // GetLogLevel returns the current global minimum log level.

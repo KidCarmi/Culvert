@@ -1,15 +1,14 @@
-package main
+package threatfeed
 
-// threatfeed_savetodisk_race_test.go — focused race investigation
-// for the ThreatFeed.saveToDisk capture pattern (PR #247 non-
-// blocking review note).
+// savetodisk_race_test.go — focused race investigation for the
+// Feed.saveToDisk capture pattern (PR #247 non-blocking review note;
+// moved in-package from package main at extraction, ADR-0002).
 //
 // Surface under examination
 // =========================
-// saveToDisk (threatfeed.go:416–440) reads tf.urls / tf.domains
-// under RLock and captures them into a feedDB struct by *reference*
-// (the maps are not deep-copied). It then RUnlocks BEFORE
-// json.Marshal walks those references:
+// saveToDisk reads tf.urls / tf.domains under RLock and captures them into
+// a feedDB struct by *reference* (the maps are not deep-copied). It then
+// RUnlocks BEFORE json.Marshal walks those references:
 //
 //	tf.mu.RLock()
 //	allowlist := make([]string, 0, len(tf.domainAllowlist))
@@ -28,27 +27,17 @@ package main
 // This test investigates whether the pattern actually trips
 // `go test -race` under concurrent mutator activity.
 //
-// Static analysis (recorded for context)
-// ======================================
-// Grep `tf.urls\b|tf.domains\b|tf.domainAllowlist\b` returns:
-//   - urls written only at :150 (Sync), :398 (loadFromDisk init),
-//     :495 (ImportFeedData) — all REASSIGNMENTS to fresh maps under
-//     tf.mu.Lock(); the OLD map is never mutated in place.
-//   - domains: same pattern (:151, :399, :496).
-//   - domainAllowlist: REASSIGNED at :89 (Init), :257
-//     (SetDomainAllowlist), :403 (loadFromDisk); but ALSO mutated
-//     in place at :279 (AddDomainAllowlist add) and :292
-//     (RemoveDomainAllowlist delete).
-//
 // Predictions
 // ===========
-// - urls/domains: saveToDisk after RUnlock walks the OLD map; the
-//   field reassignment doesn't mutate the old map, so json.Marshal
-//   sees a stable snapshot. No race expected on these.
-// - domainAllowlist: saveToDisk DEEP-COPIES into a []string slice
-//   under RLock, so no reference is held past RUnlock. The in-place
-//   mutations at :279 / :292 cannot race with the slice walk. No
-//   race expected.
+// - urls/domains: saveToDisk after RUnlock walks the OLD map; wholesale
+//   field reassignment (Sync, loadFromDisk, ImportFeedData — all under
+//   tf.mu.Lock) doesn't mutate the old map, so json.Marshal sees a stable
+//   snapshot. No race expected on these. (SeedForTest, test-only, is the
+//   sole per-key write site; it also holds tf.mu.Lock.)
+// - domainAllowlist: saveToDisk DEEP-COPIES into a []string slice under
+//   RLock, so no reference is held past RUnlock. The in-place mutations in
+//   AddDomainAllowlist / RemoveDomainAllowlist cannot race the slice walk.
+//   No race expected.
 //
 // Result (recorded after running this harness under -race -count=1
 // on the PR #247 baseline, May 2026)
@@ -64,23 +53,22 @@ package main
 // invariant set**:
 //
 //	(i)  tf.urls / tf.domains are only ever REASSIGNED wholesale
-//	     (lines 150–151 in Sync, 495–496 in ImportFeedData) under
-//	     tf.mu.Lock — the old map captured by saveToDisk is
-//	     unreachable from any writer after the reassignment, so the
-//	     unlocked json.Marshal walk iterates an immutable snapshot.
-//	     Grep `tf.urls\[|tf.domains\[` returns only READS (lines
-//	     177, 182, 199); no per-key WRITE site exists.
-//	(ii) tf.domainAllowlist IS mutated in place at :279 / :292, but
-//	     saveToDisk DEEP-COPIES it into a []string slice under
-//	     RLock before RUnlock; the in-place mutators cannot reach
-//	     the slice.
+//	     (Sync, loadFromDisk, ImportFeedData) under tf.mu.Lock — the old
+//	     map captured by saveToDisk is unreachable from any writer after
+//	     the reassignment, so the unlocked json.Marshal walk iterates an
+//	     immutable snapshot. No production per-key WRITE site exists.
+//	(ii) tf.domainAllowlist IS mutated in place by AddDomainAllowlist /
+//	     RemoveDomainAllowlist, but saveToDisk DEEP-COPIES it into a
+//	     []string slice under RLock before RUnlock; the in-place
+//	     mutators cannot reach the slice.
 //
 // No production fix is warranted. This test stays as a forward
 // regression guard:
 //   - if a future change adds a per-key write site on tf.urls or
 //     tf.domains (e.g. `tf.urls[k] = v` outside a wholesale
-//     reassignment), the harness will trip `-race` because
-//     saveToDisk's unlocked walk would race the in-place mutation;
+//     reassignment) without holding the lock, the harness will trip
+//     `-race` because saveToDisk's unlocked walk would race the
+//     in-place mutation;
 //   - if a future change replaces the domainAllowlist slice copy
 //     with a direct reference, the AddDomainAllowlist /
 //     RemoveDomainAllowlist mutators will race the same way.
@@ -97,15 +85,13 @@ import (
 )
 
 func TestThreatFeed_SaveToDisk_ConcurrentMutators_Race(t *testing.T) {
-	ensureClusterPersistTestLogger(t)
-
 	dir := t.TempDir()
 	path := filepath.Join(dir, "threatfeed.json")
 
-	tf := &ThreatFeed{
+	tf := &Feed{
 		dbPath:          path,
-		urls:            map[string]feedEntry{},
-		domains:         map[string]feedEntry{},
+		urls:            map[string]entry{},
+		domains:         map[string]entry{},
 		domainAllowlist: map[string]bool{},
 	}
 
@@ -141,7 +127,7 @@ func TestThreatFeed_SaveToDisk_ConcurrentMutators_Race(t *testing.T) {
 	//      deep-copies tf.domainAllowlist into a slice.
 	//   2. RUnlocks.
 	//   3. json.Marshal walks the held references.
-	//   4. atomicWriteFile commits to disk.
+	//   4. fileutil.AtomicWrite commits to disk.
 	for i := 0; i < saveGoroutines; i++ {
 		go func() {
 			defer wg.Done()
@@ -164,8 +150,8 @@ func TestThreatFeed_SaveToDisk_ConcurrentMutators_Race(t *testing.T) {
 			for j := 0; j < mutatorsPerGoroutine; j++ {
 				switch (i + j) % 4 {
 				case 0:
-					// Reassign urls + domains (Lock'd in
-					// threatfeed.go:149–153).
+					// Reassign urls + domains (Lock'd in Sync-style
+					// wholesale replacement).
 					newURLs := map[string]int64{
 						fmt.Sprintf("http://mut-%d-%d.example/x", i, j): 1700000000,
 					}
@@ -174,18 +160,15 @@ func TestThreatFeed_SaveToDisk_ConcurrentMutators_Race(t *testing.T) {
 					}
 					tf.ImportFeedData(newURLs, newDomains)
 				case 1:
-					// Reassign domainAllowlist (Lock'd in
-					// threatfeed.go:255–270).
+					// Reassign domainAllowlist.
 					tf.SetDomainAllowlist([]string{
 						fmt.Sprintf("allow-mut-%d-%d.example", i, j),
 					})
 				case 2:
-					// In-place ADD to domainAllowlist (Lock'd
-					// in threatfeed.go:273–287).
+					// In-place ADD to domainAllowlist.
 					tf.AddDomainAllowlist(fmt.Sprintf("add-mut-%d-%d.example", i, j))
 				case 3:
-					// In-place DELETE from domainAllowlist
-					// (Lock'd in threatfeed.go:289–301).
+					// In-place DELETE from domainAllowlist.
 					tf.RemoveDomainAllowlist(fmt.Sprintf("add-mut-%d-%d.example", i, j))
 				}
 			}
