@@ -1544,20 +1544,31 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		proto := detectProtocolName(firstByte[0])
 		logger.Printf("SSL_INSPECT non-TLS protocol detected for %q (first byte=0x%02x, proto=%s) — falling back to raw relay",
 			sanitizeLog(hostOnly), firstByte[0], proto)
-		// Raw relay: splice the peeked reader (client) ↔ upstream (already TLS-connected)
+		// Raw relay: splice the peeked reader (client) ↔ upstream (already
+		// TLS-connected). This is a non-TLS tunnel that bypasses HTTP-level
+		// inspection, so — like the CONNECT-bypass / WebSocket / SOCKS5 relays —
+		// account its bytes and lifetime in the request log (Finding 11.1).
+		// Teardown is unchanged: wait for one side to EOF, then Close both to
+		// unblock the other. Each direction's count is written by exactly one
+		// goroutine before its done-send and read only after both done-receives
+		// (channel happens-before), so no atomics are needed.
+		start := time.Now()
+		var toUpstream, toClient int64
 		done := make(chan struct{}, 2)
-		relay := func(dst io.Writer, src io.Reader) {
+		relay := func(dst io.Writer, src io.Reader, count *int64) {
 			bp := getRelayBuf()
-			io.CopyBuffer(dst, src, *bp) //nolint:errcheck
+			n, _ := io.CopyBuffer(dst, src, *bp) //nolint:errcheck // relay copy error is expected on peer close; byte count still valid
 			relayBufPool.Put(bp)
+			*count = n
 			done <- struct{}{}
 		}
-		go relay(upstreamTLS, peekBuf)   // client → upstream
-		go relay(rawClient, upstreamTLS) // upstream → client
+		go relay(upstreamTLS, peekBuf, &toUpstream) // client → upstream
+		go relay(rawClient, upstreamTLS, &toClient) // upstream → client
 		<-done
-		rawClient.Close()
-		upstreamTLS.Close()
+		rawClient.Close()   //nolint:errcheck // force the peer relay to unblock
+		upstreamTLS.Close() //nolint:errcheck // force the peer relay to unblock
 		<-done
+		recordTunnelCloseGated(match, id, "CONNECT", hostOnly, toUpstream, toClient, start, "inspect")
 		return
 	}
 

@@ -5,6 +5,43 @@ Newest entry first.
 
 ---
 
+## 8. Account the non-TLS inspect-fallback tunnel in the request log
+
+**What changed**
+When a non-TLS protocol (SSH/RDP/etc.) is sent through a CONNECT that policy
+marked for SSL inspection, `handleTunnelInspect` detects the non-TLS first byte
+and falls back to a raw relay (proxy.go). This was the ONE raw-relay path
+iteration 2 didn't cover — it counted no bytes and emitted no `TUNNEL_CLOSED`
+entry, so these tunnels were invisible in the request log / SIEM / byte stats.
+
+- Added per-direction byte counting and a `recordTunnelCloseGated(...,
+  "inspect")` accounting entry to the fallback relay. The proven teardown
+  (wait for one side to EOF, then Close both to unblock the other) is
+  UNCHANGED — only the counting and the close-time record were added.
+
+**Why**
+Completes Finding 11.1 across every raw-relay path (WebSocket, CONNECT-bypass,
+SOCKS5 from iteration 2; now the inspect non-TLS fallback). A non-TLS protocol
+tunneled through an inspect rule is exactly the kind of traffic an operator
+most wants visible.
+
+**Validation**
+`go build`, full `go test .` (47s) green, race on the MITM + accounting paths
+green, `--new-from-rev=main` lint 0 issues. New e2e test drives a real non-TLS
+protocol (`SSH-2.0-…` first byte) through an inspect-marked CONNECT against a
+plain TLS echo upstream and asserts the `TUNNEL_CLOSED` entry
+(SSLAction=inspect, byte counts in both directions). This path had no test
+before — net coverage increase for a security-relevant fallback.
+
+**Note (defense-in-depth, not addressed)**
+The goroutine/resource-leak audit that surfaced this path found NO genuine
+leaks anywhere in the codebase, but noted that established tunnels have no
+application-level idle timeout (they terminate on client TCP death). Adding a
+configurable idle cap is a GUI-parity feature/behavior change — logged, not
+done.
+
+---
+
 ## 7. Bound the cluster-enrollment rate-limiter map
 
 **What changed**
