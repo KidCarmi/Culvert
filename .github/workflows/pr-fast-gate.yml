@@ -104,6 +104,17 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: go mod tidy check (root module)
+        # Check-only by contract (never auto-push to contributor branches).
+        # Moved here from code-review.yml's retired build job (step 7).
+        run: |
+          if go mod tidy -diff; then
+            echo "go.mod and go.sum are tidy ✓"
+          else
+            echo "::error::go.mod/go.sum are not tidy — run 'go mod tidy' locally and commit the result"
+            exit 1
+          fi
+
       - name: Build static binary + assert no dynamic linkage
         # Guards the CGO_ENABLED=0 single-binary contract (was qa-os).
         run: |
