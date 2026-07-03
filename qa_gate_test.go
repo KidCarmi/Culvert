@@ -17,6 +17,7 @@ package main
 // persistence stays here — it exercises store.go, not the TOTP algorithm.
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -222,10 +223,10 @@ func TestSSRFSafeDialer_RejectsLoopbackDial(t *testing.T) {
 	defer ln.Close()
 
 	addr := ln.Addr().String()
-	conn, err := ssrfSafeDialer.Dial("tcp", addr)
+	conn, err := ssrfSafeDialContext(context.Background(), "tcp", addr)
 	if err == nil {
 		conn.Close()
-		t.Fatalf("ssrfSafeDialer permitted loopback dial to %s — SSRF guard regression", addr)
+		t.Fatalf("SSRF-safe dialer permitted loopback dial to %s — SSRF guard regression", addr)
 	}
 }
 

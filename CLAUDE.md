@@ -30,7 +30,7 @@ identity.go   — Identity model (Sub, Groups, Source)
 clam.go       — ClamAV INSTREAM scanner
 yara_scan.go  — Pure-Go YARA rule engine
 scanner.go    — Unified DPI + ClamAV + YARA scan coordinator
-security.go   — Security helpers (SSRF guard via isPrivateHost, header scrub)
+security.go   — Security helpers: SSRF wrappers over internal/ssrf + IP filter + header scrub
 security_scan.go — Scan-orchestrator shim: adapters + wrappers over internal/secscan (ADR-0006)
 fileblock.go  — File extension/MIME blocking profiles
 fileprofile.go — Named file-type blocking profiles (Executables, Archives, etc.)

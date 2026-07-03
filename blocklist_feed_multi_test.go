@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 func newTestBlocklistSyncer(t *testing.T) *BlocklistSyncer {
@@ -120,12 +122,10 @@ func allowLoopbackSSRF(t *testing.T) {
 	origDial := ssrfSafeDialContext
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	ssrfSafeDialContext = dialer.DialContext
-	ssrfDNSCache.Store("127.0.0.1", false)
+	ssrf.CacheStore("127.0.0.1", false)
 	t.Cleanup(func() {
 		ssrfSafeDialContext = origDial
-		ssrfDNSCache.mu.Lock()
-		delete(ssrfDNSCache.entries, "127.0.0.1")
-		ssrfDNSCache.mu.Unlock()
+		ssrf.CacheDelete("127.0.0.1")
 	})
 }
 
@@ -187,11 +187,9 @@ func TestBlocklistSyncer_SyncFeed_UsesSSRFSafeDialContext(t *testing.T) {
 	bs := newTestBlocklistSyncer(t)
 	const feedURL = "http://feeds.example/feed.txt"
 	const sentinel = "dial guard sentinel"
-	ssrfDNSCache.Store("feeds.example", false)
+	ssrf.CacheStore("feeds.example", false)
 	t.Cleanup(func() {
-		ssrfDNSCache.mu.Lock()
-		delete(ssrfDNSCache.entries, "feeds.example")
-		ssrfDNSCache.mu.Unlock()
+		ssrf.CacheDelete("feeds.example")
 	})
 
 	origDial := ssrfSafeDialContext
@@ -244,7 +242,7 @@ func TestAPIBlocklistFeed_MultiFeedLifecycle(t *testing.T) {
 	swapAdminSettingsPath(t, "") // disable background settings writes
 	// Pre-seed the SSRF DNS cache so the handler's isPrivateHost guard
 	// passes without real DNS resolution (fails closed on NXDOMAIN).
-	ssrfDNSCache.Store("feeds.example", false)
+	ssrf.CacheStore("feeds.example", false)
 
 	post := func(url, interval string) *httptest.ResponseRecorder {
 		r := jsonReq(http.MethodPost, "/api/blocklist/feed",

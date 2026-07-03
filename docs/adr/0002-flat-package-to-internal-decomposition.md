@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -673,6 +673,20 @@ down by decomposition, not suppression: `collectSANs`, `appendEnvPublicIPs`, and
 (gocognit/cyclop/nestif); metadata requests use `http.NoBody`. No SSRF-guard coupling — the IMDS
 endpoints are deliberately link-local and use a dedicated 2s-timeout client. Leaf proof: imports `obs`
 only.
+
+### 2026-07-03 — `internal/ssrf` seam built (4th seam; unblocks blocklist_feed)
+The SSRF guard moved out of `proxy.go`/`security.go` into `internal/ssrf`: the private-CIDR table,
+`PrivateIP`/`PrivateHost` (with the 30s-TTL DNS verdict cache — negative results uncached, fail-closed),
+the connect-time `Control` (DNS-rebinding TOCTOU closure), and `SafeDialContext`. package main keeps
+thin wrappers so every call site is UNCHANGED: `isPrivateIP`/`isPrivateHost` funcs and the
+test-swappable `ssrfSafeDialContext`/`ssrfControl` vars (security.go); the tick loop calls
+`ssrf.CacheCleanup()` (connlimit_startup.go). Test pokes at `ssrfDNSCache.mu/.entries` were replaced by
+`CacheStore`/`CacheDelete` test support (lesson 3); `qa_gate_test.go`'s direct `ssrfSafeDialer.Dial`
+retargeted onto the DialContext var. **CodeQL contract note:** main call sites still see the
+`url.Parse + scheme + isPrivateHost()` inline pattern — the wrapper adds one call level; the CI CodeQL
+gate on this commit is the empirical verdict, and the follow-on `internal/blocklistfeed` extraction
+waits for it. Package suite: 96% coverage (CIDR table incl. the IPv4-mapped-IPv6 case, cached verdicts,
+Control fail-closed cases, cache cleanup).
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
