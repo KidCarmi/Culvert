@@ -20,6 +20,15 @@ zero-runtime-dependency, Go-first contract.
   logout → gated again AND `/api/auth/status` reports logged-out (session cleared);
   and 5 failed attempts trip the brute-force lockout (429, "locked"). The
   process-global login limiter is snapshot/cleared for isolation.
+- **Slice 3 — policy-editor cross-plane** (`ui_policy_e2e_test.go`). The strongest
+  assertion in the suite: boots the admin UI AND a real proxy listener in one
+  process (shared global `policyStore`). Baseline default-deny → a proxied request
+  is 403; the admin creates an "allow *" rule through the policy panel; then the
+  SAME request reaches the backend (200) — a control-plane (UI) change taking
+  effect on the data plane (proxy), plus the rule rendering in the policy table.
+  Note: the SPA's post-submit table refresh races the panel-open fetch at
+  test speed (a real user's panel-open fetch has long completed before they
+  submit), so the test re-opens the panel for a deterministic single fetch.
 
 ### Dependency footprint (test-only)
 

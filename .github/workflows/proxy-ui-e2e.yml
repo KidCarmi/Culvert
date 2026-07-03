@@ -27,6 +27,7 @@ on:
       - "store.go"
       - "ui_rbac_e2e_test.go"
       - "ui_login_e2e_test.go"
+      - "ui_policy_e2e_test.go"
       - "ui_e2e_helpers_test.go"
       - ".github/workflows/proxy-ui-e2e.yml"
 

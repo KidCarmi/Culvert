@@ -141,6 +141,33 @@ func newUIPage(t *testing.T, browser playwright.Browser, base string) (playwrigh
 	return ctx, page
 }
 
+// newAuthedUIPage opens a page already authenticated as user/role by injecting a
+// signed ps_ui_session cookie BEFORE the first navigation (so the SPA's on-load
+// auth/status fetch sees the session and applies role gating).
+func newAuthedUIPage(t *testing.T, browser playwright.Browser, base, user string, role UIRole) (playwright.BrowserContext, playwright.Page) {
+	t.Helper()
+	ctx, err := browser.NewContext()
+	if err != nil {
+		t.Fatalf("new context: %v", err)
+	}
+	t.Cleanup(func() { _ = ctx.Close() })
+	if err := ctx.AddCookies([]playwright.OptionalCookie{{
+		Name:  uiSessionCookieName,
+		Value: mintUISessionValue(t, user, role),
+		URL:   playwright.String(base),
+	}}); err != nil {
+		t.Fatalf("add cookie: %v", err)
+	}
+	page, err := ctx.NewPage()
+	if err != nil {
+		t.Fatalf("new page: %v", err)
+	}
+	if _, err := page.Goto(base+"/", playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateNetworkidle}); err != nil {
+		t.Fatalf("goto %s: %v", base, err)
+	}
+	return ctx, page
+}
+
 // mintUISessionValue produces a signed ps_ui_session cookie value for user/role,
 // identical to what setUISessionCookie writes — so the browser is authenticated
 // deterministically without driving the login overlay (that fidelity is slice 2).
