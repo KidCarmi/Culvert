@@ -5,6 +5,45 @@ Newest entry first.
 
 ---
 
+## 5. Bound the top-hosts counter (unbounded-memory DoS)
+
+**What changed**
+`topHosts` was a `map[string]int64` keyed by hostname, incremented on every
+allowed request and NEVER evicted. The hostname is attacker-controllable, so a
+client requesting arbitrarily many distinct hosts (`random-N.example.com`) grew
+the map without limit — a memory-exhaustion DoS — and it also grows unbounded
+on any proxy serving naturally diverse traffic over a long uptime.
+
+- The counter is now hard-capped at `topHostsMaxEntries` (10,000 distinct
+  hosts). At capacity, a new host triggers a decay pass (halve every count,
+  drop those that reach zero) that evicts cold entries — including
+  high-cardinality count-1 flood junk — while continuously-reinforced heavy
+  hitters survive (a host that goes silent correctly ages out). Decay is O(n)
+  but amortized to at most once per `topHostsMaxEntries` new-host drops, so
+  each `Record` is amortized O(1). Already-tracked hosts always increment,
+  never gated.
+
+**Why**
+Unbounded memory keyed by untrusted input is a latent DoS. The decay design
+also resists top-N poisoning: a flood of one-off hosts (count 1) is exactly
+what decays out first, so the dashboard keeps showing the real heavy hitters
+even under a cardinality flood.
+
+**Risks**
+- Counts become approximate lower bounds once the cap is first hit (standard
+  for a bounded frequent-items counter). The RANKING — what "top hosts" is
+  for — stays correct. Below 10k distinct hosts (the overwhelming common
+  case) behavior is unchanged and counts are exact.
+
+**Validation**
+`go build`, full `go test .` (47s) green, race on the counter + record paths
+green, `--new-from-rev=main` lint 0 issues. 4 new tests: memory strictly
+bounded under a 50k-host flood, heavy hitters survive an interleaved flood
+(no poisoning), already-tracked hosts keep counting at capacity, and Top()
+ordering.
+
+---
+
 ## 4. IP filter fails closed on a corrupt mode (was: silent fail-open)
 
 **What changed**

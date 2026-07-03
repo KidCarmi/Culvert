@@ -1082,16 +1082,60 @@ type HostStat struct {
 }
 
 type hostCounter struct {
-	mu    sync.Mutex
-	hosts map[string]int64
+	mu           sync.Mutex
+	hosts        map[string]int64
+	pendingDecay int // new-host drops since the last decay pass (amortization)
 }
 
 var topHosts = &hostCounter{hosts: map[string]int64{}}
 
+// topHostsMaxEntries bounds the number of distinct hostnames the top-hosts
+// counter tracks. The hostname is attacker-controllable (any client can
+// request arbitrarily many distinct hosts), so without a bound the map is an
+// unbounded memory-exhaustion DoS. A var (not const) so tests can lower it.
+var topHostsMaxEntries = 10000
+
 func (hc *hostCounter) Record(host string) {
 	hc.mu.Lock()
-	hc.hosts[host]++
-	hc.mu.Unlock()
+	defer hc.mu.Unlock()
+	if _, ok := hc.hosts[host]; ok {
+		hc.hosts[host]++ // already tracked — always count, never gated
+		return
+	}
+	if len(hc.hosts) >= topHostsMaxEntries {
+		// At capacity with a NEW host. Decaying (halve all counts, drop those
+		// that reach zero) evicts cold entries — including high-cardinality
+		// count-1 junk from a flood — so continuously-reinforced heavy hitters
+		// survive (each decay only halves them, and their ongoing traffic tops
+		// them back up) while a host that has gone silent correctly ages out.
+		// Decay is O(n), so amortize it to at most once per topHostsMaxEntries
+		// new-host drops; between passes newcomers are dropped in O(1). Net:
+		// strict memory bound + amortized O(1) per call.
+		hc.pendingDecay++
+		if hc.pendingDecay < topHostsMaxEntries {
+			return
+		}
+		hc.pendingDecay = 0
+		hc.decayLocked()
+		if len(hc.hosts) >= topHostsMaxEntries {
+			return // still saturated with hot hosts — drop the newcomer
+		}
+	}
+	hc.hosts[host] = 1
+}
+
+// decayLocked halves every count and deletes entries that reach zero. Caller
+// holds hc.mu. This is the eviction primitive: cold entries (low counts) fall
+// out while heavy hitters persist, keeping the top-N ranking meaningful.
+func (hc *hostCounter) decayLocked() {
+	for h, c := range hc.hosts {
+		c /= 2
+		if c == 0 {
+			delete(hc.hosts, h)
+		} else {
+			hc.hosts[h] = c
+		}
+	}
 }
 
 // Top returns the n most-requested hosts, sorted descending by count.
