@@ -95,15 +95,26 @@ func TestSet_EvictsUnderCapacity(t *testing.T) {
 
 func TestSet_EvictsExpiredFirst(t *testing.T) {
 	const capacity = 4
-	c := New(capacity, time.Millisecond)
+	// Generous TTL so the freshly inserted entry can never expire mid-test
+	// on a slow runner (the previous 1ms-TTL + sleep version flaked in CI:
+	// "fresh" itself expired between Set and Get). Expiry of the initial
+	// entries is forced deterministically by backdating them instead.
+	c := New(capacity, time.Hour)
 	for i := 0; i < capacity; i++ {
 		c.Set(string(rune('a'+i)), ScanCacheResult{Clean: true})
 	}
-	time.Sleep(5 * time.Millisecond) // all entries now expired
+	c.mu.Lock()
+	for _, e := range c.entries {
+		e.expiresAt = time.Now().Add(-time.Minute)
+	}
+	c.mu.Unlock()
 	// Next Set hits capacity → evictLocked clears the expired ones first,
 	// leaving room without resorting to the 25 % drop.
 	c.Set("fresh", ScanCacheResult{Clean: true})
 	if _, ok := c.Get("fresh"); !ok {
 		t.Error("freshly inserted entry should be present")
+	}
+	if _, _, size := c.Stats(); size != 1 {
+		t.Errorf("size after expired-first eviction = %d, want 1 (only the fresh entry)", size)
 	}
 }
