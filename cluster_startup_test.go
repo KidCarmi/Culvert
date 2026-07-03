@@ -128,6 +128,16 @@ func TestArmHALease_MalformedConfigErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no certificates parsed") {
 		t.Errorf("garbage CA: err = %v, want no-certificates-parsed error", err)
 	}
+
+	// TTL at or below the write margin would grant a lease that never
+	// confers write authority (WriteAllowed subtracts haLeaseWriteMargin).
+	err = armHALease(clusterStartupConfig{
+		HAEtcdEndpoints: "https://etcd:2379",
+		HALeaseTTLSec:   1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "too short") {
+		t.Errorf("TTL 1s: err = %v, want too-short error", err)
+	}
 }
 
 // armHALease with an UNREACHABLE (but well-formed) endpoint must succeed and
@@ -137,7 +147,7 @@ func TestArmHALease_UnreachableEndpointStillArms(t *testing.T) {
 	installGlobalHA(t, &HAState{})
 	if err := armHALease(clusterStartupConfig{
 		HAEtcdEndpoints: "127.0.0.1:1, 127.0.0.1:2", // reserved ports; nothing listens
-		HALeaseTTLSec:   1,
+		HALeaseTTLSec:   haLeaseMinTTLSec,
 	}); err != nil {
 		t.Fatalf("armHALease with unreachable endpoints must not error (lazy client): %v", err)
 	}

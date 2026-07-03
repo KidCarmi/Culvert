@@ -167,7 +167,7 @@ type FileConfig struct {
 		EtcdCert        string `yaml:"etcd_cert_file"`    // client cert for etcd mTLS (optional)
 		EtcdKey         string `yaml:"etcd_key_file"`     // client key for etcd mTLS (optional)
 		EtcdCA          string `yaml:"etcd_ca_file"`      // CA cert for etcd server validation (optional)
-		LeaseTTLSeconds int    `yaml:"lease_ttl_seconds"` // fencing lease TTL (default 10; failover latency ≈ TTL)
+		LeaseTTLSeconds int    `yaml:"lease_ttl_seconds"` // fencing lease TTL (default 10, minimum 3; failover latency ≈ TTL)
 	} `yaml:"cluster"`
 
 	// SecurityScan configures the local security scanning stack:

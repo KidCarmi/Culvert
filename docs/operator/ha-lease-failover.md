@@ -97,7 +97,9 @@ The TTL is the **failover-latency ↔ tolerance trade**:
   The keepalive renews at TTL/3 (capped at 2s), so transient etcd blips
   shorter than roughly TTL−1s never fence a healthy leader.
 - Lower TTL = faster failover but less tolerance for etcd/network hiccups.
-  10s is a sane default; go below 5s only on a very reliable LAN.
+  10s is a sane default; go below 5s only on a very reliable LAN. The
+  enforced minimum is **3s** — a TTL at or below the 1s write margin would
+  grant a lease that never confers write authority, so startup rejects it.
 
 ## Observing
 

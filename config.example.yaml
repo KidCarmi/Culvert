@@ -168,7 +168,7 @@ cluster:
   etcd_cert_file: ""      # client cert for etcd mTLS (optional)
   etcd_key_file: ""       # client key for etcd mTLS (optional)
   etcd_ca_file: ""        # CA cert for etcd server validation (optional)
-  lease_ttl_seconds: 10   # fencing lease TTL (default 10)
+  lease_ttl_seconds: 10   # fencing lease TTL (default 10, minimum 3)
 
 # ── Admin UI ──────────────────────────────────────────────────────────────
 

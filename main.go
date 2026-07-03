@@ -257,7 +257,7 @@ func parseFlags(s *startupState) {
 	s.haEtcdCert = flag.String("ha-etcd-cert", "", "HA fencing lease: client certificate for etcd mTLS")
 	s.haEtcdKey = flag.String("ha-etcd-key", "", "HA fencing lease: client key for etcd mTLS")
 	s.haEtcdCA = flag.String("ha-etcd-ca", "", "HA fencing lease: CA certificate to validate the etcd server")
-	s.haLeaseTTL = flag.Int("ha-lease-ttl", 10, "HA fencing lease TTL in seconds (failover latency ≈ TTL; minimum 1)")
+	s.haLeaseTTL = flag.Int("ha-lease-ttl", 0, "HA fencing lease TTL in seconds (failover latency ≈ TTL; minimum 3; 0 = cluster.lease_ttl_seconds from config, or 10)")
 	s.dpCPAddr = flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
 	s.dpNodeID = flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
 	s.dpCert = flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")

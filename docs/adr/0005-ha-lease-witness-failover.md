@@ -137,6 +137,12 @@ Recorded so implementation cannot forget them:
   option A), failure scenarios (leader death, partition, etcd-down-for-both = read-only until it
   returns, ghost restart, double outage), break-glass (manual promote bypasses freshness/hysteresis;
   removing endpoints on BOTH nodes reverts to legacy; `etcdctl del` + promote).
+- **PR #551 review fixes (Codex, both P2, both real):** (1) the `-ha-lease-ttl` flag default of 10
+  shadowed `cluster.lease_ttl_seconds` (a non-zero flag value always won `firstNonZero`) — flag
+  default is now 0 = "unset", so YAML wins and the resolver's 10s fallback still applies; (2) a TTL
+  at or below the 1s write margin granted a lease that never conferred write authority
+  (`WriteAllowed` subtracts the margin) — `armHALease` now rejects TTL < 3s (`haLeaseMinTTLSec`,
+  fatal at boot like the other malformed-config cases). Both test-pinned.
 - **Evidence re-pinned:** `ha_split_brain_failover_evidence_test.go` header updated (mechanism
   landed) + new `TestCL4_LeaseMode_SplitBrainStructurallyPrevented` — two nodes, one Fake authority:
   second promotion DENIED, healthz distinguishes holder by `lease_valid`+`epoch`. Legacy CL-4 facts

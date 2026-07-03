@@ -136,13 +136,24 @@ func resolveDPWiring(cfg clusterStartupConfig, enrolled *dpEnrollmentConfig) dpW
 	return dp
 }
 
+// haLeaseMinTTLSec is the smallest accepted lease TTL. WriteAllowed trusts
+// the confirmed validity window MINUS haLeaseWriteMargin (1s), so a TTL at
+// or below the margin would grant a lease that never confers write
+// authority; 3s leaves a ≥2s trusted window plus renew headroom
+// (keepalive tick = TTL/3).
+const haLeaseMinTTLSec = 3
+
 // armHALease builds the etcd-backed fencing lease from the resolved config
 // and installs it on globalHA (ADR-0005 S5). The candidate ID is this
 // node's cluster identity. etcd client construction is lazy (no connection
 // until the first lease operation), so an unreachable etcd surfaces as
 // denied leadership (fail-closed) rather than a boot failure — only
-// MALFORMED config (bad TLS material, zero endpoints) errors here.
+// MALFORMED config (bad TLS material, unusable TTL) errors here.
 func armHALease(cfg clusterStartupConfig) error {
+	if cfg.HALeaseTTLSec < haLeaseMinTTLSec {
+		return fmt.Errorf("lease TTL %ds too short: minimum %ds (the %s write margin would leave no trusted write window)",
+			cfg.HALeaseTTLSec, haLeaseMinTTLSec, haLeaseWriteMargin)
+	}
 	endpoints := strings.Split(cfg.HAEtcdEndpoints, ",")
 	for i := range endpoints {
 		endpoints[i] = strings.TrimSpace(endpoints[i])
