@@ -731,6 +731,42 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
 
+### 2026-07-03 — `configversion.go` mapped; extraction REJECTED (deliberate keep)
+Full design pass on the 819-line hub. Three layers: (1) the numbered-version file store
+(`v{N}.json` naming, seq scan, prune-at-50, corrupt-file skip) — generically extractable; (2)
+`captureConfigBackup`/`applyConfigBackup`/`validateConfigBackup` — composition-root logic by
+NATURE: it reads/writes 12 main store singletons (`bl`, `policyStore`, `rewriter`, `sslBypass`,
+`dpiScanner`, `fileBlocker`, `ipf`, `rl`, `pacStore`, `globalCategoryGroups`, `catStore`) under
+the Finding 10.3 three-surface contract and the documented apply-order/nil-skip invariants; (3)
+the diff engine — typed over policy-engine structs (`PolicyRule`, `RewriteRule`, `CategoryGroup`,
+`CategoryEntry`). Verdict: **stays in main deliberately.** Layer 2/3 belong to the composition
+root until the core-hub (store/policy) decomposition changes type ownership; layer 1's ~150-line
+mechanical value is outweighed by its blast radius — **14 test files** swap the
+`configVersionsDir`/`configVersionSeq` package vars directly and would all need rewiring onto new
+seams. Re-evaluate layer 1 only if a second consumer of numbered-snapshot storage appears.
+
+### 2026-07-03 — `logstore` mapped; extraction DESIGNED (next unit)
+The Badger-backed request-log history (`logstore.go`, 769 lines) is the strongest remaining
+candidate — same BadgerDB-containment rationale as `catdb`. Recorded design:
+- **`internal/logstore`** owns: the store engine (`logStore` → `logstore.Store`: open/TTL/encrypted
+  variants, key layout, async `writeLoop`, `Query`/`Stats`/`RunRetention`/`SetRetention`, purge,
+  the pbkdf2/AES encryption-key handling), the **priority-aware deletion passes from logguard.go**
+  (`cleanupBytes`/`deletePass` — pure Badger ops, move as methods), and the dropped/pruned
+  counters (package-owned accessors; read by events.go's /metrics exposition — the feedsync
+  counter pattern).
+- **`LogEntry` moves INTO the package** as `logstore.Entry` with a main alias (`type LogEntry =
+  logstore.Entry`) — it is a wire DTO (the alerts.Payload precedent), currently defined in
+  store.go with ~90 uses across main that the alias covers unchanged. `logEntryLowPriority`
+  moves with the deletion passes.
+- **main keeps**: the `globalLogStore atomic.Pointer` singleton + enable/disable/purge
+  orchestration (admin-settings + API wiring), the logguard ORCHESTRATOR (`runDiskGuard`,
+  `handleDiskCritical`, the `logGuard` GUI-state struct, `diskUsage` syscall helper, minimal-mode
+  + `SetLogLevel` coupling, `auditSystem` — audit ring is main-owned), the retention admin API,
+  and the health/usage/estimate view helpers (they read main state).
+- **Test surface**: logstore_test.go (engine → in-package), logguard_test.go (split: deletion-pass
+  tests in-package, guard-orchestration in main), loguri/store_test LogEntry uses covered by the
+  alias. Deps: obs + fileutil(?) + badger — a contained-dependency leaf like catdb.
+
 ### 2026-07-03 — `internal/sse` extracted (31st; second zero-dependency leaf)
 The SSE client hub moved out of `events.go`: `sse.Hub` owns registration under the connection cap,
 `Broadcast` with B21 slow-client eviction, and the observability counters. Deltas: the cap
