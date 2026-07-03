@@ -88,7 +88,7 @@ func TestPQC_MLKEM768_KeyExchange(t *testing.T) {
 			serverDone <- err
 			return
 		}
-		defer conn.Close() //nolint:errcheck -- test cleanup
+		defer conn.Close() //nolint:errcheck // test cleanup
 		serverDone <- conn.(*tls.Conn).HandshakeContext(t.Context())
 	}()
 
