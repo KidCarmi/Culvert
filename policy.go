@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/hostutil"
+	"github.com/KidCarmi/Culvert/internal/sslbypass"
 	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
@@ -892,25 +893,15 @@ func matchFileExt(urlPath string, exts []string) bool {
 	return false
 }
 
-func matchFQDN(pattern, host string) bool {
-	return matchFQDNNorm(normalizeHost(pattern), normalizeHost(host))
-}
+// The canonical FQDN-glob matcher moved to internal/hostutil (ADR-0002,
+// policy.go decomposition Phase B) — it is shared by rule matching here and
+// the SSL-bypass matcher (internal/sslbypass); their agreement is pinned by
+// policy_bypass_security_test.go. Wrapper FUNCTIONS (not func vars) so the
+// per-rule call in Evaluate's hot path stays direct and inlinable.
 
-// matchFQDNNorm is matchFQDN's core, operating on inputs that are ALREADY
-// IDNA-normalized. The hot path passes a once-normalized host and a rule's
-// precomputed normFQDN, avoiding the two per-rule normalizeHost allocations.
-func matchFQDNNorm(pattern, host string) bool {
-	if pattern == "*" {
-		return true
-	}
-	if strings.HasPrefix(pattern, "*.") {
-		suffix := pattern[1:] // .example.com
-		return strings.HasSuffix(host, suffix) || host == pattern[2:]
-	}
-	// Palo Alto-style: a bare domain implicitly includes all its subdomains.
-	// "example.com" matches "example.com" AND "www.example.com".
-	return host == pattern || strings.HasSuffix(host, "."+pattern)
-}
+func matchFQDN(pattern, host string) bool { return hostutil.MatchFQDN(pattern, host) }
+
+func matchFQDNNorm(pattern, host string) bool { return hostutil.MatchFQDNNorm(pattern, host) }
 
 func matchCategory(cat URLCategory, host string) bool {
 	// Layer 1: admin-managed catStore — exact + suffix match (fast, in-memory).
@@ -946,158 +937,14 @@ func lookupHostCategory(host string) (category, tier, matchedBy string) {
 }
 
 // ── SSL Bypass Matcher ────────────────────────────────────────────────────────
+// The SSL-bypass engine (pattern compilation, glob/regex matching, JSON
+// persistence) moved to internal/sslbypass (ADR-0002, policy.go
+// decomposition Phase B). main keeps the /api/ssl-bypass handlers, the
+// inspection-rules startup slice, cluster sync, and rollback — via this
+// alias + singleton. Matches sits on the per-CONNECT hot path
+// (resolveSSLAction).
 
-// bypassPattern holds one compiled bypass entry.
-// Glob patterns (e.g. "*.co.il") use matchFQDN semantics.
-// Regex patterns are prefixed with "~" (e.g. "~^.*\.gov\.il$").
-type bypassPattern struct {
-	raw  string
-	isRE bool
-	re   *regexp.Regexp
-}
-
-// SSLBypassMatcher holds a list of host patterns that must always bypass
-// SSL inspection, regardless of what the PBAC policy says.
-// Patterns are managed at runtime via /api/ssl-bypass and persisted to a
-// JSON file so they survive restarts without modifying config.yaml.
-type SSLBypassMatcher struct {
-	mu       sync.RWMutex
-	raw      []string        // raw strings for persistence and API listing
-	compiled []bypassPattern // pre-compiled for fast matching
-	path     string          // optional JSON file path for persistence
-}
+// SSLBypassMatcher is re-exposed unqualified (engine type is sslbypass.Matcher).
+type SSLBypassMatcher = sslbypass.Matcher
 
 var sslBypass = &SSLBypassMatcher{}
-
-func compileBypassPattern(p string) (bypassPattern, error) {
-	bp := bypassPattern{raw: p}
-	if strings.HasPrefix(p, "~") {
-		re, err := regexp.Compile(p[1:])
-		if err != nil {
-			return bypassPattern{}, fmt.Errorf("ssl bypass pattern %q: %w", p, err)
-		}
-		bp.isRE = true
-		bp.re = re
-	}
-	return bp, nil
-}
-
-// Set atomically replaces all bypass patterns.
-func (m *SSLBypassMatcher) Set(patterns []string) error {
-	compiled := make([]bypassPattern, 0, len(patterns))
-	for _, p := range patterns {
-		bp, err := compileBypassPattern(p)
-		if err != nil {
-			return err
-		}
-		compiled = append(compiled, bp)
-	}
-	m.mu.Lock()
-	m.raw = append([]string(nil), patterns...)
-	m.compiled = compiled
-	m.mu.Unlock()
-	return nil
-}
-
-// Load reads bypass patterns from a JSON file (array of strings).
-// A missing file is treated as an empty list (not an error).
-// Sets the persistence path so subsequent Save() calls write to this file.
-func (m *SSLBypassMatcher) Load(path string) error {
-	m.path = path
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	var patterns []string
-	if err := json.Unmarshal(data, &patterns); err != nil {
-		return err
-	}
-	return m.Set(patterns)
-}
-
-// Save atomically persists the current patterns to the configured JSON file.
-// A temporary file + rename ensures a crash mid-write never corrupts the list.
-func (m *SSLBypassMatcher) Save() {
-	if m.path == "" {
-		return
-	}
-	m.mu.RLock()
-	raw := make([]string, len(m.raw))
-	copy(raw, m.raw)
-	m.mu.RUnlock()
-
-	data, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return
-	}
-	// Bucket-4 durability hardening: atomicWriteFile gives unique
-	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
-	// dir) — replaces the previous os.WriteFile+os.Rename which was
-	// atomic-via-rename but NOT fsynced.
-	_ = atomicWriteFile(m.path, data, 0o600)
-}
-
-// Add appends a single pattern. No-ops if the pattern is already present.
-func (m *SSLBypassMatcher) Add(pattern string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, p := range m.raw {
-		if p == pattern {
-			return nil // already present
-		}
-	}
-	bp, err := compileBypassPattern(pattern)
-	if err != nil {
-		return err
-	}
-	m.raw = append(m.raw, pattern)
-	m.compiled = append(m.compiled, bp)
-	return nil
-}
-
-// Remove deletes a pattern by exact string match. Returns true if removed.
-func (m *SSLBypassMatcher) Remove(pattern string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, p := range m.raw {
-		if p == pattern {
-			m.raw = append(m.raw[:i], m.raw[i+1:]...)
-			m.compiled = append(m.compiled[:i], m.compiled[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-// List returns a snapshot of all raw patterns.
-func (m *SSLBypassMatcher) List() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]string, len(m.raw))
-	copy(out, m.raw)
-	return out
-}
-
-// Matches reports whether host matches any configured bypass pattern.
-// Glob patterns follow matchFQDN semantics ("*.co.il" matches "www.co.il").
-// Regex patterns (prefix "~") are matched against the lower-cased bare host.
-func (m *SSLBypassMatcher) Matches(host string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	h := normalizeHost(host)
-	for _, p := range m.compiled {
-		if p.isRE {
-			if p.re.MatchString(h) {
-				return true
-			}
-		} else {
-			if matchFQDN(p.raw, h) {
-				return true
-			}
-		}
-	}
-	return false
-}

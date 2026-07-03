@@ -312,16 +312,16 @@ func TestApplyConfigSnapshot_NodeGroupsPersist(t *testing.T) {
 // caller-side sslBypass.Save() hook after sslBypass.Set() in
 // applyConfigSnapshot's snap.SSLBypassPatterns branch.
 func TestApplyConfigSnapshot_SSLBypassPatternsPersist(t *testing.T) {
-	origPath := sslBypass.path
+	origPath := sslBypass.Path()
 	origPatterns := sslBypass.List()
 	t.Cleanup(func() {
-		sslBypass.path = origPath
+		sslBypass.SetPathForTest(origPath)
 		_ = sslBypass.Set(origPatterns)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ssl_bypass.json")
-	sslBypass.path = path
+	sslBypass.SetPathForTest(path)
 
 	snap := ConfigSnapshot{
 		Version:           1,

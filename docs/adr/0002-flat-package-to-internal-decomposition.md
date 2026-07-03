@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B), `reqlog` (35th — store.go Phase C; **the store.go program is CLOSED**), `urlcat` (36th — policy.go Phase A) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B), `reqlog` (35th — store.go Phase C; **the store.go program is CLOSED**), `urlcat` (36th — policy.go Phase A), `sslbypass` (37th — policy.go Phase B; FQDN glob matcher promoted to `hostutil.MatchFQDN`) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,25 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/sslbypass` extracted (37th; policy.go Phase B) + `hostutil` gains MatchFQDN
+The open design point resolved first: the FQDN glob matcher has two engine consumers (policy rule
+matching + the bypass matcher) with their agreement pinned by policy_bypass_security_test.go, so a
+private copy was off the table — `matchFQDN`/`matchFQDNNorm` moved to **hostutil.MatchFQDN /
+MatchFQDNNorm** (hostutil already owns NormalizeHost, their only dependency; Phase C's policy
+engine will consume them from there too). main keeps them as thin wrapper FUNCTIONS — not func
+vars — so the per-rule call in Evaluate's hot path stays direct and inlinable. The bypass engine
+then moved verbatim to `internal/sslbypass`: `pattern` (compiled glob/`~`-regex), `Matcher`
+(zero-value valid), Set/Load/Save (AtomicWrite durability)/Add/Remove/List/Matches (per-CONNECT
+hot path, resolveSSLAction). main keeps: the `sslBypass` singleton via `SSLBypassMatcher =
+sslbypass.Matcher` alias, /api/ssl-bypass handlers, the inspection-rules startup slice, cluster
+sync, rollback. Test seams `Path()`/`SetPathForTest` replaced the `sslBypass.path` pokes
+(Bucket-4 durability + cluster apply-persist tests); six engine tests consolidated in-package
+(policy_test.go's glob/regex/Set/LoadInvalidJSON + rewrite_scanner_policy_test.go's
+AddRemove/compile — the compile test grew an invalid-regex case). Gates: full suite, `-race`
+over the proxy-e2e/policy/bypass scope, shuffled determinism ×2 (package + main), lint 0 issues,
+leaf proof exactly `fileutil`+`hostutil`. Remaining in policy.go: the Phase C engine (PolicyStore/
+Evaluate/matchers) — design + adversarial review required before execution, per the program note.
 
 ### 2026-07-03 — `internal/urlcat` extracted (36th; policy.go Phase A, executed from the design)
 Executed exactly per the program design below. The engine moved verbatim: `Entry`/`Store` +

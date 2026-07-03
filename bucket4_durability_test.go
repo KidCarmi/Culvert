@@ -130,7 +130,8 @@ func TestBucket4_SSLBypassMatcher_Save_AtomicWriteFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ssl_bypass.json")
 
-	m := &SSLBypassMatcher{path: path}
+	m := &SSLBypassMatcher{}
+	m.SetPathForTest(path)
 	if err := m.Set([]string{"*.bank.example", "*.payments.example"}); err != nil {
 		t.Fatalf("seed Set: %v", err)
 	}

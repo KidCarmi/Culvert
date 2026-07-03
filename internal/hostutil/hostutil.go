@@ -37,6 +37,32 @@ func NormalizeHost(host string) string {
 	return strings.ToLower(ascii)
 }
 
+// MatchFQDN reports whether host matches pattern under the proxy's canonical
+// FQDN-glob semantics, normalizing both inputs first. Moved from package
+// main's policy engine (ADR-0002, policy.go decomposition Phase B) — shared
+// by policy rule matching and the SSL-bypass matcher, whose agreement is
+// pinned by main's policy_bypass_security_test.go.
+func MatchFQDN(pattern, host string) bool {
+	return MatchFQDNNorm(NormalizeHost(pattern), NormalizeHost(host))
+}
+
+// MatchFQDNNorm is MatchFQDN's core, operating on inputs that are ALREADY
+// IDNA-normalized. The policy hot path passes a once-normalized host and a
+// rule's precomputed normalized pattern, avoiding the two per-rule
+// NormalizeHost allocations.
+func MatchFQDNNorm(pattern, host string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if strings.HasPrefix(pattern, "*.") {
+		suffix := pattern[1:] // .example.com
+		return strings.HasSuffix(host, suffix) || host == pattern[2:]
+	}
+	// Palo Alto-style: a bare domain implicitly includes all its subdomains.
+	// "example.com" matches "example.com" AND "www.example.com".
+	return host == pattern || strings.HasSuffix(host, "."+pattern)
+}
+
 // StripHostPort removes a trailing :port and IPv6 brackets from a host value,
 // accepting all shapes that reach scan/bypass lookups: "host:port",
 // "[v6]:port", "[v6]", bare "v6", and bare "host". A naive

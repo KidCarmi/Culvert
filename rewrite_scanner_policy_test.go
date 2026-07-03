@@ -66,44 +66,8 @@ func TestContainsGroupCI_Empty(t *testing.T) {
 
 // ─── SSLBypassMatcher ─────────────────────────────────────────────────────────
 
-func TestSSLBypassMatcher_AddRemoveMatches(t *testing.T) {
-	s := &SSLBypassMatcher{}
-
-	if err := s.Add("*.example.com"); err != nil {
-		t.Fatalf("Add wildcard error: %v", err)
-	}
-	if err := s.Add("exact.test.com"); err != nil {
-		t.Fatalf("Add exact error: %v", err)
-	}
-
-	list := s.List()
-	if len(list) < 2 {
-		t.Errorf("List should have 2 entries, got %d", len(list))
-	}
-	if !s.Matches("sub.example.com") {
-		t.Error("should match wildcard pattern")
-	}
-	if !s.Matches("exact.test.com") {
-		t.Error("should match exact pattern")
-	}
-	if s.Matches("other.com") {
-		t.Error("should not match unrelated host")
-	}
-
-	if !s.Remove("exact.test.com") {
-		t.Error("Remove should return true for existing pattern")
-	}
-	if s.Matches("exact.test.com") {
-		t.Error("removed pattern should no longer match")
-	}
-}
-
-func TestSSLBypassMatcher_CompileBypassPattern(t *testing.T) {
-	_, err := compileBypassPattern("*.valid.com")
-	if err != nil {
-		t.Errorf("compileBypassPattern valid: %v", err)
-	}
-}
+// TestSSLBypassMatcher_AddRemoveMatches + CompileBypassPattern moved to
+// internal/sslbypass (ADR-0002, policy.go decomposition Phase B).
 
 // ─── SecurityScanner with YARA ────────────────────────────────────────────────
 
