@@ -63,21 +63,8 @@ func TestRecordRequestLogOnly_NoStatIncrement(t *testing.T) {
 	}
 }
 
-// TestLevelForStatus_BlockedTab verifies block/threat statuses land in the
-// WARN ("Blocked & Threats") tab, not ERROR ("Auth & Errors").
-func TestLevelForStatus_BlockedTab(t *testing.T) {
-	for _, s := range []string{"DPI_BLOCKED", "POLYGLOT_BLOCKED", "CDR_BLOCKED", "CDR_SANITIZED", "POLICY_DEFAULT_DENY"} {
-		if got := levelForStatus(s); got != "WARN" {
-			t.Errorf("levelForStatus(%q) = %q, want WARN", s, got)
-		}
-	}
-	if got := levelForStatus("AUTH_FAIL"); got != "ERROR" {
-		t.Errorf("levelForStatus(AUTH_FAIL) = %q, want ERROR", got)
-	}
-	if got := levelForStatus("OK"); got != "INFO" {
-		t.Errorf("levelForStatus(OK) = %q, want INFO", got)
-	}
-}
+// TestLevelForStatus_BlockedTab moved to internal/reqlog (ADR-0002, store.go
+// decomposition Phase C).
 
 // TestRecordInspectBlock_URIGatedOnLogFullURI verifies inspected blocks carry
 // the decrypted URL when the rule has LogFullURI (Codex review fix), and not
@@ -151,15 +138,7 @@ func TestPolicyLogURI(t *testing.T) {
 }
 
 func TestRecordRequestAuthURI_SetsURI(t *testing.T) {
-	logsMu.Lock()
-	old := logs
-	logs = nil
-	logsMu.Unlock()
-	t.Cleanup(func() {
-		logsMu.Lock()
-		logs = old
-		logsMu.Unlock()
-	})
+	isolateLogRing(t)
 
 	recordRequestAuthURI("10.0.0.1", "GET", "h.example.com", "OK", "rule1", "Allow",
 		"alice", "inspect", "h.example.com/secret/path", AuthLogFields{})
@@ -179,15 +158,7 @@ func TestRecordRequestAuthURI_SetsURI(t *testing.T) {
 func TestRecordRequestAuth_NoURI(t *testing.T) {
 	// The non-URI recorder must leave URI empty so existing rules' wire output
 	// stays byte-identical (omitempty).
-	logsMu.Lock()
-	old := logs
-	logs = nil
-	logsMu.Unlock()
-	t.Cleanup(func() {
-		logsMu.Lock()
-		logs = old
-		logsMu.Unlock()
-	})
+	isolateLogRing(t)
 
 	recordRequestAuth("10.0.0.2", "GET", "plain.example.com", "OK", "r", "Allow", "bob", AuthLogFields{})
 	entries := logGet()

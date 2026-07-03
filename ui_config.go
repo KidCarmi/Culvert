@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
@@ -77,7 +78,7 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		"serverTime":  time.Now().Format("2006-01-02 15:04:05"),
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
-		"logWriteErrors": atomic.LoadInt64(&statReqLogWriteErrors),
+		"logWriteErrors": reqlog.WriteErrors(),
 	})
 }
 
@@ -171,7 +172,7 @@ func apiLogsSource(w http.ResponseWriter, r *http.Request) (entries []LogEntry, 
 // GET /api/logs?filter=...&status=...&level=...&method=...&from=...&to=...&source=file
 // from/to accept Unix timestamps (seconds) or ISO 8601 (RFC 3339) strings.
 // source=file reads from the persistent JSONL request log file (newest-first,
-// capped at requestLogMaxPersistentReturn entries); any other value reads from
+// capped at reqlog.MaxPersistentReturn entries); any other value reads from
 // the in-memory ring buffer.
 func apiLogs(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {

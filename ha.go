@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // ── Control Plane High Availability ─────────────────────────────────────────
@@ -673,7 +674,7 @@ func generateHAToken() string {
 // the normal case; the node stays "ok" — degraded logging must not pull it
 // out of the load balancer.
 func addRequestLogHealth(resp map[string]any) {
-	if n := atomic.LoadInt64(&statReqLogWriteErrors); n > 0 {
+	if n := reqlog.WriteErrors(); n > 0 {
 		resp["requestLogWriteErrors"] = n
 	}
 }

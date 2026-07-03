@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // caPassphraseEnv holds the name of the environment variable that supplies the
@@ -559,9 +560,9 @@ func initSession(s *startupState) {
 // audit/request logs. P4.3 / S1: the implementation lives in
 // observability_startup.go + observability_startup_config.go; this is
 // a thin shim that resolves the slice config and hands it to the
-// loader. No carry to startupState — the file-handle closers stay on
-// their package globals (globalSyslog, auditCloser, requestLogCloser)
-// and continue to be read by the existing syslog-close / audit-log-
+// loader. No carry to startupState — the file handles stay on their
+// owning packages' state (globalSyslog, internal/audit, internal/reqlog)
+// and continue to be released by the existing syslog-close / audit-log-
 // close / request-log-close shutdown hooks.
 func initObservability(s *startupState) {
 	loadObservability(resolveObservabilityStartupConfig(
@@ -1223,9 +1224,7 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 		return nil
 	})
 	reg.Register("request-log-close", shutdownOrderRequestLogClose, func(context.Context) error {
-		if requestLogCloser != nil {
-			_ = requestLogCloser.Close() // best-effort flush
-		}
+		_ = reqlog.Close() // best-effort flush; nil-safe
 		return nil
 	})
 	// P3.3 / S7. Release the audit-log file descriptor. Writes are

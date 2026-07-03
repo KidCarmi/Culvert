@@ -458,170 +458,10 @@ func TestIsDNSError(t *testing.T) {
 	}
 }
 
-// ── Request log persistence (store.go) ──────────────────────────────────────
-
-func TestInitRequestLog(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "request.log")
-
-	if err := initRequestLog(path, 10); err != nil {
-		t.Fatalf("initRequestLog: %v", err)
-	}
-	defer func() {
-		if requestLogCloser != nil {
-			requestLogCloser.Close()
-			requestLogCloser = nil
-			requestLogWriter = nil
-			requestLogFilePath = ""
-		}
-	}()
-
-	logAdd(LogEntry{
-		TS: time.Now().UnixMilli(), Time: time.Now().Format("15:04:05"),
-		IP: "10.0.0.1", Method: "GET", Host: "example.com", Status: "OK", Level: "INFO",
-	})
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if len(data) == 0 {
-		t.Error("request log file is empty after logAdd")
-	}
-}
-
-func TestInitRequestLog_EmptyPath(t *testing.T) {
-	if err := initRequestLog("", 10); err != nil {
-		t.Fatalf("initRequestLog empty path should succeed: %v", err)
-	}
-}
-
-// ── Persistent request log query (H1) ───────────────────────────────────────
-
-// resetRequestLogState unwires the persistent request log package state so
-// tests can safely re-init without leaking file handles or paths across
-// tests. Safe to call whether or not persistence was initialised.
-func resetRequestLogState() {
-	if requestLogCloser != nil {
-		requestLogCloser.Close()
-	}
-	requestLogCloser = nil
-	requestLogWriter = nil
-	requestLogFilePath = ""
-}
-
-func TestRequestLogReadPersistent_NewestFirst(t *testing.T) {
-	t.Cleanup(resetRequestLogState)
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "request.jsonl")
-	if err := initRequestLog(path, 10); err != nil {
-		t.Fatalf("initRequestLog: %v", err)
-	}
-
-	base := time.Now().UnixMilli()
-	for i := 0; i < 50; i++ {
-		e := LogEntry{
-			TS:       base + int64(i),
-			Time:     "12:00:00",
-			IP:       "10.0.0.1",
-			Identity: "alice",
-			Method:   "GET",
-			Host:     "example.com",
-			Status:   "OK",
-			Level:    "INFO",
-		}
-		if i%2 == 0 {
-			e.Host = "blocked.example.com"
-			e.Status = "BLOCKED"
-			e.Level = "WARN"
-		}
-		logAdd(e)
-	}
-
-	entries, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("requestLogReadPersistent: %v", err)
-	}
-	if len(entries) != 50 {
-		t.Fatalf("expected 50 entries, got %d", len(entries))
-	}
-	// Newest-first: first entry should have the highest TS (= base+49).
-	if entries[0].TS != base+49 {
-		t.Errorf("newest entry TS = %d, want %d", entries[0].TS, base+49)
-	}
-	if entries[len(entries)-1].TS != base {
-		t.Errorf("oldest entry TS = %d, want %d", entries[len(entries)-1].TS, base)
-	}
-	// Ordering strictly monotonically descending.
-	for i := 1; i < len(entries); i++ {
-		if entries[i-1].TS < entries[i].TS {
-			t.Errorf("entries not newest-first at idx %d: %d < %d", i, entries[i-1].TS, entries[i].TS)
-			break
-		}
-	}
-}
-
-func TestRequestLogReadPersistent_EmptyPath(t *testing.T) {
-	prev := requestLogFilePath
-	requestLogFilePath = ""
-	t.Cleanup(func() { requestLogFilePath = prev })
-
-	entries, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if entries != nil {
-		t.Errorf("expected nil when no path, got %d entries", len(entries))
-	}
-}
-
-func TestRequestLogReadPersistent_MissingFile(t *testing.T) {
-	prev := requestLogFilePath
-	requestLogFilePath = filepath.Join(t.TempDir(), "does-not-exist.jsonl")
-	t.Cleanup(func() { requestLogFilePath = prev })
-
-	entries, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("missing file should not error: %v", err)
-	}
-	if entries != nil {
-		t.Errorf("expected nil for missing file, got %d entries", len(entries))
-	}
-}
-
-func TestRequestLogReadPersistent_CapEnforced(t *testing.T) {
-	t.Cleanup(resetRequestLogState)
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "request.jsonl")
-	// Use a large rotation cap so the single file holds all entries.
-	if err := initRequestLog(path, 200); err != nil {
-		t.Fatalf("initRequestLog: %v", err)
-	}
-
-	total := requestLogMaxPersistentReturn + 500
-	for i := 0; i < total; i++ {
-		logAdd(LogEntry{
-			TS: int64(i), Method: "GET", Host: "h.example.com", Status: "OK", Level: "INFO",
-		})
-	}
-
-	entries, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("requestLogReadPersistent: %v", err)
-	}
-	if len(entries) != requestLogMaxPersistentReturn {
-		t.Fatalf("expected cap=%d entries, got %d", requestLogMaxPersistentReturn, len(entries))
-	}
-	// Newest-first: first entry TS should be total-1, last should be total-cap.
-	if entries[0].TS != int64(total-1) {
-		t.Errorf("newest TS = %d, want %d", entries[0].TS, total-1)
-	}
-	if entries[len(entries)-1].TS != int64(total-requestLogMaxPersistentReturn) {
-		t.Errorf("oldest TS = %d, want %d", entries[len(entries)-1].TS, total-requestLogMaxPersistentReturn)
-	}
-}
+// ── Request log persistence ─────────────────────────────────────────────────
+// The Init + persistent-read (H1) engine tests moved to internal/reqlog
+// (ADR-0002, store.go decomposition Phase C). resetRequestLogState lives in
+// events_livefeed_test.go as a thin wrapper over reqlog.ResetForTest.
 
 // TestApiLogs_SourceFile exercises the new ?source=file branch end-to-end:
 // entries on disk should be returned via the API in newest-first order,
@@ -631,15 +471,7 @@ func TestApiLogs_SourceFile(t *testing.T) {
 
 	// Isolate global in-memory log state so logAdd side-effects here don't
 	// leak into other tests that inspect the ring buffer.
-	logsMu.Lock()
-	oldLogs := logs
-	logs = nil
-	logsMu.Unlock()
-	t.Cleanup(func() {
-		logsMu.Lock()
-		logs = oldLogs
-		logsMu.Unlock()
-	})
+	isolateLogRing(t)
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "request.jsonl")
@@ -781,15 +613,7 @@ func TestBlocklistSyncer_Sync_BadURL(t *testing.T) {
 // ── Log pagination (ui.go apiLogs) ──────────────────────────────────────────
 
 func TestAPILogs_Pagination(t *testing.T) {
-	logsMu.Lock()
-	oldLogs := logs
-	logs = nil
-	logsMu.Unlock()
-	defer func() {
-		logsMu.Lock()
-		logs = oldLogs
-		logsMu.Unlock()
-	}()
+	isolateLogRing(t)
 
 	for i := 0; i < 10; i++ {
 		logAdd(LogEntry{

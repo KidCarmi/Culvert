@@ -167,10 +167,7 @@ func TestRateLimiterExemption(t *testing.T) {
 // ─── Finding 3.1: SSLAction in LogEntry ─────────────────────────────────────
 
 func TestRecordRequestSSLAction(t *testing.T) {
-	// Clear logs.
-	logsMu.Lock()
-	logs = nil
-	logsMu.Unlock()
+	isolateLogRing(t)
 
 	recordRequest("1.2.3.4", "CONNECT", "example.com:443", "OK", "rule1", "allow", "user@test", "inspect")
 

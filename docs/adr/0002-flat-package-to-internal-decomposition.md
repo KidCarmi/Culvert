@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B), `reqlog` (35th — store.go Phase C; **the store.go program is CLOSED**) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,32 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/reqlog` extracted (35th; store.go Phase C, executed from the design) — store.go program CLOSED
+Executed exactly per the recorded design below, after PR #533 merged (sequencing verdict honoured).
+The engine moved verbatim: ring (`MaxRing` 5000), persistent JSONL layer (`Init`/`Close`/the write
+half of `Add` with the count-once-log-first contract), `ReadPersistent` + TTL read cache (the
+serialised-parse trade moved untouched, per review verdict 2), `WriteErrors`/`SkippedLines`
+accessors, `LevelForStatus`. `Entry = logstore.Entry` (alias, no DTO package). The single inversion
+point `SetHistory` is wired in store.go's init — the closure performs the same
+`globalLogStore.Load().Add(e)` atomic load the inline code did (logStore.Add is nil-receiver-safe),
+so the hot path is behavior-identical. main keeps: `AuthLogFields`+`applyTo` (frozen AuthOutcome
+contract), `persistLogEntry` + the recordRequest* fan-out, the API handlers, ts/stats, topHosts.
+Aliases: `levelForStatus`/`logAdd`/`logGet`/`initRequestLog`/`requestLogReadPersistent`; the
+`maxLogs`/`requestLogMaxPersistentReturn` const aliases were DROPPED (their last users moved with
+the tests — callers use `reqlog.MaxRing`/`MaxPersistentReturn`). Counter reads in ui_config/ha/
+events went through the accessors; the shutdown hook uses `reqlog.Close()`. Test seams as designed
+(`SwapRingForTest`, `SetWriterForTest`, `SetFilePathForTest`, `SwapPersistenceForTest`,
+`ResetForTest` with resetRequestLogState's exact no-restore semantics, `PinCacheForTest`/
+`ExpireCacheForTest`, `PersistActive`/`FilePath`); main's `isolateLogRing`/`resetRequestLogState`
+became thin wrappers, and the three remaining inline ring-poke sites (loguri, edge_audit,
+coverage_boost) were rewired onto the helper. Twelve engine tests consolidated in-package (88%
+coverage) — the ring order/capacity pair now exercises the REAL ring instead of store_test.go's
+local reimplementation (`newTestLog`, deleted). Gates: full suite, `-race` over the proxy/record
+scope + the proxy_traffic_e2e suite (hot-path verdict 1), shuffled determinism ×2, leaf proof
+exactly `fileutil`+`logstore`+`obs`. **store.go is now a composition root by classification**
+(stats/ts counters, auth `Config`, recordRequest* orchestration) — the store.go decomposition
+program closes with Phases A (blocklist), B (audit), C (reqlog) shipped.
 
 ### 2026-07-03 — store.go Phase C (`reqlog`) DESIGNED + adversarially reviewed (execute after PR #533 merges)
 The request-log layer (~230 lines) is the LAST decomposable slice of store.go; executing it closes

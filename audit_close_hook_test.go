@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // snapshotLateShutdownGlobals saves and zeroes every package-level handle
@@ -34,10 +35,8 @@ func snapshotLateShutdownGlobals(t *testing.T) {
 	// Audit engine state (internal/audit).
 	restoreAudit := audit.ResetForTest()
 
-	// Request log globals (store.go).
-	oldReqWriter := requestLogWriter
-	oldReqCloser := requestLogCloser
-	oldReqPath := requestLogFilePath
+	// Request-log persistence (internal/reqlog).
+	restoreReqlog := reqlog.SwapPersistenceForTest()
 
 	// Syslog (syslog.go).
 	oldSyslog := globalSyslog
@@ -50,20 +49,13 @@ func snapshotLateShutdownGlobals(t *testing.T) {
 	// what other tests left behind.
 	oldActiveConns := atomic.LoadInt64(&activeConns)
 
-	requestLogWriter = nil
-	requestLogCloser = nil
-	requestLogFilePath = ""
-
 	globalSyslog = nil
 	communityDB = nil
 	atomic.StoreInt64(&activeConns, 0)
 
 	t.Cleanup(func() {
 		restoreAudit()
-
-		requestLogWriter = oldReqWriter
-		requestLogCloser = oldReqCloser
-		requestLogFilePath = oldReqPath
+		restoreReqlog()
 
 		globalSyslog = oldSyslog
 		communityDB = oldCommunityDB

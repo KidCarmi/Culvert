@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strings"
@@ -21,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // ─── Uptime ───────────────────────────────────────────────────────────────────
@@ -140,205 +139,27 @@ func (a AuthLogFields) applyTo(e *LogEntry) {
 	e.AuthSchemaVersion = a.SchemaVersion
 }
 
-func levelForStatus(status string) string {
-	switch status {
-	case "OK", "POLICY_ALLOW":
-		return "INFO"
-	case "BLOCKED", "THREAT_BLOCKED", "FILE_BLOCKED", "SCAN_BLOCKED",
-		"DPI_BLOCKED", "POLYGLOT_BLOCKED", "CDR_BLOCKED", "CDR_SANITIZED",
-		"RATE_LIMITED", "IP_BLOCKED",
-		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT", "POLICY_DEFAULT_DENY":
-		return "WARN"
-	default: // AUTH_FAIL, CDR_ERROR, and anything unexpected
-		return "ERROR"
-	}
-}
-
-const maxLogs = 5000
-
+// The request-log engine (ring + persistent JSONL layer + TTL read cache +
+// levelForStatus) moved to internal/reqlog (ADR-0002, store.go decomposition
+// Phase C). main keeps AuthLogFields above (welded to the frozen AuthOutcome
+// contract), the recordRequest*/persistLogEntry fan-out below, and the API
+// handlers — all through these aliases. Shutdown closes the file via
+// reqlog.Close() (main.go); the ring/read caps live on the package
+// (reqlog.MaxRing, reqlog.MaxPersistentReturn).
 var (
-	logsMu sync.Mutex
-	logs   []LogEntry
+	levelForStatus           = reqlog.LevelForStatus
+	logAdd                   = reqlog.Add
+	logGet                   = reqlog.Get
+	initRequestLog           = reqlog.Init
+	requestLogReadPersistent = reqlog.ReadPersistent
 )
 
-// ─── Persistent JSONL request log ────────────────────────────────────────────
-
-var (
-	requestLogWriter   io.Writer // *rotatingFile; nil = file persistence disabled
-	requestLogCloser   io.Closer
-	requestLogFilePath string // path to JSONL file for paginated reads; "" = disabled
-)
-
-// requestLogMaxPersistentReturn caps the newest-N entries returned from the
-// persistent JSONL request log so admin queries remain bounded regardless of
-// the on-disk rotation size. Roughly one day of traffic at ~100 req/s.
-const requestLogMaxPersistentReturn = 20000
-
-// Persistent request-log failure counters. A full disk or corrupt file must
-// not silently destroy the request history — both are counted, surfaced via
-// /metrics, /api/stats, and /healthz, and logged once (not per occurrence).
-var (
-	statReqLogWriteErrors  int64 // failed JSONL marshals/writes in logAdd
-	statReqLogSkippedLines int64 // corrupt JSONL lines skipped on read
-)
-
-// reqLogReadCache memoises the parsed persistent log for a short TTL so N
-// concurrent dashboard pollers share one file parse instead of each re-reading
-// up to requestLogMaxPersistentReturn JSON lines per request. Keyed by path so
-// a re-init (config change, tests) never serves entries from the old file.
-// Cached entries are shared read-only between callers — never mutate them.
-var reqLogReadCache struct {
-	mu      sync.Mutex
-	path    string
-	expires time.Time
-	entries []LogEntry
-}
-
-// requestLogReadCacheTTL bounds staleness; the dashboard polls every 3 s.
-const requestLogReadCacheTTL = 2 * time.Second
-
-// initRequestLog opens a rotating JSONL file for persistent request logging.
-// Each LogEntry is appended as a single JSON line. The file rotates at maxMB.
-// If path is empty this is a no-op (backwards-compatible).
-func initRequestLog(path string, maxMB int) error {
-	if path == "" {
-		return nil
-	}
-	if maxMB <= 0 {
-		maxMB = 100
-	}
-	rf, err := newRotatingFile(path, maxMB)
-	if err != nil {
-		return fmt.Errorf("request log open %s: %w", path, err)
-	}
-	requestLogWriter = rf
-	requestLogCloser = rf
-	requestLogFilePath = path
-
-	// Drop any cached parse from a previous file.
-	reqLogReadCache.mu.Lock()
-	reqLogReadCache.path = ""
-	reqLogReadCache.entries = nil
-	reqLogReadCache.mu.Unlock()
-	return nil
-}
-
-// requestLogReadPersistent streams the persistent JSONL request log file and
-// returns the newest-first slice of parsed entries, capped at
-// requestLogMaxPersistentReturn so memory stays bounded regardless of file
-// size. Callers should apply their own filter + pagination loop on top — the
-// same loop they use on the in-memory ring buffer — so there is a single
-// filter code path to maintain.
-//
-// Returns (nil, nil) when persistence is disabled (no file configured) or
-// when the file has not yet been created. Only the active (non-rotated) log
-// file is consulted; the rotated ".1" archive is intentionally skipped to
-// keep each query bounded to one rotation window.
-func requestLogReadPersistent() ([]LogEntry, error) {
-	path := requestLogFilePath
-	if path == "" {
-		return nil, nil
-	}
-	// Serialise readers through the cache lock: the first poller parses the
-	// file, concurrent pollers wait and then reuse the fresh cached result.
-	reqLogReadCache.mu.Lock()
-	defer reqLogReadCache.mu.Unlock()
-	if reqLogReadCache.path == path && time.Now().Before(reqLogReadCache.expires) {
-		return reqLogReadCache.entries, nil
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("request log open: %w", err)
-	}
-	defer f.Close() //nolint:errcheck // read-only close
-
-	sc := bufio.NewScanner(f)
-	// SSL-inspected entries with long identity/rule strings occasionally
-	// exceed the 64 KB default scanner buffer; lift the ceiling to 1 MB.
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	// Amortized O(N) truncate-to-cap: grow up to 2× cap, then drop the oldest
-	// half. Peak memory is ~2× cap parsed structs (~8 MB at cap=20k).
-	const cap_ = requestLogMaxPersistentReturn
-	buf := make([]LogEntry, 0, 2*cap_)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var e LogEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			// Count corrupt lines instead of dropping them invisibly; log only
-			// the first so a damaged file cannot flood the logger.
-			if atomic.AddInt64(&statReqLogSkippedLines, 1) == 1 {
-				logger.Printf("WARN request log: skipping corrupt JSONL line (further occurrences counted silently): %v", err)
-			}
-			continue
-		}
-		buf = append(buf, e)
-		if len(buf) >= 2*cap_ {
-			copy(buf, buf[len(buf)-cap_:])
-			buf = buf[:cap_]
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("request log scan: %w", err)
-	}
-	if len(buf) > cap_ {
-		buf = buf[len(buf)-cap_:]
-	}
-	// Reverse in place to newest-first.
-	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
-		buf[i], buf[j] = buf[j], buf[i]
-	}
-	reqLogReadCache.path = path
-	reqLogReadCache.expires = time.Now().Add(requestLogReadCacheTTL)
-	reqLogReadCache.entries = buf
-	return buf, nil
-}
-
-func logAdd(e LogEntry) {
-	logsMu.Lock()
-	logs = append(logs, e)
-	if len(logs) > maxLogs {
-		logs = logs[len(logs)-maxLogs:]
-	}
-	logsMu.Unlock()
-
-	// Persist to JSONL file (outside the lock to avoid blocking callers).
-	if w := requestLogWriter; w != nil {
-		b, err := json.Marshal(e)
-		if err == nil {
-			b = append(b, '\n')
-			_, err = w.Write(b)
-		}
-		if err != nil {
-			// A full disk must not silently destroy the request history:
-			// count every failure, log only the first to avoid flooding.
-			if atomic.AddInt64(&statReqLogWriteErrors, 1) == 1 {
-				logger.Printf("ERROR request log: persistent write failed (further failures counted silently): %v", err)
-			}
-		}
-	}
-
-	// Persist to the queryable history store (async, non-blocking, nil-safe).
-	// Atomic load so a runtime enable/disable swap is race-free on the hot path.
-	globalLogStore.Load().Add(e)
-}
-
-func logGet() []LogEntry {
-	logsMu.Lock()
-	cp := make([]LogEntry, len(logs))
-	copy(cp, logs)
-	logsMu.Unlock()
-	for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
-		cp[i], cp[j] = cp[j], cp[i]
-	}
-	return cp
+// The queryable-history hook: the closure performs the same lock-free atomic
+// load the pre-extraction inline code did, so a runtime enable/disable swap
+// of the history store stays race-free on the hot path (logStore.Add is
+// nil-receiver-safe).
+func init() {
+	reqlog.SetHistory(func(e LogEntry) { globalLogStore.Load().Add(e) })
 }
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────
