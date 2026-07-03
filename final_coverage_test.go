@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
@@ -424,21 +425,22 @@ func TestBlocklist_SaveMode_NonEmptyPath(t *testing.T) {
 	}
 	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-		path:      dir + "/blocklist.txt",
-		mode:      "allow",
+	path := dir + "/blocklist.txt"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	b.saveMode()
+	b := blocklist.New()
+	if err := b.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	b.SetMode("allow") // persists the .mode sidecar via the public path
 
-	// Verify the mode file was created
-	data, err := os.ReadFile(dir + "/blocklist.txt.mode")
+	data, err := os.ReadFile(path + ".mode")
 	if err != nil {
-		t.Fatalf("saveMode should create mode file: %v", err)
+		t.Fatalf("SetMode should create mode file: %v", err)
 	}
 	if string(data) != "allow" {
-		t.Errorf("saveMode content = %q, want allow", string(data))
+		t.Errorf("mode sidecar content = %q, want allow", string(data))
 	}
 }
 
@@ -461,15 +463,12 @@ func TestBlocklist_Load_WithModeSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-	}
+	b := blocklist.New()
 	if err := b.Load(path); err != nil {
 		t.Fatalf("Blocklist.Load: %v", err)
 	}
-	if b.mode != "allow" {
-		t.Errorf("Blocklist.Load mode = %q, want allow", b.mode)
+	if b.Mode() != "allow" {
+		t.Errorf("Blocklist.Load mode = %q, want allow", b.Mode())
 	}
 }
 
@@ -979,10 +978,9 @@ func TestAPIStats_WithBlockedStats(t *testing.T) {
 // ─── Blocklist.List with wildcards ────────────────────────────────────────────
 
 func TestBlocklist_List_WithWildcards(t *testing.T) {
-	b := &Blocklist{
-		exact:     map[string]bool{"exact.example.com": true},
-		wildcards: map[string]bool{".example.com": true},
-	}
+	b := blocklist.New()
+	b.Add("exact.example.com")
+	b.Add("*.example.com")
 	list := b.List()
 	if len(list) != 2 {
 		t.Errorf("List should return 2 items (1 exact + 1 wildcard), got %d", len(list))
@@ -1055,11 +1053,9 @@ func TestTsRecord_DiffPath(_ *testing.T) {
 // ─── Blocklist.IsBlocked in allow mode ───────────────────────────────────────
 
 func TestBlocklist_IsBlocked_AllowMode(t *testing.T) {
-	b := &Blocklist{
-		exact:     map[string]bool{"allowed.example.com": true},
-		wildcards: make(map[string]bool),
-		mode:      "allow",
-	}
+	b := blocklist.New()
+	b.Add("allowed.example.com")
+	b.SetMode("allow")
 	// In allow mode, listed hosts are NOT blocked (allowed), unlisted ARE blocked
 	if b.IsBlocked("allowed.example.com") {
 		t.Error("listed host in allow mode should NOT be blocked")
@@ -1072,13 +1068,14 @@ func TestBlocklist_IsBlocked_AllowMode(t *testing.T) {
 // ─── Blocklist.Remove wildcard ────────────────────────────────────────────────
 
 func TestBlocklist_Remove_Wildcard(t *testing.T) {
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: map[string]bool{".example.com": true},
+	b := blocklist.New()
+	b.Add("*.example.com")
+	if !b.IsBlocked("sub.example.com") {
+		t.Fatal("wildcard should block subdomains after Add")
 	}
 	b.Remove("*.example.com")
-	if b.wildcards[".example.com"] {
-		t.Error("Remove wildcard should delete from wildcards map")
+	if b.IsBlocked("sub.example.com") {
+		t.Error("Remove wildcard should delete the wildcard entry")
 	}
 }
 
@@ -1141,20 +1138,19 @@ func TestBlocklist_List_Save(t *testing.T) {
 	}
 	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-		path:      dir + "/bl.txt",
-		mode:      "block",
+	path := dir + "/bl.txt"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := blocklist.New()
+	if err := b.Load(path); err != nil {
+		t.Fatalf("initial Load: %v", err)
 	}
 	b.Add("list-save-test.example.com")
 	b.Save()
 
 	// Reload
-	b2 := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-	}
+	b2 := blocklist.New()
 	if err := b2.Load(dir + "/bl.txt"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}

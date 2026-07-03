@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 // ── ConfigStore Tests ──────────────────────────────────────────────────────
@@ -381,7 +383,7 @@ func TestApplyConfigSnapshot(t *testing.T) {
 	}()
 
 	// Initialize required globals.
-	bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+	bl = blocklist.New()
 	ipf = &IPFilter{single: map[string]bool{}}
 	rl = &RateLimiter{}
 
@@ -420,7 +422,7 @@ func TestCurrentConfigSnapshot(t *testing.T) {
 		cfg = origCfg
 	}()
 
-	bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+	bl = blocklist.New()
 	bl.Add("test.com")
 	ipf = &IPFilter{single: map[string]bool{}}
 	ipf.SetMode("deny")

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 type testProxyIdentityProvider struct {
@@ -37,7 +39,7 @@ func (p *testProxyIdentityProvider) Name() string { return "test-idp" }
 // setupProxyTest resets all global state for a clean test run.
 func setupProxyTest(t *testing.T) {
 	t.Helper()
-	bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}, manual: map[string]bool{}, exceptions: map[string]bool{}}
+	bl = blocklist.New()
 	ipf = &IPFilter{single: map[string]bool{}}
 	rl = newRateLimiter()
 	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}

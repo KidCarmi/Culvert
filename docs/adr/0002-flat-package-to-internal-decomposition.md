@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,20 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/blocklist` extracted (33rd; store.go Phase A, executed from the design)
+Executed exactly per the design below. The full engine moved verbatim (matcher, mode, Load/Save +
+four sidecars, exceptions, manual/bulk durability paths, feed attribution, MergeFromLines +
+`NormalizeLine`); `IsBlocked` is byte-identical under the same RWMutex. `New()` is the only
+constructor; NO test-support methods were needed — every field-literal construction across the
+~20 test files rebuilt on the public API (`New()` + `Add`/`Load(fixture)`/`MergeFromLines`), per
+the design's stability preference. Five engine test files moved in-package wholesale
+(blocklist_test, addmanual_persist, coldstart sidecars, normalize/attribution/cascade, the
+MergeFromLines/mode set from totp_extra) at 85% package coverage; the API-handler tests
+(cleanup-unattributed gate, bulk-add) and the CP snapshot-apply tests stayed in main on public
+API. Two pre-existing comment misorders (Store/Entry docs, ClearAll/MergeFromLines) were
+straightened as revive surfaced them. Leaf proof: `fileutil`+`hostutil`+`obs` only. Gate included
+`-race` over proxy/socks5/blocklist and the traffic-e2e smoke per the hot-path plan.
 
 ### 2026-07-03 — store.go decomposition program OPENED; Phase A (`blocklist`) DESIGNED
 `store.go` (2,324 lines) is five engines sharing a file: (1) uptime/stats/timeSeries hot-path

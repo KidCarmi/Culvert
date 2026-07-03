@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 // ── configversion.go coverage ────────────────────────────────────────────────
@@ -760,10 +762,7 @@ func TestSyslogWriter_WriteRequest(t *testing.T) {
 // ── Blocklist feed Sync (blocklist_feed.go) ─────────────────────────────────
 
 func TestBlocklistSyncer_Sync_BadURL(t *testing.T) {
-	testBL := &Blocklist{
-		exact: map[string]bool{}, wildcards: map[string]bool{},
-		manual: map[string]bool{}, exceptions: map[string]bool{},
-	}
+	testBL := blocklist.New()
 	bs := newBlocklistSyncer(testBL)
 	bs.SetFeed("http://127.0.0.1:1/nonexistent", 24*time.Hour)
 	count, err := bs.SyncAll()

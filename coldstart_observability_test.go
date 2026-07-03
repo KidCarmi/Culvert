@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 // captureLogger swaps the package-level logger to a buffer for the
@@ -88,7 +90,7 @@ func TestObservability_F3_BlocklistMode_UnrecognizedValue(t *testing.T) {
 	}
 
 	out := captureLogger(t, func() {
-		b := freshBLForLoad()
+		b := blocklist.New()
 		if err := b.Load(primary); err != nil {
 			t.Fatalf("Load: %v", err)
 		}
@@ -113,7 +115,7 @@ func TestObservability_F4_BlocklistManual_InvalidLine(t *testing.T) {
 	}
 
 	out := captureLogger(t, func() {
-		b := freshBLForLoad()
+		b := blocklist.New()
 		if err := b.Load(primary); err != nil {
 			t.Fatalf("Load: %v", err)
 		}
@@ -137,7 +139,7 @@ func TestObservability_F4_BlocklistExceptions_InvalidLine(t *testing.T) {
 	}
 
 	out := captureLogger(t, func() {
-		b := freshBLForLoad()
+		b := blocklist.New()
 		if err := b.Load(primary); err != nil {
 			t.Fatalf("Load: %v", err)
 		}

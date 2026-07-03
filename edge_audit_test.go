@@ -12,34 +12,34 @@ import (
 	"github.com/KidCarmi/Culvert/internal/fileblock"
 
 	"github.com/KidCarmi/Culvert/internal/ocsp"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 // ─── Finding 1.1: Blocklist.ClearAll ────────────────────────────────────────
 
 func TestBlocklistClearAll(t *testing.T) {
-	b := &Blocklist{
-		exact:      map[string]bool{"example.com": true, "test.org": true},
-		wildcards:  map[string]bool{".evil.com": true},
-		manual:     map[string]bool{"manual.net": true},
-		exceptions: map[string]bool{"safe.com": true},
-		mode:       "block",
-	}
+	b := blocklist.New()
+	b.Add("example.com")
+	b.Add("test.org")
+	b.Add("*.evil.com")
+	b.AddManual("manual.net")
+	b.AddException("safe.com")
+	b.SetMode("block")
+
 	b.ClearAll()
-	if len(b.exact) != 0 {
-		t.Error("exact should be empty after ClearAll")
+	if b.Count() != 0 {
+		t.Errorf("Count after ClearAll = %d, want 0 (exact+wildcard+manual cleared)", b.Count())
 	}
-	if len(b.wildcards) != 0 {
-		t.Error("wildcards should be empty after ClearAll")
+	if b.IsBlocked("example.com") || b.IsBlocked("sub.evil.com") || b.IsBlocked("manual.net") {
+		t.Error("no entry should be blocked after ClearAll")
 	}
-	if len(b.manual) != 0 {
-		t.Error("manual should be empty after ClearAll")
+	// Exceptions and mode survive ClearAll by contract.
+	if got := b.ListExceptions(); len(got) != 1 || got[0] != "safe.com" {
+		t.Errorf("exceptions after ClearAll = %v, want [safe.com]", got)
 	}
-	// Exceptions and mode should be preserved.
-	if len(b.exceptions) != 1 {
-		t.Error("exceptions should be preserved after ClearAll")
-	}
-	if b.mode != "block" {
-		t.Error("mode should be preserved after ClearAll")
+	if b.Mode() != "block" {
+		t.Errorf("mode after ClearAll = %q, want block", b.Mode())
 	}
 }
 

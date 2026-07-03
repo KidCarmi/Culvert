@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 // TestValidateConfigSnapshot_AcceptsEmpty confirms the trivial case.
@@ -89,12 +91,8 @@ func TestApplyConfigSnapshot_RejectsOversizedSnapshot(t *testing.T) {
 
 	// Pre-populate the blocklist with a known marker so we can confirm
 	// the over-cap snapshot does NOT replace it.
-	bl = &Blocklist{
-		exact:      map[string]bool{"preexisting.example": true},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
+	bl = blocklist.New()
+	bl.Add("preexisting.example")
 	preBL := bl
 
 	snap := ConfigSnapshot{
@@ -109,7 +107,7 @@ func TestApplyConfigSnapshot_RejectsOversizedSnapshot(t *testing.T) {
 	if bl != preBL {
 		t.Error("bl pointer changed despite over-cap snapshot — partial application")
 	}
-	if !bl.exact["preexisting.example"] {
+	if !bl.IsBlocked("preexisting.example") {
 		t.Error("pre-existing blocklist entry was replaced")
 	}
 }
