@@ -20,6 +20,7 @@ func TestResolvePersistentAdminStateStartupConfig_Paths(t *testing.T) {
 		NodeGroupsPath:    filepath.Join(dir, "node_groups.json"),
 		BandwidthPath:     filepath.Join(dir, "bandwidth.json"),
 		HitCountersPath:   filepath.Join(dir, "hit_counters.json"),
+		AlertWebhooksPath: filepath.Join(dir, "alert_webhooks.json"),
 		AdminSettingsPath: filepath.Join(dir, "admin_settings.json"),
 	}
 	if got != want {

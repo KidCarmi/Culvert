@@ -155,7 +155,7 @@
 - **Recommendation:** Pin scanner versions (or vendor), SHA-pin the `@main` action, add CodeQL to
   the blocking set. **Complexity S.** *(This was the original RISK-006 before the 2026-06-28 split.)*
 
-## RISK-017 — Alert webhooks never persisted (Init unwired) · MEDIUM · OPEN
+## RISK-017 — Alert webhooks never persisted (Init unwired) · MEDIUM · ✅ CLOSED 2026-07-03
 - **Found (2026-07-03, while mapping the `internal/alerts` extraction):** `AlertStore.Init(path)` is
   **never called from production code** — only tests call it. `git log -S` confirms no production
   call has ever existed. The process-wide store is constructed with an empty `filePath`, so `save()`
@@ -165,12 +165,16 @@
   RISK-003 encryption-at-rest machinery protects `alert_webhooks.json`, a file production never
   writes; the F16 retry queue DOES persist (`/data/alert_retry_queue.json`), an inconsistency that
   hides the gap. The only durability today is a manually downloaded config export.
-- **Recommendation:** wire `globalAlertStore.Init(filepath.Join(dataDir, "alert_webhooks.json"))`
-  into the persistent-admin-state startup slice (a deliberate behavior change: webhooks configured
-  after the fix will load on boot and RISK-003 encryption becomes live in production for the first
-  time). Also consider migrating `Store.save()` to `fileutil.AtomicWrite` (it still uses
-  non-fsynced WriteFile+Rename, pre-Bucket-4 style). **Complexity S.** The extraction itself was
-  kept behavior-preserving; this is a separate follow-up unit.
+- **Fix (2026-07-03, follow-up commit to the extraction):** `AlertWebhooksPath`
+  (`<dataDir>/alert_webhooks.json`) added to the persistent-admin-state startup slice
+  (resolver + DTO + loader step 4); `globalAlertStore.Init` now runs at startup, so webhooks —
+  and their RISK-003 encrypted secrets — survive restart, and the encryption-at-rest machinery is
+  live in production for the first time. In the same change `Store.save()` was upgraded from the
+  pre-Bucket-4 WriteFile+Rename to `fileutil.AtomicWrite` (fsynced), since the path only now
+  became load-bearing. No ordering hazard: the F16 retry loop reads the store through a provider
+  closure each 10s tick. Pinned by `TestStore_Persist_RestartRoundTripAndDurability`
+  (internal/alerts) — restart round-trip incl. decrypted secret, mode 0600, no tmp leftovers —
+  and the slice-resolver path test.
 
 ## RISK-ACC-1 — `docker/docker` CVEs in the updater · HIGH · ACCEPTED
 - **Current state (trivy-verified 2026-06-28):** 5 CVEs in `github.com/docker/docker v28.5.2`,

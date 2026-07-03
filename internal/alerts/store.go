@@ -209,12 +209,12 @@ func (as *Store) save() {
 		encHooks[i].Secret = enc
 	}
 	data, _ := json.MarshalIndent(encHooks, "", "  ") // #nosec G117 -- Secret holds AES-GCM ciphertext at rest (RISK-003), not the cleartext key
-	tmp := as.filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil { // #nosec G306
-		obs.Printf("AlertStore: write %s: %v", tmp, err)
-		return
+	// RISK-017 closure made this path live in production for the first time,
+	// so it was upgraded from the pre-Bucket-4 WriteFile+Rename to the
+	// fsynced atomic writer in the same change.
+	if err := fileutil.AtomicWrite(as.filePath, data, 0o600); err != nil {
+		obs.Printf("AlertStore: write %s: %v", as.filePath, err)
 	}
-	os.Rename(tmp, as.filePath) //nolint:errcheck // best-effort persist, matches pre-extraction behavior
 }
 
 // List returns the webhooks with secrets redacted.

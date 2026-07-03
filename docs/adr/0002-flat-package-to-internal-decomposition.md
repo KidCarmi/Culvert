@@ -731,6 +731,12 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
 
+### 2026-07-03 — RISK-017 closed (follow-up to the alerts extraction)
+`globalAlertStore.Init(<dataDir>/alert_webhooks.json)` is now wired as step 4 of the
+persistent-admin-state startup slice (resolver gains `AlertWebhooksPath`), and `Store.save()`
+upgraded to `fileutil.AtomicWrite` now that the path is load-bearing. Deliberate behavior change,
+shipped as its own commit after the behavior-preserving extraction. Details in the risk register.
+
 ### 2026-07-03 — `internal/alerts` grows into the full delivery engine (29th) + RISK-017 found
 The webhook delivery implementation (alerts.go + alerts_secret.go, 670 lines) moved INTO the
 existing `internal/alerts` producer seam — the seam's contract (`Payload`/`Sink`/`SetSink`/`Fire`)

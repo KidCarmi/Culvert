@@ -9,22 +9,24 @@ package main
 import "path/filepath"
 
 // persistentAdminStateStartupConfig carries the resolved on-disk locations of
-// the four persistent admin stores initialised at startup. The loader consumes
+// the five persistent admin stores initialised at startup. The loader consumes
 // this struct and owns the store constructions + restore side effects.
 type persistentAdminStateStartupConfig struct {
 	NodeGroupsPath    string // node group definitions (label selectors)
 	BandwidthPath     string // per-group bandwidth/QoS policies
 	HitCountersPath   string // per-rule hit-counter persistence (Finding 2.3)
+	AlertWebhooksPath string // alert webhook store (RISK-017: was never wired)
 	AdminSettingsPath string // GUI-changed settings restored across restarts
 }
 
-// resolvePersistentAdminStateStartupConfig derives the four store paths from
+// resolvePersistentAdminStateStartupConfig derives the five store paths from
 // the data dir. Pure and deterministic.
 func resolvePersistentAdminStateStartupConfig(dataDirVal string) persistentAdminStateStartupConfig {
 	return persistentAdminStateStartupConfig{
 		NodeGroupsPath:    filepath.Join(dataDirVal, "node_groups.json"),
 		BandwidthPath:     filepath.Join(dataDirVal, "bandwidth.json"),
 		HitCountersPath:   filepath.Join(dataDirVal, "hit_counters.json"),
+		AlertWebhooksPath: filepath.Join(dataDirVal, "alert_webhooks.json"),
 		AdminSettingsPath: filepath.Join(dataDirVal, "admin_settings.json"),
 	}
 }
