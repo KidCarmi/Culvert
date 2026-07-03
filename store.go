@@ -282,7 +282,7 @@ func requestLogReadPersistent() ([]LogEntry, error) {
 		}
 		return nil, fmt.Errorf("request log open: %w", err)
 	}
-	defer f.Close() //nolint:errcheck -- read-only close
+	defer f.Close() //nolint:errcheck // read-only close
 
 	sc := bufio.NewScanner(f)
 	// SSL-inspected entries with long identity/rule strings occasionally

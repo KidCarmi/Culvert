@@ -75,7 +75,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 				// Persist the matched counter to close the replay window for
 				// this step and all earlier steps within the skew tolerance.
 				cfg.SetTOTPLastCounter(body.User, matchedCounter)
-				cfg.SaveUIUsersFile() //nolint:errcheck — best-effort persist
+				cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
 			} else {
 				// Try backup codes.
 				if !cfg.ConsumeBackupCode(body.User, body.TOTP) {
@@ -84,7 +84,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 					// brute-force the 6-digit OTP (1M possibilities) with
 					// only the 300 ms delay as a barrier.
 					nowLocked := loginLimiter.RecordFailure(body.User)
-					cfg.SaveUIUsersFile() //nolint:errcheck — best-effort persist
+					cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
 					auditEvent(r, "auth.totp.fail", body.User,
 						fmt.Sprintf("invalid TOTP, locked=%v, attempts_left=%d",
 							nowLocked, loginLimiter.AttemptsLeft(body.User)))

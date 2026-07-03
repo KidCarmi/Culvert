@@ -110,8 +110,13 @@ func (bs *BlocklistSyncer) RemoveFeed(feedURL string) bool {
 }
 
 // Feeds returns a snapshot of all configured feeds, sorted by URL for
-// deterministic API output and persistence.
+// deterministic API output and persistence. A nil syncer (feeds never
+// configured/initialized) has no feeds — return empty rather than panic, so the
+// read-only /api/blocklist/feed endpoint stays a 200 in that state.
 func (bs *BlocklistSyncer) Feeds() []BlocklistFeed {
+	if bs == nil {
+		return nil
+	}
 	bs.mu.RLock()
 	defer bs.mu.RUnlock()
 	out := make([]BlocklistFeed, 0, len(bs.feeds))

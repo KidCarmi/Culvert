@@ -235,7 +235,7 @@ func TestVerifyNode_ValidNode(t *testing.T) {
 	}
 }
 
-func testBGCtx() context.Context { //nolint:unused -- used by tests
+func testBGCtx() context.Context { //nolint:unused // used by tests
 	return context.Background()
 }
 
