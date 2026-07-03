@@ -79,6 +79,11 @@ type HAState struct {
 	leaseConfirmedAt time.Time     // local time of the last backend-CONFIRMED grant/renew
 	leaseValidFor    time.Duration // validity the backend confirmed at leaseConfirmedAt
 	leaseStopCh      chan struct{} // keepalive loop stop; nil = not running
+
+	// ── Lease-arbitrated failover (ADR-0005 S4) ──
+	resync        haResyncContext // material to re-enter standby after a demotion (cluster loader)
+	lastSyncOK    time.Time       // last successful HASync apply (freshness-gate input)
+	lastSelfFence time.Time       // last self-fence (re-promotion hysteresis)
 }
 
 // promoteContext holds the parameters StartAsStandby threads into the sync loop,
@@ -246,11 +251,22 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 	// ADR-0005 S2: a restarting leader's old lease expired during the
 	// restart, so it must re-acquire. Granted ⇒ normal leadership (epoch,
-	// keepalive). Denied or unknown ⇒ it resumes the ROLE (ADR-0004 restart
-	// semantics) but with NO write authority (WriteAllowed()==false,
-	// fail-closed) and a CRITICAL alert — S4 replaces this stance with
-	// proper demote + resync from the recorded standby address.
+	// keepalive). Denied ⇒ S4: if the ex-standby's address was recorded
+	// (S0) and the loader provided resync material, re-enter STANDBY
+	// against it instead of asserting an unfenced leader role; otherwise
+	// fall back to the S2 stance (role kept, NO write authority, CRITICAL
+	// alert).
 	leaseGranted := h.acquireLeaseForLeadership("leader resume")
+	if !leaseGranted && h.leaseConfigured() {
+		h.mu.Lock()
+		h.token = cfg.Token
+		h.standbyAddr = cfg.StandbyAddr
+		h.autoFailover = cfg.AutoFailover
+		h.mu.Unlock()
+		if h.enterStandbyResync("unfenced leader resume") {
+			return
+		}
+	}
 	h.mu.Lock()
 	h.role = "leader"
 	h.peerAddr = cfg.PeerAddr
@@ -368,10 +384,20 @@ func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
 }
 
 // onMaxFail handles the leader-unreachable threshold. Returns true when the loop
-// should EXIT (auto-failover promoted this node to leader); false to keep the
-// standby read-only and retrying (auto-failover disabled — the default split-
-// brain mitigation; see ADR-0004), warning once until the leader returns.
+// should EXIT (this node promoted to leader); false to keep the standby
+// read-only and retrying.
+//
+// Lease mode (ADR-0005 S4): promotion is arbitrated by the FENCE, not the
+// --ha-auto-failover flag — Acquire is denied while the leader lives, so the
+// split-brain that made the flag opt-in cannot happen; freshness + hysteresis
+// additionally gate the automatic path (see leaseAutoPromote).
+//
+// Legacy mode (ADR-0004, unchanged): auto-failover only when opted in;
+// otherwise warn once and stay read-only until an operator acts.
 func (s *standbyLoopState) onMaxFail() bool {
+	if s.h.leaseConfigured() {
+		return s.h.leaseAutoPromote()
+	}
 	if s.h.autoFailoverEnabled() {
 		s.h.promote("leader unreachable")
 		return true
@@ -460,6 +486,7 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 	}
 	ok := applyHABundle(&bundle, token)
 	if ok {
+		h.markSyncOK() // ADR-0005 S4: freshness-gate input
 		// Seed the standby's epoch from the leader's term (ADR-0004 Slice 1c/1e,
 		// Codex P2): without this a standby starts at term 0, so its first
 		// promotion reports term 1 — identical to the original leader's term 1,

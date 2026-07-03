@@ -1,11 +1,11 @@
 # ADR-0005: Safe automatic HA failover via a fencing lease in etcd
 
-- **Status:** Accepted-direction, **RESUMED — S0 + S1 + S2 + S3 SHIPPED** (S1–S3: 2026-07-03,
-  after the ADR-0002 decomposition program completed). Design adversarially reviewed and revised
-  from a hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the big
-  stable vendors" + self-hosted → etcd). S4–S5 remain; the lease is DORMANT in production until
-  S5 wires flags (nil provider = legacy). **F4 posture: documented bounded-LWW (option A)** —
-  not state-in-etcd.
+- **Status:** Accepted-direction, **RESUMED — S0–S4 SHIPPED** (S1–S4: 2026-07-03, after the
+  ADR-0002 decomposition program completed). Design adversarially reviewed and revised from a
+  hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the big
+  stable vendors" + self-hosted → etcd). **Only S5 (flags/compose/GUI/runbook) remains** — the
+  complete failover logic is in the binary but DORMANT until S5 wires operator configuration
+  (nil provider = legacy). **F4 posture: documented bounded-LWW (option A)** — not state-in-etcd.
 - **Safety posture while parked:** unchanged from ADR-0004 Slice 1 — HA is safe-by-default (manual
   failover, explicit promote, planned handoff, term-visible `/healthz`). Nothing regresses by pausing;
   only the *automatic* convenience is deferred.
@@ -133,6 +133,44 @@ Recorded so implementation cannot forget them:
   `server/v3` is imported exclusively by `_test.go` files.
 - **Not in S1 (by design):** no runtime wiring, no flags, no compose/GUI — the primitive is
   dormant until S2. Nothing about ADR-0004's safe-by-default posture changes yet.
+
+### 2026-07-03 — S4 SHIPPED: lease-arbitrated automatic failover (ha_failover.go)
+Implemented exactly per the design decisions below. Surfaces: `onMaxFail` branches on
+`leaseConfigured()` — lease mode runs `leaseAutoPromote` (hysteresis → freshness → the S2
+Acquire-gated `promote()`), legacy keeps the ADR-0004 flag semantics verbatim (test-pinned);
+`syncFromLeader` records `markSyncOK` (freshness input); `selfFence` stamps the hysteresis
+timestamp and then `enterStandbyResync("self-fence")`; an unfenced `ResumeAsLeader` with a
+recorded S0 failback target re-enters standby against it (no leader role asserted), falling
+back to the S2 passive stance when target/material is missing (test-pinned both ways); the
+cluster loader records `SetResyncMaterial` at CP boot on both the resume and join paths.
+Constants: freshness window 10m, re-promotion cooldown 30s. Tests (ha_failover_test.go):
+promote-when-free, denied-while-held (partitioned leader), flag-ignored-in-lease-mode,
+freshness (refuse never-synced + stale; manual bypass), hysteresis (suppress + resume),
+legacy-unchanged, self-fence → standby-resync end-to-end (keepalive loss → role standby,
+peerAddr = recorded ex-standby, hysteresis stamped), unfenced-resume → standby-resync, and
+no-target → S2 stance. Race ×3 + full suite + shuffled ×2 green.
+
+### 2026-07-03 — S4 design decisions (recorded before implementation)
+- **Lease mode auto-arms failover.** The `--ha-auto-failover` opt-in existed because witness-less
+  auto-promotion is a split-brain (ADR-0004). With a fence, the unsafe case is structurally
+  impossible — `Acquire` is denied while the leader lives — so in lease mode the standby's
+  leader-unreachable path ALWAYS attempts fence-gated promotion (the flag governs only legacy
+  mode; S5 documents this). This is the ADR's stated purpose: safe AUTOMATIC failover.
+- **The 15s trigger is replaced, not deleted:** `onMaxFail` in lease mode calls
+  `leaseAutoPromote` — hysteresis check, freshness check, then `promote()` (which S2 already
+  Acquire-gates). A denied fence keeps the standby looping read-only. Legacy mode is untouched.
+- **Freshness gates ONLY the automatic path** (Finding 8): auto-promotion refuses when the last
+  successful HASync is older than `haPromoteFreshnessWindow` (10m) or never happened —
+  preferring an availability gap over importing-nothing-and-serving-stale. `PromoteManually`
+  BYPASSES freshness (operator judgment is the break-glass; the staleness is logged instead).
+- **Self-fence hysteresis** (Finding 8 flap): `lastSelfFence` + `haRepromoteCooldown` (30s)
+  suppress auto-repromotion after a demote; manual promotion unaffected.
+- **Demote + resync from the S0-recorded address:** the cluster loader records
+  `SetResyncMaterial(ctx, grpcAddr, certs…)` at CP boot; a leader that (a) self-fences or
+  (b) resumes without the lease AND knows its ex-standby (`standbyAddr`, S0) re-enters
+  `StartAsStandby` against it — with a NO-OP onPromote (its CP gRPC server never stopped;
+  S3's role-gated issuance keeps writes fenced while standby). Missing material or no recorded
+  standby falls back to the S2 stance (passive, no write authority, CRITICAL alert).
 
 ### 2026-07-03 — S3 SHIPPED: epoch fencing at every write sink + DP propagation (ha_fencing.go)
 The write-sink audit is recorded in ha_fencing.go's header — the source of truth. Summary:

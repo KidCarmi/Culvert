@@ -49,6 +49,9 @@ func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnro
 // CP gRPC server when this standby is later promoted.
 func startHAStandby(cfg clusterStartupConfig, ctx context.Context, leaderAddr, token string, autoFailover bool) {
 	initClusterCA(cfg.ClusterDBPath)
+	// ADR-0005 S4: record the material a later demotion needs to resync
+	// (a promoted standby that self-fences re-enters standby mode).
+	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
 	globalHA.StartAsStandby(ctx, leaderAddr, token,
 		cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, autoFailover,
 		func() error {
@@ -75,6 +78,9 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 	if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
 		logger.Fatalf("ControlPlane gRPC: %v", err)
 	}
+	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
+	// an unfenced resume (or a later self-fence) re-enters standby with it.
+	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
 	// Persisted leader (or legacy config with no role) resumes leadership.
 	if haErr == nil && haCfg.Enabled {
 		globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
