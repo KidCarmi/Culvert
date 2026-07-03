@@ -174,7 +174,7 @@ func (s *Store) GeneratePAC(proxyAddr string) string {
 	}
 
 	sb.WriteString("\n  // All other traffic routes through the proxy\n")
-	sb.WriteString(fmt.Sprintf("  return %q;\n", proxyDirective))
+	fmt.Fprintf(&sb, "  return %q;\n", proxyDirective)
 	sb.WriteString("}\n")
 	return sb.String()
 }

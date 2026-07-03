@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/pac"
 )
@@ -78,10 +79,23 @@ func servePACFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pacBody := pacStore.GeneratePAC(r.Host)
+	// r.Host is attacker-influenced; strip everything outside RFC-3986
+	// host:port characters before it flows into the generated PAC body
+	// (gosec G705 taint). GeneratePAC additionally %q-quotes the value and
+	// the response is served as application/x-ns-proxy-autoconfig, not HTML.
+	reqHost := strings.Map(func(c rune) rune {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '.', c == '-', c == ':', c == '[', c == ']':
+			return c
+		}
+		return -1
+	}, r.Host)
+	pacBody := pacStore.GeneratePAC(reqHost)
 	w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
-	fmt.Fprint(w, pacBody) //nolint:errcheck // best-effort response write
+	fmt.Fprint(w, pacBody) //nolint:errcheck,gosec // best-effort response write
+	// #nosec G705 -- host is character-whitelisted above; PAC output is %q-quoted JS served as application/x-ns-proxy-autoconfig
 }
 
 // registerPACRoutes wires the PAC file endpoint and its admin config API.
