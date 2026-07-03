@@ -40,7 +40,7 @@ func setupProxyTest(t *testing.T) {
 	ipf = &IPFilter{single: map[string]bool{}}
 	rl = newRateLimiter()
 	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
-	plugins = nil
+	pluginReplace(nil)
 	// Also reset policy state — callers like TestHandleRequest_DefaultDeny_NoRules
 	// rely on "no rules" AND "default deny" being the post-setup state. Earlier
 	// tests (e.g. TestHandleRequest_AllowedByRule, apiDefaultAction handlers)
@@ -247,7 +247,7 @@ func TestHandleRequest_RateLimited(t *testing.T) {
 
 func TestHandleRequest_PluginBlocks(t *testing.T) {
 	setupProxyTest(t)
-	plugins = []Middleware{&testPlugin{name: "block-all", decision: DecisionBlock}}
+	pluginReplace([]Middleware{&testPlugin{name: "block-all", decision: DecisionBlock}})
 
 	w := httptest.NewRecorder()
 	r := makeRequest("http://example.com/", nil)

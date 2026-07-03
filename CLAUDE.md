@@ -46,7 +46,7 @@ threatfeed.go — Threat intelligence feed integration (URLhaus, OpenPhish), dom
 feedsync.go   — UT1 URL category database syncer
 blocklist_feed.go — Blocklist URL feed syncer
 rewrite.go    — HTTP header rewrite rules (per-host, wildcard)
-plugin.go     — Middleware plugin API
+plugin.go     — Plugin shim: aliases over internal/plugin (ADR-0002)
 logger.go     — Rotating file logger with JSON mode
 syslog.go     — Syslog SIEM forwarding (UDP/TCP, RFC 3164)
 config.go     — YAML + CLI flag configuration (goccy/go-yaml)

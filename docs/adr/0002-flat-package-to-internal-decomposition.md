@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -636,6 +636,20 @@ the startup slice), and the startup test's mutex/field pokes were replaced by st
 fallback-port tests now set the per-store default instead of the global). The exclusions loop was
 extracted to a `writeExclusion` switch helper (nestif). Cluster PAC sync (`controlplane.go`) is
 untouched — it uses `pacStore.Get`/`Set` through the alias. Leaf proof: stdlib-only (no internal deps).
+
+### 2026-07-03 — `internal/plugin` extracted (22nd leaf)
+The middleware plugin API (Middleware contract, Decision, the global chain, panic-safe Decide /
+OnResponse dispatch) moved to `internal/plugin`; `plugin.go` is a pure alias shim (RegisterPlugin /
+pluginDecision / pluginOnResponse for the proxy+SOCKS5 hot paths and external plugin authors). Tests
+that assigned the `plugins` slice directly now go through the new `Replace(ps) []Middleware` swap API
+(lesson 3 — the chain is package-owned; Replace is documented as test-support, not safe under
+traffic, matching the pre-extraction lock-free-read contract). Leaf proof: imports `obs` only.
+
+Same-sweep verdict for the sibling candidate: `blocklist_feed.go` needs TWO seams before it can move —
+a domain-merger interface over the `Blocklist` hub and an SSRF-guard seam (`isPrivateHost` /
+`ssrfSafeDialContext` are main-owned and under the CodeQL inline-guard convention in CLAUDE.md, so
+relocating them needs a deliberate design pass, not a mechanical move). Deferred with this note as
+the map.
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
