@@ -5,6 +5,40 @@ Newest entry first.
 
 ---
 
+## 7. Bound the cluster-enrollment rate-limiter map
+
+**What changed**
+`enrollRateLimit.attempts` (controlplane.go), keyed by client IP, prunes an
+IP's timestamp slice only on that IP's NEXT enrollment attempt. An IP that
+attempts once and never returns leaves a permanent entry — unbounded growth
+keyed by source IP (third and last of the maps the audit found).
+
+- Added `enrollRateLimitCleanup`: drops entries whose timestamps have all aged
+  out of the window, prunes stale timestamps from surviving entries. Wired into
+  the shared security-limiter janitor (now: `rl` + SSRF DNS + login-lockout +
+  admin-API + enrollment). No-op on non-control-plane nodes (empty map).
+- Factored the window into `enrollRateLimitWindow` so the hot path and the
+  sweep agree on staleness.
+
+**Why**
+Completes the unbounded-map cleanup surfaced by the audit. Lower cardinality
+than the login map (enrollment is a cluster control-plane endpoint), but still
+unbounded over a long uptime.
+
+**Validation**
+`go build`, full `go test .` (47s) green, race on the enrollment / janitor /
+cluster paths green, `--new-from-rev=main` lint 0 issues. New test: single
+one-shot, all-stale, in-window, and mixed entries — evicts the stale, keeps and
+prunes the live.
+
+**Audit closure**
+All three genuinely-unbounded maps from the untrusted-key audit are now
+bounded (login-lockout #6, admin-API #6, enrollment #7); the top-hosts map was
+#5. Every other per-request/per-IP/per-host map in the codebase was verified to
+already have a cap, TTL, LRU, or removal-on-release.
+
+---
+
 ## 6. Bound the login-lockout and admin-API rate-limiter maps (auth-path DoS)
 
 **What changed**

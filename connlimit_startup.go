@@ -15,7 +15,8 @@ package main
 //     (the login-lockout + admin-API limiters are always active and must be
 //     swept even when RateLimitRPM is 0; see loadConnAndRateLimit)
 //   - cleanup goroutine ticks rl.Cleanup() + ssrf.CacheCleanup() +
-//     loginLimiter.Cleanup() + apiLimiter.Cleanup()
+//     loginLimiter.Cleanup() + apiLimiter.Cleanup() +
+//     enrollRateLimitCleanup()
 //   - log strings unchanged so operators see the same startup banner
 //   - Loader returns the cleanup-goroutine cancel func (always non-nil now)
 //     so the caller can store it on s.rlCleanupCancel. The early-phase
@@ -75,7 +76,8 @@ func loadConnAndRateLimit(cfg connAndRateLimitStartupConfig, parentCtx context.C
 
 // rateLimitCleanupLoop runs the periodic security-limiter cleanup pass every
 // 5 minutes until ctx is cancelled: the IP rate limiter, SSRF DNS cache, login
-// account-lockout, and admin-API rate limiter. Extracted from the inline
+// account-lockout, admin-API rate limiter, and cluster-enrollment rate limiter.
+// Extracted from the inline
 // goroutine in the pre-extraction body so the loader stays flat (avoids the
 // linter's nestif trigger) and so the cancellation invariant can be unit-tested
 // directly without waiting on a real tick.
@@ -91,6 +93,7 @@ func rateLimitCleanupLoop(ctx context.Context) {
 			ssrf.CacheCleanup()
 			loginLimiter.Cleanup()
 			apiLimiter.Cleanup()
+			enrollRateLimitCleanup()
 		}
 	}
 }
