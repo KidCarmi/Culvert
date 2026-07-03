@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -583,6 +583,157 @@ extracted:** its `IdentityProvider` interface embeds `AuthProvider` (the auth-ba
 in `auth.go`, implemented across local/LDAP/OIDC/SAML), so moving it would drag the auth interface
 graph out, and pulling *only* the `Identity` DTO would fragment a cohesive 49-line file for a 17-prod
 + 38-test alias churn at marginal benefit. It stays as a shared model in `package main` by design.
+
+### 2026-07-02 — `internal/bandwidth` extracted (18th leaf, post-completion addendum)
+With the startup-slice program finished, a re-sweep of the mid-size root files (which the original
+completion sweep had only sampled) found `bandwidth.go` (403 ln) had become a **clean seam-covered
+leaf**: its only couplings were `logger`/`sanitizeLog`/`atomicWriteFile` — all satisfied by
+`obs`+`fileutil`. Moved the engine (token bucket, `Manager` with F10 overlap detection, D1.2-flag-F6
+load validation, `HumanRate`) to `internal/bandwidth` (renames `BandwidthPolicy`→`Policy`,
+`BandwidthManager`→`Manager`, `NewBandwidthManager`→`NewManager`, `humanRate`→`HumanRate`; revive).
+The trimmed `bandwidth.go` keeps the alias shim + `globalBandwidth` + the `apiBandwidthPolicies`
+handler (requireRole/auditEvent are main-owned); the handler's `PolicyInfo` composite literals updated
+for the renamed embedded field. Test split (the recurring lesson): engine tests + the `TestSelectorsOverlap`
+block (from `coverage_boost_test.go`) + the D1.2b cold-start table moved into the package (local
+`assertNoTmpLeak` copy, as fileblock); the 5 handler tests stayed in main. `ConfigSnapshot`'s
+`BandwidthPolicies []BandwidthPolicy` field is untouched via the alias. `go list -deps` proof: imports
+only `obs`+`fileutil`. Same-sweep result for the siblings: `nodegroup.go` couples to `globalClusterStore`
+(needs a nodes-view seam — candidate next), `configversion.go`/`events.go` are hubs (stay).
+
+### 2026-07-02 — `internal/nodegroup` extracted (19th leaf)
+The bandwidth-sweep sibling: `nodegroup.go`'s `globalClusterStore` coupling turned out to live in the
+**API handlers**, not the engine — and the one `EnrolledNode`-typed engine method (`NodesInGroup`)
+already took nodes as a parameter with no production caller. So the engine (Store, D1.2-flag-F6 load
+validation, label-selector matching) moved to `internal/nodegroup` (`Group`/`Store`/`NewStore`/
+`LabelsMatch`) **EnrolledNode-free by design**; `NodesInGroup` became a main-side `nodesInGroup` free
+helper over the exported API (Get + LabelsMatch — behavior-identical). Handlers, `NodeGroupInfo`
+(response DTO), and the singleton stay in the trimmed `nodegroup.go`; `ConfigSnapshot.NodeGroups`
+untouched via the alias (embedding an alias keeps the field name, so `NodeGroupInfo{NodeGroup: g}`
+still compiles). D1.2b cold-start table moved into the package; `nodegroup_test.go` stayed black-box in
+main with its two `NodesInGroup` calls retargeted to the helper. Leaf proof: imports only
+`obs`+`fileutil`.
+
+### 2026-07-03 — `internal/secscan` extracted (20th; the ADR-0006 composition root)
+The completion table below gated `security_scan.go` behind "a dependency-injection refactor with its
+own ADR" — that is ADR-0006. Slice 1 built the injected-collaborator seams inside main; Slice 2 moved
+the orchestrator (`Scanner`/`Result`/`Deps`/`New`, `DecompressForScan`, package-owned counters) to
+`internal/secscan`. Key deltas vs the leaf playbook: constructor injection replaced Slice 1's
+nil-fallback-to-globals (an internal package cannot read main's globals; safe because production never
+reassigns `globalYARA`/`globalThreatFeed`/`globalScanExclusions` — in-place mutation only), and main
+tests that swapped those globals now inject the instance explicitly (`newEnabledScanner` helper,
+`newEnabledTestScanner` in-package). Main keeps the panic-safe wrappers, the remote-scanner fork, the
+`yaraRuleSetMatcher` toggle adapter, HTTP block helpers, the status map, and the singleton wiring
+(trimmed `security_scan.go`). Leaf proof: imports `clamav`+`hashcache`+`obs` (+`fileutil` transitive).
+See `docs/adr/0006-security-scanner-di.md` for the full decision record.
+
+### 2026-07-03 — `internal/pac` extracted (21st leaf)
+The PAC engine (`Config`/`Store` with Load/Get/Set persistence, `GeneratePAC`, the CIDR helpers) moved
+to `internal/pac`; the HTTP handlers (`apiPACConfig`, `servePACFile`), route registration, and the
+`pacStore` singleton stay in the trimmed `pac.go` shim. Design improvement folded in (lesson 3): the
+`pacDefaultProxyPort` package global became a Store field (`SetDefaultPort`/`DefaultPort`, set once by
+the startup slice), and the startup test's mutex/field pokes were replaced by store-owned
+`Snapshot`/`Restore` test support. `pac_test.go` moved wholesale (pure engine suite; the two
+fallback-port tests now set the per-store default instead of the global). The exclusions loop was
+extracted to a `writeExclusion` switch helper (nestif). Cluster PAC sync (`controlplane.go`) is
+untouched — it uses `pacStore.Get`/`Set` through the alias. Leaf proof: stdlib-only (no internal deps).
+
+### 2026-07-03 — `internal/plugin` extracted (22nd leaf)
+The middleware plugin API (Middleware contract, Decision, the global chain, panic-safe Decide /
+OnResponse dispatch) moved to `internal/plugin`; `plugin.go` is a pure alias shim (RegisterPlugin /
+pluginDecision / pluginOnResponse for the proxy+SOCKS5 hot paths and external plugin authors). Tests
+that assigned the `plugins` slice directly now go through the new `Replace(ps) []Middleware` swap API
+(lesson 3 — the chain is package-owned; Replace is documented as test-support, not safe under
+traffic, matching the pre-extraction lock-free-read contract). Leaf proof: imports `obs` only.
+
+Same-sweep verdict for the sibling candidate: `blocklist_feed.go` needs TWO seams before it can move —
+a domain-merger interface over the `Blocklist` hub and an SSRF-guard seam (`isPrivateHost` /
+`ssrfSafeDialContext` are main-owned and under the CodeQL inline-guard convention in CLAUDE.md, so
+relocating them needs a deliberate design pass, not a mechanical move). Deferred with this note as
+the map.
+
+### 2026-07-03 — `internal/ocsp` extracted (23rd leaf)
+The OCSP revocation engine (`Checker` — renamed from `OCSPChecker` per revive — with the TTL'd verdict
+cache, responder query pipeline, `VerifyPeerCertificate` callback, and `resolveIssuer`) moved to
+`internal/ocsp` (the `golang.org/x/crypto/ocsp` import is aliased `cryptoocsp` inside). Deliberately
+stays in main: `ConfigureTLSConfigOCSP`/`ConfigureTransportOCSP` — they are upstream-transport
+ownership glue under the P5.3 / S6 contract (must only run inside `swapUpstreamTransport` closures)
+and reference the `globalOCSP` singleton, now built via `ocsp.New()`. The whitebox engine tests moved
+wholesale into the package; the two `ConfigureTransportOCSP` tests stayed in the trimmed main
+`ocsp_test.go`; `edge_audit_test.go`'s literal-construction tests were retargeted (`ocsp.New()`; the
+CacheLen-with-seeded-entries assertion relocated into the package suite rather than growing exported
+test API). Leaf proof: imports `obs` + `x/crypto/ocsp` only.
+
+### 2026-07-03 — `internal/uitls` extracted (24th leaf)
+The admin-UI self-signed certificate generator (`SelfSigned` — baseline/interface/hostname SANs,
+CULVERT_PUBLIC_IP, cloud-metadata public-IP detection with the IMDSv2→v1 fallback) moved to
+`internal/uitls`. Design improvement folded in: the `uiExtraSANs` global is no longer read by the
+engine — main's `selfSignedTLS()` wrapper passes it as a parameter (the ui_extras startup slice and
+admin-settings persistence keep owning the var in the trimmed `tls.go`). Moved-code complexity paid
+down by decomposition, not suppression: `collectSANs`, `appendEnvPublicIPs`, and `imdsv2Token` helpers
+(gocognit/cyclop/nestif); metadata requests use `http.NoBody`. No SSRF-guard coupling — the IMDS
+endpoints are deliberately link-local and use a dedicated 2s-timeout client. Leaf proof: imports `obs`
+only.
+
+### 2026-07-03 — `internal/ssrf` seam built (4th seam; unblocks blocklist_feed)
+The SSRF guard moved out of `proxy.go`/`security.go` into `internal/ssrf`: the private-CIDR table,
+`PrivateIP`/`PrivateHost` (with the 30s-TTL DNS verdict cache — negative results uncached, fail-closed),
+the connect-time `Control` (DNS-rebinding TOCTOU closure), and `SafeDialContext`. package main keeps
+thin wrappers so every call site is UNCHANGED: `isPrivateIP`/`isPrivateHost` funcs and the
+test-swappable `ssrfSafeDialContext`/`ssrfControl` vars (security.go); the tick loop calls
+`ssrf.CacheCleanup()` (connlimit_startup.go). Test pokes at `ssrfDNSCache.mu/.entries` were replaced by
+`CacheStore`/`CacheDelete` test support (lesson 3); `qa_gate_test.go`'s direct `ssrfSafeDialer.Dial`
+retargeted onto the DialContext var. **CodeQL contract note:** main call sites still see the
+`url.Parse + scheme + isPrivateHost()` inline pattern — the wrapper adds one call level; the CI CodeQL
+gate on this commit is the empirical verdict, and the follow-on `internal/blocklistfeed` extraction
+waits for it. Package suite: 96% coverage (CIDR table incl. the IPv4-mapped-IPv6 case, cached verdicts,
+Control fail-closed cases, cache cleanup).
+
+### 2026-07-03 — `internal/blocklistfeed` extracted (25th leaf; the two-seam candidate)
+The remote blocklist syncer moved to `internal/blocklistfeed` — the extraction ADR-0002 had deferred
+pending TWO seams, both now in place. (1) The `Blocklist` hub coupling is inverted to a `Merger`
+interface (`MergeFromLines`) that `*Blocklist` satisfies — the hub stays in main, the engine depends
+only on the narrow contract. (2) The SSRF guard is the `internal/ssrf` seam (built in the prior
+commit): `fetchFeedLines`/`feedCheckRedirect` call `ssrf.PrivateHost` + `ssrf.SafeDialContext`
+inline — the same defense, now importable. main keeps the `blFeedSyncer` singleton (main.go), the
+`newBlocklistSyncer` constructor + `blFeedDefaultInterval` alias, and the admin API handler
+(ui_policy.go). **Test-seam consequence, recorded as a lesson:** the engine now calls the ssrf seam
+directly instead of the swappable main-package `ssrfSafeDialContext` var, so two integration tests
+that swapped that var broke — the loopback-allow helper was retargeted onto `ssrf.AllowLoopbackForTest()`
+(drops loopback from the guard table, covering BOTH the host check and the connect-time control), the
+redirect-block test now targets a non-loopback private IP (10.0.0.1, still caught), and the
+dialer-wiring test became a direct `feedCheckRedirect` unit test in the package. Package suite (fake
+Merger + httptest): 70% coverage. Leaf proof: imports `obs` + `ssrf` only.
+
+### 2026-07-03 — `internal/feedsync` extracted (26th leaf) + ssrf-seam CI verdict recorded
+**Seam verdict:** the CI code-scanning gates (CodeQL + gosec, both the code-scanning checks and the
+SAST jobs) are GREEN on the `internal/ssrf` seam and the `internal/blocklistfeed` extraction — the
+one-extra-call-level wrapper does NOT break the inline-guard recognition. The convention holds for
+future extractions: engines call `ssrf.PrivateHost`/`ssrf.SafeDialContext` directly inline.
+
+The UT1 URL-category syncer moved to `internal/feedsync` (`Syncer`/`New`, tarball download/parse,
+the ingest map). Depends on `internal/catdb` (already extracted) + `obs`. Deltas: the UT1 sync-failure
+counter is package-owned (`SyncFailures()`, read by `urlcat_metrics.go` — same pattern as secscan's
+counters); `ut1CategoryMap` consumers (UI feed-backed badge, startup category seeding) go through the
+exported `MappedCategories()` values accessor instead of the mutable map; the metrics test's
+lastSync/totalDomains field pokes became `SeedStats` test support (lesson 3). The whole
+`catdb_feedsync_test.go` engine suite moved in-package (84% coverage); `feedUserAgent` stays owned by
+`threatfeed.go` with the package keeping its own copy of the value. Leaf proof: `catdb`+`obs` only.
+
+### 2026-07-03 — `saas_feed.go` mapped; extraction DESIGNED, deliberately checkpointed
+The next unit is fully mapped and the design decided — recorded here so a fresh session (or the
+post-#529 branch) executes it without re-discovery. `internal/saasfeed` needs FIVE seams, the widest
+so far: (1) the `catStore` merge inverted to an injected `merge func([]Category) int` closure —
+`CategoryStore`/`CategoryEntry` live in policy.go (core hub), so the package defines its own
+`Category{name,hosts}` wire type (JSON-compatible; `builtIn` ignored) and main's closure keeps the
+GetByName/Set/AddHost/Save additive-merge logic + the added>0 Save; (2) a lifecycle-context provider
+injected via Deps — `Configure` currently parents the sync loop on main's `resolveLifecycleCtx()`
+(P6.1 UC-3 contract, do not lose the Done()-channel semantics); (3) the client injected (the
+singleton builds it with `ssrf.SafeDialContext`); (4) the SaaS sync-failure counter package-owned
+(`SyncFailures()`, read by urlcat_metrics.go — the feedsync pattern); (5) test-construction support:
+seven `&SaaSFeedSyncer{...}` field literals across saas_feed_test.go (engine tests move in-package
+with a fake merge), saas_feed_lifecycle_test.go (stays in main — drives globals; needs Deps-based
+construction), and urlcat_metrics_test.go (needs `SeedStats`, per feedsync).
+`TestCategoryStore_GetByName` in saas_feed_test.go is a policy.go test and stays in main.
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 

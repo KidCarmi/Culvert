@@ -25,6 +25,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // validOTLPEndpoint matches http:// or https:// followed by at least one host
@@ -232,6 +234,7 @@ type otlpAnyValue struct {
 }
 
 func otlpCounterMetrics(now string) []otlpMetric {
+	scanCounters := secscan.Counters()
 	counters := []struct {
 		name string
 		desc string
@@ -242,9 +245,9 @@ func otlpCounterMetrics(now string) []otlpMetric {
 		{"culvert.requests.auth_fail", "Total auth failures", atomic.LoadInt64(&statAuthFail)},
 		{"culvert.requests.file_blocked", "File extension blocks", atomic.LoadInt64(&statFileBlocked)},
 		{"culvert.requests.dpi_blocked", "DPI content blocks", atomic.LoadInt64(&statDPIBlocked)},
-		{"culvert.requests.clamav_blocked", "ClamAV blocks", atomic.LoadInt64(&statClamBlocked)},
-		{"culvert.requests.yara_blocked", "YARA blocks", atomic.LoadInt64(&statYARABlocked)},
-		{"culvert.requests.threat_feed_blocked", "Threat feed blocks", atomic.LoadInt64(&statThreatFeedBlocked)},
+		{"culvert.requests.clamav_blocked", "ClamAV blocks", scanCounters.ClamBlocked},
+		{"culvert.requests.yara_blocked", "YARA blocks", scanCounters.YARABlocked},
+		{"culvert.requests.threat_feed_blocked", "Threat feed blocks", scanCounters.ThreatFeedBlocked},
 		{"culvert.bytes.sent", "Bytes sent upstream", atomic.LoadInt64(&statBytesSent)},
 		{"culvert.bytes.recv", "Bytes received", atomic.LoadInt64(&statBytesRecv)},
 	}
@@ -270,7 +273,7 @@ func otlpCounterMetrics(now string) []otlpMetric {
 func otlpGaugeMetrics(now string) []otlpMetric {
 	uptimeSec := time.Since(startTime).Seconds()
 	feedEntries, _, _ := globalThreatFeed.Stats()
-	_, _, cacheSize := globalSecScanner.cache.Stats()
+	_, _, cacheSize := globalSecScanner.CacheStats()
 	gauges := []struct {
 		name string
 		desc string

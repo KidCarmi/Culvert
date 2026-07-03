@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileblock"
+
+	"github.com/KidCarmi/Culvert/internal/ocsp"
 )
 
 // ─── Finding 1.1: Blocklist.ClearAll ────────────────────────────────────────
@@ -476,7 +478,7 @@ func TestConnLimiterMaxPerIP(t *testing.T) {
 // ─── ocsp: Disable / CacheLen ────────────────────────────────────────────────
 
 func TestOCSPDisable(t *testing.T) {
-	oc := &OCSPChecker{cache: map[string]*ocspCacheEntry{}}
+	oc := ocsp.New()
 	oc.Enable()
 	if !oc.Enabled() {
 		t.Fatal("expected enabled")
@@ -487,18 +489,9 @@ func TestOCSPDisable(t *testing.T) {
 	}
 }
 
-func TestOCSPCacheLen(t *testing.T) {
-	oc := &OCSPChecker{cache: map[string]*ocspCacheEntry{
-		"a": {}, "b": {},
-	}}
-	if got := oc.CacheLen(); got != 2 {
-		t.Errorf("CacheLen() = %d, want 2", got)
-	}
-}
-
 // ─── logScanLimitExceeded (Finding 4.2) ──────────────────────────────────────
 
-func TestLogScanLimitExceeded(t *testing.T) {
+func TestLogScanLimitExceeded(_ *testing.T) {
 	// Just ensure it doesn't panic. No need to swap globalAlertStore since
 	// logScanLimitExceeded fires the alert via go fireAlert() which captures
 	// the store pointer internally.

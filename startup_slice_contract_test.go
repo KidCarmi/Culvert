@@ -41,20 +41,35 @@ func TestStartupSliceContract_PureAndDeterministic(t *testing.T) {
 	}{
 		{"auth", func(_ *FileConfig) any { return resolveAuthStartupConfig(0, 0, "", "", "") }},
 		{"fileblock", func(fc *FileConfig) any { return resolveFileBlockStartupConfig(fc, "") }},
+		{"background_services", func(fc *FileConfig) any {
+			return resolveBackgroundServicesStartupConfig(fc, "", "", "")
+		}},
 		{"blocklist", func(fc *FileConfig) any { return resolveBlocklistStartupConfig(fc, "") }},
+		{"cdr", func(fc *FileConfig) any { return resolveCDRStartupConfig(fc, cdrCLIFlags{}) }},
+		{"cluster", func(fc *FileConfig) any { return resolveClusterStartupConfig(fc, clusterCLIFlags{}) }},
 		{"conn_and_rate_limit", func(fc *FileConfig) any { return resolveConnAndRateLimitStartupConfig(fc, "", 0) }},
 		{"geoip", func(fc *FileConfig) any { return resolveGeoIPStartupConfig(fc, "") }},
 		{"inspection_rules", func(fc *FileConfig) any { return resolveInspectionRulesConfig(fc) }},
 		{"legacy_auth_providers", func(fc *FileConfig) any { return resolveLegacyAuthProvidersStartupConfig(fc, "") }},
+		{"logstore", func(fc *FileConfig) any { return resolveLogStoreStartupConfig(fc, "", "", "") }},
 		{"metrics_token", func(fc *FileConfig) any { return resolveMetricsTokenStartupConfig(fc, "") }},
 		{"mtls_ocsp", func(fc *FileConfig) any { return resolveMTLSOCSPStartupConfig(fc) }},
 		{"observability", func(fc *FileConfig) any {
 			return resolveObservabilityStartupConfig(fc, "", "", "", "", "", 0)
 		}},
 		{"pac", func(_ *FileConfig) any { return resolvePACStartupConfig(0) }},
+		{"persistent_admin_state", func(_ *FileConfig) any { return resolvePersistentAdminStateStartupConfig("") }},
 		{"rewrite_default_action", func(fc *FileConfig) any { return resolveRewriteDefaultActionStartupConfig(fc) }},
+		{"rootca", func(fc *FileConfig) any { return resolveRootCAStartupConfig(fc, "", "") }},
+		{"scanning", func(fc *FileConfig) any {
+			return resolveScanningStartupConfig(fc, scanningCLIFlags{}, "")
+		}},
 		{"session", func(fc *FileConfig) any { return resolveSessionStartupConfig(fc, "", 0) }},
 		{"ui_access_policy", func(fc *FileConfig) any { return resolveUIAccessPolicyStartupConfig(fc, "", "") }},
+		{"upstream_pool", func(fc *FileConfig) any { return resolveUpstreamPoolStartupConfig(fc) }},
+		{"urlcategories", func(fc *FileConfig) any {
+			return resolveURLCategoriesStartupConfig(fc, "", "", "", "")
+		}},
 		{"ui_extras", func(fc *FileConfig) any { return resolveUIExtrasStartupConfig(fc, "", false) }},
 	}
 

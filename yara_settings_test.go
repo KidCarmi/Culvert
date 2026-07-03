@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // resetYARASettings saves all current YARA engine runtime settings and
@@ -387,21 +389,23 @@ func TestYARA_DisabledSkipsScanAndDiagnosticsWarn(t *testing.T) {
 		t.Fatal("setup: YARA rule did not match EICAR — check rule format")
 	}
 
-	// With admin toggle off: scanBodyInner must return nil (not blocked)
-	// even for content that would match the loaded rule.
-	result := globalSecScanner.scanBodyInner(
-		[]byte("EICAR"), t.Name()+"-disabled")
+	// With admin toggle off: ScanBody must return nil (not blocked) even
+	// for content that would match the loaded rule. Exercised through the
+	// public API on an enabled scanner wired to globalYARA (ADR-0006: the
+	// inner dispatch is package-private in internal/secscan now).
+	ss := newEnabledScanner(secscan.Deps{Yara: yaraRuleSetMatcher{globalYARA}})
+	result := ss.ScanBody([]byte("EICAR"))
 	if result != nil {
-		t.Errorf("YARA disabled: scanBodyInner returned blocked=%v, want nil", result)
+		t.Errorf("YARA disabled: ScanBody returned blocked=%v, want nil", result)
 	}
 
-	// Re-enable: the same content must now be blocked by YARA.
+	// Re-enable: the same content must now be blocked by YARA. Clear the
+	// cache first — the disabled-phase scan cached a clean verdict.
 	yaraSetEnabled(true)
-	globalSecScanner.cache.Clear()
-	result = globalSecScanner.scanBodyInner(
-		[]byte("EICAR"), t.Name()+"-enabled")
+	ss.CacheClear()
+	result = ss.ScanBody([]byte("EICAR"))
 	if result == nil {
-		t.Error("YARA enabled: scanBodyInner should block EICAR-matching content")
+		t.Error("YARA enabled: ScanBody should block EICAR-matching content")
 	}
 	if result != nil && result.Source != "yara" {
 		t.Errorf("block source = %q, want yara", result.Source)

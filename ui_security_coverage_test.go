@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/scanexcl"
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // ─── apiCARotate ────────────────────────────────────────────────────────────
@@ -344,7 +345,7 @@ func yaraTestRuleset(t *testing.T, dir string) {
 	y := &YARARuleSet{}
 	y.SetDir(dir)
 	globalYARA = y
-	globalSecScanner = &SecurityScanner{cache: newHashCache(16, time.Minute)}
+	globalSecScanner = secscan.New(secscan.Deps{Cache: newHashCache(16, time.Minute)})
 	t.Cleanup(func() {
 		globalYARA = origYARA
 		globalSecScanner = origSec
@@ -398,7 +399,7 @@ func TestAPISecYARARules_WriteReadDelete(t *testing.T) {
 	yaraTestRuleset(t, dir)
 
 	// Prime the cache so we can confirm the handler clears it.
-	globalSecScanner.cache.Set("primed", ScanCacheResult{Clean: true})
+	globalSecScanner.CacheSet("primed", ScanCacheResult{Clean: true})
 
 	src := yaraRule("CoverRule", `        $a = "HELLO"`, "any of them")
 
@@ -422,7 +423,7 @@ func TestAPISecYARARules_WriteReadDelete(t *testing.T) {
 	}
 
 	// Cache should no longer contain "primed".
-	if _, ok := globalSecScanner.cache.Get("primed"); ok {
+	if _, ok := globalSecScanner.CacheGet("primed"); ok {
 		t.Error("cache was not cleared by write")
 	}
 
@@ -436,7 +437,7 @@ func TestAPISecYARARules_WriteReadDelete(t *testing.T) {
 	}
 
 	// Re-prime then DELETE.
-	globalSecScanner.cache.Set("primed2", ScanCacheResult{Clean: true})
+	globalSecScanner.CacheSet("primed2", ScanCacheResult{Clean: true})
 	w3 := httptest.NewRecorder()
 	apiSecYARARules(w3, jsonReq(http.MethodDelete, "/api/security-scan/yara/rules/coverrule", nil))
 	assertStatus(t, w3, http.StatusOK)
@@ -447,7 +448,7 @@ func TestAPISecYARARules_WriteReadDelete(t *testing.T) {
 	if dm["cache_cleared"] != true {
 		t.Error("delete response must indicate cache_cleared=true")
 	}
-	if _, ok := globalSecScanner.cache.Get("primed2"); ok {
+	if _, ok := globalSecScanner.CacheGet("primed2"); ok {
 		t.Error("cache was not cleared by delete")
 	}
 }

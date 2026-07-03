@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // ─── Per-rule hit counter ────────────────────────────────────────────────────
@@ -282,14 +284,15 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) { //nolint:errcheck /
 		rlEnabled = 1
 	}
 
-	clamBlocked := atomic.LoadInt64(&statClamBlocked)
-	yaraBlocked := atomic.LoadInt64(&statYARABlocked)
-	feedBlocked := atomic.LoadInt64(&statThreatFeedBlocked)
+	scanCounters := secscan.Counters()
+	clamBlocked := scanCounters.ClamBlocked
+	yaraBlocked := scanCounters.YARABlocked
+	feedBlocked := scanCounters.ThreatFeedBlocked
 	dpiBlocked := atomic.LoadInt64(&statDPIBlocked)
 	bytesSent := atomic.LoadInt64(&statBytesSent)
 	bytesRecv := atomic.LoadInt64(&statBytesRecv)
 	feedEntries, _, _ := globalThreatFeed.Stats()
-	cacheHits, cacheMisses, cacheSize := globalSecScanner.cache.Stats()
+	cacheHits, cacheMisses, cacheSize := globalSecScanner.CacheStats()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 

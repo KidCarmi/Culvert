@@ -36,6 +36,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 // TestProxyE2E_WebSocket_PipelinedClientBytes proves the WebSocket relay does
@@ -227,31 +229,15 @@ func (cb *countingBackend) hitCount() int64 { return atomic.LoadInt64(&cb.hits) 
 
 // ─── SSRF seam (loopback only, restored on cleanup) ──────────────────────────
 
-// allowLoopbackTunnel temporarily removes the loopback ranges from privateCIDRs
-// so the real CONNECT path can reach a 127.0.0.1 fixture. Production code is
-// unchanged; only this package var is swapped, and it is restored on cleanup.
+// allowLoopbackTunnel temporarily removes the loopback ranges from the SSRF
+// guard's CIDR table so the real CONNECT path can reach a 127.0.0.1 fixture.
+// Production code is unchanged; the table lives in internal/ssrf now
+// (ADR-0002 seam) and is swapped/restored through its documented test
+// support, which also resets the DNS verdict cache on both sides.
 func allowLoopbackTunnel(t *testing.T) {
 	t.Helper()
-	orig := privateCIDRs
-	lo4 := net.ParseIP("127.0.0.1")
-	lo6 := net.ParseIP("::1")
-	filtered := make([]*net.IPNet, 0, len(orig))
-	for _, c := range orig {
-		if c.Contains(lo4) || c.Contains(lo6) {
-			continue // drop loopback ranges
-		}
-		filtered = append(filtered, c)
-	}
-	privateCIDRs = filtered
-	resetSSRFDNSCache()
-	t.Cleanup(func() {
-		privateCIDRs = orig
-		resetSSRFDNSCache()
-	})
-}
-
-func resetSSRFDNSCache() {
-	ssrfDNSCache = &dnsSSRFCache{entries: make(map[string]dnsSSRFEntry)}
+	restore := ssrf.AllowLoopbackForTest()
+	t.Cleanup(restore)
 }
 
 // ─── CONNECT byte relay ──────────────────────────────────────────────────────

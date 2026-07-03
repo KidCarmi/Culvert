@@ -887,6 +887,39 @@ type HAStateBundle struct {
 	LeaderTerm uint64 `json:"leader_term,omitempty"`
 }
 
+// normalizeAdvertisedAddr turns a standby's advertised address into one the
+// leader can actually dial (ADR-0005 S0; PR #529 review). The standby commonly
+// advertises its BIND address — ":50051" or "0.0.0.0:50051" — because the HA
+// deploy command reuses --cp-grpc-addr, and a bind address is not reachable
+// from the leader. When the advertised host is empty or a wildcard, substitute
+// the peer IP observed on this gRPC connection, keeping the advertised port.
+// A concrete host:port passes through verbatim (explicit operator intent);
+// non-host:port values also pass through verbatim (pre-existing behavior for
+// custom inputs). Returns "" (record nothing) when a wildcard cannot be
+// resolved against an observed peer — a knowingly-undialable target is worse
+// than none.
+func normalizeAdvertisedAddr(ctx context.Context, adv string) string {
+	if adv == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(adv)
+	if err != nil {
+		return adv
+	}
+	if host != "" && host != "0.0.0.0" && host != "::" {
+		return adv
+	}
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.Addr == nil {
+		return ""
+	}
+	peerHost, _, err := net.SplitHostPort(p.Addr.String())
+	if err != nil {
+		return ""
+	}
+	return net.JoinHostPort(peerHost, port)
+}
+
 // haEncryptKey encrypts data with AES-256-GCM using a key derived from the
 // HA token via PBKDF2-SHA256. Returns base64(salt + nonce + ciphertext).
 func haEncryptKey(plaintext []byte, token string) (string, error) {
@@ -942,9 +975,10 @@ func haDecryptKey(encoded string, token string) ([]byte, error) {
 
 // HASync returns the full state bundle for HA standby replication.
 // Authenticated via a shared HA token (not node cert pinning).
-func (s *controlPlaneServer) HASync(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var req struct {
-		Token string `json:"token"`
+		Token       string `json:"token"`
+		StandbyAddr string `json:"standby_addr"`
 	}
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, fmt.Errorf("invalid request: %w", err)
@@ -954,6 +988,16 @@ func (s *controlPlaneServer) HASync(_ context.Context, raw json.RawMessage) (jso
 	if !globalHA.VerifyToken(req.Token) {
 		return nil, status.Errorf(codes.PermissionDenied, "invalid HA token")
 	}
+
+	// ADR-0005 S0: record the standby's advertised address as the failback
+	// target (only after the token check, so an unauthenticated caller cannot
+	// poison it). The advertised value is normalised against the OBSERVED peer
+	// of this connection (PR #529 review): the standby commonly advertises its
+	// BIND address (":50051" / "0.0.0.0:50051", copied from --cp-grpc-addr by
+	// the deploy command), which the leader cannot dial — substitute the peer
+	// IP, keep the advertised port. No-op unless we are the leader and the
+	// address changed.
+	globalHA.RecordStandbyAddr(normalizeAdvertisedAddr(ctx, req.StandbyAddr))
 
 	// Build state bundle.
 	stateJSON, err := globalClusterStore.ExportState()

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -60,93 +59,6 @@ func defaultPolicyAction() string {
 		return "allow"
 	}
 	return "deny"
-}
-
-// privateCIDRs lists every non-routable / internal-infrastructure range that
-// must never be exposed to an untrusted client (SSRF guard) and must never be
-// forwarded to upstream servers in headers such as X-Forwarded-For.
-//
-// Coverage goes beyond RFC 1918 on purpose: CGN (100.64/10) can reach a
-// carrier's management plane, 0.0.0.0/8 is treated as "this host" by many
-// stacks, and the IPv4-mapped IPv6 form ::ffff:0:0/96 is a known SSRF bypass
-// if only IPv4 ranges are listed. Multicast (224/4, ff00::/8) and reserved
-// (240/4) ranges are included because they have no legitimate proxy target.
-var privateCIDRs = func() []*net.IPNet {
-	ranges := []string{
-		"0.0.0.0/8",      // "this network" / local host on most stacks
-		"10.0.0.0/8",     // RFC 1918
-		"100.64.0.0/10",  // RFC 6598 — carrier-grade NAT
-		"127.0.0.0/8",    // loopback (IPv4)
-		"169.254.0.0/16", // link-local (IPv4) — AWS/GCP/Azure metadata lives here
-		"172.16.0.0/12",  // RFC 1918
-		"192.168.0.0/16", // RFC 1918
-		"198.18.0.0/15",  // benchmark network
-		"224.0.0.0/4",    // multicast
-		"240.0.0.0/4",    // reserved / broadcast (includes 255.255.255.255)
-		"::/128",         // unspecified (IPv6)
-		"::1/128",        // loopback (IPv6)
-		"64:ff9b::/96",   // NAT64
-		"100::/64",       // discard prefix
-		"fc00::/7",       // ULA (IPv6)
-		"fe80::/10",      // link-local (IPv6)
-		"ff00::/8",       // multicast (IPv6)
-		// IPv4-mapped IPv6 (::ffff:0:0/96) is intentionally NOT listed here:
-		// net.IPNet.Contains calls To4() on the input, so a mapped address like
-		// ::ffff:127.0.0.1 is still caught by 127.0.0.0/8 above. Listing
-		// ::ffff:0:0/96 directly would match ALL IPv4 addresses (since Go
-		// stores IPv4 in 16-byte form by default) and block every destination.
-	}
-	nets := make([]*net.IPNet, 0, len(ranges))
-	for _, r := range ranges {
-		_, cidr, _ := net.ParseCIDR(r)
-		if cidr != nil {
-			nets = append(nets, cidr)
-		}
-	}
-	return nets
-}()
-
-// isPrivateIP reports whether ip falls within any private/internal range.
-func isPrivateIP(ip net.IP) bool {
-	for _, cidr := range privateCIDRs {
-		if cidr.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// isPrivateHost resolves host (host or host:port) and returns an error if any
-// resolved IP falls within a private/internal range. This prevents SSRF via
-// proxy CONNECT to loopback, RFC 1918, link-local, or metadata endpoints.
-// Results are cached in ssrfDNSCache (30s TTL) to avoid redundant DNS lookups.
-func isPrivateHost(hostport string) error {
-	host, _, err := net.SplitHostPort(hostport)
-	if err != nil {
-		host = hostport // no port
-	}
-	// Check cache first.
-	if priv, ok := ssrfDNSCache.Lookup(host); ok {
-		if priv {
-			return fmt.Errorf("destination %s resolves to private address (cached)", host)
-		}
-		return nil
-	}
-	ips, err := net.DefaultResolver.LookupHost(context.Background(), host)
-	if err != nil {
-		// Fail closed: unresolvable hosts are rejected to prevent DNS-rebinding
-		// attacks where the check resolves to a public IP but Dial resolves to
-		// a private one after TTL expiry. DNS errors are NOT cached.
-		return fmt.Errorf("destination %s: DNS resolution failed: %w", host, err)
-	}
-	for _, ipStr := range ips {
-		if ip := net.ParseIP(ipStr); ip != nil && isPrivateIP(ip) {
-			ssrfDNSCache.Store(host, true)
-			return fmt.Errorf("destination %s resolves to private address %s", host, ipStr)
-		}
-	}
-	ssrfDNSCache.Store(host, false)
-	return nil
 }
 
 // scrubForwardedHeaders sanitises request headers before forwarding upstream:

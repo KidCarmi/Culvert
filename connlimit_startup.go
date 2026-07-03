@@ -12,7 +12,7 @@ package main
 //     entries are logged at warn level and skipped (NOT fatal)
 //   - rl.Configure(N, time.Minute) only when RateLimitRPM > 0
 //   - 5-minute cleanup goroutine spawned ONLY when RateLimitRPM > 0
-//   - cleanup goroutine ticks rl.Cleanup() + ssrfDNSCache.Cleanup()
+//   - cleanup goroutine ticks rl.Cleanup() + ssrf.CacheCleanup()
 //   - log strings unchanged so operators see the same startup banner
 //   - Loader returns the cleanup-goroutine cancel func so the caller
 //     can store it on s.rlCleanupCancel. Returns nil when rate-limit
@@ -22,6 +22,8 @@ package main
 import (
 	"context"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 // loadConnAndRateLimit applies cfg to the package-global connLimiter,
@@ -60,7 +62,7 @@ func loadConnAndRateLimit(cfg connAndRateLimitStartupConfig, parentCtx context.C
 	return cancel
 }
 
-// rateLimitCleanupLoop runs the periodic rl + ssrfDNSCache cleanup
+// rateLimitCleanupLoop runs the periodic rl + SSRF DNS-cache cleanup
 // pass every 5 minutes until ctx is cancelled. Extracted from the
 // inline goroutine in the pre-extraction body so the loader stays
 // flat (avoids the linter's nestif trigger) and so the cancellation
@@ -75,7 +77,7 @@ func rateLimitCleanupLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			rl.Cleanup()
-			ssrfDNSCache.Cleanup()
+			ssrf.CacheCleanup()
 		}
 	}
 }

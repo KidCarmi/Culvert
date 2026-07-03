@@ -1,4 +1,4 @@
-package main
+package pac
 
 import (
 	"encoding/json"
@@ -63,8 +63,8 @@ func TestIsIPCIDR(t *testing.T) {
 
 // ─── PACStore ─────────────────────────────────────────────────────────────────
 
-func newTestPACStore() *PACStore {
-	return &PACStore{}
+func newTestPACStore() *Store {
+	return &Store{}
 }
 
 func TestPACStore_GetDefault(t *testing.T) {
@@ -83,7 +83,7 @@ func TestPACStore_GetDefault(t *testing.T) {
 
 func TestPACStore_SetAndGet(t *testing.T) {
 	s := newTestPACStore()
-	cfg := PACConfig{
+	cfg := Config{
 		ProxyHost:  "proxy.corp.com",
 		ProxyPort:  3128,
 		Exclusions: []string{"corp.local", "*.internal.corp"},
@@ -136,7 +136,7 @@ func TestPACStore_LoadSave(t *testing.T) {
 	if err := s.Load(path); err != nil {
 		t.Fatalf("Load missing file: %v", err)
 	}
-	if err := s.Set(PACConfig{ProxyHost: "proxy.example.com", ProxyPort: 8080}); err != nil {
+	if err := s.Set(Config{ProxyHost: "proxy.example.com", ProxyPort: 8080}); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestPACStore_LoadSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	var stored PACConfig
+	var stored Config
 	if err := json.Unmarshal(data, &stored); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestPACStore_LoadSave(t *testing.T) {
 
 func TestGeneratePAC_Basic(t *testing.T) {
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{ProxyHost: "proxy.corp.com", ProxyPort: 3128})
+	_ = s.Set(Config{ProxyHost: "proxy.corp.com", ProxyPort: 3128})
 
 	pac := s.GeneratePAC("proxy.corp.com:3128")
 
@@ -193,7 +193,7 @@ func TestGeneratePAC_Basic(t *testing.T) {
 func TestGeneratePAC_FallbackHost(t *testing.T) {
 	// ProxyHost empty — should use hostname from proxyAddr argument.
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{ProxyPort: 8080})
+	_ = s.Set(Config{ProxyPort: 8080})
 
 	pac := s.GeneratePAC("10.0.0.1:8080")
 
@@ -203,13 +203,10 @@ func TestGeneratePAC_FallbackHost(t *testing.T) {
 }
 
 func TestGeneratePAC_FallbackPort(t *testing.T) {
-	// ProxyPort zero, pacDefaultProxyPort set.
-	origDefault := pacDefaultProxyPort
-	pacDefaultProxyPort = 9999
-	defer func() { pacDefaultProxyPort = origDefault }()
-
+	// ProxyPort zero, store default port set.
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{ProxyHost: "proxy.corp.com"})
+	s.SetDefaultPort(9999)
+	_ = s.Set(Config{ProxyHost: "proxy.corp.com"})
 
 	pac := s.GeneratePAC("proxy.corp.com:9999")
 	if !strings.Contains(pac, "PROXY proxy.corp.com:9999") {
@@ -218,13 +215,9 @@ func TestGeneratePAC_FallbackPort(t *testing.T) {
 }
 
 func TestGeneratePAC_FallbackPortDefault8080(t *testing.T) {
-	// ProxyPort zero, pacDefaultProxyPort zero — falls back to 8080.
-	origDefault := pacDefaultProxyPort
-	pacDefaultProxyPort = 0
-	defer func() { pacDefaultProxyPort = origDefault }()
-
+	// ProxyPort zero, store default port zero — falls back to 8080.
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{ProxyHost: "proxy.corp.com"})
+	_ = s.Set(Config{ProxyHost: "proxy.corp.com"})
 
 	pac := s.GeneratePAC("proxy.corp.com")
 	if !strings.Contains(pac, "PROXY proxy.corp.com:8080") {
@@ -234,7 +227,7 @@ func TestGeneratePAC_FallbackPortDefault8080(t *testing.T) {
 
 func TestGeneratePAC_Exclusions_BareDomain(t *testing.T) {
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{
+	_ = s.Set(Config{
 		ProxyHost:  "proxy",
 		ProxyPort:  8080,
 		Exclusions: []string{"corp.local"},
@@ -253,7 +246,7 @@ func TestGeneratePAC_Exclusions_BareDomain(t *testing.T) {
 
 func TestGeneratePAC_Exclusions_Wildcard(t *testing.T) {
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{
+	_ = s.Set(Config{
 		ProxyHost:  "proxy",
 		ProxyPort:  8080,
 		Exclusions: []string{"*.corp.com"},
@@ -268,7 +261,7 @@ func TestGeneratePAC_Exclusions_Wildcard(t *testing.T) {
 
 func TestGeneratePAC_Exclusions_CIDR(t *testing.T) {
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{
+	_ = s.Set(Config{
 		ProxyHost:  "proxy",
 		ProxyPort:  8080,
 		Exclusions: []string{"172.16.0.0/12"},
@@ -289,7 +282,7 @@ func TestGeneratePAC_Exclusions_CIDR(t *testing.T) {
 
 func TestGeneratePAC_EmptyExclusionsSkipped(t *testing.T) {
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{
+	_ = s.Set(Config{
 		ProxyHost:  "proxy",
 		ProxyPort:  8080,
 		Exclusions: []string{"", "  ", "valid.com"},
@@ -306,7 +299,7 @@ func TestGeneratePAC_EmptyExclusionsSkipped(t *testing.T) {
 func TestGeneratePAC_HostFromBareAddr(t *testing.T) {
 	// proxyAddr without port (no colon).
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{ProxyPort: 8080})
+	_ = s.Set(Config{ProxyPort: 8080})
 
 	pac := s.GeneratePAC("barehost")
 	if !strings.Contains(pac, "PROXY barehost:8080") {
@@ -317,7 +310,7 @@ func TestGeneratePAC_HostFromBareAddr(t *testing.T) {
 func TestGeneratePAC_HTTPSPrefixStripped(t *testing.T) {
 	// proxyAddr with https:// prefix (from window.location in browser).
 	s := newTestPACStore()
-	_ = s.Set(PACConfig{ProxyPort: 8080})
+	_ = s.Set(Config{ProxyPort: 8080})
 
 	pac := s.GeneratePAC("https://proxy.corp.com:9090")
 	if !strings.Contains(pac, "PROXY proxy.corp.com:8080") {

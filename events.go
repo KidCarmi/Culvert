@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // sseHub manages Server-Sent Events (SSE) connections for the live dashboard.
@@ -157,6 +159,7 @@ func (b *sseBroadcaster) tick() {
 	updLatest := globalUpdateInfo.latestVersion
 	globalUpdateInfo.mu.RUnlock()
 
+	scanCounters := secscan.Counters()
 	payload := DashboardPayload{
 		ActiveConns:       getActiveConns(),
 		TotalRequests:     atomic.LoadInt64(&statTotal),
@@ -165,10 +168,10 @@ func (b *sseBroadcaster) tick() {
 		RPS:               rps,
 		TopCountries:      countryTraffic.Top(15),
 		UptimeSec:         int64(time.Since(startTime).Seconds()),
-		ClamBlocked:       atomic.LoadInt64(&statClamBlocked),
-		YARABlocked:       atomic.LoadInt64(&statYARABlocked),
+		ClamBlocked:       scanCounters.ClamBlocked,
+		YARABlocked:       scanCounters.YARABlocked,
 		DPIBlocked:        atomic.LoadInt64(&statDPIBlocked),
-		ThreatFeedBlocked: atomic.LoadInt64(&statThreatFeedBlocked),
+		ThreatFeedBlocked: scanCounters.ThreatFeedBlocked,
 		UpdateAvailable:   updAvail,
 		LatestVersion:     updLatest,
 	}

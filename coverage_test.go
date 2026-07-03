@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // ─── SSE hub (events.go) ─────────────────────────────────────────────────────
@@ -65,32 +67,32 @@ func TestSSEHub_Broadcast_SlowClient(_ *testing.T) {
 // ─── SecurityScanner (security_scan.go) ──────────────────────────────────────
 
 func TestSecurityScanner_Enabled(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0)}
+	ss := secscan.New(secscan.Deps{Cache: newHashCache(100, 0)})
 	if ss.Enabled() {
 		t.Error("uninitialized scanner should not be enabled")
 	}
-	ss.enabled = true
+	ss.Init("", 0, nil)
 	if !ss.Enabled() {
 		t.Error("enabled scanner should report enabled")
 	}
 }
 
 func TestSecurityScanner_MaxBytes(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0), maxBytes: 5 << 20}
+	ss := secscan.New(secscan.Deps{Cache: newHashCache(100, 0), MaxBytes: 5 << 20})
 	if got := ss.MaxBytes(); got != 5<<20 {
 		t.Errorf("MaxBytes() = %d, want 5MiB", got)
 	}
 }
 
 func TestSecurityScanner_BodyScanEnabled_Disabled(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0)}
+	ss := secscan.New(secscan.Deps{Cache: newHashCache(100, 0)})
 	if ss.BodyScanEnabled() {
 		t.Error("disabled scanner should report BodyScanEnabled=false")
 	}
 }
 
 func TestSecurityScanner_CheckURL_NoFeed(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0)}
+	ss := secscan.New(secscan.Deps{Cache: newHashCache(100, 0)})
 	// globalThreatFeed not enabled — should return nil
 	result := ss.CheckURL("http://malware.example.com/bad")
 	if result != nil {
@@ -99,7 +101,7 @@ func TestSecurityScanner_CheckURL_NoFeed(t *testing.T) {
 }
 
 func TestSecurityScanner_CheckDomain_NoFeed(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0)}
+	ss := secscan.New(secscan.Deps{Cache: newHashCache(100, 0)})
 	result := ss.CheckDomain("malware.example.com")
 	if result != nil {
 		t.Error("CheckDomain should return nil when threat feed is not enabled")
@@ -107,7 +109,7 @@ func TestSecurityScanner_CheckDomain_NoFeed(t *testing.T) {
 }
 
 func TestSecurityScanner_ScanBody_Empty(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{})
 	// empty data → should return nil
 	if result := ss.ScanBody(nil); result != nil {
 		t.Error("ScanBody with nil data should return nil")
@@ -118,7 +120,7 @@ func TestSecurityScanner_ScanBody_Empty(t *testing.T) {
 }
 
 func TestSecurityScanner_ScanBody_NotEnabled(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0)}
+	ss := secscan.New(secscan.Deps{Cache: newHashCache(100, 0)})
 	result := ss.ScanBody([]byte("some data"))
 	if result != nil {
 		t.Error("ScanBody with disabled scanner should return nil")
@@ -126,7 +128,7 @@ func TestSecurityScanner_ScanBody_NotEnabled(t *testing.T) {
 }
 
 func TestSecurityScanner_ClamAVStatus_Nil(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0)}
+	ss := secscan.New(secscan.Deps{Cache: newHashCache(100, 0)})
 	if got := ss.ClamAVStatus(); got != "disabled" {
 		t.Errorf("ClamAVStatus with nil clam = %q, want disabled", got)
 	}
@@ -363,7 +365,7 @@ func TestHandleMetrics_ScanCacheHitsMisses(t *testing.T) {
 	cache.Get("absent-1") // miss 1
 	cache.Get("absent-2") // miss 2
 	cache.Get("absent-3") // miss 3
-	globalSecScanner = &SecurityScanner{cache: cache}
+	globalSecScanner = secscan.New(secscan.Deps{Cache: cache})
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)

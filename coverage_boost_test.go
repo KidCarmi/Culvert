@@ -149,44 +149,6 @@ func TestCaptureConfigBackup(t *testing.T) {
 
 // ── bandwidth.go coverage ────────────────────────────────────────────────────
 
-func TestSelectorsOverlap_BothEmpty(t *testing.T) {
-	if !selectorsOverlap(nil, nil) {
-		t.Error("empty selectors should overlap")
-	}
-}
-
-func TestSelectorsOverlap_OneEmpty(t *testing.T) {
-	if !selectorsOverlap(map[string]string{"env": "prod"}, nil) {
-		t.Error("empty selector overlaps with everything")
-	}
-}
-
-func TestSelectorsOverlap_Disjoint(t *testing.T) {
-	a := map[string]string{"env": "prod"}
-	b := map[string]string{"env": "staging"}
-	if selectorsOverlap(a, b) {
-		t.Error("disjoint selectors should not overlap")
-	}
-}
-
-func TestSelectorsOverlap_Overlapping(t *testing.T) {
-	a := map[string]string{"env": "prod", "region": "us"}
-	b := map[string]string{"env": "prod", "tier": "web"}
-	if !selectorsOverlap(a, b) {
-		t.Error("selectors with compatible shared keys should overlap")
-	}
-}
-
-func TestSelectorsOverlap_Subset(t *testing.T) {
-	a := map[string]string{"env": "prod"}
-	b := map[string]string{"env": "prod", "region": "eu"}
-	if !selectorsOverlap(a, b) {
-		t.Error("subset selector should overlap with superset")
-	}
-}
-
-// ── nodegroup.go coverage ────────────────────────────────────────────────────
-
 func TestNodeGroupStore_Get(t *testing.T) {
 	dir := t.TempDir()
 	s := NewNodeGroupStore(filepath.Join(dir, "ng.json"))

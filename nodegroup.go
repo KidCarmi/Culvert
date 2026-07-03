@@ -1,26 +1,34 @@
 package main
 
+// nodegroup.go — package-main glue for node groups, moved to
+// internal/nodegroup (ADR-0002). The alias shim keeps ConfigSnapshot, the
+// startup slice, and the test suite using the original unqualified names; the
+// admin API handlers, the EnrolledNode-typed membership filter, and the
+// globalNodeGroups singleton stay here (requireRole/auditEvent/jsonOK and the
+// cluster-store read are main-owned).
+
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"sort"
-	"sync"
-	"time"
+
+	"github.com/KidCarmi/Culvert/internal/nodegroup"
 )
 
-// ─── Node Group Definitions ─────────────────────────────────────────────────
+// NodeGroup / NodeGroupStore re-exposed unqualified (engine types are
+// nodegroup.Group / .Store).
+type (
+	NodeGroup      = nodegroup.Group
+	NodeGroupStore = nodegroup.Store
+)
 
-// NodeGroup defines a named collection of Data Plane nodes matched by label
-// selectors.  Used for geo-aware grouping, tiered routing, and policy scoping.
-type NodeGroup struct {
-	Name          string            `json:"name"`
-	Description   string            `json:"description,omitempty"`
-	LabelSelector map[string]string `json:"label_selector"` // all must match
-	Priority      int               `json:"priority,omitempty"`
-	CreatedAt     string            `json:"created_at"`
-}
+// NewNodeGroupStore / labelsMatch re-exposed for the startup slice, the
+// handlers below, and the test suite.
+var (
+	NewNodeGroupStore = nodegroup.NewStore
+	labelsMatch       = nodegroup.LabelsMatch
+)
 
 // NodeGroupInfo extends NodeGroup with runtime membership info for the API.
 type NodeGroupInfo struct {
@@ -29,184 +37,33 @@ type NodeGroupInfo struct {
 	NodeIDs   []string `json:"node_ids"`
 }
 
-// NodeGroupStore persists node group definitions to a JSON file.
-type NodeGroupStore struct {
-	mu     sync.RWMutex
-	groups []NodeGroup
-	path   string
-}
-
 // globalNodeGroups is the singleton node-group store.
 var globalNodeGroups *NodeGroupStore
 
-// NewNodeGroupStore loads (or creates) a NodeGroupStore backed by path.
-func NewNodeGroupStore(path string) *NodeGroupStore {
-	s := &NodeGroupStore{path: path}
-	data, err := os.ReadFile(path)
-	if err == nil {
-		if err2 := json.Unmarshal(data, &s.groups); err2 != nil {
-			logger.Printf("NodeGroups: failed to parse %q: %v", sanitizeLog(path), err2)
-			s.groups = nil
-		}
-	}
-	if s.groups == nil {
-		s.groups = []NodeGroup{}
-	}
-	// D1.1h: surface groups missing required fields. Loader keeps the
-	// entry; warn so operators can spot match-nothing groups.
-	for i, g := range s.groups {
-		if g.Name == "" || len(g.LabelSelector) == 0 {
-			logger.Printf("Loader: node_groups.json: group[%d] missing required field(s) at %q — keeping (D1.2-flag-F6)", i, sanitizeLog(path))
-		}
-	}
-	return s
-}
-
-// Get returns a copy of a named group and true if found.
-func (s *NodeGroupStore) Get(name string) (NodeGroup, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, g := range s.groups {
-		if g.Name == name {
-			return g, true
-		}
-	}
-	return NodeGroup{}, false
-}
-
-// List returns a copy of all node groups.
-func (s *NodeGroupStore) List() []NodeGroup {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]NodeGroup, len(s.groups))
-	copy(out, s.groups)
-	return out
-}
-
-// Add validates and appends a new node group.
-func (s *NodeGroupStore) Add(g NodeGroup) (NodeGroup, error) {
-	if g.Name == "" {
-		return NodeGroup{}, fmt.Errorf("name is required")
-	}
-	if len(g.LabelSelector) == 0 {
-		return NodeGroup{}, fmt.Errorf("label_selector must not be empty")
-	}
-	// Validate label keys/values: DNS-like alphanumeric + dots/dashes/colons/underscores.
-	for k, v := range g.LabelSelector {
-		if k == "" {
-			return NodeGroup{}, fmt.Errorf("label key must not be empty")
-		}
-		if len(k) > 253 || len(v) > 253 {
-			return NodeGroup{}, fmt.Errorf("label key/value must be <= 253 characters")
-		}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, existing := range s.groups {
-		if existing.Name == g.Name {
-			return NodeGroup{}, fmt.Errorf("group %q already exists", g.Name)
-		}
-	}
-	g.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.groups = append(s.groups, g)
-	s.saveLocked()
-	return g, nil
-}
-
-// Delete removes a node group by name.  Returns true if found and removed.
-func (s *NodeGroupStore) Delete(name string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, g := range s.groups {
-		if g.Name == name {
-			s.groups = append(s.groups[:i], s.groups[i+1:]...)
-			s.saveLocked()
-			return true
-		}
-	}
-	return false
-}
-
-// Save persists the current groups to disk.
-func (s *NodeGroupStore) Save() {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	s.saveLocked()
-}
-
-// saveLocked writes groups to disk.  Caller must hold at least a read lock.
-func (s *NodeGroupStore) saveLocked() {
-	data, err := json.MarshalIndent(s.groups, "", "  ")
-	if err != nil {
-		logger.Printf("NodeGroups: marshal error: %v", err)
-		return
-	}
-	if err := atomicWriteFile(s.path, data, 0o600); err != nil {
-		logger.Printf("NodeGroups: write error: %v", err)
-	}
-}
-
-// ReplaceAll atomically replaces all groups (used by config snapshot sync).
-func (s *NodeGroupStore) ReplaceAll(groups []NodeGroup) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.groups = make([]NodeGroup, len(groups))
-	copy(s.groups, groups)
-	s.saveLocked()
-}
-
-// MatchingGroups returns the names of groups whose label selectors are
-// satisfied by the given labels map.  A group matches when every key-value
-// pair in its LabelSelector exists in labels.
-func (s *NodeGroupStore) MatchingGroups(labels map[string]string) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var names []string
-	for _, g := range s.groups {
-		if labelsMatch(g.LabelSelector, labels) {
-			names = append(names, g.Name)
-		}
-	}
-	return names
-}
-
-// NodesInGroup filters the provided nodes, returning only those whose labels
-// satisfy the named group's selector.
-func (s *NodeGroupStore) NodesInGroup(name string, nodes []EnrolledNode) []EnrolledNode {
-	s.mu.RLock()
-	var sel map[string]string
-	for _, g := range s.groups {
-		if g.Name == name {
-			sel = g.LabelSelector
-			break
-		}
-	}
-	s.mu.RUnlock()
-	if sel == nil {
+// nodesInGroup filters the provided nodes, returning only those whose labels
+// satisfy the named group's selector. Stays in main because EnrolledNode is
+// the enrollment hub's type (the engine is EnrolledNode-free by design).
+func nodesInGroup(s *NodeGroupStore, name string, nodes []EnrolledNode) []EnrolledNode {
+	g, ok := s.Get(name)
+	if !ok {
 		return nil
 	}
 	var out []EnrolledNode
 	for i := range nodes {
-		if labelsMatch(sel, nodes[i].Labels) {
+		if labelsMatch(g.LabelSelector, nodes[i].Labels) {
 			out = append(out, nodes[i])
 		}
 	}
 	return out
 }
 
-// labelsMatch returns true when every k/v in selector exists in labels.
-func labelsMatch(selector, labels map[string]string) bool {
-	for k, v := range selector {
-		if labels[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
 // ─── Admin API ──────────────────────────────────────────────────────────────
 
-// apiNodeGroups handles GET / POST / DELETE on /api/cluster/node-groups.
+// apiNodeGroups handles CRUD for node groups.
+//
+//	GET    /api/node-groups          — list all groups with membership (viewer)
+//	POST   /api/node-groups          — create a group (admin)
+//	DELETE /api/node-groups?name=X   — delete a group (admin)
 func apiNodeGroups(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:

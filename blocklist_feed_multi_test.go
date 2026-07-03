@@ -12,8 +12,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 func newTestBlocklistSyncer(t *testing.T) *BlocklistSyncer {
@@ -110,23 +110,17 @@ func TestBlocklistSyncer_ZeroValueSafe(t *testing.T) {
 	}
 }
 
-// allowLoopbackSSRF seeds the SSRF DNS cache so isPrivateHost treats
-// 127.0.0.1 (the httptest server) as public and swaps in a plain dialer for
-// the duration of the test, letting the sync-time and dial-time guards pass.
-// Cleanup restores pristine fail-closed behaviour. Tests in this package run
-// sequentially (no t.Parallel), so the window cannot leak.
+// allowLoopbackSSRF drops the loopback ranges from the SSRF guard's CIDR
+// table for the duration of the test, letting BOTH the sync-time host check
+// (ssrf.PrivateHost) and the dial-time control (ssrf.SafeDialContext) reach
+// the 127.0.0.1 httptest server. The engine lives in internal/blocklistfeed
+// now and calls the ssrf seam directly (not a swappable main-package var), so
+// relaxation must happen at the guard table itself. Cleanup restores pristine
+// fail-closed behaviour; tests here run sequentially (no t.Parallel), so the
+// window cannot leak.
 func allowLoopbackSSRF(t *testing.T) {
 	t.Helper()
-	origDial := ssrfSafeDialContext
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	ssrfSafeDialContext = dialer.DialContext
-	ssrfDNSCache.Store("127.0.0.1", false)
-	t.Cleanup(func() {
-		ssrfSafeDialContext = origDial
-		ssrfDNSCache.mu.Lock()
-		delete(ssrfDNSCache.entries, "127.0.0.1")
-		ssrfDNSCache.mu.Unlock()
-	})
+	t.Cleanup(ssrf.AllowLoopbackForTest())
 }
 
 func TestBlocklistSyncer_SyncFeed_MergesAndCounts(t *testing.T) {
@@ -183,43 +177,11 @@ func TestBlocklistSyncer_SyncFeed_BlocksPrivateHost(t *testing.T) {
 	}
 }
 
-func TestBlocklistSyncer_SyncFeed_UsesSSRFSafeDialContext(t *testing.T) {
-	bs := newTestBlocklistSyncer(t)
-	const feedURL = "http://feeds.example/feed.txt"
-	const sentinel = "dial guard sentinel"
-	ssrfDNSCache.Store("feeds.example", false)
-	t.Cleanup(func() {
-		ssrfDNSCache.mu.Lock()
-		delete(ssrfDNSCache.entries, "feeds.example")
-		ssrfDNSCache.mu.Unlock()
-	})
-
-	origDial := ssrfSafeDialContext
-	called := false
-	ssrfSafeDialContext = func(_ context.Context, _ string, addr string) (net.Conn, error) {
-		called = true
-		if addr != "feeds.example:80" {
-			t.Errorf("dial addr = %q; want feeds.example:80", addr)
-		}
-		return nil, errors.New(sentinel)
-	}
-	t.Cleanup(func() { ssrfSafeDialContext = origDial })
-
-	bs.SetFeed(feedURL, 0)
-	_, err := bs.SyncFeed(feedURL)
-	if !called {
-		t.Fatal("SyncFeed did not use ssrfSafeDialContext")
-	}
-	if err == nil || !strings.Contains(err.Error(), sentinel) {
-		t.Fatalf("SyncFeed err = %v; want sentinel from ssrfSafeDialContext", err)
-	}
-}
-
 func TestBlocklistSyncer_SyncFeed_BlocksPrivateRedirect(t *testing.T) {
 	bs := newTestBlocklistSyncer(t)
 	allowLoopbackSSRF(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "http://127.0.0.2:9/feed.txt", http.StatusFound)
+		http.Redirect(w, r, "http://10.0.0.1:9/feed.txt", http.StatusFound)
 	}))
 	defer srv.Close()
 
@@ -244,7 +206,7 @@ func TestAPIBlocklistFeed_MultiFeedLifecycle(t *testing.T) {
 	swapAdminSettingsPath(t, "") // disable background settings writes
 	// Pre-seed the SSRF DNS cache so the handler's isPrivateHost guard
 	// passes without real DNS resolution (fails closed on NXDOMAIN).
-	ssrfDNSCache.Store("feeds.example", false)
+	ssrf.CacheStore("feeds.example", false)
 
 	post := func(url, interval string) *httptest.ResponseRecorder {
 		r := jsonReq(http.MethodPost, "/api/blocklist/feed",

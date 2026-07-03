@@ -1,8 +1,8 @@
-package main
+package bandwidth
 
 // D1.2b cold-start tests for /data/bandwidth.json.
 //
-// NewBandwidthManager always returns a non-nil *BandwidthManager —
+// NewManager always returns a non-nil *Manager —
 // load errors are logged and reset m.policies to nil. These tests pin
 // that contract across missing / empty / garbage / valid / unknown-
 // field / missing-required-field inputs.
@@ -20,7 +20,7 @@ import (
 	"testing"
 )
 
-// duplication with coldstart_nodegroups_test.go is by design — the two artifacts
+// duplication with package main coldstart_nodegroups_test.go is by design — the two artifacts
 // have structurally identical loaders and the symmetry is part of the regression
 // guard. Refactoring to a shared helper would obscure per-artifact assertions.
 //
@@ -30,7 +30,7 @@ func TestColdStart_Bandwidth_Cases(t *testing.T) {
 		name         string
 		body         []byte // nil = do not write the file
 		wantPolicies int
-		verify       func(t *testing.T, m *BandwidthManager)
+		verify       func(t *testing.T, m *Manager)
 	}{
 		{
 			name:         "missing_file",
@@ -49,7 +49,7 @@ func TestColdStart_Bandwidth_Cases(t *testing.T) {
 		},
 		{
 			name: "empty_object",
-			// `{}` cannot unmarshal into []BandwidthPolicy → log + nil.
+			// `{}` cannot unmarshal into []Policy → log + nil.
 			body:         []byte("{}"),
 			wantPolicies: 0,
 		},
@@ -62,7 +62,7 @@ func TestColdStart_Bandwidth_Cases(t *testing.T) {
 			name:         "valid_one_policy",
 			body:         []byte(`[{"name":"p1","label_selector":{"role":"edge"},"max_bytes_per_sec":1024,"priority":1}]`),
 			wantPolicies: 1,
-			verify: func(t *testing.T, m *BandwidthManager) {
+			verify: func(t *testing.T, m *Manager) {
 				p := m.policies[0]
 				if p.Name != "p1" {
 					t.Errorf("Name = %q, want p1", p.Name)
@@ -76,7 +76,7 @@ func TestColdStart_Bandwidth_Cases(t *testing.T) {
 			name:         "valid_with_unknown_field",
 			body:         []byte(`[{"name":"p2","label_selector":{},"max_bytes_per_sec":2048,"future_field":"ignored"}]`),
 			wantPolicies: 1,
-			verify: func(t *testing.T, m *BandwidthManager) {
+			verify: func(t *testing.T, m *Manager) {
 				if m.policies[0].MaxBytesPerSec != 2048 {
 					t.Errorf("MaxBytesPerSec = %d, want 2048", m.policies[0].MaxBytesPerSec)
 				}
@@ -89,7 +89,7 @@ func TestColdStart_Bandwidth_Cases(t *testing.T) {
 			name:         "missing_required_fields",
 			body:         []byte(`[{"max_bytes_per_sec":4096}]`),
 			wantPolicies: 1,
-			verify: func(t *testing.T, m *BandwidthManager) {
+			verify: func(t *testing.T, m *Manager) {
 				p := m.policies[0]
 				if p.Name != "" {
 					t.Errorf("Name should be zero value, got %q", p.Name)
@@ -115,9 +115,9 @@ func TestColdStart_Bandwidth_Cases(t *testing.T) {
 				}
 			}
 
-			m := NewBandwidthManager(path)
+			m := NewManager(path)
 			if m == nil {
-				t.Fatal("NewBandwidthManager returned nil — contract is always non-nil")
+				t.Fatal("NewManager returned nil — contract is always non-nil")
 			}
 			if got := len(m.policies); got != tc.wantPolicies {
 				t.Errorf("policies len = %d, want %d", got, tc.wantPolicies)

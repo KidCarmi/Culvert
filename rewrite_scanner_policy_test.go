@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // Rewriter matchesHost tests moved to internal/rewrite (ADR-0002) — matchesHost
@@ -115,7 +117,7 @@ func TestSecurityScanner_ScanBody_WithYARA(t *testing.T) {
 	globalYARA = y
 	defer func() { globalYARA = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Yara: yaraRuleSetMatcher{y}})
 	result := ss.ScanBody([]byte("contains EICAR pattern"))
 	if result == nil {
 		t.Error("ScanBody should detect YARA match")
@@ -126,7 +128,7 @@ func TestSecurityScanner_ScanBody_WithYARA(t *testing.T) {
 }
 
 func TestSecurityScanner_ScanBody_CachesClean(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{})
 	// No ClamAV, no YARA — body scan enabled = false
 	// (BodyScanEnabled needs enabled=true AND (clam!=nil OR yara enabled))
 	// So for this test, just confirm clean data returns nil

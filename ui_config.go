@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // GET /api/audit — return configuration-change audit entries (newest first).
@@ -102,11 +104,12 @@ func apiDashboardThreats(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
+	scanCounters := secscan.Counters()
 	jsonOK(w, map[string]any{
-		"clamav":     atomic.LoadInt64(&statClamBlocked),
-		"yara":       atomic.LoadInt64(&statYARABlocked),
+		"clamav":     scanCounters.ClamBlocked,
+		"yara":       scanCounters.YARABlocked,
 		"dpi":        atomic.LoadInt64(&statDPIBlocked),
-		"threatFeed": atomic.LoadInt64(&statThreatFeedBlocked),
+		"threatFeed": scanCounters.ThreatFeedBlocked,
 	})
 }
 

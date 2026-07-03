@@ -1,15 +1,13 @@
 package main
 
 import (
-	"context"
-	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/hostutil"
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 // normalizeHost and stripHostPort moved to internal/hostutil (ADR-0002/0003).
@@ -18,103 +16,30 @@ import (
 func normalizeHost(host string) string { return hostutil.NormalizeHost(host) }
 func stripHostPort(host string) string { return hostutil.StripHostPort(host) }
 
-// ─── SSRF-safe dialer ────────────────────────────────────────────────────────
+// ─── SSRF guard (moved to internal/ssrf, ADR-0002) ──────────────────────────
+// The CIDR table, DNS-cached host check, and connect-time dialer control live
+// in internal/ssrf. These thin wrappers keep every unqualified call site (and
+// the CodeQL inline-guard convention at those sites) unchanged.
 
-// ssrfControl rejects a connection when the resolved peer address falls into
-// any private/internal range. Installed as net.Dialer.Control, it runs AFTER
-// DNS resolution and IMMEDIATELY BEFORE connect(2), closing the TOCTOU window
-// that a pre-flight LookupHost leaves open (DNS-rebinding: public IP on the
-// pre-check, private IP on the real dial).
-//
-// address is the resolved IP:port that the kernel is about to connect to
-// (never a hostname at this layer), so net.ParseIP always succeeds for a
-// well-formed stack. We still fail-closed on any parse anomaly.
-func ssrfControl(network, address string, _ syscall.RawConn) error {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("ssrf control: invalid address %q: %w", address, err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return fmt.Errorf("ssrf control: unexpected non-IP %q in dial", host)
-	}
-	if isPrivateIP(ip) {
-		return fmt.Errorf("ssrf control: refusing %s dial to private address %s", network, ip)
-	}
-	return nil
-}
+// isPrivateIP reports whether ip falls within any private/internal range.
+func isPrivateIP(ip net.IP) bool { return ssrf.PrivateIP(ip) }
 
-// ssrfSafeDialer is the canonical SSRF-safe dialer. It resolves DNS once, then
-// Go applies ssrfControl to every resolved address the dialer attempts.
-var ssrfSafeDialer = &net.Dialer{
-	Timeout: 15 * time.Second,
-	Control: ssrfControl,
-}
+// isPrivateHost resolves host (host or host:port) and returns an error if any
+// resolved IP falls within a private/internal range (30s-TTL DNS cache;
+// fail-closed on resolution errors).
+func isPrivateHost(hostport string) error { return ssrf.PrivateHost(hostport) }
+
+// ssrfControl is the connect-time guard (net.Dialer.Control) — rejects dials
+// whose resolved address is private/internal. Re-exposed for the CONNECT and
+// SOCKS5 paths, which build their own dialers.
+var ssrfControl = ssrf.Control
 
 // ssrfSafeDialContext is a net.Dialer.DialContext replacement that rejects
-// connections to private/internal IPs. Use as the DialContext in an
-// http.Transport to prevent SSRF at the network level, independent of URL
-// validation. Safe against DNS rebinding because the check runs on the
-// post-resolution address that will actually be connected.
+// connections to private/internal IPs at connect time (DNS-rebinding safe).
 //
 // Declared as a variable so that tests can temporarily replace it with a
 // plain dialer that permits localhost webhook targets.
-var ssrfSafeDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-	return ssrfSafeDialer.DialContext(ctx, network, addr)
-}
-
-// ─── DNS result cache for SSRF checks ────────────────────────────────────────
-// Avoids repeated DNS lookups in isPrivateHost() for the same host within a
-// short window. Entries expire after dnsSSRFCacheTTL. Negative results (DNS
-// errors) are NOT cached so that transient failures remain fail-closed.
-
-const dnsSSRFCacheTTL = 30 * time.Second
-
-type dnsSSRFEntry struct {
-	private bool // true if any resolved IP was private
-	expires time.Time
-}
-
-type dnsSSRFCache struct {
-	mu      sync.RWMutex
-	entries map[string]dnsSSRFEntry
-}
-
-var ssrfDNSCache = &dnsSSRFCache{entries: make(map[string]dnsSSRFEntry)}
-
-// Lookup returns (isPrivate, found). If found is false the caller must do a
-// live DNS lookup and call Store.
-func (c *dnsSSRFCache) Lookup(host string) (bool, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[host]
-	c.mu.RUnlock()
-	if !ok || time.Now().After(e.expires) {
-		return false, false
-	}
-	return e.private, true
-}
-
-// Store records a positive (resolved) result. DNS errors are not stored.
-func (c *dnsSSRFCache) Store(host string, private bool) {
-	c.mu.Lock()
-	c.entries[host] = dnsSSRFEntry{
-		private: private,
-		expires: time.Now().Add(dnsSSRFCacheTTL),
-	}
-	c.mu.Unlock()
-}
-
-// Cleanup evicts expired entries (called periodically from main tick loop).
-func (c *dnsSSRFCache) Cleanup() {
-	c.mu.Lock()
-	now := time.Now()
-	for k, e := range c.entries {
-		if now.After(e.expires) {
-			delete(c.entries, k)
-		}
-	}
-	c.mu.Unlock()
-}
+var ssrfSafeDialContext = ssrf.SafeDialContext
 
 // ─── IP Filter ────────────────────────────────────────────────────────────────
 

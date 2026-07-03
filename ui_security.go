@@ -613,7 +613,7 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	// Tier 1.1: Clear hash cache so content scanned as clean under old rules
 	// is re-scanned under the new rule set. Without this, new rules don't
 	// apply to previously-cached content until the 1-hour TTL expires.
-	globalSecScanner.cache.Clear()
+	globalSecScanner.CacheClear()
 	auditEvent(r, "security.yara-reload", dir, "YARA rules reloaded and hash cache cleared")
 	jsonOK(w, map[string]any{
 		"yara_rules":    globalYARA.Count(),
@@ -782,7 +782,7 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Hash cache must be cleared on any rule change (Tier 1.1 applies to CRUD).
-		globalSecScanner.cache.Clear()
+		globalSecScanner.CacheClear()
 		auditEvent(r, "security.yara-write", req.Name, fmt.Sprintf("%d warning(s)", len(warnings)))
 		// Intentionally NOT calling saveConfigVersion: YARA rule files
 		// are out of the rollback surface by design (D-ops,
@@ -812,7 +812,7 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "delete rule: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		globalSecScanner.cache.Clear()
+		globalSecScanner.CacheClear()
 		auditEvent(r, "security.yara-delete", name, "rule removed and cache cleared")
 		// Intentionally NOT calling saveConfigVersion: YARA rule files
 		// are out of the rollback surface by design (D-ops,
@@ -990,11 +990,11 @@ func apiScanCache(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		if globalSecScanner == nil || globalSecScanner.cache == nil {
+		if !globalSecScanner.CacheReady() {
 			jsonOK(w, map[string]any{"enabled": false})
 			return
 		}
-		hits, misses, size := globalSecScanner.cache.Stats()
+		hits, misses, size := globalSecScanner.CacheStats()
 		jsonOK(w, map[string]any{
 			"enabled":      true,
 			"cache_hits":   hits,
@@ -1006,17 +1006,17 @@ func apiScanCache(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		if globalSecScanner == nil || globalSecScanner.cache == nil {
+		if !globalSecScanner.CacheReady() {
 			http.Error(w, "scan cache not enabled", http.StatusServiceUnavailable)
 			return
 		}
 		hash := r.URL.Query().Get("hash")
 		if hash != "" {
-			found := globalSecScanner.cache.Evict(hash)
+			found := globalSecScanner.CacheEvict(hash)
 			auditEvent(r, "scan_cache.evict", sanitizeLog(hash), "")
 			jsonOK(w, map[string]any{"evicted": found, "hash": hash})
 		} else {
-			globalSecScanner.cache.Clear()
+			globalSecScanner.CacheClear()
 			auditEvent(r, "scan_cache.clear", "all", "")
 			jsonOK(w, map[string]any{"cleared": true})
 		}
