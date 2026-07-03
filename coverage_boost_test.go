@@ -168,80 +168,9 @@ func TestNodeGroupStore_Get(t *testing.T) {
 	}
 }
 
-// ── alerts.go coverage ──────────────────────────────────────────────────────
-
-func TestEnqueueRetry_MaxAttempts(t *testing.T) {
-	alertRetryMu.Lock()
-	orig := alertRetryQueue
-	alertRetryQueue = nil
-	alertRetryMu.Unlock()
-	defer func() {
-		alertRetryMu.Lock()
-		alertRetryQueue = orig
-		alertRetryMu.Unlock()
-	}()
-
-	// Should not enqueue when attempt >= max.
-	enqueueRetry("hook-1", AlertPayload{Event: "test"}, alertRetryMax)
-	alertRetryMu.Lock()
-	count := len(alertRetryQueue)
-	alertRetryMu.Unlock()
-	if count != 0 {
-		t.Errorf("expected 0 entries after max attempts, got %d", count)
-	}
-}
-
-func TestEnqueueRetry_Success(t *testing.T) {
-	alertRetryMu.Lock()
-	orig := alertRetryQueue
-	alertRetryQueue = nil
-	alertRetryMu.Unlock()
-	defer func() {
-		alertRetryMu.Lock()
-		alertRetryQueue = orig
-		alertRetryMu.Unlock()
-	}()
-
-	enqueueRetry("hook-1", AlertPayload{Event: "test"}, 0)
-	alertRetryMu.Lock()
-	count := len(alertRetryQueue)
-	alertRetryMu.Unlock()
-	if count != 1 {
-		t.Errorf("expected 1 entry, got %d", count)
-	}
-}
-
-func TestProcessRetryQueue_Empty(t *testing.T) {
-	alertRetryMu.Lock()
-	orig := alertRetryQueue
-	alertRetryQueue = nil
-	alertRetryMu.Unlock()
-	defer func() {
-		alertRetryMu.Lock()
-		alertRetryQueue = orig
-		alertRetryMu.Unlock()
-	}()
-
-	// Should not panic on empty queue.
-	processRetryQueue()
-}
-
-func TestSaveAlertRetryQueueLocked(t *testing.T) {
-	alertRetryMu.Lock()
-	orig := alertRetryQueue
-	alertRetryQueue = []retryEntry{{WebhookID: "test", Attempt: 0}}
-	alertRetryMu.Unlock()
-	defer func() {
-		alertRetryMu.Lock()
-		alertRetryQueue = orig
-		alertRetryMu.Unlock()
-	}()
-
-	// Should not panic.
-	alertRetryMu.Lock()
-	saveAlertRetryQueueLocked()
-	alertRetryMu.Unlock()
-}
+// ── alerts.go coverage — the F16 retry-queue tests moved in-package to
+// internal/alerts/retry_test.go with the delivery-engine extraction
+// (ADR-0002).
 
 // ── update.go coverage ──────────────────────────────────────────────────────
 

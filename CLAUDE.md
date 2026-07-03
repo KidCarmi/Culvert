@@ -41,7 +41,7 @@ upstream.go   — Upstream proxy chaining with failover, circuit breaker, round-
 ocsp.go       — OCSP shim: transport wiring over internal/ocsp (ADR-0002)
 metrics.go    — Prometheus metrics (culvert_* namespace, per-rule hit counters, latency histogram)
 connlimit.go  — Per-IP connection limiting and X-Request-ID generation
-alerts.go     — Webhook alerting for security events (HMAC-SHA256 signed)
+alerts.go     — Alerts shim: aliases + singleton + fireAlert/retry-loop wrappers over internal/alerts (ADR-0002; delivery engine + RISK-003 secret encryption live in the package)
 threatfeed.go — Threat-feed shim: alias + singleton over internal/threatfeed (ADR-0002; URLhaus/OpenPhish, domain allowlist)
 feedsync.go   — Feedsync shim: aliases over internal/feedsync (ADR-0002)
 blocklist_feed.go — Blocklist-feed shim: aliases over internal/blocklistfeed (ADR-0002; Merger iface + ssrf seam)

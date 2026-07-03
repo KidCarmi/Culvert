@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,27 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/alerts` grows into the full delivery engine (29th) + RISK-017 found
+The webhook delivery implementation (alerts.go + alerts_secret.go, 670 lines) moved INTO the
+existing `internal/alerts` producer seam — the seam's contract (`Payload`/`Sink`/`SetSink`/`Fire`)
+is unchanged; what moved is what the installed sink delegates to: `Store` (webhook CRUD + delivery
+history + RISK-003 AES-GCM secret encryption-at-rest), `(*Store).Dispatch` (Q17 dedup + bounded
+fan-out + F16 retry enqueue), `(*Store).Deliver` (SSRF-guarded, HMAC-signed HTTP POST), the
+persistent retry queue (`StartRetryLoop(ctx, current func() *Store)` — the store provider closure
+preserves the read-global-each-tick test-reassignment tolerance), and `ValidateURL`. main keeps the
+singleton + `fireAlert` wrapper (still installed as the sink at init). Deltas: the Q17 dedup map
+became **per-Store** state (production has one store — behavior identical; tests that swap in a
+fresh store get a fresh dedup window; `ResetDedupForTest` replaces the whitebox map wipe);
+`processRetryQueue`'s inline hook scan became `GetByID` (same lock, copy semantics); the retry-queue
+tests (coverage_boost + the tmp-leak guard) consolidated in-package; `Store.save()` keeps its
+non-fsynced WriteFile+Rename verbatim (pre-Bucket-4 style — noted in RISK-017, not silently fixed).
+**Dialer-swap retarget (same as blocklistfeed):** `Deliver` dials `ssrf.SafeDialContext` directly,
+so the two webhook tests that swapped main's `ssrfSafeDialContext` var were retargeted onto
+`ssrf.AllowLoopbackForTest()`. **Finding recorded as RISK-017:** `AlertStore.Init(path)` has NEVER
+been wired in production (git-history verified) — webhooks don't survive restart and the RISK-003
+machinery protects a file production never writes; the extraction stayed behavior-preserving and
+the fix is a separate unit. Leaf proof: `fileutil`+`obs`+`ssrf` only.
 
 ### 2026-07-03 — `internal/threatfeed` extracted (28th) + obs facade gains `Debugf`
 The local threat-feed manager (URLhaus/OpenPhish download, offline URL/domain lookups, the

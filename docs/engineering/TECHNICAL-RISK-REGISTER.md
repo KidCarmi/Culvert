@@ -155,6 +155,23 @@
 - **Recommendation:** Pin scanner versions (or vendor), SHA-pin the `@main` action, add CodeQL to
   the blocking set. **Complexity S.** *(This was the original RISK-006 before the 2026-06-28 split.)*
 
+## RISK-017 — Alert webhooks never persisted (Init unwired) · MEDIUM · OPEN
+- **Found (2026-07-03, while mapping the `internal/alerts` extraction):** `AlertStore.Init(path)` is
+  **never called from production code** — only tests call it. `git log -S` confirms no production
+  call has ever existed. The process-wide store is constructed with an empty `filePath`, so `save()`
+  is a silent no-op for every admin webhook create/update/delete.
+- **Impact:** Admin-configured alert webhooks (and their HMAC secrets) **do not survive a restart** —
+  security alerting silently stops after any upgrade/restart until the admin reconfigures. The
+  RISK-003 encryption-at-rest machinery protects `alert_webhooks.json`, a file production never
+  writes; the F16 retry queue DOES persist (`/data/alert_retry_queue.json`), an inconsistency that
+  hides the gap. The only durability today is a manually downloaded config export.
+- **Recommendation:** wire `globalAlertStore.Init(filepath.Join(dataDir, "alert_webhooks.json"))`
+  into the persistent-admin-state startup slice (a deliberate behavior change: webhooks configured
+  after the fix will load on boot and RISK-003 encryption becomes live in production for the first
+  time). Also consider migrating `Store.save()` to `fileutil.AtomicWrite` (it still uses
+  non-fsynced WriteFile+Rename, pre-Bucket-4 style). **Complexity S.** The extraction itself was
+  kept behavior-preserving; this is a separate follow-up unit.
+
 ## RISK-ACC-1 — `docker/docker` CVEs in the updater · HIGH · ACCEPTED
 - **Current state (trivy-verified 2026-06-28):** 5 CVEs in `github.com/docker/docker v28.5.2`,
   all in `updater/go.mod` only: `CVE-2026-41567` (HIGH), `CVE-2026-42306` (HIGH),

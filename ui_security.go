@@ -135,7 +135,7 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 		Detail:    "This is a test alert from Culvert",
 		Source:    "test",
 	}
-	ok2 := deliverWebhook(globalAlertStore, h, payload)
+	ok2 := globalAlertStore.Deliver(h, payload)
 	jsonOK(w, map[string]any{"ok": ok2, "delivered": ok2})
 }
 
