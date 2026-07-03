@@ -731,6 +731,57 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
 
+### 2026-07-03 — Core-hub survey (proxy / controlplane / policy) + the policy.go decomposition program (Phases A–C)
+With store.go closed, the three remaining hubs were mapped BEFORE any move (sizes as of today):
+
+- **proxy.go (1847 lines, 38 funcs) — request-path composition root. Extraction REJECTED.**
+  Every handler (`handleRequest`/`handleHTTP`/`handleTunnel*`/`handleWebSocket`) orchestrates the
+  auth resolver, policy evaluation, scanning, cert manager, relays, and telemetry singletons —
+  that IS the composition. DEBT-002 already decomposed the mega-handlers into in-file stage
+  functions (resolveRequestAuth, preDispatchBlocked, applyPolicyDecision, recordRequestTelemetry),
+  which is the right structure for this file. The movable crumbs are pinned or worthless:
+  `sanitizeLog` must stay call-site-recognisable for CodeQL (CLAUDE.md convention), the relay-buf
+  pool and hop-header helpers are ~30 lines of stdlib. No slice meets the value bar.
+- **controlplane.go (2102 lines, 65 funcs) — cluster-sync hub. Core extraction REJECTED.**
+  `ConfigSnapshot` is the cluster sync CONTRACT: it references the DTOs of nearly every subsystem
+  by design, so moving it just relocates the hub. The gRPC service methods and the DP client
+  orchestrate main singletons (stores, HA state, cert manager) — composition, not engine. The
+  three in-file aggregators (`rateLimitAggregator`, `revocationAggregator`, `clusterAuditLog`)
+  are self-contained engines but small (~150 lines total) and bound to shared DTOs — **DEFERRED**
+  (not worth a package today; revisit only if cluster work grows them).
+- **policy.go (1374 lines, 57 funcs) — THREE engines in one file → phased program (mirrors
+  store.go).** Order A → B → C, one slice per commit, full gates each:
+  - **Phase A — `internal/urlcat` (CategoryStore, ~250 lines).** Package owns: `Entry`
+    (CategoryEntry), the `Store` with its lowercase host index, `DefaultEntries()` + the
+    `default_categories.json` embed (moves into the package), `GetByName` (currently defined in
+    saas_feed.go — moves home), and two free functions that today reach into store internals
+    become methods: `matchCategoryInStore` → `Store.MatchesHost`, the admin tier of
+    `lookupHostCategory` → `Store.LookupHost` (returns the original-case name + matched pattern —
+    move verbatim, it deliberately scans entries not the index). `URLCategory` + the `Category*`
+    constants move with aliases. The TWO-TIER fusion (`matchCategory`, `lookupHostCategory` over
+    catStore + communityDB) STAYS in main — it composes two singletons. Deps/leaf target:
+    `hostutil` + `fileutil`. Test seam: `SetPathForTest` (snapshotCatStore needs an empty store
+    with a tmp save path; `Load` would seed defaults). ~9 production files keep compiling via the
+    `catStore` singleton alias.
+  - **Phase B — `internal/sslbypass` (SSLBypassMatcher, ~150 lines).** compile/Set/Load/Save/
+    Add/Remove/List/Matches. `Matches` sits on the per-CONNECT hot path (resolveSSLAction) →
+    -race over proxy scope + traffic smoke, per the Phase A/C precedents. Open design point to
+    settle at execution: glob patterns delegate to the policy engine's `matchFQDN` — either the
+    FQDN glob matcher moves to `hostutil` as a shared primitive or the package keeps a local
+    copy; decide by mapping matchFQDN's other callers.
+  - **Phase C — `internal/policy` (PolicyStore + PolicyRule + Evaluate + matchers, ~900
+    lines).** The real engine and the widest DTO in the repo (`PolicyRule` reaches 73 files —
+    alias keeps source compat; 240-byte struct, index-based range convention preserved). FOUR
+    runtime lookups need inversion seams: `geo.LookupCached` (fail-closed contract must move
+    verbatim), `globalCategoryGroups.MatchesHost`, `globalProfileStore.GetByName` (dynamic
+    profiles beat the legacy map), and the two-tier category match (one `SetCategoryMatcher`
+    seam over the main-side fusion). Stage-1 coupling: `Evaluate` filters on `ruleTypeOf`
+    (authpolicy.go — the frozen `defaultAuthOutcome` contract owns that vocabulary), so either
+    the RuleType vocabulary moves with the rule or the filter becomes an injected predicate —
+    **Phase C requires its own recorded design + adversarial review before execution** (store.go
+    Phase C precedent). Per-rule `HitCount` is an atomic on the rule pointer and moves fine.
+    Hot path per request → full hot-path gate.
+
 ### 2026-07-03 — `internal/reqlog` extracted (35th; store.go Phase C, executed from the design) — store.go program CLOSED
 Executed exactly per the recorded design below, after PR #533 merged (sequencing verdict honoured).
 The engine moved verbatim: ring (`MaxRing` 5000), persistent JSONL layer (`Init`/`Close`/the write
