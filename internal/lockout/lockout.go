@@ -99,6 +99,32 @@ func (l *LoginLimiter) RecordSuccess(username string) {
 	l.mu.Unlock()
 }
 
+// Cleanup removes entries that can no longer affect a decision, bounding the
+// map against an unbounded-memory DoS: the key is the attacker-controlled
+// username from the unauthenticated login POST, so without a sweep one failed
+// attempt per distinct random username leaks a permanent entry each. An entry
+// is removable when its lock has expired (a future Check would delete it
+// anyway) or when it is unlocked and its failure window has elapsed (a future
+// RecordFailure would reset it to a fresh window). Called periodically by the
+// shared cleanup janitor. Removing a stale entry is behaviorally identical to
+// the lazy reset both hot paths already perform, so it changes no decision.
+func (l *LoginLimiter) Cleanup() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	for username, e := range l.entries {
+		if !e.lockedUntil.IsZero() {
+			if e.lockedUntil.Before(now) {
+				delete(l.entries, username) // lock expired
+			}
+			continue
+		}
+		if !e.firstFail.IsZero() && now.Sub(e.firstFail) > Window {
+			delete(l.entries, username) // accumulating-failures window elapsed
+		}
+	}
+}
+
 // AttemptsLeft returns how many more failures are allowed before lockout.
 func (l *LoginLimiter) AttemptsLeft(username string) int {
 	l.mu.Lock()

@@ -5,6 +5,62 @@ Newest entry first.
 
 ---
 
+## 6. Bound the login-lockout and admin-API rate-limiter maps (auth-path DoS)
+
+**What changed**
+Two more unbounded maps in the auth/security path (same bug class as #5,
+higher severity because one is unauthenticated and keyed by fully
+attacker-controlled input):
+
+- `LoginLimiter.entries` (internal/lockout) is keyed by the **username** from
+  the unauthenticated login POST body. It had NO `Cleanup` method and no
+  janitor — an entry created with 1–4 failures has a zero `lockedUntil` and is
+  never swept, so one failed login per distinct random username leaks a
+  permanent entry (memory-exhaustion DoS, no credentials required).
+- `APIRateLimiter.Cleanup` (internal/lockout, keyed by client IP) already
+  existed but was **never wired** to any janitor.
+- The shared 5-minute cleanup janitor (`rateLimitCleanupLoop`) only spawned
+  when `RateLimitRPM > 0` — but the lockout and API limiters are ALWAYS active,
+  so with the optional IP rate limit disabled nothing swept them.
+
+Fix:
+- Added `LoginLimiter.Cleanup`: evicts entries whose lock has expired or whose
+  unlocked failure-window has elapsed (behavior-identical to the lazy reset
+  both hot paths already do — changes no decision), keeping in-window and
+  actively-locked entries.
+- The security janitor now spawns UNCONDITIONALLY and ticks
+  `loginLimiter.Cleanup()` + `apiLimiter.Cleanup()` alongside `rl.Cleanup()` +
+  `ssrf.CacheCleanup()`. `rl.Cleanup` on an unconfigured limiter is a harmless
+  empty walk. (Side benefit: the SSRF DNS cache is now also swept when rate
+  limiting is off — it wasn't before.)
+
+**Why**
+An unauthenticated username-keyed map with no eviction is a textbook
+memory-exhaustion DoS. Wiring the janitor unconditionally is the correct
+lifetime for limiters that don't depend on the rate-limit toggle.
+
+**Risks**
+- Very low. `Cleanup` only removes entries a future hot-path call would have
+  reset/deleted anyway. The janitor always running is one cheap 5-minute
+  goroutine (it already ran in every rate-limit-enabled deployment).
+- Two loader tests pinned the old "returns nil cancel when rate limit
+  disabled" behavior; updated to assert the janitor now always spawns (the old
+  behavior was the bug) and that the IP limiter stays unconfigured.
+
+**Validation**
+`go build`, full `go test .` (48s) green, race on `internal/lockout` green,
+full cumulative `-race` suite (through iter 5) green, `--new-from-rev=main`
+lint 0 issues. New tests: `LoginLimiter.Cleanup` evicts the two stale classes
+and keeps the two live ones, and a behavior-preservation test (post-cleanup
+failure starts a fresh window). Loader tests updated for the always-on janitor.
+
+**Remaining work / follow-ups**
+- The enrollment rate limiter (`controlplane.go` `enrollRateLimit.attempts`,
+  keyed by client IP) writes back empty slices but never deletes the map key —
+  a slower unbounded growth. Next iteration.
+
+---
+
 ## 5. Bound the top-hosts counter (unbounded-memory DoS)
 
 **What changed**
