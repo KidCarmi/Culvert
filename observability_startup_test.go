@@ -18,15 +18,14 @@ import (
 	"context"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/otlp"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
@@ -41,24 +40,15 @@ func ensureObservabilityStartupTestLogger(t *testing.T) {
 	}
 }
 
-// freshOTLPExporter constructs a zero-state OTLPExporter for tests.
-// Mirrors the package-level initialiser at otlp.go:45–51.
+// freshOTLPExporter constructs a zero-state metrics exporter for tests
+// (nil snapshot: the engine exports an empty metric set).
 func freshOTLPExporter() *OTLPExporter {
-	return &OTLPExporter{
-		interval: 15 * time.Second,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-	}
+	return otlp.NewMetrics(nil)
 }
 
-// freshOTLPSpanExporter constructs a zero-state OTLPSpanExporter for
-// tests. Mirrors otlp_traces.go:67–.
+// freshOTLPSpanExporter constructs a zero-state span exporter for tests.
 func freshOTLPSpanExporter() *OTLPSpanExporter {
-	return &OTLPSpanExporter{
-		interval: 15 * time.Second,
-		client:   &http.Client{Timeout: 10 * time.Second},
-	}
+	return otlp.NewSpans()
 }
 
 // snapshotObservabilityGlobals saves and zeroes every package-level

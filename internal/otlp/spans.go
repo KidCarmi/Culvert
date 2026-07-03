@@ -1,18 +1,12 @@
-package main
+package otlp
 
-// ─── OpenTelemetry OTLP/HTTP trace (span) export ───────────────────────────
-//
-// Exports request-level spans to any OpenTelemetry Collector via OTLP/HTTP
-// JSON (POST /v1/traces). Mirrors the metrics exporter in otlp.go: no SDK
-// dependency, background push loop, fire-and-forget semantics.
+// OTLP/HTTP trace (span) export (POST /v1/traces). Mirrors the metrics
+// exporter: no SDK dependency, background push loop, fire-and-forget.
 //
 // Spans are collected into a bounded ring buffer during request handling
 // (one mutex-guarded append per request ≈ nanoseconds). A background
 // goroutine batch-flushes them to the collector every push interval.
 // The buffer cap (spanBufferCap) prevents OOM when the collector is down.
-//
-// Configuration: shares the same -otlp-endpoint as the metrics exporter.
-// When the endpoint is set, both metrics and traces push to it.
 
 import (
 	"bytes"
@@ -24,6 +18,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/obs"
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 // spanBufferCap is the maximum number of spans held in memory before the
@@ -32,7 +29,8 @@ const spanBufferCap = 4096
 
 // SpanRecord holds the data collected per proxied request. Allocated on the
 // stack in handleRequest and copied into the ring buffer — no heap escape
-// for the common no-OTLP case because RecordSpan checks Enabled() first.
+// for the common no-OTLP case because RecordSpan callers check Enabled()
+// first.
 type SpanRecord struct {
 	TraceID   string // 32 hex chars from Traceparent
 	SpanID    string // 16 hex chars from Traceparent
@@ -47,8 +45,8 @@ type SpanRecord struct {
 	EndNano   int64  // time.Now().UnixNano() at request end
 }
 
-// OTLPSpanExporter collects spans and pushes them to an OTLP/HTTP endpoint.
-type OTLPSpanExporter struct {
+// SpanExporter collects spans and pushes them to an OTLP/HTTP endpoint.
+type SpanExporter struct {
 	mu       sync.Mutex
 	active   atomic.Bool // lock-free fast path for Enabled()
 	endpoint string
@@ -64,21 +62,24 @@ type OTLPSpanExporter struct {
 	count int
 }
 
-var globalOTLPTraces = &OTLPSpanExporter{
-	interval: 15 * time.Second,
-	client: &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConnsPerHost: 2,
-			IdleConnTimeout:     90 * time.Second,
-			DialContext:         ssrfSafeDialContext,
+// NewSpans builds a span exporter.
+func NewSpans() *SpanExporter {
+	return &SpanExporter{
+		interval: 15 * time.Second,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 2,
+				IdleConnTimeout:     90 * time.Second,
+				DialContext:         ssrf.SafeDialContext,
+			},
 		},
-	},
-	buf: make([]SpanRecord, spanBufferCap),
+		buf: make([]SpanRecord, spanBufferCap),
+	}
 }
 
 // Configure sets the OTLP endpoint and starts the push loop.
-func (e *OTLPSpanExporter) Configure(endpoint string, headers map[string]string) {
+func (e *SpanExporter) Configure(endpoint string, headers map[string]string) {
 	e.mu.Lock()
 	if e.cancel != nil {
 		e.cancel()
@@ -96,11 +97,11 @@ func (e *OTLPSpanExporter) Configure(endpoint string, headers map[string]string)
 	e.cancel = cancel
 	e.mu.Unlock()
 	go e.pushLoop(ctx)
-	logger.Printf("OTLP: exporting traces to %s every %s", sanitizeLog(endpoint), e.interval)
+	obs.Printf("OTLP: exporting traces to %s every %s", obs.Sanitize(endpoint), e.interval)
 }
 
 // Stop halts the push loop and clears the endpoint.
-func (e *OTLPSpanExporter) Stop() {
+func (e *SpanExporter) Stop() {
 	e.mu.Lock()
 	if e.cancel != nil {
 		e.cancel()
@@ -112,14 +113,14 @@ func (e *OTLPSpanExporter) Stop() {
 }
 
 // Enabled returns whether trace export is active (lock-free fast path).
-func (e *OTLPSpanExporter) Enabled() bool {
+func (e *SpanExporter) Enabled() bool {
 	return e.active.Load()
 }
 
-// RecordSpan appends a span to the ring buffer. Lock-free fast path: callers
-// should check Enabled() first to avoid constructing the SpanRecord at all
-// when tracing is off.
-func (e *OTLPSpanExporter) RecordSpan(s SpanRecord) {
+// RecordSpan appends a span to the ring buffer. Callers should check
+// Enabled() first to avoid constructing the SpanRecord at all when tracing
+// is off.
+func (e *SpanExporter) RecordSpan(s SpanRecord) {
 	e.mu.Lock()
 	e.buf[e.head%spanBufferCap] = s
 	e.head++
@@ -130,7 +131,7 @@ func (e *OTLPSpanExporter) RecordSpan(s SpanRecord) {
 }
 
 // drain returns all buffered spans and resets the buffer.
-func (e *OTLPSpanExporter) drain() []SpanRecord {
+func (e *SpanExporter) drain() []SpanRecord {
 	e.mu.Lock()
 	if e.count == 0 {
 		e.mu.Unlock()
@@ -148,24 +149,24 @@ func (e *OTLPSpanExporter) drain() []SpanRecord {
 	return out
 }
 
-func (e *OTLPSpanExporter) pushLoop(ctx context.Context) {
+func (e *SpanExporter) pushLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			// Final flush on shutdown.
-			e.push(context.Background()) //nolint:errcheck
+			e.push(context.Background()) //nolint:errcheck // best-effort final flush
 			return
 		case <-ticker.C:
 			if err := e.push(ctx); err != nil {
-				logger.Printf("OTLP traces push error: %s", sanitizeLog(err.Error()))
+				obs.Printf("OTLP traces push error: %s", obs.Sanitize(err.Error()))
 			}
 		}
 	}
 }
 
-func (e *OTLPSpanExporter) push(ctx context.Context) error {
+func (e *SpanExporter) push(ctx context.Context) error {
 	spans := e.drain()
 	if len(spans) == 0 {
 		return nil
@@ -180,7 +181,7 @@ func (e *OTLPSpanExporter) push(ctx context.Context) error {
 		return nil
 	}
 
-	if !validOTLPEndpoint.MatchString(endpoint) {
+	if !validEndpoint.MatchString(endpoint) {
 		return fmt.Errorf("invalid OTLP endpoint URL: %q", endpoint)
 	}
 	tracesURL := strings.TrimRight(endpoint, "/") + "/v1/traces"
@@ -216,39 +217,39 @@ func (e *OTLPSpanExporter) push(ctx context.Context) error {
 // Follows the OTLP/HTTP JSON schema:
 // https://opentelemetry.io/docs/specs/otlp/#otlphttp-request
 
-type otlpTraceExportRequest struct {
-	ResourceSpans []otlpResourceSpan `json:"resourceSpans"`
+type traceExportRequest struct {
+	ResourceSpans []resourceSpan `json:"resourceSpans"`
 }
 
-type otlpResourceSpan struct {
-	Resource   otlpResource    `json:"resource"`
-	ScopeSpans []otlpScopeSpan `json:"scopeSpans"`
+type resourceSpan struct {
+	Resource   Resource    `json:"resource"`
+	ScopeSpans []scopeSpan `json:"scopeSpans"`
 }
 
-type otlpScopeSpan struct {
-	Scope otlpScope  `json:"scope"`
-	Spans []otlpSpan `json:"spans"`
+type scopeSpan struct {
+	Scope Scope  `json:"scope"`
+	Spans []span `json:"spans"`
 }
 
-type otlpSpan struct {
-	TraceID           string         `json:"traceId"`
-	SpanID            string         `json:"spanId"`
-	Name              string         `json:"name"`
-	Kind              int            `json:"kind"` // 2 = SPAN_KIND_SERVER
-	StartTimeUnixNano string         `json:"startTimeUnixNano"`
-	EndTimeUnixNano   string         `json:"endTimeUnixNano"`
-	Attributes        []otlpKeyValue `json:"attributes,omitempty"`
-	Status            otlpSpanStatus `json:"status"`
+type span struct {
+	TraceID           string     `json:"traceId"`
+	SpanID            string     `json:"spanId"`
+	Name              string     `json:"name"`
+	Kind              int        `json:"kind"` // 2 = SPAN_KIND_SERVER
+	StartTimeUnixNano string     `json:"startTimeUnixNano"`
+	EndTimeUnixNano   string     `json:"endTimeUnixNano"`
+	Attributes        []KeyValue `json:"attributes,omitempty"`
+	Status            spanStatus `json:"status"`
 }
 
-type otlpSpanStatus struct {
+type spanStatus struct {
 	Code    int    `json:"code"` // 0=unset, 1=ok, 2=error
 	Message string `json:"message,omitempty"`
 }
 
-// parseTraceparent extracts the trace-id and span-id from a W3C Traceparent
+// ParseTraceparent extracts the trace-id and span-id from a W3C Traceparent
 // header value: "00-{traceID}-{spanID}-{flags}"
-func parseTraceparent(tp string) (traceID, spanID string) {
+func ParseTraceparent(tp string) (traceID, spanID string) {
 	parts := strings.Split(tp, "-")
 	if len(parts) >= 3 {
 		traceID = parts[1]
@@ -266,27 +267,27 @@ func spanStatusCode(status string) int {
 	}
 }
 
-func buildTracePayload(spans []SpanRecord) otlpTraceExportRequest {
-	otlpSpans := make([]otlpSpan, 0, len(spans))
+func buildTracePayload(spans []SpanRecord) traceExportRequest {
+	otlpSpans := make([]span, 0, len(spans))
 	for i := range spans {
 		s := &spans[i]
-		attrs := []otlpKeyValue{
-			{Key: "http.method", Value: otlpAnyValue{StringValue: s.Method}},
-			{Key: "http.host", Value: otlpAnyValue{StringValue: s.Host}},
-			{Key: "culvert.status", Value: otlpAnyValue{StringValue: s.Status}},
-			{Key: "net.peer.ip", Value: otlpAnyValue{StringValue: s.ClientIP}},
+		attrs := []KeyValue{
+			{Key: "http.method", Value: AnyValue{StringValue: s.Method}},
+			{Key: "http.host", Value: AnyValue{StringValue: s.Host}},
+			{Key: "culvert.status", Value: AnyValue{StringValue: s.Status}},
+			{Key: "net.peer.ip", Value: AnyValue{StringValue: s.ClientIP}},
 		}
 		if s.Rule != "" {
-			attrs = append(attrs, otlpKeyValue{
-				Key: "culvert.rule", Value: otlpAnyValue{StringValue: s.Rule},
+			attrs = append(attrs, KeyValue{
+				Key: "culvert.rule", Value: AnyValue{StringValue: s.Rule},
 			})
 		}
 		if s.SSLAction != "" {
-			attrs = append(attrs, otlpKeyValue{
-				Key: "culvert.ssl_action", Value: otlpAnyValue{StringValue: s.SSLAction},
+			attrs = append(attrs, KeyValue{
+				Key: "culvert.ssl_action", Value: AnyValue{StringValue: s.SSLAction},
 			})
 		}
-		otlpSpans = append(otlpSpans, otlpSpan{
+		otlpSpans = append(otlpSpans, span{
 			TraceID:           s.TraceID,
 			SpanID:            s.SpanID,
 			Name:              s.Name,
@@ -294,20 +295,15 @@ func buildTracePayload(spans []SpanRecord) otlpTraceExportRequest {
 			StartTimeUnixNano: fmt.Sprintf("%d", s.StartNano),
 			EndTimeUnixNano:   fmt.Sprintf("%d", s.EndNano),
 			Attributes:        attrs,
-			Status:            otlpSpanStatus{Code: spanStatusCode(s.Status)},
+			Status:            spanStatus{Code: spanStatusCode(s.Status)},
 		})
 	}
 
-	return otlpTraceExportRequest{
-		ResourceSpans: []otlpResourceSpan{{
-			Resource: otlpResource{
-				Attributes: []otlpKeyValue{
-					{Key: "service.name", Value: otlpAnyValue{StringValue: "culvert"}},
-					{Key: "service.version", Value: otlpAnyValue{StringValue: "1.0.0"}},
-				},
-			},
-			ScopeSpans: []otlpScopeSpan{{
-				Scope: otlpScope{Name: "culvert.proxy", Version: "1.0.0"},
+	return traceExportRequest{
+		ResourceSpans: []resourceSpan{{
+			Resource: culvertResource(),
+			ScopeSpans: []scopeSpan{{
+				Scope: Scope{Name: "culvert.proxy", Version: "1.0.0"},
 				Spans: otlpSpans,
 			}},
 		}},
