@@ -190,6 +190,32 @@ runs in `egress-policy: audit` as the first step of each — non-breaking egress
 monitoring + a baseline for the block flip. golangci-lint is now installed via
 checksum-verified `go install` (was `curl | sh` off a mutable tag ref).
 
+### 5c. DAST — attack the running product (PANW audit item 3)
+
+`dast-nightly.yml` (scheduled) boots the real proxy and points scanners at it:
+`testssl.sh` against the admin UI TLS (**gated** on legacy protocols / weak
+cipher families — not on severity, since a self-signed cert is a legitimate
+HIGH PKI finding), an OWASP ZAP baseline (advisory, passive), and a gosec run
+with **G401 (weak crypto) + G402 (InsecureSkipVerify) re-included** (report-only
+discovery of the surface the blocking gates' blanket exclusion hides).
+
+The forged-leaf TLS posture of the **inspected path** — the product's core
+function — is asserted deterministically + hermetically by
+`TestMITM_ForgedLeafTLSPosture` (Go, default suite): TLS ≥ 1.2, AEAD cipher,
+ECDSA P-256 leaf, and a TLS 1.1 client refused. An external scanner through the
+CONNECT path is infeasible in CI (the shipped binary has no runtime
+loopback-SSRF relax — that is test-only). `proxy.go`'s client-facing
+`tls.Config` now pins `MinVersion: tls.VersionTLS12` explicitly (was relying on
+the Go default) so the floor is contractual.
+
+**Follow-ups:** authenticated ZAP (session-cookie context — where the real yield
+is); drive the G401/G402 discovery delta to zero with justified `#nosec` on the
+remaining sites, then flip the **blocking** gosec to include them; add HSTS +
+CSP to the admin UI (neither is emitted today) with Go assertions; a client-side
+cipher **allowlist** on the inspect `tls.Config` (MinVersion is pinned; the
+suite set still inherits Go defaults); optionally promote the ZAP/testssl
+findings from advisory to blocking after a stable baseline.
+
 **Phase 2b (TODO — flip to block after one real tagged release):** harden-runner
 `block` is NOT applied yet because the Actions runtime/OIDC/cache use
 per-region FQDNs under `*.actions.githubusercontent.com` that block can't

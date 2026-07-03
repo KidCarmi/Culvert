@@ -20,6 +20,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -398,4 +400,91 @@ func upstreamCertPool(t *testing.T, srv *httptest.Server) *x509.CertPool {
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
 	return pool
+}
+
+// TestMITM_ForgedLeafTLSPosture is the DAST-grade assertion on the CLIENT-FACING
+// side of an inspected tunnel (PANW audit item 3, J2a — hermetic replacement for
+// running an external TLS scanner through the CONNECT path, which the shipped
+// binary's SSRF loopback guard makes infeasible in CI). It pins the posture the
+// SWG presents to clients via its forged leaf: a modern protocol floor, an AEAD
+// cipher, and an ECDSA P-256 leaf signed by the proxy CA. It also proves the
+// negotiated protocol FLOOR is enforced (a TLS 1.1-max client is refused), which
+// guards the explicit MinVersion on proxy.go's client-facing tls.Config.
+func TestMITM_ForgedLeafTLSPosture(t *testing.T) {
+	allowLoopbackTunnel(t)
+	cm, proxyRoots := setupInspectCA(t)
+	_ = cm
+
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok")) //nolint:errcheck // test I/O
+	}))
+	defer upstream.Close()
+	target := upstream.Listener.Addr().String()
+
+	proxyURL := startTestProxy(t)
+	inspectRule(true) // skip-verify: accept httptest's self-signed upstream
+
+	// ── Positive: a modern client reflects the forged-leaf server posture ──
+	tc, err := connectAndTLS(proxyURL.Host, target, "inspect.test", proxyRoots)
+	if err != nil {
+		t.Fatalf("inspect handshake must succeed when client trusts the proxy CA: %v", err)
+	}
+	defer tc.Close() //nolint:errcheck // test cleanup
+	cs := tc.ConnectionState()
+
+	if cs.Version < tls.VersionTLS12 {
+		t.Errorf("SECURITY: forged leaf negotiated TLS version 0x%04x, want >= TLS 1.2", cs.Version)
+	}
+
+	// The negotiated cipher must be a modern AEAD suite — never RC4/3DES/CBC.
+	allowedAEAD := map[uint16]bool{
+		tls.TLS_AES_128_GCM_SHA256:                        true, // TLS 1.3
+		tls.TLS_AES_256_GCM_SHA384:                        true, // TLS 1.3
+		tls.TLS_CHACHA20_POLY1305_SHA256:                  true, // TLS 1.3
+		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:       true,
+		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:       true,
+		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: true,
+		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:         true,
+		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:         true,
+		tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:   true,
+	}
+	if !allowedAEAD[cs.CipherSuite] {
+		t.Errorf("SECURITY: forged leaf negotiated non-AEAD/weak cipher 0x%04x (%s)",
+			cs.CipherSuite, tls.CipherSuiteName(cs.CipherSuite))
+	}
+
+	if len(cs.PeerCertificates) == 0 {
+		t.Fatal("no peer certificate presented on the inspected tunnel")
+	}
+	leaf := cs.PeerCertificates[0]
+	if leaf.PublicKeyAlgorithm != x509.ECDSA {
+		t.Errorf("SECURITY: forged leaf key algorithm = %v, want ECDSA", leaf.PublicKeyAlgorithm)
+	}
+	if pk, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || pk.Curve != elliptic.P256() {
+		t.Errorf("SECURITY: forged leaf is not an ECDSA P-256 key: %T", leaf.PublicKey)
+	}
+
+	// ── Negative: a legacy (TLS 1.1-max) client MUST be refused ──
+	raw, err := dialTimeout(proxyURL.Host)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer raw.Close() //nolint:errcheck // test cleanup
+	_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, err := fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	if err := readCONNECT200(raw); err != nil {
+		t.Fatalf("CONNECT: %v", err)
+	}
+	legacy := tls.Client(raw, &tls.Config{ //nolint:gosec // G402: MaxVersion pinned low ON PURPOSE to prove the server floor
+		RootCAs:    proxyRoots,
+		ServerName: "inspect.test",
+		MaxVersion: tls.VersionTLS11,
+	})
+	if err := legacy.HandshakeContext(context.Background()); err == nil {
+		legacy.Close() //nolint:errcheck // test cleanup
+		t.Error("SECURITY: forged-leaf server accepted a TLS 1.1 handshake — MinVersion floor not enforced")
+	}
 }
