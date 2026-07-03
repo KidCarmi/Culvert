@@ -30,7 +30,11 @@ on:
     branches: [main]
     paths:
       - "release_*.go"
-      - "internal/**"
+      # Non-Go trust material: the baked Sigstore root and the CI↔binary
+      # identity SSOT are release-trust inputs too (CI review P1-3).
+      - "trusted_root.json"
+      - "trusted_root.provenance.txt"
+      - "release_identity.env"
       - "test/e2e/**"
       - "Dockerfile"
       - "go.mod"

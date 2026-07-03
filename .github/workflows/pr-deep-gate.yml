@@ -73,23 +73,32 @@ jobs:
 
           proxy_core=false; security=false; docker=false; deps=false
           tests=false; packaging=false; release=false
+          self=false
           while IFS= read -r f; do
             case "$f" in
-              proxy.go|socks5.go|policy.go|store.go|upstream.go|connlimit.go|main.go)
+              # upstream*.go includes upstream_transport.go — the S6 shared
+              # *http.Transport race contract (CI review P1-4).
+              proxy.go|socks5.go|policy.go|store.go|upstream*.go|connlimit.go|main.go)
                 proxy_core=true ;;
             esac
             case "$f" in
               # Auth/TLS/session/scanning surface — including the internal/
               # packages (ssrf, secscan, ocsp, uitls, …) that the top-level
-              # shims delegate to, and the RBAC/session UI plumbing.
+              # shims delegate to, the ENTIRE admin-plane enforcement surface
+              # (ui_*.go: middleware/CSRF, C2 metadata enforcement, RBAC,
+              # routes SSOT — CI review P1-1), and the self-update/backup/
+              # restore + fail-closed GeoIP policy input.
               auth*.go|ca.go|tls.go|session.go|ocsp.go|security*.go|scanner.go|\
               clam.go|yara_scan.go|fileblock.go|fileprofile.go|threatfeed.go|\
               lockout.go|totp.go|identity.go|enrollment.go|controlplane.go|\
-              ui_rbac.go|ui_session.go|ui_auth.go|internal/*)
+              ui_*.go|update*.go|backup*.go|restore.go|geoip.go|events.go|\
+              internal/*)
                 security=true ;;
             esac
             case "$f" in
-              Dockerfile*|docker-compose*.yml|.dockerignore) docker=true ;;
+              # .trivyignore: a suppression edit must re-run the scan that
+              # consumes it (CI review P1-5).
+              Dockerfile*|docker-compose*.yml|.dockerignore|.trivyignore) docker=true ;;
             esac
             case "$f" in
               go.mod|go.sum) deps=true ;;
@@ -101,13 +110,28 @@ jobs:
               packaging/*|scripts/*) packaging=true ;;
             esac
             case "$f" in
-              # Release-catalog trust chain. NOTE: catalog-e2e.yml provides
-              # the behavioral coverage for these paths — when it gains its
-              # own paths: filter at retirement time it must include these
-              # same globs (see roadmap/CI-REDESIGN.md).
-              release_*.go|test/e2e/*) release=true ;;
+              # Release-catalog trust chain — Go code AND the non-Go trust
+              # material (baked Sigstore root, CI↔binary identity SSOT).
+              # NOTE: catalog-e2e.yml's paths: filter must stay in sync with
+              # these globs (see roadmap/CI-REDESIGN.md).
+              release_*.go|test/e2e/*|trusted_root.json|trusted_root.provenance.txt|release_identity.env)
+                release=true ;;
+            esac
+            case "$f" in
+              # Self-validation: edits to this workflow, its reusable build,
+              # or the shared composite action must exercise EVERY deep job —
+              # otherwise a broken gate lands silently and degrades all
+              # future PRs (CI review P1-2).
+              .github/workflows/pr-deep-gate.yml|.github/workflows/_build-image.yml|.github/actions/*)
+                self=true ;;
             esac
           done < changed.txt
+
+          if $self; then
+            echo "Gate self-change detected — enabling all deep jobs."
+            proxy_core=true; security=true; docker=true; deps=true
+            tests=true; packaging=true; release=true
+          fi
 
           image_needed=false
           if $proxy_core || $security || $docker || $deps || $release; then
