@@ -1,0 +1,90 @@
+# Admin-UI Browser E2E (CI quality program — advisory tier)
+#
+# Real-browser end-to-end coverage of the admin UI SPA via playwright-go,
+# driving headless Chromium against the REAL admin-UI handler chain mounted
+# in-process (httptest.NewServer(newAdminUIHandler)). Hermetic: no external
+# services, no public target sites.
+#
+# ADVISORY / NON-BLOCKING by design — never added to qa-gate-approved. Browser
+# E2E is inherently flakier than the socket-level Go suites, so it runs nightly
+# + on-demand and reports, but does not gate merges. The suite lives behind the
+# `uie2e` build tag so playwright-go and a browser are NEVER pulled into the
+# required `go test ./...` gate or the shipped single binary.
+#
+# See docs/ci/ui-e2e-playwright-plan.md.
+
+name: Proxy UI E2E (advisory)
+
+on:
+  schedule:
+    - cron: "37 4 * * *" # 04:37 UTC daily (off the top-of-hour)
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "ui*.go"
+      - "static/index.html"
+      - "session.go"
+      - "store.go"
+      - "events.go"
+      - "ui_rbac_e2e_test.go"
+      - "ui_login_e2e_test.go"
+      - "ui_policy_e2e_test.go"
+      - "ui_events_e2e_test.go"
+      - "ui_audit_e2e_test.go"
+      - "ui_e2e_helpers_test.go"
+      - ".github/workflows/proxy-ui-e2e.yml"
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  ui-e2e:
+    name: Admin-UI RBAC (playwright-go, headless Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Advisory: a failure here annotates the run but must not block the PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # Install the playwright-go driver + Chromium at the version pinned in
+      # go.mod (so driver and library never skew). Downloads to the default
+      # cache; the test then finds them without any env override.
+      - name: Install playwright driver + chromium
+        run: go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium
+
+      - name: UI RBAC E2E
+        id: uie2e
+        run: |
+          set -o pipefail
+          go test -tags uie2e -run 'TestUIE2E_' -v -timeout 15m . 2>&1 | tee uie2e.log
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## Admin-UI RBAC Browser E2E (advisory)"
+            echo ""
+            case "${{ steps.uie2e.outcome }}" in
+              success) echo "✅ RBAC nav gating + server-side enforcement verified in a real browser." ;;
+              *)       echo "⚠️ Advisory failure — see \`uie2e.log\` artifact. Does NOT block the PR." ;;
+            esac
+            echo ""
+            echo '```'
+            grep -E 'PASS|FAIL|SKIP|RBAC|DENIED' uie2e.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: proxy-ui-e2e
+          path: uie2e.log
+          retention-days: 14

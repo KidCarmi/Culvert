@@ -1,9 +1,65 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **proposal** (no code/dependency landed yet). Companion to
+Status: **slice 1 shipped** (RBAC nav gating). Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
+
+## Shipped
+
+- **Slice 1 — UI RBAC nav gating** (`ui_rbac_e2e_test.go`, `ui_e2e_helpers_test.go`,
+  build tag `uie2e`; advisory workflow `.github/workflows/proxy-ui-e2e.yml`).
+  Extracted `newAdminUIHandler()` from `newAdminUIServer` (ui.go) so the REAL
+  middleware chain mounts under `httptest.NewServer`. Verifies: admin sees
+  `users`/`governance` panels + dashboard; viewer has admin/operator nav hidden
+  but keeps the read-only dashboard; and a viewer's forced POST to
+  `/api/auth/users` is 403'd server-side (the C2 backstop), with no user created.
+- **Slice 2 — login / auth flows** (`ui_login_e2e_test.go`). Drives the REAL login
+  overlay (not cookie-inject): wrong password → error shown, still gated; correct
+  password → overlay clears, role gating applies, identity shown in the topbar;
+  logout → gated again AND `/api/auth/status` reports logged-out (session cleared);
+  and 5 failed attempts trip the brute-force lockout (429, "locked"). The
+  process-global login limiter is snapshot/cleared for isolation.
+- **Slice 3 — policy-editor cross-plane** (`ui_policy_e2e_test.go`). The strongest
+  assertion in the suite: boots the admin UI AND a real proxy listener in one
+  process (shared global `policyStore`). Baseline default-deny → a proxied request
+  is 403; the admin creates an "allow *" rule through the policy panel; then the
+  SAME request reaches the backend (200) — a control-plane (UI) change taking
+  effect on the data plane (proxy), plus the rule rendering in the policy table.
+  Note: the SPA's post-submit table refresh races the panel-open fetch at
+  test speed (a real user's panel-open fetch has long completed before they
+  submit), so the test re-opens the panel for a deterministic single fetch.
+- **Slice 4 — live SSE dashboard** (`ui_events_e2e_test.go`). Proves the real-time
+  telemetry path: the dashboard's EventSource → `/api/events` → SPA stat tile.
+  Boots UI + a real proxy + the 1s SSE broadcaster; a block-all policy makes each
+  proxied request bump `statBlocked`; the test snapshots the rendered "blocked"
+  tile, sends N blocked requests, and asserts the tile climbs by ≥N via a live SSE
+  frame (no reload). Three environment findings baked into the harness (see
+  `ui_e2e_helpers_test.go`): (a) Chromium honors the ambient `HTTP(S)_PROXY`, so
+  the browser is launched `--no-proxy-server` to reach the loopback server;
+  (b) the SPA loads Chart.js from a CDN unreachable in the hermetic test — a
+  no-op `Chart` stub is injected so the on-load init reaches `connectSSE()`
+  instead of throwing; (c) the persistent SSE connection means `networkidle`
+  never fires, so page loads wait for `load` and rely on the retrying assertions.
+- **Slice 5 — audit-trail surfacing** (`ui_audit_e2e_test.go`). Compliance
+  guarantee: an admin state change is recorded AND shown in the UI. The admin
+  performs an audited mutation in their session (`POST /api/blocklist` with a
+  unique host); the audit panel must then render an entry for it — asserted on
+  the `blocklist.add` action and the unique host in the detail column (content
+  discriminator, per the repo's audit-ring test guidance — never len() deltas,
+  the ring is bounded at 500). Exercises auditEvent → in-memory ring →
+  `/api/audit` → renderAuditLog.
+
+### Dependency footprint (test-only)
+
+`go.mod` gains `playwright-community/playwright-go` + 3 small indirect deps
+(`golang-set/v2`, `go-jose/v3`, `go-stack`). All are compiled **only** under
+`-tags uie2e`, so they never enter the default `go test ./...` gate or the
+shipped binary. `go mod tidy` retains them (it evaluates custom build tags).
+If tighter supply-chain isolation is wanted later, the harness can move to a
+nested module that drives the shipped binary over a socket instead of importing
+`package main` — noted as a hardening follow-up, not required for the advisory
+tier.
 
 ## 1. Why — the gap
 

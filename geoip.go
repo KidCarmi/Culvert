@@ -38,7 +38,7 @@ func resolveHost(host string) net.IP {
 		}
 		return ip
 	}
-	addrs, err := net.LookupHost(host) //nolint:noctx -- pre-existing resolver call moved verbatim during the internal/geoip split (ADR-0002); context-aware DNS is a separate, out-of-scope change to this SSRF-adjacent path
+	addrs, err := net.LookupHost(host) //nolint:noctx // pre-existing resolver call moved verbatim during the internal/geoip split (ADR-0002); context-aware DNS is a separate, out-of-scope change to this SSRF-adjacent path
 	if err != nil || len(addrs) == 0 {
 		return nil
 	}

@@ -55,7 +55,13 @@ var (
 // listener. Extracted so tests can drive the same server against an explicit
 // net.Listener (avoiding port-discovery TOCTOU) and so startUI can return a
 // shutdown handle to runProxyUntilShutdown. P1.1 / S4.AdminUI.
-func newAdminUIServer(port int) *http.Server { //nolint:funlen // route registration; each line is one endpoint
+// newAdminUIHandler builds the fully-composed admin-UI handler: the route mux
+// wrapped in the canonical middleware chain (IP guard → security → auth → C2).
+// Split out of newAdminUIServer so tests (e.g. the uie2e browser suite) can
+// mount the REAL handler chain via httptest.NewServer without the port/TLS
+// server wrapper. The middleware order here is the single source of truth and
+// must not diverge between production and test.
+func newAdminUIHandler() http.Handler { //nolint:funlen // route registration; each line is one endpoint
 	sub, _ := fs.Sub(staticFiles, "static")
 
 	// Pre-read index.html from embed for nonce injection.
@@ -84,9 +90,13 @@ func newAdminUIServer(port int) *http.Server { //nolint:funlen // route registra
 	registerGovernanceRoutes(mux)    // ui_governance.go  —  1 route  (C3, admin-only)
 	registerReleaseRoutes(mux)       // release_api.go    —  5 routes (P1.6d-0, no GUI)
 
+	return uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(uiMetadataEnforcement(mux))))
+}
+
+func newAdminUIServer(port int) *http.Server {
 	return &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(uiMetadataEnforcement(mux)))),
+		Handler:      newAdminUIHandler(),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // SSE (/api/events) requires long-lived write streams; no write deadline
 		IdleTimeout:  60 * time.Second,
