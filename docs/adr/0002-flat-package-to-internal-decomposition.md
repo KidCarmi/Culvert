@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -719,7 +719,19 @@ lastSync/totalDomains field pokes became `SeedStats` test support (lesson 3). Th
 `catdb_feedsync_test.go` engine suite moved in-package (84% coverage); `feedUserAgent` stays owned by
 `threatfeed.go` with the package keeping its own copy of the value. Leaf proof: `catdb`+`obs` only.
 
-### 2026-07-03 — `saas_feed.go` mapped; extraction DESIGNED, deliberately checkpointed
+### 2026-07-03 — `internal/saasfeed` extracted (27th; executed from the recorded design)
+Executed post-#529 on the restarted branch, exactly per the five-seam map below: the catStore merge
+became main's `mergeSaaSCategories` closure (additive semantics + Save-if-added pinned by a new main
+test); the lifecycle provider is injected (`Deps.Lifecycle` = `resolveLifecycleCtx`, preserving the
+P6.1 UC-3 Done() contract — the lifecycle regression test constructs via `saasfeed.New` and still
+drives the real appLifecycleCtx path); the client is injected (main builds it on
+`ssrf.SafeDialContext`); the SaaS sync-failure counter is package-owned (`SyncFailures()`); test
+construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suite moved in-package
+(fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
+tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
+Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `saas_feed.go` mapped; extraction DESIGNED (executed above)
 The next unit is fully mapped and the design decided — recorded here so a fresh session (or the
 post-#529 branch) executes it without re-discovery. `internal/saasfeed` needs FIVE seams, the widest
 so far: (1) the `catStore` merge inverted to an injected `merge func([]Category) int` closure —
