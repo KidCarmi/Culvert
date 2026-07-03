@@ -23,8 +23,20 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Retirement step 2 (roadmap/CI-REDESIGN.md): off the every-PR path —
+  # nightly + main-push + tags carry the signal; maint-agent-update-e2e is
+  # the PR-time representative for the agent-driven flows.
+  schedule:
+    - cron: "20 2 * * *"   # 02:20 UTC nightly (staggered after install-lifecycle)
   pull_request:
     branches: [main]
+    paths:
+      - "test/e2e/**"
+      - "cmd/culvert-maint/**"
+      - "packaging/**"
+      - "docker-compose*.yml"
+      - "Dockerfile*"
+      - ".github/workflows/maint-agent-backup-upgrade-e2e.yml"
   workflow_dispatch:
 
 concurrency:

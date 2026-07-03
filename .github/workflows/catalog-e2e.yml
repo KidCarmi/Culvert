@@ -23,8 +23,19 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Retirement step 3 (roadmap/CI-REDESIGN.md): PR-time runs are scoped to
+  # the release-catalog trust chain this workflow exists to prove — these
+  # globs deliberately match the Deep PR Gate's `release` filter.
   pull_request:
     branches: [main]
+    paths:
+      - "release_*.go"
+      - "internal/**"
+      - "test/e2e/**"
+      - "Dockerfile"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/catalog-e2e.yml"
   workflow_dispatch:
 
 concurrency:

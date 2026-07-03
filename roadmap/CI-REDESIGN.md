@@ -1,9 +1,14 @@
 # CI/CD Redesign — Lane Architecture & Retirement Checklist
 
-Status: **parallel phase** — the new lanes run alongside the pre-existing
-workflows. Nothing has been retired yet. This document is the authority for
-what supersedes what, and for the retirement steps that must happen
-**atomically** with branch-protection edits.
+Status: **parallel phase — retirement steps 2, 3, 4 and the §3.9 docker-skip
+APPLIED** (2026-07-03). The heavy installer/maint e2e workflows are now
+nightly + path-filtered on PRs, catalog-e2e and CodeQL are PR-path-scoped,
+and the multi-arch QEMU image build no longer runs on PRs. Steps 1 and 5–8
+(branch-protection swap, retiring qa-gate, slimming security-gate/code-review,
+traffic-smoke promotion) remain OPEN — they require repo-admin access to
+branch protection and/or the flake-record window, and must happen
+**atomically** with branch-protection edits. This document is the authority
+for what supersedes what.
 
 ## 1. Lane architecture
 

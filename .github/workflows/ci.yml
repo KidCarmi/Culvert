@@ -142,6 +142,13 @@ jobs:
     name: Docker Build & Publish
     runs-on: ubuntu-latest
     needs: [test, smoke]
+    # Skip on PRs (retirement step, roadmap/CI-REDESIGN.md §3.9): the PR run
+    # built multi-arch amd64+arm64 via QEMU with push:false — pure cost. The
+    # Deep PR Gate builds + trivy-scans the amd64 image on PRs that touch the
+    # container surface, and the Fast PR Gate compile-checks linux/arm64.
+    # Every downstream consumer of this job (catalog-pipeline, auto-tag,
+    # release) already only runs on main pushes or v* tags.
+    if: github.event_name != 'pull_request'
 
     # Expose the pushed manifest-list digest + computed version so the
     # catalog-pipeline job (P2a) can generate + gate the release catalog against

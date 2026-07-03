@@ -16,8 +16,42 @@ env:
 on:
   push:
     branches: [main]
+  # Retirement step 4 (roadmap/CI-REDESIGN.md): semantic analysis on every
+  # PR is heavyweight; main-push + weekly full scans keep continuous
+  # coverage, and PR-time CodeQL still fires for the proxy-core/security
+  # surface (same globs as the Deep PR Gate's proxy_core+security filters).
   pull_request:
     branches: [main]
+    paths:
+      - "proxy.go"
+      - "socks5.go"
+      - "policy.go"
+      - "store.go"
+      - "upstream.go"
+      - "connlimit.go"
+      - "main.go"
+      - "auth*.go"
+      - "ca.go"
+      - "tls.go"
+      - "session.go"
+      - "ocsp.go"
+      - "security*.go"
+      - "scanner.go"
+      - "clam.go"
+      - "yara_scan.go"
+      - "fileblock.go"
+      - "fileprofile.go"
+      - "threatfeed.go"
+      - "lockout.go"
+      - "totp.go"
+      - "identity.go"
+      - "enrollment.go"
+      - "controlplane.go"
+      - "ui_rbac.go"
+      - "ui_session.go"
+      - "ui_auth.go"
+      - "internal/**"
+      - ".github/workflows/codeql.yml"
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
