@@ -82,6 +82,8 @@ jobs:
                 proxy_core=true ;;
             esac
             case "$f" in
+              # KEEP IN SYNC with codeql.yml's PR paths: — that workflow
+              # mirrors this security set (plus proxy_core) as GH path globs.
               # Auth/TLS/session/scanning surface — including the internal/
               # packages (ssrf, secscan, ocsp, uitls, …) that the top-level
               # shims delegate to, the ENTIRE admin-plane enforcement surface
