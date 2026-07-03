@@ -727,8 +727,11 @@ jobs:
           for pair in "culvert-linux-amd64:culvert.sbom.cdx.json" \
                       "culvert-maint-linux-amd64:culvert-maint.sbom.cdx.json"; do
             BIN="${pair%%:*}"; SBOM="${pair##*:}"
-            syft "$BIN" -o cyclonedx-json="$SBOM"
-            test -s "$SBOM" || { echo "::error::empty SBOM $SBOM — refusing SBOM-less release"; exit 1; }
+            syft "file:$BIN" -o cyclonedx-json="$SBOM"
+            # Fail closed on CONTENT, not just a byte-empty file: a zero-component
+            # SBOM is worthless evidence and must not ship.
+            jq -e '.components | length > 0' "$SBOM" >/dev/null \
+              || { echo "::error::SBOM $SBOM has no components — refusing SBOM-less release"; exit 1; }
             cosign sign-blob --yes \
               --output-certificate "${SBOM}.pem" \
               --output-signature   "${SBOM}.sig" \
