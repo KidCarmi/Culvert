@@ -6,6 +6,7 @@
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
 - **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B), `reqlog` (35th — store.go Phase C; **the store.go program is CLOSED**), `urlcat` (36th — policy.go Phase A), `sslbypass` (37th — policy.go Phase B; FQDN glob matcher promoted to `hostutil.MatchFQDN`) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
+- **Decomposition program:** ✅ **COMPLETE** (2026-07-03) — 37 packages + 4 seams; store.go program closed (Phases A/B/C), policy.go program closed at A+B (Phase C REJECTED with a recorded re-evaluation trigger), proxy.go/controlplane.go/configversion.go extraction REJECTED with recorded verdicts. Every root file is an extracted engine, a shim, or classified composition-root/domain-core. Future extractions require a fresh recorded design + review, not a continuation of this program.
 
 ## Notes / log
 
@@ -730,6 +731,41 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — policy.go Phase C (`internal/policy`) REJECTED after design mapping — the policy.go program closes at A+B; **the ADR-0002 decomposition program is COMPLETE**
+The Phase C design pass mapped the remaining engine (PolicyStore + Evaluate + matchers, ~590 of
+policy.go's 950 post-A/B lines) and found coupling the program note had underestimated. Verdict:
+**REJECTED (deferred with an explicit re-evaluation trigger)** — recorded adversarial findings:
+
+1. **The DTO is welded to an in-flight frozen contract.** `PolicyRule` embeds `*SubjectMatch` and
+   `*AuthRuleSpec`, both owned by authpolicy.go (1,047 lines; 24 "reserved / NOT implemented /
+   later slice" markers — the AUTH-POLICY spec is still landing Phase 3 slices). Extracting the
+   rule forces the Stage-1 vocabulary to move with it: `AuthOutcome`, `AuthRuleSpec`,
+   `SubjectMatch`, the ruleType consts, `newRuleID` (ulid), and the SIX-validator chain under
+   `validateAuthRule` — including SSO provider-ref SHAPE validation whose LIVE counterpart
+   (`validateSSOProviderRefsLive`) reads the runtime IdP registry. That is a mid-program contract
+   relocation, not an engine extraction.
+2. **The load gate is a fail-closed security boundary.** `policyRulePersistable` runs inside
+   `Load`/`ReplaceAll` and DROPS rules (Phase 1 Slice 3: access rules carrying SubjectMatch would
+   otherwise fail OPEN). Injecting it as a seam creates an unwired-seam fail-open hazard; moving
+   it relocates authority over those drop semantics away from the spec that owns them.
+3. **Widest blast radius in the repo for marginal value.** `PolicyRule` reaches 73 files; the
+   reusable engines that lived in policy.go (URL categories, SSL bypass, FQDN glob) are ALREADY
+   extracted as Phases A/B + hostutil. What remains is domain core that exists to serve exactly
+   this proxy's rule vocabulary — no second consumer.
+4. **Four hot-path lookups would become seam indirections** (geo fail-closed cache, category
+   groups, file profiles, two-tier categories) — cost without corresponding benefit given 1–3.
+
+**Re-evaluation trigger:** when the auth-policy roadmap completes (SSORequired shipped,
+ProviderRefs activated, the spec unfrozen) AND a concrete second consumer for an out-of-main
+policy engine exists (e.g. DP-side local evaluation), re-run this design from scratch.
+
+**Program closure.** With this verdict every root file is accounted for: (a) extracted engine
+(37 packages + 4 seams), (b) thin shim over `internal/`, or (c) classified composition-root /
+domain-core with a recorded verdict (proxy.go, controlplane.go, policy.go+authpolicy.go domain
+core, configversion.go REJECTED, main.go startup slices program). The ADR-0002 decomposition
+program is COMPLETE — future extractions happen only against a recorded new design with its own
+review, not as continuations of this program.
 
 ### 2026-07-03 — `internal/sslbypass` extracted (37th; policy.go Phase B) + `hostutil` gains MatchFQDN
 The open design point resolved first: the FQDN glob matcher has two engine consumers (policy rule
