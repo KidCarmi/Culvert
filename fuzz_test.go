@@ -11,8 +11,9 @@ package main
 //   go test -fuzz=FuzzParseYARALiteral   -fuzztime=30s
 //   go test -fuzz=FuzzRemoveHopHeaders   -fuzztime=30s
 //
-// In CI the targets run for a short duration (5 s each) as a regression
-// check; the corpus/ directories capture any panics found during local runs.
+// In CI these run nightly (Mon/Wed/Fri) with a 15m coverage-guided budget each
+// (fuzz-nightly.yml); any crash input is uploaded so it can be committed as a
+// permanent regression seed.
 
 import (
 	"net/http"
@@ -151,12 +152,21 @@ func FuzzRemoveHopHeaders(f *testing.F) {
 		{"a,b,c,d,e", "b", "v"},
 		{"X-Token\x00", "X-Token", "v"},
 		{"UPPER,lower,MiXeD", "MiXeD", "v"},
+		// Regression seeds: fuzzed extra-header name canonicalizes to "Connection"
+		// and must NOT clobber the token list under assertion.
+		{"X-Custom-Hop,close", "Connection", "close"},
+		{"A,B", "connection", "override"},
+		{"A", "CONNECTION", ""},
 	}
 	for _, s := range seeds {
 		f.Add(s.connVal, s.name, s.val)
 	}
 	f.Fuzz(func(t *testing.T, connVal, name, val string) {
 		h := http.Header{}
+		// Set the arbitrary extra header FIRST, then Connection LAST: if the fuzzed
+		// name canonicalizes to "Connection" it must not clobber the token list we
+		// are about to assert on (that would make the test fail on a non-bug).
+		h.Set(name, val)
 		h.Set("Connection", connVal)
 		// Pre-populate a header for every token the Connection value names, so a
 		// successful removal is observable.
@@ -166,7 +176,6 @@ func FuzzRemoveHopHeaders(f *testing.F) {
 				h.Add(tok, "populated")
 			}
 		}
-		h.Set(name, val)
 
 		removeHopHeaders(h) // must not panic
 
