@@ -41,6 +41,14 @@ zero-runtime-dependency, Go-first contract.
   no-op `Chart` stub is injected so the on-load init reaches `connectSSE()`
   instead of throwing; (c) the persistent SSE connection means `networkidle`
   never fires, so page loads wait for `load` and rely on the retrying assertions.
+- **Slice 5 — audit-trail surfacing** (`ui_audit_e2e_test.go`). Compliance
+  guarantee: an admin state change is recorded AND shown in the UI. The admin
+  performs an audited mutation in their session (`POST /api/blocklist` with a
+  unique host); the audit panel must then render an entry for it — asserted on
+  the `blocklist.add` action and the unique host in the detail column (content
+  discriminator, per the repo's audit-ring test guidance — never len() deltas,
+  the ring is bounded at 500). Exercises auditEvent → in-memory ring →
+  `/api/audit` → renderAuditLog.
 
 ### Dependency footprint (test-only)
 
