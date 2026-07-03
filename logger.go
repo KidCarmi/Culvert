@@ -78,12 +78,9 @@ func GetLogLevel() LogLevel {
 // These wrap the global logger with level filtering.
 // Printf remains an alias for Infof (backward compatibility — all 418 existing
 // logger.Printf calls continue to work at INFO level).
-
-func logDebugf(format string, args ...any) {
-	if GetLogLevel() <= LevelDebug {
-		logger.Printf("DEBUG "+format, args...)
-	}
-}
+// logDebugf was removed when its last caller moved to internal/threatfeed
+// (which uses the level-gated obs.Debugf); main code needing a debug line
+// uses obs.Debugf too, or logger.Printf("DEBUG ...") behind GetLogLevel.
 
 func logWarnf(format string, args ...any) {
 	if GetLogLevel() <= LevelWarn {
