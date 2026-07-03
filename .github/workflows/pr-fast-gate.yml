@@ -1,0 +1,393 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Lane A — Fast PR Gate
+#
+# The single REQUIRED merge check for pull requests. Lean, deterministic,
+# fast: hygiene, lint, ONE full `-race` run with the coverage floors,
+# the alloc-regression benchgate, and the fast security trio
+# (govulncheck + gosec + gitleaks). Target wall time ≤ ~15 min warm-cache
+# (bounded by the -race suite).
+#
+# Docs-only handling (required-check safe): this workflow deliberately has
+# NO `paths:`/`paths-ignore:` filter. A required check whose workflow never
+# runs sits at "Expected" and blocks merge forever — so instead the
+# `changes` job classifies the diff and heavy jobs skip themselves via
+# `if:`. The `fast-gate-approved` aggregate always runs and treats
+# skipped jobs as passing.
+#
+# Rollout: runs in PARALLEL with qa-gate / security-release-gate /
+# code-review until one green cycle, then supersedes the duplicated jobs
+# there (see roadmap/CI-REDESIGN.md for the retirement checklist).
+# ─────────────────────────────────────────────────────────────────────────────
+name: Fast PR Gate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: fast-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ─── 0. Classify the diff ──────────────────────────────────────────────────
+  # Dependency-free path filter: on pull_request the checked-out ref is the
+  # merge commit, so `git diff HEAD^1 HEAD` with fetch-depth:2 is exactly the
+  # PR's changed files. No third-party filter action to trust or pin.
+  changes:
+    name: "Gate · classify diff"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+      agent: ${{ steps.classify.outputs.agent }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+
+      - name: Classify changed files
+        id: classify
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            # workflow_dispatch: no diff to classify — run everything.
+            echo "code=true"  >> "$GITHUB_OUTPUT"
+            echo "agent=true" >> "$GITHUB_OUTPUT"
+            echo "Manual run — all jobs enabled."
+            exit 0
+          fi
+          git diff --name-only HEAD^1 HEAD > changed.txt
+          echo "── Changed files ──"; cat changed.txt
+
+          # Docs-only = every file matches a documentation pattern.
+          # Anything else counts as code (fail toward running the gate).
+          code=false
+          agent=false
+          while IFS= read -r f; do
+            case "$f" in
+              *.md|docs/*|roadmap/*|LICENSE|.github/CODEOWNERS) ;;
+              *) code=true ;;
+            esac
+            case "$f" in
+              cmd/culvert-maint/*) agent=true ;;
+            esac
+          done < changed.txt
+          echo "code=$code"   >> "$GITHUB_OUTPUT"
+          echo "agent=$agent" >> "$GITHUB_OUTPUT"
+          echo "code=$code agent=$agent"
+
+  # ─── 1. Hygiene: fmt + vet + build (incl. arm64 compile + static assert) ──
+  hygiene:
+    name: "Gate · fmt + vet + build"
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: gofmt check
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "::error::gofmt violations:"; echo "$UNFORMATTED"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build static binary + assert no dynamic linkage
+        # Guards the CGO_ENABLED=0 single-binary contract (was qa-os).
+        run: |
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
+          file culvert
+          if ldd culvert 2>/dev/null; then
+            echo "::error::binary is dynamically linked — CGO_ENABLED=0 contract broken"
+            exit 1
+          fi
+
+      - name: Cross-compile check (linux/arm64, no QEMU)
+        # PR image builds are amd64-only; this keeps arm64 compile breakage
+        # visible pre-merge without paying for an emulated image build.
+        run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null .
+
+  # ─── 2. Lint ───────────────────────────────────────────────────────────────
+  lint:
+    name: "Gate · golangci-lint"
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0    # --new-from-rev needs the merge base in history
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.5.0
+
+      - name: Run golangci-lint (new issues only)
+        # Diff-scoped by design: the tree is not lint-clean under a full run
+        # (~137 legacy findings), and the protection contract this replaces
+        # (reviewdog filter_mode: diff_context in code-review.yml) only
+        # fails on issues in the PR's changed lines. --new-from-rev is the
+        # native equivalent: fail only on issues introduced vs the merge base.
+        run: |
+          BASE_REF="${GITHUB_BASE_REF:-main}"
+          git fetch --no-tags origin "$BASE_REF"
+          golangci-lint run --timeout=5m --new-from-rev "origin/$BASE_REF"
+
+  # ─── 3. THE race + coverage run (single source of truth) ──────────────────
+  # Replaces the 3× full -race runs previously spread across qa-gate and
+  # security-release-gate, and unifies BOTH coverage contracts: the global
+  # 55% floor (was security-release-gate) and the per-file floors on the
+  # security-sensitive surface (was qa-gate).
+  test-race:
+    name: "Gate · go test -race + coverage floors"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Run full suite (-race, coverage)
+        env:
+          TEST_SEED: "20260421"
+        run: go test -race -count=1 -timeout=15m -coverprofile=coverage.out ./...
+
+      - name: Enforce global coverage floor (55%)
+        run: |
+          set -e
+          TOTAL=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/,"",$3); print $3}')
+          echo "Total coverage: ${TOTAL}%"
+          awk -v p="$TOTAL" 'BEGIN { exit (p+0 < 55) ? 1 : 0 }' || {
+            echo "::error::total coverage ${TOTAL}% below the 55% floor"; exit 1
+          }
+
+      - name: Enforce coverage floor on critical files
+        # Every file listed here is security-sensitive. If coverage drops below
+        # the threshold it usually means a new branch was added without tests —
+        # exactly the kind of regression this gate is designed to catch.
+        run: |
+          set -e
+          FUNC=$(go tool cover -func=coverage.out)
+          fail=0
+          check () {
+            local file="$1" floor="$2"
+            local pct
+            # Anchored match: require "/<file>:" so security.go doesn't also
+            # match ui_security.go (and policy.go doesn't match cdrpolicy.go
+            # / ui_policy.go, etc.). index() on a literal string keeps the
+            # check invariant to any regex-special characters in the name.
+            pct=$(echo "$FUNC" | awk -v f="$file" '
+              index($1, "/" f ":") > 0 {
+                match($NF, /[0-9.]+/); sum += substr($NF, RSTART, RLENGTH); n++
+              }
+              END { if (n>0) printf "%.1f", sum/n; else printf "0.0" }')
+            echo "  $file ... ${pct}% (floor ${floor}%)"
+            awk -v p="$pct" -v f="$floor" 'BEGIN { exit (p+0 < f+0) ? 1 : 0 }' || {
+              echo "::error file=$file::coverage ${pct}% below floor ${floor}%"
+              fail=1
+            }
+          }
+          echo "── Gate-critical coverage ──"
+          check "totp.go"        85
+          check "security.go"    70
+          check "session.go"     75
+          check "lockout.go"     80
+          check "policy.go"      60
+          exit $fail
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fast-gate-coverage
+          path: coverage.out
+          retention-days: 30
+
+  # ─── 4. Alloc-regression benchgate ─────────────────────────────────────────
+  # `benchgate`-tagged tests are OUTSIDE the default `go test ./...` build —
+  # this job is the required path that runs them (weekly-stress also runs
+  # them, but only weekly). Hard pass/fail on allocs/op on the hot path.
+  benchgate:
+    name: "Gate · perf-regression (allocs/op)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+      - name: Run benchgate
+        run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v .
+
+  # ─── 5. Fast security: govulncheck + gosec (pinned) ────────────────────────
+  security-fast:
+    name: "Gate · govulncheck + gosec"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: govulncheck (known CVEs in the dependency graph)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+          govulncheck ./...
+
+      - name: gosec (root module)
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 ./...
+
+      - name: gosec (cmd/culvert-maint)
+        working-directory: cmd/culvert-maint
+        run: gosec -exclude=G104,G302,G304,G401,G402,G703,G704 ./...
+
+  # ─── 6. Secrets: gitleaks (runs on EVERY PR, docs included) ────────────────
+  # Deliberately not gated on the code filter — secrets leak into docs too.
+  gitleaks:
+    name: "Gate · gitleaks"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0    # full history so gitleaks can scan all commits
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─── 7. Maintenance agent (nested module) — gated on agent paths ──────────
+  agent:
+    name: "Gate · maint-agent (cmd/culvert-maint)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    if: needs.changes.outputs.agent == 'true'
+    defaults:
+      run:
+        working-directory: cmd/culvert-maint
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+
+      - name: go mod tidy drift check
+        run: |
+          cp go.mod go.mod.orig && cp go.sum go.sum.orig
+          go mod tidy
+          diff -u go.mod.orig go.mod && diff -u go.sum.orig go.sum || {
+            echo "::error::cmd/culvert-maint go.mod/go.sum not tidy"; exit 1
+          }
+          mv go.mod.orig go.mod && mv go.sum.orig go.sum
+
+      - name: Build + vet
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: Tests (-race)
+        env:
+          TEST_SEED: "20260421"
+        run: go test -race -count=1 -timeout=10m -v ./...
+
+      - name: golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.5.0
+          golangci-lint run --timeout=5m
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1
+          staticcheck ./...
+
+  # ─── 8. Proxy traffic smoke — ADVISORY (promotion criteria in doc) ────────
+  # Hermetic in-process traffic-plane e2e (HTTP forward, CONNECT relay,
+  # SOCKS5, policy allow/block/default-deny). Advisory until it shows a
+  # stable flake-free record on the nightly lane (see roadmap/CI-REDESIGN.md);
+  # then it joins the aggregate below.
+  traffic-smoke:
+    name: "Gate · proxy traffic smoke (advisory)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+      - name: Traffic-plane E2E
+        run: |
+          set -o pipefail   # default shell lacks it; tee must not mask a failure
+          go test -race -count=1 -timeout=10m -v \
+            -run 'TestProxyE2E_|TestUNAUTH_HTTP_|TestUNAUTH_CONNECT_|TestSOCKS5_' . \
+            | tee proxy-traffic.log
+      - name: Upload log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-traffic-log
+          path: proxy-traffic.log
+          retention-days: 7
+
+  # ─── ✅ Aggregate — the ONE required branch-protection check ────────────────
+  # Always runs. Skipped jobs (docs-only PRs, unchanged agent module) count
+  # as passing; failure or cancellation of any needed job fails the gate.
+  # traffic-smoke is intentionally NOT in `needs` while advisory.
+  fast-gate-approved:
+    name: "✅ Fast PR Gate — APPROVED"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - changes
+      - hygiene
+      - lint
+      - test-race
+      - benchgate
+      - security-fast
+      - gitleaks
+      - agent
+    if: always()
+    steps:
+      - name: Evaluate results (skipped = pass)
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS_JSON" | jq .
+          if [ "$(echo "$NEEDS_JSON" | jq -r '.changes.result')" != "success" ]; then
+            echo "::error::diff classification failed — cannot trust the gate"; exit 1
+          fi
+          BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
+          if [ -n "$BAD" ]; then
+            echo "::error::failed jobs: $BAD"; exit 1
+          fi
+          echo "Fast PR Gate: all required jobs passed (or were not applicable)."
+          {
+            echo "## ✅ Fast PR Gate — APPROVED"
+            echo ""
+            echo "| Job | Result |"
+            echo "|-----|--------|"
+            echo "$NEEDS_JSON" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
+          } >> "$GITHUB_STEP_SUMMARY"

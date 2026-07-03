@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# _build-image — reusable PR-ONLY image build (build once, consume many).
+#
+# Builds the proxy image a single time (linux/amd64, never pushed) and
+# publishes it as a `docker save` artifact so downstream PR jobs — trivy
+# image scan, compose validation, e2e — can `docker load` it instead of
+# each rebuilding the image from scratch (previously rebuilt up to ~13×
+# per PR across workflows).
+#
+# ▓▓ SCOPE GUARD ▓▓  This workflow is for PR validation ONLY. The main-push /
+# tag `docker` job in ci.yml is release machinery — it computes the next
+# version, pushes + retags multi-arch images, cosign-signs them, and exports
+# `proxy_digest` that catalog-pipeline consumes. That path MUST NOT be
+# migrated onto this reusable workflow.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Build Image (PR, reusable)
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        description: "Local tag for the built image"
+        type: string
+        default: "culvert:ci-smoke"
+      artifact-name:
+        description: "Artifact name for the saved image tarball"
+        type: string
+        default: "culvert-image-amd64"
+      retention-days:
+        type: number
+        default: 1
+    outputs:
+      image-tag:
+        description: "Tag the image was built with (docker load restores it)"
+        value: ${{ inputs.image-tag }}
+      artifact-name:
+        value: ${{ inputs.artifact-name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "Build proxy image (amd64, artifact-shared)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Build image (amd64 only — no QEMU/arm64 on the PR path)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ inputs.image-tag }}
+          cache-from: type=gha,scope=pr-image
+          cache-to: type=gha,mode=max,scope=pr-image
+
+      - name: Save image tarball
+        run: docker save "${{ inputs.image-tag }}" -o culvert-image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: culvert-image.tar
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error

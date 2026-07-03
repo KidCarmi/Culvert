@@ -1,0 +1,375 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Lane B — Deep PR Gate
+#
+# Supplementary depth that runs only when the diff touches the proxy core,
+# the security surface, the container/deps stack, tests, or packaging.
+# Lane A already runs the FULL -race suite on every code PR — this lane
+# adds the containerized/behavioral surface on top: image scan, compose
+# validation, staticcheck, the determinism rerun, license blocking on
+# dependency changes, and installer packaging validation.
+#
+# "Required-if-run" mechanics (GitHub has no native semantics for this):
+# the workflow triggers on ALL PRs with no paths filter; the `changes` job
+# classifies the diff; each job self-gates with `if:`; and the
+# always-running `deep-gate-approved` aggregate is the required check —
+# it passes when everything was skipped, so unrelated PRs are never
+# blocked, but a red deep check DOES block merge.
+#
+# Filter philosophy for a flat `package main`: these filters gate only the
+# SUPPLEMENTARY checks. Correctness of any .go change is already covered by
+# Lane A's full race suite, so a filter miss here degrades depth, not safety.
+# Filters err toward over-triggering.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Deep PR Gate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deep-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ─── 0. Classify the diff ──────────────────────────────────────────────────
+  changes:
+    name: "Deep · classify diff"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      proxy_core: ${{ steps.classify.outputs.proxy_core }}
+      security: ${{ steps.classify.outputs.security }}
+      docker: ${{ steps.classify.outputs.docker }}
+      deps: ${{ steps.classify.outputs.deps }}
+      tests: ${{ steps.classify.outputs.tests }}
+      packaging: ${{ steps.classify.outputs.packaging }}
+      release: ${{ steps.classify.outputs.release }}
+      image_needed: ${{ steps.classify.outputs.image_needed }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+
+      - name: Classify changed files
+        id: classify
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            for k in proxy_core security docker deps tests packaging release image_needed; do
+              echo "$k=true" >> "$GITHUB_OUTPUT"
+            done
+            echo "Manual run — all deep jobs enabled."
+            exit 0
+          fi
+          git diff --name-only HEAD^1 HEAD > changed.txt
+          echo "── Changed files ──"; cat changed.txt
+
+          proxy_core=false; security=false; docker=false; deps=false
+          tests=false; packaging=false; release=false
+          while IFS= read -r f; do
+            case "$f" in
+              proxy.go|socks5.go|policy.go|store.go|upstream.go|connlimit.go|main.go)
+                proxy_core=true ;;
+            esac
+            case "$f" in
+              # Auth/TLS/session/scanning surface — including the internal/
+              # packages (ssrf, secscan, ocsp, uitls, …) that the top-level
+              # shims delegate to, and the RBAC/session UI plumbing.
+              auth*.go|ca.go|tls.go|session.go|ocsp.go|security*.go|scanner.go|\
+              clam.go|yara_scan.go|fileblock.go|fileprofile.go|threatfeed.go|\
+              lockout.go|totp.go|identity.go|enrollment.go|controlplane.go|\
+              ui_rbac.go|ui_session.go|ui_auth.go|internal/*)
+                security=true ;;
+            esac
+            case "$f" in
+              Dockerfile*|docker-compose*.yml|.dockerignore) docker=true ;;
+            esac
+            case "$f" in
+              go.mod|go.sum) deps=true ;;
+            esac
+            case "$f" in
+              *_test.go) tests=true ;;
+            esac
+            case "$f" in
+              packaging/*|scripts/*) packaging=true ;;
+            esac
+            case "$f" in
+              # Release-catalog trust chain. NOTE: catalog-e2e.yml provides
+              # the behavioral coverage for these paths — when it gains its
+              # own paths: filter at retirement time it must include these
+              # same globs (see roadmap/CI-REDESIGN.md).
+              release_*.go|test/e2e/*) release=true ;;
+            esac
+          done < changed.txt
+
+          image_needed=false
+          if $proxy_core || $security || $docker || $deps || $release; then
+            image_needed=true
+          fi
+          for k in proxy_core security docker deps tests packaging release image_needed; do
+            eval "echo \"$k=\$$k\"" >> "$GITHUB_OUTPUT"
+          done
+          echo "proxy_core=$proxy_core security=$security docker=$docker deps=$deps tests=$tests packaging=$packaging release=$release image_needed=$image_needed"
+
+  # ─── 1. Build the proxy image ONCE (amd64) — consumed by the jobs below ───
+  build-image:
+    name: "Deep · build image (once)"
+    needs: changes
+    if: needs.changes.outputs.image_needed == 'true'
+    uses: ./.github/workflows/_build-image.yml
+    with:
+      image-tag: "culvert:ci-smoke"
+      artifact-name: "deep-gate-image"
+
+  # ─── 2. Trivy image scan (reuses the artifact — no rebuild) ────────────────
+  trivy-image:
+    name: "Deep · trivy image scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes, build-image]
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.deps == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deep-gate-image
+
+      - name: Load image
+        run: docker load -i culvert-image.tar
+
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
+        with:
+          version: v0.69.3
+          cache: true
+
+      - name: Scan image (CRITICAL/HIGH, gate)
+        run: |
+          trivy image \
+            --scanners vuln \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --ignorefile .trivyignore \
+            --exit-code 1 \
+            culvert:ci-smoke
+
+  # ─── 3. Dockerfile lint ────────────────────────────────────────────────────
+  hadolint:
+    name: "Deep · hadolint"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: Dockerfile
+          ignore: DL3018,DL3047,DL4006
+          failure-threshold: warning
+
+  # ─── 4. Compose environment validation (reuses the built image) ───────────
+  compose-validate:
+    name: "Deep · compose validation"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [changes, build-image]
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.proxy_core == 'true' || needs.changes.outputs.security == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deep-gate-image
+
+      - name: Load image
+        run: docker load -i culvert-image.tar
+
+      - name: Validate compose graph
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Bring up proxy (pre-built image — no rebuild)
+        # docker-compose.ci.yml tags the service image culvert:ci-smoke;
+        # the image is already loaded, and `up` without --build reuses it.
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            up -d --no-deps --no-build proxy
+
+      - name: Wait for healthy + probe endpoints
+        timeout-minutes: 3
+        run: |
+          for i in $(seq 1 24); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
+              "$(docker compose -f docker-compose.yml -f docker-compose.ci.yml ps -q proxy)" 2>/dev/null || echo starting)
+            [ "$STATUS" = "healthy" ] && break
+            sleep 5
+          done
+          [ "$STATUS" = "healthy" ] || { echo "::error::proxy never became healthy"; exit 1; }
+          curl -sf http://localhost:8080/health | grep -q '"status":"ok"'
+          # Readiness must actually gate (same semantics as the ci.yml smoke):
+          # a loop ending in `sleep` would exit 0 and mask a broken /ready.
+          for i in 1 2 3; do
+            if curl -sf http://localhost:8080/ready 2>/dev/null | grep -q '"status":"ready"'; then
+              echo "Ready check passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: not ready yet, waiting 2s..."
+            sleep 2
+          done
+          echo "::error::/ready did not return ready after 3 attempts"
+          exit 1
+
+      - name: Diagnostics & teardown
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml ps || true
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs proxy || true
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v || true
+
+  # ─── 5. staticcheck (root module) ──────────────────────────────────────────
+  staticcheck:
+    name: "Deep · staticcheck"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.proxy_core == 'true' || needs.changes.outputs.security == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.release == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+      - run: go mod download
+      - uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1
+        with:
+          version: "2025.1"
+          install-go: false
+
+  # ─── 6. Determinism (shuffle + count=2) ────────────────────────────────────
+  # Any *_test.go change triggers this: CLAUDE.md's test-authoring rules
+  # (audit-ring saturation etc.) rely on this gate to flush order-dependent
+  # tests BEFORE they land and start breaking unrelated PRs.
+  determinism:
+    name: "Deep · determinism (shuffle, count=2)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: changes
+    if: needs.changes.outputs.tests == 'true' || needs.changes.outputs.proxy_core == 'true' || needs.changes.outputs.security == 'true' || needs.changes.outputs.release == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+      - name: Shuffled double run (no -race, matches qa-determinism contract)
+        env:
+          TEST_SEED: "20260421"
+        run: go test -count=2 -shuffle=on -timeout=20m ./...
+
+  # ─── 7. License blocking on dependency changes ─────────────────────────────
+  # Keeps per-PR license enforcement (was security-release-gate on every PR):
+  # a dep bump cannot merge with a forbidden/restricted license.
+  licenses:
+    name: "Deep · go-licenses"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.deps == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+      - run: go mod download
+      - name: Check for disallowed licenses
+        # pipefail is required: GitHub's default shell does not set it, so
+        # without it the pipeline would return tee's (always-zero) status
+        # and a forbidden license could sail through the gate.
+        run: |
+          set -o pipefail
+          go install github.com/google/go-licenses@v1.6.0
+          go-licenses check ./... \
+            --disallowed_types=forbidden,restricted \
+            --ignore=proxy 2>&1 | tee license-report.txt
+      - name: Upload license report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deep-gate-license-report
+          path: license-report.txt
+          retention-days: 30
+
+  # ─── 8. Installer packaging validation (was qa-agent, now path-gated) ─────
+  packaging:
+    name: "Deep · packaging (shellcheck/sudoers/systemd)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+
+      - name: shellcheck installer
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          shellcheck packaging/culvert-maint/install.sh
+
+      - name: Validate sudoers drop-in
+        # The P1.4 pin-binding security boundary — a syntax error here would
+        # brick the maintenance agent's privilege model on install.
+        run: sudo visudo -c -f packaging/sudoers/culvert-maint
+
+      - name: Validate systemd unit
+        # systemd-analyze verify checks that ExecStart resolves to an
+        # executable, so the freshly-built agent binary must be staged at
+        # the unit's documented path first (same as the legacy qa-agent job)
+        # or the verify fails on every packaging PR.
+        run: |
+          if ! command -v systemd-analyze >/dev/null 2>&1; then
+            echo "systemd-analyze unavailable — skipping unit verification"
+            exit 0
+          fi
+          (cd cmd/culvert-maint && go build -o /tmp/culvert-maint .)
+          sudo install -m 0755 /tmp/culvert-maint /usr/local/bin/culvert-maint
+          systemd-analyze verify packaging/systemd/culvert-maint.service
+
+  # ─── ✅ Aggregate — required check, passes when all-skipped ─────────────────
+  deep-gate-approved:
+    name: "✅ Deep PR Gate — APPROVED"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - changes
+      - build-image
+      - trivy-image
+      - hadolint
+      - compose-validate
+      - staticcheck
+      - determinism
+      - licenses
+      - packaging
+    if: always()
+    steps:
+      - name: Evaluate results (skipped = pass)
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS_JSON" | jq .
+          if [ "$(echo "$NEEDS_JSON" | jq -r '.changes.result')" != "success" ]; then
+            echo "::error::diff classification failed — cannot trust the gate"; exit 1
+          fi
+          BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
+          if [ -n "$BAD" ]; then
+            echo "::error::failed jobs: $BAD"; exit 1
+          fi
+          echo "Deep PR Gate: all triggered jobs passed (or none were applicable)."
+          {
+            echo "## ✅ Deep PR Gate — APPROVED"
+            echo ""
+            echo "| Job | Result |"
+            echo "|-----|--------|"
+            echo "$NEEDS_JSON" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
+          } >> "$GITHUB_STEP_SUMMARY"

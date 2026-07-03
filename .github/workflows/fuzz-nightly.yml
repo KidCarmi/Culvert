@@ -1,0 +1,69 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Lane C/D — Nightly fuzzing
+#
+# The repo ships six Fuzz targets, but until this workflow they were only
+# ever executed as seed-corpus unit tests — `go test -fuzz` never ran in CI.
+# This lane gives each target a real coverage-guided fuzzing budget nightly.
+# All targets guard security-relevant parsers/matchers (SSRF host
+# classification, redirect safety, feed URL normalisation, policy
+# destination matching, ClamAV response parsing, YARA literal parsing).
+#
+# On a crash: `go test -fuzz` writes the failing input to
+# testdata/fuzz/<Target>/ — uploaded as an artifact so the case can be
+# committed as a permanent regression seed.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Fuzz Nightly
+
+on:
+  schedule:
+    - cron: "30 3 * * *"   # 03:30 UTC daily — before the 04:00 nightly e2e
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  fuzz:
+    name: "Fuzz · ${{ matrix.target }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: FuzzIsPrivateHost,      pkg: "." }
+          - { target: FuzzIsSafeRedirectURL,  pkg: "." }
+          - { target: FuzzNormaliseFeedURL,   pkg: "." }
+          - { target: FuzzMatchDest,          pkg: "." }
+          - { target: FuzzParseClamResponse,  pkg: "./internal/clamav" }
+          - { target: FuzzParseYARALiteral,   pkg: "./internal/yara" }
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Fuzz ${{ matrix.target }} (15m budget)
+        # pipefail is required: GitHub's default shell does not set it, so
+        # without it a crash would be masked by tee's zero exit and the
+        # failure-only artifact upload below would never fire.
+        run: |
+          set -o pipefail
+          go test -run '^$' -fuzz "^${{ matrix.target }}$" -fuzztime 15m \
+            ${{ matrix.pkg }} | tee "fuzz-${{ matrix.target }}.log"
+
+      - name: Upload crash inputs (if any)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: |
+            fuzz-${{ matrix.target }}.log
+            **/testdata/fuzz/${{ matrix.target }}/**
+          retention-days: 30
+          if-no-files-found: warn
