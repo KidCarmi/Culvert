@@ -54,7 +54,7 @@ pac.go        — PAC shim: handlers + routes over internal/pac (ADR-0002)
 hashcache.go  — SHA-256 scan result cache with TTL
 lockout.go    — Brute-force lockout (IP + user)
 totp.go       — TOTP 2FA (RFC 6238, inline stdlib HMAC-SHA1, no external dep)
-tls.go        — TLS helpers (self-signed cert for admin UI)
+tls.go        — UI-TLS shim: uiExtraSANs + wrapper over internal/uitls (ADR-0002)
 blockpage.go  — Block page HTML template
 events.go     — SSE event stream for live UI dashboard
 catdb.go      — URL category database

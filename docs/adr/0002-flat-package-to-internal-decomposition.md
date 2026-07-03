@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -662,6 +662,17 @@ wholesale into the package; the two `ConfigureTransportOCSP` tests stayed in the
 `ocsp_test.go`; `edge_audit_test.go`'s literal-construction tests were retargeted (`ocsp.New()`; the
 CacheLen-with-seeded-entries assertion relocated into the package suite rather than growing exported
 test API). Leaf proof: imports `obs` + `x/crypto/ocsp` only.
+
+### 2026-07-03 — `internal/uitls` extracted (24th leaf)
+The admin-UI self-signed certificate generator (`SelfSigned` — baseline/interface/hostname SANs,
+CULVERT_PUBLIC_IP, cloud-metadata public-IP detection with the IMDSv2→v1 fallback) moved to
+`internal/uitls`. Design improvement folded in: the `uiExtraSANs` global is no longer read by the
+engine — main's `selfSignedTLS()` wrapper passes it as a parameter (the ui_extras startup slice and
+admin-settings persistence keep owning the var in the trimmed `tls.go`). Moved-code complexity paid
+down by decomposition, not suppression: `collectSANs`, `appendEnvPublicIPs`, and `imdsv2Token` helpers
+(gocognit/cyclop/nestif); metadata requests use `http.NoBody`. No SSRF-guard coupling — the IMDS
+endpoints are deliberately link-local and use a dedicated 2s-timeout client. Leaf proof: imports `obs`
+only.
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
