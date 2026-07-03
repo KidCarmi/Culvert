@@ -13,9 +13,12 @@ package main
 // clients cannot present a session), so it is fetched without credentials.
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -32,14 +35,21 @@ func TestUIE2E_PACServedAndPreviewed(t *testing.T) {
 	_, page := newAuthedUIPage(t, browser, uiSrv.URL, adminUser, RoleAdmin)
 
 	// ── The served /proxy.pac is a valid PAC document (unauthenticated) ─────
-	resp, err := page.Context().Request().Get(uiSrv.URL + "/proxy.pac")
+	// Fetch with a plain, cookie-less client — NOT the browser context, which
+	// carries the admin session. PAC clients cannot present a session, so this is
+	// the actual contract: /proxy.pac must be served without auth. Going through
+	// the browser context would still get 200 even if the route regressed to
+	// require a session, silently dropping the coverage this test exists for.
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Get(uiSrv.URL + "/proxy.pac")
 	if err != nil {
 		t.Fatalf("GET /proxy.pac: %v", err)
 	}
-	if resp.Status() != 200 {
-		t.Fatalf("/proxy.pac status %d, want 200 (it must be reachable without auth)", resp.Status())
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("/proxy.pac status %d, want 200 (it must be reachable without auth)", resp.StatusCode)
 	}
-	bodyBytes, err := resp.Body()
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read /proxy.pac body: %v", err)
 	}
@@ -50,7 +60,7 @@ func TestUIE2E_PACServedAndPreviewed(t *testing.T) {
 	if !strings.Contains(body, "PROXY") {
 		t.Errorf("/proxy.pac has no PROXY directive:\n%.300s", body)
 	}
-	if ct := resp.Headers()["content-type"]; !strings.Contains(ct, "proxy-autoconfig") {
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "proxy-autoconfig") {
 		t.Errorf("/proxy.pac content-type = %q, want x-ns-proxy-autoconfig", ct)
 	}
 

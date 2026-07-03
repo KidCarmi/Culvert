@@ -35,10 +35,13 @@ func TestUIE2E_HeaderRewriteCrossPlane(t *testing.T) {
 	}))
 	t.Cleanup(backend.Close)
 
-	// Restore the global rewriter after the test (registered before startTestProxy
-	// so this runs AFTER the proxy is torn down — no racing the hot path).
-	oldRewriter := rewriter
-	t.Cleanup(func() { rewriter = oldRewriter })
+	// Restore the global rewriter's rules after the test. The UI POST mutates the
+	// shared rewriter in place (rewriter.Add), and the global is never reassigned,
+	// so saving/restoring the pointer is a no-op — snapshot the RULES instead, or
+	// the injected rule leaks into later tests (shuffled / -count=2). Registered
+	// before startTestProxy so the restore runs AFTER the proxy is torn down (the
+	// closure takes the rewriter mutex, so it never races the hot path either way).
+	t.Cleanup(rewriter.Snapshot())
 
 	uiSrv := httptest.NewServer(newAdminUIHandler())
 	t.Cleanup(uiSrv.Close)
