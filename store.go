@@ -111,38 +111,9 @@ func tsGet() (total, allowed, blocked []int64) {
 
 // ─── Request log ──────────────────────────────────────────────────────────────
 
-type LogEntry struct {
-	TS          int64  `json:"ts"`
-	Time        string `json:"time"`
-	IP          string `json:"ip"`
-	Identity    string `json:"identity,omitempty"` // authenticated username/email, empty if unauthenticated
-	Method      string `json:"method"`
-	Host        string `json:"host"`
-	URI         string `json:"uri,omitempty"`       // full request URL (host+path, no query); only set when the matched rule has LogFullURI
-	Status      string `json:"status"`              // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
-	Level       string `json:"level"`               // INFO | WARN | ERROR
-	RuleMatched string `json:"ruleMatched"`         // policy rule name that matched, if any
-	ActionTaken string `json:"actionTaken"`         // policy action taken, if any
-	BytesSent   int64  `json:"bytesSent,omitempty"` // bytes sent to upstream (request body)
-	BytesRecv   int64  `json:"bytesRecv,omitempty"` // bytes received from upstream (response body)
-	SSLAction   string `json:"sslAction,omitempty"` // "inspect", "bypass", or empty (non-CONNECT)
-
-	// Normalized authentication-policy SIEM fields (Phase 0 seam, §1.8; the
-	// auth_* observability block is finalized in Phase 1 Slice 5). Declared as the
-	// durable SIEM contract but populated only when an auth decision supplies them
-	// — all are omitempty so wire output stays byte-identical for requests with no
-	// auth decision. NO identity is carried in the auth_* block: an Exempt decision
-	// is logged by outcome + rule id/name (+ low-cardinality subject predicate
-	// types and the matched rule's subject schema version) only.
-	SchemaVersion         int      `json:"schema_version,omitempty"`           // event schema version
-	AuthSource            string   `json:"auth_source,omitempty"`              // categorical: idp|local|oidc:x|saml:x|exempt|unauth
-	AuthOutcome           string   `json:"auth_outcome,omitempty"`             // Stage-1 outcome (e.g. "Exempt"); "" = none
-	AuthPolicyRuleID      string   `json:"auth_policy_rule_id,omitempty"`      // ULID of matched Stage-1 rule
-	AuthPolicyRuleName    string   `json:"auth_policy_rule_name,omitempty"`    // display name of matched Stage-1 rule
-	AccessRuleID          string   `json:"access_rule_id,omitempty"`           // ULID of matched Stage-2 rule
-	AuthSubjectMatchTypes []string `json:"auth_subject_match_types,omitempty"` // low-cardinality predicate type names (e.g. ["cidr"])
-	AuthSchemaVersion     int      `json:"auth_schema_version,omitempty"`      // matched rule's SubjectMatch schema version
-}
+// LogEntry moved to internal/logstore (logstore.Entry) with the history-store
+// extraction (ADR-0002); the alias in logstore.go keeps every unqualified use
+// — ring, JSONL writer, SSE feed, SIEM fields — source-compatible.
 
 // AuthLogFields carries the low-cardinality Stage-1 authentication-policy
 // observability fields attached to a request log entry. The zero value adds

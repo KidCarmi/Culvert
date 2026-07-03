@@ -1,6 +1,11 @@
 package main
 
-// logguard.go — production-grade log retention & disk-protection policy.
+// logguard.go — production-grade log retention & disk-protection ORCHESTRATOR.
+// The priority-aware deletion passes (CleanupBytes/deletePass) moved into
+// internal/logstore with the engine (ADR-0002); this file keeps the policy:
+// disk-usage checks, the critical-threshold override, emergency minimal mode
+// (whose state the engine reads through the injected hook), audit recording,
+// and the GUI status.
 //
 // Priority order (highest first):
 //   1. Keep the proxy operational — all cleanup is bounded and never blocks the
@@ -21,14 +26,11 @@ package main
 // the app log level is raised, and a critical alert is emitted.
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	badger "github.com/dgraph-io/badger/v4"
 )
 
 const (
@@ -82,18 +84,6 @@ func diskUsage(path string) (usedPct float64, free, total uint64, err error) {
 	return usedPct, free, total, nil
 }
 
-// logEntryLowPriority classifies an entry's storage priority by level. INFO,
-// DEBUG, and empty are LOW priority (access/traffic); WARN and ERROR are HIGH
-// priority (security: threats, malware, auth failures, policy violations).
-func logEntryLowPriority(level string) bool {
-	switch level {
-	case "WARN", "ERROR":
-		return false
-	default:
-		return true
-	}
-}
-
 // fmtBytes renders a byte count for audit/log detail (server-side counterpart
 // to the UI's humanBytes).
 func fmtBytes(n int64) string {
@@ -120,119 +110,6 @@ func auditSystem(action, object, detail string) {
 		Object: object,
 		Detail: detail,
 	})
-}
-
-// cleanupBytes deletes stored entries to free at least `need` logical bytes,
-// removing LOW-priority entries (oldest first) before HIGH-priority ones.
-// Returns bytes freed, entries removed, and a per-level category breakdown.
-// Held under the close read-lock; bounded by logStoreScanCap per pass.
-func (s *logStore) cleanupBytes(need int64) (freed, count int64, levels map[string]int64) {
-	levels = map[string]int64{}
-	if s == nil || need <= 0 {
-		return freed, count, levels
-	}
-	s.closeMu.RLock()
-	defer s.closeMu.RUnlock()
-	if s.closed {
-		return freed, count, levels
-	}
-	// One call deletes at most logStorePruneBatch entries total (the janitor
-	// converges across passes); within that budget, Pass 1 removes low-priority
-	// entries first and Pass 2 (only if still short) sacrifices any priority,
-	// oldest first — security logs go only when nothing else remains.
-	budget := int64(logStorePruneBatch)
-	for _, lowOnly := range []bool{true, false} {
-		if freed >= need || count >= budget {
-			break
-		}
-		f, c := s.deletePass(need-freed, budget-count, lowOnly, levels)
-		freed += f
-		count += c
-	}
-	if count > 0 {
-		for { // clamp-subtract the logical counter (race-safe vs concurrent flush)
-			old := atomic.LoadInt64(&s.bytesUsed)
-			nv := old - freed
-			if nv < 0 {
-				nv = 0
-			}
-			if atomic.CompareAndSwapInt64(&s.bytesUsed, old, nv) {
-				break
-			}
-		}
-		atomic.AddInt64(&statLogStorePruned, count)
-		_ = s.db.RunValueLogGC(0.5) // reclaim disk; ErrNoRewrite expected/ignored
-	}
-	return freed, count, levels
-}
-
-// deletePass deletes oldest entries until `need` bytes are freed or limits are
-// hit. When lowOnly is true, only LOW-priority entries are deleted (others are
-// skipped). Records deleted entries' levels into the shared breakdown. Caller
-// holds closeMu.RLock.
-//
-// "Low-before-high" is best-effort ("when possible"): pass 1 scans at most
-// logStoreScanCap (500k) entries hunting for low-priority keys. In the
-// pathological case where the oldest 500k entries are ALL high-priority
-// (WARN/ERROR) and low-priority entries exist only deeper in the store, pass 1
-// finds none and pass 2 (lowOnly=false) deletes the oldest security records
-// instead. This is an accepted limitation: the bounded scan caps value-read
-// cost, and preventing disk exhaustion (priority 2) outranks the ordering
-// preference — so deleting the oldest records to free space is correct even when
-// they happen to be security logs. The case requires >500k consecutive oldest
-// security entries, which does not arise in normal traffic where access/traffic
-// logs dominate.
-func (s *logStore) deletePass(need, maxKeys int64, lowOnly bool, levels map[string]int64) (freed, count int64) {
-	if maxKeys <= 0 {
-		return 0, 0
-	}
-	keys := make([][]byte, 0, 1024)
-	klevels := make([]string, 0, 1024)
-	var pending int64
-	scanned := 0
-	_ = s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = true // need the value to read Level
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Rewind(); it.Valid() && pending < need && int64(len(keys)) < maxKeys; it.Next() {
-			scanned++
-			if scanned > logStoreScanCap {
-				break
-			}
-			item := it.Item()
-			level := "INFO"
-			_ = item.Value(func(v []byte) error {
-				var e LogEntry
-				if json.Unmarshal(v, &e) == nil && e.Level != "" {
-					level = e.Level
-				}
-				return nil
-			})
-			if lowOnly && !logEntryLowPriority(level) {
-				continue // keep high-priority security logs in pass 1
-			}
-			keys = append(keys, item.KeyCopy(nil))
-			klevels = append(klevels, level)
-			pending += itemLogicalSize(item)
-		}
-		return nil
-	})
-	if len(keys) == 0 {
-		return 0, 0
-	}
-	wb := s.db.NewWriteBatch()
-	for _, k := range keys {
-		_ = wb.Delete(k)
-	}
-	if err := wb.Flush(); err != nil {
-		logger.Printf("WARN logstore: cleanup delete: %v", err)
-		return 0, 0
-	}
-	for _, lvl := range klevels {
-		levels[lvl]++
-	}
-	return pending, int64(len(keys))
 }
 
 // recordPressureCleanup updates the guard counters, the last-cleanup marker, and
@@ -353,13 +230,17 @@ func runDiskGuard(s *logStore) {
 
 	switch {
 	case err == nil && usedPct >= crit:
-		s.handleDiskCritical(usedPct, float64(total), crit)
+		handleDiskCritical(s, usedPct, float64(total), crit)
 	case err == nil:
 		exitMinimalMode() // disk healthy
 	}
 
-	// (3) Enforce the max log-storage size (priority-aware).
-	s.RunRetention()
+	// (3) Enforce the max log-storage size (priority-aware). The engine
+	// returns what it cleaned; recording the audit/pressure event is main's
+	// job (the engine owns deletion, main owns observability state).
+	if freed, count, levels := s.RunRetention(); count > 0 {
+		recordPressureCleanup("max log storage exceeded", freed, count, levels)
+	}
 
 	// Clear a stale warning once the disk is healthy and not in minimal mode.
 	logGuard.mu.Lock()
@@ -373,7 +254,7 @@ func runDiskGuard(s *logStore) {
 // retention to free space, then re-checks — if logs can't bring the disk back
 // under the threshold it engages emergency minimal mode, otherwise it posts the
 // operator warning. Caller has confirmed usedPct >= crit.
-func (s *logStore) handleDiskCritical(usedPct, total, crit float64) {
+func handleDiskCritical(s *logStore, usedPct, total, crit float64) {
 	// Free enough to drop the whole volume to (crit - margin). Cap the target at
 	// the logstore's own size — we can only ever delete our own logs, so when the
 	// disk is full from non-log data this avoids an unreachable target (and
@@ -381,11 +262,11 @@ func (s *logStore) handleDiskCritical(usedPct, total, crit float64) {
 	// minimal mode).
 	targetUsed := (crit - diskRecoverMargin) / 100 * total
 	need := int64(usedPct/100*total - targetUsed)
-	if own := atomic.LoadInt64(&s.bytesUsed); need > own {
+	if own := s.BytesUsed(); need > own {
 		need = own
 	}
 	if need > 0 {
-		freed, count, levels := s.cleanupBytes(need)
+		freed, count, levels := s.CleanupBytes(need)
 		recordPressureCleanup("critical disk usage (overrides retention)", freed, count, levels)
 	}
 	// Re-check: if still critical, deleting logs can't fix it (disk full from

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/logstore"
 )
 
 // TestSetCriticalDiskPct_Clamps verifies the threshold is floored at 50 and
@@ -28,21 +30,6 @@ func TestSetCriticalDiskPct_Clamps(t *testing.T) {
 // TestLogEntryLowPriority pins the security-vs-traffic classification that drives
 // priority-aware cleanup: WARN/ERROR are HIGH priority (kept), everything else
 // is LOW priority (deleted first).
-func TestLogEntryLowPriority(t *testing.T) {
-	low := []string{"INFO", "DEBUG", "", "trace", "anything"}
-	high := []string{"WARN", "ERROR"}
-	for _, l := range low {
-		if !logEntryLowPriority(l) {
-			t.Errorf("level %q: want low priority", l)
-		}
-	}
-	for _, l := range high {
-		if logEntryLowPriority(l) {
-			t.Errorf("level %q: want high priority", l)
-		}
-	}
-}
-
 func TestFmtBytes(t *testing.T) {
 	cases := []struct {
 		in   int64
@@ -76,96 +63,17 @@ func TestDiskUsage(t *testing.T) {
 	}
 }
 
-// newTestLogStore opens an unencrypted store directly (no janitor goroutine) so
-// tests can drive cleanup deterministically.
+// newTestLogStore opens an unencrypted store directly (no janitor goroutine),
+// wired to the real minimal-mode state like production's openLogStore, so the
+// minimal-mode test drives the logguard state through Add.
 func newTestLogStore(t *testing.T) *logStore {
 	t.Helper()
-	dir := t.TempDir()
-	s, err := openLogStoreTTL(dir, 0, 0, nil)
+	s, err := logstore.OpenTTL(t.TempDir(), 0, 0, nil, minimalMode)
 	if err != nil {
-		t.Fatalf("openLogStoreTTL: %v", err)
+		t.Fatalf("logstore.OpenTTL: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
-}
-
-// TestCleanupBytes_PriorityOrder proves low-priority (INFO) entries are deleted
-// before high-priority security (WARN/ERROR) entries when freeing space.
-func TestCleanupBytes_PriorityOrder(t *testing.T) {
-	isolateLogRing(t)
-	s := newTestLogStore(t)
-
-	base := time.Now().UnixMilli()
-	// Interleave low and high priority so pass-1 (low-only) must skip the high
-	// ones rather than just deleting the oldest block.
-	const n = 40
-	for i := 0; i < n; i++ {
-		lvl := "INFO"
-		if i%2 == 0 {
-			lvl = "WARN"
-		}
-		s.Add(LogEntry{TS: base + int64(i), Level: lvl, Host: "example.com", Method: "GET"})
-	}
-	drainLogStore(t, s, n)
-
-	// Ask to free a large amount so pass-1 deletes ALL low-priority entries but
-	// pass-2 should not be reached unless pass-1 was insufficient.
-	freed, count, levels := s.cleanupBytes(1 << 40)
-	if count == 0 {
-		t.Fatal("cleanupBytes freed nothing")
-	}
-	if freed <= 0 {
-		t.Fatalf("freed = %d, want > 0", freed)
-	}
-	// All INFO entries should be gone; WARN entries are sacrificed only in pass-2
-	// (when need still unmet). Since we asked for more than exists, pass-2 will
-	// also remove WARN — so just assert INFO was removed before WARN by checking
-	// the per-level breakdown counted INFO at least as many as WARN deletions in
-	// the typical case. The hard invariant: querying for remaining INFO == 0.
-	remaining, _, err := s.Query(0, 0, 0, 100000, func(e *LogEntry) bool { return e.Level == "INFO" })
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	if len(remaining) != 0 {
-		t.Errorf("expected all INFO deleted, %d remain", len(remaining))
-	}
-	if levels["INFO"] == 0 {
-		t.Error("expected INFO entries in cleanup breakdown")
-	}
-}
-
-// TestCleanupBytes_KeepsSecurityWhenLowFrees proves that if deleting just the
-// low-priority entries frees enough, the high-priority security logs survive.
-func TestCleanupBytes_KeepsSecurityWhenLowFrees(t *testing.T) {
-	isolateLogRing(t)
-	s := newTestLogStore(t)
-
-	base := time.Now().UnixMilli()
-	const lows, highs = 30, 10
-	for i := 0; i < lows; i++ {
-		s.Add(LogEntry{TS: base + int64(i), Level: "INFO", Host: "a.com"})
-	}
-	for i := 0; i < highs; i++ {
-		s.Add(LogEntry{TS: base + int64(1000+i), Level: "ERROR", Host: "threat.com"})
-	}
-	drainLogStore(t, s, lows+highs)
-
-	// Free a small amount — a handful of entries' worth. Pass-1 (low only) should
-	// satisfy it, leaving every ERROR security log intact.
-	_, count, levels := s.cleanupBytes(200)
-	if count == 0 {
-		t.Fatal("cleanupBytes freed nothing")
-	}
-	if levels["ERROR"] != 0 || levels["WARN"] != 0 {
-		t.Errorf("security logs were deleted in low-pressure cleanup: %v", levels)
-	}
-	sec, _, err := s.Query(0, 0, 0, 100000, func(e *LogEntry) bool { return e.Level == "ERROR" })
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	if len(sec) != highs {
-		t.Errorf("expected %d ERROR logs preserved, got %d", highs, len(sec))
-	}
 }
 
 // TestMinimalMode_DropsLowPriority verifies emergency minimal mode stops

@@ -1,18 +1,22 @@
 package main
 
+// logstore_test.go — lifecycle (enable/disable/purge) and API-handler tests
+// for the request-log history. The engine tests moved in-package to
+// internal/logstore with the extraction (ADR-0002).
+
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/logstore"
 )
 
 // adminReq returns a request whose context carries the admin role, so handlers
@@ -82,56 +86,6 @@ func TestEnableDisablePurgeLogStore(t *testing.T) {
 	}
 }
 
-// TestEnableLogStore_ConcurrentSafe exercises the lifecycle mutex: many
-// concurrent enables must publish exactly one store (no double-open, no orphan,
-// no panic) — verified under -race.
-func TestLogStore_EncryptedRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	key, err := logStoreEncKey(dir, "correct horse battery staple")
-	if err != nil {
-		t.Fatalf("derive key: %v", err)
-	}
-	if len(key) != logStoreEncKeyLen {
-		t.Fatalf("key len = %d, want %d", len(key), logStoreEncKeyLen)
-	}
-	s, err := openLogStoreTTL(dir, 0, 0, key)
-	if err != nil {
-		t.Fatalf("open encrypted: %v", err)
-	}
-	if !s.Encrypted() {
-		t.Error("store should report encrypted")
-	}
-	s.Add(LogEntry{TS: time.Now().UnixMilli(), Host: "secret.example.com", Status: "OK"})
-	got := drainLogStore(t, s, 1)
-	if len(got) != 1 || got[0].Host != "secret.example.com" {
-		t.Fatalf("encrypted read-back failed: %+v", got)
-	}
-	_ = s.Close()
-
-	// Reopening the SAME dir with the SAME passphrase+salt works.
-	key2, _ := logStoreEncKey(dir, "correct horse battery staple")
-	s2, err := openLogStoreTTL(dir, 0, 0, key2)
-	if err != nil {
-		t.Fatalf("reopen encrypted: %v", err)
-	}
-	if _, total, _ := s2.Query(0, 0, 0, 10, nil); total != 1 {
-		t.Errorf("reopen total = %d, want 1", total)
-	}
-	_ = s2.Close()
-
-	// Wrong passphrase → mismatch sentinel.
-	wrong, _ := logStoreEncKey(dir, "wrong passphrase")
-	if _, err := openLogStoreTTL(dir, 0, 0, wrong); !errors.Is(err, errLogStoreEncMismatch) {
-		t.Errorf("wrong key err = %v, want errLogStoreEncMismatch", err)
-	}
-
-	// "Lost passphrase": opening an encrypted store with NO key must be rejected
-	// (not silently read ciphertext as plaintext).
-	if _, err := openLogStoreTTL(dir, 0, 0, nil); !errors.Is(err, errLogStoreEncMismatch) {
-		t.Errorf("no-key open of encrypted store err = %v, want errLogStoreEncMismatch (must not open as plaintext)", err)
-	}
-}
-
 func TestPurgeLogStore_OfflineReset(t *testing.T) {
 	old := globalLogStore.Swap(nil)
 	oldDir := logStoreDir
@@ -159,6 +113,9 @@ func TestPurgeLogStore_OfflineReset(t *testing.T) {
 	}
 }
 
+// TestEnableLogStore_ConcurrentSafe exercises the lifecycle mutex: many
+// concurrent enables must publish exactly one store (no double-open, no orphan,
+// no panic) — verified under -race.
 func TestEnableLogStore_ConcurrentSafe(t *testing.T) {
 	old := globalLogStore.Swap(nil)
 	oldDir := logStoreDir
@@ -223,194 +180,9 @@ func TestLogStoreDiskEstimate(t *testing.T) {
 	}
 }
 
-func TestLogStore_WriteQueryNewestFirst(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	base := time.Now().UnixMilli()
-	for i := 0; i < 50; i++ {
-		s.Add(LogEntry{TS: base + int64(i), Host: "h.example.com", Status: "OK"})
-	}
-	got := drainLogStore(t, s, 50)
-	if len(got) < 50 {
-		t.Fatalf("got %d entries, want >=50", len(got))
-	}
-	// Newest-first.
-	for i := 1; i < len(got); i++ {
-		if got[i-1].TS < got[i].TS {
-			t.Fatalf("not newest-first at %d: %d < %d", i, got[i-1].TS, got[i].TS)
-		}
-	}
-	if got[0].TS != base+49 {
-		t.Errorf("newest TS = %d, want %d", got[0].TS, base+49)
-	}
-}
-
-func TestLogStore_OffsetPagination(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	base := time.Now().UnixMilli()
-	for i := 0; i < 100; i++ {
-		s.Add(LogEntry{TS: base + int64(i), Host: "h", Status: "OK"})
-	}
-	drainLogStore(t, s, 100)
-
-	// Two non-overlapping pages of 10 over a frozen window.
-	page1, total, _ := s.Query(0, 0, 0, 10, nil)
-	page2, _, _ := s.Query(0, 0, 10, 10, nil)
-	if total != 100 {
-		t.Errorf("total = %d, want 100", total)
-	}
-	if len(page1) != 10 || len(page2) != 10 {
-		t.Fatalf("page sizes = %d,%d, want 10,10", len(page1), len(page2))
-	}
-	// page1 newest (base+99..base+90), page2 next (base+89..base+80).
-	if page1[0].TS != base+99 {
-		t.Errorf("page1[0].TS = %d, want %d", page1[0].TS, base+99)
-	}
-	if page2[0].TS != base+89 {
-		t.Errorf("page2[0].TS = %d, want %d", page2[0].TS, base+89)
-	}
-}
-
-func TestLogStore_FilterAndTimeRange(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	base := time.Now().UnixMilli()
-	for i := 0; i < 30; i++ {
-		host := "good.example.com"
-		if i%3 == 0 {
-			host = "bad.example.com"
-		}
-		s.Add(LogEntry{TS: base + int64(i), Host: host, Status: "OK"})
-	}
-	drainLogStore(t, s, 30)
-
-	// Host filter.
-	_, total, _ := s.Query(0, 0, 0, 1000, func(e *LogEntry) bool { return e.Host == "bad.example.com" })
-	if total != 10 {
-		t.Errorf("filtered total = %d, want 10", total)
-	}
-
-	// Time-range slice: only entries with TS in [base+10, base+19].
-	_, rngTotal, _ := s.Query(base+10, base+19, 0, 1000, nil)
-	if rngTotal != 10 {
-		t.Errorf("range total = %d, want 10", rngTotal)
-	}
-}
-
-func TestLogStore_AgeRetentionTTL(t *testing.T) {
-	// Short TTL: entries must be gone from reads shortly after expiry. The TTL is
-	// 5s (not 1s) so the 20 entries reliably COEXIST in reads long enough for the
-	// initial drain to observe all of them even when the async writer goroutine is
-	// starved and flushes them a few seconds late under the determinism gate's
-	// parallel load — with a 1s TTL the earliest entries could expire before the
-	// last were written, so the drain never saw 20 at once ("have 0" flake).
-	const ttl = 5 * time.Second
-	s, err := openLogStoreTTL(t.TempDir(), ttl, 0, nil)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	base := time.Now().UnixMilli()
-	for i := 0; i < 20; i++ {
-		s.Add(LogEntry{TS: base + int64(i), Host: "h", Status: "OK"})
-	}
-	drainLogStore(t, s, 20)
-
-	// Badger filters TTL-expired entries at read time, so once the TTL passes
-	// Query returns total=0. Poll up to a generous deadline (well beyond the TTL)
-	// instead of a single fixed sleep, so slow expiry detection under parallel
-	// load does not flake.
-	deadline := time.Now().Add(ttl + 15*time.Second)
-	var total int
-	for {
-		var qerr error
-		if _, total, qerr = s.Query(0, 0, 0, 1000, nil); qerr != nil {
-			t.Fatalf("Query after expiry: %v", qerr)
-		}
-		if total == 0 {
-			break // all entries expired out of reads — success
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("after TTL expiry total = %d, want 0 (entries did not expire within deadline)", total)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-func TestLogStore_SizeRetentionPrunesOldest(t *testing.T) {
-	// maxBytes=1 forces the janitor to prune on every pass; a small batch makes
-	// the prune partial so we can prove it drops the OLDEST entries first.
-	old := logStorePruneBatch
-	logStorePruneBatch = 10
-	defer func() { logStorePruneBatch = old }()
-
-	s, err := openLogStoreTTL(t.TempDir(), 0, 1, nil)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	base := time.Now().UnixMilli()
-	for i := 0; i < 50; i++ {
-		s.Add(LogEntry{TS: base + int64(i), Host: "h", Status: "OK"})
-	}
-	drainLogStore(t, s, 50)
-
-	before := atomic.LoadInt64(&statLogStorePruned)
-	s.RunRetention()
-	if got := atomic.LoadInt64(&statLogStorePruned); got != before+10 {
-		t.Errorf("pruned counter delta = %d, want 10", got-before)
-	}
-
-	got, total, _ := s.Query(0, 0, 0, 1000, nil)
-	if total != 40 {
-		t.Errorf("after prune total = %d, want 40", total)
-	}
-	// The 10 oldest (base..base+9) should be gone; oldest remaining is base+10.
-	if len(got) > 0 && got[len(got)-1].TS != base+10 {
-		t.Errorf("oldest remaining TS = %d, want %d (oldest pruned first)", got[len(got)-1].TS, base+10)
-	}
-}
-
-func TestLogStore_Stats(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	base := time.Now().UnixMilli()
-	for i := 0; i < 25; i++ {
-		s.Add(LogEntry{TS: base + int64(i), Host: "h", Status: "OK"})
-	}
-	drainLogStore(t, s, 25)
-
-	st := s.Stats()
-	if st.Count != 25 {
-		t.Errorf("Stats.Count = %d, want 25", st.Count)
-	}
-	if st.OldestMs != base {
-		t.Errorf("Stats.OldestMs = %d, want %d", st.OldestMs, base)
-	}
-}
-
 func TestApiLogs_SourceStore(t *testing.T) {
 	isolateLogRing(t)
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
+	s, err := logstore.OpenTTL(t.TempDir(), 0, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -479,7 +251,7 @@ func TestApiLogs_SourceStore_Disabled(t *testing.T) {
 }
 
 func TestApiLogsRetention_GetPut(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 7*24*time.Hour, 2<<30, nil) // 7 days, 2 GB
+	s, err := logstore.OpenTTL(t.TempDir(), 7*24*time.Hour, 2<<30, nil, nil) // 7 days, 2 GB
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -564,7 +336,7 @@ func TestApiLogs_TimeRangeMemory(t *testing.T) {
 }
 
 func TestApiLogsRetention_ViewerForbidden(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
+	s, err := logstore.OpenTTL(t.TempDir(), 0, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -580,31 +352,6 @@ func TestApiLogsRetention_ViewerForbidden(t *testing.T) {
 	}
 }
 
-// TestLogStore_AddCloseRace exercises concurrent Add during Close — under -race
-// this fails if the send/close synchronization regresses (no send on a closed
-// channel, no panic).
-func TestLogStore_AddCloseRace(t *testing.T) {
-	s, err := openLogStoreTTL(t.TempDir(), 0, 0, nil)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	var wg sync.WaitGroup
-	for g := 0; g < 8; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 500; i++ {
-				s.Add(LogEntry{TS: int64(i), Host: "h", Status: "OK"})
-			}
-		}()
-	}
-	time.Sleep(2 * time.Millisecond) // let some Adds get in flight
-	if err := s.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	wg.Wait() // must complete without a panic
-}
-
 func TestApiLogsRetention_DisabledConflict(t *testing.T) {
 	old := globalLogStore.Load()
 	globalLogStore.Store(nil)
@@ -614,20 +361,5 @@ func TestApiLogsRetention_DisabledConflict(t *testing.T) {
 	apiLogsRetention(rec, adminReq(http.MethodPut, "/api/logs/retention", `{"retentionDays":30}`))
 	if rec.Code != http.StatusConflict {
 		t.Errorf("disabled PUT status %d, want 409", rec.Code)
-	}
-}
-
-func TestLogStore_NilSafe(t *testing.T) {
-	var s *logStore
-	s.Add(LogEntry{TS: 1})
-	s.RunRetention()
-	if _, total, err := s.Query(0, 0, 0, 10, nil); err != nil || total != 0 {
-		t.Errorf("nil Query = (%d,%v), want (0,nil)", total, err)
-	}
-	if st := s.Stats(); st.Bytes != 0 || st.Count != 0 {
-		t.Errorf("nil Stats = %+v, want zero", st)
-	}
-	if err := s.Close(); err != nil {
-		t.Errorf("nil Close = %v", err)
 	}
 }

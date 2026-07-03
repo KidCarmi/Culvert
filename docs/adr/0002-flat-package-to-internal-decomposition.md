@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,25 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/logstore` extracted (32nd; executed from the recorded design)
+Executed exactly per the design note below. The engine (open/TTL/encryption variants, key layout,
+async writeLoop, Query/Stats/retention, PurgeAll, EncKey/ErrEncMismatch, the priority-aware
+deletion passes from logguard.go as `CleanupBytes`+`deletePass`, the dropped/pruned counters with
+`Dropped()`/`Pruned()` accessors) and the `Entry` DTO (main alias `LogEntry = logstore.Entry`;
+`LowPriority` aliased too) moved to `internal/logstore`. The two designed inversion points shipped
+as designed: the **minimal-mode hook** is an `OpenTTL` parameter (Add's emergency skip reads main's
+logguard state through it; pinned in-package by `TestAdd_MinimalHook` and in main by the
+minimal-mode integration test whose `newTestLogStore` wires the real `minimalMode`), and
+**`RunRetention` returns (freed, count, levels)** so main's `runDiskGuard` records the
+audit/pressure event — the engine owns deletion, main owns observability state.
+`handleDiskCritical` became a function taking the store (methods can't live in main anymore),
+reading `BytesUsed()`/calling `CleanupBytes`. main keeps the singleton + lifecycle
+(enable/disable/purge, desired-retention memory, dir/passphrase startup state), the logguard
+orchestrator, the retention API, and the health/usage/estimate views. Engine tests (9 from
+logstore_test + the 2 deletion-pass tests + LowPriority) moved in-package (78% coverage);
+lifecycle/API/guard tests stayed in main with `logstore.OpenTTL` retargets. Leaf proof: `obs` only
+(BadgerDB contained — second Badger package after catdb).
 
 ### 2026-07-03 — `configversion.go` mapped; extraction REJECTED (deliberate keep)
 Full design pass on the 819-line hub. Three layers: (1) the numbered-version file store
