@@ -50,6 +50,7 @@ on:
       - "ui_rbac.go"
       - "ui_session.go"
       - "ui_auth.go"
+      - "release_*.go"
       - "internal/**"
       - ".github/workflows/codeql.yml"
   schedule:
