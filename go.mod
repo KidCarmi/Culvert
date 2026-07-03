@@ -15,7 +15,7 @@ require (
 	github.com/klauspost/compress v1.18.6
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/oschwald/geoip2-golang v1.13.0
-	github.com/playwright-community/playwright-go v0.5700.1
+	github.com/playwright-community/playwright-go v0.6000.0
 	github.com/sigstore/protobuf-specs v0.5.1
 	github.com/sigstore/sigstore-go v1.2.1
 	golang.org/x/crypto v0.53.0
