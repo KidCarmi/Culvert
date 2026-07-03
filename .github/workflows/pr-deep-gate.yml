@@ -82,6 +82,8 @@ jobs:
                 proxy_core=true ;;
             esac
             case "$f" in
+              # KEEP IN SYNC with codeql.yml's PR paths: — that workflow
+              # mirrors this security set (plus proxy_core) as GH path globs.
               # Auth/TLS/session/scanning surface — including the internal/
               # packages (ssrf, secscan, ocsp, uitls, …) that the top-level
               # shims delegate to, the ENTIRE admin-plane enforcement surface
@@ -391,24 +393,9 @@ jobs:
       - packaging
     if: always()
     steps:
-      - name: Evaluate results (skipped = pass)
-        env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          echo "$NEEDS_JSON" | jq .
-          if [ "$(echo "$NEEDS_JSON" | jq -r '.changes.result')" != "success" ]; then
-            echo "::error::diff classification failed — cannot trust the gate"; exit 1
-          fi
-          BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
-          if [ -n "$BAD" ]; then
-            echo "::error::failed jobs: $BAD"; exit 1
-          fi
-          echo "Deep PR Gate: all triggered jobs passed (or none were applicable)."
-          {
-            echo "## ✅ Deep PR Gate — APPROVED"
-            echo ""
-            echo "| Job | Result |"
-            echo "|-----|--------|"
-            echo "$NEEDS_JSON" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
-          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/needs-verdict
+        with:
+          needs-json: ${{ toJSON(needs) }}
+          title: "✅ Deep PR Gate — APPROVED"
+          require-success: changes

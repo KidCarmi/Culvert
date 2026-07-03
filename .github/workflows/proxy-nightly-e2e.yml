@@ -23,8 +23,6 @@ on:
 permissions:
   contents: read
 
-env:
-  GO_VERSION: "1.25"
 
 jobs:
   load-harness:
@@ -33,9 +31,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
+      - uses: ./.github/actions/setup-go-cache
 
       - name: Load harness (nightly-medium, under 1000-rule policy)
         id: load
@@ -79,9 +75,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
+      - uses: ./.github/actions/setup-go-cache
 
       # The binary's dataDir is hardcoded to /data; make it writable for the
       # non-root runner user (documented limitation, see the architecture doc).
@@ -130,9 +124,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
+      - uses: ./.github/actions/setup-go-cache
 
       - name: Run benchmarks (10/100/1000/10000 rules)
         run: |

@@ -183,48 +183,11 @@ jobs:
           TEST_SEED: "20260421"
         run: go test -race -count=1 -timeout=15m -coverprofile=coverage.out ./...
 
-      - name: Enforce global coverage floor (55%)
-        run: |
-          set -e
-          TOTAL=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/,"",$3); print $3}')
-          echo "Total coverage: ${TOTAL}%"
-          awk -v p="$TOTAL" 'BEGIN { exit (p+0 < 55) ? 1 : 0 }' || {
-            echo "::error::total coverage ${TOTAL}% below the 55% floor"; exit 1
-          }
-
-      - name: Enforce coverage floor on critical files
-        # Every file listed here is security-sensitive. If coverage drops below
-        # the threshold it usually means a new branch was added without tests —
-        # exactly the kind of regression this gate is designed to catch.
-        run: |
-          set -e
-          FUNC=$(go tool cover -func=coverage.out)
-          fail=0
-          check () {
-            local file="$1" floor="$2"
-            local pct
-            # Anchored match: require "/<file>:" so security.go doesn't also
-            # match ui_security.go (and policy.go doesn't match cdrpolicy.go
-            # / ui_policy.go, etc.). index() on a literal string keeps the
-            # check invariant to any regex-special characters in the name.
-            pct=$(echo "$FUNC" | awk -v f="$file" '
-              index($1, "/" f ":") > 0 {
-                match($NF, /[0-9.]+/); sum += substr($NF, RSTART, RLENGTH); n++
-              }
-              END { if (n>0) printf "%.1f", sum/n; else printf "0.0" }')
-            echo "  $file ... ${pct}% (floor ${floor}%)"
-            awk -v p="$pct" -v f="$floor" 'BEGIN { exit (p+0 < f+0) ? 1 : 0 }' || {
-              echo "::error file=$file::coverage ${pct}% below floor ${floor}%"
-              fail=1
-            }
-          }
-          echo "── Gate-critical coverage ──"
-          check "totp.go"        85
-          check "security.go"    70
-          check "session.go"     75
-          check "lockout.go"     80
-          check "policy.go"      60
-          exit $fail
+      - name: Enforce coverage floors (global + per-file)
+        # Single source of truth for BOTH coverage contracts — floors live in
+        # .github/scripts/coverage-floor.sh (shared with qa-gate's main-push
+        # run so the two event paths can never drift).
+        run: .github/scripts/coverage-floor.sh coverage.out
 
       - name: Upload coverage
         if: always()
@@ -387,24 +350,9 @@ jobs:
       - agent
     if: always()
     steps:
-      - name: Evaluate results (skipped = pass)
-        env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          echo "$NEEDS_JSON" | jq .
-          if [ "$(echo "$NEEDS_JSON" | jq -r '.changes.result')" != "success" ]; then
-            echo "::error::diff classification failed — cannot trust the gate"; exit 1
-          fi
-          BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
-          if [ -n "$BAD" ]; then
-            echo "::error::failed jobs: $BAD"; exit 1
-          fi
-          echo "Fast PR Gate: all required jobs passed (or were not applicable)."
-          {
-            echo "## ✅ Fast PR Gate — APPROVED"
-            echo ""
-            echo "| Job | Result |"
-            echo "|-----|--------|"
-            echo "$NEEDS_JSON" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
-          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/needs-verdict
+        with:
+          needs-json: ${{ toJSON(needs) }}
+          title: "✅ Fast PR Gate — APPROVED"
+          require-success: changes

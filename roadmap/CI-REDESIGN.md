@@ -34,11 +34,16 @@ Cost — ci.yml test/smoke PR-skip, proxy-pr-gate.yml deleted (triple
 duplicate), buildx cache main-scope fallback, fuzz Mon/Wed/Fri, conditional
 cancel-in-progress on ci.yml, nightly concurrency groups isolated.
 Reliability — deep-gate trivy DB mirror, TEST_SEED everywhere, determinism
-failure DX (seed + artifact), timeout-minutes on every job. DEFERRED to a
-follow-up: composite-action consolidation (classify-diff, needs-verdict,
-coverage-floor script — the load-bearing duplication), setup-go composite
-migration for the proxy-* nightly/weekly family, playwright browser cache,
-release-matrix consolidation.
+failure DX (seed + artifact), timeout-minutes on every job. **Hygiene batch applied
+(2026-07-03)**: `.github/actions/needs-verdict` is now THE skipped-as-pass
+aggregate (all four gate aggregates use it); `.github/scripts/
+coverage-floor.sh` is THE coverage contract (Fast Gate + qa-gate share one
+floors table); every job uses the `setup-go-cache` composite (31 direct
+call sites migrated, GO_VERSION envs removed); playwright browsers cached.
+STILL DEFERRED: classify-diff consolidation (the fast/deep filter sets are
+intentionally different — reciprocal sync comments added instead, incl.
+deep-gate↔codeql), release-matrix consolidation (release machinery, ~10
+min/release payoff only).
 
 ## 1. Lane architecture
 
