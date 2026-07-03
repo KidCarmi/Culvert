@@ -128,6 +128,8 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0    # --new-from-rev needs the merge base in history
       - uses: ./.github/actions/setup-go-cache
 
       - name: Install golangci-lint
@@ -135,8 +137,16 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
             | sh -s -- -b "$(go env GOPATH)/bin" v2.5.0
 
-      - name: Run golangci-lint
-        run: golangci-lint run --timeout=5m
+      - name: Run golangci-lint (new issues only)
+        # Diff-scoped by design: the tree is not lint-clean under a full run
+        # (~137 legacy findings), and the protection contract this replaces
+        # (reviewdog filter_mode: diff_context in code-review.yml) only
+        # fails on issues in the PR's changed lines. --new-from-rev is the
+        # native equivalent: fail only on issues introduced vs the merge base.
+        run: |
+          BASE_REF="${GITHUB_BASE_REF:-main}"
+          git fetch --no-tags origin "$BASE_REF"
+          golangci-lint run --timeout=5m --new-from-rev "origin/$BASE_REF"
 
   # ─── 3. THE race + coverage run (single source of truth) ──────────────────
   # Replaces the 3× full -race runs previously spread across qa-gate and
