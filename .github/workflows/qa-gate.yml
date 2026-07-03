@@ -462,7 +462,7 @@ jobs:
         run: $(go env GOPATH)/bin/golangci-lint run --timeout=5m ./...
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
 
       - name: gosec (agent module)
         # G703 excluded for parity with security-release-gate.yml (taint-mode
