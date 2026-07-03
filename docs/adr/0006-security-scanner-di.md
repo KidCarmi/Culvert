@@ -137,6 +137,16 @@ move time (recorded because they refine Slice 1):
 - Leaf proof (`go list -deps`): `clamav`, `hashcache`, `obs` (+ fileutil
   transitively) — no main import.
 
+**Follow-up (same day): `RemoteScanner` joined `internal/secscan`**
+(`remote.go`). The remote-scan client's only main couplings were `logger`
+(→`obs`), `fireAlert` (→the `alerts` seam, matching `logScanLimitExceeded`),
+and the `ScanResponse` wire type — which moved with it (the sidecar SERVER in
+`scan_svc.go` stays in main and shares the type via alias). `scan_remote.go`
+is now a pure alias shim (`RemoteScanner`/`ScanResponse` + the
+`globalRemoteScanner` singleton). Package deps gain `alerts`; still no main
+import. The `safeScanBody*` remote-vs-local fork deliberately stays in main —
+it is composition-root policy, not client logic.
+
 ## Alternatives considered
 
 - **Move to `internal/` in one step.** Rejected: `globalThreatFeed` and the
