@@ -79,12 +79,6 @@ func logDebugf(format string, args ...any) {
 	}
 }
 
-func logInfof(format string, args ...any) {
-	if GetLogLevel() <= LevelInfo {
-		logger.Printf("INFO "+format, args...)
-	}
-}
-
 func logWarnf(format string, args ...any) {
 	if GetLogLevel() <= LevelWarn {
 		logger.Printf("WARN "+format, args...)
