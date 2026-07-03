@@ -164,6 +164,50 @@ func TestSelfFence_EntersStandbyResync(t *testing.T) {
 	}
 }
 
+func TestAcquireLeaseForResume_WaitsOutOwnGhost(t *testing.T) {
+	tempHADir(t)
+	// Simulate a fast leader restart: the PREVIOUS process's lease (same
+	// candidate ID, nobody renewing it) still holds the key. The resume
+	// acquire must recognize its own ghost, wait it out, and re-acquire —
+	// never demote a healthy leader for restarting quickly (ADR-0005 S5).
+	f := halease.NewFake(1200 * time.Millisecond)
+	if granted, _, _ := f.Acquire(context.Background(), "cp-me"); !granted {
+		t.Fatal("seed ghost acquire")
+	}
+
+	h := &HAState{}
+	h.SetLeaseProvider(f, "cp-me")
+	if !h.acquireLeaseForResume() {
+		t.Fatal("resume must succeed once our own ghost lease expires")
+	}
+	if !h.WriteAllowed() {
+		t.Fatal("a successful resume acquire must confer write authority")
+	}
+}
+
+func TestAcquireLeaseForResume_OtherHolderDeniesImmediately(t *testing.T) {
+	tempHADir(t)
+	f := halease.NewFake(time.Minute)
+	if granted, _, _ := f.Acquire(context.Background(), "cp-other"); !granted {
+		t.Fatal("seed acquire")
+	}
+
+	h := &HAState{}
+	h.SetLeaseProvider(f, "cp-me")
+	start := time.Now()
+	if h.acquireLeaseForResume() {
+		t.Fatal("a lease held by ANOTHER node is a real denial — no ghost wait")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("other-holder denial must be immediate, took %s", elapsed)
+	}
+
+	// Legacy mode (nil provider): resume is always allowed.
+	if !(&HAState{}).acquireLeaseForResume() {
+		t.Fatal("nil provider must allow resume (legacy mode)")
+	}
+}
+
 func TestResumeDenied_EntersStandbyResync(t *testing.T) {
 	tempHADir(t)
 	f := halease.NewFake(time.Minute)

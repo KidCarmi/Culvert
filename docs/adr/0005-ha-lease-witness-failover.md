@@ -1,14 +1,15 @@
 # ADR-0005: Safe automatic HA failover via a fencing lease in etcd
 
-- **Status:** Accepted-direction, **RESUMED — S0–S4 SHIPPED** (S1–S4: 2026-07-03, after the
+- **Status:** Accepted, **PROGRAM COMPLETE — S0–S5 SHIPPED** (S1–S5: 2026-07-03, after the
   ADR-0002 decomposition program completed). Design adversarially reviewed and revised from a
   hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the big
-  stable vendors" + self-hosted → etcd). **Only S5 (flags/compose/GUI/runbook) remains** — the
-  complete failover logic is in the binary but DORMANT until S5 wires operator configuration
-  (nil provider = legacy). **F4 posture: documented bounded-LWW (option A)** — not state-in-etcd.
-- **Safety posture while parked:** unchanged from ADR-0004 Slice 1 — HA is safe-by-default (manual
-  failover, explicit promote, planned handoff, term-visible `/healthz`). Nothing regresses by pausing;
-  only the *automatic* convenience is deferred.
+  stable vendors" + self-hosted → etcd). S5 wired the operator surface (flags/YAML/compose/GUI/
+  runbook), so the mechanism is live wherever `--ha-etcd-endpoints` is set; nil provider = legacy
+  ADR-0004 behavior, byte-identical. **F4 posture: documented bounded-LWW (option A)** — not
+  state-in-etcd. **Closes RISK-001.**
+- **Safety posture:** lease mode gives safe AUTOMATIC failover (Acquire-gated promotion, self-fence,
+  epoch-fenced writes); legacy mode keeps the ADR-0004 safe-by-default posture (manual failover,
+  explicit promote, planned handoff, term-visible `/healthz`).
 - **Date:** 2026-07-01
 - **Deciders:** Chief Engineering Advisor (proposed + revised); project maintainer (chose etcd + LWW-A).
 - **Builds on:** ADR-0004 (HA Slice 1 — merged, PR #525). This is the deferred automatic-failover
@@ -106,6 +107,41 @@ Recorded so implementation cannot forget them:
   **documented LWW window**, evidence tests re-pinned, ADR-0004/RISK-001 updated.
 
 ## Implementation log
+
+### 2026-07-03 — S5 SHIPPED: operator wiring (flags/YAML/compose/GUI/runbook) — PROGRAM COMPLETE
+- **Config surface:** `-ha-etcd-endpoints/-ha-etcd-cert/-ha-etcd-key/-ha-etcd-ca/-ha-lease-ttl`
+  flags + `cluster.{etcd_endpoints,etcd_cert_file,etcd_key_file,etcd_ca_file,lease_ttl_seconds}`
+  YAML (CLI wins per field; TTL default 10s), resolved through the existing cluster startup slice
+  (resolver stays pure; test-pinned). Read once at startup — deliberate GUI-parity deferral, same
+  pattern as the `CULVERT_RELEASE_*` envs: the panel shows STATUS, the endpoints are boot config.
+- **`armHALease` (cluster_startup.go):** runs BEFORE any role branch so every path to leadership is
+  lease-arbitrated. **Malformed lease config is FATAL** (bad TLS material, unparsable CA) — silently
+  running legacy when the operator asked for fencing would be an invisible safety downgrade; an
+  UNREACHABLE etcd is NOT fatal (client connects lazily) — leadership is simply denied (fail-closed).
+  Both pinned by `TestArmHALease_*`.
+- **Ghost-lease restart (`acquireLeaseForResume`, ha_failover.go):** design gap found during S5 —
+  a leader restarting WITHIN the TTL finds the key held by its previous process's lease (holder ==
+  own candidate ID, no keepaliver); treating that as a real denial would demote a healthy leader on
+  every fast restart. The resume path waits out its OWN ghost (retry bounded at 45s) and re-acquires;
+  a denial by any OTHER holder stays an immediate real denial. `ResumeAsLeader` now uses it.
+  Test-pinned both ways (`TestAcquireLeaseForResume_*`).
+- **GUI:** `/api/cluster/ha` GET now carries `lease_mode`/`lease_valid`/`epoch` (same
+  `addLeaseHealth` as `/healthz`); the HA panel gains a "Fencing Lease" card (`held (epoch N)` /
+  `not held — writes fenced` / `none`) + a status-only note pointing at the startup config.
+- **Compose:** profile-gated `etcd` service (`--profile ha`, quay.io/coreos/etcd v3.6.13 matching
+  the pinned client) explicitly labelled LAB/SINGLE-HOST ONLY — a witness sharing a CP's host cannot
+  arbitrate that host's failure; production = third machine / 3-node cluster + TLS.
+- **Runbook:** `docs/operator/ha-lease-failover.md` — legacy-vs-lease table, TTL trade
+  (failover latency ≈ TTL; keepalive TTL/3 capped 2s; self-fence at confirmed-window end minus 1s
+  margin), the **documented LWW window** (≤TTL of unreplicated admin writes lost on resync — F4
+  option A), failure scenarios (leader death, partition, etcd-down-for-both = read-only until it
+  returns, ghost restart, double outage), break-glass (manual promote bypasses freshness/hysteresis;
+  removing endpoints on BOTH nodes reverts to legacy; `etcdctl del` + promote).
+- **Evidence re-pinned:** `ha_split_brain_failover_evidence_test.go` header updated (mechanism
+  landed) + new `TestCL4_LeaseMode_SplitBrainStructurallyPrevented` — two nodes, one Fake authority:
+  second promotion DENIED, healthz distinguishes holder by `lease_valid`+`epoch`. Legacy CL-4 facts
+  stay pinned for legacy deployments. RISK-001 CLOSED in the register; ADR-0004 cross-referenced;
+  stale ha.go header rewritten (lease/legacy split).
 
 ### 2026-07-03 — S1 SHIPPED: `internal/halease` (LeaseProvider + etcd impl + conformance suite)
 - **Package `internal/halease`:** `Provider` interface exactly per this ADR (`Acquire`/`Renew`/

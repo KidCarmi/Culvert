@@ -29,22 +29,27 @@ import (
 //   1. Admin enables CP from GUI, clicks "Enable HA" → generates HA token
 //   2. GUI shows a deploy command for the standby (includes --ha-join URL)
 //   3. Admin runs command on Server B → standby syncs state, stands by
-//   4. If leader dies AND auto-failover is enabled → standby promotes after 3
-//      failed sync attempts. Auto-failover is OPT-IN and OFF by default: a
-//      2-node active/passive cluster has no witness, so unattended promotion on
-//      a surviving-leader partition is a split-brain (ADR-0004 / RISK-001).
-//      Default (manual): the standby stays read-only until an operator acts.
+//   4. If the leader dies, failover depends on the mode:
+//      - LEASE mode (ADR-0005; --ha-etcd-endpoints set): automatic failover is
+//        always on and SAFE — the standby promotes only after ACQUIRING the
+//        etcd fencing lease (denied while the leader lives), a partitioned
+//        leader self-fences to read-only standby, and --ha-auto-failover is
+//        ignored. See ha_lease.go (S2), ha_fencing.go (S3), ha_failover.go (S4).
+//      - LEGACY mode (no lease): auto-failover is OPT-IN and OFF by default —
+//        a 2-node cluster without a witness cannot promote safely on a
+//        surviving-leader partition (ADR-0004 / RISK-001). Default (manual):
+//        the standby stays read-only until an operator acts.
 //   5. DPs automatically failover (--dp-cp-addr supports comma-separated addrs)
 //
 // Restart behaviour (ADR-0004): on restart a node honours its PERSISTED role —
 // a standby re-enters standby (it never silently self-asserts as a second
-// leader). A restarted LEADER resumes leadership because the topology gives it
-// no way to probe its peer: the standby is the gRPC client, so the leader does
-// not record the standby's address (peerAddr holds the *leader's own* advertised
-// address — see haDeployCommand). True "handshake the peer on restart, become
-// standby if it already leads" therefore requires recording the standby's
-// address and is deferred to the failover-mechanism work; until then a
-// leader-resume under auto-failover logs a split-brain-risk warning.
+// leader). A restarted LEADER in lease mode must RE-ACQUIRE the lease
+// (acquireLeaseForResume waits out its own previous process's ghost lease);
+// denied + a recorded standby address (ADR-0005 S0, learned via HASync) means
+// the standby promoted meanwhile, so the node re-enters standby and resyncs
+// from it (enterStandbyResync). In legacy mode a restarted leader resumes
+// leadership — it has no way to probe its peer — and under auto-failover it
+// logs a split-brain-risk warning.
 //
 // Authentication: standby presents a shared HA token in every HASync RPC.
 // The leader verifies it against the stored token.
@@ -256,7 +261,7 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 	// against it instead of asserting an unfenced leader role; otherwise
 	// fall back to the S2 stance (role kept, NO write authority, CRITICAL
 	// alert).
-	leaseGranted := h.acquireLeaseForLeadership("leader resume")
+	leaseGranted := h.acquireLeaseForResume()
 	if !leaseGranted && h.leaseConfigured() {
 		h.mu.Lock()
 		h.token = cfg.Token
@@ -828,6 +833,10 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 			"auto_failover": status.AutoFailover,
 			"term":          status.Term,
 		}
+		// ADR-0005 S5: surface the fencing-lease posture (GUI parity for the
+		// -ha-etcd-endpoints wiring; the endpoints themselves are startup
+		// config — read-once, restart-scoped — so the panel shows STATUS).
+		addLeaseHealth(resp, globalHA)
 		if status.Enabled && status.Role == "leader" {
 			resp["deploy_cmd"] = haDeployCommand()
 		}

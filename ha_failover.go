@@ -33,6 +33,10 @@ const (
 	// haRepromoteCooldown suppresses automatic re-promotion after a
 	// self-fence so flapping connectivity cannot churn leadership.
 	haRepromoteCooldown = 30 * time.Second
+	// haResumeGhostWait bounds how long a restarting leader waits for its
+	// OWN previous process's lease to expire before treating the denial as
+	// real (ghost-lease window ≈ one TTL).
+	haResumeGhostWait = 45 * time.Second
 )
 
 // haResyncContext is the material a demoted leader needs to re-enter
@@ -136,4 +140,43 @@ func (h *HAState) enterStandbyResync(reason string) bool {
 		func() error { return nil }, // CP gRPC server already running
 	)
 	return true
+}
+
+// acquireLeaseForResume is acquireLeaseForLeadership plus ghost-lease
+// handling for restarts (ADR-0005 S5): a leader that restarts WITHIN the
+// lease TTL finds the key still held by its previous process's lease —
+// holder == our own candidate ID with no keepaliver. Treating that as a
+// real denial would demote a healthy leader on every fast restart, so we
+// wait out our own ghost (bounded by the denial's reported validity plus
+// margin, capped at haResumeGhostWait) and retry. A denial by ANY OTHER
+// holder returns false immediately — that fence is real.
+func (h *HAState) acquireLeaseForResume() bool {
+	h.mu.RLock()
+	p, id := h.lease, h.leaseCandidateID
+	h.mu.RUnlock()
+	if p == nil {
+		return true
+	}
+	deadline := time.Now().Add(haResumeGhostWait)
+	for {
+		if h.acquireLeaseForLeadership("leader resume") {
+			return true
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), haLeaseOpTimeout)
+		st, err := p.Read(ctx)
+		cancel()
+		if err != nil || st.Holder != id {
+			return false // real denial (other holder) or unknown backend state
+		}
+		if time.Now().After(deadline) {
+			logger.Printf("HA: own ghost lease did not expire within %s — giving up the resume acquire", haResumeGhostWait)
+			return false
+		}
+		logger.Printf("HA: waiting out our own ghost lease from the previous process (valid_for=%s)", st.ValidFor)
+		wait := st.ValidFor + time.Second
+		if wait > 5*time.Second || wait <= time.Second {
+			wait = 5 * time.Second
+		}
+		time.Sleep(wait)
+	}
 }

@@ -157,6 +157,17 @@ type FileConfig struct {
 		// HA is configured at runtime from the admin GUI (Enable HA button) or
 		// via --ha-join/--ha-token flags on the standby. No shared filesystem needed —
 		// state is replicated over the existing mTLS gRPC channel.
+
+		// ADR-0005 S5: the etcd fencing lease for SAFE automatic failover.
+		// When etcd_endpoints is set, every path to HA leadership is
+		// arbitrated by a lease in etcd (epoch-fenced write sinks, automatic
+		// standby promotion on leader loss, self-fence on lease loss). Unset
+		// = legacy manual-failover mode (ADR-0004). Read once at startup.
+		EtcdEndpoints   string `yaml:"etcd_endpoints"`    // comma-separated (e.g. "https://etcd1:2379,https://etcd2:2379")
+		EtcdCert        string `yaml:"etcd_cert_file"`    // client cert for etcd mTLS (optional)
+		EtcdKey         string `yaml:"etcd_key_file"`     // client key for etcd mTLS (optional)
+		EtcdCA          string `yaml:"etcd_ca_file"`      // CA cert for etcd server validation (optional)
+		LeaseTTLSeconds int    `yaml:"lease_ttl_seconds"` // fencing lease TTL (default 10; failover latency ≈ TTL)
 	} `yaml:"cluster"`
 
 	// SecurityScan configures the local security scanning stack:

@@ -3119,7 +3119,11 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="ha-since-val">—</div><div class="stat-label">Since</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-failover-val">—</div><div class="stat-label">Failover</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-term-val">—</div><div class="stat-label">Term</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-lease-val">—</div><div class="stat-label">Fencing Lease</div></div>
             </div>
+            <p id="ha-lease-note" style="display:none;color:var(--muted);font-size:.7rem;margin:0 0 16px 0">
+              Fencing is configured at startup (<code>--ha-etcd-endpoints</code> / <code>cluster.etcd_endpoints</code>) and read once — this panel shows status only. With a lease armed, leadership and automatic failover are arbitrated by etcd; write authority requires a live lease.
+            </p>
             <!-- Manual failover: shown only when this node is a standby -->
             <div id="ha-promote-row" style="display:none;margin-bottom:16px">
               <button class="btn warn" id="ha-promote-btn" data-click="promoteHA">Promote this node to Leader</button>
@@ -10837,6 +10841,18 @@ async function loadHA(isCP) {
         ? '<span style="color:#f59e0b">Automatic</span>'
         : '<span style="color:#22c55e">Manual</span>';
       document.getElementById('ha-term-val').textContent = (r.term != null) ? r.term : '—';
+      // Fencing-lease posture (ADR-0005): startup-scoped config, status-only here.
+      const leaseVal = document.getElementById('ha-lease-val');
+      const leaseNote = document.getElementById('ha-lease-note');
+      if (r.lease_mode === 'lease') {
+        leaseVal.innerHTML = r.lease_valid
+          ? `<span style="color:#22c55e">● held</span><br><span style="font-size:.65rem;color:var(--muted)">epoch ${escHtml(String(r.epoch))}</span>`
+          : '<span style="color:#ef4444">○ not held</span><br><span style="font-size:.65rem;color:var(--muted)">writes fenced</span>';
+        leaseNote.style.display = '';
+      } else {
+        leaseVal.innerHTML = '<span style="color:var(--muted)">none</span>';
+        leaseNote.style.display = 'none';
+      }
       // Manual-failover button: only a standby can be promoted.
       document.getElementById('ha-promote-row').style.display = (r.role === 'standby') ? '' : 'none';
       if (r.deploy_cmd) {

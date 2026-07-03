@@ -165,6 +165,7 @@ services:
       "-fileprofiles-file", "/data/fileprofiles.json",
       "-idp-profiles-file", "/data/idp_profiles.json"
       # Optional extras — uncomment as needed:
+      # "-ha-etcd-endpoints", "http://etcd:2379",  # ADR-0005 fencing lease (needs --profile ha)
       # "-syslog",          "udp://10.0.0.1:514",
       # "-ui-allow-ip",     "10.0.0.0/8,192.168.0.0/16",
       # "-session-timeout", "8",
@@ -172,6 +173,39 @@ services:
     ]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── etcd fencing-lease witness (ADR-0005) ──────────────────────────────
+  # OPTIONAL, profile-gated: enables SAFE automatic HA failover by arbitrating
+  # leadership through a fencing lease. Start with:
+  #
+  #   docker compose --profile ha up -d
+  #
+  # then add to the proxy command on BOTH Control Planes:
+  #   "-ha-etcd-endpoints", "http://etcd:2379",
+  #
+  # LAB/SINGLE-HOST ONLY as configured here (plaintext client port, never
+  # published to the host, single member). A witness on the same host as a
+  # CP cannot arbitrate that host's failure — production runs etcd on a
+  # THIRD machine (or a 3-node cluster) with TLS (-ha-etcd-ca/-cert/-key).
+  # See docs/operator/ha-lease-failover.md.
+  etcd:
+    image: quay.io/coreos/etcd:v3.6.13   # matches the etcd client pinned in go.mod
+    container_name: culvert-etcd
+    profiles: ["ha"]
+    restart: unless-stopped
+    command:
+      - etcd
+      - --name=culvert-witness
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -226,3 +260,4 @@ volumes:
   clamav-db:        # ClamAV signature database — persisted to skip re-download on restart
   updater-state:   # writable rollback state for the updater sidecar (survives self-update)
   culvert-backups: # backup archives produced by the cli service (D1.5; mounted at /backup, only in cli)
+  etcd-data:       # fencing-lease witness state (ADR-0005; only with --profile ha)

@@ -30,10 +30,16 @@ package main
 //   - /healthz now exposes `term` + `write_authority`, so a double
 //     leader is DETECTABLE (compare terms across both CPs) instead of
 //     two indistinguishable `leader:true` bodies.
-// The assertions below are updated to pin this NEW behavior. The
-// failure mode that REMAINS open (no automatic reconcile on heal; and
-// split-brain is still POSSIBLE under opt-in auto-failover) stays
-// pinned as the work owned by the failover-mechanism slice.
+// The assertions below are updated to pin this NEW behavior.
+//
+// UPDATED for ADR-0005 S5 (2026-07-03). The failover-mechanism slice
+// landed: with an etcd fencing lease armed, every path to leadership
+// is Acquire-gated, so the CL-4 double-leader shape is STRUCTURALLY
+// impossible in lease mode (TestCL4_LeaseMode_SplitBrainStructurally-
+// Prevented below). The legacy-mode facts stay pinned as-is — they
+// describe deployments WITHOUT a lease (nil provider = byte-identical
+// ADR-0004 behavior), where no-reconcile-on-heal and opt-in-flag
+// split-brain remain the documented reality.
 //
 // Determinism contract
 // ====================
@@ -58,6 +64,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/halease"
 )
 
 // ─────────────────────────────────────────────────────────────────────
@@ -153,6 +161,54 @@ func TestCL4_SplitBrain_BothSidesReportLeaderAfterPromote(t *testing.T) {
 	// DIFFERENT terms (1 vs 2), which IS the split-brain detection
 	// signal Slice 1c added: an operator/monitor scraping both CPs sees
 	// two leaders at different epochs and knows S promoted later.
+}
+
+// TestCL4_LeaseMode_SplitBrainStructurallyPrevented — ADR-0005 closure
+// evidence. With a fencing lease armed, the double-leader shape pinned
+// above CANNOT be constructed through any promotion path: two nodes
+// share one lease authority, the second promotion is DENIED while the
+// first holds the lease, and /healthz distinguishes the real leader by
+// lease_valid + a non-zero fencing epoch.
+func TestCL4_LeaseMode_SplitBrainStructurallyPrevented(t *testing.T) {
+	defer swapGlobalHA(t)()
+	tempHADir(t)
+
+	f := halease.NewFake(time.Minute)
+	sideA := leaseStandby(f, "cp-a")
+	sideB := leaseStandby(f, "cp-b")
+
+	if err := sideA.PromoteManually(); err != nil {
+		t.Fatalf("first promotion (lease free) must succeed: %v", err)
+	}
+	defer sideA.Stop()
+	defer sideB.Stop()
+
+	if err := sideB.PromoteManually(); err == nil {
+		t.Fatal("second promotion must be DENIED while side A holds the lease — the CL-4 double leader cannot form in lease mode")
+	}
+	if sideB.IsLeader() {
+		t.Fatal("side B must remain standby after the denied promotion")
+	}
+
+	// Distinguishability: the holder's /healthz carries the live lease
+	// posture; the denied node still reports role=standby.
+	globalHA = sideA
+	rA := httptest.NewRecorder()
+	apiHealthz(rA, httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody))
+	body := rA.Body.String()
+	if !strings.Contains(body, `"lease_mode":"lease"`) || !strings.Contains(body, `"lease_valid":true`) {
+		t.Errorf("holder /healthz must expose the live lease posture: %s", body)
+	}
+	if !strings.Contains(body, `"epoch":1`) {
+		t.Errorf("holder /healthz must expose the fencing epoch: %s", body)
+	}
+
+	globalHA = sideB
+	rB := httptest.NewRecorder()
+	apiHealthz(rB, httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody))
+	if !strings.Contains(rB.Body.String(), `"role":"standby"`) {
+		t.Errorf("denied side /healthz must report standby: %s", rB.Body.String())
+	}
 }
 
 // TestCL4_SplitBrain_NoReconcileLogicExistsOnRejoin pins the absence

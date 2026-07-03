@@ -20,11 +20,17 @@ type clusterCLIFlags struct {
 	HAJoin         string
 	HAToken        string
 	HAAutoFailover bool
-	DPCPAddr       string
-	DPNodeID       string
-	DPCert         string
-	DPKey          string
-	DPCA           string
+	// ADR-0005 S5: etcd fencing-lease wiring.
+	HAEtcdEndpoints string
+	HAEtcdCert      string
+	HAEtcdKey       string
+	HAEtcdCA        string
+	HALeaseTTLSec   int
+	DPCPAddr        string
+	DPNodeID        string
+	DPCert          string
+	DPKey           string
+	DPCA            string
 }
 
 // clusterStartupConfig carries the resolved cluster init inputs.
@@ -37,9 +43,16 @@ type clusterStartupConfig struct {
 	CPAddr, CPCert, CPKey, CPCA string
 
 	// HA standby-join inputs (--ha-join/--ha-token from the leader's deploy
-	// command) + the opt-in auto-failover preference (ADR-0004).
+	// command) + the opt-in auto-failover preference (ADR-0004; legacy mode
+	// only — in lease mode the fence arbitrates).
 	HAJoinAddr, HAToken string
 	HAAutoFailover      bool
+
+	// ADR-0005 S5: etcd fencing lease (empty endpoints = legacy manual
+	// mode). CLI wins per field; TTL defaults to 10s.
+	HAEtcdEndpoints                 string
+	HAEtcdCert, HAEtcdKey, HAEtcdCA string
+	HALeaseTTLSec                   int
 
 	// ConfigRoleIsCP is true when the YAML pins cluster.role=control-plane.
 	ConfigRoleIsCP bool
@@ -65,19 +78,24 @@ func (c clusterStartupConfig) cpMode() bool {
 // for this slice. Pure and deterministic; safe on a zero-value *FileConfig.
 func resolveClusterStartupConfig(fc *FileConfig, flags clusterCLIFlags) clusterStartupConfig {
 	return clusterStartupConfig{
-		ClusterDBPath:  firstStr(flags.ClusterDB, fc.Cluster.StateDB, "cluster.json"),
-		CPAddr:         firstStr(flags.CPGRPCAddr, fc.Cluster.GRPCAddr),
-		CPCert:         firstStr(flags.CPGRPCCert, fc.Cluster.CertFile),
-		CPKey:          firstStr(flags.CPGRPCKey, fc.Cluster.KeyFile),
-		CPCA:           firstStr(flags.CPGRPCCA, fc.Cluster.CAFile),
-		HAJoinAddr:     flags.HAJoin,
-		HAToken:        flags.HAToken,
-		HAAutoFailover: flags.HAAutoFailover,
-		ConfigRoleIsCP: fc.Cluster.Role == "control-plane",
-		DPAddr:         flags.DPCPAddr,
-		DPNodeID:       flags.DPNodeID,
-		DPCert:         flags.DPCert,
-		DPKey:          flags.DPKey,
-		DPCA:           flags.DPCA,
+		ClusterDBPath:   firstStr(flags.ClusterDB, fc.Cluster.StateDB, "cluster.json"),
+		CPAddr:          firstStr(flags.CPGRPCAddr, fc.Cluster.GRPCAddr),
+		CPCert:          firstStr(flags.CPGRPCCert, fc.Cluster.CertFile),
+		CPKey:           firstStr(flags.CPGRPCKey, fc.Cluster.KeyFile),
+		CPCA:            firstStr(flags.CPGRPCCA, fc.Cluster.CAFile),
+		HAJoinAddr:      flags.HAJoin,
+		HAToken:         flags.HAToken,
+		HAAutoFailover:  flags.HAAutoFailover,
+		HAEtcdEndpoints: firstStr(flags.HAEtcdEndpoints, fc.Cluster.EtcdEndpoints),
+		HAEtcdCert:      firstStr(flags.HAEtcdCert, fc.Cluster.EtcdCert),
+		HAEtcdKey:       firstStr(flags.HAEtcdKey, fc.Cluster.EtcdKey),
+		HAEtcdCA:        firstStr(flags.HAEtcdCA, fc.Cluster.EtcdCA),
+		HALeaseTTLSec:   firstNonZero(flags.HALeaseTTLSec, fc.Cluster.LeaseTTLSeconds, 10),
+		ConfigRoleIsCP:  fc.Cluster.Role == "control-plane",
+		DPAddr:          flags.DPCPAddr,
+		DPNodeID:        flags.DPNodeID,
+		DPCert:          flags.DPCert,
+		DPKey:           flags.DPKey,
+		DPCA:            flags.DPCA,
 	}
 }

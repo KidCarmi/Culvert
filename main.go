@@ -86,6 +86,11 @@ type startupState struct {
 	haJoin                  *string
 	haToken                 *string
 	haAutoFailover          *bool
+	haEtcdEndpoints         *string
+	haEtcdCert              *string
+	haEtcdKey               *string
+	haEtcdCA                *string
+	haLeaseTTL              *int
 	dpCPAddr                *string
 	dpNodeID                *string
 	dpCert                  *string
@@ -247,7 +252,12 @@ func parseFlags(s *startupState) {
 	s.cpGRPCCA = flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
 	s.haJoin = flag.String("ha-join", "", "HA standby: leader CP gRPC address to sync from (e.g. cp1:50051)")
 	s.haToken = flag.String("ha-token", "", "HA standby: authentication token (from leader's deploy command)")
-	s.haAutoFailover = flag.Bool("ha-auto-failover", false, "HA: allow the standby to self-promote on leader loss. DEFAULT OFF — 2-node active/passive has no witness, so unattended auto-promotion can split-brain (ADR-0004/RISK-001). Off = manual failover.")
+	s.haAutoFailover = flag.Bool("ha-auto-failover", false, "HA: allow the standby to self-promote on leader loss. DEFAULT OFF — 2-node active/passive has no witness, so unattended auto-promotion can split-brain (ADR-0004/RISK-001). Off = manual failover. With -ha-etcd-endpoints the fencing lease arbitrates instead and this flag is ignored (ADR-0005).")
+	s.haEtcdEndpoints = flag.String("ha-etcd-endpoints", "", "HA fencing lease: comma-separated etcd endpoints (e.g. https://etcd1:2379). Enables SAFE automatic failover — every path to leadership is lease-arbitrated (ADR-0005). Empty = legacy manual failover.")
+	s.haEtcdCert = flag.String("ha-etcd-cert", "", "HA fencing lease: client certificate for etcd mTLS")
+	s.haEtcdKey = flag.String("ha-etcd-key", "", "HA fencing lease: client key for etcd mTLS")
+	s.haEtcdCA = flag.String("ha-etcd-ca", "", "HA fencing lease: CA certificate to validate the etcd server")
+	s.haLeaseTTL = flag.Int("ha-lease-ttl", 10, "HA fencing lease TTL in seconds (failover latency ≈ TTL; minimum 1)")
 	s.dpCPAddr = flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
 	s.dpNodeID = flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
 	s.dpCert = flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
@@ -625,19 +635,24 @@ func initMetricsToken(s *startupState) {
 func initCluster(s *startupState) {
 	loadCluster(
 		resolveClusterStartupConfig(s.fc, clusterCLIFlags{
-			ClusterDB:      *s.clusterDB,
-			CPGRPCAddr:     *s.cpGRPCAddr,
-			CPGRPCCert:     *s.cpGRPCCert,
-			CPGRPCKey:      *s.cpGRPCKey,
-			CPGRPCCA:       *s.cpGRPCCA,
-			HAJoin:         *s.haJoin,
-			HAToken:        *s.haToken,
-			HAAutoFailover: *s.haAutoFailover,
-			DPCPAddr:       *s.dpCPAddr,
-			DPNodeID:       *s.dpNodeID,
-			DPCert:         *s.dpCert,
-			DPKey:          *s.dpKey,
-			DPCA:           *s.dpCA,
+			ClusterDB:       *s.clusterDB,
+			CPGRPCAddr:      *s.cpGRPCAddr,
+			CPGRPCCert:      *s.cpGRPCCert,
+			CPGRPCKey:       *s.cpGRPCKey,
+			CPGRPCCA:        *s.cpGRPCCA,
+			HAJoin:          *s.haJoin,
+			HAToken:         *s.haToken,
+			HAAutoFailover:  *s.haAutoFailover,
+			HAEtcdEndpoints: *s.haEtcdEndpoints,
+			HAEtcdCert:      *s.haEtcdCert,
+			HAEtcdKey:       *s.haEtcdKey,
+			HAEtcdCA:        *s.haEtcdCA,
+			HALeaseTTLSec:   *s.haLeaseTTL,
+			DPCPAddr:        *s.dpCPAddr,
+			DPNodeID:        *s.dpNodeID,
+			DPCert:          *s.dpCert,
+			DPKey:           *s.dpKey,
+			DPCA:            *s.dpCA,
 		}),
 		appLifecycleCtx,
 		s.enrolledConfig,

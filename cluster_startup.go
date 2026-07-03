@@ -7,7 +7,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"os"
+	"strings"
+	"time"
+
+	"github.com/KidCarmi/Culvert/internal/halease"
 )
 
 // loadCluster applies the resolved cluster config. enrolled is the
@@ -26,6 +33,16 @@ func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnro
 		logger.Printf("ClusterDB: load error: %v — starting fresh", err)
 	} else if nodes := globalClusterStore.ListNodes(); len(nodes) > 0 {
 		logger.Printf("ClusterDB: loaded %d enrolled node(s) from %s", len(nodes), cfg.ClusterDBPath)
+	}
+
+	// ADR-0005 S5: arm the etcd fencing lease BEFORE any role branch so
+	// every path to leadership below is lease-arbitrated. A requested fence
+	// that cannot be built is FATAL — silently running legacy when the
+	// operator asked for fencing would be an invisible safety downgrade.
+	if cfg.HAEtcdEndpoints != "" {
+		if err := armHALease(cfg); err != nil {
+			logger.Fatalf("HA lease: %v", err)
+		}
 	}
 
 	switch {
@@ -117,4 +134,64 @@ func resolveDPWiring(cfg clusterStartupConfig, enrolled *dpEnrollmentConfig) dpW
 		}
 	}
 	return dp
+}
+
+// armHALease builds the etcd-backed fencing lease from the resolved config
+// and installs it on globalHA (ADR-0005 S5). The candidate ID is this
+// node's cluster identity. etcd client construction is lazy (no connection
+// until the first lease operation), so an unreachable etcd surfaces as
+// denied leadership (fail-closed) rather than a boot failure — only
+// MALFORMED config (bad TLS material, zero endpoints) errors here.
+func armHALease(cfg clusterStartupConfig) error {
+	endpoints := strings.Split(cfg.HAEtcdEndpoints, ",")
+	for i := range endpoints {
+		endpoints[i] = strings.TrimSpace(endpoints[i])
+	}
+
+	tlsCfg, err := buildEtcdTLSConfig(cfg)
+	if err != nil {
+		return err
+	}
+
+	provider, err := halease.NewEtcd(halease.Config{
+		Endpoints: endpoints,
+		TLS:       tlsCfg,
+		TTL:       time.Duration(cfg.HALeaseTTLSec) * time.Second,
+	})
+	if err != nil {
+		return err
+	}
+	globalHA.SetLeaseProvider(provider, clusterRole.nodeID)
+	logger.Printf("HA: etcd fencing lease ARMED (endpoints=%s, ttl=%ds, candidate=%s) — leadership is lease-arbitrated (ADR-0005)",
+		sanitizeLog(cfg.HAEtcdEndpoints), cfg.HALeaseTTLSec, sanitizeLog(clusterRole.nodeID))
+	return nil
+}
+
+// buildEtcdTLSConfig assembles the etcd client TLS material from the resolved
+// config. nil when neither cert nor CA is configured (plaintext — operator's
+// call, the compose lab profile uses it).
+func buildEtcdTLSConfig(cfg clusterStartupConfig) (*tls.Config, error) {
+	if cfg.HAEtcdCert == "" && cfg.HAEtcdCA == "" {
+		return nil, nil
+	}
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if cfg.HAEtcdCert != "" {
+		pair, err := tls.LoadX509KeyPair(cfg.HAEtcdCert, cfg.HAEtcdKey)
+		if err != nil {
+			return nil, fmt.Errorf("etcd client cert: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{pair}
+	}
+	if cfg.HAEtcdCA != "" {
+		caPEM, err := os.ReadFile(cfg.HAEtcdCA) // #nosec G304 -- operator-configured path
+		if err != nil {
+			return nil, fmt.Errorf("etcd CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("etcd CA: no certificates parsed from %s", cfg.HAEtcdCA)
+		}
+		tlsCfg.RootCAs = pool
+	}
+	return tlsCfg, nil
 }
