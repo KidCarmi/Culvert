@@ -26,6 +26,7 @@ on:
       - "session.go"
       - "store.go"
       - "events.go"
+      - "configversion.go"
       - "ui_rbac_e2e_test.go"
       - "ui_login_e2e_test.go"
       - "ui_policy_e2e_test.go"
@@ -41,6 +42,7 @@ on:
       - "ui_security_e2e_test.go"
       - "ui_ca_e2e_test.go"
       - "ui_updates_e2e_test.go"
+      - "ui_configversion_e2e_test.go"
       - "ui_e2e_helpers_test.go"
       - ".github/workflows/proxy-ui-e2e.yml"
 

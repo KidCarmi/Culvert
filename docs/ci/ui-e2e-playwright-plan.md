@@ -1,6 +1,6 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **slices 1–15 shipped**. Companion to
+Status: **slices 1–16 shipped**. Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
@@ -90,6 +90,13 @@ zero-runtime-dependency, Go-first contract.
 - **Slice 15 — self-update panel** (`ui_updates_e2e_test.go`). The panel is
   reachable and `/api/update/status` (version + update availability) responds
   through the admin's browser session.
+- **Slice 16 — config-versioning rollback, cross-plane** (`ui_configversion_e2e_test.go`).
+  The strongest governance assertion: a snapshot rolled back through the Settings
+  panel reverts the LIVE proxy plane. Baseline default-deny is snapshotted; a
+  UI-created `allow *` rule auto-snapshots (`policy.add`) and opens the plane
+  (200); the Config Versions list surfaces that snapshot; clicking Rollback +
+  confirming re-applies the baseline via `applyConfigBackup`, and the same request
+  is 403 again (deny→allow→deny, the last transition driven by a UI rollback).
 
 ### Dependency footprint (test-only)
 
