@@ -253,11 +253,14 @@ jobs:
 
       - name: Check for disallowed licenses
         # Fail if any dependency uses GPL, AGPL, LGPL, or CPAL.
+        # pipefail is required: the default shell does not set it, so without
+        # it the pipeline returns tee's (always-zero) status and a forbidden
+        # license would NOT fail this job.
         run: |
+          set -o pipefail
           go-licenses check ./... \
             --disallowed_types=forbidden,restricted \
             --ignore=proxy 2>&1 | tee license-report.txt
-          # Exit code from go-licenses is respected automatically.
 
       - name: Upload license report
         if: always()

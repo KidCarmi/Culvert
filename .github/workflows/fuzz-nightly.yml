@@ -49,7 +49,11 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
 
       - name: Fuzz ${{ matrix.target }} (15m budget)
+        # pipefail is required: GitHub's default shell does not set it, so
+        # without it a crash would be masked by tee's zero exit and the
+        # failure-only artifact upload below would never fire.
         run: |
+          set -o pipefail
           go test -run '^$' -fuzz "^${{ matrix.target }}$" -fuzztime 15m \
             ${{ matrix.pkg }} | tee "fuzz-${{ matrix.target }}.log"
 

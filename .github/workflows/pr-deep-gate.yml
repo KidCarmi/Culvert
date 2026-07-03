@@ -212,10 +212,19 @@ jobs:
             sleep 5
           done
           [ "$STATUS" = "healthy" ] || { echo "::error::proxy never became healthy"; exit 1; }
-          curl -fsS http://localhost:8080/health
+          curl -sf http://localhost:8080/health | grep -q '"status":"ok"'
+          # Readiness must actually gate (same semantics as the ci.yml smoke):
+          # a loop ending in `sleep` would exit 0 and mask a broken /ready.
           for i in 1 2 3; do
-            curl -fsS http://localhost:8080/ready && break || sleep 3
+            if curl -sf http://localhost:8080/ready 2>/dev/null | grep -q '"status":"ready"'; then
+              echo "Ready check passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: not ready yet, waiting 2s..."
+            sleep 2
           done
+          echo "::error::/ready did not return ready after 3 attempts"
+          exit 1
 
       - name: Diagnostics & teardown
         if: always()
@@ -272,7 +281,11 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
       - run: go mod download
       - name: Check for disallowed licenses
+        # pipefail is required: GitHub's default shell does not set it, so
+        # without it the pipeline would return tee's (always-zero) status
+        # and a forbidden license could sail through the gate.
         run: |
+          set -o pipefail
           go install github.com/google/go-licenses@v1.6.0
           go-licenses check ./... \
             --disallowed_types=forbidden,restricted \
@@ -294,6 +307,9 @@ jobs:
     if: needs.changes.outputs.packaging == 'true'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
 
       - name: shellcheck installer
         run: |
@@ -306,12 +322,18 @@ jobs:
         run: sudo visudo -c -f packaging/sudoers/culvert-maint
 
       - name: Validate systemd unit
+        # systemd-analyze verify checks that ExecStart resolves to an
+        # executable, so the freshly-built agent binary must be staged at
+        # the unit's documented path first (same as the legacy qa-agent job)
+        # or the verify fails on every packaging PR.
         run: |
-          if command -v systemd-analyze >/dev/null 2>&1; then
-            systemd-analyze verify packaging/systemd/culvert-maint.service || exit 1
-          else
+          if ! command -v systemd-analyze >/dev/null 2>&1; then
             echo "systemd-analyze unavailable — skipping unit verification"
+            exit 0
           fi
+          (cd cmd/culvert-maint && go build -o /tmp/culvert-maint .)
+          sudo install -m 0755 /tmp/culvert-maint /usr/local/bin/culvert-maint
+          systemd-analyze verify packaging/systemd/culvert-maint.service
 
   # ─── ✅ Aggregate — required check, passes when all-skipped ─────────────────
   deep-gate-approved:

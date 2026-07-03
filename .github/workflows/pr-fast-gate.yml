@@ -339,6 +339,7 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
       - name: Traffic-plane E2E
         run: |
+          set -o pipefail   # default shell lacks it; tee must not mask a failure
           go test -race -count=1 -timeout=10m -v \
             -run 'TestProxyE2E_|TestUNAUTH_HTTP_|TestUNAUTH_CONNECT_|TestSOCKS5_' . \
             | tee proxy-traffic.log
