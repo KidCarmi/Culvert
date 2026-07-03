@@ -18,8 +18,9 @@ import (
 	"io"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // RemoteScanner sends scan requests to a scan microservice.
@@ -68,7 +69,7 @@ func (rs *RemoteScanner) URL() string {
 // webhook alert so admins see when the sidecar starts dropping scans.
 // Tier 2.2: every fail-open return path routes through this helper.
 func remoteScanFailAlert(reason string) {
-	atomic.AddInt64(&statRemoteScanFail, 1)
+	secscan.AddRemoteScanFail()
 	go fireAlert("scan_svc_down", AlertPayload{
 		Source: "remote_scan",
 		Detail: reason,

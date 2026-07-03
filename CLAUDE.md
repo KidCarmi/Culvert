@@ -31,7 +31,7 @@ clam.go       — ClamAV INSTREAM scanner
 yara_scan.go  — Pure-Go YARA rule engine
 scanner.go    — Unified DPI + ClamAV + YARA scan coordinator
 security.go   — Security helpers (SSRF guard via isPrivateHost, header scrub)
-security_scan.go — Scan orchestration: ClamAV + YARA + threat feed + hash cache
+security_scan.go — Scan-orchestrator shim: adapters + wrappers over internal/secscan (ADR-0006)
 fileblock.go  — File extension/MIME blocking profiles
 fileprofile.go — Named file-type blocking profiles (Executables, Archives, etc.)
 geoip.go      — MaxMind GeoLite2 country lookup with background cache

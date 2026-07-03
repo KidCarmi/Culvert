@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -612,6 +612,19 @@ untouched via the alias (embedding an alias keeps the field name, so `NodeGroupI
 still compiles). D1.2b cold-start table moved into the package; `nodegroup_test.go` stayed black-box in
 main with its two `NodesInGroup` calls retargeted to the helper. Leaf proof: imports only
 `obs`+`fileutil`.
+
+### 2026-07-03 — `internal/secscan` extracted (20th; the ADR-0006 composition root)
+The completion table below gated `security_scan.go` behind "a dependency-injection refactor with its
+own ADR" — that is ADR-0006. Slice 1 built the injected-collaborator seams inside main; Slice 2 moved
+the orchestrator (`Scanner`/`Result`/`Deps`/`New`, `DecompressForScan`, package-owned counters) to
+`internal/secscan`. Key deltas vs the leaf playbook: constructor injection replaced Slice 1's
+nil-fallback-to-globals (an internal package cannot read main's globals; safe because production never
+reassigns `globalYARA`/`globalThreatFeed`/`globalScanExclusions` — in-place mutation only), and main
+tests that swapped those globals now inject the instance explicitly (`newEnabledScanner` helper,
+`newEnabledTestScanner` in-package). Main keeps the panic-safe wrappers, the remote-scanner fork, the
+`yaraRuleSetMatcher` toggle adapter, HTTP block helpers, the status map, and the singleton wiring
+(trimmed `security_scan.go`). Leaf proof: imports `clamav`+`hashcache`+`obs` (+`fileutil` transitive).
+See `docs/adr/0006-security-scanner-di.md` for the full decision record.
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 

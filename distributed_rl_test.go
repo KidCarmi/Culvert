@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // ─── generateTraceparent ────────────────────────────────────────────────────
@@ -261,7 +263,7 @@ func TestBodyNeedsBuffering(t *testing.T) {
 
 	// No scanners active.
 	dpiScanner = newContentScanner(1 << 20)
-	globalSecScanner = &SecurityScanner{cache: newHashCache(100, 0)}
+	globalSecScanner = secscan.New(secscan.Deps{Cache: newHashCache(100, 0)})
 	if bodyNeedsBuffering("text/html") {
 		t.Fatal("should not buffer when no scanners active")
 	}
@@ -285,7 +287,7 @@ func TestMaxScanBufferBytes_DPIvsSec(t *testing.T) {
 	}()
 
 	dpiScanner = newContentScanner(2 << 20)
-	globalSecScanner = &SecurityScanner{maxBytes: 5 << 20, cache: newHashCache(100, 0)}
+	globalSecScanner = secscan.New(secscan.Deps{MaxBytes: 5 << 20, Cache: newHashCache(100, 0)})
 
 	got := maxScanBufferBytes()
 	if got != 5<<20 {

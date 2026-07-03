@@ -1,6 +1,6 @@
 # ADR-0006: SecurityScanner dependency injection (scan orchestrator refactor)
 
-- **Status**: Accepted — Slice 1 shipped (2026-07-03); Slice 2 deferred, not committed
+- **Status**: Accepted — Slice 1 shipped (2026-07-03); Slice 2 shipped (2026-07-03, `internal/secscan`)
 - **Date**: 2026-07-03
 - **Deciders**: maintainer + engineering advisor session
 - **Relates to**: ADR-0002 (flat-package decomposition), ADR-0003 (obs facade)
@@ -105,13 +105,37 @@ calls, no behavior change anywhere on the hot path — the diff must be
 behavior-preserving and provable by the existing scan test suite plus new
 fake-engine unit tests for `ScanBody` branch coverage.
 
-### Slice 2 (deferred, not committed) — `internal/secscan`
+### Slice 2 (shipped 2026-07-03) — `internal/secscan`
 
-Only worth doing after Slice 1 proves the seams: move the orchestrator +
-interfaces to `internal/secscan`, main provides adapters for the threat feed
-and remote scanner, counters become package-owned with exported snapshots for
-`metrics.go`/`otlp.go`, logging via `obs`. Decide then, against the same
-leaf-proof bar as ADR-0002 (no main import; `go list -deps` check).
+The orchestrator + interfaces moved to `internal/secscan` (`Scanner`,
+`Result`, `Deps`, `New`, exported `ClamScanner`/`YARAMatcher`/`ThreatChecker`/
+`HashExcluder`, `DecompressForScan`, `ScanBodyTimeout`). Decisions made at
+move time (recorded because they refine Slice 1):
+
+- **Constructor injection replaced the nil-fallback.** An internal package
+  cannot read main's globals, so `New(Deps)` collaborators are fixed at
+  construction and immutable afterwards (`Init` only touches
+  clam/cache/maxBytes/enabled — dep reads need no lock). Pointer-capture of
+  the production singletons is safe: nothing in production reassigns
+  `globalYARA`/`globalThreatFeed`/`globalScanExclusions` (in-place mutation
+  only); main-package tests that used to swap those globals now inject the
+  swapped instance explicitly (`newEnabledScanner` helper).
+- **`New` constructs DISABLED** (Init enables), mirroring the pre-extraction
+  package-main literal semantics so `secScanStatusMap`'s `enabled` field and
+  the startup gating behave identically.
+- **Counters are package-owned** (`Counters()` snapshot;
+  `AddScanSkipped`/`AddRemoteScanFail` for the two main-side increment
+  sites); `metrics.go`/`otlp.go`/`events.go`/`ui_config.go` read the
+  snapshot.
+- **Logging via obs**: `Init`/ClamAV-error/timeout lines now always emit
+  (obs has no runtime level filter) — accepted, same as every prior leaf.
+- **Stays in main**: the panic-safe wrappers + remote-scanner fork
+  (`safeScanBody*`, `safeDPIScan`), `scanBlock*`, `bodyNeedsBuffering`,
+  `maxScanBufferBytes`, `logScanLimitExceeded` (alerts + sanitizeLog),
+  `secScanStatusMap`, the `yaraRuleSetMatcher` adapter (reads the yara
+  runtime toggle), and the `globalSecScanner` singleton wiring.
+- Leaf proof (`go list -deps`): `clamav`, `hashcache`, `obs` (+ fileutil
+  transitively) — no main import.
 
 ## Alternatives considered
 

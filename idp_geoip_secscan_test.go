@@ -7,6 +7,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // ─── IdPRegistry.Load ─────────────────────────────────────────────────────────
@@ -163,7 +165,7 @@ func TestSecurityScanner_CheckURL_EnabledFeed_Hit(t *testing.T) {
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Feed: tf})
 	result := ss.CheckURL("http://evil.example.com/malware")
 	if result == nil {
 		t.Error("CheckURL should return result for known malicious URL")
@@ -180,7 +182,7 @@ func TestSecurityScanner_CheckDomain_EnabledFeed_Hit(t *testing.T) {
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Feed: tf})
 	result := ss.CheckDomain("phishing.example.com")
 	if result == nil {
 		t.Error("CheckDomain should return result for known malicious domain")
@@ -196,7 +198,7 @@ func TestSecurityScanner_CheckURL_EnabledFeed_Miss(t *testing.T) {
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Feed: tf})
 	result := ss.CheckURL("http://clean.example.com/page")
 	if result != nil {
 		t.Error("CheckURL should return nil for clean URL")
@@ -209,7 +211,7 @@ func TestSecurityScanner_CheckDomain_EnabledFeed_Miss(t *testing.T) {
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Feed: tf})
 	result := ss.CheckDomain("clean.example.com")
 	if result != nil {
 		t.Error("CheckDomain should return nil for clean domain")

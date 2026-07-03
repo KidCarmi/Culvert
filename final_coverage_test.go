@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // ─── ScanBody cache paths ─────────────────────────────────────────────────────
@@ -25,7 +27,7 @@ func makeScannerWithYARA(t *testing.T) (*SecurityScanner, func()) { //nolint:goc
 	}
 	old := globalYARA
 	globalYARA = y
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Yara: yaraRuleSetMatcher{y}})
 	return ss, func() { globalYARA = old }
 }
 
@@ -35,7 +37,7 @@ func TestSecurityScanner_ScanBody_CacheHit_Dirty(t *testing.T) {
 
 	data := []byte("evil cached content")
 	hash := SHA256Hex(data)
-	ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: "virus-name", Source: "clamav"})
+	ss.CacheSet(hash, ScanCacheResult{Clean: false, Reason: "virus-name", Source: "clamav"})
 
 	result := ss.ScanBody(data)
 	if result == nil {
@@ -52,7 +54,7 @@ func TestSecurityScanner_ScanBody_CacheHit_Clean(t *testing.T) {
 
 	data := []byte("clean cached content")
 	hash := SHA256Hex(data)
-	ss.cache.Set(hash, ScanCacheResult{Clean: true, Source: "clean"})
+	ss.CacheSet(hash, ScanCacheResult{Clean: true, Source: "clean"})
 
 	result := ss.ScanBody(data)
 	if result != nil {
@@ -228,7 +230,7 @@ func TestSecurityScanner_ScanBody_YARA_Clean(t *testing.T) {
 	globalYARA = y
 	defer func() { globalYARA = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Yara: yaraRuleSetMatcher{y}})
 	result := ss.ScanBody([]byte("clean data that does not match"))
 	if result != nil {
 		t.Error("ScanBody should return nil for clean data with no YARA match")
