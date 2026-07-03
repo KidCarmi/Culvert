@@ -12,34 +12,34 @@ import (
 	"github.com/KidCarmi/Culvert/internal/fileblock"
 
 	"github.com/KidCarmi/Culvert/internal/ocsp"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 // ─── Finding 1.1: Blocklist.ClearAll ────────────────────────────────────────
 
 func TestBlocklistClearAll(t *testing.T) {
-	b := &Blocklist{
-		exact:      map[string]bool{"example.com": true, "test.org": true},
-		wildcards:  map[string]bool{".evil.com": true},
-		manual:     map[string]bool{"manual.net": true},
-		exceptions: map[string]bool{"safe.com": true},
-		mode:       "block",
-	}
+	b := blocklist.New()
+	b.Add("example.com")
+	b.Add("test.org")
+	b.Add("*.evil.com")
+	b.AddManual("manual.net")
+	b.AddException("safe.com")
+	b.SetMode("block")
+
 	b.ClearAll()
-	if len(b.exact) != 0 {
-		t.Error("exact should be empty after ClearAll")
+	if b.Count() != 0 {
+		t.Errorf("Count after ClearAll = %d, want 0 (exact+wildcard+manual cleared)", b.Count())
 	}
-	if len(b.wildcards) != 0 {
-		t.Error("wildcards should be empty after ClearAll")
+	if b.IsBlocked("example.com") || b.IsBlocked("sub.evil.com") || b.IsBlocked("manual.net") {
+		t.Error("no entry should be blocked after ClearAll")
 	}
-	if len(b.manual) != 0 {
-		t.Error("manual should be empty after ClearAll")
+	// Exceptions and mode survive ClearAll by contract.
+	if got := b.ListExceptions(); len(got) != 1 || got[0] != "safe.com" {
+		t.Errorf("exceptions after ClearAll = %v, want [safe.com]", got)
 	}
-	// Exceptions and mode should be preserved.
-	if len(b.exceptions) != 1 {
-		t.Error("exceptions should be preserved after ClearAll")
-	}
-	if b.mode != "block" {
-		t.Error("mode should be preserved after ClearAll")
+	if b.Mode() != "block" {
+		t.Errorf("mode after ClearAll = %q, want block", b.Mode())
 	}
 }
 
@@ -181,62 +181,6 @@ func TestRecordRequestSSLAction(t *testing.T) {
 	last := entries[len(entries)-1]
 	if last.SSLAction != "inspect" {
 		t.Errorf("expected SSLAction='inspect', got %q", last.SSLAction)
-	}
-}
-
-// ─── Finding 6.2: auditGetMemory ────────────────────────────────────────────
-
-func TestAuditGetMemory(t *testing.T) {
-	// Seed some audit entries.
-	auditMu.Lock()
-	auditLog = nil
-	auditMu.Unlock()
-
-	now := time.Now().UnixMilli()
-	for i := 0; i < 5; i++ {
-		auditMu.Lock()
-		auditLog = append(auditLog, AuditEntry{
-			TS:     now + int64(i*1000),
-			Time:   time.Now().Format("15:04:05"),
-			Actor:  "admin",
-			Action: "test",
-		})
-		auditMu.Unlock()
-	}
-
-	// No filter.
-	entries, total := auditGetMemory(0, 100, 0, 0)
-	if total != 5 {
-		t.Errorf("expected total=5, got %d", total)
-	}
-	if len(entries) != 5 {
-		t.Errorf("expected 5 entries, got %d", len(entries))
-	}
-
-	// With pagination.
-	entries, total = auditGetMemory(2, 2, 0, 0)
-	if total != 5 {
-		t.Errorf("expected total=5, got %d", total)
-	}
-	if len(entries) != 2 {
-		t.Errorf("expected 2 entries, got %d", len(entries))
-	}
-
-	// Offset past end.
-	entries, _ = auditGetMemory(10, 5, 0, 0)
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries for offset past end, got %d", len(entries))
-	}
-
-	// With time filter.
-	entries, _ = auditGetMemory(0, 100, now+1000, now+3000)
-	if len(entries) == 0 {
-		t.Error("expected some entries with time filter")
-	}
-	for _, e := range entries {
-		if e.TS < now+1000 || e.TS > now+3000 {
-			t.Errorf("entry TS %d outside filter range [%d, %d]", e.TS, now+1000, now+3000)
-		}
 	}
 }
 

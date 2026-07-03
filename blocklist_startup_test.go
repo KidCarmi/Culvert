@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 var blocklistStartupLoggerMu sync.Mutex
@@ -38,12 +40,7 @@ func snapshotBlocklistGlobals(t *testing.T) {
 	t.Helper()
 	oldBL := bl
 	oldSyncer := blFeedSyncer
-	bl = &Blocklist{
-		exact:      map[string]bool{},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
+	bl = blocklist.New()
 	blFeedSyncer = nil
 	t.Cleanup(func() {
 		bl = oldBL

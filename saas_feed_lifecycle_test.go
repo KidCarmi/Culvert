@@ -10,9 +10,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/saasfeed"
 )
 
 // errRoundTripper makes the syncer's HTTP fetch fail instantly without
@@ -46,11 +47,14 @@ func TestUC3_SaaSFeed_ExitsOnAppLifecycleCancel(t *testing.T) {
 
 	// Fresh syncer with a no-network transport. enabled defaults to false,
 	// matching the production zero value (atomic.Bool).
-	globalSaaSFeed = &SaaSFeedSyncer{
-		interval: 24 * time.Hour, // ticker will never fire during the test
-		client:   &http.Client{Transport: errRoundTripper{}},
-		enabled:  atomic.Bool{},
-	}
+	// interval defaults to 24h in New — the ticker will never fire during
+	// the test; enabled defaults to false, matching the production zero
+	// value. The lifecycle provider is the production resolveLifecycleCtx
+	// so Configure picks up the test-installed appLifecycleCtx.
+	globalSaaSFeed = saasfeed.New(saasfeed.Deps{
+		Client:    &http.Client{Transport: errRoundTripper{}},
+		Lifecycle: resolveLifecycleCtx,
+	})
 
 	// Install a test lifecycle context that Configure will pick up via
 	// resolveLifecycleCtx().

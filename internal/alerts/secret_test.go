@@ -1,4 +1,4 @@
-package main
+package alerts
 
 import (
 	"bytes"
@@ -42,9 +42,9 @@ func TestWebhookSecret_EncryptedAtRest(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "alert_webhooks.json")
 
-	as := &AlertStore{}
+	as := &Store{}
 	as.Init(path) // file does not exist yet → in-memory, path set
-	h := as.Add(AlertWebhook{
+	h := as.Add(Webhook{
 		Name:    "hook",
 		URL:     "https://example.invalid/hook",
 		Events:  []string{"*"},
@@ -68,7 +68,7 @@ func TestWebhookSecret_EncryptedAtRest(t *testing.T) {
 	}
 
 	// A fresh store reading the same file decrypts back to cleartext for signing.
-	as2 := &AlertStore{}
+	as2 := &Store{}
 	as2.Init(path)
 	got, ok := as2.GetByID(h.ID)
 	if !ok {
@@ -89,7 +89,7 @@ func TestWebhookSecret_LegacyCleartextMigratedOnSave(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	as := &AlertStore{}
+	as := &Store{}
 	as.Init(path)
 	got, ok := as.GetByID("1")
 	if !ok || got.Secret != "legacy-cleartext" {
@@ -97,7 +97,7 @@ func TestWebhookSecret_LegacyCleartextMigratedOnSave(t *testing.T) {
 	}
 
 	// Any mutation triggers save(), which re-encrypts the whole set.
-	as.Add(AlertWebhook{Name: "new", Secret: "another"})
+	as.Add(Webhook{Name: "new", Secret: "another"})
 
 	raw, _ := os.ReadFile(path)
 	if bytes.Contains(raw, []byte("legacy-cleartext")) {

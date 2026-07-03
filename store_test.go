@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // ── Config tests ───────────────────────────────────────────────────────────────
@@ -134,9 +136,9 @@ func TestUptime_Format(t *testing.T) {
 // ── Audit log ─────────────────────────────────────────────────────────────────
 
 func resetAuditLog() {
-	auditMu.Lock()
-	auditLog = nil
-	auditMu.Unlock()
+	// Clear the ring (snapshot deliberately dropped — matches the
+	// pre-extraction `auditLog = nil` reset semantics).
+	_ = audit.SwapRingForTest()
 }
 
 func TestAuditLog_AddAndGet(t *testing.T) {

@@ -23,21 +23,21 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/threatfeed"
 )
 
 // snapshotGlobalThreatFeedForAudit swaps globalThreatFeed for a fresh
 // in-memory instance so SetDomainAllowlist's saveToDisk call is a no-op
-// (dbPath is empty) and so other tests don't see the mutated state.
-// The cleanup restores the original.
+// (Init with an empty dbPath disables persistence) and so other tests
+// don't see the mutated state. The cleanup restores the original.
 func snapshotGlobalThreatFeedForAudit(t *testing.T) {
 	t.Helper()
 	orig := globalThreatFeed
 	t.Cleanup(func() { globalThreatFeed = orig })
-	globalThreatFeed = &ThreatFeed{
-		enabled:         true,
-		syncInterval:    time.Hour,
-		domainAllowlist: map[string]bool{},
-	}
+	fresh := threatfeed.New()
+	fresh.Init("", time.Hour)
+	globalThreatFeed = fresh
 }
 
 // TestDomainAllowlist_PUT_RecordsAuditEntry pins the positive path: a

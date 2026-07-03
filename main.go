@@ -32,6 +32,8 @@ import (
 	"github.com/KidCarmi/Culvert/internal/obs"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // caPassphraseEnv holds the name of the environment variable that supplies the
@@ -1231,9 +1233,7 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 	// the OS handle to eliminate the FD leak flagged as Risk #6 in
 	// ARCH_DISCOVERY. Best-effort, byte-equivalent to request-log-close.
 	reg.Register("audit-log-close", shutdownOrderAuditLogClose, func(context.Context) error {
-		if auditCloser != nil {
-			_ = auditCloser.Close() // best-effort FD release
-		}
+		_ = audit.Close() // best-effort FD release
 		return nil
 	})
 	reg.Register("log-closer", shutdownOrderLogCloser, func(context.Context) error {
@@ -1757,7 +1757,7 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 		logger.Fatalf("DataPlane client: %v", err)
 	}
 	activeDPClient.Store(dpClient) // for HA address discovery
-	clusterRoleIsDP.Store(true)
+	audit.SetDPMode(true)
 	dpClient.Run(ctx, 30*time.Second)
 	go dpCertRenewalLoop(ctx, dpClient, nodeID, certFile, keyFile, caFile)
 	logger.Printf("DataPlane: polling ControlPlane at %s every 30s", addr)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/secscan"
+	"github.com/KidCarmi/Culvert/internal/threatfeed"
 )
 
 // ─── IdPRegistry.Load ─────────────────────────────────────────────────────────
@@ -157,11 +158,20 @@ func TestValidateExternalURL_HTTP(t *testing.T) {
 
 // ─── SecurityScanner.CheckURL/CheckDomain with enabled feed ──────────────────
 
+// newEnabledFeed returns an enabled in-memory threat feed (no persistence).
+// Entries are seeded via threatfeed.SeedForTest — the engine's whitebox map
+// pokes moved in-package with the extraction (ADR-0002).
+func newEnabledFeed() *ThreatFeed {
+	tf := threatfeed.New()
+	tf.Init("", time.Hour)
+	return tf
+}
+
 func TestSecurityScanner_CheckURL_EnabledFeed_Hit(t *testing.T) {
 	// Temporarily enable the global threat feed and add a URL
 	old := globalThreatFeed
 	tf := newEnabledFeed()
-	tf.urls["http://evil.example.com/malware"] = feedEntry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.SeedForTest(map[string]string{"http://evil.example.com/malware": "urlhaus"}, nil)
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 
@@ -178,7 +188,7 @@ func TestSecurityScanner_CheckURL_EnabledFeed_Hit(t *testing.T) {
 func TestSecurityScanner_CheckDomain_EnabledFeed_Hit(t *testing.T) {
 	old := globalThreatFeed
 	tf := newEnabledFeed()
-	tf.domains["phishing.example.com"] = feedEntry{Source: "openphish", AddedAt: time.Now()}
+	tf.SeedForTest(nil, map[string]string{"phishing.example.com": "openphish"})
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 

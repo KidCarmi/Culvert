@@ -20,16 +20,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 func newTestBlocklistSyncer(t *testing.T) *BlocklistSyncer {
 	t.Helper()
 	ensureBlocklistStartupTestLogger(t)
-	testBL := &Blocklist{
-		exact: map[string]bool{}, wildcards: map[string]bool{},
-		manual: map[string]bool{}, exceptions: map[string]bool{},
-	}
+	testBL := blocklist.New()
 	return newBlocklistSyncer(testBL)
 }
 

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // TestKeyAtRest_Audit_MigrateCompleted: a successful cluster-CA plaintext→
@@ -80,15 +82,7 @@ func TestKeyAtRest_Audit_UnlockFailed(t *testing.T) {
 // entry — the unlock-failed audit is only on the decrypt-error branch, which a
 // plaintext passthrough never reaches.
 func TestKeyAtRest_Audit_NoEventWhenPlaintextDecrypt(t *testing.T) {
-	auditMu.Lock()
-	saved := auditLog
-	auditLog = nil
-	auditMu.Unlock()
-	t.Cleanup(func() {
-		auditMu.Lock()
-		auditLog = saved
-		auditMu.Unlock()
-	})
+	t.Cleanup(audit.SwapRingForTest())
 
 	dir := t.TempDir()
 	if _, wasEnc, err := decryptClusterCAKey(dir, dpTestKeyPEM(t)); err != nil || wasEnc {

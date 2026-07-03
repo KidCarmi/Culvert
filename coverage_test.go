@@ -11,58 +11,8 @@ import (
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
-// ─── SSE hub (events.go) ─────────────────────────────────────────────────────
-
-func TestSSEHub_RegisterUnregister(t *testing.T) {
-	h := &sseHub{clients: make(map[chan []byte]struct{})}
-	ch := make(chan []byte, 4)
-
-	if h.ClientCount() != 0 {
-		t.Error("fresh hub should have 0 clients")
-	}
-	h.register(ch)
-	if h.ClientCount() != 1 {
-		t.Errorf("ClientCount = %d, want 1 after register", h.ClientCount())
-	}
-	h.unregister(ch)
-	if h.ClientCount() != 0 {
-		t.Errorf("ClientCount = %d, want 0 after unregister", h.ClientCount())
-	}
-}
-
-func TestSSEHub_Broadcast(t *testing.T) {
-	h := &sseHub{clients: make(map[chan []byte]struct{})}
-	ch := make(chan []byte, 4)
-	h.register(ch)
-
-	msg := []byte(`{"test":1}`)
-	h.broadcast(msg)
-
-	select {
-	case received := <-ch:
-		if !bytes.Equal(received, msg) {
-			t.Errorf("broadcast received %q, want %q", received, msg)
-		}
-	default:
-		t.Error("broadcast message not received")
-	}
-	h.unregister(ch)
-}
-
-func TestSSEHub_Broadcast_SlowClient(_ *testing.T) {
-	// A full channel (no buffer space) should be skipped gracefully.
-	h := &sseHub{clients: make(map[chan []byte]struct{})}
-	ch := make(chan []byte) // unbuffered — will always be "full"
-	h.register(ch)
-	// broadcast should not block
-	done := make(chan struct{})
-	go func() {
-		h.broadcast([]byte("msg"))
-		close(done)
-	}()
-	<-done
-	h.unregister(ch)
-}
+// ─── SSE hub — engine tests moved in-package to internal/sse with the
+// extraction (ADR-0002). ─────────────────────────────────────────────────────
 
 // ─── SecurityScanner (security_scan.go) ──────────────────────────────────────
 

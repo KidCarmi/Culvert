@@ -17,6 +17,8 @@ import (
 	"github.com/crewjam/saml"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
@@ -150,7 +152,7 @@ func TestClusterAuth_LastGoodSnapshotKeepsSAMLSessionPolicyLocal(t *testing.T) {
 		Provider: "corp-saml",
 	}), http.StatusForbidden)
 
-	clusterRoleIsDP.Store(true)
+	audit.SetDPMode(true)
 	activeDPClient.Store(&DataPlaneClient{})
 	dpControlPlanePollFailing.Store(true)
 	if got := checkDPLastGoodConfigSnapshot(); got.Status != diagWarn {
@@ -166,7 +168,7 @@ func withClusterAuthLastGoodGlobals(t *testing.T) {
 	origSecret := append([]byte(nil), sessionSecret...)
 	origBaseURL := cfg.ProxyBaseURL()
 	origTrustForwarded := trustForwardedHeaders
-	origDP := clusterRoleIsDP.Load()
+	origDP := audit.DPMode()
 	origClient := activeDPClient.Load()
 	origPollFailing := dpControlPlanePollFailing.Load()
 	withDPLastGoodConfigTestGlobals(t)
@@ -178,7 +180,7 @@ func withClusterAuthLastGoodGlobals(t *testing.T) {
 		sessionSecret = origSecret
 		SetProxyBaseURL(origBaseURL)
 		trustForwardedHeaders = origTrustForwarded
-		clusterRoleIsDP.Store(origDP)
+		audit.SetDPMode(origDP)
 		activeDPClient.Store(origClient)
 		dpControlPlanePollFailing.Store(origPollFailing)
 	})

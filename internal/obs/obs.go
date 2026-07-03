@@ -45,6 +45,25 @@ func Printf(format string, args ...any) { emit(fmt.Sprintf(format, args...)) }
 // log-level filter (that state lives in main); internal warnings always emit.
 func Warnf(format string, args ...any) { emit("WARN " + fmt.Sprintf(format, args...)) }
 
+// debugEnabled mirrors "main's log level is DEBUG". The level state itself
+// stays in package main (same stance as Warnf's note above); main publishes
+// the boolean from SetLogLevel. Default is off, so Debugf lines are dropped
+// until main first publishes — in production that happens at startup before
+// any internal engine runs.
+var debugEnabled atomic.Bool
+
+// SetDebugEnabled publishes whether debug-level lines should emit. Called by
+// package main's SetLogLevel on every level change.
+func SetDebugEnabled(on bool) { debugEnabled.Store(on) }
+
+// Debugf formats with a DEBUG prefix and sends the line to the configured
+// sink, but only while debug logging is enabled (SetDebugEnabled).
+func Debugf(format string, args ...any) {
+	if debugEnabled.Load() {
+		emit("DEBUG " + fmt.Sprintf(format, args...))
+	}
+}
+
 // Sanitize strips control characters from s to prevent log injection (CWE-117).
 //
 // This is an INDEPENDENT copy of package main's sanitizeLog (proxy.go), kept

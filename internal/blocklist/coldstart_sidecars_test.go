@@ -1,24 +1,10 @@
-package main
+package blocklist
 
-// D1.2b cold-start tests for the blocklist sidecar files (.mode,
-// .manual, .exceptions). Reads run through Blocklist.Load.
-//
-// Two D1.2-flag findings pinned by these tests:
-//
-// Flag 1 — .mode silent fallback to "block" on any non-"allow" value
-//   The loader at store.go:577-579 only recognizes the literal string
-//   "allow" (after TrimSpace). Anything else — "block", "BLOCK",
-//   "deny", "ALLOW", garbage, empty — silently leaves the mode at
-//   default ("block"). Because the default IS "block" this is not a
-//   security regression, but operators have no signal that their
-//   intended config did not take effect.
-//
-// Flag 2 — .manual / .exceptions accept any line content as a
-//   "hostname". Loader at store.go:583-590 / 593-600 trims whitespace
-//   per line, skips blanks, and adds whatever's left. There is no
-//   hostname validation. A line like "obviously not a host" becomes a
-//   literal entry that will never match real traffic and will never be
-//   reported as invalid.
+// D1.2b cold-start tests for the blocklist sidecar files (.mode, .manual,
+// .exceptions), moved in-package from package main with the extraction
+// (ADR-0002, store.go decomposition Phase A). Reads run through Load.
+// See the D1.2-flag findings pinned inline (mode silent-default; sidecar
+// lines accepted without hostname validation).
 
 import (
 	"os"
@@ -30,8 +16,8 @@ import (
 // freshBLForLoad returns a Blocklist with the maps Load needs to be
 // able to assign into. Load itself initializes manual/exceptions but
 // requires exact/wildcards (touched by other code paths) to be ready.
-func freshBLForLoad() *Blocklist {
-	return &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+func freshBLForLoad() *Store {
+	return New()
 }
 
 func writeOptional(t *testing.T, path string, body []byte) {

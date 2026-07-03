@@ -1,4 +1,4 @@
-package main
+package threatfeed
 
 import (
 	"encoding/json"
@@ -7,63 +7,63 @@ import (
 	"time"
 )
 
-// ─── normaliseFeedURL ─────────────────────────────────────────────────────────
+// ─── NormaliseURL ─────────────────────────────────────────────────────────────
 
 func TestNormaliseFeedURL_Valid(t *testing.T) {
-	norm, host := normaliseFeedURL("http://malware.example.com/bad/path?query=1")
+	norm, host := NormaliseURL("http://malware.example.com/bad/path?query=1")
 	if norm == "" {
-		t.Error("normaliseFeedURL: expected non-empty norm")
+		t.Error("NormaliseURL: expected non-empty norm")
 	}
 	if host != "malware.example.com" {
-		t.Errorf("normaliseFeedURL host = %q, want malware.example.com", host)
+		t.Errorf("NormaliseURL host = %q, want malware.example.com", host)
 	}
 	// query stripped
 	if norm != "http://malware.example.com/bad/path" {
-		t.Errorf("normaliseFeedURL norm = %q, want path only (no query)", norm)
+		t.Errorf("NormaliseURL norm = %q, want path only (no query)", norm)
 	}
 }
 
 func TestNormaliseFeedURL_NoScheme(t *testing.T) {
-	norm, host := normaliseFeedURL("evil.example.com/malware")
+	norm, host := NormaliseURL("evil.example.com/malware")
 	if norm == "" {
-		t.Error("normaliseFeedURL: no-scheme URL should still parse")
+		t.Error("NormaliseURL: no-scheme URL should still parse")
 	}
 	if host != "evil.example.com" {
-		t.Errorf("normaliseFeedURL host = %q, want evil.example.com", host)
+		t.Errorf("NormaliseURL host = %q, want evil.example.com", host)
 	}
 }
 
 func TestNormaliseFeedURL_InvalidURL(t *testing.T) {
-	norm, host := normaliseFeedURL("://bad")
+	norm, host := NormaliseURL("://bad")
 	if norm != "" || host != "" {
-		t.Errorf("normaliseFeedURL invalid URL should return empty, got norm=%q host=%q", norm, host)
+		t.Errorf("NormaliseURL invalid URL should return empty, got norm=%q host=%q", norm, host)
 	}
 }
 
 func TestNormaliseFeedURL_PrivateIP(t *testing.T) {
-	norm, host := normaliseFeedURL("http://192.168.1.1/malware")
+	norm, host := NormaliseURL("http://192.168.1.1/malware")
 	if norm != "" || host != "" {
-		t.Errorf("normaliseFeedURL private IP should return empty, got norm=%q host=%q", norm, host)
+		t.Errorf("NormaliseURL private IP should return empty, got norm=%q host=%q", norm, host)
 	}
 }
 
 func TestNormaliseFeedURL_TrailingSlash(t *testing.T) {
-	norm, _ := normaliseFeedURL("http://evil.example.com/")
+	norm, _ := NormaliseURL("http://evil.example.com/")
 	if norm == "" {
 		t.Fatal("expected non-empty norm")
 	}
 	// trailing slash should be trimmed
 	if norm[len(norm)-1] == '/' {
-		t.Errorf("normaliseFeedURL should trim trailing slash, got %q", norm)
+		t.Errorf("NormaliseURL should trim trailing slash, got %q", norm)
 	}
 }
 
-// ─── ThreatFeed CheckURL / CheckDomain ────────────────────────────────────────
+// ─── Feed CheckURL / CheckDomain ──────────────────────────────────────────────
 
-func newEnabledFeed() *ThreatFeed {
-	tf := &ThreatFeed{
-		urls:    make(map[string]feedEntry),
-		domains: make(map[string]feedEntry),
+func newEnabledFeed() *Feed {
+	tf := &Feed{
+		urls:    make(map[string]entry),
+		domains: make(map[string]entry),
 		enabled: true,
 	}
 	tf.totalEntries.Store(0)
@@ -72,7 +72,7 @@ func newEnabledFeed() *ThreatFeed {
 
 func TestThreatFeed_CheckURL_Hit(t *testing.T) {
 	tf := newEnabledFeed()
-	tf.urls["http://malware.example.com/evil"] = feedEntry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.urls["http://malware.example.com/evil"] = entry{Source: "urlhaus", AddedAt: time.Now()}
 
 	hit, src := tf.CheckURL("http://malware.example.com/evil")
 	if !hit {
@@ -93,7 +93,7 @@ func TestThreatFeed_CheckURL_Miss(t *testing.T) {
 
 func TestThreatFeed_CheckURL_DomainFallback(t *testing.T) {
 	tf := newEnabledFeed()
-	tf.domains["malware.example.com"] = feedEntry{Source: "openphish", AddedAt: time.Now()}
+	tf.domains["malware.example.com"] = entry{Source: "openphish", AddedAt: time.Now()}
 
 	// URL not in urls map but domain is in domains map
 	hit, src := tf.CheckURL("http://malware.example.com/some/path")
@@ -106,9 +106,9 @@ func TestThreatFeed_CheckURL_DomainFallback(t *testing.T) {
 }
 
 func TestThreatFeed_CheckURL_Disabled(t *testing.T) {
-	tf := &ThreatFeed{
-		urls:    make(map[string]feedEntry),
-		domains: make(map[string]feedEntry),
+	tf := &Feed{
+		urls:    make(map[string]entry),
+		domains: make(map[string]entry),
 		enabled: false,
 	}
 	hit, _ := tf.CheckURL("http://malware.example.com/evil")
@@ -119,7 +119,7 @@ func TestThreatFeed_CheckURL_Disabled(t *testing.T) {
 
 func TestThreatFeed_CheckDomain_Hit(t *testing.T) {
 	tf := newEnabledFeed()
-	tf.domains["phishing.example.com"] = feedEntry{Source: "openphish", AddedAt: time.Now()}
+	tf.domains["phishing.example.com"] = entry{Source: "openphish", AddedAt: time.Now()}
 
 	hit, src := tf.CheckDomain("phishing.example.com")
 	if !hit {
@@ -132,7 +132,7 @@ func TestThreatFeed_CheckDomain_Hit(t *testing.T) {
 
 func TestThreatFeed_CheckDomain_CaseInsensitive(t *testing.T) {
 	tf := newEnabledFeed()
-	tf.domains["malware.example.com"] = feedEntry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["malware.example.com"] = entry{Source: "urlhaus", AddedAt: time.Now()}
 
 	hit, _ := tf.CheckDomain("MALWARE.EXAMPLE.COM")
 	if !hit {
@@ -142,7 +142,7 @@ func TestThreatFeed_CheckDomain_CaseInsensitive(t *testing.T) {
 
 func TestThreatFeed_CheckDomain_TrailingDot(t *testing.T) {
 	tf := newEnabledFeed()
-	tf.domains["malware.example.com"] = feedEntry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["malware.example.com"] = entry{Source: "urlhaus", AddedAt: time.Now()}
 
 	hit, _ := tf.CheckDomain("malware.example.com.")
 	if !hit {
@@ -159,9 +159,9 @@ func TestThreatFeed_CheckDomain_Miss(t *testing.T) {
 }
 
 func TestThreatFeed_CheckDomain_Disabled(t *testing.T) {
-	tf := &ThreatFeed{
-		urls:    make(map[string]feedEntry),
-		domains: make(map[string]feedEntry),
+	tf := &Feed{
+		urls:    make(map[string]entry),
+		domains: make(map[string]entry),
 		enabled: false,
 	}
 	hit, _ := tf.CheckDomain("evil.example.com")
@@ -170,7 +170,7 @@ func TestThreatFeed_CheckDomain_Disabled(t *testing.T) {
 	}
 }
 
-// ─── ThreatFeed.loadFromDisk ───────────────────────────────────────────────────
+// ─── Feed.loadFromDisk ────────────────────────────────────────────────────────
 
 func TestThreatFeed_LoadFromDisk_NonExistent(t *testing.T) {
 	tf := newEnabledFeed()
@@ -183,8 +183,8 @@ func TestThreatFeed_LoadFromDisk_NonExistent(t *testing.T) {
 func TestThreatFeed_LoadFromDisk_Valid(t *testing.T) {
 	db := feedDB{
 		LastSync: time.Now(),
-		URLs:     map[string]feedEntry{"http://evil.com/bad": {Source: "urlhaus", AddedAt: time.Now()}},
-		Domains:  map[string]feedEntry{"evil.com": {Source: "urlhaus", AddedAt: time.Now()}},
+		URLs:     map[string]entry{"http://evil.com/bad": {Source: "urlhaus", AddedAt: time.Now()}},
+		Domains:  map[string]entry{"evil.com": {Source: "urlhaus", AddedAt: time.Now()}},
 	}
 	data, _ := json.Marshal(db)
 	f, err := os.CreateTemp("", "feeddb*.json")
@@ -217,7 +217,7 @@ func TestThreatFeed_LoadFromDisk_BadJSON(t *testing.T) {
 	}
 }
 
-// ─── ThreatFeed.Stats ─────────────────────────────────────────────────────────
+// ─── Feed.Stats ───────────────────────────────────────────────────────────────
 
 func TestThreatFeed_Stats(t *testing.T) {
 	tf := newEnabledFeed()
@@ -230,8 +230,8 @@ func TestThreatFeed_Stats(t *testing.T) {
 
 func TestThreatFeed_ExportURLs(t *testing.T) {
 	tf := newEnabledFeed()
-	tf.urls["http://evil.com/payload"] = feedEntry{Source: "urlhaus", AddedAt: time.Unix(1700000000, 0)}
-	tf.urls["http://bad.com/malware"] = feedEntry{Source: "openphish", AddedAt: time.Unix(1700000001, 0)}
+	tf.urls["http://evil.com/payload"] = entry{Source: "urlhaus", AddedAt: time.Unix(1700000000, 0)}
+	tf.urls["http://bad.com/malware"] = entry{Source: "openphish", AddedAt: time.Unix(1700000001, 0)}
 
 	exported := tf.ExportURLs()
 	if len(exported) != 2 {
@@ -244,7 +244,7 @@ func TestThreatFeed_ExportURLs(t *testing.T) {
 
 func TestThreatFeed_ExportDomains(t *testing.T) {
 	tf := newEnabledFeed()
-	tf.domains["evil.com"] = feedEntry{Source: "urlhaus", AddedAt: time.Unix(1700000000, 0)}
+	tf.domains["evil.com"] = entry{Source: "urlhaus", AddedAt: time.Unix(1700000000, 0)}
 
 	exported := tf.ExportDomains()
 	if len(exported) != 1 {
@@ -257,7 +257,7 @@ func TestThreatFeed_ExportDomains(t *testing.T) {
 
 func TestThreatFeed_ImportFeedData(t *testing.T) {
 	tf := newEnabledFeed()
-	tf.urls["old.com/page"] = feedEntry{Source: "urlhaus", AddedAt: time.Unix(1600000000, 0)}
+	tf.urls["old.com/page"] = entry{Source: "urlhaus", AddedAt: time.Unix(1600000000, 0)}
 
 	urls := map[string]int64{
 		"http://new.com/bad": 1700000000,

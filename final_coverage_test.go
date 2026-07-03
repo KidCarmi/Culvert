@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
@@ -366,18 +367,6 @@ func TestAPIAuthLogin_Success_AuthDisabled(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 }
 
-// ─── store.auditAdd with syslog (global nil) ──────────────────────────────────
-
-func TestAuditAdd_NoFile_NoSyslog(_ *testing.T) {
-	// Make sure auditLogFile and globalSyslog are nil
-	oldFile := auditLogFile
-	auditLogFile = nil
-	defer func() { auditLogFile = oldFile }()
-
-	// auditAdd should not panic when both file and syslog are nil
-	auditAdd(AuditEntry{TS: 1, Action: "test.action", Actor: "testactor"})
-}
-
 // ─── CertManager.GetCert ─────────────────────────────────────────────────────
 
 func TestCertManager_GetCert(t *testing.T) {
@@ -424,21 +413,22 @@ func TestBlocklist_SaveMode_NonEmptyPath(t *testing.T) {
 	}
 	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-		path:      dir + "/blocklist.txt",
-		mode:      "allow",
+	path := dir + "/blocklist.txt"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	b.saveMode()
+	b := blocklist.New()
+	if err := b.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	b.SetMode("allow") // persists the .mode sidecar via the public path
 
-	// Verify the mode file was created
-	data, err := os.ReadFile(dir + "/blocklist.txt.mode")
+	data, err := os.ReadFile(path + ".mode")
 	if err != nil {
-		t.Fatalf("saveMode should create mode file: %v", err)
+		t.Fatalf("SetMode should create mode file: %v", err)
 	}
 	if string(data) != "allow" {
-		t.Errorf("saveMode content = %q, want allow", string(data))
+		t.Errorf("mode sidecar content = %q, want allow", string(data))
 	}
 }
 
@@ -461,15 +451,12 @@ func TestBlocklist_Load_WithModeSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-	}
+	b := blocklist.New()
 	if err := b.Load(path); err != nil {
 		t.Fatalf("Blocklist.Load: %v", err)
 	}
-	if b.mode != "allow" {
-		t.Errorf("Blocklist.Load mode = %q, want allow", b.mode)
+	if b.Mode() != "allow" {
+		t.Errorf("Blocklist.Load mode = %q, want allow", b.Mode())
 	}
 }
 
@@ -479,33 +466,6 @@ func TestValidateExternalURL_PublicHTTPS(t *testing.T) {
 	err := validateExternalURL("http://192.168.0.1/")
 	if err == nil {
 		t.Error("private URL should be rejected")
-	}
-}
-
-// ─── auditAdd with file ───────────────────────────────────────────────────────
-
-func TestAuditAdd_WithFile(t *testing.T) {
-	f, err := os.CreateTemp("", "auditadd*.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
-
-	oldFile := auditLogFile
-	auditLogFile = f
-	defer func() {
-		auditLogFile = oldFile
-		f.Close()
-	}()
-
-	auditAdd(AuditEntry{TS: 1, Action: "test.file.write", Actor: "testactor"})
-
-	// Verify something was written
-	f.Seek(0, 0) //nolint:errcheck // seeking to start of file; error is non-actionable in test context
-	buf := make([]byte, 1024)
-	n, _ := f.Read(buf)
-	if n == 0 {
-		t.Error("auditAdd should write to the file when auditLogFile is set")
 	}
 }
 
@@ -565,28 +525,6 @@ func TestLogAdd_Truncation(t *testing.T) {
 	logsMu.Unlock()
 	if n > maxLogs {
 		t.Errorf("logAdd should cap logs at %d, got %d", maxLogs, n)
-	}
-}
-
-// ─── auditAdd truncation ──────────────────────────────────────────────────────
-
-func TestAuditAdd_Truncation(t *testing.T) {
-	oldFile := auditLogFile
-	auditLogFile = nil
-	defer func() { auditLogFile = oldFile }()
-
-	oldLog := auditLog
-	auditLog = nil
-	defer func() { auditLog = oldLog }()
-
-	for i := 0; i < maxAuditLogs+10; i++ {
-		auditAdd(AuditEntry{TS: int64(i), Action: "test"})
-	}
-	auditMu.Lock()
-	n := len(auditLog)
-	auditMu.Unlock()
-	if n > maxAuditLogs {
-		t.Errorf("auditAdd should cap at %d, got %d", maxAuditLogs, n)
 	}
 }
 
@@ -806,46 +744,6 @@ func TestAuthSelectProvider_WithRelay(t *testing.T) {
 	}
 }
 
-// ─── InitAuditLog: with oversized existing data ───────────────────────────────
-
-func TestInitAuditLog_WithManyEntries(t *testing.T) {
-	f, err := os.CreateTemp("", "auditinit*.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
-
-	// Write more than maxAuditLogs entries to trigger truncation
-	for i := 0; i < maxAuditLogs+5; i++ {
-		_, _ = f.WriteString(`{"ts":` + string(rune('0'+i%10)) + `,"action":"test"}` + "\n")
-	}
-	f.Close()
-
-	oldFile := auditLogFile
-	oldCloser := auditCloser
-	oldLog := auditLog
-	auditLogFile = nil
-	auditCloser = nil
-	auditLog = nil
-	defer func() {
-		auditLogFile = oldFile
-		auditCloser = oldCloser
-		auditLog = oldLog
-		if auditCloser != nil {
-			auditCloser.Close()
-		}
-	}()
-
-	if err := InitAuditLog(f.Name()); err != nil {
-		t.Fatalf("InitAuditLog: %v", err)
-	}
-	if auditCloser != nil {
-		auditCloser.Close()
-		auditLogFile = nil
-		auditCloser = nil
-	}
-}
-
 // ─── apiUIAllowIPs POST with valid IPs ───────────────────────────────────────
 
 func TestAPIUIAllowIPs_Post_ValidEmpty(t *testing.T) {
@@ -979,10 +877,9 @@ func TestAPIStats_WithBlockedStats(t *testing.T) {
 // ─── Blocklist.List with wildcards ────────────────────────────────────────────
 
 func TestBlocklist_List_WithWildcards(t *testing.T) {
-	b := &Blocklist{
-		exact:     map[string]bool{"exact.example.com": true},
-		wildcards: map[string]bool{".example.com": true},
-	}
+	b := blocklist.New()
+	b.Add("exact.example.com")
+	b.Add("*.example.com")
 	list := b.List()
 	if len(list) != 2 {
 		t.Errorf("List should return 2 items (1 exact + 1 wildcard), got %d", len(list))
@@ -1055,11 +952,9 @@ func TestTsRecord_DiffPath(_ *testing.T) {
 // ─── Blocklist.IsBlocked in allow mode ───────────────────────────────────────
 
 func TestBlocklist_IsBlocked_AllowMode(t *testing.T) {
-	b := &Blocklist{
-		exact:     map[string]bool{"allowed.example.com": true},
-		wildcards: make(map[string]bool),
-		mode:      "allow",
-	}
+	b := blocklist.New()
+	b.Add("allowed.example.com")
+	b.SetMode("allow")
 	// In allow mode, listed hosts are NOT blocked (allowed), unlisted ARE blocked
 	if b.IsBlocked("allowed.example.com") {
 		t.Error("listed host in allow mode should NOT be blocked")
@@ -1072,13 +967,14 @@ func TestBlocklist_IsBlocked_AllowMode(t *testing.T) {
 // ─── Blocklist.Remove wildcard ────────────────────────────────────────────────
 
 func TestBlocklist_Remove_Wildcard(t *testing.T) {
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: map[string]bool{".example.com": true},
+	b := blocklist.New()
+	b.Add("*.example.com")
+	if !b.IsBlocked("sub.example.com") {
+		t.Fatal("wildcard should block subdomains after Add")
 	}
 	b.Remove("*.example.com")
-	if b.wildcards[".example.com"] {
-		t.Error("Remove wildcard should delete from wildcards map")
+	if b.IsBlocked("sub.example.com") {
+		t.Error("Remove wildcard should delete the wildcard entry")
 	}
 }
 
@@ -1141,20 +1037,19 @@ func TestBlocklist_List_Save(t *testing.T) {
 	}
 	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-		path:      dir + "/bl.txt",
-		mode:      "block",
+	path := dir + "/bl.txt"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := blocklist.New()
+	if err := b.Load(path); err != nil {
+		t.Fatalf("initial Load: %v", err)
 	}
 	b.Add("list-save-test.example.com")
 	b.Save()
 
 	// Reload
-	b2 := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-	}
+	b2 := blocklist.New()
 	if err := b2.Load(dir + "/bl.txt"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}

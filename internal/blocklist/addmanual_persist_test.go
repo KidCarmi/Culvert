@@ -1,19 +1,11 @@
-package main
+package blocklist
 
-// blocklist_addmanual_persist_test.go — regression coverage for the
-// "manual blocklist entries lost across restart" gap: AddManual must
-// persist its entry to the MAIN blocklist file (not just the .manual
-// sidecar), because Load reads the main file into b.exact / b.wildcards
-// — the only maps IsBlocked consults. The .manual sidecar restores
-// attribution metadata (b.manual) but is NOT re-injected into the
-// enforcement maps by Load, so an entry that only made it to .manual
-// will not be enforced after restart.
-//
-// The realistic failure mode is the apiBlocklist POST handler
-// (ui_policy.go) processing a bulk add: it calls AddManual per host
-// inside a loop and bl.Save() once after the loop, but it `return`s
-// early on an invalid wildcard mid-loop — skipping the post-loop Save
-// for the valid entries that already ran through AddManual.
+// AddManual / AddManualBulk durability tests, moved in-package from package
+// main's blocklist_addmanual_persist_test.go with the extraction (ADR-0002,
+// store.go decomposition Phase A). See the original file header for the
+// "manual entries lost across restart" gap these pin: AddManual must persist
+// to the MAIN blocklist file (not just the .manual sidecar) because Load
+// reads the main file into the enforcement maps IsBlocked consults.
 
 import (
 	"bytes"
@@ -220,21 +212,4 @@ func TestBlocklist_AddManualBulk_DuplicateNoCorruption(t *testing.T) {
 	if !b2.IsBlocked(host) {
 		t.Fatalf("duplicate-input AddManualBulk entry %q did not survive reload — the deduped line on disk must still be enforced", host)
 	}
-}
-
-// splitLines is a tiny strings.Split wrapper kept local to avoid
-// importing strings just for this file.
-func splitLines(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		out = append(out, s[start:])
-	}
-	return out
 }

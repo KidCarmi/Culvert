@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // OperatorContract is the aggregated, operator-visible health verdict for
@@ -175,7 +177,7 @@ func buildOperatorContract() OperatorContract {
 }
 
 func checkDPLastGoodConfigSnapshot() OperatorContractCheck {
-	if !clusterRoleIsDP.Load() {
+	if !audit.DPMode() {
 		return OperatorContractCheck{
 			Code:    "dp_last_known_good_config",
 			Status:  diagOK,

@@ -15,6 +15,8 @@ package main
 
 import (
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/threatfeed"
 )
 
 // FuzzIsPrivateHost ensures the private-host classifier never panics on
@@ -93,7 +95,7 @@ func FuzzNormaliseFeedURL(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, raw string) {
-		_, _ = normaliseFeedURL(raw)
+		_, _ = threatfeed.NormaliseURL(raw)
 	})
 }
 

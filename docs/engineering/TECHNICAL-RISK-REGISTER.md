@@ -155,6 +155,27 @@
 - **Recommendation:** Pin scanner versions (or vendor), SHA-pin the `@main` action, add CodeQL to
   the blocking set. **Complexity S.** *(This was the original RISK-006 before the 2026-06-28 split.)*
 
+## RISK-017 — Alert webhooks never persisted (Init unwired) · MEDIUM · ✅ CLOSED 2026-07-03
+- **Found (2026-07-03, while mapping the `internal/alerts` extraction):** `AlertStore.Init(path)` is
+  **never called from production code** — only tests call it. `git log -S` confirms no production
+  call has ever existed. The process-wide store is constructed with an empty `filePath`, so `save()`
+  is a silent no-op for every admin webhook create/update/delete.
+- **Impact:** Admin-configured alert webhooks (and their HMAC secrets) **do not survive a restart** —
+  security alerting silently stops after any upgrade/restart until the admin reconfigures. The
+  RISK-003 encryption-at-rest machinery protects `alert_webhooks.json`, a file production never
+  writes; the F16 retry queue DOES persist (`/data/alert_retry_queue.json`), an inconsistency that
+  hides the gap. The only durability today is a manually downloaded config export.
+- **Fix (2026-07-03, follow-up commit to the extraction):** `AlertWebhooksPath`
+  (`<dataDir>/alert_webhooks.json`) added to the persistent-admin-state startup slice
+  (resolver + DTO + loader step 4); `globalAlertStore.Init` now runs at startup, so webhooks —
+  and their RISK-003 encrypted secrets — survive restart, and the encryption-at-rest machinery is
+  live in production for the first time. In the same change `Store.save()` was upgraded from the
+  pre-Bucket-4 WriteFile+Rename to `fileutil.AtomicWrite` (fsynced), since the path only now
+  became load-bearing. No ordering hazard: the F16 retry loop reads the store through a provider
+  closure each 10s tick. Pinned by `TestStore_Persist_RestartRoundTripAndDurability`
+  (internal/alerts) — restart round-trip incl. decrypted secret, mode 0600, no tmp leftovers —
+  and the slice-resolver path test.
+
 ## RISK-ACC-1 — `docker/docker` CVEs in the updater · HIGH · ACCEPTED
 - **Current state (trivy-verified 2026-06-28):** 5 CVEs in `github.com/docker/docker v28.5.2`,
   all in `updater/go.mod` only: `CVE-2026-41567` (HIGH), `CVE-2026-42306` (HIGH),
@@ -168,6 +189,10 @@
   removed**. If updater removal stalls, re-evaluate: confirm the `.trivyignore` reachability
   rationale still holds and that the updater is not exposed to untrusted Docker registry/plugin input.
 - **Resolution:** DEBT-008 (remove legacy updater). **Owner:** maintainer · **Target:** with DEBT-008.
+- **Re-verified 2026-07-03:** `go list -m -u github.com/docker/docker` in `updater/` reports no
+  newer version — still no upstream fix, acceptance conditions still hold. The GitHub Dependabot
+  banner shown on every push ("5 vulnerabilities, 3 high") maps to THIS entry (the updater-only
+  CVE set); it is not an unhandled finding.
 
 ## RISK-005 — Interrupted restore leaves `/data` absent · MEDIUM · ✅ CLOSED 2026-06-30
 - **Was:** `runRestoreCommit` (`restore.go`) does move-aside (`rename /data → /data.bak.<ts>-<pid>`)

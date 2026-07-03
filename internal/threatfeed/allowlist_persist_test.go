@@ -1,7 +1,8 @@
-package main
+package threatfeed
 
-// threatfeed_allowlist_persist_test.go — regression coverage for the
-// domain-allowlist empty-clear persistence quirk closed in this PR.
+// allowlist_persist_test.go — regression coverage for the domain-allowlist
+// empty-clear persistence quirk (moved in-package from package main's
+// threatfeed_allowlist_persist_test.go at extraction, ADR-0002).
 //
 // Pre-fix shape: feedDB.DomainAllowlist had json:"domain_allowlist,omitempty"
 // AND loadFromDisk gated restore on `len(db.DomainAllowlist) > 0`. So:
@@ -13,11 +14,11 @@ package main
 //      (26 popular hosting platforms) silently come back.
 // The admin's clear was reverted on every restart, with no signal.
 //
-// Fix shape (this PR): remove omitempty AND switch the load guard from
-// `len > 0` to `!= nil`. Empty allowlist now serializes as
-// `"domain_allowlist": []`, the load branch fires for the explicit
-// empty case (wipe), and absent-field (legacy save / pre-allowlist DB)
-// still falls through to "keep seeded defaults" — backward compatible.
+// Fix shape: remove omitempty AND switch the load guard from `len > 0` to
+// `!= nil`. Empty allowlist now serializes as `"domain_allowlist": []`, the
+// load branch fires for the explicit empty case (wipe), and absent-field
+// (legacy save / pre-allowlist DB) still falls through to "keep seeded
+// defaults" — backward compatible.
 
 import (
 	"os"
@@ -27,17 +28,6 @@ import (
 	"time"
 )
 
-// freshThreatFeed returns a ThreatFeed with the same map-initialized
-// shape as globalThreatFeed (threatfeed.go:64). Init must follow before
-// any persistence operation so dbPath is set.
-func freshThreatFeed() *ThreatFeed {
-	return &ThreatFeed{
-		urls:            make(map[string]feedEntry),
-		domains:         make(map[string]feedEntry),
-		domainAllowlist: make(map[string]bool),
-	}
-}
-
 // TestThreatFeed_DomainAllowlist_PopulatedRoundTrip is the baseline:
 // a populated admin allowlist must save and reload faithfully. Passes
 // before and after the fix; pins that we didn't regress the working
@@ -45,12 +35,12 @@ func freshThreatFeed() *ThreatFeed {
 func TestThreatFeed_DomainAllowlist_PopulatedRoundTrip(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "feed.json")
 
-	tf1 := freshThreatFeed()
+	tf1 := New()
 	tf1.Init(dbPath, time.Hour) // seeds 26 defaults; load is a no-op (file missing)
 
 	tf1.SetDomainAllowlist([]string{"example.com", "test.example"})
 
-	tf2 := freshThreatFeed()
+	tf2 := New()
 	tf2.Init(dbPath, time.Hour) // seeds defaults, then loads from disk → replaces
 
 	got := tf2.DomainAllowlist()
@@ -68,7 +58,7 @@ func TestThreatFeed_DomainAllowlist_PopulatedRoundTrip(t *testing.T) {
 func TestThreatFeed_DomainAllowlist_EmptyClearPersists(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "feed.json")
 
-	tf1 := freshThreatFeed()
+	tf1 := New()
 	tf1.Init(dbPath, time.Hour)
 	// Sanity: defaults were seeded.
 	if n := len(tf1.DomainAllowlist()); n != len(defaultDomainAllowlist) {
@@ -77,7 +67,7 @@ func TestThreatFeed_DomainAllowlist_EmptyClearPersists(t *testing.T) {
 
 	tf1.SetDomainAllowlist([]string{}) // explicit clear → saves
 
-	tf2 := freshThreatFeed()
+	tf2 := New()
 	tf2.Init(dbPath, time.Hour) // seeds defaults, then loads from disk
 
 	got := tf2.DomainAllowlist()
@@ -103,7 +93,7 @@ func TestThreatFeed_DomainAllowlist_LegacyAbsentFieldKeepsDefaults(t *testing.T)
 		t.Fatalf("write legacy DB: %v", err)
 	}
 
-	tf := freshThreatFeed()
+	tf := New()
 	tf.Init(dbPath, time.Hour) // seeds defaults, loads → field absent → keep defaults
 
 	got := tf.DomainAllowlist()

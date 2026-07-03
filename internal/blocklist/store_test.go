@@ -1,13 +1,33 @@
-package main
+package blocklist
+
+// Core matcher/exception/persistence tests, moved in-package from package
+// main's blocklist_test.go with the extraction (ADR-0002, store.go
+// decomposition Phase A).
 
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func freshBL() *Blocklist {
-	return &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+// assertNoTmpLeak is a local copy of main's test helper: fails if any
+// *.tmp.* file from the atomic writer remains in dir.
+func assertNoTmpLeak(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("orphaned tmp file: %s", e.Name())
+		}
+	}
+}
+
+func freshBL() *Store {
+	return New()
 }
 
 func TestBlocklist_AddAndIsBlocked(t *testing.T) {
@@ -80,7 +100,7 @@ func TestBlocklist_LoadSave(t *testing.T) {
 
 	// Write a file with hosts + comments.
 	content := "# comment\nevil.com\n*.bad.org\n\ngood.com\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,14 +133,10 @@ func TestBlocklist_LoadSave(t *testing.T) {
 // freshBLWithSidecars returns a Blocklist with all map fields initialized,
 // including the sidecar-backed `manual` and `exceptions` sets which freshBL
 // does not initialize. Required for AddManual / AddException to not panic.
-func freshBLWithSidecars(path string) *Blocklist {
-	return &Blocklist{
-		path:       path,
-		exact:      map[string]bool{},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
+func freshBLWithSidecars(path string) *Store {
+	b := New()
+	b.path = path
+	return b
 }
 
 func TestBlocklist_SaveMode_NoTmpLeak(t *testing.T) {

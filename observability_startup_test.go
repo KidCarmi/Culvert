@@ -25,6 +25,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 var observabilityStartupLoggerMu sync.Mutex
@@ -74,11 +76,8 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	oldGlobalOTLP := globalOTLP
 	oldGlobalOTLPTraces := globalOTLPTraces
 
-	// Audit log (store.go).
-	oldAuditLogFile := auditLogFile
-	oldAuditCloser := auditCloser
-	oldAuditLogFilePath := auditLogFilePath
-	oldAuditLog := auditLog
+	// Audit engine (internal/audit).
+	restoreAudit := audit.ResetForTest()
 
 	// Request log (store.go).
 	oldRequestLogWriter := requestLogWriter
@@ -89,12 +88,6 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	globalSyslog = nil
 	globalOTLP = freshOTLPExporter()
 	globalOTLPTraces = freshOTLPSpanExporter()
-	auditLogFile = nil
-	auditCloser = nil
-	auditLogFilePath = ""
-	auditMu.Lock()
-	auditLog = nil
-	auditMu.Unlock()
 	requestLogWriter = nil
 	requestLogCloser = nil
 	requestLogFilePath = ""
@@ -107,9 +100,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		}
 		globalOTLP.Stop()
 		globalOTLPTraces.Stop()
-		if auditCloser != nil {
-			_ = auditCloser.Close()
-		}
+		_ = audit.Close() // close any handle the test-under-test opened
 		if requestLogCloser != nil {
 			_ = requestLogCloser.Close()
 		}
@@ -117,12 +108,8 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		globalSyslog = oldGlobalSyslog
 		globalOTLP = oldGlobalOTLP
 		globalOTLPTraces = oldGlobalOTLPTraces
-		auditLogFile = oldAuditLogFile
-		auditCloser = oldAuditCloser
-		auditLogFilePath = oldAuditLogFilePath
-		auditMu.Lock()
-		auditLog = oldAuditLog
-		auditMu.Unlock()
+		audit.ClearPersistForTest() // closed above; restore must not double-close
+		restoreAudit()
 		requestLogWriter = oldRequestLogWriter
 		requestLogCloser = oldRequestLogCloser
 		requestLogFilePath = oldRequestLogFilePath
@@ -227,8 +214,8 @@ func TestLoadObservability_EmptyConfigIsNoOp(t *testing.T) {
 	if globalOTLPTraces.Enabled() {
 		t.Errorf("globalOTLPTraces.Enabled() = true; want false")
 	}
-	if auditCloser != nil {
-		t.Errorf("auditCloser = %v; want nil", auditCloser)
+	if audit.PersistActive() {
+		t.Error("audit persistence active; want inactive (no AuditLogPath)")
 	}
 	if requestLogCloser != nil {
 		t.Errorf("requestLogCloser = %v; want nil", requestLogCloser)
@@ -245,11 +232,8 @@ func TestLoadObservability_AuditLogOpens(t *testing.T) {
 		RequestLogMaxMB: 100,
 	})
 
-	if auditCloser == nil {
-		t.Fatal("auditCloser == nil after AuditLogPath set; want non-nil")
-	}
-	if auditLogFilePath != path {
-		t.Errorf("auditLogFilePath = %q; want %q", auditLogFilePath, path)
+	if !audit.PersistActive() {
+		t.Fatal("audit persistence inactive after AuditLogPath set; want active")
 	}
 }
 

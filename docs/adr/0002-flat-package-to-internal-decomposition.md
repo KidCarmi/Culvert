@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -719,7 +719,285 @@ lastSync/totalDomains field pokes became `SeedStats` test support (lesson 3). Th
 `catdb_feedsync_test.go` engine suite moved in-package (84% coverage); `feedUserAgent` stays owned by
 `threatfeed.go` with the package keeping its own copy of the value. Leaf proof: `catdb`+`obs` only.
 
-### 2026-07-03 — `saas_feed.go` mapped; extraction DESIGNED, deliberately checkpointed
+### 2026-07-03 — `internal/saasfeed` extracted (27th; executed from the recorded design)
+Executed post-#529 on the restarted branch, exactly per the five-seam map below: the catStore merge
+became main's `mergeSaaSCategories` closure (additive semantics + Save-if-added pinned by a new main
+test); the lifecycle provider is injected (`Deps.Lifecycle` = `resolveLifecycleCtx`, preserving the
+P6.1 UC-3 Done() contract — the lifecycle regression test constructs via `saasfeed.New` and still
+drives the real appLifecycleCtx path); the client is injected (main builds it on
+`ssrf.SafeDialContext`); the SaaS sync-failure counter is package-owned (`SyncFailures()`); test
+construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suite moved in-package
+(fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
+tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
+Leaf proof: imports `obs` only.
+
+### 2026-07-03 — store.go Phase C (`reqlog`) DESIGNED + adversarially reviewed (execute after PR #533 merges)
+The request-log layer (~230 lines) is the LAST decomposable slice of store.go; executing it closes
+the store.go program. Recorded design for `internal/reqlog` (35th):
+- **Package owns:** the in-memory ring (`maxLogs` 5000, `Add`/`Get`), the persistent JSONL layer
+  (`Init(path, maxMB)` on fileutil.RotatingFile, `Close`, the write half of `Add` with the
+  count-once-log-first write-error contract), `ReadPersistent` (bounded amortized parse, 1 MB
+  scanner buffer, 20k cap, rotated-archive intentionally skipped) with its TTL read cache
+  (path-keyed, serialised parse — pre-existing documented design, moves verbatim), the
+  `WriteErrors()`/`SkippedLines()` counter accessors (read by /metrics, /api/stats, /healthz), and
+  `LevelForStatus`.
+- **Entry type:** `logstore.Entry` (import) — the history store owns the wire/SIEM contract; a
+  neutral DTO micro-package was considered and REJECTED (churn without benefit). Leaf proof
+  target: `fileutil` + `logstore` + `obs`.
+- **One inversion point:** `SetHistory(func(Entry))` — main wires
+  `func(e){ globalLogStore.Load().Add(e) }`, preserving the lock-free runtime enable/disable swap
+  exactly (the closure performs the same atomic load the inline code does today).
+- **Stays in main:** `AuthLogFields`+`applyTo` (writes exported alias fields; welded to the frozen
+  `AuthOutcome` contract), the `recordRequest*`/`recordStats`/`persistLogEntry` fan-out
+  (orchestrates stats globals + syslog `WriteRequest` + this layer), topHosts, the ts/stats
+  counters.
+- **Test seams:** `SwapRingForTest` (replaces `isolateLogRing`'s pokes), `SetWriterForTest`,
+  `PinCacheForTest`/`ExpireCacheForTest` (replace the `reqLogReadCache.expires` pokes), and a
+  `ResetForTest` matching `resetRequestLogState`'s exact semantics — verify each helper's
+  snapshot-vs-clear behavior at execution before substituting.
+- **Adversarial review (recorded verdicts):** (1) hot path — `logAdd` runs per request; the only
+  change is the history hook replacing an inline atomic load with a closure doing the same load —
+  gate with `-race` over the proxy scope + traffic smoke, per the Phase A precedent. (2) The
+  serialised-parse read cache is a deliberate pre-existing trade (documented in code) — do NOT
+  "improve" it mid-move. (3) SSE/C2c consumers are alias-covered (`logGet`). (4) Value is thinner
+  than Phases A/B — justified as program completion, not standalone. (5) SEQUENCING: execute only
+  after PR #533 merges; widening an open 17-commit PR trades review quality for nothing.
+  After Phase C, store.go = stats/ts + auth `Config` + record* orchestration — composition root by
+  classification; the store.go program CLOSES.
+
+### 2026-07-03 — `internal/audit` extracted (34th; store.go Phase B) + fileutil gains RotatingFile
+The audit engine moved to `internal/audit`: the bounded ring (`MaxRing` 500, saturation pitfall
+preserved in the doc comment), append-only JSONL persistence with rotation, the paginated/
+time-filtered reads (`Get`/`GetMemory`/`GetPersistent` — the memory/persistent filter+paginate
+duplication collapsed into shared `filterByTime`/`paginate` helpers), and the DP→CP push queue
+(`Drain`/`Requeue`, cap 1000). Two inversion points: **SetSIEM** (main's init wires a closure over
+`globalSyslog` — runtime-configured, read at call time; `syslog.WriteAudit(any)` was already
+decoupled) and **SetDPMode/DPMode** (replaces main's `clusterRoleIsDP` atomic; set by the cluster
+wiring, read by diagnostics/ui_cluster). `fileutil` gained **RotatingFile** (moved from logger.go —
+the audit engine and the system/request logs share it; logger.go keeps `rotatingFile`/
+`newRotatingFile` aliases so its call sites are unchanged; the three rotating-writer tests moved
+in-package). main keeps: `auditEvent`/`auditEventDiff` (actor enrichment), the C2c middleware
+(observes the wrappers, untouched), the API handlers, the CP push loop, and `InitAuditLog`/
+shutdown-close as thin wrappers. Whitebox test state pokes across ~10 main files were replaced by
+five named seams (`ResetForTest`/`SwapRingForTest`/`SetPersistForTest`/`ClearPersistForTest`/
+`PersistActive`); six engine tests consolidated in-package (77% coverage). Leaf proof:
+`fileutil` only.
+
+### 2026-07-03 — `internal/blocklist` extracted (33rd; store.go Phase A, executed from the design)
+Executed exactly per the design below. The full engine moved verbatim (matcher, mode, Load/Save +
+four sidecars, exceptions, manual/bulk durability paths, feed attribution, MergeFromLines +
+`NormalizeLine`); `IsBlocked` is byte-identical under the same RWMutex. `New()` is the only
+constructor; NO test-support methods were needed — every field-literal construction across the
+~20 test files rebuilt on the public API (`New()` + `Add`/`Load(fixture)`/`MergeFromLines`), per
+the design's stability preference. Five engine test files moved in-package wholesale
+(blocklist_test, addmanual_persist, coldstart sidecars, normalize/attribution/cascade, the
+MergeFromLines/mode set from totp_extra) at 85% package coverage; the API-handler tests
+(cleanup-unattributed gate, bulk-add) and the CP snapshot-apply tests stayed in main on public
+API. Two pre-existing comment misorders (Store/Entry docs, ClearAll/MergeFromLines) were
+straightened as revive surfaced them. Leaf proof: `fileutil`+`hostutil`+`obs` only. Gate included
+`-race` over proxy/socks5/blocklist and the traffic-e2e smoke per the hot-path plan.
+
+### 2026-07-03 — store.go decomposition program OPENED; Phase A (`blocklist`) DESIGNED
+`store.go` (2,324 lines) is five engines sharing a file: (1) uptime/stats/timeSeries hot-path
+counters, (2) the request-log ring + JSONL persistent log + read cache, (3) the audit ring +
+persistent log + DP→CP push queue, (4) the **Blocklist engine** (~830 lines), (5) the auth cache +
+`Config` (UI users/TOTP/`defaultAuthOutcome` — the frozen contract, stays). Phase A extracts the
+Blocklist; the ring/audit engines are later phases (their record* fan-out and DP-queue coupling
+need their own passes); the counters stay hot-path-local.
+
+**Phase A design — `internal/blocklist` (33rd), execute on next unit:**
+- **Shape:** `Blocklist` → `blocklist.Store` (main alias `Blocklist = blocklist.Store`,
+  `BlocklistEntry = blocklist.Entry`, `var bl = blocklist.New()`). `New()` returns the
+  initialized-maps zero state (mode default "block"). The ENTIRE method set moves verbatim:
+  mode (Mode/SetMode + sidecar), Load/Save (main file + .mode/.manual/.exceptions/.sources
+  sidecars, fsynced via fileutil.AtomicWrite), the O(labels) exact/wildcard matcher
+  (isListed/isExcepted/IsBlocked), Add/AddManual/AddManualBulk/Remove/ClearAll,
+  ReplaceFeedEntries, the exceptions API, List/ListWithSource/Count, the feed-attribution API
+  (SnapshotFeedSources/RestoreFeedSources/RemoveByFeedSource/CountByFeedSource/
+  RemoveUnattributedFeedEntries), MergeFromLines + normalizeBlocklistLine (exported as
+  `NormalizeLine`; hostsFileBoilerplate + looksLikeHostname move with it).
+- **Deps:** `hostutil.NormalizeHost` (already a main wrapper — engine calls the package
+  directly), `obs` (Printf/Sanitize; `logWarnf`→`obs.Warnf` under the accepted always-emit
+  precedent), `fileutil.AtomicWrite`. Pure leaf; no inversion seams needed.
+- **Hot path (the reason this is a design pass, not a casual slice):** `IsBlocked` is called from
+  `proxy.go` and `socks5.go` per request. It moves VERBATIM — same RWMutex, same map probes; the
+  package boundary adds nothing to the lock or allocation profile. Gate additions beyond the
+  standard set: `-race` over the proxy/socks5 test scope and the traffic-e2e smoke suite.
+- **Production construction sites: NONE beyond the singleton.** The CP snapshot apply already goes
+  through `ReplaceFeedEntries` + `Save` (the P3.4 fix removed the wholesale `bl = newBL`
+  construction), so no snapshot-constructor API is needed.
+- **Consumers** (all method calls through `bl`, alias-covered): ui_policy (16), ui_config (12),
+  configversion (9 — capture/apply, stays per the REJECTED verdict), controlplane (4),
+  blocklist_startup (3), main/proxy/socks5/metrics/otlp (1–2 each). `blocklist_feed.go`'s
+  blocklistfeed.Merger adapter is UNCHANGED in this slice (possible follow-up: blocklist.Store
+  satisfying the Merger directly, both being internal packages — do NOT fold into Phase A).
+- **Test surface (~20 files; the widest since ssrf):** engine suites move in-package
+  (blocklist_test.go's matcher/exception/normalize cases, blocklist_normalize_test.go — its two
+  `&Blocklist{...}` literals become `New()`+Load); integration tests stay in main on the alias,
+  with the `&Blocklist{...}` field literals in blocklist_apply_persist_test.go (×3) and
+  blocklist_feed_multi_test.go rebuilt on `New()` + `Load(tmpfile)` (both only seed maps + path —
+  Load from a written fixture reproduces the state through the public API). 15 direct field pokes
+  across main tests to rewire; count them at execution and prefer public-API rebuilds over new
+  test-support methods (add `SetPathForTest` ONLY if a fixture-file rebuild is genuinely awkward).
+- **Validation plan:** the standard full gate + `-race` on proxy/socks5/blocklist scopes +
+  `proxy_traffic_e2e` smoke + shuffled determinism on main + package.
+
+## Engine-Extraction Wave COMPLETE (second wave) — 2026-07-03
+
+With `logstore` (32nd), the engine-extraction wave that followed the original leaf sweep is
+**complete**: every root file that carries an extractable engine has been extracted, and every
+remaining root file has a considered classification. A final survey (size-ordered, all root `*.go`
+read or previously mapped) leaves four classes, none of which is a next "slice":
+
+1. **Composition root by nature** — `configversion.go` (recorded REJECTED verdict below),
+   `diagnostics.go` (viewer API handlers), `admin_settings.go`, the `ui_*.go` handler files, the
+   `*_startup*.go` slices (shipped program, do not re-extract), the `*_vars.go`/shim files.
+2. **Subsystem programs with their own roadmaps** — the CDR/Sluice cluster (`cdr*.go`,
+   `cdrstore.go`; contains the Sluice gRPC dep but is a multi-file program wired into the proxy
+   hot path), release management (`release_*.go`, D1.6d), backup/restore/cleanup (D1.3/D1.5),
+   update/update_cluster (D1.6, DEBT-008).
+3. **Security-sensitive low-value** — `session.go`/`auth*.go` (HMAC cookies, providers; welded to
+   the frozen `defaultAuthOutcome` contract; extraction churn > boundary value today).
+4. **The core four hubs + hot-path satellites** — `store.go`, `policy.go`, `proxy.go`,
+   `controlplane.go`, plus `upstream.go`/`ha.go`/`enrollment.go` (the S6 upstreamTransport
+   contract and ADR-0004 HA state live here). These need ADR-grade design passes each;
+   `proxy.go` deliberately last, per the original decision.
+
+**Wave tally: 32 packages + 4 seams** under `internal/`, every one behind the full validated gate
+(build/vet, lint-vs-main 0, full suite, -race, shuffled determinism, leaf proof). Next
+decomposition work starts with a design pass on `store.go` (the request-log ring / stats /
+audit-ring hub) — a new program, not a continuation of this sweep.
+
+### 2026-07-03 — `internal/logstore` extracted (32nd; executed from the recorded design)
+Executed exactly per the design note below. The engine (open/TTL/encryption variants, key layout,
+async writeLoop, Query/Stats/retention, PurgeAll, EncKey/ErrEncMismatch, the priority-aware
+deletion passes from logguard.go as `CleanupBytes`+`deletePass`, the dropped/pruned counters with
+`Dropped()`/`Pruned()` accessors) and the `Entry` DTO (main alias `LogEntry = logstore.Entry`;
+`LowPriority` aliased too) moved to `internal/logstore`. The two designed inversion points shipped
+as designed: the **minimal-mode hook** is an `OpenTTL` parameter (Add's emergency skip reads main's
+logguard state through it; pinned in-package by `TestAdd_MinimalHook` and in main by the
+minimal-mode integration test whose `newTestLogStore` wires the real `minimalMode`), and
+**`RunRetention` returns (freed, count, levels)** so main's `runDiskGuard` records the
+audit/pressure event — the engine owns deletion, main owns observability state.
+`handleDiskCritical` became a function taking the store (methods can't live in main anymore),
+reading `BytesUsed()`/calling `CleanupBytes`. main keeps the singleton + lifecycle
+(enable/disable/purge, desired-retention memory, dir/passphrase startup state), the logguard
+orchestrator, the retention API, and the health/usage/estimate views. Engine tests (9 from
+logstore_test + the 2 deletion-pass tests + LowPriority) moved in-package (78% coverage);
+lifecycle/API/guard tests stayed in main with `logstore.OpenTTL` retargets. Leaf proof: `obs` only
+(BadgerDB contained — second Badger package after catdb).
+
+### 2026-07-03 — `configversion.go` mapped; extraction REJECTED (deliberate keep)
+Full design pass on the 819-line hub. Three layers: (1) the numbered-version file store
+(`v{N}.json` naming, seq scan, prune-at-50, corrupt-file skip) — generically extractable; (2)
+`captureConfigBackup`/`applyConfigBackup`/`validateConfigBackup` — composition-root logic by
+NATURE: it reads/writes 12 main store singletons (`bl`, `policyStore`, `rewriter`, `sslBypass`,
+`dpiScanner`, `fileBlocker`, `ipf`, `rl`, `pacStore`, `globalCategoryGroups`, `catStore`) under
+the Finding 10.3 three-surface contract and the documented apply-order/nil-skip invariants; (3)
+the diff engine — typed over policy-engine structs (`PolicyRule`, `RewriteRule`, `CategoryGroup`,
+`CategoryEntry`). Verdict: **stays in main deliberately.** Layer 2/3 belong to the composition
+root until the core-hub (store/policy) decomposition changes type ownership; layer 1's ~150-line
+mechanical value is outweighed by its blast radius — **14 test files** swap the
+`configVersionsDir`/`configVersionSeq` package vars directly and would all need rewiring onto new
+seams. Re-evaluate layer 1 only if a second consumer of numbered-snapshot storage appears.
+
+### 2026-07-03 — `logstore` mapped; extraction DESIGNED (next unit)
+The Badger-backed request-log history (`logstore.go`, 769 lines) is the strongest remaining
+candidate — same BadgerDB-containment rationale as `catdb`. Recorded design:
+- **`internal/logstore`** owns: the store engine (`logStore` → `logstore.Store`: open/TTL/encrypted
+  variants, key layout, async `writeLoop`, `Query`/`Stats`/`RunRetention`/`SetRetention`, purge,
+  the pbkdf2/AES encryption-key handling), the **priority-aware deletion passes from logguard.go**
+  (`cleanupBytes`/`deletePass` — pure Badger ops, move as methods), and the dropped/pruned
+  counters (package-owned accessors; read by events.go's /metrics exposition — the feedsync
+  counter pattern).
+- **`LogEntry` moves INTO the package** as `logstore.Entry` with a main alias (`type LogEntry =
+  logstore.Entry`) — it is a wire DTO (the alerts.Payload precedent), currently defined in
+  store.go with ~90 uses across main that the alias covers unchanged. `logEntryLowPriority`
+  moves with the deletion passes.
+- **main keeps**: the `globalLogStore atomic.Pointer` singleton + enable/disable/purge
+  orchestration (admin-settings + API wiring), the logguard ORCHESTRATOR (`runDiskGuard`,
+  `handleDiskCritical`, the `logGuard` GUI-state struct, `diskUsage` syscall helper, minimal-mode
+  + `SetLogLevel` coupling, `auditSystem` — audit ring is main-owned), the retention admin API,
+  and the health/usage/estimate view helpers (they read main state).
+- **Test surface**: logstore_test.go (engine → in-package), logguard_test.go (split: deletion-pass
+  tests in-package, guard-orchestration in main), loguri/store_test LogEntry uses covered by the
+  alias. Deps: obs + fileutil(?) + badger — a contained-dependency leaf like catdb.
+
+### 2026-07-03 — `internal/sse` extracted (31st; second zero-dependency leaf)
+The SSE client hub moved out of `events.go`: `sse.Hub` owns registration under the connection cap,
+`Broadcast` with B21 slow-client eviction, and the observability counters. Deltas: the cap
+(`sseMaxClients` package var) and both counters (`statSSEEvicted`/`statSSERejected`) became
+**per-Hub** state — single production hub ⇒ identical behavior, and the cap accessor pair
+(`SetMaxClients`/`MaxClients`) is the seam the planned admin-configurable limit will use; `Rejected`
+stays handler-owned (`AddRejected` — the handler owns the 503, so it owns the count). main keeps the
+dashboard broadcaster (payload assembly reads main's stats globals), `apiEvents` (auth, framing,
+mid-stream revalidation), and the /metrics exposition (reads `Evicted()`/`Rejected()`). Test seams
+`ClientsForTest`/`EvictForTest` replaced the handler test's `hub.mu`/`hub.clients` whitebox pokes;
+the engine tests (coverage_test trio + eviction-counter) moved in-package (84% coverage) and the
+cap test now sets the per-hub cap instead of the atomic package var. Leaf proof: **zero Culvert
+imports** (second pure-stdlib leaf in a row).
+
+### 2026-07-03 — `internal/bootstrap` extracted (30th; zero-dependency leaf)
+The one-click DP-node bootstrap generators moved to `internal/bootstrap`: the shell-script and
+docker-compose templates (`RenderScript`/`RenderCompose`), image-reference resolution
+(`Image`/`UpdaterImage` take the registry-settings path + version as params — the file read moved
+with them), and the pure request-derivation helpers (`ExtractToken`, `BaseURL`, `EnrollmentAddr` —
+main's `trustForwardedHeaders` global becomes a parameter). The HTTP handlers stay in main: they
+validate the single-use enrollment token against `globalClusterStore` and assemble the enrollment
+URL from cluster state (`clusterRole`, `globalClusterCA`) — core-hub singletons. `ui_cluster.go`'s
+enrollment-token handler retargets its `cpBaseURL` call onto `bootstrap.BaseURL`. Helper + image
+tests moved in-package (no more `trustForwardedHeaders` global swaps — the param replaces them; the
+registry-override and corrupt-settings branches gained coverage; 98% package coverage); handler
+tests stayed in main. Leaf proof: **zero Culvert imports** — the first pure-stdlib extraction since
+the early leaves.
+
+### 2026-07-03 — RISK-017 closed (follow-up to the alerts extraction)
+`globalAlertStore.Init(<dataDir>/alert_webhooks.json)` is now wired as step 4 of the
+persistent-admin-state startup slice (resolver gains `AlertWebhooksPath`), and `Store.save()`
+upgraded to `fileutil.AtomicWrite` now that the path is load-bearing. Deliberate behavior change,
+shipped as its own commit after the behavior-preserving extraction. Details in the risk register.
+
+### 2026-07-03 — `internal/alerts` grows into the full delivery engine (29th) + RISK-017 found
+The webhook delivery implementation (alerts.go + alerts_secret.go, 670 lines) moved INTO the
+existing `internal/alerts` producer seam — the seam's contract (`Payload`/`Sink`/`SetSink`/`Fire`)
+is unchanged; what moved is what the installed sink delegates to: `Store` (webhook CRUD + delivery
+history + RISK-003 AES-GCM secret encryption-at-rest), `(*Store).Dispatch` (Q17 dedup + bounded
+fan-out + F16 retry enqueue), `(*Store).Deliver` (SSRF-guarded, HMAC-signed HTTP POST), the
+persistent retry queue (`StartRetryLoop(ctx, current func() *Store)` — the store provider closure
+preserves the read-global-each-tick test-reassignment tolerance), and `ValidateURL`. main keeps the
+singleton + `fireAlert` wrapper (still installed as the sink at init). Deltas: the Q17 dedup map
+became **per-Store** state (production has one store — behavior identical; tests that swap in a
+fresh store get a fresh dedup window; `ResetDedupForTest` replaces the whitebox map wipe);
+`processRetryQueue`'s inline hook scan became `GetByID` (same lock, copy semantics); the retry-queue
+tests (coverage_boost + the tmp-leak guard) consolidated in-package; `Store.save()` keeps its
+non-fsynced WriteFile+Rename verbatim (pre-Bucket-4 style — noted in RISK-017, not silently fixed).
+**Dialer-swap retarget (same as blocklistfeed):** `Deliver` dials `ssrf.SafeDialContext` directly,
+so the two webhook tests that swapped main's `ssrfSafeDialContext` var were retargeted onto
+`ssrf.AllowLoopbackForTest()`. **Finding recorded as RISK-017:** `AlertStore.Init(path)` has NEVER
+been wired in production (git-history verified) — webhooks don't survive restart and the RISK-003
+machinery protects a file production never writes; the extraction stayed behavior-preserving and
+the fix is a separate unit. Leaf proof: `fileutil`+`obs`+`ssrf` only.
+
+### 2026-07-03 — `internal/threatfeed` extracted (28th) + obs facade gains `Debugf`
+The local threat-feed manager (URLhaus/OpenPhish download, offline URL/domain lookups, the
+admin-managed domain allowlist with its nil-vs-empty persistence contract, CP export/import) moved to
+`internal/threatfeed` as a pure leaf — every dependency already had an internal home: `isPrivateIP` →
+`ssrf.PrivateIP` (inline, per the recorded seam verdict), `atomicWriteFile` → `fileutil.AtomicWrite`,
+`logger.Printf` → `obs.Printf`. `ThreatFeed` → `threatfeed.Feed` behind the usual alias;
+`normaliseFeedURL` → exported `NormaliseURL` (main's fuzz target retargets); `fetchTextFeed` became a
+method so its allowlist check reads the receiver instead of the `globalThreatFeed` singleton (only
+caller is `Sync` on the same instance — behavior identical). Moved code got the house-rule fixes
+(`NewRequestWithContext`+`http.NoBody`, named results). **Facade extension (ADR-0003):** the engine's
+one `logDebugf` line required `obs.Debugf`/`obs.SetDebugEnabled` — main's `SetLogLevel` now mirrors
+the debug-enabled boolean into obs on every level change (level state stays in main, same stance as
+`obs.Warnf`). Three whitebox suites moved in-package (engine tests, the allowlist empty-clear
+persistence regressions, the PR #247 saveToDisk race harness); main-side integration tests rewired
+onto public API + two test-support methods (`SeedForTest` replacing map pokes in the secscan feed
+tests, `SetDBPathForTest` replacing the dbPath/mu pokes in the cluster-apply persistence test); the
+bucket-4 durability test now drives `Init`+`SeedForTest`+`Save` instead of whitebox `saveToDisk`.
+Leaf proof: `fileutil`+`obs`+`ssrf` only.
+
+### 2026-07-03 — `saas_feed.go` mapped; extraction DESIGNED (executed above)
 The next unit is fully mapped and the design decided — recorded here so a fresh session (or the
 post-#529 branch) executes it without re-discovery. `internal/saasfeed` needs FIVE seams, the widest
 so far: (1) the `catStore` merge inverted to an injected `merge func([]Category) int` closure —

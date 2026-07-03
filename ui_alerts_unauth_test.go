@@ -66,8 +66,8 @@ func TestAPIAlertsWebhooks_POST(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(as.hooks) != 1 {
-		t.Errorf("expected 1 webhook stored, got %d", len(as.hooks))
+	if got := len(as.List()); got != 1 {
+		t.Errorf("expected 1 webhook stored, got %d", got)
 	}
 }
 
@@ -140,7 +140,7 @@ func TestAPIAlertsWebhooks_DELETE(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(as.hooks) != 0 {
+	if len(as.List()) != 0 {
 		t.Error("webhook should have been deleted")
 	}
 }

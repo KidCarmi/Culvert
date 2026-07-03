@@ -11,7 +11,7 @@ main.go       — Entrypoint, flag parsing, signal handling, graceful shutdown
 proxy.go      — HTTP/CONNECT/WebSocket handlers, tunnel relay, upstream transport, sanitizeLog
 socks5.go     — SOCKS5 protocol handler (RFC 1928/1929)
 policy.go     — Policy engine: rule evaluation, FQDN/category/GeoIP/schedule matching
-store.go      — Persistent state: blocklist, request log, audit log, config store
+store.go      — Persistent state: request log, config store, auth Config (blocklist → internal/blocklist, audit → internal/audit per ADR-0002; shims/aliases in blocklist_vars.go + the audit section)
 ca.go         — Root CA management, leaf cert signing, encrypted CA bundle (AES-GCM + PBKDF2), LRU cert cache
 ui.go         — startUI bootstrap only (no direct mux.HandleFunc; routes registered via register*Routes helpers)
 ui_routes_meta.go — uiRoutes: single source of truth for route metadata (method-aware via Methods []uiRouteMethod)
@@ -41,8 +41,8 @@ upstream.go   — Upstream proxy chaining with failover, circuit breaker, round-
 ocsp.go       — OCSP shim: transport wiring over internal/ocsp (ADR-0002)
 metrics.go    — Prometheus metrics (culvert_* namespace, per-rule hit counters, latency histogram)
 connlimit.go  — Per-IP connection limiting and X-Request-ID generation
-alerts.go     — Webhook alerting for security events (HMAC-SHA256 signed)
-threatfeed.go — Threat intelligence feed integration (URLhaus, OpenPhish), domain allowlist for hosting platforms
+alerts.go     — Alerts shim: aliases + singleton + fireAlert/retry-loop wrappers over internal/alerts (ADR-0002; delivery engine + RISK-003 secret encryption live in the package)
+threatfeed.go — Threat-feed shim: alias + singleton over internal/threatfeed (ADR-0002; URLhaus/OpenPhish, domain allowlist)
 feedsync.go   — Feedsync shim: aliases over internal/feedsync (ADR-0002)
 blocklist_feed.go — Blocklist-feed shim: aliases over internal/blocklistfeed (ADR-0002; Merger iface + ssrf seam)
 rewrite.go    — HTTP header rewrite rules (per-host, wildcard)
@@ -56,12 +56,12 @@ lockout.go    — Brute-force lockout (IP + user)
 totp.go       — TOTP 2FA (RFC 6238, inline stdlib HMAC-SHA1, no external dep)
 tls.go        — UI-TLS shim: uiExtraSANs + wrapper over internal/uitls (ADR-0002)
 blockpage.go  — Block page HTML template
-events.go     — SSE event stream for live UI dashboard
+events.go     — SSE shim: broadcaster + apiEvents + /metrics exposition over internal/sse (ADR-0002; hub engine lives in the package)
 catdb.go      — URL category database
 configversion.go — Config versioning, snapshots, diff, rollback (50-version max)
 nodegroup.go  — Node group definitions with label selectors, priority-based matching
 bandwidth.go  — Per-group bandwidth/QoS policies with token bucket rate limiting
-bootstrap.go  — Bootstrap script/compose generators for node enrollment
+bootstrap.go  — Bootstrap shim: token-gated HTTP handlers over internal/bootstrap (ADR-0002; templates + image refs + URL helpers live in the package)
 update.go     — Self-update system (binary + Docker)
 update_cluster.go — Rolling cluster update orchestrator (canary, drain, HA sync)
 scan_remote.go — Remote scan sidecar for production sandboxing

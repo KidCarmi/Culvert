@@ -1,7 +1,7 @@
-package main
+package alerts
 
-// alerts_secret.go — encryption-at-rest for webhook HMAC signing secrets
-// (RISK-003). AlertWebhook.Secret is the HMAC-SHA256 signing key; persisting it
+// secret.go — encryption-at-rest for webhook HMAC signing secrets
+// (RISK-003, moved from package main per ADR-0002). Webhook.Secret is the HMAC-SHA256 signing key; persisting it
 // as cleartext in alert_webhooks.json let a file read or a copied data dir forge
 // signed alert payloads. Secrets are now AES-256-GCM encrypted on disk under a
 // per-data-dir key file; the in-memory value stays cleartext so signing works.
