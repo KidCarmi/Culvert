@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B), `reqlog` (35th — store.go Phase C; **the store.go program is CLOSED**) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th), `sse` (31st), `logstore` (32nd), `blocklist` (33rd — store.go Phase A), `audit` (34th — store.go Phase B), `reqlog` (35th — store.go Phase C; **the store.go program is CLOSED**), `urlcat` (36th — policy.go Phase A) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,25 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/urlcat` extracted (36th; policy.go Phase A, executed from the design)
+Executed exactly per the program design below. The engine moved verbatim: `Entry`/`Store` +
+lowercase host index, `Load`/`Save` (fileutil.AtomicWrite durability comment preserved), `All`/
+`ReplaceAll`/`Set`/`Delete`/`AddHost`/`RemoveHost`, `GetByName` (moved home from saas_feed.go),
+`DefaultEntries` + the `default_categories.json` embed (file moved into the package), and the two
+internals-reaching free functions became methods: `matchCategoryInStore` → `Store.MatchesHost`
+(hot path — policy Evaluate's category check), the admin tier of `lookupHostCategory` →
+`Store.LookupHost` (entry-scan preserved verbatim for the original-case matchedBy contract).
+`Category` + constants moved (`urlcat.Social` …) with typed-const aliases (`CategorySocial` etc.);
+`URLCategory`/`CategoryEntry`/`CategoryStore` are type aliases; `newCategoryStore = urlcat.New`
+(the `defaultCategoryEntries` alias was dropped — its last user moved with the tests). The
+TWO-TIER fusion (`matchCategory`/`lookupHostCategory` over catStore + communityDB) stays in main
+as designed. Test seams: `Path()` accessor + `SetPathForTest` — snapshotCatStore, the Bucket-4
+durability test, and the cluster apply-persist test dropped their `cs.path`/`rebuildIndex` field
+pokes onto them. catstore_test.go moved in-package wholesale (+ GetByName's test; 76% coverage).
+Moved-code lint (4 gocritic nestingReduce/equalFold) fixed by style, not suppression. Gates: full
+suite, `-race` over policy/category/proxy-e2e scope, shuffled determinism ×2, leaf proof exactly
+`fileutil`+`hostutil`. Next: Phase B (`internal/sslbypass`).
 
 ### 2026-07-03 — Core-hub survey (proxy / controlplane / policy) + the policy.go decomposition program (Phases A–C)
 With store.go closed, the three remaining hubs were mapped BEFORE any move (sizes as of today):

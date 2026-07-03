@@ -4,7 +4,7 @@ package main
 // to internal/saasfeed (ADR-0002, five-seam design). The alias shim keeps the
 // urlcategories startup slice, admin-settings persistence, and the metrics
 // surface using the original unqualified names. main owns the merge closure
-// (CategoryStore/CategoryEntry live in the policy engine), the lifecycle
+// (the category store lives in internal/urlcat), the lifecycle
 // provider, and the SSRF-safe client; the sync-failure counter is
 // package-owned (saasfeed.SyncFailures, read by urlcat_metrics.go).
 
@@ -74,15 +74,5 @@ func mergeSaaSCategories(categories []saasfeed.Category) int {
 	return added
 }
 
-// GetByName finds a category by name in catStore (case-insensitive).
-func (cs *CategoryStore) GetByName(name string) *CategoryEntry {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	target := strings.ToLower(name)
-	for _, e := range cs.entries {
-		if strings.ToLower(e.Name) == target {
-			return e
-		}
-	}
-	return nil
-}
+// GetByName moved home to internal/urlcat with the CategoryStore extraction
+// (ADR-0002, policy.go decomposition Phase A).

@@ -55,7 +55,7 @@ func TestBucket4_CategoryStore_Save_AtomicWriteFile(t *testing.T) {
 	path := filepath.Join(dir, "categories.json")
 
 	cs := newCategoryStore(nil)
-	cs.path = path
+	cs.SetPathForTest(path)
 	if err := cs.Set("bucket4-test-cat", []string{"example.com", "test.com"}, false); err != nil {
 		t.Fatalf("seed Set: %v", err)
 	}
