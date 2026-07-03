@@ -4,8 +4,11 @@
 ## This workflow is the mandatory security gate that must pass before any
 ## release is published.  It runs automatically on:
 ##   • Push of a version tag (v*)   → blocks release if any check fails
-##   • Pull requests to main/master → enforces the gate on every merge
-##   • Manual trigger               → allows ad-hoc scanning (nightly, etc.)
+##   • Push to main + weekly cron   → continuous scanning cadence
+##   • Pull requests to main        → PASS-THROUGH ONLY (retirement step 6):
+##     the scan jobs skip and the aggregate reports success — PR-time
+##     scanning lives in the Fast/Deep PR Gates (roadmap/CI-REDESIGN.md)
+##   • Manual trigger               → allows ad-hoc scanning
 ##
 ## How the gate fits into the release flow:
 ##   1. Developer pushes tag:  git tag v1.2.3 && git push origin v1.2.3
@@ -24,8 +27,13 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # PR trigger retained ONLY so the "✅ Security Gate — APPROVED" check name
+  # keeps reporting (pass-through; see header). Do not remove until branch
+  # protection no longer requires it.
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "30 5 * * 1"   # weekly full scan, Mondays 05:30 UTC
   workflow_dispatch:
 
 # Prevent two concurrent scans on the same ref — cancel the older one.
@@ -37,6 +45,8 @@ jobs:
   # ─── 1. SAST — gosec ───────────────────────────────────────────────────────
   sast-gosec:
     name: "SAST · gosec"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -94,6 +104,8 @@ jobs:
   # ─── 2. Known CVEs — govulncheck ───────────────────────────────────────────
   vuln-govulncheck:
     name: "CVE · govulncheck"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -116,6 +128,8 @@ jobs:
   # ─── 3. Dependency audit — trivy filesystem ────────────────────────────────
   vuln-trivy-fs:
     name: "CVE · trivy (source)"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -167,6 +181,8 @@ jobs:
   # ─── 4. Docker image scan — trivy ──────────────────────────────────────────
   vuln-trivy-image:
     name: "CVE · trivy (Docker image)"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -221,6 +237,8 @@ jobs:
   # ─── 5. Secret scanning — gitleaks ─────────────────────────────────────────
   secrets-gitleaks:
     name: "Secrets · gitleaks"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -236,6 +254,8 @@ jobs:
   # ─── 6. Dependency license check ───────────────────────────────────────────
   license-check:
     name: "Licenses · go-licenses"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -273,6 +293,8 @@ jobs:
   # ─── 7. Generate SBOM ──────────────────────────────────────────────────────
   sbom:
     name: "SBOM · syft"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # SBOM generation is informational — does not block the gate.
     # The artifact is attached to every release for supply-chain transparency.
@@ -297,6 +319,8 @@ jobs:
   # ─── 8. Static analysis — staticcheck ──────────────────────────────────────
   sast-staticcheck:
     name: "SAST · staticcheck"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -329,6 +353,8 @@ jobs:
   # ─── 9. Race-condition & coverage tests ────────────────────────────────────
   tests-race:
     name: "Tests · race detector + coverage"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -363,6 +389,8 @@ jobs:
   # ─── 10. Dockerfile linting — hadolint ──────────────────────────────────────
   lint-dockerfile:
     name: "Lint · Hadolint (Dockerfile)"
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -394,6 +422,7 @@ jobs:
   release-approved:
     name: "✅ Security Gate — APPROVED"
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs:
       - sast-gosec
       - vuln-govulncheck
@@ -405,9 +434,35 @@ jobs:
       - tests-race
       - lint-dockerfile
     # sbom is informational — not in needs (non-blocking)
+    # always() + skipped-as-pass: on PRs the scan jobs are skipped
+    # (superseded by the Fast/Deep PR Gates — retirement step 6) but this
+    # check name must keep reporting success so a branch-protection rule
+    # requiring it can never wedge a PR at "Expected". On main pushes, tags,
+    # and the weekly schedule everything runs and any failure/cancellation
+    # fails the gate as before.
+    if: always()
     steps:
-      - name: Gate passed
+      - name: Evaluate results (skipped = pass)
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
+          set -euo pipefail
+          echo "$NEEDS_JSON" | jq .
+          BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
+          if [ -n "$BAD" ]; then
+            echo "::error::failed jobs: $BAD"; exit 1
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            {
+              echo "## ✅ Security Gate — pass-through on PRs"
+              echo ""
+              echo "PR-time security scanning is enforced by the **Fast PR Gate**"
+              echo "(govulncheck, gosec, gitleaks) and **Deep PR Gate** (trivy image,"
+              echo "hadolint, go-licenses) — roadmap/CI-REDESIGN.md, retirement step 6."
+              echo "This gate runs fully on main pushes, release tags, and weekly."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           echo "=================================================="
           echo "  All security checks passed — release approved"
           echo "  Ref:    ${{ github.ref }}"
@@ -417,6 +472,7 @@ jobs:
           echo "=================================================="
 
       - name: Create gate summary
+        if: github.event_name != 'pull_request'
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
           ## ✅ Security Gate Passed

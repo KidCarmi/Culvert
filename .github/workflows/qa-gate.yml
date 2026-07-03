@@ -62,6 +62,8 @@ jobs:
   # the committed source code is wrong — not infra, not the runner.
   qa-logic:
     name: "QA · Application logic (race + vet)"
+    # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates; full behavior retained on main pushes and tags. Dependent jobs cascade-skip; the aggregate below treats skipped as pass so the required-check name keeps reporting.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -401,6 +403,8 @@ jobs:
   # before merge.
   qa-agent:
     name: "QA · Maintenance Agent (cmd/culvert-maint)"
+    # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates; full behavior retained on main pushes and tags. Dependent jobs cascade-skip; the aggregate below treats skipped as pass so the required-check name keeps reporting.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -547,6 +551,7 @@ jobs:
   qa-gate-approved:
     name: "✅ QA Gate — APPROVED"
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs:
       - qa-logic
       - qa-determinism
@@ -556,8 +561,35 @@ jobs:
       - qa-contract
       - qa-agent
       - qa-bench
+    # always() + skipped-as-pass: on PRs the QA jobs are skipped (superseded
+    # by the Fast/Deep PR Gates — retirement step 5) but this check name must
+    # keep reporting success so a branch-protection rule requiring it can
+    # never wedge a PR at "Expected". On main pushes/tags everything runs
+    # and failure/cancellation of any needed job fails the gate as before.
+    if: always()
     steps:
+      - name: Evaluate results (skipped = pass)
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS_JSON" | jq .
+          BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
+          if [ -n "$BAD" ]; then
+            echo "::error::failed jobs: $BAD"; exit 1
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            {
+              echo "## ✅ QA Gate — pass-through on PRs"
+              echo ""
+              echo "PR-time QA is enforced by the **Fast PR Gate** and **Deep PR Gate**"
+              echo "(roadmap/CI-REDESIGN.md, retirement step 5). This gate runs fully on"
+              echo "main pushes and release tags."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Summarise
+        if: github.event_name != 'pull_request'
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
           ## ✅ QA Gate Passed
