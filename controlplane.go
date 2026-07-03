@@ -68,7 +68,11 @@ import (
 // ConfigSnapshot is the canonical, immutable view of proxy configuration that
 // the Control Plane distributes to Data Plane nodes.
 type ConfigSnapshot struct {
-	Version               int64    `json:"version"`
+	Version int64 `json:"version"`
+	// Epoch is the issuing CP's fencing epoch (ADR-0005 S3; 0 = legacy).
+	// DPs reject snapshots below their last-seen epoch and ratchet forward
+	// otherwise, so a fenced-out zombie CP cannot roll a DP's config back.
+	Epoch                 int64    `json:"epoch,omitempty"`
 	BlockedHosts          []string `json:"blocked_hosts"`
 	IPFilterMode          string   `json:"ip_filter_mode"`
 	IPList                []string `json:"ip_list"`
@@ -664,7 +668,10 @@ func (s *controlPlaneServer) PushMetrics(ctx context.Context, raw json.RawMessag
 	globalClusterStore.UpdateNodeSeen(report.NodeID, "")
 
 	logger.Printf("ControlPlane: metrics from node %s (total=%d)", report.NodeID, report.Total)
-	return json.RawMessage(`{"ok":true}`), nil
+	// ADR-0005 S3: piggyback the fencing epoch on every heartbeat reply so
+	// DPs track leadership changes between config polls.
+	reply, _ := json.Marshal(dpHeartbeatReply{OK: true, Epoch: globalHA.CurrentEpoch()})
+	return reply, nil
 }
 
 // SyncRateLimits receives hot-IP deltas from a DP node and returns cluster-wide
@@ -694,6 +701,10 @@ func (s *controlPlaneServer) SyncRateLimits(ctx context.Context, raw json.RawMes
 // SyncRevocations receives revoked session tokens from a DP node and returns
 // the merged list from all other nodes, enabling cluster-wide session invalidation.
 func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	// ADR-0005 S3: revocation merge is a cluster-state write — fenced.
+	if ok, reason := haIssuanceAllowed(); !ok {
+		return nil, status.Errorf(codes.FailedPrecondition, "revocation sync fenced: %s", reason)
+	}
 	var req struct {
 		NodeID  string            `json:"node_id"`
 		Entries []RevocationEntry `json:"entries"`
@@ -733,6 +744,10 @@ func (s *controlPlaneServer) PushAuditEvents(ctx context.Context, raw json.RawMe
 
 // Enroll handles node enrollment: validates token, signs CSR, registers node.
 func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	// ADR-0005 S3: CA issuance is fenced — a zombie leader must not sign.
+	if ok, reason := haIssuanceAllowed(); !ok {
+		return nil, status.Errorf(codes.FailedPrecondition, "enrollment fenced: %s", reason)
+	}
 	var req EnrollRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
@@ -807,6 +822,7 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 		CAPEM:   string(globalClusterCA.CACertPEM()),
 		NodeID:  req.NodeID,
 		CPAddr:  clusterRole.grpcAddr,
+		Epoch:   globalHA.CurrentEpoch(), // ADR-0005 S3: seed the DP's epoch ratchet
 	}
 	b, _ := json.Marshal(resp)
 	return b, nil
@@ -815,6 +831,10 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 // RenewCert handles certificate renewal requests from enrolled DP nodes.
 // The node must be enrolled and not revoked. A new cert is signed from the CSR.
 func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	// ADR-0005 S3: CA issuance is fenced — a zombie leader must not sign.
+	if ok, reason := haIssuanceAllowed(); !ok {
+		return nil, status.Errorf(codes.FailedPrecondition, "cert renewal fenced: %s", reason)
+	}
 	var req struct {
 		NodeID string `json:"node_id"`
 		CSR    string `json:"csr"`
@@ -855,9 +875,10 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 	// Track renewal progress if a CA rotation is active.
 	globalClusterStore.RecordNodeRenewed(req.NodeID)
 
-	resp, _ := json.Marshal(map[string]string{
+	resp, _ := json.Marshal(map[string]any{
 		"cert_pem": string(certPEM),
 		"ca_pem":   string(globalClusterCA.AllCACertsPEM()),
+		"epoch":    globalHA.CurrentEpoch(), // ADR-0005 S3: DP rejects below-ratchet issuance
 	})
 	return resp, nil
 }
@@ -885,6 +906,10 @@ type HAStateBundle struct {
 	// own term (ADR-0004 Slice 1c, Codex P2) and a promotion yields a strictly
 	// higher epoch — making the /healthz split-brain signal meaningful.
 	LeaderTerm uint64 `json:"leader_term,omitempty"`
+	// Epoch is the leader's fencing epoch (ADR-0005 S3; 0 = legacy mode).
+	// The PULLER verifies it against its own lease backend before importing
+	// (Finding 7 — a zombie leader serving stale state cannot be imported).
+	Epoch int64 `json:"epoch,omitempty"`
 }
 
 // normalizeAdvertisedAddr turns a standby's advertised address into one the
@@ -1023,6 +1048,7 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 		Version:          globalConfigStore.Get().Version,
 		PromoteRequested: globalHA.plannedPromotion.Load(), // ADR-0004 Slice 1e: coordinated handoff
 		LeaderTerm:       globalHA.Status().Term,           // ADR-0004 Slice 1c/P2: seed standby epoch
+		Epoch:            globalHA.CurrentEpoch(),          // ADR-0005 S3: puller-side fence input
 	}
 
 	resp, _ := json.Marshal(bundle)
@@ -1368,8 +1394,17 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 				Uptime:   uptime(),
 			}
 			b, _ := json.Marshal(report)
-			if _, err := c.call(ctx, methodPushMetrics, b); err != nil {
+			raw, err := c.call(ctx, methodPushMetrics, b)
+			if err != nil {
 				logger.Printf("DataPlane: PushMetrics error: %v", err)
+				continue
+			}
+			// ADR-0005 S3: every heartbeat reply carries the CP's fencing
+			// epoch — ratchet it so leadership changes are learned between
+			// config polls (a stale reply just logs; nothing to reject here).
+			var reply dpHeartbeatReply
+			if json.Unmarshal(raw, &reply) == nil {
+				_ = dpObserveEpoch("heartbeat reply", reply.Epoch)
 			}
 		}
 	}
@@ -1561,6 +1596,12 @@ var caRotationNotify = make(chan struct{}, 1)
 
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
 func applyConfigSnapshot(snap ConfigSnapshot) {
+	// ADR-0005 S3: reject snapshots from a fenced-out (stale-epoch) CP
+	// before ANY state mutation; ratchet the last-seen epoch forward
+	// otherwise. Epoch 0 = legacy CP, accepted unchanged.
+	if !dpObserveEpoch("config snapshot", snap.Epoch) {
+		return
+	}
 	// H5: reject the entire snapshot if any per-slice cap is exceeded.
 	// Logged at info; the next CP poll cycle will retry with a fresh
 	// snapshot once the operator corrects the CP-side input. No partial
@@ -1871,6 +1912,7 @@ func setDPLastGoodConfigSnapshotSaveError(version int64, err error) {
 // Used by the Control Plane to serve the initial configuration.
 func CurrentConfigSnapshot() ConfigSnapshot {
 	snap := ConfigSnapshot{
+		Epoch:                 globalHA.CurrentEpoch(), // ADR-0005 S3: DP-side fence input
 		BlockedHosts:          bl.List(),
 		IPFilterMode:          ipf.Mode(),
 		IPList:                ipf.List(),

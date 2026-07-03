@@ -1640,6 +1640,9 @@ func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte) (*EnrollResponse
 	if err := json.Unmarshal(respRaw, &resp); err != nil {
 		return nil, fmt.Errorf("parse enrollment response: %w", err)
 	}
+	// ADR-0005 S3: seed this DP's fencing-epoch ratchet from the enrolling
+	// CP (0 = legacy CP, ratchet stays unseeded).
+	_ = dpObserveEpoch("enrollment", resp.Epoch)
 	return &resp, nil
 }
 
@@ -1882,9 +1885,15 @@ func renewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile,
 	var resp struct {
 		CertPEM string `json:"cert_pem"`
 		CAPEM   string `json:"ca_pem"`
+		Epoch   int64  `json:"epoch"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return fmt.Errorf("parse renewal response: %w", err)
+	}
+	// ADR-0005 S3: refuse a certificate signed by a fenced-out (stale-epoch)
+	// CP — installing it would re-trust a zombie's CA chain.
+	if !dpObserveEpoch("cert renewal", resp.Epoch) {
+		return fmt.Errorf("cert renewal rejected: response stamped with a stale fencing epoch")
 	}
 
 	keyDER, err := x509.MarshalECPrivateKey(privKey)

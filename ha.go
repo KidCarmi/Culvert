@@ -452,6 +452,12 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: parse state bundle error: %v", err)
 		return false
 	}
+	// ADR-0005 S3 (Finding 7): PULLER-side fence — verify the bundle's
+	// epoch against our own lease backend BEFORE any import. A zombie
+	// leader serving stale state must not reach ImportFullState.
+	if !h.verifyBundleEpoch(bundle.Epoch) {
+		return false
+	}
 	ok := applyHABundle(&bundle, token)
 	if ok {
 		// Seed the standby's epoch from the leader's term (ADR-0004 Slice 1c/1e,

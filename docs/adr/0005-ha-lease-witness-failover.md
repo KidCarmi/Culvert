@@ -1,11 +1,11 @@
 # ADR-0005: Safe automatic HA failover via a fencing lease in etcd
 
-- **Status:** Accepted-direction, **RESUMED — S0 + S1 + S2 SHIPPED** (S1+S2: 2026-07-03, after
-  the ADR-0002 decomposition program completed). Design adversarially reviewed and revised from a
-  hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the big stable
-  vendors" + self-hosted → etcd). S3–S5 remain; the lease is DORMANT in production until S5
-  wires flags (nil provider = legacy). **F4 posture: documented bounded-LWW (option A)** — not
-  state-in-etcd.
+- **Status:** Accepted-direction, **RESUMED — S0 + S1 + S2 + S3 SHIPPED** (S1–S3: 2026-07-03,
+  after the ADR-0002 decomposition program completed). Design adversarially reviewed and revised
+  from a hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the big
+  stable vendors" + self-hosted → etcd). S4–S5 remain; the lease is DORMANT in production until
+  S5 wires flags (nil provider = legacy). **F4 posture: documented bounded-LWW (option A)** —
+  not state-in-etcd.
 - **Safety posture while parked:** unchanged from ADR-0004 Slice 1 — HA is safe-by-default (manual
   failover, explicit promote, planned handoff, term-visible `/healthz`). Nothing regresses by pausing;
   only the *automatic* convenience is deferred.
@@ -133,6 +133,30 @@ Recorded so implementation cannot forget them:
   `server/v3` is imported exclusively by `_test.go` files.
 - **Not in S1 (by design):** no runtime wiring, no flags, no compose/GUI — the primitive is
   dormant until S2. Nothing about ADR-0004's safe-by-default posture changes yet.
+
+### 2026-07-03 — S3 SHIPPED: epoch fencing at every write sink + DP propagation (ha_fencing.go)
+The write-sink audit is recorded in ha_fencing.go's header — the source of truth. Summary:
+- **FENCED:** `Enroll` / `RenewCert` (CA issuance — Finding 2's zombie-signing capability) and
+  `SyncRevocations` (cluster-state merge) gate on `haIssuanceAllowed()`: standalone allowed,
+  HA requires leader role AND (in lease mode) live `WriteAllowed()` — the commit-time re-check of
+  Finding 3, evaluated per RPC. Fenced calls return gRPC `FailedPrecondition`.
+- **HASync bundle** carries `Epoch`; the **PULLER verifies it against its OWN backend read**
+  before `ImportFullState` (Finding 7 — the fence sits on the pull side). A backend read failure
+  rejects the round (fail-closed: skipping a sync is recoverable, importing a zombie's state is
+  not). An epoch-0 bundle is rejected while the fence carries a real epoch (unfenced leader).
+- **ConfigSnapshot** carries `Epoch`; `applyConfigSnapshot` rejects below-ratchet snapshots
+  BEFORE any state mutation. **Every heartbeat reply** (`PushMetrics` → `dpHeartbeatReply`) and
+  **both issuance responses** (Enroll seeds, RenewCert is enforced — a DP refuses to install a
+  cert signed by a stale-epoch CP) carry the epoch. DP-side `dpLastSeenEpoch` is a CAS ratchet:
+  0 = legacy (accepted, never moves the ratchet), higher/equal ratchets forward, lower rejects.
+- **DELIBERATELY NOT FENCED (recorded rationale):** `PushMetrics`/`SyncRateLimits`/
+  `PushAuditEvents` are DP→CP telemetry aggregation — accepting them on a zombie wastes memory
+  but grants no authority; `GetConfig` reads are epoch-checked on the DP side via the snapshot
+  stamp, which is stronger than gating the serve.
+- Tests: issuance matrix (standalone/legacy-leader/standby/zombie/live-holder), the three RPCs
+  return FailedPrecondition when fenced, puller-fence accept/reject/fail-closed, the DP ratchet,
+  and an end-to-end stale-snapshot rejection through `applyConfigSnapshot`. Race + shuffled ×2 +
+  full suite green.
 
 ### 2026-07-03 — S2 SHIPPED: the lease wired into HA leadership (ha_lease.go)
 Implemented exactly per the design decisions below, plus two findings from execution:
