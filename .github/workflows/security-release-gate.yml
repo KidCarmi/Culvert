@@ -52,6 +52,7 @@ jobs:
   # ─── 1. SAST — gosec ───────────────────────────────────────────────────────
   sast-gosec:
     name: "SAST · gosec"
+    timeout-minutes: 15
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -111,6 +112,7 @@ jobs:
   # ─── 2. Known CVEs — govulncheck ───────────────────────────────────────────
   vuln-govulncheck:
     name: "CVE · govulncheck"
+    timeout-minutes: 15
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -135,6 +137,7 @@ jobs:
   # ─── 3. Dependency audit — trivy filesystem ────────────────────────────────
   vuln-trivy-fs:
     name: "CVE · trivy (source)"
+    timeout-minutes: 15
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -188,6 +191,7 @@ jobs:
   # ─── 4. Docker image scan — trivy ──────────────────────────────────────────
   vuln-trivy-image:
     name: "CVE · trivy (Docker image)"
+    timeout-minutes: 30
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -244,6 +248,7 @@ jobs:
   # ─── 5. Secret scanning — gitleaks ─────────────────────────────────────────
   secrets-gitleaks:
     name: "Secrets · gitleaks"
+    timeout-minutes: 10
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -261,6 +266,7 @@ jobs:
   # ─── 6. Dependency license check ───────────────────────────────────────────
   license-check:
     name: "Licenses · go-licenses"
+    timeout-minutes: 10
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -300,6 +306,7 @@ jobs:
   # ─── 7. Generate SBOM ──────────────────────────────────────────────────────
   sbom:
     name: "SBOM · syft"
+    timeout-minutes: 10
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -326,6 +333,7 @@ jobs:
   # ─── 8. Static analysis — staticcheck ──────────────────────────────────────
   sast-staticcheck:
     name: "SAST · staticcheck"
+    timeout-minutes: 20
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -360,6 +368,7 @@ jobs:
   # ─── 9. Race-condition & coverage tests ────────────────────────────────────
   tests-race:
     name: "Tests · race detector + coverage"
+    timeout-minutes: 25
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -375,6 +384,8 @@ jobs:
         run: go mod download
 
       - name: Run tests with race detector
+        env:
+          TEST_SEED: "20260421"   # same seed as the other gates — reproducible reruns
         run: go test -v -race -count=1 -timeout=15m -coverprofile=coverage.out ./...
 
       - name: Check coverage threshold (≥ 55%)
@@ -396,6 +407,7 @@ jobs:
   # ─── 10. Dockerfile linting — hadolint ──────────────────────────────────────
   lint-dockerfile:
     name: "Lint · Hadolint (Dockerfile)"
+    timeout-minutes: 10
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest

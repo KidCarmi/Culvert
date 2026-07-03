@@ -46,6 +46,7 @@ concurrency:
 jobs:
   publish:
     name: Publish signed catalog to Pages
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     # Manual dispatch always runs. workflow_run only proceeds for a SUCCESSFUL CI
     # run on a tag push (head_branch is the tag, e.g. "v1.0.0") — branch/PR CI

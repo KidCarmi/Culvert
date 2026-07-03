@@ -33,6 +33,7 @@ jobs:
   # ─── 1. golangci-lint (comprehensive linter with inline PR comments) ────────
   lint:
     name: "Lint · golangci-lint"
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -64,6 +65,7 @@ jobs:
   # ─── 2. PR size gate ───────────────────────────────────────────────────────
   pr-size:
     name: "Review · PR size"
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -105,6 +107,7 @@ jobs:
   # ─── 4. Conventional commits check ────────────────────────────────────────
   commits:
     name: "Review · commit messages"
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -139,6 +142,7 @@ jobs:
   # ─── Summary ───────────────────────────────────────────────────────────────
   review-summary:
     name: "✅ Code Review — Complete"
+    timeout-minutes: 5
     runs-on: ubuntu-latest
     needs: [lint, pr-size]
     if: always()

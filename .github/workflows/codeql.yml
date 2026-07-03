@@ -72,6 +72,7 @@ concurrency:
 jobs:
   analyze:
     name: "SAST · CodeQL"
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -353,6 +353,8 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/setup-go-cache
       - name: Traffic-plane E2E
+        env:
+          TEST_SEED: "20260421"   # reproducible flake triage for the promotion record
         run: |
           set -o pipefail   # default shell lacks it; tee must not mask a failure
           go test -race -count=1 -timeout=10m -v \

@@ -55,6 +55,7 @@ permissions:
 jobs:
   catalog-e2e:
     name: Catalog E2E (real VM)
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -133,6 +134,7 @@ jobs:
 
   catalog-e2e-docker:
     name: Catalog E2E (Docker image)
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

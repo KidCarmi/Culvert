@@ -153,7 +153,18 @@ jobs:
           # sensitivity that is orthogonal to order-dependency — exactly
           # the failure-isolation principle this gate enforces (one job,
           # one layer, one failure class).
-          go test -count=2 -shuffle=on -timeout=20m ./...
+          set -o pipefail
+          go test -count=2 -shuffle=on -timeout=20m ./... 2>&1 | tee determinism.log \
+            || { grep -m1 -- "-test.shuffle " determinism.log || true; \
+                 echo "::error::determinism failure — reproduce with the printed -test.shuffle seed (log artifact: qa-determinism-log)"; exit 1; }
+
+      - name: Upload determinism log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qa-determinism-log
+          path: determinism.log
+          retention-days: 14
 
   # ─── C. Gate-critical coverage floor ───────────────────────────────────────
   # Coverage floor is enforced on the SECURITY-SENSITIVE surface specifically.
@@ -173,6 +184,8 @@ jobs:
           cache: true
 
       - name: Run tests with coverage
+        env:
+          TEST_SEED: "20260421"   # same seed as qa-logic — coverage %s must not wobble around the floors between reruns
         run: go test -count=1 -timeout=15m -coverprofile=coverage.out ./...
 
       - name: Enforce coverage floor on critical files
@@ -548,7 +561,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
