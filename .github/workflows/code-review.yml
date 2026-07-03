@@ -4,10 +4,18 @@
 ## Runs on every Pull Request.  Provides inline review comments via reviewdog
 ## so developers see findings directly in the PR diff — not just in CI logs.
 ##
-## These checks are ADVISORY on feature branches and BLOCKING on PRs to main.
+## ADVISORY ONLY (retirement step 7): blocking lint lives in the Fast PR
+## Gate (--new-from-rev). This workflow exists for the inline-comment DX;
+## reviewdog also cannot post comments on fork PRs (read-only token), so it
+## must not be a hard gate.
 ## ─────────────────────────────────────────────────────────────────────────────
 
 name: Code Review
+# Least-privilege default: jobs that need write scopes (packages, checks,
+# contents, security-events, pull-requests) declare them at job level.
+permissions:
+  contents: read
+
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -48,7 +56,10 @@ jobs:
             --config=.golangci.yml
             --timeout=5m
           filter_mode: diff_context
-          fail_on_error: true
+          # Advisory: the blocking lint verdict is the Fast PR Gate's
+          # --new-from-rev run. fail_on_error:true here would also hard-fail
+          # fork PRs, where the read-only token can't post review comments.
+          fail_on_error: false
 
   # ─── 2. PR size gate ───────────────────────────────────────────────────────
   pr-size:

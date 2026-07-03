@@ -11,14 +11,21 @@
 ##   • Manual trigger               → allows ad-hoc scanning
 ##
 ## How the gate fits into the release flow:
-##   1. Developer pushes tag:  git tag v1.2.3 && git push origin v1.2.3
-##   2. This workflow runs ALL checks below in parallel where possible.
-##   3. The "release-approved" job only runs if EVERY check passes.
-##   4. The main ci.yml "release" job depends on "release-approved" as a
-##      required status check (enforce via Branch Protection rules).
+##   1. A main push runs this gate AND ci.yml in parallel.
+##   2. ci.yml's auto-tag job POLLS the "✅ Security Gate — APPROVED"
+##      check-run for the same SHA and refuses to create the release tag
+##      until it concludes success — that wait step is the mechanical
+##      enforcement point (branch protection cannot gate tag-triggered
+##      workflows). Manually-pushed tags bypass it: only tag commits that
+##      are already green on main.
 ## ─────────────────────────────────────────────────────────────────────────────
 
 name: Security Release Gate
+# Least-privilege default: jobs that need write scopes (packages, checks,
+# contents, security-events, pull-requests) declare them at job level.
+permissions:
+  contents: read
+
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
