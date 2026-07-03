@@ -61,7 +61,7 @@ catdb.go      — URL category database
 configversion.go — Config versioning, snapshots, diff, rollback (50-version max)
 nodegroup.go  — Node group definitions with label selectors, priority-based matching
 bandwidth.go  — Per-group bandwidth/QoS policies with token bucket rate limiting
-bootstrap.go  — Bootstrap script/compose generators for node enrollment
+bootstrap.go  — Bootstrap shim: token-gated HTTP handlers over internal/bootstrap (ADR-0002; templates + image refs + URL helpers live in the package)
 update.go     — Self-update system (binary + Docker)
 update_cluster.go — Rolling cluster update orchestrator (canary, drain, HA sync)
 scan_remote.go — Remote scan sidecar for production sandboxing

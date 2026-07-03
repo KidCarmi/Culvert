@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/bootstrap"
 )
 
 func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +215,7 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
 
 	// Build bootstrap command (curl | bash).
-	cpBase := cpBaseURL(r)
+	cpBase := bootstrap.BaseURL(r, trustForwardedHeaders)
 	bootstrapCmd := fmt.Sprintf("curl -fsSL -k %s/api/cluster/bootstrap/%s | sudo bash", cpBase, plaintext)
 	enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
 

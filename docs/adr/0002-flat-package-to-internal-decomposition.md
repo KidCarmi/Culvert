@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd), `uitls` (24th), `blocklistfeed` (25th), `feedsync` (26th), `saasfeed` (27th), `threatfeed` (28th), `alerts` delivery engine (29th — the seam grown into the full engine), `bootstrap` (30th) (+ the `obs`/`fileutil`, `hostutil`, `alerts`, and `ssrf` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -730,6 +730,20 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 (fetch/parse/dispatch, nil-merge safety); `TestCategoryStore_GetByName` + the category-groups API
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
+
+### 2026-07-03 — `internal/bootstrap` extracted (30th; zero-dependency leaf)
+The one-click DP-node bootstrap generators moved to `internal/bootstrap`: the shell-script and
+docker-compose templates (`RenderScript`/`RenderCompose`), image-reference resolution
+(`Image`/`UpdaterImage` take the registry-settings path + version as params — the file read moved
+with them), and the pure request-derivation helpers (`ExtractToken`, `BaseURL`, `EnrollmentAddr` —
+main's `trustForwardedHeaders` global becomes a parameter). The HTTP handlers stay in main: they
+validate the single-use enrollment token against `globalClusterStore` and assemble the enrollment
+URL from cluster state (`clusterRole`, `globalClusterCA`) — core-hub singletons. `ui_cluster.go`'s
+enrollment-token handler retargets its `cpBaseURL` call onto `bootstrap.BaseURL`. Helper + image
+tests moved in-package (no more `trustForwardedHeaders` global swaps — the param replaces them; the
+registry-override and corrupt-settings branches gained coverage; 98% package coverage); handler
+tests stayed in main. Leaf proof: **zero Culvert imports** — the first pure-stdlib extraction since
+the early leaves.
 
 ### 2026-07-03 — RISK-017 closed (follow-up to the alerts extraction)
 `globalAlertStore.Init(<dataDir>/alert_webhooks.json)` is now wired as step 4 of the
