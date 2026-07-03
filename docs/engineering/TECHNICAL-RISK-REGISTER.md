@@ -189,6 +189,10 @@
   removed**. If updater removal stalls, re-evaluate: confirm the `.trivyignore` reachability
   rationale still holds and that the updater is not exposed to untrusted Docker registry/plugin input.
 - **Resolution:** DEBT-008 (remove legacy updater). **Owner:** maintainer · **Target:** with DEBT-008.
+- **Re-verified 2026-07-03:** `go list -m -u github.com/docker/docker` in `updater/` reports no
+  newer version — still no upstream fix, acceptance conditions still hold. The GitHub Dependabot
+  banner shown on every push ("5 vulnerabilities, 3 high") maps to THIS entry (the updater-only
+  CVE set); it is not an unhandled finding.
 
 ## RISK-005 — Interrupted restore leaves `/data` absent · MEDIUM · ✅ CLOSED 2026-06-30
 - **Was:** `runRestoreCommit` (`restore.go`) does move-aside (`rename /data → /data.bak.<ts>-<pid>`)

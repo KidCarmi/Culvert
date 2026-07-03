@@ -731,6 +731,32 @@ construction goes through `New`/`SeedStats`/`SetFeedURLForTest`. The engine suit
 tests stayed in main; `GetByName` itself stays in the shim (CategoryStore is policy-engine-owned).
 Leaf proof: imports `obs` only.
 
+## Engine-Extraction Wave COMPLETE (second wave) — 2026-07-03
+
+With `logstore` (32nd), the engine-extraction wave that followed the original leaf sweep is
+**complete**: every root file that carries an extractable engine has been extracted, and every
+remaining root file has a considered classification. A final survey (size-ordered, all root `*.go`
+read or previously mapped) leaves four classes, none of which is a next "slice":
+
+1. **Composition root by nature** — `configversion.go` (recorded REJECTED verdict below),
+   `diagnostics.go` (viewer API handlers), `admin_settings.go`, the `ui_*.go` handler files, the
+   `*_startup*.go` slices (shipped program, do not re-extract), the `*_vars.go`/shim files.
+2. **Subsystem programs with their own roadmaps** — the CDR/Sluice cluster (`cdr*.go`,
+   `cdrstore.go`; contains the Sluice gRPC dep but is a multi-file program wired into the proxy
+   hot path), release management (`release_*.go`, D1.6d), backup/restore/cleanup (D1.3/D1.5),
+   update/update_cluster (D1.6, DEBT-008).
+3. **Security-sensitive low-value** — `session.go`/`auth*.go` (HMAC cookies, providers; welded to
+   the frozen `defaultAuthOutcome` contract; extraction churn > boundary value today).
+4. **The core four hubs + hot-path satellites** — `store.go`, `policy.go`, `proxy.go`,
+   `controlplane.go`, plus `upstream.go`/`ha.go`/`enrollment.go` (the S6 upstreamTransport
+   contract and ADR-0004 HA state live here). These need ADR-grade design passes each;
+   `proxy.go` deliberately last, per the original decision.
+
+**Wave tally: 32 packages + 4 seams** under `internal/`, every one behind the full validated gate
+(build/vet, lint-vs-main 0, full suite, -race, shuffled determinism, leaf proof). Next
+decomposition work starts with a design pass on `store.go` (the request-log ring / stats /
+audit-ring hub) — a new program, not a continuation of this sweep.
+
 ### 2026-07-03 — `internal/logstore` extracted (32nd; executed from the recorded design)
 Executed exactly per the design note below. The engine (open/TTL/encryption variants, key layout,
 async writeLoop, Query/Stats/retention, PurgeAll, EncKey/ErrEncMismatch, the priority-aware
