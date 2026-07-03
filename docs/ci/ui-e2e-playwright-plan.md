@@ -1,6 +1,6 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **slices 1–9 shipped**. Companion to
+Status: **slices 1–11 shipped**. Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
@@ -67,6 +67,15 @@ zero-runtime-dependency, Go-first contract.
   header "set" rule the admin adds in the UI is applied on the LIVE proxy (shared
   global `rewriter`; `rewriter.ApplyRequest` before forwarding). A header-capturing
   upstream sees no header at baseline, then the injected header after the UI add.
+- **Slice 10 — file-extension blocking cross-plane** (`ui_fileblock_e2e_test.go`). An
+  extension the admin blocks in the UI is enforced on the LIVE proxy (shared global
+  file blocker; `fileBlocker.CheckPath` in the pre-policy gate): a request for a
+  path with that extension reaches the backend at baseline, then is 403'd after the
+  UI add and never forwarded.
+- **Slice 11 — PAC served + previewed** (`ui_pac_e2e_test.go`). The dynamically
+  generated `/proxy.pac` (served UNAUTHENTICATED for browser auto-config) is a valid
+  PAC document (FindProxyForURL + PROXY, correct content-type), and the PAC panel
+  renders the same generated config in its preview.
 
 ### Dependency footprint (test-only)
 

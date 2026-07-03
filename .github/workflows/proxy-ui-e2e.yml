@@ -35,6 +35,8 @@ on:
       - "ui_governance_e2e_test.go"
       - "ui_blocklist_e2e_test.go"
       - "ui_rewrite_e2e_test.go"
+      - "ui_fileblock_e2e_test.go"
+      - "ui_pac_e2e_test.go"
       - "ui_e2e_helpers_test.go"
       - ".github/workflows/proxy-ui-e2e.yml"
 
