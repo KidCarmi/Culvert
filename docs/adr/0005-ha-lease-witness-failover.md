@@ -1,12 +1,10 @@
 # ADR-0005: Safe automatic HA failover via a fencing lease in etcd
 
-- **Status:** Accepted-direction, **PARKED at S0** (2026-07-01). Design adversarially reviewed and
-  revised from a hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the
-  big stable vendors" + self-hosted → etcd). **S0 (peer-address prerequisite) is SHIPPED**; S1–S5 are
-  deliberately deferred — the maintainer prioritised the decomposition program (maintainability) over
-  the automatic-failover convenience, and crucially the **etcd runtime dependency has NOT been taken
-  yet** (S1 is the point of no cheap return; pausing before it costs nothing). Resume at S1.
-  **F4 posture: documented bounded-LWW (option A)** — not state-in-etcd.
+- **Status:** Accepted-direction, **RESUMED — S0 + S1 SHIPPED** (S1: 2026-07-03, after the
+  ADR-0002 decomposition program completed). Design adversarially reviewed and revised from a
+  hand-rolled witness to an **etcd-backed fencing lease** (maintainer: "do it like the big stable
+  vendors" + self-hosted → etcd). S2–S5 remain. **F4 posture: documented bounded-LWW (option A)**
+  — not state-in-etcd.
 - **Safety posture while parked:** unchanged from ADR-0004 Slice 1 — HA is safe-by-default (manual
   failover, explicit promote, planned handoff, term-visible `/healthz`). Nothing regresses by pausing;
   only the *automatic* convenience is deferred.
@@ -105,6 +103,35 @@ Recorded so implementation cannot forget them:
 - **S5 — config/flags/compose/GUI/docs.** `--ha-etcd-endpoints` (+ TLS), the etcd service in
   `docker-compose.yml`, epoch/lease status in the HA panel (GUI parity), operator runbook incl. the
   **documented LWW window**, evidence tests re-pinned, ADR-0004/RISK-001 updated.
+
+## Implementation log
+
+### 2026-07-03 — S1 SHIPPED: `internal/halease` (LeaseProvider + etcd impl + conformance suite)
+- **Package `internal/halease`:** `Provider` interface exactly per this ADR (`Acquire`/`Renew`/
+  `Read` + `Close`), with the contract written into the interface doc: grants are strictly
+  monotonic (the fencing property), **loss is an outcome (`ok=false`, nil error), transport
+  failure is an error (truth UNKNOWN)** — callers fail toward self-fence on both. `Close` MUST NOT
+  revoke a held lease (release-on-shutdown is S2 policy, not a primitive).
+- **`Etcd`:** lease-bound key `/culvert/ha/leader`; **epoch = the key's `create_revision`**
+  (from the grant txn's header revision) exactly as designed. `Acquire` is a single txn
+  (`CreateRevision==0 → Put(lease)` else `Get`); a **denied Acquire revokes its scratch lease**
+  (pinned by test — leaked leases would accumulate on every standby retry). `Renew` keepalives
+  then **re-verifies the key still carries (holder, epoch)** — guarding the fencing property even
+  if a stray keepalive outlives the key; `ErrLeaseNotFound` ⇒ loss, everything else ⇒ error.
+- **`Fake`:** injectable clock, `ExpireForTest`; the S2 Culvert-side logic unit-tests against it.
+- **One conformance suite, two backends:** `testConformance` pins grant/deny/read/renew/stale-
+  epoch/expiry-reacquire/**fencing-monotonicity** and runs against the Fake always AND against a
+  REAL etcd — `TestEtcd_Conformance_Embedded` boots `go.etcd.io/etcd/server/v3` **embed**
+  in-process (TEST-ONLY dependency; state in `t.TempDir`), so etcd's actual Raft state machine
+  exercises the mapping on every CI run with zero external infrastructure. An env-gated leg
+  (`CULVERT_TEST_ETCD_ENDPOINTS`) can additionally target an external etcd.
+- **Dependency reality check (recorded):** `go.etcd.io/etcd/{client,api,server}/v3` were ALREADY
+  in the module graph as indirects of existing dependencies — pinning them direct at v3.6.13
+  added ~80 go.sum lines total. The "point of no cheap return" was far cheaper than the parking
+  note assumed. The shipped binary links only `client/v3` (and only once S2 wires it into ha.go);
+  `server/v3` is imported exclusively by `_test.go` files.
+- **Not in S1 (by design):** no runtime wiring, no flags, no compose/GUI — the primitive is
+  dormant until S2. Nothing about ADR-0004's safe-by-default posture changes yet.
 
 ## Consequences
 
