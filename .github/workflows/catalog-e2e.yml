@@ -22,7 +22,10 @@ name: Catalog E2E (real binary)
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # tags trigger removed (CI review P0-3): auto-tag only tags SHAs that
+    # already passed this workflow on the main push — the tag re-run was a
+    # full duplicate of the identical commit. Release evidence for tags
+    # remains via security-release-gate (tags) + ci.yml catalog gate.
   # Retirement step 3 (roadmap/CI-REDESIGN.md): PR-time runs are scoped to
   # the release-catalog trust chain this workflow exists to prove — these
   # globs deliberately match the Deep PR Gate's `release` filter.

@@ -27,9 +27,12 @@ name: Install Lifecycle E2E
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # tags trigger removed (CI review P0-3): auto-tag only tags SHAs that
+    # already passed this workflow on the main push — the tag re-run was a
+    # full duplicate of the identical commit. Release evidence for tags
+    # remains via security-release-gate (tags) + ci.yml catalog gate.
   # Retirement step 2 (roadmap/CI-REDESIGN.md): two 35-minute jobs no longer
-  # run on every PR — nightly + main-push + release tags carry the continuous
+  # run on every PR — nightly + main-push carry the continuous
   # signal, and PRs that actually touch the installer surface still trigger it.
   schedule:
     - cron: "0 2 * * *"   # 02:00 UTC nightly
@@ -45,8 +48,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: install-lifecycle-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  # Scheduled runs get their own group: nightlies execute at github.ref =
+  # refs/heads/main, so sharing the push group meant a main push and the
+  # nightly could cancel each other (CI review P1-6).
+  group: install-lifecycle-e2e-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   contents: read

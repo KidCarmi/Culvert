@@ -12,7 +12,10 @@ name: Maintenance Agent Update E2E
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # tags trigger removed (CI review P0-3): auto-tag only tags SHAs that
+    # already passed this workflow on the main push — the tag re-run was a
+    # full duplicate of the identical commit. Release evidence for tags
+    # remains via security-release-gate (tags) + ci.yml catalog gate.
   # Retirement step 2 (roadmap/CI-REDESIGN.md): this workflow is the PR-time
   # representative of the agent-driven e2e flows, but only for PRs that touch
   # the surfaces it exercises — not on every docs or unrelated-Go change.

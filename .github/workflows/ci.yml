@@ -15,7 +15,10 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # PRs: fast-cancel superseded runs. Main/tags: QUEUE instead — cancelling a
+  # main run mid-flight can kill release machinery after images were pushed
+  # but before auto-tag ran, orphaning ghcr tags (CI review P1-3).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -24,6 +27,11 @@ jobs:
   test:
     name: Test & Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Skip on PRs (CI review): duplicates the Fast PR Gate's hygiene job
+    # (fmt/vet/build) exactly; this job remains the main/tag-path build that
+    # feeds smoke/docker/auto-tag/release.
+    if: github.event_name != 'pull_request'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -84,7 +92,11 @@ jobs:
   smoke:
     name: Compose Smoke Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Skip on PRs (CI review): a full compose image build per PR; the Deep PR
+    # Gate's build-image + compose-validate covers container-surface PRs.
     needs: test
+    if: github.event_name != 'pull_request'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -98,7 +110,7 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-deps proxy
 
       - name: Wait for healthy (fail fast on container exit)
-        timeout-minutes: 2
+        timeout-minutes: 3   # loop budget is 120s — pad so the loop's own FAIL diagnostic wins, not a step-timeout cancel
         run: |
           for i in $(seq 1 24); do
             STATE=$(docker inspect --format='{{.State.Status}}' culvert 2>/dev/null || echo "missing")
@@ -524,32 +536,38 @@ jobs:
           echo "next=$NEXT" >> $GITHUB_OUTPUT
           echo "Next version: $NEXT"
 
-      - name: Wait for Security Gate approval on this SHA
+      - name: Wait for Security Gate + QA Gate approval on this SHA
         # The Security Release Gate runs in PARALLEL with this workflow on
         # the same push, and branch protection cannot gate tag-triggered
         # workflows — so before this comment was mechanical reality, a
         # failing gosec/trivy/gitleaks did NOT stop the tag (and therefore
         # the signed release) from publishing (P0, CI review). This step is
-        # the enforcement point: no tag until the gate concludes success
-        # for this exact commit.
+        # the enforcement point: no tag until BOTH the Security Gate and the
+        # QA Gate conclude success for this exact commit. This also lets the
+        # QA/e2e workflows drop their tags: triggers — the tag SHA is by
+        # construction already fully validated on main.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
-            CONCLUSION=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100" \
-              --jq '[.check_runs[] | select(.name == "✅ Security Gate — APPROVED")][0].conclusion // "pending"')
-            case "$CONCLUSION" in
-              success)
-                echo "Security Gate approved ${GITHUB_SHA} — proceeding to tag."
-                exit 0 ;;
-              failure|cancelled|timed_out|action_required)
-                echo "::error::Security Gate concluded '$CONCLUSION' for ${GITHUB_SHA} — refusing to create a release tag"
-                exit 1 ;;
-              *)
-                echo "Attempt $i/60: Security Gate not concluded yet ($CONCLUSION); waiting 30s..."
-                sleep 30 ;;
-            esac
+            RUNS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100")
+            SEC=$(echo "$RUNS" | jq -r '[.check_runs[] | select(.name == "✅ Security Gate — APPROVED")][0].conclusion // "pending"')
+            QA=$(echo "$RUNS" | jq -r '[.check_runs[] | select(.name == "✅ QA Gate — APPROVED")][0].conclusion // "pending"')
+            for PAIR in "Security Gate:$SEC" "QA Gate:$QA"; do
+              NAME="${PAIR%%:*}"; CONCLUSION="${PAIR##*:}"
+              case "$CONCLUSION" in
+                failure|cancelled|timed_out|action_required)
+                  echo "::error::$NAME concluded '$CONCLUSION' for ${GITHUB_SHA} — refusing to create a release tag"
+                  exit 1 ;;
+              esac
+            done
+            if [ "$SEC" = "success" ] && [ "$QA" = "success" ]; then
+              echo "Security Gate and QA Gate approved ${GITHUB_SHA} — proceeding to tag."
+              exit 0
+            fi
+            echo "Attempt $i/60: gates not concluded yet (security=$SEC qa=$QA); waiting 30s..."
+            sleep 30
           done
           echo "::error::Security Gate did not conclude within 30 minutes — refusing to create a release tag"
           exit 1

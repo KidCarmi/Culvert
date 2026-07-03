@@ -58,7 +58,12 @@ jobs:
           push: false
           load: true
           tags: ${{ inputs.image-tag }}
-          cache-from: type=gha,scope=pr-image
+          # PR-written GHA caches are branch-isolated (not shared across PRs),
+          # so scope=pr-image alone is a permanent cold start. Fall back to
+          # the default-scope cache written by ci.yml's main-push docker job.
+          cache-from: |
+            type=gha,scope=pr-image
+            type=gha
           cache-to: type=gha,mode=max,scope=pr-image
 
       - name: Save image tarball
