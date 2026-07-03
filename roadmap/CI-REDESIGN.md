@@ -179,6 +179,39 @@ refuses a non-green commit). Set the ruleset to close the arbitrary-tree class.
 dependency — a commit that later fails the gate has already shipped a signed
 `latest`. Fix by gating the main-push publish/sign the same way (wait mode).
 
+### 5b. Egress control on the signing jobs (PANW audit item 2)
+
+The OIDC-token-bearing jobs (`docker`, `catalog-pipeline`, `release`, plus the
+`_build-image` reusable, `pr-fast-gate/test-race`, and `publish-catalog-pages`)
+run `go build`/`go test`/`docker build` over the full dependency graph while
+holding the cosign signing identity. A compromised transitive dep could
+exfiltrate that token. **Phase 2a (applied):** `step-security/harden-runner`
+runs in `egress-policy: audit` as the first step of each — non-breaking egress
+monitoring + a baseline for the block flip. golangci-lint is now installed via
+checksum-verified `go install` (was `curl | sh` off a mutable tag ref).
+
+**Phase 2b (TODO — flip to block after one real tagged release):** harden-runner
+`block` is NOT applied yet because the Actions runtime/OIDC/cache use
+per-region FQDNs under `*.actions.githubusercontent.com` that block can't
+reliably match without an empirical baseline, and a wrong allowlist mid-pipeline
+yields a *partial* release (images already signed to ghcr, release aborted).
+Procedure: run one real `v*` release with audit on, read harden-runner's
+reported endpoints, then set `egress-policy: block` + `allowed-endpoints` pinned
+to those exact FQDNs. Known-required hosts (starting list, confirm against the
+report): `github.com:443`, `api.github.com:443`, `uploads.github.com:443`,
+`release-assets.githubusercontent.com:443`, `objects.githubusercontent.com:443`,
+`codeload.github.com:443`, the reported `*.actions.githubusercontent.com` +
+`*.blob.core.windows.net` FQDNs (Actions/OIDC/artifacts/gha-cache),
+`ghcr.io:443`, `pkg-containers.githubusercontent.com:443`,
+`proxy.golang.org:443`, `sum.golang.org:443`, `storage.googleapis.com:443`,
+`fulcio.sigstore.dev:443`, `rekor.sigstore.dev:443`,
+`tuf-repo-cdn.sigstore.dev:443`, `registry-1.docker.io:443`,
+`auth.docker.io:443`, `production.cloudflare.docker.com:443`. Note: the
+`docker` job's in-container build egress (apk, `go mod download` inside
+buildkit) bypasses harden-runner — block there protects only the host-side
+cosign step. The `provenance` job is an SLSA reusable workflow (`@v2.1.0`,
+tag-pinned by design) — harden-runner cannot be injected into it; accepted gap.
+
 ## 6. Pinning policy
 
 GitHub Actions: full commit SHA + version comment (enforced convention).
