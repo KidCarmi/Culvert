@@ -220,12 +220,12 @@ func TestSSRFSafeDialer_RejectsLoopbackDial(t *testing.T) {
 	if err != nil {
 		t.Skipf("cannot bind loopback listener: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	addr := ln.Addr().String()
 	conn, err := ssrfSafeDialContext(context.Background(), "tcp", addr)
 	if err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("SSRF-safe dialer permitted loopback dial to %s — SSRF guard regression", addr)
 	}
 }
