@@ -28,8 +28,20 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Retirement step 2 (roadmap/CI-REDESIGN.md): two 35-minute jobs no longer
+  # run on every PR — nightly + main-push + release tags carry the continuous
+  # signal, and PRs that actually touch the installer surface still trigger it.
+  schedule:
+    - cron: "0 2 * * *"   # 02:00 UTC nightly
   pull_request:
     branches: [main]
+    paths:
+      - "scripts/**"
+      - "packaging/**"
+      - "docker-compose*.yml"
+      - "Dockerfile*"
+      - "test/e2e/**"
+      - ".github/workflows/install-lifecycle-e2e.yml"
   workflow_dispatch:
 
 concurrency:

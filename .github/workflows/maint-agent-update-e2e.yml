@@ -13,8 +13,18 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Retirement step 2 (roadmap/CI-REDESIGN.md): this workflow is the PR-time
+  # representative of the agent-driven e2e flows, but only for PRs that touch
+  # the surfaces it exercises — not on every docs or unrelated-Go change.
   pull_request:
     branches: [main]
+    paths:
+      - "test/e2e/**"
+      - "cmd/culvert-maint/**"
+      - "packaging/**"
+      - "docker-compose*.yml"
+      - "Dockerfile*"
+      - ".github/workflows/maint-agent-update-e2e.yml"
   workflow_dispatch:
 
 concurrency:
