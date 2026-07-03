@@ -210,8 +210,9 @@ the Go default) so the floor is contractual.
 
 **Follow-ups:** authenticated ZAP (session-cookie context — where the real yield
 is); drive the G401/G402 discovery delta to zero with justified `#nosec` on the
-remaining sites, then flip the **blocking** gosec to include them; add HSTS +
-CSP to the admin UI (neither is emitted today) with Go assertions; a client-side
+remaining sites, then flip the **blocking** gosec to include them; add **HSTS**
+to the admin UI (a `Strict-Transport-Security` header is not emitted today; CSP
+already is, with a nonce) plus a Go assertion; a client-side
 cipher **allowlist** on the inspect `tls.Config` (MinVersion is pinned; the
 suite set still inherits Go defaults); optionally promote the ZAP/testssl
 findings from advisory to blocking after a stable baseline.

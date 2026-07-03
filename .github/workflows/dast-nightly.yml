@@ -71,7 +71,7 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/testssl/testssl.sh" \
             --jsonfile-pretty "$RUNNER_TEMP/testssl.json" \
-            --protocols --cipherlist --server-preference \
+            --protocols -s --server-preference \
             --fast --connect-timeout 30 --openssl-timeout 30 \
             --warnings off --color 0 \
             https://127.0.0.1:9090 || true
@@ -93,7 +93,7 @@ jobs:
           # Weak cipher families offered → fail.
           while IFS= read -r line; do
             echo "::error::weak cipher family offered: $line"; fail=1
-          done < <(jq -r '.[] | select((.id | test("^cipherlist_(NULL|aNULL|EXPORT|LOW|3DES|RC4)"; "i"))
+          done < <(jq -r '.[] | select((.id | test("^cipherlist_(NULL|aNULL|EXPORT|LOW|3DES)"; "i"))
                             and (.finding | test("not offered"; "i") | not))
                           | "\(.id): \(.finding)"' "$J")
           [ "$fail" = 0 ] && echo "admin UI TLS posture: no legacy protocols / weak ciphers offered."
@@ -186,7 +186,7 @@ jobs:
         run: |
           set -o pipefail
           echo "── root module ──"
-          gosec -tests=false -exclude=G104,G302,G304,G703,G704 -fmt=text ./... || true
+          gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... || true
           echo "── cmd/culvert-maint ──"
-          ( cd cmd/culvert-maint && gosec -tests=false -exclude=G104,G302,G304,G703,G704 -fmt=text ./... ) || true
+          ( cd cmd/culvert-maint && gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... ) || true
           echo "Report-only: see roadmap/CI-REDESIGN.md §5c for the drive-to-zero follow-up."

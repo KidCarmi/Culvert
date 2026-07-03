@@ -478,9 +478,14 @@ func TestMITM_ForgedLeafTLSPosture(t *testing.T) {
 	if err := readCONNECT200(raw); err != nil {
 		t.Fatalf("CONNECT: %v", err)
 	}
-	legacy := tls.Client(raw, &tls.Config{ //nolint:gosec // G402: MaxVersion pinned low ON PURPOSE to prove the server floor
+	// MinVersion TLS10 is load-bearing: without it the client's own default
+	// minimum (TLS 1.2 since Go 1.22) makes the handshake fail LOCALLY before
+	// any ClientHello, so the server floor would never be exercised. Forcing
+	// the client to offer 1.0–1.1 makes the SERVER do the refusing.
+	legacy := tls.Client(raw, &tls.Config{ //nolint:gosec // G402: versions pinned low ON PURPOSE to prove the server floor
 		RootCAs:    proxyRoots,
 		ServerName: "inspect.test",
+		MinVersion: tls.VersionTLS10,
 		MaxVersion: tls.VersionTLS11,
 	})
 	if err := legacy.HandshakeContext(context.Background()); err == nil {
