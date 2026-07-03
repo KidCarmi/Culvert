@@ -748,50 +748,12 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	if ok, reason := haIssuanceAllowed(); !ok {
 		return nil, status.Errorf(codes.FailedPrecondition, "enrollment fenced: %s", reason)
 	}
-	var req EnrollRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
-	}
-
-	if req.Token == "" || req.CSR == "" || req.NodeID == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "token, csr, and node_id are required")
-	}
-
-	// Rate limit enrollment attempts per IP.
-	sourceIP := ""
-	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
-		sourceIP, _, _ = net.SplitHostPort(p.Addr.String())
-	}
-	if sourceIP != "" && !enrollRateLimitAllow(sourceIP) {
-		return nil, status.Errorf(codes.ResourceExhausted, "enrollment rate limited — try again later")
-	}
-
-	// Check if node ID is already registered and not revoked.
-	// Use a generic error message to avoid leaking enrolled node names.
-	if existing, ok := globalClusterStore.GetNode(req.NodeID); ok && existing.Status != "revoked" {
-		return nil, status.Errorf(codes.PermissionDenied, "enrollment denied")
-	}
-
-	// Validate and consume the enrollment token atomically (persisted to disk).
-	// Returns token metadata so we don't need to re-access the map.
-	tokInfo, err := globalClusterStore.ValidateAndConsumeToken(req.Token, req.NodeID, sourceIP)
+	req, tokInfo, err := admitEnrollment(ctx, raw)
 	if err != nil {
-		logger.Printf("Enrollment: rejected node %q: %v", sanitizeLog(req.NodeID), err)
-		return nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
+		return nil, err
 	}
-
-	// Validate CSR CommonName matches claimed node ID to prevent identity spoofing.
-	csrBlock, _ := pem.Decode([]byte(req.CSR))
-	if csrBlock == nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid CSR: no PEM block found")
-	}
-	csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid CSR: %v", err)
-	}
-	if csr.Subject.CommonName != req.NodeID {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"CSR CommonName %q does not match claimed node_id %q", csr.Subject.CommonName, req.NodeID)
+	if err := validateEnrollCSR(req.CSR, req.NodeID); err != nil {
+		return nil, err
 	}
 
 	// Sign the CSR.
@@ -826,6 +788,63 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	}
 	b, _ := json.Marshal(resp)
 	return b, nil
+}
+
+// admitEnrollment parses and admission-checks an Enroll request: shape,
+// required fields, per-IP rate limit, duplicate-node check, and atomic
+// token consumption (persisted). Returns the parsed request and the
+// consumed token's metadata. Extracted from Enroll (cyclop).
+func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, TokenInfo, error) {
+	var req EnrollRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return req, TokenInfo{}, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
+	}
+	if req.Token == "" || req.CSR == "" || req.NodeID == "" {
+		return req, TokenInfo{}, status.Errorf(codes.InvalidArgument, "token, csr, and node_id are required")
+	}
+
+	// Rate limit enrollment attempts per IP.
+	sourceIP := ""
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		sourceIP, _, _ = net.SplitHostPort(p.Addr.String())
+	}
+	if sourceIP != "" && !enrollRateLimitAllow(sourceIP) {
+		return req, TokenInfo{}, status.Errorf(codes.ResourceExhausted, "enrollment rate limited — try again later")
+	}
+
+	// Check if node ID is already registered and not revoked.
+	// Use a generic error message to avoid leaking enrolled node names.
+	if existing, ok := globalClusterStore.GetNode(req.NodeID); ok && existing.Status != "revoked" {
+		return req, TokenInfo{}, status.Errorf(codes.PermissionDenied, "enrollment denied")
+	}
+
+	// Validate and consume the enrollment token atomically (persisted to disk).
+	// Returns token metadata so we don't need to re-access the map.
+	tokInfo, err := globalClusterStore.ValidateAndConsumeToken(req.Token, req.NodeID, sourceIP)
+	if err != nil {
+		logger.Printf("Enrollment: rejected node %q: %v", sanitizeLog(req.NodeID), err)
+		return req, TokenInfo{}, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
+	}
+	return req, tokInfo, nil
+}
+
+// validateEnrollCSR checks the CSR parses and that its CommonName matches
+// the claimed node ID (identity-spoofing guard). Extracted from Enroll
+// (cyclop).
+func validateEnrollCSR(csrPEM, nodeID string) error {
+	csrBlock, _ := pem.Decode([]byte(csrPEM))
+	if csrBlock == nil {
+		return status.Errorf(codes.InvalidArgument, "invalid CSR: no PEM block found")
+	}
+	csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "invalid CSR: %v", err)
+	}
+	if csr.Subject.CommonName != nodeID {
+		return status.Errorf(codes.InvalidArgument,
+			"CSR CommonName %q does not match claimed node_id %q", csr.Subject.CommonName, nodeID)
+	}
+	return nil
 }
 
 // RenewCert handles certificate renewal requests from enrolled DP nodes.
@@ -1362,6 +1381,16 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
 		return
 	}
+	// ADR-0005 S3: the epoch fence must run BEFORE any caller-side mutation
+	// — external-auth/IdP application below, the last-good persist, and the
+	// lastVersion advance would otherwise let a fenced-out zombie CP poison
+	// the last-good file and the version ratchet even though
+	// applyConfigSnapshot rejects (Codex review, PR #536). Same poison
+	// rationale as the H5 placement above. applyConfigSnapshot re-checks
+	// (equal epoch passes) for its other callers.
+	if !dpObserveEpoch("config snapshot", snap.Epoch) {
+		return
+	}
 	if snap.Version <= c.lastVersion {
 		return // nothing changed
 	}
@@ -1598,7 +1627,10 @@ var caRotationNotify = make(chan struct{}, 1)
 func applyConfigSnapshot(snap ConfigSnapshot) {
 	// ADR-0005 S3: reject snapshots from a fenced-out (stale-epoch) CP
 	// before ANY state mutation; ratchet the last-seen epoch forward
-	// otherwise. Epoch 0 = legacy CP, accepted unchanged.
+	// otherwise. Epoch 0 is accepted only while the ratchet is unseeded
+	// (pure-legacy cluster). The DP poller (fetchAndApply) runs this same
+	// check EARLIER — before its external-auth/IdP application, last-good
+	// persist, and version advance — this one covers the other callers.
 	if !dpObserveEpoch("config snapshot", snap.Epoch) {
 		return
 	}
@@ -1611,6 +1643,28 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		return
 	}
 
+	applySnapshotPolicyAndTraffic(snap)
+	applySnapshotClusterRuntime(snap)
+
+	// IdP profiles. ReplaceAll compiles every enabled provider before swapping
+	// the live registry, so a bad CP-side IdP update does not break the DP's
+	// currently working SAML/OIDC providers. A rejection ABORTS the remaining
+	// (extended) state below — pre-existing ordering, preserved by the split.
+	if err := syncSnapshotIdPProfiles(snap); err != nil {
+		logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
+		return
+	}
+
+	applySnapshotExtendedState(snap)
+
+	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
+		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
+}
+
+// applySnapshotPolicyAndTraffic applies the traffic-control and policy
+// slices of a snapshot (split from applyConfigSnapshot for gocognit; order
+// preserved verbatim).
+func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) {
 	// Blocklist — in-place feed-entry replacement preserves the
 	// package-global bl's path / mode / manual / exceptions (the
 	// DP-local state that isn't in the cluster snapshot). The
@@ -1703,7 +1757,13 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	if snap.MaxConnsPerIP > 0 {
 		connLimiter.Enable(snap.MaxConnsPerIP)
 	}
+}
 
+// applySnapshotClusterRuntime applies the cluster-runtime slices of a
+// snapshot: CA-rotation detection, CP addresses, PAC, threat feed, and the
+// session secret (split from applyConfigSnapshot for gocognit; order
+// preserved verbatim).
+func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 	// Detect cluster CA rotation: if the fingerprint changed, trigger immediate cert renewal.
 	if snap.CAFingerprint != "" {
 		prev, _ := lastSeenCAFingerprint.Load().(string)
@@ -1747,25 +1807,29 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 		globalThreatFeed.SetDomainAllowlist(snap.ThreatDomainAllowlist)
 	}
 
-	// Session secret.
-	if snap.SessionHMAC != "" {
-		key, err := hex.DecodeString(snap.SessionHMAC)
-		if err == nil && len(key) >= 32 {
-			sessionSecret = key
-			logger.Printf("DataPlane: session secret synced from control plane")
-		} else if err != nil {
-			logger.Printf("DataPlane: invalid session secret hex: %v", err)
-		}
-	}
+	applySnapshotSessionSecret(snap)
+}
 
-	// IdP profiles. ReplaceAll compiles every enabled provider before swapping
-	// the live registry, so a bad CP-side IdP update does not break the DP's
-	// currently working SAML/OIDC providers.
-	if err := syncSnapshotIdPProfiles(snap); err != nil {
-		logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
+// applySnapshotSessionSecret installs the CP-synced session HMAC when it is
+// present and well-formed (hex, ≥32 bytes).
+func applySnapshotSessionSecret(snap ConfigSnapshot) {
+	if snap.SessionHMAC == "" {
 		return
 	}
+	key, err := hex.DecodeString(snap.SessionHMAC)
+	switch {
+	case err != nil:
+		logger.Printf("DataPlane: invalid session secret hex: %v", err)
+	case len(key) >= 32:
+		sessionSecret = key
+		logger.Printf("DataPlane: session secret synced from control plane")
+	}
+}
 
+// applySnapshotExtendedState applies the post-IdP slices of a snapshot —
+// everything the IdP-sync early return is allowed to abort (split from
+// applyConfigSnapshot for gocognit; order preserved verbatim).
+func applySnapshotExtendedState(snap ConfigSnapshot) {
 	// Bandwidth / QoS policies.
 	if snap.BandwidthPolicies != nil && globalBandwidth != nil {
 		globalBandwidth.ReplaceAll(snap.BandwidthPolicies)
@@ -1803,9 +1867,6 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	if snap.NodeGroups != nil && globalNodeGroups != nil {
 		globalNodeGroups.ReplaceAll(snap.NodeGroups)
 	}
-
-	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
-		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
 }
 
 func applyExternalAuthSnapshotSettings(snap ConfigSnapshot) {

@@ -144,11 +144,19 @@ The write-sink audit is recorded in ha_fencing.go's header — the source of tru
   before `ImportFullState` (Finding 7 — the fence sits on the pull side). A backend read failure
   rejects the round (fail-closed: skipping a sync is recoverable, importing a zombie's state is
   not). An epoch-0 bundle is rejected while the fence carries a real epoch (unfenced leader).
-- **ConfigSnapshot** carries `Epoch`; `applyConfigSnapshot` rejects below-ratchet snapshots
-  BEFORE any state mutation. **Every heartbeat reply** (`PushMetrics` → `dpHeartbeatReply`) and
-  **both issuance responses** (Enroll seeds, RenewCert is enforced — a DP refuses to install a
-  cert signed by a stale-epoch CP) carry the epoch. DP-side `dpLastSeenEpoch` is a CAS ratchet:
-  0 = legacy (accepted, never moves the ratchet), higher/equal ratchets forward, lower rejects.
+- **ConfigSnapshot** carries `Epoch`; the DP poller (`fetchAndApply`) runs the fence BEFORE its
+  caller-side mutations (external-auth/IdP application, last-good persist, version advance —
+  Codex P1 on PR #536: the in-function check alone let a zombie poison the last-good file and
+  the version ratchet), and `applyConfigSnapshot` re-checks for its other callers. **Every
+  heartbeat reply** (`PushMetrics` → `dpHeartbeatReply`) and **both issuance responses** (Enroll
+  seeds, RenewCert is enforced — a DP refuses to install a cert signed by a stale-epoch CP)
+  carry the epoch. DP-side `dpLastSeenEpoch` is a CAS ratchet: higher/equal ratchets forward,
+  lower rejects, and an epoch-less (0) message is accepted ONLY while the ratchet is unseeded —
+  once fencing has been proven, a 0 stamp is the zombie shape (a lease-configured CP that lost
+  its lease stamps 0) and is rejected (Codex P1). The puller-side bundle fence likewise rejects
+  when NO live holder exists — an expired key reads as an empty Status with no floor, so a
+  less-than-only check would accept any positive zombie stamp (Codex P2); corollary: a
+  lease-configured standby requires a lease-holding leader (S5 wires both together).
 - **DELIBERATELY NOT FENCED (recorded rationale):** `PushMetrics`/`SyncRateLimits`/
   `PushAuditEvents` are DP→CP telemetry aggregation — accepting them on a zombie wastes memory
   but grants no authority; `GetConfig` reads are epoch-checked on the DP side via the snapshot

@@ -31,7 +31,10 @@ import (
 
 // DefaultFeedURL is the built-in feed location (the Culvert GitHub repo);
 // package main's urlcategories startup slice uses it as the config default.
-const DefaultFeedURL = "https://raw.githubusercontent.com/KidCarmi/Culvert/main/default_categories.json"
+// The path tracks the file's in-repo home (internal/urlcat since the
+// ADR-0002 urlcat extraction — a stale root path here would 404 every
+// default-URL deployment).
+const DefaultFeedURL = "https://raw.githubusercontent.com/KidCarmi/Culvert/main/internal/urlcat/default_categories.json"
 
 // validFeedURL matches http:// or https:// — SSRF guard for CodeQL.
 var validFeedURL = regexp.MustCompile(`^https?://[^/]`)

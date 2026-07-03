@@ -143,8 +143,16 @@ func TestVerifyBundleEpoch(t *testing.T) {
 		t.Error("epoch-0 bundle must be rejected while the fence has a real epoch (zombie leader)")
 	}
 
-	// Advance the epoch; the old leader's stamp is now stale.
+	// Expired lease, NO live holder: reject regardless of the stamp — an
+	// empty backend Status has no floor, so a less-than-only check would
+	// accept any positive stamp from a zombie whose lease just lapsed
+	// (Codex review, PR #536).
 	f.ExpireForTest()
+	if h.verifyBundleEpoch(1) || h.verifyBundleEpoch(99) {
+		t.Error("bundles must be rejected while no live lease holder exists")
+	}
+
+	// Advance the epoch; the old leader's stamp is now stale.
 	if granted, st, _ := f.Acquire(context.Background(), "cp-new"); !granted || st.Epoch != 2 {
 		t.Fatal("second acquire")
 	}
@@ -185,10 +193,15 @@ func TestDPObserveEpoch_Ratchet(t *testing.T) {
 	if dpLastSeenEpoch.Load() != 8 {
 		t.Error("a rejected observation must not move the ratchet")
 	}
-	// Epoch 0 after seeding: still accepted (legacy CP in a mixed cluster),
-	// ratchet unchanged.
-	if !dpObserveEpoch("t", 0) || dpLastSeenEpoch.Load() != 8 {
-		t.Error("epoch 0 after seeding must be accepted without lowering the ratchet")
+	// Epoch 0 AFTER seeding: REJECTED — a lease-configured CP that lost its
+	// lease stamps 0 (CurrentEpoch on an unheld lease), so an epoch-less
+	// message after the cluster has proven fencing is the zombie shape
+	// (Codex review, PR #536). Ratchet unchanged.
+	if dpObserveEpoch("t", 0) {
+		t.Error("epoch 0 after seeding must be rejected (fenced-out or unfenced CP)")
+	}
+	if dpLastSeenEpoch.Load() != 8 {
+		t.Error("the rejected epoch-0 observation must not move the ratchet")
 	}
 }
 

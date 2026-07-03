@@ -84,6 +84,17 @@ func (h *HAState) verifyBundleEpoch(bundleEpoch int64) bool {
 		logger.Printf("HA: bundle epoch verification unavailable (backend read failed) — rejecting this sync round: %v", err)
 		return false
 	}
+	// No live holder ⇒ the serving leader has lost (or never held) the
+	// fence, and there is no floor to compare against — an expired key
+	// returns an empty Status, so a less-than-only check would accept ANY
+	// positive stamp from a zombie whose lease just lapsed (Codex review,
+	// PR #536). Reject until a holder exists; sync resumes within one lease
+	// acquisition. Note the corollary: a lease-configured standby requires
+	// a lease-holding leader (S5 wires both nodes together).
+	if st.Holder == "" {
+		logger.Printf("HA: REJECTED state bundle — no live lease holder (leader lost the fence?); refusing import until a holder exists")
+		return false
+	}
 	if bundleEpoch < st.Epoch {
 		logger.Printf("HA: REJECTED state bundle from a stale leader (bundle epoch %d < current epoch %d)", bundleEpoch, st.Epoch)
 		return false
@@ -99,10 +110,18 @@ func (h *HAState) verifyBundleEpoch(bundleEpoch int64) bool {
 var dpLastSeenEpoch atomic.Int64
 
 // dpObserveEpoch ratchets the last-seen epoch and reports whether the
-// observed value is acceptable. 0 = no fencing information (legacy CP) —
-// accepted without moving the ratchet.
+// observed value is acceptable. An epoch-less message (0) is accepted ONLY
+// while the ratchet is unseeded (pure-legacy cluster): once a positive
+// epoch has been seen, a 0 stamp is either a lease-configured CP that LOST
+// its lease (CurrentEpoch returns 0 when unheld — the zombie shape) or an
+// unfenced CP masquerading as legacy, and both are rejected (Codex review,
+// PR #536).
 func dpObserveEpoch(source string, epoch int64) bool {
 	if epoch <= 0 {
+		if last := dpLastSeenEpoch.Load(); last > 0 {
+			logger.Printf("DataPlane: REJECTED %s carrying no fencing epoch after epoch %d was seen (unfenced or fenced-out control plane)", sanitizeLog(source), last)
+			return false
+		}
 		return true
 	}
 	for {
