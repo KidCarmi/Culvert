@@ -36,29 +36,14 @@ func TestUIE2E_RBACNavGating(t *testing.T) {
 	browser := uiE2EBrowser(t)
 
 	// openAs returns a page in a fresh context authenticated as the given role.
+	// Delegates to newAuthedUIPage so it gets the same hardening as the rest of
+	// the suite: the Chart.js stub (so the on-load init reaches applySession
+	// instead of throwing) and a `load` wait (the persistent SSE connection means
+	// `networkidle` never fires — the original inline path deadlocked on it in CI
+	// where the Chart.js CDN is reachable and the full init runs).
 	openAs := func(user string, role UIRole) playwright.Page {
 		t.Helper()
-		ctx, err := browser.NewContext()
-		if err != nil {
-			t.Fatalf("new context: %v", err)
-		}
-		t.Cleanup(func() { _ = ctx.Close() })
-		if err := ctx.AddCookies([]playwright.OptionalCookie{{
-			Name:  uiSessionCookieName,
-			Value: mintUISessionValue(t, user, role),
-			URL:   playwright.String(srv.URL),
-		}}); err != nil {
-			t.Fatalf("add cookie: %v", err)
-		}
-		page, err := ctx.NewPage()
-		if err != nil {
-			t.Fatalf("new page: %v", err)
-		}
-		if _, err := page.Goto(srv.URL+"/", playwright.PageGotoOptions{
-			WaitUntil: playwright.WaitUntilStateNetworkidle,
-		}); err != nil {
-			t.Fatalf("goto: %v", err)
-		}
+		_, page := newAuthedUIPage(t, browser, srv.URL, user, role)
 		return page
 	}
 

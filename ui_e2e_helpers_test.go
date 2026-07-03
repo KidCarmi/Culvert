@@ -24,6 +24,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +151,29 @@ func injectChartStub(t *testing.T, ctx playwright.BrowserContext) {
 	}
 }
 
+// blockExternalRequests aborts every request that does not target the loopback
+// test server (or a data:/blob: URL). This keeps the suite HERMETIC and, just as
+// importantly, deterministic across environments: the SPA references an external
+// Chart.js CDN, which is unreachable in the sandbox but REACHABLE from CI — a
+// difference that made the full on-load init (and thus the page-load timing) vary
+// between local and CI. Aborting external requests makes the CDN "fail" fast
+// everywhere, so `load` fires promptly and the Chart stub is what initChart sees.
+func blockExternalRequests(t *testing.T, ctx playwright.BrowserContext) {
+	t.Helper()
+	err := ctx.Route("**/*", func(route playwright.Route) {
+		u := route.Request().URL()
+		if strings.Contains(u, "127.0.0.1") || strings.Contains(u, "localhost") ||
+			strings.HasPrefix(u, "data:") || strings.HasPrefix(u, "blob:") {
+			_ = route.Continue()
+			return
+		}
+		_ = route.Abort()
+	})
+	if err != nil {
+		t.Fatalf("route external block: %v", err)
+	}
+}
+
 // newUIPage opens a fresh browser context + page and navigates to base, waiting
 // for network idle so the SPA's on-load /api/auth/status fetch has completed.
 // The context is closed on cleanup.
@@ -161,6 +185,7 @@ func newUIPage(t *testing.T, browser playwright.Browser, base string) (playwrigh
 	}
 	t.Cleanup(func() { _ = ctx.Close() })
 	injectChartStub(t, ctx)
+	blockExternalRequests(t, ctx)
 	page, err := ctx.NewPage()
 	if err != nil {
 		t.Fatalf("new page: %v", err)
@@ -182,6 +207,7 @@ func newAuthedUIPage(t *testing.T, browser playwright.Browser, base, user string
 	}
 	t.Cleanup(func() { _ = ctx.Close() })
 	injectChartStub(t, ctx)
+	blockExternalRequests(t, ctx)
 	if err := ctx.AddCookies([]playwright.OptionalCookie{{
 		Name:  uiSessionCookieName,
 		Value: mintUISessionValue(t, user, role),
