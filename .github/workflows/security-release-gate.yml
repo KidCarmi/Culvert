@@ -461,27 +461,16 @@ jobs:
     # fails the gate as before.
     if: always()
     steps:
-      - name: Evaluate results (skipped = pass)
-        env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/needs-verdict
+        with:
+          needs-json: ${{ toJSON(needs) }}
+          title: "✅ Security Gate — APPROVED"
+          extra-summary: ${{ github.event_name == 'pull_request' && 'PASS-THROUGH on PRs — scanning is enforced by the Fast PR Gate (govulncheck/gosec/gitleaks) and Deep PR Gate (trivy/hadolint/go-licenses) — roadmap/CI-REDESIGN.md, step 6; this gate runs fully on main pushes, tags, and weekly.' || '' }}
+
+      - name: Release-approved banner
+        if: github.event_name != 'pull_request'
         run: |
-          set -euo pipefail
-          echo "$NEEDS_JSON" | jq .
-          BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
-          if [ -n "$BAD" ]; then
-            echo "::error::failed jobs: $BAD"; exit 1
-          fi
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            {
-              echo "## ✅ Security Gate — pass-through on PRs"
-              echo ""
-              echo "PR-time security scanning is enforced by the **Fast PR Gate**"
-              echo "(govulncheck, gosec, gitleaks) and **Deep PR Gate** (trivy image,"
-              echo "hadolint, go-licenses) — roadmap/CI-REDESIGN.md, retirement step 6."
-              echo "This gate runs fully on main pushes, release tags, and weekly."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           echo "=================================================="
           echo "  All security checks passed — release approved"
           echo "  Ref:    ${{ github.ref }}"

@@ -188,39 +188,10 @@ jobs:
           TEST_SEED: "20260421"   # same seed as qa-logic — coverage %s must not wobble around the floors between reruns
         run: go test -count=1 -timeout=15m -coverprofile=coverage.out ./...
 
-      - name: Enforce coverage floor on critical files
-        # Every file listed here is security-sensitive. If coverage drops below
-        # the threshold it usually means a new branch was added without tests —
-        # exactly the kind of regression this gate is designed to catch.
-        run: |
-          set -e
-          FUNC=$(go tool cover -func=coverage.out)
-          fail=0
-          check () {
-            local file="$1" floor="$2"
-            local pct
-            # Anchored match: require "/<file>:" so security.go doesn't also
-            # match ui_security.go (and policy.go doesn't match cdrpolicy.go
-            # / ui_policy.go, etc.). index() on a literal string keeps the
-            # check invariant to any regex-special characters in the name.
-            pct=$(echo "$FUNC" | awk -v f="$file" '
-              index($1, "/" f ":") > 0 {
-                match($NF, /[0-9.]+/); sum += substr($NF, RSTART, RLENGTH); n++
-              }
-              END { if (n>0) printf "%.1f", sum/n; else printf "0.0" }')
-            echo "  $file ... ${pct}% (floor ${floor}%)"
-            awk -v p="$pct" -v f="$floor" 'BEGIN { exit (p+0 < f+0) ? 1 : 0 }' || {
-              echo "::error file=$file::coverage ${pct}% below floor ${floor}%"
-              fail=1
-            }
-          }
-          echo "── Gate-critical coverage ──"
-          check "totp.go"        85
-          check "security.go"    70
-          check "session.go"     75
-          check "lockout.go"     80
-          check "policy.go"      60
-          exit $fail
+      - name: Enforce coverage floors (global + per-file)
+        # Shared with the Fast PR Gate — floors live in
+        # .github/scripts/coverage-floor.sh (one table, two event paths).
+        run: .github/scripts/coverage-floor.sh coverage.out
 
       - name: Upload coverage
         if: always()
@@ -593,25 +564,12 @@ jobs:
     # and failure/cancellation of any needed job fails the gate as before.
     if: always()
     steps:
-      - name: Evaluate results (skipped = pass)
-        env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          echo "$NEEDS_JSON" | jq .
-          BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
-          if [ -n "$BAD" ]; then
-            echo "::error::failed jobs: $BAD"; exit 1
-          fi
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            {
-              echo "## ✅ QA Gate — pass-through on PRs"
-              echo ""
-              echo "PR-time QA is enforced by the **Fast PR Gate** and **Deep PR Gate**"
-              echo "(roadmap/CI-REDESIGN.md, retirement step 5). This gate runs fully on"
-              echo "main pushes and release tags."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/needs-verdict
+        with:
+          needs-json: ${{ toJSON(needs) }}
+          title: "✅ QA Gate — APPROVED"
+          extra-summary: ${{ github.event_name == 'pull_request' && 'PASS-THROUGH on PRs — QA is enforced by the Fast/Deep PR Gates (roadmap/CI-REDESIGN.md, step 5); this gate runs fully on main pushes.' || '' }}
 
       - name: Summarise
         if: github.event_name != 'pull_request'
