@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup` (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -599,6 +599,19 @@ block (from `coverage_boost_test.go`) + the D1.2b cold-start table moved into th
 `BandwidthPolicies []BandwidthPolicy` field is untouched via the alias. `go list -deps` proof: imports
 only `obs`+`fileutil`. Same-sweep result for the siblings: `nodegroup.go` couples to `globalClusterStore`
 (needs a nodes-view seam — candidate next), `configversion.go`/`events.go` are hubs (stay).
+
+### 2026-07-02 — `internal/nodegroup` extracted (19th leaf)
+The bandwidth-sweep sibling: `nodegroup.go`'s `globalClusterStore` coupling turned out to live in the
+**API handlers**, not the engine — and the one `EnrolledNode`-typed engine method (`NodesInGroup`)
+already took nodes as a parameter with no production caller. So the engine (Store, D1.2-flag-F6 load
+validation, label-selector matching) moved to `internal/nodegroup` (`Group`/`Store`/`NewStore`/
+`LabelsMatch`) **EnrolledNode-free by design**; `NodesInGroup` became a main-side `nodesInGroup` free
+helper over the exported API (Get + LabelsMatch — behavior-identical). Handlers, `NodeGroupInfo`
+(response DTO), and the singleton stay in the trimmed `nodegroup.go`; `ConfigSnapshot.NodeGroups`
+untouched via the alias (embedding an alias keeps the field name, so `NodeGroupInfo{NodeGroup: g}`
+still compiles). D1.2b cold-start table moved into the package; `nodegroup_test.go` stayed black-box in
+main with its two `NodesInGroup` calls retargeted to the helper. Leaf proof: imports only
+`obs`+`fileutil`.
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
