@@ -38,7 +38,7 @@ geoip.go      — MaxMind GeoLite2 country lookup with background cache
 controlplane.go — gRPC-based Control Plane / Data Plane distributed architecture
 enrollment.go — Token-based node enrollment, ClusterStore, cluster CA, heartbeat monitor
 upstream.go   — Upstream proxy chaining with failover, circuit breaker, round-robin health checks
-ocsp.go       — OCSP/CRL revocation checking for upstream TLS certificates
+ocsp.go       — OCSP shim: transport wiring over internal/ocsp (ADR-0002)
 metrics.go    — Prometheus metrics (culvert_* namespace, per-rule hit counters, latency histogram)
 connlimit.go  — Per-IP connection limiting and X-Request-ID generation
 alerts.go     — Webhook alerting for security events (HMAC-SHA256 signed)

@@ -82,9 +82,11 @@ func TestRegisterPlugin(t *testing.T) {
 		p := &testPlugin{name: "reg", decision: DecisionAllow}
 		RegisterPlugin(p)
 		// Read the chain back via the swap API (the slice is package-owned
-		// in internal/plugin now); restore what Register appended.
+		// in internal/plugin now) and put it straight back — withPlugins'
+		// cleanup restores the original chain when fn returns, so a deferred
+		// restore here would run AFTER it and leak the test plugin.
 		got := pluginReplace(nil)
-		defer pluginReplace(got)
+		pluginReplace(got)
 		if len(got) != 1 {
 			t.Errorf("expected 1 plugin after Register, got %d", len(got))
 		}

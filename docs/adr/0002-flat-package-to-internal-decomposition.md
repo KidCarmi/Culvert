@@ -4,7 +4,7 @@
 - **Date:** 2026-06-28
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted)
 - **Proving PR:** `internal/totp` — ✅ extracted 2026-06-28 (see Notes); proves the strategy viable
-- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
+- **Leaves extracted:** `totp`, `geoip`, `fileblock`, `lockout`, `hashcache`, `catdb`, `blockpage`, `rewrite`, `connlimit`, `syslog`, `clamav`, `yara`, `scanner`, `scanexcl`, `filemagic`, `clientclass`, `backupcrypt`, `bandwidth`, `nodegroup`, `secscan` (20th — the ADR-0006 composition root, via DI), `pac` (21st), `plugin` (22nd), `ocsp` (23rd) (+ the `obs`/`fileutil`, `hostutil`, and `alerts` seams)
 - **Leaf-extraction phase:** ✅ **COMPLETE** (2026-06-30) — 17 leaves + 3 seams; see "Decomposition Complete" below for the completion line and the categorisation of every root file that deliberately stays in `package main`.
 
 ## Notes / log
@@ -650,6 +650,18 @@ a domain-merger interface over the `Blocklist` hub and an SSRF-guard seam (`isPr
 `ssrfSafeDialContext` are main-owned and under the CodeQL inline-guard convention in CLAUDE.md, so
 relocating them needs a deliberate design pass, not a mechanical move). Deferred with this note as
 the map.
+
+### 2026-07-03 — `internal/ocsp` extracted (23rd leaf)
+The OCSP revocation engine (`Checker` — renamed from `OCSPChecker` per revive — with the TTL'd verdict
+cache, responder query pipeline, `VerifyPeerCertificate` callback, and `resolveIssuer`) moved to
+`internal/ocsp` (the `golang.org/x/crypto/ocsp` import is aliased `cryptoocsp` inside). Deliberately
+stays in main: `ConfigureTLSConfigOCSP`/`ConfigureTransportOCSP` — they are upstream-transport
+ownership glue under the P5.3 / S6 contract (must only run inside `swapUpstreamTransport` closures)
+and reference the `globalOCSP` singleton, now built via `ocsp.New()`. The whitebox engine tests moved
+wholesale into the package; the two `ConfigureTransportOCSP` tests stayed in the trimmed main
+`ocsp_test.go`; `edge_audit_test.go`'s literal-construction tests were retargeted (`ocsp.New()`; the
+CacheLen-with-seeded-entries assertion relocated into the package suite rather than growing exported
+test API). Leaf proof: imports `obs` + `x/crypto/ocsp` only.
 
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
