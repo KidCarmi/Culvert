@@ -270,7 +270,7 @@ func otlpCounterMetrics(now string) []otlpMetric {
 func otlpGaugeMetrics(now string) []otlpMetric {
 	uptimeSec := time.Since(startTime).Seconds()
 	feedEntries, _, _ := globalThreatFeed.Stats()
-	_, _, cacheSize := globalSecScanner.cache.Stats()
+	_, _, cacheSize := globalSecScanner.CacheStats()
 	gauges := []struct {
 		name string
 		desc string

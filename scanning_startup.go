@@ -21,8 +21,7 @@ func loadScanning(cfg scanningStartupConfig, ctx context.Context) *ScanService {
 		logger.Printf("ScanSvc: remote mode, delegating to %s", cfg.RemoteScanURL)
 		startThreatFeedIfEnabled(cfg, ctx)
 	case cfg.LocalEnabled:
-		globalSecScanner.cache = newHashCache(cfg.CacheSize, cfg.CacheTTL)
-		globalSecScanner.Init(cfg.ClamAddr, cfg.MaxScanBytes)
+		globalSecScanner.Init(cfg.ClamAddr, cfg.MaxScanBytes, newHashCache(cfg.CacheSize, cfg.CacheTTL))
 		loadYARARules(cfg.YaraDir)
 		if cfg.ScanExclusionsPath != "" {
 			if err := globalScanExclusions.Load(cfg.ScanExclusionsPath); err != nil {

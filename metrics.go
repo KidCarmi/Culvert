@@ -289,7 +289,7 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) { //nolint:errcheck /
 	bytesSent := atomic.LoadInt64(&statBytesSent)
 	bytesRecv := atomic.LoadInt64(&statBytesRecv)
 	feedEntries, _, _ := globalThreatFeed.Stats()
-	cacheHits, cacheMisses, cacheSize := globalSecScanner.cache.Stats()
+	cacheHits, cacheMisses, cacheSize := globalSecScanner.CacheStats()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 

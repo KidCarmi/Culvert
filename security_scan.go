@@ -75,11 +75,53 @@ type SecurityScanResult struct {
 	Hash    string // SHA-256 hex of scanned content (body scans only)
 }
 
+// ── Collaborator contracts (ADR-0006 Slice 1) ────────────────────────────────
+// The orchestrator owns the narrow interfaces it needs; the engines stay
+// interface-free. Production wiring adapts the existing singletons; tests
+// inject in-memory fakes via NewSecurityScanner.
+
+// clamScanner is the ClamAV surface ScanBody/ClamAVStatus need.
+type clamScanner interface {
+	Ping() error
+	Scan(data []byte) (name string, found bool, err error)
+}
+
+// yaraMatcher is the YARA surface the scan pipeline needs. Loaded and Enabled
+// are deliberately distinct to preserve pre-ADR-0006 behavior verbatim:
+// BodyScanEnabled keys on rules-present only (Loaded), while scanBodyInner
+// additionally honors the runtime enable toggle (Enabled).
+type yaraMatcher interface {
+	Loaded() bool
+	Enabled() bool
+	Match(data []byte) []string
+}
+
+// threatChecker is the threat-feed surface CheckURL/CheckDomain need.
+type threatChecker interface {
+	Enabled() bool
+	CheckURL(rawURL string) (bool, string)
+	CheckDomain(domain string) (bool, string)
+}
+
+// hashExcluder is the admin hash-allowlist surface ScanBody needs.
+type hashExcluder interface{ IsHashExcluded(hash string) bool }
+
+// yaraRuleSetMatcher adapts a YARARuleSet plus the runtime enable toggle to
+// the yaraMatcher contract.
+type yaraRuleSetMatcher struct{ rs *YARARuleSet }
+
+func (m yaraRuleSetMatcher) Loaded() bool               { return m.rs.Enabled() }
+func (m yaraRuleSetMatcher) Enabled() bool              { return yaraGetEnabled() && m.rs.Enabled() }
+func (m yaraRuleSetMatcher) Match(data []byte) []string { return m.rs.Match(data) }
+
 // SecurityScanner ties together ClamAV, YARA, the threat feed, and the hash
 // cache into a single, easy-to-use interface for the proxy pipeline.
 type SecurityScanner struct {
 	mu       sync.RWMutex
-	clam     *ClamAV
+	clam     clamScanner
+	yara     yaraMatcher   // nil → globalYARA (+ runtime toggle)
+	feed     threatChecker // nil → globalThreatFeed
+	excl     hashExcluder  // nil → globalScanExclusions
 	cache    *HashCache
 	maxBytes int64 // max bytes to buffer per response for body scanning
 	enabled  bool
@@ -88,6 +130,65 @@ type SecurityScanner struct {
 	// opening a fresh TCP connection to ClamAV on every status poll.
 	clamStatusVal    string
 	clamStatusExpiry time.Time
+}
+
+// secScannerDeps carries the injectable collaborators for NewSecurityScanner.
+// Nil fields fall back to the process-wide singletons, so partial injection
+// (e.g. only a fake ClamAV) is fine.
+type secScannerDeps struct {
+	clam     clamScanner
+	yara     yaraMatcher
+	feed     threatChecker
+	excl     hashExcluder
+	cache    *HashCache
+	maxBytes int64
+}
+
+// NewSecurityScanner builds a ready-to-use scanner from injected
+// collaborators (ADR-0006). Unlike the globalSecScanner+Init path it is
+// enabled on construction; it exists for tests today and future callers.
+func NewSecurityScanner(deps secScannerDeps) *SecurityScanner {
+	ss := &SecurityScanner{
+		clam:     deps.clam,
+		yara:     deps.yara,
+		feed:     deps.feed,
+		excl:     deps.excl,
+		cache:    deps.cache,
+		maxBytes: deps.maxBytes,
+		enabled:  true,
+	}
+	if ss.cache == nil {
+		ss.cache = newHashCache(10_000, 0)
+	}
+	if ss.maxBytes <= 0 {
+		ss.maxBytes = 5 << 20
+	}
+	return ss
+}
+
+// yaraDep / feedDep / exclDep return the injected collaborator or the
+// production singleton when unset. The nil-defaulting keeps existing
+// &SecurityScanner{...} literals (tests, globalSecScanner) behaving exactly
+// as before injection existed.
+func (ss *SecurityScanner) yaraDep() yaraMatcher {
+	if ss.yara != nil {
+		return ss.yara
+	}
+	return yaraRuleSetMatcher{globalYARA}
+}
+
+func (ss *SecurityScanner) feedDep() threatChecker {
+	if ss.feed != nil {
+		return ss.feed
+	}
+	return globalThreatFeed
+}
+
+func (ss *SecurityScanner) exclDep() hashExcluder {
+	if ss.excl != nil {
+		return ss.excl
+	}
+	return globalScanExclusions
 }
 
 // clamStatusTTL is how long a successful ClamAV ping result is considered fresh.
@@ -114,12 +215,17 @@ var globalScanExclusions = scanexcl.New()
 //
 //	clamAddr — ClamAV address string (see NewClamAV); "" disables ClamAV.
 //	maxBytes — maximum bytes to buffer per response (0 = use default 5 MiB).
-func (ss *SecurityScanner) Init(clamAddr string, maxBytes int64) {
+//	cache    — hash cache to adopt; nil keeps the current one (ADR-0006: the
+//	           cache is handed over here instead of being poked from outside).
+func (ss *SecurityScanner) Init(clamAddr string, maxBytes int64, cache *HashCache) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 
 	if maxBytes > 0 {
 		ss.maxBytes = maxBytes
+	}
+	if cache != nil {
+		ss.cache = cache
 	}
 	if clamAddr != "" {
 		ss.clam = NewClamAV(clamAddr)
@@ -147,7 +253,7 @@ func (ss *SecurityScanner) Enabled() bool {
 func (ss *SecurityScanner) BodyScanEnabled() bool {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return ss.enabled && (ss.clam != nil || globalYARA.Enabled())
+	return ss.enabled && (ss.clam != nil || ss.yaraDep().Loaded())
 }
 
 // MaxBytes returns the buffer limit for body scanning.
@@ -194,10 +300,11 @@ func (ss *SecurityScanner) ClamAVStatus() string {
 // CheckURL checks a full URL against the threat feed.
 // Returns nil when no threat is found.
 func (ss *SecurityScanner) CheckURL(rawURL string) *SecurityScanResult {
-	if !globalThreatFeed.Enabled() {
+	feed := ss.feedDep()
+	if !feed.Enabled() {
 		return nil
 	}
-	if ok, source := globalThreatFeed.CheckURL(rawURL); ok {
+	if ok, source := feed.CheckURL(rawURL); ok {
 		atomic.AddInt64(&statThreatFeedBlocked, 1)
 		return &SecurityScanResult{
 			Blocked: true,
@@ -211,10 +318,11 @@ func (ss *SecurityScanner) CheckURL(rawURL string) *SecurityScanResult {
 // CheckDomain checks a bare hostname against the threat feed.
 // Returns nil when no threat is found.
 func (ss *SecurityScanner) CheckDomain(domain string) *SecurityScanResult {
-	if !globalThreatFeed.Enabled() {
+	feed := ss.feedDep()
+	if !feed.Enabled() {
 		return nil
 	}
-	if ok, source := globalThreatFeed.CheckDomain(domain); ok {
+	if ok, source := feed.CheckDomain(domain); ok {
 		atomic.AddInt64(&statThreatFeedBlocked, 1)
 		return &SecurityScanResult{
 			Blocked: true,
@@ -300,7 +408,7 @@ func (ss *SecurityScanner) ScanBody(data []byte) *SecurityScanResult {
 
 	// Tier 3.3: admin-managed hash allowlist. If the content hash is
 	// explicitly trusted, skip all scanning.
-	if globalScanExclusions.IsHashExcluded(hash) {
+	if ss.exclDep().IsHashExcluded(hash) {
 		return nil
 	}
 
@@ -354,8 +462,8 @@ func (ss *SecurityScanner) scanBodyInner(data []byte, hash string) *SecurityScan
 	}
 
 	// YARA scan.
-	if yaraGetEnabled() && globalYARA.Enabled() {
-		if matches := globalYARA.Match(data); len(matches) > 0 {
+	if y := ss.yaraDep(); y.Enabled() {
+		if matches := y.Match(data); len(matches) > 0 {
 			reason := strings.Join(matches, ", ")
 			atomic.AddInt64(&statYARABlocked, 1)
 			ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: reason, Source: "yara"})
@@ -366,6 +474,38 @@ func (ss *SecurityScanner) scanBodyInner(data []byte, hash string) *SecurityScan
 	// Content is clean — cache the negative result.
 	ss.cache.Set(hash, ScanCacheResult{Clean: true, Source: "clean"})
 	return nil
+}
+
+// ── Cache accessors (ADR-0006) ──────────────────────────────────────────────
+// Production consumers (ui_security.go, metrics.go, otlp.go) go through these
+// instead of reaching into the cache field, so the orchestrator owns its
+// cache. All three are nil-tolerant (scanner or cache not yet initialised).
+
+// CacheStats returns hash-cache hit/miss counters and current size.
+func (ss *SecurityScanner) CacheStats() (hits, misses int64, size int) {
+	if ss == nil || ss.cache == nil {
+		return 0, 0, 0
+	}
+	return ss.cache.Stats()
+}
+
+// CacheReady reports whether the scan hash cache is initialised.
+func (ss *SecurityScanner) CacheReady() bool { return ss != nil && ss.cache != nil }
+
+// CacheClear empties the scan hash cache.
+func (ss *SecurityScanner) CacheClear() {
+	if ss != nil && ss.cache != nil {
+		ss.cache.Clear()
+	}
+}
+
+// CacheEvict removes a single hash from the scan cache, reporting whether it
+// was present.
+func (ss *SecurityScanner) CacheEvict(hash string) bool {
+	if ss == nil || ss.cache == nil {
+		return false
+	}
+	return ss.cache.Evict(hash)
 }
 
 // ── Panic-safe scan wrappers ────────────────────────────────────────────────
@@ -519,7 +659,7 @@ func secScanStatusMap() map[string]interface{} {
 	}
 
 	feedTotal, feedLastSync, feedInterval := globalThreatFeed.Stats()
-	hits, misses, cacheSize := globalSecScanner.cache.Stats()
+	hits, misses, cacheSize := globalSecScanner.CacheStats()
 	return map[string]interface{}{
 		"enabled":               globalSecScanner.Enabled(),
 		"scan_svc_mode":         "local",
