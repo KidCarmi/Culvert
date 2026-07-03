@@ -14,6 +14,11 @@ import (
 // hosts (additive — duplicates by case-insensitive match are skipped).
 // The fetch/parse/dispatch half lives in internal/saasfeed's own suite.
 func TestMergeSaaSCategories_AdditiveMerge(t *testing.T) {
+	// Isolate the package-global catStore (fresh store, tmp Save path):
+	// without this the created category leaks into later runs and the
+	// first-merge count assertion fails under -count=2 / -shuffle=on.
+	snapshotCatStore(t)
+
 	feed := []saasfeed.Category{{
 		Name:  "MergeTestCat",
 		Hosts: []string{"merge1.com", "merge2.com"},
