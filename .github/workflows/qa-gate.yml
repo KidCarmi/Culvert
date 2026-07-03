@@ -515,6 +515,34 @@ jobs:
           sudo install -m 0755 /tmp/culvert-maint /usr/local/bin/culvert-maint
           systemd-analyze verify packaging/systemd/culvert-maint.service
 
+  # ─── H. Performance-regression gate ─────────────────────────────────────────
+  # Deterministic ALLOCATION-regression gate on the proxy hot paths (policy
+  # Evaluate + header scrub). Keyed on allocs/op via testing.Benchmark, which is
+  # hardware-independent (unlike ns/op) and identical with or without -race —
+  # so this is fast (~6s) and never flaky. It exists because ordinary tests do
+  # not catch a per-request allocation regression: policy Evaluate was recently
+  # taken from ~2 allocs/rule (O(rules)) to O(1); without this gate that win can
+  # silently regress on any PR. The benchgate-tagged tests live outside the
+  # default `go test ./...`, so this is the ONLY required path that runs them.
+  qa-bench:
+    name: "QA · Perf-regression gate (allocs/op)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: qa-logic
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Allocation-regression gate (policy + scrub hot paths)
+        run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v .
+
   # ─── Gate summary ───────────────────────────────────────────────────────────
   qa-gate-approved:
     name: "✅ QA Gate — APPROVED"
@@ -527,6 +555,7 @@ jobs:
       - qa-os
       - qa-contract
       - qa-agent
+      - qa-bench
     steps:
       - name: Summarise
         run: |
@@ -542,6 +571,7 @@ jobs:
           | OS / environment  | qa-os | ✅ |
           | On-disk contract  | qa-contract | ✅ |
           | Maintenance Agent (cmd/culvert-maint) | qa-agent | ✅ |
+          | Perf-regression (allocs/op) | qa-bench | ✅ |
 
           **Interpretation**
           - If `qa-logic` was the only red job, the code is wrong.

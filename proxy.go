@@ -1243,8 +1243,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		done <- struct{}{}
 	}
-	go relayWS(clientConn, br)       // target → client (br may have buffered bytes)
-	go relayWS(destConn, clientConn) // client → target
+	go relayWS(clientConn, br) // target → client (br may have buffered bytes)
+	// client → target: read via clientBuf.Reader, NOT the raw clientConn. The
+	// HTTP server may have buffered client bytes (frames a client pipelines right
+	// after the Upgrade request) into the hijacked reader; relaying the raw conn
+	// would strand them and the target would block waiting. Same class of bug as
+	// the CONNECT bypass path.
+	go relayWS(destConn, clientBuf.Reader)
 	<-done
 	<-done
 }
@@ -1340,16 +1345,39 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	clientConn, _, err := hijacker.Hijack()
+	// Hijack BEFORE sending the 200 and relay the response by hand. Calling
+	// w.WriteHeader(200) and THEN hijacking discards the *bufio.ReadWriter the
+	// server returns — and the server's request reader may have already buffered
+	// client bytes into it (body bytes a client pipelines right after CONNECT).
+	// A raw-conn relay never sees those stranded bytes, so the upstream stalls
+	// waiting for them: the rare first-byte tunnel hang observed under concurrent
+	// setup. Hijack first, send the 200, then FLUSH any buffered client bytes to
+	// the upstream before starting the byte relay.
+	clientConn, clientBuf, err := hijacker.Hijack()
 	if err != nil {
 		logger.Printf("Hijack error: %v", err)
 		return
 	}
 	defer clientConn.Close()
 
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		logger.Printf("CONNECT 200 write error %q: %v", sanitizeLog(r.Host), err)
+		return
+	}
+
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
+
+	// Drain bytes the HTTP server already buffered from the client during request
+	// parsing; without this they are lost and the upstream blocks forever.
+	if clientBuf != nil {
+		if n := clientBuf.Reader.Buffered(); n > 0 {
+			if _, err := io.CopyN(destConn, clientBuf.Reader, int64(n)); err != nil {
+				logger.Printf("CONNECT prebuffer flush error %q: %v", sanitizeLog(r.Host), err)
+				return
+			}
+		}
+	}
 
 	done := make(chan struct{}, 2)
 	// B2: Each relay closes its own dst write half after copy completes,
@@ -1450,7 +1478,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	rawClient, _, err := hijacker.Hijack()
+	rawClient, clientBuf, err := hijacker.Hijack()
 	if err != nil {
 		upstreamTLS.Close()
 		logger.Printf("SSL_INSPECT hijack error: %v", err)
@@ -1461,7 +1489,13 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// TLS ClientHello starts with 0x16 (handshake record). If the client
 	// is sending SSH, RDP, or another non-TLS protocol through CONNECT,
 	// fall back to raw relay instead of crashing on TLS handshake.
-	peekBuf := bufio.NewReaderSize(rawClient, 1)
+	//
+	// Read through clientBuf.Reader (the hijacked buffer) rather than a fresh
+	// reader over the raw conn: the HTTP server may have already buffered client
+	// bytes (a pipelined ClientHello) into it, and reading the raw conn would
+	// strand them — breaking protocol detection / the client handshake. Same
+	// class of bug as the CONNECT bypass path.
+	peekBuf := clientBuf.Reader
 	firstByte, err := peekBuf.Peek(1)
 	if err != nil {
 		rawClient.Close()   //nolint:errcheck // best-effort cleanup on peek failure
@@ -1559,6 +1593,14 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			profileStr = sanitizeLog(string(match.Rule.FileProfile))
 		}
 		logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(req.URL.Path), profileStr, filterStr)
+		// Scrub client-spoofable forwarded/identity headers on the DECRYPTED
+		// inner request, exactly as the plain-HTTP path does in handleHTTP.
+		// Without this, an SSL-inspected HTTPS request could inject
+		// X-User-Identity (impersonating an authenticated user to upstreams that
+		// trust the proxy's identity header) or leak private X-Forwarded-For /
+		// X-Real-IP addresses — a defense the plain-HTTP path already has but the
+		// inspect path was missing.
+		scrubForwardedHeaders(req)
 		// Strip hop-by-hop headers before forwarding upstream.
 		removeHopHeaders(req.Header)
 

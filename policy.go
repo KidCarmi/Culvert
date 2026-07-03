@@ -339,6 +339,16 @@ type PolicyRule struct {
 	SubjectMatch      *SubjectMatch   `json:"subjectMatch,omitempty"` // typed subject selector (reserved; nil = unused)
 	Auth              *AuthRuleSpec   `json:"auth,omitempty"`         // Stage-1 auth-rule spec; non-nil only for ruleType="auth" (Phase 1 seam)
 	HitCount          int64           `json:"hitCount"`               // runtime counter, not persisted
+
+	// normFQDN is the IDNA-normalized form of DestFQDN, precomputed by
+	// sortLocked() whenever rules are mutated. The proxy hot path (Evaluate)
+	// reads it instead of re-normalizing DestFQDN on every request — normalizing
+	// a host allocates (~1 alloc via idna.ToASCII), so doing it per-rule
+	// per-request was the dominant policy-eval allocation. Unexported ⇒ never
+	// serialized; a rule that reaches the store outside the mutators (empty
+	// normFQDN) falls back to the allocating path, so correctness never depends
+	// on it being populated.
+	normFQDN string
 }
 
 // ruleIsEnabled returns whether a rule is active. A nil Enabled pointer
@@ -773,6 +783,17 @@ func (ps *PolicyStore) sortLocked() {
 	sort.Slice(ps.rules, func(i, j int) bool {
 		return ps.rules[i].Priority < ps.rules[j].Priority
 	})
+	// Precompute the normalized FQDN once per mutation so Evaluate never has to
+	// normalize a rule's pattern on the per-request hot path. Index-based range
+	// avoids copying the rule pointer's target.
+	for i := range ps.rules {
+		r := ps.rules[i]
+		if r.DestFQDN != "" {
+			r.normFQDN = normalizeHost(r.DestFQDN)
+		} else {
+			r.normFQDN = ""
+		}
+	}
 }
 
 // PolicyMatch is returned when a rule is matched against a request.
@@ -797,6 +818,12 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	rules := ps.rules
 	ps.mu.RUnlock()
 
+	// Normalize the destination host ONCE for the whole scan; every rule's FQDN
+	// check reuses it (the host is identical across rules). This, plus each
+	// rule's precomputed normFQDN, removes the ~2 allocs/rule the policy hot path
+	// previously incurred re-normalizing host+pattern on every rule.
+	normHost := normalizeHost(host)
+
 	for i := range rules {
 		rule := rules[i]
 		if !ruleIsEnabled(rule) {
@@ -814,7 +841,7 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if !matchSchedule(rule.Schedule) {
 			continue
 		}
-		if !matchDest(rule, host) {
+		if !matchDestNorm(rule, host, normHost) {
 			continue
 		}
 		atomic.AddInt64(&rule.HitCount, 1)
@@ -930,7 +957,29 @@ func matchAuthSource(ruleAuthSource, actualAuthSource string) bool {
 	if strings.EqualFold(ruleAuthSource, actualAuthSource) {
 		return true
 	}
-	return strings.EqualFold(stripIdPPrefix(ruleAuthSource), stripIdPPrefix(actualAuthSource))
+	// Legacy/canonical alias: a bare profile ID ("okta") and its prefixed form
+	// ("oidc:okta") refer to the same provider, so they match. BUT two DIFFERENT
+	// explicit schemes MUST NOT alias — a rule scoped to "oidc:okta" must not
+	// authorize a "saml:okta" source (cross-IdP/cross-scheme confusion). Match
+	// iff the bare names are equal AND the schemes are compatible (either side
+	// bare, or the same scheme).
+	ruleScheme, ruleName := splitIdPSource(ruleAuthSource)
+	actScheme, actName := splitIdPSource(actualAuthSource)
+	if !strings.EqualFold(ruleName, actName) {
+		return false
+	}
+	return ruleScheme == "" || actScheme == "" || strings.EqualFold(ruleScheme, actScheme)
+}
+
+// splitIdPSource separates an auth-source string into its IdP scheme
+// ("oidc"/"saml", or "" when bare/non-IdP) and the profile name.
+func splitIdPSource(source string) (scheme, name string) {
+	for _, p := range []string{"oidc:", "saml:"} {
+		if rest, ok := strings.CutPrefix(source, p); ok && rest != "" {
+			return strings.TrimSuffix(p, ":"), rest
+		}
+	}
+	return "", source
 }
 
 func stripIdPPrefix(source string) string {
@@ -968,15 +1017,32 @@ func matchIPOrCIDR(cidrOrIP, clientIP string) bool {
 // ─── Destination matching ─────────────────────────────────────────────────────
 
 func matchDest(rule *PolicyRule, host string) bool {
+	return matchDestNorm(rule, host, normalizeHost(host))
+}
+
+// matchDestNorm is matchDest's core. normHost MUST be normalizeHost(host); the
+// hot path (Evaluate) computes it ONCE per request and reuses it across every
+// rule, and uses each rule's precomputed normFQDN — eliminating the two
+// per-rule host+pattern normalization allocations. Category/country checks keep
+// using the raw host (they normalize internally and are far less common).
+func matchDestNorm(rule *PolicyRule, host, normHost string) bool {
 	// Empty fields mean "match any" — all configured fields must satisfy.
 	fqdnSet := rule.DestFQDN != ""
 	catSet := rule.DestCategory != "" && rule.DestCategory != CategoryAny
 	catGroupSet := rule.DestCategoryGroup != ""
 	countrySet := len(rule.DestCountry) > 0
 
-	// FQDN check.
-	if fqdnSet && !matchFQDN(rule.DestFQDN, host) {
-		return false
+	// FQDN check — use the precomputed normalized pattern when available;
+	// otherwise fall back to the allocating matchFQDN so correctness never
+	// depends on normFQDN having been precomputed.
+	if fqdnSet {
+		if rule.normFQDN != "" {
+			if !matchFQDNNorm(rule.normFQDN, normHost) {
+				return false
+			}
+		} else if !matchFQDN(rule.DestFQDN, host) {
+			return false
+		}
 	}
 	// URL category check (single category).
 	if catSet && !matchCategory(rule.DestCategory, host) {
@@ -1053,8 +1119,13 @@ func matchFileExt(urlPath string, exts []string) bool {
 }
 
 func matchFQDN(pattern, host string) bool {
-	host = normalizeHost(host)
-	pattern = normalizeHost(pattern)
+	return matchFQDNNorm(normalizeHost(pattern), normalizeHost(host))
+}
+
+// matchFQDNNorm is matchFQDN's core, operating on inputs that are ALREADY
+// IDNA-normalized. The hot path passes a once-normalized host and a rule's
+// precomputed normFQDN, avoiding the two per-rule normalizeHost allocations.
+func matchFQDNNorm(pattern, host string) bool {
 	if pattern == "*" {
 		return true
 	}
