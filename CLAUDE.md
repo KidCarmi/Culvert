@@ -6,7 +6,8 @@ Single binary, zero runtime dependencies.
 ## Project Structure
 
 ```
-*.go          — All source in package main (flat layout, no internal/)
+*.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
+internal/     — 42 packages (ADR-0002 decomposition, COMPLETE): 37 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
 main.go       — Entrypoint, flag parsing, signal handling, graceful shutdown
 proxy.go      — HTTP/CONNECT/WebSocket handlers, tunnel relay, upstream transport, sanitizeLog
 socks5.go     — SOCKS5 protocol handler (RFC 1928/1929)
