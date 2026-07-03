@@ -190,6 +190,33 @@ runs in `egress-policy: audit` as the first step of each — non-breaking egress
 monitoring + a baseline for the block flip. golangci-lint is now installed via
 checksum-verified `go install` (was `curl | sh` off a mutable tag ref).
 
+### 5d. SBOM + reproducibility (PANW audit item 4)
+
+The Dockerfile no longer runs `go mod tidy` at image-build time — the image
+builds from the exact reviewed `go.mod`/`go.sum` (tidiness is enforced in CI by
+the Fast Gate's `go mod tidy -diff`, not re-resolved in the image layer). All
+Go builds (image, `test`, and the `release` matrix) now pass `-trimpath` as
+reproducibility groundwork. **Caveat:** `-trimpath` is a build-input change, so
+the first tagged release carrying it produces different binary hashes (and
+therefore different SLSA subject digests) than prior releases — expected, not
+tampering; note it in that release's changelog.
+
+Every GitHub Release now carries **signed per-module CycloneDX SBOMs** for its
+binaries (`culvert.sbom.cdx.json` + `culvert-maint.sbom.cdx.json`, each with a
+cosign `.sig`/`.pem`), generated once on the linux/amd64 leg (syft reads the
+embedded Go build-info, identical across GOOS/GOARCH). This replaces the prior
+state where the source-tree SBOM was a 90-day artifact falsely documented as
+"attached to every release" and the 7 released binaries had no SBOM at all. The
+SBOMs are Release *assets*, a channel disjoint from the SLSA subjects, so the
+`aggregate-subjects` `==7` invariant is untouched. The image already ships a
+BuildKit CycloneDX SBOM attestation (`sbom: true`), so it is out of scope here.
+
+**Follow-ups:** upgrade the SBOM signature to a cosign `attest-blob --type
+cyclonedx` in-toto statement (binds the SBOM to the subject binary — stronger
+than a detached sign-blob) once in-repo attestation-verify tooling exists; a
+single consolidated evidence-bundle tarball (SBOMs + provenance + scan reports +
+gate summaries per tag) is optional (those artifacts already exist individually).
+
 ### 5c. DAST — attack the running product (PANW audit item 3)
 
 `dast-nightly.yml` (scheduled) boots the real proxy and points scanners at it:

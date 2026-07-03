@@ -302,8 +302,10 @@ jobs:
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # SBOM generation is informational — does not block the gate.
-    # The artifact is attached to every release for supply-chain transparency.
+    # Informational SOURCE-TREE SBOM (whole repo), 90-day artifact — NOT a
+    # release asset. It runs on main/weekly to catch dependency drift BETWEEN
+    # releases. The authoritative per-release evidence is the signed per-MODULE
+    # binary SBOMs attached to each GitHub Release by ci.yml's `release` job.
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -483,5 +485,7 @@ jobs:
           | Tests (race detector + coverage) | ✅ |
           | Dockerfile lint (hadolint) | ✅ |
 
-          **SBOM** attached as artifact (`culvert-sbom.json`).
+          **SBOM** (source-tree) uploaded as a 90-day workflow artifact
+          (`culvert-sbom.json`). Per-release binary SBOMs are signed + attached
+          to each GitHub Release by the `release` job.
           EOF
