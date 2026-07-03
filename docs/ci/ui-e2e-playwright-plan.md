@@ -1,6 +1,6 @@
 # Admin-UI Browser E2E (Playwright) — Implementation Plan
 
-Status: **slice 1 shipped** (RBAC nav gating). Companion to
+Status: **slices 1–7 shipped**. Companion to
 `docs/ci/proxy-quality-architecture.md`. This describes how to add real-browser
 end-to-end coverage of the Culvert admin UI without breaking the single-binary,
 zero-runtime-dependency, Go-first contract.
@@ -49,6 +49,15 @@ zero-runtime-dependency, Go-first contract.
   discriminator, per the repo's audit-ring test guidance — never len() deltas,
   the ring is bounded at 500). Exercises auditEvent → in-memory ring →
   `/api/audit` → renderAuditLog.
+- **Slice 6 — policy-tester (simulator)** (`ui_policytester_e2e_test.go`). Dry-runs
+  the REAL policy engine via the tester panel (no traffic): a block rule the admin
+  defined is reported as a block (matching rule identified) and an allow rule as an
+  allow. Proves the simulator panel is wired to `/api/policy/test` → policyStore.
+- **Slice 7 — governance / control-plane panel** (`ui_governance_e2e_test.go`). The
+  admin-only C3 observability surface: asserts the panel renders the route
+  inventory ("routes total"), the C2 metadata-enforcement mode, and the C2 counters
+  (would_deny …) from `/api/governance/control-plane`, plus a backstop that a viewer
+  is denied the endpoint. The browser view of the C2/RBAC machinery.
 
 ### Dependency footprint (test-only)
 
