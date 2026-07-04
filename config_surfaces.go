@@ -239,22 +239,22 @@ var configSurfaces = []configSurfaceRow{
 			{Struct: "AdminSettings", Field: "ConnLimitMaxPerIP"},
 			{Struct: "ConfigSnapshot", Field: "MaxConnsPerIP", Apply: semSkipIfZero}}},
 	{ID: "category_groups", Kind: kindConfig, Owner: "globalCategoryGroups",
-		Rollback: true, Diffed: true, DiffKey: "category_groups", DiffNilGuarded: true,
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "category_groups", DiffNilGuarded: true,
 		ClusterSynced: true, SnapshotCap: maxSnapCategoryGroups,
-		Note: "NOT on export/import — known gap: a \"full\" config export does not round-trip category groups; rollback apply ordered after url_categories, before policy_rules",
+		Note: "apply ordered after url_categories, before policy_rules (import and rollback both); import never wipes (merge = upsert-by-name)",
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "CategoryGroups", Apply: semNilSkipEmptyWipe},
 			{Struct: "ConfigSnapshot", Field: "CategoryGroups", Apply: semNilSkipEmptyWipe}}},
 	{ID: "url_categories", Kind: kindConfig, Owner: "catStore",
-		Rollback: true, Diffed: true, DiffKey: "url_categories", DiffNilGuarded: true,
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "url_categories", DiffNilGuarded: true,
 		ClusterSynced: true, SnapshotCap: maxSnapURLCategories,
-		Note: "NOT on export/import — same gap as category_groups; admin-managed Layer 1 only (communityDB untouched)",
+		Note: "admin-managed Layer 1 only (communityDB untouched); import never wipes",
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "URLCategories", Apply: semNilSkipEmptyWipe},
 			{Struct: "ConfigSnapshot", Field: "URLCategories", Apply: semNilSkipEmptyWipe}}},
 	{ID: "content_scan_bypass_hosts", Kind: kindConfig, Owner: "dpiScanner",
-		Rollback: true, Diffed: true, DiffKey: "content_scan_bypass_hosts", DiffNilGuarded: true,
-		Note:     "NOT on export/import; shares the content_scan.json envelope with content_scan_patterns (single Save)",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "content_scan_bypass_hosts", DiffNilGuarded: true,
+		Note:     "shares the content_scan.json envelope with content_scan_patterns (single Save on import and rollback); import never wipes",
 		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "ContentScanBypassHosts", Apply: semNilSkipEmptyWipe}}},
 
 	// ── AdminSettings-only settings ──────────────────────────────────────
