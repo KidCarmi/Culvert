@@ -566,13 +566,21 @@ dump_compose_diagnostics() {
 ###############################################################################
 # Encryption-at-rest passphrase
 ###############################################################################
-# is_fresh_deployment — true when this looks like a first-time install: the
-# proxy-data Docker volume does not exist yet (Docker creates it on the first
-# `docker compose up`). Any docker error => treat as NOT fresh (conservative).
+# is_fresh_deployment — true when this looks like a first-time install: THIS
+# install directory's own proxy-data Docker volume does not exist yet (Docker
+# creates it on the first `docker compose up`). Scoped via the
+# com.docker.compose.project.working_dir label Compose stamps on volumes it
+# creates, so an unrelated compose project on the same host (e.g. a second
+# Culvert install in a different directory) that also happens to declare a
+# "proxy-data" volume can't make a genuinely fresh install misreport as
+# existing. Any docker error => treat as NOT fresh (conservative).
 is_fresh_deployment() {
   local vols
-  vols="$(sudo docker volume ls --format '{{.Name}}' 2>/dev/null)" || return 1
-  ! grep -qE '(^|_)proxy-data$' <<<"$vols"
+  vols="$(sudo docker volume ls \
+    --filter "label=com.docker.compose.volume=proxy-data" \
+    --filter "label=com.docker.compose.project.working_dir=${INSTALL_DIR}" \
+    --format '{{.Name}}' 2>/dev/null)" || return 1
+  [[ -z "$vols" ]]
 }
 
 # secret_already_set VAR — true if VAR is non-empty in the host env or in .env.
