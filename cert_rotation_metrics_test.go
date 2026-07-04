@@ -9,17 +9,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // TestCARotationCounter_AutoRotateIncrements: a successful auto-rotation
 // (RotateIfNeeded) bumps culvert_ca_rotations_total. Forces near-expiry on a
 // fresh CertManager so rotation fires; caPath="" skips SaveCA (no disk).
 func TestCARotationCounter_AutoRotateIncrements(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
-	cm.caCert.NotAfter = time.Now().Add(24 * time.Hour) // within caRotationOverlap
+	cm.CACertForTest().NotAfter = time.Now().Add(24 * time.Hour) // within caRotationOverlap
 
 	before := statCARotations.Load()
 	if !cm.RotateIfNeeded("", "") {
@@ -34,7 +36,7 @@ func TestCARotationCounter_AutoRotateIncrements(t *testing.T) {
 // NOT bump the rotation counter — only real rotation paths do.
 func TestCARotationCounter_InitCADoesNotIncrement(t *testing.T) {
 	before := statCARotations.Load()
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -52,7 +54,7 @@ func TestCARotationCounter_ManualRotateIncrements(t *testing.T) {
 		certMgr = oldMgr
 		caRuntime.path = oldPath
 	})
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -95,13 +97,13 @@ func TestCARotationCounter_ManualRotateIncrements(t *testing.T) {
 // chokepoint (shared by auto-rotation and manual import) bumps
 // culvert_cluster_ca_rotations_total.
 func TestClusterCARotationCounter_ImportCAIncrements(t *testing.T) {
-	ca := &clusterCA{}
-	if err := ca.InitOrLoad(t.TempDir()); err != nil {
+	cca := &clusterCA{}
+	if err := cca.InitOrLoad(t.TempDir()); err != nil {
 		t.Fatalf("InitOrLoad: %v", err)
 	}
 	before := statClusterCARotations.Load()
 	newCertPEM, newKeyPEM := seedClusterCAFiles(t)
-	if err := ca.ImportCA(newCertPEM, newKeyPEM); err != nil {
+	if err := cca.ImportCA(newCertPEM, newKeyPEM); err != nil {
 		t.Fatalf("ImportCA: %v", err)
 	}
 	if got := statClusterCARotations.Load(); got != before+1 {
@@ -119,7 +121,7 @@ func TestCARotationMetrics_Rendered(t *testing.T) {
 		certMgr = oldMgr
 	})
 	metricsToken = ""
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}

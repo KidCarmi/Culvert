@@ -31,6 +31,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // kekLen is the size of a key-encryption key in bytes (256-bit). The KEK is
@@ -78,7 +80,7 @@ func encryptWithKEK(plaintext []byte, p KEKProvider) ([]byte, error) {
 	if len(kek) == 0 {
 		return nil, errKEKMissing
 	}
-	return encryptBundle(plaintext, kek)
+	return ca.EncryptBundle(plaintext, kek)
 }
 
 // decryptWithKEK decrypts a PSCA envelope produced by encryptWithKEK using the
@@ -96,7 +98,7 @@ func decryptWithKEK(data []byte, p KEKProvider) ([]byte, error) {
 	if len(kek) == 0 {
 		return nil, errKEKMissing
 	}
-	return decryptBundle(data, kek)
+	return ca.DecryptBundle(data, kek)
 }
 
 // writeEncryptedFile encrypts plaintext under the provider's KEK and writes the

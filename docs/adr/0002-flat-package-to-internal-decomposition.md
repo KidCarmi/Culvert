@@ -1245,6 +1245,34 @@ in-package. Validated: build/vet/gofmt, package `-race -count=2 -shuffle=on`, ro
 ConfigVersion/ConfigSurfaces/ColdStart/Rollback/Diff/BlocklistMode/Slice8/Diagnostics suites
 `-race` — all green. **Slice B (`internal/ca`) remains designed-not-executed below.**
 
+### 2026-07-04 — `internal/ca` extracted (SSL-inspection Root CA — the MITM trust core)
+Slice B executed after the re-map. The engine (root-CA lifecycle, the FROZEN encrypted-bundle
+codec, leaf signing + LRU/TTL cache, dual-CA rotation, KeyProvider) moved to `internal/ca`;
+`Manager` is aliased as main's `CertManager`. **Two findings the mapping surfaced, both handled:**
+1. **The bundle codec is NOT CA-private.** `kek.go` (key-at-rest KEK envelope), `restore.go`, and
+   `cluster_ca_keyatrest.go` all reuse `encryptBundle`/`decryptBundle`/`caMagic` in production.
+   Resolved by EXPORTING the codec from the package (`EncryptBundle`/`DecryptBundle`/
+   `HasBundleMagic`/`ImportBundle`) — correct, because the PSCA envelope format belongs with the
+   CA package that defines it; the three consumers now call the exported API. Format stays frozen.
+2. **The metrics/alert coupling is an observability seam, not a behavior change.** `GetCert`
+   observes sign latency on main's `certSignHist`; `RotateIfNeeded` fires `fireAlert` + bumps
+   `statCARotations`, and `cert_rotation_metrics_test` pins that RotateIfNeeded ITSELF counts.
+   Resolved with publish-once package hooks (`SignLatencyObserver`, `RotationObserver`) wired by
+   main's `ca.go` `init()` — the obs/fileutil pattern. Because `init()` runs in tests too, the
+   "direct RotateIfNeeded counts a rotation" contract is preserved byte-for-byte; no test changed
+   its assertions. This retires the "genuine behavior-surface change" flagged in the Slice B halt.
+`StartCAAutoRotation` (drives BOTH the inspection CA and the separate cluster CA), the `certMgr`
+singleton, and `caRuntime` stay in main; the package exposes the per-tick primitives
+(`RotateIfNeeded`, `CleanupSecondaryCA`, `RotationCheckInterval`). Six test hooks added for
+main-side whitebox tests (`SetCAForTest`, `CACertForTest`, `HasKeyProviderForTest`,
+`SeedCacheEntryForTest`, `AgeCacheEntryForTest`, `NewLocalKeyProvider` + `Magic`/`CacheTTL`/
+`CacheMaxSize`/`BundleVersion` const mirrors) — recorded honestly as beyond the pure surface,
+same fileblock precedent. `TestSignLeaf_ValidCert` moved in-package (unexported `signLeaf`).
+**Gates (all green):** `mitm_inspect_e2e_test.go` (the customer-visible decrypt→sign→re-encrypt
+proof) `-race`; the full CA/Cert/Bundle/Rotation/Coldstart/KEK/Restore/ClusterCA/Backup suite
+`-race` (120s); `internal/ca` `-race -count=2 -shuffle=on`; build+vet+gofmt across all packages.
+**Adversarial review run on the diff before push** (recorded gate).
+
 ### 2026-07-04 — next tranche mapped; TWO extractions DESIGNED (configver store, ca)
 Recorded per the standing rule so execution needs no re-discovery. Sequencing: **Slice A first
 (small, low-risk), Slice B as its OWN PR with an adversarial-review gate** (TLS hot path).

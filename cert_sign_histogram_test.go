@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // TestCertSignHistogram_RequestHistogramUnchanged proves the generalization
@@ -47,7 +49,7 @@ func TestCertSignHistogram_ObservesSignOnly(t *testing.T) {
 	})
 	metricsToken = ""
 
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
