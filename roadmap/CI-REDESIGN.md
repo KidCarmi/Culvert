@@ -261,8 +261,12 @@ bites (a protected route returns **401** unauthenticated), logs in, and injects
 the `ps_ui_session` cookie on **every** ZAP request via the Replacer add-on
 (`matchtype=REQ_HEADER` adds the header when absent), with a positive
 authenticated-**200** reach-check bracketing the anon-401 smoke so a cookie-name
-regression can't silently un-authenticate the scan. `/api/auth/logout` is
-globally excluded so a stray hit can't drop the session mid-scan. The
+regression can't silently un-authenticate the scan. The admin UI is a **SPA**
+whose protected `/api/*` routes are fetched from JavaScript, so the job also runs
+the **AJAX (JS-aware) spider** (`-j`, duration-capped) — a headless browser that
+executes the SPA's JS so ZAP actually reaches the post-login API surface, not
+just the static shell. `/api/auth/logout` is globally excluded so a stray hit
+can't drop the session mid-scan. The
 provision/gate checks are a deterministic (non-advisory) guard; ZAP findings
 stay advisory (`-I` + `|| true`).
 

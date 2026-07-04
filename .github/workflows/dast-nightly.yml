@@ -126,7 +126,7 @@ jobs:
   admin-ui-zap:
     name: "DAST · admin UI ZAP authenticated (advisory scan)"
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25   # traditional + AJAX (JS-aware) spider for the SPA
     env:
       # Ephemeral CI admin, provisioned + torn down with the runner. Low-entropy
       # wordy value ON PURPOSE (meets complexity: upper+lower+digit, >=8) so
@@ -203,9 +203,21 @@ jobs:
           Z="$Z -config ${G}.regex=true"
           Z="$Z -config ${G}.enabled=true"
           Z="$Z -config ${G}.url=.*/api/auth/logout.*"
+          # Bound the AJAX spider so it can't run its 60-min default and blow the
+          # job timeout.
+          Z="$Z -config ajaxSpider.maxDuration=3"
+          # -j = ALSO run the AJAX (JS-aware) spider. The admin UI is a SPA whose
+          # protected /api/* routes are fetched from JavaScript, not HTML
+          # href/form links, so the traditional spider alone never reaches them —
+          # it would rescan the static shell with a cookie. The AJAX spider drives
+          # a headless browser (in the stable image) that executes the SPA's JS;
+          # the cookie replacer applies to those browser requests too, so the
+          # authenticated API surface is actually crawled. /api/auth/logout is
+          # globally excluded (above) so ZAP won't forward a logout that would
+          # drop the session mid-crawl.
           docker run --rm --network host -v "$RUNNER_TEMP:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t https://127.0.0.1:9090 -I -m 2 -T 5 \
+            zap-baseline.py -t https://127.0.0.1:9090 -I -j -m 2 -T 5 \
             -J zap-auth.json -w zap-auth.md -z "$Z" || true
           echo "── ZAP authenticated baseline summary ──"; sed -n '1,60p' "$RUNNER_TEMP/zap-auth.md" 2>/dev/null || true
 
