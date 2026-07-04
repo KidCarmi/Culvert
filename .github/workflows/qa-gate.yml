@@ -451,7 +451,7 @@ jobs:
         working-directory: cmd/culvert-maint
         run: |
           $(go env GOPATH)/bin/gosec \
-            -exclude=G104,G302,G304,G401,G402,G703,G704 \
+            -exclude=G104,G302,G304,G703,G704 \
             -fmt=text \
             ./...
 

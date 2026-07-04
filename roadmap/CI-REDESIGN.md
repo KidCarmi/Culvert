@@ -279,14 +279,29 @@ loopback-SSRF relax — that is test-only). `proxy.go`'s client-facing
 `tls.Config` now pins `MinVersion: tls.VersionTLS12` explicitly (was relying on
 the Go default) so the floor is contractual.
 
-**Follow-ups:** drive the G401/G402 discovery delta to zero with justified
-`#nosec` on the remaining sites, then flip the **blocking** gosec to include
-them; add **HSTS**
-to the admin UI (a `Strict-Transport-Security` header is not emitted today; CSP
-already is, with a nonce) plus a Go assertion; a client-side
-cipher **allowlist** on the inspect `tls.Config` (MinVersion is pinned; the
-suite set still inherits Go defaults); optionally promote the ZAP/testssl
-findings from advisory to blocking after a stable baseline.
+**G401/G402 now ENFORCED (DONE).** The blocking gosec (Fast Gate root +
+cmd/culvert-maint, the release/QA gates, and `.golangci.yml`) no longer
+blanket-excludes G401 (weak crypto) / G402 (InsecureSkipVerify). The discovery
+delta was exactly three G402 sites, all already config-gated operator opt-ins
+(`auth_oidc.go`, `auth_oidc_flow.go`, `auth_ldap.go` — `cfg.TLSSkipVerify`); each
+now carries an at-site `// #nosec G402 -- <reason>` (the form standalone gosec
+honors, vs the prior `//nolint:gosec` which it ignored — that mismatch was the
+sole reason for the blanket exclude). Zero G401 findings. Net: no product
+behavior change; any NEW ungated `InsecureSkipVerify` or weak hash now fails CI.
+The nightly DAST J4 lane is retained as a report-only view of the *remaining*
+excluded classes (G703/G704, SSRF/forward-proxy-by-design).
+
+**HSTS — evaluated and dropped.** Admin-UI HSTS was implemented and reviewed but
+**cancelled**: HSTS is host-scoped (not port-scoped, RFC 6797 §8.3), so a header
+from the HTTPS UI (:9090) would force-upgrade the same host's **always-HTTP**
+proxy/PAC/health port (:8080) to HTTPS in an admin's browser, breaking PAC
+auto-config in Culvert's default same-host topology. Only revisit as an **opt-in**
+(default off) for operators who run the UI on a dedicated host.
+
+**Follow-ups:** a client-side cipher **allowlist** on the inspect `tls.Config`
+(MinVersion is pinned; the suite set still inherits Go defaults); optionally
+promote the ZAP/testssl findings from advisory to blocking after a stable
+baseline.
 
 **Phase 2b (TODO — flip to block after one real tagged release):** harden-runner
 `block` is NOT applied yet because the Actions runtime/OIDC/cache use

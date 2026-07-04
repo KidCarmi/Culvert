@@ -61,8 +61,9 @@ linters:
         - G104  # unhandled errors on stream copies
         - G302  # log file permissions
         - G304  # file path from variable (acceptable for blocklist loading)
-        - G401  # MD5/SHA1 misidentification
-        - G402  # TLSSkipVerify — config-guarded
+        # G401 (weak crypto) + G402 (InsecureSkipVerify) are ENFORCED — the few
+        # legit config-gated sites carry an at-site `// #nosec G402` (honored by
+        # both golangci and standalone gosec); new ungated ones fail the gate.
         - G704  # SSRF — forward proxy design
 
     cyclop:

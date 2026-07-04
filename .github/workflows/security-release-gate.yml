@@ -75,14 +75,14 @@ jobs:
       - name: Run gosec (SARIF for upload)
         # Generate SARIF for GitHub Security tab; continue even if findings exist.
         run: |
-          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 \
+          gosec -exclude=G104,G302,G304,G703,G704 \
             -fmt=sarif -out=gosec-results.sarif \
             ./... || true
 
       - name: Run gosec (text for log visibility)
         # Re-run with text output so findings are visible in CI logs.
         run: |
-          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 \
+          gosec -exclude=G104,G302,G304,G703,G704 \
             -fmt=text \
             ./...
 
@@ -95,7 +95,7 @@ jobs:
         # gate's logs as well.
         working-directory: cmd/culvert-maint
         run: |
-          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 \
+          gosec -exclude=G104,G302,G304,G703,G704 \
             -fmt=text \
             ./...
 
