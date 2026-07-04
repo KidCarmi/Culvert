@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // TestCAMetrics_CacheHitMissAndSize verifies CA-2 PR1: GetCert increments the
@@ -25,7 +27,7 @@ func TestCAMetrics_CacheHitMissAndSize(t *testing.T) {
 	})
 	metricsToken = ""
 
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}

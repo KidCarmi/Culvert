@@ -7,13 +7,13 @@ Single binary, zero runtime dependencies.
 
 ```
 *.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
-internal/     — 47 packages (ADR-0002 decomposition, COMPLETE): 42 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
+internal/     — 48 packages (ADR-0002 decomposition, COMPLETE): 43 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
 main.go       — Entrypoint, flag parsing, signal handling, graceful shutdown
 proxy.go      — HTTP/CONNECT/WebSocket handlers, tunnel relay, upstream transport, sanitizeLog
 socks5.go     — SOCKS5 protocol handler (RFC 1928/1929)
 policy.go     — Policy engine: rule evaluation, FQDN/category/GeoIP/schedule matching (URL-category store → internal/urlcat, SSL-bypass matcher → internal/sslbypass, FQDN glob → hostutil.MatchFQDN per ADR-0002; two-tier matchCategory/lookupHostCategory fusion stays here)
 store.go      — Composition root: stats/ts counters, auth Config, recordRequest* fan-out (blocklist → internal/blocklist, audit → internal/audit, request log → internal/reqlog per ADR-0002; shims/aliases in blocklist_vars.go + the audit/request-log sections)
-ca.go         — Root CA management, leaf cert signing, encrypted CA bundle (AES-GCM + PBKDF2), LRU cert cache
+ca.go         — CA shim: aliases + singleton + auto-rotation loop over internal/ca (ADR-0002; the MITM trust engine — root-CA lifecycle, FROZEN PSCA bundle codec, leaf signing + LRU/TTL cache, dual-CA rotation, KeyProvider — lives in the package; main keeps certMgr, caRuntime, the StartCAAutoRotation loop that also drives the cluster CA, and init-wired observability hooks. The bundle codec is EXPORTED (EncryptBundle/DecryptBundle/HasBundleMagic) because kek.go/restore.go/cluster_ca_keyatrest.go reuse the PSCA envelope)
 ui.go         — startUI bootstrap only (no direct mux.HandleFunc; routes registered via register*Routes helpers)
 ui_routes_meta.go — uiRoutes: single source of truth for route metadata (method-aware via Methods []uiRouteMethod)
 ui_metadata_enforcement.go — C2 metadata-driven middleware (MinRole enforcement + AuditExpected observability)

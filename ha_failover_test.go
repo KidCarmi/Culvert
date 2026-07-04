@@ -19,6 +19,23 @@ func freshStandby(f halease.Provider) *HAState {
 	return h
 }
 
+// resyncCtx returns the ctx to seed into SetResyncMaterial in tests,
+// cancelled on test cleanup (RISK-018). Production seeds the process
+// lifecycle ctx here (cluster_startup.go), so a standby loop restarted by
+// an ASYNC self-fence always dies at shutdown — but a test that seeded
+// context.Background() could leak that loop forever when the fence fired
+// after the test's own h.Stop() (Stop closes the CURRENT stopCh; the
+// post-Stop resync creates a fresh one nobody closes). The leaked loop
+// then races later tests' logger swaps under -race (the flake pinned in
+// TECHNICAL-RISK-REGISTER.md RISK-018). Cancelling on cleanup makes any
+// such loop die with its test regardless of Stop/fence interleaving.
+func resyncCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func TestLeaseAutoPromote_PromotesWhenLeaseFree(t *testing.T) {
 	tempHADir(t)
 	h := freshStandby(halease.NewFake(time.Minute))
@@ -131,7 +148,7 @@ func TestSelfFence_EntersStandbyResync(t *testing.T) {
 	tempHADir(t)
 	f := halease.NewFake(200 * time.Millisecond)
 	h := leaseStandby(f, "cp-me")
-	h.SetResyncMaterial(context.Background(), ":50051", "", "", "")
+	h.SetResyncMaterial(resyncCtx(t), ":50051", "", "", "")
 	if err := h.PromoteManually(); err != nil {
 		t.Fatalf("PromoteManually: %v", err)
 	}
@@ -217,7 +234,7 @@ func TestResumeDenied_EntersStandbyResync(t *testing.T) {
 
 	h := &HAState{}
 	h.SetLeaseProvider(f, "cp-me")
-	h.SetResyncMaterial(context.Background(), ":50051", "", "", "")
+	h.SetResyncMaterial(resyncCtx(t), ":50051", "", "", "")
 	h.ResumeAsLeader(&haConfig{
 		Enabled: true, Token: "tok", PeerAddr: "peer:50051", Role: "leader",
 		Term: 9, StandbyAddr: "ex-standby.example:50051",
@@ -240,7 +257,7 @@ func TestResumeDenied_NoTarget_KeepsS2Stance(t *testing.T) {
 	// No StandbyAddr recorded: fall back to S2 (role kept, no write authority).
 	h := &HAState{}
 	h.SetLeaseProvider(f, "cp-me")
-	h.SetResyncMaterial(context.Background(), ":50051", "", "", "")
+	h.SetResyncMaterial(resyncCtx(t), ":50051", "", "", "")
 	h.ResumeAsLeader(&haConfig{Enabled: true, Token: "tok", PeerAddr: "peer:50051", Role: "leader", Term: 9})
 	defer h.Stop()
 

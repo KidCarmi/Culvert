@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // restoreSchemaVersion is the manifest envelope version this PR accepts.
@@ -458,7 +460,7 @@ func validateTier1Artifacts(files map[string][]byte, passphrase string, summary 
 	}
 
 	if body, ok := files["data/ca.bundle"]; ok {
-		summary.CABundleEncrypted = len(body) >= 5 && [4]byte(body[:4]) == caMagic
+		summary.CABundleEncrypted = ca.HasBundleMagic(body)
 		if err := validateCABundle(body, passphrase); err != nil {
 			return fmt.Errorf("restore: ca.bundle: %w", err)
 		}
@@ -499,21 +501,21 @@ func validateClusterJSON(data []byte) (int, error) {
 
 func validateCABundle(data []byte, passphrase string) error {
 	var plaintext []byte
-	if len(data) >= 5 && [4]byte(data[:4]) == caMagic {
+	if ca.HasBundleMagic(data) {
 		// Encrypted bundle.
 		if passphrase == "" {
 			return fmt.Errorf("encrypted bundle but no passphrase available (set CULVERT_CA_PASSPHRASE)")
 		}
 		var err error
-		plaintext, err = decryptBundle(data, []byte(passphrase))
+		plaintext, err = ca.DecryptBundle(data, []byte(passphrase))
 		if err != nil {
 			return fmt.Errorf("decrypt: %w", err)
 		}
 	} else {
 		plaintext = data
 	}
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
-	if err := cm.importBundle(plaintext); err != nil {
+	cm := ca.New()
+	if err := cm.ImportBundle(plaintext); err != nil {
 		return fmt.Errorf("import: %w", err)
 	}
 	return nil

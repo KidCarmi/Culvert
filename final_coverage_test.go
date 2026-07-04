@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/blocklist"
+	"github.com/KidCarmi/Culvert/internal/ca"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
@@ -370,7 +371,7 @@ func TestAPIAuthLogin_Success_AuthDisabled(t *testing.T) {
 // ─── CertManager.GetCert ─────────────────────────────────────────────────────
 
 func TestCertManager_GetCert(t *testing.T) {
-	cm := &CertManager{cache: make(map[string]*certCacheEntry)}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -390,7 +391,7 @@ func TestCertManager_GetCert(t *testing.T) {
 }
 
 func TestCertManager_GetCert_EmptyServerName(t *testing.T) {
-	cm := &CertManager{cache: make(map[string]*certCacheEntry)}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -472,7 +473,7 @@ func TestValidateExternalURL_PublicHTTPS(t *testing.T) {
 // ─── ca.go: decryptBundle error paths ────────────────────────────────────────
 
 func TestDecryptBundle_TooShort(t *testing.T) {
-	_, err := decryptBundle([]byte("short"), []byte("passphrase"))
+	_, err := ca.DecryptBundle([]byte("short"), []byte("passphrase"))
 	if err == nil {
 		t.Error("decryptBundle should fail on short data")
 	}
@@ -480,9 +481,9 @@ func TestDecryptBundle_TooShort(t *testing.T) {
 
 func TestDecryptBundle_BadMagic(t *testing.T) {
 	data := make([]byte, 100)
-	data[4] = caVersion
+	data[4] = ca.BundleVersion
 	binary.BigEndian.PutUint32(data[5:9], 100_001) // valid iteration count
-	_, err := decryptBundle(data, []byte("passphrase"))
+	_, err := ca.DecryptBundle(data, []byte("passphrase"))
 	if err == nil {
 		t.Error("decryptBundle should fail with bad magic")
 	}

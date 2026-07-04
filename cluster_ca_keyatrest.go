@@ -37,6 +37,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // clusterCAEncryptEnvVar opts cluster CA key encryption in (opt-in-first).
@@ -82,7 +84,7 @@ func clusterCAKEKProvider(dir string) KEKProvider {
 // (the encrypted format produced by encryptBundle). Mirrors the magic check in
 // ca.go LoadCA so the same detector governs both Root CA and cluster CA keys.
 func isEncryptedKeyFile(data []byte) bool {
-	return len(data) >= len(caMagic) && [4]byte(data[:4]) == caMagic
+	return ca.HasBundleMagic(data)
 }
 
 // decryptClusterCAKey returns the plaintext key PEM for raw on-disk key bytes.

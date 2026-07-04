@@ -17,19 +17,21 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // ── CA Auto-Rotation ─────────────────────────────────────────────────────────
 
 func TestCAExpiry_NoCA(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if !cm.CAExpiry().IsZero() {
 		t.Fatal("CAExpiry should return zero when CA not ready")
 	}
 }
 
 func TestCAExpiry_HasCA(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +45,7 @@ func TestCAExpiry_HasCA(t *testing.T) {
 }
 
 func TestRotateIfNeeded_NotNeeded(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +56,7 @@ func TestRotateIfNeeded_NotNeeded(t *testing.T) {
 }
 
 func TestRotateIfNeeded_Needed(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	// Create a CA that expires in 5 days (< 30 day overlap).
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{
@@ -68,10 +70,7 @@ func TestRotateIfNeeded_Needed(t *testing.T) {
 	}
 	certDER, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	cert, _ := x509.ParseCertificate(certDER)
-	cm.mu.Lock()
-	cm.caCert = cert
-	cm.caKey = key
-	cm.mu.Unlock()
+	cm.SetCAForTest(cert, key)
 
 	origExpiry := cm.CAExpiry()
 
@@ -86,7 +85,7 @@ func TestRotateIfNeeded_Needed(t *testing.T) {
 }
 
 func TestRotateIfNeeded_PersistsToDisk(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -99,10 +98,7 @@ func TestRotateIfNeeded_PersistsToDisk(t *testing.T) {
 	}
 	certDER, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	cert, _ := x509.ParseCertificate(certDER)
-	cm.mu.Lock()
-	cm.caCert = cert
-	cm.caKey = key
-	cm.mu.Unlock()
+	cm.SetCAForTest(cert, key)
 
 	path := filepath.Join(t.TempDir(), "rotated.bundle")
 	cm.RotateIfNeeded(path, "testpass")
@@ -113,7 +109,7 @@ func TestRotateIfNeeded_PersistsToDisk(t *testing.T) {
 }
 
 func TestRotateIfNeeded_NoCA(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if cm.RotateIfNeeded("", "") {
 		t.Fatal("should return false with no CA")
 	}
@@ -123,7 +119,7 @@ func TestRotateIfNeeded_NoCA(t *testing.T) {
 
 func TestLocalKeyProvider_Implements(t *testing.T) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	p := &localKeyProvider{key: key}
+	p := ca.NewLocalKeyProvider(key)
 
 	// Check interface methods.
 	if p.Name() != "local" {
@@ -153,17 +149,17 @@ func TestLocalKeyProvider_Implements(t *testing.T) {
 }
 
 func TestSetKeyProvider(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if cm.KeyProviderName() != "local" {
 		t.Fatalf("default provider = %q, want local", cm.KeyProviderName())
 	}
 
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	cm.SetKeyProvider(&localKeyProvider{key: key})
+	cm.SetKeyProvider(ca.NewLocalKeyProvider(key))
 	if cm.KeyProviderName() != "local" {
 		t.Fatal("should still be local after setting localKeyProvider")
 	}
-	if cm.keyProvider == nil {
+	if !cm.HasKeyProviderForTest() {
 		t.Fatal("keyProvider should be set")
 	}
 }

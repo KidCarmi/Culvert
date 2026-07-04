@@ -37,6 +37,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/ca"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
@@ -52,7 +53,7 @@ func dialTimeout(addr string) (net.Conn, error) {
 func setupInspectCA(t *testing.T) (*CertManager, *x509.CertPool) {
 	t.Helper()
 	prev := certMgr
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}

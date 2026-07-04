@@ -26,7 +26,7 @@
 | RISK-010 | MEDIUM | OPEN | Self-update has no in-binary image signature/digest check | `update.go:496-608` |
 | RISK-011 | MEDIUM | OPEN | Cluster rolling-update auto-rollback unverified | `update_cluster.go:804-852` |
 | RISK-012 | LOW | OPEN | Account lockout is username-keyed (lockout-as-DoS) | `lockout.go:36,60` |
-| RISK-018 | LOW | OPEN | Leaked HA `standbyLoop` goroutine races test `logger` swaps (determinism-gate flake) | race report, PR #560 gate run 28705150574 |
+| RISK-018 | LOW | ✅ CLOSED | Leaked HA `standbyLoop` goroutine races test `logger` swaps (determinism-gate flake) | `resyncCtx(t)` cleanup-cancelled ctx (2026-07-04) |
 | RISK-013 | LOW | OPEN | `normalizeHost` IDNA failure is fail-open | `security.go:34-37` |
 
 ---
@@ -292,7 +292,21 @@
 - `lockout.go:36,60`: an attacker who knows an admin username can deliberately lock it out; restart
   clears all lockouts (also the informal break-glass). Consider IP+user keying. **Complexity S.**
 
-## RISK-018 — Leaked HA standby goroutine races test logger swaps · LOW · OPEN
+## RISK-018 — Leaked HA standby goroutine races test logger swaps · LOW · ✅ CLOSED 2026-07-04
+- **Root cause (narrower than first mapped):** three `ha_failover_test.go` tests seeded
+  `SetResyncMaterial(context.Background(), …)`. The leak interleaving: the test's `h.Stop()`
+  closes the CURRENT `stopCh`, but the keepalive goroutine can already be mid-`selfFence`; its
+  `enterStandbyResync` then calls `StartAsStandby` AFTER Stop — fresh `stopCh` nobody closes,
+  ctx = Background → immortal loop retrying `HASync` every 5s across the rest of the suite,
+  racing any test that swaps the `logger` global. **Production was never exposed:** the resync
+  ctx there is the process lifecycle ctx (`cluster_startup.go:71,100`), so shutdown always kills
+  a post-Stop resync loop; the standby-loop/Stop design is unchanged.
+- **Fix:** `resyncCtx(t)` — a cleanup-cancelled ctx seeded at all three sites, so any loop
+  spawned under ANY Stop/fence interleaving dies with its test. Verified: HA + SAML suites
+  `-race -count=2 -shuffle=on` ×3 green.
+- Original finding preserved below.
+
+### (was) RISK-018 — Leaked HA standby goroutine races test logger swaps · LOW · OPEN
 - **Observed (PR #560 Fast-Gate run 28705150574, `-race`):** `HAState.syncFromLeader`
   (`ha.go:477`, `logger.Printf`) racing `TestAuthSAMLCallbackLogsProviderRejection`'s cleanup
   (`ui_auth_saml_test.go:31`, `logger = origLogger`). The reading goroutine was created via
