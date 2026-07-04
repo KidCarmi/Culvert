@@ -62,7 +62,7 @@ Env knobs:
   CULVERT_MAINT_BUNDLE         cosign Sigstore bundle (*.sigstore.json) for
                                verifying a local binary
   CULVERT_MAINT_CERT_IDENTITY  override the expected cosign cert identity
-  CULVERT_MAINT_COSIGN_IMAGE   pinned cosign image (default ghcr.io/sigstore/cosign:v3.0.6;
+  CULVERT_MAINT_COSIGN_IMAGE   pinned cosign image (default ghcr.io/sigstore/cosign/cosign:v3.0.6;
                                MUST be cosign v3.x to read the new-format bundle —
                                operators who pinned a v2.x DIGEST must re-pin to v3)
   CULVERT_MAINT_SKIP_VERIFY=1  trust a hand-supplied LOCAL binary without
@@ -163,11 +163,11 @@ trap cleanup EXIT
 CERT_OIDC_ISSUER=${CULVERT_MAINT_CERT_OIDC_ISSUER:-https://token.actions.githubusercontent.com}
 # The cosign verifier image IS the root of trust for the download path. A bare
 # tag is mutable; high-assurance / air-gapped operators should override this
-# with a digest-pinned ref (ghcr.io/sigstore/cosign:v3.0.6@sha256:<digest>).
+# with a digest-pinned ref (ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:<digest>).
 # MUST be cosign v3.x: the release signs with cosign 3.x new-format Sigstore
 # bundles, which a v2.x verifier cannot parse — operators who pinned a v2.x
 # digest must re-pin to v3.0.6.
-COSIGN_IMAGE=${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign:v3.0.6}
+COSIGN_IMAGE=${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6}
 GH_REPO=${CULVERT_MAINT_GITHUB_REPO:-KidCarmi/Culvert}
 
 # Map host arch → release asset arch (matches ci.yml's linux-only legs).

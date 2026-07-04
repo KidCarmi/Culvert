@@ -25,17 +25,22 @@ func TestCosignBundleMigration_CIProducesBundles(t *testing.T) {
 
 	for _, want := range []string{
 		"cosign-release: 'v3.0.6'",            // cosign binary pinned to the 3.x line
-		"cosign sign-blob --yes",              // binary signing → bundle
+		"cosign sign-blob --yes",              // binary + SBOM signing → bundle
 		`--bundle "${BINARY}.sigstore.json"`,  // proxy + maint binary bundles
-		"cosign attest-blob --yes",            // SBOM bound to the binary digest
-		`--predicate "$SBOM"`,                 // predicate = the CycloneDX SBOM
-		"--type cyclonedx",                    // typed in-toto predicate
-		`--bundle "${SBOM}.sigstore.json"`,    // SBOM attestation bundle
+		`--bundle "${SBOM}.sigstore.json"`,    // per-module SBOM bundle (standalone)
 		"culvert.sbom.cdx.json.sigstore.json", // uploaded to the Release
 	} {
 		if !strings.Contains(ci, want) {
 			t.Errorf("ci.yml must produce cosign 3.x bundles: missing %q", want)
 		}
+	}
+
+	// The per-module SBOM is signed STANDALONE, NOT bound to a single binary via
+	// attest-blob — that would make the shared multi-arch SBOM unverifiable for
+	// the non-amd64 binaries (subject-digest mismatch). Guard against a regression
+	// back to a binary-subject attestation.
+	if strings.Contains(activeConfigLines(ci), "attest-blob") {
+		t.Error("ci.yml must NOT attest-blob the per-module SBOM to a single binary subject (breaks non-amd64 verification)")
 	}
 
 	// The removed cosign 2.x detached-output flags must never reappear — they
@@ -53,10 +58,10 @@ func TestCosignBundleMigration_InstallerVerifiesBundles(t *testing.T) {
 
 	for _, want := range []string{
 		"verify-blob",
-		`--bundle "$_bin.sigstore.json"`, // verify against the bundle
-		"$ASSET.sigstore.json",           // download path fetches the bundle
-		"CULVERT_MAINT_BUNDLE",           // new local-binary bundle override
-		"ghcr.io/sigstore/cosign:v3.0.6", // verifier bumped to cosign 3.x
+		`--bundle "$_bin.sigstore.json"`,        // verify against the bundle
+		"$ASSET.sigstore.json",                  // download path fetches the bundle
+		"CULVERT_MAINT_BUNDLE",                  // new local-binary bundle override
+		"ghcr.io/sigstore/cosign/cosign:v3.0.6", // verifier: correct GHCR path + cosign 3.x
 	} {
 		if !strings.Contains(install, want) {
 			t.Errorf("install.sh must verify cosign 3.x bundles: missing %q", want)

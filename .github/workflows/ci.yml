@@ -715,21 +715,24 @@ jobs:
       # syft reads the binary's embedded Go build-info, identical across
       # GOOS/GOARCH for a given module — so 2 module SBOMs (proxy + agent) fully
       # describe all 7 released binaries (per-binary would be 7× the same 2
-      # dependency sets). Each SBOM is bound to its binary via `cosign
-      # attest-blob` (subject = the binary, predicate = the CycloneDX SBOM) → an
-      # in-toto attestation in a Sigstore bundle, so the SBOM is cryptographically
-      # tied to the exact binary digest (stronger than signing the SBOM bytes in
-      # isolation). Attached to the Release (below) so every release ships durable,
-      # bound SBOM evidence. NOTE: SBOMs are deliberately NOT added to "Compute
-      # release subjects" — the SLSA subject set must stay exactly the 7 binaries.
-      # Verify with: cosign verify-blob-attestation --type cyclonedx \
-      #   --new-bundle-format --bundle culvert.sbom.cdx.json.sigstore.json \
+      # dependency sets). Each SBOM is keyless-signed STANDALONE via `cosign
+      # sign-blob --bundle` (new-format Sigstore bundle). Deliberately NOT
+      # `attest-blob` with a binary subject: a per-module SBOM is shared by every
+      # arch binary, so binding it to one binary's digest (e.g. linux/amd64) would
+      # make verify-blob-attestation FAIL the subject-digest check for the
+      # arm64/darwin/windows binaries. A standalone signed SBOM verifies for
+      # consumers of ANY released binary. Attached to the Release (below). NOTE:
+      # SBOMs are deliberately NOT added to "Compute release subjects" — the SLSA
+      # subject set must stay exactly the 7 binaries.
+      # Verify with: cosign verify-blob --new-bundle-format \
+      #   --bundle culvert.sbom.cdx.json.sigstore.json \
       #   --certificate-identity-regexp '^https://github\.com/KidCarmi/Culvert/\.github/workflows/ci\.yml@refs/tags/v.*$' \
-      #   --certificate-oidc-issuer https://token.actions.githubusercontent.com culvert-linux-amd64
+      #   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      #   culvert.sbom.cdx.json
       - name: Install syft (pinned)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
-      - name: Generate + attest binary SBOMs (linux/amd64 leg)
+      - name: Generate + sign binary SBOMs (linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
           set -euo pipefail
@@ -741,11 +744,9 @@ jobs:
             # SBOM is worthless evidence and must not ship.
             jq -e '.components | length > 0' "$SBOM" >/dev/null \
               || { echo "::error::SBOM $SBOM has no components — refusing SBOM-less release"; exit 1; }
-            cosign attest-blob --yes \
-              --predicate "$SBOM" \
-              --type cyclonedx \
+            cosign sign-blob --yes \
               --bundle "${SBOM}.sigstore.json" \
-              "$BIN"
+              "$SBOM"
           done
 
       # SLSA subjects: one sha256sum line per released binary for THIS leg

@@ -219,19 +219,23 @@ binary/SBOM assets). Migrated to the cosign-3.x **new-format Sigstore bundle**
 (`--bundle *.sigstore.json`, matching the catalog step) on all three paths:
 - **Binaries** now ship a single `<binary>.sigstore.json` bundle instead of
   `.sig`/`.pem`.
-- **SBOMs** are upgraded from a detached `sign-blob` to `cosign attest-blob
-  --type cyclonedx` — an in-toto statement whose **subject is the binary** and
-  predicate is the SBOM, so the SBOM is cryptographically bound to the exact
-  binary digest (`<sbom>.sigstore.json`).
+- **SBOMs** are signed **standalone** with `cosign sign-blob --bundle`
+  (`<sbom>.sigstore.json`, new-format Sigstore bundle). Deliberately NOT
+  `attest-blob` with a binary subject: the SBOMs are per-**module** and shared by
+  every arch binary, so binding one to a single binary's digest (e.g.
+  linux/amd64) would make `verify-blob-attestation` fail the subject check for
+  the arm64/darwin/windows binaries. A standalone signed SBOM verifies for
+  consumers of any released binary.
 - The cosign binary is explicitly pinned (`cosign-release: 'v3.0.6'`) on all
   Install-cosign steps so a future installer bump can't silently reintroduce the
   flag drift.
 - **Operator impact:** `packaging/culvert-maint/install.sh` now verifies with
   `cosign verify-blob --bundle`, the verifier container default is bumped to
-  `ghcr.io/sigstore/cosign:v3.0.6`, and the local-binary override is
-  `CULVERT_MAINT_BUNDLE` (was `CULVERT_MAINT_SIG`/`_PEM`). **Operators who pinned
-  a cosign v2.x digest via `CULVERT_MAINT_COSIGN_IMAGE` MUST re-pin to v3.0.6** —
-  a v2.x verifier cannot parse a v3 new-format bundle.
+  `ghcr.io/sigstore/cosign/cosign:v3.0.6` (the correct GHCR path — the prior
+  `ghcr.io/sigstore/cosign:*` reference was never a pullable image), and the
+  local-binary override is `CULVERT_MAINT_BUNDLE` (was `CULVERT_MAINT_SIG`/`_PEM`).
+  **Operators who pinned a cosign v2.x digest via `CULVERT_MAINT_COSIGN_IMAGE`
+  MUST re-pin to v3.0.6** — a v2.x verifier cannot parse a v3 new-format bundle.
 - No CI lane runs a real keyless verify (needs OIDC), so
   `cosign_bundle_migration_test.go` string-pins the bundle wiring on both the
   producer (`ci.yml`) and consumer (`install.sh`) as the regression guard.
