@@ -22,7 +22,7 @@ import (
 // meaningfully mocked without losing the point of the regression it guards.
 func requireDockerForTest(t *testing.T) {
 	t.Helper()
-	if err := exec.Command("docker", "info").Run(); err != nil {
+	if err := exec.CommandContext(t.Context(), "docker", "info").Run(); err != nil {
 		t.Skip("docker daemon not reachable in this environment — skipping")
 	}
 }
@@ -48,11 +48,11 @@ func TestInstallScript_IsFreshDeployment_IgnoresUnrelatedProjectVolume(t *testin
 	// install living at a different path, or leftover volumes from a
 	// previous install that was moved/reinstalled elsewhere).
 	volName := "installscripttest_otherproject_proxy-data"
-	rm := func() { exec.Command("docker", "volume", "rm", "-f", volName).Run() } //nolint:errcheck // best-effort cleanup
+	rm := func() { exec.CommandContext(t.Context(), "docker", "volume", "rm", "-f", volName).Run() } //nolint:errcheck // best-effort cleanup
 	rm()
 	t.Cleanup(rm)
 
-	createCmd := exec.Command("docker", "volume", "create", //nolint:gosec // fixed args, not user input
+	createCmd := exec.CommandContext(t.Context(), "docker", "volume", "create", //nolint:gosec // fixed args, not user input
 		"--label", "com.docker.compose.project=otherproject",
 		"--label", "com.docker.compose.project.working_dir=/srv/unrelated-other-project",
 		"--label", "com.docker.compose.volume=proxy-data",
@@ -68,7 +68,7 @@ func TestInstallScript_IsFreshDeployment_IgnoresUnrelatedProjectVolume(t *testin
 		"INSTALL_DIR='" + installDir + "'\n" +
 		"if is_fresh_deployment; then echo FRESH; else echo NOTFRESH; fi\n"
 
-	cmd := exec.Command("bash", "-c", script) //nolint:gosec // fixed test script content, not external/user input
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) //nolint:gosec // fixed test script content, not external/user input
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("shell script failed: %v\n%s", err, out)
@@ -95,7 +95,7 @@ func TestInstallScript_IsFreshDeployment_TrueWhenNoVolumeExists(t *testing.T) {
 		"INSTALL_DIR='" + installDir + "'\n" +
 		"if is_fresh_deployment; then echo FRESH; else echo NOTFRESH; fi\n"
 
-	cmd := exec.Command("bash", "-c", script) //nolint:gosec // fixed test script content, not external/user input
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) //nolint:gosec // fixed test script content, not external/user input
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("shell script failed: %v\n%s", err, out)
@@ -116,11 +116,11 @@ func TestInstallScript_IsFreshDeployment_FalseForOwnExistingVolume(t *testing.T)
 
 	installDir := t.TempDir()
 	volName := "installscripttest_own_proxy-data"
-	rm := func() { exec.Command("docker", "volume", "rm", "-f", volName).Run() } //nolint:errcheck // best-effort cleanup
+	rm := func() { exec.CommandContext(t.Context(), "docker", "volume", "rm", "-f", volName).Run() } //nolint:errcheck // best-effort cleanup
 	rm()
 	t.Cleanup(rm)
 
-	createCmd := exec.Command("docker", "volume", "create", //nolint:gosec // fixed args, not user input
+	createCmd := exec.CommandContext(t.Context(), "docker", "volume", "create", //nolint:gosec // fixed args, not user input
 		"--label", "com.docker.compose.project=culvert",
 		"--label", "com.docker.compose.project.working_dir="+installDir,
 		"--label", "com.docker.compose.volume=proxy-data",
@@ -134,7 +134,7 @@ func TestInstallScript_IsFreshDeployment_FalseForOwnExistingVolume(t *testing.T)
 		"INSTALL_DIR='" + installDir + "'\n" +
 		"if is_fresh_deployment; then echo FRESH; else echo NOTFRESH; fi\n"
 
-	cmd := exec.Command("bash", "-c", script) //nolint:gosec // fixed test script content, not external/user input
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) //nolint:gosec // fixed test script content, not external/user input
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("shell script failed: %v\n%s", err, out)
