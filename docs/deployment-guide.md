@@ -389,6 +389,21 @@ backend proxy_nodes
 > since each node maintains its own rate limit counters, cert cache, and
 > short-lived IdP login state.
 
+### Control Plane High Availability
+
+A single Control Plane is a single point of failure for enrollment, config
+sync, and the admin dashboard (Data Plane nodes keep serving proxy traffic on
+their last-known-good config if the CP goes down — see "What Syncs Between
+Nodes" above — but no new config or enrollments land until it's back).
+
+Run a second Control Plane as a standby with `-ha-join <leader-cp>:50051`. By
+default, a lost leader requires **manual** promotion of the standby
+(`-ha-auto-failover` is off by default — a 2-node pair alone can't safely
+tell "leader is dead" apart from "network partition"). For **safe automatic**
+failover, add an etcd fencing lease (`-ha-etcd-endpoints ...`) — see
+[`docs/operator/ha-lease-failover.md`](operator/ha-lease-failover.md) for the
+full setup and behavior.
+
 ---
 
 ## 3. Upstream Proxy Chaining

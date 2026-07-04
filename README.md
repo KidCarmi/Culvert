@@ -246,7 +246,7 @@ For proxy-only (no AV, no SSL inspection):
 | Component | CPU | RAM | Storage | Notes |
 |---|---|---|---|---|
 | **Control Plane** | 2 vCPU | 512 MB | 500 MB | No proxy traffic - config sync, enrollment, dashboard only |
-| **Control Plane (HA pair)** | 2 vCPU each | 512 MB each | 500 MB each | Leader + standby with automatic failover |
+| **Control Plane (HA pair)** | 2 vCPU each | 512 MB each | 500 MB each | Leader + standby; manual failover by default, safe automatic failover with an etcd fencing lease ([details](docs/operator/ha-lease-failover.md)) |
 | **Data Plane node** | 2 vCPU | 1 GB | 1 GB | Handles proxy traffic, receives config from CP |
 | **Data Plane + ClamAV** | 2 vCPU | 2 GB | 1.5 GB | Add ~1 GB RAM + 300 MB disk for AV |
 
