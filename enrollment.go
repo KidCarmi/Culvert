@@ -271,7 +271,13 @@ func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP stri
 		return TokenInfo{}, fmt.Errorf("node ID %q does not match required prefix %q", nodeID, tok.NodePrefix)
 	}
 	if tok.AllowCIDR != "" {
-		_, cidr, _ := net.ParseCIDR(tok.AllowCIDR)
+		_, cidr, cidrErr := net.ParseCIDR(tok.AllowCIDR)
+		if cidrErr != nil || cidr == nil {
+			// Malformed CIDR (e.g. corrupted persisted token state). Fail
+			// closed rather than dereferencing a nil *net.IPNet below.
+			cs.mu.Unlock()
+			return TokenInfo{}, fmt.Errorf("token has invalid allowed CIDR %q: %w", tok.AllowCIDR, cidrErr)
+		}
 		ip := net.ParseIP(sourceIP)
 		if ip == nil || !cidr.Contains(ip) {
 			cs.mu.Unlock()
