@@ -6,9 +6,12 @@
 #   J1  testssl.sh against the admin UI's own TLS (:9090) — GATED on legacy
 #       protocols / weak cipher families (NOT on severity: a self-signed cert
 #       is a HIGH PKI finding that would false-fail every run).
-#   J3  OWASP ZAP baseline against the admin UI — ADVISORY (passive; catches
-#       missing headers / cookie flags / info leaks). Authenticated ZAP is a
-#       documented follow-up.
+#   J3  OWASP ZAP baseline against the admin UI, AUTHENTICATED — provisions an
+#       admin (so auth is enforced), logs in, and injects the ps_ui_session
+#       cookie on every ZAP request to scan the real post-login surface. The
+#       provision + anon-401 + authenticated-200 gate is a deterministic guard;
+#       ZAP findings stay advisory (passive: missing headers / cookie flags /
+#       info leaks).
 #   J4  gosec with G401 (weak crypto) + G402 (InsecureSkipVerify) UN-excluded —
 #       report-only discovery of the surface those blanket exclusions hide in a
 #       TLS-interception product. Drive-to-zero + flip-to-blocking is a follow-up.
@@ -114,12 +117,22 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-  # ─── J3 — ZAP baseline against the admin UI (advisory) ─────────────────────
+  # ─── J3 — Authenticated ZAP baseline against the admin UI ───────────────────
+  # Scans the CONFIGURED proxy (an admin is provisioned, so auth is ENFORCED)
+  # with a real session cookie, exercising the post-login attack surface — not
+  # an open first-run server where the auth/session/CSRF/RBAC stack is inert.
+  # The provision+login+gate check is a deterministic (non-advisory) guard; the
+  # ZAP findings themselves stay advisory (-I + || true).
   admin-ui-zap:
-    name: "DAST · admin UI ZAP baseline (advisory)"
+    name: "DAST · admin UI ZAP authenticated (advisory scan)"
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    continue-on-error: true   # advisory first cut; unauthenticated passive scan
+    timeout-minutes: 25   # traditional + AJAX (JS-aware) spider for the SPA
+    env:
+      # Ephemeral CI admin, provisioned + torn down with the runner. Low-entropy
+      # wordy value ON PURPOSE (meets complexity: upper+lower+digit, >=8) so
+      # gitleaks' entropy rule doesn't false-flag it — NOT a real secret.
+      ZAP_ADMIN_USER: zapadmin
+      ZAP_ADMIN_PASS: ZapNightly-Test-Admin-1
     steps:
       - name: Harden runner (egress audit)
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
@@ -135,18 +148,78 @@ jobs:
           ./culvert -port 8080 -ui-port 9090 > "$RUNNER_TEMP/proxy.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/proxy.pid"
           for i in $(seq 1 30); do
-            curl -ksf https://127.0.0.1:9090/ >/dev/null 2>&1 && break
+            curl -ksf https://127.0.0.1:9090/api/setup/status >/dev/null 2>&1 && break
             sleep 1
+            [ "$i" = 30 ] && { echo "::error::admin UI did not come up"; cat "$RUNNER_TEMP/proxy.log"; exit 1; }
           done
 
-      - name: ZAP baseline (passive, host network so localhost resolves)
+      - name: Provision admin + verify auth gate (deterministic guard)
+        # NON-advisory: the whole value of an "authenticated" scan is that auth is
+        # actually enforced. If setup/login/gating regresses, fail the job red so
+        # a future change can't silently un-authenticate the scan.
+        run: |
+          set -euo pipefail
+          # 1. Provision the first admin → IsConfigured() true → auth enforced.
+          curl -ksf -X POST https://127.0.0.1:9090/api/setup/complete \
+            -H 'Content-Type: application/json' \
+            -d "{\"user\":\"$ZAP_ADMIN_USER\",\"pass\":\"$ZAP_ADMIN_PASS\"}" >/dev/null
+          # 2. Anon-rejection smoke: a protected route with NO session must 401.
+          code=$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:9090/api/policy)
+          [ "$code" = 401 ] || { echo "::error::unauth /api/policy expected 401, got $code (auth not enforced?)"; exit 1; }
+          # 3. Log in → capture the admin-UI session cookie (ps_ui_session, HttpOnly).
+          curl -ksf -c "$RUNNER_TEMP/cj" -X POST https://127.0.0.1:9090/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"user\":\"$ZAP_ADMIN_USER\",\"pass\":\"$ZAP_ADMIN_PASS\"}" >/dev/null
+          # Netscape jar: fields are domain flag path secure expiry NAME VALUE;
+          # HttpOnly prefixes $1 with "#HttpOnly_" but $6/$7 (name/value) are stable.
+          SESSVAL=$(awk '$6=="ps_ui_session"{print $7}' "$RUNNER_TEMP/cj")
+          [ -n "$SESSVAL" ] || { echo "::error::failed to capture ps_ui_session cookie"; cat "$RUNNER_TEMP/cj"; exit 1; }
+          # 4. Positive reach-check: the SAME cookie must authenticate (200).
+          code=$(curl -ks -b "$RUNNER_TEMP/cj" -o /dev/null -w '%{http_code}' https://127.0.0.1:9090/api/policy)
+          [ "$code" = 200 ] || { echo "::error::session cookie did not authenticate /api/policy, got $code"; exit 1; }
+          printf 'ps_ui_session=%s' "$SESSVAL" > "$RUNNER_TEMP/cookie.txt"
+          echo "auth gate verified: anon=401, authenticated=200"
+
+      - name: ZAP baseline authenticated (advisory findings)
+        # Advisory: ZAP findings never fail the job (-I + || true). The session
+        # cookie is injected on EVERY request via the Replacer add-on
+        # (matchtype=REQ_HEADER ADDS the Cookie header when the request has none);
+        # the logout route is globally excluded so a stray hit can't
+        # un-authenticate the rest of the scan.
         run: |
           set -o pipefail
+          COOKIE=$(cat "$RUNNER_TEMP/cookie.txt")
+          # Build the -z option string via single-space concatenation (NOT a
+          # backslash-continued quoted literal, whose continuation-line indent
+          # would inject runs of spaces that ZAP could split into empty tokens).
+          R="replacer.full_list(0)"
+          G="globalexcludeurl.url_list.url(0)"
+          Z="-config ${R}.description=authcookie"
+          Z="$Z -config ${R}.enabled=true"
+          Z="$Z -config ${R}.matchtype=REQ_HEADER"
+          Z="$Z -config ${R}.matchstr=Cookie"
+          Z="$Z -config ${R}.regex=false"
+          Z="$Z -config ${R}.replacement=$COOKIE"
+          Z="$Z -config ${G}.regex=true"
+          Z="$Z -config ${G}.enabled=true"
+          Z="$Z -config ${G}.url=.*/api/auth/logout.*"
+          # Bound the AJAX spider so it can't run its 60-min default and blow the
+          # job timeout.
+          Z="$Z -config ajaxSpider.maxDuration=3"
+          # -j = ALSO run the AJAX (JS-aware) spider. The admin UI is a SPA whose
+          # protected /api/* routes are fetched from JavaScript, not HTML
+          # href/form links, so the traditional spider alone never reaches them —
+          # it would rescan the static shell with a cookie. The AJAX spider drives
+          # a headless browser (in the stable image) that executes the SPA's JS;
+          # the cookie replacer applies to those browser requests too, so the
+          # authenticated API surface is actually crawled. /api/auth/logout is
+          # globally excluded (above) so ZAP won't forward a logout that would
+          # drop the session mid-crawl.
           docker run --rm --network host -v "$RUNNER_TEMP:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t https://127.0.0.1:9090 -I -m 2 -T 5 \
-            -J zap-report.json -w zap-report.md || true
-          echo "── ZAP baseline summary ──"; sed -n '1,60p' "$RUNNER_TEMP/zap-report.md" 2>/dev/null || true
+            zap-baseline.py -t https://127.0.0.1:9090 -I -j -m 2 -T 5 \
+            -J zap-auth.json -w zap-auth.md -z "$Z" || true
+          echo "── ZAP authenticated baseline summary ──"; sed -n '1,60p' "$RUNNER_TEMP/zap-auth.md" 2>/dev/null || true
 
       - name: Teardown + upload
         if: always()
@@ -154,10 +227,10 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: zap-admin-ui
+          name: zap-admin-ui-authenticated
           path: |
-            ${{ runner.temp }}/zap-report.json
-            ${{ runner.temp }}/zap-report.md
+            ${{ runner.temp }}/zap-auth.json
+            ${{ runner.temp }}/zap-auth.md
           retention-days: 30
           if-no-files-found: warn
 
