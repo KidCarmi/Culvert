@@ -463,44 +463,7 @@ func TestOTLPBuildPayload(t *testing.T) {
 }
 
 // ─── Session revocation export/merge ───────────────────────────────────────
-
-func TestExportRevocations_FiltersExpired(t *testing.T) {
-	rl := &revocationList{tokens: map[string]time.Time{}}
-	// Add one valid and one expired token.
-	rl.tokens["valid-token"] = time.Now().Add(1 * time.Hour)
-	rl.tokens["expired-token"] = time.Now().Add(-1 * time.Hour)
-
-	entries := rl.ExportRevocations()
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry (expired filtered), got %d", len(entries))
-	}
-	if entries[0].Token != "valid-token" {
-		t.Fatalf("expected valid-token, got %q", entries[0].Token)
-	}
-	// Expired token should have been cleaned up.
-	if _, exists := rl.tokens["expired-token"]; exists {
-		t.Fatal("expired token should be removed from map")
-	}
-}
-
-func TestMergeRevocations(t *testing.T) {
-	rl := &revocationList{tokens: map[string]time.Time{}}
-	// Pre-existing token.
-	rl.tokens["existing"] = time.Now().Add(1 * time.Hour)
-
-	entries := []RevocationEntry{
-		{Token: "new-token", Expiry: time.Now().Add(1 * time.Hour).Unix()},
-		{Token: "existing", Expiry: time.Now().Add(2 * time.Hour).Unix()}, // duplicate
-		{Token: "expired", Expiry: time.Now().Add(-1 * time.Hour).Unix()}, // expired
-	}
-	added := rl.MergeRevocations(entries)
-	if added != 1 {
-		t.Fatalf("expected 1 added, got %d", added)
-	}
-	if rl.Count() != 2 {
-		t.Fatalf("expected 2 total, got %d", rl.Count())
-	}
-}
+// (Moved to internal/session with the ADR-0002 extraction.)
 
 // ─── clusterAuditLog ──────────────────────────────────────────────────────
 

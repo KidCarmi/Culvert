@@ -83,22 +83,9 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 	// JWTs. If a prior test logged out and revoked a JWT for "e2e_viewer"
 	// at second T, a fresh login here at the same second T would
 	// regenerate the revoked JWT and immediately trip decodeSession's
-	// "session: revoked" guard. Snapshot+restore isolates each fixture
-	// from any other test's revocations.
-	sessionRevoked.mu.Lock()
-	prevRevokedTokens := make(map[string]time.Time, len(sessionRevoked.tokens))
-	for k, v := range sessionRevoked.tokens {
-		prevRevokedTokens[k] = v
-	}
-	prevRevokedUsers := make(map[string]time.Time, len(sessionRevoked.users))
-	for k, v := range sessionRevoked.users {
-		prevRevokedUsers[k] = v
-	}
-	// Reset to empty for this fixture's lifetime so my own logout
-	// revocations cannot collide with my own re-logins.
-	sessionRevoked.tokens = map[string]time.Time{}
-	sessionRevoked.users = map[string]time.Time{}
-	sessionRevoked.mu.Unlock()
+	// "session: revoked" guard. Swap-in-fresh (restored below) isolates
+	// each fixture from any other test's revocations.
+	restoreRevoked := sessionRevoked.SwapForTest()
 
 	prevDataDir := dataDir
 	dataDir = t.TempDir()
@@ -133,10 +120,7 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 		cfg.uiUsers = prevUsers
 		cfg.mu.Unlock()
 		cfg.cache.clear()
-		sessionRevoked.mu.Lock()
-		sessionRevoked.tokens = prevRevokedTokens
-		sessionRevoked.users = prevRevokedUsers
-		sessionRevoked.mu.Unlock()
+		restoreRevoked()
 		dataDir = prevDataDir
 	})
 

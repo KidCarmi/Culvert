@@ -552,7 +552,18 @@ func diffConfigs(a, b *configBackup) []configChange {
 	diffStringList("blocklist", a.Blocklist, b.Blocklist, &changes)
 	diffStringList("ssl_bypass", a.SSLBypass, b.SSLBypass, &changes)
 	diffStringList("content_scan_patterns", a.ContentScanPatterns, b.ContentScanPatterns, &changes)
-	diffStringList("content_scan_bypass_hosts", a.ContentScanBypassHosts, b.ContentScanBypassHosts, &changes)
+
+	// ContentScanBypassHosts mirrors applyConfigBackup's nil-skip (see the
+	// scanner block there): a nil target is an old/pre-extension snapshot that
+	// apply leaves untouched, so the dry-run diff must skip it too — otherwise
+	// rolling back to a pre-extension snapshot reports every live bypass host
+	// as "removed" while apply changes nothing. A non-nil [] still diffs (the
+	// wipe). Same contract as RateLimitExempt/CategoryGroups/URLCategories
+	// below; pinned by the config-surface registry (config_surfaces.go
+	// DiffNilGuarded + TestConfigSurfaces_DiffNilGuardMirrorsApply).
+	if b.ContentScanBypassHosts != nil {
+		diffStringList("content_scan_bypass_hosts", a.ContentScanBypassHosts, b.ContentScanBypassHosts, &changes)
+	}
 	diffStringList("file_block_extensions", a.FileBlockExtensions, b.FileBlockExtensions, &changes)
 	diffStringList("ip_list", a.IPList, b.IPList, &changes)
 	diffStringList("pac_exclusions", a.PACExclusions, b.PACExclusions, &changes)

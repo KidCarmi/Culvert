@@ -288,7 +288,7 @@ func TestSlice7_StaleSessionCookie_ExemptEligible(t *testing.T) {
 	const host = "slice7-stale.example.test"
 	policyStore.Add(slice7ExemptRule(host))
 
-	if len(sessionSecret) == 0 {
+	if !sessionSecretSet() {
 		initSessionSecret()
 	}
 	value, err := encodeSession(&Session{

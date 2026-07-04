@@ -162,7 +162,7 @@ func TestAuthzMatrix_BlockBeatsGroupAllow(t *testing.T) {
 func TestAuthzMatrix_SessionCookie(t *testing.T) {
 	backend, cb := startCountingBackend(t)
 	proxyURL := startAuthProxy(t, testProvider(), engRule())
-	if len(sessionSecret) == 0 {
+	if !sessionSecretSet() {
 		initSessionSecret()
 	}
 

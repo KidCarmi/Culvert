@@ -17,6 +17,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // GET /api/audit — return configuration-change audit entries (newest first).
@@ -599,6 +600,14 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		// Connection limits.
 		b.ConnLimitEnabled = connLimiter.Enabled()
 		b.ConnLimitMaxPerIP = connLimiter.MaxPerIP()
+		// Category taxonomy + DPI bypass hosts (config-surface registry rows
+		// url_categories / category_groups / content_scan_bypass_hosts).
+		// Previously rollback-only: a "full" export could not round-trip
+		// category policy, so a restored backup silently dropped every
+		// category-group rule's referents.
+		b.URLCategories = catStore.All()
+		b.CategoryGroups = globalCategoryGroups.List()
+		b.ContentScanBypassHosts = dpiScanner.BypassHosts()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -647,6 +656,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		bl.SetMode(b.BlocklistMode)
 	}
 
+	// URL categories + category groups — BEFORE policy rules, matching
+	// applyConfigBackup's leaf-first dependency order (rules reference groups,
+	// groups reference categories by name).
+	importCategoryTaxonomy(&b, replaceMode)
+
 	// Policy rules — validate each before importing.
 	if replaceMode && len(b.PolicyRules) > 0 {
 		policyStore.ReplaceAll(b.PolicyRules)
@@ -683,15 +697,30 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 	sslBypass.Save()
 
-	// Content scan patterns.
+	// Content scan patterns. Track replace-mode success: bypass hosts share
+	// the content_scan.json envelope, and a failed pattern replace must not
+	// be followed by a bypass import + Save — that would persist a mixed
+	// old-patterns/new-bypass envelope matching neither the backup nor the
+	// prior state. Mirrors applyConfigBackup's guard on the same envelope
+	// (PR #557 Codex review). Merge-mode Add failures stay per-pattern and
+	// additive, so they don't gate the bypass import.
+	patternsOK := true
 	if replaceMode && len(b.ContentScanPatterns) > 0 {
-		_ = dpiScanner.Set(b.ContentScanPatterns)
+		if err := dpiScanner.Set(b.ContentScanPatterns); err != nil {
+			patternsOK = false
+			logger.Printf("ConfigImport: content scan patterns rejected: %s — skipping bypass-host import (shared envelope)", strings.ReplaceAll(err.Error(), "\n", ""))
+		}
 	} else {
 		for _, p := range b.ContentScanPatterns {
 			_ = dpiScanner.Add(p)
 		}
 	}
-	dpiScanner.Save()
+	if patternsOK {
+		// DPI bypass hosts — applied before the single Save so both halves
+		// of the envelope persist atomically.
+		importScanBypassHosts(&b, replaceMode)
+		dpiScanner.Save()
+	}
 
 	// File block extensions.
 	if replaceMode && len(b.FileBlockExtensions) > 0 {
@@ -789,6 +818,85 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt})
 }
 
+// importCategoryTaxonomy applies URL categories then category groups from an
+// import backup, in that order — groups reference categories by name and
+// policy rules (applied by the caller AFTER this) reference groups, the same
+// leaf-first chain as applyConfigBackup (configversion.go). Empty/absent
+// slices are skipped in BOTH modes: import never wipes (an old backup without
+// these fields must not clear live taxonomy); explicit wipes are a
+// rollback-surface capability only. Merge mode upserts by name (incoming
+// wins) so re-importing an edited backup updates entries instead of
+// duplicating them.
+func importCategoryTaxonomy(b *configBackup, replaceMode bool) {
+	if len(b.URLCategories) > 0 {
+		if replaceMode {
+			catStore.ReplaceAll(b.URLCategories)
+		} else {
+			catStore.ReplaceAll(mergeByName(catStore.All(), b.URLCategories,
+				func(e CategoryEntry) string { return e.Name }))
+		}
+		catStore.Save()
+	}
+	if len(b.CategoryGroups) > 0 {
+		if replaceMode {
+			globalCategoryGroups.ReplaceAll(b.CategoryGroups)
+		} else {
+			globalCategoryGroups.ReplaceAll(mergeByName(globalCategoryGroups.List(), b.CategoryGroups,
+				func(g CategoryGroup) string { return g.Name }))
+		}
+		globalCategoryGroups.Save()
+	}
+}
+
+// importScanBypassHosts applies the DPI bypass-host half of the
+// content_scan.json envelope. The caller runs this before its single
+// dpiScanner.Save() so patterns and bypass hosts persist in one atomic
+// envelope write. Empty/absent is skipped in both modes (no import wipes).
+func importScanBypassHosts(b *configBackup, replaceMode bool) {
+	if len(b.ContentScanBypassHosts) == 0 {
+		return
+	}
+	if replaceMode {
+		dpiScanner.SetBypassHosts(b.ContentScanBypassHosts)
+		return
+	}
+	merged := b.ContentScanBypassHosts
+	existing := dpiScanner.BypassHosts()
+	seen := make(map[string]struct{}, len(existing)+len(merged))
+	union := make([]string, 0, len(existing)+len(merged))
+	for _, h := range append(existing, merged...) {
+		if _, ok := seen[h]; ok {
+			continue
+		}
+		seen[h] = struct{}{}
+		union = append(union, h)
+	}
+	dpiScanner.SetBypassHosts(union)
+}
+
+// mergeByName upserts incoming entries into existing by case-insensitive
+// name: matches are replaced in place (incoming wins), new names are
+// appended. Existing order is preserved so a merge-mode import doesn't
+// reshuffle the operator's list.
+func mergeByName[T any](existing, incoming []T, name func(T) string) []T {
+	merged := make([]T, len(existing))
+	copy(merged, existing)
+	idx := make(map[string]int, len(merged))
+	for i := range merged {
+		idx[strings.ToLower(name(merged[i]))] = i
+	}
+	for i := range incoming {
+		key := strings.ToLower(name(incoming[i]))
+		if j, ok := idx[key]; ok {
+			merged[j] = incoming[i]
+		} else {
+			idx[key] = len(merged)
+			merged = append(merged, incoming[i])
+		}
+	}
+	return merged
+}
+
 // GET/POST /api/session-secret — shared session signing key management.
 func apiSessionSecret(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -818,7 +926,9 @@ func apiSessionSecret(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "secret must be ≥32 bytes of hex (64 hex chars)", http.StatusBadRequest)
 			return
 		}
-		sessionSecret = key
+		// Synchronized setter — rotation happens while concurrent requests
+		// compute session MACs (internal/session owns the lock).
+		session.SetSigningKey(key)
 		auditEvent(r, "settings.session_secret", "rotated", "shared session key updated via GUI")
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true})

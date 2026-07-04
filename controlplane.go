@@ -56,6 +56,8 @@ import (
 
 	"golang.org/x/crypto/pbkdf2"
 	"google.golang.org/grpc"
+
+	"github.com/KidCarmi/Culvert/internal/session"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -1852,7 +1854,9 @@ func applySnapshotSessionSecret(snap ConfigSnapshot) {
 	case err != nil:
 		logger.Printf("DataPlane: invalid session secret hex: %v", err)
 	case len(key) >= 32:
-		sessionSecret = key
+		// Synchronized setter — this runs at runtime while concurrent
+		// requests compute session MACs (internal/session owns the lock).
+		session.SetSigningKey(key)
 		logger.Printf("DataPlane: session secret synced from control plane")
 	}
 }
@@ -2052,8 +2056,8 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	}
 
 	// Session secret (hex-encoded for safe JSON transport).
-	if len(sessionSecret) > 0 {
-		snap.SessionHMAC = hex.EncodeToString(sessionSecret)
+	if key := session.SigningKey(); len(key) > 0 {
+		snap.SessionHMAC = hex.EncodeToString(key)
 	}
 	snap.IdPProfiles = idpRegistry.All()
 

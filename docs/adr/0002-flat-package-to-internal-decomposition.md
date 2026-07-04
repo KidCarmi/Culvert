@@ -1203,6 +1203,48 @@ with a fake merge), saas_feed_lifecycle_test.go (stays in main — drives global
 construction), and urlcat_metrics_test.go (needs `SeedStats`, per feedsync).
 `TestCategoryStore_GetByName` in saas_feed_test.go is a policy.go test and stays in main.
 
+### 2026-07-04 — `internal/upstream` extracted (upstream pool + circuit breaker)
+The upstream-chaining engine (`upstream.go`, 363 LOC — pool, per-proxy circuit breaker,
+round-robin failover, health-check loop, config/status types) moved to `internal/upstream`.
+Post-program extraction under the standing "new engines go to internal/ with a recorded design"
+rule; picked over `session`/`ca` as the lowest-coupling candidate (sole seams: `obs.Printf` +
+`obs.Sanitize` — no new seam needed). Exported surface: `Pool` (zero value usable), `Proxy`,
+`CircuitBreaker`, `Entry`/`Config`/`Status`, `RunHealthCheckLoop`, `FormatSummary`. main keeps
+the singleton (`upstreamPool`), the transport wiring (`applyUpstreamProxy`, P5.3 contract
+untouched), and persistence (admin_settings sentinel — unchanged ownership). **Two methods beyond
+the mapped surface** (fileblock precedent, recorded honestly): `CircuitBreaker.Params()` and
+`Pool.CBParams()` — needed because main's persistence-contract tests
+(`admin_settings_upstream_test.go`) asserted CB inheritance via unexported fields; both are
+read-only, off the request path, and legitimately useful for diagnostics. Tests: engine +
+pool-contract tests moved in-package (incl. the P1.3 health-loop shutdown-invariant suite);
+main keeps only `applyUpstreamProxy` transport wiring + the admin-settings round-trip/sentinel/
+API contracts, re-expressed against the exported surface. Deleted `joinStrings` (hand-rolled
+`strings.Join`); health-probe URL promoted to a package const. Validated: build, vet (all pkgs),
+gofmt, package suite `-race -count=2 -shuffle=on`, root Upstream/AdminSettings/SIGHUP suites
+`-race` — all green.
+
+### 2026-07-04 — `internal/session` extracted (HMAC tokens + revocation) — with a race fix
+The session engine (`session.go`, 435 LOC — signing-key holder, token encode/decode
+(base64(json).HMAC-SHA256), revocation list (token + user level, lazy eviction, gossip
+export/merge, disk persistence), TTL, jti) moved to `internal/session`. **Security fix shipped
+with the boundary:** the signing key was a bare `[]byte` global written at runtime by THREE
+paths — `applySnapshotSessionSecret` (DP cluster sync), the GUI rotation endpoint
+(`apiSessionSecret` POST), and startup — while every MAC computation read it concurrently, with
+no synchronization. The package now owns the key behind a mutex (`SetSigningKey`/`SigningKey`/
+`HasSigningKey`); all three writers funnel through the setter. Seam decisions: `Session` is
+aliased in main; **`Session.Identity()` became main-side `sessionIdentity(s)`** (Identity is a
+main hub type the package must not import — one production caller, proxy.go). Cookie helpers
+(set/read/clear + revoke-from-request) stay in main (`isSecureRequest` + Identity). Env/config
+key priority stays in the main shim per the startup-slice convention (env read in the shim).
+`Revoked` is the package singleton (pointer-stable; tests isolate via `SwapForTest()`, which
+replaced three hand-rolled map-snapshot idioms in main tests). Engine tests moved in-package
+(encode/decode/MAC, revocation incl. persistence + export/merge from controlplane_extra/
+distributed_rl test files, TTL clamp, the full C5.1 Jti suite); main keeps sessionIdentity,
+Jti-not-in-Identity, revokeSessionCookie, and the startup/rotation shim tests re-expressed via
+the exported surface. Validated: build, vet (all pkgs), gofmt, package suite `-race -count=2
+-shuffle=on`, root Session/Revocation/Jti/Ready/Diagnostics/ClusterAuth/Login/AuthzMatrix
+suites `-race` — all green.
+
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
 The leaf-first extraction phase of ADR-0002 is **complete**. A final size-ordered sweep of every

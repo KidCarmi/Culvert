@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // OperatorContract is the aggregated, operator-visible health verdict for
@@ -124,7 +125,7 @@ func storageWritability() string {
 // sessionSecretSet reports whether the admin session HMAC key has been
 // initialised. Boolean only — the secret value is never returned or logged.
 func sessionSecretSet() bool {
-	return len(sessionSecret) >= 32
+	return len(session.SigningKey()) >= 32
 }
 
 // buildOperatorContract assembles the full diagnostics report.

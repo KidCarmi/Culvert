@@ -117,7 +117,7 @@ func seedUIRoster(t *testing.T, adminUser, viewerUser, pass string) {
 	if err := cfg.SetUIUser(viewerUser, pass, RoleViewer); err != nil {
 		t.Fatalf("SetUIUser viewer: %v", err)
 	}
-	if len(sessionSecret) == 0 {
+	if !sessionSecretSet() {
 		initSessionSecret() // encodeSession needs the HMAC key
 	}
 	t.Cleanup(func() {

@@ -234,6 +234,25 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
           govulncheck ./...
 
+      # govulncheck does not traverse module boundaries — `./...` from the
+      # repo root analyzes the root module only, so the nested modules get
+      # explicit runs (RISK-014). cmd/culvert-maint is blocking like the root.
+      - name: govulncheck (cmd/culvert-maint)
+        working-directory: cmd/culvert-maint
+        run: govulncheck ./...
+
+      # ADVISORY: updater/ carries known unfixed docker/docker CVEs whose
+      # unreachability was previously asserted only by prose (.trivyignore
+      # rationale — RISK-ACC-1). This run turns that assertion into real
+      # reachability analysis. Non-blocking because the module is slated for
+      # deletion (DEBT-008) and a reachable finding has no fix short of
+      # removal — but ANY finding here invalidates the RISK-ACC-1 acceptance
+      # and must be triaged, not ignored.
+      - name: govulncheck (updater — advisory)
+        continue-on-error: true
+        working-directory: updater
+        run: govulncheck ./...
+
       - name: gosec (root module)
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1

@@ -1,6 +1,12 @@
 # Moby Docker SDK CVEs -- both affect Docker plugin installation/AuthZ,
 # which the culvert-updater sidecar never uses (it only calls container
 # lifecycle APIs: inspect, pull, create, start, stop, remove, logs).
-# Will upgrade when a patched SDK version is released.
-CVE-2026-34040
-CVE-2026-33997
+# Accepted under RISK-ACC-1 (docs/engineering/TECHNICAL-RISK-REGISTER.md)
+# until the updater module is removed (DEBT-008).
+#
+# exp: dates are enforced by trivy itself -- once the date passes, the CVE
+# stops being ignored and the blocking gate goes red, forcing re-triage
+# (RISK-006). If the updater removal slips past the date, re-validate the
+# reachability rationale and extend deliberately; do not extend by reflex.
+CVE-2026-34040 exp:2026-10-01
+CVE-2026-33997 exp:2026-10-01
