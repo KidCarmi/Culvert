@@ -32,7 +32,7 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
 # If the download fails (db-ip.com blocks some cloud/CI IPs), the build
 # continues without GeoIP — country-based policy rules will be silently
 # skipped until a valid .mmdb is mounted at runtime.
-FROM alpine:3.22 AS geoip
+FROM alpine:3.24 AS geoip
 RUN apk add --no-cache wget && \
     (wget -qO- "https://download.db-ip.com/free/dbip-country-lite-$(date +%Y-%m).mmdb.gz" \
       | gzip -d > /GeoLite2-Country.mmdb 2>/dev/null && \
@@ -49,7 +49,7 @@ RUN apk add --no-cache wget && \
 #       (see deploy/seccomp.json)
 #   • Drop all Linux capabilities: --cap-drop=ALL
 #   • No new privileges: --security-opt no-new-privileges
-FROM alpine:3.22
+FROM alpine:3.24
 
 # /data and /backup are pre-created + chowned to proxy so that a FRESH named
 # volume mounted over them (proxy-data:/data, culvert-backups:/backup) inherits
