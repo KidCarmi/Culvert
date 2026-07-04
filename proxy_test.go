@@ -102,7 +102,7 @@ func setupProxyIdentityE2EWithRules(t *testing.T, provider IdentityProvider, rul
 
 func sessionCookieForIdentity(t *testing.T, id *Identity) *http.Cookie {
 	t.Helper()
-	if len(sessionSecret) == 0 {
+	if !sessionSecretSet() {
 		initSessionSecret()
 	}
 	value, err := encodeSession(&Session{

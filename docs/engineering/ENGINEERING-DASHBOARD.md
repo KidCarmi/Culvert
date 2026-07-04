@@ -27,7 +27,7 @@ A score only moves when the underlying evidence changes in the repository.
 | Documentation | 4.0 | ↑ | Strong `CLAUDE.md` + roadmap + governance layer. Both formerly-missing runbooks now exist: `docs/operator/ha-lease-failover.md`, backup-restore §8b recovery. |
 | Operability (single-CP) | 3.5 | → | Fail-static confirmed, atomic restore + interrupted-restore boot guard (RISK-005), OTLP traces, alert webhooks now durable (RISK-017). No distinct `/readyz`. |
 | HA / DR readiness | 3.5 | ↑ | RISK-001 CLOSED: ADR-0005 etcd fencing lease — split-brain structurally prevented in lease mode (pinned by `TestCL4_*`), safe auto-failover, runbook. Residual: bounded LWW ≤TTL on partition; legacy (no-etcd) mode stays safe-manual. |
-| Maintainability | 3.2 | ↑ | ADR-0002 decomposition COMPLETE (45 `internal/` packages; `upstream` extracted 2026-07-04); startup slices complete (24, contract-tested); `store.go` halved (2,313→1,171). Residual: 172 root files still share one namespace (DEBT-001/003). |
+| Maintainability | 3.2 | ↑ | ADR-0002 decomposition COMPLETE (46 `internal/` packages; `upstream` + `session` extracted 2026-07-04); startup slices complete (24, contract-tested); `store.go` halved (2,313→1,171). Residual: 172 root files still share one namespace (DEBT-001/003). |
 | Architecture | 3.2 | ↑ | Engines own logic/state/persistence behind compiler-enforced `internal/` boundaries; `main` reduced to composition roots + shims. Residual: the flat root namespace and its globals remain the tax (DEBT-001). |
 
 **Headline:** The two items that blocked the enterprise claim in June — HA split-brain and the

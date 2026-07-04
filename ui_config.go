@@ -17,6 +17,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // GET /api/audit — return configuration-change audit entries (newest first).
@@ -913,7 +914,9 @@ func apiSessionSecret(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "secret must be ≥32 bytes of hex (64 hex chars)", http.StatusBadRequest)
 			return
 		}
-		sessionSecret = key
+		// Synchronized setter — rotation happens while concurrent requests
+		// compute session MACs (internal/session owns the lock).
+		session.SetSigningKey(key)
 		auditEvent(r, "settings.session_secret", "rotated", "shared session key updated via GUI")
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true})

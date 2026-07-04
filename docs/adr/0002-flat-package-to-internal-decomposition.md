@@ -1223,6 +1223,28 @@ API contracts, re-expressed against the exported surface. Deleted `joinStrings` 
 gofmt, package suite `-race -count=2 -shuffle=on`, root Upstream/AdminSettings/SIGHUP suites
 `-race` — all green.
 
+### 2026-07-04 — `internal/session` extracted (HMAC tokens + revocation) — with a race fix
+The session engine (`session.go`, 435 LOC — signing-key holder, token encode/decode
+(base64(json).HMAC-SHA256), revocation list (token + user level, lazy eviction, gossip
+export/merge, disk persistence), TTL, jti) moved to `internal/session`. **Security fix shipped
+with the boundary:** the signing key was a bare `[]byte` global written at runtime by THREE
+paths — `applySnapshotSessionSecret` (DP cluster sync), the GUI rotation endpoint
+(`apiSessionSecret` POST), and startup — while every MAC computation read it concurrently, with
+no synchronization. The package now owns the key behind a mutex (`SetSigningKey`/`SigningKey`/
+`HasSigningKey`); all three writers funnel through the setter. Seam decisions: `Session` is
+aliased in main; **`Session.Identity()` became main-side `sessionIdentity(s)`** (Identity is a
+main hub type the package must not import — one production caller, proxy.go). Cookie helpers
+(set/read/clear + revoke-from-request) stay in main (`isSecureRequest` + Identity). Env/config
+key priority stays in the main shim per the startup-slice convention (env read in the shim).
+`Revoked` is the package singleton (pointer-stable; tests isolate via `SwapForTest()`, which
+replaced three hand-rolled map-snapshot idioms in main tests). Engine tests moved in-package
+(encode/decode/MAC, revocation incl. persistence + export/merge from controlplane_extra/
+distributed_rl test files, TTL clamp, the full C5.1 Jti suite); main keeps sessionIdentity,
+Jti-not-in-Identity, revokeSessionCookie, and the startup/rotation shim tests re-expressed via
+the exported surface. Validated: build, vet (all pkgs), gofmt, package suite `-race -count=2
+-shuffle=on`, root Session/Revocation/Jti/Ready/Diagnostics/ClusterAuth/Login/AuthzMatrix
+suites `-race` — all green.
+
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
 The leaf-first extraction phase of ADR-0002 is **complete**. A final size-ordered sweep of every

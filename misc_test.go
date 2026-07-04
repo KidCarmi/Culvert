@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // ─── firstNonZero / firstStr ──────────────────────────────────────────────────
@@ -98,9 +100,9 @@ func TestHandleReady_EmptyPolicyStillReady(t *testing.T) {
 // TestHandleReady_SessionSecretMissing503 zeros the admin session HMAC
 // and asserts /ready returns 503 with status:not_ready.
 func TestHandleReady_SessionSecretMissing503(t *testing.T) {
-	prev := sessionSecret
-	sessionSecret = nil
-	t.Cleanup(func() { sessionSecret = prev })
+	prev := session.SigningKey()
+	session.SetSigningKey(nil)
+	t.Cleanup(func() { session.SetSigningKey(prev) })
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/ready", http.NoBody)
@@ -309,7 +311,7 @@ func TestSHA256Hex(t *testing.T) {
 
 func init() {
 	// Ensure session secret is initialised for session tests.
-	if len(sessionSecret) == 0 {
+	if !session.HasSigningKey() {
 		initSessionSecret()
 	}
 }

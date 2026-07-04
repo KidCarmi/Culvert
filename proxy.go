@@ -186,7 +186,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
 		if sess, err := readSessionCookie(r); err == nil && sess != nil {
-			id := sess.Identity()
+			id := sessionIdentity(sess)
 			authenticatedIdentity = id.Sub
 			if authenticatedIdentity == "" {
 				authenticatedIdentity = id.Email

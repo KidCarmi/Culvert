@@ -7,7 +7,7 @@ Single binary, zero runtime dependencies.
 
 ```
 *.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
-internal/     — 45 packages (ADR-0002 decomposition, COMPLETE): 40 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
+internal/     — 46 packages (ADR-0002 decomposition, COMPLETE): 41 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
 main.go       — Entrypoint, flag parsing, signal handling, graceful shutdown
 proxy.go      — HTTP/CONNECT/WebSocket handlers, tunnel relay, upstream transport, sanitizeLog
 socks5.go     — SOCKS5 protocol handler (RFC 1928/1929)
@@ -20,7 +20,7 @@ ui_metadata_enforcement.go — C2 metadata-driven middleware (MinRole enforcemen
 ui_auth.go / ui_config.go / ui_policy.go / ui_security.go / ui_cluster.go / ui_static.go / cdr_ui.go / pac.go / update.go / diagnostics.go — per-domain register*Routes helpers + handlers
 ui_helpers.go — auditEvent / auditEventDiff / decodeJSON / shared validators
 ui_middleware.go / ui_session.go / ui_rbac.go — middleware chain, session cookies, RBAC helpers
-session.go    — HMAC-SHA256 signed session cookies, revocation list, dynamic Secure flag
+session.go    — Session shim over internal/session (ADR-0002; key holder — race-safe, three runtime writers — token codec, revocation, TTL, jti live in the package; main keeps cookie helpers + sessionIdentity + env/config key wiring)
 auth.go       — Local bcrypt auth
 auth_ldap.go  — LDAP bind + search auth with group resolution
 auth_oidc.go  — OIDC token introspection (RFC 7662)

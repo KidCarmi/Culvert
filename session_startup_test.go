@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 var sessionStartupLoggerMu sync.Mutex
@@ -22,19 +24,15 @@ func ensureSessionStartupTestLogger(t *testing.T) {
 	}
 }
 
-// resetSessionStartupGlobals snapshots/restores revocationFilePath and
-// uiSessionTTL for isolation under -shuffle.
+// resetSessionStartupGlobals snapshots/restores the revocations path and
+// session TTL for isolation under -shuffle.
 func resetSessionStartupGlobals(t *testing.T) {
 	t.Helper()
-	origPath := revocationFilePath
-	uiSessionTTLMu.RLock()
-	origTTL := uiSessionTTL
-	uiSessionTTLMu.RUnlock()
+	origPath := session.RevocationsPath()
+	origTTL := session.TTL()
 	t.Cleanup(func() {
-		revocationFilePath = origPath
-		uiSessionTTLMu.Lock()
-		uiSessionTTL = origTTL
-		uiSessionTTLMu.Unlock()
+		session.SetRevocationsPath(origPath)
+		session.SetTTL(origTTL)
 	})
 }
 
@@ -84,12 +82,12 @@ func TestLoadSession_AppliesTTL(t *testing.T) {
 func TestLoadSession_SkipsRevocationsWhenFileEmpty(t *testing.T) {
 	resetSessionStartupGlobals(t)
 	ensureSessionStartupTestLogger(t)
-	revocationFilePath = "should-not-be-overwritten"
+	session.SetRevocationsPath("should-not-be-overwritten")
 	if err := loadSession(sessionStartupConfig{}); err != nil {
 		t.Fatalf("loadSession: %v", err)
 	}
-	if revocationFilePath != "should-not-be-overwritten" {
-		t.Errorf("revocationFilePath changed unexpectedly; got %q", revocationFilePath)
+	if got := session.RevocationsPath(); got != "should-not-be-overwritten" {
+		t.Errorf("revocations path changed unexpectedly; got %q", got)
 	}
 }
 
@@ -102,7 +100,7 @@ func TestLoadSession_LoadsRevocationsFromFile(t *testing.T) {
 	if err := loadSession(sessionStartupConfig{RevocationsFile: path}); err != nil {
 		t.Fatalf("loadSession: %v", err)
 	}
-	if revocationFilePath != path {
-		t.Errorf("revocationFilePath: got %q, want %q", revocationFilePath, path)
+	if got := session.RevocationsPath(); got != path {
+		t.Errorf("revocations path: got %q, want %q", got, path)
 	}
 }
