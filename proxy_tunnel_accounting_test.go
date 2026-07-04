@@ -181,23 +181,59 @@ func TestProxyE2E_CONNECT_RecordsTunnelClose(t *testing.T) {
 	}
 }
 
-// TestTunnelClose_RespectsLogTrafficOff proves the accounting entry honors the
-// per-rule "log traffic off" gate: a matched rule with LogTraffic=false must
-// NOT write a TUNNEL_CLOSED feed entry (volume control), mirroring the OK-entry
-// gate at allow time.
+// TestTunnelClose_RespectsLogTrafficOff proves the per-rule "log traffic off"
+// gate suppresses the TUNNEL_CLOSED FEED ENTRY (volume control) — but NOT the
+// global byte accounting. A quiet-rule tunnel that transferred data must still
+// move statBytesSent/statBytesRecv even though it writes no feed entry (PR
+// review, Codex P2: the log gate must not blind the bytes dashboard).
 func TestTunnelClose_RespectsLogTrafficOff(t *testing.T) {
 	t.Cleanup(reqlog.SwapRingForTest())
 	off := false
 	match := &PolicyMatch{Rule: &PolicyRule{Name: "quiet-rule", LogTraffic: &off}}
 
+	sent0 := atomic.LoadInt64(&statBytesSent)
+	recv0 := atomic.LoadInt64(&statBytesRecv)
 	before := len(logGet())
-	// recordTunnelClose is only reached when the gate passes; the gate itself
-	// lives at the call site, so assert the gate expression directly.
-	if ruleLogsTraffic(match.Rule) {
-		t.Fatal("ruleLogsTraffic should be false for LogTraffic=false")
+
+	recordTunnelCloseGated(match, ProxyIdentity{ClientIP: "203.0.113.5", Identity: "bob"},
+		"CONNECT", "quiet.example:443", 900, 1700, time.Now().Add(-time.Second), "bypass")
+
+	// No feed entry (gate suppressed it).
+	if got := len(logGet()); got != before {
+		t.Errorf("ring grew by %d; a LogTraffic=false tunnel must write no feed entry", got-before)
 	}
-	if len(logGet()) != before {
-		t.Error("no entry should have been written")
+	if findTunnelClose("quiet.example:443") != nil {
+		t.Error("TUNNEL_CLOSED entry written despite LogTraffic=false")
+	}
+	// But bytes ARE counted globally.
+	if got := atomic.LoadInt64(&statBytesSent) - sent0; got != 900 {
+		t.Errorf("statBytesSent delta = %d, want 900 (bytes must count even when the entry is gated)", got)
+	}
+	if got := atomic.LoadInt64(&statBytesRecv) - recv0; got != 1700 {
+		t.Errorf("statBytesRecv delta = %d, want 1700 (bytes must count even when the entry is gated)", got)
+	}
+}
+
+// TestTunnelCloseGated_LogsWhenTrafficOn confirms the complementary case: a
+// rule with logging on (or nil match) writes the feed entry AND counts bytes.
+func TestTunnelCloseGated_LogsWhenTrafficOn(t *testing.T) {
+	t.Cleanup(reqlog.SwapRingForTest())
+	on := true
+	match := &PolicyMatch{Rule: &PolicyRule{Name: "loud-rule", LogTraffic: &on}}
+
+	sent0 := atomic.LoadInt64(&statBytesSent)
+	recordTunnelCloseGated(match, ProxyIdentity{ClientIP: "203.0.113.6", Identity: "carol"},
+		"WS", "loud.example:80", 500, 600, time.Now(), "")
+
+	entry := findTunnelClose("loud.example:80")
+	if entry == nil {
+		t.Fatal("no TUNNEL_CLOSED entry for a log-enabled rule")
+	}
+	if entry.RuleMatched != "loud-rule" || entry.Identity != "carol" {
+		t.Errorf("entry Rule/Identity = %q/%q, want loud-rule/carol", entry.RuleMatched, entry.Identity)
+	}
+	if got := atomic.LoadInt64(&statBytesSent) - sent0; got != 500 {
+		t.Errorf("statBytesSent delta = %d, want 500", got)
 	}
 }
 

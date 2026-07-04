@@ -1013,27 +1013,42 @@ func recordRequestLogOnly(ip, method, host, status, ruleMatched, actionTaken, id
 	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, 0, sslAction, uri, auth)
 }
 
-// recordTunnelClose writes the per-connection accounting entry emitted when a
-// raw relay (CONNECT bypass, WebSocket, SOCKS5) finishes: byte counts in both
-// directions plus the connection lifetime. Log-only — the tunnel was already
-// counted by the allow path when it was established, so running the stats
-// fan-out again would double-count statTotal/topHosts. The relayed bytes DO
-// feed the global byte counters: raw tunnels are the dominant traffic class
-// and were previously invisible in the bytes dashboard (only SSL-inspected
-// bodies were counted).
-func recordTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+// recordTunnelBytes folds a raw tunnel's relayed bytes into the global byte
+// counters. This is ALWAYS done for an allowed tunnel, independent of the
+// per-rule "log traffic" flag: that flag is a feed-volume control, not a
+// stats-accounting control. Raw tunnels are the dominant traffic class and
+// were previously invisible in the bytes dashboard (only SSL-inspected bodies
+// were counted). Split out from persistence so a quiet-rule tunnel still
+// updates the byte totals even when it writes no feed entry.
+func recordTunnelBytes(bytesSent, bytesRecv int64) {
 	atomic.AddInt64(&statBytesSent, bytesSent)
 	atomic.AddInt64(&statBytesRecv, bytesRecv)
+}
+
+// persistTunnelClose writes the per-connection TUNNEL_CLOSED feed entry (byte
+// counts + lifetime). Log-only — the tunnel was already stats-counted by the
+// allow path when it was established, so running the stats fan-out again would
+// double-count statTotal/topHosts. Byte counters are handled separately by
+// recordTunnelBytes so they are not tied to the log gate.
+func persistTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
 	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, "", identity,
 		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{})
 }
 
-// recordTunnelCloseGated is the raw-relay call-site helper: it applies the
-// per-rule "log traffic" gate (mirroring the OK entry recorded at allow time —
-// LogTraffic=false means no feed entry for this connection either), extracts
-// the matched rule name, and records the accounting entry. A nil match (no
-// rule matched, default-allow) always logs.
+// recordTunnelClose accounts a raw tunnel's bytes AND writes its feed entry
+// unconditionally. Used by the always-logged paths (SOCKS5) and tests.
+func recordTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	recordTunnelBytes(bytesSent, bytesRecv)
+	persistTunnelClose(ip, method, host, identity, ruleMatched, bytesSent, bytesRecv, start, sslAction)
+}
+
+// recordTunnelCloseGated is the raw-relay call-site helper. It ALWAYS folds the
+// bytes into the global counters, then applies the per-rule "log traffic" gate
+// to the FEED ENTRY only (mirroring the OK entry recorded at allow time —
+// LogTraffic=false suppresses the entry but not the byte accounting). A nil
+// match (no rule matched, default-allow) always logs.
 func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	recordTunnelBytes(bytesSent, bytesRecv) // always — independent of the log gate
 	if match != nil && !ruleLogsTraffic(match.Rule) {
 		return
 	}
@@ -1041,7 +1056,7 @@ func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host s
 	if match != nil && match.Rule != nil {
 		ruleName = match.Rule.Name
 	}
-	recordTunnelClose(id.ClientIP, method, host, id.Identity, ruleName, bytesSent, bytesRecv, start, sslAction)
+	persistTunnelClose(id.ClientIP, method, host, id.Identity, ruleName, bytesSent, bytesRecv, start, sslAction)
 }
 
 // persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,
