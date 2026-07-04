@@ -114,8 +114,10 @@
 ## RISK-006 — Trivy gate config blind spots · MEDIUM · ✅ CLOSED 2026-07-04
 - **Fix (as recommended):** (1) the blocking gate keeps `--ignore-unfixed` (un-actionable noise is a
   real cost), and a new **non-blocking full-severity pass** (no `--ignore-unfixed`, no severity
-  filter, no ignorefile) posts everything Trivy knows to the job summary — "green gate" can no
-  longer silently coexist with masked vulns. (2) `.trivyignore` entries now carry **trivy-native
+  filter, `--show-suppressed` so `.trivyignore`'d findings appear WITH suppression status — trivy
+  auto-loads `.trivyignore` from the cwd, so merely omitting `--ignorefile` would not unmask them;
+  caught by Codex review on PR #557) posts everything Trivy knows to the job summary — "green
+  gate" can no longer silently coexist with masked vulns. (2) `.trivyignore` entries now carry **trivy-native
   `exp:` dates** (better than the recommended CI check — trivy itself stops honoring the ignore
   when the date passes, flipping the blocking gate red and forcing re-triage). Dates set to
   2026-10-01, aligned to the updater-removal target (DEBT-008/RISK-ACC-1); the file documents

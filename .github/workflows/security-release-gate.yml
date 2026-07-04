@@ -184,14 +184,18 @@ jobs:
       # RISK-006: the blocking gate above structurally CANNOT fail on a vuln
       # that is (a) unfixed upstream, (b) MEDIUM or lower, or (c) listed in
       # .trivyignore — all three masks are active there. This advisory pass
-      # scans with NO masking and posts to the job summary, so "green gate"
-      # never silently means "vulns exist but are filtered". Never fails.
+      # drops the severity/unfixed filters and adds --show-suppressed so the
+      # .trivyignore'd findings appear WITH their suppression status (trivy
+      # auto-loads .trivyignore from the cwd, so merely omitting --ignorefile
+      # would NOT unmask them — PR #557 Codex review). "Green gate" can never
+      # silently mean "vulns exist but are filtered". Never fails.
       - name: Full-severity unmasked report (advisory — what the gate cannot see)
         if: always()
         run: |
           trivy fs \
             --scanners vuln \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --show-suppressed \
             --exit-code 0 \
             --format table \
             . | tee trivy-fs-unmasked.txt

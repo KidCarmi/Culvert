@@ -159,6 +159,30 @@ func TestConfigImport_TaxonomyAbsent_IsNoOp(t *testing.T) {
 	}
 }
 
+func TestConfigImport_BypassSkippedOnBadPatterns(t *testing.T) {
+	csrTaxIsolate(t)
+	csrTaxSeed()
+
+	// A replace-mode import whose contentScanPatterns carry an invalid regex
+	// must NOT apply the bypass hosts from the same backup: patterns and
+	// bypass share the content_scan.json envelope, and applying one half
+	// would persist a state matching neither the backup nor the prior state
+	// (mirrors applyConfigBackup's guard; PR #557 Codex review).
+	csrTaxImport(t, "/api/config/import?mode=replace", map[string]any{
+		"version":                1,
+		"exportedAt":             "2026-01-01T00:00:00Z",
+		"contentScanPatterns":    []string{"("}, // invalid regex — Set must reject
+		"contentScanBypassHosts": []string{"mixed-envelope.example.com"},
+	})
+
+	if got := dpiScanner.List(); len(got) != 0 {
+		t.Errorf("invalid patterns were applied: %v", got)
+	}
+	if got := dpiScanner.BypassHosts(); len(got) != 1 || got[0] != "tax-bypass.example.com" {
+		t.Errorf("bypass hosts = %v; want the seeded host untouched (mixed-envelope guard)", got)
+	}
+}
+
 func TestConfigExportImport_Taxonomy_RoundTrip(t *testing.T) {
 	csrTaxIsolate(t)
 	csrTaxSeed()

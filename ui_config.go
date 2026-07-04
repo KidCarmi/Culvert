@@ -697,18 +697,30 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 	sslBypass.Save()
 
-	// Content scan patterns.
+	// Content scan patterns. Track replace-mode success: bypass hosts share
+	// the content_scan.json envelope, and a failed pattern replace must not
+	// be followed by a bypass import + Save — that would persist a mixed
+	// old-patterns/new-bypass envelope matching neither the backup nor the
+	// prior state. Mirrors applyConfigBackup's guard on the same envelope
+	// (PR #557 Codex review). Merge-mode Add failures stay per-pattern and
+	// additive, so they don't gate the bypass import.
+	patternsOK := true
 	if replaceMode && len(b.ContentScanPatterns) > 0 {
-		_ = dpiScanner.Set(b.ContentScanPatterns)
+		if err := dpiScanner.Set(b.ContentScanPatterns); err != nil {
+			patternsOK = false
+			logger.Printf("ConfigImport: content scan patterns rejected: %s — skipping bypass-host import (shared envelope)", strings.ReplaceAll(err.Error(), "\n", ""))
+		}
 	} else {
 		for _, p := range b.ContentScanPatterns {
 			_ = dpiScanner.Add(p)
 		}
 	}
-	// DPI bypass hosts share the content_scan.json envelope with the patterns
-	// above — applied before the single Save so both halves persist atomically.
-	importScanBypassHosts(&b, replaceMode)
-	dpiScanner.Save()
+	if patternsOK {
+		// DPI bypass hosts — applied before the single Save so both halves
+		// of the envelope persist atomically.
+		importScanBypassHosts(&b, replaceMode)
+		dpiScanner.Save()
+	}
 
 	// File block extensions.
 	if replaceMode && len(b.FileBlockExtensions) > 0 {
