@@ -587,7 +587,19 @@ env_put() {
   local var="$1" val="$2" file="$3"
   touch "$file"; chmod 600 "$file"
   sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
-  if grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null; then mv "$file.tmp" "$file"; else rm -f "$file.tmp"; fi
+  # grep -v exits 1 (not just erroring) whenever EVERY line matched the
+  # pattern being dropped — including the common case where $file contains
+  # only this one VAR=... line. Treat ONLY that "no lines survived" case (1)
+  # as benign and promote the filtered file; a real error (e.g. ENOSPC while
+  # writing $file.tmp) gets a higher exit code and must NOT clobber the
+  # existing $file with a truncated/empty temp file.
+  local rc=0
+  grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null && rc=0 || rc=$?
+  if [[ $rc -eq 0 || $rc -eq 1 ]]; then
+    mv "$file.tmp" "$file"
+  else
+    rm -f "$file.tmp"
+  fi
   printf '%s=%s\n' "$var" "$val" >> "$file"
   chmod 600 "$file"
 }
