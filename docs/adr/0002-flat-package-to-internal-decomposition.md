@@ -1223,6 +1223,25 @@ API contracts, re-expressed against the exported surface. Deleted `joinStrings` 
 gofmt, package suite `-race -count=2 -shuffle=on`, root Upstream/AdminSettings/SIGHUP suites
 `-race` — all green.
 
+### 2026-07-04 — `internal/configver` extracted (Slice A of the tranche below — ✅ executed as designed)
+Executed exactly per the design: `Store` (New/Init/Save/Load/List/Seq/Dir + SetDirForTest/
+SetSeqForTest), `Meta` (aliased as main's `ConfigVersion`), `ErrCorrupt` sentinel so the
+rollback API keeps its 404-vs-500 split (read error → 404, unparseable envelope → 500 —
+previously distinguished inline). The `json.RawMessage` seam worked as mapped: main marshals
+`configBackup` before `Save` and unmarshals after `Load`; the package never sees the type.
+Deviations from pre-extraction behavior, all deliberate: (1) capture now happens OUTSIDE the
+store mutex (previously `configVersionMu` held across capture+write; snapshots stay internally
+consistent via each store's own locks, and saves still serialize); (2) a marshal failure no
+longer consumes a sequence number (marshal moved before Save; write failures still consume one,
+as before); (3) prune ignores malformed `v*.json` names entirely (previously they counted
+toward the >max threshold with Atoi-zero ordering). diff/validate/capture/apply + handlers
+stayed in main as designed; `summarizeLatestConfigVersion` (diagnostics) reads `Dir()`. Six
+main test files swapped from direct `configVersionsDir`/`configVersionSeq` access to the test
+hooks; store-mechanics tests (seq resume, prune, list skip+sort, load not-found/corrupt) live
+in-package. Validated: build/vet/gofmt, package `-race -count=2 -shuffle=on`, root
+ConfigVersion/ConfigSurfaces/ColdStart/Rollback/Diff/BlocklistMode/Slice8/Diagnostics suites
+`-race` — all green. **Slice B (`internal/ca`) remains designed-not-executed below.**
+
 ### 2026-07-04 — next tranche mapped; TWO extractions DESIGNED (configver store, ca)
 Recorded per the standing rule so execution needs no re-discovery. Sequencing: **Slice A first
 (small, low-risk), Slice B as its OWN PR with an adversarial-review gate** (TLS hot path).

@@ -7,7 +7,7 @@ Single binary, zero runtime dependencies.
 
 ```
 *.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
-internal/     — 46 packages (ADR-0002 decomposition, COMPLETE): 41 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
+internal/     — 47 packages (ADR-0002 decomposition, COMPLETE): 42 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
 main.go       — Entrypoint, flag parsing, signal handling, graceful shutdown
 proxy.go      — HTTP/CONNECT/WebSocket handlers, tunnel relay, upstream transport, sanitizeLog
 socks5.go     — SOCKS5 protocol handler (RFC 1928/1929)
@@ -59,7 +59,7 @@ tls.go        — UI-TLS shim: uiExtraSANs + wrapper over internal/uitls (ADR-00
 blockpage.go  — Block page HTML template
 events.go     — SSE shim: broadcaster + apiEvents + /metrics exposition over internal/sse (ADR-0002; hub engine lives in the package)
 catdb.go      — URL category database
-configversion.go — Config versioning, snapshots, diff, rollback (50-version max)
+configversion.go — Config-versioning shim + typed logic: capture/apply/validate, diff engine, API handlers (numbered-file store → internal/configver per ADR-0002, json.RawMessage seam, 50-version max)
 nodegroup.go  — Node group definitions with label selectors, priority-based matching
 bandwidth.go  — Per-group bandwidth/QoS policies with token bucket rate limiting
 bootstrap.go  — Bootstrap shim: token-gated HTTP handlers over internal/bootstrap (ADR-0002; templates + image refs + URL helpers live in the package)
