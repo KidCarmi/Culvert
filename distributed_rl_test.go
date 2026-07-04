@@ -1,11 +1,12 @@
 package main
 
 import (
-	"net/http"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/otlp"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
@@ -328,10 +329,7 @@ func TestSafeDPIScan_NoPatterns(t *testing.T) {
 // ─── OTLP exporter ────────────────────────────────────────────────────────
 
 func TestOTLPExporter_ConfigureAndStop(t *testing.T) {
-	o := &OTLPExporter{
-		interval: 1 * time.Hour, // long interval to avoid push
-		client:   &http.Client{Timeout: 1 * time.Second},
-	}
+	o := otlp.NewMetrics(nil)
 	// Initially disabled.
 	if o.Enabled() {
 		t.Fatal("should be disabled initially")
@@ -357,10 +355,7 @@ func TestOTLPExporter_ConfigureAndStop(t *testing.T) {
 }
 
 func TestOTLPExporter_ConfigureEmpty(t *testing.T) {
-	o := &OTLPExporter{
-		interval: 1 * time.Hour,
-		client:   &http.Client{Timeout: 1 * time.Second},
-	}
+	o := otlp.NewMetrics(nil)
 	// Empty endpoint should be a no-op.
 	o.Configure("", nil)
 	if o.Enabled() {
@@ -368,26 +363,8 @@ func TestOTLPExporter_ConfigureEmpty(t *testing.T) {
 	}
 }
 
-func TestValidOTLPEndpoint_Regexp(t *testing.T) {
-	tests := []struct {
-		url  string
-		want bool
-	}{
-		{"http://collector:4318", true},
-		{"https://otel.example.com", true},
-		{"http://10.0.0.1:4318", true},
-		{"ftp://bad.example.com", false},
-		{"", false},
-		{"not-a-url", false},
-		{"http://", false},
-	}
-	for _, tc := range tests {
-		got := validOTLPEndpoint.MatchString(tc.url)
-		if got != tc.want {
-			t.Errorf("validOTLPEndpoint(%q) = %v, want %v", tc.url, got, tc.want)
-		}
-	}
-}
+// TestValidOTLPEndpoint_Regexp moved to internal/otlp (the endpoint
+// validator is package-internal since the extraction).
 
 func TestOTLPCounterMetrics(t *testing.T) {
 	now := "1234567890"
@@ -471,11 +448,7 @@ func TestOTLPRuleMetrics_Empty(t *testing.T) {
 }
 
 func TestOTLPBuildPayload(t *testing.T) {
-	o := &OTLPExporter{
-		interval: 1 * time.Hour,
-		client:   &http.Client{Timeout: 1 * time.Second},
-	}
-	payload := o.buildPayload()
+	payload := otlp.Envelope(culvertMetricsSnapshot(fmt.Sprintf("%d", time.Now().UnixNano())))
 	if len(payload.ResourceMetrics) != 1 {
 		t.Fatalf("expected 1 resource metric, got %d", len(payload.ResourceMetrics))
 	}

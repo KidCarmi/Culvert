@@ -7,7 +7,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"os"
+	"strings"
+	"time"
+
+	"github.com/KidCarmi/Culvert/internal/halease"
 )
 
 // loadCluster applies the resolved cluster config. enrolled is the
@@ -26,6 +33,16 @@ func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnro
 		logger.Printf("ClusterDB: load error: %v — starting fresh", err)
 	} else if nodes := globalClusterStore.ListNodes(); len(nodes) > 0 {
 		logger.Printf("ClusterDB: loaded %d enrolled node(s) from %s", len(nodes), cfg.ClusterDBPath)
+	}
+
+	// ADR-0005 S5: arm the etcd fencing lease BEFORE any role branch so
+	// every path to leadership below is lease-arbitrated. A requested fence
+	// that cannot be built is FATAL — silently running legacy when the
+	// operator asked for fencing would be an invisible safety downgrade.
+	if cfg.HAEtcdEndpoints != "" {
+		if err := armHALease(cfg); err != nil {
+			logger.Fatalf("HA lease: %v", err)
+		}
 	}
 
 	switch {
@@ -49,6 +66,9 @@ func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnro
 // CP gRPC server when this standby is later promoted.
 func startHAStandby(cfg clusterStartupConfig, ctx context.Context, leaderAddr, token string, autoFailover bool) {
 	initClusterCA(cfg.ClusterDBPath)
+	// ADR-0005 S4: record the material a later demotion needs to resync
+	// (a promoted standby that self-fences re-enters standby mode).
+	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
 	globalHA.StartAsStandby(ctx, leaderAddr, token,
 		cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, autoFailover,
 		func() error {
@@ -75,6 +95,9 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 	if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
 		logger.Fatalf("ControlPlane gRPC: %v", err)
 	}
+	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
+	// an unfenced resume (or a later self-fence) re-enters standby with it.
+	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
 	// Persisted leader (or legacy config with no role) resumes leadership.
 	if haErr == nil && haCfg.Enabled {
 		globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
@@ -111,4 +134,75 @@ func resolveDPWiring(cfg clusterStartupConfig, enrolled *dpEnrollmentConfig) dpW
 		}
 	}
 	return dp
+}
+
+// haLeaseMinTTLSec is the smallest accepted lease TTL. WriteAllowed trusts
+// the confirmed validity window MINUS haLeaseWriteMargin (1s), so a TTL at
+// or below the margin would grant a lease that never confers write
+// authority; 3s leaves a ≥2s trusted window plus renew headroom
+// (keepalive tick = TTL/3).
+const haLeaseMinTTLSec = 3
+
+// armHALease builds the etcd-backed fencing lease from the resolved config
+// and installs it on globalHA (ADR-0005 S5). The candidate ID is this
+// node's cluster identity. etcd client construction is lazy (no connection
+// until the first lease operation), so an unreachable etcd surfaces as
+// denied leadership (fail-closed) rather than a boot failure — only
+// MALFORMED config (bad TLS material, unusable TTL) errors here.
+func armHALease(cfg clusterStartupConfig) error {
+	if cfg.HALeaseTTLSec < haLeaseMinTTLSec {
+		return fmt.Errorf("lease TTL %ds too short: minimum %ds (the %s write margin would leave no trusted write window)",
+			cfg.HALeaseTTLSec, haLeaseMinTTLSec, haLeaseWriteMargin)
+	}
+	endpoints := strings.Split(cfg.HAEtcdEndpoints, ",")
+	for i := range endpoints {
+		endpoints[i] = strings.TrimSpace(endpoints[i])
+	}
+
+	tlsCfg, err := buildEtcdTLSConfig(cfg)
+	if err != nil {
+		return err
+	}
+
+	provider, err := halease.NewEtcd(halease.Config{
+		Endpoints: endpoints,
+		TLS:       tlsCfg,
+		TTL:       time.Duration(cfg.HALeaseTTLSec) * time.Second,
+	})
+	if err != nil {
+		return err
+	}
+	globalHA.SetLeaseProvider(provider, clusterRole.nodeID)
+	logger.Printf("HA: etcd fencing lease ARMED (endpoints=%s, ttl=%ds, candidate=%s) — leadership is lease-arbitrated (ADR-0005)",
+		sanitizeLog(cfg.HAEtcdEndpoints), cfg.HALeaseTTLSec, sanitizeLog(clusterRole.nodeID))
+	return nil
+}
+
+// buildEtcdTLSConfig assembles the etcd client TLS material from the resolved
+// config. nil when neither cert nor CA is configured (plaintext — operator's
+// call, the compose lab profile uses it).
+func buildEtcdTLSConfig(cfg clusterStartupConfig) (*tls.Config, error) {
+	if cfg.HAEtcdCert == "" && cfg.HAEtcdCA == "" {
+		return nil, nil
+	}
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if cfg.HAEtcdCert != "" {
+		pair, err := tls.LoadX509KeyPair(cfg.HAEtcdCert, cfg.HAEtcdKey)
+		if err != nil {
+			return nil, fmt.Errorf("etcd client cert: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{pair}
+	}
+	if cfg.HAEtcdCA != "" {
+		caPEM, err := os.ReadFile(cfg.HAEtcdCA) // #nosec G304 -- operator-configured path
+		if err != nil {
+			return nil, fmt.Errorf("etcd CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("etcd CA: no certificates parsed from %s", cfg.HAEtcdCA)
+		}
+		tlsCfg.RootCAs = pool
+	}
+	return tlsCfg, nil
 }

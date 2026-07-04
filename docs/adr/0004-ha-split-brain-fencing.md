@@ -1,6 +1,6 @@
 # ADR-0004: Control-Plane HA split-brain — make it visible and manual now; pick a fencing mechanism deliberately
 
-- **Status:** Proposed (2026-06-30). Slice 1 (this ADR) ACCEPTED for implementation; the automatic-failover **mechanism** (§Decision) is an OPEN decision deliberately deferred.
+- **Status:** Accepted + SHIPPED (Slice 1: 2026-06-30). The automatic-failover **mechanism** decision this ADR deliberately deferred was made and shipped as **ADR-0005** (etcd-backed fencing lease, S0–S5 complete 2026-07-03): with `--ha-etcd-endpoints` set, leadership is lease-arbitrated and automatic failover is safe. Without a lease, this ADR's safe-manual posture remains the exact runtime behavior (nil provider = byte-identical).
 - **Date:** 2026-06-30
 - **Deciders:** Chief Engineering Advisor (proposed); project maintainer (accepted Slice 1 direction)
 - **Risk:** Closes the design gap behind **RISK-001** (BLOCKER) in `docs/engineering/TECHNICAL-RISK-REGISTER.md`.

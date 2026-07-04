@@ -1342,10 +1342,8 @@ func resolveOTLPHeaders(name, value string) map[string]string {
 	if n != "" && v != "" {
 		return map[string]string{n: v}
 	}
-	globalOTLP.mu.RLock()
-	defer globalOTLP.mu.RUnlock()
-	if len(globalOTLP.headers) > 0 {
-		return globalOTLP.headers
+	if h := globalOTLP.Headers(); len(h) > 0 {
+		return h
 	}
 	return nil
 }
@@ -1358,14 +1356,13 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Check if auth headers are configured (don't expose the actual value).
-		globalOTLP.mu.RLock()
-		hasAuth := len(globalOTLP.headers) > 0
+		headers := globalOTLP.Headers()
+		hasAuth := len(headers) > 0
 		authName := ""
-		for k := range globalOTLP.headers {
+		for k := range headers {
 			authName = k // return the header NAME (not value) so UI can show it
 			break
 		}
-		globalOTLP.mu.RUnlock()
 		jsonOK(w, map[string]any{
 			"enabled":        globalOTLP.Enabled(),
 			"endpoint":       globalOTLP.Endpoint(),

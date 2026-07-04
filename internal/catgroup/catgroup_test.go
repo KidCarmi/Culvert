@@ -1,4 +1,8 @@
-package main
+package catgroup
+
+// Engine tests, moved in-package from package main's categorygroup_test.go
+// with the extraction. The host-level match (categoryGroupMatchesHost) is
+// tested in main, where the two-tier category fusion lives.
 
 import (
 	"os"
@@ -7,7 +11,7 @@ import (
 )
 
 func TestCategoryGroupStore_AddListDelete(t *testing.T) {
-	s := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	s := New()
 
 	g, err := s.Add("Prod Allowed", []string{"AI", "Marketing", "Messaging"})
 	if err != nil {
@@ -42,7 +46,7 @@ func TestCategoryGroupStore_AddListDelete(t *testing.T) {
 }
 
 func TestCategoryGroupStore_Update(t *testing.T) {
-	s := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	s := New()
 	_, _ = s.Add("Test", []string{"AI", "Marketing"})
 
 	if err := s.Update("Test", []string{"AI", "Messaging", "DevTools"}); err != nil {
@@ -64,7 +68,7 @@ func TestCategoryGroupStore_Update(t *testing.T) {
 }
 
 func TestCategoryGroupStore_CatSetO1(t *testing.T) {
-	s := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	s := New()
 	_, _ = s.Add("Test", []string{"AI", "Marketing", "MESSAGING"})
 
 	g := s.GetByName("test")
@@ -85,7 +89,7 @@ func TestCategoryGroupStore_CatSetO1(t *testing.T) {
 }
 
 func TestCategoryGroupStore_ContainsCategory(t *testing.T) {
-	s := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	s := New()
 	_, _ = s.Add("Prod", []string{"AI", "Marketing"})
 
 	name, found := s.ContainsCategory("AI")
@@ -100,10 +104,10 @@ func TestCategoryGroupStore_ContainsCategory(t *testing.T) {
 }
 
 func TestCategoryGroupStore_ReplaceAll(t *testing.T) {
-	s := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	s := New()
 	_, _ = s.Add("Old", []string{"AI"})
 
-	s.ReplaceAll([]CategoryGroup{
+	s.ReplaceAll([]Group{
 		{ID: "1", Name: "New1", Categories: []string{"Marketing"}},
 		{ID: "2", Name: "New2", Categories: []string{"Messaging", "AI"}},
 	})
@@ -124,7 +128,7 @@ func TestCategoryGroupStore_Persistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "catgroups.json")
 
-	s1 := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	s1 := New()
 	s1.path = path
 	_, _ = s1.Add("Persist", []string{"AI", "Marketing"})
 	s1.Save()
@@ -135,7 +139,7 @@ func TestCategoryGroupStore_Persistence(t *testing.T) {
 	}
 
 	// Load into new store.
-	s2 := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	s2 := New()
 	if err := s2.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -149,7 +153,7 @@ func TestCategoryGroupStore_Persistence(t *testing.T) {
 }
 
 func TestCategoryGroupStore_Names(t *testing.T) {
-	s := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	s := New()
 	_, _ = s.Add("Alpha", []string{"AI"})
 	_, _ = s.Add("Beta", []string{"Marketing"})
 
@@ -172,7 +176,7 @@ func TestCategoryGroupStore_NormCats(t *testing.T) {
 }
 
 func TestCategoryGroupStore_DeleteNonExistent(t *testing.T) {
-	s := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	s := New()
 	if err := s.Delete("nope"); err == nil {
 		t.Error("expected error deleting non-existent group")
 	}

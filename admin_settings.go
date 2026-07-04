@@ -345,12 +345,10 @@ func SaveAdminSettings() {
 	}
 
 	// OTLP
-	globalOTLP.mu.RLock()
-	s.OTLPEndpoint = globalOTLP.endpoint
-	if len(globalOTLP.headers) > 0 {
-		s.OTLPHeaders = globalOTLP.headers
+	s.OTLPEndpoint = globalOTLP.Endpoint()
+	if h := globalOTLP.Headers(); len(h) > 0 {
+		s.OTLPHeaders = h
 	}
-	globalOTLP.mu.RUnlock()
 
 	// Rewrite rules
 	s.RewriteRules = rewriter.List()

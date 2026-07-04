@@ -63,6 +63,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/KidCarmi/Culvert/internal/catgroup"
 	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
@@ -482,16 +483,16 @@ func keysOf(m map[string]any) []string {
 // caller-side globalCategoryGroups.Save() hook after ReplaceAll in
 // applyConfigSnapshot's snap.CategoryGroups branch (P6.1 UC-2 closure).
 func TestApplyConfigSnapshot_CategoryGroupsPersist(t *testing.T) {
-	origPath := globalCategoryGroups.path
+	origPath := globalCategoryGroups.Path()
 	origGroups := globalCategoryGroups.List()
 	t.Cleanup(func() {
-		globalCategoryGroups.path = origPath
+		globalCategoryGroups.SetPathForTest(origPath)
 		globalCategoryGroups.ReplaceAll(origGroups)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "category_groups.json")
-	globalCategoryGroups.path = path
+	globalCategoryGroups.SetPathForTest(path)
 
 	snap := ConfigSnapshot{
 		Version: 1,
@@ -505,7 +506,7 @@ func TestApplyConfigSnapshot_CategoryGroupsPersist(t *testing.T) {
 		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
 	}
 
-	fresh := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	fresh := catgroup.New()
 	if err := fresh.Load(path); err != nil {
 		t.Fatalf("fresh.Load: %v", err)
 	}

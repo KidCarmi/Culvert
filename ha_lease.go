@@ -18,8 +18,9 @@ package main
 //   - WriteAllowed() is the write-authority primitive surfaced on /healthz
 //     in S2; stamping every write sink is S3.
 //
-// Self-fence demotes in-process to a read-only standby WITHOUT resync —
-// failback (resync from the S0-recorded address) is S4.
+// Self-fence demotes in-process to a read-only standby and (S4) re-enters
+// standby-resync against the S0-recorded ex-standby — see ha_failover.go
+// for the S4 layer (fence-gated auto-promotion, freshness, hysteresis).
 
 import (
 	"context"
@@ -186,8 +187,9 @@ func (h *HAState) leaseRenewOnce() (fenced bool) {
 
 // selfFence demotes this leader in-process to a read-only standby (ADR-0005
 // S2): role persisted, write authority gone (leaseEpoch=0), promote guard
-// re-armed. NO resync/failback here — that is S4; the node stays passive
-// pending operator action, matching the manual-failover posture.
+// re-armed. S4 then re-enters standby-resync against the S0-recorded
+// ex-standby (enterStandbyResync below); when target/material is missing
+// the node stays passive pending operator action.
 func (h *HAState) selfFence(reason string) {
 	h.mu.Lock()
 	if h.role != "leader" {
@@ -197,7 +199,8 @@ func (h *HAState) selfFence(reason string) {
 	h.role = "standby"
 	h.since = time.Now()
 	h.leaseEpoch = 0
-	h.leaseStopCh = nil // the keepalive loop exits by returning after selfFence
+	h.leaseStopCh = nil          // the keepalive loop exits by returning after selfFence
+	h.lastSelfFence = time.Now() // re-promotion hysteresis input (ADR-0005 S4)
 	// Persist INSIDE the lock: anyone observing the demotion (IsLeader/
 	// Status take h.mu) is then guaranteed the config write has completed —
 	// the small file write is worth the determinism (matches EnableAsLeader).
@@ -211,6 +214,11 @@ func (h *HAState) selfFence(reason string) {
 		Detail: "leader lost the fencing lease and demoted to read-only standby: " + reason,
 		Source: "ha",
 	})
+
+	// ADR-0005 S4: resync from the S0-recorded ex-standby (the presumptive
+	// new leader) so this node converges instead of serving frozen state.
+	// Falls back to the passive S2 stance when target/material is missing.
+	h.enterStandbyResync("self-fence")
 }
 
 // WriteAllowed is the lease-layer write-authority primitive (ADR-0005 S2).

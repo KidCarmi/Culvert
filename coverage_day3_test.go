@@ -2,13 +2,12 @@ package main
 
 import (
 	"bytes"
-	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileblock"
+	"github.com/KidCarmi/Culvert/internal/otlp"
 )
 
 // ── buildMovedPriorities ────────────────────────────────────────────────────
@@ -254,11 +253,7 @@ func TestDecompressForScan_ZstdFallback(t *testing.T) {
 // ── OTLPSpanExporter Configure/Stop/Enabled ─────────────────────────────────
 
 func TestOTLPSpanExporter_ConfigureAndStop(t *testing.T) {
-	e := &OTLPSpanExporter{
-		interval: 100 * time.Millisecond,
-		client:   &http.Client{Timeout: 5 * time.Second},
-		buf:      make([]SpanRecord, spanBufferCap),
-	}
+	e := otlp.NewSpans()
 
 	if e.Enabled() {
 		t.Error("should not be enabled before Configure")
@@ -276,11 +271,7 @@ func TestOTLPSpanExporter_ConfigureAndStop(t *testing.T) {
 }
 
 func TestOTLPSpanExporter_ConfigureEmpty(t *testing.T) {
-	e := &OTLPSpanExporter{
-		interval: 100 * time.Millisecond,
-		client:   &http.Client{Timeout: 5 * time.Second},
-		buf:      make([]SpanRecord, spanBufferCap),
-	}
+	e := otlp.NewSpans()
 	e.Configure("", nil)
 	if e.Enabled() {
 		t.Error("empty endpoint should not enable")

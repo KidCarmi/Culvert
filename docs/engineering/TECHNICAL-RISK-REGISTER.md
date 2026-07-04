@@ -12,7 +12,7 @@
 
 | ID | Sev | Status | Title | Evidence |
 |---|---|---|---|---|
-| RISK-001 | HIGH | MITIGATING | Multi-CP HA split-brain (no quorum/fencing) | Slice 1 landed (ADR-0004): auto-failover OPT-IN/OFF, restart honors role, term-visible `/healthz`. Safe-automatic failover (mechanism) still open. **HV** |
+| RISK-001 | HIGH | ✅ CLOSED | Multi-CP HA split-brain (no quorum/fencing) | ADR-0004 safe defaults + ADR-0005 S0–S5 SHIPPED (2026-07-03): etcd fencing lease — Acquire-gated promotion, self-fence, epoch-fenced write sinks, safe auto-failover, GUI/compose/runbook. Legacy (no etcd) keeps the safe-manual posture. **HV** |
 | RISK-002 | HIGH | ✅ CLOSED | OIDC introspection path missing SSRF dial guard | fixed `auth_oidc.go:95` (2026-06-28) |
 | RISK-003 | HIGH | ✅ CLOSED | Webhook HMAC secret persisted cleartext on disk | `alerts.go`, `alerts_secret.go` |
 | RISK-006 | MEDIUM | OPEN | Gate config blind spots: `--ignore-unfixed` + `HIGH,CRITICAL` only (masks unfixed/medium) | `security-release-gate.yml:135-143` — **trivy-verified 2026-06-28** |
@@ -30,7 +30,7 @@
 
 ---
 
-## RISK-001 — Multi-CP HA split-brain · HIGH · MITIGATING
+## RISK-001 — Multi-CP HA split-brain · HIGH · ✅ CLOSED 2026-07-03
 - **Design:** `docs/adr/0004-ha-split-brain-fencing.md` (the 2-node-no-witness theorem, the rejected
   hand-rolled DP-quorum design with the adversarial-review findings F1–F9, and the Slice 1 / open-
   mechanism split).
@@ -50,21 +50,30 @@
     default-manual introduced. Failback stays deferred.
   - Behavior is re-pinned in `ha_split_brain_failover_evidence_test.go` (assertions flipped to the new
     state) + `ha_autofailover_test.go` / `ha_term_test.go` / `ha_promote_test.go`.
-- **Residual (why still HIGH, not closed):** *safe automatic* failover on UNPLANNED leader loss does
-  not exist yet. Under the opt-in `--ha-auto-failover`, a surviving-leader partition can still
-  split-brain (no demote/fence/reconcile); failback is deferred. The default-manual posture is safe.
-- **Mechanism DECIDED + PARKED at S0 (2026-07-01, ADR-0005):** the automatic-failover mechanism is an
+- **Mechanism SHIPPED — ADR-0005 S0–S5 complete (2026-07-03):** the automatic-failover mechanism is an
   **etcd-backed fencing lease** (maintainer chose "big-vendor, self-hosted" → etcd; hand-rolled witness
   rejected by a second adversarial review — findings 1–8 recorded in ADR-0005 with per-slice
-  resolutions). **S0 (record the standby's advertised address — the failback prerequisite) is
-  SHIPPED**; S1–S5 (etcd LeaseProvider, keepalive/self-fence/demote, epoch fencing at every write sink
-  + DP propagation, acquire-on-loss + failback, flags/GUI/docs) are deliberately deferred in favour of
-  the decomposition program. The etcd runtime dependency has NOT been taken yet — parking before S1 is
-  the cheap pause point. F4 posture on resume: documented bounded-LWW (option A).
-- **Posture while parked:** safe by default (manual failover, explicit promote, planned handoff,
-  term-visible `/healthz`) for any topology; **automatic** failover remains opt-in-with-documented-risk
-  until S1–S5 ship.
-- **Owner:** unassigned · **Target:** resume at ADR-0005 S1 when prioritised.
+  resolutions, plus 4 Codex-review fixes on the S3 fencing surfaces).
+  - **S0** — leader records the standby's advertised address (failback target).
+  - **S1** — `internal/halease`: Provider contract + etcd backend (epoch = `create_revision`) +
+    Fake, dual-backend conformance suite incl. embedded etcd.
+  - **S2** — lease wired into leadership: Acquire-gated promotion, keepalive with
+    etcd-as-clock self-fence, `WriteAllowed()`, term collapsed to the fencing epoch.
+  - **S3** — epoch fencing at every write sink: per-RPC issuance gate (Enroll/RenewCert/
+    SyncRevocations), puller-side bundle-epoch verification, DP epoch ratchet.
+  - **S4** — lease-arbitrated auto-failover (flag ignored in lease mode) + freshness gate +
+    re-promotion hysteresis + demote-and-resync from the S0-recorded ex-standby.
+  - **S5** — operator wiring: `-ha-etcd-*`/`-ha-lease-ttl` flags + `cluster.etcd_*` YAML,
+    fail-fast on malformed lease config, ghost-lease resume (`acquireLeaseForResume`), GUI lease
+    card + `/api/cluster/ha` lease fields, profile-gated compose etcd witness,
+    `docs/operator/ha-lease-failover.md` runbook.
+- **Residual (accepted + documented, not risk-register material):** (1) deployments WITHOUT etcd stay
+  in the ADR-0004 safe-manual posture — split-brain there requires the operator to opt into the legacy
+  flag against documented advice; (2) bounded LWW window on partition (≤TTL of unreplicated admin
+  writes may be lost on resync) — the chosen F4 posture (option A), documented in the runbook;
+  (3) evidence: `TestCL4_LeaseMode_SplitBrainStructurallyPrevented` pins that the double-leader shape
+  cannot form in lease mode; legacy-mode CL-4 facts stay pinned for legacy deployments.
+- **Owner:** shipped · **Closed:** 2026-07-03 (ADR-0005 S5).
 
 ## RISK-002 — OIDC introspection missing SSRF guard · HIGH · ✅ CLOSED 2026-06-28
 - **Was (HV):** `NewOIDCAuth` (`auth_oidc.go`) cloned the introspection transport with **no**
@@ -297,3 +306,12 @@
   data. Prints actionable REVERT / COMPLETE `mv` moves (newest `.bak`), reusing the D1.3c
   `discoverLeftovers` scanner; fresh installs unaffected. Tests in `restore_interrupted_test.go`;
   recovery runbook in `docs/operator/docker-compose-backup-restore.md` §8b.
+- **2026-07-03** — **RISK-001 CLOSED.** ADR-0005 S0–S5 shipped in full: etcd-backed fencing lease
+  (`internal/halease`) arbitrates every path to HA leadership — Acquire-gated promotion, keepalive
+  self-fence with etcd as the clock, epoch-fenced write sinks + DP ratchet, lease-arbitrated safe
+  auto-failover with freshness/hysteresis gates, demote-and-resync failback, ghost-lease-safe leader
+  restart, and the S5 operator surface (flags/YAML/GUI/compose witness/runbook). Split-brain is
+  structurally prevented in lease mode (pinned by `TestCL4_LeaseMode_SplitBrainStructurallyPrevented`);
+  legacy (no etcd) deployments keep the ADR-0004 safe-manual default. Residuals accepted + documented:
+  bounded-LWW window ≤TTL on partition (F4 option A) and the legacy opt-in flag, both in
+  `docs/operator/ha-lease-failover.md`.

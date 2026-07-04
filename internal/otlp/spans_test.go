@@ -1,4 +1,7 @@
-package main
+package otlp
+
+// Engine tests, moved in-package from package main's otlp_traces_test.go
+// with the extraction.
 
 import (
 	"encoding/json"
@@ -12,7 +15,7 @@ import (
 // ── parseTraceparent ────────────────────────────────────────────────────────
 
 func TestParseTraceparent(t *testing.T) {
-	traceID, spanID := parseTraceparent("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+	traceID, spanID := ParseTraceparent("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
 	if traceID != "0af7651916cd43dd8448eb211c80319c" {
 		t.Errorf("traceID = %q, want 0af7651916cd43dd8448eb211c80319c", traceID)
 	}
@@ -22,7 +25,7 @@ func TestParseTraceparent(t *testing.T) {
 }
 
 func TestParseTraceparent_Empty(t *testing.T) {
-	traceID, spanID := parseTraceparent("")
+	traceID, spanID := ParseTraceparent("")
 	if traceID != "" || spanID != "" {
 		t.Errorf("expected empty for empty input, got %q / %q", traceID, spanID)
 	}
@@ -30,7 +33,7 @@ func TestParseTraceparent_Empty(t *testing.T) {
 
 func TestParseTraceparent_Short(t *testing.T) {
 	// "00-abc" has only 2 parts → both empty (need at least 3 for trace+span).
-	traceID, spanID := parseTraceparent("00-abc")
+	traceID, spanID := ParseTraceparent("00-abc")
 	if traceID != "" || spanID != "" {
 		t.Errorf("expected empty for short input, got %q / %q", traceID, spanID)
 	}
@@ -56,7 +59,7 @@ func TestSpanStatusCode(t *testing.T) {
 // ── Ring buffer: RecordSpan + drain ─────────────────────────────────────────
 
 func TestSpanExporter_RecordAndDrain(t *testing.T) {
-	e := &OTLPSpanExporter{buf: make([]SpanRecord, spanBufferCap)}
+	e := &SpanExporter{buf: make([]SpanRecord, spanBufferCap)}
 
 	for i := 0; i < 10; i++ {
 		e.RecordSpan(SpanRecord{
@@ -85,7 +88,7 @@ func TestSpanExporter_RecordAndDrain(t *testing.T) {
 }
 
 func TestSpanExporter_RingBufferOverflow(t *testing.T) {
-	e := &OTLPSpanExporter{buf: make([]SpanRecord, spanBufferCap)}
+	e := &SpanExporter{buf: make([]SpanRecord, spanBufferCap)}
 
 	// Write more than cap to trigger ring-buffer wrap.
 	total := spanBufferCap + 500
@@ -107,7 +110,7 @@ func TestSpanExporter_RingBufferOverflow(t *testing.T) {
 }
 
 func TestSpanExporter_ConcurrentRecordDrain(t *testing.T) {
-	e := &OTLPSpanExporter{buf: make([]SpanRecord, spanBufferCap)}
+	e := &SpanExporter{buf: make([]SpanRecord, spanBufferCap)}
 
 	var wg sync.WaitGroup
 	// Concurrent writers.
@@ -264,7 +267,7 @@ func TestSpanExporter_PushIntegration(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	e := &OTLPSpanExporter{
+	e := &SpanExporter{
 		endpoint: ts.URL,
 		interval: 100 * time.Millisecond,
 		client:   ts.Client(),
@@ -292,7 +295,7 @@ func TestSpanExporter_PushIntegration(t *testing.T) {
 		t.Fatal("server received no data")
 	}
 	// Verify it's valid OTLP JSON.
-	var payload otlpTraceExportRequest
+	var payload traceExportRequest
 	if err := json.Unmarshal(received, &payload); err != nil {
 		t.Fatalf("unmarshal received payload: %v", err)
 	}

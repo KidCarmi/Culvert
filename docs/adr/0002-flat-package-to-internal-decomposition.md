@@ -786,6 +786,45 @@ over the proxy-e2e/policy/bypass scope, shuffled determinism ×2 (package + main
 leaf proof exactly `fileutil`+`hostutil`. Remaining in policy.go: the Phase C engine (PolicyStore/
 Evaluate/matchers) — design + adversarial review required before execution, per the program note.
 
+### 2026-07-03 — `internal/otlp` extracted (39th; post-program extraction with its own recorded design)
+The second gap-review candidate (approved with catgroup). otlp.go + otlp_traces.go (~700 lines)
+split on the transport/content boundary: the PACKAGE owns both push loops (metrics `/v1/metrics`,
+spans `/v1/traces`), the SSRF-guarded clients (ssrf.SafeDialContext), the CodeQL-recognised
+endpoint validator, the full OTLP/HTTP JSON schema (metric types EXPORTED — `Metric`/`Sum`/
+`Gauge`/`Hist`/… — they are the wire contract main builds against; trace DTOs stay private), the
+span ring buffer (`SpanRecord`/`RecordSpan`, lock-free Enabled fast path preserved), and
+`ParseTraceparent`. **Inversion point:** `NewMetrics(snapshot SnapshotFunc)` — WHAT gets exported
+is main's business: `culvertMetricsSnapshot` (otlp.go shim) reads the ~10 stat singletons
+(statTotal…, secscan.Counters, threat feed, scanner cache, bl, rl, latencyHist, ruleMet) and
+returns `[]otlp.Metric`; the engine never imports main state. `Envelope()` exported so main's
+payload tests assert the full shape. otlp_traces.go DELETED; main otlp.go = aliases
+(`OTLPExporter`/`OTLPSpanExporter`/`SpanRecord`), the two singletons, the snapshot builders, and
+a `parseTraceparent` wrapper function (per-request telemetry path). A `Headers()` defensive-copy
+accessor replaced the direct `globalOTLP.mu/.headers` pokes in admin_settings.go and
+ui_config.go (two production sites the survey's "field poke" sweep had missed). Trace tests
+moved in-package wholesale; NEW in-package metrics-exporter tests (Configure/Stop/Headers-copy/
+push integration with header assertion/bad-endpoint/Envelope) lift package coverage to 71.8% —
+the old main-side tests only exercised the engine cross-package, which the coverage contract
+doesn't credit. Gates: full suite, `-race` over otlp/observability/proxy-e2e scope, shuffled ×2,
+lint 0, leaf proof exactly `obs`+`ssrf`.
+
+### 2026-07-03 — `internal/catgroup` extracted (38th; post-program extraction with its own recorded design)
+The first extraction under the program-closure rule (fresh design, not a continuation): the final
+survey had not named `categorygroup.go` (300 lines) — flagged as a gap in a post-closure review
+and approved by the maintainer. The engine is `urlcat.Store`'s sibling: named category bundles
+with pre-computed lowercase catSets for O(1) hot-path membership, JSON persistence, insertion-
+order listing. **Design decision (mirrors the urlcat fusion verdict):** the engine exposes the
+pure `MatchesCategory(group, category)`; the HOST-level match stays in main as
+`categoryGroupMatchesHost` (categorygroup.go shim), composing the two-tier
+`lookupHostCategory` fusion with the engine's O(1) check — `matchDestNorm` (policy hot path,
+its only production caller) rewired onto it. Aliases: `CategoryGroup = catgroup.Group`,
+`CategoryGroupStore = catgroup.Store`, `globalCategoryGroups = catgroup.New()`. The
+`ConfigSnapshot.CategoryGroups` / rollback wire shape is untouched (catSet was never
+serialized). Seams `Path()`/`SetPathForTest` replaced the `.path`/`.groups` field pokes in
+snapshotGlobalCategoryGroups, Bucket-4, and cluster apply-persist tests; the 11 engine tests
+moved in-package (87.5% coverage). Gates: full suite, `-race` over proxy-e2e/policy/group scope,
+shuffled ×2 (package + main), lint 0, leaf proof exactly `fileutil`+`obs`.
+
 ### 2026-07-03 — `internal/urlcat` extracted (36th; policy.go Phase A, executed from the design)
 Executed exactly per the program design below. The engine moved verbatim: `Entry`/`Store` +
 lowercase host index, `Load`/`Save` (fileutil.AtomicWrite durability comment preserved), `All`/

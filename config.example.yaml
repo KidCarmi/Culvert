@@ -145,6 +145,31 @@ log_retention_max_gb: 0   # size cap in GB (0 = no size limit)
 # Encryption at rest (AES-256) for the saved logs is controlled by the
 # CULVERT_LOG_PASSPHRASE env var (falls back to CULVERT_CA_PASSPHRASE), not YAML.
 
+# ── Cluster / High Availability ───────────────────────────────────────────
+
+cluster:
+  role: ""            # "control-plane" or "" (standalone); Data-Plane mode uses -enroll CLI
+  grpc_addr: ""       # Control Plane gRPC listen address (e.g. ":50051")
+  cert_file: ""       # TLS cert for gRPC mTLS (optional)
+  key_file: ""        # TLS key for gRPC mTLS (optional)
+  ca_file: ""         # CA cert for client validation (optional)
+  state_db: ""        # Path to cluster.json (default: "cluster.json")
+  # HA leader/standby pairing is configured at runtime from the admin GUI
+  # (Enable HA) or via --ha-join/--ha-token on the standby.
+  #
+  # etcd fencing lease (ADR-0005) — enables SAFE automatic failover.
+  # When etcd_endpoints is set, every path to HA leadership is arbitrated by
+  # a fencing lease in etcd: the standby auto-promotes only after acquiring
+  # the lease, a partitioned leader self-fences to read-only standby, and
+  # every cluster write sink is epoch-fenced. Unset = legacy manual-failover
+  # mode (ADR-0004). Read once at startup. Failover latency ≈ lease TTL.
+  # See docs/operator/ha-lease-failover.md.
+  etcd_endpoints: ""      # comma-separated, e.g. "https://etcd1:2379,https://etcd2:2379"
+  etcd_cert_file: ""      # client cert for etcd mTLS (optional)
+  etcd_key_file: ""       # client key for etcd mTLS (optional)
+  etcd_ca_file: ""        # CA cert for etcd server validation (optional)
+  lease_ttl_seconds: 10   # fencing lease TTL (default 10, minimum 3)
+
 # ── Admin UI ──────────────────────────────────────────────────────────────
 
 ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all)

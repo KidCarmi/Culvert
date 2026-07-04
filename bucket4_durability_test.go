@@ -41,6 +41,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/catgroup"
 	"github.com/KidCarmi/Culvert/internal/threatfeed"
 )
 
@@ -91,10 +92,8 @@ func TestBucket4_CategoryGroupStore_Save_AtomicWriteFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "category_groups.json")
 
-	s := &CategoryGroupStore{
-		groups: make(map[string]*CategoryGroup),
-		path:   path,
-	}
+	s := catgroup.New()
+	s.SetPathForTest(path)
 	if _, err := s.Add("bucket4-test-group", []string{"Adult", "Gambling"}); err != nil {
 		t.Fatalf("seed Add: %v", err)
 	}
@@ -104,7 +103,7 @@ func TestBucket4_CategoryGroupStore_Save_AtomicWriteFile(t *testing.T) {
 	assertNoTmpLeftovers(t, dir)
 
 	// Round-trip via Load on a fresh store.
-	fresh := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	fresh := catgroup.New()
 	if err := fresh.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
