@@ -11,7 +11,7 @@
 |---|---|---|---|
 | DEBT-001 | MEDIUM ↓ | Flat root namespace — engines extracted (ADR-0002 COMPLETE, 44 pkgs), root shims/globals remain | 172 root `.go` files (non-test) |
 | DEBT-002 | ✅ CLOSED | `handleRequest` was ~497 lines / cyclo 73 on the hottest security path | `proxy.go` — decomposed 2026-06-28 |
-| DEBT-003 | MEDIUM ↓ | God-files: `controlplane.go` split 2,240→341, `proxy.go` split 1,901→727 (2026-07-04); remaining `main.go` (1,990) | `main.go` |
+| DEBT-003 | ✅ CLOSED | God-files split (2026-07-04): `controlplane.go` 2,240→341, `proxy.go` 1,901→727, `main.go` 1,990→1,211. No non-generated `.go` file > ~1,300 LOC | — |
 | DEBT-004 | MEDIUM | `configBackup` god-struct with 3 divergent memberships | `ui_policy.go:736`, `configversion.go` |
 | DEBT-005 | ✅ CLOSED | `main.go` was a 30-`init*` hand-wired DI container | startup-slice program complete (24 slices, contract-tested) |
 | DEBT-006 | MEDIUM | `ConfigSnapshot` (33-field) CP→DP god-DTO | `controlplane.go:1508 applyConfigSnapshot` |
@@ -84,7 +84,7 @@
   (`handleHTTP` gocognit 32, `handleWebSocket` funlen, `handleTunnelInspect` 57) are separate
   functions, out of scope here; candidates for a future targeted pass if prioritised.
 
-## DEBT-003 — God-files · MEDIUM (↓ progress 2026-07-04)
+## DEBT-003 — God-files · ✅ CLOSED 2026-07-04
 - **`controlplane.go` SPLIT (2026-07-04):** the flagged next target — 2,240 LOC, the one file
   *growing* (every cluster feature landed there) — decomposed into five cohesive same-package
   files along the CP/DP boundary the file's own header described: `controlplane.go` (341 — service
@@ -108,9 +108,24 @@
   an identical 52-declaration set before/after (no add/loss/dup); build/vet/gofmt clean; the hot-path
   race suite (Proxy|Tunnel|WebSocket|Relay|HandleHTTP|HandleRequest|Mitm|Inspect|Policy|Auth|Scrub|
   HopHeader|Portal|SSO|Bypass) green under `-race`; `BenchmarkPolicyEvaluate_*` allocs/op unchanged.
-- **Remaining god-file:** `main.go` (1,990 — the 24-slice startup shim; DEBT-005 closed its opacity,
-  size is now mostly thin shim calls). Lower-priority than controlplane/proxy were: it is not growing
-  and was already de-risked by the startup-slice program. **Complexity L (staged).**
+- **`main.go` SPLIT (2026-07-04):** the last god-file — 1,990 LOC — decomposed into four cohesive
+  same-package files along the lifecycle boundary: `main.go` (1,211 — composition root: entrypoint,
+  flag parsing, the 24 `init*` startup shims, proxy-server wiring, signal handling), `main_shutdown.go`
+  (241 — the graceful-shutdown sequence + shutdown-order constants + early/late hook registration +
+  `drainActiveTunnels`), `healthcheck.go` (159 — `handleHealth`/`handleReady`/`configSnapshotValidatorOK`),
+  `dp_enrollment.go` (385 — the DP-side enrollment client + `startDataPlane` + DP cert-renewal loop,
+  distinct from the CP-side `enrollment.go`). **Pure move, zero behaviour change:** identical
+  86-declaration set before/after (modulo one gofmt comment realignment); build/vet/gofmt clean;
+  the enrollment/control-plane/health suites green.
+- **DEBT-003 CLOSED.** All three flagged god-files split; no non-generated `.go` file exceeds ~1,300 LOC.
+  **Follow-up (out of scope, tracked here):** the diff-scoped golangci gate re-surfaced ~19 legacy
+  findings on the *moved* lines (grandfathered under `--new-from-rev` while they sat in the origin
+  files). Trivial ones were fixed in place (errcheck `//nolint` explanations, `rangeValCopy` →
+  index-range, `net.Listen` → `ListenConfig.Listen`, named results, unused-param `_`); the four
+  handler-complexity findings (`handleHTTP` gocognit/cyclop/funlen, two `nestif` blocks in
+  `proxy_tunnel.go`, one in `proxy_http.go`) carry a reasoned `//nolint` pointing here — a targeted
+  handler-decomposition pass remains a candidate but is deliberately NOT bundled into a mechanical
+  file split.
 
 ## DEBT-004 — `configBackup` god-struct · MEDIUM
 - One 25-field struct (`ui_policy.go:736`) serves export/import, version rollback, and restart

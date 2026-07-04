@@ -8,7 +8,10 @@ Single binary, zero runtime dependencies.
 ```
 *.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
 internal/     — 48 packages (ADR-0002 decomposition, COMPLETE): 43 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
-main.go       — Entrypoint, flag parsing, signal handling, graceful shutdown
+main.go       — Composition root: entrypoint, flag parsing, the 24 init* startup shims, proxy-server wiring, signal handling (DEBT-003 split; the file is the startup orchestrator only)
+main_shutdown.go — Graceful-shutdown sequence: runShutdownSequence, shutdown-order constants, registerEarly/LateShutdownHooks, drainActiveTunnels
+healthcheck.go — /healthz + /readyz handlers: handleHealth, handleReady, configSnapshotValidatorOK
+dp_enrollment.go — DP-side node enrollment client + cert lifecycle: enroll flow (CSR/RPC/CA-fingerprint/persist), startDataPlane, DP cert-renewal loop (distinct from the CP-side enrollment.go)
 proxy.go      — Request-dispatch pipeline (handleRequest + DEBT-002 helpers), policy-action state, scrubForwardedHeaders, sanitizeLog (DEBT-003 split; the file is now the composition root only)
 proxy_tunnel.go — CONNECT/WebSocket/tunnel relay: relayBufPool, relayCounted/bidiRelayCounted, handleTunnel(Bypass/Inspect), handleWebSocket, applyUpstreamProxy, hop-by-hop stripping
 proxy_http.go — Plain-HTTP forward path: handleHTTP, request-body limits, SSL-inspect stall detection
