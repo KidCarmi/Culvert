@@ -1,26 +1,29 @@
 package main
 
-// admin_settings_upstream_test.go — persistence + circuit-breaker-parameter
-// contracts for the GUI-configured upstream pool (the "upstream runtime
-// durability gap" logged as an out-of-scope observation in
+// admin_settings_upstream_test.go — persistence contracts for the
+// GUI-configured upstream pool (the "upstream runtime durability gap" logged
+// as an out-of-scope observation in
 // roadmap/CATEGORY-B-PRIME-FINDING-10.3-SPEC.md §5).
 //
-// Contracts pinned here:
-//  1. SetProxies keeps the circuit-breaker parameters from the last
-//     Configure (the API path previously hardcoded 5/60s).
-//  2. Entries() round-trips RAW entry URLs (inline credentials intact) while
-//     List() stays redacted — persistence needs the former, display the latter.
-//  3. SaveAdminSettings writes the pool with the UpstreamProxiesSaved
-//     sentinel; applyAdminNetwork restores it (restart simulation).
-//  4. Sentinel semantics mirror BlocklistFeedsSaved: unset → YAML seed kept;
+// Engine-level pool contracts (SetProxies keeps CB params, Entries() raw vs
+// List() redacted, hostless-URL rejection) moved to internal/upstream with
+// the ADR-0002 extraction. This file keeps the MAIN-side contracts:
+//
+//  1. SaveAdminSettings writes the pool with the UpstreamProxiesSaved
+//     sentinel; applyAdminNetwork restores it (restart simulation) and keeps
+//     the startup-configured circuit-breaker params (YAML-owned).
+//  2. Sentinel semantics mirror BlocklistFeedsSaved: unset → YAML seed kept;
 //     set + empty → authoritative wipe.
+//  3. POST /api/upstream keeps CB params and persists via adminSettingsSave.
+//
+// CB params are asserted through the exported surface: Pool.Next() returns
+// the sole *upstream.Proxy, whose CB exposes Params().
 
 import (
 	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -30,86 +33,21 @@ import (
 // pool stay order-independent under -count=N / -shuffle=on.
 func snapshotUpstreamPool(t *testing.T) {
 	t.Helper()
-	upstreamPool.mu.RLock()
-	prevEntries := append([]UpstreamEntry(nil), upstreamPool.entries...)
-	prevThreshold := upstreamPool.cbThreshold
-	prevTimeout := upstreamPool.cbTimeout
-	upstreamPool.mu.RUnlock()
+	prevEntries := upstreamPool.Entries()
+	prevThreshold, prevTimeout := upstreamPool.CBParams()
 	t.Cleanup(func() {
 		upstreamPool.Configure(prevEntries, prevThreshold, prevTimeout)
 	})
 }
 
-func TestUpstreamPool_SetProxiesPreservesCBParams(t *testing.T) {
-	pool := &UpstreamPool{}
-	pool.Configure([]UpstreamEntry{{URL: "http://seed.test:3128"}}, 7, 90*time.Second)
-
-	pool.SetProxies([]UpstreamEntry{{URL: "http://replaced.test:3128"}})
-
-	pool.mu.RLock()
-	defer pool.mu.RUnlock()
-	if len(pool.proxies) != 1 {
-		t.Fatalf("proxies = %d, want 1", len(pool.proxies))
+// soleProxyCBParams returns the CB params of the pool's single healthy proxy.
+func soleProxyCBParams(t *testing.T) (int, time.Duration) {
+	t.Helper()
+	up := upstreamPool.Next()
+	if up == nil {
+		t.Fatal("pool has no available proxy")
 	}
-	cb := pool.proxies[0].CB
-	if cb.threshold != 7 {
-		t.Errorf("threshold = %d, want 7 (SetProxies must keep Configure's CB params)", cb.threshold)
-	}
-	if cb.timeout != 90*time.Second {
-		t.Errorf("timeout = %v, want 90s (SetProxies must keep Configure's CB params)", cb.timeout)
-	}
-}
-
-func TestUpstreamPool_SetProxiesOnZeroPoolUsesCBDefaults(t *testing.T) {
-	// A pool that was never Configure'd (or Configure'd with zero params —
-	// YAML with no circuit_breaker section) must fall back to the
-	// newCircuitBreaker defaults, matching the API handler's old behavior.
-	pool := &UpstreamPool{}
-	pool.SetProxies([]UpstreamEntry{{URL: "http://gui-added.test:3128"}})
-
-	pool.mu.RLock()
-	defer pool.mu.RUnlock()
-	if len(pool.proxies) != 1 {
-		t.Fatalf("proxies = %d, want 1", len(pool.proxies))
-	}
-	cb := pool.proxies[0].CB
-	if cb.threshold != 5 || cb.timeout != 60*time.Second {
-		t.Errorf("CB params = %d/%v, want defaults 5/60s", cb.threshold, cb.timeout)
-	}
-}
-
-func TestUpstreamPool_EntriesReturnsRawCredentialedURL(t *testing.T) {
-	const raw = "http://user:sekret-cred@parent.test:3128" // #nosec G101 -- fake userinfo in a reserved .test URL; fixture verifies raw credential round-trip (List() redacts)
-	pool := &UpstreamPool{}
-	pool.Configure([]UpstreamEntry{{URL: raw}}, 5, time.Minute)
-
-	entries := pool.Entries()
-	if len(entries) != 1 || entries[0].URL != raw {
-		t.Fatalf("Entries() = %+v, want raw URL %q (persistence must round-trip credentials)", entries, raw)
-	}
-	list := pool.List()
-	if len(list) != 1 {
-		t.Fatalf("List() = %d entries, want 1", len(list))
-	}
-	if strings.Contains(list[0].URL, "sekret-cred") {
-		t.Errorf("List() leaked the credential: %q (must stay redacted)", list[0].URL)
-	}
-}
-
-func TestUpstreamPool_SkipsHostlessURL(t *testing.T) {
-	pool := &UpstreamPool{}
-	pool.SetProxies([]UpstreamEntry{
-		{URL: "parent1.corp.com:3128"}, // no scheme — parses opaque, undialable
-		{URL: ""},
-		{URL: "http://ok.test:3128"},
-	})
-	entries := pool.Entries()
-	if len(entries) != 1 || entries[0].URL != "http://ok.test:3128" {
-		t.Fatalf("Entries() = %+v, want only the valid scheme://host URL", entries)
-	}
-	if got := len(pool.List()); got != 1 {
-		t.Fatalf("List() = %d proxies, want 1", got)
-	}
+	return up.CB.Params()
 }
 
 func TestAdminSettings_UpstreamRoundTrip(t *testing.T) {
@@ -155,10 +93,8 @@ func TestAdminSettings_UpstreamRoundTrip(t *testing.T) {
 	}
 
 	// The restore path must keep the startup-configured CB params too.
-	upstreamPool.mu.RLock()
-	defer upstreamPool.mu.RUnlock()
-	if cb := upstreamPool.proxies[0].CB; cb.threshold != 7 || cb.timeout != 90*time.Second {
-		t.Errorf("restored CB params = %d/%v, want 7/90s (YAML-owned, not persisted)", cb.threshold, cb.timeout)
+	if th, to := soleProxyCBParams(t); th != 7 || to != 90*time.Second {
+		t.Errorf("restored CB params = %d/%v, want 7/90s (YAML-owned, not persisted)", th, to)
 	}
 }
 
@@ -203,16 +139,11 @@ func TestAPIUpstream_PostKeepsCBParamsAndPersists(t *testing.T) {
 	apiUpstream(w, r)
 	assertStatus(t, w, 200)
 
-	upstreamPool.mu.RLock()
-	if len(upstreamPool.proxies) != 1 {
-		upstreamPool.mu.RUnlock()
-		t.Fatalf("pool has %d proxies, want 1", len(upstreamPool.proxies))
+	if got := len(upstreamPool.List()); got != 1 {
+		t.Fatalf("pool has %d proxies, want 1", got)
 	}
-	cb := upstreamPool.proxies[0].CB
-	threshold, timeout := cb.threshold, cb.timeout
-	upstreamPool.mu.RUnlock()
-	if threshold != 9 || timeout != 45*time.Second {
-		t.Errorf("CB params after POST = %d/%v, want 9/45s (handler must not hardcode 5/60s)", threshold, timeout)
+	if th, to := soleProxyCBParams(t); th != 9 || to != 45*time.Second {
+		t.Errorf("CB params after POST = %d/%v, want 9/45s (handler must not hardcode 5/60s)", th, to)
 	}
 
 	// adminSettingsSave runs SaveAdminSettings in a goroutine — poll for the

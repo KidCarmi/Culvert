@@ -1203,6 +1203,26 @@ with a fake merge), saas_feed_lifecycle_test.go (stays in main — drives global
 construction), and urlcat_metrics_test.go (needs `SeedStats`, per feedsync).
 `TestCategoryStore_GetByName` in saas_feed_test.go is a policy.go test and stays in main.
 
+### 2026-07-04 — `internal/upstream` extracted (upstream pool + circuit breaker)
+The upstream-chaining engine (`upstream.go`, 363 LOC — pool, per-proxy circuit breaker,
+round-robin failover, health-check loop, config/status types) moved to `internal/upstream`.
+Post-program extraction under the standing "new engines go to internal/ with a recorded design"
+rule; picked over `session`/`ca` as the lowest-coupling candidate (sole seams: `obs.Printf` +
+`obs.Sanitize` — no new seam needed). Exported surface: `Pool` (zero value usable), `Proxy`,
+`CircuitBreaker`, `Entry`/`Config`/`Status`, `RunHealthCheckLoop`, `FormatSummary`. main keeps
+the singleton (`upstreamPool`), the transport wiring (`applyUpstreamProxy`, P5.3 contract
+untouched), and persistence (admin_settings sentinel — unchanged ownership). **Two methods beyond
+the mapped surface** (fileblock precedent, recorded honestly): `CircuitBreaker.Params()` and
+`Pool.CBParams()` — needed because main's persistence-contract tests
+(`admin_settings_upstream_test.go`) asserted CB inheritance via unexported fields; both are
+read-only, off the request path, and legitimately useful for diagnostics. Tests: engine +
+pool-contract tests moved in-package (incl. the P1.3 health-loop shutdown-invariant suite);
+main keeps only `applyUpstreamProxy` transport wiring + the admin-settings round-trip/sentinel/
+API contracts, re-expressed against the exported surface. Deleted `joinStrings` (hand-rolled
+`strings.Join`); health-probe URL promoted to a package const. Validated: build, vet (all pkgs),
+gofmt, package suite `-race -count=2 -shuffle=on`, root Upstream/AdminSettings/SIGHUP suites
+`-race` — all green.
+
 ## Decomposition Complete (leaf-extraction phase) — 2026-06-30
 
 The leaf-first extraction phase of ADR-0002 is **complete**. A final size-ordered sweep of every

@@ -48,7 +48,8 @@
   essentially unchanged; this is proof-of-method (repeatable, safe boundaries), not a dent yet.
   **Recommended next foundational step:** design the shared seam layer rather than chase more leaves.
 - **Progress (2026-07-04 drift sync, tree-verified):** the June snapshot above is history —
-  **ADR-0002 is COMPLETE**: `internal/` holds **44 packages** (39 extracted engines + 4 seams +
+  **ADR-0002 is COMPLETE**: `internal/` holds **45 packages** (40 extracted engines — `upstream`
+  added 2026-07-04 under the standing recorded-design rule — + 4 seams +
   `halease`), engines own logic/state/persistence, and `main` is reduced to composition roots,
   shims, and aliases (per `CLAUDE.md`, corroborated by `ls internal`). `store.go` halved
   (2,313 → 1,171 LOC). What REMAINS of the principal: 172 root non-test `.go` files still share

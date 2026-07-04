@@ -7,7 +7,7 @@ Single binary, zero runtime dependencies.
 
 ```
 *.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
-internal/     — 44 packages (ADR-0002 decomposition, COMPLETE): 39 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
+internal/     — 45 packages (ADR-0002 decomposition, COMPLETE): 40 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
 main.go       — Entrypoint, flag parsing, signal handling, graceful shutdown
 proxy.go      — HTTP/CONNECT/WebSocket handlers, tunnel relay, upstream transport, sanitizeLog
 socks5.go     — SOCKS5 protocol handler (RFC 1928/1929)
@@ -38,7 +38,7 @@ fileprofile.go — Named file-type blocking profiles (Executables, Archives, etc
 geoip.go      — MaxMind GeoLite2 country lookup with background cache
 controlplane.go — gRPC-based Control Plane / Data Plane distributed architecture
 enrollment.go — Token-based node enrollment, ClusterStore, cluster CA, heartbeat monitor
-upstream.go   — Upstream proxy chaining with failover, circuit breaker, round-robin health checks
+upstream.go   — Upstream-pool shim: aliases + singleton over internal/upstream (ADR-0002; pool/circuit-breaker/health-loop engine lives in the package; main keeps applyUpstreamProxy transport wiring)
 ocsp.go       — OCSP shim: transport wiring over internal/ocsp (ADR-0002)
 metrics.go    — Prometheus metrics (culvert_* namespace, per-rule hit counters, latency histogram)
 connlimit.go  — Per-IP connection limiting and X-Request-ID generation
