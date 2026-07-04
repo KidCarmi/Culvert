@@ -2,7 +2,7 @@
 
 > **Owner:** Chief Engineering Advisor (standing role)
 > **Status:** Living document — re-validated against the repository, not assumed.
-> **Last full review:** 2026-06-28
+> **Last full review:** 2026-06-28 · **Last drift sync:** 2026-07-04 (registers + tree re-checked; scores moved on evidence below)
 > **Next scheduled re-validation:** 2026-09-28 (quarterly) or on any change to architecture, HA, auth, or the release pipeline.
 
 This is the single entry point for Culvert's engineering governance. It is intentionally short:
@@ -21,18 +21,19 @@ A score only moves when the underlying evidence changes in the repository.
 
 | Dimension | Score | Trend | Basis (see registers for evidence) |
 |---|:---:|:---:|---|
-| Security | 4.0 | → | Fail-closed RBAC, 600k PBKDF2, DNS-rebind-safe SSRF. Open: RISK-002, RISK-003. |
-| Testing | 4.0 | → | Behavioral suite, race+shuffle determinism gate. Gap: DEBT-007 (no e2e MITM test). |
-| CI/CD & Release | 4.0 | → | SHA-pinned actions, cosign keyless, SLSA L3. Gate verified to genuinely clear the **root binary** (0 vulns). Open: RISK-006/014/015/016 (gate blind spots). |
-| Documentation | 3.5 | ↑ | Strong `CLAUDE.md` + roadmap; governance layer seeded 2026-06-28. Gaps: missing runbooks. |
-| Operability (single-CP) | 3.5 | → | Fail-static confirmed, atomic restore, OTLP traces. No distinct `/readyz`. |
-| Maintainability | 2.6 | ↑ | DEBT-002 closed: `handleRequest` 73→11 cyclo, suppression removed (evidence-backed). Still gated by god-files + ~359 globals (DEBT-001/003). |
-| Architecture | 2.5 | → | Flat `package main`, no compiler-enforced boundaries. See ADR-0002. |
-| HA / DR readiness | 2.0 | → | Split-brain-capable, no quorum/fencing. See RISK-001 (BLOCKER). |
+| Security | 4.2 | ↑ | All non-accepted HIGH risks closed (RISK-002/003 fixed; RISK-008 timing oracle; RISK-017 alert persistence). Open: RISK-010 (update image verify), gate blind spots. |
+| Testing | 4.2 | ↑ | Behavioral suite, race+shuffle determinism gate. DEBT-007 closed: `mitm_inspect_e2e_test.go` drives real TLS through the inspect path (trust-asymmetry proof). |
+| CI/CD & Release | 4.0 | → | SHA-pinned actions, cosign keyless, SLSA L3, signed catalog (P2b-2b). Open: RISK-006/014/015/016 (gate blind spots — all XS/S fixes). |
+| Documentation | 4.0 | ↑ | Strong `CLAUDE.md` + roadmap + governance layer. Both formerly-missing runbooks now exist: `docs/operator/ha-lease-failover.md`, backup-restore §8b recovery. |
+| Operability (single-CP) | 3.5 | → | Fail-static confirmed, atomic restore + interrupted-restore boot guard (RISK-005), OTLP traces, alert webhooks now durable (RISK-017). No distinct `/readyz`. |
+| HA / DR readiness | 3.5 | ↑ | RISK-001 CLOSED: ADR-0005 etcd fencing lease — split-brain structurally prevented in lease mode (pinned by `TestCL4_*`), safe auto-failover, runbook. Residual: bounded LWW ≤TTL on partition; legacy (no-etcd) mode stays safe-manual. |
+| Maintainability | 3.2 | ↑ | ADR-0002 decomposition COMPLETE (44 `internal/` packages); startup slices complete (24, contract-tested); `store.go` halved (2,313→1,171). Residual: 172 root files still share one namespace (DEBT-001/003). |
+| Architecture | 3.2 | ↑ | Engines own logic/state/persistence behind compiler-enforced `internal/` boundaries; `main` reduced to composition roots + shims. Residual: the flat root namespace and its globals remain the tax (DEBT-001). |
 
-**Headline:** Quality is real but increasingly *carried by tests compensating for structure the
-language could enforce for free*. The flat package (ADR-0002) is the tax that makes the lower
-scores hard to raise; the HA design (RISK-001) is the one item that blocks an enterprise claim.
+**Headline:** The two items that blocked the enterprise claim in June — HA split-brain and the
+un-decomposed flat package — are both resolved with evidence. The remaining risk mass has moved
+to the **update/supply-chain trust chain** (RISK-010/011, gate hardening) and to
+**config-surface drift** (DEBT-004/006/009). That is where attention should go next.
 
 ---
 
@@ -42,43 +43,50 @@ scores hard to raise; the HA design (RISK-001) is the one item that blocks an en
 |---|---|---|
 | Engineering Constitution | `docs/engineering/ENGINEERING-CONSTITUTION.md` | ✅ Adopted (governing charter for this dashboard and the registers) |
 | Engineering Dashboard | `docs/engineering/ENGINEERING-DASHBOARD.md` | ✅ Live (this file) |
-| Technical Risk Register | `docs/engineering/TECHNICAL-RISK-REGISTER.md` | ✅ Live |
-| Technical Debt Register | `docs/engineering/TECHNICAL-DEBT-REGISTER.md` | ✅ Live |
+| Technical Risk Register | `docs/engineering/TECHNICAL-RISK-REGISTER.md` | ✅ Live (last review 2026-07-03) |
+| Technical Debt Register | `docs/engineering/TECHNICAL-DEBT-REGISTER.md` | ✅ Live (drift-synced 2026-07-04) |
 | ADR practice | `docs/adr/0001-record-architecture-decisions.md` | ✅ Live |
-| ADR-0002: package decomposition | `docs/adr/0002-flat-package-to-internal-decomposition.md` | 🟡 Proposed |
-| Enterprise Readiness Assessment | _(deferred)_ | ⏳ Create when RISK-001 has a decided direction |
-| Operational Readiness Assessment | _(deferred)_ | ⏳ Create alongside the first recovery runbook |
+| ADR-0002: package decomposition | `docs/adr/0002-flat-package-to-internal-decomposition.md` | ✅ Implemented (44 packages; program complete) |
+| ADR-0003: shared foundation seam | `docs/adr/0003-shared-foundation-seam.md` | ✅ Implemented |
+| ADR-0004/0005: HA fencing + lease failover | `docs/adr/0004-*.md`, `docs/adr/0005-*.md` | ✅ Implemented (S0–S5 shipped; closed RISK-001) |
+| ADR-0006: security-scanner DI | `docs/adr/0006-security-scanner-di.md` | ✅ Implemented |
+| Runbooks / Recovery Procedures | `docs/operator/` | ✅ HA failover + backup/restore/interrupted-restore covered; keep growing per feature |
+| Enterprise Readiness Assessment | _(deferred)_ | ⏳ **Unblocked** (RISK-001 closed) — create at the next full review |
+| Operational Readiness Assessment | _(deferred)_ | ⏳ Create alongside the Enterprise Readiness Assessment |
 | Engineering Standards | `CLAUDE.md` (de-facto) | 🟡 Exists informally; promote when patterns stabilize |
-| Runbooks / Recovery Procedures | `docs/operator/` (partial) | ⏳ Missing: HA split-brain recovery, interrupted-restore recovery |
 
 **Why some are deferred, not stubbed:** an empty governance template is debt, not governance.
-The deferred artifacts will be created when there is validated content to put in them — a recovery
-runbook must be traced against the real recovery code path, not guessed (Constitution: *never guess*).
-The two missing runbooks are tracked as committed actions in the Risk Register (RISK-001, RISK-005).
+The deferred artifacts will be created when there is validated content to put in them
+(Constitution: *never guess*).
 
 ---
 
 ## 3. Current engineering priority (Advisor's standing recommendation)
 
-> **Recommendation: do not start new feature work until the "this-week" security fixes land and
-> RISK-001 (HA split-brain) has a decided direction.** The marginal value of another feature is
-> lower than the marginal value of closing a BLOCKER that invalidates the enterprise-HA claim and
-> a set of hours-to-fix security gaps. This is a deliberate call to slow feature velocity in favor
-> of foundational health, per the Engineering Constitution.
+> **The 2026-06-28 feature freeze is LIFTED** — its justification (RISK-001 BLOCKER + the
+> hours-to-fix security gaps) no longer exists; all of those items shipped with evidence.
+>
+> **New standing recommendation: before the next feature, close the update-trust gap.** Culvert
+> now verifies what it *advertises* (signed catalog, P2b) but not what it *runs* (RISK-010: the
+> applied image is never signature/digest-verified in-binary) and not what it *undoes* (RISK-011:
+> auto-rollback never confirms the node actually reverted). For a security product whose update
+> path is the highest-value supply-chain target, that asymmetry is the most important open item.
+> Removing the legacy updater (DEBT-008) is part of the same move — it deletes the entire
+> vulnerable dependency tree behind RISK-ACC-1 (all 5 open Dependabot alerts) at once.
 
 Sequenced backlog (full detail in the registers):
 
-1. **This week (hours each):** RISK-002 (OIDC SSRF one-liner), RISK-003 (webhook secret at rest),
-   RISK-008 (username timing oracle), RISK-009 (`InsecureSkipVerify` warning), RISK-006 (pin CI scanners).
-2. **This month:** RISK-001 mitigation (fencing token + honest HA docs + split-brain runbook),
-   DEBT-007 (e2e MITM test), add CodeQL to the merge-blocking set.
-3. **This quarter (ADR-gated):** ✅ DEBT-002 (`handleRequest` 73→11); ✅ ADR-0002 leaves
-   `internal/totp`, `internal/geoip`, `internal/fileblock`; ✅ ADR-0003 seam
-   (`internal/obs`+`internal/fileutil`) — all **2026-06-28**. Remaining named candidate: `scan` (hub),
-   which needs one more seam increment (`fireAlert` alerting + a `stripHostPort` home).
-   *(Architecture score unchanged — 3 small leaves + a seam out of ~58K LOC are proof-of-method and
-   enabling infra, not yet a material dent in DEBT-001's ~359-global flat namespace.)*
-4. **Roadmap:** real HA consensus, self-update in-binary verification, rollback verification.
+1. **This week (hours each, all XS/S):** RISK-014 (govulncheck the two nested modules),
+   RISK-016 (pin scanner versions, SHA-pin the `@main` action, make CodeQL blocking),
+   RISK-006 (non-blocking full-severity trivy report + `# expires:` on `.trivyignore` entries),
+   DEBT-010 (reconcile the 55%-vs-60% coverage floor; make the delta gate blocking).
+2. **This month:** DEBT-008 — finish removing the legacy `updater/` (closes RISK-ACC-1);
+   RISK-011 — post-rollback health verification + failure-path tests.
+3. **This quarter:** RISK-010 — in-binary digest/signature verification of the applied image
+   (natural extension of the P2b Sigstore machinery from catalogs to images);
+   DEBT-004/006 — explicit per-surface config types to stop membership drift.
+4. **Roadmap:** `/readyz` distinct from `/healthz`; DEBT-009 effective-config diagnostics
+   endpoint; failback UX for lease-mode HA.
 
 ---
 
@@ -107,3 +115,9 @@ static, not dynamically confirmed. The three highest-stakes findings (RISK-001 H
 RISK-002 OIDC SSRF, DEBT-002 `handleRequest` size) were hand-verified against source; the
 remainder rest on sub-reviewer `file:line` evidence. Re-validate with the toolchain when CI access
 is available.
+
+**2026-07-04 drift sync:** score moves were verified against the tree, not the registers'
+prose — `ls internal | wc -l` = 44 packages; `wc -l` on the four god-files; read of
+`mitm_inspect_e2e_test.go` confirming a real TLS client through the inspect branch; presence of
+both operator runbooks. The risk register (2026-07-03) was already current; the debt register was
+drift-synced in the same pass (DEBT-005/007 closed, DEBT-001/003 progress recorded).

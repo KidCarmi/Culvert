@@ -1,6 +1,6 @@
 # Culvert Technical Debt Register
 
-> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-06-28
+> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-07-04 (drift sync)
 >
 > Debt = a structural shortcut that raises the cost of future change. Runtime/supply-chain hazards
 > live in the [Technical Risk Register](./TECHNICAL-RISK-REGISTER.md). Each item is framed as
@@ -9,20 +9,20 @@
 
 | ID | Sev | Title | Principal location |
 |---|---|---|---|
-| DEBT-001 | HIGH | Flat `package main` — no compiler-enforced boundaries | all 152 root `.go` files; see ADR-0002 |
+| DEBT-001 | MEDIUM ↓ | Flat root namespace — engines extracted (ADR-0002 COMPLETE, 44 pkgs), root shims/globals remain | 172 root `.go` files (non-test) |
 | DEBT-002 | ✅ CLOSED | `handleRequest` was ~497 lines / cyclo 73 on the hottest security path | `proxy.go` — decomposed 2026-06-28 |
-| DEBT-003 | MEDIUM | God-files (4 over 1,800 LOC) | `main.go`, `store.go`, `controlplane.go`, `proxy.go` |
+| DEBT-003 | MEDIUM | God-files (3 over 1,800 LOC; `store.go` halved by extraction) | `controlplane.go` (2,236), `main.go` (1,990), `proxy.go` (1,901) |
 | DEBT-004 | MEDIUM | `configBackup` god-struct with 3 divergent memberships | `ui_policy.go:736`, `configversion.go` |
-| DEBT-005 | MEDIUM | `main.go` is a 30-`init*` hand-wired DI container | `main.go` (30 `initX` funcs) |
+| DEBT-005 | ✅ CLOSED | `main.go` was a 30-`init*` hand-wired DI container | startup-slice program complete (24 slices, contract-tested) |
 | DEBT-006 | MEDIUM | `ConfigSnapshot` (33-field) CP→DP god-DTO | `controlplane.go:1508 applyConfigSnapshot` |
-| DEBT-007 | MEDIUM | No end-to-end SSL-inspection MITM data-path test | (absence) `proxy.go handleConnect` inspect branch |
+| DEBT-007 | ✅ CLOSED | No end-to-end SSL-inspection MITM data-path test | `mitm_inspect_e2e_test.go` — verified 2026-07-04 |
 | DEBT-008 | LOW | Two parallel update mechanisms coexist | `updater/` + `release_dispatch*.go` |
 | DEBT-009 | LOW | Three durability layers for config can drift | `config.go`, `admin_settings.go`, `configversion.go` |
 | DEBT-010 | LOW | Coverage floor 55% (doc says 60%); delta gate non-blocking | `security-release-gate.yml:344`; `code-review.yml:96` |
 
 ---
 
-## DEBT-001 — Flat `package main` · HIGH
+## DEBT-001 — Flat root namespace · HIGH → MEDIUM (2026-07-04)
 - **Principal:** All 152 root source files share one namespace (1,950 top-level funcs, 187 exported
   types, ~359 package-level vars). Core runtime state (`cfg`, `bl`, `policyStore`, `ts`, …) are
   mutable globals reachable by both the proxy hot path and the admin write path; isolation is by
@@ -47,6 +47,14 @@
   move the Architecture/Maintainability score — the principal (flat namespace, ~359 globals) is
   essentially unchanged; this is proof-of-method (repeatable, safe boundaries), not a dent yet.
   **Recommended next foundational step:** design the shared seam layer rather than chase more leaves.
+- **Progress (2026-07-04 drift sync, tree-verified):** the June snapshot above is history —
+  **ADR-0002 is COMPLETE**: `internal/` holds **44 packages** (39 extracted engines + 4 seams +
+  `halease`), engines own logic/state/persistence, and `main` is reduced to composition roots,
+  shims, and aliases (per `CLAUDE.md`, corroborated by `ls internal`). `store.go` halved
+  (2,313 → 1,171 LOC). What REMAINS of the principal: 172 root non-test `.go` files still share
+  one namespace, and the shim/alias globals still bridge into the engines — the blast-radius and
+  race-surface interest is much reduced but not zero. **Severity HIGH → MEDIUM.** Direction per
+  `CLAUDE.md`: new engines go to `internal/` with a recorded design; do not re-inline shipped ones.
 
 ## DEBT-002 — `handleRequest` oversized · ✅ CLOSED 2026-06-28
 - **Was:** the single most-exercised security function carried the entire auth + content-block +
@@ -76,9 +84,12 @@
   functions, out of scope here; candidates for a future targeted pass if prioritised.
 
 ## DEBT-003 — God-files · MEDIUM
-- `main.go` (2,367), `store.go` (2,313, ≥5 unrelated stores behind one file's locks),
-  `controlplane.go` (2,047), `proxy.go` (1,802). Merge-conflict magnets; exceed reviewer working
-  memory. Natural targets for the ADR-0002 extraction. **Complexity L (staged).**
+- **2026-07-04 (re-measured):** `controlplane.go` (2,236 — *grew* since June, now the largest),
+  `main.go` (1,990, was 2,367), `proxy.go` (1,901, roughly flat), `store.go` (**1,171**, was
+  2,313 — halved by the ADR-0002 blocklist/audit/reqlog extractions). Merge-conflict magnets;
+  exceed reviewer working memory. `controlplane.go` is the one moving in the wrong direction —
+  every cluster feature lands there (same force as DEBT-006); it should be the next split target.
+  **Complexity L (staged).**
 
 ## DEBT-004 — `configBackup` god-struct · MEDIUM
 - One 25-field struct (`ui_policy.go:736`) serves export/import, version rollback, and restart
@@ -88,23 +99,33 @@
   across 3 files. **Recommendation:** explicit per-surface types or a generated membership table.
   **Complexity M.**
 
-## DEBT-005 — Hand-wired 30-init DI in `main.go` · MEDIUM
-- Startup is 30 `init*` functions invoked in sequence with cross-dependencies expressed only by
-  call order. The "startup slices" effort has extracted ~11; the MEDIUM-risk list
-  (`initBlocklist`, `initObservability`, `initConnAndRateLimit`) remains. **Interest:** a reordered
-  init silently breaks a dependency. Continue the existing slicing pattern. **Complexity M.**
+## DEBT-005 — Hand-wired 30-init DI in `main.go` · ✅ CLOSED 2026-07-04
+- **Was:** startup was 30 `init*` functions invoked in sequence with cross-dependencies expressed
+  only by call order; ~11 slices extracted at the June review.
+- **Resolution:** the startup-slice program is **COMPLETE — 24 slices shipped** (SAFE pilots +
+  MEDIUM tranche + final sweep, per `CLAUDE.md`). Every fat `init*` is now a thin shim over a
+  pure resolver + loader with per-slice tests; `startup_slice_contract_test.go` pins the
+  convention (purity, determinism, no-fc-mutation) for every future slice.
+- **Honest residual:** the call-*order* sequencing in `main()` still exists — but each step is
+  now a thin, contract-tested shim rather than a fat opaque function, which was the interest this
+  entry was charging. `startDataPlane` is deliberately not a slice (runtime wiring, not config
+  resolution — recorded decision). Residual ordering risk is accepted as ordinary structure.
 
 ## DEBT-006 — `ConfigSnapshot` god-DTO · MEDIUM
 - A 33-field struct is the CP→DP contract, applied by a 206-line `applyConfigSnapshot`
   (`controlplane.go:1508`). Every cluster-aware feature must thread a field through both. High
   coupling between unrelated subsystems and the distribution layer. **Complexity M.**
 
-## DEBT-007 — No e2e MITM test · MEDIUM
-- The flagship decrypt→scan→re-encrypt→block relay is tested only in pieces (cert signing, TLS
-  handshake, EICAR/YARA at the scanner level). No test drives a real TLS client through the
-  inspecting CONNECT proxy. A regression in the assembled path passes CI. **Recommendation:** one
-  listener-level test through `handleConnect`'s inspect branch. **Complexity M.** (Cross-listed:
-  this is debt with a latent risk.)
+## DEBT-007 — No e2e MITM test · ✅ CLOSED 2026-07-04 (verified)
+- **Was:** the flagship decrypt→scan→re-encrypt→block relay was tested only in pieces; no test
+  drove a real TLS client through the inspecting CONNECT proxy.
+- **Resolution (hand-verified 2026-07-04):** `mitm_inspect_e2e_test.go` drives a real TLS client
+  through the inspect path with the **trust-asymmetry proof** — a client trusting ONLY the proxy
+  CA completes the handshake on the inspect path and FAILS on the bypass path, which proves the
+  MITM actually happened rather than merely that a request succeeded. Also covers identity-header
+  scrubbing on the decrypted inner request, fail-closed on bad upstream cert, block-before-tunnel,
+  large-body integrity, and leaf-cache hit/miss + rotation. Hermetic (in-process TLS upstream,
+  in-memory CA, loopback-only). This is exactly the listener-level test this entry asked for.
 
 ## DEBT-008 — Two update mechanisms · LOW → **active removal**
 - Legacy `updater/` sidecar and the new release-catalog dispatch both ship. Documented as a
@@ -133,3 +154,10 @@
 ### Review log
 - **2026-06-28** — Register created from the baseline audit. DEBT-002 hand-verified. ADR-0002 opened
   to govern the DEBT-001/002/003 decomposition direction.
+- **2026-07-04** — **Drift sync (tree-verified, not prose-trusted).** DEBT-005 CLOSED (startup-slice
+  program complete: 24 slices + contract test). DEBT-007 CLOSED (`mitm_inspect_e2e_test.go`
+  hand-read: real TLS client, trust-asymmetry proof, fail-closed + scrub + block-before-tunnel).
+  DEBT-001 HIGH → MEDIUM (ADR-0002 COMPLETE: 44 `internal/` packages; residual = 172-file flat
+  root + shim globals). DEBT-003 re-measured: `store.go` halved to 1,171; `controlplane.go` grew
+  to 2,236 and is now the largest file — flagged as next split target. DEBT-004/006/008/009/010
+  unchanged and still real.
