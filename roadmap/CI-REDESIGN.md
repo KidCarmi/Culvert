@@ -249,9 +249,22 @@ exist individually).
 `dast-nightly.yml` (scheduled) boots the real proxy and points scanners at it:
 `testssl.sh` against the admin UI TLS (**gated** on legacy protocols / weak
 cipher families — not on severity, since a self-signed cert is a legitimate
-HIGH PKI finding), an OWASP ZAP baseline (advisory, passive), and a gosec run
-with **G401 (weak crypto) + G402 (InsecureSkipVerify) re-included** (report-only
-discovery of the surface the blocking gates' blanket exclusion hides).
+HIGH PKI finding), an **authenticated** OWASP ZAP baseline (see below), and a
+gosec run with **G401 (weak crypto) + G402 (InsecureSkipVerify) re-included**
+(report-only discovery of the surface the blocking gates' blanket exclusion
+hides).
+
+**Authenticated ZAP (DONE).** The ZAP job scans the **configured** proxy so the
+auth/session/CSRF/RBAC stack is live — not a first-run open server where it is
+inert. It provisions an admin via `POST /api/setup/complete`, proves auth now
+bites (a protected route returns **401** unauthenticated), logs in, and injects
+the `ps_ui_session` cookie on **every** ZAP request via the Replacer add-on
+(`matchtype=REQ_HEADER` adds the header when absent), with a positive
+authenticated-**200** reach-check bracketing the anon-401 smoke so a cookie-name
+regression can't silently un-authenticate the scan. `/api/auth/logout` is
+globally excluded so a stray hit can't drop the session mid-scan. The
+provision/gate checks are a deterministic (non-advisory) guard; ZAP findings
+stay advisory (`-I` + `|| true`).
 
 The forged-leaf TLS posture of the **inspected path** — the product's core
 function — is asserted deterministically + hermetically by
@@ -262,9 +275,9 @@ loopback-SSRF relax — that is test-only). `proxy.go`'s client-facing
 `tls.Config` now pins `MinVersion: tls.VersionTLS12` explicitly (was relying on
 the Go default) so the floor is contractual.
 
-**Follow-ups:** authenticated ZAP (session-cookie context — where the real yield
-is); drive the G401/G402 discovery delta to zero with justified `#nosec` on the
-remaining sites, then flip the **blocking** gosec to include them; add **HSTS**
+**Follow-ups:** drive the G401/G402 discovery delta to zero with justified
+`#nosec` on the remaining sites, then flip the **blocking** gosec to include
+them; add **HSTS**
 to the admin UI (a `Strict-Transport-Security` header is not emitted today; CSP
 already is, with a nonce) plus a Go assertion; a client-side
 cipher **allowlist** on the inspect `tls.Config` (MinVersion is pinned; the
