@@ -87,6 +87,63 @@ func (c *Client) Ping() error {
 	return nil
 }
 
+// Version queries the ClamAV daemon for its engine and signature-database
+// version via the VERSION command. The daemon replies with a single line like:
+//
+//	ClamAV 0.103.8/26982/Wed Apr 12 09:30:00 2023
+//
+// where the three "/"-separated fields are the engine version, the signature
+// database version (main+daily counter), and the database build date. Older or
+// minimally-configured daemons may reply with just the engine string and no
+// "/" fields; DBVersion/DBDate are then empty. Raw is always the full reply.
+func (c *Client) Version() (Version, error) {
+	conn, err := (&net.Dialer{Timeout: c.timeout}).DialContext(context.Background(), c.network, c.addr)
+	if err != nil {
+		return Version{}, fmt.Errorf("clamav: connect failed: %w", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(c.timeout)) //nolint:errcheck // a failed deadline set is surfaced by the subsequent read/write
+
+	if _, err := fmt.Fprintf(conn, "zVERSION\x00"); err != nil {
+		return Version{}, fmt.Errorf("clamav: version write: %w", err)
+	}
+	// Responses are short; 256 bytes is ample and bounds a misbehaving daemon.
+	resp, err := io.ReadAll(io.LimitReader(conn, 256))
+	if err != nil {
+		return Version{}, fmt.Errorf("clamav: version read: %w", err)
+	}
+	raw := strings.TrimRight(string(resp), "\x00\n\r ")
+	if raw == "" {
+		return Version{}, fmt.Errorf("clamav: empty version response (daemon may have closed connection)")
+	}
+	return parseClamVersion(raw), nil
+}
+
+// Version holds the parsed ClamAV VERSION response.
+type Version struct {
+	Engine    string `json:"engine"`               // e.g. "ClamAV 0.103.8"
+	DBVersion string `json:"db_version,omitempty"` // signature database counter, e.g. "26982"
+	DBDate    string `json:"db_date,omitempty"`    // database build date, e.g. "Wed Apr 12 09:30:00 2023"
+	Raw       string `json:"raw"`                  // full unparsed reply
+}
+
+// parseClamVersion splits a VERSION reply into its "/"-separated fields. A
+// reply with no "/" (engine only) leaves DBVersion/DBDate empty.
+func parseClamVersion(raw string) Version {
+	v := Version{Engine: raw, Raw: raw}
+	parts := strings.SplitN(raw, "/", 3)
+	switch len(parts) {
+	case 3:
+		v.Engine = strings.TrimSpace(parts[0])
+		v.DBVersion = strings.TrimSpace(parts[1])
+		v.DBDate = strings.TrimSpace(parts[2])
+	case 2:
+		v.Engine = strings.TrimSpace(parts[0])
+		v.DBVersion = strings.TrimSpace(parts[1])
+	}
+	return v
+}
+
 // Scan submits data to the ClamAV daemon via the INSTREAM command.
 // Returns (virusName, isMalicious, error).
 // virusName is non-empty only when isMalicious is true.

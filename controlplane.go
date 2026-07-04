@@ -527,6 +527,37 @@ func enrollRateLimitAllow(ip string) bool {
 	return true
 }
 
+// enrollRateLimitWindow is the sliding window over which enrollment attempts
+// accumulate. Shared by enrollRateLimitAllow and the cleanup sweep so the two
+// agree on staleness. (enrollRateLimitAllow keeps its own local const equal to
+// this for the hot path; both are one minute.)
+const enrollRateLimitWindow = time.Minute
+
+// enrollRateLimitCleanup drops per-IP entries whose every timestamp has aged
+// out of the window. enrollRateLimitAllow prunes a slice only on that same IP's
+// NEXT attempt, so an IP that enrolls once and never returns would otherwise
+// leave a permanent entry — unbounded growth keyed by client IP. Called
+// periodically by the shared security-limiter janitor; a no-op on non-control-
+// plane nodes (the map is empty there).
+func enrollRateLimitCleanup() {
+	enrollRateLimit.mu.Lock()
+	defer enrollRateLimit.mu.Unlock()
+	now := time.Now()
+	for ip, times := range enrollRateLimit.attempts {
+		fresh := times[:0]
+		for _, t := range times {
+			if now.Sub(t) < enrollRateLimitWindow {
+				fresh = append(fresh, t)
+			}
+		}
+		if len(fresh) == 0 {
+			delete(enrollRateLimit.attempts, ip)
+		} else {
+			enrollRateLimit.attempts[ip] = fresh
+		}
+	}
+}
+
 // NodeMetricsList returns a copy of all connected Data Plane node metrics.
 func NodeMetricsList() []MetricsReport {
 	nodeMetricsMu.RLock()

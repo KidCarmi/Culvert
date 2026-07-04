@@ -8,6 +8,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/KidCarmi/Culvert/internal/clamav"
 	"github.com/KidCarmi/Culvert/internal/hashcache"
 )
 
@@ -197,3 +198,81 @@ func TestSecScanDI_CacheAccessors(t *testing.T) {
 		t.Fatal("evict on nil cache must be false")
 	}
 }
+
+// ── ClamAV VERSION surface ──────────────────────────────────────────────────
+
+// fakeClamVer is a ClamScanner that also implements the optional VERSION
+// capability, so ClamAVVersion can exercise the happy + caching paths.
+type fakeClamVer struct {
+	fakeClam
+	ver     clamav.Version
+	verErr  error
+	verHits int
+}
+
+func (f *fakeClamVer) Version() (clamav.Version, error) {
+	f.verHits++
+	return f.ver, f.verErr
+}
+
+func TestClamAVVersion_ReportsAndCaches(t *testing.T) {
+	clam := &fakeClamVer{ver: clamav.Version{Engine: "ClamAV 1.0.0", DBVersion: "27000", DBDate: "Wed Apr 12 2023", Raw: "raw"}}
+	ss := newEnabledTestScanner(Deps{Clam: clam, Yara: &fakeYARA{}, Feed: fakeFeed{}})
+
+	v, ok := ss.ClamAVVersion()
+	if !ok {
+		t.Fatal("ClamAVVersion ok=false, want true for a version-capable client")
+	}
+	if v.Engine != "ClamAV 1.0.0" || v.DBVersion != "27000" {
+		t.Errorf("got %+v, want engine ClamAV 1.0.0 / db 27000", v)
+	}
+	if clam.verHits != 1 {
+		t.Fatalf("verHits = %d after first call, want 1", clam.verHits)
+	}
+	// Second call within TTL must be served from cache (no re-query).
+	if _, ok := ss.ClamAVVersion(); !ok {
+		t.Fatal("second ClamAVVersion ok=false")
+	}
+	if clam.verHits != 1 {
+		t.Errorf("verHits = %d after cached call, want 1 (result must be cached)", clam.verHits)
+	}
+}
+
+func TestClamAVVersion_NoVersionCapability(t *testing.T) {
+	// A plain fakeClam does not implement Version() → ok=false, no panic.
+	ss := newEnabledTestScanner(Deps{Clam: &fakeClam{}, Yara: &fakeYARA{}, Feed: fakeFeed{}})
+	if _, ok := ss.ClamAVVersion(); ok {
+		t.Error("ClamAVVersion ok=true for a client without VERSION support, want false")
+	}
+}
+
+func TestClamAVVersion_Disabled(t *testing.T) {
+	// No clam injected → disabled → ok=false.
+	ss := newEnabledTestScanner(Deps{Yara: &fakeYARA{}, Feed: fakeFeed{}})
+	if _, ok := ss.ClamAVVersion(); ok {
+		t.Error("ClamAVVersion ok=true with no ClamAV, want false")
+	}
+}
+
+func TestClamAVVersion_ErrorNotCachedLong(t *testing.T) {
+	clam := &fakeClamVer{verErr: errValidation}
+	ss := newEnabledTestScanner(Deps{Clam: clam, Yara: &fakeYARA{}, Feed: fakeFeed{}})
+
+	if _, ok := ss.ClamAVVersion(); ok {
+		t.Fatal("ClamAVVersion ok=true on error, want false")
+	}
+	// An errored result must not be treated as a successful cache: the next
+	// call re-queries (clamVerOK stays false).
+	if _, ok := ss.ClamAVVersion(); ok {
+		t.Fatal("second call ok=true, want false")
+	}
+	if clam.verHits != 2 {
+		t.Errorf("verHits = %d, want 2 (errors must not be cached as success)", clam.verHits)
+	}
+}
+
+var errValidation = errClamTest("clamav down")
+
+type errClamTest string
+
+func (e errClamTest) Error() string { return string(e) }

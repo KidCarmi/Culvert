@@ -64,14 +64,15 @@ type Entry struct {
 	Identity    string `json:"identity,omitempty"` // authenticated username/email, empty if unauthenticated
 	Method      string `json:"method"`
 	Host        string `json:"host"`
-	URI         string `json:"uri,omitempty"`       // full request URL (host+path, no query); only set when the matched rule has LogFullURI
-	Status      string `json:"status"`              // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
-	Level       string `json:"level"`               // INFO | WARN | ERROR
-	RuleMatched string `json:"ruleMatched"`         // policy rule name that matched, if any
-	ActionTaken string `json:"actionTaken"`         // policy action taken, if any
-	BytesSent   int64  `json:"bytesSent,omitempty"` // bytes sent to upstream (request body)
-	BytesRecv   int64  `json:"bytesRecv,omitempty"` // bytes received from upstream (response body)
-	SSLAction   string `json:"sslAction,omitempty"` // "inspect", "bypass", or empty (non-CONNECT)
+	URI         string `json:"uri,omitempty"`        // full request URL (host+path, no query); only set when the matched rule has LogFullURI
+	Status      string `json:"status"`               // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
+	Level       string `json:"level"`                // INFO | WARN | ERROR
+	RuleMatched string `json:"ruleMatched"`          // policy rule name that matched, if any
+	ActionTaken string `json:"actionTaken"`          // policy action taken, if any
+	BytesSent   int64  `json:"bytesSent,omitempty"`  // bytes sent to upstream (request body / tunnel client→dest)
+	BytesRecv   int64  `json:"bytesRecv,omitempty"`  // bytes received from upstream (response body / tunnel dest→client)
+	SSLAction   string `json:"sslAction,omitempty"`  // "inspect", "bypass", or empty (non-CONNECT)
+	DurationMs  int64  `json:"durationMs,omitempty"` // connection lifetime; set on TUNNEL_CLOSED accounting entries
 
 	// Normalized authentication-policy SIEM fields (Phase 0 seam, §1.8; the
 	// auth_* observability block is finalized in Phase 1 Slice 5). Declared as the

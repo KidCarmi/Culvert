@@ -785,12 +785,12 @@ func initScanning(s *startupState) {
 	)
 }
 
-// initUpstreamProxy configures parent-proxy chaining when configured.
+// initUpstreamProxy configures parent-proxy chaining. Runs even when the
+// YAML seeds no proxies so the pool records the configured circuit-breaker
+// parameters and the health-check loop starts — GUI-added proxies (restored
+// from admin_settings.json or POSTed to /api/upstream) then inherit both.
 func initUpstreamProxy(s *startupState) {
-	// ── Upstream proxy chaining ──────────────────────────────────────────────
-	if len(s.fc.Upstream.Proxies) > 0 {
-		initUpstreamPool(s.fc)
-	}
+	initUpstreamPool(s.fc)
 }
 
 // initCDR wires Sluice CDR configuration, persistent state, client, and health poller.
@@ -1978,16 +1978,13 @@ func applyHotReload(fc *FileConfig) {
 		logger.Printf("Reload: rewrite %d rules", len(fc.Rewrite))
 	}
 
-	// Upstream proxy pool
+	// Upstream proxy pool. Gated on a non-empty YAML list so a reload with no
+	// upstream section does not wipe GUI-configured proxies; resolution is
+	// shared with the startup slice (resolveUpstreamPoolStartupConfig).
 	if len(fc.Upstream.Proxies) > 0 {
-		cbTimeout := 60 * time.Second
-		if fc.Upstream.CircuitBreaker.Timeout != "" {
-			if d, err := time.ParseDuration(fc.Upstream.CircuitBreaker.Timeout); err == nil {
-				cbTimeout = d
-			}
-		}
-		upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
+		ucfg := resolveUpstreamPoolStartupConfig(fc)
+		upstreamPool.Configure(ucfg.Proxies, ucfg.CBThreshold, ucfg.CBTimeout)
 		applyUpstreamProxy()
-		logger.Printf("Reload: upstream %s", formatUpstreamSummary(fc.Upstream.Proxies))
+		logger.Printf("Reload: upstream %s", formatUpstreamSummary(ucfg.Proxies))
 	}
 }

@@ -71,7 +71,7 @@ func TestHandleWebSocket_Non101NotTunneled(t *testing.T) {
 	r.Header.Set("Connection", "Upgrade")
 	w := httptest.NewRecorder()
 
-	handleWebSocket(w, r)
+	handleWebSocket(w, r, nil, ProxyIdentity{ClientIP: "192.0.2.99"})
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (upstream's declined-upgrade response must be relayed, not tunneled); body=%q",

@@ -1001,7 +1001,7 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 // captured request URL (host+path, no query) or "" when not logged.
 func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
 	recordStats(ip, host, status, ruleMatched, actionTaken)
-	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, uri, auth)
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, 0, sslAction, uri, auth)
 }
 
 // recordRequestLogOnly writes a request-log entry WITHOUT the stats/alert/
@@ -1010,13 +1010,59 @@ func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, ident
 // allow path, so counting each inner request again would inflate statTotal
 // (a CONNECT carrying N requests would count as 1+N).
 func recordRequestLogOnly(ip, method, host, status, ruleMatched, actionTaken, identity, sslAction, uri string, auth AuthLogFields) {
-	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, sslAction, uri, auth)
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, 0, sslAction, uri, auth)
+}
+
+// recordTunnelBytes folds a raw tunnel's relayed bytes into the global byte
+// counters. This is ALWAYS done for an allowed tunnel, independent of the
+// per-rule "log traffic" flag: that flag is a feed-volume control, not a
+// stats-accounting control. Raw tunnels are the dominant traffic class and
+// were previously invisible in the bytes dashboard (only SSL-inspected bodies
+// were counted). Split out from persistence so a quiet-rule tunnel still
+// updates the byte totals even when it writes no feed entry.
+func recordTunnelBytes(bytesSent, bytesRecv int64) {
+	atomic.AddInt64(&statBytesSent, bytesSent)
+	atomic.AddInt64(&statBytesRecv, bytesRecv)
+}
+
+// persistTunnelClose writes the per-connection TUNNEL_CLOSED feed entry (byte
+// counts + lifetime). Log-only — the tunnel was already stats-counted by the
+// allow path when it was established, so running the stats fan-out again would
+// double-count statTotal/topHosts. Byte counters are handled separately by
+// recordTunnelBytes so they are not tied to the log gate.
+func persistTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, "", identity,
+		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{})
+}
+
+// recordTunnelClose accounts a raw tunnel's bytes AND writes its feed entry
+// unconditionally. Used by the always-logged paths (SOCKS5) and tests.
+func recordTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	recordTunnelBytes(bytesSent, bytesRecv)
+	persistTunnelClose(ip, method, host, identity, ruleMatched, bytesSent, bytesRecv, start, sslAction)
+}
+
+// recordTunnelCloseGated is the raw-relay call-site helper. It ALWAYS folds the
+// bytes into the global counters, then applies the per-rule "log traffic" gate
+// to the FEED ENTRY only (mirroring the OK entry recorded at allow time —
+// LogTraffic=false suppresses the entry but not the byte accounting). A nil
+// match (no rule matched, default-allow) always logs.
+func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	recordTunnelBytes(bytesSent, bytesRecv) // always — independent of the log gate
+	if match != nil && !ruleLogsTraffic(match.Rule) {
+		return
+	}
+	ruleName := ""
+	if match != nil && match.Rule != nil {
+		ruleName = match.Rule.Name
+	}
+	persistTunnelClose(id.ClientIP, method, host, id.Identity, ruleName, bytesSent, bytesRecv, start, sslAction)
 }
 
 // persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,
-// history store, and syslog — the logging half shared by recordRequestFull and
-// recordRequestLogOnly.
-func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
+// history store, and syslog — the logging half shared by recordRequestFull,
+// recordRequestLogOnly, and recordTunnelClose.
+func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv, durationMs int64, sslAction, uri string, auth AuthLogFields) {
 	entry := LogEntry{
 		TS:          time.Now().UnixMilli(),
 		Time:        time.Now().Format("15:04:05"),
@@ -1031,6 +1077,7 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 		ActionTaken: actionTaken,
 		BytesSent:   bytesSent,
 		BytesRecv:   bytesRecv,
+		DurationMs:  durationMs,
 		SSLAction:   sslAction,
 	}
 	auth.applyTo(&entry)
@@ -1050,16 +1097,60 @@ type HostStat struct {
 }
 
 type hostCounter struct {
-	mu    sync.Mutex
-	hosts map[string]int64
+	mu           sync.Mutex
+	hosts        map[string]int64
+	pendingDecay int // new-host drops since the last decay pass (amortization)
 }
 
 var topHosts = &hostCounter{hosts: map[string]int64{}}
 
+// topHostsMaxEntries bounds the number of distinct hostnames the top-hosts
+// counter tracks. The hostname is attacker-controllable (any client can
+// request arbitrarily many distinct hosts), so without a bound the map is an
+// unbounded memory-exhaustion DoS. A var (not const) so tests can lower it.
+var topHostsMaxEntries = 10000
+
 func (hc *hostCounter) Record(host string) {
 	hc.mu.Lock()
-	hc.hosts[host]++
-	hc.mu.Unlock()
+	defer hc.mu.Unlock()
+	if _, ok := hc.hosts[host]; ok {
+		hc.hosts[host]++ // already tracked — always count, never gated
+		return
+	}
+	if len(hc.hosts) >= topHostsMaxEntries {
+		// At capacity with a NEW host. Decaying (halve all counts, drop those
+		// that reach zero) evicts cold entries — including high-cardinality
+		// count-1 junk from a flood — so continuously-reinforced heavy hitters
+		// survive (each decay only halves them, and their ongoing traffic tops
+		// them back up) while a host that has gone silent correctly ages out.
+		// Decay is O(n), so amortize it to at most once per topHostsMaxEntries
+		// new-host drops; between passes newcomers are dropped in O(1). Net:
+		// strict memory bound + amortized O(1) per call.
+		hc.pendingDecay++
+		if hc.pendingDecay < topHostsMaxEntries {
+			return
+		}
+		hc.pendingDecay = 0
+		hc.decayLocked()
+		if len(hc.hosts) >= topHostsMaxEntries {
+			return // still saturated with hot hosts — drop the newcomer
+		}
+	}
+	hc.hosts[host] = 1
+}
+
+// decayLocked halves every count and deletes entries that reach zero. Caller
+// holds hc.mu. This is the eviction primitive: cold entries (low counts) fall
+// out while heavy hitters persist, keeping the top-N ranking meaningful.
+func (hc *hostCounter) decayLocked() {
+	for h, c := range hc.hosts {
+		c /= 2
+		if c == 0 {
+			delete(hc.hosts, h)
+		} else {
+			hc.hosts[h] = c
+		}
+	}
 }
 
 // Top returns the n most-requested hosts, sorted descending by count.

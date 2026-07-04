@@ -36,6 +36,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // dialTimeout is the context-aware replacement for net.DialTimeout (noctx),
@@ -125,6 +127,86 @@ func inspectRule(tlsSkipVerify bool) {
 		Priority: 1, Name: "inspect-all", DestFQDN: "*",
 		Action: ActionAllow, SSLAction: SSLInspect, TLSSkipVerify: tlsSkipVerify,
 	})
+}
+
+// TestMITM_NonTLSFallbackRecordsTunnelClose proves that when a non-TLS
+// protocol (SSH/RDP/etc.) is sent through an inspect-marked CONNECT, the proxy
+// falls back to raw relay AND records a TUNNEL_CLOSED accounting entry
+// (SSLAction=inspect, byte counts) — the Finding 11.1 observability contract
+// extended to the last raw-relay path. The upstream is a plain TLS echo
+// listener (the proxy connects to it over TLS and relays the client's raw
+// non-TLS bytes into that connection).
+func TestMITM_NonTLSFallbackRecordsTunnelClose(t *testing.T) {
+	t.Cleanup(reqlog.SwapRingForTest())
+	allowLoopbackTunnel(t)
+	setupInspectCA(t) // makes certMgr.Ready() true so the inspect path is taken
+
+	certPEM, keyPEM, _ := generateSelfSignedECDSA(t)
+	upCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("upstream keypair: %v", err)
+	}
+	rawLn, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ln := tls.NewListener(rawLn, &tls.Config{Certificates: []tls.Certificate{upCert}}) // #nosec G402 -- test upstream
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer c.Close()      //nolint:errcheck // test cleanup
+		_, _ = io.Copy(c, c) // echo the relayed client bytes back
+	}()
+
+	proxyURL := startTestProxy(t)
+	inspectRule(true) // skip-verify so the proxy accepts the self-signed upstream
+
+	target := ln.Addr().String()
+	conn, err := dialTimeout(proxyURL.Host)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // test cleanup
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	if err := readCONNECT200(conn); err != nil {
+		t.Fatalf("CONNECT: %v", err)
+	}
+
+	// Send a NON-TLS first byte ('S', 0x53 — an SSH-style banner) + payload in
+	// one write, so the proxy's protocol peek takes the raw-relay fallback.
+	const payload = "SSH-2.0-nonTLS-probe-through-inspect"
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("read echo through raw relay: %v", err)
+	}
+	if string(got) != payload {
+		t.Fatalf("echo = %q, want %q (raw relay must splice bytes verbatim)", got, payload)
+	}
+	_ = conn.Close() // trigger teardown → TUNNEL_CLOSED
+
+	entry := findTunnelClose("127.0.0.1")
+	if entry == nil {
+		t.Fatal("no TUNNEL_CLOSED entry for the non-TLS inspect fallback")
+	}
+	if entry.SSLAction != "inspect" {
+		t.Errorf("SSLAction = %q, want inspect", entry.SSLAction)
+	}
+	if entry.BytesSent < int64(len(payload)) {
+		t.Errorf("BytesSent = %d, want >= %d (client→upstream)", entry.BytesSent, len(payload))
+	}
+	if entry.BytesRecv < int64(len(payload)) {
+		t.Errorf("BytesRecv = %d, want >= %d (upstream→client echo)", entry.BytesRecv, len(payload))
+	}
 }
 
 // TestMITM_InspectMITMsAndScrubsIdentity proves the proxy MITMs the client TLS

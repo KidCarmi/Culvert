@@ -690,6 +690,7 @@ tr.dragging  { opacity: .4; }
           <option value="IP_BLOCKED">IP Blocked</option>
           <option value="POLICY_DEFAULT_DENY">Policy Deny</option>
           <option value="AUTH_FAIL">Auth Fail</option>
+          <option value="TUNNEL_CLOSED">Tunnel Closed</option>
         </select>
         <select class="select" id="log-level" data-change="applyLogFilter">
           <option value="">All levels</option>
@@ -1025,6 +1026,7 @@ tr.dragging  { opacity: .4; }
             <div style="background:var(--surface2);border-radius:8px;padding:12px">
               <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">ClamAV</div>
               <div id="sec-clamav-status" style="font-weight:600;font-size:.9rem">—</div>
+              <div id="sec-clamav-version" style="font-size:.7rem;color:var(--muted);margin-top:2px"></div>
               <div id="sec-clam-blocked" style="font-size:.75rem;color:var(--muted);margin-top:2px"></div>
             </div>
             <div style="background:var(--surface2);border-radius:8px;padding:12px">
@@ -5185,7 +5187,18 @@ function badgeHTML(status) {
   if (status === 'IP_BLOCKED')      return '<span class="badge blocked" title="IP Filter">IP BLOCK</span>';
   if (status === 'POLICY_DEFAULT_DENY') return '<span class="badge blocked" title="No matching policy rule">POLICY DENY</span>';
   if (status === 'AUTH_FAIL')       return '<span class="badge auth">AUTH FAIL</span>';
+  if (status === 'TUNNEL_CLOSED')   return '<span class="badge bypass" title="Raw tunnel closed — bytes/duration accounted (WebSocket / CONNECT / SOCKS5)">TUNNEL</span>';
   return '<span class="badge auth">' + escHtml(status) + '</span>';
+}
+
+// fmtBytes renders a byte count as a compact human-readable string.
+function fmtBytes(n) {
+  n = n || 0;
+  if (n < 1024) return n + ' B';
+  const u = ['KB', 'MB', 'GB', 'TB'];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(1) + ' ' + u[i];
 }
 
 function levelBadge(level) {
@@ -5204,7 +5217,7 @@ function rowHTML(e) {
     <td style="font-family:monospace">${escHtml(e.ip)}</td>
     ${identityCell}
     <td><code style="font-size:.78rem">${escHtml(e.method)}</code></td>
-    <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}${e.uri ? `<div style="font-size:.7rem;color:var(--accent2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px" title="${escHtml(e.uri)}">${escHtml(e.uri)}</div>` : ''}</td>
+    <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}${e.uri ? `<div style="font-size:.7rem;color:var(--accent2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px" title="${escHtml(e.uri)}">${escHtml(e.uri)}</div>` : ''}${(e.bytesSent || e.bytesRecv || e.durationMs) ? `<div style="font-size:.7rem;color:var(--muted)">&#8593;${fmtBytes(e.bytesSent)} &#8595;${fmtBytes(e.bytesRecv)}${e.durationMs ? ' &middot; ' + (e.durationMs >= 1000 ? (e.durationMs/1000).toFixed(1)+'s' : e.durationMs+'ms') : ''}</div>` : ''}</td>
     <td>${badgeHTML(e.status)}</td>
     <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}">${escHtml(e.ruleMatched||'')}</td>
     <td>${levelBadge(e.level)}</td>
@@ -5979,6 +5992,17 @@ async function loadSecScanStatus() {
       const ok = s.clamav_status === 'ok' || s.clamav_status === 'connected';
       clamEl.textContent  = s.clamav_status || '—';
       clamEl.style.color  = ok ? 'var(--green)' : (s.clamav_status === 'disabled' ? 'var(--muted)' : 'var(--red)');
+    }
+    const cvEl = document.getElementById('sec-clamav-version');
+    if (cvEl) {
+      const v = s.clamav_version;
+      if (v && v.engine) {
+        const defs = v.db_date ? ' · defs ' + escHtml(v.db_date) : (v.db_version ? ' · defs ' + escHtml(v.db_version) : '');
+        cvEl.innerHTML = escHtml(v.engine) + defs;
+        cvEl.title = v.raw || '';
+      } else {
+        cvEl.textContent = '';
+      }
     }
     const cb = document.getElementById('sec-clam-blocked');
     if (cb) cb.textContent = s.stat_clam_blocked ? s.stat_clam_blocked + ' blocked' : '';

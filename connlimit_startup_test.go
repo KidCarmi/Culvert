@@ -118,16 +118,22 @@ func TestResolveConnAndRateLimitStartupConfig_PropagatesMaxConnsPerIP(t *testing
 
 // ─── Loader ──────────────────────────────────────────────────────────
 
-func TestLoadConnAndRateLimit_AllZeroReturnsNil(t *testing.T) {
+func TestLoadConnAndRateLimit_AllZeroStillSpawnsSecurityJanitor(t *testing.T) {
 	ensureConnlimitStartupTestLogger(t)
 	snapshotConnAndRateLimitGlobals(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
+	// Even with rate limiting disabled, the loader must spawn the
+	// security-limiter cleanup janitor (login-lockout + admin-API maps are
+	// always active and must be swept to avoid unbounded growth), so it returns
+	// a non-nil cancel now.
 	got := loadConnAndRateLimit(connAndRateLimitStartupConfig{}, ctx)
-	if got != nil {
-		t.Errorf("loadConnAndRateLimit(all-zero) returned non-nil cancel; want nil")
+	if got == nil {
+		t.Errorf("loadConnAndRateLimit(all-zero) returned nil cancel; want non-nil (security janitor must always run)")
+	} else {
+		t.Cleanup(got) // stop the spawned cleanup goroutine
 	}
 	if connLimiter.Enabled() {
 		t.Errorf("connLimiter.enabled = true after all-zero cfg; want false")
@@ -205,14 +211,16 @@ func TestLoadConnAndRateLimit_RateLimitEnabledReturnsCancel(t *testing.T) {
 	}
 }
 
-func TestLoadConnAndRateLimit_RateLimitDisabledReturnsNil(t *testing.T) {
+func TestLoadConnAndRateLimit_RateLimitDisabledStillSpawnsJanitor(t *testing.T) {
 	ensureConnlimitStartupTestLogger(t)
 	snapshotConnAndRateLimitGlobals(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	// Other fields set, but RateLimitRPM == 0 — must still return nil.
+	// RateLimitRPM == 0 means the IP rate limiter is not configured, but the
+	// security janitor (which also sweeps the always-active login-lockout and
+	// admin-API maps) must still spawn — so the cancel is non-nil.
 	cfg := connAndRateLimitStartupConfig{
 		MaxConnsPerIP: 50,
 		IPMode:        "allow",
@@ -220,8 +228,14 @@ func TestLoadConnAndRateLimit_RateLimitDisabledReturnsNil(t *testing.T) {
 		RateLimitRPM:  0,
 	}
 	got := loadConnAndRateLimit(cfg, ctx)
-	if got != nil {
-		t.Errorf("loadConnAndRateLimit with RateLimitRPM=0 returned non-nil cancel; want nil")
+	if got == nil {
+		t.Errorf("loadConnAndRateLimit with RateLimitRPM=0 returned nil cancel; want non-nil (security janitor)")
+	} else {
+		t.Cleanup(got)
+	}
+	// The IP rate limiter itself must remain unconfigured (limit 0).
+	if lim := rl.Limit(); lim != 0 {
+		t.Errorf("rl.Limit() = %d; want 0 (rate limiting disabled)", lim)
 	}
 }
 

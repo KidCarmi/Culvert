@@ -55,6 +55,16 @@ type IPFilter struct {
 
 var ipf = &IPFilter{single: map[string]bool{}}
 
+// SetMode sets the IP-filter mode. Valid values are "allow" (allowlist),
+// "block" (blocklist), and "" (disabled). The mode is stored verbatim — the
+// fail-closed handling lives in Allowed(), which denies ALL traffic for any
+// unrecognized (corrupt) mode. This is safer than coercing a corrupt value to
+// "block" here, which would silently convert a corrupted *allowlist*
+// deployment into a permissive blocklist (admitting every non-listed IP). The
+// validated admin API path only ever passes "allow"/"block"; the raw
+// persistence/snapshot paths (config reload, admin_settings restore,
+// config-version rollback, cluster ConfigSnapshot) may carry corruption, and
+// Allowed() fails closed on it.
 func (f *IPFilter) SetMode(mode string) {
 	f.mu.Lock()
 	f.mode = mode
@@ -135,6 +145,15 @@ func (f *IPFilter) contains(ipStr string) bool {
 }
 
 // Allowed returns true when the IP should be allowed through.
+//
+// Mode semantics: "allow" = allowlist (only listed IPs pass), "block" =
+// blocklist (listed IPs are denied), "" = disabled (filter off, all pass).
+// ANY OTHER value is treated as corruption and DENIES ALL traffic (fail
+// closed). Coercing a corrupt mode to "block" instead would be unsafe: a
+// corrupted *allowlist* deployment (mode was "allow" with a list of the only
+// trusted IPs) would become a blocklist that admits every IP not on the list —
+// fail open. When we cannot trust the mode, we cannot reason about the list, so
+// we deny everything until an operator restores a valid config.
 func (f *IPFilter) Allowed(ipStr string) bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -143,8 +162,10 @@ func (f *IPFilter) Allowed(ipStr string) bool {
 		return f.contains(ipStr)
 	case "block":
 		return !f.contains(ipStr)
+	case "":
+		return true // filter disabled
 	default:
-		return true
+		return false // corrupt/unknown mode — deny all (fail closed)
 	}
 }
 

@@ -425,7 +425,7 @@ func TestCurrentConfigSnapshot(t *testing.T) {
 	bl = blocklist.New()
 	bl.Add("test.com")
 	ipf = &IPFilter{single: map[string]bool{}}
-	ipf.SetMode("deny")
+	ipf.SetMode("block") // valid mode; snapshot must round-trip it
 	rl = &RateLimiter{}
 	rl.Configure(200, time.Minute)
 
@@ -433,7 +433,7 @@ func TestCurrentConfigSnapshot(t *testing.T) {
 	if len(snap.BlockedHosts) != 1 || snap.BlockedHosts[0] != "test.com" {
 		t.Fatalf("blocked hosts = %v", snap.BlockedHosts)
 	}
-	if snap.IPFilterMode != "deny" {
+	if snap.IPFilterMode != "block" {
 		t.Fatalf("IP filter mode = %q", snap.IPFilterMode)
 	}
 	if snap.RateLimitRPM != 200 {

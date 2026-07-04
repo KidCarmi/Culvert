@@ -11,13 +11,17 @@ package main
 //   - ipf.SetMode + ipf.Add only when IPMode != "" ; invalid IP-list
 //     entries are logged at warn level and skipped (NOT fatal)
 //   - rl.Configure(N, time.Minute) only when RateLimitRPM > 0
-//   - 5-minute cleanup goroutine spawned ONLY when RateLimitRPM > 0
-//   - cleanup goroutine ticks rl.Cleanup() + ssrf.CacheCleanup()
+//   - 5-minute security-limiter cleanup goroutine spawned UNCONDITIONALLY
+//     (the login-lockout + admin-API limiters are always active and must be
+//     swept even when RateLimitRPM is 0; see loadConnAndRateLimit)
+//   - cleanup goroutine ticks rl.Cleanup() + ssrf.CacheCleanup() +
+//     loginLimiter.Cleanup() + apiLimiter.Cleanup() +
+//     enrollRateLimitCleanup()
 //   - log strings unchanged so operators see the same startup banner
-//   - Loader returns the cleanup-goroutine cancel func so the caller
-//     can store it on s.rlCleanupCancel. Returns nil when rate-limit
-//     is disabled — the early-phase `rate-limit-cleanup-cancel`
-//     shutdown hook (main.go:1428–1430) nil-checks before calling.
+//   - Loader returns the cleanup-goroutine cancel func (always non-nil now)
+//     so the caller can store it on s.rlCleanupCancel. The early-phase
+//     `rate-limit-cleanup-cancel` shutdown hook (main.go) nil-checks before
+//     calling, so a non-nil value is safe.
 
 import (
 	"context"
@@ -52,22 +56,31 @@ func loadConnAndRateLimit(cfg connAndRateLimitStartupConfig, parentCtx context.C
 		logger.Printf("IPFilter: mode=%s entries=%d", cfg.IPMode, len(cfg.IPList))
 	}
 
-	if cfg.RateLimitRPM <= 0 {
-		return nil
+	if cfg.RateLimitRPM > 0 {
+		rl.Configure(cfg.RateLimitRPM, time.Minute)
+		logger.Printf("RateLimit: %d req/min per IP", cfg.RateLimitRPM)
 	}
-	rl.Configure(cfg.RateLimitRPM, time.Minute)
-	logger.Printf("RateLimit: %d req/min per IP", cfg.RateLimitRPM)
+
+	// The security-limiter cleanup janitor runs UNCONDITIONALLY. The IP rate
+	// limiter (rl) is optional, but the login account-lockout and admin-API
+	// rate limiters — both keyed by attacker-controllable input (username /
+	// client IP) — are ALWAYS active, so their maps must be swept even when
+	// RateLimitRPM is 0. rl.Cleanup on an unconfigured limiter is a harmless
+	// empty-shard walk, and the SSRF DNS cache is always in use. Previously the
+	// janitor spawned only when RateLimitRPM > 0, so with rate limiting off the
+	// lockout/API maps grew without bound (memory-exhaustion DoS).
 	rlCtx, cancel := context.WithCancel(parentCtx)
 	go rateLimitCleanupLoop(rlCtx)
 	return cancel
 }
 
-// rateLimitCleanupLoop runs the periodic rl + SSRF DNS-cache cleanup
-// pass every 5 minutes until ctx is cancelled. Extracted from the
-// inline goroutine in the pre-extraction body so the loader stays
-// flat (avoids the linter's nestif trigger) and so the cancellation
-// invariant can be unit-tested directly without waiting on a real
-// tick.
+// rateLimitCleanupLoop runs the periodic security-limiter cleanup pass every
+// 5 minutes until ctx is cancelled: the IP rate limiter, SSRF DNS cache, login
+// account-lockout, admin-API rate limiter, and cluster-enrollment rate limiter.
+// Extracted from the inline
+// goroutine in the pre-extraction body so the loader stays flat (avoids the
+// linter's nestif trigger) and so the cancellation invariant can be unit-tested
+// directly without waiting on a real tick.
 func rateLimitCleanupLoop(ctx context.Context) {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
@@ -78,6 +91,9 @@ func rateLimitCleanupLoop(ctx context.Context) {
 		case <-t.C:
 			rl.Cleanup()
 			ssrf.CacheCleanup()
+			loginLimiter.Cleanup()
+			apiLimiter.Cleanup()
+			enrollRateLimitCleanup()
 		}
 	}
 }

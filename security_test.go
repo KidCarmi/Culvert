@@ -21,6 +21,47 @@ func TestIPFilter_ModeOff(t *testing.T) {
 	}
 }
 
+// TestIPFilter_CorruptModeDeniesAll pins the fail-closed contract: an
+// unrecognized (corrupt) mode reaching the filter through a raw
+// persistence/snapshot path (config reload / admin_settings restore /
+// config-version rollback / cluster ConfigSnapshot) must DENY ALL traffic.
+// Denying-all (not coercing to "block") is the only safe choice: a corrupted
+// allowlist deployment coerced to a blocklist would admit every non-listed IP
+// (fail open). Here we prove BOTH a listed and an unlisted IP are denied.
+func TestIPFilter_CorruptModeDeniesAll(t *testing.T) {
+	for _, bad := range []string{"deny", "blockk", "ALLOW", "off", "enabled", "x"} {
+		f := freshIPF()
+		f.SetMode(bad)
+		f.Add("203.0.113.9") //nolint:errcheck // valid IP literal, Add cannot fail here
+		if f.Allowed("203.0.113.9") {
+			t.Errorf("SetMode(%q): listed IP allowed — corrupt mode must deny all (fail closed)", bad)
+		}
+		if f.Allowed("198.51.100.7") {
+			t.Errorf("SetMode(%q): unlisted IP allowed — corrupt allowlist must NOT become a permissive blocklist", bad)
+		}
+	}
+}
+
+// TestIPFilter_ValidModesAndDisabled pins that the three valid states behave
+// correctly: "" disables (all pass), and "allow"/"block" round-trip through
+// Mode() unchanged.
+func TestIPFilter_ValidModesAndDisabled(t *testing.T) {
+	for _, ok := range []string{"allow", "block", ""} {
+		f := freshIPF()
+		f.SetMode(ok)
+		if got := f.Mode(); got != ok {
+			t.Errorf("SetMode(%q): Mode() = %q, want unchanged", ok, got)
+		}
+	}
+	// "" is disabled — every IP passes.
+	f := freshIPF()
+	f.SetMode("")
+	f.Add("203.0.113.9") //nolint:errcheck // valid IP literal
+	if !f.Allowed("203.0.113.9") || !f.Allowed("8.8.8.8") {
+		t.Error(`empty mode must disable the filter (all IPs allowed)`)
+	}
+}
+
 func TestIPFilter_AllowMode(t *testing.T) {
 	f := freshIPF()
 	f.SetMode("allow")

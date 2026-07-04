@@ -760,9 +760,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Upstream proxies (Finding 10.3).
+	// Upstream proxies (Finding 10.3). SetProxies keeps the YAML-configured
+	// circuit-breaker parameters (previously hardcoded to 5/60s here).
 	if len(b.UpstreamProxies) > 0 {
-		upstreamPool.Configure(b.UpstreamProxies, 5, 60*time.Second)
+		upstreamPool.SetProxies(b.UpstreamProxies)
+		applyUpstreamProxy()
 	}
 
 	// Connection limits (Finding 10.3).
@@ -780,6 +782,10 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "config.import", importMode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
 	saveConfigVersion(sessionAdmin(r), "config.import")
+	// Snapshot the admin-settings layer (rate limit, IP filter, rewrite
+	// rules, block page, conn limit, upstream pool, …) so the imported state
+	// survives a restart — import previously left it runtime-only.
+	adminSettingsSave()
 	jsonOK(w, map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt})
 }
 
@@ -1300,9 +1306,13 @@ func apiUpstream(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		upstreamPool.Configure(body.Proxies, 5, 60*time.Second)
+		// SetProxies keeps the YAML-configured circuit-breaker parameters;
+		// adminSettingsSave makes the change survive a restart (the pool is
+		// otherwise runtime-only — Finding 10.3 out-of-scope observation).
+		upstreamPool.SetProxies(body.Proxies)
 		applyUpstreamProxy()
 		auditEvent(r, "upstream.update", fmt.Sprintf("%d proxies", len(body.Proxies)), "")
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "proxies": upstreamPool.List()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

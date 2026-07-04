@@ -211,3 +211,65 @@ func TestAPIRateLimiter_Cleanup(t *testing.T) {
 		t.Error("expected cleanup to remove expired entry")
 	}
 }
+
+// ─── LoginLimiter.Cleanup — bound the username-keyed map ─────────────────────
+
+// TestLoginLimiter_Cleanup_RemovesStaleEntries is the regression guard for the
+// unbounded-memory DoS: the key is the attacker-controlled login username, so
+// without a sweep one failed attempt per random username leaks a permanent
+// entry. Cleanup must evict entries whose lock has expired AND unlocked
+// entries whose failure window has elapsed, while keeping still-relevant ones.
+func TestLoginLimiter_Cleanup_RemovesStaleEntries(t *testing.T) {
+	l := newLimiter()
+	now := time.Now()
+
+	l.mu.Lock()
+	// (a) lock expired → removable.
+	l.entries["expired-lock"] = &lockoutEntry{attempts: MaxAttempts, lockedUntil: now.Add(-time.Second)}
+	// (b) unlocked, window elapsed → removable (a future RecordFailure resets it).
+	l.entries["stale-window"] = &lockoutEntry{attempts: 2, firstFail: now.Add(-Window - time.Minute)}
+	// (c) unlocked, window still open → KEEP (an in-progress attacker must stay
+	//     rate-limited).
+	l.entries["fresh-fail"] = &lockoutEntry{attempts: 2, firstFail: now.Add(-time.Second)}
+	// (d) currently locked → KEEP (the lock must still apply).
+	l.entries["active-lock"] = &lockoutEntry{attempts: MaxAttempts, lockedUntil: now.Add(Duration)}
+	l.mu.Unlock()
+
+	l.Cleanup()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.entries["expired-lock"]; ok {
+		t.Error("expired lock entry should be evicted")
+	}
+	if _, ok := l.entries["stale-window"]; ok {
+		t.Error("elapsed-window entry should be evicted")
+	}
+	if _, ok := l.entries["fresh-fail"]; !ok {
+		t.Error("in-window failure entry must be kept (attacker still rate-limited)")
+	}
+	if _, ok := l.entries["active-lock"]; !ok {
+		t.Error("active lock entry must be kept (lock still applies)")
+	}
+}
+
+// TestLoginLimiter_Cleanup_DoesNotAlterDecision proves eviction is behavior-
+// preserving: a fresh attempt after a stale entry is swept sees exactly the
+// same state it would have via the hot-path lazy reset.
+func TestLoginLimiter_Cleanup_DoesNotAlterDecision(t *testing.T) {
+	l := newLimiter()
+	const user = "carol"
+
+	l.mu.Lock()
+	l.entries[user] = &lockoutEntry{attempts: 3, firstFail: time.Now().Add(-Window - time.Minute)}
+	l.mu.Unlock()
+
+	l.Cleanup() // removes the stale entry
+
+	// A subsequent failure must start a fresh window (attempts=1), identical to
+	// the lazy reset RecordFailure would have applied to the stale entry.
+	l.RecordFailure(user)
+	if left := l.AttemptsLeft(user); left != MaxAttempts-1 {
+		t.Errorf("AttemptsLeft = %d after post-cleanup failure; want %d (fresh window)", left, MaxAttempts-1)
+	}
+}
