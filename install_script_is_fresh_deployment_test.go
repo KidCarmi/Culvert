@@ -77,7 +77,7 @@ func ensureFixtureImage(t *testing.T) {
 func uniqueProjectDir(t *testing.T, suffix string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), t.Name()+"-"+suffix)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
 	return dir
