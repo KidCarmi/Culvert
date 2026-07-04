@@ -12,9 +12,10 @@
 #       provision + anon-401 + authenticated-200 gate is a deterministic guard;
 #       ZAP findings stay advisory (passive: missing headers / cookie flags /
 #       info leaks).
-#   J4  gosec with G401 (weak crypto) + G402 (InsecureSkipVerify) UN-excluded —
-#       report-only discovery of the surface those blanket exclusions hide in a
-#       TLS-interception product. Drive-to-zero + flip-to-blocking is a follow-up.
+#   J4  gosec report-only view with the remaining blocking-gate exclusions
+#       dropped (G703/G704 — SSRF / forward-proxy-by-design). G401 (weak crypto)
+#       + G402 (InsecureSkipVerify) are now ENFORCED by the blocking gate, so
+#       this lane just surfaces the residual excluded classes for human eyes.
 #
 # The forged-leaf TLS posture of the INSPECTED path is asserted deterministically
 # and hermetically by TestMITM_ForgedLeafTLSPosture (Go), not here — the shipped
@@ -250,16 +251,17 @@ jobs:
       - name: Install gosec (pinned)
         run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
 
-      - name: gosec with G401 + G402 RE-INCLUDED (non-test, report-only)
-        # The blocking gates exclude G401 (weak crypto) + G402 (InsecureSkipVerify)
-        # repo-wide. This measures the hidden surface WITHOUT that exclusion,
-        # scoped to non-test files (inline #nosec on the annotated production
-        # sites already suppresses the legitimate ones). Report-only until a
-        # follow-up drives the delta to zero and flips the blocking gate.
+      - name: gosec with the blocking-gate exclusions dropped (non-test, report-only)
+        # G401 (weak crypto) + G402 (InsecureSkipVerify) are now ENFORCED by the
+        # blocking gates (the few config-gated sites carry an at-site `// #nosec`).
+        # This lane keeps a broader report-only view by dropping the REMAINING
+        # exclusions too (G703/G704 — SSRF / forward-proxy-by-design), surfacing
+        # that hidden surface for periodic human eyes without blocking. Non-test
+        # (inline #nosec on annotated production sites suppresses the legit ones).
         run: |
           set -o pipefail
           echo "── root module ──"
           gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... || true
           echo "── cmd/culvert-maint ──"
           ( cd cmd/culvert-maint && gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... ) || true
-          echo "Report-only: see roadmap/CI-REDESIGN.md §5c for the drive-to-zero follow-up."
+          echo "Report-only: G401/G402 are enforced in the blocking gate; this surfaces the remaining (G703/G704) delta."

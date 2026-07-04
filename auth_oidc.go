@@ -95,7 +95,7 @@ func NewOIDCAuth(cfg OIDCConfig) (*OIDCAuth, error) {
 	transport.DialContext = ssrfSafeDialContext // SSRF guard at dial level (RISK-002): the admin-configured IntrospectURL is reached per-request
 	if cfg.TLSSkipVerify {
 		logWarnf("OIDC introspection: TLS certificate verification DISABLED (tls_skip_verify) — credentials traverse an unverified channel vulnerable to MITM; intended for self-signed dev IdPs only") // RISK-009
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}                                                                                                                               //nolint:gosec // InsecureSkipVerify is config-guarded by cfg.TLSSkipVerify
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}                                                                                                                               // #nosec G402 -- InsecureSkipVerify is config-guarded by cfg.TLSSkipVerify
 	}
 	return &OIDCAuth{
 		cfg:    cfg,

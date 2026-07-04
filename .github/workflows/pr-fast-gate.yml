@@ -256,11 +256,11 @@ jobs:
       - name: gosec (root module)
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
-          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 ./...
+          gosec -exclude=G104,G302,G304,G703,G704 ./...
 
       - name: gosec (cmd/culvert-maint)
         working-directory: cmd/culvert-maint
-        run: gosec -exclude=G104,G302,G304,G401,G402,G703,G704 ./...
+        run: gosec -exclude=G104,G302,G304,G703,G704 ./...
 
   # ─── 6. Secrets: gitleaks (runs on EVERY PR, docs included) ────────────────
   # Deliberately not gated on the code filter — secrets leak into docs too.
