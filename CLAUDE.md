@@ -36,7 +36,7 @@ security_scan.go — Scan-orchestrator shim: adapters + wrappers over internal/s
 fileblock.go  — File extension/MIME blocking profiles
 fileprofile.go — Named file-type blocking profiles (Executables, Archives, etc.)
 geoip.go      — MaxMind GeoLite2 country lookup with background cache
-controlplane.go — gRPC-based Control Plane / Data Plane distributed architecture
+controlplane.go — CP/DP distributed architecture, split across cohesive same-package files (DEBT-003): controlplane.go (service def + CP aggregators + enroll rate-limit), controlplane_snapshot.go (ConfigSnapshot/ConfigStore + applyConfigSnapshot lifecycle), controlplane_server.go (CP gRPC server + RPC handlers), controlplane_client.go (DP gRPC client + loops), controlplane_tls.go (mTLS + cert-pool)
 enrollment.go — Token-based node enrollment, ClusterStore, cluster CA, heartbeat monitor
 upstream.go   — Upstream-pool shim: aliases + singleton over internal/upstream (ADR-0002; pool/circuit-breaker/health-loop engine lives in the package; main keeps applyUpstreamProxy transport wiring)
 ocsp.go       — OCSP shim: transport wiring over internal/ocsp (ADR-0002)

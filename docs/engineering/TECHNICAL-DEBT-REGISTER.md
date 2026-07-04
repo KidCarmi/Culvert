@@ -11,7 +11,7 @@
 |---|---|---|---|
 | DEBT-001 | MEDIUM ↓ | Flat root namespace — engines extracted (ADR-0002 COMPLETE, 44 pkgs), root shims/globals remain | 172 root `.go` files (non-test) |
 | DEBT-002 | ✅ CLOSED | `handleRequest` was ~497 lines / cyclo 73 on the hottest security path | `proxy.go` — decomposed 2026-06-28 |
-| DEBT-003 | MEDIUM | God-files (3 over 1,800 LOC; `store.go` halved by extraction) | `controlplane.go` (2,236), `main.go` (1,990), `proxy.go` (1,901) |
+| DEBT-003 | MEDIUM ↓ | God-files: `controlplane.go` split 2,240→341 (2026-07-04); remaining `main.go` (1,990), `proxy.go` (1,901) | `main.go`, `proxy.go` |
 | DEBT-004 | MEDIUM | `configBackup` god-struct with 3 divergent memberships | `ui_policy.go:736`, `configversion.go` |
 | DEBT-005 | ✅ CLOSED | `main.go` was a 30-`init*` hand-wired DI container | startup-slice program complete (24 slices, contract-tested) |
 | DEBT-006 | MEDIUM | `ConfigSnapshot` (33-field) CP→DP god-DTO | `controlplane.go:1508 applyConfigSnapshot` |
@@ -84,13 +84,23 @@
   (`handleHTTP` gocognit 32, `handleWebSocket` funlen, `handleTunnelInspect` 57) are separate
   functions, out of scope here; candidates for a future targeted pass if prioritised.
 
-## DEBT-003 — God-files · MEDIUM
-- **2026-07-04 (re-measured):** `controlplane.go` (2,236 — *grew* since June, now the largest),
-  `main.go` (1,990, was 2,367), `proxy.go` (1,901, roughly flat), `store.go` (**1,171**, was
-  2,313 — halved by the ADR-0002 blocklist/audit/reqlog extractions). Merge-conflict magnets;
-  exceed reviewer working memory. `controlplane.go` is the one moving in the wrong direction —
-  every cluster feature lands there (same force as DEBT-006); it should be the next split target.
-  **Complexity L (staged).**
+## DEBT-003 — God-files · MEDIUM (↓ progress 2026-07-04)
+- **`controlplane.go` SPLIT (2026-07-04):** the flagged next target — 2,240 LOC, the one file
+  *growing* (every cluster feature landed there) — decomposed into five cohesive same-package
+  files along the CP/DP boundary the file's own header described: `controlplane.go` (341 — service
+  def + the CP-side rate-limit/revocation/audit aggregators + enrollment rate-limiting),
+  `controlplane_snapshot.go` (678 — ConfigSnapshot/ConfigStore + the applyConfigSnapshot / DP
+  last-good / CurrentConfigSnapshot lifecycle), `controlplane_server.go` (677 — CP gRPC server +
+  all RPC handlers), `controlplane_client.go` (439 — DP gRPC client + poll/gossip loops),
+  `controlplane_tls.go` (147 — shared mTLS + cert-pool rebuild). **Pure move, zero behaviour
+  change:** verified by an identical 102-declaration set before/after (no add/loss/dup);
+  build/vet/gofmt clean; controlplane-adjacent suites green under `-race`. No file over 1,800 LOC
+  references `controlplane.go` any more.
+- **Remaining god-files:** `main.go` (1,990 — the 24-slice startup shim; DEBT-005 closed its
+  opacity, size is now mostly thin shim calls) and `proxy.go` (1,901 — the hot path; `handleRequest`
+  already decomposed under DEBT-002). Both are lower-priority than controlplane was: neither is
+  growing, and both were already de-risked by prior work. **Complexity L (staged); next candidate
+  is `proxy.go`'s remaining handler split if prioritised.**
 
 ## DEBT-004 — `configBackup` god-struct · MEDIUM
 - One 25-field struct (`ui_policy.go:736`) serves export/import, version rollback, and restart
