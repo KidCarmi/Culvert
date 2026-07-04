@@ -11,7 +11,7 @@
 |---|---|---|---|
 | DEBT-001 | MEDIUM ↓ | Flat root namespace — engines extracted (ADR-0002 COMPLETE, 44 pkgs), root shims/globals remain | 172 root `.go` files (non-test) |
 | DEBT-002 | ✅ CLOSED | `handleRequest` was ~497 lines / cyclo 73 on the hottest security path | `proxy.go` — decomposed 2026-06-28 |
-| DEBT-003 | MEDIUM ↓ | God-files: `controlplane.go` split 2,240→341 (2026-07-04); remaining `main.go` (1,990), `proxy.go` (1,901) | `main.go`, `proxy.go` |
+| DEBT-003 | MEDIUM ↓ | God-files: `controlplane.go` split 2,240→341, `proxy.go` split 1,901→727 (2026-07-04); remaining `main.go` (1,990) | `main.go` |
 | DEBT-004 | MEDIUM | `configBackup` god-struct with 3 divergent memberships | `ui_policy.go:736`, `configversion.go` |
 | DEBT-005 | ✅ CLOSED | `main.go` was a 30-`init*` hand-wired DI container | startup-slice program complete (24 slices, contract-tested) |
 | DEBT-006 | MEDIUM | `ConfigSnapshot` (33-field) CP→DP god-DTO | `controlplane.go:1508 applyConfigSnapshot` |
@@ -96,11 +96,21 @@
   change:** verified by an identical 102-declaration set before/after (no add/loss/dup);
   build/vet/gofmt clean; controlplane-adjacent suites green under `-race`. No file over 1,800 LOC
   references `controlplane.go` any more.
-- **Remaining god-files:** `main.go` (1,990 — the 24-slice startup shim; DEBT-005 closed its
-  opacity, size is now mostly thin shim calls) and `proxy.go` (1,901 — the hot path; `handleRequest`
-  already decomposed under DEBT-002). Both are lower-priority than controlplane was: neither is
-  growing, and both were already de-risked by prior work. **Complexity L (staged); next candidate
-  is `proxy.go`'s remaining handler split if prioritised.**
+- **`proxy.go` SPLIT (2026-07-04):** the flagged next candidate — 1,901 LOC on the hot path —
+  decomposed into four cohesive same-package files along the handler boundary: `proxy.go` (727 —
+  the request-dispatch pipeline `handleRequest` + its DEBT-002 helpers, policy-action state,
+  `scrubForwardedHeaders`, `sanitizeLog`; now the composition root only), `proxy_tunnel.go` (796 —
+  CONNECT/WebSocket/tunnel relay: `relayBufPool`, `relayCounted`/`bidiRelayCounted`,
+  `handleTunnel`/`handleTunnelBypass`/`handleTunnelInspect`, `handleWebSocket`, `applyUpstreamProxy`,
+  hop-by-hop stripping), `proxy_http.go` (209 — plain-HTTP forward `handleHTTP` + request-body
+  limits + SSL-inspect stall detection), `proxy_portal.go` (197 — captive/SSO portal resolution,
+  proxy-auth parsing, safe-redirect validation). **Pure move, zero behaviour change:** verified by
+  an identical 52-declaration set before/after (no add/loss/dup); build/vet/gofmt clean; the hot-path
+  race suite (Proxy|Tunnel|WebSocket|Relay|HandleHTTP|HandleRequest|Mitm|Inspect|Policy|Auth|Scrub|
+  HopHeader|Portal|SSO|Bypass) green under `-race`; `BenchmarkPolicyEvaluate_*` allocs/op unchanged.
+- **Remaining god-file:** `main.go` (1,990 — the 24-slice startup shim; DEBT-005 closed its opacity,
+  size is now mostly thin shim calls). Lower-priority than controlplane/proxy were: it is not growing
+  and was already de-risked by the startup-slice program. **Complexity L (staged).**
 
 ## DEBT-004 — `configBackup` god-struct · MEDIUM
 - One 25-field struct (`ui_policy.go:736`) serves export/import, version rollback, and restart
