@@ -1223,6 +1223,56 @@ API contracts, re-expressed against the exported surface. Deleted `joinStrings` 
 gofmt, package suite `-race -count=2 -shuffle=on`, root Upstream/AdminSettings/SIGHUP suites
 `-race` — all green.
 
+### 2026-07-04 — next tranche mapped; TWO extractions DESIGNED (configver store, ca)
+Recorded per the standing rule so execution needs no re-discovery. Sequencing: **Slice A first
+(small, low-risk), Slice B as its OWN PR with an adversarial-review gate** (TLS hot path).
+Candidates surveyed and REJECTED for this tranche: `kek.go` (couples backupcrypt + cluster-CA
+key-at-rest — map after `ca` ships), `enrollment.go` (cluster hub, 1,290 LOC — needs its own
+program), `policy.go` (recorded keep, Phase C verdict), `controlplane.go` (DEBT-003 root-file
+*split*, not an internal extraction — every cluster feature lands there; different tool).
+
+**Slice A — `internal/configver` (config-version file store; Complexity S).**
+The numbered-snapshot store inside `configversion.go`: `ConfigVersion` meta, the
+`configVersionMu`/`configVersionSeq` counter + startup dir-scan (`initConfigVersioning`),
+envelope write (`saveConfigVersion`'s persistence half), `pruneConfigVersions` (50-max),
+`loadConfigVersion`, and the list logic behind `listConfigVersions`. **The one hard bind is the
+envelope embedding main's `configBackup`; the seam is `json.RawMessage`:** the store's API is
+`Save(meta ConfigVersion, config json.RawMessage)`, `Load(ver) (ConfigVersion, json.RawMessage,
+error)`, `List() []ConfigVersion`, `SetDirForTest`; main marshals/unmarshals `configBackup` on
+either side, so the package never sees the type. On-disk shape stays `{meta, config}`
+(MarshalIndent; the nested raw config's indentation may differ cosmetically — loader uses
+`Unmarshal`, tolerant; round-trip pinned by the existing configversion suites + the
+config_surfaces full-surface round-trip). Seams: `obs` + `fileutil.AtomicWrite` (both exist).
+**Stays in main:** `captureConfigBackup`/`applyConfigBackup`/`restoreBlocklistFromBackup`
+(touch every store), `validateConfigBackup`, ALL `diff*` functions (typed on main structs —
+`configBackup`, `PolicyRule`, `RewriteRule`, `CategoryGroup`, `CategoryEntry`),
+`configRollbackMu`, and the API handlers (RBAC + audit + saveConfigVersion callers). Root
+`saveConfigVersion(actor, action)` keeps its signature: capture → marshal → `store.Save`.
+Tests: `snapshotConfigVersionsDir` swaps to `SetDirForTest`; store-mechanics tests (seq resume,
+prune, corrupt-file tolerance) move in-package; behavior suites stay in main.
+
+**Slice B — `internal/ca` (CertManager; Complexity M/L — HOT PATH, own PR).**
+The MITM trust core in `ca.go` (739 LOC): `CertManager` (root CA init/load/save, leaf signing,
+LRU cache w/ TTL + 10% eviction, hit/miss atomics), the encrypted-bundle codec (PBKDF2-600k +
+AES-GCM; **`caMagic`/`caVersion` byte format is FROZEN — on-disk compatibility**), dual-CA
+rotation (`RotateIfNeeded`, secondary-CA overlap, `StartCAAutoRotation` loop), `KeyProvider`
+iface + `localKeyProvider`, `ParseTLSPair`, `Ready`, `CacheStats`. Seams: `obs.Printf`/
+`obs.Sanitize`, `fileutil.AtomicWrite`, **plus the ONE new seam discovery found:
+`GetCert` observes sign latency on main's `certSignHist` (metrics.go)** — inject a
+publish-once observer (`cm.SetSignLatencyObserver(func(seconds float64))`, nil-safe no-op;
+main wires it at startup) so the engine never imports main metrics. **Stays in main:** the
+`certMgr` singleton, `caRuntime` (path/passphrase published by the rootca startup slice; read
+by ui_security re-persist), the rootca startup slice itself, all UI handlers, ca_metrics.go
+(already reads via exported `CacheStats` — unchanged), the CLUSTER CA (enrollment.go — a
+different CA, out of scope), and KeyProvider registration callers. **Execution gates
+(non-negotiable):** move-only diff (no signature/behavior changes beyond the observer seam);
+full `-race ./...`; the MITM e2e suite (`mitm_inspect_e2e_test.go`) green — it is the
+customer-visible proof the hot path still MITMs; `ca_test`/`ca_rotation_test`/
+`coldstart_cabundle_test`/`cert_sign_histogram_test`/`cert_rotation_metrics_test` moved or
+re-expressed; benchgate green (leaf-sign latency is budgeted); **adversarial review agent on
+the diff before push** (the PR-1 registry precedent). If the observer seam grows beyond one
+hook, STOP and re-map — that's the fileblock lesson.
+
 ### 2026-07-04 — `internal/session` extracted (HMAC tokens + revocation) — with a race fix
 The session engine (`session.go`, 435 LOC — signing-key holder, token encode/decode
 (base64(json).HMAC-SHA256), revocation list (token + user level, lazy eviction, gossip
