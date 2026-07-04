@@ -71,7 +71,9 @@ type Feed struct {
 	domainAllowlist map[string]bool  // domains exempt from domain-level blocking
 	dbPath          string
 	syncInterval    time.Duration
-	lastSync        time.Time
+	lastSync        time.Time // time of the most recent sync attempt, success or failure
+	lastSuccess     time.Time // time of the most recent sync where every feed fetched cleanly
+	lastSyncErr     string    // summary of the most recent failure(s); empty when the last sync fully succeeded
 	totalEntries    atomic.Int64
 	enabled         bool
 }
@@ -151,10 +153,12 @@ func (tf *Feed) Sync() {
 	obs.Debugf("ThreatFeed: starting sync")
 	newURLs := make(map[string]entry, 50_000)
 	newDomains := make(map[string]entry, 20_000)
+	var failures []string
 
 	n, err := tf.fetchTextFeed(urlHausTextFeed, "urlhaus", newURLs, newDomains)
 	if err != nil {
 		obs.Printf("ThreatFeed: URLhaus sync failed: %v", err)
+		failures = append(failures, fmt.Sprintf("URLhaus: %v", err))
 	} else {
 		obs.Printf("ThreatFeed: URLhaus %d entries", n)
 	}
@@ -162,14 +166,22 @@ func (tf *Feed) Sync() {
 	n, err = tf.fetchTextFeed(openPhishFeed, "openphish", newURLs, newDomains)
 	if err != nil {
 		obs.Printf("ThreatFeed: OpenPhish sync failed: %v", err)
+		failures = append(failures, fmt.Sprintf("OpenPhish: %v", err))
 	} else {
 		obs.Printf("ThreatFeed: OpenPhish %d entries", n)
 	}
 
+	now := time.Now()
 	tf.mu.Lock()
 	tf.urls = newURLs
 	tf.domains = newDomains
-	tf.lastSync = time.Now()
+	tf.lastSync = now
+	if len(failures) == 0 {
+		tf.lastSuccess = now
+		tf.lastSyncErr = ""
+	} else {
+		tf.lastSyncErr = strings.Join(failures, "; ")
+	}
 	tf.mu.Unlock()
 	tf.totalEntries.Store(int64(len(newURLs)))
 
@@ -235,6 +247,19 @@ func (tf *Feed) Stats() (int64, time.Time, time.Duration) {
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 	return tf.totalEntries.Load(), tf.lastSync, tf.syncInterval
+}
+
+// SyncStatus reports whether the most recent sync fetched every feed
+// cleanly, the time of the last fully-successful sync (which may lag
+// lastSync from Stats if recent attempts have been failing), and a
+// summary of the most recent failure (empty when the last sync succeeded).
+// lastSync updates on every attempt regardless of outcome, so relying on
+// Stats alone lets a persistently-failing feed hide behind a
+// perpetually-fresh timestamp.
+func (tf *Feed) SyncStatus() (ok bool, lastSuccess time.Time, errSummary string) {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	return tf.lastSyncErr == "", tf.lastSuccess, tf.lastSyncErr
 }
 
 // defaultDomainAllowlist seeds the threat-feed domain allowlist with popular

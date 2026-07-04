@@ -212,6 +212,12 @@ func secScanStatusMap() map[string]interface{} {
 		m["threat_feed_entries"] = feedTotal
 		m["threat_feed_last_sync"] = feedLastSync
 		m["threat_feed_interval"] = feedInterval.String()
+		feedOK, feedLastSuccess, feedErr := globalThreatFeed.SyncStatus()
+		m["threat_feed_sync_ok"] = feedOK
+		m["threat_feed_last_success"] = feedLastSuccess
+		if feedErr != "" {
+			m["threat_feed_sync_error"] = feedErr
+		}
 		m["stat_feed_blocked"] = counters.ThreatFeedBlocked
 		// Tier 2.2: surface remote sidecar failure counter even when scan_svc_mode=remote.
 		m["stat_remote_scan_fail"] = counters.RemoteScanFail
@@ -219,38 +225,44 @@ func secScanStatusMap() map[string]interface{} {
 	}
 
 	feedTotal, feedLastSync, feedInterval := globalThreatFeed.Stats()
+	feedOK, feedLastSuccess, feedErr := globalThreatFeed.SyncStatus()
 	hits, misses, cacheSize := globalSecScanner.CacheStats()
 	m := map[string]interface{}{
-		"enabled":               globalSecScanner.Enabled(),
-		"scan_svc_mode":         "local",
-		"clamav_status":         globalSecScanner.ClamAVStatus(),
-		"yara_rules":            globalYARA.Count(),
-		"yara_warnings":         len(globalYARA.Warnings()), // Tier 2.1
-		"yara_inflight":         yaraInflightLoad(),         // Tier 1.3
-		"yara_inflight_max":     yaraGetMaxInflight(),       // Tier 1.3
-		"yara_enabled":          yaraGetEnabled(),
-		"yara_timeout_secs":     yaraGetTimeoutSecs(),
-		"yara_on_timeout":       yaraGetOnTimeout(),
-		"yara_on_saturation":    yaraGetOnSaturation(),
-		"yara_alert_degraded":   yaraGetAlertDegraded(),
-		"threat_feed_entries":   feedTotal,
-		"threat_feed_last_sync": feedLastSync,
-		"threat_feed_interval":  feedInterval.String(),
-		"cache_size":            cacheSize,
-		"cache_hits":            hits,
-		"cache_misses":          misses,
-		"stat_clam_blocked":     counters.ClamBlocked,
-		"stat_yara_blocked":     counters.YARABlocked,
-		"stat_feed_blocked":     counters.ThreatFeedBlocked,
-		"stat_scan_timeout":     counters.ScanTimeout,    // Tier 1.2
-		"stat_scan_skipped":     counters.ScanSkipped,    // Tier 1.2
-		"stat_remote_scan_fail": counters.RemoteScanFail, // Tier 2.2
+		"enabled":                  globalSecScanner.Enabled(),
+		"scan_svc_mode":            "local",
+		"clamav_status":            globalSecScanner.ClamAVStatus(),
+		"yara_rules":               globalYARA.Count(),
+		"yara_warnings":            len(globalYARA.Warnings()), // Tier 2.1
+		"yara_inflight":            yaraInflightLoad(),         // Tier 1.3
+		"yara_inflight_max":        yaraGetMaxInflight(),       // Tier 1.3
+		"yara_enabled":             yaraGetEnabled(),
+		"yara_timeout_secs":        yaraGetTimeoutSecs(),
+		"yara_on_timeout":          yaraGetOnTimeout(),
+		"yara_on_saturation":       yaraGetOnSaturation(),
+		"yara_alert_degraded":      yaraGetAlertDegraded(),
+		"threat_feed_entries":      feedTotal,
+		"threat_feed_last_sync":    feedLastSync,
+		"threat_feed_interval":     feedInterval.String(),
+		"threat_feed_sync_ok":      feedOK,
+		"threat_feed_last_success": feedLastSuccess,
+		"cache_size":               cacheSize,
+		"cache_hits":               hits,
+		"cache_misses":             misses,
+		"stat_clam_blocked":        counters.ClamBlocked,
+		"stat_yara_blocked":        counters.YARABlocked,
+		"stat_feed_blocked":        counters.ThreatFeedBlocked,
+		"stat_scan_timeout":        counters.ScanTimeout,    // Tier 1.2
+		"stat_scan_skipped":        counters.ScanSkipped,    // Tier 1.2
+		"stat_remote_scan_fail":    counters.RemoteScanFail, // Tier 2.2
 	}
 	// ClamAV engine + signature-database version (Finding 4.3), so operators
 	// can see whether virus definitions are current. Absent when ClamAV is
 	// disabled or the daemon does not answer VERSION.
 	if v, ok := globalSecScanner.ClamAVVersion(); ok {
 		m["clamav_version"] = v
+	}
+	if feedErr != "" {
+		m["threat_feed_sync_error"] = feedErr
 	}
 	return m
 }

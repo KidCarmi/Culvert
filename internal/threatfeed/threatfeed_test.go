@@ -228,6 +228,46 @@ func TestThreatFeed_Stats(t *testing.T) {
 	}
 }
 
+func TestThreatFeed_SyncStatus_DefaultOK(t *testing.T) {
+	tf := newEnabledFeed()
+	ok, lastSuccess, errSummary := tf.SyncStatus()
+	if !ok || errSummary != "" || !lastSuccess.IsZero() {
+		t.Errorf("SyncStatus on fresh feed = (%v, %v, %q), want (true, zero, \"\")", ok, lastSuccess, errSummary)
+	}
+}
+
+func TestThreatFeed_SyncStatus_ReflectsFailure(t *testing.T) {
+	tf := newEnabledFeed()
+	// Simulate what Sync() records on a failed attempt: lastSync always
+	// advances, but lastSuccess only does when every feed fetched cleanly.
+	tf.lastSync = time.Now()
+	tf.lastSyncErr = "URLhaus: HTTP 503 from https://urlhaus.abuse.ch/downloads/text/"
+
+	ok, lastSuccess, errSummary := tf.SyncStatus()
+	if ok {
+		t.Error("SyncStatus ok = true, want false after a recorded failure")
+	}
+	if errSummary == "" {
+		t.Error("SyncStatus errSummary is empty, want the recorded failure")
+	}
+	if !lastSuccess.IsZero() {
+		t.Errorf("SyncStatus lastSuccess = %v, want zero (feed has never synced cleanly)", lastSuccess)
+	}
+
+	// A subsequent clean sync clears the error and records the success time.
+	now := time.Now()
+	tf.mu.Lock()
+	tf.lastSync = now
+	tf.lastSuccess = now
+	tf.lastSyncErr = ""
+	tf.mu.Unlock()
+
+	ok, lastSuccess, errSummary = tf.SyncStatus()
+	if !ok || errSummary != "" || lastSuccess.IsZero() {
+		t.Errorf("SyncStatus after recovery = (%v, %v, %q), want (true, non-zero, \"\")", ok, lastSuccess, errSummary)
+	}
+}
+
 func TestThreatFeed_ExportURLs(t *testing.T) {
 	tf := newEnabledFeed()
 	tf.urls["http://evil.com/payload"] = entry{Source: "urlhaus", AddedAt: time.Unix(1700000000, 0)}
