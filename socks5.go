@@ -117,6 +117,66 @@ func (s *socks5Server) serve() {
 	}
 }
 
+// errSOCKS5ATYPUnsupported is returned by parseSOCKS5Request for an unknown
+// address type. It is the ONLY parse error the caller answers with a reply
+// (0x08, "address type not supported"), reproducing the prior inline behavior;
+// every other parse failure (bad version, short read) returns a distinct error
+// and the caller closes silently.
+var errSOCKS5ATYPUnsupported = errors.New("socks5: unsupported address type")
+
+// parseSOCKS5Request reads a SOCKS5 request — VER(1) CMD(1) RSV(1) ATYP(1),
+// the ATYP-typed destination address, and the 2-byte big-endian port — from r.
+// It is a pure wire parser: it performs NO writes, dials, logging, or policy
+// checks; the caller owns every reply and side effect. Host formatting matches
+// the wire: IPv4/IPv6 via net.IP.String() (IPv6 bracketed), domain as the raw
+// string. A zero-length domain is accepted (host == "", err == nil), exactly as
+// the prior inline parser did — it is rejected later by the SSRF guard, not here.
+// The returned cmd is NOT validated (the caller enforces CONNECT-only) so the
+// full address+port frame is consumed first, preserving the original read order.
+func parseSOCKS5Request(r io.Reader) (cmd byte, host string, port uint16, err error) {
+	req := make([]byte, 4)
+	if _, err = io.ReadFull(r, req); err != nil {
+		return 0, "", 0, err
+	}
+	if req[0] != 0x05 {
+		return 0, "", 0, fmt.Errorf("socks5: bad request version 0x%02x", req[0])
+	}
+	cmd = req[1]
+
+	switch req[3] { // ATYP
+	case 0x01: // IPv4
+		b := make([]byte, 4)
+		if _, err = io.ReadFull(r, b); err != nil {
+			return 0, "", 0, err
+		}
+		host = net.IP(b).String()
+	case 0x03: // Domain
+		lenBuf := make([]byte, 1)
+		if _, err = io.ReadFull(r, lenBuf); err != nil {
+			return 0, "", 0, err
+		}
+		domain := make([]byte, lenBuf[0])
+		if _, err = io.ReadFull(r, domain); err != nil {
+			return 0, "", 0, err
+		}
+		host = string(domain)
+	case 0x04: // IPv6
+		b := make([]byte, 16)
+		if _, err = io.ReadFull(r, b); err != nil {
+			return 0, "", 0, err
+		}
+		host = "[" + net.IP(b).String() + "]"
+	default:
+		return 0, "", 0, errSOCKS5ATYPUnsupported
+	}
+
+	portBuf := make([]byte, 2)
+	if _, err = io.ReadFull(r, portBuf); err != nil {
+		return 0, "", 0, err
+	}
+	return cmd, host, binary.BigEndian.Uint16(portBuf), nil
+}
+
 func handleSOCKS5(conn net.Conn) {
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck
@@ -193,47 +253,17 @@ func handleSOCKS5(conn net.Conn) {
 		conn.Write([]byte{0x05, 0x00}) //nolint:errcheck
 	}
 
-	// ── Request: VER(1) CMD(1) RSV(1) ATYP(1) ───────────────────────────────
-	req := make([]byte, 4)
-	if _, err := io.ReadFull(conn, req); err != nil || req[0] != 0x05 {
+	// ── Request: VER(1) CMD(1) RSV(1) ATYP(1) + address + port ──────────────
+	cmd, host, port, err := parseSOCKS5Request(conn)
+	if err != nil {
+		// Only the unsupported-ATYP case emits a reply before closing, exactly
+		// as the prior inline parser did; every other parse failure (bad VER,
+		// short read) closes silently.
+		if errors.Is(err, errSOCKS5ATYPUnsupported) {
+			socks5Reply(conn, 0x08) // address type not supported
+		}
 		return
 	}
-	cmd, atyp := req[1], req[3]
-
-	var host string
-	switch atyp {
-	case 0x01: // IPv4
-		b := make([]byte, 4)
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return
-		}
-		host = net.IP(b).String()
-	case 0x03: // Domain
-		lenBuf := make([]byte, 1)
-		if _, err := io.ReadFull(conn, lenBuf); err != nil {
-			return
-		}
-		domain := make([]byte, lenBuf[0])
-		if _, err := io.ReadFull(conn, domain); err != nil {
-			return
-		}
-		host = string(domain)
-	case 0x04: // IPv6
-		b := make([]byte, 16)
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return
-		}
-		host = "[" + net.IP(b).String() + "]"
-	default:
-		socks5Reply(conn, 0x08) // address type not supported
-		return
-	}
-
-	portBuf := make([]byte, 2)
-	if _, err := io.ReadFull(conn, portBuf); err != nil {
-		return
-	}
-	port := binary.BigEndian.Uint16(portBuf)
 	target := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
 	if cmd != 0x01 { // only CONNECT supported
