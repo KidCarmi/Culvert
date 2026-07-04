@@ -18,7 +18,7 @@
 | DEBT-007 | ✅ CLOSED | No end-to-end SSL-inspection MITM data-path test | `mitm_inspect_e2e_test.go` — verified 2026-07-04 |
 | DEBT-008 | LOW | Two parallel update mechanisms coexist | `updater/` + `release_dispatch*.go` |
 | DEBT-009 | LOW | Three durability layers for config can drift | `config.go`, `admin_settings.go`, `configversion.go` |
-| DEBT-010 | LOW | Coverage floor 55% (doc says 60%); delta gate non-blocking | `security-release-gate.yml:344`; `code-review.yml:96` |
+| DEBT-010 | ✅ CLOSED | Coverage floor 55% (doc said 60%); delta gate non-blocking | resolved in tree by CI-REDESIGN step 7 — verified 2026-07-04 |
 
 ---
 
@@ -143,11 +143,14 @@
   wins is non-obvious. Documented but operationally confusing. **Recommendation:** a single
   precedence doc + a diagnostics endpoint that shows effective-vs-source for each setting.
 
-## DEBT-010 — Coverage floor / delta gate · LOW
-- Global floor is 55% (`security-release-gate.yml:344`) while a comment says 60%
-  (`code-review.yml:91`) — doc/impl drift; the delta gate is `continue-on-error`
-  (`code-review.yml:96`) so it cannot block. **Recommendation:** reconcile the number and make the
-  delta gate blocking on a real regression. **Complexity S.**
+## DEBT-010 — Coverage floor / delta gate · ✅ CLOSED 2026-07-04 (drift sync)
+- **Was:** global floor 55% while a `code-review.yml` comment said 60%; the coverage delta gate
+  was `continue-on-error` and could not block.
+- **Found already resolved in the tree:** the delta gate was **retired** by CI-REDESIGN step 7
+  ("Superseded by the Fast PR Gate's single `-race` run") — both coverage contracts (55% global +
+  per-file floors) are now enforced by ONE blocking script, `.github/scripts/coverage-floor.sh`
+  (`GLOBAL_FLOOR=55` + a per-file floor table; the old 60% comment is gone with the retired job).
+  Single enforcement point, no doc/impl split — the debt's premise no longer exists.
 
 ---
 

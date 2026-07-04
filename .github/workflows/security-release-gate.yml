@@ -129,6 +129,25 @@ jobs:
         # govulncheck exits non-zero if any reachable code has a known CVE.
         run: govulncheck ./...
 
+      # govulncheck does not traverse module boundaries — `./...` from the
+      # repo root analyzes the root module only, so the nested modules get
+      # explicit runs (RISK-014). cmd/culvert-maint is blocking like the root.
+      - name: Check nested module cmd/culvert-maint
+        working-directory: cmd/culvert-maint
+        run: govulncheck ./...
+
+      # ADVISORY: updater/ carries known unfixed docker/docker CVEs whose
+      # unreachability was previously asserted only by prose (.trivyignore
+      # rationale — RISK-ACC-1). This run turns that assertion into real
+      # reachability analysis. Non-blocking because the module is slated for
+      # deletion (DEBT-008) and a reachable finding has no fix short of
+      # removal — but ANY finding here invalidates the RISK-ACC-1 acceptance
+      # and must be triaged, not ignored.
+      - name: Check nested module updater (advisory)
+        continue-on-error: true
+        working-directory: updater
+        run: govulncheck ./...
+
   # ─── 3. Dependency audit — trivy filesystem ────────────────────────────────
   vuln-trivy-fs:
     name: "CVE · trivy (source)"
@@ -161,6 +180,28 @@ jobs:
             --exit-code 1 \
             --format table \
             .
+
+      # RISK-006: the blocking gate above structurally CANNOT fail on a vuln
+      # that is (a) unfixed upstream, (b) MEDIUM or lower, or (c) listed in
+      # .trivyignore — all three masks are active there. This advisory pass
+      # scans with NO masking and posts to the job summary, so "green gate"
+      # never silently means "vulns exist but are filtered". Never fails.
+      - name: Full-severity unmasked report (advisory — what the gate cannot see)
+        if: always()
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --exit-code 0 \
+            --format table \
+            . | tee trivy-fs-unmasked.txt
+          {
+            echo "### Trivy full-severity report (advisory)"
+            echo "Everything Trivy knows about, INCLUDING vulns masked from the blocking gate by --ignore-unfixed, the CRITICAL,HIGH filter, or .trivyignore."
+            echo '```'
+            cat trivy-fs-unmasked.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate SARIF report (optional — for GitHub Security tab)
         if: always()

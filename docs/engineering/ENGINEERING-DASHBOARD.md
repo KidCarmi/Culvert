@@ -23,7 +23,7 @@ A score only moves when the underlying evidence changes in the repository.
 |---|:---:|:---:|---|
 | Security | 4.2 | ↑ | All non-accepted HIGH risks closed (RISK-002/003 fixed; RISK-008 timing oracle; RISK-017 alert persistence). Open: RISK-010 (update image verify), gate blind spots. |
 | Testing | 4.2 | ↑ | Behavioral suite, race+shuffle determinism gate. DEBT-007 closed: `mitm_inspect_e2e_test.go` drives real TLS through the inspect path (trust-asymmetry proof). |
-| CI/CD & Release | 4.0 | → | SHA-pinned actions, cosign keyless, SLSA L3, signed catalog (P2b-2b). Open: RISK-006/014/015/016 (gate blind spots — all XS/S fixes). |
+| CI/CD & Release | 4.2 | ↑ | SHA-pinned actions, cosign keyless, SLSA L3, signed catalog (P2b-2b). Gate hardening landed 2026-07-04: per-module govulncheck, unmasked-vuln advisory report, self-expiring `.trivyignore`, all scanners version-pinned. Open: RISK-015 (LOW), CodeQL-as-required-check (maintainer branch-protection toggle). |
 | Documentation | 4.0 | ↑ | Strong `CLAUDE.md` + roadmap + governance layer. Both formerly-missing runbooks now exist: `docs/operator/ha-lease-failover.md`, backup-restore §8b recovery. |
 | Operability (single-CP) | 3.5 | → | Fail-static confirmed, atomic restore + interrupted-restore boot guard (RISK-005), OTLP traces, alert webhooks now durable (RISK-017). No distinct `/readyz`. |
 | HA / DR readiness | 3.5 | ↑ | RISK-001 CLOSED: ADR-0005 etcd fencing lease — split-brain structurally prevented in lease mode (pinned by `TestCL4_*`), safe auto-failover, runbook. Residual: bounded LWW ≤TTL on partition; legacy (no-etcd) mode stays safe-manual. |
@@ -76,12 +76,13 @@ The deferred artifacts will be created when there is validated content to put in
 
 Sequenced backlog (full detail in the registers):
 
-1. **This week (hours each, all XS/S):** RISK-014 (govulncheck the two nested modules),
-   RISK-016 (pin scanner versions, SHA-pin the `@main` action, make CodeQL blocking),
-   RISK-006 (non-blocking full-severity trivy report + `# expires:` on `.trivyignore` entries),
-   DEBT-010 (reconcile the 55%-vs-60% coverage floor; make the delta gate blocking).
-2. **This month:** DEBT-008 — finish removing the legacy `updater/` (closes RISK-ACC-1);
-   RISK-011 — post-rollback health verification + failure-path tests.
+1. ~~**This week:** gate hardening~~ ✅ **DONE 2026-07-04** — RISK-014 (per-module govulncheck),
+   RISK-006 (unmasked advisory report + self-expiring `.trivyignore`), RISK-016 pins (found
+   already fixed in tree), DEBT-010 (found already resolved by CI-REDESIGN step 7).
+   **Remaining from this batch, maintainer-only:** add CodeQL to the required status checks
+   (branch-protection setting — not expressible in repo code).
+2. **This month:** DEBT-008 — finish removing the legacy `updater/` (closes RISK-ACC-1 and the
+   standing Dependabot banner); RISK-011 — post-rollback health verification + failure-path tests.
 3. **This quarter:** RISK-010 — in-binary digest/signature verification of the applied image
    (natural extension of the P2b Sigstore machinery from catalogs to images);
    DEBT-004/006 — explicit per-surface config types to stop membership drift.

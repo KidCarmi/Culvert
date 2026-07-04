@@ -15,10 +15,10 @@
 | RISK-001 | HIGH | ✅ CLOSED | Multi-CP HA split-brain (no quorum/fencing) | ADR-0004 safe defaults + ADR-0005 S0–S5 SHIPPED (2026-07-03): etcd fencing lease — Acquire-gated promotion, self-fence, epoch-fenced write sinks, safe auto-failover, GUI/compose/runbook. Legacy (no etcd) keeps the safe-manual posture. **HV** |
 | RISK-002 | HIGH | ✅ CLOSED | OIDC introspection path missing SSRF dial guard | fixed `auth_oidc.go:95` (2026-06-28) |
 | RISK-003 | HIGH | ✅ CLOSED | Webhook HMAC secret persisted cleartext on disk | `alerts.go`, `alerts_secret.go` |
-| RISK-006 | MEDIUM | OPEN | Gate config blind spots: `--ignore-unfixed` + `HIGH,CRITICAL` only (masks unfixed/medium) | `security-release-gate.yml:135-143` — **trivy-verified 2026-06-28** |
-| RISK-014 | MEDIUM | OPEN | Reachability gate (govulncheck) scans root module only; nested modules unanalyzed | `security-release-gate.yml:114` vs `updater/go.mod`, `cmd/culvert-maint/go.mod` |
+| RISK-006 | MEDIUM | ✅ CLOSED | Gate config blind spots: `--ignore-unfixed` + `HIGH,CRITICAL` only (masks unfixed/medium) | advisory unmasked report + trivy-native `exp:` dates (2026-07-04) |
+| RISK-014 | MEDIUM | ✅ CLOSED | Reachability gate (govulncheck) scans root module only; nested modules unanalyzed | per-module govulncheck in both lanes (2026-07-04) |
 | RISK-015 | LOW | OPEN | Single-scanner gate; detection-source divergence (Dependabot 5 vs Trivy DB 3) | trivy run vs Dependabot count, 2026-06-28 |
-| RISK-016 | MEDIUM | OPEN | Scanners installed `@latest`; CodeQL non-blocking | `security-release-gate.yml:52,110,252`; `ci.yml:72` |
+| RISK-016 | LOW ↓ | MITIGATING | ~~Scanners `@latest`~~ all pinned (tree-verified 2026-07-04); residual: CodeQL non-blocking | gosec v2.27.1 / govulncheck v1.5.0 / go-licenses v1.6.0 / trivy v0.69.3 / Obituary SHA-pinned |
 | RISK-ACC-1 | HIGH | ACCEPTED | 5 `docker/docker` CVEs in `updater/` (no upstream fix) | `updater/go.mod`; resolution = DEBT-008 |
 | RISK-005 | MEDIUM | ✅ CLOSED | Interrupted restore can leave `/data` absent | boot guard `checkInterruptedRestore` (`restore.go`) + runbook §8b |
 | RISK-008 | MEDIUM | ✅ CLOSED | Username timing oracle enables user enumeration | fixed `store.go` (2026-06-28) |
@@ -111,7 +111,18 @@
     cleartext migrated on save. Webhook HMAC delivery tests still green (signing unaffected).
     Build/vet/lint/`-race`/determinism all green. **Complexity S — closed as recommended.**
 
-## RISK-006 — Trivy gate config blind spots · MEDIUM · OPEN
+## RISK-006 — Trivy gate config blind spots · MEDIUM · ✅ CLOSED 2026-07-04
+- **Fix (as recommended):** (1) the blocking gate keeps `--ignore-unfixed` (un-actionable noise is a
+  real cost), and a new **non-blocking full-severity pass** (no `--ignore-unfixed`, no severity
+  filter, no ignorefile) posts everything Trivy knows to the job summary — "green gate" can no
+  longer silently coexist with masked vulns. (2) `.trivyignore` entries now carry **trivy-native
+  `exp:` dates** (better than the recommended CI check — trivy itself stops honoring the ignore
+  when the date passes, flipping the blocking gate red and forcing re-triage). Dates set to
+  2026-10-01, aligned to the updater-removal target (DEBT-008/RISK-ACC-1); the file documents
+  that extending requires re-validating the reachability rationale, not reflex.
+- Original finding preserved below for context.
+
+### (was) RISK-006 — Trivy gate config blind spots · MEDIUM · OPEN
 - **Current state (trivy-verified 2026-06-28):** The blocking trivy gate runs
   `trivy fs --severity CRITICAL,HIGH --ignore-unfixed --ignorefile .trivyignore`
   (`security-release-gate.yml:135-143`). I ran the *exact* command locally: it exits **0 (green)**
@@ -131,7 +142,19 @@
   give every `.trivyignore` entry an `# expires:` date that a CI check enforces. **Complexity S.**
 - **Owner:** unassigned · **Target:** this month.
 
-## RISK-014 — Reachability gate covers root module only · MEDIUM · OPEN
+## RISK-014 — Reachability gate covers root module only · MEDIUM · ✅ CLOSED 2026-07-04
+- **Fix (as recommended, with one deliberate nuance):** explicit per-module govulncheck steps in
+  BOTH lanes (`pr-fast-gate.yml` security-fast job — the merge-blocking one — and
+  `security-release-gate.yml` vuln-govulncheck). `cmd/culvert-maint` is **blocking** like the
+  root. `updater/` is **advisory** (`continue-on-error`): it carries the RISK-ACC-1 accepted
+  unfixed CVEs, so a reachable finding has no fix short of removal — but the run converts the
+  `.trivyignore` prose unreachability claim into actual reachability analysis, and any finding
+  there invalidates the acceptance and must be triaged (comment in both workflows says exactly
+  that). Flips to moot when DEBT-008 deletes the module.
+- Local verification unavailable (org egress still 403s `vuln.go.dev`); the CI runs on this
+  branch's PR are the proof. Original finding preserved below.
+
+### (was) RISK-014 — Reachability gate covers root module only · MEDIUM · OPEN
 - **Current state:** `vuln-govulncheck` runs `govulncheck ./...` from the repo root
   (`security-release-gate.yml:114`). govulncheck does not traverse separate modules, so
   `updater/go.mod` and `cmd/culvert-maint/go.mod` get **no reachability analysis** — they are
@@ -155,14 +178,17 @@
   periodically (this exercise). Optionally add `osv-scanner` as a second non-blocking source.
   **Complexity S.**
 
-## RISK-016 — Scanners installed `@latest`; CodeQL non-blocking · MEDIUM · OPEN
-- **Current state:** The gate installs its own scanners from `@latest`
-  (`security-release-gate.yml:52` gosec, `:110` govulncheck, `:252` go-licenses) and runs
-  `KidCarmi/Dependency-Obituary@main` (`ci.yml:72`). CodeQL is in no gate's `needs:` (advisory only).
-- **Impact:** The gate meant to catch supply-chain risk is itself unpinned and non-reproducible;
-  deep SAST findings never block a merge.
-- **Recommendation:** Pin scanner versions (or vendor), SHA-pin the `@main` action, add CodeQL to
-  the blocking set. **Complexity S.** *(This was the original RISK-006 before the 2026-06-28 split.)*
+## RISK-016 — Scanners `@latest` / CodeQL non-blocking · MEDIUM → LOW · MITIGATING
+- **Drift sync (tree-verified 2026-07-04): the pinning half was already fixed in the tree** —
+  gosec `@v2.27.1`, govulncheck `@v1.5.0`, go-licenses `@v1.6.0` (both lanes), trivy `v0.69.3`
+  via SHA-pinned setup action, and `KidCarmi/Dependency-Obituary` SHA-pinned with a dated
+  comment (`ci.yml:87`). The register was stale, not the gates.
+- **Residual (the reason this stays open at LOW):** CodeQL remains advisory — it is in no gate's
+  `needs:` and not a required check. Making it merge-blocking is a **branch-protection setting**
+  (add the CodeQL check to required status checks), which only the repo admin can flip — it is
+  not expressible in repo code. **Action for maintainer:** enable it once comfortable with CodeQL's
+  signal-to-noise on this repo; the workflow already runs on the right PR surface (`codeql.yml`).
+- *(This was the original RISK-006 before the 2026-06-28 split.)*
 
 ## RISK-017 — Alert webhooks never persisted (Init unwired) · MEDIUM · ✅ CLOSED 2026-07-03
 - **Found (2026-07-03, while mapping the `internal/alerts` extraction):** `AlertStore.Init(path)` is
@@ -306,6 +332,14 @@
   data. Prints actionable REVERT / COMPLETE `mv` moves (newest `.bak`), reusing the D1.3c
   `discoverLeftovers` scanner; fresh installs unaffected. Tests in `restore_interrupted_test.go`;
   recovery runbook in `docs/operator/docker-compose-backup-restore.md` §8b.
+- **2026-07-04** — **Gate-hardening pass.** RISK-014 CLOSED: per-module govulncheck in both lanes
+  (culvert-maint blocking; updater advisory with RISK-ACC-1 rationale — converts the prose
+  unreachability claim into analysis). RISK-006 CLOSED: advisory full-severity unmasked trivy
+  report + trivy-native `exp:2026-10-01` dates on both `.trivyignore` entries (self-enforcing;
+  gate goes red when the date passes). RISK-016 drift-synced MEDIUM→LOW/MITIGATING: all scanner
+  pins were already fixed in the tree (register was stale); sole residual is CodeQL-as-required-
+  check, a branch-protection toggle only the repo admin can set. DEBT-010 found already resolved
+  in the tree (delta gate retired by CI-REDESIGN step 7) — closed in the debt register.
 - **2026-07-03** — **RISK-001 CLOSED.** ADR-0005 S0–S5 shipped in full: etcd-backed fencing lease
   (`internal/halease`) arbitrates every path to HA leadership — Acquire-gated promotion, keepalive
   self-fence with etcd as the clock, epoch-fenced write sinks + DP ratchet, lease-arbitrated safe
