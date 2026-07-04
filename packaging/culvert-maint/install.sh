@@ -59,9 +59,12 @@ Env knobs:
   CULVERT_MAINT_GITHUB_REPO    owner/repo for the release + cosign identity
                                (default KidCarmi/Culvert)
   CULVERT_MAINT_RELEASE_BASE   override the asset base URL
-  CULVERT_MAINT_SIG / _PEM      signature/cert for verifying a local binary
+  CULVERT_MAINT_BUNDLE         cosign Sigstore bundle (*.sigstore.json) for
+                               verifying a local binary
   CULVERT_MAINT_CERT_IDENTITY  override the expected cosign cert identity
-  CULVERT_MAINT_COSIGN_IMAGE   pinned cosign image (default ghcr.io/sigstore/cosign:v2.4.1)
+  CULVERT_MAINT_COSIGN_IMAGE   pinned cosign image (default ghcr.io/sigstore/cosign/cosign:v3.0.6;
+                               MUST be cosign v3.x to read the new-format bundle —
+                               operators who pinned a v2.x DIGEST must re-pin to v3)
   CULVERT_MAINT_SKIP_VERIFY=1  trust a hand-supplied LOCAL binary without
                                verification (never honored on the download path)
 EOF
@@ -153,14 +156,18 @@ trap cleanup EXIT
 # with the OLD install untouched — never a half-installed state. The download
 # path ALWAYS cosign-verifies and FAILS CLOSED; an unverified download is worse
 # than a host build, so verification is non-optional there. A locally supplied
-# binary is the operator's own artifact: verified against sibling .sig/.pem (or
-# $CULVERT_MAINT_SIG/_PEM) when present, or trusted with $CULVERT_MAINT_SKIP_VERIFY=1.
+# binary is the operator's own artifact: verified against a sibling cosign
+# Sigstore bundle (*.sigstore.json, or $CULVERT_MAINT_BUNDLE) when present, or
+# trusted with $CULVERT_MAINT_SKIP_VERIFY=1.
 
 CERT_OIDC_ISSUER=${CULVERT_MAINT_CERT_OIDC_ISSUER:-https://token.actions.githubusercontent.com}
 # The cosign verifier image IS the root of trust for the download path. A bare
 # tag is mutable; high-assurance / air-gapped operators should override this
-# with a digest-pinned ref (ghcr.io/sigstore/cosign:v2.4.1@sha256:<digest>).
-COSIGN_IMAGE=${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign:v2.4.1}
+# with a digest-pinned ref (ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:<digest>).
+# MUST be cosign v3.x: the release signs with cosign 3.x new-format Sigstore
+# bundles, which a v2.x verifier cannot parse — operators who pinned a v2.x
+# digest must re-pin to v3.0.6.
+COSIGN_IMAGE=${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6}
 GH_REPO=${CULVERT_MAINT_GITHUB_REPO:-KidCarmi/Culvert}
 
 # Map host arch → release asset arch (matches ci.yml's linux-only legs).
@@ -179,16 +186,17 @@ cert_identity_for() {
 # is already required for the seed step). $1=dir $2=binary basename $3=identity.
 verify_cosign() {
     _dir=$1; _bin=$2; _ident=$3
-    [ -f "$_dir/$_bin.sig" ] || die "missing signature: $_bin.sig"
-    [ -f "$_dir/$_bin.pem" ] || die "missing certificate: $_bin.pem"
+    [ -f "$_dir/$_bin.sigstore.json" ] || die "missing signature bundle: $_bin.sigstore.json"
     log "verifying $_bin with cosign (identity=$_ident) ..."
     # --user 0:0: the scratch dir is mktemp -d (0700 root); the cosign image
     # defaults to USER nonroot (65532), which could not traverse/read the
     # root-owned mount. The files are root-owned, so run cosign as root.
+    # --new-bundle-format is cosign v3's default; passed explicitly to self-
+    # document and stay correct if the default ever flips.
     docker run --rm --user 0:0 -v "$_dir:/work:ro" -w /work "$COSIGN_IMAGE" \
         verify-blob \
-        --certificate "$_bin.pem" \
-        --signature   "$_bin.sig" \
+        --bundle "$_bin.sigstore.json" \
+        --new-bundle-format \
         --certificate-identity "$_ident" \
         --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
         "$_bin" \
@@ -205,10 +213,9 @@ if [ -n "${BIN_ARG:-}" ]; then
     if [ "${CULVERT_MAINT_SKIP_VERIFY:-}" = "1" ]; then
         warn "CULVERT_MAINT_SKIP_VERIFY=1 — installing local binary WITHOUT signature verification"
     else
-        _sig=${CULVERT_MAINT_SIG:-$BIN_SRC.sig}
-        _pem=${CULVERT_MAINT_PEM:-$BIN_SRC.pem}
-        if [ ! -f "$_sig" ] || [ ! -f "$_pem" ]; then
-            die "no signature material for '$BIN_SRC' (looked for $_sig / $_pem). Supply them, set CULVERT_MAINT_SIG/_PEM, or set CULVERT_MAINT_SKIP_VERIFY=1 to trust a hand-supplied binary."
+        _bundle=${CULVERT_MAINT_BUNDLE:-$BIN_SRC.sigstore.json}
+        if [ ! -f "$_bundle" ]; then
+            die "no signature bundle for '$BIN_SRC' (looked for $_bundle). Supply it, set CULVERT_MAINT_BUNDLE, or set CULVERT_MAINT_SKIP_VERIFY=1 to trust a hand-supplied binary."
         fi
         if [ -n "${CULVERT_MAINT_CERT_IDENTITY:-}" ]; then
             _ident=$CULVERT_MAINT_CERT_IDENTITY
@@ -217,11 +224,10 @@ if [ -n "${BIN_ARG:-}" ]; then
         else
             die "to verify a local binary set CULVERT_MAINT_CERT_IDENTITY (or CULVERT_MAINT_VERSION to derive it), or CULVERT_MAINT_SKIP_VERIFY=1 to trust it"
         fi
-        # Stage into a temp dir so cosign resolves the sibling files by basename.
+        # Stage into a temp dir so cosign resolves the sibling bundle by basename.
         CLEAN_VERIFY_DIR=$(mktemp -d)
-        cp "$BIN_SRC" "$CLEAN_VERIFY_DIR/culvert-maint"
-        cp "$_sig"    "$CLEAN_VERIFY_DIR/culvert-maint.sig"
-        cp "$_pem"    "$CLEAN_VERIFY_DIR/culvert-maint.pem"
+        cp "$BIN_SRC"  "$CLEAN_VERIFY_DIR/culvert-maint"
+        cp "$_bundle"  "$CLEAN_VERIFY_DIR/culvert-maint.sigstore.json"
         verify_cosign "$CLEAN_VERIFY_DIR" culvert-maint "$_ident"
         # Install the EXACT bytes that just passed cosign, not the original
         # path (which a racing process could swap post-verification).
@@ -250,7 +256,7 @@ else
     BASE=${CULVERT_MAINT_RELEASE_BASE:-https://github.com/$GH_REPO/releases/download/$VERSION}
     CLEAN_DL_DIR=$(mktemp -d)
     log "downloading $ASSET ($VERSION) from $BASE ..."
-    for f in "$ASSET" "$ASSET.sig" "$ASSET.pem"; do
+    for f in "$ASSET" "$ASSET.sigstore.json"; do
         if [ "$DL_TOOL" = curl ]; then
             curl -fsSL -o "$CLEAN_DL_DIR/$f" "$BASE/$f" || die "download failed: $BASE/$f"
         else

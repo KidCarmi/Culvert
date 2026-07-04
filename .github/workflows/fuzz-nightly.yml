@@ -1,13 +1,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Lane C/D — Nightly fuzzing
 #
-# The repo ships seven Fuzz targets, but until this workflow they were only
+# The repo ships eight Fuzz targets, but until this workflow they were only
 # ever executed as seed-corpus unit tests — `go test -fuzz` never ran in CI.
 # This lane gives each target a real coverage-guided fuzzing budget nightly.
 # All targets guard security-relevant parsers/matchers (SSRF host
 # classification, redirect safety, feed URL normalisation, policy
-# destination matching, ClamAV response parsing, YARA literal parsing, and the
-# RFC 7230 hop-by-hop Connection-token parser on the proxy forwarding path).
+# destination matching, ClamAV response parsing, YARA literal parsing, the
+# RFC 7230 hop-by-hop Connection-token parser on the proxy forwarding path, and
+# the SOCKS5 request wire parser on the attacker-facing proxy ingress).
 #
 # On a crash: `go test -fuzz` writes the failing input to
 # testdata/fuzz/<Target>/ — uploaded as an artifact so the case can be
@@ -44,6 +45,7 @@ jobs:
           - { target: FuzzNormaliseFeedURL,   pkg: "." }
           - { target: FuzzMatchDest,          pkg: "." }
           - { target: FuzzRemoveHopHeaders,   pkg: "." }
+          - { target: FuzzParseSOCKS5Request, pkg: "." }
           - { target: FuzzParseClamResponse,  pkg: "./internal/clamav" }
           - { target: FuzzParseYARALiteral,   pkg: "./internal/yara" }
     steps:

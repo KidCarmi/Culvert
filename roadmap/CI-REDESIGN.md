@@ -201,21 +201,48 @@ the first tagged release carrying it produces different binary hashes (and
 therefore different SLSA subject digests) than prior releases — expected, not
 tampering; note it in that release's changelog.
 
-Every GitHub Release now carries **signed per-module CycloneDX SBOMs** for its
-binaries (`culvert.sbom.cdx.json` + `culvert-maint.sbom.cdx.json`, each with a
-cosign `.sig`/`.pem`), generated once on the linux/amd64 leg (syft reads the
-embedded Go build-info, identical across GOOS/GOARCH). This replaces the prior
-state where the source-tree SBOM was a 90-day artifact falsely documented as
-"attached to every release" and the 7 released binaries had no SBOM at all. The
-SBOMs are Release *assets*, a channel disjoint from the SLSA subjects, so the
-`aggregate-subjects` `==7` invariant is untouched. The image already ships a
-BuildKit CycloneDX SBOM attestation (`sbom: true`), so it is out of scope here.
+Every GitHub Release now carries **per-module CycloneDX SBOMs** for its binaries
+(`culvert.sbom.cdx.json` + `culvert-maint.sbom.cdx.json`), generated once on the
+linux/amd64 leg (syft reads the embedded Go build-info, identical across
+GOOS/GOARCH). This replaces the prior state where the source-tree SBOM was a
+90-day artifact falsely documented as "attached to every release" and the 7
+released binaries had no SBOM at all. The SBOMs are Release *assets*, a channel
+disjoint from the SLSA subjects, so the `aggregate-subjects` `==7` invariant is
+untouched. The image already ships a BuildKit CycloneDX SBOM attestation
+(`sbom: true`), so it is out of scope here.
 
-**Follow-ups:** upgrade the SBOM signature to a cosign `attest-blob --type
-cyclonedx` in-toto statement (binds the SBOM to the subject binary — stronger
-than a detached sign-blob) once in-repo attestation-verify tooling exists; a
-single consolidated evidence-bundle tarball (SBOMs + provenance + scan reports +
-gate summaries per tag) is optional (those artifacts already exist individually).
+**cosign 2.x→3.x bundle migration (DONE).** The pinned `cosign-installer@v4.1.2`
+installs cosign **3.0.6**, which removed `sign-blob`/`attest-blob`'s detached
+`--output-certificate`/`--output-signature` — so the binary/SBOM signing steps
+were latently broken on the next tag (corroborated: release v1.0.0 shipped zero
+binary/SBOM assets). Migrated to the cosign-3.x **new-format Sigstore bundle**
+(`--bundle *.sigstore.json`, matching the catalog step) on all three paths:
+- **Binaries** now ship a single `<binary>.sigstore.json` bundle instead of
+  `.sig`/`.pem`.
+- **SBOMs** are signed **standalone** with `cosign sign-blob --bundle`
+  (`<sbom>.sigstore.json`, new-format Sigstore bundle). Deliberately NOT
+  `attest-blob` with a binary subject: the SBOMs are per-**module** and shared by
+  every arch binary, so binding one to a single binary's digest (e.g.
+  linux/amd64) would make `verify-blob-attestation` fail the subject check for
+  the arm64/darwin/windows binaries. A standalone signed SBOM verifies for
+  consumers of any released binary.
+- The cosign binary is explicitly pinned (`cosign-release: 'v3.0.6'`) on all
+  Install-cosign steps so a future installer bump can't silently reintroduce the
+  flag drift.
+- **Operator impact:** `packaging/culvert-maint/install.sh` now verifies with
+  `cosign verify-blob --bundle`, the verifier container default is bumped to
+  `ghcr.io/sigstore/cosign/cosign:v3.0.6` (the correct GHCR path — the prior
+  `ghcr.io/sigstore/cosign:*` reference was never a pullable image), and the
+  local-binary override is `CULVERT_MAINT_BUNDLE` (was `CULVERT_MAINT_SIG`/`_PEM`).
+  **Operators who pinned a cosign v2.x digest via `CULVERT_MAINT_COSIGN_IMAGE`
+  MUST re-pin to v3.0.6** — a v2.x verifier cannot parse a v3 new-format bundle.
+- No CI lane runs a real keyless verify (needs OIDC), so
+  `cosign_bundle_migration_test.go` string-pins the bundle wiring on both the
+  producer (`ci.yml`) and consumer (`install.sh`) as the regression guard.
+
+**Follow-ups:** a single consolidated evidence-bundle tarball (SBOMs + provenance
++ scan reports + gate summaries per tag) is optional (those artifacts already
+exist individually).
 
 ### 5c. DAST — attack the running product (PANW audit item 3)
 
