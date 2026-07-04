@@ -2189,7 +2189,7 @@ Firefox (all platforms):
               <input type="text" class="input" style="width:100%" id="pol-src-id" placeholder="alice">
             </div>
             <div>
-              <label class="form-label">Auth Provider <span style="color:var(--muted);font-weight:400">(for group filter)</span></label>
+              <label class="form-label">Group Provider Filter <span style="color:var(--muted);font-weight:400">(narrows Source Group search)</span></label>
               <select class="select" style="width:100%" id="pol-src-provider" data-change="loadPolicyGroupOptions">
                 <option value="">Any provider</option>
               </select>
@@ -9196,7 +9196,7 @@ function onGroupFocus() {
   const pid = document.getElementById('pol-src-provider').value;
   if (!pid) {
     const dd = document.getElementById('pol-src-group-dropdown');
-    dd.innerHTML = '<div class="picker-empty">Select an Auth Provider first</div>';
+    dd.innerHTML = '<div class="picker-empty">Select a Group Provider Filter first</div>';
     dd.style.display = '';
     return;
   }
