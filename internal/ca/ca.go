@@ -47,13 +47,13 @@ import (
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
-// SignLatencyObserver, if set, receives each successful leaf-sign's latency in
-// seconds. Publish-once: package main wires it to its Prometheus histogram at
+// SignLatencyObserver receives each successful leaf-sign's latency in seconds
+// when set. Publish-once: package main wires it to its Prometheus histogram at
 // startup. nil ⇒ no-op (the engine never depends on metrics wiring).
 var SignLatencyObserver func(seconds float64)
 
-// RotationObserver, if set, is called after a successful RotateIfNeeded with
-// the old and new CA expiry times. Publish-once: package main wires it to
+// RotationObserver is invoked after a successful RotateIfNeeded with the old
+// and new CA expiry times when set. Publish-once: package main wires it to
 // fire the cert-rotation alert and bump the rotation counter. nil ⇒ no-op.
 var RotationObserver func(oldExpiry, newExpiry time.Time)
 
@@ -253,7 +253,8 @@ func (cm *Manager) exportBundle() (caBundle, error) {
 	}, nil
 }
 
-// importBundle parses a PEM bundle and stores the CA into the Manager.
+// ImportBundle parses a PEM bundle (CERTIFICATE + EC PRIVATE KEY blocks) and
+// installs the CA into the Manager, clearing the leaf cache.
 func (cm *Manager) ImportBundle(data []byte) error {
 	var certDER, keyDER []byte
 	rest := data
@@ -314,6 +315,9 @@ func HasBundleMagic(data []byte) bool {
 	return len(data) >= len(caMagic) && [4]byte(data[:4]) == caMagic
 }
 
+// EncryptBundle seals plaintext into a PSCA envelope: a magic+version header,
+// PBKDF2-SHA256 (600k iterations) key derivation over a random salt, and
+// AES-256-GCM with a random nonce. The layout is FROZEN (see the package doc).
 func EncryptBundle(plaintext, passphrase []byte) ([]byte, error) {
 	salt := make([]byte, pbkdf2SaltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -348,6 +352,9 @@ func EncryptBundle(plaintext, passphrase []byte) ([]byte, error) {
 	return out, nil
 }
 
+// DecryptBundle opens a PSCA envelope produced by EncryptBundle, validating
+// the magic, version, and minimum iteration count before AES-256-GCM decrypt.
+// It returns a generic error on any failure without disclosing key material.
 func DecryptBundle(data, passphrase []byte) ([]byte, error) {
 	const hdrLen = 4 + 1 + 4 + pbkdf2SaltLen + aesGCMNonceLen
 	if len(data) < hdrLen {
@@ -581,11 +588,16 @@ type localKeyProvider struct {
 // Compile-time interface check.
 var _ KeyProvider = (*localKeyProvider)(nil)
 
+// SignCertificate signs template with the in-memory local key.
 func (p *localKeyProvider) SignCertificate(template, parent *x509.Certificate, pubKey any) ([]byte, error) {
 	return x509.CreateCertificate(rand.Reader, template, parent, pubKey, p.key)
 }
+
+// PublicKey returns the local signing key's public key.
 func (p *localKeyProvider) PublicKey() any { return &p.key.PublicKey }
-func (p *localKeyProvider) Name() string   { return "local" }
+
+// Name identifies this provider ("local").
+func (p *localKeyProvider) Name() string { return "local" }
 
 // SetKeyProvider allows an external key provider (HSM/KMS) to be registered.
 func (cm *Manager) SetKeyProvider(kp KeyProvider) {
