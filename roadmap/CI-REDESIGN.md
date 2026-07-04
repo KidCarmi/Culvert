@@ -214,17 +214,32 @@ after this again changes the hashes (expected). A Deep-gate **build-determinism*
 step (two identical-flag builds must be byte-identical, to `RUNNER_TEMP`) now
 guards this on every Go-touching PR — for **both** release modules (proxy AND
 `culvert-maint`, the module that carried the bug), so a future maint-specific
-non-determinism regression is caught too. **Follow-up (F1):** a tag-path
-`verify-reproducible` job that independently rebuilds at the tag and asserts the
-hashes match `aggregate-subjects.outputs.hashes` (what the SLSA provenance signs)
-— turning L3 provenance into *verifiable* provenance; deferred to its own PR
-(it needs a shared build composite + is tag-path-only, not PR-testable). The F1
-follow-up should also cover the **Docker image binary** (`Dockerfile`): it still
-builds with default `-buildvcs=auto` and its `.dockerignore` strips tracked files
-(`*_test.go`, `*.md`, …) while keeping `.git`, so the in-container `git status` sees
-those as deleted and the image binary ships `vcs.modified=true` (not tree-state
-reproducible). Out of scope for this phase (the image has its own cosign/provenance
-surface, disjoint from the Release-attached SLSA subjects) but tracked for F1.
+non-determinism regression is caught too.
+
+**F1 — verifiable provenance (DONE).** A tag-path `verify-reproducible` matrix
+job (`ci.yml`, `needs: [aggregate-subjects]`) independently rebuilds every
+released binary at the tag (fresh checkout, fresh runner) and asserts each
+rebuilt `sha256` EQUALS the signed SLSA subject decoded from
+`aggregate-subjects.outputs.hashes` — the exact bytes `provenance` signs. Any
+mismatch (or a missing subject / drifted filename) fails the leg **closed**, and
+`provenance` is gated on it (`needs: [aggregate-subjects, verify-reproducible]`),
+so a reproducibility break on ANY leg withholds the SLSA attestation and reds the
+release. The build is a **shared composite** (`.github/actions/build-release-binaries`)
+that BOTH the `release` job and `verify-reproducible` call, so the independent
+rebuild can never drift from the real build (a two-copy build command would make
+the check tautological or falsely-red). Honest scope: this is **same-image,
+same-pinned-toolchain** reproduction (`setup-go-cache` pins Go 1.25.11 for both),
+not an independent-environment rebuild — SLSA's trusted builder covers build
+integrity; F1 verifies *determinism* (catches dep/toolchain-drift/tampering
+nondeterrminism between hashing and signing). The verify job is `contents: read`
+only (signs nothing — deliberately no `id-token`). **Guardrail:** never add
+`always()`/`success()`/a status function to `provenance`'s `if:`, or the gate
+silently opens. **Remaining follow-up** — the **Docker image binary**
+(`Dockerfile`) still builds with default `-buildvcs=auto`, and its `.dockerignore`
+strips tracked files (`*_test.go`, `*.md`, …) while keeping `.git`, so the
+in-container `git status` sees those as deleted and the image binary ships
+`vcs.modified=true` (not tree-state reproducible). Disjoint provenance surface
+(the image has its own cosign signature), tracked separately.
 
 Every GitHub Release now carries **per-module CycloneDX SBOMs** for its binaries
 (`culvert.sbom.cdx.json` + `culvert-maint.sbom.cdx.json`), generated once on the

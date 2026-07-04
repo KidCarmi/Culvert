@@ -645,54 +645,17 @@ jobs:
 
       - uses: ./.github/actions/setup-go-cache
 
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-          # env-indirection: never shell-interpolate ref names (injection).
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          # -buildvcs=false: the binary must be byte-reproducible independent of
-          # working-tree state. Without it (auto), a non-gitignored untracked file
-          # (e.g. the sibling binary written by an earlier matrix step) flips the
-          # embedded vcs.modified and changes the hash — making the SLSA subject
-          # order-dependent. The commit is already carried by the git tag + SLSA
-          # provenance, so the embedded VCS stamp is redundant.
-          go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${REF_NAME}" \
-            -o culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
-
-      # Maintenance agent (cmd/culvert-maint) is a SEPARATE Go module and is
-      # Linux-only by design (SO_PEERCRED peer auth) — build + ship it on the
-      # linux legs only. The version is stamped via the agent's OWN symbol path
-      # (culvert-maint/internal/server.Version), not main.version. CGO_ENABLED=0
-      # yields a static binary; operators must use NUMERIC UIDs in allow_peers
-      # since pure-Go os/user cannot resolve NSS/LDAP/SSSD usernames.
-      - name: Download agent dependencies (linux)
-        if: matrix.goos == 'linux'
-        working-directory: cmd/culvert-maint
-        run: go mod download
-
-      - name: Build culvert-maint ${{ matrix.goos }}/${{ matrix.goarch }} (linux)
-        if: matrix.goos == 'linux'
-        working-directory: cmd/culvert-maint
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-          # env-indirection: never shell-interpolate ref names (injection).
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          # -buildvcs=false (see the proxy build above): REQUIRED here — this
-          # module has no own .git and reads the ROOT repo status, and the proxy
-          # binary written by the earlier step is an untracked, non-gitignored
-          # sibling, so `auto` would stamp vcs.modified=true and produce an
-          # order-dependent hash. false makes it byte-reproducible.
-          go build -trimpath -buildvcs=false -ldflags="-s -w -X culvert-maint/internal/server.Version=${REF_NAME}" \
-            -o "${GITHUB_WORKSPACE}/culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}" .
+      # Build the release binaries via the shared composite — the SAME action the
+      # verify-reproducible job calls, so an independent tag rebuild can never
+      # drift from this build. Proxy on every leg; culvert-maint on linux only.
+      - name: Build release binaries
+        uses: ./.github/actions/build-release-binaries
+        with:
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+          ext: ${{ matrix.ext || '' }}
+          ref-name: ${{ github.ref_name }}
+          include-maint: ${{ matrix.goos == 'linux' }}
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
       - name: Install cosign
@@ -846,12 +809,107 @@ jobs:
           fi
           echo "hashes=$(base64 -w0 all-subjects.txt)" >> "$GITHUB_OUTPUT"
 
+  # ─── Verifiable reproducible-build gate ───────────────────────────────────
+  # Turns SLSA L3 provenance into VERIFIABLE provenance: independently rebuild
+  # every released binary at the tag (fresh checkout, fresh runner) and assert
+  # each rebuilt sha256 EQUALS the signed SLSA subject (the exact bytes
+  # `provenance` signs, from aggregate-subjects.outputs.hashes). Any mismatch
+  # fails the leg → provenance is withheld (see its needs:) → the release run is
+  # red. This is same-image, same-pinned-toolchain reproduction (not an
+  # independent-environment rebuild — SLSA's trusted builder covers build
+  # integrity); it catches nondeterminism from deps/toolchain drift/tampering
+  # between hashing and signing. The build is the SHARED composite, so the
+  # rebuild cannot drift from the real release build.
+  verify-reproducible:
+    name: "Supply Chain · Verify reproducible build"
+    timeout-minutes: 25
+    needs: [aggregate-subjects]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read   # rebuild + hash only — signs nothing, needs no id-token
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # one leg's mismatch must not cancel the others' diagnostics
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64, ext: .exe }
+    steps:
+      - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          # Needs module-proxy egress: the composite runs `go mod download` for
+          # BOTH modules (cmd/culvert-maint deps are not in the root-go.sum
+          # cache). If release is ever flipped to egress-policy: block, this job
+          # must get the same allowlist.
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      # SAME composite + SAME inputs as the release job → an independent rebuild
+      # that cannot drift from the real build.
+      - name: Rebuild release binaries
+        uses: ./.github/actions/build-release-binaries
+        with:
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+          ext: ${{ matrix.ext || '' }}
+          ref-name: ${{ github.ref_name }}
+          include-maint: ${{ matrix.goos == 'linux' }}
+
+      - name: Verify rebuilt binaries hash-match the signed SLSA subjects
+        working-directory: ${{ github.workspace }}
+        env:
+          # The authoritative expectation: the exact bytes `provenance` signs.
+          HASHES_B64: ${{ needs.aggregate-subjects.outputs.hashes }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          EXT: ${{ matrix.ext || '' }}
+        run: |
+          set -euo pipefail
+          echo "toolchain: $(go version)"
+          # `want` comes ONLY from the decoded signed subjects; `got` comes ONLY
+          # from sha256sum of this job's own independent rebuild — never the
+          # reverse, or the check would compare the composite to itself.
+          printf '%s' "$HASHES_B64" | base64 -d > all-subjects.txt
+          echo "── Signed SLSA subjects ──"; cat all-subjects.txt
+          # This leg's binaries: proxy always (with ext, so windows carries .exe
+          # — the subject line is 'culvert-windows-amd64.exe'); maint on linux.
+          # BARE basenames, matching the subject file computed from the repo root.
+          FILES="culvert-${GOOS}-${GOARCH}${EXT}"
+          if [ "$GOOS" = "linux" ]; then
+            FILES="$FILES culvert-maint-${GOOS}-${GOARCH}"
+          fi
+          matched=0
+          for f in $FILES; do
+            want=$(awk -v f="$f" '$2 == f { print $1 }' all-subjects.txt)
+            if [ -z "$want" ]; then
+              echo "::error::no signed SLSA subject found for ${f} — the release did not publish this binary (or the filename drifted)"
+              exit 1
+            fi
+            got=$(sha256sum "$f" | cut -d' ' -f1)
+            if [ "$got" != "$want" ]; then
+              echo "::error::REPRODUCIBILITY BREAK: ${f} rebuilt=${got} but signed subject=${want} — the released binary is NOT the deterministic output of the tagged source"
+              exit 1
+            fi
+            echo "ok: ${f} ${got}"
+            matched=$((matched + 1))
+          done
+          echo "reproducibility: ${matched}/${matched} binaries hash-matched the signed subjects for ${GOOS}/${GOARCH}"
+
   # ─── SLSA provenance ──────────────────────────────────────────────────────
   # Generates SLSA Level 3 provenance for all release binaries, providing a
   # cryptographically verifiable record of what was built, when, and how.
+  # Gated on verify-reproducible: a repro break on ANY leg withholds the
+  # attestation. Do NOT add always()/success()/a status function to the `if`
+  # below — that would silently open the gate (a failed need would no longer
+  # skip this job).
   provenance:
     name: "Supply Chain · SLSA provenance"
-    needs: [aggregate-subjects]
+    needs: [aggregate-subjects, verify-reproducible]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       actions: read
