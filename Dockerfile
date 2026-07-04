@@ -17,12 +17,19 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
     fi && \
     : "${VERSION:=dev}" && \
     echo "$VERSION" > /app/VERSION && \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o culvert .
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o culvert .
 # No `go mod tidy` here — the image must build from the EXACT reviewed module
 # graph (go.mod/go.sum COPYed + `go mod download`ed above), not re-resolve deps
 # at build time (a divergent-recipe supply-chain smell). Tidiness is enforced in
-# CI (Fast Gate `go mod tidy -diff`). `-trimpath` strips build-path prefixes as
-# reproducibility groundwork.
+# CI (Fast Gate `go mod tidy -diff`). `-trimpath` strips build-path prefixes and
+# `-buildvcs=false` drops the VCS stamp — together they make the image binary
+# byte-reproducible. -buildvcs=false is REQUIRED, not cosmetic: `.git` is in the
+# build context (the `git describe` above needs it) while `.dockerignore` strips
+# tracked files (*_test.go, *.md, …), so the in-container `git status` sees those
+# as deleted → the default `auto` would stamp vcs.modified=true and make the
+# binary depend on which files the build context happened to include. VERSION is
+# still stamped explicitly via the -X ldflag above (independent of buildvcs), so
+# the git-describe/--build-arg version path is unaffected.
 
 # ── GeoIP stage ───────────────────────────────────────────────────────────────
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build
