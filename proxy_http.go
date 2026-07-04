@@ -55,6 +55,7 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 
 func (cr *countingReader) Close() error { return cr.r.Close() }
 
+//nolint:gocognit,cyclop,funlen // DEBT-003: relocated verbatim from proxy.go; pre-existing complexity, refactor deferred (TECHNICAL-DEBT-REGISTER)
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
@@ -142,6 +143,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
 		logScanLimitExceeded(r.Host, cip, globalSecScanner.MaxBytes())
 	}
+	//nolint:nestif // DEBT-003: relocated verbatim from proxy.go; pre-existing complexity, refactor deferred (TECHNICAL-DEBT-REGISTER)
 	if scanActive && (resp.ContentLength < 0 || resp.ContentLength <= globalSecScanner.MaxBytes()) {
 		buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
 		if readErr == nil {

@@ -121,7 +121,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 		logger.Printf("WS: upstream declined upgrade for %q (status %d)", sanitizeLog(host), resp.StatusCode)
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body) //nolint:errcheck
+		io.Copy(w, resp.Body) //nolint:errcheck // best-effort copy of block-page body to client
 		return
 	}
 
@@ -396,7 +396,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	}
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
 	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
-		upstreamTLS.Close() // closes both TLS and underlying TCP conn
+		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn
 		logger.Printf("upstream TLS handshake error %q: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -405,14 +405,14 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// 3. Hijack the client connection and send the 200 Connection Established.
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		upstreamTLS.Close()
+		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup on hijack-unsupported
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 	rawClient, clientBuf, err := hijacker.Hijack()
 	if err != nil {
-		upstreamTLS.Close()
+		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup on hijack failure
 		logger.Printf("SSL_INSPECT hijack error: %v", err)
 		return
 	}
@@ -513,7 +513,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	for {
 		// Slowloris protection: enforce a read deadline so a slow client cannot
 		// hold the connection open indefinitely by trickling bytes.
-		clientTLS.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
+		clientTLS.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck // best-effort slowloris deadline
 		// Read next HTTP/1.x request from the (decrypted) client stream.
 		req, err := http.ReadRequest(clientBR)
 		if err != nil {
@@ -592,6 +592,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		}
 		// 3. Content-Disposition header — catches downloads that use a generic
 		//    URL but declare the real filename in the response header.
+		//nolint:nestif // DEBT-003: relocated verbatim from proxy.go; pre-existing complexity, refactor deferred (TECHNICAL-DEBT-REGISTER)
 		if cd := resp.Header.Get("Content-Disposition"); cd != "" {
 			if ext := fileBlocker.CheckContentDisposition(cd); ext != "" {
 				atomic.AddInt64(&statFileBlocked, 1)
@@ -630,12 +631,12 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		// WebSocket upgrade: the protocol switches after the 101 handshake.
 		// Write the 101 response to the client and fall back to raw relay.
 		if resp.StatusCode == http.StatusSwitchingProtocols {
-			resp.Write(clientTLS) //nolint:errcheck
+			resp.Write(clientTLS) //nolint:errcheck // best-effort write of buffered response to client
 			resp.Body.Close()
 			done := make(chan struct{}, 2)
 			rawRelay := func(dst, src net.Conn) {
 				bp := getRelayBuf()
-				io.CopyBuffer(dst, src, *bp) //nolint:errcheck
+				io.CopyBuffer(dst, src, *bp) //nolint:errcheck // best-effort relay copy; peer close ends the stream
 				relayBufPool.Put(bp)
 				done <- struct{}{}
 			}
@@ -644,8 +645,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			<-done
 			// Unblock the peer goroutine by closing both TLS connections.
 			// tls.Conn has no CloseWrite, so full Close is used instead.
-			clientTLS.Close()
-			upstreamTLS.Close()
+			clientTLS.Close()   //nolint:errcheck // best-effort; unblocks the peer relay goroutine
+			upstreamTLS.Close() //nolint:errcheck // best-effort; unblocks the peer relay goroutine
 			<-done
 			return
 		}
@@ -657,6 +658,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
 		hostExcluded := globalScanExclusions.IsHostExcluded(hostOnly)
 		dpiBypassed := dpiScanner.IsBypassHost(hostOnly)
+		//nolint:nestif // DEBT-003: relocated verbatim from proxy.go; pre-existing complexity, refactor deferred (TECHNICAL-DEBT-REGISTER)
 		if !hostExcluded && bodyNeedsBuffering(ct) {
 			origBody := resp.Body
 			body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
@@ -765,8 +767,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			break
 		}
 	}
-	clientTLS.Close()
-	upstreamTLS.Close()
+	clientTLS.Close()   //nolint:errcheck // best-effort cleanup at relay end
+	upstreamTLS.Close() //nolint:errcheck // best-effort cleanup at relay end
 }
 
 func removeHopHeaders(h http.Header) {

@@ -128,8 +128,9 @@ func callerIsEnrolledNode(ctx context.Context) bool {
 	if globalClusterStore.IsRevoked(serial) {
 		return false
 	}
-	for _, n := range globalClusterStore.ListNodes() {
-		if n.CertSerial == serial {
+	nodes := globalClusterStore.ListNodes()
+	for i := range nodes { // index-based: EnrolledNode is 176 bytes (rangeValCopy)
+		if nodes[i].CertSerial == serial {
 			return true
 		}
 	}
@@ -642,7 +643,8 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		Streams: []grpc.StreamDesc{},
 	}, svc)
 
-	ln, err := net.Listen("tcp", addr)
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("gRPC listen: %w", err)
 	}

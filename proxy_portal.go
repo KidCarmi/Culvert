@@ -65,7 +65,7 @@ func resolveCaptivePortalURL(r *http.Request) string {
 //   - 0  → ("", 0): the caller fails closed (403).
 //   - 1  → that provider's CaptiveLoginURL (direct redirect).
 //   - >1 → "/auth/select?relay=…&providers=<ids>" (scoped selection page).
-func resolveSSOPortalURL(r *http.Request, providerRefs []string) (string, int) {
+func resolveSSOPortalURL(r *http.Request, providerRefs []string) (portalURL string, eligibleCount int) {
 	elig := eligibleSSOProviders(providerRefs)
 	switch len(elig) {
 	case 0:
@@ -127,7 +127,7 @@ func ssoRelayURL(r *http.Request) string {
 	return r.URL.String()
 }
 
-func parseProxyAuth(r *http.Request) (string, string, bool) {
+func parseProxyAuth(r *http.Request) (username, password string, ok bool) {
 	auth := r.Header.Get("Proxy-Authorization")
 	if !strings.HasPrefix(auth, "Basic ") {
 		return "", "", false
