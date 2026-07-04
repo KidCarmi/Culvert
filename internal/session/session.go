@@ -124,12 +124,15 @@ func NewRevocationList() *RevocationList {
 // Revoked is the process-wide revocation list consulted by Decode.
 var Revoked = NewRevocationList()
 
+// Revoke marks a token (its b64 payload) as revoked until exp.
 func (r *RevocationList) Revoke(token string, exp time.Time) {
 	r.mu.Lock()
 	r.tokens[token] = exp
 	r.mu.Unlock()
 }
 
+// IsRevoked reports whether the token is currently revoked, lazily
+// evicting entries whose original expiry has passed.
 func (r *RevocationList) IsRevoked(token string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -267,7 +270,7 @@ func (r *RevocationList) SaveRevocations() error {
 		return fmt.Errorf("marshal revocations: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("write revocations: %w", err)
 	}
 	return os.Rename(tmp, path)

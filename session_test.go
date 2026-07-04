@@ -78,8 +78,13 @@ func TestRevokeSessionCookie_MalformedCookie(t *testing.T) {
 	if !session.HasSigningKey() {
 		initSessionSecret()
 	}
-	req, _ := http.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "notvalid"})
+	req, _ := http.NewRequest(http.MethodGet, "/", http.NoBody)
+	// Attributes are irrelevant on an inbound request cookie (only Name=Value
+	// serializes), set to satisfy gosec G124.
+	req.AddCookie(&http.Cookie{
+		Name: sessionCookieName, Value: "notvalid",
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
 	// Should not panic on malformed cookie value.
 	revokeSessionCookie(sessionCookieName, req)
 }

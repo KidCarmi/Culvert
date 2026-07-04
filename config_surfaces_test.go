@@ -427,31 +427,38 @@ func csrMutateStateB() {
 func csrCanon(t *testing.T, v any, stripID bool) string {
 	t.Helper()
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Slice {
-		parts := make([]string, 0, rv.Len())
-		for i := 0; i < rv.Len(); i++ {
-			b, err := json.Marshal(rv.Index(i).Interface())
-			if err != nil {
-				t.Fatalf("marshal slice elem: %v", err)
-			}
-			if stripID {
-				var m map[string]any
-				if err := json.Unmarshal(b, &m); err != nil {
-					t.Fatalf("unmarshal slice elem: %v", err)
-				}
-				delete(m, "id")
-				if b, err = json.Marshal(m); err != nil {
-					t.Fatalf("re-marshal slice elem: %v", err)
-				}
-			}
-			parts = append(parts, string(b))
+	if rv.Kind() != reflect.Slice {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
 		}
-		sort.Strings(parts)
-		return strings.Join(parts, "\n")
+		return string(b)
 	}
+	parts := make([]string, 0, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		parts = append(parts, csrCanonElem(t, rv.Index(i).Interface(), stripID))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\n")
+}
+
+// csrCanonElem marshals one slice element, optionally dropping the "id" key.
+func csrCanonElem(t *testing.T, v any, stripID bool) string {
+	t.Helper()
 	b, err := json.Marshal(v)
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatalf("marshal slice elem: %v", err)
+	}
+	if !stripID {
+		return string(b)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal slice elem: %v", err)
+	}
+	delete(m, "id")
+	if b, err = json.Marshal(m); err != nil {
+		t.Fatalf("re-marshal slice elem: %v", err)
 	}
 	return string(b)
 }

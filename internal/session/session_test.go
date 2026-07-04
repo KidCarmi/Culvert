@@ -335,7 +335,7 @@ func TestJti_GenerateUnique(t *testing.T) {
 	}
 	// Must be lowercase hex.
 	for _, c := range a {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Errorf("jti contains non-hex char %q in %q", c, a)
 			break
 		}

@@ -288,7 +288,7 @@ func (p *Pool) HealthCheck() {
 			},
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req, err := http.NewRequestWithContext(ctx, http.MethodHead, healthCheckURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodHead, healthCheckURL, http.NoBody)
 		if err != nil {
 			cancel()
 			up.Healthy.Store(false)
