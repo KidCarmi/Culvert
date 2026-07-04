@@ -1292,6 +1292,39 @@ re-expressed; benchgate green (leaf-sign latency is budgeted); **adversarial rev
 the diff before push** (the PR-1 registry precedent). If the observer seam grows beyond one
 hook, STOP and re-map — that's the fileblock lesson.
 
+#### 2026-07-04 — Slice B execution attempted, HALTED at the gate; RE-MAP required (no code moved)
+The "ONE new seam" premise is **falsified by the code** — dependency mapping before touching
+`ca.go` found the seam is FOUR outbound couplings, not one, plus whitebox test entanglement on
+unexported fields. The gate above fired exactly as written; halting was the correct move, and
+the boundary is re-scoped here so the next attempt is honest. Findings (all `file:line`-verified):
+1. **Sign-latency observer** — `GetCert` → `certSignHist.Observe` (`ca.go:634`). The mapped hook.
+2. **Alert emission** — `RotateIfNeeded` fires `fireAlert("cert_expiry", AlertPayload{...})`
+   (`ca.go:470`) on rotation. `fireAlert`/`AlertPayload` are main (alerts shim).
+3. **Stat counter** — `RotateIfNeeded` bumps `statCARotations.Add(1)` (`ca.go:475`), a main
+   metrics global. `cert_rotation_metrics_test.go` asserts this bump directly.
+4. **Cluster-CA orchestration** — `StartCAAutoRotation`'s loop (`ca.go:520-536`) drives BOTH
+   `certMgr` AND `globalClusterCA.RotateIfNeeded()`/`CleanupSecondary()` — a *different* CA
+   engine (enrollment.go). The auto-rotation loop is a cross-subsystem orchestrator, not CA-core.
+- **Test entanglement (the fileblock signature):** `p4_test.go` constructs `CertManager` and
+  pokes unexported `cm.caCert`/`cm.caKey`/`cm.keyProvider` (`p4_test.go:72-73,102-104,166`) — so
+  the rotation + key-provider tests are whitebox against internals, not the public surface.
+- **Re-mapped boundary (for the next attempt):** package `internal/ca` owns the PURE trust
+  engine only — bundle codec (frozen format), `InitCA`/`Load*`/`SaveCA`/`LoadCustomCA`/export-
+  import, `CACertPEM`/`CACertInfo`/`CAExpiry`, `GetCert`/`signLeaf`/cache/`CacheStats`/
+  `ClearCache`, `KeyProvider`+`localKeyProvider`, `ParseTLSPair`, `Ready`, dual-CA state +
+  `SecondaryCA*`/`CleanupSecondary`, the sign-latency observer, AND a pure
+  `RotateIfNeeded(caPath, passphrase) (rotated bool, oldExpiry, newExpiry time.Time)` that does
+  threshold+preserve-secondary+reinit+save and returns FACTS. **Main keeps the orchestration:**
+  `StartCAAutoRotation` (the loop, + cluster-CA), and the alert+stat move to the *callers* of the
+  pure rotate (the loop tick + the UI rotate handler) — so the package carries exactly the ONE
+  observer hook, honoring the gate. `p4_test`'s rotation/key-provider tests move in-package
+  (whitebox belongs with the type); `cert_rotation_metrics_test` stays in main and is re-expressed
+  against the caller that bumps the stat; `cert_sign_histogram_test` stays in main (it proves the
+  observer wiring end-to-end through `handleMetrics`). Still M/L, still own PR, still gated on the
+  MITM e2e + benchgate + adversarial review. **Estimated: the alert/stat relocation is a real
+  behavior-surface change (which caller counts a rotation), so this is NOT move-only — it needs
+  its own review beyond the mechanical extraction.**
+
 ### 2026-07-04 — `internal/session` extracted (HMAC tokens + revocation) — with a race fix
 The session engine (`session.go`, 435 LOC — signing-key holder, token encode/decode
 (base64(json).HMAC-SHA256), revocation list (token + user level, lazy eviction, gossip
