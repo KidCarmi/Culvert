@@ -656,7 +656,13 @@ jobs:
           # env-indirection: never shell-interpolate ref names (injection).
           REF_NAME: ${{ github.ref_name }}
         run: |
-          go build -trimpath -ldflags="-s -w -X main.version=${REF_NAME}" \
+          # -buildvcs=false: the binary must be byte-reproducible independent of
+          # working-tree state. Without it (auto), a non-gitignored untracked file
+          # (e.g. the sibling binary written by an earlier matrix step) flips the
+          # embedded vcs.modified and changes the hash — making the SLSA subject
+          # order-dependent. The commit is already carried by the git tag + SLSA
+          # provenance, so the embedded VCS stamp is redundant.
+          go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${REF_NAME}" \
             -o culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
 
       # Maintenance agent (cmd/culvert-maint) is a SEPARATE Go module and is
@@ -680,7 +686,12 @@ jobs:
           # env-indirection: never shell-interpolate ref names (injection).
           REF_NAME: ${{ github.ref_name }}
         run: |
-          go build -trimpath -ldflags="-s -w -X culvert-maint/internal/server.Version=${REF_NAME}" \
+          # -buildvcs=false (see the proxy build above): REQUIRED here — this
+          # module has no own .git and reads the ROOT repo status, and the proxy
+          # binary written by the earlier step is an untracked, non-gitignored
+          # sibling, so `auto` would stamp vcs.modified=true and produce an
+          # order-dependent hash. false makes it byte-reproducible.
+          go build -trimpath -buildvcs=false -ldflags="-s -w -X culvert-maint/internal/server.Version=${REF_NAME}" \
             -o "${GITHUB_WORKSPACE}/culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}" .
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).

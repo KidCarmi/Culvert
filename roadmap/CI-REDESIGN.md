@@ -201,6 +201,31 @@ the first tagged release carrying it produces different binary hashes (and
 therefore different SLSA subject digests) than prior releases — expected, not
 tampering; note it in that release's changelog.
 
+**Reproducible-build determinism (verifiable-provenance groundwork).** The two
+release builds (`ci.yml`, proxy + `culvert-maint`) now also pass `-buildvcs=false`.
+This was **required, not cosmetic**: `culvert-maint` is a separate module with no
+own `.git`, it reads the ROOT repo status, and the proxy binary written by the
+earlier matrix step is an untracked, non-gitignored sibling — so the default
+`auto` stamped `vcs.modified=true` and made the maint SLSA subject
+**order-dependent** (a clean-tree rebuild would hash-mismatch). With `false`, both
+binaries are byte-reproducible independent of tree state (the commit is already
+carried by the tag + provenance, so the VCS stamp is redundant); the first release
+after this again changes the hashes (expected). A Deep-gate **build-determinism**
+step (two identical-flag builds must be byte-identical, to `RUNNER_TEMP`) now
+guards this on every Go-touching PR — for **both** release modules (proxy AND
+`culvert-maint`, the module that carried the bug), so a future maint-specific
+non-determinism regression is caught too. **Follow-up (F1):** a tag-path
+`verify-reproducible` job that independently rebuilds at the tag and asserts the
+hashes match `aggregate-subjects.outputs.hashes` (what the SLSA provenance signs)
+— turning L3 provenance into *verifiable* provenance; deferred to its own PR
+(it needs a shared build composite + is tag-path-only, not PR-testable). The F1
+follow-up should also cover the **Docker image binary** (`Dockerfile`): it still
+builds with default `-buildvcs=auto` and its `.dockerignore` strips tracked files
+(`*_test.go`, `*.md`, …) while keeping `.git`, so the in-container `git status` sees
+those as deleted and the image binary ships `vcs.modified=true` (not tree-state
+reproducible). Out of scope for this phase (the image has its own cosign/provenance
+surface, disjoint from the Release-attached SLSA subjects) but tracked for F1.
+
 Every GitHub Release now carries **per-module CycloneDX SBOMs** for its binaries
 (`culvert.sbom.cdx.json` + `culvert-maint.sbom.cdx.json`), generated once on the
 linux/amd64 leg (syft reads the embedded Go build-info, identical across

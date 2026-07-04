@@ -51,6 +51,7 @@ jobs:
       tests: ${{ steps.classify.outputs.tests }}
       packaging: ${{ steps.classify.outputs.packaging }}
       release: ${{ steps.classify.outputs.release }}
+      maint: ${{ steps.classify.outputs.maint }}
       image_needed: ${{ steps.classify.outputs.image_needed }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -62,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" != "pull_request" ]; then
-            for k in proxy_core security docker deps tests packaging release image_needed; do
+            for k in proxy_core security docker deps tests packaging release maint image_needed; do
               echo "$k=true" >> "$GITHUB_OUTPUT"
             done
             echo "Manual run — all deep jobs enabled."
@@ -72,7 +73,7 @@ jobs:
           echo "── Changed files ──"; cat changed.txt
 
           proxy_core=false; security=false; docker=false; deps=false
-          tests=false; packaging=false; release=false
+          tests=false; packaging=false; release=false; maint=false
           self=false
           while IFS= read -r f; do
             case "$f" in
@@ -109,6 +110,19 @@ jobs:
               *_test.go) tests=true ;;
             esac
             case "$f" in
+              # culvert-maint is a SEPARATE module (own go.sum) and a released
+              # binary, but none of the outputs above match its production
+              # paths — so a maint-only change would skip the `determinism` job
+              # and the maint build-determinism guard would never run on the
+              # very module it protects (Codex P2). Classify maint production
+              # code + its module manifests here; `maint` gates `determinism`.
+              # Test-only maint changes already set tests=true (also gates it).
+              # (`*` in a bash case matches `/`, so this catches internal/… too.)
+              cmd/culvert-maint/*_test.go) ;;
+              cmd/culvert-maint/*.go|cmd/culvert-maint/go.mod|cmd/culvert-maint/go.sum)
+                maint=true ;;
+            esac
+            case "$f" in
               packaging/*|scripts/*) packaging=true ;;
             esac
             case "$f" in
@@ -132,17 +146,17 @@ jobs:
           if $self; then
             echo "Gate self-change detected — enabling all deep jobs."
             proxy_core=true; security=true; docker=true; deps=true
-            tests=true; packaging=true; release=true
+            tests=true; packaging=true; release=true; maint=true
           fi
 
           image_needed=false
           if $proxy_core || $security || $docker || $deps || $release; then
             image_needed=true
           fi
-          for k in proxy_core security docker deps tests packaging release image_needed; do
+          for k in proxy_core security docker deps tests packaging release maint image_needed; do
             eval "echo \"$k=\$$k\"" >> "$GITHUB_OUTPUT"
           done
-          echo "proxy_core=$proxy_core security=$security docker=$docker deps=$deps tests=$tests packaging=$packaging release=$release image_needed=$image_needed"
+          echo "proxy_core=$proxy_core security=$security docker=$docker deps=$deps tests=$tests packaging=$packaging release=$release maint=$maint image_needed=$image_needed"
 
   # ─── 1. Build the proxy image ONCE (amd64) — consumed by the jobs below ───
   build-image:
@@ -287,7 +301,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: changes
-    if: needs.changes.outputs.tests == 'true' || needs.changes.outputs.proxy_core == 'true' || needs.changes.outputs.security == 'true' || needs.changes.outputs.release == 'true'
+    if: needs.changes.outputs.tests == 'true' || needs.changes.outputs.proxy_core == 'true' || needs.changes.outputs.security == 'true' || needs.changes.outputs.release == 'true' || needs.changes.outputs.maint == 'true'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/setup-go-cache
@@ -299,6 +313,38 @@ jobs:
           go test -count=2 -shuffle=on -timeout=20m ./... 2>&1 | tee determinism.log \
             || { grep -m1 -- "-test.shuffle " determinism.log || true; \
                  echo "::error::determinism failure — reproduce with the printed -test.shuffle seed (log artifact: deep-determinism-log)"; exit 1; }
+
+      - name: Build determinism (release binaries are byte-reproducible)
+        # The release builds' reproducibility underpins verifiable SLSA provenance
+        # (an independent rebuild must hash-match the signed subjects). Two builds
+        # with the exact release flags must be byte-identical. -buildvcs=false
+        # mirrors the release build (ci.yml) and makes the hash independent of
+        # tree state; outputs go to RUNNER_TEMP so neither build dirties the tree.
+        # Catches a non-determinism regression (e.g. an embedded build timestamp)
+        # on the PR that introduces it, BEFORE it reaches a tagged release.
+        # Both release modules are guarded: the proxy AND culvert-maint — the
+        # latter is the separate module whose missing -buildvcs=false was the
+        # order-dependent bug this phase fixed, so it must stay covered.
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          check() {
+            # $1 = label, $2 = module dir, $3 = ldflags
+            local label="$1" dir="$2" flags="$3"
+            ( cd "$dir" && for o in b1 b2; do
+                go build -trimpath -buildvcs=false -ldflags="$flags" \
+                  -o "$RUNNER_TEMP/${label}-$o" .
+              done )
+            if cmp -s "$RUNNER_TEMP/${label}-b1" "$RUNNER_TEMP/${label}-b2"; then
+              echo "build determinism OK ($label): sha256 $(sha256sum "$RUNNER_TEMP/${label}-b1" | cut -d' ' -f1)"
+            else
+              echo "::error::$label build is NON-DETERMINISTIC — two identical-flag builds produced different binaries"
+              exit 1
+            fi
+          }
+          check proxy "$GITHUB_WORKSPACE" "-s -w -X main.version=determinism-check"
+          check maint "$GITHUB_WORKSPACE/cmd/culvert-maint" "-s -w -X culvert-maint/internal/server.Version=determinism-check"
 
       - name: Upload determinism log
         if: failure()
