@@ -8,6 +8,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -78,7 +79,7 @@ func TestRevokeSessionCookie_MalformedCookie(t *testing.T) {
 	if !session.HasSigningKey() {
 		initSessionSecret()
 	}
-	req, _ := http.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	// Attributes are irrelevant on an inbound request cookie (only Name=Value
 	// serializes), set to satisfy gosec G124.
 	req.AddCookie(&http.Cookie{
