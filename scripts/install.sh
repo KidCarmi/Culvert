@@ -568,19 +568,25 @@ dump_compose_diagnostics() {
 ###############################################################################
 # is_fresh_deployment — true when this looks like a first-time install: THIS
 # install directory's own proxy-data Docker volume does not exist yet (Docker
-# creates it on the first `docker compose up`). Scoped via the
-# com.docker.compose.project.working_dir label Compose stamps on volumes it
-# creates, so an unrelated compose project on the same host (e.g. a second
-# Culvert install in a different directory) that also happens to declare a
-# "proxy-data" volume can't make a genuinely fresh install misreport as
-# existing. Any docker error => treat as NOT fresh (conservative).
+# creates it on the first `docker compose up`). Resolves the REAL volume name
+# via `docker compose config` (run from $INSTALL_DIR, our cwd since the `cd`
+# above) instead of guessing it — Compose only labels volumes it creates with
+# com.docker.compose.project/.volume (NOT a working-directory label), so
+# matching by label alone can't distinguish this project from another compose
+# project on the same host that also declares a "proxy-data" volume. Asking
+# Compose for the resolved name applies whatever project-naming it would
+# actually use (directory basename, COMPOSE_PROJECT_NAME, or an explicit
+# `name:`) and lets us check that exact volume for existence. Any docker/
+# compose error => treat as NOT fresh (conservative).
 is_fresh_deployment() {
-  local vols
-  vols="$(sudo docker volume ls \
-    --filter "label=com.docker.compose.volume=proxy-data" \
-    --filter "label=com.docker.compose.project.working_dir=${INSTALL_DIR}" \
-    --format '{{.Name}}' 2>/dev/null)" || return 1
-  [[ -z "$vols" ]]
+  local resolved_name
+  resolved_name="$(sudo docker compose config 2>/dev/null | awk '
+    /^volumes:/ { invol=1; next }
+    invol && /^  proxy-data:/ { inpd=1; next }
+    inpd && /^    name:/ { print $2; exit }
+  ')"
+  [[ -n "$resolved_name" ]] || return 1
+  ! sudo docker volume inspect "$resolved_name" >/dev/null 2>&1
 }
 
 # secret_already_set VAR — true if VAR is non-empty in the host env or in .env.
