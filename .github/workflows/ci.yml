@@ -349,6 +349,11 @@ jobs:
       - name: Install cosign
         if: ${{ github.event_name != 'pull_request' }}
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin the cosign BINARY (installer default drifts across majors; the
+          # 2.x→3.x jump dropped the detached cert/signature output flags on
+          # sign-blob/attest-blob in favour of the Sigstore bundle).
+          cosign-release: 'v3.0.6'
 
       - name: Sign proxy image (keyless via Sigstore)
         if: ${{ github.event_name != 'pull_request' }}
@@ -462,6 +467,8 @@ jobs:
       - name: Install cosign
         if: startsWith(github.ref, 'refs/tags/v')
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
       - name: Sign catalog index keyless (cosign sign-blob → index.json.sigstore)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -679,49 +686,51 @@ jobs:
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
 
-      # Sign the proxy binary with cosign keyless signing. The signature and
-      # certificate are recorded in the Sigstore transparency log (Rekor).
-      # Verify with: cosign verify-blob --certificate-identity-regexp 'github.com/...'
+      # Sign the proxy binary with cosign keyless signing → a single self-contained
+      # Sigstore bundle (cert + signature + Rekor proof). cosign 3.x dropped the
+      # detached cert/signature output flags; --bundle is the new-format output
+      # (matches the catalog step above).
+      # Verify with: cosign verify-blob --bundle "${BINARY}.sigstore.json" \
+      #   --new-bundle-format --certificate-identity-regexp 'github.com/...ci.yml@refs/tags/v.*' \
+      #   --certificate-oidc-issuer https://token.actions.githubusercontent.com "${BINARY}"
       - name: Sign binary with cosign (keyless)
-        env:
-          COSIGN_EXPERIMENTAL: "1"
         run: |
           BINARY="culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}"
-          cosign sign-blob \
-            --yes \
-            --output-certificate "${BINARY}.pem" \
-            --output-signature  "${BINARY}.sig" \
+          cosign sign-blob --yes \
+            --bundle "${BINARY}.sigstore.json" \
             "${BINARY}"
 
       - name: Sign culvert-maint with cosign (keyless, linux)
         if: matrix.goos == 'linux'
-        env:
-          COSIGN_EXPERIMENTAL: "1"
         run: |
           BINARY="culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}"
-          cosign sign-blob \
-            --yes \
-            --output-certificate "${BINARY}.pem" \
-            --output-signature  "${BINARY}.sig" \
+          cosign sign-blob --yes \
+            --bundle "${BINARY}.sigstore.json" \
             "${BINARY}"
 
       # Per-MODULE CycloneDX SBOMs, generated ONCE on the linux/amd64 leg.
       # syft reads the binary's embedded Go build-info, identical across
       # GOOS/GOARCH for a given module — so 2 module SBOMs (proxy + agent) fully
       # describe all 7 released binaries (per-binary would be 7× the same 2
-      # dependency sets). Signed with the same keyless sign-blob flow the
-      # binaries use, and attached to the Release (below) so every release ships
-      # durable, signed SBOM evidence. NOTE: SBOMs are deliberately NOT added to
-      # "Compute release subjects" — the SLSA subject set must stay exactly the
-      # 7 binaries.
+      # dependency sets). Each SBOM is bound to its binary via `cosign
+      # attest-blob` (subject = the binary, predicate = the CycloneDX SBOM) → an
+      # in-toto attestation in a Sigstore bundle, so the SBOM is cryptographically
+      # tied to the exact binary digest (stronger than signing the SBOM bytes in
+      # isolation). Attached to the Release (below) so every release ships durable,
+      # bound SBOM evidence. NOTE: SBOMs are deliberately NOT added to "Compute
+      # release subjects" — the SLSA subject set must stay exactly the 7 binaries.
+      # Verify with: cosign verify-blob-attestation --type cyclonedx \
+      #   --new-bundle-format --bundle culvert.sbom.cdx.json.sigstore.json \
+      #   --certificate-identity-regexp '^https://github\.com/KidCarmi/Culvert/\.github/workflows/ci\.yml@refs/tags/v.*$' \
+      #   --certificate-oidc-issuer https://token.actions.githubusercontent.com culvert-linux-amd64
       - name: Install syft (pinned)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
-      - name: Generate + sign binary SBOMs (linux/amd64 leg)
+      - name: Generate + attest binary SBOMs (linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        env:
-          COSIGN_EXPERIMENTAL: "1"
         run: |
           set -euo pipefail
           for pair in "culvert-linux-amd64:culvert.sbom.cdx.json" \
@@ -732,10 +741,11 @@ jobs:
             # SBOM is worthless evidence and must not ship.
             jq -e '.components | length > 0' "$SBOM" >/dev/null \
               || { echo "::error::SBOM $SBOM has no components — refusing SBOM-less release"; exit 1; }
-            cosign sign-blob --yes \
-              --output-certificate "${SBOM}.pem" \
-              --output-signature   "${SBOM}.sig" \
-              "$SBOM"
+            cosign attest-blob --yes \
+              --predicate "$SBOM" \
+              --type cyclonedx \
+              --bundle "${SBOM}.sigstore.json" \
+              "$BIN"
           done
 
       # SLSA subjects: one sha256sum line per released binary for THIS leg
@@ -751,37 +761,35 @@ jobs:
           sha256sum $FILES > "subjects-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
           cat "subjects-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
 
-      - name: Upload proxy release asset + signature
+      - name: Upload proxy release asset + signature bundle
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: |
             culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
-            culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.sig
-            culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.pem
+            culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}.sigstore.json
 
-      - name: Upload culvert-maint release asset + signature (linux)
+      - name: Upload culvert-maint release asset + signature bundle (linux)
         if: matrix.goos == 'linux'
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: |
             culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}
-            culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}.sig
-            culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}.pem
+            culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}.sigstore.json
 
-      # Attach the signed module SBOMs to the Release (Release assets are a
-      # channel DISJOINT from the SLSA subjects artifact — this cannot affect
-      # the ==7 subject assertion). linux/amd64 leg only (where they're made).
-      - name: Upload signed binary SBOMs (linux/amd64 leg)
+      # Attach the SBOMs + their attestation bundles to the Release (Release
+      # assets are a channel DISJOINT from the SLSA subjects artifact — this
+      # cannot affect the ==7 subject assertion). linux/amd64 leg only (where
+      # they're made). The raw SBOM feeds tooling (grype/trivy/Dependency-Track);
+      # the .sigstore.json is the in-toto attestation binding it to the binary.
+      - name: Upload SBOMs + attestation bundles (linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: |
             culvert.sbom.cdx.json
-            culvert.sbom.cdx.json.sig
-            culvert.sbom.cdx.json.pem
+            culvert.sbom.cdx.json.sigstore.json
             culvert-maint.sbom.cdx.json
-            culvert-maint.sbom.cdx.json.sig
-            culvert-maint.sbom.cdx.json.pem
+            culvert-maint.sbom.cdx.json.sigstore.json
 
       - name: Upload per-leg subjects artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
