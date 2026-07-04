@@ -146,6 +146,14 @@ func securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		// HSTS: pin HTTPS on the admin UI. Emit ONLY over TLS (direct r.TLS or via
+		// a TLS-terminating reverse proxy signalling X-Forwarded-Proto: https) —
+		// sending it on plain HTTP is ignored by browsers (RFC 6797 §8.1) and
+		// gating avoids pinning an operator who deliberately runs the UI without
+		// TLS. Fixed security default (no config knob → no GUI-parity surface).
+		if isSecureRequest(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		// CSP: generate a per-request nonce and pass it to handlers via context.
 		// The index.html handler reads this to inject into <script> tags.
 		nonce := cspNonce()

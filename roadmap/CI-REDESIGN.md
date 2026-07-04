@@ -279,14 +279,22 @@ loopback-SSRF relax — that is test-only). `proxy.go`'s client-facing
 `tls.Config` now pins `MinVersion: tls.VersionTLS12` explicitly (was relying on
 the Go default) so the floor is contractual.
 
+**Admin-UI HSTS (DONE).** `securityMiddleware` now emits
+`Strict-Transport-Security: max-age=31536000; includeSubDomains` — gated on
+`isSecureRequest` (direct `r.TLS` or a reverse proxy's `X-Forwarded-Proto:
+https`), so it's sent only over TLS and never pins an intentionally-plaintext UI
+(browsers ignore HSTS received over HTTP, RFC 6797 §8.1). No `preload` (an
+irrevocable public-list commitment inappropriate for a self-hosted panel); a
+fixed security default (no config knob → no GUI-parity surface). Admin-UI-only —
+NOT the proxy data path / block page (the proxy must not pin HSTS on third-party
+origins it inspects). Pinned by `TestSecurityMiddleware_HSTS` (TLS-present /
+XFP-present / plain-HTTP-absent).
+
 **Follow-ups:** drive the G401/G402 discovery delta to zero with justified
 `#nosec` on the remaining sites, then flip the **blocking** gosec to include
-them; add **HSTS**
-to the admin UI (a `Strict-Transport-Security` header is not emitted today; CSP
-already is, with a nonce) plus a Go assertion; a client-side
-cipher **allowlist** on the inspect `tls.Config` (MinVersion is pinned; the
-suite set still inherits Go defaults); optionally promote the ZAP/testssl
-findings from advisory to blocking after a stable baseline.
+them; a client-side cipher **allowlist** on the inspect `tls.Config` (MinVersion
+is pinned; the suite set still inherits Go defaults); optionally promote the
+ZAP/testssl findings from advisory to blocking after a stable baseline.
 
 **Phase 2b (TODO — flip to block after one real tagged release):** harden-runner
 `block` is NOT applied yet because the Actions runtime/OIDC/cache use

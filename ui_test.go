@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -179,6 +180,43 @@ func TestSecurityMiddleware_Headers(t *testing.T) {
 	}
 	if w.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Error("X-Content-Type-Options should be nosniff")
+	}
+}
+
+// TestSecurityMiddleware_HSTS pins the HSTS contract: the admin UI emits
+// Strict-Transport-Security over TLS (direct or via a TLS-terminating reverse
+// proxy's X-Forwarded-Proto) and NEVER over plain HTTP — sending it on HTTP is
+// ignored by browsers and would risk pinning an intentionally-plaintext UI. The
+// plain-HTTP absence case is the load-bearing regression guard for the gate.
+func TestSecurityMiddleware_HSTS(t *testing.T) {
+	handler := securityMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	const want = "max-age=31536000; includeSubDomains"
+
+	// (1) direct TLS → header present
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	r.TLS = &tls.ConnectionState{} // simulate a TLS connection
+	handler.ServeHTTP(w, r)
+	if got := w.Header().Get("Strict-Transport-Security"); got != want {
+		t.Errorf("TLS: HSTS = %q, want %q", got, want)
+	}
+
+	// (2) reverse-proxy X-Forwarded-Proto: https → header present
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	r.Header.Set("X-Forwarded-Proto", "https")
+	handler.ServeHTTP(w, r)
+	if got := w.Header().Get("Strict-Transport-Security"); got != want {
+		t.Errorf("XFP: HSTS = %q, want %q", got, want)
+	}
+
+	// (3) plain HTTP → header ABSENT (the gate must hold)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	if got := w.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("plain HTTP: HSTS = %q, want absent", got)
 	}
 }
 
