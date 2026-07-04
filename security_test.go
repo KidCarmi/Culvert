@@ -21,37 +21,44 @@ func TestIPFilter_ModeOff(t *testing.T) {
 	}
 }
 
-// TestIPFilter_SetModeInvalidFailsClosed pins the fail-closed contract: an
-// unrecognized non-empty mode (a corrupt persisted/snapshot value reaching
-// SetMode through config reload / admin_settings restore / config-version
-// rollback / cluster ConfigSnapshot) must NOT be stored raw. Allowed() treats
-// an unknown mode as "allow all" (filter disabled), so storing garbage would
-// silently fail OPEN. SetMode coerces it to the restrictive "block" instead.
-func TestIPFilter_SetModeInvalidFailsClosed(t *testing.T) {
+// TestIPFilter_CorruptModeDeniesAll pins the fail-closed contract: an
+// unrecognized (corrupt) mode reaching the filter through a raw
+// persistence/snapshot path (config reload / admin_settings restore /
+// config-version rollback / cluster ConfigSnapshot) must DENY ALL traffic.
+// Denying-all (not coercing to "block") is the only safe choice: a corrupted
+// allowlist deployment coerced to a blocklist would admit every non-listed IP
+// (fail open). Here we prove BOTH a listed and an unlisted IP are denied.
+func TestIPFilter_CorruptModeDeniesAll(t *testing.T) {
 	for _, bad := range []string{"deny", "blockk", "ALLOW", "off", "enabled", "x"} {
 		f := freshIPF()
 		f.SetMode(bad)
-		if got := f.Mode(); got != "block" {
-			t.Errorf("SetMode(%q): Mode() = %q, want coercion to block (fail closed)", bad, got)
-		}
-		// With an IP added, the coerced block mode must actually filter it —
-		// proving the filter is NOT silently disabled.
 		f.Add("203.0.113.9") //nolint:errcheck // valid IP literal, Add cannot fail here
 		if f.Allowed("203.0.113.9") {
-			t.Errorf("SetMode(%q): listed IP allowed — filter failed OPEN instead of blocking", bad)
+			t.Errorf("SetMode(%q): listed IP allowed — corrupt mode must deny all (fail closed)", bad)
+		}
+		if f.Allowed("198.51.100.7") {
+			t.Errorf("SetMode(%q): unlisted IP allowed — corrupt allowlist must NOT become a permissive blocklist", bad)
 		}
 	}
 }
 
-// TestIPFilter_SetModeValidPassThrough pins that the coercion only touches
-// invalid modes: the two valid modes and the disabled sentinel are unchanged.
-func TestIPFilter_SetModeValidPassThrough(t *testing.T) {
+// TestIPFilter_ValidModesAndDisabled pins that the three valid states behave
+// correctly: "" disables (all pass), and "allow"/"block" round-trip through
+// Mode() unchanged.
+func TestIPFilter_ValidModesAndDisabled(t *testing.T) {
 	for _, ok := range []string{"allow", "block", ""} {
 		f := freshIPF()
 		f.SetMode(ok)
 		if got := f.Mode(); got != ok {
 			t.Errorf("SetMode(%q): Mode() = %q, want unchanged", ok, got)
 		}
+	}
+	// "" is disabled — every IP passes.
+	f := freshIPF()
+	f.SetMode("")
+	f.Add("203.0.113.9") //nolint:errcheck // valid IP literal
+	if !f.Allowed("203.0.113.9") || !f.Allowed("8.8.8.8") {
+		t.Error(`empty mode must disable the filter (all IPs allowed)`)
 	}
 }
 
