@@ -152,6 +152,120 @@ Everything else — nightly stress/load/fuzz, weekly IdP interop, UI e2e,
 benchmarks, heavy installer e2e — is scheduled/advisory, and release-blocking
 only via the tag-path gates.
 
+### 5a. Release-gate integrity (PANW audit item 1 — REQUIRED admin step)
+
+The signing/publish jobs (`docker`, `catalog-pipeline`, `release`) and
+`auto-tag` gate on the gate **workflow files** concluding success for the
+commit on its main push, via `.github/scripts/require-gate.sh` (bound to the
+workflow path + main-push provenance — a spoofed check-run *name* or a
+tag-triggered re-run of the same SHA can no longer self-approve). This is the
+in-repo backstop.
+
+It is a BACKSTOP, not the primary control. On the tag path `require-gate.sh`
+is checked out from the **tagged tree**, so anyone able to push an arbitrary
+`v*` tag can also strip the guard. The primary control is a **repo ruleset
+that restricts `v*` tag creation to the `github-actions[bot]`** (i.e. only
+`auto-tag` may mint release tags; humans cannot push `v*` at all):
+
+> Settings → Rules → Rulesets → New tag ruleset → Target `v*` →
+> Restrict creations → Bypass list: `github-actions[bot]` only.
+
+Until that ruleset exists, a maintainer with push access can still hand-push a
+tag on a *reviewed, green* commit (the in-repo guard allows exactly that and
+refuses a non-green commit). Set the ruleset to close the arbitrary-tree class.
+
+**Deferred (same class, Phase 2):** on a *main* push the `docker` job publishes
++ cosign-signs `ghcr:latest` in parallel with the gate, with no gate
+dependency — a commit that later fails the gate has already shipped a signed
+`latest`. Fix by gating the main-push publish/sign the same way (wait mode).
+
+### 5b. Egress control on the signing jobs (PANW audit item 2)
+
+The OIDC-token-bearing jobs (`docker`, `catalog-pipeline`, `release`, plus the
+`_build-image` reusable, `pr-fast-gate/test-race`, and `publish-catalog-pages`)
+run `go build`/`go test`/`docker build` over the full dependency graph while
+holding the cosign signing identity. A compromised transitive dep could
+exfiltrate that token. **Phase 2a (applied):** `step-security/harden-runner`
+runs in `egress-policy: audit` as the first step of each — non-breaking egress
+monitoring + a baseline for the block flip. golangci-lint is now installed via
+checksum-verified `go install` (was `curl | sh` off a mutable tag ref).
+
+### 5d. SBOM + reproducibility (PANW audit item 4)
+
+The Dockerfile no longer runs `go mod tidy` at image-build time — the image
+builds from the exact reviewed `go.mod`/`go.sum` (tidiness is enforced in CI by
+the Fast Gate's `go mod tidy -diff`, not re-resolved in the image layer). All
+Go builds (image, `test`, and the `release` matrix) now pass `-trimpath` as
+reproducibility groundwork. **Caveat:** `-trimpath` is a build-input change, so
+the first tagged release carrying it produces different binary hashes (and
+therefore different SLSA subject digests) than prior releases — expected, not
+tampering; note it in that release's changelog.
+
+Every GitHub Release now carries **signed per-module CycloneDX SBOMs** for its
+binaries (`culvert.sbom.cdx.json` + `culvert-maint.sbom.cdx.json`, each with a
+cosign `.sig`/`.pem`), generated once on the linux/amd64 leg (syft reads the
+embedded Go build-info, identical across GOOS/GOARCH). This replaces the prior
+state where the source-tree SBOM was a 90-day artifact falsely documented as
+"attached to every release" and the 7 released binaries had no SBOM at all. The
+SBOMs are Release *assets*, a channel disjoint from the SLSA subjects, so the
+`aggregate-subjects` `==7` invariant is untouched. The image already ships a
+BuildKit CycloneDX SBOM attestation (`sbom: true`), so it is out of scope here.
+
+**Follow-ups:** upgrade the SBOM signature to a cosign `attest-blob --type
+cyclonedx` in-toto statement (binds the SBOM to the subject binary — stronger
+than a detached sign-blob) once in-repo attestation-verify tooling exists; a
+single consolidated evidence-bundle tarball (SBOMs + provenance + scan reports +
+gate summaries per tag) is optional (those artifacts already exist individually).
+
+### 5c. DAST — attack the running product (PANW audit item 3)
+
+`dast-nightly.yml` (scheduled) boots the real proxy and points scanners at it:
+`testssl.sh` against the admin UI TLS (**gated** on legacy protocols / weak
+cipher families — not on severity, since a self-signed cert is a legitimate
+HIGH PKI finding), an OWASP ZAP baseline (advisory, passive), and a gosec run
+with **G401 (weak crypto) + G402 (InsecureSkipVerify) re-included** (report-only
+discovery of the surface the blocking gates' blanket exclusion hides).
+
+The forged-leaf TLS posture of the **inspected path** — the product's core
+function — is asserted deterministically + hermetically by
+`TestMITM_ForgedLeafTLSPosture` (Go, default suite): TLS ≥ 1.2, AEAD cipher,
+ECDSA P-256 leaf, and a TLS 1.1 client refused. An external scanner through the
+CONNECT path is infeasible in CI (the shipped binary has no runtime
+loopback-SSRF relax — that is test-only). `proxy.go`'s client-facing
+`tls.Config` now pins `MinVersion: tls.VersionTLS12` explicitly (was relying on
+the Go default) so the floor is contractual.
+
+**Follow-ups:** authenticated ZAP (session-cookie context — where the real yield
+is); drive the G401/G402 discovery delta to zero with justified `#nosec` on the
+remaining sites, then flip the **blocking** gosec to include them; add **HSTS**
+to the admin UI (a `Strict-Transport-Security` header is not emitted today; CSP
+already is, with a nonce) plus a Go assertion; a client-side
+cipher **allowlist** on the inspect `tls.Config` (MinVersion is pinned; the
+suite set still inherits Go defaults); optionally promote the ZAP/testssl
+findings from advisory to blocking after a stable baseline.
+
+**Phase 2b (TODO — flip to block after one real tagged release):** harden-runner
+`block` is NOT applied yet because the Actions runtime/OIDC/cache use
+per-region FQDNs under `*.actions.githubusercontent.com` that block can't
+reliably match without an empirical baseline, and a wrong allowlist mid-pipeline
+yields a *partial* release (images already signed to ghcr, release aborted).
+Procedure: run one real `v*` release with audit on, read harden-runner's
+reported endpoints, then set `egress-policy: block` + `allowed-endpoints` pinned
+to those exact FQDNs. Known-required hosts (starting list, confirm against the
+report): `github.com:443`, `api.github.com:443`, `uploads.github.com:443`,
+`release-assets.githubusercontent.com:443`, `objects.githubusercontent.com:443`,
+`codeload.github.com:443`, the reported `*.actions.githubusercontent.com` +
+`*.blob.core.windows.net` FQDNs (Actions/OIDC/artifacts/gha-cache),
+`ghcr.io:443`, `pkg-containers.githubusercontent.com:443`,
+`proxy.golang.org:443`, `sum.golang.org:443`, `storage.googleapis.com:443`,
+`fulcio.sigstore.dev:443`, `rekor.sigstore.dev:443`,
+`tuf-repo-cdn.sigstore.dev:443`, `registry-1.docker.io:443`,
+`auth.docker.io:443`, `production.cloudflare.docker.com:443`. Note: the
+`docker` job's in-container build egress (apk, `go mod download` inside
+buildkit) bypasses harden-runner — block there protects only the host-side
+cosign step. The `provenance` job is an SLSA reusable workflow (`@v2.1.0`,
+tag-pinned by design) — harden-runner cannot be injected into it; accepted gap.
+
 ## 6. Pinning policy
 
 GitHub Actions: full commit SHA + version comment (enforced convention).

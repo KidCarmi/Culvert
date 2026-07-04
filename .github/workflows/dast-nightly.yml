@@ -1,0 +1,192 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DAST Nightly — attack the running product (PANW audit item 3)
+#
+# The running product was never attacked in CI. This lane boots the real proxy
+# and points scanners at it:
+#   J1  testssl.sh against the admin UI's own TLS (:9090) — GATED on legacy
+#       protocols / weak cipher families (NOT on severity: a self-signed cert
+#       is a HIGH PKI finding that would false-fail every run).
+#   J3  OWASP ZAP baseline against the admin UI — ADVISORY (passive; catches
+#       missing headers / cookie flags / info leaks). Authenticated ZAP is a
+#       documented follow-up.
+#   J4  gosec with G401 (weak crypto) + G402 (InsecureSkipVerify) UN-excluded —
+#       report-only discovery of the surface those blanket exclusions hide in a
+#       TLS-interception product. Drive-to-zero + flip-to-blocking is a follow-up.
+#
+# The forged-leaf TLS posture of the INSPECTED path is asserted deterministically
+# and hermetically by TestMITM_ForgedLeafTLSPosture (Go), not here — the shipped
+# binary's SSRF loopback guard makes an external scanner through the CONNECT path
+# infeasible in CI (see roadmap/CI-REDESIGN.md §5c).
+# ─────────────────────────────────────────────────────────────────────────────
+name: DAST Nightly
+
+on:
+  schedule:
+    - cron: "45 3 * * *"   # 03:45 UTC nightly (after fuzz 03:30, before e2e 04:00)
+  workflow_dispatch:
+
+concurrency:
+  group: dast-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ─── J1 — TLS posture of the admin UI (gated) ──────────────────────────────
+  admin-ui-tls:
+    name: "DAST · admin UI TLS (testssl)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Build + start proxy (admin UI on self-signed TLS)
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
+          # No -ui-no-tls → the admin UI serves HTTPS with a generated
+          # self-signed cert; unconfigured first-run serves without auth.
+          ./culvert -port 8080 -ui-port 9090 > "$RUNNER_TEMP/proxy.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/proxy.pid"
+          for i in $(seq 1 30); do
+            if curl -ksf https://127.0.0.1:9090/ >/dev/null 2>&1; then echo "admin UI up"; break; fi
+            sleep 1
+            [ "$i" = 30 ] && { echo "::error::admin UI did not come up"; cat "$RUNNER_TEMP/proxy.log"; exit 1; }
+          done
+
+      - name: Fetch testssl.sh (pinned tag)
+        run: git clone --depth 1 --branch v3.2.3 https://github.com/testssl/testssl.sh "$RUNNER_TEMP/testssl"
+
+      - name: Run testssl against admin UI TLS
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/testssl/testssl.sh" \
+            --jsonfile-pretty "$RUNNER_TEMP/testssl.json" \
+            --protocols -s --server-preference \
+            --fast --connect-timeout 30 --openssl-timeout 30 \
+            --warnings off --color 0 \
+            https://127.0.0.1:9090 || true
+          test -s "$RUNNER_TEMP/testssl.json" || { echo "::error::no testssl output"; exit 1; }
+
+      - name: Gate on legacy protocols + weak cipher families
+        # Scope the gate to protocol/cipher IDs only — NOT severity. A self-signed
+        # cert legitimately raises HIGH PKI/trust findings that must not fail us.
+        run: |
+          set -euo pipefail
+          J="$RUNNER_TEMP/testssl.json"
+          fail=0
+          # Legacy protocols offered → fail.
+          while IFS= read -r line; do
+            echo "::error::legacy protocol offered: $line"; fail=1
+          done < <(jq -r '.[] | select((.id=="SSLv2" or .id=="SSLv3" or .id=="TLS1" or .id=="TLS1_1")
+                            and (.finding | test("not offered"; "i") | not))
+                          | "\(.id): \(.finding)"' "$J")
+          # Weak cipher families offered → fail.
+          while IFS= read -r line; do
+            echo "::error::weak cipher family offered: $line"; fail=1
+          done < <(jq -r '.[] | select((.id | test("^cipherlist_(NULL|aNULL|EXPORT|LOW|3DES)"; "i"))
+                            and (.finding | test("not offered"; "i") | not))
+                          | "\(.id): \(.finding)"' "$J")
+          [ "$fail" = 0 ] && echo "admin UI TLS posture: no legacy protocols / weak ciphers offered."
+          exit $fail
+
+      - name: Diagnostics + teardown
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/proxy.pid" 2>/dev/null)" 2>/dev/null || true
+          echo "=== proxy.log ==="; tail -n 40 "$RUNNER_TEMP/proxy.log" 2>/dev/null || true
+
+      - name: Upload testssl report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: testssl-admin-ui
+          path: ${{ runner.temp }}/testssl.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ─── J3 — ZAP baseline against the admin UI (advisory) ─────────────────────
+  admin-ui-zap:
+    name: "DAST · admin UI ZAP baseline (advisory)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true   # advisory first cut; unauthenticated passive scan
+    steps:
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Build + start proxy (admin UI on self-signed TLS)
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
+          ./culvert -port 8080 -ui-port 9090 > "$RUNNER_TEMP/proxy.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/proxy.pid"
+          for i in $(seq 1 30); do
+            curl -ksf https://127.0.0.1:9090/ >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+      - name: ZAP baseline (passive, host network so localhost resolves)
+        run: |
+          set -o pipefail
+          docker run --rm --network host -v "$RUNNER_TEMP:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t https://127.0.0.1:9090 -I -m 2 -T 5 \
+            -J zap-report.json -w zap-report.md || true
+          echo "── ZAP baseline summary ──"; sed -n '1,60p' "$RUNNER_TEMP/zap-report.md" 2>/dev/null || true
+
+      - name: Teardown + upload
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/proxy.pid" 2>/dev/null)" 2>/dev/null || true
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zap-admin-ui
+          path: |
+            ${{ runner.temp }}/zap-report.json
+            ${{ runner.temp }}/zap-report.md
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ─── J4 — gosec G401/G402 discovery (report-only) ──────────────────────────
+  weak-crypto-discovery:
+    name: "DAST · gosec G401/G402 surface (report-only)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Install gosec (pinned)
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+
+      - name: gosec with G401 + G402 RE-INCLUDED (non-test, report-only)
+        # The blocking gates exclude G401 (weak crypto) + G402 (InsecureSkipVerify)
+        # repo-wide. This measures the hidden surface WITHOUT that exclusion,
+        # scoped to non-test files (inline #nosec on the annotated production
+        # sites already suppresses the legitimate ones). Report-only until a
+        # follow-up drives the delta to zero and flips the blocking gate.
+        run: |
+          set -o pipefail
+          echo "── root module ──"
+          gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... || true
+          echo "── cmd/culvert-maint ──"
+          ( cd cmd/culvert-maint && gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... ) || true
+          echo "Report-only: see roadmap/CI-REDESIGN.md §5c for the drive-to-zero follow-up."

@@ -17,7 +17,12 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
     fi && \
     : "${VERSION:=dev}" && \
     echo "$VERSION" > /app/VERSION && \
-    go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o culvert .
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o culvert .
+# No `go mod tidy` here — the image must build from the EXACT reviewed module
+# graph (go.mod/go.sum COPYed + `go mod download`ed above), not re-resolve deps
+# at build time (a divergent-recipe supply-chain smell). Tidiness is enforced in
+# CI (Fast Gate `go mod tidy -diff`). `-trimpath` strips build-path prefixes as
+# reproducibility groundwork.
 
 # ── GeoIP stage ───────────────────────────────────────────────────────────────
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build

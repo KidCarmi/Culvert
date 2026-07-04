@@ -20,10 +20,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -398,4 +405,202 @@ func upstreamCertPool(t *testing.T, srv *httptest.Server) *x509.CertPool {
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
 	return pool
+}
+
+// TestMITM_ForgedLeafTLSPosture is the DAST-grade assertion on the CLIENT-FACING
+// side of an inspected tunnel (PANW audit item 3, J2a — hermetic replacement for
+// running an external TLS scanner through the CONNECT path, which the shipped
+// binary's SSRF loopback guard makes infeasible in CI). It pins the posture the
+// SWG presents to clients via its forged leaf: a modern protocol floor, an AEAD
+// cipher, and an ECDSA P-256 leaf signed by the proxy CA. It also proves the
+// negotiated protocol FLOOR is enforced (a TLS 1.1-max client is refused), which
+// guards the explicit MinVersion on proxy.go's client-facing tls.Config.
+func TestMITM_ForgedLeafTLSPosture(t *testing.T) {
+	allowLoopbackTunnel(t)
+	cm, proxyRoots := setupInspectCA(t)
+	_ = cm
+
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok")) //nolint:errcheck // test I/O
+	}))
+	defer upstream.Close()
+	target := upstream.Listener.Addr().String()
+
+	proxyURL := startTestProxy(t)
+	inspectRule(true) // skip-verify: accept httptest's self-signed upstream
+
+	// ── Positive: a modern client reflects the forged-leaf server posture ──
+	tc, err := connectAndTLS(proxyURL.Host, target, "inspect.test", proxyRoots)
+	if err != nil {
+		t.Fatalf("inspect handshake must succeed when client trusts the proxy CA: %v", err)
+	}
+	defer tc.Close() //nolint:errcheck // test cleanup
+	cs := tc.ConnectionState()
+
+	if cs.Version < tls.VersionTLS12 {
+		t.Errorf("SECURITY: forged leaf negotiated TLS version 0x%04x, want >= TLS 1.2", cs.Version)
+	}
+
+	// The negotiated cipher must be a modern AEAD suite — never RC4/3DES/CBC.
+	allowedAEAD := map[uint16]bool{
+		tls.TLS_AES_128_GCM_SHA256:                        true, // TLS 1.3
+		tls.TLS_AES_256_GCM_SHA384:                        true, // TLS 1.3
+		tls.TLS_CHACHA20_POLY1305_SHA256:                  true, // TLS 1.3
+		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:       true,
+		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:       true,
+		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: true,
+		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:         true,
+		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:         true,
+		tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:   true,
+	}
+	if !allowedAEAD[cs.CipherSuite] {
+		t.Errorf("SECURITY: forged leaf negotiated non-AEAD/weak cipher 0x%04x (%s)",
+			cs.CipherSuite, tls.CipherSuiteName(cs.CipherSuite))
+	}
+
+	if len(cs.PeerCertificates) == 0 {
+		t.Fatal("no peer certificate presented on the inspected tunnel")
+	}
+	leaf := cs.PeerCertificates[0]
+	if leaf.PublicKeyAlgorithm != x509.ECDSA {
+		t.Errorf("SECURITY: forged leaf key algorithm = %v, want ECDSA", leaf.PublicKeyAlgorithm)
+	}
+	if pk, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || pk.Curve != elliptic.P256() {
+		t.Errorf("SECURITY: forged leaf is not an ECDSA P-256 key: %T", leaf.PublicKey)
+	}
+
+	// ── Negative: a legacy (TLS 1.1-max) client MUST be refused ──
+	raw, err := dialTimeout(proxyURL.Host)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer raw.Close() //nolint:errcheck // test cleanup
+	_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, err := fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	if err := readCONNECT200(raw); err != nil {
+		t.Fatalf("CONNECT: %v", err)
+	}
+	// MinVersion TLS10 is load-bearing: without it the client's own default
+	// minimum (TLS 1.2 since Go 1.22) makes the handshake fail LOCALLY before
+	// any ClientHello, so the server floor would never be exercised. Forcing
+	// the client to offer 1.0–1.1 makes the SERVER do the refusing.
+	legacy := tls.Client(raw, &tls.Config{ //nolint:gosec // G402: versions pinned low ON PURPOSE to prove the server floor
+		RootCAs:    proxyRoots,
+		ServerName: "inspect.test",
+		MinVersion: tls.VersionTLS10,
+		MaxVersion: tls.VersionTLS11,
+	})
+	if err := legacy.HandshakeContext(context.Background()); err == nil {
+		legacy.Close() //nolint:errcheck // test cleanup
+		t.Error("SECURITY: forged-leaf server accepted a TLS 1.1 handshake — MinVersion floor not enforced")
+	}
+}
+
+// selfSignedCert mints a self-signed leaf of the requested key type ("rsa" =>
+// RSA-2048, "ecdsa" => ECDSA P-256) valid for the loopback origin. Used to stand
+// up httptest origins with a chosen key algorithm so the interop matrix exercises
+// the proxy's upstream TLS client against the real spread of origin cert types.
+func selfSignedCert(t *testing.T, keyType string) tls.Certificate {
+	t.Helper()
+
+	var signer crypto.Signer
+	switch keyType {
+	case "rsa":
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("rsa.GenerateKey: %v", err)
+		}
+		signer = k
+	case "ecdsa":
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("ecdsa.GenerateKey: %v", err)
+		}
+		signer = k
+	default:
+		t.Fatalf("selfSignedCert: unknown keyType %q", keyType)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "origin.test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              []string{"origin.test", "localhost"},
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, signer.Public(), signer)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate: %v", err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: signer, Leaf: tmpl}
+}
+
+// TestMITM_OriginInterop drives the inspected path against a MATRIX of upstream
+// origin TLS postures — {TLS 1.2, TLS 1.3} × {RSA-2048, ECDSA-P256} leaves — to
+// prove the proxy's upstream TLS client interoperates with the real spread of
+// origin server configurations a SWG meets in production. Each cell stands up a
+// pinned-version httptest origin with a self-signed leaf of the chosen key type,
+// CONNECTs + SSL-inspects through the proxy (skip-verify accepts the self-signed
+// origin), and asserts the inner request round-trips 200 + body. Hermetic
+// (loopback + in-memory CA), runs in the default -race suite.
+func TestMITM_OriginInterop(t *testing.T) {
+	allowLoopbackTunnel(t)
+	_, proxyRoots := setupInspectCA(t)
+	proxyURL := startTestProxy(t)
+	inspectRule(true) // skip-verify: accept each self-signed origin leaf
+
+	versions := []struct {
+		name string
+		ver  uint16
+	}{
+		{"TLS1.2", tls.VersionTLS12},
+		{"TLS1.3", tls.VersionTLS13},
+	}
+	keyTypes := []string{"rsa", "ecdsa"}
+
+	for _, v := range versions {
+		for _, kt := range keyTypes {
+			name := v.name + "/" + kt
+			t.Run(name, func(t *testing.T) {
+				cert := selfSignedCert(t, kt)
+				srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte("origin-ok")) //nolint:errcheck // test I/O
+				}))
+				srv.TLS = &tls.Config{ //nolint:gosec // G402: version pinned to exercise one matrix cell
+					MinVersion:   v.ver,
+					MaxVersion:   v.ver,
+					Certificates: []tls.Certificate{cert},
+				}
+				srv.StartTLS()
+				defer srv.Close()
+				target := srv.Listener.Addr().String()
+
+				tc, err := connectAndTLS(proxyURL.Host, target, "origin.test", proxyRoots)
+				if err != nil {
+					t.Fatalf("inspect handshake against %s origin failed: %v", name, err)
+				}
+				defer tc.Close() //nolint:errcheck // test cleanup
+
+				_, _ = fmt.Fprint(tc, "GET / HTTP/1.1\r\nHost: origin.test\r\nConnection: close\r\n\r\n")
+				resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
+				if err != nil {
+					t.Fatalf("read inspected response (%s): %v", name, err)
+				}
+				defer resp.Body.Close()
+				body, _ := io.ReadAll(resp.Body)
+				if resp.StatusCode != http.StatusOK || string(body) != "origin-ok" {
+					t.Fatalf("interop %s: status=%d body=%q, want 200 origin-ok", name, resp.StatusCode, body)
+				}
+			})
+		}
+	}
 }

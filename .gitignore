@@ -4,6 +4,9 @@ culvert
 /Culvert
 updater/culvert-updater
 
+# Runtime artifacts (pid files from local/CI proxy runs)
+*.pid
+
 # Local configuration (may contain real passwords — never commit)
 config.yaml
 

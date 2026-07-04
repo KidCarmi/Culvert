@@ -58,7 +58,7 @@ jobs:
       # (fuzz-nightly.yml). This job only verifies compilation on the
       # main/tag path.
       - name: Build
-        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o culvert .
 
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -181,11 +181,28 @@ jobs:
       contents: read
       packages: write      # push to ghcr.io
       id-token: write      # cosign keyless image signing
+      actions: read        # require-gate.sh (tag-path guard)
 
     steps:
+      - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0   # full history needed for tag-based version computation
+
+      # Tag-path guard: on a v* tag this job builds, pushes, and cosign-signs
+      # ghcr images BEFORE the release job runs — so the gate check must sit
+      # here too, not only in release. Refuse unless the tagged commit was
+      # green on its main push (assert mode: the main run must already exist).
+      - name: Require gate approval on the tagged commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
+          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
 
       # ── Compute next semver on main push ──────────────────────────────────
       # GITHUB_TOKEN tag pushes (from auto-tag) can't trigger new workflows,
@@ -383,10 +400,24 @@ jobs:
     permissions:
       contents: write     # attach the signed catalog to the GitHub Release (tag path)
       id-token: write     # cosign keyless blob signing of index.json (tag path)
+      actions: read       # require-gate.sh (tag-path guard)
     steps:
+      - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0   # tag history for catalog_version
+      # Tag-path guard: this job keyless-signs the release catalog on a v*
+      # tag. Refuse unless the tagged commit was green on its main push.
+      - name: Require gate approval on the tagged commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
+          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
       - uses: ./.github/actions/setup-go-cache
       - name: Build catalog spec from the pushed digest
         id: spec
@@ -512,7 +543,7 @@ jobs:
 
     permissions:
       contents: write
-      checks: read   # poll the Security Gate conclusion before tagging
+      actions: read   # list-workflow-runs endpoint (require-gate.sh)
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -538,41 +569,17 @@ jobs:
           echo "next=$NEXT" >> $GITHUB_OUTPUT
           echo "Next version: $NEXT"
 
-      - name: Wait for Security Gate + QA Gate approval on this SHA
-        # The Security Release Gate runs in PARALLEL with this workflow on
-        # the same push, and branch protection cannot gate tag-triggered
-        # workflows — so before this comment was mechanical reality, a
-        # failing gosec/trivy/gitleaks did NOT stop the tag (and therefore
-        # the signed release) from publishing (P0, CI review). This step is
-        # the enforcement point: no tag until BOTH the Security Gate and the
-        # QA Gate conclude success for this exact commit. This also lets the
-        # QA/e2e workflows drop their tags: triggers — the tag SHA is by
-        # construction already fully validated on main.
+      - name: Require Security + QA gate approval on this SHA
+        # Gate the tag on the gate WORKFLOW FILES concluding success for this
+        # main-push commit — bound to the workflow path, not a spoofable
+        # check-run name (former hole A), and to main-push provenance so a
+        # tag re-run of the same SHA can't self-approve (former hole B).
+        # `wait`: the gates run in parallel with this job on the same push.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          for i in $(seq 1 60); do
-            RUNS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100")
-            SEC=$(echo "$RUNS" | jq -r '[.check_runs[] | select(.name == "✅ Security Gate — APPROVED")][0].conclusion // "pending"')
-            QA=$(echo "$RUNS" | jq -r '[.check_runs[] | select(.name == "✅ QA Gate — APPROVED")][0].conclusion // "pending"')
-            for PAIR in "Security Gate:$SEC" "QA Gate:$QA"; do
-              NAME="${PAIR%%:*}"; CONCLUSION="${PAIR##*:}"
-              case "$CONCLUSION" in
-                failure|cancelled|timed_out|action_required)
-                  echo "::error::$NAME concluded '$CONCLUSION' for ${GITHUB_SHA} — refusing to create a release tag"
-                  exit 1 ;;
-              esac
-            done
-            if [ "$SEC" = "success" ] && [ "$QA" = "success" ]; then
-              echo "Security Gate and QA Gate approved ${GITHUB_SHA} — proceeding to tag."
-              exit 0
-            fi
-            echo "Attempt $i/60: gates not concluded yet (security=$SEC qa=$QA); waiting 30s..."
-            sleep 30
-          done
-          echo "::error::Security Gate did not conclude within 30 minutes — refusing to create a release tag"
-          exit 1
+          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" wait
+          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" wait
 
       - name: Create and push tag
         run: |
@@ -590,15 +597,17 @@ jobs:
     # (branch protection cannot gate tag-triggered workflows — the wait step
     # in auto-tag is the mechanical enforcement point). catalog-pipeline is a
     # hard dependency so the release-blocking catalog gate (digest-match +
-    # verify) must also pass before any release asset is published. NOTE:
-    # manually-pushed tags bypass the auto-tag gate — push tags only for
-    # commits that are already green on main.
+    # verify) must also pass before any release asset is published. The
+    # "Require gate approval" step below is the in-repo backstop for
+    # manually-pushed tags (assert mode); the primary control for arbitrary
+    # tags is the v* tag ruleset (see roadmap/CI-REDESIGN.md).
     needs: [test, docker, catalog-pipeline]
     if: startsWith(github.ref, 'refs/tags/v')
 
     permissions:
       contents: write
       id-token: write   # required for cosign keyless signing and SLSA provenance
+      actions: read     # require-gate.sh (tag-path guard)
 
     strategy:
       matrix:
@@ -610,7 +619,22 @@ jobs:
           - { goos: windows, goarch: amd64, ext: .exe }
 
     steps:
+      - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Tag-path guard (assert): refuse to build/sign release binaries unless
+      # the tagged commit was green on its main push. Defense-in-depth behind
+      # the docker/catalog-pipeline guards; F3 (tag ruleset) is the primary
+      # control for arbitrary-tree tags.
+      - name: Require gate approval on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
+          .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
 
       - uses: ./.github/actions/setup-go-cache
 
@@ -625,7 +649,7 @@ jobs:
           # env-indirection: never shell-interpolate ref names (injection).
           REF_NAME: ${{ github.ref_name }}
         run: |
-          go build -ldflags="-s -w -X main.version=${REF_NAME}" \
+          go build -trimpath -ldflags="-s -w -X main.version=${REF_NAME}" \
             -o culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} .
 
       # Maintenance agent (cmd/culvert-maint) is a SEPARATE Go module and is
@@ -649,7 +673,7 @@ jobs:
           # env-indirection: never shell-interpolate ref names (injection).
           REF_NAME: ${{ github.ref_name }}
         run: |
-          go build -ldflags="-s -w -X culvert-maint/internal/server.Version=${REF_NAME}" \
+          go build -trimpath -ldflags="-s -w -X culvert-maint/internal/server.Version=${REF_NAME}" \
             -o "${GITHUB_WORKSPACE}/culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}" .
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
@@ -682,6 +706,38 @@ jobs:
             --output-signature  "${BINARY}.sig" \
             "${BINARY}"
 
+      # Per-MODULE CycloneDX SBOMs, generated ONCE on the linux/amd64 leg.
+      # syft reads the binary's embedded Go build-info, identical across
+      # GOOS/GOARCH for a given module — so 2 module SBOMs (proxy + agent) fully
+      # describe all 7 released binaries (per-binary would be 7× the same 2
+      # dependency sets). Signed with the same keyless sign-blob flow the
+      # binaries use, and attached to the Release (below) so every release ships
+      # durable, signed SBOM evidence. NOTE: SBOMs are deliberately NOT added to
+      # "Compute release subjects" — the SLSA subject set must stay exactly the
+      # 7 binaries.
+      - name: Install syft (pinned)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      - name: Generate + sign binary SBOMs (linux/amd64 leg)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          for pair in "culvert-linux-amd64:culvert.sbom.cdx.json" \
+                      "culvert-maint-linux-amd64:culvert-maint.sbom.cdx.json"; do
+            BIN="${pair%%:*}"; SBOM="${pair##*:}"
+            syft "file:$BIN" -o cyclonedx-json="$SBOM"
+            # Fail closed on CONTENT, not just a byte-empty file: a zero-component
+            # SBOM is worthless evidence and must not ship.
+            jq -e '.components | length > 0' "$SBOM" >/dev/null \
+              || { echo "::error::SBOM $SBOM has no components — refusing SBOM-less release"; exit 1; }
+            cosign sign-blob --yes \
+              --output-certificate "${SBOM}.pem" \
+              --output-signature   "${SBOM}.sig" \
+              "$SBOM"
+          done
+
       # SLSA subjects: one sha256sum line per released binary for THIS leg
       # (linux legs cover both the proxy and the agent). The aggregate-subjects
       # job merges every leg's file so provenance attests ALL binaries — a single
@@ -711,6 +767,21 @@ jobs:
             culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}
             culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}.sig
             culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}.pem
+
+      # Attach the signed module SBOMs to the Release (Release assets are a
+      # channel DISJOINT from the SLSA subjects artifact — this cannot affect
+      # the ==7 subject assertion). linux/amd64 leg only (where they're made).
+      - name: Upload signed binary SBOMs (linux/amd64 leg)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            culvert.sbom.cdx.json
+            culvert.sbom.cdx.json.sig
+            culvert.sbom.cdx.json.pem
+            culvert-maint.sbom.cdx.json
+            culvert-maint.sbom.cdx.json.sig
+            culvert-maint.sbom.cdx.json.pem
 
       - name: Upload per-leg subjects artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

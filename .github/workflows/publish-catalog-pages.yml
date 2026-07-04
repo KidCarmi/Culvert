@@ -64,6 +64,10 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       # Resolve the target tag from the trigger. External input is passed via env
       # (never interpolated into the shell) and validated to a vX.Y.Z shape to
       # avoid script injection and to refuse non-release refs.

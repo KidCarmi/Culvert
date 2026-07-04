@@ -148,9 +148,10 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
 
       - name: Install golangci-lint
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.5.0/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" v2.5.0
+        # Checksum-verified via the Go module proxy + sum.golang.org (v2 dropped
+        # its replace directives so `go install` works) — replaces `curl … |
+        # sh` off a mutable tag ref, whose fetched script was the trust root.
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
 
       - name: Run golangci-lint (new issues only)
         # Diff-scoped by design: the tree is not lint-clean under a full run
@@ -175,6 +176,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
+      - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/setup-go-cache
 
@@ -290,9 +295,9 @@ jobs:
         run: go test -race -count=1 -timeout=10m -v ./...
 
       - name: golangci-lint
+        # Checksum-verified install (sum.golang.org), not curl|sh off a tag ref.
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.5.0/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" v2.5.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
           golangci-lint run --timeout=5m
 
       - name: staticcheck

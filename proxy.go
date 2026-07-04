@@ -1528,6 +1528,12 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// Wrap rawClient with the peek buffer so the already-peeked byte isn't lost.
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, &tls.Config{
 		GetCertificate: certMgr.GetCert,
+		// Explicit floor for the client-facing (forged-leaf) side of an
+		// inspected tunnel: never present legacy TLS to clients. Matches Go's
+		// current default but is pinned so a toolchain default change or a
+		// refactor can't silently weaken the posture the SWG offers clients.
+		// Asserted by TestMITM_ForgedLeafTLSPosture.
+		MinVersion: tls.VersionTLS12,
 		// Force HTTP/1.1 — the inner request loop uses http.ReadRequest which
 		// is HTTP/1.x only. Without this, browsers negotiate HTTP/2 via ALPN
 		// and the parser can't read H2 frames, causing a silent fallback to
