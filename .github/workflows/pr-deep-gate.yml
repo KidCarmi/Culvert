@@ -300,6 +300,29 @@ jobs:
             || { grep -m1 -- "-test.shuffle " determinism.log || true; \
                  echo "::error::determinism failure — reproduce with the printed -test.shuffle seed (log artifact: deep-determinism-log)"; exit 1; }
 
+      - name: Build determinism (release binary is byte-reproducible)
+        # The release build's reproducibility underpins verifiable SLSA provenance
+        # (an independent rebuild must hash-match the signed subjects). Two builds
+        # with the exact release flags must be byte-identical. -buildvcs=false
+        # mirrors the release build (ci.yml) and makes the hash independent of
+        # tree state; outputs go to RUNNER_TEMP so neither build dirties the tree.
+        # Catches a non-determinism regression (e.g. an embedded build timestamp)
+        # on the PR that introduces it, BEFORE it reaches a tagged release.
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          for o in b1 b2; do
+            go build -trimpath -buildvcs=false \
+              -ldflags="-s -w -X main.version=determinism-check" -o "$RUNNER_TEMP/$o" .
+          done
+          if cmp -s "$RUNNER_TEMP/b1" "$RUNNER_TEMP/b2"; then
+            echo "build determinism OK: sha256 $(sha256sum "$RUNNER_TEMP/b1" | cut -d' ' -f1)"
+          else
+            echo "::error::proxy build is NON-DETERMINISTIC — two identical-flag builds produced different binaries"
+            exit 1
+          fi
+
       - name: Upload determinism log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
