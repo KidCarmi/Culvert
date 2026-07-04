@@ -40,6 +40,7 @@ scores hard to raise; the HA design (RISK-001) is the one item that blocks an en
 
 | Artifact | Location | Status |
 |---|---|---|
+| Engineering Constitution | `docs/engineering/ENGINEERING-CONSTITUTION.md` | ✅ Adopted (governing charter for this dashboard and the registers) |
 | Engineering Dashboard | `docs/engineering/ENGINEERING-DASHBOARD.md` | ✅ Live (this file) |
 | Technical Risk Register | `docs/engineering/TECHNICAL-RISK-REGISTER.md` | ✅ Live |
 | Technical Debt Register | `docs/engineering/TECHNICAL-DEBT-REGISTER.md` | ✅ Live |
