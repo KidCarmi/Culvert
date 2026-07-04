@@ -177,9 +177,80 @@ func parseSOCKS5Request(r io.Reader) (cmd byte, host string, port uint16, err er
 	return cmd, host, binary.BigEndian.Uint16(portBuf), nil
 }
 
+// socks5Negotiate performs the SOCKS5 greeting (VER NMETHODS METHODS) and, when
+// auth is enabled, the RFC 1929 username/password sub-negotiation, writing the
+// method-selection and auth-status replies. It returns true iff the client
+// authenticated (or auth is disabled) and may proceed to the request phase.
+// Every failure path (bad greeting, no acceptable method, short read, auth
+// failure) is fully handled here — reply + stats + audit — and returns false so
+// the caller simply closes the connection. Extracted from handleSOCKS5 to keep
+// that function's cognitive complexity under the linter threshold; behavior is a
+// strict relocation of the prior inline greeting/auth block.
+func socks5Negotiate(conn net.Conn, clientIP string) bool {
+	// Greeting: VER(1) NMETHODS(1) METHODS(N)
+	hdr := make([]byte, 2)
+	if _, err := io.ReadFull(conn, hdr); err != nil || hdr[0] != 0x05 {
+		return false
+	}
+	methods := make([]byte, hdr[1])
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		return false
+	}
+
+	if !cfg.AuthEnabled() {
+		conn.Write([]byte{0x05, 0x00}) //nolint:errcheck // best-effort no-auth method selection; a write error surfaces on the next read
+		return true
+	}
+
+	// Auth required: the client must offer USER/PASS (0x02).
+	hasUserPass := false
+	for _, m := range methods {
+		if m == 0x02 {
+			hasUserPass = true
+			break
+		}
+	}
+	if !hasUserPass {
+		conn.Write([]byte{0x05, 0xFF}) //nolint:errcheck // best-effort "no acceptable method" reply before close
+		return false
+	}
+	conn.Write([]byte{0x05, 0x02}) //nolint:errcheck // best-effort USER/PASS method selection; error surfaces on the next read
+
+	// RFC 1929 sub-negotiation: VER(1) ULEN(1) UNAME PLEN(1) PASSWD
+	subHdr := make([]byte, 2)
+	if _, err := io.ReadFull(conn, subHdr); err != nil {
+		return false
+	}
+	uname := make([]byte, subHdr[1])
+	if _, err := io.ReadFull(conn, uname); err != nil {
+		return false
+	}
+	plenBuf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, plenBuf); err != nil {
+		return false
+	}
+	passwd := make([]byte, plenBuf[0])
+	if _, err := io.ReadFull(conn, passwd); err != nil {
+		return false
+	}
+	authOK := cfg.VerifyAuth(string(uname), string(passwd))
+	// B5: Zero credentials from memory immediately after auth check.
+	clear(uname)
+	clear(passwd)
+	if !authOK {
+		conn.Write([]byte{0x01, 0x01}) //nolint:errcheck // best-effort auth-failure reply before close
+		atomic.AddInt64(&statAuthFail, 1)
+		recordRequest(clientIP, "SOCKS5", "", "AUTH_FAIL", "", "", "", "")
+		logger.Printf("SOCKS5 AUTH_FAIL %s", clientIP)
+		return false
+	}
+	conn.Write([]byte{0x01, 0x00}) //nolint:errcheck // best-effort auth-success reply; error surfaces on the next read
+	return true
+}
+
 func handleSOCKS5(conn net.Conn) {
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck
+	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck // deadline is best-effort; a set failure still yields a bounded relay via peer close
 
 	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 
@@ -195,62 +266,9 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
-	// ── Greeting: VER(1) NMETHODS(1) METHODS(N) ─────────────────────────────
-	hdr := make([]byte, 2)
-	if _, err := io.ReadFull(conn, hdr); err != nil || hdr[0] != 0x05 {
+	// ── Greeting + auth negotiation ─────────────────────────────────────────
+	if !socks5Negotiate(conn, clientIP) {
 		return
-	}
-	methods := make([]byte, hdr[1])
-	if _, err := io.ReadFull(conn, methods); err != nil {
-		return
-	}
-
-	// ── Auth negotiation ─────────────────────────────────────────────────────
-	if cfg.AuthEnabled() {
-		hasUserPass := false
-		for _, m := range methods {
-			if m == 0x02 {
-				hasUserPass = true
-				break
-			}
-		}
-		if !hasUserPass {
-			conn.Write([]byte{0x05, 0xFF}) //nolint:errcheck
-			return
-		}
-		conn.Write([]byte{0x05, 0x02}) //nolint:errcheck
-
-		// RFC 1929 sub-negotiation
-		subHdr := make([]byte, 2)
-		if _, err := io.ReadFull(conn, subHdr); err != nil {
-			return
-		}
-		uname := make([]byte, subHdr[1])
-		if _, err := io.ReadFull(conn, uname); err != nil {
-			return
-		}
-		plenBuf := make([]byte, 1)
-		if _, err := io.ReadFull(conn, plenBuf); err != nil {
-			return
-		}
-		passwd := make([]byte, plenBuf[0])
-		if _, err := io.ReadFull(conn, passwd); err != nil {
-			return
-		}
-		authOK := cfg.VerifyAuth(string(uname), string(passwd))
-		// B5: Zero credentials from memory immediately after auth check.
-		clear(uname)
-		clear(passwd)
-		if !authOK {
-			conn.Write([]byte{0x01, 0x01}) //nolint:errcheck
-			atomic.AddInt64(&statAuthFail, 1)
-			recordRequest(clientIP, "SOCKS5", "", "AUTH_FAIL", "", "", "", "")
-			logger.Printf("SOCKS5 AUTH_FAIL %s", clientIP)
-			return
-		}
-		conn.Write([]byte{0x01, 0x00}) //nolint:errcheck
-	} else {
-		conn.Write([]byte{0x05, 0x00}) //nolint:errcheck
 	}
 
 	// ── Request: VER(1) CMD(1) RSV(1) ATYP(1) + address + port ──────────────
@@ -314,6 +332,17 @@ func handleSOCKS5(conn net.Conn) {
 	recordRequest(clientIP, "SOCKS5", host, "OK", "", "", "", "")
 	logger.Printf("SOCKS5 OK %s -> %s", clientIP, target)
 
+	socks5Relay(conn, destConn, clientIP, host)
+}
+
+// socks5Relay bidirectionally copies between the client and destination conns,
+// waiting for BOTH directions to finish. Closing the write half of each side
+// (CloseWrite) unblocks the peer's io.Copy so the second direction returns —
+// the same relay contract as the CONNECT/WebSocket tunnels (CLAUDE.md relay
+// pattern). On teardown it records the per-connection tunnel-close accounting
+// entry (byte counts + lifetime); log-only — the OK request-log entry already
+// ran the stats fan-out for this connection.
+func socks5Relay(client, dest net.Conn, clientIP, host string) {
 	start := time.Now()
 	// Byte counts: each direction is written by exactly one goroutine before
 	// its done-send and read only after both receives (channel happens-before).
@@ -324,20 +353,18 @@ func handleSOCKS5(conn net.Conn) {
 		*count = n
 		done <- struct{}{}
 	}
-	go relay(destConn, conn, &toDest)
-	go relay(conn, destConn, &toClient)
+	go relay(dest, client, &toDest)
+	go relay(client, dest, &toClient)
 	<-done
 	// Unblock the peer goroutine by closing write halves so io.Copy returns.
-	if tc, ok := destConn.(interface{ CloseWrite() error }); ok {
+	if tc, ok := dest.(interface{ CloseWrite() error }); ok {
 		tc.CloseWrite() //nolint:errcheck
 	}
-	if tc, ok := conn.(interface{ CloseWrite() error }); ok {
+	if tc, ok := client.(interface{ CloseWrite() error }); ok {
 		tc.CloseWrite() //nolint:errcheck
 	}
 	<-done
 
-	// Per-connection accounting entry (bytes + lifetime). Log-only: the OK
-	// entry above already ran the stats fan-out for this connection.
 	recordTunnelClose(clientIP, "SOCKS5", host, "", "", toDest, toClient, start, "")
 }
 

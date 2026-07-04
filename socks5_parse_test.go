@@ -21,7 +21,10 @@ func socks5Frame(ver, cmd, rsv, atyp byte, addr []byte, port uint16) []byte {
 }
 
 func domainAddr(name string) []byte {
-	return append([]byte{byte(len(name))}, []byte(name)...)
+	if len(name) > 255 {
+		panic("domainAddr: name too long for a SOCKS5 length byte")
+	}
+	return append([]byte{byte(len(name))}, []byte(name)...) //nolint:gosec // G115: length bounded to <=255 above
 }
 
 // errKind classifies the expected error without pinning an exact value for the
@@ -139,7 +142,7 @@ func TestParseSOCKS5Request(t *testing.T) {
 // address decode) that any SOCKS5 client can drive. The invariant is NO-PANIC
 // ONLY: return values are intentionally unconstrained because a zero-length
 // domain (ATYP=0x03, len=0) is a valid parse yielding host=="" with err==nil
-// (rejected later by the SSRF guard), so any "host != ” when err == nil"
+// (rejected later by the SSRF guard), so any 'host != "" when err == nil'
 // assertion would fire on a non-bug.
 func FuzzParseSOCKS5Request(f *testing.F) {
 	seeds := [][]byte{
