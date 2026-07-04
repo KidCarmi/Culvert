@@ -86,7 +86,20 @@ func captureConfigBackup() *configBackup {
 	}
 }
 
+// saveConfigVersionMu serializes capture→Save so version numbers are
+// assigned in capture order (PR #560 Codex review). Without it, two
+// overlapping admin mutations could interleave: a slow request captures
+// state A, a later request captures and saves A+B, then the first request
+// persists its STALE snapshot under the HIGHER version number — making the
+// UI's "latest" version silently omit the newer change. This restores the
+// pre-extraction boundary (the old configVersionMu covered capture through
+// write); the store's own mutex still guards its internals independently.
+var saveConfigVersionMu sync.Mutex
+
 func saveConfigVersion(actor, action string) {
+	saveConfigVersionMu.Lock()
+	defer saveConfigVersionMu.Unlock()
+
 	snap := captureConfigBackup()
 	raw, err := json.Marshal(snap)
 	if err != nil {
@@ -124,7 +137,7 @@ func apiConfigVersions(w http.ResponseWriter, r *http.Request) {
 
 func listConfigVersions(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(configVersions.List()) //nolint:errcheck
+	json.NewEncoder(w).Encode(configVersions.List()) //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
 }
 
 func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +177,7 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		current := captureConfigBackup()
 		changes := diffConfigs(current, &target)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
 			"status":   "dry_run",
 			"version":  req.Version,
 			"warnings": warnings,

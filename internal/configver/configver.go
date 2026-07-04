@@ -59,13 +59,13 @@ type Store struct {
 	seq int
 }
 
-// New returns a store rooted at dir keeping at most max versions
-// (max <= 0 selects DefaultMax). Call Init before first use.
-func New(dir string, max int) *Store {
-	if max <= 0 {
-		max = DefaultMax
+// New returns a store rooted at dir keeping at most maxVersions versions
+// (maxVersions <= 0 selects DefaultMax). Call Init before first use.
+func New(dir string, maxVersions int) *Store {
+	if maxVersions <= 0 {
+		maxVersions = DefaultMax
 	}
-	return &Store{dir: dir, max: max}
+	return &Store{dir: dir, max: maxVersions}
 }
 
 // Init creates the directory and resumes the sequence counter from the

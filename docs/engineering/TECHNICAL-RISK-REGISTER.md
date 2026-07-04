@@ -26,6 +26,7 @@
 | RISK-010 | MEDIUM | OPEN | Self-update has no in-binary image signature/digest check | `update.go:496-608` |
 | RISK-011 | MEDIUM | OPEN | Cluster rolling-update auto-rollback unverified | `update_cluster.go:804-852` |
 | RISK-012 | LOW | OPEN | Account lockout is username-keyed (lockout-as-DoS) | `lockout.go:36,60` |
+| RISK-018 | LOW | OPEN | Leaked HA `standbyLoop` goroutine races test `logger` swaps (determinism-gate flake) | race report, PR #560 gate run 28705150574 |
 | RISK-013 | LOW | OPEN | `normalizeHost` IDNA failure is fail-open | `security.go:34-37` |
 
 ---
@@ -290,6 +291,23 @@
 ## RISK-012 — Username-keyed lockout (DoS) · LOW · OPEN
 - `lockout.go:36,60`: an attacker who knows an admin username can deliberately lock it out; restart
   clears all lockouts (also the informal break-glass). Consider IP+user keying. **Complexity S.**
+
+## RISK-018 — Leaked HA standby goroutine races test logger swaps · LOW · OPEN
+- **Observed (PR #560 Fast-Gate run 28705150574, `-race`):** `HAState.syncFromLeader`
+  (`ha.go:477`, `logger.Printf`) racing `TestAuthSAMLCallbackLogsProviderRejection`'s cleanup
+  (`ui_auth_saml_test.go:31`, `logger = origLogger`). The reading goroutine was created via
+  `enterStandbyResync → StartAsStandby` (`ha_failover.go:138`) — an HA failover test's standby
+  loop left RUNNING after its test ended, still retrying `HASync` ("sync failed (28/3)" in the
+  log) while an unrelated test swapped the `logger` global. Ordering-dependent: shuffle decides
+  whether a logger-swapping test runs while the leaked loop is alive. **Test-infra only** — no
+  production code path swaps `logger` at runtime.
+- **Impact:** flaky `-race` gate (blocks unrelated PRs); a leaked standby loop can also distort
+  other tests' HA state.
+- **Recommendation:** whichever HA test drives `enterStandbyResync` must stop the standby loop
+  in cleanup (the loop honors its stop channel/ctx — audit `ha_failover_test.go` /
+  `ha_failback_test.go` cleanups); consider a `TestMain`-level leak check for `standbyLoop`
+  goroutines on the HA suite. **Complexity S.** Not attempted inside PR #560 (out of that PR's
+  diff; HA test lifecycle deserves its own reviewed change).
 
 ## RISK-013 — `normalizeHost` IDNA fail-open · LOW · OPEN
 - `security.go:34-37`: on IDNA error the original host is returned, potentially letting a malformed/

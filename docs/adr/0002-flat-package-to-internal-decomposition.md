@@ -1229,12 +1229,15 @@ SetSeqForTest), `Meta` (aliased as main's `ConfigVersion`), `ErrCorrupt` sentine
 rollback API keeps its 404-vs-500 split (read error → 404, unparseable envelope → 500 —
 previously distinguished inline). The `json.RawMessage` seam worked as mapped: main marshals
 `configBackup` before `Save` and unmarshals after `Load`; the package never sees the type.
-Deviations from pre-extraction behavior, all deliberate: (1) capture now happens OUTSIDE the
-store mutex (previously `configVersionMu` held across capture+write; snapshots stay internally
-consistent via each store's own locks, and saves still serialize); (2) a marshal failure no
-longer consumes a sequence number (marshal moved before Save; write failures still consume one,
-as before); (3) prune ignores malformed `v*.json` names entirely (previously they counted
-toward the >max threshold with Atoi-zero ordering). diff/validate/capture/apply + handlers
+Deviations from pre-extraction behavior: (1) ~~capture outside the store mutex~~ **RETRACTED —
+Codex review on PR #560 caught an ordering inversion**: with capture unserialized, a slow
+request could capture state A, lose the race to a later capture of A+B, and persist stale A
+under the HIGHER version number (the UI's "latest" would omit the newer change). Fixed with a
+main-side `saveConfigVersionMu` covering capture→Save, restoring the original serialization
+boundary exactly; (2) a marshal failure no longer consumes a sequence number (marshal moved
+before Save; write failures still consume one, as before); (3) prune ignores malformed
+`v*.json` names entirely (previously they counted toward the >max threshold with Atoi-zero
+ordering). diff/validate/capture/apply + handlers
 stayed in main as designed; `summarizeLatestConfigVersion` (diagnostics) reads `Dir()`. Six
 main test files swapped from direct `configVersionsDir`/`configVersionSeq` access to the test
 hooks; store-mechanics tests (seq resume, prune, list skip+sort, load not-found/corrupt) live
