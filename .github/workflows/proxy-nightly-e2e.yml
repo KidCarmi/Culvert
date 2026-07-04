@@ -129,7 +129,7 @@ jobs:
       - name: Run benchmarks (10/100/1000/10000 rules)
         run: |
           set -o pipefail
-          go test -run '^$' -bench 'BenchmarkPolicy|BenchmarkScrub' -benchmem -benchtime=1000x . \
+          go test -run '^$' -bench 'BenchmarkPolicy|BenchmarkScrub|BenchmarkUpstreamInspect' -benchmem -benchtime=1000x . \
             | tee bench.txt
 
       - name: Step summary
