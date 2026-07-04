@@ -212,11 +212,19 @@ binaries are byte-reproducible independent of tree state (the commit is already
 carried by the tag + provenance, so the VCS stamp is redundant); the first release
 after this again changes the hashes (expected). A Deep-gate **build-determinism**
 step (two identical-flag builds must be byte-identical, to `RUNNER_TEMP`) now
-guards this on every Go-touching PR. **Follow-up (F1):** a tag-path
+guards this on every Go-touching PR — for **both** release modules (proxy AND
+`culvert-maint`, the module that carried the bug), so a future maint-specific
+non-determinism regression is caught too. **Follow-up (F1):** a tag-path
 `verify-reproducible` job that independently rebuilds at the tag and asserts the
 hashes match `aggregate-subjects.outputs.hashes` (what the SLSA provenance signs)
 — turning L3 provenance into *verifiable* provenance; deferred to its own PR
-(it needs a shared build composite + is tag-path-only, not PR-testable).
+(it needs a shared build composite + is tag-path-only, not PR-testable). The F1
+follow-up should also cover the **Docker image binary** (`Dockerfile`): it still
+builds with default `-buildvcs=auto` and its `.dockerignore` strips tracked files
+(`*_test.go`, `*.md`, …) while keeping `.git`, so the in-container `git status` sees
+those as deleted and the image binary ships `vcs.modified=true` (not tree-state
+reproducible). Out of scope for this phase (the image has its own cosign/provenance
+surface, disjoint from the Release-attached SLSA subjects) but tracked for F1.
 
 Every GitHub Release now carries **per-module CycloneDX SBOMs** for its binaries
 (`culvert.sbom.cdx.json` + `culvert-maint.sbom.cdx.json`), generated once on the
