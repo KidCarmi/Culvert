@@ -5,52 +5,35 @@ package main
 // Automatic snapshots of all non-secret configuration on every mutation.
 // Stored as numbered JSON files in /data/config_versions/.
 // Admin can list versions, view diffs, and one-click rollback.
+//
+// The numbered-file STORE (sequence counter, envelope write, prune,
+// list/load) lives in internal/configver (ADR-0002); it crosses the boundary
+// via json.RawMessage so the package never sees configBackup. This file
+// keeps everything typed: capture/apply/validate, the diff engine, and the
+// API handlers.
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/configver"
 )
-
-// configVersionsDir is a var (not const) so tests can redirect writes to a
-// temp dir. Production code never reassigns it.
-var configVersionsDir = "/data/config_versions"
-
-const maxConfigVersions = 50
 
 // ConfigVersion is metadata for a stored config snapshot.
-type ConfigVersion struct {
-	Version   int    `json:"version"`
-	CreatedAt string `json:"created_at"`
-	Actor     string `json:"actor"`
-	Action    string `json:"action"` // what triggered the snapshot (e.g. "policy.update", "blocklist.import")
-}
+type ConfigVersion = configver.Meta
 
-var (
-	configVersionMu  sync.Mutex
-	configVersionSeq int
-)
+// configVersions is the process-wide snapshot store. Tests redirect it via
+// SetDirForTest/SetSeqForTest (production code never does).
+var configVersions = configver.New("/data/config_versions", 0)
 
 func initConfigVersioning() {
-	_ = os.MkdirAll(configVersionsDir, 0o750)
-	// Find highest existing version number.
-	entries, _ := os.ReadDir(configVersionsDir)
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") || !strings.HasPrefix(e.Name(), "v") {
-			continue
-		}
-		numStr := strings.TrimSuffix(strings.TrimPrefix(e.Name(), "v"), ".json")
-		if n, err := strconv.Atoi(numStr); err == nil && n > configVersionSeq {
-			configVersionSeq = n
-		}
-	}
+	configVersions.Init()
 }
 
 // saveConfigVersion captures the current configuration state.
@@ -103,70 +86,28 @@ func captureConfigBackup() *configBackup {
 	}
 }
 
-func saveConfigVersion(actor, action string) {
-	configVersionMu.Lock()
-	defer configVersionMu.Unlock()
+// saveConfigVersionMu serializes capture→Save so version numbers are
+// assigned in capture order (PR #560 Codex review). Without it, two
+// overlapping admin mutations could interleave: a slow request captures
+// state A, a later request captures and saves A+B, then the first request
+// persists its STALE snapshot under the HIGHER version number — making the
+// UI's "latest" version silently omit the newer change. This restores the
+// pre-extraction boundary (the old configVersionMu covered capture through
+// write); the store's own mutex still guards its internals independently.
+var saveConfigVersionMu sync.Mutex
 
-	configVersionSeq++
-	seq := configVersionSeq
+func saveConfigVersion(actor, action string) {
+	saveConfigVersionMu.Lock()
+	defer saveConfigVersionMu.Unlock()
 
 	snap := captureConfigBackup()
-
-	meta := ConfigVersion{
-		Version:   seq,
-		CreatedAt: snap.ExportedAt,
-		Actor:     actor,
-		Action:    action,
-	}
-
-	envelope := struct {
-		Meta   ConfigVersion `json:"meta"`
-		Config configBackup  `json:"config"`
-	}{Meta: meta, Config: *snap}
-
-	data, err := json.MarshalIndent(envelope, "", "  ")
+	raw, err := json.Marshal(snap)
 	if err != nil {
 		logger.Printf("ConfigVersion: marshal error: %v", err)
 		return
 	}
-
-	path := filepath.Join(configVersionsDir, fmt.Sprintf("v%d.json", seq))
-	if err := atomicWriteFile(path, data, 0o600); err != nil {
+	if _, err := configVersions.Save(actor, action, snap.ExportedAt, raw); err != nil {
 		logger.Printf("ConfigVersion: write error: %v", err)
-		return
-	}
-
-	// Prune old versions beyond max.
-	pruneConfigVersions()
-}
-
-func pruneConfigVersions() {
-	entries, err := os.ReadDir(configVersionsDir)
-	if err != nil {
-		return
-	}
-
-	var versions []string
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "v") && strings.HasSuffix(e.Name(), ".json") {
-			versions = append(versions, e.Name())
-		}
-	}
-
-	if len(versions) <= maxConfigVersions {
-		return
-	}
-
-	// Sort by version number.
-	sort.Slice(versions, func(i, j int) bool {
-		ni, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(versions[i], "v"), ".json"))
-		nj, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(versions[j], "v"), ".json"))
-		return ni < nj
-	})
-
-	// Remove oldest.
-	for i := 0; i < len(versions)-maxConfigVersions; i++ {
-		_ = os.Remove(filepath.Join(configVersionsDir, versions[i]))
 	}
 }
 
@@ -195,43 +136,8 @@ func apiConfigVersions(w http.ResponseWriter, r *http.Request) {
 }
 
 func listConfigVersions(w http.ResponseWriter) {
-	entries, err := os.ReadDir(configVersionsDir)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]ConfigVersion{}) //nolint:errcheck
-		return
-	}
-
-	versions := make([]ConfigVersion, 0)
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), "v") || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		fullPath := filepath.Join(configVersionsDir, e.Name())
-		data, err := os.ReadFile(fullPath)
-		if err != nil {
-			// D1.1h: surface skipped files — the rollback UI never sees
-			// them otherwise. Behavior unchanged.
-			logger.Printf("Loader: config_versions: skipping unreadable %q: %v (D1.2-flag-F5)", sanitizeLog(fullPath), err)
-			continue
-		}
-		var envelope struct {
-			Meta ConfigVersion `json:"meta"`
-		}
-		if jerr := json.Unmarshal(data, &envelope); jerr != nil {
-			logger.Printf("Loader: config_versions: skipping unparseable %q: %v (D1.2-flag-F5)", sanitizeLog(fullPath), jerr)
-			continue
-		}
-		versions = append(versions, envelope.Meta)
-	}
-
-	// Sort descending by version number.
-	sort.Slice(versions, func(i, j int) bool {
-		return versions[i].Version > versions[j].Version
-	})
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(versions) //nolint:errcheck
+	json.NewEncoder(w).Encode(configVersions.List()) //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
 }
 
 func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
@@ -248,31 +154,30 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path := filepath.Join(configVersionsDir, fmt.Sprintf("v%d.json", req.Version))
-	data, err := os.ReadFile(path)
+	meta, raw, err := configVersions.Load(req.Version)
 	if err != nil {
+		if errors.Is(err, configver.ErrCorrupt) {
+			http.Error(w, "corrupt version file", http.StatusInternalServerError)
+			return
+		}
 		http.Error(w, "version not found", http.StatusNotFound)
 		return
 	}
-
-	var envelope struct {
-		Meta   ConfigVersion `json:"meta"`
-		Config configBackup  `json:"config"`
-	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
+	var target configBackup
+	if err := json.Unmarshal(raw, &target); err != nil {
 		http.Error(w, "corrupt version file", http.StatusInternalServerError)
 		return
 	}
 
 	// F7: Pre-flight validation — check snapshot before applying.
-	warnings := validateConfigBackup(&envelope.Config)
+	warnings := validateConfigBackup(&target)
 
 	if req.DryRun {
 		// Compare against current config for a preview diff.
 		current := captureConfigBackup()
-		changes := diffConfigs(current, &envelope.Config)
+		changes := diffConfigs(current, &target)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
 			"status":   "dry_run",
 			"version":  req.Version,
 			"warnings": warnings,
@@ -282,12 +187,12 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyConfigBackup(&envelope.Config)
+	applyConfigBackup(&target)
 
 	actor := sessionAdmin(r)
 	auditEvent(r, "config.rollback", "system",
 		fmt.Sprintf("rolled back to version %d (from %s by %s)",
-			req.Version, envelope.Meta.CreatedAt, sanitizeLog(envelope.Meta.Actor)))
+			req.Version, meta.CreatedAt, sanitizeLog(meta.Actor)))
 
 	saveConfigVersion(actor, fmt.Sprintf("rollback to v%d", req.Version))
 
@@ -508,18 +413,17 @@ type configChange struct {
 
 // loadConfigVersion reads and parses a stored config version file.
 func loadConfigVersion(ver int) (*configBackup, error) {
-	path := filepath.Join(configVersionsDir, fmt.Sprintf("v%d.json", ver))
-	data, err := os.ReadFile(path)
+	_, raw, err := configVersions.Load(ver)
 	if err != nil {
 		return nil, err
 	}
-	var envelope struct {
-		Config configBackup `json:"config"`
+	var cb configBackup
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &cb); err != nil {
+			return nil, err
+		}
 	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, err
-	}
-	return &envelope.Config, nil
+	return &cb, nil
 }
 
 // diffConfigs compares two config backups and returns field-level changes.

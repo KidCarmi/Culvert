@@ -1223,6 +1223,111 @@ API contracts, re-expressed against the exported surface. Deleted `joinStrings` 
 gofmt, package suite `-race -count=2 -shuffle=on`, root Upstream/AdminSettings/SIGHUP suites
 `-race` — all green.
 
+### 2026-07-04 — `internal/configver` extracted (Slice A of the tranche below — ✅ executed as designed)
+Executed exactly per the design: `Store` (New/Init/Save/Load/List/Seq/Dir + SetDirForTest/
+SetSeqForTest), `Meta` (aliased as main's `ConfigVersion`), `ErrCorrupt` sentinel so the
+rollback API keeps its 404-vs-500 split (read error → 404, unparseable envelope → 500 —
+previously distinguished inline). The `json.RawMessage` seam worked as mapped: main marshals
+`configBackup` before `Save` and unmarshals after `Load`; the package never sees the type.
+Deviations from pre-extraction behavior: (1) ~~capture outside the store mutex~~ **RETRACTED —
+Codex review on PR #560 caught an ordering inversion**: with capture unserialized, a slow
+request could capture state A, lose the race to a later capture of A+B, and persist stale A
+under the HIGHER version number (the UI's "latest" would omit the newer change). Fixed with a
+main-side `saveConfigVersionMu` covering capture→Save, restoring the original serialization
+boundary exactly; (2) a marshal failure no longer consumes a sequence number (marshal moved
+before Save; write failures still consume one, as before); (3) prune ignores malformed
+`v*.json` names entirely (previously they counted toward the >max threshold with Atoi-zero
+ordering). diff/validate/capture/apply + handlers
+stayed in main as designed; `summarizeLatestConfigVersion` (diagnostics) reads `Dir()`. Six
+main test files swapped from direct `configVersionsDir`/`configVersionSeq` access to the test
+hooks; store-mechanics tests (seq resume, prune, list skip+sort, load not-found/corrupt) live
+in-package. Validated: build/vet/gofmt, package `-race -count=2 -shuffle=on`, root
+ConfigVersion/ConfigSurfaces/ColdStart/Rollback/Diff/BlocklistMode/Slice8/Diagnostics suites
+`-race` — all green. **Slice B (`internal/ca`) remains designed-not-executed below.**
+
+### 2026-07-04 — next tranche mapped; TWO extractions DESIGNED (configver store, ca)
+Recorded per the standing rule so execution needs no re-discovery. Sequencing: **Slice A first
+(small, low-risk), Slice B as its OWN PR with an adversarial-review gate** (TLS hot path).
+Candidates surveyed and REJECTED for this tranche: `kek.go` (couples backupcrypt + cluster-CA
+key-at-rest — map after `ca` ships), `enrollment.go` (cluster hub, 1,290 LOC — needs its own
+program), `policy.go` (recorded keep, Phase C verdict), `controlplane.go` (DEBT-003 root-file
+*split*, not an internal extraction — every cluster feature lands there; different tool).
+
+**Slice A — `internal/configver` (config-version file store; Complexity S).**
+The numbered-snapshot store inside `configversion.go`: `ConfigVersion` meta, the
+`configVersionMu`/`configVersionSeq` counter + startup dir-scan (`initConfigVersioning`),
+envelope write (`saveConfigVersion`'s persistence half), `pruneConfigVersions` (50-max),
+`loadConfigVersion`, and the list logic behind `listConfigVersions`. **The one hard bind is the
+envelope embedding main's `configBackup`; the seam is `json.RawMessage`:** the store's API is
+`Save(meta ConfigVersion, config json.RawMessage)`, `Load(ver) (ConfigVersion, json.RawMessage,
+error)`, `List() []ConfigVersion`, `SetDirForTest`; main marshals/unmarshals `configBackup` on
+either side, so the package never sees the type. On-disk shape stays `{meta, config}`
+(MarshalIndent; the nested raw config's indentation may differ cosmetically — loader uses
+`Unmarshal`, tolerant; round-trip pinned by the existing configversion suites + the
+config_surfaces full-surface round-trip). Seams: `obs` + `fileutil.AtomicWrite` (both exist).
+**Stays in main:** `captureConfigBackup`/`applyConfigBackup`/`restoreBlocklistFromBackup`
+(touch every store), `validateConfigBackup`, ALL `diff*` functions (typed on main structs —
+`configBackup`, `PolicyRule`, `RewriteRule`, `CategoryGroup`, `CategoryEntry`),
+`configRollbackMu`, and the API handlers (RBAC + audit + saveConfigVersion callers). Root
+`saveConfigVersion(actor, action)` keeps its signature: capture → marshal → `store.Save`.
+Tests: `snapshotConfigVersionsDir` swaps to `SetDirForTest`; store-mechanics tests (seq resume,
+prune, corrupt-file tolerance) move in-package; behavior suites stay in main.
+
+**Slice B — `internal/ca` (CertManager; Complexity M/L — HOT PATH, own PR).**
+The MITM trust core in `ca.go` (739 LOC): `CertManager` (root CA init/load/save, leaf signing,
+LRU cache w/ TTL + 10% eviction, hit/miss atomics), the encrypted-bundle codec (PBKDF2-600k +
+AES-GCM; **`caMagic`/`caVersion` byte format is FROZEN — on-disk compatibility**), dual-CA
+rotation (`RotateIfNeeded`, secondary-CA overlap, `StartCAAutoRotation` loop), `KeyProvider`
+iface + `localKeyProvider`, `ParseTLSPair`, `Ready`, `CacheStats`. Seams: `obs.Printf`/
+`obs.Sanitize`, `fileutil.AtomicWrite`, **plus the ONE new seam discovery found:
+`GetCert` observes sign latency on main's `certSignHist` (metrics.go)** — inject a
+publish-once observer (`cm.SetSignLatencyObserver(func(seconds float64))`, nil-safe no-op;
+main wires it at startup) so the engine never imports main metrics. **Stays in main:** the
+`certMgr` singleton, `caRuntime` (path/passphrase published by the rootca startup slice; read
+by ui_security re-persist), the rootca startup slice itself, all UI handlers, ca_metrics.go
+(already reads via exported `CacheStats` — unchanged), the CLUSTER CA (enrollment.go — a
+different CA, out of scope), and KeyProvider registration callers. **Execution gates
+(non-negotiable):** move-only diff (no signature/behavior changes beyond the observer seam);
+full `-race ./...`; the MITM e2e suite (`mitm_inspect_e2e_test.go`) green — it is the
+customer-visible proof the hot path still MITMs; `ca_test`/`ca_rotation_test`/
+`coldstart_cabundle_test`/`cert_sign_histogram_test`/`cert_rotation_metrics_test` moved or
+re-expressed; benchgate green (leaf-sign latency is budgeted); **adversarial review agent on
+the diff before push** (the PR-1 registry precedent). If the observer seam grows beyond one
+hook, STOP and re-map — that's the fileblock lesson.
+
+#### 2026-07-04 — Slice B execution attempted, HALTED at the gate; RE-MAP required (no code moved)
+The "ONE new seam" premise is **falsified by the code** — dependency mapping before touching
+`ca.go` found the seam is FOUR outbound couplings, not one, plus whitebox test entanglement on
+unexported fields. The gate above fired exactly as written; halting was the correct move, and
+the boundary is re-scoped here so the next attempt is honest. Findings (all `file:line`-verified):
+1. **Sign-latency observer** — `GetCert` → `certSignHist.Observe` (`ca.go:634`). The mapped hook.
+2. **Alert emission** — `RotateIfNeeded` fires `fireAlert("cert_expiry", AlertPayload{...})`
+   (`ca.go:470`) on rotation. `fireAlert`/`AlertPayload` are main (alerts shim).
+3. **Stat counter** — `RotateIfNeeded` bumps `statCARotations.Add(1)` (`ca.go:475`), a main
+   metrics global. `cert_rotation_metrics_test.go` asserts this bump directly.
+4. **Cluster-CA orchestration** — `StartCAAutoRotation`'s loop (`ca.go:520-536`) drives BOTH
+   `certMgr` AND `globalClusterCA.RotateIfNeeded()`/`CleanupSecondary()` — a *different* CA
+   engine (enrollment.go). The auto-rotation loop is a cross-subsystem orchestrator, not CA-core.
+- **Test entanglement (the fileblock signature):** `p4_test.go` constructs `CertManager` and
+  pokes unexported `cm.caCert`/`cm.caKey`/`cm.keyProvider` (`p4_test.go:72-73,102-104,166`) — so
+  the rotation + key-provider tests are whitebox against internals, not the public surface.
+- **Re-mapped boundary (for the next attempt):** package `internal/ca` owns the PURE trust
+  engine only — bundle codec (frozen format), `InitCA`/`Load*`/`SaveCA`/`LoadCustomCA`/export-
+  import, `CACertPEM`/`CACertInfo`/`CAExpiry`, `GetCert`/`signLeaf`/cache/`CacheStats`/
+  `ClearCache`, `KeyProvider`+`localKeyProvider`, `ParseTLSPair`, `Ready`, dual-CA state +
+  `SecondaryCA*`/`CleanupSecondary`, the sign-latency observer, AND a pure
+  `RotateIfNeeded(caPath, passphrase) (rotated bool, oldExpiry, newExpiry time.Time)` that does
+  threshold+preserve-secondary+reinit+save and returns FACTS. **Main keeps the orchestration:**
+  `StartCAAutoRotation` (the loop, + cluster-CA), and the alert+stat move to the *callers* of the
+  pure rotate (the loop tick + the UI rotate handler) — so the package carries exactly the ONE
+  observer hook, honoring the gate. `p4_test`'s rotation/key-provider tests move in-package
+  (whitebox belongs with the type); `cert_rotation_metrics_test` stays in main and is re-expressed
+  against the caller that bumps the stat; `cert_sign_histogram_test` stays in main (it proves the
+  observer wiring end-to-end through `handleMetrics`). Still M/L, still own PR, still gated on the
+  MITM e2e + benchgate + adversarial review. **Estimated: the alert/stat relocation is a real
+  behavior-surface change (which caller counts a rotation), so this is NOT move-only — it needs
+  its own review beyond the mechanical extraction.**
+
 ### 2026-07-04 — `internal/session` extracted (HMAC tokens + revocation) — with a race fix
 The session engine (`session.go`, 435 LOC — signing-key holder, token encode/decode
 (base64(json).HMAC-SHA256), revocation list (token + user level, lazy eviction, gossip

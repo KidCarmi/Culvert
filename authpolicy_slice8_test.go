@@ -43,10 +43,10 @@ func slice8Rule(name string) map[string]any {
 // withConfigVersionsDir redirects config-version snapshots to a tempdir.
 func withConfigVersionsDir(t *testing.T) string {
 	t.Helper()
-	orig := configVersionsDir
+	orig := configVersions.Dir()
 	tmp := t.TempDir()
-	configVersionsDir = tmp
-	t.Cleanup(func() { configVersionsDir = orig })
+	configVersions.SetDirForTest(tmp)
+	t.Cleanup(func() { configVersions.SetDirForTest(orig) })
 	return tmp
 }
 

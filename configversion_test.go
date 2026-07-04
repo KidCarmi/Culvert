@@ -10,10 +10,7 @@ import (
 	"testing"
 )
 
-func TestPruneConfigVersions(t *testing.T) {
-	t.Log("verifying pruneConfigVersions does not panic")
-	pruneConfigVersions()
-}
+// (Prune mechanics are tested in internal/configver — TestSave_PrunesBeyondMax.)
 
 func TestListConfigVersions_EmptyDir(t *testing.T) {
 	w := httptest.NewRecorder()
@@ -74,17 +71,12 @@ func TestApiConfigDiff_InvalidFrom(t *testing.T) {
 func TestSaveConfigVersion_WritesValidJSON(t *testing.T) {
 	tmp := t.TempDir()
 
-	origDir := configVersionsDir
-	configVersionsDir = tmp
-	t.Cleanup(func() { configVersionsDir = origDir })
-
-	configVersionMu.Lock()
-	origSeq := configVersionSeq
-	configVersionMu.Unlock()
+	origDir := configVersions.Dir()
+	origSeq := configVersions.Seq()
+	configVersions.SetDirForTest(tmp)
 	t.Cleanup(func() {
-		configVersionMu.Lock()
-		configVersionSeq = origSeq
-		configVersionMu.Unlock()
+		configVersions.SetDirForTest(origDir)
+		configVersions.SetSeqForTest(origSeq)
 	})
 
 	saveConfigVersion("d1.1a-test", "test-action")
@@ -205,10 +197,6 @@ func TestInitConfigVersioning_CreatesDir(t *testing.T) {
 
 func TestSaveConfigVersion_WritesFile(t *testing.T) {
 	dir := t.TempDir()
-	origDir := configVersionsDir
-	// We can't easily change the const, so just test the file write logic directly.
-	_ = dir
-	_ = origDir
 
 	// Create a version envelope and verify marshaling works.
 	snap := configBackup{

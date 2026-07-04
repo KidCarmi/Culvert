@@ -47,20 +47,15 @@ import (
 // removed from apiBlocklistMode POST, this test fails because no
 // blocklist.mode version envelope is written to disk.
 func TestAPIBlocklistMode_POST_CreatesConfigVersion(t *testing.T) {
-	// Snapshot/restore the package globals this test mutates.
+	// Snapshot/restore the store state this test mutates.
 	tmp := t.TempDir()
-	origDir := configVersionsDir
-	configVersionsDir = tmp
-	t.Cleanup(func() { configVersionsDir = origDir })
-
-	configVersionMu.Lock()
-	origSeq := configVersionSeq
-	configVersionSeq = 0 // newly-created file becomes v1.json
-	configVersionMu.Unlock()
+	origDir := configVersions.Dir()
+	origSeq := configVersions.Seq()
+	configVersions.SetDirForTest(tmp)
+	configVersions.SetSeqForTest(0) // newly-created file becomes v1.json
 	t.Cleanup(func() {
-		configVersionMu.Lock()
-		configVersionSeq = origSeq
-		configVersionMu.Unlock()
+		configVersions.SetDirForTest(origDir)
+		configVersions.SetSeqForTest(origSeq)
 	})
 
 	origMode := bl.Mode()

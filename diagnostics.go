@@ -634,7 +634,7 @@ type configVersionSummary struct {
 // summarizeLatestConfigVersion is the production entry point used by
 // the diagnostics handler. It scans configVersionsDir.
 func summarizeLatestConfigVersion() configVersionSummary {
-	return summarizeLatestConfigVersionAt(configVersionsDir)
+	return summarizeLatestConfigVersionAt(configVersions.Dir())
 }
 
 // summarizeLatestConfigVersionAt is the dir-parameterised inner form.

@@ -36,11 +36,11 @@ import (
 func TestUIE2E_ConfigVersionRollbackCrossPlane(t *testing.T) {
 	const adminUser, viewerUser, pass = "admin-e2e", "viewer-e2e", "Cfgver-e2e-pass-1!" // #nosec G101 -- test-only fixture credentials
 
-	// Snapshots must land in a scratch dir, never touch /data. configVersionsDir
-	// is a var precisely so tests can redirect it.
-	origDir := configVersionsDir
-	configVersionsDir = t.TempDir()
-	t.Cleanup(func() { configVersionsDir = origDir })
+	// Snapshots must land in a scratch dir, never touch /data — the store
+	// exposes SetDirForTest precisely for this.
+	origDir := configVersions.Dir()
+	configVersions.SetDirForTest(t.TempDir())
+	t.Cleanup(func() { configVersions.SetDirForTest(origDir) })
 
 	uiSrv := httptest.NewServer(newAdminUIHandler())
 	t.Cleanup(uiSrv.Close)
@@ -62,9 +62,7 @@ func TestUIE2E_ConfigVersionRollbackCrossPlane(t *testing.T) {
 
 	// The version counter is a process-global (shared across the suite), so read
 	// the baseline's number rather than assuming v1.
-	configVersionMu.Lock()
-	baselineVer := configVersionSeq
-	configVersionMu.Unlock()
+	baselineVer := configVersions.Seq()
 
 	// ── Baseline: default-deny, no rules → proxy denies ─────────────────────
 	if s := proxyGETStatus(t, proxyURL, backend.URL); s != http.StatusForbidden {
