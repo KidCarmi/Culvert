@@ -79,7 +79,7 @@ func TestUpstreamPool_SetProxiesOnZeroPoolUsesCBDefaults(t *testing.T) {
 }
 
 func TestUpstreamPool_EntriesReturnsRawCredentialedURL(t *testing.T) {
-	const raw = "http://user:sekret-cred@parent.test:3128"
+	const raw = "http://user:sekret-cred@parent.test:3128" // #nosec G101 -- fake userinfo in a reserved .test URL; fixture verifies raw credential round-trip (List() redacts)
 	pool := &UpstreamPool{}
 	pool.Configure([]UpstreamEntry{{URL: raw}}, 5, time.Minute)
 
@@ -117,7 +117,7 @@ func TestAdminSettings_UpstreamRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin_settings.json")
 	swapAdminSettingsPath(t, path)
 
-	const userinfoURL = "http://svc:rt-userinfo@parent-a.test:3128" // fake — reserved .test TLD
+	const userinfoURL = "http://svc:rt-userinfo@parent-a.test:3128" // #nosec G101 -- fake userinfo in a reserved .test URL; verifies raw credential round-trip through persistence
 	upstreamPool.Configure([]UpstreamEntry{
 		{URL: userinfoURL},
 		{URL: "http://parent-b.test:3128"},
