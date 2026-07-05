@@ -30,6 +30,14 @@ type Checker struct {
 	enabled atomic.Bool
 	mu      sync.RWMutex
 	cache   map[string]*cacheEntry // serial hex → result
+
+	// Fail-closed / revocation counters (P-blindspot: surfaced via
+	// /api/ocsp so an admin can see mass HTTPS breakage caused by
+	// unreachable OCSP responders without grepping logs for
+	// "fail-closed").
+	failClosedTotal   atomic.Int64
+	revokedTotal      atomic.Int64
+	lastFailClosedUTC atomic.Int64 // unix seconds; 0 = never
 }
 
 type cacheEntry struct {
@@ -68,6 +76,28 @@ func (oc *Checker) CacheLen() int {
 	oc.mu.RLock()
 	defer oc.mu.RUnlock()
 	return len(oc.cache)
+}
+
+// FailClosedTotal returns the number of times a peer certificate was treated
+// as revoked because every OCSP responder listed on it was unreachable.
+func (oc *Checker) FailClosedTotal() int64 {
+	return oc.failClosedTotal.Load()
+}
+
+// RevokedTotal returns the number of times an OCSP responder confirmed a
+// peer certificate as actually revoked.
+func (oc *Checker) RevokedTotal() int64 {
+	return oc.revokedTotal.Load()
+}
+
+// LastFailClosedAt returns the time of the most recent fail-closed event, or
+// the zero time if none has occurred.
+func (oc *Checker) LastFailClosedAt() time.Time {
+	ts := oc.lastFailClosedUTC.Load()
+	if ts == 0 {
+		return time.Time{}
+	}
+	return time.Unix(ts, 0).UTC()
 }
 
 // resolveIssuer extracts the issuer certificate from verified chains or raw certs.
@@ -171,12 +201,15 @@ func (oc *Checker) checkResponders(leaf, issuer *x509.Certificate) bool {
 		}
 		anyResponded = true
 		if rev {
+			oc.revokedTotal.Add(1)
 			return true // confirmed revoked
 		}
 	}
 	if !anyResponded && len(leaf.OCSPServer) > 0 {
 		obs.Printf("OCSP: all %d responder(s) unreachable for cert %s — fail-closed (treating as revoked)",
 			len(leaf.OCSPServer), leaf.SerialNumber.Text(16))
+		oc.failClosedTotal.Add(1)
+		oc.lastFailClosedUTC.Store(time.Now().Unix())
 		return true // fail-closed: treat as revoked when no responder reachable
 	}
 	return false

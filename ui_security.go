@@ -1209,9 +1209,16 @@ func apiCAKeyProvider(w http.ResponseWriter, r *http.Request) {
 func apiOCSPConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		var lastFailClosedAt string
+		if t := globalOCSP.LastFailClosedAt(); !t.IsZero() {
+			lastFailClosedAt = t.Format(time.RFC3339)
+		}
 		jsonOK(w, map[string]any{
-			"enabled":  globalOCSP.Enabled(),
-			"cacheLen": globalOCSP.CacheLen(),
+			"enabled":          globalOCSP.Enabled(),
+			"cacheLen":         globalOCSP.CacheLen(),
+			"failClosedTotal":  globalOCSP.FailClosedTotal(),
+			"revokedTotal":     globalOCSP.RevokedTotal(),
+			"lastFailClosedAt": lastFailClosedAt,
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {

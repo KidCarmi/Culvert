@@ -6,9 +6,14 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	cryptoocsp "golang.org/x/crypto/ocsp"
 )
 
 func TestOCSPChecker_EnableDisable(t *testing.T) {
@@ -211,5 +216,129 @@ func TestChecker_CacheLen(t *testing.T) {
 	oc.cache["b"] = &cacheEntry{}
 	if got := oc.CacheLen(); got != 2 {
 		t.Errorf("CacheLen() = %d, want 2", got)
+	}
+}
+
+func TestChecker_CountersDefaultZero(t *testing.T) {
+	oc := New()
+	if oc.FailClosedTotal() != 0 {
+		t.Errorf("FailClosedTotal() = %d, want 0", oc.FailClosedTotal())
+	}
+	if oc.RevokedTotal() != 0 {
+		t.Errorf("RevokedTotal() = %d, want 0", oc.RevokedTotal())
+	}
+	if !oc.LastFailClosedAt().IsZero() {
+		t.Errorf("LastFailClosedAt() = %v, want zero time", oc.LastFailClosedAt())
+	}
+}
+
+// buildLeafWithResponder generates an issuer + leaf pair where the leaf's
+// AIA extension points at responderURL, for exercising checkResponders.
+func buildLeafWithResponder(t *testing.T, responderURL string) (leaf, issuer *x509.Certificate, issuerKey *ecdsa.PrivateKey) {
+	t.Helper()
+	issuerKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	issuerTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-issuer"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	issuerDER, err := x509.CreateCertificate(rand.Reader, issuerTmpl, issuerTmpl, &issuerKey.PublicKey, issuerKey)
+	if err != nil {
+		t.Fatalf("create issuer cert: %v", err)
+	}
+	issuer, err = x509.ParseCertificate(issuerDER)
+	if err != nil {
+		t.Fatalf("parse issuer cert: %v", err)
+	}
+
+	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "test-leaf"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		OCSPServer:   []string{responderURL},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, issuerTmpl, &leafKey.PublicKey, issuerKey)
+	if err != nil {
+		t.Fatalf("create leaf cert: %v", err)
+	}
+	leaf, err = x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatalf("parse leaf cert: %v", err)
+	}
+	return leaf, issuer, issuerKey
+}
+
+func TestOCSPChecker_CheckRespondersFailClosedIncrementsCounters(t *testing.T) {
+	// Port 1 is a reserved, never-listening TCP port — the connection is
+	// refused immediately instead of timing out, keeping the test fast.
+	leaf, issuer, _ := buildLeafWithResponder(t, "http://127.0.0.1:1")
+
+	oc := New()
+	before := time.Now()
+	if revoked := oc.checkResponders(leaf, issuer); !revoked {
+		t.Fatal("checkResponders should fail-closed (return true) when every responder is unreachable")
+	}
+	if got := oc.FailClosedTotal(); got != 1 {
+		t.Errorf("FailClosedTotal() = %d, want 1", got)
+	}
+	if got := oc.RevokedTotal(); got != 0 {
+		t.Errorf("RevokedTotal() = %d, want 0 (no responder ever confirmed revocation)", got)
+	}
+	if last := oc.LastFailClosedAt(); last.Before(before.Add(-time.Second)) {
+		t.Errorf("LastFailClosedAt() = %v, want a time around %v", last, before)
+	}
+}
+
+func TestOCSPChecker_VerifyPeerCertificateRevokedIncrementsCounter(t *testing.T) {
+	var issuerCert *x509.Certificate
+	var issuerKey *ecdsa.PrivateKey
+	var leafCert *x509.Certificate
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		reqBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read OCSP request: %v", err)
+			return
+		}
+		ocspReq, err := cryptoocsp.ParseRequest(reqBytes)
+		if err != nil {
+			t.Errorf("parse OCSP request: %v", err)
+			return
+		}
+		respBytes, err := cryptoocsp.CreateResponse(issuerCert, issuerCert, cryptoocsp.Response{
+			Status:       cryptoocsp.Revoked,
+			SerialNumber: ocspReq.SerialNumber,
+			ThisUpdate:   time.Now().Add(-time.Minute),
+			NextUpdate:   time.Now().Add(time.Hour),
+		}, issuerKey)
+		if err != nil {
+			t.Errorf("create OCSP response: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/ocsp-response")
+		w.Write(respBytes)
+	})
+
+	leafCert, issuerCert, issuerKey = buildLeafWithResponder(t, srv.URL)
+
+	oc := New()
+	oc.Enable()
+	err := oc.VerifyPeerCertificate([][]byte{leafCert.Raw}, [][]*x509.Certificate{{leafCert, issuerCert}})
+	if err == nil {
+		t.Fatal("expected revocation error, got nil")
+	}
+	if got := oc.RevokedTotal(); got != 1 {
+		t.Errorf("RevokedTotal() = %d, want 1", got)
+	}
+	if got := oc.FailClosedTotal(); got != 0 {
+		t.Errorf("FailClosedTotal() = %d, want 0 (responder answered)", got)
 	}
 }
