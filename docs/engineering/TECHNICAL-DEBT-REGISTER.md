@@ -118,14 +118,20 @@
   86-declaration set before/after (modulo one gofmt comment realignment); build/vet/gofmt clean;
   the enrollment/control-plane/health suites green.
 - **DEBT-003 CLOSED.** All three flagged god-files split; no non-generated `.go` file exceeds ~1,300 LOC.
-  **Follow-up (out of scope, tracked here):** the diff-scoped golangci gate re-surfaced ~19 legacy
+  **Follow-up (RESOLVED 2026-07-05):** the diff-scoped golangci gate had re-surfaced ~19 legacy
   findings on the *moved* lines (grandfathered under `--new-from-rev` while they sat in the origin
-  files). Trivial ones were fixed in place (errcheck `//nolint` explanations, `rangeValCopy` →
-  index-range, `net.Listen` → `ListenConfig.Listen`, named results, unused-param `_`); the four
-  handler-complexity findings (`handleHTTP` gocognit/cyclop/funlen, two `nestif` blocks in
-  `proxy_tunnel.go`, one in `proxy_http.go`) carry a reasoned `//nolint` pointing here — a targeted
-  handler-decomposition pass remains a candidate but is deliberately NOT bundled into a mechanical
-  file split.
+  files). Trivial ones were fixed in place with the split (errcheck `//nolint` explanations,
+  `rangeValCopy` → index-range, `net.Listen` → `ListenConfig.Listen`, named results, unused-param
+  `_`). The four handler-complexity findings (`handleHTTP` gocognit/cyclop/funlen, the `nestif`
+  blocks in `proxy_tunnel.go`/`proxy_http.go`) were then retired by a dedicated
+  **handler-decomposition pass** (deliberately its own change, not bundled into the mechanical
+  split): `handleHTTP` → `blockedByResponseHeaders`/`serveHTTPFileBlock`/`scanHTTPResponseBody`;
+  `handleTunnelInspect` → `inspectFileBlocked`/`inspectCDBlocked`/`scanInspectBody`/
+  `inspectMagicBlock`. Semantic-equivalence refactor (not a pure move) — gated by a 3× pre-push
+  review (equivalence, correctness, adversarial red-team; all clean; the one review note — a
+  double-read of `globalRemoteScanner.Enabled()` — fixed by hoisting a single read), the De Morgan
+  scan-guard truth-tabled, hot-path race suite + MITM e2e green, allocs/op unchanged. **All four
+  complexity `//nolint` suppressions removed**; diff-scoped lint is 0 issues.
 
 ## DEBT-004 — `configBackup` god-struct · MEDIUM
 - One 25-field struct (`ui_policy.go:736`) serves export/import, version rollback, and restart
