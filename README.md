@@ -54,11 +54,20 @@ See the interactive **[architecture overview](docs/architecture.md)** and the pa
 
 ### One-line install (Linux)
 
-Installs Docker, pulls the pre-built images, and starts the stack. Tested on Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Amazon Linux, and Arch.
+This script does more than start containers - it provisions the host. Tested on Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Amazon Linux, and Arch.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/scripts/install.sh | bash
 ```
+
+What it does:
+
+1. Installs Docker Engine + Compose v2 from Docker's official repo (removing conflicting snap/distro packages first).
+2. Clones the repo (to `/srv/culvert` when run as root, otherwise `~/Culvert`), seeds the local `culvert/proxy:pinned` image (pulled from `ghcr.io/kidcarmi/culvert`, or **built from source** if the pull fails), and runs `docker compose up -d`.
+3. Sets up **encryption at rest** - prompts for (or auto-generates) a passphrase and writes it to `.env`.
+4. **Installs the host-side maintenance agent as a systemd service** (`culvert-maint`) - a best-effort, opt-out step that creates a `culvert-maint` user, a systemd unit, a scoped `sudoers` entry, and `/etc/culvert-maint/config.toml`, then optionally wires Release Management to the proxy over a local Unix socket. It never mounts the Docker socket into the proxy, and a failure here never fails the install.
+
+> **Opt out of the systemd agent** with `CULVERT_SKIP_MAINT_AGENT=1`, and skip only the Release-Management wiring with `CULVERT_SKIP_RELEASE_AGENT_WIRING=1`. If you want a containers-only install with no host-side service, set `CULVERT_SKIP_MAINT_AGENT=1` before running the script, or use the [Docker (manual)](#docker-manual) path below.
 
 ### Docker (manual)
 
