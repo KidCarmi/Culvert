@@ -28,6 +28,9 @@ package main
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
 	"sort"
 	"strings"
@@ -500,4 +503,96 @@ func TestConfigSurfaces_RollbackRoundTrip(t *testing.T) {
 	if compared == 0 {
 		t.Fatal("round-trip compared zero fields — registry has no rollback bindings?")
 	}
+}
+
+// ─── 7. Snapshot capture parity (DEBT-006 PR-1) ───────────────────────
+//
+// Every ConfigSnapshot field must be ASSIGNED a value on the CP-side capture
+// path, or a Data Plane silently receives that field's zero value for a
+// setting the operator configured — the "captured-but-forgotten" drift the
+// four-way DTO can hide (the field is in the struct + registered, so
+// ReflectionParity passes, yet nothing puts a value on the wire).
+//
+// The capture "family" is CurrentConfigSnapshot (the bulk) PLUS
+// ConfigStore.Update, which stamps Version + UpdatedAt AFTER capture
+// (controlplane_snapshot.go). Both live in that one file, so the scan parses
+// it and counts every write to a ConfigSnapshot-typed value. This is robust
+// to a future gocognit split of CurrentConfigSnapshot: split helpers still
+// assign `snap.Field` on a ConfigSnapshot(-pointer) named `snap`. See the
+// DEBT-006 plan, Layer B.
+func TestConfigSurfaces_SnapshotCaptureParity(t *testing.T) {
+	captured := snapshotCapturedFields(t)
+	st := reflect.TypeOf(ConfigSnapshot{})
+	for i := 0; i < st.NumField(); i++ {
+		f := st.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if !captured[f.Name] {
+			t.Errorf("ConfigSnapshot.%s is never assigned on the capture path "+
+				"(CurrentConfigSnapshot / ConfigStore.Update in controlplane_snapshot.go): "+
+				"a DP would receive its zero value. Wire the capture — or, if it is stamped "+
+				"in a new function, extend the capture scan in snapshotCapturedFields.", f.Name)
+		}
+	}
+}
+
+// snapshotCapturedFields returns the set of ConfigSnapshot field names
+// assigned anywhere in controlplane_snapshot.go, counting ONLY writes to a
+// ConfigSnapshot-typed value:
+//
+//   - composite-literal keys in a `ConfigSnapshot{…}` literal, type-scoped so a
+//     same-named key in an unrelated literal (e.g. FileExtProfile{}) is ignored;
+//   - selector assignments `snap.Field = …` / `s.snap.Field = …` — the two
+//     ConfigSnapshot value spellings in this file (the `snap` local/param and
+//     the ConfigStore.snap field). Whole-struct writes like `s.snap = snap`
+//     do not match (their LHS field is "snap", never a ConfigSnapshot field).
+func snapshotCapturedFields(t *testing.T) map[string]bool {
+	t.Helper()
+	const file = "controlplane_snapshot.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	captured := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CompositeLit:
+			id, ok := node.Type.(*ast.Ident)
+			if !ok || id.Name != "ConfigSnapshot" {
+				return true
+			}
+			for _, el := range node.Elts {
+				if kv, ok := el.(*ast.KeyValueExpr); ok {
+					if key, ok := kv.Key.(*ast.Ident); ok {
+						captured[key.Name] = true
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && snapshotSelectorBase(sel.X) {
+					captured[sel.Sel.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return captured
+}
+
+// snapshotSelectorBase reports whether expr denotes the ConfigSnapshot value
+// in controlplane_snapshot.go: the ident `snap` (CurrentConfigSnapshot local,
+// Update param, and any future capture-helper *ConfigSnapshot param
+// conventionally named snap) or the selector `s.snap` (the ConfigStore.snap
+// field).
+func snapshotSelectorBase(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name == "snap"
+	case *ast.SelectorExpr:
+		return e.Sel.Name == "snap"
+	}
+	return false
 }
