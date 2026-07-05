@@ -31,6 +31,24 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		}
 	}
 
+	// RISK-019 trusted-proxy set: merge --trusted-proxy-cidrs with
+	// fc.Proxy.TrustedProxyCIDRs. Invalid entries are logged and leave the set
+	// empty (fail-safe: X-Forwarded-For stays untrusted, admin-UI per-IP logic
+	// keys on the direct peer).
+	trustedProxies := cfg.TrustedProxyList
+	if cfg.TrustedProxyCLI != "" {
+		for _, cidr := range strings.Split(cfg.TrustedProxyCLI, ",") {
+			trustedProxies = append(trustedProxies, strings.TrimSpace(cidr))
+		}
+	}
+	if len(trustedProxies) > 0 {
+		if err := SetTrustedProxyCIDRs(trustedProxies); err != nil {
+			logger.Printf("TrustedProxy: invalid IP/CIDR (%v) — X-Forwarded-For will NOT be trusted", err)
+		} else {
+			logger.Printf("TrustedProxy: admin-UI client-IP trusts X-Forwarded-For from %v", ListTrustedProxyCIDRs())
+		}
+	}
+
 	if cfg.BaseURL != "" {
 		SetProxyBaseURL(cfg.BaseURL)
 		logger.Printf("BaseURL: %s", cfg.BaseURL)

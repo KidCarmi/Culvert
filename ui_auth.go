@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,10 +43,10 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if clientIP == "" {
-		clientIP = r.RemoteAddr
-	}
+	// RISK-019: resolve the real client behind a configured trusted proxy, so
+	// an L7 proxy that collapses peer IPs can't let one attacker lock out every
+	// admin (falls back to the direct peer when no trusted proxy is set).
+	clientIP := realClientIP(r)
 	// Account lockout check — before any credential verification. Two-tier
 	// (RISK-012): the (IP, user) pair lock plus the trusted-IP-bypassed
 	// account lock, so a remote attacker can no longer lock the real admin
@@ -348,10 +347,8 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// S4: Rate-limit setup endpoint to prevent brute-force race during initial setup window.
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if ip == "" {
-		ip = r.RemoteAddr
-	}
+	// RISK-019: trusted-proxy-aware client IP (falls back to the direct peer).
+	ip := realClientIP(r)
 	// Setup runs BEFORE any admin account exists, so it must use the
 	// PAIR-ONLY limiter (CheckPair/RecordPairFailure): pure per-IP rate
 	// limiting with no account-tier aggregation. Routing it through the

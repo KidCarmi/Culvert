@@ -99,6 +99,12 @@ func TestConfigSurfaces_ReflectionParity(t *testing.T) {
 
 // ─── 2. Snapshot cap parity (H5) ──────────────────────────────────────
 
+// snapshotCapCeiling bounds any single ConfigSnapshot per-slice cap. The
+// current maximum is 200k; 1M gives headroom without letting a cap grow so
+// large the H5 memory-DoS bound stops meaning anything (DEBT-006 residual:
+// magnitude, not just existence).
+const snapshotCapCeiling = 1_000_000
+
 func TestConfigSurfaces_SnapshotCapParity(t *testing.T) {
 	snapType := csrStructTypes()["ConfigSnapshot"]
 	capped := 0
@@ -115,6 +121,16 @@ func TestConfigSurfaces_SnapshotCapParity(t *testing.T) {
 			}
 			if row.SnapshotCap <= 0 {
 				t.Errorf("ConfigSnapshot.%s (row %q) is a %s with no SnapshotCap — every synced slice/map needs a validateConfigSnapshot bound or a CP can memory-DoS every DP (H5)", b.Field, row.ID, k)
+			}
+			// Magnitude, not just existence (DEBT-006 residual): a cap set to
+			// MaxInt or an absurd value passes the existence check but leaves
+			// the H5 DoS bound toothless. The current max is 200k
+			// (maxSnapBlockedHosts/IPList/URLCategories); ceiling gives 5×
+			// headroom while still bounding a single field well under a
+			// pathological allocation. A field that legitimately needs more is
+			// a design smell that should be reviewed, not silently capped huge.
+			if row.SnapshotCap > snapshotCapCeiling {
+				t.Errorf("ConfigSnapshot.%s (row %q) SnapshotCap=%d exceeds the sanity ceiling %d — a cap this large defeats the H5 memory-DoS bound; if this is intentional, raise snapshotCapCeiling with justification", b.Field, row.ID, row.SnapshotCap, snapshotCapCeiling)
 			}
 			capped++
 		}
@@ -595,6 +611,112 @@ func snapshotSelectorBase(expr ast.Expr) bool {
 		return e.Sel.Name == "snap"
 	}
 	return false
+}
+
+// ─── 7b. Snapshot wrong-owner capture guard (DEBT-006 residual) ───────
+//
+// The registry's Owner column names the global a field is captured FROM. A
+// presence scan (capture parity) can't catch `snap.NodeGroups =
+// globalBandwidth.List()` — a paste-o that captures the right field from the
+// WRONG store. This walls the DIRECT-receiver captures (`snap.Field =
+// owner.Method(...)`): the receiver ident must equal the row's Owner. Captures
+// that read through an intermediate local (`cats := catStore.All(); snap.X =
+// cats`) or a helper (`buildCPAddressList()`) can't be bound by a receiver
+// scan and are intentionally out of scope — they simply don't appear in the
+// direct-capture map. A coverage floor keeps the guard from silently decaying
+// to zero if the capture style changes wholesale.
+func TestConfigSurfaces_SnapshotCaptureOwner(t *testing.T) {
+	direct := snapshotDirectCaptureOwners(t) // field → receiver ident
+	ownerByField := map[string]string{}
+	knownOwner := map[string]bool{}
+	for i := range configSurfaces {
+		row := &configSurfaces[i]
+		if row.Owner == "" {
+			continue
+		}
+		knownOwner[row.Owner] = true
+		for _, b := range row.Bindings {
+			if b.Struct == "ConfigSnapshot" {
+				ownerByField[b.Field] = row.Owner
+			}
+		}
+	}
+	checked := 0
+	for field, recv := range direct {
+		owner, ok := ownerByField[field]
+		if !ok {
+			continue // meta field with no Owner (e.g. captured from a ConfigStore field)
+		}
+		// Only receivers that are themselves a known store Owner are direct
+		// store captures. A receiver like `hex` (SessionHMAC =
+		// hex.EncodeToString(session.SigningKey())) is a stdlib wrapper over
+		// the real owner and is out of scope — same as an intermediate local.
+		if !knownOwner[recv] {
+			continue
+		}
+		checked++
+		if recv != owner {
+			t.Errorf("CurrentConfigSnapshot captures ConfigSnapshot.%s from %q but the registry "+
+				"Owner is %q — wrong-owner capture (the field would carry another store's data). "+
+				"Fix the capture receiver or the registry Owner.", field, recv, owner)
+		}
+	}
+	if checked < 10 {
+		t.Fatalf("wrong-owner guard bound only %d direct captures (want >=10) — the capture style "+
+			"changed and the scan no longer sees receivers; revisit snapshotDirectCaptureOwners", checked)
+	}
+}
+
+// snapshotDirectCaptureOwners scans CurrentConfigSnapshot for direct-receiver
+// captures `snap.Field = <ident>.Method(...)` and returns field → receiver
+// ident. Intermediate-local and helper-call captures are not matched (no
+// single receiver ident) and are excluded by construction.
+func snapshotDirectCaptureOwners(t *testing.T) map[string]string {
+	t.Helper()
+	const file = "controlplane_snapshot.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	out := map[string]string{}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "CurrentConfigSnapshot" {
+			fn = fd
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("CurrentConfigSnapshot not found in controlplane_snapshot.go")
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		lhs, ok := as.Lhs[0].(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if base, ok := lhs.X.(*ast.Ident); !ok || base.Name != "snap" {
+			return true
+		}
+		// RHS must be <ident>.Method(...): a call on a selector with an ident receiver.
+		call, ok := as.Rhs[0].(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if recv, ok := sel.X.(*ast.Ident); ok {
+			out[lhs.Sel.Name] = recv.Name
+		}
+		return true
+	})
+	return out
 }
 
 // ─── 8. Snapshot apply parity (DEBT-006 PR-2) ─────────────────────────

@@ -90,6 +90,7 @@ type startupState struct {
 	syslogFormat            *string
 	otlpEndpoint            *string
 	uiAllowIP               *string
+	trustedProxyCIDRs       *string
 	sessionHrs              *int
 	geoIPDB                 *string
 	clamavAddr              *string
@@ -257,6 +258,7 @@ func parseFlags(s *startupState) {
 	s.syslogFormat = flag.String("syslog-format", "", "Syslog message format: rfc3164 (default) or rfc5424")
 	s.otlpEndpoint = flag.String("otlp-endpoint", "", "OTLP/HTTP endpoint for metrics export (e.g. http://otel-collector:4318)")
 	s.uiAllowIP = flag.String("ui-allow-ip", "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
+	s.trustedProxyCIDRs = flag.String("trusted-proxy-cidrs", "", "Comma-separated CIDRs/IPs of reverse proxies whose X-Forwarded-For is trusted for admin-UI client-IP (empty=never trust XFF)")
 	s.sessionHrs = flag.Int("session-timeout", 0, "Admin UI session lifetime in hours (1-168, 0=default 8h)")
 	s.geoIPDB = flag.String("geoip-db", "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
 	s.clamavAddr = flag.String("clamav-addr", "", "ClamAV address: unix:/run/clamav/clamd.sock or tcp:host:port")
@@ -582,7 +584,7 @@ func initGeoIP(s *startupState) {
 // initUIAccessPolicy is the PR3 expansion shim: resolve the UI access
 // policy slice (IP allowlist + base URL + IdP registry) and apply it.
 func initUIAccessPolicy(s *startupState) {
-	cfg := resolveUIAccessPolicyStartupConfig(s.fc, *s.uiAllowIP, *s.idpProfilesFile)
+	cfg := resolveUIAccessPolicyStartupConfig(s.fc, *s.uiAllowIP, *s.trustedProxyCIDRs, *s.idpProfilesFile)
 	if err := loadUIAccessPolicy(cfg); err != nil {
 		log.Fatalf("%v", err)
 	}

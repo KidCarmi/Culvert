@@ -33,6 +33,7 @@ type FileConfig struct {
 		URLCategoriesFile     string   `yaml:"url_categories_file"`     // JSON file for dynamic URL categories (host lists per category)
 		BaseURL               string   `yaml:"base_url"`                // External base URL for OIDC/SAML callbacks (e.g. "https://proxy.corp.com:9090")
 		TrustForwardedHeaders bool     `yaml:"trust_forwarded_headers"` // Trust X-Forwarded-* headers (enable when behind reverse proxy)
+		TrustedProxyCIDRs     []string `yaml:"trusted_proxy_cidrs"`     // IPs/CIDRs of reverse proxies whose X-Forwarded-For is trusted for admin-UI client-IP (RISK-019); empty = never trust XFF
 		BlocklistFeedURL      string   `yaml:"blocklist_feed_url"`      // URL to auto-sync blocklist from (one domain per line)
 		BlocklistFeedInterval string   `yaml:"blocklist_feed_interval"` // sync interval (e.g. "24h"); default 24h
 		FileProfilesFile      string   `yaml:"fileprofiles_file"`       // JSON file for dynamic file extension profiles

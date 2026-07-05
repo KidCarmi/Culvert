@@ -1130,10 +1130,7 @@ func apiClusterUpdate(w http.ResponseWriter, r *http.Request) {
 		req.MaxPercent = 50
 	}
 
-	actor, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if actor == "" {
-		actor = r.RemoteAddr
-	}
+	actor := realClientIP(r) // RISK-019: trusted-proxy-aware client IP
 	budget := ErrorBudgetConfig{
 		MaxConsecutive: req.MaxConsecutive,
 		MaxPercent:     req.MaxPercent,

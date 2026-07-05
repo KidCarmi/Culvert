@@ -166,19 +166,33 @@ its "fix" silently committed the forbidden wire change — self-contradiction.)
 Each PR is independently green (PR-1's scoping is the fix that makes this true,
 which v1 failed to establish).
 
-## 7. Known-unclosed by this wall (record, don't pretend)
-- **Wrong-owner wiring:** a presence scan passes `snap.NodeGroups =
-  globalBandwidth.List()`. The registry has an `Owner` column but nothing binds
-  it to the global actually used. Closing it needs a runtime capture round-trip,
-  not an AST scan — out of scope; noted.
-- **Apply ordering:** `applyConfigSnapshot` is leaf-first (url_categories →
-  category_groups → policy_rules; IdP-sync before extended state, `:251-263`).
-  A presence scan proves a field is read, never *when*. The rollback surface has
-  a behavioral round-trip (`TestConfigSurfaces_RollbackRoundTrip`) that would
-  catch reordering; ConfigSnapshot gets no equivalent under this plan. Candidate
-  follow-up: a DP apply round-trip test.
-- **Cap magnitude:** `SnapshotCapParity` proves a cap exists, not that it is
-  sane (a `MaxInt` cap passes). Minor; within the H5 threat model.
+## 7. Formerly-known-unclosed — resolved 2026-07-05 (post-close follow-up)
+- **Wrong-owner wiring — WALLED (direct captures).** `TestConfigSurfaces_
+  SnapshotCaptureOwner` scans `CurrentConfigSnapshot` for direct-receiver
+  captures (`snap.Field = owner.Method(...)`) and asserts the receiver ident
+  equals the registry `Owner`. Catches the type-COMPATIBLE swap the compiler
+  can't (e.g. `snap.SSLBypassPatterns = dpiScanner.List()` — both `[]string`);
+  the type-INcompatible swap the compiler already rejects. Out of scope by
+  construction (documented, coverage-floored ≥10): captures through an
+  intermediate local (`cats := catStore.All(); snap.URLCategories = cats`), a
+  helper (`buildCPAddressList()`), or a stdlib wrapper (`SessionHMAC =
+  hex.EncodeToString(session.SigningKey())` — receiver `hex` is not a store
+  Owner, so it is skipped rather than mis-flagged).
+- **Apply ordering — CLOSED BY ANALYSIS (not applicable to this surface).**
+  The v1 claim ("leaf-first url_categories → category_groups → policy_rules")
+  conflated this surface with the config-IMPORT path. Traced: the snapshot
+  apply actually runs PolicyRules (`:317`) BEFORE URLCategories (`:334`) BEFORE
+  CategoryGroups (`:447`) — the *opposite* order — and it works because each
+  store's `ReplaceAll` is an independent atomic swap and rules reference
+  categories/groups BY NAME, resolved at EVALUATION time
+  (`policy.go:828 categoryGroupMatchesHost`), never at apply time.
+  `policyStore.ReplaceAll` validates rule *shape* only (`policyRulePersistable`),
+  not reference existence, so applying rules before groups drops nothing. There
+  is no load-bearing apply-time ordering on the ConfigSnapshot path; a
+  round-trip ordering test would assert a non-dependency. No test warranted.
+- **Cap magnitude — WALLED.** `SnapshotCapParity` now asserts every cap is
+  `≤ snapshotCapCeiling` (1M; current max 200k), so a `MaxInt`/absurd cap that
+  defeats the H5 bound fails instead of passing the existence check.
 
 ## 8. Design-review corrections folded in (audit trail)
 1. Registry rows already exist + enforced by `ReflectionParity` → PR-1 rescoped

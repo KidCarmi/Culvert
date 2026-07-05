@@ -305,6 +305,9 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SessionTimeoutHours"}}},
 	{ID: "ui_allow_ips", Kind: kindConfig, Owner: "uiIPGuard", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UIAllowIPs"}}},
+	{ID: "trusted_proxy_cidrs", Kind: kindConfig, Owner: "trustedProxyNets", AdminDurable: true,
+		Note:     "RISK-019 reverse-proxy trust set for admin-UI client-IP; admin-durable only (per-node topology), NOT cluster-synced; empty len-guarded apply",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRs"}}},
 	{ID: "base_url", Kind: kindConfig, Owner: "proxyBaseURL", AdminDurable: true, ClusterSynced: true,
 		Bindings: []surfaceBinding{
 			{Struct: "AdminSettings", Field: "BaseURL"},
@@ -343,6 +346,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeedsSaved"}}},
 	{ID: "upstream_proxies_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UpstreamProxiesSaved"}}},
+	{ID: "trusted_proxy_cidrs_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRsSaved"}}},
 	{ID: "yara_settings_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},
 	{ID: "blocklist_feed_url_legacy", Kind: kindLegacyMigration,
