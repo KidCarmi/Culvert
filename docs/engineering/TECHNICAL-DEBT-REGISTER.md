@@ -1,6 +1,6 @@
 # Culvert Technical Debt Register
 
-> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-07-04 (drift sync)
+> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-07-05 (drift sync)
 >
 > Debt = a structural shortcut that raises the cost of future change. Runtime/supply-chain hazards
 > live in the [Technical Risk Register](./TECHNICAL-RISK-REGISTER.md). Each item is framed as
@@ -9,15 +9,15 @@
 
 | ID | Sev | Title | Principal location |
 |---|---|---|---|
-| DEBT-001 | MEDIUM ↓ | Flat root namespace — engines extracted (ADR-0002 COMPLETE, 44 pkgs), root shims/globals remain | 172 root `.go` files (non-test) |
+| DEBT-001 | MEDIUM ↓ | Flat root namespace — engines extracted (ADR-0002 COMPLETE, 48 pkgs), root shims/globals remain | 184 root `.go` files (non-test) — ↑ from the DEBT-003 god-file splits (cohesion up, not new debt) |
 | DEBT-002 | ✅ CLOSED | `handleRequest` was ~497 lines / cyclo 73 on the hottest security path | `proxy.go` — decomposed 2026-06-28 |
 | DEBT-003 | ✅ CLOSED | God-files split (2026-07-04): `controlplane.go` 2,240→341, `proxy.go` 1,901→727, `main.go` 1,990→1,211. No non-generated `.go` file > ~1,300 LOC | — |
-| DEBT-004 | MEDIUM | `configBackup` god-struct with 3 divergent memberships | `ui_policy.go:736`, `configversion.go` |
+| DEBT-004 | ✅ CLOSED | `configBackup` god-struct with 3 divergent memberships | walled by the `config_surfaces.go` registry + `config_surfaces_test.go` reflection parity (the "membership table" this item recommended) |
 | DEBT-005 | ✅ CLOSED | `main.go` was a 30-`init*` hand-wired DI container | startup-slice program complete (24 slices, contract-tested) |
 | DEBT-006 | ✅ CLOSED | `ConfigSnapshot` (34-field) CP→DP god-DTO | walled by capture/apply/redaction/wire-wipe parity (2026-07-05); `config_surfaces_test.go` |
 | DEBT-007 | ✅ CLOSED | No end-to-end SSL-inspection MITM data-path test | `mitm_inspect_e2e_test.go` — verified 2026-07-04 |
 | DEBT-008 | LOW | Two parallel update mechanisms coexist | `updater/` + `release_dispatch*.go` |
-| DEBT-009 | LOW | Three durability layers for config can drift | `config.go`, `admin_settings.go`, `configversion.go` |
+| DEBT-009 | LOW ↓ | Three durability layers for config can drift — ownership now registry-declared; effective-config visibility remains | `config.go`, `admin_settings.go`, `configversion.go` |
 | DEBT-010 | ✅ CLOSED | Coverage floor 55% (doc said 60%); delta gate non-blocking | resolved in tree by CI-REDESIGN step 7 — verified 2026-07-04 |
 
 ---
@@ -52,7 +52,7 @@
   added 2026-07-04 under the standing recorded-design rule — + 4 seams +
   `halease`), engines own logic/state/persistence, and `main` is reduced to composition roots,
   shims, and aliases (per `CLAUDE.md`, corroborated by `ls internal`). `store.go` halved
-  (2,313 → 1,171 LOC). What REMAINS of the principal: 172 root non-test `.go` files still share
+  (2,313 → 1,171 LOC). What REMAINS of the principal: 184 root non-test `.go` files still share
   one namespace, and the shim/alias globals still bridge into the engines — the blast-radius and
   race-surface interest is much reduced but not zero. **Severity HIGH → MEDIUM.** Direction per
   `CLAUDE.md`: new engines go to `internal/` with a recorded design; do not re-inline shipped ones.
@@ -133,13 +133,19 @@
   scan-guard truth-tabled, hot-path race suite + MITM e2e green, allocs/op unchanged. **All four
   complexity `//nolint` suppressions removed**; diff-scoped lint is 0 issues.
 
-## DEBT-004 — `configBackup` god-struct · MEDIUM
-- One 25-field struct (`ui_policy.go:736`) serves export/import, version rollback, and restart
+## DEBT-004 — `configBackup` god-struct · ✅ CLOSED 2026-07-05 (walled)
+- **Was:** one struct (`ui_policy.go`) served export/import, version rollback, and restart
   durability — each with a *different* intended field subset encoded only in prose (CLAUDE.md
-  "Finding 10.3"). `RateLimitExempt` is already half-migrated, so the surfaces are out of sync.
-- **Interest:** adding a config field means remembering to wire it into N hand-curated functions
-  across 3 files. **Recommendation:** explicit per-surface types or a generated membership table.
-  **Complexity M.**
+  "Finding 10.3"), so a field addition had to be hand-wired into N functions across 3 files and
+  `RateLimitExempt` had already drifted half-migrated.
+- **Resolution:** the recommended "generated membership table" shipped as the
+  `config_surfaces.go` registry (its header comment explicitly names DEBT-004/006/009 as its
+  charge). `config_surfaces_test.go` enforces it via reflection: forward/reverse parity (every
+  field claimed by exactly one row, every binding resolves to a real field), diff-nil-guard ⇔
+  apply-nil-skip parity, per-field diff coverage, Sensitive invariants, and a full-surface rollback
+  round-trip. Adding a config field now fails CI until it is registered on the correct surfaces —
+  the drift is a compile-adjacent test failure, not a prose hope. The CP→DP `ConfigSnapshot`
+  surface was walled the same way under DEBT-006 (capture/apply/redaction/wire-wipe/owner parity).
 
 ## DEBT-005 — Hand-wired 30-init DI in `main.go` · ✅ CLOSED 2026-07-04
 - **Was:** startup was 30 `init*` functions invoked in sequence with cross-dependencies expressed
@@ -200,10 +206,15 @@
   all 5 alerts at once — the correct fix, vs. bumping deps in soon-deleted code. **Priority raised
   in practice** by the alert pressure, even though the structural debt itself is LOW.
 
-## DEBT-009 — Three config durability layers · LOW
+## DEBT-009 — Three config durability layers · LOW ↓ (partially addressed)
 - CLI flags / YAML / `admin_settings.json` can hold different values for the same setting; which
-  wins is non-obvious. Documented but operationally confusing. **Recommendation:** a single
-  precedence doc + a diagnostics endpoint that shows effective-vs-source for each setting.
+  wins is non-obvious. Documented but operationally confusing.
+- **Partial (2026-07-05):** the *membership/ownership* half is now declared — the
+  `config_surfaces.go` registry records which surface owns each setting (`AdminDurable`/`Rollback`
+  flags + the `…Saved` sentinel semantics), and DEBT-004's parity tests enforce it. What REMAINS is
+  the *precedence-visibility* half: no diagnostics endpoint shows effective-vs-source per setting at
+  runtime, so an operator still can't see which layer won. **Recommendation (residual):** a single
+  precedence doc + an effective-config diagnostics endpoint. **Complexity S.**
 
 ## DEBT-010 — Coverage floor / delta gate · ✅ CLOSED 2026-07-04 (drift sync)
 - **Was:** global floor 55% while a `code-review.yml` comment said 60%; the coverage delta gate
