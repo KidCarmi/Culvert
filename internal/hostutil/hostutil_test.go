@@ -22,6 +22,42 @@ func TestNormalizeHost(t *testing.T) {
 	}
 }
 
+func TestNormalizeHostStrict(t *testing.T) {
+	cases := []struct {
+		name, input, wantNorm string
+		wantOK                bool
+	}{
+		// Valid → ok=true, canonical form.
+		{"trailing dot + case", "Example.COM.", "example.com", true},
+		{"empty (validity handled upstream)", "", "", true},
+		{"ipv4 literal", "192.168.0.1", "192.168.0.1", true},
+		{"ascii hostname", "sub.example.com", "sub.example.com", true},
+		{"unicode IDN to punycode", "bücher.de", "xn--bcher-kva.de", true},
+		// IPv6 literals — the bracketed forms reach the request-path gate
+		// (default-port r.Host, SOCKS5 IPv6 ATYP) and MUST be accepted, by
+		// construction rather than by idna leniency (regression guard: Codex
+		// P2 on PR #572 / RISK-013).
+		{"bare ipv6", "2001:db8::2", "2001:db8::2", true},
+		{"bracketed ipv6", "[2001:db8::2]", "[2001:db8::2]", true},
+		{"bracketed ipv6 loopback", "[::1]", "[::1]", true},
+		// Fail-closed → ok=false (invalid punycode label).
+		{"invalid punycode dollar", "xn--$$$.com", "", false},
+		{"invalid punycode zero", "xn--0.com", "", false},
+		{"invalid punycode dash", "xn---", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotNorm, gotOK := NormalizeHostStrict(c.input)
+			if gotOK != c.wantOK {
+				t.Fatalf("NormalizeHostStrict(%q) ok = %v, want %v", c.input, gotOK, c.wantOK)
+			}
+			if gotOK && gotNorm != c.wantNorm {
+				t.Errorf("NormalizeHostStrict(%q) norm = %q, want %q", c.input, gotNorm, c.wantNorm)
+			}
+		})
+	}
+}
+
 func TestStripHostPort(t *testing.T) {
 	cases := []struct {
 		name, input, want string

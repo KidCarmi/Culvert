@@ -589,64 +589,10 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		}
 
 		// ── File blocking (tunnel inner request) ────────────────────────────
-		// These checks mirror the file-blocking logic in handleHTTP and the
-		// pre-policy global check in handleRequest. They run before any data
-		// is written to the client, so a clean 403 is safe to inject.
-
-		// 1. Global file extension blocklist — check the inner request URL.
-		if ext := fileBlocker.CheckPath(req.URL.Path); ext != "" {
-			atomic.AddInt64(&statFileBlocked, 1)
-			atomic.AddInt64(&statBlocked, 1)
-			recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
-			resp.Body.Close()
-			fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "global ext")
-			break
-		}
-		// 2. Per-rule file profile — check the inner request URL against the
-		//    file-extension profile attached to the matched policy rule.
-		if match != nil && match.Rule != nil && match.Rule.FileProfileBlocked(req.URL.Path) {
-			atomic.AddInt64(&statFileBlocked, 1)
-			atomic.AddInt64(&statBlocked, 1)
-			recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
-			resp.Body.Close()
-			fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
-			break
-		}
-		// 3. Content-Disposition header — catches downloads that use a generic
-		//    URL but declare the real filename in the response header.
-		//nolint:nestif // DEBT-003: relocated verbatim from proxy.go; pre-existing complexity, refactor deferred (TECHNICAL-DEBT-REGISTER)
-		if cd := resp.Header.Get("Content-Disposition"); cd != "" {
-			if ext := fileBlocker.CheckContentDisposition(cd); ext != "" {
-				atomic.AddInt64(&statFileBlocked, 1)
-				atomic.AddInt64(&statBlocked, 1)
-				recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
-				resp.Body.Close()
-				fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
-				break
-			}
-			// Per-rule profile: check the CD filename against the matched rule's
-			// file profile (catches SourceForge-style /files/latest/download URLs).
-			if match != nil && match.Rule != nil && match.Rule.FileFiltering && match.Rule.FileProfile != "" {
-				if fn := fileblock.ExtractCDFilename(cd); fn != "" {
-					if match.Rule.FileProfileBlocked(fn) {
-						atomic.AddInt64(&statFileBlocked, 1)
-						atomic.AddInt64(&statBlocked, 1)
-						recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
-						resp.Body.Close()
-						fileblock.BlockConn(clientTLS, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
-						break
-					}
-				}
-			}
-		}
-		// 4. Content-Type MIME — catches renamed executables where the server
-		//    still reports the true MIME type.
-		if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
-			atomic.AddInt64(&statFileBlocked, 1)
-			atomic.AddInt64(&statBlocked, 1)
-			recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
-			resp.Body.Close()
-			fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-type")
+		// Mirrors the file-blocking logic in handleHTTP and the pre-policy
+		// global check in handleRequest. Runs before any data is written to the
+		// client, so a clean 403 is safe to inject.
+		if inspectFileBlocked(clientTLS, req, resp, match, hostOnly, clientIP) {
 			break
 		}
 
@@ -673,100 +619,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 			return
 		}
 
-		// Unified scan buffer: DPI signatures + ClamAV + YARA.
-		// We buffer up to maxScanBufferBytes() before forwarding so any match
+		// Unified scan buffer: magic/polyglot + CDR + DPI signatures + ClamAV +
+		// YARA. Buffers up to maxScanBufferBytes() before forwarding so any match
 		// blocks the response entirely (true prevention, not merely logging).
-		ct := resp.Header.Get("Content-Type")
-		// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
-		hostExcluded := globalScanExclusions.IsHostExcluded(hostOnly)
-		dpiBypassed := dpiScanner.IsBypassHost(hostOnly)
-		//nolint:nestif // DEBT-003: relocated verbatim from proxy.go; pre-existing complexity, refactor deferred (TECHNICAL-DEBT-REGISTER)
-		if !hostExcluded && bodyNeedsBuffering(ct) {
-			origBody := resp.Body
-			body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
-			if readErr != nil {
-				origBody.Close()
-				logger.Printf("SSL_INSPECT: body read error for %q: %v", sanitizeLog(hostOnly), readErr)
-				break
-			}
-			if readErr == nil {
-				// 1.1 fix: decompress gzip/deflate bodies before scanning so
-				// ClamAV/YARA signatures match the actual content.
-				ce := resp.Header.Get("Content-Encoding")
-				scanBody := decompressForScan(body, ce)
-
-				// File blocking: magic byte detection — block archives even
-				// if the URL/Content-Disposition doesn't reveal the format.
-				if archType := IsBlockedArchive(scanBody); archType != "" {
-					origBody.Close()
-					atomic.AddInt64(&statFileBlocked, 1)
-					atomic.AddInt64(&statBlocked, 1)
-					recordInspectBlock(clientIP, "FILE_BLOCKED", "magic:"+archType, "", hostOnly, req.URL.Path, match)
-					fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, "magic:"+archType, "magic bytes")
-					break
-				}
-				// File blocking: polyglot detection — block files whose
-				// Content-Type doesn't match their actual magic bytes.
-				if reason := CheckMagicVsContentType(scanBody, ct); reason != "" {
-					origBody.Close()
-					atomic.AddInt64(&statFileBlocked, 1)
-					atomic.AddInt64(&statBlocked, 1)
-					recordInspectBlock(clientIP, "POLYGLOT_BLOCKED", reason, "", hostOnly, req.URL.Path, match)
-					fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, reason, "polyglot")
-					break
-				}
-
-				// ── CDR (Sluice content disarm & reconstruction) ──
-				// Runs BEFORE ClamAV/YARA so downstream scanners see the
-				// sanitized bytes if CDR stripped active content.  No-op
-				// (single atomic load) when CDR is disabled.
-				cdrDecision := runCDRStage(r, req, body, scanBody, ct, ce, clientTLS, hostOnly, clientIP, id)
-				if cdrDecision.blocked {
-					origBody.Close()
-					break
-				}
-				body = cdrDecision.body
-				scanBody = cdrDecision.scanBody
-
-				// When remote scan service is active, delegate all scanning
-				// (ClamAV + YARA + DPI) in a single remote call.
-				if globalRemoteScanner.Enabled() {
-					if scanResult := safeScanBodyWithCT(scanBody, ct); scanResult != nil {
-						if scanResult.Source == "timeout" {
-							go fireAlert("scan_timeout", AlertPayload{Actor: clientIP, Host: hostOnly, Detail: scanResult.Reason, Source: "scan_timeout"})
-						}
-						origBody.Close()
-						atomic.AddInt64(&statBlocked, 1)
-						recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match)
-						scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
-						break
-					}
-				} else {
-					// DPI regex scan (text content only).
-					// Tier 3.4: respect per-host DPI bypass list.
-					if !dpiBypassed && dpiScanner.Enabled() && isTextContentType(ct) {
-						if pattern, matched := safeDPIScan(scanBody); matched {
-							origBody.Close()
-							recordInspectBlock(clientIP, "DPI_BLOCKED", "", pattern, hostOnly, req.URL.Path, match)
-							dpiBlock(clientTLS, hostOnly, pattern)
-							break
-						}
-					}
-					// ClamAV + YARA body scan (all content types).
-					if scanResult := safeScanBody(scanBody); scanResult != nil {
-						if scanResult.Source == "timeout" {
-							go fireAlert("scan_timeout", AlertPayload{Actor: clientIP, Host: hostOnly, Detail: scanResult.Reason, Source: "scan_timeout"})
-						}
-						origBody.Close()
-						atomic.AddInt64(&statBlocked, 1)
-						recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match)
-						scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
-						break
-					}
-				}
-				// No match: reassemble the body (buffered prefix + remaining bytes).
-				resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), origBody))
-			}
+		if scanInspectBody(r, req, resp, clientTLS, match, id, hostOnly, clientIP) {
+			break
 		}
 
 		closeAfter := req.Close || resp.Close
@@ -791,6 +648,189 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	}
 	clientTLS.Close()   //nolint:errcheck // best-effort cleanup at relay end
 	upstreamTLS.Close() //nolint:errcheck // best-effort cleanup at relay end
+}
+
+// inspectFileBlocked runs the inner-request file-block checks against a decrypted
+// tunnel request/response: (1) global file-extension blocklist on the URL, (2)
+// per-rule file profile on the URL, (3) Content-Disposition filename, (4)
+// Content-Type MIME. On a match it records the block, closes resp.Body, writes
+// the block page to the client, and returns true — the caller must stop serving
+// the tunnel. Returns false (resp.Body left open) when nothing is blocked.
+func inspectFileBlocked(clientTLS *tls.Conn, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string) bool {
+	// 1. Global file extension blocklist — inner request URL.
+	if ext := fileBlocker.CheckPath(req.URL.Path); ext != "" {
+		atomic.AddInt64(&statFileBlocked, 1)
+		atomic.AddInt64(&statBlocked, 1)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
+		resp.Body.Close()
+		fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "global ext")
+		return true
+	}
+	// 2. Per-rule file profile — inner request URL against the profile on the
+	//    matched policy rule.
+	if match != nil && match.Rule != nil && match.Rule.FileProfileBlocked(req.URL.Path) {
+		atomic.AddInt64(&statFileBlocked, 1)
+		atomic.AddInt64(&statBlocked, 1)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
+		resp.Body.Close()
+		fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
+		return true
+	}
+	// 3. Content-Disposition header — generic URL but declared filename.
+	if inspectCDBlocked(clientTLS, req, resp, match, hostOnly, clientIP) {
+		return true
+	}
+	// 4. Content-Type MIME — renamed executables where the server still reports
+	//    the true MIME type.
+	if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
+		atomic.AddInt64(&statFileBlocked, 1)
+		atomic.AddInt64(&statBlocked, 1)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
+		resp.Body.Close()
+		fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-type")
+		return true
+	}
+	return false
+}
+
+// inspectCDBlocked is check 3 of inspectFileBlocked, factored out to keep the
+// nesting flat: it blocks on a Content-Disposition filename whose extension is
+// on the global blocklist, or whose filename matches the matched rule's file
+// profile (catches SourceForge-style /files/latest/download URLs). Returns true
+// if it blocked (resp.Body closed, block page written).
+func inspectCDBlocked(clientTLS *tls.Conn, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string) bool {
+	cd := resp.Header.Get("Content-Disposition")
+	if cd == "" {
+		return false
+	}
+	if ext := fileBlocker.CheckContentDisposition(cd); ext != "" {
+		atomic.AddInt64(&statFileBlocked, 1)
+		atomic.AddInt64(&statBlocked, 1)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
+		resp.Body.Close()
+		fileblock.BlockConn(clientTLS, hostOnly, req.URL.Path, ext, "content-disposition")
+		return true
+	}
+	if match == nil || match.Rule == nil || !match.Rule.FileFiltering || match.Rule.FileProfile == "" {
+		return false
+	}
+	fn := fileblock.ExtractCDFilename(cd)
+	if fn == "" || !match.Rule.FileProfileBlocked(fn) {
+		return false
+	}
+	atomic.AddInt64(&statFileBlocked, 1)
+	atomic.AddInt64(&statBlocked, 1)
+	recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
+	resp.Body.Close()
+	fileblock.BlockConn(clientTLS, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
+	return true
+}
+
+// inspectMagicBlock is the shared block bookkeeping for the two magic-byte
+// detections in scanInspectBody (blocked archive / polyglot): closes the
+// original body, bumps the file-block counters, records the block, and writes
+// the block page. status is the request-log status ("FILE_BLOCKED"/
+// "POLYGLOT_BLOCKED"), detail the matched type/reason, source the BlockConn
+// label ("magic bytes"/"polyglot").
+func inspectMagicBlock(clientTLS *tls.Conn, origBody io.ReadCloser, match *PolicyMatch, status, detail, source, hostOnly, clientIP, path string) {
+	origBody.Close()
+	atomic.AddInt64(&statFileBlocked, 1)
+	atomic.AddInt64(&statBlocked, 1)
+	recordInspectBlock(clientIP, status, detail, "", hostOnly, path, match)
+	fileblock.BlockConn(clientTLS, hostOnly, path, detail, source)
+}
+
+// scanInspectBody buffers and scans a decrypted tunnel response body: magic-byte
+// archive/polyglot detection, then CDR (content disarm), then either the remote
+// scan service or local DPI + ClamAV/YARA. It returns true if the caller must
+// stop serving the tunnel — either because the content was blocked (block page
+// already written, origBody closed) or the body could not be read. On a clean
+// scan it reassembles resp.Body (buffered prefix + unread remainder) and returns
+// false. When buffering does not apply (host excluded or a content type that
+// needs no buffering) it returns false without touching the body.
+func scanInspectBody(r, req *http.Request, resp *http.Response, clientTLS *tls.Conn, match *PolicyMatch, id ProxyIdentity, hostOnly, clientIP string) bool {
+	ct := resp.Header.Get("Content-Type")
+	// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
+	if globalScanExclusions.IsHostExcluded(hostOnly) || !bodyNeedsBuffering(ct) {
+		return false
+	}
+
+	origBody := resp.Body
+	body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
+	if readErr != nil {
+		origBody.Close()
+		logger.Printf("SSL_INSPECT: body read error for %q: %v", sanitizeLog(hostOnly), readErr)
+		return true
+	}
+	// 1.1 fix: decompress gzip/deflate bodies before scanning so ClamAV/YARA
+	// signatures match the actual content.
+	ce := resp.Header.Get("Content-Encoding")
+	scanBody := decompressForScan(body, ce)
+
+	// File blocking: magic byte detection — block archives even if the
+	// URL/Content-Disposition doesn't reveal the format.
+	if archType := IsBlockedArchive(scanBody); archType != "" {
+		inspectMagicBlock(clientTLS, origBody, match, "FILE_BLOCKED", "magic:"+archType, "magic bytes", hostOnly, clientIP, req.URL.Path)
+		return true
+	}
+	// File blocking: polyglot detection — block files whose Content-Type
+	// doesn't match their actual magic bytes.
+	if reason := CheckMagicVsContentType(scanBody, ct); reason != "" {
+		inspectMagicBlock(clientTLS, origBody, match, "POLYGLOT_BLOCKED", reason, "polyglot", hostOnly, clientIP, req.URL.Path)
+		return true
+	}
+
+	// ── CDR (Sluice content disarm & reconstruction) ──
+	// Runs BEFORE ClamAV/YARA so downstream scanners see the sanitized bytes
+	// if CDR stripped active content. No-op (single atomic load) when disabled.
+	cdrDecision := runCDRStage(r, req, body, scanBody, ct, ce, clientTLS, hostOnly, clientIP, id)
+	if cdrDecision.blocked {
+		origBody.Close()
+		return true
+	}
+	body = cdrDecision.body
+	scanBody = cdrDecision.scanBody
+
+	// Read the remote-scanner toggle ONCE so the DPI gate and the body-scan
+	// branch below can't observe different values if an admin flips it
+	// mid-request (preserves the original's single-read semantics).
+	remoteScan := globalRemoteScanner.Enabled()
+
+	// Local-only: DPI regex scan (text content only) before the body scan.
+	// Tier 3.4: respect per-host DPI bypass list. The remote scan service
+	// folds DPI into its single call, so this only runs on the local path.
+	if !remoteScan && !dpiScanner.IsBypassHost(hostOnly) && dpiScanner.Enabled() && isTextContentType(ct) {
+		if pattern, matched := safeDPIScan(scanBody); matched {
+			origBody.Close()
+			recordInspectBlock(clientIP, "DPI_BLOCKED", "", pattern, hostOnly, req.URL.Path, match)
+			dpiBlock(clientTLS, hostOnly, pattern)
+			return true
+		}
+	}
+
+	// Body scan: remote (ClamAV + YARA + DPI in one call) when the remote scan
+	// service is active, otherwise local ClamAV + YARA. Both surface the same
+	// *SecurityScanResult and are handled identically.
+	var scanResult *SecurityScanResult
+	if remoteScan {
+		scanResult = safeScanBodyWithCT(scanBody, ct)
+	} else {
+		scanResult = safeScanBody(scanBody)
+	}
+	if scanResult != nil {
+		if scanResult.Source == "timeout" {
+			go fireAlert("scan_timeout", AlertPayload{Actor: clientIP, Host: hostOnly, Detail: scanResult.Reason, Source: "scan_timeout"})
+		}
+		origBody.Close()
+		atomic.AddInt64(&statBlocked, 1)
+		recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match)
+		scanBlockConn(clientTLS, hostOnly, scanResult.Reason, scanResult.Source)
+		return true
+	}
+
+	// No match: reassemble the body (buffered prefix + remaining bytes).
+	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), origBody))
+	return false
 }
 
 func removeHopHeaders(h http.Header) {

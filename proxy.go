@@ -640,6 +640,19 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		host = h
 	}
 
+	// ── Host canonicalization gate (RISK-013, fail-closed) ─────────────────
+	// A destination that cannot be IDNA-normalized (invalid punycode label)
+	// would flow into every downstream matcher (blocklist, threat feed,
+	// policy FQDN, category) un-normalized. No legitimate client emits
+	// invalid punycode, so reject outright instead of failing open.
+	if _, ok := normalizeHostStrict(host); !ok {
+		atomic.AddInt64(&statBlocked, 1)
+		http.Error(w, "Bad Request: invalid host", http.StatusBadRequest)
+		recordRequestAuth(clientIP, r.Method, r.Host, "INVALID_HOST", "idna", "", authenticatedIdentity, authLog)
+		logger.Printf("INVALID_HOST %s -> %q {req_id=%s action=block source=idna}", clientIP, sanitizeLog(host), reqID)
+		return
+	}
+
 	// ── Pre-policy content blocks (blocklist / threat / plugin / file) ──────
 	// Extracted to preDispatchBlocked (DEBT-002). Returns true if it already
 	// wrote a terminal block response.

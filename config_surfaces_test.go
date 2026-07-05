@@ -28,6 +28,9 @@ package main
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
 	"sort"
 	"strings"
@@ -500,4 +503,317 @@ func TestConfigSurfaces_RollbackRoundTrip(t *testing.T) {
 	if compared == 0 {
 		t.Fatal("round-trip compared zero fields — registry has no rollback bindings?")
 	}
+}
+
+// ─── 7. Snapshot capture parity (DEBT-006 PR-1) ───────────────────────
+//
+// Every ConfigSnapshot field must be ASSIGNED a value on the CP-side capture
+// path, or a Data Plane silently receives that field's zero value for a
+// setting the operator configured — the "captured-but-forgotten" drift the
+// four-way DTO can hide (the field is in the struct + registered, so
+// ReflectionParity passes, yet nothing puts a value on the wire).
+//
+// The capture "family" is CurrentConfigSnapshot (the bulk) PLUS
+// ConfigStore.Update, which stamps Version + UpdatedAt AFTER capture
+// (controlplane_snapshot.go). Both live in that one file, so the scan parses
+// it and counts every write to a ConfigSnapshot-typed value. This is robust
+// to a future gocognit split of CurrentConfigSnapshot: split helpers still
+// assign `snap.Field` on a ConfigSnapshot(-pointer) named `snap`. See the
+// DEBT-006 plan, Layer B.
+func TestConfigSurfaces_SnapshotCaptureParity(t *testing.T) {
+	captured := snapshotCapturedFields(t)
+	st := reflect.TypeOf(ConfigSnapshot{})
+	for i := 0; i < st.NumField(); i++ {
+		f := st.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if !captured[f.Name] {
+			t.Errorf("ConfigSnapshot.%s is never assigned on the capture path "+
+				"(CurrentConfigSnapshot / ConfigStore.Update in controlplane_snapshot.go): "+
+				"a DP would receive its zero value. Wire the capture — or, if it is stamped "+
+				"in a new function, extend the capture scan in snapshotCapturedFields.", f.Name)
+		}
+	}
+}
+
+// snapshotCapturedFields returns the set of ConfigSnapshot field names
+// assigned anywhere in controlplane_snapshot.go, counting ONLY writes to a
+// ConfigSnapshot-typed value:
+//
+//   - composite-literal keys in a `ConfigSnapshot{…}` literal, type-scoped so a
+//     same-named key in an unrelated literal (e.g. FileExtProfile{}) is ignored;
+//   - selector assignments `snap.Field = …` / `s.snap.Field = …` — the two
+//     ConfigSnapshot value spellings in this file (the `snap` local/param and
+//     the ConfigStore.snap field). Whole-struct writes like `s.snap = snap`
+//     do not match (their LHS field is "snap", never a ConfigSnapshot field).
+func snapshotCapturedFields(t *testing.T) map[string]bool {
+	t.Helper()
+	const file = "controlplane_snapshot.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	captured := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CompositeLit:
+			id, ok := node.Type.(*ast.Ident)
+			if !ok || id.Name != "ConfigSnapshot" {
+				return true
+			}
+			for _, el := range node.Elts {
+				if kv, ok := el.(*ast.KeyValueExpr); ok {
+					if key, ok := kv.Key.(*ast.Ident); ok {
+						captured[key.Name] = true
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && snapshotSelectorBase(sel.X) {
+					captured[sel.Sel.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return captured
+}
+
+// snapshotSelectorBase reports whether expr denotes the ConfigSnapshot value
+// in controlplane_snapshot.go: the ident `snap` (CurrentConfigSnapshot local,
+// Update param, and any future capture-helper *ConfigSnapshot param
+// conventionally named snap) or the selector `s.snap` (the ConfigStore.snap
+// field).
+func snapshotSelectorBase(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name == "snap"
+	case *ast.SelectorExpr:
+		return e.Sel.Name == "snap"
+	}
+	return false
+}
+
+// ─── 8. Snapshot apply parity (DEBT-006 PR-2) ─────────────────────────
+//
+// Every ConfigSnapshot field the Data Plane is supposed to CONSUME must be
+// read in the apply family, or the DP silently ignores a setting the CP
+// synced (it diverges with no error). "Supposed to consume" = the binding
+// declares empty-value apply semantics (Apply != semNA) OR carries the
+// AppliesOnDP marker. The marker exists so a field the DP acts on via a
+// non-config side-effect — today only Epoch, the ADR-0005 fence ratchet read
+// by dpObserveEpoch — is apply-verified even though it is kindMeta with no
+// empty-value semantics. Keying on this (not on kindConfig) is deliberate:
+// mislabeling a fence/rotation field kindMeta must NOT exempt it. See the
+// DEBT-006 plan, Layer C.
+func TestConfigSurfaces_SnapshotApplyParity(t *testing.T) {
+	consumed := snapshotConsumedFields(t)
+	checked := 0
+	for _, row := range configSurfaces {
+		for _, b := range row.Bindings {
+			if b.Struct != "ConfigSnapshot" || (b.Apply == semNA && !b.AppliesOnDP) {
+				continue
+			}
+			checked++
+			if !consumed[b.Field] {
+				t.Errorf("ConfigSnapshot.%s (row %q) declares a DP apply "+
+					"(Apply=%d AppliesOnDP=%v) but is never read in the apply family "+
+					"(%s) — the DP would silently ignore this synced setting. Wire the "+
+					"apply, or if it moved to a new function extend snapshotApplyFuncs.",
+					b.Field, row.ID, b.Apply, b.AppliesOnDP, snapshotApplyFuncNames())
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("apply parity checked zero ConfigSnapshot bindings — registry wiring changed?")
+	}
+}
+
+// snapshotApplyFuncs is the DP-side apply family: functions that CONSUME a
+// received ConfigSnapshot. None of them WRITE snap.Field (verified), so every
+// `snap.Field` selector inside them is a read = a consumed field. Enumerated
+// here so the scan survives further gocognit splits (add the new function).
+var snapshotApplyFuncs = map[string]bool{
+	"applyConfigSnapshot":               true, // controlplane_snapshot.go
+	"applySnapshotPolicyAndTraffic":     true,
+	"applySnapshotClusterRuntime":       true,
+	"applySnapshotSessionSecret":        true,
+	"applySnapshotExtendedState":        true,
+	"applyExternalAuthSnapshotSettings": true,
+	"syncSnapshotIdPProfiles":           true,
+	"fetchAndApply":                     true, // controlplane_client.go (DP poller)
+}
+
+func snapshotApplyFuncNames() string {
+	names := make([]string, 0, len(snapshotApplyFuncs))
+	for n := range snapshotApplyFuncs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// snapshotConsumedFields returns the ConfigSnapshot field names read anywhere
+// in the apply family (snap.Field selectors inside snapshotApplyFuncs bodies,
+// across controlplane_snapshot.go + controlplane_client.go).
+func snapshotConsumedFields(t *testing.T) map[string]bool {
+	t.Helper()
+	consumed := map[string]bool{}
+	for _, file := range []string{"controlplane_snapshot.go", "controlplane_client.go"} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || !snapshotApplyFuncs[fn.Name.Name] {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok {
+					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "snap" {
+						consumed[sel.Sel.Name] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+	return consumed
+}
+
+// ─── 9. Snapshot redaction parity (DEBT-006 PR-2, Layer D) ────────────
+//
+// The ConfigSnapshot DTO carries secrets (SessionHMAC, IdP client secrets) BY
+// DESIGN. GetConfig zeroes them for non-enrolled callers
+// (controlplane_server.go, the `if !callerIsEnrolledNode` block). Deleting
+// that block would leak the session HMAC + OIDC secrets to any unenrolled TLS
+// peer with NO other test firing — the highest-severity uncovered drift on
+// this surface. Assert every Sensitive ConfigSnapshot binding is zeroed there.
+func TestConfigSurfaces_SnapshotRedaction(t *testing.T) {
+	redacted := snapshotRedactedFields(t)
+	checked := 0
+	for _, row := range configSurfaces {
+		if !row.Sensitive {
+			continue
+		}
+		for _, b := range row.Bindings {
+			if b.Struct != "ConfigSnapshot" {
+				continue
+			}
+			checked++
+			if !redacted[b.Field] {
+				t.Errorf("ConfigSnapshot.%s (Sensitive row %q) is synced CP→DP but is NOT "+
+					"zeroed in the GetConfig redaction block (controlplane_server.go, "+
+					"!callerIsEnrolledNode) — an unenrolled TLS peer could read this secret. "+
+					"Add it to the redaction block.", b.Field, row.ID)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("redaction parity checked zero Sensitive ConfigSnapshot bindings — registry changed?")
+	}
+}
+
+// ─── 10. Snapshot wire-wipe semantics (DEBT-006 PR-3) ─────────────────
+//
+// A ConfigSnapshot slice with semNilSkipEmptyWipe apply semantics has a real
+// nil-vs-[] branch on the DP (nil → keep live state; [] → wipe). But Go's
+// `omitempty` DROPS a non-nil EMPTY slice on the wire, so for any such field
+// carrying `omitempty` the []-wipe is unreachable over JSON — an operator
+// clearing the last entry sends [], it is omitted, the DP reads nil and SKIPS
+// (keeps stale state). Only a field WITHOUT `omitempty` actually propagates
+// the wipe.
+//
+// This is the RateLimitExempt bug class. The test pins BOTH postures so the
+// tags cannot silently drift from intent:
+//   - WireWipeCapable row  → its ConfigSnapshot field MUST omit `omitempty`
+//     (clearing propagates). Adding omitempty to rate_limit_exempt — silently
+//     breaking DP exemption clears — fails here.
+//   - other semNilSkipEmptyWipe → MUST keep `omitempty` (the []-wipe is
+//     intentionally wire-dead). Removing it is a deliberate wire-shape change
+//     that must be accompanied by declaring the row WireWipeCapable.
+//
+// See the DEBT-006 plan, §4 (the corrected empty-semantics check).
+func TestConfigSurfaces_SnapshotWireWipe(t *testing.T) {
+	snapType := csrStructTypes()["ConfigSnapshot"]
+	checked := 0
+	for i := range configSurfaces {
+		row := &configSurfaces[i]
+		for _, b := range row.Bindings {
+			if b.Struct != "ConfigSnapshot" || b.Apply != semNilSkipEmptyWipe {
+				continue
+			}
+			checked++
+			f, ok := snapType.FieldByName(b.Field)
+			if !ok {
+				t.Errorf("row %q binds ConfigSnapshot.%s which does not exist", row.ID, b.Field)
+				continue
+			}
+			hasOmitempty := strings.Contains(f.Tag.Get("json"), ",omitempty")
+			switch {
+			case row.WireWipeCapable && hasOmitempty:
+				t.Errorf("ConfigSnapshot.%s (row %q) is WireWipeCapable but its json tag has "+
+					"`omitempty`: an empty slice is dropped on the wire, so clearing the last "+
+					"entry never wipes the DP copy. Remove omitempty.", b.Field, row.ID)
+			case !row.WireWipeCapable && !hasOmitempty:
+				t.Errorf("ConfigSnapshot.%s (row %q) is semNilSkipEmptyWipe WITHOUT omitempty, "+
+					"so an empty slice serializes as [] and the DP applies a wipe — but the row "+
+					"is not marked WireWipeCapable. Either set WireWipeCapable (declare the wipe "+
+					"intentional) or restore omitempty.", b.Field, row.ID)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("wire-wipe parity checked zero semNilSkipEmptyWipe ConfigSnapshot bindings — registry changed?")
+	}
+}
+
+// snapshotRedactedFields returns the ConfigSnapshot field names zeroed inside
+// the `if !callerIsEnrolledNode(…) { … }` block of controlplane_server.go
+// (snap.Field = "" / nil assignments).
+func snapshotRedactedFields(t *testing.T) map[string]bool {
+	t.Helper()
+	const file = "controlplane_server.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	redacted := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		ifst, ok := n.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		un, ok := ifst.Cond.(*ast.UnaryExpr)
+		if !ok || un.Op != token.NOT {
+			return true
+		}
+		call, ok := un.X.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if fnid, ok := call.Fun.(*ast.Ident); !ok || fnid.Name != "callerIsEnrolledNode" {
+			return true
+		}
+		ast.Inspect(ifst.Body, func(m ast.Node) bool {
+			if as, ok := m.(*ast.AssignStmt); ok {
+				for _, lhs := range as.Lhs {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok {
+						if id, ok := sel.X.(*ast.Ident); ok && id.Name == "snap" {
+							redacted[sel.Sel.Name] = true
+						}
+					}
+				}
+			}
+			return true
+		})
+		return true
+	})
+	return redacted
 }

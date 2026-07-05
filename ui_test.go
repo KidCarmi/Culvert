@@ -24,12 +24,12 @@ func adminCtx(r *http.Request) *http.Request {
 // resetSetupLockout clears the per-IP lockout state apiSetupComplete uses
 // when validation fails. Without this, the lockout counter LEAKS ACROSS
 // tests (every TestAPISetupComplete_* test that hits a 4xx path triggers
-// loginLimiter.RecordFailure on the same setupKey "setup:127.0.0.1"), so
+// loginLimiter.RecordFailure on the same ("127.0.0.1", "setup") pair), so
 // after ~5 attempts in a single suite run the next test gets a 429 instead
 // of the expected 4xx — a flake that surfaces under -count>1 / -shuffle=on.
 // Tests calling apiSetupComplete should defer or invoke this helper.
 func resetSetupLockout() {
-	loginLimiter.RecordSuccess("setup:127.0.0.1")
+	loginLimiter.ResetUser("setup")
 }
 
 // jsonReq builds a request with a JSON body.
@@ -352,7 +352,7 @@ func TestAPIAuthLogin_InvalidCredentials(t *testing.T) {
 	initSecret(t)
 
 	// Reset lockout counter for this user to avoid test pollution.
-	loginLimiter.RecordSuccess("admin")
+	loginLimiter.ResetUser("admin")
 
 	w := httptest.NewRecorder()
 	apiAuthLogin(w, jsonReq(http.MethodPost, "/api/auth/login", map[string]string{

@@ -14,7 +14,7 @@
 | DEBT-003 | ✅ CLOSED | God-files split (2026-07-04): `controlplane.go` 2,240→341, `proxy.go` 1,901→727, `main.go` 1,990→1,211. No non-generated `.go` file > ~1,300 LOC | — |
 | DEBT-004 | MEDIUM | `configBackup` god-struct with 3 divergent memberships | `ui_policy.go:736`, `configversion.go` |
 | DEBT-005 | ✅ CLOSED | `main.go` was a 30-`init*` hand-wired DI container | startup-slice program complete (24 slices, contract-tested) |
-| DEBT-006 | MEDIUM | `ConfigSnapshot` (33-field) CP→DP god-DTO | `controlplane.go:1508 applyConfigSnapshot` |
+| DEBT-006 | ✅ CLOSED | `ConfigSnapshot` (34-field) CP→DP god-DTO | walled by capture/apply/redaction/wire-wipe parity (2026-07-05); `config_surfaces_test.go` |
 | DEBT-007 | ✅ CLOSED | No end-to-end SSL-inspection MITM data-path test | `mitm_inspect_e2e_test.go` — verified 2026-07-04 |
 | DEBT-008 | LOW | Two parallel update mechanisms coexist | `updater/` + `release_dispatch*.go` |
 | DEBT-009 | LOW | Three durability layers for config can drift | `config.go`, `admin_settings.go`, `configversion.go` |
@@ -118,14 +118,20 @@
   86-declaration set before/after (modulo one gofmt comment realignment); build/vet/gofmt clean;
   the enrollment/control-plane/health suites green.
 - **DEBT-003 CLOSED.** All three flagged god-files split; no non-generated `.go` file exceeds ~1,300 LOC.
-  **Follow-up (out of scope, tracked here):** the diff-scoped golangci gate re-surfaced ~19 legacy
+  **Follow-up (RESOLVED 2026-07-05):** the diff-scoped golangci gate had re-surfaced ~19 legacy
   findings on the *moved* lines (grandfathered under `--new-from-rev` while they sat in the origin
-  files). Trivial ones were fixed in place (errcheck `//nolint` explanations, `rangeValCopy` →
-  index-range, `net.Listen` → `ListenConfig.Listen`, named results, unused-param `_`); the four
-  handler-complexity findings (`handleHTTP` gocognit/cyclop/funlen, two `nestif` blocks in
-  `proxy_tunnel.go`, one in `proxy_http.go`) carry a reasoned `//nolint` pointing here — a targeted
-  handler-decomposition pass remains a candidate but is deliberately NOT bundled into a mechanical
-  file split.
+  files). Trivial ones were fixed in place with the split (errcheck `//nolint` explanations,
+  `rangeValCopy` → index-range, `net.Listen` → `ListenConfig.Listen`, named results, unused-param
+  `_`). The four handler-complexity findings (`handleHTTP` gocognit/cyclop/funlen, the `nestif`
+  blocks in `proxy_tunnel.go`/`proxy_http.go`) were then retired by a dedicated
+  **handler-decomposition pass** (deliberately its own change, not bundled into the mechanical
+  split): `handleHTTP` → `blockedByResponseHeaders`/`serveHTTPFileBlock`/`scanHTTPResponseBody`;
+  `handleTunnelInspect` → `inspectFileBlocked`/`inspectCDBlocked`/`scanInspectBody`/
+  `inspectMagicBlock`. Semantic-equivalence refactor (not a pure move) — gated by a 3× pre-push
+  review (equivalence, correctness, adversarial red-team; all clean; the one review note — a
+  double-read of `globalRemoteScanner.Enabled()` — fixed by hoisting a single read), the De Morgan
+  scan-guard truth-tabled, hot-path race suite + MITM e2e green, allocs/op unchanged. **All four
+  complexity `//nolint` suppressions removed**; diff-scoped lint is 0 issues.
 
 ## DEBT-004 — `configBackup` god-struct · MEDIUM
 - One 25-field struct (`ui_policy.go:736`) serves export/import, version rollback, and restart
@@ -147,10 +153,30 @@
   entry was charging. `startDataPlane` is deliberately not a slice (runtime wiring, not config
   resolution — recorded decision). Residual ordering risk is accepted as ordinary structure.
 
-## DEBT-006 — `ConfigSnapshot` god-DTO · MEDIUM
-- A 33-field struct is the CP→DP contract, applied by a 206-line `applyConfigSnapshot`
-  (`controlplane.go:1508`). Every cluster-aware feature must thread a field through both. High
-  coupling between unrelated subsystems and the distribution layer. **Complexity M.**
+## DEBT-006 — `ConfigSnapshot` god-DTO · ✅ CLOSED 2026-07-05 (walled, not restructured)
+- **Was:** a 34-field struct is the CP→DP contract, threaded by hand through FOUR places nothing
+  forced to agree — the struct (+ `omitempty` choice), `CurrentConfigSnapshot` (capture),
+  `validateConfigSnapshot` (H5 caps), and the `applySnapshot*` fan-out. A field added to
+  struct+capture but not `apply` = a silently-unsynced setting; not `validate` = an uncapped
+  memory-DoS; a capture/apply empty-semantics mismatch = a delete that doesn't replicate. All
+  silent until a cluster misbehaves.
+- **Resolution — parity wall (mirrors DEBT-004), design-reviewed then shipped in 3 slices:** the DTO
+  is NOT restructured (it crosses the wire + ADR-0005 fence-epoch boundary; compat is frozen).
+  Instead `config_surfaces_test.go` now enforces, via reflection + AST over `config_surfaces.go`:
+  - **capture parity** — every field assigned in `CurrentConfigSnapshot` ∪ `ConfigStore.Update`;
+  - **apply parity** — every field with a DP effect read in `applySnapshot*`/`fetchAndApply`, keyed
+    on `Apply != semNA || AppliesOnDP` so `Epoch` (the `dpObserveEpoch` fence ratchet, `kindMeta`)
+    is verified — the design-review gap where mislabeling a fence field would exempt it;
+  - **redaction parity** — every `Sensitive` synced field zeroed in the `!callerIsEnrolledNode`
+    GetConfig block (the `SessionHMAC`/`IdPProfiles` secret-leak guard);
+  - **wire-wipe parity** — `WireWipeCapable` ⇔ no `omitempty` (only `RateLimitExempt` propagates an
+    empty-slice clear; the other 12 `semNilSkipEmptyWipe` slices keep `omitempty`, so their
+    `[]`-wipe is intentionally wire-dead — pinned, not surprising).
+  Each wall proven to bite by negative test. **Known-unclosed, recorded not walled:** wrong-owner
+  capture/apply wiring, `applySnapshot*` ordering, cap magnitude. Authority + audit trail:
+  `roadmap/DEBT-006-configsnapshot-parity-plan.md` (incl. the 5 design-review corrections). Adding
+  a synced field now fails CI until it is registered, captured, applied, capped, redacted (if
+  secret), and wire-consistent.
 
 ## DEBT-007 — No e2e MITM test · ✅ CLOSED 2026-07-04 (verified)
 - **Was:** the flagship decrypt→scan→re-encrypt→block relay was tested only in pieces; no test
