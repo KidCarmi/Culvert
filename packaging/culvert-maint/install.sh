@@ -90,15 +90,19 @@ sed_escape_replacement() {
 
 # Read a TOML basic-string value:  key = "value"  (any leading whitespace,
 # any spacing around =). Ignores commented lines. Prints empty if absent.
+# Strips everything from the FIRST "=" (not FS="="'s second field) so an "="
+# embedded in the value itself is not truncated, and cuts the value at its
+# closing quote so a trailing inline "# comment" after the string does not
+# leak into the extracted value.
 extract_toml_string() {
     awk -v k="$1" '
-        BEGIN { FS="=" }
         /^[[:space:]]*#/ { next }
         $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
-            v=$2
-            sub(/^[[:space:]]*"/,"",v)
-            sub(/"[[:space:]]*$/,"",v)
-            print v
+            line=$0
+            sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*", "", line)
+            sub(/^"/, "", line)
+            sub(/".*$/, "", line)
+            print line
             exit
         }
     ' "$CONFIG_DEST"
