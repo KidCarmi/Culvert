@@ -214,8 +214,8 @@ func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	policyStore.Save()
 	logger.Printf("UI: auth rule deleted priority=%s",
 		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"))
-	auditEventDiff(r, "authpolicy.delete", before.Name, "", before, nil)
-	saveConfigVersion(sessionAdmin(r), "authpolicy.delete")
+	auditEventDiff(r, "authpolicy.remove", before.Name, "", before, nil)
+	saveConfigVersion(sessionAdmin(r), "authpolicy.remove")
 	w.WriteHeader(http.StatusNoContent)
 }
 

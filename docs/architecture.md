@@ -46,7 +46,7 @@ upstream.
                         └──────────────┬───────────────┘
                                        ▼ (Allow + CONNECT)
                         ┌─────────────────────────────┐
-                        │  TLS action                  │  Inspect (MITM, ECDSA P-256 leaf)
+                        │  SSL action                  │  Inspect (MITM, ECDSA P-256 leaf)
                         │  ca.go, proxy_tunnel.go      │  or Bypass (transparent tunnel)
                         └──────────────┬───────────────┘
                                        ▼ (Inspect only)
@@ -77,9 +77,9 @@ passthrough so operators cannot lock themselves out.
 
 ---
 
-## 2. TLS inspection
+## 2. SSL inspection
 
-When a rule's TLS action is `Inspect`, Culvert terminates the client TLS
+When a rule's SSL action is `Inspect`, Culvert terminates the client TLS
 session with an on-the-fly leaf certificate signed by its internal CA:
 
 - **Leaf certs:** ECDSA P-256, minted per SNI, cached in a bounded cache

@@ -1739,12 +1739,12 @@ Firefox (all platforms):
           </div>
         </div>
 
-      <!-- Backup & Restore -->
+      <!-- Config Export / Import -->
       <div class="panel" style="margin-top:18px">
-        <div class="panel-header"><span class="panel-title">Backup &amp; Restore</span></div>
+        <div class="panel-header"><span class="panel-title">Config Export / Import</span></div>
         <div class="panel-body">
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:16px">
-            Export all configuration (policy rules, blocklist, rewrites, SSL bypass, security settings) as a portable JSON file.<br>
+            Export all configuration (policy rules, blocklist, rewrites, SSL bypass, security settings) as a portable JSON file. To roll back a recent config change instead, use Config Versions below; for full disaster-recovery backup/restore of <code>/data</code>, see the <code>cli</code> service in <code>docker-compose.yml</code>.<br>
             <strong style="color:var(--red)">Note:</strong> Admin credentials are not exported for security reasons.
           </p>
           <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
@@ -1754,7 +1754,7 @@ Firefox (all platforms):
               <input type="file" accept=".json" style="display:none" data-change="importConfig">
             </label>
           </div>
-          <div id="backup-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
+          <div id="config-export-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
           <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">
             <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;font-weight:600">Export Individual Sections</p>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -2588,7 +2588,7 @@ Firefox (all platforms):
       <div style="margin-bottom:14px">
         <p style="font-size:.82rem;color:var(--muted);margin:0;line-height:1.6">
           Create named extension profiles and assign them to policy rules via <strong>File Extension Profile</strong>.
-          The <strong>Global Block List</strong> below applies to <em>all</em> traffic regardless of policy rules.
+          The <strong>Global File Extension Block List</strong> below applies to <em>all</em> traffic regardless of policy rules.
         </p>
       </div>
 
@@ -2623,10 +2623,10 @@ Firefox (all platforms):
         </div>
       </div>
 
-      <!-- Global Block List (existing flat list) -->
+      <!-- Global File Extension Block List (existing flat list) -->
       <div style="display:grid;grid-template-columns:300px 1fr;gap:18px;align-items:start">
         <div class="panel">
-          <div class="panel-header"><span class="panel-title">Global Block List</span></div>
+          <div class="panel-header"><span class="panel-title">Global File Extension Block List</span></div>
           <div class="panel-body">
             <p style="font-size:.78rem;color:var(--muted);margin-bottom:14px">
               Extensions here are blocked for ALL traffic. Independent of policy rules.
@@ -4918,14 +4918,14 @@ async function toggleBlocklistMode() {
   }
 }
 
-// ── Config Backup / Restore ──────────────────────────────────────────────
+// ── Config Export / Import ────────────────────────────────────────────────
 async function exportConfig() {
   const r = await fetch('/api/config/export');
   if (!r.ok) { toast('Export failed: ' + await r.text(), 'error'); return; }
   const blob = await r.blob();
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'culvert-backup.json';
+  a.download = 'culvert-config-export.json';
   a.click();
 }
 
@@ -4946,7 +4946,7 @@ async function importConfig(input) {
   if (!file) return;
   const ok = await confirmAction('Import Configuration', 'Imported rules will be MERGED with existing config (not replaced). Duplicate rules may accumulate. This cannot be undone.', 'Import');
   if (!ok) { input.value = ''; return; }
-  const statusEl = document.getElementById('backup-status');
+  const statusEl = document.getElementById('config-export-status');
   statusEl.style.display = 'none';
   try {
     const text = await file.text();
@@ -4959,7 +4959,7 @@ async function importConfig(input) {
     const data = await r.json().catch(() => ({}));
     if (r.ok) {
       statusEl.style.cssText = 'display:block;color:var(--green)';
-      statusEl.textContent = `✓ Configuration restored (backup from ${data.exportedAt || 'unknown date'})`;
+      statusEl.textContent = `✓ Configuration imported (exported ${data.exportedAt || 'unknown date'})`;
       // Refresh relevant views.
       fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
     } else {
