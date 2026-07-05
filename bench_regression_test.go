@@ -51,6 +51,37 @@ func TestBenchGate_PolicyEvalAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_UpstreamInspectTLSConfigAllocs locks in the shared-root-pool
+// contract on the SSL-inspect upstream leg. Before the optimization every
+// inspected CONNECT tunnel called x509.SystemCertPool(), which clones the
+// cached system pool per call — 162 allocs/op and ~26.7 KB/op measured with a
+// standard Linux ca-certificates bundle. With upstreamVerifyRoots the steady
+// state is the single tls.Config allocation; any reintroduction of a per-tunnel
+// pool clone blows through the constant bound immediately.
+func TestBenchGate_UpstreamInspectTLSConfigAllocs(t *testing.T) {
+	const maxAllocs int64 = 4 // steady state 1 (the tls.Config); pre-fix 162
+	// Warm the once-loaded pool so the measurement is steady state, not the
+	// first-call pool load.
+	if cfg := upstreamInspectTLSConfig("warm.example.com", false); cfg.RootCAs == nil {
+		t.Fatal("nil RootCAs on the verifying path")
+	}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			cfg := upstreamInspectTLSConfig("origin.example.com", false)
+			if cfg.RootCAs == nil {
+				b.Fatal("nil RootCAs on the verifying path")
+			}
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("upstreamInspectTLSConfig: %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: upstreamInspectTLSConfig allocates %d/op, exceeds bound %d — "+
+			"a per-tunnel system-cert-pool clone (x509.SystemCertPool per call) has returned to the SSL-inspect hot path", allocs, maxAllocs)
+	}
+}
+
 // TestBenchGate_ScrubAllocs guards the per-request header-scrub hot path.
 func TestBenchGate_ScrubAllocs(t *testing.T) {
 	const maxAllocs = 16 // baseline 13

@@ -331,6 +331,48 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMat
 	recordTunnelCloseGated(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass")
 }
 
+// upstreamVerifyRoots returns the process-wide root pool used to verify
+// upstream certificates on SSL-inspected tunnels. x509.SystemCertPool clones
+// the cached system pool on EVERY call (~150 roots ⇒ ~160 allocs / ~26 KB /
+// ~20 µs measured on the CI runner class), and the pre-optimization code paid
+// that per inspected CONNECT tunnel. The pool is loaded once and shared
+// read-only across all upstream tls.Configs — safe because certificate
+// verification never mutates a CertPool and nothing calls AddCert on this one
+// (callers that need to extend a pool must Clone it first). Fail-closed: when
+// the system pool is unavailable the cached EMPTY pool rejects all unknown
+// CAs — that condition is environmental (missing ca-certificates bundle) and
+// does not heal without operator action, so caching it is correct; the
+// warning now logs once per process instead of once per tunnel.
+var upstreamVerifyRoots = sync.OnceValue(func() *x509.CertPool {
+	systemRoots, err := x509.SystemCertPool()
+	if err != nil {
+		logWarnf("TLS: SystemCertPool unavailable, using empty pool (will reject all unknown CAs): %v", err)
+		return x509.NewCertPool()
+	}
+	return systemRoots
+})
+
+// upstreamInspectTLSConfig builds the tls.Config for the upstream leg of an
+// SSL-inspected tunnel. The default path verifies against the shared
+// upstreamVerifyRoots pool; tlsSkipVerify (admin-configured per-rule) disables
+// upstream certificate validation for internal/self-signed hosts and stays
+// logged per tunnel so every unverified connection remains auditable.
+func upstreamInspectTLSConfig(hostOnly string, tlsSkipVerify bool) *tls.Config {
+	if tlsSkipVerify {
+		logWarnf("SSLInspect: skipping upstream cert verify for %q (tlsSkipVerify rule)", sanitizeLog(hostOnly))
+		return &tls.Config{
+			ServerName:         hostOnly,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true, // #nosec G402 — admin-configured per-rule override
+		}
+	}
+	return &tls.Config{
+		ServerName: hostOnly,
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    upstreamVerifyRoots(),
+	}
+}
+
 // handleTunnelInspect performs SSL inspection (MITM) for CONNECT tunnels.
 // It terminates TLS on both sides using on-the-fly certificates signed by the
 // internal Root CA, allowing the proxy to inspect decrypted HTTP/1.x traffic.
@@ -369,31 +411,11 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	}
 
 	// 2. Perform TLS handshake with the upstream.
-	// By default RootCAs is set from the system cert pool (fail-secure).
-	// When tlsSkipVerify is true (admin-configured per-rule) cert validation is
-	// skipped — this is intentional for internal/self-signed cert hosts and is
-	// logged as a warning so it is auditable.
-	var upstreamTLSCfg *tls.Config
-	if tlsSkipVerify {
-		logWarnf("SSLInspect: skipping upstream cert verify for %q (tlsSkipVerify rule)", sanitizeLog(hostOnly))
-		upstreamTLSCfg = &tls.Config{
-			ServerName:         hostOnly,
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true, // #nosec G402 — admin-configured per-rule override
-		}
-	} else {
-		systemRoots, err := x509.SystemCertPool()
-		if err != nil {
-			// Fail-closed: empty pool rejects all unknown CAs.
-			logWarnf("TLS: SystemCertPool unavailable, using empty pool (will reject all unknown CAs): %v", err)
-			systemRoots = x509.NewCertPool()
-		}
-		upstreamTLSCfg = &tls.Config{
-			ServerName: hostOnly,
-			MinVersion: tls.VersionTLS12,
-			RootCAs:    systemRoots,
-		}
-	}
+	// upstreamInspectTLSConfig verifies against the shared system root pool by
+	// default (fail-secure); tlsSkipVerify (admin-configured per-rule) skips
+	// cert validation for internal/self-signed hosts and is logged as a warning
+	// so it is auditable.
+	upstreamTLSCfg := upstreamInspectTLSConfig(hostOnly, tlsSkipVerify)
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
 	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
 		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn
