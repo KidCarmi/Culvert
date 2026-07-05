@@ -153,7 +153,7 @@ security:
 upstream:
   proxies:
     - url: http://parent-proxy:3128
-      health_interval: 30s
+  health_interval: 30s        # sibling of `proxies` (a field on `upstream`, not on a proxy entry)
   circuit_breaker:
     threshold: 5
     timeout: 30s
