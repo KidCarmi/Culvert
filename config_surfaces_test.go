@@ -719,6 +719,60 @@ func TestConfigSurfaces_SnapshotRedaction(t *testing.T) {
 	}
 }
 
+// ─── 10. Snapshot wire-wipe semantics (DEBT-006 PR-3) ─────────────────
+//
+// A ConfigSnapshot slice with semNilSkipEmptyWipe apply semantics has a real
+// nil-vs-[] branch on the DP (nil → keep live state; [] → wipe). But Go's
+// `omitempty` DROPS a non-nil EMPTY slice on the wire, so for any such field
+// carrying `omitempty` the []-wipe is unreachable over JSON — an operator
+// clearing the last entry sends [], it is omitted, the DP reads nil and SKIPS
+// (keeps stale state). Only a field WITHOUT `omitempty` actually propagates
+// the wipe.
+//
+// This is the RateLimitExempt bug class. The test pins BOTH postures so the
+// tags cannot silently drift from intent:
+//   - WireWipeCapable row  → its ConfigSnapshot field MUST omit `omitempty`
+//     (clearing propagates). Adding omitempty to rate_limit_exempt — silently
+//     breaking DP exemption clears — fails here.
+//   - other semNilSkipEmptyWipe → MUST keep `omitempty` (the []-wipe is
+//     intentionally wire-dead). Removing it is a deliberate wire-shape change
+//     that must be accompanied by declaring the row WireWipeCapable.
+//
+// See the DEBT-006 plan, §4 (the corrected empty-semantics check).
+func TestConfigSurfaces_SnapshotWireWipe(t *testing.T) {
+	snapType := csrStructTypes()["ConfigSnapshot"]
+	checked := 0
+	for i := range configSurfaces {
+		row := &configSurfaces[i]
+		for _, b := range row.Bindings {
+			if b.Struct != "ConfigSnapshot" || b.Apply != semNilSkipEmptyWipe {
+				continue
+			}
+			checked++
+			f, ok := snapType.FieldByName(b.Field)
+			if !ok {
+				t.Errorf("row %q binds ConfigSnapshot.%s which does not exist", row.ID, b.Field)
+				continue
+			}
+			hasOmitempty := strings.Contains(f.Tag.Get("json"), ",omitempty")
+			switch {
+			case row.WireWipeCapable && hasOmitempty:
+				t.Errorf("ConfigSnapshot.%s (row %q) is WireWipeCapable but its json tag has "+
+					"`omitempty`: an empty slice is dropped on the wire, so clearing the last "+
+					"entry never wipes the DP copy. Remove omitempty.", b.Field, row.ID)
+			case !row.WireWipeCapable && !hasOmitempty:
+				t.Errorf("ConfigSnapshot.%s (row %q) is semNilSkipEmptyWipe WITHOUT omitempty, "+
+					"so an empty slice serializes as [] and the DP applies a wipe — but the row "+
+					"is not marked WireWipeCapable. Either set WireWipeCapable (declare the wipe "+
+					"intentional) or restore omitempty.", b.Field, row.ID)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("wire-wipe parity checked zero semNilSkipEmptyWipe ConfigSnapshot bindings — registry changed?")
+	}
+}
+
 // snapshotRedactedFields returns the ConfigSnapshot field names zeroed inside
 // the `if !callerIsEnrolledNode(…) { … }` block of controlplane_server.go
 // (snap.Field = "" / nil assignments).

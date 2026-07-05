@@ -85,8 +85,17 @@ type configSurfaceRow struct {
 	ClusterSynced  bool      // pushed CP→DP in ConfigSnapshot
 	Sensitive      bool      // may carry secret material (never Rollback; Export only via Redacted accessor)
 	SnapshotCap    int       // validateConfigSnapshot cap for the ConfigSnapshot slice/map binding (0 = scalar / not synced)
-	Note           string    // constraint the flags can't express (ordering, validation, known gaps)
-	Bindings       []surfaceBinding
+	// WireWipeCapable marks a semNilSkipEmptyWipe ConfigSnapshot slice whose
+	// EMPTY state must actually propagate CP→DP (clearing the last entry wipes
+	// the DP's copy). That requires the JSON tag to OMIT `omitempty` — else Go
+	// drops a non-nil empty slice on the wire and the DP reads it as nil→skip,
+	// keeping stale state. Today only rate_limit_exempt. Every OTHER
+	// semNilSkipEmptyWipe field keeps `omitempty`, so its []-wipe is
+	// intentionally wire-dead (an operator clearing the list must push a
+	// non-empty replacement); SnapshotWireWipe pins both postures.
+	WireWipeCapable bool
+	Note            string // constraint the flags can't express (ordering, validation, known gaps)
+	Bindings        []surfaceBinding
 }
 
 // configSurfaces is the registry. Ordering: meta rows, then the
@@ -199,7 +208,8 @@ var configSurfaces = []configSurfaceRow{
 			{Struct: "ConfigSnapshot", Field: "RateLimitRPM", Apply: semAlwaysReplace}}},
 	{ID: "rate_limit_exempt", Kind: kindConfig, Owner: "rl",
 		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "rate_limit_exempt", DiffNilGuarded: true,
-		AdminDurable: true, ClusterSynced: true, SnapshotCap: maxSnapRateLimitExempt,
+		AdminDurable: true, ClusterSynced: true, SnapshotCap: maxSnapRateLimitExempt, WireWipeCapable: true,
+		Note: "the one wire-wipe-capable synced slice: NO omitempty so an empty list clears DP exemptions; CurrentConfigSnapshot sends non-nil",
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "RateLimitExempt", Apply: semNilSkipEmptyWipe},
 			{Struct: "AdminSettings", Field: "RateLimitExemptions"},
