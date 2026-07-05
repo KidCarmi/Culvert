@@ -21,7 +21,7 @@
 
 ## What is Culvert?
 
-Culvert is a **Secure Web Gateway (SWG)** — a policy-enforcing forward proxy that sits between your users and the internet, deciding what traffic is allowed, inspecting it, and recording it. It delivers the capabilities enterprises buy from commercial appliances — TLS inspection, identity-aware policy, malware scanning, threat intelligence, SSO, and centralized management — as a **single Go binary** you run yourself.
+Culvert is a **Secure Web Gateway (SWG)** - a policy-enforcing forward proxy that sits between your users and the internet, deciding what traffic is allowed, inspecting it, and recording it. It delivers the capabilities enterprises buy from commercial appliances - TLS inspection, identity-aware policy, malware scanning, threat intelligence, SSO, and centralized management - as a **single Go binary** you run yourself.
 
 There is no agent to install, no plugin marketplace to assemble, and no external database or message bus to operate. The binary is statically linked (no CGO); the only optional runtime companion is a ClamAV sidecar if you enable antivirus scanning.
 
@@ -69,7 +69,7 @@ docker build -t culvert/proxy:pinned .   # seed the local-only image tag the com
 docker compose up -d
 ```
 
-No configuration is required — the setup wizard creates your first admin account on first visit.
+No configuration is required - the setup wizard creates your first admin account on first visit.
 
 > **`pull access denied for culvert/proxy`?** The compose file intentionally resolves the
 > local-only tag `culvert/proxy:pinned` (the proxy image is pinned at the sudo boundary and
@@ -97,10 +97,10 @@ curl -x http://localhost:8080 https://example.com
 
 ### First-run checklist
 
-1. **Setup wizard** — open `https://<host>:9090`, accept the cert, create the first admin. Required before any other API call.
-2. **Verify readiness** — `curl http://<host>:8080/ready` should return `200`; see [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the full checks map.
-3. **Review Diagnostics** — Admin UI → **Infrastructure → Diagnostics** surfaces the operator contract (storage, policy load, root CA, session key, cluster TLS posture, release-management and config-version health). Resolve any `fail` rows before taking traffic.
-4. **Enforce Zero Trust** — a fresh install with **no policy rules** starts in passthrough so you can't lock yourself out. Set `default_action: deny` (or add rules) to enforce default-deny from boot. See [Policy Model](#policy-model).
+1. **Setup wizard** - open `https://<host>:9090`, accept the cert, create the first admin. Required before any other API call.
+2. **Verify readiness** - `curl http://<host>:8080/ready` should return `200`; see [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the full checks map.
+3. **Review Diagnostics** - Admin UI → **Infrastructure → Diagnostics** surfaces the operator contract (storage, policy load, root CA, session key, cluster TLS posture, release-management and config-version health). Resolve any `fail` rows before taking traffic.
+4. **Enforce Zero Trust** - a fresh install with **no policy rules** starts in passthrough so you can't lock yourself out. Set `default_action: deny` (or add rules) to enforce default-deny from boot. See [Policy Model](#policy-model).
 
 ### Monitoring stack (optional)
 
@@ -181,7 +181,7 @@ Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 | `CULVERT_RELEASE_PROXY_REPO` | Bare image repository allowed for release dispatch (default `ghcr.io/kidcarmi/culvert`; no tag/digest). |
 | `CULVERT_MAINT_AGENT_URL` | Local maintenance-agent endpoint (default Unix socket `/run/culvert-maint/culvert-maint.sock`). |
 | `CULVERT_RELEASE_CATALOG_TRUST_KEYS` | JSON array of **public** Ed25519 catalog trust roots. Public keys only. |
-| `CULVERT_RELEASE_CATALOG_VERIFY` | Signature mode: enforce (default when a trust root is present), `permissive`, or `disabled`. **Break-glass only** — leave unset in production. |
+| `CULVERT_RELEASE_CATALOG_VERIFY` | Signature mode: enforce (default when a trust root is present), `permissive`, or `disabled`. **Break-glass only** - leave unset in production. |
 | `CULVERT_RELEASE_CATALOG_URL` | Optional signed-catalog origin for verified auto-seed at startup (enforce mode only). |
 | `CULVERT_RELEASE_SIGSTORE_IDENTITY` / `_TRUSTED_ROOT` | Optional overrides for the keyless (Sigstore-identity) release-trust policy. Public material only. |
 
@@ -195,14 +195,14 @@ The policy engine evaluates rules in **priority order and stops at the first mat
 2. **Authenticated identity**
 3. **IdP group membership**
 4. **Auth source** (OIDC / SAML / LDAP / local)
-5. **Destination FQDN** — exact + wildcard
+5. **Destination FQDN** - exact + wildcard
 6. **URL category** (UT1 + curated: Social, Streaming, Gambling, Malicious, Adult, …)
-7. **Destination country** (GeoIP; **fail-closed** — unknown country does not match)
-8. **Time schedule** — day-of-week + time window + IANA timezone
+7. **Destination country** (GeoIP; **fail-closed** - unknown country does not match)
+8. **Time schedule** - day-of-week + time window + IANA timezone
 
-**Actions:** `Allow`, `Drop`, `Block Page`, `Redirect`. Every rule also carries a **TLS action** — `Inspect` (full MITM) or `Bypass` (transparent tunnel).
+**Actions:** `Allow`, `Drop`, `Block Page`, `Redirect`. Every rule also carries a **TLS action** - `Inspect` (full MITM) or `Bypass` (transparent tunnel).
 
-**Default-deny (Zero Trust):** once any rule exists or `default_action: deny` is set, unmatched traffic is blocked. A fresh install with **zero rules and no explicit `default_action`** starts in passthrough by design, so you can't lock yourself out — enforce deny explicitly for production.
+**Default-deny (Zero Trust):** once any rule exists or `default_action: deny` is set, unmatched traffic is blocked. A fresh install with **zero rules and no explicit `default_action`** starts in passthrough by design, so you can't lock yourself out - enforce deny explicitly for production.
 
 **Conflict detection:** overlapping rules with the same priority but different actions are surfaced as warnings at load and in the UI. **Policy Tester** dry-runs any host/user/IP against the live ruleset. Per-rule hit counters are exported to Prometheus (cardinality-capped at 200 series).
 
@@ -224,21 +224,21 @@ Culvert is built defense-in-depth. Every claim below is enforced in code.
 | **CSRF** | Origin-based same-origin enforcement on mutating requests + `X-Frame-Options: DENY` and CSP |
 | **Session security** | HMAC-SHA256 signed cookies, per-session 128-bit `jti`, dynamic `Secure` flag, fresh token per login, disk-persisted revocation list synced across the cluster via the control plane |
 | **CA key protection** | AES-256-GCM with PBKDF2-SHA256 (600,000 iterations, NIST SP 800-132) at rest; atomic bundle writes |
-| **Certificate revocation** | Upstream OCSP checking (fail-closed when a published responder is unreachable). CRL checking is **not yet implemented** — see [Limitations](#limitations--known-gaps) |
-| **Hop-by-hop stripping** | RFC 7230-compliant — parses the `Connection` header for dynamically listed hop-by-hop names |
+| **Certificate revocation** | Upstream OCSP checking (fail-closed when a published responder is unreachable). CRL checking is **not yet implemented** - see [Limitations](#limitations--known-gaps) |
+| **Hop-by-hop stripping** | RFC 7230-compliant - parses the `Connection` header for dynamically listed hop-by-hop names |
 | **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, drops private `X-Real-IP`, always removes `X-User-Identity` before forwarding |
 | **Password complexity** | 8+ chars, mixed case, and a digit required |
 | **Admin RBAC (defense-in-depth)** | Metadata-driven enforcement layer *in addition to* per-handler `requireRole`; report-only audit-completeness and role-divergence detectors; read-only governance surface at `/api/governance/control-plane` |
 
 ### Post-Quantum key exchange
 
-Culvert runs on Go 1.25, whose `crypto/tls` **auto-negotiates the hybrid X25519 + ML-KEM-768 key exchange** when the peer supports it — protecting confidentiality against "Harvest Now, Decrypt Later" attacks on all TLS connections. This capability is inherited from the Go toolchain rather than configured by Culvert, and adds ~1ms to the initial handshake with no ongoing cost. Certificate **signing** remains classical ECDSA P-256; PQC signatures (ML-DSA) will follow when the Go standard library adds native support.
+Culvert runs on Go 1.25, whose `crypto/tls` **auto-negotiates the hybrid X25519 + ML-KEM-768 key exchange** when the peer supports it - protecting confidentiality against "Harvest Now, Decrypt Later" attacks on all TLS connections. This capability is inherited from the Go toolchain rather than configured by Culvert, and adds ~1ms to the initial handshake with no ongoing cost. Certificate **signing** remains classical ECDSA P-256; PQC signatures (ML-DSA) will follow when the Go standard library adds native support.
 
 ### Supply-chain integrity
 
-- **Signed release catalog** — the Control Plane loads a catalog validated with fail-closed manifest-hash binding and **Ed25519 signatures (enforce-by-default when trust roots are present)**, plus a second **Sigstore keyless (identity-pinned)** scheme; freshness (`expires_at`) and rollback (`catalog_version`) protection are enforced in enforce mode. An unsigned catalog is never auto-trusted.
-- **Digest-pinned dispatch** — releases resolve to an immutable `repo@sha256:<digest>` ref; the image is pinned at the sudo boundary and retagged locally, so a compromised maintenance user can only run a digest of the one configured repo.
-- **Provenance & signing** — releases ship **SLSA Level 3** provenance and **Cosign keyless** signatures on images, binaries, SBOMs, and the catalog itself.
+- **Signed release catalog** - the Control Plane loads a catalog validated with fail-closed manifest-hash binding and **Ed25519 signatures (enforce-by-default when trust roots are present)**, plus a second **Sigstore keyless (identity-pinned)** scheme; freshness (`expires_at`) and rollback (`catalog_version`) protection are enforced in enforce mode. An unsigned catalog is never auto-trusted.
+- **Digest-pinned dispatch** - releases resolve to an immutable `repo@sha256:<digest>` ref; the image is pinned at the sudo boundary and retagged locally, so a compromised maintenance user can only run a digest of the one configured repo.
+- **Provenance & signing** - releases ship **SLSA Level 3** provenance and **Cosign keyless** signatures on images, binaries, SBOMs, and the catalog itself.
 
 ---
 
@@ -253,7 +253,7 @@ Culvert runs on Go 1.25, whose `crypto/tls` **auto-negotiates the hybrid X25519 
 | `culvert_requests_blocked` | counter | Blocked requests (all reasons) |
 | `culvert_requests_auth_fail` | counter | Authentication failures |
 | `culvert_bytes_sent_total` / `culvert_bytes_recv_total` | counter | Bytes to client / from upstream |
-| `culvert_request_duration_seconds` | histogram | Request latency (11 buckets, 5ms–10s) |
+| `culvert_request_duration_seconds` | histogram | Request latency (11 buckets, 5ms-10s) |
 | `culvert_policy_rule_hits_total{rule="..."}` | counter | Per-rule hit counter (capped) |
 | `culvert_clamav_blocked_total` | counter | ClamAV blocks |
 | `culvert_yara_blocked_total` | counter | YARA blocks |
@@ -265,11 +265,11 @@ Culvert runs on Go 1.25, whose `crypto/tls` **auto-negotiates the hybrid X25519 
 
 ### Logging & SIEM
 
-- **Structured logging** — text or JSON, with rotating files (configurable size thresholds).
-- **Syslog forwarding** — UDP/TCP, RFC 3164 and RFC 5424, for Splunk / Elastic / QRadar.
-- **Live SSE feed** — the Admin UI dashboard streams request activity in real time.
-- **Signed webhook alerts** — HMAC-SHA256 (`X-Culvert-Signature`) for threats, blocks, and lockouts.
-- **Tamper-evident audit trail** — JSONL of every admin action, enriched with the authenticated actor.
+- **Structured logging** - text or JSON, with rotating files (configurable size thresholds).
+- **Syslog forwarding** - UDP/TCP, RFC 3164 and RFC 5424, for Splunk / Elastic / QRadar.
+- **Live SSE feed** - the Admin UI dashboard streams request activity in real time.
+- **Signed webhook alerts** - HMAC-SHA256 (`X-Culvert-Signature`) for threats, blocks, and lockouts.
+- **Tamper-evident audit trail** - JSONL of every admin action, enriched with the authenticated actor.
 
 ---
 
@@ -291,14 +291,14 @@ Beyond ~500 users or ~1 Gbps sustained, scale horizontally with a gRPC Control P
 
 | Component | CPU | RAM | Storage | Role |
 |---|---|---|---|---|
-| Control Plane | 2 vCPU | 512 MB | 500 MB | Config sync, enrollment, dashboard — **no proxy traffic** |
+| Control Plane | 2 vCPU | 512 MB | 500 MB | Config sync, enrollment, dashboard - **no proxy traffic** |
 | Data Plane node | 2 vCPU | 1 GB | 1 GB | Handles proxy traffic; receives full config from CP on connect |
 | DP + ClamAV | 2 vCPU | 2 GB | 1.5 GB | Add ~1 GB RAM + 300 MB disk for AV |
 
-- **DP nodes are stateless** — they receive their entire config (policy, blocklist, PAC, threat feeds, session key, bandwidth policies, node groups) from the CP over mTLS gRPC. Lose one, spin up a replacement, it auto-enrolls in seconds.
-- **HA fencing** — optional etcd fencing lease (`-ha-etcd-*`) provides fail-closed leader election with epoch-based fencing; without it, the legacy leader/standby model applies. See [`docs/operator/ha-lease-failover.md`](docs/operator/ha-lease-failover.md).
-- **Config versioning** — every mutation snapshots automatically (50-version history) with side-by-side diff and one-click rollback.
-- **Backup / restore** — via the profile-gated `cli` compose service; see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
+- **DP nodes are stateless** - they receive their entire config (policy, blocklist, PAC, threat feeds, session key, bandwidth policies, node groups) from the CP over mTLS gRPC. Lose one, spin up a replacement, it auto-enrolls in seconds.
+- **HA fencing** - optional etcd fencing lease (`-ha-etcd-*`) provides fail-closed leader election with epoch-based fencing; without it, the legacy leader/standby model applies. See [`docs/operator/ha-lease-failover.md`](docs/operator/ha-lease-failover.md).
+- **Config versioning** - every mutation snapshots automatically (50-version history) with side-by-side diff and one-click rollback.
+- **Backup / restore** - via the profile-gated `cli` compose service; see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
 
 Detailed single-node, multi-node, and upstream-chaining topologies are in the **[Deployment Guide](docs/deployment-guide.md)**. Full sizing tables (per-connection memory, cluster throughput) are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
@@ -321,9 +321,9 @@ go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 
 ### CI & security pipeline
 
-Pull requests are gated by two required checks — **Fast PR Gate** and **Deep PR Gate** — covering fmt/vet/build, diff-scoped `golangci-lint` (22 linters), the full `-race` suite with a 55% coverage floor, `govulncheck`, `gosec`, `gitleaks`, Trivy, and image/compose validation.
+Pull requests are gated by two required checks - **Fast PR Gate** and **Deep PR Gate** - covering fmt/vet/build, diff-scoped `golangci-lint` (22 linters), the full `-race` suite with a 55% coverage floor, `govulncheck`, `gosec`, `gitleaks`, Trivy, and image/compose validation.
 
-The main/tag security-release gate adds **9 blocking checks** — gosec, govulncheck, Trivy (filesystem + image), gitleaks, staticcheck, hadolint, `-race` tests, the coverage floor, and license compliance (blocks GPL/AGPL/LGPL) — plus **CodeQL** SAST, an informational **CycloneDX SBOM** (Syft), **Cosign** keyless signing, and **SLSA L3** provenance on releases.
+The main/tag security-release gate adds **9 blocking checks** - gosec, govulncheck, Trivy (filesystem + image), gitleaks, staticcheck, hadolint, `-race` tests, the coverage floor, and license compliance (blocks GPL/AGPL/LGPL) - plus **CodeQL** SAST, an informational **CycloneDX SBOM** (Syft), **Cosign** keyless signing, and **SLSA L3** provenance on releases.
 
 ---
 
@@ -331,12 +331,12 @@ The main/tag security-release gate adds **9 blocking checks** — gosec, govulnc
 
 Stated plainly, because a security product should be honest about its edges:
 
-- **Revocation:** OCSP only — **CRL checking is not implemented**. OCSP fails open when a certificate publishes no responder.
+- **Revocation:** OCSP only - **CRL checking is not implemented**. OCSP fails open when a certificate publishes no responder.
 - **Fresh-install posture:** with zero rules and no `default_action`, the proxy starts in passthrough (allow), not deny. Enforce Zero Trust explicitly.
 - **Post-quantum:** key exchange is quantum-resistant (inherited from Go 1.25); certificate signing remains classical ECDSA P-256.
-- **SOCKS5:** CONNECT only — UDP ASSOCIATE is rejected.
+- **SOCKS5:** CONNECT only - UDP ASSOCIATE is rejected.
 - **License gate:** blocks GPL/AGPL/LGPL; CPAL is not currently enforced by the license check.
-- **Sizing figures** in the deployment tables are engineering estimates, not published benchmarks — validate against your own workload before capacity planning.
+- **Sizing figures** in the deployment tables are engineering estimates, not published benchmarks - validate against your own workload before capacity planning.
 
 ---
 
@@ -351,7 +351,7 @@ Development phases, production-readiness items, and the engineering governance m
 1. Fork and branch (`git checkout -b feature/my-feature`)
 2. `go test -race ./...`
 3. Keep the admin-API route-metadata and config-surface parity tests green (see [`CLAUDE.md`](CLAUDE.md))
-4. Open a PR — the full CI pipeline (CodeQL, security gate, golangci-lint) runs automatically
+4. Open a PR - the full CI pipeline (CodeQL, security gate, golangci-lint) runs automatically
 
 ---
 

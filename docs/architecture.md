@@ -117,7 +117,7 @@ session with an on-the-fly leaf certificate signed by its internal CA:
 ```
 
 - **DP nodes are stateless.** On connect they receive the entire config
-  snapshot — policy rules, blocklist, PAC exclusions, threat-feed data, session
+  snapshot - policy rules, blocklist, PAC exclusions, threat-feed data, session
   HMAC key, bandwidth policies, node groups. Replace a node and it re-enrolls in
   seconds.
 - **Config snapshot** is a single walled surface (capture/apply/redaction/
