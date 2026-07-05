@@ -61,6 +61,13 @@ type surfaceBinding struct {
 	Field    string // exact Go field name; reflection-verified by the parity test
 	Apply    emptySemantics
 	Redacted bool // true when the capture/export accessor strips secret material
+	// AppliesOnDP marks a ConfigSnapshot binding that the Data Plane consumes
+	// but whose consumption is NOT an empty-value config apply (so Apply stays
+	// semNA). Today the sole case is Epoch — read by dpObserveEpoch as the
+	// ADR-0005 fence ratchet, not applied as configuration. SnapshotApplyParity
+	// keys "must be consumed on the DP" on (Apply != semNA || AppliesOnDP), so a
+	// fence/rotation field mislabeled kindMeta is still apply-verified.
+	AppliesOnDP bool
 }
 
 // configSurfaceRow is one logical setting spanning up to three structs.
@@ -97,7 +104,7 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "Version"}}},
 	{ID: "snapshot_epoch", Kind: kindMeta,
 		Note:     "ADR-0005 fencing epoch; DPs CAS-ratchet and reject stale-epoch snapshots",
-		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "Epoch"}}},
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "Epoch", AppliesOnDP: true}}},
 	{ID: "snapshot_updated_at", Kind: kindMeta,
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "UpdatedAt"}}},
 	{ID: "policy_version", Kind: kindMeta,

@@ -596,3 +596,170 @@ func snapshotSelectorBase(expr ast.Expr) bool {
 	}
 	return false
 }
+
+// ─── 8. Snapshot apply parity (DEBT-006 PR-2) ─────────────────────────
+//
+// Every ConfigSnapshot field the Data Plane is supposed to CONSUME must be
+// read in the apply family, or the DP silently ignores a setting the CP
+// synced (it diverges with no error). "Supposed to consume" = the binding
+// declares empty-value apply semantics (Apply != semNA) OR carries the
+// AppliesOnDP marker. The marker exists so a field the DP acts on via a
+// non-config side-effect — today only Epoch, the ADR-0005 fence ratchet read
+// by dpObserveEpoch — is apply-verified even though it is kindMeta with no
+// empty-value semantics. Keying on this (not on kindConfig) is deliberate:
+// mislabeling a fence/rotation field kindMeta must NOT exempt it. See the
+// DEBT-006 plan, Layer C.
+func TestConfigSurfaces_SnapshotApplyParity(t *testing.T) {
+	consumed := snapshotConsumedFields(t)
+	checked := 0
+	for _, row := range configSurfaces {
+		for _, b := range row.Bindings {
+			if b.Struct != "ConfigSnapshot" || (b.Apply == semNA && !b.AppliesOnDP) {
+				continue
+			}
+			checked++
+			if !consumed[b.Field] {
+				t.Errorf("ConfigSnapshot.%s (row %q) declares a DP apply "+
+					"(Apply=%d AppliesOnDP=%v) but is never read in the apply family "+
+					"(%s) — the DP would silently ignore this synced setting. Wire the "+
+					"apply, or if it moved to a new function extend snapshotApplyFuncs.",
+					b.Field, row.ID, b.Apply, b.AppliesOnDP, snapshotApplyFuncNames())
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("apply parity checked zero ConfigSnapshot bindings — registry wiring changed?")
+	}
+}
+
+// snapshotApplyFuncs is the DP-side apply family: functions that CONSUME a
+// received ConfigSnapshot. None of them WRITE snap.Field (verified), so every
+// `snap.Field` selector inside them is a read = a consumed field. Enumerated
+// here so the scan survives further gocognit splits (add the new function).
+var snapshotApplyFuncs = map[string]bool{
+	"applyConfigSnapshot":               true, // controlplane_snapshot.go
+	"applySnapshotPolicyAndTraffic":     true,
+	"applySnapshotClusterRuntime":       true,
+	"applySnapshotSessionSecret":        true,
+	"applySnapshotExtendedState":        true,
+	"applyExternalAuthSnapshotSettings": true,
+	"syncSnapshotIdPProfiles":           true,
+	"fetchAndApply":                     true, // controlplane_client.go (DP poller)
+}
+
+func snapshotApplyFuncNames() string {
+	names := make([]string, 0, len(snapshotApplyFuncs))
+	for n := range snapshotApplyFuncs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// snapshotConsumedFields returns the ConfigSnapshot field names read anywhere
+// in the apply family (snap.Field selectors inside snapshotApplyFuncs bodies,
+// across controlplane_snapshot.go + controlplane_client.go).
+func snapshotConsumedFields(t *testing.T) map[string]bool {
+	t.Helper()
+	consumed := map[string]bool{}
+	for _, file := range []string{"controlplane_snapshot.go", "controlplane_client.go"} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || !snapshotApplyFuncs[fn.Name.Name] {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok {
+					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "snap" {
+						consumed[sel.Sel.Name] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+	return consumed
+}
+
+// ─── 9. Snapshot redaction parity (DEBT-006 PR-2, Layer D) ────────────
+//
+// The ConfigSnapshot DTO carries secrets (SessionHMAC, IdP client secrets) BY
+// DESIGN. GetConfig zeroes them for non-enrolled callers
+// (controlplane_server.go, the `if !callerIsEnrolledNode` block). Deleting
+// that block would leak the session HMAC + OIDC secrets to any unenrolled TLS
+// peer with NO other test firing — the highest-severity uncovered drift on
+// this surface. Assert every Sensitive ConfigSnapshot binding is zeroed there.
+func TestConfigSurfaces_SnapshotRedaction(t *testing.T) {
+	redacted := snapshotRedactedFields(t)
+	checked := 0
+	for _, row := range configSurfaces {
+		if !row.Sensitive {
+			continue
+		}
+		for _, b := range row.Bindings {
+			if b.Struct != "ConfigSnapshot" {
+				continue
+			}
+			checked++
+			if !redacted[b.Field] {
+				t.Errorf("ConfigSnapshot.%s (Sensitive row %q) is synced CP→DP but is NOT "+
+					"zeroed in the GetConfig redaction block (controlplane_server.go, "+
+					"!callerIsEnrolledNode) — an unenrolled TLS peer could read this secret. "+
+					"Add it to the redaction block.", b.Field, row.ID)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("redaction parity checked zero Sensitive ConfigSnapshot bindings — registry changed?")
+	}
+}
+
+// snapshotRedactedFields returns the ConfigSnapshot field names zeroed inside
+// the `if !callerIsEnrolledNode(…) { … }` block of controlplane_server.go
+// (snap.Field = "" / nil assignments).
+func snapshotRedactedFields(t *testing.T) map[string]bool {
+	t.Helper()
+	const file = "controlplane_server.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	redacted := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		ifst, ok := n.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		un, ok := ifst.Cond.(*ast.UnaryExpr)
+		if !ok || un.Op != token.NOT {
+			return true
+		}
+		call, ok := un.X.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if fnid, ok := call.Fun.(*ast.Ident); !ok || fnid.Name != "callerIsEnrolledNode" {
+			return true
+		}
+		ast.Inspect(ifst.Body, func(m ast.Node) bool {
+			if as, ok := m.(*ast.AssignStmt); ok {
+				for _, lhs := range as.Lhs {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok {
+						if id, ok := sel.X.(*ast.Ident); ok && id.Name == "snap" {
+							redacted[sel.Sel.Name] = true
+						}
+					}
+				}
+			}
+			return true
+		})
+		return true
+	})
+	return redacted
+}
