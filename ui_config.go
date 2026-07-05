@@ -1213,6 +1213,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			"base_url":                proxyExternalBaseURL,
 			"ui_sans":                 uiExtraSANs,
 			"trust_forwarded_headers": trustForwardedHeaders,
+			"trusted_proxy_cidrs":     ListTrustedProxyCIDRs(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
@@ -1222,9 +1223,16 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			BaseURL               string   `json:"base_url"`
 			UISANs                []string `json:"ui_sans"`
 			TrustForwardedHeaders bool     `json:"trust_forwarded_headers"`
+			TrustedProxyCIDRs     []string `json:"trusted_proxy_cidrs"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		// Validate + apply the trusted-proxy set BEFORE the other mutations so
+		// an invalid CIDR rejects the whole update without partial application.
+		if err := SetTrustedProxyCIDRs(body.TrustedProxyCIDRs); err != nil {
+			http.Error(w, "invalid trusted_proxy_cidrs: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		SetProxyBaseURL(body.BaseURL)

@@ -13,6 +13,12 @@ type uiAccessPolicyStartupConfig struct {
 	// AllowList is fc.UIAllowIPs (additional entries from file config
 	// that are merged with AllowIPCLI).
 	AllowList []string
+	// TrustedProxyCLI is the dereferenced --trusted-proxy-cidrs CLI value
+	// (comma-separated); empty when the flag is unset.
+	TrustedProxyCLI string
+	// TrustedProxyList is fc.Proxy.TrustedProxyCIDRs, merged with
+	// TrustedProxyCLI to seed the RISK-019 trusted-proxy set.
+	TrustedProxyList []string
 	// BaseURL is fc.Proxy.BaseURL, the externally-visible URL used for
 	// OIDC/SAML callback construction.
 	BaseURL string
@@ -34,16 +40,18 @@ type uiAccessPolicyStartupConfig struct {
 // The resolver ALSO observes fc.OIDC.IntrospectionURL and the resolved IdP
 // path to precompute HasOIDCOrSAML, but those fields remain primarily owned
 // by legacy-auth-providers / UI-access (respectively).
-func resolveUIAccessPolicyStartupConfig(fc *FileConfig, uiAllowIPCLI, idpProfilesFileCLI string) uiAccessPolicyStartupConfig {
+func resolveUIAccessPolicyStartupConfig(fc *FileConfig, uiAllowIPCLI, trustedProxyCLI, idpProfilesFileCLI string) uiAccessPolicyStartupConfig {
 	idpFile := fc.Proxy.IdPProfilesFile
 	if idpProfilesFileCLI != "" {
 		idpFile = idpProfilesFileCLI
 	}
 	return uiAccessPolicyStartupConfig{
-		AllowIPCLI:      uiAllowIPCLI,
-		AllowList:       fc.UIAllowIPs,
-		BaseURL:         fc.Proxy.BaseURL,
-		IdPProfilesFile: idpFile,
-		HasOIDCOrSAML:   fc.OIDC.IntrospectionURL != "" || idpFile != "",
+		AllowIPCLI:       uiAllowIPCLI,
+		AllowList:        fc.UIAllowIPs,
+		TrustedProxyCLI:  trustedProxyCLI,
+		TrustedProxyList: fc.Proxy.TrustedProxyCIDRs,
+		BaseURL:          fc.Proxy.BaseURL,
+		IdPProfilesFile:  idpFile,
+		HasOIDCOrSAML:    fc.OIDC.IntrospectionURL != "" || idpFile != "",
 	}
 }

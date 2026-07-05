@@ -1862,6 +1862,13 @@ Firefox (all platforms):
               Enable only when running behind a trusted reverse proxy. When disabled, X-Forwarded-Host/Proto headers are ignored.
             </p>
           </div>
+          <div class="form-group" style="margin-top:14px">
+            <label class="form-label" for="s-trusted-proxies">Trusted proxy IPs/CIDRs (admin-UI client IP)</label>
+            <input type="text" class="input" style="width:100%" id="s-trusted-proxies" placeholder="Comma-separated, e.g. 10.0.0.0/8,192.168.1.5">
+            <p style="font-size:.72rem;color:var(--muted);margin-top:4px">
+              Reverse proxies whose <code>X-Forwarded-For</code> is trusted to resolve the real client IP for login lockout, admin-API rate limiting, the admin-IP allowlist, and audit attribution. Only requests arriving directly from one of these addresses have their X-Forwarded-For honored; empty = always use the direct peer IP (spoofing-safe default).
+            </p>
+          </div>
           <button class="btn" style="margin-top:10px" data-click="saveNetworkTLS">Save Network Settings</button>
           <span id="s-network-status" style="font-size:.8rem;color:var(--muted);margin-left:10px"></span>
         </div>
@@ -6787,6 +6794,7 @@ async function loadSettings() {
     document.getElementById('s-base-url').value = n.base_url || '';
     document.getElementById('s-ui-sans').value = (n.ui_sans || []).join(', ');
     document.getElementById('s-trust-fwd').checked = !!n.trust_forwarded_headers;
+    document.getElementById('s-trusted-proxies').value = (n.trusted_proxy_cidrs || []).join(', ');
   } catch(e) { console.error(e); }
 }
 
@@ -7298,12 +7306,14 @@ async function saveNetworkTLS() {
   const baseURL = document.getElementById('s-base-url').value.trim();
   const sansRaw = document.getElementById('s-ui-sans').value.trim();
   const trustFwd = document.getElementById('s-trust-fwd').checked;
+  const proxiesRaw = document.getElementById('s-trusted-proxies').value.trim();
   const uiSans = sansRaw ? sansRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const trustedProxies = proxiesRaw ? proxiesRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
   try {
     await api('/api/settings/network', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ base_url: baseURL, ui_sans: uiSans, trust_forwarded_headers: trustFwd })
+      body: JSON.stringify({ base_url: baseURL, ui_sans: uiSans, trust_forwarded_headers: trustFwd, trusted_proxy_cidrs: trustedProxies })
     });
     const el = document.getElementById('s-network-status');
     el.textContent = 'Saved. TLS SAN changes require restart.';

@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,10 +25,9 @@ func auditEvent(r *http.Request, action, object, detail string) {
 // service (which audits via the headless auditAdd) use this to pass the same
 // actor string the audit ring would record.
 func auditActor(r *http.Request) string {
-	actor, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if actor == "" {
-		actor = r.RemoteAddr
-	}
+	// RISK-019: attribute to the real client behind a configured trusted proxy
+	// so audit lines don't all name the reverse proxy (falls back to the peer).
+	actor := realClientIP(r)
 	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
 		name := sess.Sub
 		if name == "" {

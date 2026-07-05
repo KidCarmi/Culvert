@@ -70,6 +70,7 @@ type AdminSettings struct {
 	BaseURL               string   `json:"base_url,omitempty"`
 	UISANs                []string `json:"ui_sans,omitempty"`
 	TrustForwardedHeaders bool     `json:"trust_forwarded_headers"`
+	TrustedProxyCIDRs     []string `json:"trusted_proxy_cidrs,omitempty"` // RISK-019: reverse-proxy IPs/CIDRs whose XFF is trusted for admin-UI client-IP
 
 	// Blocklist feeds (multi-feed). BlocklistFeedsSaved is a sentinel
 	// (mirroring YARASettingsSaved): when true the persisted feed list is
@@ -270,6 +271,11 @@ func applyAdminNetwork(s *AdminSettings) {
 	if s.TrustForwardedHeaders {
 		trustForwardedHeaders = true
 	}
+	if len(s.TrustedProxyCIDRs) > 0 {
+		if err := SetTrustedProxyCIDRs(s.TrustedProxyCIDRs); err != nil {
+			logger.Printf("AdminSettings: invalid trusted_proxy_cidrs (%v) — X-Forwarded-For will NOT be trusted", err)
+		}
+	}
 	if s.UpstreamProxiesSaved {
 		// Authoritative replace (empty list wipes the YAML seed). SetProxies
 		// keeps the circuit-breaker parameters the startup slice configured.
@@ -345,6 +351,7 @@ func SaveAdminSettings() {
 		SessionTimeoutHours:   int(getSessionTTL().Hours()),
 		UIAllowIPs:            ListUIAllowedCIDRs(),
 		TrustForwardedHeaders: trustForwardedHeaders,
+		TrustedProxyCIDRs:     ListTrustedProxyCIDRs(),
 	}
 
 	// BaseURL / SANs

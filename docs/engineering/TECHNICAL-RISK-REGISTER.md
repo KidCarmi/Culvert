@@ -26,7 +26,7 @@
 | RISK-010 | MEDIUM | OPEN | Self-update has no in-binary image signature/digest check | `update.go:496-608` |
 | RISK-011 | MEDIUM | OPEN | Cluster rolling-update auto-rollback unverified | `update_cluster.go:804-852` |
 | RISK-012 | LOW | ✅ CLOSED | Account lockout is username-keyed (lockout-as-DoS) | two-tier (IP,user)+account keying w/ trusted-IP bypass (2026-07-05); adversarially reviewed 2× |
-| RISK-019 | MEDIUM | OPEN | Admin-UI per-IP logic keys on direct peer IP; no trusted-proxy XFF extraction (lockout collapses behind an L7 proxy) | `ui_auth.go:47`, `ui_helpers.go:29` |
+| RISK-019 | MEDIUM | ✅ CLOSED | Admin-UI per-IP logic keys on direct peer IP; no trusted-proxy XFF extraction (lockout collapses behind an L7 proxy) | trusted-proxy `realClientIP` (2026-07-05); adversarially reviewed |
 | RISK-018 | LOW | ✅ CLOSED | Leaked HA `standbyLoop` goroutine races test `logger` swaps (determinism-gate flake) | `resyncCtx(t)` cleanup-cancelled ctx (2026-07-04) |
 | RISK-013 | LOW | ✅ CLOSED | `normalizeHost` IDNA failure is fail-open | fail-closed `NormalizeHostStrict` gate at proxy+SOCKS5 dispatch (2026-07-05); adversarially reviewed |
 
@@ -319,23 +319,36 @@
   - *Untrusted-IP admin during an active flood* — a fresh-deploy / new-location admin with no live
     trust grant can still be caught by the account lock during a distributed flood (re-trippable
     every 15m). Strictly better than the username-only original; inherent to IP-based keying.
-  - *Reverse-proxy topologies* — see **RISK-019** (new): behind an L7 proxy that collapses client
-    IPs, both tiers degrade toward a global lock. Tracked separately because the fix (trusted-proxy
-    real-client-IP extraction) is cross-cutting with the rate limiter and audit actor.
+  - *Reverse-proxy topologies* — **CLOSED via RISK-019** (2026-07-05): the trusted-proxy-aware
+    `realClientIP` now feeds the lockout keys, so behind a configured trusted proxy the tiers key on
+    the real client again instead of collapsing onto the proxy IP.
 
-## RISK-019 — Admin-UI per-IP logic keys on the direct peer IP (no trusted-proxy extraction) · MEDIUM · OPEN
-- The admin UI derives client IP from `r.RemoteAddr` everywhere (login lockout `ui_auth.go:47`,
-  audit actor `ui_helpers.go:29`, admin-API rate limiter, conn limiter). There is no
-  trusted-proxy `X-Forwarded-For` extraction gated on a configured proxy CIDR (`trustForwardedHeaders`
-  today governs only X-Forwarded-Host/Proto for base-URL construction, not client IP).
-- **Impact:** when the admin UI is fronted by nginx/ALB/any L7 proxy that terminates TCP, every
-  request presents the proxy's IP, so the RISK-012 two-tier lockout collapses toward a single
-  shared pair — 5 failures can lock the admin globally — and per-IP rate limiting / audit
-  attribution lose their meaning. The operator cannot correct this via config.
-- **Recommendation:** a single trusted-proxy-aware `realClientIP(r)` helper (validated XFF only
-  when the direct peer is in a configured trusted-proxy CIDR; else the peer IP), adopted by the
-  lockout, rate-limit, conn-limit, and audit paths together. Cross-cutting; its own reviewed
-  change. **Complexity M.** Surfaced by the RISK-012 adversarial review (F4).
+## RISK-019 — Admin-UI per-IP logic keys on the direct peer IP (no trusted-proxy extraction) · MEDIUM · ✅ CLOSED 2026-07-05
+- **Was:** the admin UI derived client IP from `r.RemoteAddr` everywhere (login lockout, admin-API
+  rate limiter, admin-IP allowlist, audit actor). Behind an L7 proxy that terminates TCP, every
+  request presented the proxy's IP, so the RISK-012 two-tier lockout collapsed toward one shared
+  pair (5 failures lock the admin globally) and per-IP rate limiting / audit attribution lost
+  meaning — uncorrectable via config.
+- **Fix:** `realclientip.go::realClientIP(r)` — a trusted-proxy-aware resolver. It returns the
+  direct peer UNLESS that peer is in a configured trusted-proxy CIDR set (`trustedProxyNets`), in
+  which case it returns the rightmost `X-Forwarded-For` hop NOT in the trusted set (the real client
+  behind the proxy chain). Empty set = always the direct peer. **The gate is the whole security
+  argument:** a direct attacker's peer is not in the trusted set, so their `X-Forwarded-For` is
+  never honored — they cannot forge a victim's IP or evade their own lockout (pinned by
+  `TestRealClientIP_SpoofDefense`). Adopted at all admin-side sites: `apiAuthLogin`,
+  `apiSetupComplete`, the `apiLimiter` gate + `uiIPGuardMiddleware` allowlist (`ui_middleware.go`),
+  `auditActor` (`ui_helpers.go`), and the cluster error-budget audit actor (`update_cluster.go`).
+  The proxy DATA path (`handleRequest`'s `rl`/`connLimiter`/`ipf`) is deliberately untouched — those
+  are direct client connections, not behind the admin reverse proxy.
+- **Config (full GUI parity):** `-trusted-proxy-cidrs` flag + `proxy.trusted_proxy_cidrs` YAML seed;
+  `POST/GET /api/settings/network` (`trusted_proxy_cidrs`); admin-durable via
+  `AdminSettings.TrustedProxyCIDRs`; UI field in the Network & TLS panel; `trusted_proxy_cidrs`
+  config-surface row (admin-durable only — per-node proxy topology, deliberately NOT cluster-synced).
+  Invalid CIDRs reject the whole update (API) or fail safe to "no trust" (startup/admin_settings).
+- **Adversarially reviewed before merge** (spoof defense, XFF parsing, the `uiIPGuard` allowlist
+  bypass path). Residual (documented): the design assumes the trusted proxy sets/overwrites XFF
+  correctly — a proxy that blindly forwards a client-supplied XFF is an operator misconfiguration
+  outside the trust contract.
 
 ## RISK-018 — Leaked HA standby goroutine races test logger swaps · LOW · ✅ CLOSED 2026-07-04
 - **Root cause (narrower than first mapped):** three `ha_failover_test.go` tests seeded
