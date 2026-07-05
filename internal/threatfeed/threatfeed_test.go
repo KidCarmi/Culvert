@@ -202,6 +202,65 @@ func TestThreatFeed_LoadFromDisk_Valid(t *testing.T) {
 	if _, ok := tf.urls["http://evil.com/bad"]; !ok {
 		t.Error("loadFromDisk should populate URLs map")
 	}
+	// Legacy DB shape (no LastSuccess/LastSyncErr): back-fill lastSuccess
+	// from LastSync so a pre-SyncStatus save still reports "last synced OK
+	// at <time>" instead of "never synced successfully".
+	if ok, lastSuccess, errSummary := tf.SyncStatus(); !ok || errSummary != "" || !lastSuccess.Equal(db.LastSync) {
+		t.Errorf("SyncStatus after loading legacy DB = (%v, %v, %q), want (true, %v, \"\")", ok, lastSuccess, errSummary, db.LastSync)
+	}
+}
+
+func TestThreatFeed_SaveLoad_PersistsSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/feed.json"
+
+	tf := newEnabledFeed()
+	tf.dbPath = path
+	tf.urls["http://evil.com/bad"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.lastSync = time.Now()
+	tf.lastSyncErr = "OpenPhish: HTTP 503 from https://openphish.com/feed.txt"
+	// lastSuccess left zero: this feed has never synced cleanly.
+	if err := tf.saveToDisk(); err != nil {
+		t.Fatalf("saveToDisk error: %v", err)
+	}
+
+	reloaded := newEnabledFeed()
+	if err := reloaded.loadFromDisk(path); err != nil {
+		t.Fatalf("loadFromDisk error: %v", err)
+	}
+	ok, lastSuccess, errSummary := reloaded.SyncStatus()
+	if ok {
+		t.Error("SyncStatus after reloading a failed-sync DB should report ok=false")
+	}
+	if errSummary != tf.lastSyncErr {
+		t.Errorf("SyncStatus errSummary = %q, want %q", errSummary, tf.lastSyncErr)
+	}
+	if !lastSuccess.IsZero() {
+		t.Errorf("SyncStatus lastSuccess = %v, want zero (feed never synced cleanly)", lastSuccess)
+	}
+}
+
+func TestThreatFeed_SaveLoad_PersistsSyncSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/feed.json"
+
+	tf := newEnabledFeed()
+	tf.dbPath = path
+	success := time.Now().Add(-2 * time.Hour)
+	tf.lastSync = success
+	tf.lastSuccess = success
+	if err := tf.saveToDisk(); err != nil {
+		t.Fatalf("saveToDisk error: %v", err)
+	}
+
+	reloaded := newEnabledFeed()
+	if err := reloaded.loadFromDisk(path); err != nil {
+		t.Fatalf("loadFromDisk error: %v", err)
+	}
+	ok, lastSuccess, errSummary := reloaded.SyncStatus()
+	if !ok || errSummary != "" || !lastSuccess.Equal(success) {
+		t.Errorf("SyncStatus after reloading a successful-sync DB = (%v, %v, %q), want (true, %v, \"\")", ok, lastSuccess, errSummary, success)
+	}
 }
 
 func TestThreatFeed_LoadFromDisk_BadJSON(t *testing.T) {
@@ -225,6 +284,46 @@ func TestThreatFeed_Stats(t *testing.T) {
 	count, _, _ := tf.Stats()
 	if count != 42 {
 		t.Errorf("Stats count = %d, want 42", count)
+	}
+}
+
+func TestThreatFeed_SyncStatus_DefaultOK(t *testing.T) {
+	tf := newEnabledFeed()
+	ok, lastSuccess, errSummary := tf.SyncStatus()
+	if !ok || errSummary != "" || !lastSuccess.IsZero() {
+		t.Errorf("SyncStatus on fresh feed = (%v, %v, %q), want (true, zero, \"\")", ok, lastSuccess, errSummary)
+	}
+}
+
+func TestThreatFeed_SyncStatus_ReflectsFailure(t *testing.T) {
+	tf := newEnabledFeed()
+	// Simulate what Sync() records on a failed attempt: lastSync always
+	// advances, but lastSuccess only does when every feed fetched cleanly.
+	tf.lastSync = time.Now()
+	tf.lastSyncErr = "URLhaus: HTTP 503 from https://urlhaus.abuse.ch/downloads/text/"
+
+	ok, lastSuccess, errSummary := tf.SyncStatus()
+	if ok {
+		t.Error("SyncStatus ok = true, want false after a recorded failure")
+	}
+	if errSummary == "" {
+		t.Error("SyncStatus errSummary is empty, want the recorded failure")
+	}
+	if !lastSuccess.IsZero() {
+		t.Errorf("SyncStatus lastSuccess = %v, want zero (feed has never synced cleanly)", lastSuccess)
+	}
+
+	// A subsequent clean sync clears the error and records the success time.
+	now := time.Now()
+	tf.mu.Lock()
+	tf.lastSync = now
+	tf.lastSuccess = now
+	tf.lastSyncErr = ""
+	tf.mu.Unlock()
+
+	ok, lastSuccess, errSummary = tf.SyncStatus()
+	if !ok || errSummary != "" || lastSuccess.IsZero() {
+		t.Errorf("SyncStatus after recovery = (%v, %v, %q), want (true, non-zero, \"\")", ok, lastSuccess, errSummary)
 	}
 }
 

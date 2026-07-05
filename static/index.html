@@ -6013,7 +6013,15 @@ async function loadSecScanStatus() {
     const fe = document.getElementById('sec-feed-entries');
     if (fe) fe.textContent = s.threat_feed_entries != null ? s.threat_feed_entries.toLocaleString() + ' entries' : '—';
     const fs = document.getElementById('sec-feed-sync');
-    if (fs) fs.textContent = s.threat_feed_last_sync ? 'Last sync: ' + new Date(s.threat_feed_last_sync).toLocaleTimeString() : '';
+    if (fs) {
+      if (s.threat_feed_sync_ok === false) {
+        const since = s.threat_feed_last_success ? new Date(s.threat_feed_last_success).toLocaleString() : 'never';
+        fs.innerHTML = '<span style="color:var(--red)" title="' + escHtml(s.threat_feed_sync_error || '') + '">sync failing</span> · last good sync: ' + escHtml(since);
+      } else {
+        fs.style.color = '';
+        fs.textContent = s.threat_feed_last_sync ? 'Last sync: ' + new Date(s.threat_feed_last_sync).toLocaleTimeString() : '';
+      }
+    }
     const fb = document.getElementById('sec-feed-blocked');
     if (fb) fb.textContent = s.stat_feed_blocked ? s.stat_feed_blocked + ' blocked' : '';
 

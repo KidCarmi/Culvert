@@ -49,9 +49,16 @@ type entry struct {
 
 // feedDB is the on-disk persistence format.
 type feedDB struct {
-	LastSync time.Time        `json:"last_sync"`
-	URLs     map[string]entry `json:"urls"`
-	Domains  map[string]entry `json:"domains"`
+	LastSync time.Time `json:"last_sync"`
+	// LastSuccess and LastSyncErr persist the SyncStatus fields across
+	// restarts. Both are omitempty so a DB written before these fields
+	// existed loads as zero/"" — loadFromDisk treats that legacy shape as
+	// "LastSync was itself a success" (matching the pre-SyncStatus
+	// behavior, where a successful sync was the only thing ever recorded).
+	LastSuccess time.Time        `json:"last_success,omitempty"`
+	LastSyncErr string           `json:"last_sync_err,omitempty"`
+	URLs        map[string]entry `json:"urls"`
+	Domains     map[string]entry `json:"domains"`
 	// DomainAllowlist persists the admin-managed allowlist. Tag has NO
 	// `omitempty` so an admin-cleared (zero-entry) allowlist serializes
 	// as `"domain_allowlist": []` and round-trips through loadFromDisk
@@ -71,7 +78,9 @@ type Feed struct {
 	domainAllowlist map[string]bool  // domains exempt from domain-level blocking
 	dbPath          string
 	syncInterval    time.Duration
-	lastSync        time.Time
+	lastSync        time.Time // time of the most recent sync attempt, success or failure
+	lastSuccess     time.Time // time of the most recent sync where every feed fetched cleanly
+	lastSyncErr     string    // summary of the most recent failure(s); empty when the last sync fully succeeded
 	totalEntries    atomic.Int64
 	enabled         bool
 }
@@ -151,10 +160,12 @@ func (tf *Feed) Sync() {
 	obs.Debugf("ThreatFeed: starting sync")
 	newURLs := make(map[string]entry, 50_000)
 	newDomains := make(map[string]entry, 20_000)
+	var failures []string
 
 	n, err := tf.fetchTextFeed(urlHausTextFeed, "urlhaus", newURLs, newDomains)
 	if err != nil {
 		obs.Printf("ThreatFeed: URLhaus sync failed: %v", err)
+		failures = append(failures, fmt.Sprintf("URLhaus: %v", err))
 	} else {
 		obs.Printf("ThreatFeed: URLhaus %d entries", n)
 	}
@@ -162,14 +173,22 @@ func (tf *Feed) Sync() {
 	n, err = tf.fetchTextFeed(openPhishFeed, "openphish", newURLs, newDomains)
 	if err != nil {
 		obs.Printf("ThreatFeed: OpenPhish sync failed: %v", err)
+		failures = append(failures, fmt.Sprintf("OpenPhish: %v", err))
 	} else {
 		obs.Printf("ThreatFeed: OpenPhish %d entries", n)
 	}
 
+	now := time.Now()
 	tf.mu.Lock()
 	tf.urls = newURLs
 	tf.domains = newDomains
-	tf.lastSync = time.Now()
+	tf.lastSync = now
+	if len(failures) == 0 {
+		tf.lastSuccess = now
+		tf.lastSyncErr = ""
+	} else {
+		tf.lastSyncErr = strings.Join(failures, "; ")
+	}
 	tf.mu.Unlock()
 	tf.totalEntries.Store(int64(len(newURLs)))
 
@@ -235,6 +254,19 @@ func (tf *Feed) Stats() (int64, time.Time, time.Duration) {
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 	return tf.totalEntries.Load(), tf.lastSync, tf.syncInterval
+}
+
+// SyncStatus reports whether the most recent sync fetched every feed
+// cleanly, the time of the last fully-successful sync (which may lag
+// lastSync from Stats if recent attempts have been failing), and a
+// summary of the most recent failure (empty when the last sync succeeded).
+// lastSync updates on every attempt regardless of outcome, so relying on
+// Stats alone lets a persistently-failing feed hide behind a
+// perpetually-fresh timestamp.
+func (tf *Feed) SyncStatus() (ok bool, lastSuccess time.Time, errSummary string) {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	return tf.lastSyncErr == "", tf.lastSuccess, tf.lastSyncErr
 }
 
 // defaultDomainAllowlist seeds the threat-feed domain allowlist with popular
@@ -423,6 +455,16 @@ func (tf *Feed) loadFromDisk(path string) error {
 	tf.urls = db.URLs
 	tf.domains = db.Domains
 	tf.lastSync = db.LastSync
+	tf.lastSyncErr = db.LastSyncErr
+	switch {
+	case !db.LastSuccess.IsZero():
+		tf.lastSuccess = db.LastSuccess
+	case db.LastSyncErr == "":
+		// Legacy DB (saved before LastSuccess existed) or a DB saved by a
+		// clean sync before this field was ever set: LastSync IS the last
+		// success, so back-fill it rather than reporting "never synced".
+		tf.lastSuccess = db.LastSync
+	}
 	// Restore the persisted allowlist. The guard keys on nil, not
 	// len()==0, so an admin-cleared explicit-empty `[]` (saved as
 	// `"domain_allowlist": []` per the no-omitempty tag) replaces the
@@ -455,6 +497,8 @@ func (tf *Feed) saveToDisk() error {
 	sort.Strings(allowlist)
 	db := feedDB{
 		LastSync:        tf.lastSync,
+		LastSuccess:     tf.lastSuccess,
+		LastSyncErr:     tf.lastSyncErr,
 		URLs:            tf.urls,
 		Domains:         tf.domains,
 		DomainAllowlist: allowlist,
