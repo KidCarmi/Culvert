@@ -51,6 +51,9 @@ func init() {
 		})
 		statCARotations.Add(1)
 	}
+	// End the client-facing TLS resumption epoch whenever the Root CA changes,
+	// so no client can resume a session authenticated under the previous CA.
+	ca.CAChangedObserver = rotateMITMTicketKeys
 }
 
 // StartCAAutoRotation runs a background goroutine that periodically checks CA

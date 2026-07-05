@@ -1,6 +1,6 @@
 # Culvert Technical Risk Register
 
-> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-06-28
+> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-07-05 (drift sync)
 >
 > Risks are things that can go wrong in production or in the supply chain. Structural shortcuts
 > live in the [Technical Debt Register](./TECHNICAL-DEBT-REGISTER.md). Some items appear in both
@@ -278,8 +278,14 @@
   updater sidecar; the proxy never verifies the pulled image's signature or digest. The Sigstore
   machinery verifies *catalogs*, not the image the updater pulls.
 - **Impact:** A compromised/misconfigured updater can run an arbitrary image with no proxy-side defense.
-- **Recommendation:** Verify a pinned digest/signature in-binary before accepting an applied update.
-  **Complexity M.**
+- **Resolution path (clarified 2026-07-05):** this gap is **inherent to the legacy tag-based updater
+  sidecar**, and its correct fix is *migration, not a patch* — the replacement path already has what
+  this asks for (the catalog + maintenance-agent flow pins by digest, `docker pull …@sha256:`, and
+  verifies keyless Sigstore signatures with catalog↔image identity parity, P2b-2b). Bolting a
+  verifier onto `apiUpdateApply` would harden code scheduled for deletion under **DEBT-008**
+  (active removal). So RISK-010 closes when the updater is retired (same move that closes
+  RISK-ACC-1), NOT by editing `update.go`. Stays OPEN until the production catalog cutover completes.
+  **Complexity M (as migration, tracked under DEBT-008).**
 
 ## RISK-011 — Rolling-update auto-rollback unverified · MEDIUM · OPEN
 - **Current state:** `triggerAutoRollback` (`update_cluster.go:804-852`) re-pushes the previous tag
