@@ -71,6 +71,12 @@ type AdminSettings struct {
 	UISANs                []string `json:"ui_sans,omitempty"`
 	TrustForwardedHeaders bool     `json:"trust_forwarded_headers"`
 	TrustedProxyCIDRs     []string `json:"trusted_proxy_cidrs,omitempty"` // RISK-019: reverse-proxy IPs/CIDRs whose XFF is trusted for admin-UI client-IP
+	// TrustedProxyCIDRsSaved is a sentinel (mirroring UpstreamProxiesSaved):
+	// once the admin has saved network settings the persisted list is
+	// AUTHORITATIVE — including an empty list, which CLEARS any YAML seed.
+	// Without it, clearing the trust set in the GUI would silently be undone by
+	// the YAML seed on restart (a security control failing toward MORE trust).
+	TrustedProxyCIDRsSaved bool `json:"trusted_proxy_cidrs_saved"`
 
 	// Blocklist feeds (multi-feed). BlocklistFeedsSaved is a sentinel
 	// (mirroring YARASettingsSaved): when true the persisted feed list is
@@ -271,7 +277,10 @@ func applyAdminNetwork(s *AdminSettings) {
 	if s.TrustForwardedHeaders {
 		trustForwardedHeaders = true
 	}
-	if len(s.TrustedProxyCIDRs) > 0 {
+	if s.TrustedProxyCIDRsSaved {
+		// Authoritative replace (empty list wipes the YAML seed), mirroring the
+		// UpstreamProxiesSaved sentinel. Sentinel-less legacy files keep the
+		// YAML/CLI seed applied by the startup slice.
 		if err := SetTrustedProxyCIDRs(s.TrustedProxyCIDRs); err != nil {
 			logger.Printf("AdminSettings: invalid trusted_proxy_cidrs (%v) — X-Forwarded-For will NOT be trusted", err)
 		}
@@ -338,20 +347,21 @@ func SaveAdminSettings() {
 	}
 
 	s := AdminSettings{
-		DefaultAction:         defaultPolicyAction(),
-		IPFilterMode:          ipf.Mode(),
-		IPFilterList:          ipf.List(),
-		RateLimitRPM:          rl.Limit(),
-		RateLimitExemptions:   rl.ListExemptions(),
-		ConnLimitEnabled:      connLimiter.Enabled(),
-		ConnLimitMaxPerIP:     connLimiter.MaxPerIP(),
-		BlockPageHTML:         getBlockPageHTML(),
-		MetricsToken:          metricsToken,
-		LogLevel:              effectiveAdminLogLevel().String(),
-		SessionTimeoutHours:   int(getSessionTTL().Hours()),
-		UIAllowIPs:            ListUIAllowedCIDRs(),
-		TrustForwardedHeaders: trustForwardedHeaders,
-		TrustedProxyCIDRs:     ListTrustedProxyCIDRs(),
+		DefaultAction:          defaultPolicyAction(),
+		IPFilterMode:           ipf.Mode(),
+		IPFilterList:           ipf.List(),
+		RateLimitRPM:           rl.Limit(),
+		RateLimitExemptions:    rl.ListExemptions(),
+		ConnLimitEnabled:       connLimiter.Enabled(),
+		ConnLimitMaxPerIP:      connLimiter.MaxPerIP(),
+		BlockPageHTML:          getBlockPageHTML(),
+		MetricsToken:           metricsToken,
+		LogLevel:               effectiveAdminLogLevel().String(),
+		SessionTimeoutHours:    int(getSessionTTL().Hours()),
+		UIAllowIPs:             ListUIAllowedCIDRs(),
+		TrustForwardedHeaders:  trustForwardedHeaders,
+		TrustedProxyCIDRs:      ListTrustedProxyCIDRs(),
+		TrustedProxyCIDRsSaved: true, // once saved, the persisted list is authoritative (incl. empty)
 	}
 
 	// BaseURL / SANs

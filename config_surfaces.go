@@ -346,6 +346,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeedsSaved"}}},
 	{ID: "upstream_proxies_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UpstreamProxiesSaved"}}},
+	{ID: "trusted_proxy_cidrs_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRsSaved"}}},
 	{ID: "yara_settings_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},
 	{ID: "blocklist_feed_url_legacy", Kind: kindLegacyMigration,

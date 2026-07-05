@@ -95,6 +95,14 @@ func TestRealClientIP(t *testing.T) {
 			remote: "203.0.113.9", xff: "",
 			want: "203.0.113.9",
 		},
+		{
+			// review F2: a non-canonical spelling of the client IP must
+			// canonicalize so it can't fork the per-IP lockout key.
+			name:    "IPv4-mapped IPv6 client canonicalizes to dotted form",
+			trusted: []string{"10.0.0.0/8"},
+			remote:  "10.0.0.5:5", xff: "::ffff:198.51.100.9",
+			want: "198.51.100.9",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -122,6 +130,38 @@ func TestRealClientIP_SpoofDefense(t *testing.T) {
 		if got != "198.51.100.66" {
 			t.Errorf("spoof via XFF=%q leaked client IP %q — must stay the direct peer 198.51.100.66", xff, got)
 		}
+	}
+}
+
+// TestTrustedProxyCIDRs_SentinelDurability is the review-F1 regression guard:
+// once saved, an EMPTY persisted list must AUTHORITATIVELY clear the trust set
+// (a GUI removal survives restart), and a sentinel-less legacy file must NOT
+// wipe a startup/YAML seed.
+func TestTrustedProxyCIDRs_SentinelDurability(t *testing.T) {
+	orig := ListTrustedProxyCIDRs()
+	t.Cleanup(func() { _ = SetTrustedProxyCIDRs(orig) })
+
+	// Simulate a YAML/startup seed.
+	if err := SetTrustedProxyCIDRs([]string{"10.0.0.0/8"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Saved=false (legacy file) with empty list → must NOT wipe the seed.
+	applyAdminNetwork(&AdminSettings{TrustedProxyCIDRs: nil, TrustedProxyCIDRsSaved: false})
+	if got := ListTrustedProxyCIDRs(); len(got) != 1 {
+		t.Errorf("sentinel-less empty list wiped the seed: got %v, want [10.0.0.0/8]", got)
+	}
+
+	// Saved=true with empty list → authoritative clear (the GUI removal).
+	applyAdminNetwork(&AdminSettings{TrustedProxyCIDRs: nil, TrustedProxyCIDRsSaved: true})
+	if got := ListTrustedProxyCIDRs(); len(got) != 0 {
+		t.Errorf("Saved empty list did not clear the trust set: got %v", got)
+	}
+
+	// Saved=true with a value → authoritative replace.
+	applyAdminNetwork(&AdminSettings{TrustedProxyCIDRs: []string{"172.16.0.0/12"}, TrustedProxyCIDRsSaved: true})
+	if got := ListTrustedProxyCIDRs(); len(got) != 1 || got[0] != "172.16.0.0/12" {
+		t.Errorf("Saved value not applied: got %v", got)
 	}
 }
 

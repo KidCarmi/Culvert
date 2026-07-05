@@ -346,9 +346,16 @@
   config-surface row (admin-durable only — per-node proxy topology, deliberately NOT cluster-synced).
   Invalid CIDRs reject the whole update (API) or fail safe to "no trust" (startup/admin_settings).
 - **Adversarially reviewed before merge** (spoof defense, XFF parsing, the `uiIPGuard` allowlist
-  bypass path). Residual (documented): the design assumes the trusted proxy sets/overwrites XFF
-  correctly — a proxy that blindly forwards a client-supplied XFF is an operator misconfiguration
-  outside the trust contract.
+  bypass path — all DEFEATED; the review confirmed the allowlist is *tightened*, not weakened).
+  Two review findings fixed in the same change: **F1** — an empty persisted trust list now wipes a
+  YAML seed via a `TrustedProxyCIDRsSaved` sentinel (a security control must not fail toward *more*
+  trust on restart); **F2** — `realClientIP` returns the canonical `ip.String()` so a non-canonical
+  XFF spelling (`::ffff:1.2.3.4`) can't fork the per-IP lockout key. Both pinned by tests.
+- **Accepted residual (F3, operational):** the trust contract assumes the configured proxy
+  actually sets/overwrites `X-Forwarded-For`. If an operator trusts a proxy that forwards a
+  client-supplied XFF verbatim, or that never sets XFF (collapsing every request onto the proxy IP),
+  the protection degrades — this is a deployment misconfiguration outside the code's control,
+  flagged in the `config.example.yaml` / API-field guidance.
 
 ## RISK-018 — Leaked HA standby goroutine races test logger swaps · LOW · ✅ CLOSED 2026-07-04
 - **Root cause (narrower than first mapped):** three `ha_failover_test.go` tests seeded

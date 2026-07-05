@@ -127,13 +127,15 @@ func realClientIP(r *http.Request) string {
 	// the client that handed off to our innermost trusted proxy.
 	parts := strings.Split(xff, ",")
 	for i := len(parts) - 1; i >= 0; i-- {
-		cand := strings.TrimSpace(parts[i])
-		ip := net.ParseIP(cand)
+		ip := net.ParseIP(strings.TrimSpace(parts[i]))
 		if ip == nil {
 			continue // malformed hop — skip, don't trust it as a client
 		}
 		if !ipInNets(ip, trusted) {
-			return cand
+			// Return the CANONICAL form, not the raw header text: two textual
+			// spellings of one IP (e.g. "::ffff:1.2.3.4" vs "1.2.3.4") must not
+			// fork the per-IP lockout/rate-limit key (review F2).
+			return ip.String()
 		}
 	}
 	// Every hop was a trusted proxy (fully-internal chain) — fall back to the
