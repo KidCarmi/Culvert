@@ -46,9 +46,16 @@ func NormalizeHostStrict(host string) (norm string, ok bool) {
 	if host == "" {
 		return host, true
 	}
-	// Skip IDNA for IP addresses (fast path — avoids allocation; IP literals
-	// have no IDNA form).
-	if net.ParseIP(host) != nil {
+	// IP literals have no IDNA form — accept them explicitly. This covers both
+	// the bare form ("2001:db8::1") and the BRACKETED IPv6 form
+	// ("[2001:db8::1]"), which reaches here on the default-port HTTP path
+	// (r.Host carries brackets when no port is present) and from the SOCKS5
+	// IPv6 ATYP. We do NOT rely on idna.ToASCII leniently passing a bracketed
+	// string (it happens to today, but that is accidental and could tighten in
+	// a future x/net) — the strict gate must accept valid IPv6 literals by
+	// construction. Return the ORIGINAL host so downstream matchers see the
+	// shape they already expect.
+	if net.ParseIP(host) != nil || net.ParseIP(stripIPv6Brackets(host)) != nil {
 		return host, true
 	}
 	ascii, err := idna.ToASCII(host)
@@ -56,6 +63,15 @@ func NormalizeHostStrict(host string) (norm string, ok bool) {
 		return "", false
 	}
 	return strings.ToLower(ascii), true
+}
+
+// stripIPv6Brackets removes a single matched surrounding [ ] pair (the
+// bracketed-IPv6-literal shape), leaving any other input untouched.
+func stripIPv6Brackets(h string) string {
+	if len(h) >= 2 && h[0] == '[' && h[len(h)-1] == ']' {
+		return h[1 : len(h)-1]
+	}
+	return h
 }
 
 // MatchFQDN reports whether host matches pattern under the proxy's canonical
