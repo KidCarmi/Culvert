@@ -118,10 +118,20 @@ func realClientIP(r *http.Request) string {
 		return peer // request did not arrive through a trusted proxy
 	}
 
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff == "" {
+	// Join ALL X-Forwarded-For field lines, not just the first. Header.Get
+	// returns only the first field value, so a proxy that APPENDS its hop as a
+	// SEPARATE X-Forwarded-For header (rather than comma-appending to the
+	// client's existing one) would leave the real client IP in a later field
+	// that Get() drops — and we'd walk only the client-controlled first field,
+	// honoring a spoofed value because the peer is trusted. Per RFC 7230 §3.2.2,
+	// repeated field lines are equivalent to one comma-joined value in order, so
+	// joining is correct and closes that spoof (Codex P1). The right-to-left
+	// walk then still selects the rightmost (proxy-appended) untrusted hop.
+	values := r.Header.Values("X-Forwarded-For")
+	if len(values) == 0 {
 		return peer
 	}
+	xff := strings.Join(values, ",")
 	// XFF is "client, proxy1, proxy2, …" (left = original client, right = most
 	// recent hop). Walk from the right; the first hop NOT in the trusted set is
 	// the client that handed off to our innermost trusted proxy.

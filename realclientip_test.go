@@ -133,6 +133,33 @@ func TestRealClientIP_SpoofDefense(t *testing.T) {
 	}
 }
 
+// TestRealClientIP_MultipleXFFHeaderFields is the Codex P1 regression guard:
+// when a request carries TWO X-Forwarded-For header FIELDS (a client-spoofed
+// first line + a proxy-appended real-client second line), realClientIP must
+// consider BOTH — Header.Get would drop the second and honor the spoof.
+func TestRealClientIP_MultipleXFFHeaderFields(t *testing.T) {
+	withTrustedProxies(t, []string{"10.0.0.0/8"})
+
+	// Peer is the trusted proxy. Client spoofs a first XFF field claiming an
+	// allowlisted/internal IP; the proxy appends the real client as a second
+	// field. The real client (rightmost untrusted) must win.
+	r := &http.Request{RemoteAddr: "10.0.0.5:9", Header: http.Header{}}
+	r.Header.Add("X-Forwarded-For", "10.0.0.99")   // client-forged (trusted-looking) first field
+	r.Header.Add("X-Forwarded-For", "203.0.113.7") // proxy-appended real client
+	if got := realClientIP(r); got != "203.0.113.7" {
+		t.Errorf("multi-field XFF: got %q, want 203.0.113.7 (proxy-appended real client, not the forged first field)", got)
+	}
+
+	// Client forges an allowlisted public IP in the first field; proxy appends
+	// the attacker's real IP. The forged value must NOT win.
+	r2 := &http.Request{RemoteAddr: "10.0.0.5:9", Header: http.Header{}}
+	r2.Header.Add("X-Forwarded-For", "198.51.100.1") // forged "allowed" IP
+	r2.Header.Add("X-Forwarded-For", "45.33.22.11")  // attacker's real IP (proxy-appended)
+	if got := realClientIP(r2); got != "45.33.22.11" {
+		t.Errorf("multi-field XFF spoof: got %q, want 45.33.22.11 — forged first field must not win", got)
+	}
+}
+
 // TestTrustedProxyCIDRs_SentinelDurability is the review-F1 regression guard:
 // once saved, an EMPTY persisted list must AUTHORITATIVELY clear the trust set
 // (a GUI removal survives restart), and a sentinel-less legacy file must NOT
